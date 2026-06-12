@@ -17,6 +17,8 @@ agent-templates/
   HYDRATION.md            ← DOWN-flow: instantiate + re-hydrate a project
   CONTRIBUTIONS_INBOX.md  ← fallback contribution log (when no PR is available)
   LICENSE-NOTE.md         ← license is TBD — a note for the maintainer
+  .github/workflows/
+    leak-check.yml        ← runs leak-check in CI on every push + pull request
   scripts/
     leak-check.mjs        ← fails if any file contains a real-world token
   anthropic/              ← templates for Anthropic's Claude Code agent model
@@ -65,7 +67,7 @@ Before any contribution lands, run the guard:
 node scripts/leak-check.mjs
 ```
 
-It exits nonzero (and prints `file:line`) if any file contains a real-world token (a project/product name, domain, user home path, handle, name, email, or a git-SHA-like hex run). Generic examples (`acme.com`, `C:\Users\you\dev\acme`, `{{PLACEHOLDER}}`) are fine.
+It exits nonzero (and prints `file:line`) if any file contains a real-world token (a project/product name, domain, user home path, handle, name, email, or a git-SHA-like hex run). Generic examples (`acme.com`, `C:\Users\you\dev\acme`, `{{PLACEHOLDER}}`) are fine. The same guard runs in CI on every push and pull request ([`.github/workflows/leak-check.yml`](.github/workflows/leak-check.yml)), so the no-project-specifics guarantee is enforced, not just a local convention.
 
 ---
 

@@ -1,0 +1,24 @@
+name: leak-check
+
+# Enforces HARD REQUIREMENT 1: no real-world tokens in the library.
+# Fails the check if scripts/leak-check.mjs finds any project/product name,
+# domain, user path, handle, name, email, or git-SHA-like hex run.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  leak-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run leak-check
+        run: node scripts/leak-check.mjs

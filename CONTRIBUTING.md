@@ -42,7 +42,7 @@ Before opening a contribution, scrub it:
 
 - [ ] **Generalize specifics → placeholders.** Every real value becomes a `{{PLACEHOLDER}}` (and gets an entry in the template's placeholder table if it's new) or a generic example.
 - [ ] **Pick the right home** (see next section).
-- [ ] **Run the leak guard:** `node scripts/leak-check.mjs` — it must exit 0. It catches any real-world token you missed (project/product names, domains, user home path, handle, name, email, git-SHA-like hex runs). Fix every hit.
+- [ ] **Run the leak guard:** `node scripts/leak-check.mjs` — it must exit 0. It catches any real-world token you missed (project/product names, domains, user home path, handle, name, email, git-SHA-like hex runs). Fix every hit. **This same guard runs in CI on every push and pull request** (see [`.github/workflows/leak-check.yml`](.github/workflows/leak-check.yml)) and fails the check on any hit — running it locally first just saves a round-trip.
 - [ ] **Re-read the diff as a stranger.** Would someone with no knowledge of your project understand and use this? If it only makes sense with your project's context, it's not generic yet.
 
 ---
@@ -64,8 +64,8 @@ If a change is generic but only relevant to one vendor's agent model, it goes un
 
 ## Contribution path
 
-1. **Preferred — a pull request.** If this library has a remote with PRs enabled, open a PR with the scrubbed change. The PR description states: what triggered it, why it's generic (the "is this generic?" result), and which template/file it lands in. Confirm `leak-check` passes in CI or locally.
+1. **Preferred — a pull request.** If this library has a remote with PRs enabled, open a PR with the scrubbed change. The PR description states: what triggered it, why it's generic (the "is this generic?" result), and which template/file it lands in. **The `leak-check` CI workflow gates every PR** — it runs automatically on the pull request and the PR cannot be merged while it's red. Don't ask a maintainer to override it; fix the leak instead.
 
-2. **Fallback — the inbox.** If no PR workflow is available (e.g. you're working offline, or the remote isn't set up yet), append a dated entry to **[CONTRIBUTIONS_INBOX.md](CONTRIBUTIONS_INBOX.md)** describing the change, so a maintainer can apply it later. The inbox is a holding area, not the final home — entries get folded into the actual templates and then removed.
+2. **Fallback — the inbox.** If no PR workflow is available (e.g. you're working offline, or the remote isn't set up yet), append a dated entry to **[CONTRIBUTIONS_INBOX.md](CONTRIBUTIONS_INBOX.md)** describing the change, so a maintainer can apply it later. The inbox is a holding area, not the final home — entries get folded into the actual templates and then removed (and that folding-in is itself gated by the leak-check CI on the maintainer's commit).
 
-Either way: the change isn't "done" until it's scrubbed (leak-check green) and lands in its proper home (a template/shared file), not just the inbox.
+Either way: the change isn't "done" until it's scrubbed (leak-check green, locally and in CI) and lands in its proper home (a template/shared file), not just the inbox.
