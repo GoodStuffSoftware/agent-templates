@@ -1,0 +1,25 @@
+{
+  "template": "anthropic/basic-site",
+  "libraryCommit": "<library-commit-sha>",
+  "hydratedAt": "2026-06-12",
+  "profile": {
+    "vendor": "anthropic",
+    "archetype": "basic-site",
+    "stacks": ["nuxt", "cloudflare-pages", "github-actions"],
+    "env": ["windows"]
+  },
+  "values": {
+    "PROJECT_NAME": "acme.com",
+    "COMPANY": "Acme LLC",
+    "REPO_PATH": "C:\\Users\\you\\dev\\acme",
+    "SITE_DOMAIN": "acme.com",
+    "STACK": "Nuxt 4 + Vue 3 + Tailwind",
+    "HOST": "Cloudflare Pages",
+    "PREVIEW_MECHANISM": "per-branch preview URLs",
+    "PKG_MANAGER": "npm",
+    "DEV_CMD": "npm run dev",
+    "DEV_PORT_BASE": "3000",
+    "AGENT_PREFIX": "acme",
+    "TEAM_PREFIX": "acme"
+  }
+}
