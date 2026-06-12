@@ -69,6 +69,7 @@ A **rule, gotcha, or hard-won lesson** is not scaffolding — it lands in `lesso
 |-----------------|-----------|
 | `universal` | `lessons/universal/` |
 | `agent-process` | `lessons/agent-process/` |
+| `vendor:*` | `lessons/vendor/` (AI-tool-specific mechanics) |
 | `stack:*` | `lessons/stacks/` |
 | `env:*` | `lessons/env/` |
 | `archetype:*` | `lessons/archetype/` (created when the first one is written) |

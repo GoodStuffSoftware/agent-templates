@@ -20,7 +20,7 @@
 // id/title/scope/status, duplicate ids) and exits nonzero with file:line on
 // any problem.
 
-import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { join, relative, sep, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -199,6 +199,23 @@ function lessonMatches(lesson, profile) {
 }
 
 // --- outputs ----------------------------------------------------------------
+// Write a generated file idempotently and without churning line endings: match
+// the existing file's EOL convention (so a CRLF working tree on Windows stays
+// CRLF), and skip the write entirely when content is unchanged. Returns whether
+// a write happened so `--index` can report silent-no-change vs. updated.
+function writeGenerated(path, contentLf) {
+  let eol = "\n";
+  let existing = null;
+  if (existsSync(path)) {
+    existing = readFileSync(path, "utf8");
+    if (existing.includes("\r\n")) eol = "\r\n";
+  }
+  const next = eol === "\r\n" ? contentLf.replace(/\n/g, "\r\n") : contentLf;
+  if (existing === next) return false;
+  writeFileSync(path, next);
+  return true;
+}
+
 function buildIndex(lessons) {
   const sorted = [...lessons].sort((a, b) => a.id.localeCompare(b.id));
   const out = [
@@ -299,10 +316,12 @@ function flag(name) {
 const lessons = loadLessons(); // always validates
 
 if (args.includes("--index")) {
-  writeFileSync(INDEX_PATH, buildIndex(lessons));
+  const relIndex = relative(ROOT, INDEX_PATH).split(sep).join("/");
+  const changed = writeGenerated(INDEX_PATH, buildIndex(lessons));
   console.log(
-    `compose: wrote ${relative(ROOT, INDEX_PATH).split(sep).join("/")} ` +
-      `(${lessons.length} lessons).`
+    changed
+      ? `compose: wrote ${relIndex} (${lessons.length} lessons).`
+      : `compose: ${relIndex} already up to date (${lessons.length} lessons).`
   );
   process.exit(0);
 }

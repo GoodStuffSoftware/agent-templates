@@ -5,7 +5,7 @@ scope: [agent-process]
 status: active
 since: 2026-06-12
 provenance: [contrib-1]
-corroborated: 1
+corroborated: 2
 ---
 In asynchronous agent communication, an approval you send and a report the teammate sends can be *in flight at the same time* — they cross. Design gates so that crossed messages don't cause double-work, lost work, or a deadlock.
 
