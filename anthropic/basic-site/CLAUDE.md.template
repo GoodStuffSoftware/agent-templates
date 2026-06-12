@@ -1,0 +1,113 @@
+# {{PROJECT_NAME}} — Agent Rules & Context
+
+> Re-read this file before starting tasks. Covers tech stack, delegation rules, commit conventions, and documentation hygiene.
+>
+> _This is a project-CLAUDE skeleton from the `simple-site` template kit. Find-replace every `{{PLACEHOLDER}}` (see the kit README for the table), then delete this note._
+
+---
+
+## Project Overview
+
+**Site** for {{COMPANY}} — {{PROJECT_NAME}}, live at `{{SITE_DOMAIN}}`.
+
+**Brand voice:** [REPLACE: one-line voice description — e.g. "plain language with technical credibility, honest, no marketing fluff"]. Canonical brand source: [REPLACE: path/URL to the brand source doc].
+
+**Tech stack:**
+- **Stack:** {{STACK}}
+- **Hosting:** {{HOST}}
+- **Package manager / dev:** `{{PKG_MANAGER}}`, dev server via `{{DEV_CMD}}` (base port `:{{DEV_PORT_BASE}}`)
+- **Forms / analytics / newsletter:** [REPLACE or remove as applicable]
+
+**Repo state:** Live. Production = `origin/main` on {{HOST}}; active work on feature branches with {{PREVIEW_MECHANISM}}.
+
+---
+
+## Delegation — main session orchestrates, teammates do
+
+The main conversation routes work to teammates instead of executing code-touching changes directly. The main session's job is to plan, brief, and decide.
+
+**Default routing:**
+
+| Task | Teammate |
+|------|----------|
+| File reads, searches, codebase exploration | `{{AGENT_PREFIX}}-explorer` |
+| Single-file or small multi-file edits (1–3 files) | `{{AGENT_PREFIX}}-builder` |
+| Lint / type-check / pre-merge quality pass | `{{AGENT_PREFIX}}-reviewer` |
+| Dev-server lifecycle / local preview / port hygiene | `{{AGENT_PREFIX}}-server-minder` |
+| Multi-file architectural work (4+ files, new abstractions) | `{{AGENT_PREFIX}}-architect` _(optional add-on)_ |
+| Diagnosing a specific reported bug | `{{AGENT_PREFIX}}-debugger` _(optional add-on)_ |
+
+**Minimal roster** = explorer + builder + reviewer + server-minder. Add `architect` + `debugger` only when the site outgrows simple.
+
+**Teammates, not plain agents.** Spawn into a team via `Agent(team_name=...)` so teammates can `SendMessage` and persist. Use a fresh, date-stamped team name per session shaped like `{{TEAM_PREFIX}}-YYYYMMDD-<slug>`. NEVER reuse a bare team name — it accumulates ghost teammates.
+
+**Reviewer pairing for every code-change teammate.** Pipeline: writer → reviewer sign-off → user sign-off → merge.
+
+**Stall prevention — first action read-only.** Every writer-style teammate brief must close with this clause verbatim:
+
+> FIRST ACTION: read-only diagnostic (pwd, git status, Read, Grep, or Glob) followed by SendMessage to team-lead with the output and your plan. THEN heartbeat at the start of every subsequent turn before any potentially-blocking tool call.
+
+---
+
+## Branch Model
+
+- **Production = `origin/main`**, served by {{HOST}}. Never push to main or deploy from the orchestrator.
+- **Feature / experiment SITE code** branches off `origin/main` as `feat|fix|content|docs|chore/<scope>`, in its own worktree when parallel isolation helps. {{HOST}} builds {{PREVIEW_MECHANISM}} for every pushed branch — that preview is our isolation/staging mechanism. **There is no separate staging branch or tier.**
+- **Dev-config is NOT a deployed artifact — don't branch it for "isolation."** `.claude/agents/`, `CLAUDE.md`, docs, and tooling are read from the working tree, never shipped. Commit them straight to the current working branch; branching them only creates merge-back busywork.
+- **Worktree pattern:** `git -C {{REPO_PATH}} worktree add -b <type>/<scope> {{REPO_PATH}}-<slug> origin/main`.
+
+_General cross-project version of these rules lives in the agent-templates library at `anthropic/shared/cross-project-rules.md`, and (once hydrated) in your global `~/.claude/CLAUDE.md` → "Worktree, write-target & dev-server discipline."_
+
+---
+
+## Dev Servers & Previews
+
+- **A persistent owner runs local dev servers — `{{AGENT_PREFIX}}-server-minder` (or the main session) — never transient writer agents.** Writers request a preview URL; they don't spawn their own long-lived `{{DEV_CMD}}`.
+- **The dev server silently falls back when a port is taken** (`:{{DEV_PORT_BASE}}` → `:{{DEV_PORT_BASE}}+1` → …). The owner reports the EXACT "Local:" URL printed, never the requested port. Before relaying a dev URL to the user or diagnosing a failure on it, the orchestrator probes it (`curl` → expect 200) and confirms which process is actually listening.
+
+_General cross-project version lives in the agent-templates library at `anthropic/shared/cross-project-rules.md`, and (once hydrated) in your global `~/.claude/CLAUDE.md` → "Worktree, write-target & dev-server discipline."_
+
+---
+
+## Commit Conventions
+
+**Format:** `type(scope): subject` — e.g. `feat(home): add hero section`
+
+**Allowed types:** `feat`, `fix`, `docs`, `content`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`
+
+**Commit discipline:** Group all changes for a logical task into ONE meaningful commit; don't commit after every edit. Push after each logical commit group.
+
+**Destructive-git safety (mandatory):** Before ANY destructive git op against an origin-tracked branch (`push --force`, `reset --hard` on pushed branch, branch delete), create and push a `backup/<branch>-pre-<reason>-YYYY-MM-DD` ref first.
+
+---
+
+## Context Loading Rules
+
+Read files based on task complexity:
+
+| Task Type | Read First |
+|-----------|------------|
+| Content tweak (copy edit) | Target file only |
+| Single component edit | Target file + design tokens config |
+| Multi-component work | Target files + relevant layout / framework config |
+| New feature from task list | Planning doc + linked design spec |
+| Architecture change | `CLAUDE.md` + planning doc + every file the change touches |
+| Anything brand / voice / copy related | Content doc + design doc |
+
+**Single source of truth per fact.** Stack decisions, content plan, brand voice/design, and deploy procedures each live in ONE doc; other docs reference. Current session state lives in the handoff doc ONLY.
+
+---
+
+## Agent Rules
+
+1. **Always read before editing.** Check file contents before Edit/Write.
+2. **Lint before wrapping up.** Run `{{PKG_MANAGER}} run lint` before reporting done.
+3. **Meaningful commit messages.** Describe the change.
+4. **Update README on structural changes.** Don't leave stale descriptions.
+5. **Worktrees for parallel SITE work.** Branch off `origin/main` per the Branch Model section. Dev-config (`.claude/`, docs) commits straight to the working branch — don't branch it.
+6. **Test new features before committing.** For content-only changes, visual review in dev server is sufficient.
+7. **Brand voice consistency.** Every piece of user-visible copy goes through the content doc's voice rules.
+
+---
+
+_Cross-project rules (delegation, model routing, worktree / write-target / dev-server discipline, docs hygiene) live in the agent-templates library at `anthropic/shared/cross-project-rules.md`, and (once hydrated) in your global `~/.claude/CLAUDE.md`. This file holds only what's specific to {{PROJECT_NAME}}._
