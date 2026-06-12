@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Logs
+*.log
+
+# A project that HYDRATES from this library keeps its own .template.lock;
+# this library repo itself never contains one.
+.template.lock
