@@ -38,21 +38,35 @@ This doc covers the DOWN-flow (library → project). For the UP-flow (project �
 
 4. **Resolve any `[REPLACE: ...]` markers** the template left in place (brand voice, brand-source path, forms/analytics, etc.). These are spots the template can't fill for you.
 
-5. **Write the lock file** (next section) so the project can be re-hydrated.
+5. **Write the lock file** (next section) so the project can be re-hydrated — including a `profile` block so the lesson composer knows which lessons apply.
 
-6. **Run leak-check on the LIBRARY side, not the project side.** The project legitimately contains real values now — leak-check is the library's guard, not the project's. Don't run it against your filled-in project.
+6. **Compose the project's "Lessons in effect" section** from the library, using the profile you just recorded:
+
+   ```
+   node scripts/compose.mjs --profile <project>/.claude/.template.lock
+   ```
+
+   Paste the generated `## Lessons in effect` markdown into the project's `CLAUDE.md` under the placeholder section the template ships (see the template's `CLAUDE.md.template`). Re-run this whenever you re-hydrate to refresh it.
+
+7. **Run leak-check on the LIBRARY side, not the project side.** The project legitimately contains real values now — leak-check is the library's guard, not the project's. Don't run it against your filled-in project.
 
 ---
 
 ## 2. The `.claude/.template.lock` convention
 
-A hydrated project keeps a lock file at `<project>/.claude/.template.lock`. It records exactly what was instantiated, so re-hydration is deterministic. JSON shape:
+A hydrated project keeps a lock file at `<project>/.claude/.template.lock`. It records exactly what was instantiated, so re-hydration is deterministic. **Schema v2** adds a `profile` block that drives lesson composition (see [ARCHITECTURE.md](ARCHITECTURE.md) for the axes). JSON shape:
 
 ```json
 {
   "template": "anthropic/basic-site",
-  "libraryCommit": "<commit-sha-of-agent-templates-at-hydration-time>",
+  "libraryCommit": "<library-commit-sha>",
   "hydratedAt": "2026-06-12",
+  "profile": {
+    "vendor": "anthropic",
+    "archetype": "basic-site",
+    "stacks": ["nuxt", "cloudflare-pages", "github-actions"],
+    "env": ["windows"]
+  },
   "values": {
     "PROJECT_NAME": "acme.com",
     "COMPANY": "Acme LLC",
@@ -71,8 +85,11 @@ A hydrated project keeps a lock file at `<project>/.claude/.template.lock`. It r
 ```
 
 - **`template`** — which template this project was hydrated from.
-- **`libraryCommit`** — the agent-templates commit the files came from. This is the "from" point of a future re-hydration diff.
+- **`libraryCommit`** — the agent-templates commit the files came from. This is the "from" point of a future re-hydration diff and of the fan-out check.
+- **`profile`** — the project's axis values: `vendor`, `archetype`, `stacks[]`, `env[]`. The lesson composer matches a lesson's `scope` tags against this (AND across axes, OR within an axis — see [ARCHITECTURE.md](ARCHITECTURE.md) §3). Add a stack/env tag here the moment the project gains that dependency, so newly-relevant lessons start composing in.
 - **`values`** — the placeholder map. The single source of truth for re-applying the template after an update.
+
+> **`libraryCommit` is a REAL commit SHA in a project's lock** — that's correct. A project's `.template.lock` lives in the project, where real values belong, so leak-check (which guards *this library only*) never sees it. **Do not "fix" a project's lock to a placeholder** — the placeholder form (`<library-commit-sha>` / `{{LIBRARY_COMMIT}}`) is used only inside this library's own docs and examples, where a real hex SHA would trip the leak-check guard.
 
 The lock file lives in the **project**, never in this library. (The library's `.gitignore` excludes `.template.lock` defensively, so a stray one never gets committed here.)
 
@@ -82,15 +99,29 @@ The lock file lives in the **project**, never in this library. (The library's `.
 
 When the library improves a template you've hydrated, re-hydrate to inherit the improvement:
 
-1. **Update your local clone of the library** (`git pull`) and note the new commit.
-2. **Render the OLD template** at `libraryCommit` with your recorded `values` → this reproduces the files you originally got. Call this `base`.
-3. **Render the NEW template** at the new library commit with the same `values` → call this `next`.
-4. **Three-way merge:** apply the `base → next` diff onto your project's *current* files (which may have drifted via local edits). This brings in the library's changes while preserving yours. In practice:
+1. **Check the fan-out signal first** — before doing any merge work, ask the library whether anything new even applies to you:
+
+   ```
+   node scripts/compose.mjs --profile <project>/.claude/.template.lock --since <your-recorded-libraryCommit>
+   ```
+
+   This prints the "Lessons in effect" section AND a **"Re-hydration available (fan-out)"** list of lessons added/changed since your recorded commit that match *your* profile. If both the fan-out list and the template diff are empty, there's nothing to re-hydrate — stop here.
+
+2. **Update your local clone of the library** (`git pull`) and note the new commit.
+3. **Render the OLD template** at `libraryCommit` with your recorded `values` → this reproduces the files you originally got. Call this `base`.
+4. **Render the NEW template** at the new library commit with the same `values` → call this `next`.
+5. **Three-way merge:** apply the `base → next` diff onto your project's *current* files (which may have drifted via local edits). This brings in the library's changes while preserving yours. In practice:
    - Where you never touched a templated file, it updates cleanly.
    - Where you edited a templated line, you get a normal merge conflict to resolve by hand.
-5. **Update `.template.lock`** — bump `libraryCommit` to the new commit and `hydratedAt` to today.
+6. **Re-compose the "Lessons in effect" section** and paste the refreshed output into the project's `CLAUDE.md`:
 
-A thin helper is fine here (a documented find-replace driven by the `values` map, or a small render-then-`git merge-file` script), but **the process above is the deliverable** — don't over-engineer a heavy generator. The lock file + a values-driven find-replace is enough to make re-hydration repeatable.
+   ```
+   node scripts/compose.mjs --profile <project>/.claude/.template.lock
+   ```
+
+7. **Update `.template.lock`** — bump `libraryCommit` to the new commit and `hydratedAt` to today.
+
+A thin helper is fine here (a documented find-replace driven by the `values` map, or a small render-then-`git merge-file` script), but **the process above is the deliverable** — don't over-engineer a heavy generator. The lock file + a values-driven find-replace + the compose step is enough to make re-hydration repeatable.
 
 ---
 
@@ -115,6 +146,6 @@ A real project accumulates customizations that are **project-local and not part 
 
 | Step | Action |
 |------|--------|
-| Instantiate | copy template → fill `{{PLACEHOLDERS}}` from values → resolve `[REPLACE]` markers → write `.template.lock` |
-| Re-hydrate | pull library → render base@oldCommit + next@newCommit with same values → 3-way merge onto current files → bump lock |
+| Instantiate | copy template → fill `{{PLACEHOLDERS}}` from values → resolve `[REPLACE]` markers → write `.template.lock` (with `profile`) → `compose --profile` into `CLAUDE.md` |
+| Re-hydrate | `compose --profile --since <oldCommit>` for the fan-out signal → pull library → render base@oldCommit + next@newCommit with same values → 3-way merge onto current files → re-`compose --profile` → bump lock |
 | Protect | keep project-only customizations in `CLAUDE.local.md` or a `## Project-local (not templated)` section; re-hydration never overwrites them |

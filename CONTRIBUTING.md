@@ -49,16 +49,33 @@ Before opening a contribution, scrub it:
 
 ## Where it goes
 
+The library has **two layers** (see [ARCHITECTURE.md](ARCHITECTURE.md)): *templates* (scaffolding, in vendor folders) and *lessons* (knowledge, in `lessons/`). Which layer your contribution belongs to determines where it lands.
+
+### Scaffolding (templates)
+
 | What you're contributing | Where it lands |
 |--------------------------|----------------|
 | A fix/improvement to a specific agent role | that role's def, e.g. `anthropic/basic-site/agents/<role>.md` |
 | A new agent role for a class of projects | a new def in the appropriate template's `agents/` |
 | A change to the project-CLAUDE skeleton | `anthropic/<template>/CLAUDE.md.template` |
-| A cross-project rule (applies regardless of template) | `anthropic/shared/cross-project-rules.md` |
 | A whole new template (new project archetype) | a new `<vendor>/<template>/` folder |
 | A whole new vendor (different AI coding tool) | a new top-level `<vendor>/` folder + its README |
 
-If a change is generic but only relevant to one vendor's agent model, it goes under that vendor folder. If it's vendor-neutral (a general orchestration principle), it goes in that vendor's `shared/` — or, when there are multiple vendor folders, gets mirrored/lifted to a top-level shared location (a future refactor; for now `anthropic/shared/` is the home).
+### Knowledge (lessons)
+
+A **rule, gotcha, or hard-won lesson** is not scaffolding — it lands in `lessons/` as a tagged lesson file, **not** pasted into an agent def or a shared rules doc. To place it, classify it onto the axes (see [ARCHITECTURE.md](ARCHITECTURE.md) §2–3) and let the **first** scope tag pick the directory (cosmetic — routing is by tags):
+
+| First scope tag | Directory |
+|-----------------|-----------|
+| `universal` | `lessons/universal/` |
+| `agent-process` | `lessons/agent-process/` |
+| `stack:*` | `lessons/stacks/` |
+| `env:*` | `lessons/env/` |
+| `archetype:*` | `lessons/archetype/` (created when the first one is written) |
+
+Remember the tag semantics: **AND across axes, OR within an axis** (`[stack:nuxt, env:windows]` = Windows-Nuxt only; `[stack:nuxt, stack:vite]` = either). Use `vendor:<id>` for AI-tool mechanics. A lesson's `id` is its forever identity — never reuse one.
+
+If a change is generic but only relevant to one vendor's agent model, tag it `vendor:<id>`. Vendor-neutral scaffolding still goes in that vendor's folder for now (a top-level shared location is a future refactor); vendor-neutral *knowledge* is just a lesson with no `vendor:` tag.
 
 ---
 
@@ -68,4 +85,33 @@ If a change is generic but only relevant to one vendor's agent model, it goes un
 
 2. **Fallback — the inbox.** If no PR workflow is available (e.g. you're working offline, or the remote isn't set up yet), append a dated entry to **[CONTRIBUTIONS_INBOX.md](CONTRIBUTIONS_INBOX.md)** describing the change, so a maintainer can apply it later. The inbox is a holding area, not the final home — entries get folded into the actual templates and then removed (and that folding-in is itself gated by the leak-check CI on the maintainer's commit).
 
-Either way: the change isn't "done" until it's scrubbed (leak-check green, locally and in CI) and lands in its proper home (a template/shared file), not just the inbox.
+Either way: the change isn't "done" until it's scrubbed (leak-check green, locally and in CI) and lands in its proper home (a template file or a `lessons/` lesson), not just the inbox.
+
+---
+
+## Provenance anonymization
+
+Lessons carry a `provenance: [contrib-1, contrib-2, …]` field — **anonymized contributor ids only**. The library must **never** record who a contributor really is.
+
+**Why:** the leak-check guard bans real names, handles, and emails (it would fail CI on any of them), and there's no reason to publish contributor identities in a vendor-/project-neutral library anyway. So the public record uses opaque ids; the real id↔person mapping lives **only** with the maintainer.
+
+**How:**
+- In any lesson you draft, set `provenance` to anonymized ids (`contrib-1`, `contrib-2`, …). Reuse an existing id for the same source across lessons.
+- The real mapping goes in `PROVENANCE.local.md` at the repo root — which is **git-ignored and never committed** (see `.gitignore`). Only the maintainer holds it.
+- `corroborated` counts *independent sources* observing a lesson; raise it (don't duplicate the lesson) when a second source confirms it.
+
+---
+
+## Harvesting
+
+Most contribution is manual: you notice a generic improvement and follow the steps above. **Harvesting** automates the *detection* and *first-draft* of that flow across a whole project's history, using the [`lessons-harvester`](anthropic/lessons-harvester.md) agent (a Claude Code agent def, `model: sonnet`, `effort: high`).
+
+Its job, in short (full process in the agent def):
+1. **Diff** a source project's agent defs + `CLAUDE.md` (+ `CLAUDE.local.md`) since the last harvest baseline (the project's `.template.lock` `libraryCommit`, or a recorded harvest date).
+2. **Run the "is this generic?" test** on each changed rule, then **classify** it onto the axes (minding AND/OR semantics).
+3. **Dedup** against `lessons/INDEX.md` *by meaning* — propose raising `corroborated` or a supersession instead of a duplicate.
+4. **Scrub** specifics → placeholders/generic examples (leak-check will enforce on commit).
+5. **Propose, never auto-commit** — drafts go to a PR or `CONTRIBUTIONS_INBOX.md`; a human gates placement + scrub before anything lands in `lessons/`.
+6. **Drift check** — compare the maintainer's private global rules kernel (for Claude Code, `~/.claude/CLAUDE.md`) against `lessons/universal/` + `lessons/agent-process/` and report divergence, so the private kernel and its public mirror don't drift silently.
+
+The routing rules the harvester applies are the axes/tags in [ARCHITECTURE.md](ARCHITECTURE.md); the gate is always a human.

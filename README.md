@@ -13,7 +13,8 @@ Agent conventions are **tool-specific**: how you declare a sub-agent, how agents
 ```
 agent-templates/
   README.md               ← this file
-  CONTRIBUTING.md         ← UP-flow: contribute generic improvements back
+  ARCHITECTURE.md         ← the canonical design: two layers, axes, tag semantics, flows
+  CONTRIBUTING.md         ← UP-flow: contribute / harvest generic improvements back
   HYDRATION.md            ← DOWN-flow: instantiate + re-hydrate a project
   CONTRIBUTIONS_INBOX.md  ← fallback contribution log (when no PR is available)
   LICENSE-NOTE.md         ← license is TBD — a note for the maintainer
@@ -21,9 +22,16 @@ agent-templates/
     leak-check.yml        ← runs leak-check in CI on every push + pull request
   scripts/
     leak-check.mjs        ← fails if any file contains a real-world token
-  anthropic/              ← templates for Anthropic's Claude Code agent model
+    compose.mjs           ← profile-matched lesson composition + INDEX + fan-out
+  lessons/                ← KNOWLEDGE layer: one tagged lesson per file
+    INDEX.md              ← generated: id — title — [scope] — status
+    universal/  agent-process/  stacks/  env/
+  examples/
+    sample.template.lock  ← a v2 lock (profile + values) for trying compose
+  anthropic/              ← TEMPLATE layer for Anthropic's Claude Code agent model
     README.md
-    shared/               ← portable cross-project rules kernel (self-contained)
+    lessons-harvester.md  ← agent def: UP-flow automation (harvest → propose)
+    shared/               ← thin digest pointing at the tagged lessons
     basic-site/           ← lean agent team for a simple marketing / content site
 ```
 
@@ -37,6 +45,8 @@ agent-templates/
 
 ## The living-library philosophy
 
+The library holds **two layers**: *templates* (scaffolding you instantiate — rosters, agent defs, the `CLAUDE.md` skeleton) and *lessons* (knowledge — one hard-won rule per file in [`lessons/`](lessons/), tagged with the dimensions it applies to). Templates *reference* lessons; lessons embed no scaffolding. A project records a **profile** (vendor / archetype / stacks / env) in its lock file, and [`scripts/compose.mjs`](scripts/compose.mjs) selects exactly the lessons whose tags match — so a new lesson can light up every existing project whose profile fits (the *fan-out* signal). The full model — axes, the AND/OR tag semantics, the most-specific-wins cascade, lesson lifecycle, and both flows — is in **[ARCHITECTURE.md](ARCHITECTURE.md)**; this section is just the overview.
+
 The library is meant to *flow in both directions*:
 
 ### Down-flow — hydration (library → project)
@@ -47,7 +57,7 @@ You instantiate a template into a project: copy the template's files, fill every
 
 ### Up-flow — contribution (project → library)
 
-When a change you make in a real project touches an agent def, a rule, or a convention that is **generic** — i.e. it would help other projects, not just this one — you generalize it (real specifics → placeholders), scrub it (run leak-check), and contribute it back so every future hydration benefits. This extends the general "keep your agent defs and rules as living documents" maintenance habit one level up: improvements don't just land in the current project, they flow back to the template.
+When a change you make in a real project touches an agent def, a rule, or a convention that is **generic** — i.e. it would help other projects, not just this one — you generalize it (real specifics → placeholders), scrub it (run leak-check), and contribute it back so every future hydration benefits. Scaffolding fixes land in a template; a rule or gotcha lands as a tagged **lesson** in [`lessons/`](lessons/). The [`lessons-harvester`](anthropic/lessons-harvester.md) agent automates detecting + classifying + drafting these from a project's history (a human always gates what lands). This extends the "keep your agent defs and rules as living documents" maintenance habit one level up: improvements don't just land in the current project, they flow back to the library.
 
 → Full process in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 

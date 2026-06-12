@@ -22,6 +22,24 @@
 
 ---
 
+## Lessons in effect
+
+<!--
+  GENERATED — do not edit by hand. This section is composed from the
+  agent-templates library against this project's profile (in
+  .claude/.template.lock). Refresh it after hydrating or re-hydrating:
+
+      node scripts/compose.mjs --profile .claude/.template.lock
+
+  Paste the tool's "## Lessons in effect" output in place of this block.
+  See the library's ARCHITECTURE.md for the routing model (axes, tag
+  semantics, cascade).
+-->
+
+_[REPLACE: paste the composed "Lessons in effect" section here at hydration time.]_
+
+---
+
 ## Delegation — main session orchestrates, teammates do
 
 The main conversation routes work to teammates instead of executing code-touching changes directly. The main session's job is to plan, brief, and decide.

@@ -13,3 +13,8 @@ Thumbs.db
 # A project that HYDRATES from this library keeps its own .template.lock;
 # this library repo itself never contains one.
 .template.lock
+
+# Provenance de-anonymization map (real contributor id <-> person). Lives with
+# the maintainer ONLY; the library records anonymized ids (contrib-1, …). See
+# ARCHITECTURE.md and CONTRIBUTING.md.
+PROVENANCE.local.md
