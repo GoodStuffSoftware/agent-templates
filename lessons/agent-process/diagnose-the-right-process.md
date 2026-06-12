@@ -14,4 +14,4 @@ Before diagnosing a failure "on a port" or "in the build," confirm which process
 **How to apply:**
 - Identify the actual listener/PID on the port before forming a hypothesis.
 - Confirm it's serving the build under test (right commit, right directory) — not a leftover from an earlier run.
-- Pairs with [[report-actual-bound-url]]: get the real URL first, then confirm the real process behind it.
+- Pairs with [[verify-actual-bound-url]]: get the real URL first, then confirm the real process behind it.

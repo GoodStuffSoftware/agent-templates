@@ -13,4 +13,4 @@ The Nuxt (and underlying Vite) dev server does not fail when its default port is
 
 **How to apply:**
 - Read the actual bound port from the server's printed "Local:" URL every time; don't hardcode it.
-- This is the stack-specific instance of the general agent-process rules [[report-actual-bound-url]] and [[diagnose-the-right-process]] — the same fallback behavior is why those rules exist.
+- This is the stack-specific instance of the general agent-process rules [[verify-actual-bound-url]] and [[diagnose-the-right-process]] — the same fallback behavior is why those rules exist.

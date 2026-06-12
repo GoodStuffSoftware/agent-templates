@@ -1,5 +1,5 @@
 ---
-id: report-actual-bound-url
+id: verify-actual-bound-url
 title: State the actual bound URL, then verify it before relaying or diagnosing
 scope: [agent-process]
 status: active

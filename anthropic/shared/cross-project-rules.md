@@ -19,7 +19,7 @@ This page stays as a thin **human-readable digest** — a map from each rule to 
 - Verify merge direction before merging a long-lived branch → `verify-merge-direction`
 - Bake the write-target into a writer's initial brief; never redirect mid-flight → `write-target-in-initial-brief`
 - Long-lived dev servers belong to a persistent owner, not transient writers → `dev-servers-persistent-owner`
-- State the actual bound URL, then verify it before relaying/diagnosing → `report-actual-bound-url`
+- State the actual bound URL, then verify it before relaying/diagnosing → `verify-actual-bound-url`
 - Confirm which process actually serves a build before diagnosing it → `diagnose-the-right-process`
 - After invalidating a teammate's world, sync it or shut it down → `sync-or-shutdown-stale-teammates`
 
