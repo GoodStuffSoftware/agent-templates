@@ -9,6 +9,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `bash-tool-routes-to-wsl` — On Windows, the Bash tool routes to WSL — use the PowerShell tool for native Windows operations — [env:windows, vendor:anthropic] — active
 - `branch-what-deploys` — Branch what deploys; commit dev-config straight to the integration branch — [universal] — active
 - `choose-branch-model-deliberately` — Choose a branch/deploy model deliberately to fit the project's shape; don't assume a staging tier — [universal] — active
+- `content-guard-honors-gitignore` — A repo content-guard must scan the committable set, not the raw working tree — [universal, stack:git] — active
 - `cowork-auto-worktree-detection` — Detect and abort when a writer agent lands in a Cowork auto-generated worktree — [vendor:anthropic] — active
 - `deploy-sequencing-tests-first` — Run the test suite to completion before deploying — never in parallel — [agent-process] — active
 - `dev-servers-persistent-owner` — Long-lived dev servers belong to a persistent owner, not transient writers — [agent-process] — active
