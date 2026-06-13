@@ -4,8 +4,8 @@ title: Bake the write-target into a writer's initial brief; never redirect mid-f
 scope: [agent-process]
 status: active
 since: 2026-06-12
-provenance: [contrib-1]
-corroborated: 1
+provenance: [contrib-1, contrib-2]
+corroborated: 2
 ---
 Decide the worktree and branch a writer agent will use BEFORE spawning it, and state that write-target in the opening brief. Never redirect a writer to a different worktree/branch after it has begun editing.
 
