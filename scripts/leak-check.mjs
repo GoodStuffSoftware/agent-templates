@@ -51,6 +51,26 @@ const banned = LITERAL_TOKENS.map(([label, hex]) => ({
   needle: fromHex(hex).toLowerCase(),
 }));
 
+// --- Ownership exemption (narrow, file- AND token-scoped) -------------------
+// A license file legally MUST name its copyright holder, so the LICENSE file
+// is allowed to contain the studio's own name — that is ownership metadata,
+// not a project-specifics leak. The exemption is deliberately tiny:
+//   * keyed by exact relative path (only `LICENSE`),
+//   * and by the single token label the LICENSE text actually uses.
+// The standard MIT copyright line contains only the SPACED company name, so
+// that is the ONLY label exempted — the no-space slug and the .com domain do
+// NOT appear in LICENSE and are NOT exempted (if a future attribution line
+// needs one, add it then, with the same "only what's used" discipline).
+// Everything else stays banned EVEN in LICENSE: the product name, the personal
+// name/handle/email, user-home paths, and git-SHA-like hex. And the company
+// name stays banned in every OTHER file. If you find yourself wanting to widen
+// this map, that's the signal to genericize instead.
+const EXEMPT = {
+  LICENSE: new Set([
+    "project-name-A-spaced", // the studio name with spaces (used in the copyright line)
+  ]),
+};
+
 // --- Banned patterns (regex) ------------------------------------------------
 // A bare git SHA: a standalone hex run 7-40 chars long. We require word
 // boundaries and that the run is NOT inside a longer hex string (so it doesn't
@@ -108,6 +128,9 @@ for (const file of walk(ROOT)) {
     const lower = line.toLowerCase();
 
     for (const { label, needle } of banned) {
+      // Skip a token only when THIS file is explicitly allowed to carry THIS
+      // label (see EXEMPT above) — e.g. the company name in LICENSE.
+      if (EXEMPT[rel]?.has(label)) continue;
       let idx = lower.indexOf(needle);
       while (idx !== -1) {
         hits.push({ rel, line: i + 1, label, text: line.trim() });

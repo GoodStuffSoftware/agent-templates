@@ -17,7 +17,7 @@ agent-templates/
   CONTRIBUTING.md         ← UP-flow: contribute / harvest generic improvements back
   HYDRATION.md            ← DOWN-flow: instantiate + re-hydrate a project
   CONTRIBUTIONS_INBOX.md  ← fallback contribution log (when no PR is available)
-  LICENSE-NOTE.md         ← license is TBD — a note for the maintainer
+  LICENSE                 ← MIT
   .github/workflows/
     leak-check.yml        ← runs leak-check in CI on every push + pull request
   scripts/
@@ -83,4 +83,4 @@ It exits nonzero (and prints `file:line`) if any file contains a real-world toke
 
 ## License
 
-**License is not yet chosen — see [LICENSE-NOTE.md](LICENSE-NOTE.md).** The intent is a permissive license (MIT or similar), but the maintainer picks and adds the actual `LICENSE` file. Until then, treat this as all-rights-reserved by default.
+[MIT](LICENSE) — see the `LICENSE` file for the copyright notice. Copy, adapt, and reuse these templates and lessons freely.
