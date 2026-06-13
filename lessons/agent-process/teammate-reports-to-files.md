@@ -1,5 +1,5 @@
 ---
-id: reports-to-files-long-session
+id: teammate-reports-to-files
 title: Teammates write long reports to files and send only a one-line pointer
 scope: [agent-process]
 status: active

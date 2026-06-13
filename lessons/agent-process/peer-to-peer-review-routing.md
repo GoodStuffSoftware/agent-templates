@@ -15,4 +15,4 @@ In a writer-reviewer pair, the reviewer messages the writer directly with the fu
 - Review verdict goes to a file. The reviewer messages the writer a pointer + verdict; separately messages the lead a pointer + rolled-up verdict.
 - The lead acknowledges the rolled-up verdict without reading the file unless there is a blocker that requires orchestrator escalation.
 - Writer addresses blockers in response to the reviewer's message — no lead relay needed for nits.
-- Pairs with [[reports-to-files-long-session]] (the file-not-chat discipline this routing depends on).
+- Pairs with [[teammate-reports-to-files]] (the file-not-chat discipline this routing depends on).

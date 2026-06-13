@@ -25,10 +25,10 @@ One line per lesson: `id — title — [scope] — status`.
 - `peer-to-peer-review-routing` — Writers and reviewers communicate directly; the lead receives only a one-line rolled-up verdict — [agent-process] — active
 - `preview-mcp-orchestrator-only` — Browser-preview and screenshot MCP tools are only available in the main orchestrator session — [agent-process, vendor:anthropic] — active
 - `recovery-from-silent-teammates` — Recover from a silent teammate by probing state before respawning — [agent-process] — active
-- `reports-to-files-long-session` — Teammates write long reports to files and send only a one-line pointer — [agent-process] — active
 - `shutdown-after-verified-not-after-committed` — Never shut down a teammate whose output hasn't been verified working at runtime — [agent-process] — active
 - `spawn-task-team-isolation` — Sessions spawned via spawn_task must use a unique team name to prevent roster bleed — [agent-process, vendor:anthropic] — active
 - `sync-or-shutdown-stale-teammates` — After invalidating a teammate's world, sync it or shut it down before it reports stale state — [agent-process] — active
+- `teammate-reports-to-files` — Teammates write long reports to files and send only a one-line pointer — [agent-process] — active
 - `unique-team-name-per-session` — Use a unique date-stamped team name for every new agent session — [agent-process] — active
 - `verify-actual-bound-url` — State the actual bound URL, then verify it before relaying or diagnosing — [agent-process] — active
 - `verify-merge-direction` — Verify merge direction before merging a long-lived branch — [universal] — active
