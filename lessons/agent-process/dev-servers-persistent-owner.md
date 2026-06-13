@@ -4,8 +4,8 @@ title: Long-lived dev servers belong to a persistent owner, not transient writer
 scope: [agent-process]
 status: active
 since: 2026-06-12
-provenance: [contrib-1]
-corroborated: 1
+provenance: [contrib-1, contrib-2]
+corroborated: 2
 ---
 A long-lived dev server is owned by the main session or a dedicated server-minder — never by a transient writer agent. Writer agents *request* a preview URL from the owner; they don't spawn their own `dev` server.
 

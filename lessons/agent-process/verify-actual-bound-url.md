@@ -4,8 +4,8 @@ title: State the actual bound URL, then verify it before relaying or diagnosing
 scope: [agent-process]
 status: active
 since: 2026-06-12
-provenance: [contrib-1]
-corroborated: 1
+provenance: [contrib-1, contrib-2]
+corroborated: 2
 ---
 Dev tooling silently falls back to the next free port when the requested one is taken (`:3000` then `:3001` then `:3002`). So the agent running the server must relay the EXACT "Local:" URL the tool printed — never the port it *requested* — and the orchestrator must probe that exact URL (expect HTTP 200) before passing it to the user or diagnosing a failure on it.
 

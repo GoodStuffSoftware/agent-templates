@@ -4,8 +4,8 @@ title: After invalidating a teammate's world, sync it or shut it down before it 
 scope: [agent-process]
 status: active
 since: 2026-06-12
-provenance: [contrib-1]
-corroborated: 1
+provenance: [contrib-1, contrib-2]
+corroborated: 2
 ---
 When an orchestrator action invalidates a teammate's cached view of the world — you merged and removed its worktree, restarted or moved a server it was using, moved the branch it was on — immediately tell that teammate what changed, or shut it down. Do it *before* the teammate sends its next report.
 
