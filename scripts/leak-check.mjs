@@ -1,10 +1,20 @@
 #!/usr/bin/env node
-// leak-check.mjs — fails (exit 1) if any tracked file contains a real-world token.
+// leak-check.mjs — fails (exit 1) if any committable file contains a real-world
+// token.
 //
 // This library is meant to be vendor-agnostic and project-agnostic. The seed
 // material was genericized from real Claude Code agent teams, so this guard
 // exists to make sure no real name, path, domain, or git SHA ever survives a
 // contribution back into the library.
+//
+// FILE SET: the guard scans the COMMITTABLE set — files git tracks plus
+// untracked files that are NOT gitignored — via
+// `git ls-files --cached --others --exclude-standard`. This honors .gitignore,
+// so a gitignored file that holds real tokens BY DESIGN (e.g. the maintainer's
+// populated PROVENANCE.local.md) does NOT trip the guard locally. That matches
+// the guard's intent — it protects what could be committed — and matches CI,
+// where gitignored files are simply absent on a fresh checkout. If git is
+// unavailable (not a repo / no git on PATH), it falls back to walking the tree.
 //
 // Zero dependencies. Run from the repo root:
 //   node scripts/leak-check.mjs
@@ -19,6 +29,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import { execFileSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -84,6 +95,9 @@ const IGNORE_DIRS = new Set([".git", "node_modules"]);
 // would otherwise self-trip on its own SHA_RE matches, so we skip scanning it.
 const SELF = relative(ROOT, fileURLToPath(import.meta.url));
 
+// Fallback enumerator (used only if git is unavailable): walk the working tree,
+// skipping .git and node_modules. This does NOT honor the rest of .gitignore, so
+// it is strictly a degraded mode — see listCommittableFiles.
 function walk(dir, acc = []) {
   for (const name of readdirSync(dir)) {
     if (IGNORE_DIRS.has(name)) continue;
@@ -93,6 +107,31 @@ function walk(dir, acc = []) {
     else acc.push(full);
   }
   return acc;
+}
+
+// Primary enumerator: the committable set — everything git tracks plus untracked
+// files that are NOT gitignored. `--cached` = tracked, `--others` = untracked,
+// `--exclude-standard` applies .gitignore / .git/info/exclude / global excludes.
+// This is exactly "what could be committed," which is what the guard protects.
+// Falls back to walk(ROOT) if git is missing or this isn't a git repo.
+function listCommittableFiles() {
+  try {
+    const out = execFileSync(
+      "git",
+      ["ls-files", "--cached", "--others", "--exclude-standard"],
+      { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    );
+    return out
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((rel) => join(ROOT, rel));
+  } catch (err) {
+    console.error(
+      `leak-check: note — git enumeration failed (${err.message.split("\n")[0]}); ` +
+        "falling back to a raw working-tree walk that does NOT honor .gitignore.",
+    );
+    return walk(ROOT);
+  }
 }
 
 // Heuristic: skip obvious binaries by extension.
@@ -111,7 +150,7 @@ function isShaFalsePositive(match) {
 
 const hits = [];
 
-for (const file of walk(ROOT)) {
+for (const file of listCommittableFiles()) {
   const rel = relative(ROOT, file).split(sep).join("/");
   if (BINARY_EXT.test(file)) continue;
 
