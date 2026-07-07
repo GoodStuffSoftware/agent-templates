@@ -10,25 +10,35 @@ One line per lesson: `id — title — [scope] — status`.
 - `branch-what-deploys` — Branch what deploys; commit dev-config straight to the integration branch — [universal] — active
 - `choose-branch-model-deliberately` — Choose a branch/deploy model deliberately to fit the project's shape; don't assume a staging tier — [universal] — active
 - `content-guard-honors-gitignore` — A repo content-guard must scan the committable set, not the raw working tree — [universal, stack:git] — active
+- `continuous-contribution-loop` — Wire capture, sweep, and fold steps so project learning flows to the library continuously — [agent-process] — active
 - `cowork-auto-worktree-detection` — Detect and abort when a writer agent lands in a Cowork auto-generated worktree — [vendor:anthropic] — active
 - `deploy-sequencing-tests-first` — Run the test suite to completion before deploying — never in parallel — [agent-process] — active
+- `dev-server-request-contract` — A dev-server request is fulfilled by a clickable tunnel URL from a daemonized server, not a process report — [agent-process] — active
 - `dev-servers-persistent-owner` — Long-lived dev servers belong to a persistent owner, not transient writers — [agent-process] — active
 - `diagnose-the-right-process` — Confirm which process actually serves a build before diagnosing it — [agent-process] — active
+- `docs-living-or-historical` — Classify every docs directory as LIVING or HISTORICAL RECORD and maintain each by its class — [universal] — active
 - `e2e-spec-registration-required` — Register every new E2E spec in the test runner's config — an unregistered spec silently never runs — [stack:playwright] — active
 - `firestore-rules-pre-merge-checklist` — Firestore rule changes require an explicit identity-binding and schema-drift review before merge — [stack:firestore] — active
 - `first-action-read-only` — Writer agents open with a read-only diagnostic and a liveness report — [agent-process] — active
 - `github-actions-path-glob-semantics` — GitHub Actions path filters — `*` does not cross `/`, `**` does; don't port globs between systems — [stack:github-actions] — active
+- `guard-hooks-deny-teach-ack` — Guard risky tool calls with hooks that deny without an ack marker, teach in the deny message, and fail open — [agent-process] — active
 - `handoff-doc-live-state` — Keep a live status doc in the worktree; never commit it; archive or delete when done — [agent-process] — active
 - `heartbeat-over-time-box` — Abort on actual blockers, not elapsed wall-clock time — [agent-process] — active
 - `idempotent-gates-crossed-messages` — Design async agent gates idempotently — approvals and reports cross in flight — [agent-process] — active
+- `knowledge-routing-ladder` — Route "remember this" by kind — skill, memory, slim core, or library inbox — and enforce the ladder with a guard hook — [agent-process] — active
+- `no-stall-decision-protocol` — On an unanswered user-decision point, take the best reversible default, log it durably, and continue — [agent-process] — active
 - `nuxt-port-fallback` — The Nuxt/Vite dev server walks to the next free port — never assume the requested one — [stack:nuxt, stack:vite] — active
 - `one-canonical-deployer` — Exactly one mechanism may deploy production — [universal, stack:ci] — active
+- `outcome-level-reporting` — Report to the user at outcome level — what happened, what's next, what needs them — with detail in files — [agent-process] — active
 - `peer-to-peer-review-routing` — Writers and reviewers communicate directly; the lead receives only a one-line rolled-up verdict — [agent-process] — active
+- `powershell-pipe-bom-breaks-json` — Windows PowerShell 5.1 pipes prepend a BOM that breaks JSON.parse — strip it, and distrust an all-ALLOW hook test — [env:windows] — active
 - `preview-mcp-orchestrator-only` — Browser-preview and screenshot MCP tools are only available in the main orchestrator session — [agent-process, vendor:anthropic] — active
 - `recovery-from-silent-teammates` — Recover from a silent teammate by probing state before respawning — [agent-process] — active
 - `shutdown-after-verified-not-after-committed` — Never shut down a teammate whose output hasn't been verified working at runtime — [agent-process] — active
+- `slim-always-loaded-instructions` — Carve always-loaded agent instructions into a slim constants core plus on-demand skills — [agent-process] — active
 - `spawn-task-team-isolation` — Sessions spawned via spawn_task must use a unique team name to prevent roster bleed — [agent-process, vendor:anthropic] — active
 - `sync-or-shutdown-stale-teammates` — After invalidating a teammate's world, sync it or shut it down before it reports stale state — [agent-process] — active
+- `team-vs-subagent-gate` — Score weight, phases, communication, and width before spawning a team — a team must earn its order-of-magnitude cost — [agent-process] — active
 - `teammate-reports-to-files` — Teammates write long reports to files and send only a one-line pointer — [agent-process] — active
 - `unique-team-name-per-session` — Use a unique date-stamped team name for every new agent session — [agent-process] — active
 - `verify-actual-bound-url` — State the actual bound URL, then verify it before relaying or diagnosing — [agent-process] — active

@@ -15,3 +15,4 @@ A long-lived dev server is owned by the main session or a dedicated server-minde
 - Designate one persistent owner for dev servers per session.
 - Writers ask the owner for a preview/URL instead of running their own long-lived server.
 - When you find stray listeners from dead agents, reap them.
+- The strongest owner is not an agent at all but a detached daemon process manager that outlives every session — see [[dev-server-request-contract]] for that shape and the user-facing contract.
