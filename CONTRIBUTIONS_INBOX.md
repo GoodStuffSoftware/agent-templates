@@ -22,6 +22,14 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-07-11 — no stale left behind: discovered staleness is in scope; de-hardcode over renumber
+
+- **Trigger:** an orchestrator scoped known-stale doc strings (an old tool count repeated across playbooks/skills) as "pre-existing, out of scope"; the user objected twice ("I don't want to leave anything stale"), quoting the scoping line verbatim. Stale docs had already misinformed downstream agents with full confidence.
+- **Is it generic?** Yes. Stripped: the project's tool registry, counts, and file names → `{{SOURCE_OF_TRUTH_FILE}}` / `{{STALE_STRING}}`. Reusable kernel: (a) staleness discovered while doing a task is part of the task, regardless of whether the rot predates it; (b) the durable fix for rotted counts/enumerations is DE-HARDCODING — docs point at `{{SOURCE_OF_TRUTH_FILE}}`; exact values stay pinned only in test assertions, where pinning is deliberate; (c) sweep the CLASS not the instance (grep for siblings of `{{STALE_STRING}}` before declaring done); (d) immutable history (changelogs, versioned notes) is exempt.
+- **Target:** `anthropic/shared/cross-project-rules.md` (docs-hygiene section), and any reviewer/scribe agent templates that audit docs.
+- **Proposed change:** add rule: "Discovered staleness is in scope. When a task surfaces a stale doc value (counts, statuses, enumerations), fix it in the same commit group. Prefer de-hardcoding: replace the literal with a pointer to `{{SOURCE_OF_TRUTH_FILE}}` so it cannot rot again; keep exact values only in test assertions. Grep for siblings of the stale string and fix the class. Never write 'pre-existing, out of scope' for a known-stale artifact; changelog/history entries are exempt."
+- **Applied?** no
+
 ### 2026-01-01 — EXAMPLE (delete me) — add a "confirm bound port" note to the builder
 
 - **Trigger:** a builder agent in a project reported a dev URL on `:{{DEV_PORT_BASE}}` when the server had actually fallen back to the next port, sending a reviewer to debug the wrong process.
