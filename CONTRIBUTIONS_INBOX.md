@@ -22,6 +22,14 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-07-12 — skills/static instructions must teach capability DISCOVERY, never freeze capability state
+
+- **Trigger:** a project built live capability propagation (new/changed MCP tools injected into running agents via server notifications + a message-bus broadcast), and the user flagged that skills defeat it: a skill is frozen text at invocation time, so a skill that enumerates tools or pins workflows to a specific tool set hard-locks agents to a stale snapshot. User's rule: skills should only be "a way to load the mutable way."
+- **Is it generic?** Yes. Stripped: the MCP server name, tool names/counts, bus subject → `{{CAPABILITY_SOURCE_OF_TRUTH}}` / `{{CHANGE_SIGNAL}}`. Reusable kernel: any static instruction artifact (skill, agent brief, system-prompt attachment, playbook) that describes a MUTABLE capability surface must teach HOW to discover current state (list call, change notification, source-of-truth file) and how to react to `{{CHANGE_SIGNAL}}` — never WHAT the state currently is. Exact values stay only in test assertions, where pinning is deliberate.
+- **Target:** `anthropic/shared/cross-project-rules.md` (agent-instruction authoring section), plus any skill-authoring template.
+- **Proposed change:** add rule: "Static instructions freeze at load time. When documenting a mutable capability surface (tool sets, endpoints, rosters), write discovery instructions — 'list via X, re-list on {{CHANGE_SIGNAL}}, source of truth is {{CAPABILITY_SOURCE_OF_TRUTH}}' — and never enumerate the current set or its count. If an existing skill hard-locks capabilities, rewrite it into a loader of the discovery mechanism."
+- **Applied?** no
+
 ### 2026-07-11 — no stale left behind: discovered staleness is in scope; de-hardcode over renumber
 
 - **Trigger:** an orchestrator scoped known-stale doc strings (an old tool count repeated across playbooks/skills) as "pre-existing, out of scope"; the user objected twice ("I don't want to leave anything stale"), quoting the scoping line verbatim. Stale docs had already misinformed downstream agents with full confidence.
