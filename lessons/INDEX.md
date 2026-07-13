@@ -16,6 +16,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `dev-server-request-contract` — A dev-server request is fulfilled by a clickable tunnel URL from a daemonized server, not a process report — [agent-process] — active
 - `dev-servers-persistent-owner` — Long-lived dev servers belong to a persistent owner, not transient writers — [agent-process] — active
 - `diagnose-the-right-process` — Confirm which process actually serves a build before diagnosing it — [agent-process] — active
+- `discovered-staleness-in-scope` — Staleness discovered while doing a task is in scope — fix it, and prefer de-hardcoding over re-editing the value — [universal] — active
 - `docs-living-or-historical` — Classify every docs directory as LIVING or HISTORICAL RECORD and maintain each by its class — [universal] — active
 - `e2e-spec-registration-required` — Register every new E2E spec in the test runner's config — an unregistered spec silently never runs — [stack:playwright] — active
 - `firestore-rules-pre-merge-checklist` — Firestore rule changes require an explicit identity-binding and schema-drift review before merge — [stack:firestore] — active
@@ -37,10 +38,12 @@ One line per lesson: `id — title — [scope] — status`.
 - `shutdown-after-verified-not-after-committed` — Never shut down a teammate whose output hasn't been verified working at runtime — [agent-process] — active
 - `slim-always-loaded-instructions` — Carve always-loaded agent instructions into a slim constants core plus on-demand skills — [agent-process] — active
 - `spawn-task-team-isolation` — Sessions spawned via spawn_task must use a unique team name to prevent roster bleed — [agent-process, vendor:anthropic] — active
+- `static-instructions-teach-discovery` — Static instruction artifacts must teach how to DISCOVER a mutable capability surface, never enumerate its current state — [agent-process] — active
 - `sync-or-shutdown-stale-teammates` — After invalidating a teammate's world, sync it or shut it down before it reports stale state — [agent-process] — active
 - `team-vs-subagent-gate` — Score weight, phases, communication, and width before spawning a team — a team must earn its order-of-magnitude cost — [agent-process] — active
 - `teammate-reports-to-files` — Teammates write long reports to files and send only a one-line pointer — [agent-process] — active
 - `unique-team-name-per-session` — Use a unique date-stamped team name for every new agent session — [agent-process] — active
+- `validate-cli-args-against-injection` — Validate any user- or agent-supplied value before it becomes a CLI argument — a leading dash is read as a flag, not data — [stack:git] — active
 - `verify-actual-bound-url` — State the actual bound URL, then verify it before relaying or diagnosing — [agent-process] — active
 - `verify-merge-direction` — Verify merge direction before merging a long-lived branch — [universal] — active
 - `version-bump-at-integration` — Version bumps happen at the integration point, not on feature branches — [universal, stack:git] — active
