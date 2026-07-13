@@ -43,7 +43,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `team-vs-subagent-gate` — Score weight, phases, communication, and width before spawning a team — a team must earn its order-of-magnitude cost — [agent-process] — active
 - `teammate-reports-to-files` — Teammates write long reports to files and send only a one-line pointer — [agent-process] — active
 - `unique-team-name-per-session` — Use a unique date-stamped team name for every new agent session — [agent-process] — active
-- `validate-cli-args-against-injection` — Validate any user- or agent-supplied value before it becomes a CLI argument — a leading dash is read as a flag, not data — [stack:git] — active
+- `validate-cli-args-against-injection` — Validate any user- or agent-supplied value before it becomes a CLI argument — a leading dash is read as a flag, not data — [universal] — active
 - `verify-actual-bound-url` — State the actual bound URL, then verify it before relaying or diagnosing — [agent-process] — active
 - `verify-merge-direction` — Verify merge direction before merging a long-lived branch — [universal] — active
 - `version-bump-at-integration` — Version bumps happen at the integration point, not on feature branches — [universal, stack:git] — active

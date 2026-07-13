@@ -44,6 +44,7 @@ Before opening a contribution, scrub it:
 - [ ] **Pick the right home** (see next section).
 - [ ] **Run the leak guard:** `node scripts/leak-check.mjs` — it must exit 0. It catches any real-world token you missed (project/product names, domains, user home path, handle, name, email, git-SHA-like hex runs). Fix every hit. **This same guard runs in CI on every push and pull request** (see [`.github/workflows/leak-check.yml`](.github/workflows/leak-check.yml)) and fails the check on any hit — running it locally first just saves a round-trip. (One narrow exception: the repo names its owner in `LICENSE` — that's ownership metadata, not a content leak. The exemption in `leak-check.mjs` is both LICENSE-scoped and token-scoped, so the company name stays banned in every other file and all other tokens stay banned even in LICENSE.)
 - [ ] **Re-read the diff as a stranger.** Would someone with no knowledge of your project understand and use this? If it only makes sense with your project's context, it's not generic yet.
+- [ ] **Know the guard's boundary.** Leak-check scans committable *file contents* only — commit messages and branch names are not scanned. Whether source-project names may appear in commit metadata is maintainer discretion; the no-specifics guarantee and its CI enforcement cover files. And the guard matches known tokens, not meaning: proprietary material (real code, config, product logic) stays out of files entirely — reconstruct generic examples rather than pasting-and-renaming.
 
 ---
 

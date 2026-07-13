@@ -213,5 +213,5 @@ This lists lessons added or changed since the project's recorded `libraryCommit`
 3. **AND across axes, OR within an axis.**
 4. **Most-specific wins; no two active lessons contradict.**
 5. **`id` is forever** — never reused, even after deprecation.
-6. **No real specifics in the library** — no project/person/path/domain/email, and **no real commit SHAs** (leak-check enforces).
+6. **No real specifics in the library** — no project/person/path/domain/email, and **no real commit SHAs** (leak-check enforces — on committable file contents; commit metadata is not scanned and is maintainer discretion).
 7. **Provenance is anonymized**; the real mapping stays in the git-ignored `PROVENANCE.local.md`.

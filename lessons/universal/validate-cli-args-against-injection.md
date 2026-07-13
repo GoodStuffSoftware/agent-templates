@@ -1,7 +1,7 @@
 ---
 id: validate-cli-args-against-injection
 title: Validate any user- or agent-supplied value before it becomes a CLI argument — a leading dash is read as a flag, not data
-scope: [stack:git]
+scope: [universal]
 status: active
 since: 2026-07-13
 provenance: [contrib-2]
