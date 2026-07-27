@@ -9,6 +9,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `bash-tool-routes-to-wsl` — On Windows, the Bash tool routes to WSL — use the PowerShell tool for native Windows operations — [env:windows, vendor:anthropic] — active
 - `branch-what-deploys` — Branch what deploys; commit dev-config straight to the integration branch — [universal] — active
 - `choose-branch-model-deliberately` — Choose a branch/deploy model deliberately to fit the project's shape; don't assume a staging tier — [universal] — active
+- `clean-clone-cross-os-build-truth` — A repo only ever built in place on its authoring OS hides clean-clone and permission-bit breakage — build it from a fresh clone on the target OS — [universal, stack:git] — active
 - `content-guard-honors-gitignore` — A repo content-guard must scan the committable set, not the raw working tree — [universal, stack:git] — active
 - `continuous-contribution-loop` — Wire capture, sweep, and fold steps so project learning flows to the library continuously — [agent-process] — active
 - `cowork-auto-worktree-detection` — Detect and abort when a writer agent lands in a Cowork auto-generated worktree — [vendor:anthropic] — active
@@ -27,14 +28,19 @@ One line per lesson: `id — title — [scope] — status`.
 - `heartbeat-over-time-box` — Abort on actual blockers, not elapsed wall-clock time — [agent-process] — active
 - `idempotent-gates-crossed-messages` — Design async agent gates idempotently — approvals and reports cross in flight — [agent-process] — active
 - `knowledge-routing-ladder` — Route "remember this" by kind — skill, memory, slim core, or library inbox — and enforce the ladder with a guard hook — [agent-process] — active
+- `migrated-config-carries-source-host-env` — Config and daemon state copied from another host still describes that host — read identity from the live system — [universal] — active
+- `no-self-waking-bus-poller` — Never arm a self-waking timer to poll a coordination bus — drain a durable inbox and let a token-free daemon hold the watch — [agent-process] — active
 - `no-stall-decision-protocol` — On an unanswered user-decision point, take the best reversible default, log it durably, and continue — [agent-process] — active
 - `nuxt-port-fallback` — The Nuxt/Vite dev server walks to the next free port — never assume the requested one — [stack:nuxt, stack:vite] — active
 - `one-canonical-deployer` — Exactly one mechanism may deploy production — [universal, stack:ci] — active
 - `outcome-level-reporting` — Report to the user at outcome level — what happened, what's next, what needs them — with detail in files — [agent-process] — active
 - `peer-to-peer-review-routing` — Writers and reviewers communicate directly; the lead receives only a one-line rolled-up verdict — [agent-process] — active
+- `pin-ipv4-loopback-not-localhost` — Pin local service hosts to the IPv4 loopback literal, not the name `localhost` — [universal] — active
 - `powershell-pipe-bom-breaks-json` — Windows PowerShell 5.1 pipes prepend a BOM that breaks JSON.parse — strip it, and distrust an all-ALLOW hook test — [env:windows] — active
 - `preview-mcp-orchestrator-only` — Browser-preview and screenshot MCP tools are only available in the main orchestrator session — [agent-process, vendor:anthropic] — active
+- `record-intentional-absence` — Record a deliberate removal where the next session will look, or someone restores it as a fix — [universal] — active
 - `recovery-from-silent-teammates` — Recover from a silent teammate by probing state before respawning — [agent-process] — active
+- `secret-resolution-fallback-chain` — Resolve a shared secret through a first-hit-wins chain ending in a fail-safe — not a single required env var — [universal] — active
 - `shutdown-after-verified-not-after-committed` — Never shut down a teammate whose output hasn't been verified working at runtime — [agent-process] — active
 - `slim-always-loaded-instructions` — Carve always-loaded agent instructions into a slim constants core plus on-demand skills — [agent-process] — active
 - `spawn-task-team-isolation` — Sessions spawned via spawn_task must use a unique team name to prevent roster bleed — [agent-process, vendor:anthropic] — active
