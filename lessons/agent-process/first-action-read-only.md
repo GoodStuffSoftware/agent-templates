@@ -2,6 +2,7 @@
 id: first-action-read-only
 title: Writer agents open with a read-only diagnostic and a liveness report
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1, contrib-2]

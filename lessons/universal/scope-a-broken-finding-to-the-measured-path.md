@@ -2,6 +2,7 @@
 id: scope-a-broken-finding-to-the-measured-path
 title: Scope an "it's broken everywhere" finding to the transport you actually measured
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

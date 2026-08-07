@@ -2,6 +2,7 @@
 id: guard-coverage-enumerate-issuing-surfaces
 title: A tool-call guard polices the agent's own calls, not commands declared in configuration — enumerate every surface that can issue the banned call
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

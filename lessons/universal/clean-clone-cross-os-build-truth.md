@@ -2,6 +2,7 @@
 id: clean-clone-cross-os-build-truth
 title: A repo only ever built in place on its authoring OS hides clean-clone and permission-bit breakage — build it from a fresh clone on the target OS
 scope: [universal, stack:git]
+requires: { stack: git }
 status: active
 since: 2026-07-27
 provenance: [contrib-2]

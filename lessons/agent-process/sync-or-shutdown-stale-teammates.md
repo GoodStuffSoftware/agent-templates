@@ -2,6 +2,7 @@
 id: sync-or-shutdown-stale-teammates
 title: After invalidating a teammate's world, sync it or shut it down before it reports stale state
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1, contrib-2]

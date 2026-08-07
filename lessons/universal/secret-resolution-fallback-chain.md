@@ -2,6 +2,7 @@
 id: secret-resolution-fallback-chain
 title: Resolve a shared secret through a first-hit-wins chain ending in a fail-safe — not a single required env var
 scope: [universal]
+requires: {}
 status: active
 since: 2026-07-27
 provenance: [contrib-2]

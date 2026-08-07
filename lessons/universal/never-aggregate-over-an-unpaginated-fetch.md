@@ -2,6 +2,7 @@
 id: never-aggregate-over-an-unpaginated-fetch
 title: Never aggregate over an unpaginated fetch — a truncated ordered page looks exactly like a complete small result
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

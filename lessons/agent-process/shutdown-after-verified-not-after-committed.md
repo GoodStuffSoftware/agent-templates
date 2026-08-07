@@ -2,6 +2,7 @@
 id: shutdown-after-verified-not-after-committed
 title: Never shut down a teammate whose output hasn't been verified working at runtime
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

@@ -2,6 +2,7 @@
 id: spawn-task-team-isolation
 title: Sessions spawned via spawn_task must use a unique team name to prevent roster bleed
 scope: [agent-process, vendor:anthropic]
+requires: { harness: cowork }
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

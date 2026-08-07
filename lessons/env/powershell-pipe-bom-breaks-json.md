@@ -2,6 +2,7 @@
 id: powershell-pipe-bom-breaks-json
 title: Windows PowerShell 5.1 pipes prepend a BOM that breaks JSON.parse — strip it, and distrust an all-ALLOW hook test
 scope: [env:windows]
+requires: { os: windows }
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

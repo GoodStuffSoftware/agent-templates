@@ -2,6 +2,7 @@
 id: idempotent-gates-crossed-messages
 title: Design async agent gates idempotently — approvals and reports cross in flight
 scope: [agent-process]
+requires: { substrate: coordination-bus }
 status: active
 since: 2026-06-12
 provenance: [contrib-1]

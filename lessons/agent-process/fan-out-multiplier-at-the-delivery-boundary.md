@@ -2,6 +2,7 @@
 id: fan-out-multiplier-at-the-delivery-boundary
 title: Fan-out cost is one worker per recipient — put the liveness filter at the boundary every send path crosses
 scope: [agent-process]
+requires: { substrate: coordination-bus }
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

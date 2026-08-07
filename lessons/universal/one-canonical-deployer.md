@@ -2,6 +2,7 @@
 id: one-canonical-deployer
 title: Exactly one mechanism may deploy production
 scope: [universal, stack:ci]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1]

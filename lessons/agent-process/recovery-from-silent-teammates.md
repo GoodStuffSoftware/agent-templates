@@ -2,6 +2,7 @@
 id: recovery-from-silent-teammates
 title: Recover from a silent teammate by probing state before respawning
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

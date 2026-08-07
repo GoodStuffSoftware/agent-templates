@@ -2,6 +2,7 @@
 id: windows-home-config-glob
 title: On Windows, the agent tool's Glob may not traverse the user-profile config dir
 scope: [env:windows, vendor:anthropic]
+requires: { harness: claude-code, os: windows }
 status: active
 since: 2026-06-12
 provenance: [contrib-1]

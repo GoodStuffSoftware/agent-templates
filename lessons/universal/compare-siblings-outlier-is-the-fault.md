@@ -2,6 +2,7 @@
 id: compare-siblings-outlier-is-the-fault
 title: Measure identical peers from one vantage in one window — the outlier names the fault
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

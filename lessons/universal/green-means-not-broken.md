@@ -2,6 +2,7 @@
 id: green-means-not-broken
 title: A passing gate means not-broken, not right — the failure space has three members
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

@@ -2,6 +2,7 @@
 id: dev-servers-persistent-owner
 title: Long-lived dev servers belong to a persistent owner, not transient writers
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1, contrib-2]

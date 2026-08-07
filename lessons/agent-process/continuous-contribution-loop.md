@@ -2,6 +2,7 @@
 id: continuous-contribution-loop
 title: Wire capture, sweep, and fold steps so project learning flows to the library continuously
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

@@ -2,6 +2,7 @@
 id: discovered-staleness-in-scope
 title: Staleness discovered while doing a task is in scope — fix it, and prefer de-hardcoding over re-editing the value
 scope: [universal]
+requires: {}
 status: active
 since: 2026-07-13
 provenance: [contrib-2]

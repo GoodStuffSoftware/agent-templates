@@ -2,6 +2,7 @@
 id: never-test-in-a-live-deployment-tree
 title: A deployment directory that is also a checkout is production, not a workspace
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

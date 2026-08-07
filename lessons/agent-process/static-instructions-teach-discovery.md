@@ -2,6 +2,7 @@
 id: static-instructions-teach-discovery
 title: Static instruction artifacts must teach how to DISCOVER a mutable capability surface, never enumerate its current state
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-07-13
 provenance: [contrib-2]

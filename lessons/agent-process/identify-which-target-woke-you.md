@@ -2,6 +2,7 @@
 id: identify-which-target-woke-you
 title: If a dispatcher started you, resolve WHICH target you are running for before diagnosing a repeat
 scope: [agent-process]
+requires: { substrate: coordination-bus }
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

@@ -2,6 +2,7 @@
 id: deploy-sequencing-tests-first
 title: Run the test suite to completion before deploying — never in parallel
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

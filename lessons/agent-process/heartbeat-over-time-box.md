@@ -2,6 +2,7 @@
 id: heartbeat-over-time-box
 title: Abort on actual blockers, not elapsed wall-clock time
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

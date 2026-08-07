@@ -2,6 +2,7 @@
 id: agent-filesystem-overlay-hides-failed-installs
 title: Never run an installer for the user — a sandboxed agent's package writes can land in an overlay the user's shell cannot see
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

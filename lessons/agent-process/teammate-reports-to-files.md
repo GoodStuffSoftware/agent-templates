@@ -2,6 +2,7 @@
 id: teammate-reports-to-files
 title: Teammates write long reports to files and send only a one-line pointer
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

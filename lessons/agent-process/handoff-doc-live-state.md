@@ -2,6 +2,7 @@
 id: handoff-doc-live-state
 title: Keep a live status doc in the worktree; never commit it; archive or delete when done
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

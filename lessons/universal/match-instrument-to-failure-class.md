@@ -2,6 +2,7 @@
 id: match-instrument-to-failure-class
 title: A gate only refutes the failure class it can observe — green from a blind gate is no evidence
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

@@ -2,6 +2,7 @@
 id: verify-at-destination-prove-the-target
 title: Verify at the destination, and prove the target you checked is the real one
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

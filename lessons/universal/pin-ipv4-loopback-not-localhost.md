@@ -2,6 +2,7 @@
 id: pin-ipv4-loopback-not-localhost
 title: Pin local service hosts to the IPv4 loopback literal, not the name `localhost`
 scope: [universal]
+requires: {}
 status: active
 since: 2026-07-27
 provenance: [contrib-2]

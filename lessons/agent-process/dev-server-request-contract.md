@@ -2,6 +2,7 @@
 id: dev-server-request-contract
 title: A dev-server request is fulfilled by a clickable tunnel URL from a daemonized server, not a process report
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

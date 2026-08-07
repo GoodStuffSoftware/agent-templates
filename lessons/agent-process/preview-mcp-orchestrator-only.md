@@ -2,6 +2,7 @@
 id: preview-mcp-orchestrator-only
 title: Browser-preview and screenshot MCP tools are only available in the main orchestrator session
 scope: [agent-process, vendor:anthropic]
+requires: { harness: claude-code }
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

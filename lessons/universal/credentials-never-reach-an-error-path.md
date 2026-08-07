@@ -2,6 +2,7 @@
 id: credentials-never-reach-an-error-path
 title: Treat every error path in credential-handling code as a publication surface
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

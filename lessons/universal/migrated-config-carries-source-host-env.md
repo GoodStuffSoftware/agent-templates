@@ -2,6 +2,7 @@
 id: migrated-config-carries-source-host-env
 title: Config and daemon state copied from another host still describes that host — read identity from the live system
 scope: [universal]
+requires: {}
 status: active
 since: 2026-07-27
 provenance: [contrib-2]

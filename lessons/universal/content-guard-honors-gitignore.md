@@ -2,6 +2,7 @@
 id: content-guard-honors-gitignore
 title: A repo content-guard must scan the committable set, not the raw working tree
 scope: [universal, stack:git]
+requires: { stack: git }
 status: active
 since: 2026-06-13
 provenance: [contrib-1]

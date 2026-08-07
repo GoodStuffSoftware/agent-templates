@@ -2,6 +2,7 @@
 id: correct-a-durable-record-explicitly
 title: Overturn a wrong entry in a durable record explicitly — an unmarked correction leaves two contradictory claims
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

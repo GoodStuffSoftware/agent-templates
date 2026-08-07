@@ -2,6 +2,7 @@
 id: verify-actual-bound-url
 title: State the actual bound URL, then verify it before relaying or diagnosing
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1, contrib-2]

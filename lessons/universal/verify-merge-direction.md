@@ -2,6 +2,7 @@
 id: verify-merge-direction
 title: Verify merge direction before merging a long-lived branch
 scope: [universal]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1]

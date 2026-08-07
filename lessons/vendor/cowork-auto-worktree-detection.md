@@ -2,6 +2,7 @@
 id: cowork-auto-worktree-detection
 title: Detect and abort when a writer agent lands in a Cowork auto-generated worktree
 scope: [vendor:anthropic]
+requires: { harness: cowork }
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

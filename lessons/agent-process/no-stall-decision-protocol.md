@@ -2,6 +2,7 @@
 id: no-stall-decision-protocol
 title: On an unanswered user-decision point, take the best reversible default, log it durably, and continue
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

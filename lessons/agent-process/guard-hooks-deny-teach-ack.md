@@ -2,6 +2,7 @@
 id: guard-hooks-deny-teach-ack
 title: Guard risky tool calls with hooks that deny without an ack marker, teach in the deny message, and fail open
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

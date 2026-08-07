@@ -2,6 +2,7 @@
 id: check-before-duplicating-a-peers-work
 title: Before starting work assigned to another agent, check whether they already did it — silence is not evidence of inaction
 scope: [agent-process]
+requires: { substrate: coordination-bus }
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

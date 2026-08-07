@@ -2,6 +2,7 @@
 id: team-vs-subagent-gate
 title: Score weight, phases, communication, and width before spawning a team — a team must earn its order-of-magnitude cost
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

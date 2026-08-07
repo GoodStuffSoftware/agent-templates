@@ -2,6 +2,7 @@
 id: record-intentional-absence
 title: Record a deliberate removal where the next session will look, or someone restores it as a fix
 scope: [universal]
+requires: {}
 status: active
 since: 2026-07-27
 provenance: [contrib-2]

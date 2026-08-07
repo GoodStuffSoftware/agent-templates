@@ -2,6 +2,7 @@
 id: e2e-spec-registration-required
 title: Register every new E2E spec in the test runner's config — an unregistered spec silently never runs
 scope: [stack:playwright]
+requires: { stack: playwright }
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

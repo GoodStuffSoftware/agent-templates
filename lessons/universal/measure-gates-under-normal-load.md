@@ -2,6 +2,7 @@
 id: measure-gates-under-normal-load
 title: A green measurement taken in a quiet window is not evidence about a contended one
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

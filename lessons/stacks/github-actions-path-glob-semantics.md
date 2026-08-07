@@ -2,6 +2,7 @@
 id: github-actions-path-glob-semantics
 title: GitHub Actions path filters — `*` does not cross `/`, `**` does; don't port globs between systems
 scope: [stack:github-actions]
+requires: { stack: github-actions }
 status: active
 since: 2026-06-12
 provenance: [contrib-1]

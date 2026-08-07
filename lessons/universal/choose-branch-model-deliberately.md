@@ -2,6 +2,7 @@
 id: choose-branch-model-deliberately
 title: Choose a branch/deploy model deliberately to fit the project's shape; don't assume a staging tier
 scope: [universal]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1, contrib-2]

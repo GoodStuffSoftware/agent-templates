@@ -2,6 +2,7 @@
 id: registry-identity-and-liveness-honesty
 title: Never advertise an identity or a reachability on a shared registry that you cannot honor
 scope: [agent-process]
+requires: { substrate: coordination-bus }
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

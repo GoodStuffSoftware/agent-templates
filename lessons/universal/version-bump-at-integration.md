@@ -2,6 +2,7 @@
 id: version-bump-at-integration
 title: Version bumps happen at the integration point, not on feature branches
 scope: [universal, stack:git]
+requires: { stack: git }
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

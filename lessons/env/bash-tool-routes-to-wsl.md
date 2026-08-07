@@ -2,6 +2,7 @@
 id: bash-tool-routes-to-wsl
 title: On Windows, the Bash tool routes to WSL — use the PowerShell tool for native Windows operations
 scope: [env:windows, vendor:anthropic]
+requires: { harness: claude-code, os: windows }
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

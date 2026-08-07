@@ -2,6 +2,7 @@
 id: no-self-waking-bus-poller
 title: Never arm a self-waking timer to poll a coordination bus — drain a durable inbox and let a token-free daemon hold the watch
 scope: [agent-process]
+requires: { substrate: coordination-bus }
 status: active
 since: 2026-07-27
 provenance: [contrib-2]

@@ -2,6 +2,7 @@
 id: avoid-report-prefixed-filenames
 title: Name lessons and docs with neutral ids so write guards don't trip on the filename
 scope: [vendor:anthropic]
+requires: { harness: claude-code }
 status: active
 since: 2026-06-12
 provenance: [contrib-1]

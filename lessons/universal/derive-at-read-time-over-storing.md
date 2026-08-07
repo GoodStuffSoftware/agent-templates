@@ -2,6 +2,7 @@
 id: derive-at-read-time-over-storing
 title: Derive a state that is already implied by stored data at read time — don't write it back
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

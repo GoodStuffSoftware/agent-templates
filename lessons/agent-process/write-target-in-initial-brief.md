@@ -2,6 +2,7 @@
 id: write-target-in-initial-brief
 title: Bake the write-target into a writer's initial brief; never redirect mid-flight
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1, contrib-2]

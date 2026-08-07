@@ -55,6 +55,8 @@ const LITERAL_TOKENS = [
   ["surname",                "53616e746f726f"],                                            // founder surname
   ["legacy-branch",          "636c617564652f7375 646f6b752d7675 652d617070"],             // an old cowork branch name
   ["user-email",             "73616e746f72 6f3132 40676d61696c2e636f6d"],                 // personal gmail
+  ["coord-bus-name",         "6465636b68616e64"],                                          // the shared agent-coordination-bus host
+  ["workboard-name",         "776865656c686f757365"],                                      // the shared work-board/graph tool
 ];
 
 const banned = LITERAL_TOKENS.map(([label, hex]) => ({

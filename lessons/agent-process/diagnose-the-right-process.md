@@ -2,6 +2,7 @@
 id: diagnose-the-right-process
 title: Confirm which process actually serves a build before diagnosing it
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1]

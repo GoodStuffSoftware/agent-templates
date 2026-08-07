@@ -2,6 +2,7 @@
 id: outcome-level-reporting
 title: Report to the user at outcome level — what happened, what's next, what needs them — with detail in files
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

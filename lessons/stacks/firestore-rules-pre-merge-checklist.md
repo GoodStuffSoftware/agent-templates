@@ -2,6 +2,7 @@
 id: firestore-rules-pre-merge-checklist
 title: Firestore rule changes require an explicit identity-binding and schema-drift review before merge
 scope: [stack:firestore]
+requires: { stack: firestore }
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

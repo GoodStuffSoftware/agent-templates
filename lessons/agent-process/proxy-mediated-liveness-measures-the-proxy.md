@@ -2,6 +2,7 @@
 id: proxy-mediated-liveness-measures-the-proxy
 title: When one process subscribes on behalf of many, server-side liveness measures the proxy — and a capped watch set evicts silently
 scope: [agent-process]
+requires: { substrate: coordination-bus }
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

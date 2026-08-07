@@ -2,6 +2,7 @@
 id: slim-always-loaded-instructions
 title: Carve always-loaded agent instructions into a slim constants core plus on-demand skills
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

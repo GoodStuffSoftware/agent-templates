@@ -2,6 +2,7 @@
 id: unique-team-name-per-session
 title: Use a unique date-stamped team name for every new agent session
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

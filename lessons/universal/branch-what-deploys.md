@@ -2,6 +2,7 @@
 id: branch-what-deploys
 title: Branch what deploys; commit dev-config straight to the integration branch
 scope: [universal]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-1]

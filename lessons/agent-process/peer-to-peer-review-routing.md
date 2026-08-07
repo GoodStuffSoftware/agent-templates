@@ -2,6 +2,7 @@
 id: peer-to-peer-review-routing
 title: Writers and reviewers communicate directly; the lead receives only a one-line rolled-up verdict
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]

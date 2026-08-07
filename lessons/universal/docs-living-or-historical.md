@@ -2,6 +2,7 @@
 id: docs-living-or-historical
 title: Classify every docs directory as LIVING or HISTORICAL RECORD and maintain each by its class
 scope: [universal]
+requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

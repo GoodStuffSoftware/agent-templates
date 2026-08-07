@@ -2,6 +2,7 @@
 id: externally-asserted-fields-are-not-self-reportable
 title: A field meaning "someone else asserted this about you" must not be settable by its subject
 scope: [universal]
+requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]

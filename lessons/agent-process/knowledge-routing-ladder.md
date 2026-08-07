@@ -2,6 +2,7 @@
 id: knowledge-routing-ladder
 title: Route "remember this" by kind — skill, memory, slim core, or library inbox — and enforce the ladder with a guard hook
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]

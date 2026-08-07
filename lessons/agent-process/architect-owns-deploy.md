@@ -2,6 +2,7 @@
 id: architect-owns-deploy
 title: The agent that built the feature owns the deploy — not the orchestrator
 scope: [agent-process]
+requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]
