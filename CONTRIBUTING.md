@@ -83,9 +83,13 @@ If a change is generic but only relevant to one vendor's agent model, tag it `ve
 
 ## Contribution path
 
-1. **Preferred — a pull request.** If this library has a remote with PRs enabled, open a PR with the scrubbed change. The PR description states: what triggered it, why it's generic (the "is this generic?" result), and which template/file it lands in. **The `leak-check` CI workflow gates every PR** — it runs automatically on the pull request and the PR cannot be merged while it's red. Don't ask a maintainer to override it; fix the leak instead.
+**In practice, this library lands changes by direct commit to `main`** — no feature branch, no PR. Every fold to date has worked this way: a maintainer (human or agent) drains `CONTRIBUTIONS_INBOX.md`, applies the scrubbed entries to their proper home, and commits straight to `main`. That doesn't relax the gate — the `leak-check` CI workflow triggers on `push` as well as `pull_request` (see [`.github/workflows/leak-check.yml`](.github/workflows/leak-check.yml)), so a bad commit to `main` still gets caught. Run `node scripts/leak-check.mjs` locally first to catch it before CI does.
 
-2. **Fallback — the inbox.** If no PR workflow is available (e.g. you're working offline, or the remote isn't set up yet), append a dated entry to **[CONTRIBUTIONS_INBOX.md](CONTRIBUTIONS_INBOX.md)** describing the change, so a maintainer can apply it later. The inbox is a holding area, not the final home — entries get folded into the actual templates and then removed (and that folding-in is itself gated by the leak-check CI on the maintainer's commit).
+1. **Standard — the inbox.** Append a dated entry to **[CONTRIBUTIONS_INBOX.md](CONTRIBUTIONS_INBOX.md)** describing the scrubbed change, newest entry at the top. This is how contributions accumulate between folds, including from agents or sandboxes that shouldn't or can't commit library changes directly. A maintainer periodically drains the inbox — applies each entry to its proper home (a template file or a `lessons/` file), flips `Applied?` to `yes`, and removes it — landing the fold as a direct commit to `main`.
+
+2. **Also fine — commit straight to `main`.** If you already have write access and the change is scrubbed and ready, there's no need to stage it through the inbox first. Small, well-scoped commits with conventional messages, same as any other change here — this is exactly what every fold commit has done.
+
+3. **If a PR workflow is ever wired up**, the same rules apply: the PR description states what triggered the change, why it's generic (the "is this generic?" result), and which file it lands in, and `leak-check` CI gates the merge. Nothing here requires PRs — treat this as available, not preferred.
 
 Either way: the change isn't "done" until it's scrubbed (leak-check green, locally and in CI) and lands in its proper home (a template file or a `lessons/` lesson), not just the inbox.
 

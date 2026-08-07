@@ -194,6 +194,19 @@ Append a new dated entry at the **top** of the list (newest first), using the te
   ```
 - **Applied?** `no`
 
+### 2026-08-06 — offer the safe handle before the unsafe one is the only one
+
+- **Trigger:** three separate identity bugs in one codebase in one week, each one an agent deriving identity from a convenient string instead of from an authenticated credential: a transport class treated as an ownership signal; a garbage-collection tombstone's actor field read as the record's owner; a requested name treated as proof of the caller. A fourth was caught *before* it was written — the proposed fix for the third would have had to parse an identifier out of a token name, because the object carrying the real identity was dropped before reaching the request context. That is: **the codebase made the wrong implementation the only available one.**
+- **Is it generic?** Yes. Stripped: the language, the auth scheme, the field names. Reusable kernel: when the correct approach requires a handle the code does not expose, every implementer independently reaches for the incorrect one — and each looks locally reasonable. The recurrence is a property of the API surface, not of the people.
+- **Target:** a new tagged file under `lessons/` — API/affordance design, adjacent to the existing safeguard-placement lesson. That one is about WHERE a check goes; this one is about whether the correct call is *possible* at the call site.
+- **Proposed change:**
+  - When the same class of mistake recurs across independent authors, stop treating it as a discipline problem. Ask what handle the correct implementation needs and whether the code exposes it. Three instances by three authors is evidence about the surface.
+  - **Ship the safe handle FIRST, as its own change, before the work that needs it.** If it lands as an acceptance criterion *inside* the risky change, the implementer still starts from the unsafe path and has to climb out. Landing it first makes the correct implementation the path of least resistance instead of the one requiring vigilance.
+  - Watch for context objects that DROP the field carrying real identity (a normalizer returning a hand-picked subset). The drop is usually invisible and is what forces every downstream caller into a string parse.
+  - **A distinction between two similar bug shapes is useless without a search handle.** When filing "these are different problems", give each one a concrete grep target — otherwise a sweep for one silently misses the other and the distinction was decorative.
+  - Derive identity from the authenticated credential, never from a parameter naming the subject. A filter like `?subject=<id>` read off the request is not a restriction; it is a lookup by any caller. If it must exist, validate it against the authenticated identity rather than trusting it.
+- **Applied?** no
+
 ### 2026-08-05 — reachability is directional: proving you can reach peers proves nothing about peers reaching you
 
 - **Trigger:** an agent acting as the coordination hub was unreachable for ~26 hours and nobody, including the agent itself, noticed. Every health check it ran was of the **outbound** direction — a dispatch log showing 12/12 sends fired with HTTP 200 — and every one passed. The **inbound** path (a background listener process that polls the message bus and resumes sessions) had died on a transient network error and nothing was configured to restart it. Peer messages were durably queued the whole time, so no data was lost and no error surfaced anywhere; the agent simply never woke. It was caught only when a human asked "do you not have a trigger?"
@@ -296,7 +309,7 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 - **Applied?** `no`
 
-### {{DATE}} — a live check against the shared trunk cannot allocate a shared number
+### 2026-08-04 — a live check against the shared trunk cannot allocate a shared number
 
 - **Trigger:** four unmerged branches, written by three agents in parallel, independently claimed the SAME sequential decision-record number ({{ADR_PREFIX}}121). Every one of them did the correct thing: fetched the current trunk, grepped the decisions file, found the real maximum, incremented. Every one of those checks was right and every one was insufficient, because a check against the trunk cannot see another branch that has not merged. Resolution cost several coordination round-trips and one agent renaming 9 references across 7 files. A fifth branch had already burned the same lesson earlier — it carried a number that had been taken by unrelated work while it sat shelved.
 - **Is it generic?** Yes. Stripped: the project, the record type, the specific numbers. The reusable kernel: **any monotonically-allocated shared identifier — ADR/decision numbers, migration ordinals, fixture ports, feature-flag slots, error codes — cannot be safely allocated by reading the trunk when work happens on concurrent branches.** The check is necessary, not sufficient, and nothing local can answer "is this free" until merge time.
@@ -310,8 +323,6 @@ Append a new dated entry at the **top** of the list (newest first), using the te
   - Reviewer prompt: "could two branches in flight both be right about this value?" If yes, it is not a value to derive locally.
 - **Why it evades review:** each branch is individually correct and passes its own gates. The conflict does not exist in any single tree — it comes into being only at merge, and only if someone happens to be looking at both.
 - **Applied?** no
-
-_The twelve entries dated 2026-07-27 through 2026-08-02 were folded into `lessons/` on 2026-08-03 (`Applied? yes`, entries removed per the maintainer flow above)._
 
 ### 2026-08-03 — normalize line endings before calling two copies "different"
 
@@ -353,26 +364,4 @@ _The twelve entries dated 2026-07-27 through 2026-08-02 were folded into `lesson
 - **Why it evades review:** every one of these passes its own gates — lint clean, tests green, commit lands, HEAD moves, remote sha real. The bypass is invisible because nothing fails; the protection simply isn't present.
 - **Applied?** no
 
-### 2026-01-01 — EXAMPLE (delete me) — add a "confirm bound port" note to the builder
-
-- **Trigger:** a builder agent in a project reported a dev URL on `:{{DEV_PORT_BASE}}` when the server had actually fallen back to the next port, sending a reviewer to debug the wrong process.
-- **Is it generic?** Yes. The only project-specific bit was the literal port number → replaced with `{{DEV_PORT_BASE}}`. The reusable kernel: "report the exact bound 'Local:' URL, never the requested port" — applies to any project with a port-falling-back dev server.
-- **Target:** `anthropic/basic-site/agents/site-builder.md` (and it's already reflected as the `verify-actual-bound-url` lesson).
-- **Proposed change:** _(example only — this rule already exists in the template; this entry is just to show the format)_ ensure the builder's local-verification step says "report the EXACT 'Local:' URL the dev server prints (never the requested port — dev servers fall back `:{{DEV_PORT_BASE}}`→`:{{DEV_PORT_BASE}}+1`→… when a port is taken)."
-- **Applied?** n/a — example entry. Delete when a real contribution arrives.
-
-
----
-
-### {{DATE}} — offer the safe handle before the unsafe one is the only one
-
-- **Trigger:** three separate identity bugs in one codebase in one week, each one an agent deriving identity from a convenient string instead of from an authenticated credential: a transport class treated as an ownership signal; a garbage-collection tombstone's actor field read as the record's owner; a requested name treated as proof of the caller. A fourth was caught *before* it was written — the proposed fix for the third would have had to parse an identifier out of a token name, because the object carrying the real identity was dropped before reaching the request context. That is: **the codebase made the wrong implementation the only available one.**
-- **Is it generic?** Yes. Stripped: the language, the auth scheme, the field names. Reusable kernel: when the correct approach requires a handle the code does not expose, every implementer independently reaches for the incorrect one — and each looks locally reasonable. The recurrence is a property of the API surface, not of the people.
-- **Target:** a new tagged file under `lessons/` — API/affordance design, adjacent to the existing safeguard-placement lesson. That one is about WHERE a check goes; this one is about whether the correct call is *possible* at the call site.
-- **Proposed change:**
-  - When the same class of mistake recurs across independent authors, stop treating it as a discipline problem. Ask what handle the correct implementation needs and whether the code exposes it. Three instances by three authors is evidence about the surface.
-  - **Ship the safe handle FIRST, as its own change, before the work that needs it.** If it lands as an acceptance criterion *inside* the risky change, the implementer still starts from the unsafe path and has to climb out. Landing it first makes the correct implementation the path of least resistance instead of the one requiring vigilance.
-  - Watch for context objects that DROP the field carrying real identity (a normalizer returning a hand-picked subset). The drop is usually invisible and is what forces every downstream caller into a string parse.
-  - **A distinction between two similar bug shapes is useless without a search handle.** When filing "these are different problems", give each one a concrete grep target — otherwise a sweep for one silently misses the other and the distinction was decorative.
-  - Derive identity from the authenticated credential, never from a parameter naming the subject. A filter like `?subject=<id>` read off the request is not a restriction; it is a lookup by any caller. If it must exist, validate it against the authenticated identity rather than trusting it.
-- **Applied?** no
+_The twelve entries dated 2026-07-27 through 2026-08-02 were folded into `lessons/` on 2026-08-03 (`Applied? yes`, entries removed per the maintainer flow above)._
