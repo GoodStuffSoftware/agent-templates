@@ -22,6 +22,54 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-08-07 — "safe because X is never used" is a tripwire, and the comment saying so is what disarms the alarm
+
+- **Trigger:** a cross-environment data-migration function copied a user's auth claims verbatim between environments. A comment on that code read, in substance, "this is a defensive no-op — no such claims are used today." It was accurate when written. A later change introduced a privilege-bearing claim, and in doing so converted the no-op into a privilege-escalation path: an administrator in a low-trust environment could grant the claim to a fresh account there, migrate that account to production, and arrive with production administrator rights. The migration code had six documented containment controls; every one of them governed WHICH environment could be written to, and none inspected WHAT was being written. The feature author never opened that file — it was not part of the change, and nothing in the change's own diff pointed at it. An adversarial reviewer found it only by asking what ELSE consumes the thing being introduced.
+- **Is it generic?** Yes. Stripped: the platform, the products, the claim name, the projects. The reusable kernel is that a comment of the form *"this is safe because X does not exist / is not used / is always empty"* is a **conditional assertion with no enforcement**. Its truth depends on a global property of the system that nothing checks and that any future change may silently revoke. Two consequences make it worse than an ordinary stale comment. First, the failure is **non-local**: the change that invalidates it happens somewhere else, by someone who has no reason to read this file, so no diff ever shows the assertion becoming false. Second, the comment is **actively load-bearing in the wrong direction** — it does not merely become wrong, it discourages the very inspection that would catch it. A reader who arrives with a doubt is talked out of it by a sentence that was true years ago.
+- **Target:** a new tagged file under `lessons/` — tags: `security`, `stale-comment`, `non-local-invariant`, `review-scope`, `assumption-drift`.
+- **Proposed change:**
+
+  ```markdown
+  # "Safe because X is never used" is an unenforced invariant — treat it as a tripwire, not a reassurance
+
+  Somewhere in most codebases is a comment shaped like: "this copies everything
+  verbatim, which is fine — nothing sensitive is stored here today." Or "no-op:
+  we never populate that field." Or "unreachable: that mode is disabled."
+
+  Each states a fact about the whole system, records it in ONE local file, and
+  then relies on it forever with nothing enforcing it. It is an invariant with
+  no guard.
+
+  The danger is not that it goes stale. Plenty of comments go stale harmlessly.
+  It is that this kind goes stale NON-LOCALLY and INVISIBLY:
+
+  - The change that falsifies it happens in a different file, by someone with no
+    reason to read this one. No diff ever shows the assertion flipping.
+  - The comment then argues AGAINST the inspection that would catch it. Someone
+    who arrives suspicious reads a confident sentence and moves on. A silent
+    hazard is bad; a hazard with a reassuring sign on it is worse.
+
+  Two habits:
+
+  1. **When you introduce X, grep for prose that assumes X's absence.** Not just
+     callers, not just types — comments. Search the words, not the symbols:
+     "never", "no-op", "not used", "always empty", "cannot happen". The code that
+     breaks may compile perfectly and have no reference to your change at all.
+  2. **When you WRITE such a comment, make it enforceable or make it a denial.**
+     Prefer an allowlist over a denylist so the next addition is safe by default;
+     prefer a test that asserts the invariant over a sentence that asserts it.
+     If you truly cannot enforce it, write it as a WARNING about what would break
+     ("if a privileged field is ever added here, this becomes an escalation
+     path") rather than as an all-clear. The same knowledge, aimed so that it
+     alerts the future reader instead of dismissing them.
+
+  For reviewers: when a change introduces a new KIND of thing, the blast radius
+  is not the diff. Ask what else in the system handles that kind generically —
+  copiers, serialisers, exporters, sync jobs, backup and migration paths. Generic
+  machinery is exactly what treats a new privileged thing as just another value.
+  ```
+- **Applied?** `no`
+
 ### 2026-08-07 — a hardcoded reply-to address in a briefing template fails silently, and silence reads as progress
 
 - **Trigger:** an orchestration doctrine file instructed, verbatim, that every subagent brief must end with `Report via SendMessage(to="team-lead")`. That address is only valid in one harness shape. In a session where the team was implicit (the spawn tool's own description said the team parameter was deprecated and ignored), no agent named `team-lead` existed — the orchestrator was addressed as `main`. Four agents were spawned with the stale wording. Each one independently discovered the address was unreachable and fell back, one of them reporting *"no agent named team-lead is reachable — messaging you as main."* Cost was one wasted turn per spawn. The latent cost is worse: an agent that does not think to fall back drops its report entirely, and a dropped report is indistinguishable from an agent still working.
