@@ -22,6 +22,53 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-08-07 — a wide agent fan-out starves the host, and the damage surfaces as "flaky tests" somewhere else
+
+- **Trigger:** an orchestrator session fanned out a large number of parallel agents on a memory-constrained laptop. Later, an unrelated task's pre-push gate failed three times. The first two failures were the same spec hitting a hardcoded timeout; the third was two *different* specs failing in two *different* modes — one reading an empty log file a piped child process should have written to, the other reporting that 2 of 5 external-process queries had genuinely errored rather than run slow. Three diagnostic rounds went into the tests and into hunting orphaned processes from a previously-documented leak. Only then did anyone measure the machine: **0.4 GB free of 13.7 GB**, with the agent fleet itself the single largest consumer. The session had starved the box and then spent three rounds debugging its own symptom, one layer too low.
+- **Is it generic?** Yes. Stripped: the machine, the vendor, the projects, the repo, the specific specs. The reusable kernel is that **concurrent agents are full OS processes, and fan-out width is a resource decision, not only a parallelism decision.** Under memory pressure, failures do not appear in the agent layer where the cause lives — they appear wherever something spawns a subprocess, shells out, or depends on I/O timing. Those failures are *nondeterministic*, which is precisely the signature people label "flaky test" and then investigate at the test layer. The tell that distinguishes the two: a **timeout** is consistent with a fragile budget, but an **error return** from an operation that normally succeeds means the resource wasn't there. Also note the self-inflicted loop — the same session that widened the fan-out was the one debugging the result, with no visibility into its own footprint.
+- **Target:** a new tagged file under `lessons/` — tags: `agent-process`, `resource-budget`, `false-flake`, `diagnosis-order`. Predicate: `requires: {}` (holds on any host; only the threshold is machine-specific).
+- **Proposed change:**
+
+  ```markdown
+  # Budget fan-out width against the host's memory, not just against the task
+
+  Each concurrent agent is a full process with its own footprint (a few hundred
+  MB is typical). Deciding how wide to fan out is therefore a resource decision
+  as much as a parallelism one, and on a constrained host the two answers differ
+  sharply.
+
+  What makes this hard to catch is that the damage does NOT land in the agent
+  layer. It lands wherever the machine is asked for something it no longer has:
+
+  - tests that spawn real subprocesses or shell out
+  - anything reading a file another process is still writing
+  - operations with a fixed time budget
+  - external process/system queries
+
+  These fail NONDETERMINISTICALLY, which reads as "flaky test." So the
+  investigation starts at the test, and the test is fine.
+
+  **Diagnostic order.** When a subprocess-spawning or I/O-timing test fails
+  nondeterministically, measure free memory BEFORE reading the test. If free
+  memory is low, stop investigating the test — free resources and retry.
+
+  **The distinguishing tell.** A *timeout* is consistent with a merely fragile
+  budget. An *error return* from an operation that normally succeeds — a query
+  that fails outright, a file that is empty rather than late — means the
+  resource was absent, not slow. Two different failure modes across two
+  unrelated specs in one run is a host signal, not a test signal.
+
+  **The trap.** The session that widened the fan-out is usually the one
+  debugging the symptom, and it has no view of its own footprint. Treat
+  "several unrelated things got flaky at once" as evidence about the machine
+  before it is evidence about the code.
+
+  Before a wide fan-out: check free memory. On a constrained host, prefer
+  sequential batches over maximum concurrency — and remember the ceiling is the
+  host's, not the task's.
+  ```
+- **Applied?** `no`
+
 ### 2026-08-07 — "safe because X is never used" is a tripwire, and the comment saying so is what disarms the alarm
 
 - **Trigger:** a cross-environment data-migration function copied a user's auth claims verbatim between environments. A comment on that code read, in substance, "this is a defensive no-op — no such claims are used today." It was accurate when written. A later change introduced a privilege-bearing claim, and in doing so converted the no-op into a privilege-escalation path: an administrator in a low-trust environment could grant the claim to a fresh account there, migrate that account to production, and arrive with production administrator rights. The migration code had six documented containment controls; every one of them governed WHICH environment could be written to, and none inspected WHAT was being written. The feature author never opened that file — it was not part of the change, and nothing in the change's own diff pointed at it. An adversarial reviewer found it only by asking what ELSE consumes the thing being introduced.
