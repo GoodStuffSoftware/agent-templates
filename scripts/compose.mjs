@@ -43,6 +43,13 @@ const AXIS_ORDER = [
 ];
 const KNOWN_AXES = new Set(AXIS_ORDER);
 
+// `requires:` predicate keys. Unlike `scope:` (a browsing/cascade axis), these
+// are machine-evaluated against a project's profile at render time: a lesson
+// only reaches a target whose profile satisfies EVERY key. Claude Code has no
+// OS-conditional config, so this is the only place a "Windows-only" rule can be
+// held back from a Linux target.
+const REQUIRES_KEYS = new Set(["os", "harness", "stack", "substrate", "repo"]);
+
 function die(msg) {
   console.error(`compose: ${msg}`);
   process.exit(1);
@@ -65,7 +72,20 @@ function parseFrontmatter(text, relPath) {
     if (!kv) die(`${relPath}: cannot parse frontmatter line: "${line}"`);
     const key = kv[1];
     let rest = kv[2].trim();
-    if (rest.startsWith("[") && rest.endsWith("]")) {
+    if (rest.startsWith("{") && rest.endsWith("}")) {
+      // inline map — `requires: { os: windows }`, or `requires: {}`
+      const inner = rest.slice(1, -1).trim();
+      const map = {};
+      if (inner) {
+        for (const pair of inner.split(",")) {
+          const mm = pair.match(/^\s*([A-Za-z_]+)\s*:\s*(.+?)\s*$/);
+          if (!mm) die(`${relPath}: cannot parse "${key}" entry "${pair.trim()}"`);
+          map[mm[1]] = mm[2];
+        }
+      }
+      data[key] = map;
+      i++;
+    } else if (rest.startsWith("[") && rest.endsWith("]")) {
       // inline list
       data[key] = rest
         .slice(1, -1)
@@ -137,8 +157,18 @@ function loadLessons() {
     if (ids.has(fm.id)) {
       die(`${rel}: duplicate id "${fm.id}" (also in ${ids.get(fm.id)})`);
     }
+    if (fm.requires !== undefined &&
+        (typeof fm.requires !== "object" || Array.isArray(fm.requires))) {
+      die(`${rel}: "requires" must be an inline map, e.g. requires: { os: windows }`);
+    }
+    const requires = fm.requires || {};
+    for (const k of Object.keys(requires)) {
+      if (!REQUIRES_KEYS.has(k)) {
+        die(`${rel}: unknown requires key "${k}" (known: ${[...REQUIRES_KEYS].join(", ")})`);
+      }
+    }
     ids.set(fm.id, rel);
-    lessons.push({ ...fm, scope, rel });
+    lessons.push({ ...fm, scope, requires, rel });
   }
   return lessons;
 }
@@ -167,8 +197,41 @@ function readProfile(lockPath) {
     archetype: p.archetype || null,
     stacks: new Set(p.stacks || []),
     env: new Set(p.env || []),
+    // `requires:` predicate inputs. Absent => null/empty, which fails CLOSED.
+    os: p.os || null,
+    harness: p.harness || null,
+    repo: p.repo || null,
+    substrates: new Set(p.substrates || []),
     libraryCommit: lock.libraryCommit || null,
   };
+}
+
+// Every key in `requires` must hold (AND). Fails CLOSED: a predicate the
+// profile does not declare does NOT match. A Windows-only rule must never
+// reach a profile that never said it was Windows — that asymmetry is the
+// entire point, and skipping it once left a literal `C:\fake\worktree`
+// directory on a Linux box.
+// A value may list alternatives with `|` (OR), mirroring how `scope:` already
+// ORs within an axis: `{ stack: nuxt|vite }` holds for either. Needed because
+// the profile vocabulary has no implication rules — a Nuxt project declares
+// "nuxt", never "vite", so a vite-only predicate would silently drop the
+// lesson from the very projects it was written for.
+function requiresMatches(requires, profile) {
+  for (const [key, raw] of Object.entries(requires || {})) {
+    const alts = String(raw).split("|").map((s) => s.trim()).filter(Boolean);
+    const any = (test) => alts.some(test);
+    let ok;
+    switch (key) {
+      case "os":        ok = any((v) => profile.os === v); break;
+      case "harness":   ok = any((v) => profile.harness === v); break;
+      case "repo":      ok = any((v) => profile.repo === v); break;
+      case "stack":     ok = any((v) => profile.stacks.has(v)); break;
+      case "substrate": ok = any((v) => profile.substrates.has(v)); break;
+      default:          return false; // unknown key => cannot be satisfied
+    }
+    if (!ok) return false;
+  }
+  return true;
 }
 
 function tagMatches(tag, profile) {
@@ -186,6 +249,7 @@ function tagMatches(tag, profile) {
 
 // AND across axes, OR within an axis.
 function lessonMatches(lesson, profile) {
+  if (!requiresMatches(lesson.requires, profile)) return false;
   const byAxis = new Map();
   for (const tag of lesson.scope) {
     const a = axisOf(tag);
@@ -314,6 +378,54 @@ function flag(name) {
 }
 
 const lessons = loadLessons(); // always validates
+
+if (args.includes("--selftest")) {
+  // Zero-dep assertions over the requires: matcher. Includes must-FAIL cases —
+  // a green run that can only pass proves nothing.
+  let failures = 0;
+  const check = (name, actual, expected) => {
+    if (actual !== expected) {
+      console.error(`  FAIL  ${name} — got ${actual}, want ${expected}`);
+      failures++;
+    } else {
+      console.log(`  ok    ${name}`);
+    }
+  };
+  const mk = (over) => ({
+    vendor: null, archetype: null, stacks: new Set(), env: new Set(),
+    os: null, harness: null, repo: null, substrates: new Set(), ...over,
+  });
+  const win = mk({ os: "windows", harness: "claude-code", stacks: new Set(["vite"]) });
+  const linux = mk({ os: "linux", harness: "claude-code" });
+  const bare = mk({});
+
+  console.log("compose --selftest: requires: predicate");
+  check("empty predicate matches anything", requiresMatches({}, bare), true);
+  check("os:windows matches a windows profile", requiresMatches({ os: "windows" }, win), true);
+  // The regression this predicate exists to prevent.
+  check("os:windows does NOT reach a linux profile", requiresMatches({ os: "windows" }, linux), false);
+  check("os:windows does NOT reach an undeclared profile", requiresMatches({ os: "windows" }, bare), false);
+  check("substrate requires explicit declaration", requiresMatches({ substrate: "coordination-bus" }, win), false);
+  check("stack matches a declared stack", requiresMatches({ stack: "vite" }, win), true);
+  check("every key must hold (AND)", requiresMatches({ os: "windows", harness: "cowork" }, win), false);
+  check("unknown key fails closed", requiresMatches({ nonsense: "x" }, win), false);
+  // Regression: a nuxt project declares "nuxt", never "vite". A vite-only
+  // predicate silently dropped this lesson from the projects it was written
+  // for — caught end-to-end, not by the unit checks above.
+  const nuxtProj = mk({ stacks: new Set(["nuxt", "github-actions"]) });
+  check("stack alternatives match either side", requiresMatches({ stack: "nuxt|vite" }, nuxtProj), true);
+  check("stack alternatives still match the other side", requiresMatches({ stack: "nuxt|vite" }, win), true);
+  check("stack alternatives do not match an unrelated stack", requiresMatches({ stack: "nuxt|vite" }, bare), false);
+
+  const tagged = lessons.filter((l) => Object.keys(l.requires).length > 0).length;
+  console.log(`compose: ${lessons.length} lessons parsed, ${tagged} carry a non-empty requires:`);
+  if (failures) {
+    console.error(`compose --selftest: ${failures} FAILED`);
+    process.exit(1);
+  }
+  console.log("compose --selftest: all passed");
+  process.exit(0);
+}
 
 if (args.includes("--index")) {
   const relIndex = relative(ROOT, INDEX_PATH).split(sep).join("/");

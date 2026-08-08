@@ -2,7 +2,7 @@
 id: nuxt-port-fallback
 title: The Nuxt/Vite dev server walks to the next free port — never assume the requested one
 scope: [stack:nuxt, stack:vite]
-requires: { stack: vite }
+requires: { stack: nuxt|vite }
 status: active
 since: 2026-06-12
 provenance: [contrib-1]
