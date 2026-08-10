@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-07-27
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 A process-manager state dump, a service unit, a scheduler export, an env file — anything copied or migrated from one machine to another — carries the source machine's baked values: hostnames, machine-identifying environment variables, absolute paths, user names. The processes still start, so nothing announces the staleness, and the artifact keeps confidently describing a machine you are not on.
 
@@ -18,6 +18,7 @@ The same staleness has a louder second form: migrated state that names a RUNTIME
 
 **How to apply:**
 - Read host identity from the live system, never from a config artifact's baked values. If a decision branches on which machine you are on, resolve that from the OS at the moment you branch.
+- **A credential file is identity-bearing: copying it to another name does not re-scope it.** A service-account key carries the identity of the environment that ISSUED it, so placing a copy at the filename a resolver expects for a *different* environment produces an artifact that authenticates as the original — and fails while LOOKING configured. That is the worst version of this failure: file-present reading as credential-works is what let one production environment sit broken for fifteen hours behind an all-green panel. **Derive the filename from the credential's own declared identity, never from where you want it to be used**, and verify by making one authenticated call and confirming which environment answers.
 - When migrating daemon or scheduler state between hosts, regenerate it on the target where the tool supports that, rather than copying. Where you must copy, audit every absolute path, hostname, and baked env var in it.
 - Annotate the migrated artifact itself with a line saying where it came from and which of its values are known-stale — the next reader is the one who needs it ([[record-intentional-absence]] is the same discipline applied to removals).
 - **When an app repeatedly spawns a missing runtime's installer or stub after a migration, suspect migrated per-app state before blaming configuration or the app.** Search the app's data directory (binary-aware, cache directories excluded) for markers of the old machine's runtimes — old hostnames, distribution paths, container or remote-shell target names — and cross-check the hits against the app's own index of stored items. Retire the stale record (archive or quarantine it; do not delete) rather than installing something the new machine never needed.

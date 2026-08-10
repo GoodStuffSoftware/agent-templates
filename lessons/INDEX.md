@@ -9,9 +9,11 @@ One line per lesson: `id — title — [scope] — status`.
 - `avoid-report-prefixed-filenames` — Name lessons and docs with neutral ids so write guards don't trip on the filename — [vendor:anthropic] — active
 - `bash-tool-routes-to-wsl` — On Windows, the Bash tool routes to WSL — use the PowerShell tool for native Windows operations — [env:windows, vendor:anthropic] — active
 - `branch-what-deploys` — Branch what deploys; commit dev-config straight to the integration branch — [universal] — active
+- `budget-fan-out-against-host-memory` — Budget agent fan-out width against the host's memory, not just against the task — the damage surfaces as "flaky tests" somewhere else — [agent-process] — active
 - `check-before-duplicating-a-peers-work` — Before starting work assigned to another agent, check whether they already did it — silence is not evidence of inaction — [agent-process] — active
 - `choose-branch-model-deliberately` — Choose a branch/deploy model deliberately to fit the project's shape; don't assume a staging tier — [universal] — active
 - `clean-clone-cross-os-build-truth` — A repo only ever built in place on its authoring OS hides clean-clone and permission-bit breakage — build it from a fresh clone on the target OS — [universal, stack:git] — active
+- `clean-conflict-map-not-safe-ordering` — A clean conflict map bounds textual risk only — it says nothing about whether landing A before B causes harm — [universal] — active
 - `compare-siblings-outlier-is-the-fault` — Measure identical peers from one vantage in one window — the outlier names the fault — [universal] — active
 - `content-guard-honors-gitignore` — A repo content-guard must scan the committable set, not the raw working tree — [universal, stack:git] — active
 - `continuous-contribution-loop` — Wire capture, sweep, and fold steps so project learning flows to the library continuously — [agent-process] — active
@@ -26,6 +28,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `discovered-staleness-in-scope` — Staleness discovered while doing a task is in scope — fix it, and prefer de-hardcoding over re-editing the value — [universal] — active
 - `docs-living-or-historical` — Classify every docs directory as LIVING or HISTORICAL RECORD and maintain each by its class — [universal] — active
 - `e2e-spec-registration-required` — Register every new E2E spec in the test runner's config — an unregistered spec silently never runs — [stack:playwright] — active
+- `exit-code-void-when-output-stream-closes` — A long command's exit code carries no information once something closed its output stream — verify the effect, not the summary — [universal] — active
 - `externally-asserted-fields-are-not-self-reportable` — A field meaning "someone else asserted this about you" must not be settable by its subject — [universal] — active
 - `fan-out-multiplier-at-the-delivery-boundary` — Fan-out cost is one worker per recipient — put the liveness filter at the boundary every send path crosses — [agent-process] — active
 - `firestore-rules-pre-merge-checklist` — Firestore rule changes require an explicit identity-binding and schema-drift review before merge — [stack:firestore] — active
@@ -39,6 +42,8 @@ One line per lesson: `id — title — [scope] — status`.
 - `idempotent-gates-crossed-messages` — Design async agent gates idempotently — approvals and reports cross in flight — [agent-process] — active
 - `identify-which-target-woke-you` — If a dispatcher started you, resolve WHICH target you are running for before diagnosing a repeat — [agent-process] — active
 - `knowledge-routing-ladder` — Route "remember this" by kind — skill, memory, slim core, or library inbox — and enforce the ladder with a guard hook — [agent-process] — active
+- `lifecycle-hook-runs-in-production-installs` — A build hook on an in-tree path dependency also runs in production installs — and that failure never reproduces locally — [universal] — active
+- `match-ids-not-dates` — Match identifiers, don't compare dates — distinct date fields name distinct events — [universal] — active
 - `match-instrument-to-failure-class` — A gate only refutes the failure class it can observe — green from a blind gate is no evidence — [universal] — active
 - `measure-gates-under-normal-load` — A green measurement taken in a quiet window is not evidence about a contended one — [universal] — active
 - `migrated-config-carries-source-host-env` — Config and daemon state copied from another host still describes that host — read identity from the live system — [universal] — active
@@ -46,19 +51,29 @@ One line per lesson: `id — title — [scope] — status`.
 - `never-test-in-a-live-deployment-tree` — A deployment directory that is also a checkout is production, not a workspace — [universal] — active
 - `no-self-waking-bus-poller` — Never arm a self-waking timer to poll a coordination bus — drain a durable inbox and let a token-free daemon hold the watch — [agent-process] — active
 - `no-stall-decision-protocol` — On an unanswered user-decision point, take the best reversible default, log it durably, and continue — [agent-process] — active
+- `non-painting-browser-pane-lies` — Don't trust geometry from an agent-driven browser pane that isn't painting — [agent-process] — active
+- `normalize-before-declaring-difference` — Normalize line endings before calling two copies different — and archive rather than delete when you act on the answer — [universal] — active
 - `nuxt-port-fallback` — The Nuxt/Vite dev server walks to the next free port — never assume the requested one — [stack:nuxt, stack:vite] — active
 - `one-canonical-deployer` — Exactly one mechanism may deploy production — [universal, stack:ci] — active
 - `outcome-level-reporting` — Report to the user at outcome level — what happened, what's next, what needs them — with detail in files — [agent-process] — active
 - `peer-to-peer-review-routing` — Writers and reviewers communicate directly; the lead receives only a one-line rolled-up verdict — [agent-process] — active
+- `persist-the-secret-before-the-artifact` — Write the secret to the vault and read it back BEFORE creating the artifact it protects — [universal] — active
 - `pin-ipv4-loopback-not-localhost` — Pin local service hosts to the IPv4 loopback literal, not the name `localhost` — [universal] — active
 - `powershell-pipe-bom-breaks-json` — Windows PowerShell 5.1 pipes prepend a BOM that breaks JSON.parse — strip it, and distrust an all-ALLOW hook test — [env:windows] — active
 - `preview-mcp-orchestrator-only` — Browser-preview and screenshot MCP tools are only available in the main orchestrator session — [agent-process, vendor:anthropic] — active
 - `proxy-mediated-liveness-measures-the-proxy` — When one process subscribes on behalf of many, server-side liveness measures the proxy — and a capped watch set evicts silently — [agent-process] — active
+- `prune-by-exact-name-not-pattern` — Prune a shared namespace by exact name, never by prefix or glob — the load-bearing row usually shares the prefix — [universal] — active
 - `record-intentional-absence` — Record a deliberate removal where the next session will look, or someone restores it as a fix — [universal] — active
 - `recovery-from-silent-teammates` — Recover from a silent teammate by probing state before respawning — [agent-process] — active
 - `registry-identity-and-liveness-honesty` — Never advertise an identity or a reachability on a shared registry that you cannot honor — [agent-process] — active
-- `scope-a-broken-finding-to-the-measured-path` — Scope an "it's broken everywhere" finding to the transport you actually measured — [universal] — active
+- `resolve-the-reply-to-address` — Don't hardcode the reply-to address in a briefing template — resolve it, or make the brief self-healing — [agent-process] — active
+- `safeguard-the-operation-not-the-entry-point` — Put a safeguard on the operation, not on the convenient entry point — the direct path is what people use under pressure — [universal] — active
+- `scope-a-broken-finding-to-the-measured-path` — Record what you measured, not what it implies about the category — scope every finding to the path you actually touched — [universal] — active
 - `secret-resolution-fallback-chain` — Resolve a shared secret through a first-hit-wins chain ending in a fail-safe — not a single required env var — [universal] — active
+- `shared-container-pays-every-dependency` — In a shared deployment container, weight added for a rare fallback is paid on the critical path — state a dependency's size before adding it — [universal] — active
+- `shared-sequential-id-needs-one-allocator` — A live check against the trunk cannot allocate a shared sequential id — prefer a non-colliding identifier or one integrator — [universal] — active
+- `shell-read-encoding-double-encodes` — A shell whose read default is the ANSI codepage double-encodes UTF-8 on every round trip — and nothing errors — [env:windows] — active
+- `ship-the-safe-handle-first` — When the same mistake recurs across independent authors, fix the affordance — and ship the safe handle before the work that needs it — [universal] — active
 - `shutdown-after-verified-not-after-committed` — Never shut down a teammate whose output hasn't been verified working at runtime — [agent-process] — active
 - `slim-always-loaded-instructions` — Carve always-loaded agent instructions into a slim constants core plus on-demand skills — [agent-process] — active
 - `spawn-task-team-isolation` — Sessions spawned via spawn_task must use a unique team name to prevent roster bleed — [agent-process, vendor:anthropic] — active
@@ -66,11 +81,16 @@ One line per lesson: `id — title — [scope] — status`.
 - `sync-or-shutdown-stale-teammates` — After invalidating a teammate's world, sync it or shut it down before it reports stale state — [agent-process] — active
 - `team-vs-subagent-gate` — Score weight, phases, communication, and width before spawning a team — a team must earn its order-of-magnitude cost — [agent-process] — active
 - `teammate-reports-to-files` — Teammates write long reports to files and send only a one-line pointer — [agent-process] — active
+- `tool-listing-is-scope-filtered` — A tool listing is filtered by your credential — absence is not evidence the capability is gone, and a carried-over name is not a carried-over schema — [agent-process] — active
+- `unenforced-absence-invariant` — A comment saying "safe because X is never used" is an unenforced invariant — treat it as a tripwire, not a reassurance — [universal] — active
+- `union-merge-eats-shared-closer` — Keep both sides is not a safe conflict resolution when both sides end the same way — parse-check every resolved file — [universal, stack:git] — active
 - `unique-team-name-per-session` — Use a unique date-stamped team name for every new agent session — [agent-process] — active
 - `validate-cli-args-against-injection` — Validate any user- or agent-supplied value before it becomes a CLI argument — a leading dash is read as a flag, not data — [universal] — active
 - `verify-actual-bound-url` — State the actual bound URL, then verify it before relaying or diagnosing — [agent-process] — active
 - `verify-at-destination-prove-the-target` — Verify at the destination, and prove the target you checked is the real one — [universal] — active
 - `verify-merge-direction` — Verify merge direction before merging a long-lived branch — [universal] — active
+- `verify-the-inbound-direction` — Reachability is directional — proving you can reach peers proves nothing about peers reaching you — [agent-process] — active
+- `verify-tools-then-fall-back-to-a-builtin-agent-type` — A custom agent type can come up missing its declared tools — verify tools as the literal first instruction, then respawn as a built-in type — [agent-process] — active
 - `version-bump-at-integration` — Version bumps happen at the integration point, not on feature branches — [universal, stack:git] — active
 - `windows-home-config-glob` — On Windows, the agent tool's Glob may not traverse the user-profile config dir — [env:windows, vendor:anthropic] — active
 - `write-target-in-initial-brief` — Bake the write-target into a writer's initial brief; never redirect mid-flight — [agent-process] — active
