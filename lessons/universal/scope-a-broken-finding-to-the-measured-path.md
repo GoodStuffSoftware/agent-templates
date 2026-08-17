@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 Before generalizing a capability failure, enumerate the delivery paths that capability actually has. An instrument observes only the path it was built for, and a second path that works shows up as SILENCE in the first path's log — which is often the healthy steady state for a pull-based transport.
 
@@ -23,9 +23,13 @@ The incident: a coordinator found zero successful deliveries in a wake/notify di
 
 The split costs one line and preserves the reason to look.
 
+**When scope and evidence diverge, narrow the SENTENCE — do not widen the search.** A fourth incident: an agent removed a stray keyword from one file, grepped the single directory it was working in, found nothing else, and reported "I closed the class rather than the instance." A reviewer checked repo-wide and found three more. The three were dormant and harmless; the overclaim was the actual defect. The agent's own diagnosis — "I should have run the repo-wide grep" — is the weaker lesson, because widening the search may be expensive, unbounded, or impossible. Narrowing is always available and always cheap: "closed within {{DIRECTORY}}; unverified elsewhere" is the same length and is exactly true. Under time pressure, shrinking the claim is the move that is always affordable.
+
 **How to apply:**
 - State the finding as "broken via {{PATH}}", never "broken". If you cannot name the path your instrument covers, you are not ready to publish a number an operator will act on.
 - Name the places you actually searched before publishing a negative. "Not found in the two places I can see" and "probably never existed" are different claims, and only one of them is one you measured.
 - Check whether a working path exists before shipping a fix that encodes the negative result as data (a `reachable: false` field, a health score, a filter).
 - Absence of evidence in a push-side log is not evidence of absence for a pull-side transport. Confirm the negative from the consumer side — did anything downstream actually happen? — as in [[verify-at-destination-prove-the-target]].
+- Watch these phrasings, which almost always outrun their evidence: "nothing else uses this", "this is the only caller", "no other instances", "the class is closed", "it's not used anywhere", "the suite is green".
+- Apply it to your own inertness proofs. A guard justified by "no current caller does X, so this refusal changes nothing" is the same shape: state what the enumeration covered (statically visible literal call sites) and what it could not (specs built at runtime, values arriving from variables, injected fakes that bypass the real implementation, callers added after the grep ran).
 - Related: [[proxy-mediated-liveness-measures-the-proxy]] covers the specific case where the working path's participants never appear in the server's registry at all.

@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 Before reporting something verified, name the failure class you are ruling out and confirm your check can actually observe it. A gate is blind outside its class, and green from a blind gate is not weak evidence — it is none.
 
@@ -26,4 +26,5 @@ The incident that bought this: a UI was completely dead for hours while a syntax
 - Count distinct failure classes covered, not gates passed. Two checks in the same class are one check.
 - **A regression test must be shown FAILING against the pre-fix code.** A test written after the fix that only ever passes proves the fix compiles, not that it fixes anything — and it cannot catch the bug's return. If you cannot make it fail on the old code, it is testing the wrong thing.
 - **Verify a conditional path by constructing its precondition.** A feature that fires zero times against real data is not thereby broken; the honest verification is a synthetic case that satisfies the trigger, plus a diagnostic showing why the real data does not. Reporting "fires 0 times, therefore broken" and reporting "fires 0 times, therefore fine" are the same unverified guess.
+- **Prove the check can fail on the condition it names.** A second incident: a live post-deploy check written to catch one specific shipping mistake was found, on inspection, to be incapable of detecting it — it asserted on a surface that is not present for the state it was testing (a signed-out visitor sees a gate, not the content the assertion looked for). A check aimed at a failure it cannot observe is worse than no check, because its row in the report is indistinguishable from a real one ([[did-not-run-is-a-third-outcome]]).
 - When a defect escapes every gate, the durable fix is a NEW gate that can see that class, and its acceptance criterion is that it fails on the original defect. Add it to the blocking set, never the advisory set — an advisory warning is exactly what everyone was already ignoring.
