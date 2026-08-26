@@ -22,6 +22,40 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-08-26 — Read WHICH error message fired before forming a theory about the cause
+
+- **Trigger:** A payment-verification failure was one step from being diagnosed as a missing server-side
+  config flag. The function emits two near-identical user-facing strings from two different failure paths:
+  one from the `catch` (the request threw — network/parse, no usable response) and one from the response
+  check (the server answered and declined, with the status interpolated). The config-flag theory predicted
+  the SECOND string, carrying an HTTP status. The string the user actually saw was the FIRST. The flag was
+  never involved, and turned out to be correctly set all along. One grep for the literal string separated
+  the two paths and killed a config hunt before it started.
+- **Is it generic?** Yes. Stripped: the product, the payment provider, the flag name, the file path. The
+  reusable kernel is that a call which can fail BOTH by throwing AND by receiving a negative response
+  normally emits different messages per path, so the message already in hand is free evidence about which
+  half failed — and it costs one grep to read. Corollary worth stating with it: a theory that predicts a
+  *different* observable than the one you actually have is already refuted, before any investigation.
+  Distinct from the existing "reproduce, don't theorize" lesson: this one is about mining evidence you were
+  ALREADY handed, not about generating new evidence.
+- **Target:** new tagged file under `lessons/`, suggested slug `read-which-error-fired-before-theorising`.
+- **Proposed change:**
+  > **Read which error fired before theorising about the cause.**
+  > When a code path can fail by throwing *and* by receiving a negative response, it usually reports those
+  > two cases with different wording. Before investigating a suspected cause, grep the exact message the
+  > user or the log actually produced and find which branch emits it. That single fact often eliminates a
+  > whole class of causes for free.
+  > Then apply the check in reverse: state what your candidate theory *predicts* the observable would be.
+  > If the prediction does not match the observable in hand, the theory is already refuted — stop and pick
+  > another, rather than starting an investigation that cannot confirm it.
+  > Example shape: `{{SYMPTOM_A}}` ("could not reach {{SERVICE}}") is emitted only from the `catch` block,
+  > while `{{SYMPTOM_B}}` ("could not confirm yet ({{STATUS}})") is emitted only when a response came back
+  > and was rejected. A misconfiguration that returns `{{STATUS}}` can therefore only ever produce
+  > `{{SYMPTOM_B}}`; observing `{{SYMPTOM_A}}` rules it out without touching the config.
+- **Applied?** no
+
+---
+
 _Append new entries above this line, newest first. The queue was drained by the 2026-08-24 fold._
 
 ---
