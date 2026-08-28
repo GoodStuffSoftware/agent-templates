@@ -31,10 +31,39 @@ It was built after two observed failures:
 | `premium_cap` | Caps concurrent premium-tier subagents at `premium_max_concurrent`. | yes, at the cap |
 | `warrant_required` | Premium spawns must carry a `WARRANT:` line stating task weight and why a cheaper tier will not do. | yes |
 | `memory_budget` | Warns when always-loaded instruction files exceed `memory_budget_tokens`, and writes a ready-to-run refactor prompt. | no |
+| `memory_doctor` | Detects memory files on disk that the index does not link — **unreachable rules** — plus broken index links. Repairs non-destructively. | no |
 | `spawn_telemetry` | Records every spawn (model, agent type, effort) for the calibration routine. | no |
 
 Premium tiers are **capped and audited, never banned**. The failure mode was
 unexamined defaults, not the model itself.
+
+## Memory doctor
+
+The index is the source of truth for what is persisted, so a memory file the
+index does not link **can never be recalled**. For a dated finding that is
+harmless housekeeping. For a standing rule it is a correctness bug: you believe
+it is in effect and it silently is not — the same failure shape as a guard that
+stopped matching.
+
+Run it against the current project, or any memory directory:
+
+```bash
+node scripts/memory-doctor.mjs                 # report only
+node scripts/memory-doctor.mjs --fix           # repair
+node scripts/memory-doctor.mjs --json          # for the calibration scout
+```
+
+Repairs are strictly non-destructive:
+
+- files matching `memory_archive_prefixes` are **moved** to `archive/`, never deleted
+- everything else is treated as a live rule and **re-linked** into the index
+- the index is backed up before it is touched, and entries are only ever added
+
+Consolidating overlapping memories is deliberately **not** automated. That needs
+judgement, and doing it wrong loses knowledge permanently.
+
+Note the tradeoff: re-linking unreachable rules makes the index *larger*.
+Reachability and size are separate problems, and this tool only fixes the first.
 
 ## Design rules
 
@@ -81,7 +110,8 @@ Written under `${CLAUDE_PLUGIN_DATA}` (survives upgrades, removed on uninstall):
 | `unknown-agent-types.jsonl` | agent types not in the known set |
 | `delegation-streak.json` | per-session main-thread streak counter |
 | `premium-window.json` | rolling window used to approximate premium concurrency |
-| `refactor-prompt.md` | generated when an instruction file is over budget |
+| `refactor-prompt.md` | generated when an instruction file is over budget or memory is unreachable |
+| `baseline.json` | previous harness version + counters, for daily drift detection |
 
 ## Install
 

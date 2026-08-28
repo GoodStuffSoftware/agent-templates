@@ -25,7 +25,14 @@ export const PREMIUM_MODELS = [/fable/i, /opus/i];
 
 export function readStdin() {
   try {
-    return JSON.parse(readFileSync(0, 'utf8') || '{}');
+    let raw = readFileSync(0, 'utf8') || '';
+    // PowerShell prepends a UTF-8 BOM to piped stdin on Windows. Without this
+    // strip, JSON.parse throws, the caller's fail-open catch swallows it, and
+    // the hook silently does nothing — indistinguishable from "no issues
+    // found". Documented in the library as powershell-pipe-bom-breaks-json.
+    if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
+    raw = raw.trim();
+    return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
   }

@@ -2,7 +2,9 @@
   "name": "agent-companion",
   "version": "0.1.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
-  "author": { "name": "{{ORG_NAME}}" },
+  "author": {
+    "name": "{{ORG_NAME}}"
+  },
   "userConfig": {
     "delegation_guard": {
       "type": "boolean",
@@ -49,6 +51,18 @@
       "title": "Spawn telemetry",
       "description": "Record every subagent spawn (model, type, agent_type) for the calibration routine.",
       "default": true
+    },
+    "memory_doctor": {
+      "type": "boolean",
+      "title": "Memory doctor",
+      "description": "Detect unreachable memory files (on disk but absent from the index) and broken index links. Repair is non-destructive and opt-in via --fix.",
+      "default": true
+    },
+    "memory_archive_prefixes": {
+      "type": "string",
+      "title": "Historical memory prefixes",
+      "description": "Comma-separated filename prefixes treated as historical and safe to archive. Anything else is treated as a live rule and re-linked instead.",
+      "default": "findings_,bugs,handoff-"
     }
   }
 }
