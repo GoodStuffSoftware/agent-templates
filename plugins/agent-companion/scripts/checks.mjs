@@ -18,8 +18,9 @@ import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync, execSync } from 'node:child_process';
 
+import { classifyModel } from '../hooks/lib/context.mjs';
+
 const est = (s) => Math.ceil(s.length / 4);
-const PREMIUM = /fable|opus/i;
 const DATED_MODEL = /-\d{6,8}$/;
 
 export function memoryDirFor(target) {
@@ -197,11 +198,20 @@ const agentDefs = {
     // have avoided and waves through the ones it would itself have made — which
     // is exactly the novel-error class a stronger writer produces. The saving is
     // taken precisely where the gate was supposed to earn its keep.
-    const TIER = { haiku: 1, sonnet: 2, opus: 3, fable: 4 };
-    const tierOf = (m) => {
-      const k = Object.keys(TIER).find((t) => new RegExp(t, 'i').test(m || ''));
-      return k ? TIER[k] : 0;
-    };
+    // One source of truth for tiers: the shared, data-driven table. A second
+    // hardcoded copy here would drift out of step with the guards, and the two
+    // disagreeing is worse than either being wrong alone.
+    const tierOf = (m) => classifyModel(m).rank;
+
+    // A model the table does not recognise is worth saying out loud. It is
+    // treated as premium so nothing slips through, but silently applying the
+    // strict path would hide that the table needs updating.
+    for (const a of roster) {
+      if (a.model && !classifyModel(a.model).known) {
+        findings.push(`${a.rel}: model "${a.model}" is not in the tier table — treated as premium; update config/model-tiers.json`);
+      }
+    }
+
     const reviewers = roster.filter((a) => /review/i.test(a.name));
     const writers = roster.filter((a) => /architect|builder|writer|implement/i.test(a.name));
     if (reviewers.length && writers.length) {
@@ -328,7 +338,7 @@ const spawnAudit = {
     if (!rows.length) return { status: 'skip', findings: ['telemetry file is empty'] };
 
     const inherited = rows.filter((r) => r.model === '(inherited)');
-    const premium = rows.filter((r) => PREMIUM.test(r.model || ''));
+    const premium = rows.filter((r) => r.model && r.model !== '(inherited)' && classifyModel(r.model).premium);
     const byModel = {};
     for (const r of rows) byModel[r.model || '?'] = (byModel[r.model || '?'] || 0) + 1;
 

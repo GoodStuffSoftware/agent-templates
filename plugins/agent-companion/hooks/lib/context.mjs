@@ -7,7 +7,8 @@
 // wedged agent. The daily calibration routine is what catches under-enforcement.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 
 // Agent types observed in the shipped binary (2.1.220). The binary tests the
@@ -21,7 +22,43 @@ export const KNOWN_AGENT_TYPES = new Set([
 ]);
 
 // Premium tiers. Fable is deliberately NOT banned — it is capped and audited.
-export const PREMIUM_MODELS = [/fable/i, /opus/i];
+// Model tiers are DATA, loaded from config/model-tiers.json and overridable at
+// $CLAUDE_PLUGIN_DATA/model-tiers.json. A tier table baked into code goes stale
+// the moment a lineup changes, and it goes stale SILENTLY - the guards keep
+// running and simply stop classifying correctly. This work began by fixing a
+// routing table that had been wrong for a whole model generation; hardcoding
+// the same knowledge here would rebuild that trap one layer down.
+let _tiers = null;
+export function modelTiers() {
+  if (_tiers) return _tiers;
+  const shipped = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'model-tiers.json');
+  let cfg = { tiers: {}, unknownIsPremium: true };
+  try { cfg = JSON.parse(readFileSync(shipped, 'utf8')); } catch { /* use defaults */ }
+  // The override merges BY ALIAS, so adding one model does not require
+  // restating the table - a table you must retype is one you will not update.
+  try {
+    const over = JSON.parse(readFileSync(join(dataDir(), 'model-tiers.json'), 'utf8'));
+    cfg = { ...cfg, ...over, tiers: { ...(cfg.tiers || {}), ...(over.tiers || {}) } };
+  } catch { /* no override: expected */ }
+  _tiers = cfg;
+  return _tiers;
+}
+
+// Returns { alias, rank, premium, known }. An unrecognised model reports
+// known:false so callers can flag it instead of quietly bucketing it.
+export function classifyModel(model) {
+  const cfg = modelTiers();
+  const m = String(model || '');
+  for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
+    if (m && new RegExp(spec.match || alias, 'i').test(m)) {
+      return { alias, rank: spec.rank ?? 0, premium: !!spec.premium, known: true };
+    }
+  }
+  // Fail toward the EXPENSIVE assumption. Treating an unknown model as cheap
+  // would let a newly released top tier bypass the warrant and the cap during
+  // exactly the window in which nobody has updated the table yet.
+  return { alias: '', rank: 0, premium: cfg.unknownIsPremium !== false, known: false };
+}
 
 export function readStdin() {
   try {
@@ -133,7 +170,8 @@ export function noteAgentType(p) {
 }
 
 export function isPremium(model) {
-  return typeof model === 'string' && PREMIUM_MODELS.some((re) => re.test(model));
+  if (!model) return false; // nothing named: the inheritance path handles it
+  return classifyModel(model).premium;
 }
 
 export function stateFile(name) {

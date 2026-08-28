@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "updated": "2026-08-28",
+  "note": "Model tiers as DATA, not code. A hardcoded tier table goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a plugin release by writing a file of this shape to $CLAUDE_PLUGIN_DATA/model-tiers.json; it is merged over these defaults by alias, so you can add one model or change one rank without restating the rest.",
+  "tiers": {
+    "haiku": {
+      "rank": 1,
+      "premium": false,
+      "match": "haiku",
+      "note": "reads, searches, single commands"
+    },
+    "sonnet": {
+      "rank": 2,
+      "premium": false,
+      "match": "sonnet",
+      "note": "bounded edits, short scripts, multi-file work"
+    },
+    "opus": {
+      "rank": 3,
+      "premium": true,
+      "match": "opus",
+      "note": "architecture, novel debugging"
+    },
+    "fable": {
+      "rank": 4,
+      "premium": true,
+      "match": "fable",
+      "note": "not a routing tier — an exception requiring a stated warrant"
+    },
+    "mythos": {
+      "rank": 4,
+      "premium": true,
+      "match": "mythos",
+      "note": "same tier and treatment as fable"
+    }
+  },
+  "unknownIsPremium": true,
+  "unknownNote": "A model matching no entry is treated as PREMIUM and flagged. Defaulting an unrecognised model to cheap would let a new top-tier model bypass the warrant and the cap on the day it ships — the exact window in which nobody has updated the table yet. Fail toward the expensive assumption; the cost of a spurious warrant is one line in a brief."
+}

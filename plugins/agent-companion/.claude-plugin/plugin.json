@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"

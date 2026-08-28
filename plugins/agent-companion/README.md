@@ -65,6 +65,30 @@ judgement, and doing it wrong loses knowledge permanently.
 Note the tradeoff: re-linking unreachable rules makes the index *larger*.
 Reachability and size are separate problems, and this tool only fixes the first.
 
+## Model tiers are data, not code
+
+Which models count as premium, and how they rank against each other, lives in
+[`config/model-tiers.json`](config/model-tiers.json) — not in the guards. A tier
+table compiled into code goes stale the moment a lineup changes, and it goes
+stale **silently**: the guards keep running and simply stop classifying
+correctly. This plugin exists partly because a routing table sat wrong for a
+whole model generation without anyone noticing.
+
+Override without waiting for a release by writing a file of the same shape to
+`$CLAUDE_PLUGIN_DATA/model-tiers.json`. It merges **by alias**, so adding one
+model needs one entry, not a restatement of the table — a table you have to
+retype is a table you will not update:
+
+```json
+{ "tiers": { "newtier": { "rank": 2, "premium": false, "match": "newtier" } } }
+```
+
+**An unrecognised model is treated as premium and flagged.** Defaulting an
+unknown model to cheap would let a newly released top tier bypass the warrant
+and the fan-out cap during exactly the window in which nobody has updated the
+table yet. So it fails toward the expensive assumption, and the audit tells you
+the table needs an entry rather than quietly applying the strict path.
+
 ## Telemetry (optional, off by default)
 
 **With no `telemetry_endpoint` set, this plugin makes no network calls at all.**
