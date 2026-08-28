@@ -33,6 +33,10 @@ agent-templates/
     lessons-harvester.md  ← agent def: UP-flow automation (harvest → propose)
     shared/               ← thin digest pointing at the tagged lessons
     basic-site/           ← lean agent team for a simple marketing / content site
+  .claude-plugin/
+    marketplace.json      ← this repo is also a Claude Code plugin marketplace
+  plugins/
+    agent-companion/      ← ENFORCEMENT layer: guardrails + audit, installable
 ```
 
 - **`anthropic/`** — templates for **Claude Code**: named sub-agents (`.claude/agents/*.md` with `model` + `effort` frontmatter), a `team-lead` orchestrator, and `SendMessage` teammate comms. See [`anthropic/README.md`](anthropic/README.md).
@@ -64,6 +68,33 @@ When a change you make in a real project touches an agent def, a rule, or a conv
 Together: **down = hydrate, up = contribute.** A fix made once in a project becomes a fix every future project inherits.
 
 ---
+
+## The enforcement layer — `agent-companion`
+
+Templates scaffold and lessons inform, but both are still *instructions*, and a
+rule about restraint ("delegate rather than doing it yourself", "use the cheapest
+sufficient model") is the kind an agent is most likely to skip. So this repo is
+also a **plugin marketplace**, and [`plugins/agent-companion/`](plugins/agent-companion/)
+is the layer that makes a few of those rules structural instead of remembered.
+
+```bash
+claude plugin marketplace add GoodStuffSoftware/agent-templates
+```
+
+```bash
+claude plugin install agent-companion@agent-templates
+```
+
+It ships hooks that guard the main thread's tool use and premium-model fan-out,
+an `audit` skill that runs a composable set of checks over any project, and a
+`calibration-scout` skill that a daily routine can invoke in one line. Installing
+the plugin is the whole setup — the routines reference its skills rather than
+hand-maintained prompt files.
+
+Two things that repay reading before use: an installed plugin does **not** track
+`main` until its marketplace cache is refreshed, and a hook that silently stopped
+firing looks identical to one that found nothing. Both are covered in
+[the plugin README](plugins/agent-companion/README.md).
 
 ## Quick start
 

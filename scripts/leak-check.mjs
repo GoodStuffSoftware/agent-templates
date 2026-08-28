@@ -94,6 +94,21 @@ const EXEMPT = {
   "plugins/agent-companion/.claude-plugin/plugin.json": new Set([
     "project-name-A-spaced", // plugin `author.name`
   ]),
+  // A repo's own install instructions must name the repo. `marketplace add
+  // <owner>/<repo>` is this repository's public address — self-reference, not a
+  // project-specifics leak, and a README that will not say where to install
+  // from is useless. Only the no-space slug (which appears in the GitHub path)
+  // is exempted, and only in these two files.
+  //
+  // NOTE: this is the second widening of this map. The guidance above says that
+  // wanting to widen is the signal to genericize instead. It holds — if a third
+  // file wants an exemption, stop and reconsider rather than adding a line here.
+  "README.md": new Set([
+    "project-name-A", // the owner segment of the marketplace install command
+  ]),
+  "plugins/agent-companion/README.md": new Set([
+    "project-name-A", // same install command in the plugin's own README
+  ]),
 };
 
 // --- Banned patterns (regex) ------------------------------------------------

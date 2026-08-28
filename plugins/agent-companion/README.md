@@ -115,16 +115,101 @@ Written under `${CLAUDE_PLUGIN_DATA}` (survives upgrades, removed on uninstall):
 
 ## Install
 
+Add the marketplace once per machine, then install:
+
 ```bash
-claude plugin marketplace add ./
+claude plugin marketplace add GoodStuffSoftware/agent-templates
+```
+
+```bash
 claude plugin install agent-companion@agent-templates
 ```
 
-For development, load it directly without installing:
+**Desktop app:** install from the plugin directory UI. It shells out to the same
+CLI and reads the same `~/.claude/plugins/` cache, so everything below applies.
+
+**Cloud sessions:** install there too — cloud clones fresh, so it always gets
+the current version of `main`.
+
+**Development, without installing** (never self-updates — use only for testing):
 
 ```bash
 claude --plugin-dir ./plugins/agent-companion
 ```
+
+### Updating — read this before debugging a "broken" fix
+
+`marketplace add` clones **once and then pins**. An installed plugin does *not*
+track `main` on its own. Push a fix and every machine keeps running the old code
+until its marketplace cache is refreshed:
+
+```bash
+claude plugin marketplace update agent-templates
+```
+
+The desktop UI's sync button does the same thing. This bit us on the very first
+publish: three install attempts failed against a manifest that had already been
+fixed on `main`, because the cache was pinned to the commit before the fix and
+the error said nothing about staleness.
+
+**So when a machine shows old behaviour, suspect a stale cache before suspecting
+the fix.** Verify what is actually cached rather than assuming:
+
+```bash
+git -C ~/.claude/plugins/marketplaces/agent-templates log --oneline -1
+```
+
+### Hot-loading into a running session
+
+Skills and hooks load differently, and the difference matters when you are
+trying to help an agent that is already mid-task:
+
+- **Skills hot-load on their own.** `audit` and `calibration-scout` become
+  available in already-running sessions shortly after install, no restart.
+- **Hooks do not.** They are bound at session start, so a session that predates
+  the install has no guards — silently, since nothing reports their absence.
+
+Bind them into the running session with:
+
+```
+/reload-plugins
+```
+
+(`/reload-plugins --force` also rebuilds the conversation cache rather than
+reusing it.) So a long-running agent can gain both the diagnostic skills and the
+guards without losing its context — no need to restart work to get protection.
+
+### Verifying it is actually running
+
+After installing or reloading:
+
+```bash
+ls ~/.claude/plugins/data/agent-companion/
+```
+
+Files there mean hooks have fired. A missing or empty directory after real work
+means they registered but never ran — which looks exactly like "found no
+issues". Confirm with the canary rather than trusting silence:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/audit.mjs" --only guard-canary
+```
+
+## Routines
+
+The skills are the prompt source of record, so a scheduled cloud routine needs
+only a one-line prompt — and it updates whenever the plugin does, instead of
+drifting in a hand-maintained file the scheduler happens to point at.
+
+| Routine | Cadence | Prompt |
+|---|---|---|
+| Calibration scout | daily | `Run /agent-companion:calibration-scout` |
+| Project audit | weekly, or on demand | `Run /agent-companion:audit for <project path>` |
+
+The scout is deliberately silent when nothing changed — it reports only on a
+real signal, so a daily cadence does not become noise you learn to ignore.
+Detection is deterministic (version strings, file hashes, counters); the model
+only decides which heavier routine a signal warrants.
 
 ## Known limits
 

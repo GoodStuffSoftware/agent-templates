@@ -94,9 +94,17 @@ export function writeJson(file, value) {
   try { writeFileSync(file, JSON.stringify(value)); } catch { /* fail open */ }
 }
 
+// Emitted telemetry is a PUBLIC CONTRACT, not an internal detail — other tools
+// read these files. Every record carries the schema version that produced it, so
+// a consumer can skip records from a major version it does not understand
+// instead of silently misreading them. Consumers must tolerate unknown fields.
+// See docs/TELEMETRY.md.
+export const TELEMETRY_SCHEMA = 1;
+
 export function appendLog(name, record) {
   try {
-    writeFileSync(stateFile(name), JSON.stringify(record) + '\n', { flag: 'a' });
+    const stamped = { v: TELEMETRY_SCHEMA, ...record };
+    writeFileSync(stateFile(name), JSON.stringify(stamped) + '\n', { flag: 'a' });
   } catch { /* fail open */ }
 }
 
