@@ -65,6 +65,48 @@ judgement, and doing it wrong loses knowledge permanently.
 Note the tradeoff: re-linking unreachable rules makes the index *larger*.
 Reachability and size are separate problems, and this tool only fixes the first.
 
+## Telemetry (optional, off by default)
+
+**With no `telemetry_endpoint` set, this plugin makes no network calls at all.**
+Setting one is the single action that turns sending on. Everything else — the
+guards, the audit, the memory doctor — is entirely local and always will be.
+
+When an endpoint *is* configured, emitted JSONL is POSTed to it:
+
+| Fires on | Behaviour |
+|---|---|
+| `Stop` (turn boundary) | sends only if the interval has elapsed since the last successful send |
+| `SessionEnd` | always sends — there may be no next turn |
+
+The interval defaults to **10 minutes in cloud sessions** and **60 locally**.
+Cloud sessions are shorter because their filesystem is destroyed with the
+session and there is no later sweep; local runs keep the JSONL on disk, so a
+missed send costs nothing. Cloud is detected via `CLAUDE_CODE_REMOTE_SESSION_ID`.
+
+**Why a throttled hook rather than a background timer.** A detached daemon
+either outlives its session (orphan) or dies with it (useless), and inside a
+cloud sandbox it is fragile besides. Letting an already-firing hook carry the
+work and rate-limiting it means nothing to schedule, nothing to leak, and no
+need to know how long a cloud session lives — the worst case is losing one
+interval whenever it disappears. Below the interval the hook exits after a
+single file read.
+
+**The token comes from the `AGENT_AUDIT_TOKEN` environment variable, never from
+plugin config.** `userConfig` values live in `settings.json` in plaintext and
+project-scoped settings get committed; a shared ingest secret does not belong
+there.
+
+Sending is always **fail-silent** with a 3-second timeout. A telemetry endpoint
+being down must never surface as an error in someone's session, and must never
+lose data: the cursor only advances on success, and the local JSONL stays on
+disk to be swept up later.
+
+`SessionEnd` fires on deliberate endings only — its reasons are `clear`,
+`resume`, `logout`, `prompt_input_exit`, `other`, `bypass_permissions_disabled`.
+There is no idle-timeout reason, and a crashed or killed process cannot run its
+own hook. So cloud coverage is a sample, not a census. Treat a gap as unknown
+rather than as quiet.
+
 ## Design rules
 
 **A hook must never break a session.** Every guard wraps in try/catch and falls

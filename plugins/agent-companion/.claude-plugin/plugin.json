@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -65,6 +65,30 @@
       "title": "Historical memory prefixes",
       "description": "Comma-separated filename prefixes treated as historical and safe to archive. Anything else is treated as a live rule and re-linked instead.",
       "default": "findings_,bugs,handoff-"
+    },
+    "telemetry_endpoint": {
+      "type": "string",
+      "title": "Telemetry endpoint",
+      "description": "Optional. Full URL to POST emitted telemetry to at session end. EMPTY BY DEFAULT — while empty the plugin makes no network calls at all. Setting it is the only thing that turns sending on.",
+      "default": ""
+    },
+    "telemetry_tenant": {
+      "type": "string",
+      "title": "Telemetry tenant",
+      "description": "Tenant key sent with uploads when a telemetry endpoint is configured.",
+      "default": "default"
+    },
+    "telemetry_interval_cloud_min": {
+      "type": "number",
+      "title": "Cloud send interval (minutes)",
+      "description": "How often a cloud session ships telemetry at turn boundaries. Cloud filesystems vanish with the session and there is no later sweep, so this is shorter than the local interval.",
+      "default": 10
+    },
+    "telemetry_interval_local_min": {
+      "type": "number",
+      "title": "Local send interval (minutes)",
+      "description": "How often a local session ships telemetry at turn boundaries. Local runs are backstopped by the on-disk JSONL, so this can be relaxed.",
+      "default": 60
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
