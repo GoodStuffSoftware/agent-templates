@@ -22,6 +22,30 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-08-28 — Fail-open error handling hides the bug that caused the failure
+
+- **Trigger:** A set of enforcement hooks was deliberately written to fail open — any exception
+  falls through and allows the operation — so that a guard could never break a working session.
+  Correct for safety. But a genuine parse bug (a byte-order mark on piped input made the payload
+  parse throw) was then swallowed by that same catch, and every hook silently became a no-op.
+  The output was empty, the exit code was zero, and "guard ran and found nothing wrong" looked
+  exactly like "guard never ran". It was caught only by testing against a target KNOWN to trip
+  the alarm and getting silence.
+- **Is it generic?** Yes. Stripped: the platform, the hook API, the specific encoding bug. The
+  kernel is that fail-open and fail-silent are separable, and conflating them is what makes
+  fail-open dangerous: the safety property (never block real work) does not require the
+  diagnostic property (never report why). A guard that swallows an exception should still record
+  it somewhere its monitoring can see. Corollary for testing: a guard can only be verified
+  against an input that SHOULD trigger it — a passing run over clean input proves nothing,
+  because a completely dead guard produces the identical result.
+- **Target:** new tagged lesson under `lessons/universal/`. Closely related to the
+  "guard that stops matching is indistinguishable from one never tripped" entry above — this is
+  the same hazard one level down, inside the guard rather than in its matcher.
+- **Proposed change:** Fail open on the ACTION, never on the RECORD. Every swallowed exception in
+  a guard increments a counter or writes a line that monitoring reads. Verify guards with inputs
+  designed to trip them, never only with clean inputs.
+- **Applied?** `no`
+
 ### 2026-08-28 — An omitted sub-agent model is a decision to pay the lead's rate
 
 - **Trigger:** Four top-tier agents ran concurrently on a task that warranted none. No routing rule had
