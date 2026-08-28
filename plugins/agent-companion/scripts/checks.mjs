@@ -322,6 +322,57 @@ const spawnAudit = {
   },
 };
 
+// --- 7. plugin manifests -------------------------------------------------
+// Added after shipping an invalid manifest to a marketplace. `claude plugin
+// validate` existed the whole time and takes a second to run; the manifest had
+// been written by copying a working reference plugin that happened not to use
+// the field that was wrong, so there was nothing to compare against. Validating
+// against a known-good EXAMPLE is not validating against the SCHEMA.
+const pluginManifests = {
+  id: 'plugin-manifest',
+  title: 'Plugin / marketplace manifest validity',
+  vendor: 'anthropic',
+  fixable: false,
+  run(ctx) {
+    const targets = [];
+    const mk = join(ctx.target, '.claude-plugin', 'marketplace.json');
+    if (existsSync(mk)) targets.push(['marketplace', ctx.target]);
+
+    const pluginsDir = join(ctx.target, 'plugins');
+    if (existsSync(pluginsDir)) {
+      for (const d of readdirSync(pluginsDir)) {
+        const p = join(pluginsDir, d);
+        if (existsSync(join(p, '.claude-plugin', 'plugin.json'))) targets.push([`plugin:${d}`, p]);
+      }
+    }
+    if (existsSync(join(ctx.target, '.claude-plugin', 'plugin.json'))) {
+      targets.push([`plugin:${basename(ctx.target)}`, ctx.target]);
+    }
+    if (!targets.length) return { status: 'skip', findings: ['no plugin or marketplace manifests here'] };
+
+    const findings = [];
+    let failed = false;
+    for (const [label, path] of targets) {
+      let out;
+      try {
+        // --strict so warnings (unknown fields, missing metadata) surface here
+        // rather than at publish time. execSync for the Windows .cmd shim.
+        out = execSync(`claude plugin validate "${path}" --strict`, { encoding: 'utf8', timeout: 60000 });
+      } catch (e) {
+        failed = true;
+        const text = `${e.stdout || ''}${e.stderr || ''}`.trim() || e.message;
+        for (const line of text.split(/\r?\n/)) {
+          const t = line.trim();
+          if (t.startsWith('❯') || /error|warning|failed/i.test(t)) findings.push(`${label}: ${t}`);
+        }
+        continue;
+      }
+      if (/warning/i.test(out)) findings.push(`${label}: passed with warnings`);
+    }
+    return { status: failed ? 'fail' : (findings.length ? 'warn' : 'ok'), findings };
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
@@ -329,4 +380,5 @@ export const CHECKS = [
   harnessDrift,
   guardCanary,
   spawnAudit,
+  pluginManifests,
 ];

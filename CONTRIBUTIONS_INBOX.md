@@ -22,6 +22,30 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-08-28 — Validating against a known-good example is not validating against the schema
+
+- **Trigger:** A published extension manifest was rejected at install time as invalid. It had been
+  authored by copying the shape of a working, installed extension from the same ecosystem — a
+  reasonable-looking move. But the reference did not use the one optional section the new manifest
+  needed, so the field that was wrong had nothing in the reference to be compared against, and the
+  omission was structurally invisible. The toolchain shipped a `validate` subcommand the whole time;
+  running it took one second and named the exact field and the exact reason.
+- **Is it generic?** Yes. Stripped: the tool, the manifest format, the field. The kernel is that a
+  working example proves only that ITS OWN feature subset is valid. Copying one gives you a plausible
+  artifact with no coverage of anything the example did not exercise — and the gaps are precisely
+  where you are least able to notice them, because there is no line to compare against. Whenever a
+  format has a real validator, the example is a starting point and the validator is the check; they
+  are not substitutes. Corollary: before publishing any manifest, config, or schema-bound artifact,
+  look for a first-party `validate`/`lint`/`check` command and run it — the cost is seconds and the
+  failure it prevents lands on users, not on you.
+- **Target:** new tagged lesson under `lessons/universal/`. Related to the "verify a harness
+  capability against the shipped artifact, not its documentation" entry — same root shape, which is
+  trusting a plausible secondary source when an authoritative one is available locally.
+- **Proposed change:** For any schema-bound artifact, run the format's own validator before shipping,
+  and wire that validator into the project's audit or CI so it cannot regress. Treat "I copied a
+  working example" as an unverified claim, not as verification.
+- **Applied?** `no`
+
 ### 2026-08-28 — Fail-open error handling hides the bug that caused the failure
 
 - **Trigger:** A set of enforcement hooks was deliberately written to fail open — any exception
