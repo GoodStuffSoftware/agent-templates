@@ -22,6 +22,76 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-08-28 — An omitted sub-agent model is a decision to pay the lead's rate
+
+- **Trigger:** Four top-tier agents ran concurrently on a task that warranted none. No routing rule had
+  been broken, because no model had ever been *chosen* — a sub-agent spawned without an explicit `model`
+  inherits the MAIN session's model, so a premium lead silently makes every worker premium. The team's
+  written rules all governed the act of choosing a tier, and were therefore aimed at a decision that
+  never happened.
+- **Is it generic?** Yes. Stripped: the model names, the vendor, the project. The reusable kernel is that
+  a delegation default which inherits the caller's tier converts one expensive decision into N of them,
+  invisibly. Any orchestration system with per-worker capability settings and an inheritance fallback has
+  this hazard. Corollary worth stating with it: a rule that governs an explicit choice cannot catch a
+  failure that happened by default — audit your DEFAULTS separately from your RULES.
+- **Target:** new tagged lesson under `lessons/agent-process/` (scope `[agent-process]`).
+- **Proposed change:** State the rule as: always set the worker's tier explicitly at spawn; treat an
+  omitted tier as an affirmative decision to pay the orchestrator's rate. Where the harness supports it,
+  make the default cheap rather than inherited.
+- **Applied?** `no`
+
+### 2026-08-28 — A guard that stops matching is indistinguishable from one never tripped
+
+- **Trigger:** Building enforcement hooks against a harness whose tool names can change between versions.
+  A hook whose matcher no longer matches anything does not error — it silently allows everything, and its
+  denial count is zero. Zero denials is exactly what a perfectly-behaving team also produces, so the two
+  states are indistinguishable from the metric alone.
+- **Is it generic?** Yes. Stripped: the tool names, the vendor, the hook API. The kernel: for any guard
+  whose "success" signal is the ABSENCE of events, silence is ambiguous between working and broken. Such
+  a guard needs a periodic liveness probe that deliberately triggers it and asserts it fired — and the
+  monitoring should treat a sustained zero as a reason to run that probe, not as good news.
+- **Target:** new tagged lesson under `lessons/universal/`.
+- **Proposed change:** Any guard measured by non-events ships with a canary that provokes a known
+  violation and asserts the denial. Sustained zero-violation counts trigger the canary rather than
+  reassure.
+- **Applied?** `no`
+
+### 2026-08-28 — Enforcement fails open; detection must not
+
+- **Trigger:** Designing a guard that must restrict the main orchestration thread while never interfering
+  with worker agents. The identifier distinguishing them is settable at runtime and its value set can grow
+  as the harness adds new worker kinds. Blocking on "not a known worker type" would break every future
+  worker; allowing silently would let the guard quietly become inert.
+- **Is it generic?** Yes. Stripped: the field name, the harness, the type values. The kernel is a split
+  most guard designs conflate: the ENFORCEMENT path should require positive confirmation and default to
+  allowing (so an unrecognized case never breaks work), while the DETECTION path should record every
+  unrecognized case (so drift surfaces instead of accumulating). Fail-open and fail-loud are not opposites
+  and belong in the same guard.
+- **Target:** new tagged lesson under `lessons/universal/`.
+- **Proposed change:** Guards enforce on allowlists, never denylists; anything outside the allowlist is
+  permitted AND logged for review. Under-enforcement is the safe failure; silent under-enforcement is not.
+- **Applied?** `no`
+
+### 2026-08-28 — Verify a harness capability against the shipped artifact, not its documentation
+
+- **Trigger:** Two research agents returned contradictory answers about which tool name a lifecycle hook
+  must match to intercept agent spawns. Both cited documentation; one cited a specific page and line.
+  Grepping the installed binary settled it in one command — and revealed the losing answer had named a
+  DIFFERENT tool entirely (a task-list tool, not the spawn tool). The binary even shipped an error string
+  distinguishing the two, written for exactly this confusion. A guard built on the wrong name would not
+  have errored; it would simply never have fired.
+- **Is it generic?** Yes. Stripped: the tool names, the vendor, the file path. The kernel: for any
+  integration keyed on an exact identifier, the shipped artifact is authoritative and cheap to interrogate
+  (strings/grep), while documentation lags releases and third-party summaries hallucinate confidently.
+  Second kernel, worth its own line: when two agents disagree on a load-bearing fact, do not average them
+  or pick the better-cited one — go to the primary artifact.
+- **Target:** new tagged lesson under `lessons/agent-process/` (scope `[agent-process]`).
+- **Proposed change:** Before shipping an integration keyed on an exact external identifier, confirm the
+  identifier against the installed artifact. Treat agent disagreement on such a fact as a signal to
+  consult the artifact, never as a tie to be broken by citation quality.
+- **Applied?** `no`
+
+
 ### 2026-08-26 — Read WHICH error message fired before forming a theory about the cause
 
 - **Trigger:** A payment-verification failure was one step from being diagnosed as a missing server-side
