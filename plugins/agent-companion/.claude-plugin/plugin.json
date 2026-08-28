@@ -1,0 +1,54 @@
+{
+  "name": "agent-companion",
+  "version": "0.1.0",
+  "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
+  "author": { "name": "{{ORG_NAME}}" },
+  "userConfig": {
+    "delegation_guard": {
+      "type": "boolean",
+      "title": "Delegation guard",
+      "description": "Nudge the MAIN thread to delegate after repeated execution-class tool calls. Never applies inside subagents.",
+      "default": true
+    },
+    "delegation_threshold": {
+      "type": "number",
+      "title": "Delegation threshold",
+      "description": "Consecutive main-thread execution calls tolerated before the guard fires.",
+      "default": 4
+    },
+    "premium_cap": {
+      "type": "boolean",
+      "title": "Premium fan-out cap",
+      "description": "Limit how many premium-tier (fable/opus) subagents may run concurrently.",
+      "default": true
+    },
+    "premium_max_concurrent": {
+      "type": "number",
+      "title": "Max concurrent premium agents",
+      "default": 2
+    },
+    "warrant_required": {
+      "type": "boolean",
+      "title": "Premium warrant",
+      "description": "Require a stated justification when spawning a premium-tier subagent.",
+      "default": true
+    },
+    "memory_budget": {
+      "type": "boolean",
+      "title": "Memory budget monitor",
+      "description": "Warn when always-loaded instruction files get too large, and write a refactor prompt.",
+      "default": true
+    },
+    "memory_budget_tokens": {
+      "type": "number",
+      "title": "Memory budget (tokens)",
+      "default": 3000
+    },
+    "spawn_telemetry": {
+      "type": "boolean",
+      "title": "Spawn telemetry",
+      "description": "Record every subagent spawn (model, type, agent_type) for the calibration routine.",
+      "default": true
+    }
+  }
+}
