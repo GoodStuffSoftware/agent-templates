@@ -78,9 +78,21 @@ const banned = LITERAL_TOKENS.map(([label, hex]) => ({
 // name/handle/email, user-home paths, and git-SHA-like hex. And the company
 // name stays banned in every OTHER file. If you find yourself wanting to widen
 // this map, that's the signal to genericize instead.
+// A published plugin manifest names its publisher for the same reason a LICENSE
+// names its copyright holder: it is ownership metadata, and a plugin shipped
+// from the studio's marketplace is attributed to the studio by definition. Same
+// discipline as LICENSE — only the SPACED company name, only in the manifests
+// that actually display it. The slug and the .com domain stay banned everywhere,
+// as do the product name, personal name/handle/email, and user-home paths.
 const EXEMPT = {
   LICENSE: new Set([
     "project-name-A-spaced", // the studio name with spaces (used in the copyright line)
+  ]),
+  ".claude-plugin/marketplace.json": new Set([
+    "project-name-A-spaced", // marketplace `owner.name`
+  ]),
+  "plugins/agent-companion/.claude-plugin/plugin.json": new Set([
+    "project-name-A-spaced", // plugin `author.name`
   ]),
 };
 
@@ -171,7 +183,10 @@ for (const file of listCommittableFiles()) {
     for (const { label, needle } of banned) {
       // Skip a token only when THIS file is explicitly allowed to carry THIS
       // label (see EXEMPT above) — e.g. the company name in LICENSE.
-      if (EXEMPT[rel]?.has(label)) continue;
+      // EXEMPT keys are written with forward slashes; `rel` uses the platform
+      // separator, so normalize or the exemption silently never matches on
+      // Windows and the guard fails in a way that looks like a real leak.
+      if (EXEMPT[rel.split(sep).join("/")]?.has(label)) continue;
       let idx = lower.indexOf(needle);
       while (idx !== -1) {
         hits.push({ rel, line: i + 1, label, text: line.trim() });

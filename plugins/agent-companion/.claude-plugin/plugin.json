@@ -1,9 +1,9 @@
 {
   "name": "agent-companion",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
-    "name": "{{ORG_NAME}}"
+    "name": "Good Stuff Software"
   },
   "userConfig": {
     "delegation_guard": {
@@ -27,7 +27,8 @@
     "premium_max_concurrent": {
       "type": "number",
       "title": "Max concurrent premium agents",
-      "default": 2
+      "default": 2,
+      "description": "How many premium-tier subagents may run at once before further spawns are denied."
     },
     "warrant_required": {
       "type": "boolean",
@@ -44,7 +45,8 @@
     "memory_budget_tokens": {
       "type": "number",
       "title": "Memory budget (tokens)",
-      "default": 3000
+      "default": 3000,
+      "description": "Token ceiling for a single always-loaded instruction file before it is flagged."
     },
     "spawn_telemetry": {
       "type": "boolean",
@@ -64,5 +66,14 @@
       "description": "Comma-separated filename prefixes treated as historical and safe to archive. Anything else is treated as a live rule and re-linked instead.",
       "default": "findings_,bugs,handoff-"
     }
-  }
+  },
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "displayName": "Agent Companion",
+  "keywords": [
+    "agents",
+    "guardrails",
+    "model-routing",
+    "audit",
+    "memory"
+  ]
 }
