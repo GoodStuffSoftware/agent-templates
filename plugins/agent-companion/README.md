@@ -211,15 +211,44 @@ trying to help an agent that is already mid-task:
 - **Hooks do not.** They are bound at session start, so a session that predates
   the install has no guards — silently, since nothing reports their absence.
 
-Bind them into the running session with:
+Where it is available, bind them into the running session with:
 
 ```
 /reload-plugins
 ```
 
-(`/reload-plugins --force` also rebuilds the conversation cache rather than
-reusing it.) So a long-running agent can gain both the diagnostic skills and the
-guards without losing its context — no need to restart work to get protection.
+(`--force` also rebuilds the conversation cache rather than reusing it.) A
+long-running agent can then gain the guards without losing its context.
+
+**That command is not available in every environment** — some surfaces report
+`/reload-plugins isn't available in this environment`. There, the only way to
+arm hooks is to start a new session. Skills still hot-load either way, so an
+in-flight agent keeps the diagnostics regardless; it is only the *enforcement*
+that waits.
+
+### Four separate stale-state traps
+
+Updating this plugin touches four independent caches, and skipping any one
+leaves you running old code **with no error at all**:
+
+| # | Step | Symptom if skipped |
+|---|---|---|
+| 1 | `claude plugin marketplace update <marketplace>` | installs re-run the old commit; a fix that is already on `main` appears not to work |
+| 2 | `claude plugin update <plugin>@<marketplace>` | cache is current, installed version is not |
+| 3 | `/reload-plugins`, or a new session | new version installed, old hooks still bound |
+| 4 | check the running session's own age | a session predating the install never had hooks at all |
+
+Two traps within the traps: `claude plugin update` needs the **fully qualified**
+`plugin@marketplace` — the bare name fails with a misleading *"Plugin not
+found"*. And `claude plugin details` reads the **cache**, not the installed copy,
+so it will happily describe components that are not actually running.
+
+Verify what is real rather than what is reported:
+
+```bash
+git -C ~/.claude/plugins/marketplaces/<marketplace> log --oneline -1
+claude plugin list
+```
 
 ### Verifying it is actually running
 
