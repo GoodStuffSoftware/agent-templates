@@ -6,7 +6,7 @@
 // cost of under-enforcing is a missed nudge; the cost of over-enforcing is a
 // wedged agent. The daily calibration routine is what catches under-enforcement.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -38,11 +38,35 @@ export function readStdin() {
   }
 }
 
+const DATA_ROOT = join(homedir(), '.claude', 'plugins', 'data');
+
+// Inside a hook the harness sets CLAUDE_PLUGIN_DATA and this is exact. The
+// fallback matters for READERS — the audit, the doctor, the scout — which run
+// outside a hook. It previously guessed `data/agent-companion`, but the real
+// convention is `data/<plugin>-<marketplace>`, so every reader was scanning a
+// directory that did not exist and reporting a clean bill of health against
+// nothing at all. A silent wrong answer, which is the failure this plugin is
+// supposed to catch, not commit.
 export function dataDir() {
-  const d = process.env.CLAUDE_PLUGIN_DATA
-    || join(homedir(), '.claude', 'plugins', 'data', 'agent-companion');
+  const d = process.env.CLAUDE_PLUGIN_DATA || dataDirs()[0]
+    || join(DATA_ROOT, 'agent-companion-agent-templates');
   try { mkdirSync(d, { recursive: true }); } catch { /* fail open */ }
   return d;
+}
+
+// The same plugin can accumulate SEVERAL data directories — one per marketplace
+// it was loaded from, plus `-inline` for a dev/--plugin-dir load. Telemetry
+// splits across them, so a reader that looks at only one under-reports without
+// any sign that it did. Readers should aggregate across all of them.
+export function dataDirs() {
+  try {
+    return readdirSync(DATA_ROOT)
+      .filter((d) => d === 'agent-companion' || d.startsWith('agent-companion-'))
+      .map((d) => join(DATA_ROOT, d))
+      .filter((d) => { try { return statSync(d).isDirectory(); } catch { return false; } });
+  } catch {
+    return [];
+  }
 }
 
 // userConfig keys surface as CLAUDE_PLUGIN_OPTION_<KEY> env vars.
@@ -62,13 +86,48 @@ export function isMainThread(p) {
   return typeof p.agent_type === 'string' && MAIN_THREAD_TYPES.has(p.agent_type);
 }
 
+// Look up a named agent's own definition. This is what distinguishes a
+// PROJECT-DEFINED agent from genuine harness drift, and a configured model from
+// an unexamined default — the two things the raw payload cannot tell apart.
+export function agentDefinition(type, cwd) {
+  if (!type) return null;
+  const roots = [
+    cwd && join(cwd, '.claude', 'agents'),
+    join(homedir(), '.claude', 'agents'),
+  ].filter(Boolean);
+  for (const root of roots) {
+    const file = join(root, `${type}.md`);
+    try {
+      if (!existsSync(file)) continue;
+      const m = readFileSync(file, 'utf8').match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (!m) return { file, model: '', effort: '' };
+      const fm = {};
+      for (const line of m[1].split(/\r?\n/)) {
+        const kv = line.match(/^(\w[\w-]*):\s*(.*)$/);
+        if (kv) fm[kv[1]] = kv[2].trim();
+      }
+      return { file, model: fm.model || '', effort: fm.effort || '' };
+    } catch { /* keep looking */ }
+  }
+  return null;
+}
+
 // Enforcement fails open on unknown types, but detection must not. Record them
 // so the daily scout can dispatch a harness-surface review.
+//
+// Two refinements learned from real data: a type with its own definition file
+// is a PROJECT-DEFINED agent, not drift — recording those buried the real signal
+// under a project's own roster. And the same type was appended dozens of times
+// in an afternoon; drift is a set, not a stream, so each type is recorded once.
 export function noteAgentType(p) {
   const t = p.agent_type;
   if (!t || KNOWN_AGENT_TYPES.has(t)) return;
+  if (agentDefinition(t, p.cwd)) return; // defined somewhere: known, not drift
   try {
     const f = join(dataDir(), 'unknown-agent-types.jsonl');
+    let seen = '';
+    try { seen = readFileSync(f, 'utf8'); } catch { /* first one */ }
+    if (seen.includes(`"agent_type":"${t}"`)) return;
     writeFileSync(f, JSON.stringify({ at: new Date().toISOString(), agent_type: t }) + '\n', { flag: 'a' });
   } catch { /* fail open */ }
 }

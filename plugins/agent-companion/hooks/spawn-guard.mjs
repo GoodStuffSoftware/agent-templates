@@ -8,7 +8,7 @@
 
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  appendLog, allow, deny, passthrough, recordDenial,
+  appendLog, allow, deny, passthrough, recordDenial, agentDefinition,
 } from './lib/context.mjs';
 
 const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
@@ -18,8 +18,19 @@ try {
   noteAgentType(p);
 
   const input = p.tool_input || {};
-  const model = input.model;
   const sid = p.session_id || 'unknown';
+
+  // Model resolution order is: env override -> spawn parameter -> the agent's
+  // own frontmatter -> the lead's model. Reading only the spawn parameter
+  // conflates the last two, so a correctly-configured named agent looked
+  // identical to an unexamined inheritance — and, worse, a definition pinned to
+  // a premium tier slipped past the warrant and the cap entirely, because the
+  // spawn itself named no model.
+  const declared = input.model || '';
+  const def = agentDefinition(input.subagent_type, p.cwd);
+  const fromDef = def?.model || '';
+  const model = declared || fromDef;            // what will actually run, when knowable
+  const trulyInherited = !declared && !fromDef; // nobody chose: the real hazard
 
   // A spawn means delegation happened — clear the main-thread streak.
   try {
@@ -38,9 +49,13 @@ try {
       at: new Date().toISOString(),
       session_id: sid,
       spawned_by_agent_type: p.agent_type,
-      model: model || '(inherited)',
+      model: model || '(inherited)',      // effective model, when knowable
+      model_declared: declared || null,   // named at the spawn site
+      model_definition: fromDef || null,  // named in the agent's frontmatter
+      inherited: trulyInherited,          // true only when NEITHER named one
       subagent_type: input.subagent_type,
       effort: p.effort?.level,
+      effort_definition: def?.effort || null,
     });
   }
 

@@ -1,8 +1,8 @@
 ---
 name: {{AGENT_PREFIX}}-reviewer
 description: Reviews code quality, content quality, and catches regressions for {{PROJECT_NAME}}. Use after a feature or content batch is built to verify correctness before merge — lint, type check, link check, copy quality, and a quality pass on the diff.
-model: sonnet
-effort: high
+model: opus
+effort: xhigh
 color: purple
 tools: Read, PowerShell, Bash, Glob, Grep
 ---

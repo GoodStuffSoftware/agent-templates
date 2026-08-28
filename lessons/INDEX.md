@@ -90,6 +90,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `resolve-the-reply-to-address` — Don't hardcode the reply-to address in a briefing template — resolve it, or make the brief self-healing — [agent-process] — active
 - `resumed-session-has-birth-capabilities` — A resumed session has the capabilities it was born with — a successful wake is not restored agency — [agent-process] — active
 - `review-docs-against-the-code-seam` — Review a doc about code against the code — prose describing a branch is exactly where a wrong branch hides — [universal] — active
+- `reviewer-matches-the-tier-it-reviews` — A reviewer runs at the tier of what it reviews, adversarially, and often at higher effort — [agent-process] — active
 - `safeguard-the-operation-not-the-entry-point` — Put a safeguard on the operation, not on the convenient entry point — the direct path is what people use under pressure — [universal] — active
 - `scope-a-broken-finding-to-the-measured-path` — Record what you measured, not what it implies about the category — scope every finding to the path you actually touched — [universal] — active
 - `secret-resolution-fallback-chain` — Resolve a shared secret through a first-hit-wins chain ending in a fail-safe — ordered by ascending privilege, not a single required env var — [universal] — active

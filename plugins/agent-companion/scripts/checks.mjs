@@ -171,12 +171,14 @@ const agentDefs = {
     if (!dirs.length) return { status: 'skip', findings: ['no agents directory under this target'] };
 
     const findings = [];
+    const roster = [];
     let count = 0;
     for (const d of dirs) {
       for (const f of readdirSync(d).filter((x) => x.endsWith('.md'))) {
         count++;
         const fm = frontmatter(readFileSync(join(d, f), 'utf8'));
         const rel = join(basename(d), f);
+        roster.push({ name: fm.name || f.replace(/\.md$/, ''), model: fm.model || '', effort: fm.effort || '', rel });
         // An omitted model inherits the LEAD's tier - the most expensive
         // default available, and the mechanism behind unexamined premium fan-out.
         if (!fm.model) findings.push(`${rel}: NO model - inherits the lead's tier`);
@@ -190,11 +192,35 @@ const agentDefs = {
         if (fm.effort === 'max') findings.push(`${rel}: effort=max - reserve for frontier work`);
       }
     }
-    const bad = findings.some((x) => /NO model|FABLE/.test(x));
+    // Reviewer parity: a reviewer is sized to the writer it gates, never
+    // discounted below it. A weaker reviewer catches the errors it would itself
+    // have avoided and waves through the ones it would itself have made — which
+    // is exactly the novel-error class a stronger writer produces. The saving is
+    // taken precisely where the gate was supposed to earn its keep.
+    const TIER = { haiku: 1, sonnet: 2, opus: 3, fable: 4 };
+    const tierOf = (m) => {
+      const k = Object.keys(TIER).find((t) => new RegExp(t, 'i').test(m || ''));
+      return k ? TIER[k] : 0;
+    };
+    const reviewers = roster.filter((a) => /review/i.test(a.name));
+    const writers = roster.filter((a) => /architect|builder|writer|implement/i.test(a.name));
+    if (reviewers.length && writers.length) {
+      const topWriter = writers.reduce((a, b) => (tierOf(b.model) > tierOf(a.model) ? b : a));
+      for (const r of reviewers) {
+        if (tierOf(r.model) > 0 && tierOf(topWriter.model) > tierOf(r.model)) {
+          findings.push(
+            `${r.name}: reviewer on "${r.model}" gates ${topWriter.name} on `
+            + `"${topWriter.model}" — a reviewer must match the tier it reviews`,
+          );
+        }
+      }
+    }
+
+    const bad = findings.some((x) => /NO model|FABLE|must match the tier/.test(x));
     return {
       status: bad ? 'fail' : (findings.length ? 'warn' : 'ok'),
       findings,
-      data: { count },
+      data: { count, roster },
     };
   },
 };
