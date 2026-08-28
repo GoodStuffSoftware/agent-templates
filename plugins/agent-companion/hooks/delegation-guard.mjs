@@ -10,7 +10,7 @@
 
 import {
   readStdin, isMainThread, noteAgentType, opt, stateFile, readJson, writeJson,
-  allow, deny, passthrough,
+  allow, deny, passthrough, recordDenial,
 } from './lib/context.mjs';
 
 try {
@@ -29,6 +29,7 @@ try {
 
   if (streak >= threshold) {
     writeJson(f, { ...st, [sid]: { streak: 0, firedAt: Date.now() } });
+    recordDenial('delegation', p, `${streak} consecutive ${p.tool_name} calls on the main thread`);
     deny(
       `Delegation guard: that is ${streak} execution-class tool calls in a row on the MAIN thread ` +
       `(${p.tool_name}). This is the pattern the orchestrator rules exist to prevent — the main ` +

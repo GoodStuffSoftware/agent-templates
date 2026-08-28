@@ -1,22 +1,28 @@
-// Optional telemetry upload — SessionEnd only.
+// Optional telemetry upload — one script, wired to Stop and SessionEnd.
 //
 // OFF BY DEFAULT. With no `telemetry_endpoint` configured this exits before
 // touching the network, so the plugin makes no outbound calls at all. Setting
 // an endpoint is the single action that turns sending on.
 //
-// WHY SessionEnd AND NOT PreToolUse:
+// WHY NOT PreToolUse:
 //   PreToolUse is a BLOCKING hook — it runs before the tool call proceeds. A
 //   network call there puts your endpoint's latency in front of every single
 //   tool call, and a slow or dead endpoint stalls each one until the hook
-//   timeout. That does not fail loudly; it just makes the agent feel broken.
-//   SessionEnd runs after the work is done, so a slow endpoint costs nothing.
+//   timeout. That does not fail loudly; it just makes the agent feel broken,
+//   which is far harder to diagnose than an outage.
 //
-// WHY SessionEnd AT ALL, rather than a scheduled upload:
-//   A cloud session's filesystem is destroyed when the session ends, so there
-//   is no "later" in which to collect it. Sending at SessionEnd is the only
-//   point at which cloud telemetry still exists. It is best-effort by nature —
-//   SessionEnd does not fire on a crash or a kill — which is why the local
-//   JSONL is still written and can be swept up afterwards.
+// WHY BOTH Stop AND SessionEnd:
+//   Stop fires at each turn boundary and is throttled, so telemetry flows
+//   during a long session instead of only at the end. SessionEnd bypasses the
+//   throttle because there may be no next turn — and for a cloud session it is
+//   the last moment the data exists at all, since the filesystem is destroyed
+//   with the session and there is no later sweep.
+//
+//   Coverage is a sample, not a census: SessionEnd's reasons are clear, resume,
+//   logout, prompt_input_exit, other, and bypass_permissions_disabled. There is
+//   no idle-timeout reason, and a killed process cannot run its own hook. The
+//   local JSONL stays on disk so a local machine can be swept later; a vanished
+//   cloud session simply loses its last interval.
 //
 // Token cost: zero. This is a subprocess; no model is invoked.
 
@@ -26,7 +32,7 @@ import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { readStdin, opt, dataDir, stateFile, readJson, writeJson, passthrough } from './lib/context.mjs';
 
-const FILES = ['spawns.jsonl', 'subagent-starts.jsonl', 'unknown-agent-types.jsonl'];
+const FILES = ['spawns.jsonl', 'subagent-starts.jsonl', 'unknown-agent-types.jsonl', 'denials.jsonl'];
 const TIMEOUT_MS = 3000;
 
 // A cloud session's filesystem dies with it and there is no later sweep, so it

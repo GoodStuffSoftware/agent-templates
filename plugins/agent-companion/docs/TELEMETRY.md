@@ -63,6 +63,26 @@ A guard that logs its own test inflates the metric it is checked against.
 Pairing this against `spawns.jsonl` shows requested-versus-started. A spawn with
 no corresponding start was denied or failed.
 
+### `denials.jsonl` — one record per guard firing
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when the guard fired |
+| `session_id` | string | session it fired in |
+| `agent_type` | string | the agent whose call was denied |
+| `guard` | string | `delegation`, `warrant`, or `premium-cap` |
+| `outcome` | string | currently always `deny` |
+| `detail` | string | short reason, truncated to 300 chars |
+
+**A consumer must not treat a zero count here as good news.** A guard that has
+silently stopped matching — after a harness rename, say — produces exactly the
+same zero as a guard with nothing to deny. Zero denials across a period of real
+spawn activity is a reason to run the canary, not a reason to relax.
+
+Canary probes (session ids beginning `canary`) are excluded, so the guards'
+own self-tests never inflate the metric they are checked against.
+
 ### `unknown-agent-types.jsonl` — harness drift signal
 
 | field | type | meaning |

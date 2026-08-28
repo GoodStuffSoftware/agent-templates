@@ -8,7 +8,7 @@
 
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  appendLog, allow, deny, passthrough,
+  appendLog, allow, deny, passthrough, recordDenial,
 } from './lib/context.mjs';
 
 const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
@@ -50,6 +50,7 @@ try {
   if (opt('warrant_required', true)) {
     const brief = String(input.prompt || '');
     if (!/WARRANT\s*:/i.test(brief)) {
+      recordDenial('warrant', p, `premium tier ${model} requested with no warrant`);
       deny(
         `Premium warrant: this spawn requests "${model}", a premium tier, with no stated ` +
         `justification.\n\n` +
@@ -72,6 +73,7 @@ try {
 
     if (recent.length >= cap) {
       writeJson(f, recent);
+      recordDenial('premium-cap', p, `${recent.length} premium agents in window, cap ${cap}`);
       deny(
         `Premium fan-out cap: ${recent.length} premium-tier agents already started in the last ` +
         `${WINDOW_MS / 60000} minutes and the cap is ${cap}.\n\n` +

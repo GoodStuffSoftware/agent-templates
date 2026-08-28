@@ -108,6 +108,23 @@ export function appendLog(name, record) {
   } catch { /* fail open */ }
 }
 
+// Record a guard firing. Without this the denial count is always zero, and a
+// guard that has silently stopped matching is indistinguishable from one with
+// nothing to deny — which is exactly the signal the calibration canary exists
+// to raise. Call this BEFORE deny(), which exits the process.
+export function recordDenial(guard, payload, detail) {
+  const sid = String(payload?.session_id ?? '');
+  if (sid.startsWith('canary')) return; // probes must not inflate their own metric
+  appendLog('denials.jsonl', {
+    at: new Date().toISOString(),
+    session_id: sid,
+    agent_type: payload?.agent_type,
+    guard,
+    outcome: 'deny',
+    detail: String(detail ?? '').slice(0, 300),
+  });
+}
+
 export function allow() {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
