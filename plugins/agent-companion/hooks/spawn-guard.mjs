@@ -28,7 +28,12 @@ try {
     if (dst[sid]) writeJson(df, { ...dst, [sid]: { ...dst[sid], streak: 0 } });
   } catch { /* fail open */ }
 
-  if (opt('spawn_telemetry', true)) {
+  // The canary deliberately provokes this guard, so it must not be recorded as
+  // real activity — otherwise the probe pollutes the very telemetry the audit
+  // then reads back, and every canary run inflates the premium spawn count.
+  const isCanary = String(sid).startsWith('canary');
+
+  if (opt('spawn_telemetry', true) && !isCanary) {
     appendLog('spawns.jsonl', {
       at: new Date().toISOString(),
       session_id: sid,
