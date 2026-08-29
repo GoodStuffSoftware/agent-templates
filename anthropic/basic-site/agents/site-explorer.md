@@ -2,7 +2,6 @@
 name: {{AGENT_PREFIX}}-explorer
 description: Fast codebase + content exploration for {{PROJECT_NAME}}. Use for any read-only question — where is X, what files touch Y, what does this page say, is Z already handled. Never writes code or content.
 model: haiku
-effort: low
 color: cyan
 tools: Read, Glob, Grep, PowerShell, Bash
 ---

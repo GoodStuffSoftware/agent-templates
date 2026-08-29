@@ -9,15 +9,39 @@ A registry of independent checks with one runner. Checks are selectable and
 chainable; the runner knows nothing about any individual check, so new checks
 (or a new vendor's worth of checks) are additive.
 
+## Locate the plugin first
+
+`${CLAUDE_PLUGIN_ROOT}` is set **only inside hooks**. In an ordinary shell it
+is empty, so a command written with it collapses to `/scripts/audit.mjs` and
+fails to resolve — quietly, and in a way that reads like the tool is missing
+rather than the path being wrong. Resolve it explicitly:
+
+```bash
+AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion 2>/dev/null | head -1)"
+[ -n "$AC" ] || AC="$(ls -d "$HOME"/.claude/plugins/cache/*/agent-companion/* 2>/dev/null | tail -1)"
+[ -n "$AC" ] || { echo "agent-companion not found — is the plugin installed?"; }
+```
+
+PowerShell:
+
+```powershell
+$AC = (Get-ChildItem "$env:USERPROFILE/.claude/plugins/marketplaces/*/plugins/agent-companion" -Directory | Select-Object -First 1).FullName
+```
+
+(Forward slashes on purpose — PowerShell accepts them on Windows, and they
+survive being copied through shells and JSON without backslash mangling.)
+
+Every command below assumes `$AC` is set.
+
 ## Run it
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/audit.mjs" --list
-node "${CLAUDE_PLUGIN_ROOT}/scripts/audit.mjs" --dir <path>
-node "${CLAUDE_PLUGIN_ROOT}/scripts/audit.mjs" --dir <path> --only memory-index,agent-defs
-node "${CLAUDE_PLUGIN_ROOT}/scripts/audit.mjs" --dir <path> --skip guard-canary
-node "${CLAUDE_PLUGIN_ROOT}/scripts/audit.mjs" --dir <path> --fix
-node "${CLAUDE_PLUGIN_ROOT}/scripts/audit.mjs" --dir <path> --json     # for scripting
+node "$AC/scripts/audit.mjs" --list
+node "$AC/scripts/audit.mjs" --dir <path>
+node "$AC/scripts/audit.mjs" --dir <path> --only memory-index,agent-defs
+node "$AC/scripts/audit.mjs" --dir <path> --skip guard-canary
+node "$AC/scripts/audit.mjs" --dir <path> --fix
+node "$AC/scripts/audit.mjs" --dir <path> --json     # for scripting
 ```
 
 `--dir` defaults to the current directory. Add `--strict` to exit non-zero on

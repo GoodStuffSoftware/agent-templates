@@ -18,7 +18,7 @@ import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync, execSync } from 'node:child_process';
 
-import { classifyModel } from '../hooks/lib/context.mjs';
+import { classifyModel, classifyEffort, isModelAvailable, effortSupported } from '../hooks/lib/context.mjs';
 
 const est = (s) => Math.ceil(s.length / 4);
 const DATED_MODEL = /-\d{6,8}$/;
@@ -183,7 +183,13 @@ const agentDefs = {
         // An omitted model inherits the LEAD's tier - the most expensive
         // default available, and the mechanism behind unexamined premium fan-out.
         if (!fm.model) findings.push(`${rel}: NO model - inherits the lead's tier`);
-        if (!fm.effort) findings.push(`${rel}: no effort set`);
+        // Only ask for an effort where the model actually takes one. A tier with
+        // a single mode has nothing to declare, and demanding a value there
+        // would push people into writing one that does nothing — which is the
+        // very confusion this check exists to remove.
+        if (!fm.effort && fm.model && effortSupported(fm.model, 'high').ok) {
+          findings.push(`${rel}: no effort set`);
+        }
         if (fm.model && DATED_MODEL.test(fm.model)) {
           findings.push(`${rel}: dated model id "${fm.model}" - pin by alias instead`);
         }
@@ -212,6 +218,25 @@ const agentDefs = {
       }
     }
 
+    // A model that classifies fine but is not reachable on this account. The
+    // spawn fails at runtime and reads as a broken agent rather than a config
+    // mistake, so it is worth catching in the roster instead.
+    for (const a of roster) {
+      if (a.model && !isModelAvailable(a.model)) {
+        findings.push(`${a.rel}: pinned to "${a.model}", which is marked unavailable on this account`);
+      }
+      if (a.effort && !classifyEffort(a.effort).known) {
+        findings.push(`${a.rel}: effort "${a.effort}" is not a known level`);
+      }
+      // Effort availability is per-model. An effort a model does not accept is
+      // not "less thinking" — it is a parameter that model ignores, so the
+      // definition reads as a deliberate choice that has no effect.
+      if (a.model && a.effort) {
+        const sup = effortSupported(a.model, a.effort);
+        if (!sup.ok) findings.push(`${a.rel}: effort "${a.effort}" on "${a.model}" — ${sup.reason}`);
+      }
+    }
+
     const reviewers = roster.filter((a) => /review/i.test(a.name));
     const writers = roster.filter((a) => /architect|builder|writer|implement/i.test(a.name));
     if (reviewers.length && writers.length) {
@@ -221,6 +246,17 @@ const agentDefs = {
           findings.push(
             `${r.name}: reviewer on "${r.model}" gates ${topWriter.name} on `
             + `"${topWriter.model}" — a reviewer must match the tier it reviews`,
+          );
+        }
+        // Effort may exceed the writer's; it must not fall below it. Refutation
+        // is a search problem, so a reviewer given LESS thinking than the writer
+        // had is being asked to find a needle with a shorter look.
+        const rE = classifyEffort(r.effort);
+        const wE = classifyEffort(topWriter.effort);
+        if (rE.rank > 0 && wE.rank > 0 && rE.rank < wE.rank) {
+          findings.push(
+            `${r.name}: reviewer effort "${r.effort}" is below ${topWriter.name}'s `
+            + `"${topWriter.effort}" — reviewer effort may exceed the writer's, never fall below`,
           );
         }
       }

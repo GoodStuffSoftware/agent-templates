@@ -44,6 +44,16 @@ try {
   // then reads back, and every canary run inflates the premium spawn count.
   const isCanary = String(sid).startsWith('canary');
 
+  // The routing table is downstream of a number nobody currently records: the
+  // doctrine says to score task weight 1-5 *silently*, so the judgement that
+  // chose the tier leaves no trace and can never be compared against what the
+  // task turned out to need. Capture it whenever it IS stated, so the data
+  // starts accumulating before anyone decides how to grade it.
+  const brief = String(input.prompt || '');
+  const wm = brief.match(/\b(?:WARRANT|WEIGHT)\s*:\s*(?:weight\s*)?([1-5])\b/i);
+  const declaredWeight = wm ? Number(wm[1]) : null;
+  const km = brief.match(/\bKIND\s*:\s*(mechanical|bounded|diagnostic|novel-design)\b/i);
+  const declaredKind = km ? km[1].toLowerCase() : null;
   if (opt('spawn_telemetry', true) && !isCanary) {
     appendLog('spawns.jsonl', {
       at: new Date().toISOString(),
@@ -56,6 +66,8 @@ try {
       subagent_type: input.subagent_type,
       effort: p.effort?.level,
       effort_definition: def?.effort || null,
+      declared_weight: declaredWeight,   // null when the brief did not say
+      declared_kind: declaredKind,
     });
   }
 

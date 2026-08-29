@@ -60,6 +60,124 @@ export function classifyModel(model) {
   return { alias: '', rank: 0, premium: cfg.unknownIsPremium !== false, known: false };
 }
 
+// Effort is a separate axis from model and scales ALL output - thinking,
+// answer, and tool calls alike. Ranking it lets the audit compare two agents'
+// effort the way it compares their tiers, which is what the reviewer-parity
+// rule needs: effort may exceed the writer's, and must never fall below it.
+export function classifyEffort(effort) {
+  const cfg = modelTiers();
+  const e = String(effort || '').toLowerCase();
+  const spec = (cfg.efforts || {})[e];
+  return spec ? { level: e, rank: spec.rank ?? 0, known: true }
+              : { level: e, rank: 0, known: false };
+}
+
+// Weight (1-5) -> the model and effort that weight routes to. Data, so the
+// routing table can be corrected without shipping code.
+export function routeForWeight(weight) {
+  const cfg = modelTiers();
+  return (cfg.routing || {})[String(weight)] || null;
+}
+
+// An entry may be classified but not reachable on this account. Pinning an
+// agent to one fails at spawn time with nothing having warned beforehand.
+export function isModelAvailable(model) {
+  const cfg = modelTiers();
+  const m = String(model || '');
+  for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
+    if (m && new RegExp(spec.match || alias, 'i').test(m)) return spec.available !== false;
+  }
+  return true; // unknown models are flagged elsewhere, not blocked here
+}
+// Effort availability is PER MODEL, not global. xhigh only exists from the
+// 4.7 generation onward, and haiku takes no effort parameter at all - so a
+// haiku agent carrying `effort: low` is not asking for less thinking, it is
+// setting a parameter the model does not accept. Returns:
+//   { ok, supported[], reason }
+export function effortSupported(model, effort) {
+  const cfg = modelTiers();
+  const m = String(model || '');
+  const e = String(effort || '').toLowerCase();
+  if (!e) return { ok: true, supported: [], reason: 'no effort set' };
+  for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
+    if (m && new RegExp(spec.match || alias, 'i').test(m)) {
+      const list = Array.isArray(spec.efforts) ? spec.efforts : null;
+      if (!list) return { ok: true, supported: [], reason: 'tier declares no effort set' };
+      if (list.length === 0) {
+        return { ok: false, supported: [], reason: `${alias} takes no effort parameter` };
+      }
+      return list.includes(e)
+        ? { ok: true, supported: list, reason: '' }
+        : { ok: false, supported: list, reason: `${alias} supports ${list.join(', ')}` };
+    }
+  }
+  return { ok: true, supported: [], reason: 'unknown model' };
+}
+// Decide the effort, rather than leaving it to taste.
+//
+// Weight picks the MODEL - how much capability the task needs. Kind adjusts
+// the EFFORT - how much the answer benefits from search. They are genuinely
+// orthogonal: a routing table and a message bus can touch the same number of
+// files and deserve completely different amounts of thinking, because one has
+// a single right shape and the other has an answer space to explore.
+//
+// Returns { model, effort, rationale } and clamps to what the model accepts,
+// so a haiku route comes back with no effort at all rather than a parameter
+// that model does not take.
+function tierRank(alias) {
+  const cfg = modelTiers();
+  return (cfg.tiers || {})[alias]?.rank ?? 0;
+}
+
+export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
+  const cfg = modelTiers();
+  const route = (cfg.routing || {})[String(weight)];
+  if (!route) return { model: '', effort: '', rationale: `no routing row for weight ${weight}` };
+
+  const tier = (cfg.tiers || {})[route.model] || {};
+  const supported = Array.isArray(tier.efforts) ? tier.efforts : [];
+  if (supported.length === 0) {
+    return {
+      model: route.model,
+      effort: '',
+      rationale: `weight ${weight} routes to ${route.model}, which takes no effort parameter`,
+    };
+  }
+
+  const delta = (cfg.taskKinds || {})[kind]?.effortDelta ?? 0;
+  const ranked = Object.entries(cfg.efforts || {})
+    .sort((a, b) => (a[1].rank ?? 0) - (b[1].rank ?? 0))
+    .map(([name]) => name)
+    .filter((name) => supported.includes(name));
+
+  const baseIdx = Math.max(0, ranked.indexOf(route.effort));
+  // Clamp rather than error: a kind that pushes past the top means 'as much as
+  // this model has', which is a real answer, not a failed lookup.
+  const idx = Math.min(ranked.length - 1, Math.max(0, baseIdx + delta));
+
+  // Consequence is a FLOOR applied AFTER the kind delta, so it cannot be
+  // undercut. Difficulty and consequence are close to orthogonal: a one-line
+  // production migration is mechanical by kind, and without this the -1 would
+  // reduce thinking on exactly the change least able to absorb a mistake.
+  const cons = (cfg.consequence || {})[consequence] || {};
+  let finalIdx = idx;
+  if (cons.effortFloor) {
+    const floorIdx = ranked.indexOf(cons.effortFloor);
+    if (floorIdx > finalIdx) finalIdx = floorIdx;
+  }
+  const effortFinal = ranked[finalIdx];
+
+  const moved = idx - baseIdx;
+  const why = moved === 0
+    ? `${kind} work needs no adjustment`
+    : `${kind} work shifts effort ${moved > 0 ? 'up' : 'down'} ${Math.abs(moved)}`;
+  const floored = finalIdx > idx ? `; ${consequence} consequence raises the floor to ${effortFinal}` : '';
+  return {
+    model: cons.modelFloor && tierRank(cons.modelFloor) > tierRank(route.model) ? cons.modelFloor : route.model,
+    effort: effortFinal,
+    rationale: `weight ${weight} routes to ${route.model}/${route.effort}; ${why}${floored} -> ${effortFinal}`,
+  };
+}
 export function readStdin() {
   try {
     let raw = readFileSync(0, 'utf8') || '';

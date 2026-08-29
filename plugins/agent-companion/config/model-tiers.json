@@ -1,39 +1,208 @@
 {
-  "version": 1,
-  "updated": "2026-08-28",
-  "note": "Model tiers as DATA, not code. A hardcoded tier table goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a plugin release by writing a file of this shape to $CLAUDE_PLUGIN_DATA/model-tiers.json; it is merged over these defaults by alias, so you can add one model or change one rank without restating the rest.",
+  "version": 2,
+  "updated": "2026-08-29",
+  "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to $CLAUDE_PLUGIN_DATA/model-tiers.json; it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
   "tiers": {
     "haiku": {
       "rank": 1,
       "premium": false,
       "match": "haiku",
+      "efforts": [],
+      "effortsNote": "Haiku 4.5 takes no effort parameter. Setting one on a haiku agent is at best a no-op — the model has one mode, and asking for more thinking does not get any.",
       "note": "reads, searches, single commands"
     },
     "sonnet": {
       "rank": 2,
       "premium": false,
       "match": "sonnet",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
       "note": "bounded edits, short scripts, multi-file work"
     },
     "opus": {
       "rank": 3,
       "premium": true,
       "match": "opus",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
       "note": "architecture, novel debugging"
     },
     "fable": {
       "rank": 4,
       "premium": true,
       "match": "fable",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "effortsNote": "Thinking is always on; effort is the only depth control.",
       "note": "not a routing tier — an exception requiring a stated warrant"
     },
     "mythos": {
       "rank": 4,
       "premium": true,
       "match": "mythos",
-      "note": "same tier and treatment as fable"
+      "available": false,
+      "note": "same tier and treatment as fable, but not available on this account — kept so it classifies correctly if access ever changes",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
     }
   },
+  "availabilityNote": "An entry with available:false is still classified, but an agent definition pinned to it is a finding. A model you cannot reach fails at spawn time with nothing having warned you beforehand, and the failure surfaces as a broken agent rather than as a configuration mistake. Set available:false for anything outside your plan.",
   "unknownIsPremium": true,
-  "unknownNote": "A model matching no entry is treated as PREMIUM and flagged. Defaulting an unrecognised model to cheap would let a new top-tier model bypass the warrant and the cap on the day it ships — the exact window in which nobody has updated the table yet. Fail toward the expensive assumption; the cost of a spurious warrant is one line in a brief."
+  "unknownNote": "A model matching no entry is treated as PREMIUM and flagged. Defaulting an unrecognised model to cheap would let a new top-tier model bypass the warrant and the cap on the day it ships — the exact window in which nobody has updated the table yet. Fail toward the expensive assumption; the cost of a spurious warrant is one line in a brief.",
+  "efforts": {
+    "low": {
+      "rank": 1,
+      "note": "skip thinking; reads and single commands"
+    },
+    "medium": {
+      "rank": 2,
+      "note": "light reasoning; bounded edits"
+    },
+    "high": {
+      "rank": 3,
+      "note": "the general sweet spot"
+    },
+    "xhigh": {
+      "rank": 4,
+      "note": "recommended start for agentic work on current top tiers"
+    },
+    "max": {
+      "rank": 5,
+      "note": "reserve for genuinely frontier problems; large cost for small gain"
+    }
+  },
+  "effortNote": "Ranks are global so two agents on different models stay comparable — the reviewer-parity rule needs that. The supported SET is per-tier, under each entry's \"efforts\", because availability genuinely differs by model. An effort not in a tier's list is not a smaller amount of thinking; it is a parameter that model does not take.",
+  "routing": {
+    "1": {
+      "model": "haiku",
+      "effort": "",
+      "label": "trivial — single lookup, read, echo",
+      "effortNote": "haiku takes no effort parameter"
+    },
+    "2": {
+      "model": "haiku",
+      "effort": "",
+      "label": "simple — one-step transform or search",
+      "effortNote": "haiku takes no effort parameter"
+    },
+    "3": {
+      "model": "sonnet",
+      "effort": "medium",
+      "label": "moderate — bounded multi-step, parse structured output"
+    },
+    "4": {
+      "model": "sonnet",
+      "effort": "high",
+      "label": "complex — multi-file, cross-referencing, integration"
+    },
+    "5": {
+      "model": "opus",
+      "effort": "xhigh",
+      "label": "deep — architecture, novel reasoning, migrations"
+    }
+  },
+  "routingNote": "Task weight 1-5 maps to a model AND an effort. Round DOWN when uncertain and escalate on failure; over-provisioning is a rule violation, not a safety margin. Weight 4 may take opus where blast radius warrants it. Nothing routes to fable — it is an exception, not a row.",
+  "taskKinds": {
+    "mechanical": {
+      "effortDelta": -1,
+      "examples": [
+        "a routing table",
+        "a rename",
+        "a config edit",
+        "reformatting",
+        "applying a known migration"
+      ],
+      "note": "Small answer space with one right shape. More thinking does not produce a better result, it produces the same result more slowly."
+    },
+    "bounded": {
+      "effortDelta": 0,
+      "examples": [
+        "a feature against a clear spec",
+        "a test for known behaviour",
+        "a scoped refactor"
+      ],
+      "note": "The shape is known; the work is filling it in correctly."
+    },
+    "diagnostic": {
+      "effortDelta": 1,
+      "examples": [
+        "root-causing a failure",
+        "a flaky test",
+        "an unexplained regression",
+        "an adversarial review"
+      ],
+      "note": "A search problem. The answer exists but must be found, and more passes genuinely raise the odds of finding it."
+    },
+    "novel-design": {
+      "effortDelta": 2,
+      "examples": [
+        "a message bus",
+        "a protocol",
+        "concurrency or sync/merge logic",
+        "a data migration",
+        "a security boundary"
+      ],
+      "note": "Large answer space with no known-good shape to copy. Each additional pass tends to surface a failure mode that would otherwise ship."
+    }
+  },
+  "taskKindNote": "Weight sets the MODEL — how much capability the task needs. Kind adjusts the EFFORT — how much the answer benefits from search. They are orthogonal: a routing table and a message bus can touch the same number of files and deserve completely different amounts of thinking. Compute effort as routing[weight].effort shifted by taskKinds[kind].effortDelta, clamped to the efforts table. When the kind is unclear, use bounded and escalate on failure rather than pre-paying for search you may not need.",
+  "reviewerParity": {
+    "modelMustMatch": true,
+    "effortMayExceed": true,
+    "effortMayNotDrop": true,
+    "note": "A reviewer is sized to the writer it gates. The MODEL must match: a weaker reviewer catches the errors it would itself have avoided and waves through the ones it would itself have made, which is the novel-error class a stronger writer produces. EFFORT may go higher and must not go lower — refutation is a search problem and can need more thinking than generation did."
+  },
+  "consequence": {
+    "routine": {
+      "effortFloor": null,
+      "modelFloor": null,
+      "note": "Reversible, contained, cheap to redo."
+    },
+    "elevated": {
+      "effortFloor": "high",
+      "modelFloor": null,
+      "triggers": [
+        "shared config",
+        "build or release pipeline",
+        "anything other agents depend on",
+        "public API shape"
+      ],
+      "note": "A mistake here costs other people time but is recoverable."
+    },
+    "critical": {
+      "effortFloor": "xhigh",
+      "modelFloor": "opus",
+      "triggers": [
+        "production data writes",
+        "migrations",
+        "destructive operations",
+        "security or permission boundaries",
+        "auth",
+        "billing or money",
+        "secrets and credentials"
+      ],
+      "note": "A mistake here is expensive or irreversible."
+    }
+  },
+  "consequenceNote": "Consequence is a FLOOR, not a delta, and it is applied AFTER the kind adjustment so it cannot be undercut. This matters because difficulty and consequence are close to orthogonal: a one-line production migration is mechanical by KIND, which would otherwise push its effort DOWN on precisely the change most likely to hurt. The floor is the answer to \"how bad is it if this is wrong\", which is a different question from \"how hard is this to get right\"."
 }

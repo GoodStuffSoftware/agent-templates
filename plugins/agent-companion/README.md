@@ -287,7 +287,7 @@ means they registered but never ran — which looks exactly like "found no
 issues". Confirm with the canary rather than trusting silence:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/audit.mjs" --only guard-canary
+node "$AC/scripts/audit.mjs" --only guard-canary
 ```
 
 ## Routines
