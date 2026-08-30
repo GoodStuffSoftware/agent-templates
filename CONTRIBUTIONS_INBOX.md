@@ -4,6 +4,14 @@ A holding area for generic improvements contributed back from real projects when
 
 **This is a queue, not a home.** A change isn't "done" while it's only in the inbox.
 
+## Same-machine agent messaging: harness session tools beat a custom bus (2026-08-30)
+
+For agents on the SAME machine, the harness's session-management tools were measurably better than a custom agent bus: `{{SESSION_LIST_TOOL}}` returned title/cwd/lastActivity/isRunning and caught a live session the bus roster missed, and `{{SESSION_SEND_TOOL}}` delivered as a labelled, source-linked user turn the recipient can trace. Keep the custom bus for cross-machine peers, durable queues to dormant agents, and audit-stamped sends. Two costs to encode with the rule: (1) the harness send has NO wake guard — delivery boots a stopped session, so a send to N sessions is N model wakes; never blast a list. (2) Display session TITLES to the operator, never internal ids; titles survive renames better and read as intent.
+
+## Cross-platform briefs: hand content, not paths (2026-08-30)
+
+In a fleet mixing local (Windows/Mac) subagents and cloud (Linux) peers, a file path is a same-box pointer, not a shared artifact. Observed failure: a reviewer wrote its report to `{{LOCAL_TASKS_DIR}}/REVIEW-{{FEATURE}}.md`; the fix brief told a cloud builder "read it first — the reviewer validated a fix shape, don't rediscover it"; the builder could not open the path, disclosed it, and built the fix blind from a summary — forcing the delta review to add a fix-shape-convergence axis. Rule: when the audience is or may be a remote peer, paste the load-bearing content into the message, commit the artifact into the shared repo, or publish it where the peer's own surface serves it; reserve local paths for agents spawned on the same machine, and apply the same translation in reverse when a peer hands you one of ITS local paths.
+
 ## How to add an entry
 
 Append a new dated entry at the **top** of the list (newest first), using the template below. Before adding it, run `node scripts/leak-check.mjs` — the entry must contain no real-world tokens (generalize specifics to `{{PLACEHOLDERS}}` or generic examples first).
@@ -21,6 +29,70 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 ---
 
 ## Entries
+
+### 2026-08-30 — A gate that exists is not a gate that covers what ships
+
+- **Trigger:** A change added a build-time guard asserting a dev-only module never reaches a production bundle.
+  The guard was real, tested, and non-vacuous — and it ran on none of the paths that actually ship. Three separate
+  instances of the same shape surfaced in one afternoon: (1) the guard's default scan directory covered the web
+  bundle but not the mobile bundle, which was the artifact its own rationale was written about; (2) it was wired
+  into the generic build alias but not the production build alias, which built inline; (3) the reviewer, having
+  just argued (1) and (2), enumerated the package manifest's script aliases exhaustively and still missed a fourth
+  path, because a deploy script invoked the build command directly rather than through an alias.
+- **Is it generic?** Yes. Stripped: the language, the bundler, the package manager, the product. The kernel is that
+  a guard has TWO independent properties and reviewers reliably check only the first: **can it fail** (non-vacuity)
+  and **does it run on the thing you care about** (coverage). Non-vacuity is the interesting-looking question, so
+  attention goes there; coverage is the one that actually determines whether a leak ships. The corollary is a
+  concrete method fix: enumerating declared script aliases is NOT enumerating invocations of the underlying
+  command, because scripts call the tool directly.
+- **Target:** new tagged file under `lessons/`, suggested slug `a-gate-that-exists-vs-a-gate-that-covers`.
+- **Proposed change:**
+  > **Verify a guard's COVERAGE, not just its ability to fail.**
+  > Every guard has two independent failure modes. It can be vacuous — unable to fail even when the thing it
+  > forbids is present. And it can be uncovered — perfectly capable of failing, but never invoked on the artifact
+  > that matters. Reviews gravitate to vacuity because it is the more interesting puzzle; coverage is what
+  > determines whether the bad thing ships.
+  > So ask both, separately: *what input would make this fail?* and *is it invoked on every path that produces the
+  > artifact it protects?* Answer the second by grepping for the underlying BUILD/DEPLOY COMMAND across the whole
+  > repo — not by enumerating the declared script aliases. Scripts, CI configs, and deploy chains routinely invoke
+  > the tool directly and never appear in the alias list. `{{BUILD_TOOL}}` invoked inside
+  > `{{SCRIPTS_DIR}}/{{DEPLOY_SCRIPT}}` is exactly the path an alias inventory misses, and it is often the one that
+  > reaches production.
+  > Watch for the tell: a guard whose scan target defaults to the *most common* output directory rather than the
+  > *shipping* one. The default is written for the developer's inner loop; the risk lives in the release artifact.
+- **Applied?** no
+
+### 2026-08-30 — All-N-fail-in-lockstep means a shared singleton, not resource exhaustion
+
+- **Trigger:** A parallel test harness booted N sandbox instances; all N failed to become ready and the run was
+  diagnosed as a memory ceiling, because the host genuinely was low on free RAM. It was not. The instances all
+  share one lock/registry file keyed by a common project identifier; a previously killed run had left that file
+  pointing at a dead process, so every new instance died on it. The low free RAM was a coincidence that made the
+  wrong theory look corroborated. The tool had even printed a message naming the real cause ("it seems you are
+  running multiple instances…"), which was quoted in the failure report and read past.
+- **Is it generic?** Yes. Stripped: the product, the test framework, the emulator vendor, the file path, the env
+  var names. Two reusable kernels remain. (1) A **failure distribution** is evidence about failure *class*:
+  resource exhaustion starves *some* participants and is order-dependent, whereas a contended singleton kills
+  *all* of them identically. All-N-in-lockstep therefore points at a shared lock/registry/port/lease, not at a
+  ceiling — and this holds even when a resource gauge independently looks bad. (2) Corollary already learned the
+  hard way elsewhere: a plausible-but-wrong theory is most dangerous when an unrelated observation happens to
+  corroborate it. Distinct from the existing "read which error fired" lesson: that one is about picking between
+  two *messages*; this is about reading the *shape* of a multi-instance failure.
+- **Target:** new tagged file under `lessons/`, suggested slug `lockstep-failure-means-shared-singleton`.
+- **Proposed change:**
+  > **When every parallel instance fails identically, suspect a shared singleton — not exhaustion.**
+  > Resource ceilings are probabilistic and order-dependent: some workers get the memory/handles/ports and
+  > proceed, others don't. A contended singleton — a lock file, a registry/locator keyed by a shared id, a fixed
+  > port, a lease — takes down *every* participant the same way at the same point. So read the distribution
+  > before reading the gauge: `{{N}}/{{N}} failed` is a lock signature; `{{SOME}}/{{N}} failed` is a ceiling
+  > signature.
+  > Guard against false corroboration: if a gauge (free RAM, disk, quota) independently looks bad, that is *not*
+  > confirmation — it is a coincidence competing for your attention. Ask what the failing tool itself printed
+  > before trusting the environmental reading.
+  > Cleanup rule that follows: a run killed mid-startup cannot run its own exit cleanup, so it strands exactly
+  > these singletons. After any killed run, clear the stranded artifact before retrying — and only after
+  > confirming no live process still holds it.
+- **Applied?** no
 
 ### 2026-08-28 — Validating against a known-good example is not validating against the schema
 
