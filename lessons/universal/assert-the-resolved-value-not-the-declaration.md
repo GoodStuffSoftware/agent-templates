@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-17
 provenance: [contrib-2]
-corroborated: 3
+corroborated: 4
 ---
 A declaration in a config file is an input to a resolution, not the outcome of one. Tests and reviews that read the declaration confirm the input and say nothing about what the system will actually use. Two failures with the same shape, from one week:
 
@@ -26,4 +26,5 @@ A declaration in a config file is an input to a resolution, not the outcome of o
 - **Read the dependency's SHIPPED source for the field you are relying on**, and confirm the consumer sits on your code path. A getter with four call sites, none of them on the path you take, is a name that agrees with you and a mechanism that does not.
 - **Verify a test by breaking the fix and confirming the test fails.** Apply it to every property the change claims, not only the headline one — in the case above the same technique had already proven a sibling fix in the same change, and would have caught this one on day one.
 - Fix at the layer that resolves, not the layer that is convenient. In the signing case the tempting fix — set it on the build type — would have applied the wrong identity to every other flavour, which the suite explicitly forbade. See [[safeguard-the-operation-not-the-entry-point]].
+- **Never RE-DERIVE a value the tool will resolve for itself.** A fourth case: a scheduler sized its work plan by recomputing the parallel worker count from the same inputs the test runner uses, instead of reading the count the runner had actually resolved. The two formulas agreed until one of them was tuned, after which the plan described a run that never happened. If the consumer exposes its resolved value, read it; a faithful reimplementation of someone else's resolution is a copy that starts drifting the day you ship it.
 - Related: [[probe-behaviour-not-version-stamps]] (behaviour outranks self-reported state) and [[unenforced-absence-invariant]] (a claim nothing enforces).

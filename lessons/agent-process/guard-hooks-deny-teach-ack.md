@@ -11,7 +11,7 @@ corroborated: 1
 Enforce safety rules at the tool boundary, not only in instructions: pre-tool-use guard hooks DENY risky calls (destructive git, memory writes, deploys) unless the call carries an explicit **ack marker** — and the protocol grants the marker only after the prerequisite verifiably succeeded. Example: destructive git against a shared branch is denied unless the command carries an ack token that is granted only after a timestamped backup ref has been pushed and the push verified. Register hooks in exec form (argv array), not shell-string form, so quoting survives every shell and OS.
 
 Three design principles:
-1. **Fail open on hook error.** A guard that crashes must allow-and-log, not block — otherwise a hook bug bricks the guarded tool entirely. Corollary: monitor for silently erroring hooks, because fail-open masks a dead guard (see [[powershell-pipe-bom-breaks-json]]).
+1. **Fail open on hook error.** A guard that crashes must allow-and-log, not block — otherwise a hook bug bricks the guarded tool entirely. The **and-log** half is not optional: a swallowed exception with no record turns every hook into a silent no-op that is indistinguishable from a clean run ([[fail-open-on-the-action-never-on-the-record]], and [[powershell-pipe-bom-breaks-json]] for the exact bug that did it).
 2. **Deny message = teaching text.** The denial states the rule, the prerequisite, and the exact ack syntax, so the agent self-corrects in one round instead of retry-flailing.
 3. **Ack markers = audit trail.** The marker travels in the command line itself, so the transcript and shell history record that the prerequisite was claimed for that exact call.
 
@@ -22,4 +22,5 @@ Three design principles:
 - Grant the ack only from the prerequisite's success path (backup ref pushed and verified, ledger entry appended, …) — never preemptively.
 - Put the rule, the recovery steps, and the exact ack syntax in the deny message.
 - Wrap the hook body in a top-level catch → allow + log.
-- Test the DENY path explicitly, not just the allow path ([[powershell-pipe-bom-breaks-json]]).
+- Test the DENY path explicitly, not just the allow path ([[powershell-pipe-bom-breaks-json]]), and keep testing it on a schedule — a matcher that silently stops matching needs a canary ([[a-silent-guard-needs-a-canary]]).
+- Confirm the tool name the matcher keys on against the installed artifact, not the documentation ([[grep-the-shipped-artifact-not-the-docs]]) — a hook wired to the wrong identifier never fires and never errors.

@@ -6,7 +6,7 @@ requires: { substrate: coordination-bus }
 status: active
 since: 2026-08-03
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 Before addressing a notice to recipients, ask what happens on the CONSUMER side. If anything starts a worker per message — a listener that spawns a fresh session for each recipient with queued mail — then the cost of one notice is (recipients) x (worker startup), and every dead or ephemeral registry row is pure waste.
 
@@ -20,4 +20,6 @@ Two rounds of the same incident, and the second is the important one. First: a c
 - Verify the fix from the CONSUMER side: count workers started or messages delivered over the window. The mitigation's own skip counter reads zero both when the harm is absent and when it is arriving via the unfiltered path ([[verify-at-destination-prove-the-target]]).
 - When placing any default or filter, trace every entry point first and put it at the single choke point they all funnel through — verified by enumeration, not by assumption.
 - **Don't discard failure signals that carry information.** A dispatcher that tries to resume a known worker and gets a non-zero exit has just proven that registry row outlived its process; reap or flag the row instead of silently respawning.
-- Related: [[registry-identity-and-liveness-honesty]] (why the dead rows exist) and [[no-self-waking-bus-poller]] (the other half of the token budget).
+- **A contract change does not need a broadcast if the contract is served live.** Two later sessions faced a "the landing session announces this to the fleet" convention and declined it, correctly: the roster was mostly dead rows, every currently-active peer had already received the change through a direct work thread, and the canonical document is fetched fresh on every contact — so each recipient gets the new truth the next time it asks, at zero cost. Prefer making the source self-serving over pushing a copy to N wakeable rows, and record the decision to skip so nobody re-adds the broadcast as a fix.
+- A convention that assigns a broadcast to whoever lands a change is a standing fan-out obligation. Audit it the same way as the code path: who actually pays, and do they need it?
+- Related: [[registry-identity-and-liveness-honesty]] (why the dead rows exist), [[no-self-waking-bus-poller]] (the other half of the token budget), and [[same-machine-peers-use-the-harness-channel]] (the harness's own send has the same per-recipient multiplier and no liveness filter at all).

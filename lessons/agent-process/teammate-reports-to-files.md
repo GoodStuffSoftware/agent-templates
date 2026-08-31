@@ -16,4 +16,6 @@ Any teammate report exceeding ~10 lines should be written to a file (e.g. `~/.cl
 - Establish a task-file path convention for the session at session start: `~/.claude/tasks/<team-name>/`.
 - All writer, reviewer, and debugger agents write their reports there. Explorer agents can use inline messages for short results (under ~10 lines).
 - The lead's rule: read a task file only when it's needed for the NEXT action — don't pull it into context speculatively.
+- **The pointer convention stops at the machine boundary.** A path is only a pointer to someone who shares the disk; for a remote or cloud peer it is an opaque string, and the failure is silent — see [[a-local-path-is-not-a-shared-artifact]] for what to send instead.
+- The same context economy applies to raw TOOL output, not just teammate prose — a wide search dumps its whole result set into whoever called it ([[delegate-wide-queries-the-result-set-lands-in-you]]).
 - Complements [[idempotent-gates-crossed-messages]] (which covers async correctness) but addresses a different problem (context efficiency).

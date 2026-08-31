@@ -15,6 +15,7 @@ The incident: a "something is throttling the network" report, with a request to 
 **Why:** Thresholds encode an expectation about conditions, and conditions drift. Sibling comparison encodes nothing — it holds every variable fixed except the one you are hunting, so it stays valid on hardware, at loads, and in topologies nobody anticipated.
 
 **How to apply:**
+- First, check whether there IS an outlier. If every sibling fails identically the method inverts: read what they SHARE, not what distinguishes them ([[lockstep-failure-means-shared-singleton]]).
 - **The complaining component is usually downstream of the fault.** A user reports the symptom they can see, which is the victim. Find what it depends on and test THAT tier before acting. Removing or restarting the loud component treats the symptom and destroys the evidence.
 - **Distinguish "slow" from "broken" with the right metric.** Many devices and services are slow BY DESIGN when idle (power saving, cold start, backoff). Latency alone cannot separate that from a fault; a correctness signal can — dropped packets, errors, failed health checks. High latency with zero loss is usually design; any loss is a fault.
 - **Infrastructure hides inside inventories.** Management and infrastructure nodes often share a vendor or naming prefix with the fleet they serve. Group unidentified entries by prefix before treating them as unknown participants — you may be looking at the equipment itself.

@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-10
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 Each concurrent agent is a full OS process with its own footprint (a few hundred MB is typical). Deciding how wide to fan out is therefore a resource decision as much as a parallelism one, and on a constrained host the two answers differ sharply.
 
@@ -29,4 +29,6 @@ The incident: an orchestrator fanned out a large number of parallel agents on a 
 - **Green in isolation, red in the suite = contention.** Run the single failing file alone before reading its diff at all.
 - Treat "several unrelated things got flaky at once" as evidence about the machine before it is evidence about the code.
 - Before a wide fan-out, check free memory; on a constrained host prefer sequential batches over maximum concurrency. The ceiling is the host's, not the task's.
+- **Size from AVAILABLE capacity, not installed capacity.** A planner that divides total RAM by a per-worker estimate produces a constant — it cannot see the other fleet, the other project's suite, or the browser. The same formula against *free* memory produces a number that moves with the machine, which is the whole point. This holds for any automated width decision: worker counts, batch sizes, connection pools.
+- When every member of a fan-out fails identically rather than some of them, stop blaming capacity — that distribution is a shared-singleton signature ([[lockstep-failure-means-shared-singleton]]).
 - The durable fix is on the test side too: a hardcoded millisecond budget that only passes on an idle box is a latent failure, not a measurement — see [[measure-gates-under-normal-load]].
