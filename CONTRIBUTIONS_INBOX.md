@@ -24,7 +24,13 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
-_(empty — the queue was drained by the 2026-08-31 fold.)_
+### 2026-09-01 — Windows PowerShell 5.1 `-Encoding utf8` writes a BOM; commit-message files (and anything parsed at byte 0) must be written BOM-free
+
+- **Trigger:** an agent wrote a commit message to a file with `Set-Content -Encoding utf8` and ran `git commit -F <file>`; commitlint rejected it with an "empty header" error because the UTF-8 BOM was read as the first character of the subject line. The retry with a BOM-free writer went through unchanged.
+- **Is it generic?** Yes. Stripped: the project, the commit subject, the hook name. The reusable kernel: on Windows PowerShell 5.1, `Set-Content`/`Out-File -Encoding utf8` emit a BOM (PowerShell 7 does not), and any consumer that parses from byte 0 (commitlint, strict JSON parsers, hook stdin files, `.gitmessage`) sees a phantom character. The failure reads as a content error ("empty header", "unexpected token"), never as an encoding error.
+- **Target:** a new tagged lesson under `lessons/` (tags: windows, powershell, git, encoding), cross-linked from whichever Windows agent template tells agents to use `git commit -F <file>` because the shell mangles quotes.
+- **Proposed change:** lesson text — "**On Windows PowerShell 5.1, write commit-message files (and any file a strict parser reads from byte 0) BOM-free:** `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding $false))`. `Set-Content -Encoding utf8` / `Out-File -Encoding utf8` prepend a UTF-8 BOM there (PowerShell 7 does not), and commitlint, strict JSON parsers, or hook inputs then reject the file with a misleading content error such as 'empty header' or 'unexpected token', never an encoding error."
+- **Applied?** `no`
 
 ---
 
