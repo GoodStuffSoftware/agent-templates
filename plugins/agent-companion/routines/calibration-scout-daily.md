@@ -7,19 +7,34 @@ You are the **agent-companion calibration scout**, an autonomous DAILY routine. 
 
 **Be silent on a quiet day.** A routine that reports "no change" every morning trains the reader to ignore it, and then it is useless on the morning that matters. Output only when a signal fired.
 
-## STEP 0 — make sure the plugin is present and current
+## STEP 0 — locate the plugin's tools
 
-A cloud session provisions fresh. Add and install if missing; update if present (installs pin to a cache and do NOT track main on their own). `{{MARKETPLACE_REPO}}` is the `owner/repo` of the marketplace this plugin came from — fill it when you instantiate this routine (the shipped copy is a template; the library's leak-check keeps real identifiers out of it):
+This routine checks out the `agent-templates` repo, and the plugin lives **in** that repo. Prefer the checkout: it needs no install, and it always matches the config it is checking.
+
+```bash
+AC="$(pwd)/plugins/agent-companion"
+[ -f "$AC/scripts/audit.mjs" ] || AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion 2>/dev/null | head -1)"
+[ -n "$AC" ] && [ -f "$AC/scripts/audit.mjs" ] && echo "plugin ok: $AC" || echo "PLUGIN NOT FOUND"
+```
+
+Only if the checkout is somehow absent, fall back to a marketplace install. `{{MARKETPLACE_REPO}}` is the `owner/repo` this plugin ships from — fill it when you instantiate this routine (the shipped copy is a template; the library's leak-check keeps real identifiers out of it):
 
 ```bash
 claude plugin marketplace add {{MARKETPLACE_REPO}} 2>/dev/null || true
-claude plugin marketplace update agent-templates
-claude plugin install agent-companion@agent-templates 2>/dev/null || claude plugin update agent-companion@agent-templates
+claude plugin marketplace update agent-templates && (claude plugin install agent-companion@agent-templates 2>/dev/null || claude plugin update agent-companion@agent-templates)
 AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion 2>/dev/null | head -1)"
-node "$AC/scripts/audit.mjs" --list >/dev/null && echo "plugin ok: $AC"
 ```
 
-If `$AC` cannot be resolved, STOP and report that as the finding — a scout that cannot load its own tools must say so rather than report calm.
+If `$AC` still cannot be resolved, STOP and report that as the finding — a scout that cannot load its own tools must say so rather than report calm.
+
+## What this routine can and cannot see
+
+A cloud session provisions **fresh** each run, so nothing under `$CLAUDE_PLUGIN_DATA` survives between runs. That splits the signals:
+
+- **Stateless — work here:** the lineup and pricing diff, `model_retirement_approaching`, the guard canary, `routing-doc` freshness. These compare live sources against the repo's own config; no memory needed.
+- **Stateful — cannot fire here:** `harness_version_changed`, `zero_denials`, `spawn_activity`, `inherited_model_spawns`. Each compares against a previous run, and a fresh sandbox has none. They are covered where the data directory persists — the local audit, or a locally scheduled scout.
+
+Report within that scope. Never describe the stateful signals as "clean" from here — they are *unobservable*, which is a different thing from quiet.
 
 ## STEP 1 — deterministic detection (no judgement yet)
 
