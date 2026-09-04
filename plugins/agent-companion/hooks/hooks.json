@@ -38,6 +38,14 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/memory-budget.mjs"
             ],
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scout-surface.mjs"
+            ],
+            "timeout": 10
           }
         ]
       }

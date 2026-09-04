@@ -215,10 +215,31 @@ const DATA_ROOT = join(homedir(), '.claude', 'plugins', 'data');
 // nothing at all. A silent wrong answer, which is the failure this plugin is
 // supposed to catch, not commit.
 export function dataDir() {
-  const d = process.env.CLAUDE_PLUGIN_DATA || dataDirs()[0]
+  const d = process.env.CLAUDE_PLUGIN_DATA || preferredDataDir()
     || join(DATA_ROOT, 'agent-companion-agent-templates');
   try { mkdirSync(d, { recursive: true }); } catch { /* fail open */ }
   return d;
+}
+
+// Outside a hook there is no CLAUDE_PLUGIN_DATA, and "first directory
+// alphabetically" is the wrong guess: a stray bare `agent-companion/` sorts
+// ahead of the `agent-companion-<marketplace>/` the hooks actually write to,
+// and a script that lands there reports zero spawns with a straight face.
+// Prefer the directory the hooks have most recently written telemetry into.
+function preferredDataDir() {
+  const dirs = dataDirs();
+  if (dirs.length === 0) return null;
+  let best = null;
+  let bestAt = -1;
+  for (const d of dirs) {
+    try {
+      const at = statSync(join(d, 'spawns.jsonl')).mtimeMs;
+      if (at > bestAt) { best = d; bestAt = at; }
+    } catch { /* no telemetry here */ }
+  }
+  if (best) return best;
+  // No telemetry anywhere yet: prefer a marketplace-shaped dir over bare/inline.
+  return dirs.find((d) => /agent-companion-(?!inline$)/.test(d)) || dirs[0];
 }
 
 // The same plugin can accumulate SEVERAL data directories — one per marketplace

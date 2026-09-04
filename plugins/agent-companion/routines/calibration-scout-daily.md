@@ -27,14 +27,21 @@ AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion 2>/de
 
 If `$AC` still cannot be resolved, STOP and report that as the finding — a scout that cannot load its own tools must say so rather than report calm.
 
-## What this routine can and cannot see
+## Where you are running — decide your scope first
 
-A cloud session provisions **fresh** each run, so nothing under `$CLAUDE_PLUGIN_DATA` survives between runs. That splits the signals:
+This one prompt is scheduled in **two** places, because the two environments see different data. Detect which you are:
 
-- **Stateless — work here:** the lineup and pricing diff, `model_retirement_approaching`, the guard canary, `routing-doc` freshness. These compare live sources against the repo's own config; no memory needed.
-- **Stateful — cannot fire here:** `harness_version_changed`, `zero_denials`, `spawn_activity`, `inherited_model_spawns`. Each compares against a previous run, and a fresh sandbox has none. They are covered where the data directory persists — the local audit, or a locally scheduled scout.
+```bash
+if [ -n "$CLAUDE_CODE_REMOTE_SESSION_ID" ]; then echo "PLATFORM=cloud"; else echo "PLATFORM=local"; fi
+```
 
-Report within that scope. Never describe the stateful signals as "clean" from here — they are *unobservable*, which is a different thing from quiet.
+| | **cloud** — claude.ai routine | **local** — desktop scheduled task |
+|---|---|---|
+| Sandbox | fresh every run; nothing under the plugin data dir survives | persistent `~/.claude/plugins/data/agent-companion-*/` written by the hooks |
+| In scope | the lineup and pricing diff (STEP 2), `model_retirement_approaching`, the guard canary, `routing-doc` freshness | **everything** — including the stateful signals: `harness_version_changed`, `zero_denials`, `spawn_activity`, `inherited_model_spawns`, `new_agent_type` |
+| Out of scope | the stateful signals. They compare against a previous run and a fresh sandbox has none. They are *unobservable* here, which is different from quiet — never call them clean | STEP 2 is optional locally (the cloud run covers it daily); do it if WebFetch is available |
+
+Report within your scope, and name the platform in the first line of any output.
 
 ## STEP 1 — deterministic detection (no judgement yet)
 

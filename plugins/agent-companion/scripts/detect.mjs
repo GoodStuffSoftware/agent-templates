@@ -13,12 +13,33 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { modelTiers } from '../hooks/lib/context.mjs';
+import { modelTiers, dataDir as resolveDataDir, dataDirs } from '../hooks/lib/context.mjs';
 
-const dataDir = process.env.CLAUDE_PLUGIN_DATA
-  || join(homedir(), '.claude', 'plugins', 'data', 'agent-companion');
+// CLAUDE_PLUGIN_DATA is set for hooks only. A scheduled session or a skill
+// runs this from Bash with no such variable, and a naive fallback lands in a
+// different directory from the one the hooks write to — zero spawns, zero
+// denials, a scout reporting calm about data it never read. Resolve it the
+// same way the hooks do.
+const dataDir = resolveDataDir();
 try { mkdirSync(dataDir, { recursive: true }); } catch {}
+
+// Telemetry splits across every data dir the plugin was ever loaded from
+// (one per marketplace, plus -inline). State (baseline, scout-latest) lives in
+// the live one; reads aggregate across all of them, or a scout under-reports
+// with no sign that it did.
+const readDirs = [...new Set([dataDir, ...dataDirs()])];
+function readJsonl(name) {
+  const out = [];
+  for (const d of readDirs) {
+    const f = join(d, name);
+    if (!existsSync(f)) continue;
+    for (const l of readFileSync(f, 'utf8').split('\n')) {
+      if (!l) continue;
+      try { out.push(JSON.parse(l)); } catch { /* torn line */ }
+    }
+  }
+  return out;
+}
 
 const baselineFile = join(dataDir, 'baseline.json');
 const baseline = existsSync(baselineFile)
@@ -50,13 +71,9 @@ try {
 
 // --- 2. Unknown agent types -------------------------------------------
 // Enforcement fails open on these by design; detection must not.
-const unknownFile = join(dataDir, 'unknown-agent-types.jsonl');
-if (existsSync(unknownFile)) {
-  const types = [...new Set(
-    readFileSync(unknownFile, 'utf8').split('\n').filter(Boolean)
-      .map((l) => { try { return JSON.parse(l).agent_type; } catch { return null; } })
-      .filter(Boolean)
-  )];
+const unknownRecords = readJsonl('unknown-agent-types.jsonl');
+if (unknownRecords.length) {
+  const types = [...new Set(unknownRecords.map((r) => r.agent_type).filter(Boolean))];
   const seen = new Set(baseline.knownUnknowns || []);
   const fresh = types.filter((t) => !seen.has(t));
   next.knownUnknowns = types;
@@ -67,14 +84,6 @@ if (existsSync(unknownFile)) {
 }
 
 // --- 3. Spawn + guardrail activity ------------------------------------
-function readJsonl(name) {
-  const f = join(dataDir, name);
-  if (!existsSync(f)) return [];
-  return readFileSync(f, 'utf8').split('\n').filter(Boolean)
-    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean);
-}
-
 const spawns = readJsonl('spawns.jsonl');
 const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
 const recent = spawns.filter((s) => Date.parse(s.at) > dayAgo);
@@ -100,8 +109,7 @@ if (inherited.length > 0) {
 // --- 4. Silent-failure canary -----------------------------------------
 // A guard that stopped matching looks identical to one never tripped.
 // Zero denials across a week of real spawn activity is a signal, not good news.
-const denialFile = join(dataDir, 'denials.jsonl');
-const denials = existsSync(denialFile) ? readJsonl('denials.jsonl') : [];
+const denials = readJsonl('denials.jsonl');
 const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 const recentDenials = denials.filter((d) => Date.parse(d.at) > weekAgo);
 const weekSpawns = spawns.filter((s) => Date.parse(s.at) > weekAgo);
@@ -130,6 +138,15 @@ try {
 } catch { /* config unreadable: the audit reports that separately */ }
 
 writeFileSync(baselineFile, JSON.stringify({ ...baseline, ...next }, null, 2));
+
+// Persist the latest result too. A locally SCHEDULED scout has no human at the
+// keyboard when it runs; writing this lets the SessionStart hook surface any
+// unresolved signal in the next interactive session — the zero-token way for a
+// scheduled check to reach a person without waking a model to relay it.
+try {
+  writeFileSync(join(dataDir, 'scout-latest.json'),
+    JSON.stringify({ checkedAt: now, changed: signals.length > 0, signals }, null, 2));
+} catch { /* reporting still goes to stdout */ }
 
 process.stdout.write(JSON.stringify({
   changed: signals.length > 0,

@@ -181,6 +181,11 @@ Written under `${CLAUDE_PLUGIN_DATA}` (survives upgrades, removed on uninstall):
 
 ## Install
 
+Installing turns on the hooks. It does **not** schedule the scout — that is a
+separate, two-environment step (a desktop scheduled task for the stateful
+signals, a claude.ai routine for the web-facing lineup diff). The `setup`
+skill walks it: `Run /agent-companion:setup`.
+
 Add the marketplace once per machine, then install:
 
 ```bash

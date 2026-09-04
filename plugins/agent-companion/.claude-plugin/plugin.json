@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -89,6 +89,12 @@
       "title": "Local send interval (minutes)",
       "description": "How often a local session ships telemetry at turn boundaries. Local runs are backstopped by the on-disk JSONL, so this can be relaxed.",
       "default": 60
+    },
+    "scout_surface": {
+      "type": "boolean",
+      "title": "Scout surface",
+      "description": "At session start, surface unresolved signals from the last locally scheduled scout run. Silent when the scout found nothing.",
+      "default": true
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
