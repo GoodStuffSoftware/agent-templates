@@ -8,10 +8,20 @@
 
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  appendLog, allow, deny, passthrough, recordDenial, agentDefinition,
+  appendLog, allow, deny, passthrough, recordDenial, agentDefinition, evaluateFit,
 } from './lib/context.mjs';
 
 const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
+
+// Allow, optionally saying something to the user. The guard never blocks the
+// cheap direction, but an under-provisioned spawn should not pass in silence.
+function allowWith(systemMessage) {
+  process.stdout.write(JSON.stringify({
+    ...(systemMessage ? { systemMessage } : {}),
+    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+  }));
+  process.exit(0);
+}
 
 try {
   const p = readStdin();
@@ -54,6 +64,18 @@ try {
   const declaredWeight = wm ? Number(wm[1]) : null;
   const km = brief.match(/\bKIND\s*:\s*(mechanical|bounded|diagnostic|novel-design)\b/i);
   const declaredKind = km ? km[1].toLowerCase() : null;
+
+  // Fit: when the brief declares a weight and the model is knowable, compare
+  // them the same way the evaluate skill does. Recorded on every such spawn so
+  // the audit can say how often spawns land over, under, or on the table;
+  // surfaced only in the direction that ships wrong code (below).
+  let fit = null;
+  if (declaredWeight && model) {
+    try {
+      fit = evaluateFit({ model, effort: def?.effort || '', weight: declaredWeight, kind: declaredKind || 'bounded' });
+    } catch { /* table unreadable: the audit reports that separately */ }
+  }
+
   if (opt('spawn_telemetry', true) && !isCanary) {
     appendLog('spawns.jsonl', {
       at: new Date().toISOString(),
@@ -68,10 +90,19 @@ try {
       effort_definition: def?.effort || null,
       declared_weight: declaredWeight,   // null when the brief did not say
       declared_kind: declaredKind,
+      fit: fit ? fit.verdict : null,     // over | under | fit | unknown, when a weight was declared
+      fit_expected: fit ? `${fit.expected.model}${fit.expected.effort ? '/' + fit.expected.effort : ''}` : null,
     });
   }
 
-  if (!isPremium(model)) allow();
+  // An under-provisioned spawn is allowed — this guard never blocks the cheap
+  // direction — but it is said out loud: a weight-4 task on haiku is the
+  // failure that ships wrong code, not the one that costs money.
+  const underMsg = fit && fit.verdict === 'under'
+    ? `agent-companion: spawning ${input.subagent_type || 'an agent'} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}. ${fit.action}.`
+    : null;
+
+  if (!isPremium(model)) allowWith(underMsg);
 
   // --- Warrant -----------------------------------------------------------
   if (opt('warrant_required', true)) {
@@ -111,7 +142,7 @@ try {
         `premium work may need the cap raised in settings rather than worked around.)`
       );
     }
-    writeJson(f, [...recent, now]);
+    if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
   allow();

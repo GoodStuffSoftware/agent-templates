@@ -33,6 +33,8 @@ It was built after two observed failures:
 | `memory_budget` | Warns when always-loaded instruction files exceed `memory_budget_tokens`, and writes a ready-to-run refactor prompt. | no |
 | `memory_doctor` | Detects memory files on disk that the index does not link — **unreachable rules** — plus broken index links. Repairs non-destructively. | no |
 | `spawn_telemetry` | Records every spawn (model, agent type, effort) for the calibration routine. | no |
+| `scout_surface` | At session start, surfaces unresolved signals from the last locally scheduled scout run. Silent on a quiet day. | no |
+| `auto_update` | When Claude Code's own auto-updater is off (`DISABLE_AUTOUPDATER=1`), refreshes the marketplace and updates the plugin in the background once a day. Always says when a newer version is installed but not yet loaded. | no |
 
 Premium tiers are **capped and audited, never banned**. The failure mode was
 unexamined defaults, not the model itself.
@@ -294,6 +296,21 @@ issues". Confirm with the canary rather than trusting silence:
 ```bash
 node "$AC/scripts/audit.mjs" --only guard-canary
 ```
+
+## Skills
+
+| Skill | Short form | Answers |
+|---|---|---|
+| `recommend` | `/ac recommend --type <task-type>` | what should this task run on: model, effort, warrant, reviewer |
+| `evaluate` | `/ac evaluate --model <alias> --type <task-type>` | is what is running (or being spawned) right for it: over, under, or fit |
+| `routing-table` | `/ac routing` | the current table, rendered from config |
+| `audit` | `/ac audit --dir <project>` | the composable hygiene audit; `--fix` for the fixable checks |
+| `setup` | `/ac setup` | the setup steps on a new machine, both scouts included |
+| `calibration-scout` | `/ac scout` | the daily drift scout, run by hand |
+
+The full form is `/agent-companion:<skill>`. `/ac` is a user-level forwarder
+that the setup skill installs from `shims/ac/`; a skill inside a plugin is
+always namespaced by the plugin name, so the short form has to live outside it.
 
 ## Routines
 

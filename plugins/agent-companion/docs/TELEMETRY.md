@@ -40,6 +40,14 @@ missing `v` as version 0 and read it as version 1 with fields possibly absent.
 | `model` | string | the requested model, or the literal `(inherited)` |
 | `subagent_type` | string \| null | the named agent type, if one was given |
 | `effort` | string \| null | effort level, when the harness reported one |
+| `model_declared` | string or null | the model named at the spawn site, if any |
+| `model_definition` | string or null | the model named in the agent definition frontmatter, if any |
+| `inherited` | boolean | true only when neither the spawn nor the definition named a model — the real hazard |
+| `effort_definition` | string or null | the effort named in the agent definition, if any |
+| `declared_weight` | 1-5 or null | task weight declared in the brief (`WEIGHT:` or `WARRANT: weight N`) |
+| `declared_kind` | string or null | task kind declared in the brief (`KIND:`) |
+| `fit` | `over`, `under`, `fit`, `unknown`, or null | the spawn compared to the routing table for its declared weight; null when no weight was declared |
+| `fit_expected` | string or null | what the table routed that weight to, e.g. `sonnet/high` |
 
 **`model: "(inherited)"` is the field that matters most.** It means no model was
 specified, so the spawn silently ran at the *lead's* tier. That is the mechanism

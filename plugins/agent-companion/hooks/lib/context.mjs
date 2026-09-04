@@ -84,7 +84,10 @@ export function retirement(alias) {
   if (!spec || !spec.retiresAfter) return null;
   const at = Date.parse(spec.retiresAfter);
   if (Number.isNaN(at)) return null;
-  const daysLeft = Math.floor((at - Date.now()) / 86400000);
+  // Calendar days: retired from the day AFTER the date, whatever the hour.
+  const n = new Date();
+  const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+  const daysLeft = Math.round((at - todayUtc) / 86400000);
   const replacement = spec.replacement && spec.replacement.model ? spec.replacement : null;
   return { alias, retiresAfter: spec.retiresAfter, daysLeft, retired: daysLeft < 0, replacement };
 }
@@ -380,6 +383,65 @@ export function writeJson(file, value) {
 // a consumer can skip records from a major version it does not understand
 // instead of silently misreading them. Consumers must tolerate unknown fields.
 // See docs/TELEMETRY.md.
+// Fit of an ACTUAL model/effort against what the table says the task needs.
+// recommend answers "what should this run on?" before the spawn; this answers
+// "is what is running right?" — the same table, read in the other direction.
+// Model dominates: a wrong tier is the finding, effort refines it. Pass
+// `expected` directly for reviewer parity, else it resolves from the task.
+export function evaluateFit({ model, effort = '', weight, kind = 'bounded', consequence = 'routine', expected = null, parity = false }) {
+  const exp = expected || effortFor(weight, kind, consequence);
+  const a = classifyModel(model);
+  const e = classifyModel(exp.model);
+  const modelDelta = a.known ? a.rank - e.rank : null;
+  const eff = String(effort || '').toLowerCase();
+  const sup = effortSupported(model, eff);
+  let effortDelta = null;
+  let effortNote = '';
+  if (!eff) effortNote = 'no effort given';
+  else if (!sup.ok) effortNote = sup.reason;
+  else if (exp.effort) effortDelta = classifyEffort(eff).rank - classifyEffort(exp.effort).rank;
+  else effortNote = `${exp.model} takes no effort parameter; effort is not comparable`;
+
+  const expLabel = `${exp.model}${exp.effort ? '/' + exp.effort : ''}`;
+  let verdict;
+  let reason;
+  if (modelDelta === null) {
+    verdict = 'unknown'; reason = `"${model}" is not in the tier table (the guards treat it as premium)`;
+  } else if (modelDelta > 0) {
+    verdict = 'over'; reason = `${a.alias} is ${modelDelta} tier(s) above ${expLabel}`;
+  } else if (modelDelta < 0) {
+    verdict = 'under'; reason = `${a.alias} is ${-modelDelta} tier(s) below ${expLabel}; the task exceeds the tier`;
+  } else if (effortDelta !== null && effortDelta < 0) {
+    verdict = 'under';
+    reason = parity
+      ? `reviewer effort ${eff} is below the writer's ${exp.effort}; a reviewer may exceed but must not drop`
+      : `right tier; effort ${eff} is below ${exp.effort}`;
+  } else if (effortDelta !== null && effortDelta > 1 && !parity) {
+    verdict = 'over'; reason = `right tier; effort ${eff} is ${effortDelta} steps above ${exp.effort}`;
+  } else {
+    verdict = 'fit'; reason = `${a.alias || model}${eff ? '/' + eff : ''} matches the table (${expLabel})`;
+  }
+
+  // Over is a cost problem: hand the rest down, or warrant it if that is
+  // honestly true. Under is a correctness problem: escalate, and treat what
+  // was produced so far as suspect where it needed the missing capability.
+  const w = typeof weight === 'number' ? weight : '<1-5>';
+  const action = {
+    fit: 'continue',
+    over: a.premium
+      ? `hand the remainder to ${expLabel}, or state "WARRANT: weight ${w} — <why the cheaper tier cannot do this>" if that is honestly true`
+      : `finish the current step, then hand the remainder to ${expLabel}`,
+    under: `escalate to ${expLabel}${e.premium ? ' with a WARRANT line' : ''}; re-check anything already produced that needed the missing capability`,
+    unknown: 'add the model to config/model-tiers.json so it can be classified',
+  }[verdict];
+
+  return {
+    verdict, reason, action, modelDelta, effortDelta, effortNote: effortNote || null,
+    expected: exp,
+    actual: { model, alias: a.alias, effort: eff || null, premium: a.premium },
+  };
+}
+
 export const TELEMETRY_SCHEMA = 1;
 
 export function appendLog(name, record) {

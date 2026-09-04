@@ -383,11 +383,17 @@ const spawnAudit = {
       findings.push(`${inherited.length}/${rows.length} spawns specified NO model (inherited the lead's tier)`);
     }
     findings.push(`mix: ${Object.entries(byModel).map(([m, n]) => `${m}=${n}`).join(', ')}`);
+    const declared = rows.filter((r) => r.fit);
+    if (declared.length) {
+      const n = (v) => declared.filter((r) => r.fit === v).length;
+      findings.push('fit where weight was declared: over=' + n('over') + ' under=' + n('under') + ' fit=' + n('fit') + ' of ' + declared.length +
+        (n('under') ? ' - under-provisioned spawns ship wrong code; see the evaluate skill' : ''));
+    }
     if (!rows.some((r) => /haiku/i.test(r.model || ''))) {
       findings.push('no haiku spawns recorded - the cheapest tier is going unused');
     }
     return {
-      status: inherited.length ? 'warn' : 'ok',
+      status: (inherited.length || rows.some((r) => r.fit === 'under')) ? 'warn' : 'ok',
       findings,
       data: { total: rows.length, premium: premium.length },
     };

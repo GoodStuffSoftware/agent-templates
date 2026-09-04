@@ -131,7 +131,11 @@ try {
   const cfg = modelTiers();
   for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
     if (!spec.retiresAfter) continue;
-    const days = Math.floor((Date.parse(spec.retiresAfter) - Date.now()) / 86400000);
+    // Calendar days, not elapsed hours: "30 days out" must mean the calendar
+    // day 30 days before, whatever time of day the scout happens to run.
+    const n = new Date();
+    const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+    const days = Math.round((Date.parse(spec.retiresAfter) - todayUtc) / 86400000);
     const staged = !!(spec.replacement && spec.replacement.model);
     const plan = staged
       ? `replacement staged: ${spec.replacement.model}${spec.replacement.effort ? '/' + spec.replacement.effort : ''} takes over automatically from ${spec.retiresAfter}`

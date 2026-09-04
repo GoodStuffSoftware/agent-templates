@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -94,6 +94,12 @@
       "type": "boolean",
       "title": "Scout surface",
       "description": "At session start, surface unresolved signals from the last locally scheduled scout run. Silent when the scout found nothing.",
+      "default": true
+    },
+    "auto_update": {
+      "type": "boolean",
+      "title": "Auto update",
+      "description": "Once a day at session start, refresh the marketplace and update the plugin in the background; say at session start when a newer version is installed but not yet loaded. Never runs in cloud sandboxes or for inline/dev loads.",
       "default": true
     }
   },

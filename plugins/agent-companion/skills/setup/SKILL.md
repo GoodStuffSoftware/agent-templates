@@ -98,6 +98,30 @@ node "$AC/scripts/audit.mjs" --dir <project> --only guard-canary,routing-doc,age
 Then start a fresh session: the `scout-surface` hook should say nothing on a
 quiet day and one line per signal otherwise.
 
+## 5. Short form — `/ac`
+
+Plugin skills are namespaced by the plugin's name, so the full form is
+`/agent-companion:recommend`. A skill *inside* the plugin cannot escape that.
+The plugin therefore ships a user-level forwarder under `shims/ac/`; install it
+and `/ac recommend …`, `/ac evaluate …`, `/ac routing`, `/ac audit …`,
+`/ac setup`, `/ac scout` all work:
+
+```bash
+mkdir -p "$HOME/.claude/skills/ac" && cp "$AC/shims/ac/SKILL.md" "$HOME/.claude/skills/ac/SKILL.md"
+```
+
+It is a pointer, not a copy — it forwards to the plugin skill and never
+re-implements one. Re-run the copy after a plugin update that changes it.
+
+## Staying current
+
+Marketplace plugins do not update themselves. The `self-update` hook (option
+`auto_update`, default on) runs `marketplace update` + `plugin update` in the
+background once a day and, at session start, says when a newer version is
+installed but not yet loaded. What it cannot do is restart the app — that
+line is yours. A second install of the same plugin at project scope shadows
+the user-scope one and never updates; `claude plugin list` shows both if so.
+
 ## What "set up" means
 
 A machine is set up when all four are true: canary PASSES, options are a
