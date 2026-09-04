@@ -1,6 +1,6 @@
 # Model routing table
 
-_Generated from `config/model-tiers.json` v2 (updated 2026-08-29) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
+_Generated from `config/model-tiers.json` v3 (updated 2026-08-30) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
 
 ## Tiers
 
@@ -68,4 +68,83 @@ Example: a one-line production migration is `mechanical` by kind (effort down) b
 - Model must match the writer it gates: **yes**
 - Effort may exceed the writer's: **yes**
 - Effort may fall below the writer's: **no**
+
+## Task types → routing (the task model list)
+
+Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. `parity` weight = match the writer being reviewed; `inherit` consequence = take the change's consequence.
+
+| Task type | Weight | Kind | Consequence | Resolves to | What it is |
+|---|---|---|---|---|---|
+| `explore` | 1 | `mechanical` | `routine` | `haiku` | read-only search: where is X, what touches Y, does Z exist |
+| `mechanical-edit` | 2 | `mechanical` | `routine` | `haiku` | rename, config edit, reformat, apply a known migration recipe |
+| `bounded-feature` | 3 | `bounded` | `routine` | `sonnet/medium` | a feature against a clear spec, 1-3 files, known shape |
+| `integration` | 4 | `bounded` | `elevated` | `sonnet/high` | multi-file, cross-referencing, touches shared config or things other agents depend on |
+| `debug-root-cause` | 4 | `diagnostic` | `routine` | `sonnet/xhigh` | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
+| `large-refactor` | 5 | `bounded` | `elevated` | `opus/xhigh` | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
+| `novel-design` | 5 | `novel-design` | `elevated` | `opus/max` | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
+| `critical-change` | 4 | `bounded` | `critical` | `opus/xhigh` | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
+| `code-review` | parity | `diagnostic` | `inherit` | _writer's model; effort ≥ writer_ | adversarial review of a diff; sized to the writer it gates |
+| `long-autonomous-run` | 5 | `bounded` | `elevated` | `opus/xhigh` | an agent session expected to run for hours with minimal supervision |
+| `subagent-worker` | 2 | `mechanical` | `routine` | `haiku` | a delegated worker doing a bounded, well-specified piece of a larger task |
+
+<details><summary>Provenance per task type</summary>
+
+- **`explore`** — OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven.
+- **`mechanical-edit`** — COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate.
+- **`bounded-feature`** — OFFICIAL choosing-a-model: Sonnet for everyday code generation and agentic tool use. COMMUNITY: Sonnet 5 delivers near-Opus coding at Sonnet price; escalate to Opus when the spec is incomplete or moves mid-run.
+- **`integration`** — Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time.
+- **`debug-root-cause`** — COMMUNITY: Sonnet 5 praised first-hand for tracing brownfield failures to root causes rather than patching symptoms. Escalate to Opus when evidence conflicts or constraints are hidden.
+- **`large-refactor`** — OFFICIAL choosing-a-model: Opus for large-scale refactoring and complex systems engineering.
+- **`novel-design`** — Our kind axis. OFFICIAL: Opus for complex systems engineering. Fable only with a warrant - and per the procedural-discipline finding, first try a brief that carries the verification checklist on Opus.
+- **`critical-change`** — Consequence axis (arXiv 2606.04402: consequence is orthogonal to difficulty). The floor raises even a one-line change to opus/xhigh.
+- **`code-review`** — Our reviewer-parity rule. BENCHMARK (CodeRabbit, semi-vendor): review precision tops out ~37% across every model tested and no model wins both precision and recall - so tier choice does not make review sufficient; adversarial framing and a human gate on critical changes still matter. CAVEAT under calibration: one first-hand report (Wavect) found HIGH effort slower AND lower-recall than LOW on review. See calibration.
+- **`long-autonomous-run`** — OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default.
+- **`subagent-worker`** — OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded.
+
+</details>
+
+## What is actually known about `fable`
+
+- OFFICIAL (whats-new-fable-5-1): prefers whole-file rewrites, fewer progress updates, less parallel tool batching. Whole-file rewrites make it a poor fit for scoped or mechanical edits even when a warrant exists.
+- OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost. A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it.
+- COMMUNITY, first-hand (Every.to, TheNeuronDaily): "sticks to what you tell it" is CONTESTED. Reports of overshooting explicit limits (1,000 words -> 1,288; 8-12 quotes -> 43, 5 fabricated) and unprompted style decisions. The friction is over-inference, not literalism. Do not route on an adherence claim.
+- COMMUNITY, first-hand (dev.to): the gap over Opus/Sonnet is procedural discipline, not intelligence - stating a hypothesis before editing, labelling claims VERIFIED/REASONED/ASSUMED. A brief that carries that checklist closes most of the gap on a cheaper tier, which is exactly what the warrant is meant to make you ask.
+
+## Open calibration questions
+
+Real findings not settled enough to encode as rules. Each names the measurement that would settle it — telemetry answers these, not opinion.
+
+### `reviewer-effort-direction` — open
+
+**Question:** Does a reviewer at HIGHER effort than the writer catch more, or less?
+
+**Tension:** Our rule says effort may exceed and must not drop. One first-hand report (Wavect) found high-effort review slower and lower-recall than low. Willison observed that past high, Fable drafts the deliverable in thinking and rewrites it - double cost, no gain.
+
+**Measure:** From telemetry: for reviews, compare findings-per-review and post-merge defect rate by reviewer effort relative to writer effort. Needs reviewers to report findings structurally.
+
+### `fable-cache-economics` — open
+
+**Question:** Does Fable 5.1 cache-read pricing make long stable-prefix sessions competitive with Opus?
+
+**Tension:** Official: cache reads at a quarter of the cost. Our measured cache hit ratio is ~96%. But at max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity.
+
+**Measure:** From telemetry: per-session cost by model with cache-read share. Compare fable vs opus on sessions of similar turn count.
+
+### `sonnet-vs-opus-at-weight-5` — open
+
+**Question:** Is Sonnet 5 sufficient for some weight-5 work?
+
+**Tension:** Vendor benchmarks put Sonnet 5 above Opus 5 on Terminal-Bench 2.1 and some agentic evals at ~40% less cost. Vendor-run, and an outlier.
+
+**Measure:** From telemetry: escalation rate (a Sonnet spawn re-run at Opus) by task type. If weight-5 bounded work rarely escalates from Sonnet, lower the base.
+
+### `procedural-checklist-vs-tier` — open
+
+**Question:** Does a verification checklist in the brief substitute for a higher tier?
+
+**Tension:** First-hand: teaching Opus/Sonnet the Fable-style checklist (hypothesis before edit, VERIFIED/REASONED/ASSUMED labels) closes most of the gap. If true, many Fable warrants should be declined in favour of a better brief.
+
+**Measure:** From telemetry: warrant acceptance rate, and outcome of warranted Fable spawns vs Opus spawns with a checklist brief on the same task type.
+
+> ⚠ `haiku` retires no sooner than **2026-10-15**. Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window.
 

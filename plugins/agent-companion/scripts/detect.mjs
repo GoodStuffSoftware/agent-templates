@@ -14,6 +14,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { modelTiers } from '../hooks/lib/context.mjs';
 
 const dataDir = process.env.CLAUDE_PLUGIN_DATA
   || join(homedir(), '.claude', 'plugins', 'data', 'agent-companion');
@@ -109,6 +110,24 @@ if (weekSpawns.length > 20 && recentDenials.length === 0) {
     `${weekSpawns.length} spawns in 7d and zero guard denials — guards may have stopped matching`,
     'guardrail-canary');
 }
+
+// --- 5. Model retirement ------------------------------------------------
+// A tier alias that retires does not error; it resolves to whatever replaces
+// it, or to nothing. Either way the routing table is silently wrong from that
+// day. Warn inside a window wide enough to decide the replacement first.
+const RETIRE_WARN_DAYS = 60;
+try {
+  const cfg = modelTiers();
+  for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
+    if (!spec.retiresAfter) continue;
+    const days = Math.floor((Date.parse(spec.retiresAfter) - Date.now()) / 86400000);
+    if (days <= RETIRE_WARN_DAYS) {
+      sig('model_retirement_approaching',
+        `${alias} retires ${days < 0 ? Math.abs(days) + ' days AGO' : 'in ' + days + ' days'} (${spec.retiresAfter}) — routing rows on this alias need a replacement decided`,
+        'routing-review');
+    }
+  }
+} catch { /* config unreadable: the audit reports that separately */ }
 
 writeFileSync(baselineFile, JSON.stringify({ ...baseline, ...next }, null, 2));
 

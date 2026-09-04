@@ -110,6 +110,64 @@ if (cfg.reviewerParity) {
   L.push(``);
 }
 
+if (cfg.taskTypes) {
+  L.push(`## Task types → routing (the task model list)`);
+  L.push(``);
+  L.push(`Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. \`parity\` weight = match the writer being reviewed; \`inherit\` consequence = take the change's consequence.`);
+  L.push(``);
+  L.push(`| Task type | Weight | Kind | Consequence | Resolves to | What it is |`);
+  L.push(`|---|---|---|---|---|---|`);
+  for (const [name, t] of Object.entries(cfg.taskTypes)) {
+    let resolved = '—';
+    if (typeof t.weight === 'number') {
+      const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
+      resolved = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
+    } else if (t.weight === 'parity') {
+      resolved = '_writer\'s model; effort ≥ writer_';
+    }
+    L.push(`| \`${name}\` | ${t.weight} | \`${t.kind}\` | \`${t.consequence}\` | ${resolved} | ${t.summary || ''} |`);
+  }
+  L.push(``);
+  L.push(`<details><summary>Provenance per task type</summary>`);
+  L.push(``);
+  for (const [name, t] of Object.entries(cfg.taskTypes)) L.push(`- **\`${name}\`** — ${t.provenance || 'none recorded'}`);
+  L.push(``);
+  L.push(`</details>`);
+  L.push(``);
+}
+
+const fableNotes = cfg.tiers?.fable?.behaviorNotes;
+if (Array.isArray(fableNotes) && fableNotes.length) {
+  L.push(`## What is actually known about \`fable\``);
+  L.push(``);
+  for (const n of fableNotes) L.push(`- ${n}`);
+  L.push(``);
+}
+
+if (cfg.calibration) {
+  L.push(`## Open calibration questions`);
+  L.push(``);
+  L.push(`Real findings not settled enough to encode as rules. Each names the measurement that would settle it — telemetry answers these, not opinion.`);
+  L.push(``);
+  for (const [id, q] of Object.entries(cfg.calibration)) {
+    L.push(`### \`${id}\` — ${q.status || 'open'}`);
+    L.push(``);
+    L.push(`**Question:** ${q.question}`);
+    L.push(``);
+    L.push(`**Tension:** ${q.tension}`);
+    L.push(``);
+    L.push(`**Measure:** ${q.measure}`);
+    L.push(``);
+  }
+}
+
+for (const [alias, t] of tiers) {
+  if (t.retiresAfter) {
+    L.push(`> ⚠ \`${alias}\` retires no sooner than **${t.retiresAfter}**. ${t.retirementNote || ''}`);
+    L.push(``);
+  }
+}
+
 const md = L.join('\n') + '\n';
 const out = val('--out');
 if (out) { writeFileSync(out, md); console.log(`wrote ${out}`); } else { process.stdout.write(md); }

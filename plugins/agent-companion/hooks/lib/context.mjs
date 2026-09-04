@@ -134,13 +134,24 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
   const route = (cfg.routing || {})[String(weight)];
   if (!route) return { model: '', effort: '', rationale: `no routing row for weight ${weight}` };
 
-  const tier = (cfg.tiers || {})[route.model] || {};
+  // Resolve the consequence MODEL floor before anything else. It used to be
+  // applied last, after the effort computation — and a tier with no effort
+  // parameter (haiku) returned early from that computation, skipping the floor
+  // entirely. So a one-line production migration at weight 2 came back as
+  // haiku. That is the exact case the consequence axis exists for.
+  const cons = (cfg.consequence || {})[consequence] || {};
+  const modelFloored = !!(cons.modelFloor && tierRank(cons.modelFloor) > tierRank(route.model));
+  const model = modelFloored ? cons.modelFloor : route.model;
+  const lifted = modelFloored ? `; ${consequence} consequence raises the model to ${model}` : '';
+  const routeLabel = `${route.model}${route.effort ? '/' + route.effort : ''}`;
+
+  const tier = (cfg.tiers || {})[model] || {};
   const supported = Array.isArray(tier.efforts) ? tier.efforts : [];
   if (supported.length === 0) {
     return {
-      model: route.model,
+      model,
       effort: '',
-      rationale: `weight ${weight} routes to ${route.model}, which takes no effort parameter`,
+      rationale: `weight ${weight} routes to ${routeLabel}${lifted}; ${model} takes no effort parameter`,
     };
   }
 
@@ -150,16 +161,17 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
     .map(([name]) => name)
     .filter((name) => supported.includes(name));
 
-  const baseIdx = Math.max(0, ranked.indexOf(route.effort));
+  // A floored model has no base effort from the route — the route's effort was
+  // for a different tier — so start from the bottom and let the floors lift it.
+  const baseIdx = modelFloored ? 0 : Math.max(0, ranked.indexOf(route.effort));
   // Clamp rather than error: a kind that pushes past the top means 'as much as
   // this model has', which is a real answer, not a failed lookup.
   const idx = Math.min(ranked.length - 1, Math.max(0, baseIdx + delta));
 
-  // Consequence is a FLOOR applied AFTER the kind delta, so it cannot be
-  // undercut. Difficulty and consequence are close to orthogonal: a one-line
-  // production migration is mechanical by kind, and without this the -1 would
-  // reduce thinking on exactly the change least able to absorb a mistake.
-  const cons = (cfg.consequence || {})[consequence] || {};
+  // Consequence EFFORT floor, applied after the kind delta so it cannot be
+  // undercut. Difficulty and consequence are close to orthogonal: without this
+  // the -1 for mechanical work would reduce thinking on exactly the change
+  // least able to absorb a mistake.
   let finalIdx = idx;
   if (cons.effortFloor) {
     const floorIdx = ranked.indexOf(cons.effortFloor);
@@ -173,9 +185,9 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
     : `${kind} work shifts effort ${moved > 0 ? 'up' : 'down'} ${Math.abs(moved)}`;
   const floored = finalIdx > idx ? `; ${consequence} consequence raises the floor to ${effortFinal}` : '';
   return {
-    model: cons.modelFloor && tierRank(cons.modelFloor) > tierRank(route.model) ? cons.modelFloor : route.model,
+    model,
     effort: effortFinal,
-    rationale: `weight ${weight} routes to ${route.model}/${route.effort}; ${why}${floored} -> ${effortFinal}`,
+    rationale: `weight ${weight} routes to ${routeLabel}${lifted}; ${why}${floored} -> ${model}/${effortFinal}`,
   };
 }
 export function readStdin() {

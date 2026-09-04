@@ -1,6 +1,6 @@
 {
-  "version": 2,
-  "updated": "2026-08-29",
+  "version": 3,
+  "updated": "2026-08-30",
   "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to $CLAUDE_PLUGIN_DATA/model-tiers.json; it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
   "tiers": {
     "haiku": {
@@ -9,7 +9,9 @@
       "match": "haiku",
       "efforts": [],
       "effortsNote": "Haiku 4.5 takes no effort parameter. Setting one on a haiku agent is at best a no-op — the model has one mode, and asking for more thinking does not get any.",
-      "note": "reads, searches, single commands"
+      "note": "reads, searches, single commands",
+      "retiresAfter": "2026-10-15",
+      "retirementNote": "Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window."
     },
     "sonnet": {
       "rank": 2,
@@ -49,7 +51,13 @@
         "max"
       ],
       "effortsNote": "Thinking is always on; effort is the only depth control.",
-      "note": "not a routing tier — an exception requiring a stated warrant"
+      "note": "not a routing tier — an exception requiring a stated warrant",
+      "behaviorNotes": [
+        "OFFICIAL (whats-new-fable-5-1): prefers whole-file rewrites, fewer progress updates, less parallel tool batching. Whole-file rewrites make it a poor fit for scoped or mechanical edits even when a warrant exists.",
+        "OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost. A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it.",
+        "COMMUNITY, first-hand (Every.to, TheNeuronDaily): \"sticks to what you tell it\" is CONTESTED. Reports of overshooting explicit limits (1,000 words -> 1,288; 8-12 quotes -> 43, 5 fabricated) and unprompted style decisions. The friction is over-inference, not literalism. Do not route on an adherence claim.",
+        "COMMUNITY, first-hand (dev.to): the gap over Opus/Sonnet is procedural discipline, not intelligence - stating a hypothesis before editing, labelling claims VERIFIED/REASONED/ASSUMED. A brief that carries that checklist closes most of the gap on a cheaper tier, which is exactly what the warrant is meant to make you ask."
+      ]
     },
     "mythos": {
       "rank": 4,
@@ -204,5 +212,111 @@
       "note": "A mistake here is expensive or irreversible."
     }
   },
-  "consequenceNote": "Consequence is a FLOOR, not a delta, and it is applied AFTER the kind adjustment so it cannot be undercut. This matters because difficulty and consequence are close to orthogonal: a one-line production migration is mechanical by KIND, which would otherwise push its effort DOWN on precisely the change most likely to hurt. The floor is the answer to \"how bad is it if this is wrong\", which is a different question from \"how hard is this to get right\"."
+  "consequenceNote": "Consequence is a FLOOR, not a delta, and it is applied AFTER the kind adjustment so it cannot be undercut. This matters because difficulty and consequence are close to orthogonal: a one-line production migration is mechanical by KIND, which would otherwise push its effort DOWN on precisely the change most likely to hurt. The floor is the answer to \"how bad is it if this is wrong\", which is a different question from \"how hard is this to get right\".",
+  "taskTypes": {
+    "explore": {
+      "weight": 1,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "read-only search: where is X, what touches Y, does Z exist",
+      "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven."
+    },
+    "mechanical-edit": {
+      "weight": 2,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "rename, config edit, reformat, apply a known migration recipe",
+      "provenance": "COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate."
+    },
+    "bounded-feature": {
+      "weight": 3,
+      "kind": "bounded",
+      "consequence": "routine",
+      "summary": "a feature against a clear spec, 1-3 files, known shape",
+      "provenance": "OFFICIAL choosing-a-model: Sonnet for everyday code generation and agentic tool use. COMMUNITY: Sonnet 5 delivers near-Opus coding at Sonnet price; escalate to Opus when the spec is incomplete or moves mid-run."
+    },
+    "integration": {
+      "weight": 4,
+      "kind": "bounded",
+      "consequence": "elevated",
+      "summary": "multi-file, cross-referencing, touches shared config or things other agents depend on",
+      "provenance": "Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time."
+    },
+    "debug-root-cause": {
+      "weight": 4,
+      "kind": "diagnostic",
+      "consequence": "routine",
+      "summary": "a specific failure, unexplained regression, flaky test - the answer exists and must be found",
+      "provenance": "COMMUNITY: Sonnet 5 praised first-hand for tracing brownfield failures to root causes rather than patching symptoms. Escalate to Opus when evidence conflicts or constraints are hidden."
+    },
+    "large-refactor": {
+      "weight": 5,
+      "kind": "bounded",
+      "consequence": "elevated",
+      "summary": "large-scale refactor across a module or subsystem; the target shape is known, the surface is wide",
+      "provenance": "OFFICIAL choosing-a-model: Opus for large-scale refactoring and complex systems engineering."
+    },
+    "novel-design": {
+      "weight": 5,
+      "kind": "novel-design",
+      "consequence": "elevated",
+      "summary": "a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape",
+      "provenance": "Our kind axis. OFFICIAL: Opus for complex systems engineering. Fable only with a warrant - and per the procedural-discipline finding, first try a brief that carries the verification checklist on Opus."
+    },
+    "critical-change": {
+      "weight": 4,
+      "kind": "bounded",
+      "consequence": "critical",
+      "summary": "production data, migrations, destructive ops, auth, billing, secrets - regardless of size",
+      "provenance": "Consequence axis (arXiv 2606.04402: consequence is orthogonal to difficulty). The floor raises even a one-line change to opus/xhigh."
+    },
+    "code-review": {
+      "weight": "parity",
+      "kind": "diagnostic",
+      "consequence": "inherit",
+      "summary": "adversarial review of a diff; sized to the writer it gates",
+      "provenance": "Our reviewer-parity rule. BENCHMARK (CodeRabbit, semi-vendor): review precision tops out ~37% across every model tested and no model wins both precision and recall - so tier choice does not make review sufficient; adversarial framing and a human gate on critical changes still matter. CAVEAT under calibration: one first-hand report (Wavect) found HIGH effort slower AND lower-recall than LOW on review. See calibration."
+    },
+    "long-autonomous-run": {
+      "weight": 5,
+      "kind": "bounded",
+      "consequence": "elevated",
+      "summary": "an agent session expected to run for hours with minimal supervision",
+      "provenance": "OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default."
+    },
+    "subagent-worker": {
+      "weight": 2,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "a delegated worker doing a bounded, well-specified piece of a larger task",
+      "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded."
+    }
+  },
+  "taskTypesNote": "A task type is a named preset over (weight, kind, consequence). Resolve it through the same grid as everything else; do not special-case it. \"parity\" as a weight means: match the writer being reviewed. \"inherit\" as a consequence means: take the consequence of the change under review. Provenance is recorded per entry because these WILL go stale - the scout re-checks the lineup, and a routing review should re-read the sources, not the table.",
+  "calibration": {
+    "reviewer-effort-direction": {
+      "question": "Does a reviewer at HIGHER effort than the writer catch more, or less?",
+      "tension": "Our rule says effort may exceed and must not drop. One first-hand report (Wavect) found high-effort review slower and lower-recall than low. Willison observed that past high, Fable drafts the deliverable in thinking and rewrites it - double cost, no gain.",
+      "measure": "From telemetry: for reviews, compare findings-per-review and post-merge defect rate by reviewer effort relative to writer effort. Needs reviewers to report findings structurally.",
+      "status": "open"
+    },
+    "fable-cache-economics": {
+      "question": "Does Fable 5.1 cache-read pricing make long stable-prefix sessions competitive with Opus?",
+      "tension": "Official: cache reads at a quarter of the cost. Our measured cache hit ratio is ~96%. But at max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity.",
+      "measure": "From telemetry: per-session cost by model with cache-read share. Compare fable vs opus on sessions of similar turn count.",
+      "status": "open"
+    },
+    "sonnet-vs-opus-at-weight-5": {
+      "question": "Is Sonnet 5 sufficient for some weight-5 work?",
+      "tension": "Vendor benchmarks put Sonnet 5 above Opus 5 on Terminal-Bench 2.1 and some agentic evals at ~40% less cost. Vendor-run, and an outlier.",
+      "measure": "From telemetry: escalation rate (a Sonnet spawn re-run at Opus) by task type. If weight-5 bounded work rarely escalates from Sonnet, lower the base.",
+      "status": "open"
+    },
+    "procedural-checklist-vs-tier": {
+      "question": "Does a verification checklist in the brief substitute for a higher tier?",
+      "tension": "First-hand: teaching Opus/Sonnet the Fable-style checklist (hypothesis before edit, VERIFIED/REASONED/ASSUMED labels) closes most of the gap. If true, many Fable warrants should be declined in favour of a better brief.",
+      "measure": "From telemetry: warrant acceptance rate, and outcome of warranted Fable spawns vs Opus spawns with a checklist brief on the same task type.",
+      "status": "open"
+    }
+  }
 }
