@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -100,6 +100,18 @@
       "type": "boolean",
       "title": "Auto update",
       "description": "Once a day at session start, refresh the marketplace and update the plugin in the background; say at session start when a newer version is installed but not yet loaded. Never runs in cloud sandboxes or for inline/dev loads.",
+      "default": true
+    },
+    "fit_guard": {
+      "type": "boolean",
+      "title": "Best-fit guard",
+      "description": "When a spawn brief declares WEIGHT (and optionally KIND / CONSEQUENCE), grade the named model against the routing table: under- and cheap-over-provisioned spawns are allowed and announced; a premium model over-provisioned for its own declared weight is denied with the correction. Off = telemetry only.",
+      "default": true
+    },
+    "fit_autofill": {
+      "type": "boolean",
+      "title": "Best-fit autofill",
+      "description": "When a spawn declares WEIGHT but names no model, set the model from the routing table instead of letting it inherit the lead’s tier. Premium results still require a WARRANT line.",
       "default": true
     }
   },

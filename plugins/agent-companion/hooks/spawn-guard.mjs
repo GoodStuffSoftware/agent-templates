@@ -1,24 +1,33 @@
-// Features 2 + 3 — Premium fan-out cap and warrant, on the Agent tool.
+// Features 2 + 3 — Premium fan-out cap and warrant, on the Agent tool — and
+// best fit: the routing table applied at the spawn, in both directions.
 //
 // Fable is deliberately NOT banned. The lesson from the four-Fable incident is
 // that nobody CHOSE Fable four times — subagents inherit the lead's model when
 // nothing specifies one, so the default did the choosing. This guard therefore
-// targets the two things that were actually missing: a stated justification,
-// and a ceiling on how many run at once.
+// targets what was actually missing: a stated justification, a ceiling on how
+// many run at once, and — when the brief declares a weight — the table's own
+// answer, filled in where the spawn left the model blank and enforced where
+// the spawn named a premium tier its own declared weight does not support.
 
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  appendLog, allow, deny, passthrough, recordDenial, agentDefinition, evaluateFit,
+  appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, effortFor,
 } from './lib/context.mjs';
 
 const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
 
-// Allow, optionally saying something to the user. The guard never blocks the
-// cheap direction, but an under-provisioned spawn should not pass in silence.
-function allowWith(systemMessage) {
+// Allow — optionally saying something to the user, and/or rewriting the tool
+// input (`updatedInput` is how a PreToolUse hook fills in a model the spawn
+// left blank). The guard never blocks the cheap direction, but neither
+// direction passes in silence once the brief has declared a weight.
+function allowWith(systemMessage, updatedInput) {
   process.stdout.write(JSON.stringify({
     ...(systemMessage ? { systemMessage } : {}),
-    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+      ...(updatedInput ? { updatedInput } : {}),
+    },
   }));
   process.exit(0);
 }
@@ -39,7 +48,7 @@ try {
   const declared = input.model || '';
   const def = agentDefinition(input.subagent_type, p.cwd);
   const fromDef = def?.model || '';
-  const model = declared || fromDef;            // what will actually run, when knowable
+  let model = declared || fromDef;              // what will actually run, when knowable
   const trulyInherited = !declared && !fromDef; // nobody chose: the real hazard
 
   // A spawn means delegation happened — clear the main-thread streak.
@@ -54,25 +63,44 @@ try {
   // then reads back, and every canary run inflates the premium spawn count.
   const isCanary = String(sid).startsWith('canary');
 
-  // The routing table is downstream of a number nobody currently records: the
+  // The routing table is downstream of a number nobody used to record: the
   // doctrine says to score task weight 1-5 *silently*, so the judgement that
-  // chose the tier leaves no trace and can never be compared against what the
-  // task turned out to need. Capture it whenever it IS stated, so the data
-  // starts accumulating before anyone decides how to grade it.
+  // chose the tier left no trace and could never be compared against what the
+  // task turned out to need. Capture it whenever it IS stated.
   const brief = String(input.prompt || '');
   const wm = brief.match(/\b(?:WARRANT|WEIGHT)\s*:\s*(?:weight\s*)?([1-5])\b/i);
   const declaredWeight = wm ? Number(wm[1]) : null;
   const km = brief.match(/\bKIND\s*:\s*(mechanical|bounded|diagnostic|novel-design)\b/i);
   const declaredKind = km ? km[1].toLowerCase() : null;
+  const cm = brief.match(/\bCONSEQUENCE\s*:\s*(routine|elevated|critical)\b/i);
+  const declaredConsequence = cm ? cm[1].toLowerCase() : null;
 
-  // Fit: when the brief declares a weight and the model is knowable, compare
-  // them the same way the evaluate skill does. Recorded on every such spawn so
-  // the audit can say how often spawns land over, under, or on the table;
-  // surfaced only in the direction that ships wrong code (below).
+  // --- Best fit ----------------------------------------------------------
+  // The table's answer for the declared weight, used two ways: filled in where
+  // the spawn left the model blank (the inheritance hazard, closed at its
+  // source), and as the yardstick for a model the spawn did name.
+  const fitOn = opt('fit_guard', true) && !!declaredWeight;
+  let route = null;
+  if (fitOn) {
+    try { route = effortFor(declaredWeight, declaredKind || 'bounded', declaredConsequence || 'routine'); } catch { /* table unreadable */ }
+  }
+  const routeLabel = route?.model ? `${route.model}${route.effort ? '/' + route.effort : ''}` : '';
+
+  let autofilled = false;
+  let updatedInput = null;
+  if (fitOn && trulyInherited && route?.model && opt('fit_autofill', true)) {
+    model = route.model;
+    autofilled = true;
+    updatedInput = { ...input, model };
+  }
+
   let fit = null;
-  if (declaredWeight && model) {
+  if (fitOn && model && !autofilled) {
     try {
-      fit = evaluateFit({ model, effort: def?.effort || '', weight: declaredWeight, kind: declaredKind || 'bounded' });
+      fit = evaluateFit({
+        model, effort: def?.effort || '', weight: declaredWeight,
+        kind: declaredKind || 'bounded', consequence: declaredConsequence || 'routine',
+      });
     } catch { /* table unreadable: the audit reports that separately */ }
   }
 
@@ -81,37 +109,62 @@ try {
       at: new Date().toISOString(),
       session_id: sid,
       spawned_by_agent_type: p.agent_type,
-      model: model || '(inherited)',      // effective model, when knowable
+      model: model || '(inherited)',      // effective model, when knowable (autofilled counts)
       model_declared: declared || null,   // named at the spawn site
       model_definition: fromDef || null,  // named in the agent's frontmatter
-      inherited: trulyInherited,          // true only when NEITHER named one
+      model_autofilled: autofilled,       // the guard set it from the table
+      inherited: trulyInherited,          // true when NEITHER the spawn nor the definition named one
       subagent_type: input.subagent_type,
       effort: p.effort?.level,
       effort_definition: def?.effort || null,
       declared_weight: declaredWeight,   // null when the brief did not say
       declared_kind: declaredKind,
-      fit: fit ? fit.verdict : null,     // over | under | fit | unknown, when a weight was declared
-      fit_expected: fit ? `${fit.expected.model}${fit.expected.effort ? '/' + fit.expected.effort : ''}` : null,
+      declared_consequence: declaredConsequence,
+      fit: autofilled ? 'fit' : fit ? fit.verdict : null, // over | under | fit | unknown, when a weight was declared
+      fit_expected: routeLabel || null,
     });
   }
 
-  // An under-provisioned spawn is allowed — this guard never blocks the cheap
-  // direction — but it is said out loud: a weight-4 task on haiku is the
-  // failure that ships wrong code, not the one that costs money.
-  const underMsg = fit && fit.verdict === 'under'
-    ? `agent-companion: spawning ${input.subagent_type || 'an agent'} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}. ${fit.action}.`
-    : null;
+  const who = input.subagent_type || 'an agent';
+  let note = null;
+  if (autofilled) {
+    note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel}).`;
+  } else if (fit?.verdict === 'under') {
+    // The cheap direction is never blocked, but a weight-4 task on haiku is
+    // the failure that ships wrong code, so it is said out loud.
+    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}. ${fit.action}.`;
+  } else if (fit?.verdict === 'over' && !isPremium(model)) {
+    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
+  }
 
-  if (!isPremium(model)) allowWith(underMsg);
+  if (!isPremium(model)) allowWith(note, updatedInput);
+
+  // --- Best fit, premium: deny ------------------------------------------
+  // A premium tier for a declared weight the table sends elsewhere is the
+  // over-provisioning this plugin exists to stop, stated by the spawner
+  // itself. Deny with the exact correction rather than a nudge.
+  if (fit?.verdict === 'over') {
+    recordDenial('fit', p, `${model} requested for declared weight ${declaredWeight}; table says ${routeLabel}`);
+    deny(
+      `Best fit: this spawn requests "${model}" but declares weight ${declaredWeight}` +
+      (declaredKind ? ` (${declaredKind})` : '') +
+      (declaredConsequence ? `, ${declaredConsequence} consequence` : '') +
+      `, which the routing table sends to ${routeLabel}. ${fit.reason}.\n\n` +
+      `Either re-spawn at ${routeLabel}, or restate the brief honestly: a higher WEIGHT if the task ` +
+      `is heavier than declared, or CONSEQUENCE: critical if a mistake would be expensive or ` +
+      `irreversible (that raises the model floor). A warrant that contradicts its own weight is ` +
+      `exactly the over-provisioning this guard exists to stop.`
+    );
+  }
 
   // --- Warrant -----------------------------------------------------------
   if (opt('warrant_required', true)) {
-    const brief = String(input.prompt || '');
     if (!/WARRANT\s*:/i.test(brief)) {
       recordDenial('warrant', p, `premium tier ${model} requested with no warrant`);
       deny(
-        `Premium warrant: this spawn requests "${model}", a premium tier, with no stated ` +
-        `justification.\n\n` +
+        (autofilled
+          ? `Premium warrant: the routing table sends declared weight ${declaredWeight} to "${model}", a premium tier, and the brief states no justification.\n\n`
+          : `Premium warrant: this spawn requests "${model}", a premium tier, with no stated justification.\n\n`) +
         `Add a line to the agent's brief in the form:\n` +
         `  WARRANT: weight <1-5> — <why a cheaper tier cannot do this>\n\n` +
         `If you cannot write that line honestly, the task does not warrant the tier — ` +
@@ -145,7 +198,7 @@ try {
     if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
-  allow();
+  allowWith(note, updatedInput);
 } catch {
   passthrough(); // never break a session
 }

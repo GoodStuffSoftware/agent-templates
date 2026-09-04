@@ -35,6 +35,8 @@ It was built after two observed failures:
 | `spawn_telemetry` | Records every spawn (model, agent type, effort) for the calibration routine. | no |
 | `scout_surface` | At session start, surfaces unresolved signals from the last locally scheduled scout run. Silent on a quiet day. | no |
 | `auto_update` | When Claude Code's own auto-updater is off (`DISABLE_AUTOUPDATER=1`), refreshes the marketplace and updates the plugin in the background once a day. Always says when a newer version is installed but not yet loaded. | no |
+| `fit_guard` | Best fit at the spawn, both directions. A brief that declares `WEIGHT:` gets its model graded against the routing table: under- and cheap-over-provisioned spawns are announced; a premium model over-provisioned for its own declared weight is denied with the correction. | premium-over only |
+| `fit_autofill` | A spawn that declares `WEIGHT:` but names no model gets the table's model filled in, instead of inheriting the lead's tier by accident. | no |
 
 Premium tiers are **capped and audited, never banned**. The failure mode was
 unexamined defaults, not the model itself.

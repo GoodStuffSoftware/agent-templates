@@ -62,10 +62,24 @@ Exit code 0 is fit, 1 over-provisioned, 2 under-provisioned.
 - **UNKNOWN** — the model is not in the tier table; the guards treat it as
   premium. Add it to `config/model-tiers.json`.
 
-## Spawns are evaluated automatically
+## Spawns are evaluated automatically — best fit, both directions
 
-The spawn guard runs the same comparison on every brief that declares
-`WEIGHT:` (or `WARRANT: weight N`): it records the fit in telemetry and warns
-when a spawn is under-provisioned for its declared weight. Declaring weight on
-every brief — not only premium ones — is what makes that data exist; the
-`spawn-audit` check reports how often spawns land over, under, or fit.
+The spawn guard applies the same table to every brief that declares `WEIGHT:`
+(or `WARRANT: weight N`), reading `KIND:` and `CONSEQUENCE:` too:
+
+- **No model named** → the guard **fills in** the table's model for that
+  weight (`fit_autofill`). The spawn no longer inherits the lead's tier by
+  accident; the inheritance hazard is closed at its source. A weight the table
+  routes to a premium tier still needs a `WARRANT:` line.
+- **Named model, under-provisioned** → allowed, said out loud.
+- **Named cheap model, over-provisioned** → allowed, said out loud.
+- **Named premium model, over-provisioned for its own declared weight** →
+  **denied**, with the exact correction: re-spawn at the routed tier, or
+  restate the weight or consequence honestly. A warrant that contradicts its
+  own weight is the over-provisioning the guard exists to stop.
+
+Every case is recorded (`fit`, `fit_expected`, `model_autofilled`), so the
+`spawn-audit` check can say how often spawns land over, under, or on the
+table. Declaring weight on every brief — not only premium ones — is what makes
+that data exist. `fit_guard: false` turns the whole thing back into
+telemetry-only.
