@@ -445,6 +445,44 @@ const pluginManifests = {
   },
 };
 
+// --- 8. routing doc freshness ---------------------------------------------
+// docs/ROUTING.md is generated from config/model-tiers.json. A generated doc
+// that is not regenerated is a hand-written doc with extra steps: it drifts the
+// moment the config changes, and a reader then sees a table the guards no
+// longer enforce. This check makes "self-generating" enforced rather than
+// remembered — and --fix regenerates it.
+const routingDoc = {
+  id: 'routing-doc',
+  title: 'Routing table doc matches config',
+  vendor: 'anthropic',
+  fixable: true,
+  run(ctx) {
+    const script = join(ctx.pluginRoot, 'scripts', 'routing-table.mjs');
+    const docPath = join(ctx.pluginRoot, 'docs', 'ROUTING.md');
+    if (!existsSync(script)) return { status: 'skip', findings: ['routing-table.mjs not found'] };
+    let fresh;
+    try {
+      fresh = execSync(`node "${script}"`, { encoding: 'utf8', timeout: 20000 });
+    } catch (e) {
+      return { status: 'error', findings: [`renderer threw: ${e.message}`] };
+    }
+    if (!existsSync(docPath)) {
+      return { status: 'warn', findings: ['docs/ROUTING.md does not exist - --fix generates it'], data: { fresh, docPath } };
+    }
+    const norm = (s) => s.replace(/\r\n/g, '\n');
+    const same = norm(readFileSync(docPath, 'utf8')) === norm(fresh);
+    return {
+      status: same ? 'ok' : 'warn',
+      findings: same ? [] : ['docs/ROUTING.md is STALE relative to config/model-tiers.json - readers see a table the guards no longer enforce; --fix regenerates'],
+      data: { fresh, docPath },
+    };
+  },
+  fix(ctx, prev) {
+    writeFileSync(prev.data.docPath, prev.data.fresh);
+    return ['regenerated docs/ROUTING.md from config'];
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
@@ -453,4 +491,5 @@ export const CHECKS = [
   guardCanary,
   spawnAudit,
   pluginManifests,
+  routingDoc,
 ];

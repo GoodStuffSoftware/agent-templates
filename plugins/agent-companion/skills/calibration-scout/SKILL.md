@@ -116,6 +116,19 @@ Treat a NEW finding as the interesting one. A standing finding you have already
 decided to live with is noise; a finding that appeared since the last run means
 something changed — a new agent, a new model, or a table that has gone stale.
 
+### regenerate the routing doc — every time the config changes
+
+`docs/ROUTING.md` is generated from `config/model-tiers.json`. If either the
+lineup or the table changed, regenerate it so what people read is what the
+guards enforce:
+
+```bash
+node "$AC/scripts/audit.mjs" --only routing-doc --fix
+```
+
+The `routing-doc` check fails when the doc is stale, so a forgotten regenerate
+surfaces here rather than as a reader trusting an old table.
+
 ### routing review
 
 Fetch the current model lineup and pricing. Compare against the routing table in
