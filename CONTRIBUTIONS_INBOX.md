@@ -28,6 +28,14 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-09-04 — DISABLE_AUTOUPDATER also silently disables plugin autoupdate
+
+- **Trigger:** a marketplace plugin stayed at an old version on one machine while the marketplace clone was current. The harness has a native plugin autoupdater ("Plugin autoupdate: skipped (auto-updater disabled)" in the bundle), gated on the same switch as the CLI self-update — so pinning the CLI pins every plugin, silently. Compounded by a second install of the same plugin at project scope, which shadowed user scope and never updated.
+- **Is it generic?** Yes. Stripped: plugin name, machine. Kernel: one switch with two effects; a stale second scope hides behind a current first one; and "installed" is not "loaded" — a restart applies it.
+- **Target:** new lesson `lessons/tooling/one-switch-two-effects-plugin-autoupdate.md` (tags: claude-code, plugins, updates, verify-against-artifact).
+- **Proposed change:** (1) When plugins look stale, run `claude plugin list` and look for a second scope before anything else; then check the auto-updater switch (`DISABLE_AUTOUPDATER`, or `autoUpdates: false` in settings). (2) A plugin that must stay current on pinned machines ships a SessionStart hook that, only when the native switch is off, runs `claude plugin marketplace update {{MARKETPLACE}} && claude plugin update {{PLUGIN}}@{{MARKETPLACE}}` detached and throttled to once a day, and in every case reports an installed-but-not-loaded version. (3) Grep the shipped bundle for the feature's strings before building a replacement for it — the native autoupdater existed; only its gate was closed.
+- **Applied?** `no`
+
 ### 2026-09-04 — A missing or unauthenticated MCP server is not a block when the project's own hook library already speaks the REST API
 
 - **Trigger:** a forked follow-up session had no `{{MCP_SERVER}}` tools (the plugin showed "Needs authentication" and the machine was OAuth-enrolled, so the documented curl-with-bearer fallback could not work either). The session's SessionStart hook had nonetheless "registered" it on the bus, which meant the repo already shipped a library that resolves the service bearer from the secrets manager and wraps the HTTP calls. Importing that library from a scratch script gave every tool's REST equivalent in one turn, with no sign-in and no restart.
