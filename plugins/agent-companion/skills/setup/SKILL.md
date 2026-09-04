@@ -78,6 +78,13 @@ Use the Claude Code `schedule` skill, which calls `RemoteTrigger`:
 - `session_context.allowed_tools`: `Bash, Read, Glob, Grep, WebFetch, WebSearch`
 - `events[0].data.message.content`: the same hydrated prompt as step 2
 
+**Check `mcp_connections` in the create response.** The API attaches every
+connector on the account by default — Gmail, Drive, Calendar, whatever is
+connected — to a routine that only reads docs. Clear them immediately with an
+`update` carrying `{"clear_mcp_connections": true}`; the scout needs none, and
+a prompt rule against sending email is not a substitute for not holding the
+handle.
+
 Then `run` it once and read the run log — a first run you can read beats
 trusting that tomorrow's will fire. Routines cannot be deleted from the CLI;
 that is https://claude.ai/code/routines.
