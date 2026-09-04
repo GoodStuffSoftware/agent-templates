@@ -122,17 +122,27 @@ if (weekSpawns.length > 20 && recentDenials.length === 0) {
 // --- 5. Model retirement ------------------------------------------------
 // A tier alias that retires does not error; it resolves to whatever replaces
 // it, or to nothing. Either way the routing table is silently wrong from that
-// day. Warn inside a window wide enough to decide the replacement first.
-const RETIRE_WARN_DAYS = 60;
+// day. Warn at a few fixed distances rather than every morning — a signal that
+// fires daily for two months trains the reader to ignore it — and say whether
+// the table already carries the replacement, because a staged replacement
+// switches itself on the date and needs no decision from anyone.
+const RETIRE_MILESTONES = new Set([60, 30, 14, 7, 1, 0]);
 try {
   const cfg = modelTiers();
   for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
     if (!spec.retiresAfter) continue;
     const days = Math.floor((Date.parse(spec.retiresAfter) - Date.now()) / 86400000);
-    if (days <= RETIRE_WARN_DAYS) {
+    const staged = !!(spec.replacement && spec.replacement.model);
+    const plan = staged
+      ? `replacement staged: ${spec.replacement.model}${spec.replacement.effort ? '/' + spec.replacement.effort : ''} takes over automatically from ${spec.retiresAfter}`
+      : 'NO replacement staged — routing rows on this alias resolve to nothing after that date';
+    if (days < 0 && !staged) {
+      // Past the date with nothing staged is the one case that warrants daily noise.
       sig('model_retirement_approaching',
-        `${alias} retires ${days < 0 ? Math.abs(days) + ' days AGO' : 'in ' + days + ' days'} (${spec.retiresAfter}) — routing rows on this alias need a replacement decided`,
-        'routing-review');
+        `${alias} retired ${Math.abs(days)} day(s) ago (${spec.retiresAfter}); ${plan}`, 'routing-review');
+    } else if (days >= 0 && days <= 60 && (RETIRE_MILESTONES.has(days) || (!staged && days <= 7))) {
+      sig('model_retirement_approaching',
+        `${alias} retires in ${days} day(s) (${spec.retiresAfter}); ${plan}`, staged ? 'none' : 'routing-review');
     }
   }
 } catch { /* config unreadable: the audit reports that separately */ }

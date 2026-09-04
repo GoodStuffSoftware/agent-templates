@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "updated": "2026-08-30",
+  "version": 4,
+  "updated": "2026-09-04",
   "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to $CLAUDE_PLUGIN_DATA/model-tiers.json; it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
   "tiers": {
     "haiku": {
@@ -11,7 +11,12 @@
       "effortsNote": "Haiku 4.5 takes no effort parameter. Setting one on a haiku agent is at best a no-op — the model has one mode, and asking for more thinking does not get any.",
       "note": "reads, searches, single commands",
       "retiresAfter": "2026-10-15",
-      "retirementNote": "Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window."
+      "retirementNote": "Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window.",
+      "replacement": {
+        "model": "sonnet",
+        "effort": "low",
+        "note": "Pre-staged 2026-09-04: no successor Haiku announced. Sonnet 5 at low effort is the cheapest available tier that takes weight 1-2 work, at roughly 2x Haiku per token. When a new Haiku ships, add its tier and point this at it - the switch is data, not code."
+      }
     },
     "sonnet": {
       "rank": 2,

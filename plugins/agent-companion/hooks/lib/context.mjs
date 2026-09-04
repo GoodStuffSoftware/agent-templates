@@ -74,18 +74,47 @@ export function classifyEffort(effort) {
 
 // Weight (1-5) -> the model and effort that weight routes to. Data, so the
 // routing table can be corrected without shipping code.
-export function routeForWeight(weight) {
-  const cfg = modelTiers();
-  return (cfg.routing || {})[String(weight)] || null;
+// A tier past its retirement date does not error — the alias resolves to
+// whatever replaces it, or to nothing. The table can carry that decision in
+// advance: `replacement: { model, effort }` on the tier, applied BY DATE, so
+// the switch happens on the day without anyone having to remember it.
+// Returns null for tiers with no retirement date.
+export function retirement(alias) {
+  const spec = (modelTiers().tiers || {})[alias];
+  if (!spec || !spec.retiresAfter) return null;
+  const at = Date.parse(spec.retiresAfter);
+  if (Number.isNaN(at)) return null;
+  const daysLeft = Math.floor((at - Date.now()) / 86400000);
+  const replacement = spec.replacement && spec.replacement.model ? spec.replacement : null;
+  return { alias, retiresAfter: spec.retiresAfter, daysLeft, retired: daysLeft < 0, replacement };
 }
 
-// An entry may be classified but not reachable on this account. Pinning an
-// agent to one fails at spawn time with nothing having warned beforehand.
+export function routeForWeight(weight) {
+  const cfg = modelTiers();
+  const route = (cfg.routing || {})[String(weight)] || null;
+  if (!route) return null;
+  const r = retirement(route.model);
+  if (r && r.retired && r.replacement) {
+    // The row still names the retired alias; resolve it to the staged
+    // replacement and say so, so a rationale never claims a model that is gone.
+    const { effortNote, ...rest } = route;
+    return { ...rest, model: r.replacement.model, effort: r.replacement.effort ?? '', retiredFrom: route.model };
+  }
+  return route;
+}
+
+// An entry may be classified but not reachable on this account — flagged
+// `available: false`, or past its retirement date. Pinning an agent to one
+// fails at spawn time with nothing having warned beforehand.
 export function isModelAvailable(model) {
   const cfg = modelTiers();
   const m = String(model || '');
   for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
-    if (m && new RegExp(spec.match || alias, 'i').test(m)) return spec.available !== false;
+    if (m && new RegExp(spec.match || alias, 'i').test(m)) {
+      if (spec.available === false) return false;
+      const r = retirement(alias);
+      return !(r && r.retired);
+    }
   }
   return true; // unknown models are flagged elsewhere, not blocked here
 }
@@ -131,7 +160,10 @@ function tierRank(alias) {
 
 export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
   const cfg = modelTiers();
-  const route = (cfg.routing || {})[String(weight)];
+  // routeForWeight, not the raw row: it applies a staged retirement replacement
+  // by date, so a weight that routes to a retired alias resolves to its
+  // successor here without anyone editing the routing rows on the day.
+  const route = routeForWeight(weight);
   if (!route) return { model: '', effort: '', rationale: `no routing row for weight ${weight}` };
 
   // Resolve the consequence MODEL floor before anything else. It used to be
@@ -143,7 +175,8 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
   const modelFloored = !!(cons.modelFloor && tierRank(cons.modelFloor) > tierRank(route.model));
   const model = modelFloored ? cons.modelFloor : route.model;
   const lifted = modelFloored ? `; ${consequence} consequence raises the model to ${model}` : '';
-  const routeLabel = `${route.model}${route.effort ? '/' + route.effort : ''}`;
+  const routeLabel = `${route.model}${route.effort ? '/' + route.effort : ''}` +
+    (route.retiredFrom ? ` (standing in for retired ${route.retiredFrom})` : '');
 
   const tier = (cfg.tiers || {})[model] || {};
   const supported = Array.isArray(tier.efforts) ? tier.efforts : [];

@@ -1,6 +1,6 @@
 # Model routing table
 
-_Generated from `config/model-tiers.json` v3 (updated 2026-08-30) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
+_Generated from `config/model-tiers.json` v4 (updated 2026-09-04) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
 
 ## Tiers
 
@@ -147,4 +147,5 @@ Real findings not settled enough to encode as rules. Each names the measurement 
 **Measure:** From telemetry: warrant acceptance rate, and outcome of warranted Fable spawns vs Opus spawns with a checklist brief on the same task type.
 
 > ⚠ `haiku` retires no sooner than **2026-10-15**. Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window.
+> Staged replacement: **sonnet/low** — routing rows on `haiku` switch to it automatically from 2026-10-15. Pre-staged 2026-09-04: no successor Haiku announced. Sonnet 5 at low effort is the cheapest available tier that takes weight 1-2 work, at roughly 2x Haiku per token. When a new Haiku ships, add its tier and point this at it - the switch is data, not code.
 

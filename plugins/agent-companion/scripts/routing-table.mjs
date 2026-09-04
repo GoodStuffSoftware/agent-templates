@@ -12,7 +12,7 @@
 //   node routing-table.mjs --out FILE    # write markdown to FILE (e.g. docs/ROUTING.md)
 
 import { writeFileSync } from 'node:fs';
-import { modelTiers, effortFor } from '../hooks/lib/context.mjs';
+import { modelTiers, effortFor, routeForWeight } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -66,7 +66,7 @@ L.push(``);
 L.push(`| Weight | Model | Effort | Task shape |`);
 L.push(`|---|---|---|---|`);
 for (const w of weights) {
-  const r = cfg.routing[w];
+  const r = routeForWeight(Number(w));
   L.push(`| ${w} | \`${r.model}\` | ${r.effort ? `\`${r.effort}\`` : '_none_'} | ${r.label || ''} |`);
 }
 L.push(``);
@@ -164,6 +164,9 @@ if (cfg.calibration) {
 for (const [alias, t] of tiers) {
   if (t.retiresAfter) {
     L.push(`> ⚠ \`${alias}\` retires no sooner than **${t.retiresAfter}**. ${t.retirementNote || ''}`);
+    if (t.replacement && t.replacement.model) {
+      L.push('> Staged replacement: **' + t.replacement.model + (t.replacement.effort ? '/' + t.replacement.effort : '') + '** — routing rows on `' + alias + '` switch to it automatically from ' + t.retiresAfter + '. ' + (t.replacement.note || ''));
+    }
     L.push(``);
   }
 }
