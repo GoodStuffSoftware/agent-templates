@@ -34,7 +34,7 @@ It was built after two observed failures:
 | `memory_doctor` | Detects memory files on disk that the index does not link — **unreachable rules** — plus broken index links. Repairs non-destructively. | no |
 | `spawn_telemetry` | Records every spawn (model, agent type, effort) for the calibration routine. | no |
 | `scout_surface` | At session start, surfaces unresolved signals from the last locally scheduled scout run. Silent on a quiet day. | no |
-| `auto_update` | When Claude Code's own auto-updater is off (`DISABLE_AUTOUPDATER=1`), refreshes the marketplace and updates the plugin in the background once a day. Always says when a newer version is installed but not yet loaded. | no |
+| `update_notice` | At session start, says when a newer plugin version is installed but this session is still running an older one. Updating itself is the harness's job: the native autoupdater in terminal sessions, the built-in `plugin update` commands run by the daily local scout in desktop sessions. | no |
 | `fit_guard` | Best fit at the spawn, both directions. A brief that declares `WEIGHT:` gets its model graded against the routing table: under- and cheap-over-provisioned spawns are announced; a premium model over-provisioned for its own declared weight is denied with the correction. | premium-over only |
 | `fit_autofill` | A spawn that declares `WEIGHT:` but names no model gets the table's model filled in, instead of inheriting the lead's tier by accident. | no |
 

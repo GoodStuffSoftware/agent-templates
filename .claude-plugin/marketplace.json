@@ -7,7 +7,7 @@
     {
       "name": "agent-companion",
       "source": "./plugins/agent-companion",
-      "version": "0.8.2",
+      "version": "0.8.3",
       "description": "Guardrails and calibration for agent teams: delegation guard, premium fan-out cap, warrant checks, instruction-budget monitor, and spawn telemetry."
     }
   ],

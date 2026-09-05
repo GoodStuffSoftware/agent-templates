@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -96,12 +96,6 @@
       "description": "At session start, surface unresolved signals from the last locally scheduled scout run. Silent when the scout found nothing.",
       "default": true
     },
-    "auto_update": {
-      "type": "boolean",
-      "title": "Auto update",
-      "description": "Once a day at session start, refresh the marketplace and update the plugin in the background; say at session start when a newer version is installed but not yet loaded. Never runs in cloud sandboxes or for inline/dev loads.",
-      "default": true
-    },
     "fit_guard": {
       "type": "boolean",
       "title": "Best-fit guard",
@@ -112,6 +106,12 @@
       "type": "boolean",
       "title": "Best-fit autofill",
       "description": "When a spawn declares WEIGHT but names no model, set the model from the routing table instead of letting it inherit the lead’s tier. Premium results still require a WARRANT line.",
+      "default": true
+    },
+    "update_notice": {
+      "type": "boolean",
+      "title": "Update notice",
+      "description": "At session start, say when a newer plugin version is installed but this session is still running an older one. No side effects; updating itself is left to the harness and the daily local scout.",
       "default": true
     }
   },

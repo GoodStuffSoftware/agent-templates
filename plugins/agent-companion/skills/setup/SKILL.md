@@ -115,12 +115,20 @@ re-implements one. Re-run the copy after a plugin update that changes it.
 
 ## Staying current
 
-Marketplace plugins do not update themselves. The `self-update` hook (option
-`auto_update`, default on) runs `marketplace update` + `plugin update` in the
-background once a day and, at session start, says when a newer version is
-installed but not yet loaded. What it cannot do is restart the app — that
-line is yours. A second install of the same plugin at project scope shadows
-the user-scope one and never updates; `claude plugin list` shows both if so.
+Updating is the harness's job, and there are two built-in paths. Terminal
+sessions: Claude Code's own plugin autoupdater runs at startup. Desktop
+sessions: the app runs them with the auto-updater switched off, so the daily
+local scout runs the two built-in commands (`claude plugin marketplace update`,
+`claude plugin update`) at the start of each run. The plugin adds only a
+notice (`update_notice`, default on): at session start it says when a newer
+version is installed but this session is still running an older one, because
+"installed" and "loaded" differ by a restart nobody is reminded to do. A
+second install of the same plugin at project scope shadows the user-scope one
+and never updates; `claude plugin list` shows both if so.
+
+Releasing: bump `version` in **both** `plugin.json` and the plugin's entry in
+`marketplace.json` — Claude Code reads the first, the claude.ai plugin
+directory keys on the second, and the manifest check fails if they differ.
 
 ## What "set up" means
 

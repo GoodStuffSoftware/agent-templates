@@ -60,6 +60,20 @@ if [ -n "$CLAUDE_CODE_REMOTE_SESSION_ID" ]; then echo "PLATFORM=cloud"; else ech
 
 Report within your scope, and name the platform in the first line of any output.
 
+**Local only — keep the install current with the built-in commands.** The
+desktop app runs its sessions with the harness's auto-updater switched off, so
+plugins do not update themselves there. Run the two commands the harness
+provides for exactly this, before STEP 1, so the rest of the run uses the
+current copy:
+
+```bash
+claude plugin marketplace update agent-templates && claude plugin update agent-companion@agent-templates
+```
+
+If the second command reports a version change, that is a finding: say the
+new version and that the desktop app needs a restart to load it. If it reports
+nothing changed, say nothing.
+
 ## STEP 1 — deterministic detection (no judgement yet)
 
 ```bash
