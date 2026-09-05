@@ -447,6 +447,28 @@ const pluginManifests = {
       }
       if (/warning/i.test(out)) findings.push(`${label}: passed with warnings`);
     }
+    // Version parity. marketplace.json may declare plugins[].version, and the
+    // docs say Claude Code always prefers plugin.json - so the two must never
+    // drift. The claude.ai plugin directory keys on the manifest, so a release
+    // that bumps plugin.json alone is invisible there (it sat at 0.1.1 through
+    // eight releases). Enforced here so it is a check, not a memory.
+    if (existsSync(mk)) {
+      try {
+        const m = JSON.parse(readFileSync(mk, 'utf8'));
+        for (const e of m.plugins || []) {
+          if (!e.source || !String(e.source).startsWith('.')) continue; // external sources: nothing local to compare
+          const pj = join(ctx.target, e.source, '.claude-plugin', 'plugin.json');
+          if (!existsSync(pj)) continue;
+          const v = JSON.parse(readFileSync(pj, 'utf8')).version;
+          if (!e.version) {
+            findings.push('marketplace: ' + e.name + ' declares no version in marketplace.json - the claude.ai directory will not see releases; set it equal to plugin.json (' + v + ')');
+          } else if (v && v !== e.version) {
+            failed = true;
+            findings.push('marketplace: ' + e.name + ' is ' + e.version + ' in marketplace.json but ' + v + ' in plugin.json - bump both on every release');
+          }
+        }
+      } catch (err) { findings.push('marketplace: could not compare versions: ' + err.message); }
+    }
     return { status: failed ? 'fail' : (findings.length ? 'warn' : 'ok'), findings };
   },
 };
