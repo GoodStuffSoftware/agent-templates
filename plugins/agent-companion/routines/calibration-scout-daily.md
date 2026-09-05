@@ -1,7 +1,24 @@
 ---
 name: agent-companion-scout
-description: Daily calibration scout for the agent-companion plugin. Deterministic drift detection — harness version, model lineup and pricing, model retirements, guard liveness — then dispatches a heavier routine ONLY when a signal fires. Silent on a quiet day. Delivered as the routine's visible run output plus a push notification when something changed. Canonical home is the claude.ai CLOUD routine (trigger); this file is the prompt source of record and ships with the plugin under routines/.
+description: Daily calibration scout for the agent-companion plugin. Deterministic drift detection — harness version, model lineup and pricing, model retirements, guard liveness — then dispatches a heavier routine ONLY when a signal fires. Silent on a quiet day. Delivered as the routine's visible run output plus a push notification when something changed. Scheduled in BOTH places — a claude.ai cloud routine and a desktop scheduled task — and neither scheduler stores this body; each stores a short bootstrap that locates the plugin and reads THIS file from it, so editing this file is the whole release.
 ---
+
+<!--
+The stored prompt in each scheduler is only this bootstrap (keep them identical):
+
+  You are the agent-companion calibration scout, a daily routine. Everything you
+  need is in the plugin; this bootstrap only locates it.
+  1. AC="$(pwd)/plugins/agent-companion"; if "$AC/scripts/audit.mjs" is missing,
+     AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion 2>/dev/null | head -1)".
+     If still missing: `claude plugin marketplace add {{MARKETPLACE_REPO}}`, then
+     `claude plugin marketplace update agent-templates`, and look again once.
+     If it is still not found, STOP and report that as the finding.
+  2. Read "$AC/routines/calibration-scout-daily.md" and follow it exactly from
+     "Where you are running" onward. It is the source of record; do not
+     improvise past it.
+  3. Silence is the success case.
+-->
+
 
 You are the **agent-companion calibration scout**, an autonomous DAILY routine. Each run starts fresh with no memory of any prior run — everything you need is below. You exist to catch **silent drift**: a routing table that is wrong for a whole model generation, a guard that stopped matching after a harness rename, a tier alias about to retire. None of these error. They just stop being true.
 
@@ -81,6 +98,7 @@ Not a summary, not a confirmation. Silence is the success case.
 | `lineup_drift` | report the exact diff against `config/model-tiers.json`, field by field |
 | `inherited_model_spawns` | report the count; spawns with no model inherit the lead's tier — the mechanism behind unexamined premium fan-out |
 | `harness_version_unreadable` | report it; do not guess |
+| `plugin_version_behind` | the installed plugin is older than the current copy. Cloud: the claude.ai plugin directory needs its **Sync** pressed on the marketplace page — cloud sessions are running the old guards until then. Local: `claude plugin marketplace update`, `claude plugin update`, restart |
 
 **Canary** — proves the guards still fire rather than merely exist:
 

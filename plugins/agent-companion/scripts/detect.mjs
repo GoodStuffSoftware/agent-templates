@@ -151,6 +151,34 @@ try {
   }
 } catch { /* config unreadable: the audit reports that separately */ }
 
+// --- 6. Plugin version behind ------------------------------------------
+// The copy that is INSTALLED is not always the copy that is CURRENT. Locally
+// the marketplace clone can be ahead of the installed cache; in the cloud, the
+// claude.ai plugin directory snapshots a marketplace when it is added and
+// serves that version until someone presses Sync. Either way the guards that
+// run are older than the guards that shipped, and nothing errors. Compare this
+// script's own manifest (the current copy) with what the harness has installed.
+try {
+  const own = JSON.parse(readFileSync(join(import.meta.dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8'));
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const inst = JSON.parse(readFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
+  const entries = Object.entries(inst.plugins || inst).filter(([k]) => k.startsWith(`${own.name}@`));
+  const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
+  for (const [key, val] of entries) {
+    for (const e of Array.isArray(val) ? val : [val]) {
+      if (e?.version && own.version && e.version !== own.version) {
+        sig('plugin_version_behind',
+          `${key} (${e.scope || 'user'} scope) is installed at ${e.version}; the current copy is ${own.version}` +
+          (cloud
+            ? ' — in the cloud this means the claude.ai plugin directory has not been synced since the marketplace was added (Sync button on the marketplace page)'
+            : ' — run claude plugin marketplace update, then claude plugin update, then restart'),
+          'plugin-update');
+      }
+    }
+  }
+  next.pluginVersion = own.version;
+} catch { /* no install record here (a bare checkout): not a signal */ }
+
 writeFileSync(baselineFile, JSON.stringify({ ...baseline, ...next }, null, 2));
 
 // Persist the latest result too. A locally SCHEDULED scout has no human at the
