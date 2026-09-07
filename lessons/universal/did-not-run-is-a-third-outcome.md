@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-17
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 A verification suite has three outcomes per check, not two: **pass**, **fail**, and **did-not-run**. Compute the aggregate verdict from the absence of *both* failures and did-not-runs. "No failures" is not "verified" — it is also what a suite that executed nothing reports.
 
@@ -19,6 +19,8 @@ A week of hardening one release-verification harness produced the same fix five 
 **How to apply:**
 - Model the third state explicitly and make the aggregate verdict require every check to have actually reported pass. A `required: false`-style escape hatch on an individual check is the wrong shape — see [[assert-the-resolved-value-not-the-declaration]] for what happens when nothing reads it anyway.
 - Distinguish **"cannot run here"** (missing optional tool, no credential on this host, leg not shipped this release) from **"ran and failed"**. The first is did-not-run, never a failure; the second is never a skip.
+- **Split did-not-run once more: NOT-APPLICABLE versus BLOCKED.** A check nobody asked for on this run (an opt-in live suite with its flag unset, a channel for a platform this release did not ship to) is *not applicable* and should never appear as an unresolved gap. A check that WAS requested and could not execute (credential absent, tool missing) is *blocked* and must stay visible until it runs. Collapsing the two either buries a real blocker or fills the report with permanent noise that trains readers to ignore it. Document which environment variables select each leg, so an off-host run declares its reduced scope instead of manufacturing failures.
+- **Accepting a gap is a legitimate outcome — in writing.** When closing a check honestly would cost more than it is worth (adding a version endpoint to a service purely so a verifier can read it), record the acceptance with its reason next to the check, and say what other coverage substitutes. An accepted gap with a written reason is a decision; an undocumented skip is a hole.
 - Carry the REASON into the verdict. A summariser that reports a boolean loses the one field that lets a reader tell a real red from an unconfigured runner — and a wrapper that drops it can mask a red entirely.
 - Track how long each check has been did-not-run, and treat a long-dormant one as unverified code, not as a passing check. Exercise it deliberately rather than discovering its defects on the day it finally matters.
 - When two checks inspect the same thing and disagree — one reports did-not-run, the other passes by reasoning that the artifact "must exist" — the disagreement is the tell. The one that inferred is the one that is wrong.

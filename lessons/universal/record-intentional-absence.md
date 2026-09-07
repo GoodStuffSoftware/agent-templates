@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-07-27
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 When you deliberately take something out of a standing set — a service out of a process manager's autostart list, a job out of a scheduler, a check out of a pipeline, an entry out of a config — the only trace the decision leaves behind is an absence. And an absence is indistinguishable from breakage. The next session investigating that surface sees a gap where the other entries are, reads it as drift, and restores it. A considered decision is silently reverted by someone doing what looks like maintenance.
 
@@ -20,3 +20,5 @@ Pair every deliberate removal with a durable note that (a) states the absence is
 - Keep a reversible snapshot of the mutated state (`{{STATE_FILE}}.bak-{{YYYY-MM-DD}}-pre-{{REASON}}`) and name it in the note, so reversing is a copy rather than a reconstruction.
 - Enumerate what deliberately **stays**, not just what went. A partial teardown is where the next session guesses wrong in the other direction and removes something load-bearing.
 - Also log the decision in the ledger for review ([[no-stall-decision-protocol]]) — but treat that as the review trail, not as the place the discovery happens.
+
+**The same rule applies to DATA, and there it has a second payoff.** A backfill stamping a new field found a handful of records whose upstream source no longer exists. Deleting them as residue was rejected — deletion is irreversible, it was outside the scope of a stamp-a-field change, and it would have stranded their dependent records in other collections. Instead each got an explicit **sentinel** value meaning "the backfill looked and there is no source", with the real cleanup carded separately. Beyond honesty, the sentinel earns its place mechanically: a typed null drops those rows out of range queries over the field automatically, where a missing field or a fabricated default would have quietly polluted every later aggregate. Choose the sentinel so that the *absence* is representable in the field's own type, and say in the schema notes what it means.

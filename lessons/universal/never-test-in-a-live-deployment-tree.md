@@ -5,8 +5,8 @@ scope: [universal]
 requires: {}
 status: active
 since: 2026-08-03
-provenance: [contrib-2]
-corroborated: 1
+provenance: [contrib-2, contrib-1]
+corroborated: 2
 ---
 Never run a test suite, seed script, or migration inside a live deployment tree. When a project is deployed by pulling into a directory that is also a source checkout, that directory looks exactly like a dev workspace and every habitual dev command is loaded. Test suites write to paths relative to the working directory (`./data`, `./tmp`, `./logs`), so "run the tests to get a baseline" silently means "run them against production".
 
@@ -30,3 +30,8 @@ This applies to any pull-to-deploy setup — self-hosted runners, `git pull && r
 - **Interpreting results from an isolated clone:** a shared clone has no secrets file and symlinked dependencies, so anything needing real credentials fails there for environmental reasons. Do not report those as codebase defects; compare against a known-good environment before raising an alarm.
 - A shared clone also sets its remote to the local path it came from — see [[verify-at-destination-prove-the-target]] before trusting any ref comparison made inside one.
 - Echo this rule in any agent definition permitted to run commands on a deployment host.
+
+**Isolating the harness's own directory is not enough — follow the children.** A second incident, on a self-hosted CI runner that shares a machine with the deployment: the suite ran from a CI-local checkout, but it spawns an **ephemeral child process** that inherits a host-path environment variable, and the child resolved its application paths back onto the **live checkout** (and a clone nested inside it). Two more consequences fell out of the same shared machine:
+
+- **A job that rewrites the deployment tree must not overlap a job that reads it.** On a single runner, a self-update job rewriting the install directory while the next run's test job read it produced reds that had nothing to do with the code. Making the update **synchronous** — poll the target until it reports the pushed revision, bounded, failing loudly on timeout — removed the overlap for about 25 seconds of wall clock.
+- **A fix that removes a plausible cause but leaves the symptom is not a diagnosis.** After the ordering fix, one run went red with the deployment provably quiet (no update running, service healthy, the inherited variable unset in the job) and an immediate rerun went green on byte-identical evidence. That non-determinism proved the overlap was *a* cause, not *the* cause, and turned an optional cleanup — decoupling the harness from host path resolution — into required work. Scrub the host resolution in the child's environment, or give the runner its own update-untouched sibling checkouts; either way, decide it deliberately, because the cheaper option changes what the real-data tests can still prove.

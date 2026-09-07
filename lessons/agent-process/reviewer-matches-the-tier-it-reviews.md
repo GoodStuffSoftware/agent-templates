@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-28
 provenance: [contrib-1]
-corroborated: 1
+corroborated: 2
 ---
 Size a reviewer to the **writer it gates**, never below it. Whatever tier the task's type and weight justified for the architect or builder, the reviewer gets the same model. Task type and weight set the tier once; both roles inherit it. Effort may go **higher** for the reviewer — refutation is a search problem, and a reviewer that must find a subtle flaw benefits from more thinking than the writer needed to produce it.
 
@@ -21,4 +21,5 @@ The failure is invisible in the usual metrics. A cheap reviewer approves faster 
 - Escalate blast radius on **both** roles together. Production data, migrations, destructive operations, security or permission boundaries, and subtle-correctness territory (concurrency, sync/merge, money) raise the writer *and* the reviewer. Escalating only the gate leaves a weaker writer still producing the risky change — the gate was never the part that needed to be smarter.
 - When the orchestrator already runs at the matching tier, it can serve as the adversarial pass itself at no extra spawn cost.
 - Audit rosters for this directly: any agent whose name marks it a reviewer, pinned below the highest-tier writer in the same roster, is a finding. It is mechanical to check and easy to let drift, because nothing about a cheap reviewer looks wrong until it misses something.
+- **Mid-flight, escalating only the REVIEWER is the defensible half of the escalation.** When a task widens under a writer that has already proven an assumption false by experiment, read every seam involved, and written a plan whose hardening conditions you can state precisely, re-briefing a higher tier from scratch discards that context and costs more than it buys. The rule this lesson states is that the reviewer never drops *below* the writer — a reviewer **above** the writer is always permitted. Take that option only with the guard rails named in advance: enumerated hardening conditions, adversarial tests named before the work, and a written commitment for what happens if the review blocks. Then **log the deviation** with that commitment ([[no-stall-decision-protocol]]), because the next round is where it quietly becomes a habit — in the case that bought this, the review did block, the deviation was extended one more round on explicitly bounded grounds, and only the ledger entry kept that visible.
 - Audit the OMISSIONS in the same pass. A reviewer with no tier set is not "matched by default" â€” it inherits the orchestrator's, which is a different rule that happens to agree sometimes ([[an-omitted-worker-tier-inherits-the-leads]]).
