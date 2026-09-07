@@ -24,7 +24,55 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
-_(empty — drained by the 2026-09-07 fold)_
+### 2026-09-07 — Committing an analysis is not delivering it
+
+- **Trigger:** a recurring scheduled agent wrote a complete, correct four-part interpretation into a long report file on a feature branch, then reported only its one-sentence headline, because the task's own REPORT step asked for "the headline". The branch was unmerged, so the analysis the task existed to produce was unreadable by the person who commissioned it. The operator had to ask for it explicitly. Every number in the run was right; the deliverable still did not arrive.
+- **Is it generic?** Yes. Stripped: the project, the document, the analysis domain. Kernel: a recurring task whose output is a JUDGMENT must state in its own instructions that the judgment is reproduced in full in the report. Left to inference, an agent under a general "be terse" rule will compress exactly the part that was the deliverable, and a file written to a branch or a path the reader cannot reach counts as undelivered. Terseness rules must carry an explicit carve-out for the artifact the task was bought to produce.
+- **Target:** new lesson under `lessons/`, e.g. `lessons/deliver-the-judgment-not-a-pointer-to-it.md` (tags: reporting, scheduled-tasks, deliverables).
+- **Proposed change:**
+  ```markdown
+  # Deliver the judgment, not a pointer to it
+
+  When a task's deliverable is an interpretation (a written read, a recommendation, a
+  verdict), its instructions must say the interpretation is reproduced VERBATIM and IN
+  FULL in the report, under its own heading. Naming it ("report the headline", "note the
+  conclusion") invites compression of the one thing that mattered.
+
+  Two failure modes this prevents:
+
+  - **Terseness bleed.** A standing "keep reports short" rule is about PROCESS noise. An
+    agent that applies it to the analysis has followed the letter and lost the deliverable.
+    State the carve-out where the terseness rule lives, not only in the task.
+  - **Undelivered artifacts.** Content written to {{BRANCH_OR_PATH}} that the reader cannot
+    open has not been delivered, regardless of how correct it is. Committed is not
+    delivered; a link the reader cannot resolve is not delivery either.
+
+  Test when writing any recurring task: if the agent reported ONLY what this step names,
+  would the person get what they commissioned? If no, the step is underspecified.
+  ```
+- **Applied?** `no`
+
+### 2026-09-07 — Identify a shell by ancestry and `uname`, never by command-not-found
+
+- **Trigger:** a project banned its agents' Bash tool for four months on the strength of one "verification": a PowerShell cmdlet typed into the Bash tool failed with `/usr/bin/bash: line 1: Write-Output: command not found`, which was read as proof the tool ran inside a Linux VM. That output is identical under a Windows-native POSIX layer (MSYS2 / Git for Windows mounts itself at `/usr/bin/bash` too). The ban had been true on an earlier machine where the agent harness itself ran inside the VM; after a PC migration the tool was native and nobody re-tested. Measured cost on the new box: the mandated shell was ~2.5x slower per glue call, used ~8x the memory, and errored on ~1 in 12 tool calls; a hook was hard-denying the faster tool.
+- **Is it generic?** Yes. Stripped: the project, the shells' names, the incident dates. Kernel: a negative result ("X is not found") only proves the absence of X, never the identity of the thing you ran it in. Two different runtimes can share the same error text. A rule whose premise is an environment fact must name the environment it was measured on, and be re-measured after that environment changes (machine migration, harness upgrade, OS reinstall).
+- **Target:** new lesson under `lessons/`, e.g. `lessons/prove-the-runtime-not-the-error-text.md` (tags: verification, environment-drift, shell).
+- **Proposed change:**
+  ```markdown
+  # Prove the runtime, not the error text
+
+  Before a rule says "tool {{TOOL}} runs in {{RUNTIME_A}}", prove it with evidence that
+  distinguishes A from B: `uname -s` / `$OSTYPE` inside the shell, the process's parent
+  chain from the host OS (`ps`, `Get-CimInstance Win32_Process`), or the executable path
+  the host spawned. "Command not found" and "no such file" cannot distinguish runtimes.
+
+  Stamp every environment-dependent rule with WHERE it was measured
+  ("measured {{DATE}} on {{MACHINE}}"). After a machine migration, harness upgrade, or OS
+  reinstall, the stamp is stale and the rule is a hypothesis again — re-measure before
+  a guard keeps enforcing it. A one-line probe at session start is cheaper than four
+  months of the wrong shell.
+  ```
+- **Applied?** `no`
 
 ---
 
