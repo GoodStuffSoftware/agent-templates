@@ -23,7 +23,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `assert-the-resolved-value-not-the-declaration` — Assert the value the system resolves, not the one you declared — precedence rules, unread flags, and unforwarded arguments live in the gap — [universal] — active
 - `avoid-report-prefixed-filenames` — Name lessons and docs with neutral ids so write guards don't trip on the filename — [vendor:anthropic] — active
 - `background-agents-die-with-their-host` — A background agent is a child of its host process — long work runs in an independent session and pushes within minutes — [agent-process] — active
-- `bash-tool-routes-to-wsl` — On Windows, the Bash tool routes to WSL — use the PowerShell tool for native Windows operations — [env:windows, vendor:anthropic] — active
+- `bash-tool-routes-to-wsl` — The Bash tool is whatever shell the harness spawns — Git Bash when Claude Code runs natively on Windows, WSL only when the harness itself runs inside WSL — [env:windows, vendor:anthropic] — active
 - `branch-what-deploys` — Branch what deploys; commit dev-config straight to the integration branch — [universal] — active
 - `bucket-by-the-other-systems-calendar` — When reconciling against someone else's dashboard, bucket by THEIR day boundary and allow for THEIR reporting lag — [universal] — active
 - `budget-fan-out-against-host-memory` — Budget agent fan-out width against the host's memory, not just against the task — the damage surfaces as "flaky tests" somewhere else — [agent-process] — active
