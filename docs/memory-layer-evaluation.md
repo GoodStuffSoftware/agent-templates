@@ -193,14 +193,21 @@ Any retrieval layer should either make them real or stop writing them.
 `~/.claude` is not a git repository, and no parent directory is either **[VERIFIED]**. The only
 durable-copy mechanism visible on the machine is ad-hoc `.bak-<date>` sibling files.
 
-**Correction, on operator report (2026-09-11):** an off-machine copy of the Claude settings tree
-does exist, outside the scope of what was measured here. That removes the catastrophic-loss
-framing this section originally carried. What remains is narrower but still real: the incumbent's
-headline strength — "git-friendly" — **is unrealised**. A copy restores *a* state; it does not
-give history, diff, blame, or the ability to see what a memory said before someone rewrote it.
-Combined with silent discard past the 25 KB ceiling (§4.1) — which a copy taken *after* the
-truncation would faithfully preserve — version control remains worth the five minutes, but this
+**Correction, and the mechanism, now verified (2026-09-11).** An off-machine copy does exist: a
+`session-sync` plugin replicates `~/.claude` to cloud storage via rclone, and **the memory
+directories are included** — they are not on its exclude list [VERIFIED: plugin source]. So the
+catastrophic-loss framing this section originally carried was wrong, and is withdrawn.
+
+What remains is narrower and still real: **a copy is not a history.** Last-write-wins
+replication restores *a* state; it cannot tell you what a memory said before someone rewrote it,
+and a copy taken *after* a silent truncation past the 25 KB ceiling (§4.1) faithfully preserves
+the truncation. The incumbent's headline strength — "git-friendly" — is unrealised, but the fix
 is a hygiene item, not an emergency.
+
+Worth noting for scale: that sync moves **~8.15 GB**, of which **96.7% is session transcripts**
+and **1.47 MB is the memory corpus** [VERIFIED by measurement]. Transport and history are
+therefore separable problems with a ~5,500× size difference between them, and should not be
+solved by the same mechanism — see §7.3.
 
 ### 4.6 Retrieval precision is the real failure
 
@@ -417,11 +424,32 @@ guessed.
 **Operator actions — not plugin features.** These apply to this machine's setup and ship in
 nothing.
 
-1. **Collapse the three duplicate `{{APP_A}}` stores.** Set `CLAUDE_CODE_PROJECT_DIR_NAME` (or
-   `autoMemoryDirectory`) so the store is keyed by project rather than by working-directory
-   path. Merge the WSL, Linux and Windows copies once, by hand, then never again.
-2. **Put the memory corpus in git.** An off-machine copy already exists (§4.5), so this is for
-   history, diff and revert rather than for backup. Five minutes; still worth it.
+1. **Collapse the three duplicate `{{APP_A}}` stores — and this is far smaller than §4.1
+   implied.** Measured **[VERIFIED]**: the WSL store's newest file is 2026-05-01 and the Linux
+   store's is 2026-04-30, with **zero files modified in either in the last 90 days**, against 119
+   in the live Windows store. **No filename exists in either dead store that is absent from the
+   live one** — it is a strict superset by name. On content, 19 of 32 WSL files are byte-identical
+   to their live counterparts, 11 more have a *larger* live copy (i.e. it evolved), and only
+   **two** files hold more content in the dead copy than the live one: `feedback_memory_sync.md`
+   (1,812 B vs 932 B) and `server_minder.md` (5,567 B vs 4,902 B).
+   So this is not a three-way merge. It is: review two files, then archive both directories.
+   Set `CLAUDE_CODE_PROJECT_DIR_NAME` (or `autoMemoryDirectory`) afterwards so the store is keyed
+   by project rather than by working-directory path, and it cannot recur.
+2. **Put the curated text in git — for history, not for backup.** Replication already covers
+   backup (§4.5). Scope the repo to what history is actually wanted for: `projects/*/memory/**`,
+   `settings.json`, `CLAUDE.md`, `skills/`, `agents/`, `hooks/`. Two rules that matter:
+   **seed `.gitignore` from the sync plugin's existing exclude list**, which already enumerates
+   the credential files (`.credentials.json`, `.claude.json`, `mcp.json`, and two token files) —
+   writing one from scratch risks committing a token; and **do not let a live `.git` directory be
+   file-synced**, since last-write-wins replication over a git directory risks index and packfile
+   corruption. Snapshot history with `git bundle create` instead — a single file, which is safe
+   under last-write-wins and restores anywhere.
+   **Do not convert the sync transport itself to git.** Evaluated and rejected: rclone is not
+   behind an adapter, so a git backend means rewriting one module and roughly half of another
+   (~250–350 lines), and git has no workable story for 8 GB of frequently-appended JSONL across
+   4,548 files. The plugin's own README already reached this conclusion independently.
+   *Scope note: sync scoping and a tested full-restore path are tracked separately from this
+   evaluation.*
 
 **Tier 1 — the recommendation. Opt-in, default-off, read-only.**
 
@@ -448,6 +476,17 @@ nothing.
 6. **A `memory-search` skill** whose body tells the model when to reach for cross-project search
    and how to invoke the script — the UC2 entry point for a human or a lead, and the thing the
    nudge in (5) points at.
+7. **A fork-detection check — and it needs no index at all.** Path-encoded stores fork silently
+   for *any* user who runs from two different paths (WSL and Windows, or a moved repo), so this
+   generalises beyond this machine. What actually resolved the case in §7.3 item 1 was three
+   cheap signals, not similarity ranking: **newest mtime per store** (is it live or dead?),
+   **filename-set overlap** (is one a superset?), and **byte-compare on the collisions** (which
+   copy evolved?). That is a pure-filesystem check with no embeddings and no index. Emit a
+   reviewable plan; **propose, never merge** — `memory-doctor.mjs` already sets the precedent of
+   moving files to `archive/` non-destructively rather than deleting. Auto-merging two versions
+   of a technical fact is how the caveat that made it worth keeping gets lost.
+   The similarity engine from (4) is for the *harder* job — near-duplicate facts that disagree,
+   which is reconciliation (item 9), not fork detection.
 
 > **On backfill cost — the operator's concern, and it is smaller than it looks.** BM25 requires
 > **no backfill in the expensive sense**. It indexes markdown that already exists: no LLM pass
@@ -459,7 +498,7 @@ nothing.
 
 **Tier 2 — extract and reconcile, once Tier 1 proves useful.**
 
-7. **Transcript mining is bounded and cheap *if scoped correctly*.** The corpus is 8.0 GB across
+8. **Transcript mining is bounded and cheap *if scoped correctly*.** The corpus is 8.0 GB across
    4,519 `.jsonl` files, but **95% of those are subagent transcripts**, and only ~4.6% of bytes
    are actual prose — the rest is tool output, hook attachments and opaque signature blocks
    **[VERIFIED by sampling]**. Critically, **compaction summaries are persisted on disk**: a
@@ -469,7 +508,7 @@ nothing.
    first**; fall back to raw prose only if that proves thin. Retention is `cleanupPeriodDays:
    180` **[VERIFIED]** — anything older is already gone, which makes this time-sensitive rather
    than optional.
-8. **Reconciliation: surface, don't auto-resolve.** No candidate does this well — Cognee's
+9. **Reconciliation: surface, do not auto-resolve.** No candidate does this well — Cognee's
    maintainers call theirs "minimal", and Graphiti's good answer costs a graph database. The
    proportionate version is a check in the existing audit registry that reports near-duplicate
    pairs above a similarity threshold (the BM25 index already gives you this) and lets the model
