@@ -31,14 +31,22 @@ to capture preferences and names, never file paths or command lines
 memory that says "fixed a path issue" is worthless to you; one that says which flag broke the
 pre-push hook is the entire value.
 
-**Q2 — what shape: a skill plus one script inside the existing `agent-companion` plugin. Not a
-service, not MCP, not a new plugin.** That plugin already has exactly the machinery this needs
-— a `SessionStart` hook that injects text via `hookSpecificOutput.additionalContext`, a scripts
-directory, and a zero-dependency Node-builtins-only discipline — so the marginal cost is one
-~200-line script and one skill, with no new process, no database, and nothing to keep running
-[VERIFIED: plugin source, §7]. Do the three cheap structural fixes first — put the corpus in
-git, collapse the three duplicate stores, and watch the 25 KB index ceiling you are already at
-79% of — because they remove more risk than any tool would.
+**Q2 — what shape: an opt-in, read-only script plus a spawn-time nudge hook inside the existing
+`agent-companion` plugin. Not a service, not MCP, not a new plugin.** That plugin already has
+exactly the machinery this needs — a `PreToolUse` hook already intercepting every `Agent` spawn,
+a `SessionStart` hook that injects text via `hookSpecificOutput.additionalContext`, a scripts
+directory, a 16-key `userConfig` toggle block, and a zero-dependency Node-builtins-only
+discipline — so the marginal cost is one ~200-line script and one hook, with no new process, no
+database and nothing to keep running [VERIFIED: plugin source, §7].
+
+**Two constraints set by the operator, 2026-09-11, and they shape the build:** the feature ships
+**default-off** behind a `userConfig` key, because `agent-companion` is distributed publicly and
+other users may not want their memory touched; and it is **strictly read-only** — it builds a
+derived, disposable index and never writes to or reorganises a memory file.
+
+**The primary consumer is the spawn path, not a human.** §4.6 and §7.1 establish that the churn
+worth fixing is subagents starting cold, not the operator failing to find things. Build for that
+first.
 
 ---
 
@@ -183,10 +191,16 @@ Any retrieval layer should either make them real or stop writing them.
 ### 4.5 The corpus is NOT under version control
 
 `~/.claude` is not a git repository, and no parent directory is either **[VERIFIED]**. The only
-durable-copy mechanism observed is ad-hoc `.bak-<date>` sibling files. The incumbent's headline
-strength — "git-friendly" — **is currently unrealised**. 1.5 MB of accumulated knowledge has no
-history, no diff, no revert and no off-machine copy. Combined with silent discard past the
-25 KB ceiling (§4.1), this is a live data-loss path, not a theoretical one.
+durable-copy mechanism visible on the machine is ad-hoc `.bak-<date>` sibling files.
+
+**Correction, on operator report (2026-09-11):** an off-machine copy of the Claude settings tree
+does exist, outside the scope of what was measured here. That removes the catastrophic-loss
+framing this section originally carried. What remains is narrower but still real: the incumbent's
+headline strength — "git-friendly" — **is unrealised**. A copy restores *a* state; it does not
+give history, diff, blame, or the ability to see what a memory said before someone rewrote it.
+Combined with silent discard past the 25 KB ceiling (§4.1) — which a copy taken *after* the
+truncation would faithfully preserve — version control remains worth the five minutes, but this
+is a hygiene item, not an emergency.
 
 ### 4.6 Retrieval precision is the real failure
 
@@ -370,22 +384,51 @@ So "what would it take to build this into a plugin" has a measured answer: the p
 lines total, its scripts run 79–523 lines each, and the largest single file is a 523-line check
 registry. **A memory-search script belongs at the small end of that range.**
 
-### 7.2 The work, in priority order
+### 7.2 The problem this is actually solving: delivery, not lookup
 
-**Tier 0 — do these regardless of any tool decision.** Highest value per unit effort in this
-document, and none requires software.
+A better index in the lead session puts **zero tokens** into a worker's context. Auto memory is
+not inherited by spawned subagents [VERIFIED: https://code.claude.com/docs/en/memory.md], and
+this was observed directly: across nine subagents spawned during this evaluation, every one
+started with no project memory, and the only context any of them had was text typed into its
+brief by hand.
 
-1. **Put the memory corpus in git.** Initialise a repository at `~/.claude`, commit the
-   `projects/*/memory/` trees, push somewhere private. This converts the worst failure mode —
-   silent loss past the 25 KB ceiling with no history — into a recoverable one.
-2. **Collapse the three duplicate `{{APP_A}}` stores.** Set `CLAUDE_CODE_PROJECT_DIR_NAME` (or
+So the churn has four distinct causes, and they need different fixes:
+
+| Cause | Fixed by a search script? |
+|---|---|
+| Subagents inherit no memory at all | **No** — needs a spawn-time mechanism |
+| Lead must skim 190 index pointers and guess which to open | Partly — ranking beats skimming, *if invoked* |
+| No cross-project view | **Yes** |
+| The fact was never written down | No — that is Tier 2 |
+
+The target state, in the operator's words, is *"targeted technical information and starting
+points for each agent"* — per-task, at spawn. That reorders the work below: the script's primary
+consumer is the spawn path, and a human-invoked search skill is a secondary convenience.
+
+**The mechanism is a nudge, not a content injection.** The hook does not need to rewrite the
+subagent's prompt. It needs to say *"this project has memory covering X, Y and Z — search it
+before you start, like this."* That is strictly weaker, degrades gracefully, costs a few tokens
+rather than a context dump, and avoids depending on an input-rewriting capability that may not
+exist. It also lets the agent pull what its own task needs rather than receiving what a hook
+guessed.
+
+### 7.3 The work, in priority order
+
+**Operator actions — not plugin features.** These apply to this machine's setup and ship in
+nothing.
+
+1. **Collapse the three duplicate `{{APP_A}}` stores.** Set `CLAUDE_CODE_PROJECT_DIR_NAME` (or
    `autoMemoryDirectory`) so the store is keyed by project rather than by working-directory
    path. Merge the WSL, Linux and Windows copies once, by hand, then never again.
-3. **Add an index-ceiling check** to the existing audit script: warn at 20 KB, fail at 24 KB.
-   You are at 19,825 B. This is a ~15-line addition to a check registry that already exists.
+2. **Put the memory corpus in git.** An off-machine copy already exists (§4.5), so this is for
+   history, diff and revert rather than for backup. Five minutes; still worth it.
 
-**Tier 1 — the retrieval layer (the actual recommendation).**
+**Tier 1 — the recommendation. Opt-in, default-off, read-only.**
 
+3. **An index-ceiling check** in the existing audit registry: warn at 20 KB, fail at 24 KB
+   against the documented 25 KB cap. `{{APP_A}}` is at 19,825 B. ~15 lines added to a check
+   registry that already exists, and it generalises to every user of the plugin — which makes it
+   the one piece worth shipping on by default.
 4. **`memory-search.mjs`, ~200 lines, zero dependencies.** Walk every
    `~/.claude/projects/*/memory/**/*.md`, split into chunks by heading, build an in-memory
    **BM25** index, and return ranked hits each labelled with its project. Cache the index as
@@ -397,10 +440,22 @@ document, and none requires software.
    smaller change that addresses the measured defect. Embeddings remain a later upgrade behind
    the same interface if ranked lexical search proves insufficient — and that is a testable
    question, not a guess.
-5. **A `memory-search` skill** whose body tells the model when to reach for cross-project search
-   and how to invoke the script. This is the UC2 entry point.
-6. **Optionally, one `SessionStart` line** naming which other projects have memory and how to
-   search them — so the model knows the capability exists without being told.
+5. **A spawn-time nudge on the existing `PreToolUse` / `^Agent$` hook — the piece that fixes the
+   churn.** `spawn-guard.mjs` already intercepts every subagent spawn [VERIFIED: plugin source].
+   Extend that path to run the search against the brief text and emit a short nudge naming which
+   memory topics look relevant and how to search them. Keep it to a handful of lines, never a
+   context dump. Behind its own `userConfig` key, default off.
+6. **A `memory-search` skill** whose body tells the model when to reach for cross-project search
+   and how to invoke the script — the UC2 entry point for a human or a lead, and the thing the
+   nudge in (5) points at.
+
+> **On backfill cost — the operator's concern, and it is smaller than it looks.** BM25 requires
+> **no backfill in the expensive sense**. It indexes markdown that already exists: no LLM pass
+> over the corpus, no embedding API, no per-file processing cost, no network. Building the index
+> over 1.5 MB is seconds, and it is disposable — delete it and rebuild. The genuinely
+> substantial backfills are (a) embedding the corpus, which is why §7.3 defers embeddings behind
+> the same interface, and (b) transcript mining over 8 GB, which is Tier 2 and scoped to
+> compaction summaries precisely to keep it bounded. Ranking is the cheap half.
 
 **Tier 2 — extract and reconcile, once Tier 1 proves useful.**
 
@@ -421,7 +476,7 @@ document, and none requires software.
    or the operator adjudicate. Silent automatic merging of technical facts is how you lose the
    caveat that made the fact worth keeping.
 
-### 7.3 What breaks
+### 7.4 What breaks
 
 - **The index cache goes stale** if a memory file changes without the mtime check firing.
   Rebuild whenever any source mtime exceeds the cache's, and keep rebuild cheap enough (1.5 MB)
@@ -438,11 +493,24 @@ document, and none requires software.
 - **Zero-dependency discipline is a real constraint.** BM25 in plain JS is fine. The moment
   anyone wants embeddings they want a model runtime, and that breaks a rule the plugin has held
   across 4,480 lines. Decide that consciously if it comes up.
-- **Nothing here helps subagents.** Auto memory is not inherited by spawned subagents
-  [VERIFIED]. A skill-based search *would* work inside a subagent, which is a genuine advantage
-  of the skill shape over the injection shape — worth noting, untested.
+- **The nudge's delivery target is unverified.** It is confirmed that a `PreToolUse` hook on
+  `^Agent$` fires at spawn [VERIFIED: plugin source], but **not** whether its output reaches the
+  *spawned subagent* or only the *spawning session*, nor whether `SubagentStart` can emit
+  `additionalContext` into the subagent the way `SessionStart` does for a main session. Both
+  routes work — one nudges the worker directly, the other nudges the lead to put it in the brief
+  — but they are different builds. Settle this before writing the hook; it is a ten-minute
+  documentation check, listed in §11.
+- **Default-off features go unused.** Shipping behind a `userConfig` key is correct for a
+  publicly distributed plugin, but it means the operator must remember to enable it and no one
+  else will discover it. Mitigate by turning on only the index-ceiling check by default — it is
+  read-only, universally applicable, and warns about a real documented cliff — and leaving
+  search and the nudge opt-in.
+- **A nudge on every spawn is a recurring context cost.** At 77 spawns in 24 hours [VERIFIED:
+  plugin telemetry], even a few lines per spawn adds up, and a nudge that fires when nothing
+  relevant exists is pure noise. Emit nothing when the top-ranked hit falls below a score
+  threshold; silence must be the default state.
 
-### 7.4 Why not the other shapes
+### 7.5 Why not the other shapes
 
 - **Standalone service:** nothing here needs a process. Rejected on criterion 3.
 - **MCP server:** defensible, and the natural upgrade path — but it is a separate process to
@@ -576,6 +644,13 @@ Falsifiable conditions, strongest first.
   negative]. **This is a significant gap**: the two skills that may already solve two of the
   three named capabilities cannot be inspected before relying on them. *Next step:* invoke them
   in a scratch session and observe what loads — **before** building anything in Tier 2.
+- **Which hook can actually deliver text into a spawned subagent's context.** Specifically: can a
+  `PreToolUse` hook modify the `Agent` tool's `prompt` input, or does it only return text to the
+  spawning session? Does a `SubagentStart` hook exist in the documented event list, and can it
+  emit `additionalContext` that lands in the subagent? Does the `memory:` frontmatter field on a
+  subagent definition point at an existing memory directory or only create a separate one? This
+  is the one open question that changes the §7.3 item 5 build, and it is a short documentation
+  check. It was scoped for this evaluation but not completed.
 - **Whether mem0's self-hosted OSS build supports the compound cross-scope filters** documented
   for its managed platform. The documentation demonstrates them on Platform only. Matters only
   if mem0 is reconsidered.
