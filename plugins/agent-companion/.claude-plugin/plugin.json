@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.8.3",
+  "version": "0.12.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -113,6 +113,36 @@
       "title": "Update notice",
       "description": "At session start, say when a newer plugin version is installed but this session is still running an older one. No side effects; updating itself is left to the harness and the daily local scout.",
       "default": true
+    },
+    "memory_search": {
+      "type": "boolean",
+      "title": "Memory search",
+      "description": "Master switch for BM25 retrieval over the operator's memory corpus. Gates the spawn-time memory brief below (memory_brief also has to be on). Does not gate scripts/memory-search.mjs itself — like memory-doctor.mjs, that CLI runs whenever invoked directly; this only controls automatic use from a hook. Read-only with respect to memory files; the index it builds is derived and disposable.",
+      "default": false
+    },
+    "memory_brief": {
+      "type": "boolean",
+      "title": "Memory brief at spawn",
+      "description": "Master switch for saying something about the memory corpus in a subagent's brief at spawn time. WHICH behaviour runs is chosen by memory_brief_mode. Requires memory_search to also be on (that is the outer master switch).",
+      "default": false
+    },
+    "memory_brief_mode": {
+      "type": "string",
+      "title": "Memory brief mode",
+      "description": "Which spawn-time memory behaviour runs when memory_brief is on. \"nudge\" (default): threshold-free and relevance-blind — appends one short line saying a searchable memory corpus exists, how many files this project has, how many other projects have one, and the exact search command; never scores or ranks content, so it cannot be wrong the way a score-gated block can. \"pointers\": the original BM25-ranked block, gated by memory_brief_max_hits/memory_brief_min_score (see that key's description for why an absolute score threshold cannot separate relevance from brief length on this operator's corpus — pointers mode is not the default because of that finding). \"off\": memory_brief is on but neither behaviour runs.",
+      "default": "nudge"
+    },
+    "memory_brief_max_hits": {
+      "type": "number",
+      "title": "Memory brief max hits (pointers mode only)",
+      "description": "How many memory pointers to append to a spawn brief at most. Applies only when memory_brief_mode is \"pointers\"; nudge mode ignores this.",
+      "default": 3
+    },
+    "memory_brief_min_score": {
+      "type": "number",
+      "title": "Memory brief minimum score (pointers mode only)",
+      "description": "Applies only when memory_brief_mode is \"pointers\"; nudge mode ignores this and uses no score at all. Raw BM25 score (k1=1.2, b=0.75, summed over matched query terms) the top hit must clear before any pointer block is appended. Below this the brief is left untouched. Calibrated against this operator's real corpus: a genuinely on-topic long brief scored 21.63, an off-topic-but-plausible long brief scored 17.65, a nonsense long brief scored 6.71, and a genuinely on-topic SHORT brief scored only 10.70 — below the off-topic long case. BM25 sums over query terms, so score tracks brief length almost as much as relevance; no fixed threshold separates the two on this corpus (25 sits above the on-topic long case itself), and relative gating (top/median ratio) is worse — the nonsense query produced the highest ratio measured (1.33). This is why memory_brief_mode defaults to \"nudge\" instead of tuning this number further.",
+      "default": 25
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
