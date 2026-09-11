@@ -419,6 +419,74 @@ rather than a context dump, and avoids depending on an input-rewriting capabilit
 exist. It also lets the agent pull what its own task needs rather than receiving what a hook
 guessed.
 
+### 7.2a Delivery mechanism — resolved by test, 2026-09-11
+
+Two claims in earlier drafts of this section were **wrong, and are corrected here.**
+
+**Correction 1 — subagents are not memory-blind.** The documentation states that a subagent does
+not load the main conversation's auto memory. A direct test — spawning a subagent and asking it
+to report its own starting context — found otherwise on this harness: it **did** receive the
+project's `MEMORY.md` index, named the project, and quoted its opening lines, alongside the user
+`CLAUDE.md`, a git-status block and the skills listing **[VERIFIED by test]**. The earlier draft
+asserted subagents start blind; that was inferred from documentation and never observed.
+What a subagent genuinely does **not** get: memory *topic files* (index only), any cross-project
+view, any ranking, and — confirmed by the same test — **any `SessionStart` hook output**; the
+plugin's own scout line was plainly absent. Treat the memory-index behaviour as version-sensitive:
+it contradicts the docs, so re-test it rather than relying on it.
+
+So the churn is not "workers start with nothing." It is that a worker receives **the same
+unranked pointer list the lead does** — 2 entries in a small project, 190 in the largest — with
+nothing targeting it to that worker's task.
+
+**Correction 2 — which mechanisms can actually deliver.** Tested, in order of what was found:
+
+| Mechanism | Verdict |
+|---|---|
+| `SubagentStart` hook output | **Dead end.** The event exists, but its output is *discarded entirely* except one terminal field — documented, and the plugin's own hook comment already says so **[VERIFIED]** |
+| `SessionStart` hook output | **Dead end.** Fires only for `startup`/`resume`/`clear`/`compact`/`fork`; a normal spawned subagent gets none, confirmed by the missing scout line **[VERIFIED by test]** |
+| `memory:` subagent frontmatter | Real but unsuitable — creates a *separate* per-agent directory keyed by agent name; cannot point at the project's auto memory **[VERIFIED]** |
+| **`PreToolUse` on `^Agent$` returning `updatedInput`** | **Works.** This is the mechanism |
+
+The last one needed a real test, because an earlier draft claimed it was "already proven in
+production" on the strength of the plugin's existing model-autofill path. That claim was
+**false**: of 401 logged spawns, **zero** had `model_autofilled: true` — every spawn names a
+model explicitly, so the branch had never executed. The code existed; the mechanism was unproven.
+
+A controlled probe settled it: a subagent was spawned with **no `model` argument** and a declared
+weight, from a session running Opus. The guard's autofill set `model: haiku` via `updatedInput`,
+and the subagent's own transcript records it running as `claude-haiku-4-5-20251001`
+**[VERIFIED by test]**. The harness therefore consumes `updatedInput` for the `Agent` tool.
+Because `updatedInput` is a whole-object replacement, a mutated `prompt` travels the same path.
+
+**Constraint this imposes on the build:** the existing guard already returns `updatedInput` to
+autofill the model. There must be **exactly one `updatedInput` per spawn**, or a second hook on
+the same matcher could silently clobber the model autofill — a live cost-control feature. So the
+memory logic belongs *inside* the existing hook, not in a second one registered alongside it.
+
+### 7.2b Why the pointers are a nudge, not injected content
+
+The intuitive design — rank the brief against the corpus and inject the best passages — requires
+deciding *whether anything is relevant at all*, and BM25 scores cannot make that call. Measured
+on this corpus **[VERIFIED by test]**:
+
+| Spawn brief | top score | top ÷ median |
+|---|---|---|
+| on-topic, long | 21.63 | 1.31 |
+| off-topic but plausible dev text, long | 17.65 | 1.26 |
+| **nonsense, long** | 6.71 | **1.33** |
+| on-topic, short | 10.70 | 1.54 |
+
+BM25 sums over query terms, so the score tracks brief *length* as much as relevance: a long
+off-topic brief outranks a short on-topic one. Normalising by matched-term count did not help,
+and a *relative* gate is worse still — the nonsense query produced the highest top-to-median
+ratio of the set. There is no threshold that separates these.
+
+The resolution is to stop asking this layer to judge relevance. Append **one line** stating that
+a searchable corpus exists and how to query it, and let the agent — which is good at judging
+relevance — decide whether to look. That needs no threshold, is invariant to brief length, costs
+~250 characters, and is never wrong. Scored pointer injection remains available as a non-default
+mode, documented with the numbers above so the next person does not re-derive them.
+
 ### 7.3 The work, in priority order
 
 **Operator actions — not plugin features.** These apply to this machine's setup and ship in
@@ -683,13 +751,7 @@ Falsifiable conditions, strongest first.
   negative]. **This is a significant gap**: the two skills that may already solve two of the
   three named capabilities cannot be inspected before relying on them. *Next step:* invoke them
   in a scratch session and observe what loads — **before** building anything in Tier 2.
-- **Which hook can actually deliver text into a spawned subagent's context.** Specifically: can a
-  `PreToolUse` hook modify the `Agent` tool's `prompt` input, or does it only return text to the
-  spawning session? Does a `SubagentStart` hook exist in the documented event list, and can it
-  emit `additionalContext` that lands in the subagent? Does the `memory:` frontmatter field on a
-  subagent definition point at an existing memory directory or only create a separate one? This
-  is the one open question that changes the §7.3 item 5 build, and it is a short documentation
-  check. It was scoped for this evaluation but not completed.
+- ~~Which hook can deliver text into a spawned subagent's context.~~ **RESOLVED — see §7.2a.**
 - **Whether mem0's self-hosted OSS build supports the compound cross-scope filters** documented
   for its managed platform. The documentation demonstrates them on Platform only. Matters only
   if mem0 is reconsidered.
