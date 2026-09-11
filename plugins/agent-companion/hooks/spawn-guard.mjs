@@ -12,7 +12,9 @@
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, effortFor,
+  dataDir,
 } from './lib/context.mjs';
+import { buildMemoryBrief } from './lib/memory-brief.mjs';
 
 const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
 
@@ -94,6 +96,31 @@ try {
     updatedInput = { ...input, model };
   }
 
+  // --- Memory brief (deliverable 2) --------------------------------------
+  // Appends AT MOST once, into the SAME updatedInput fit_autofill may already
+  // be building above — see the module banner in lib/memory-brief.mjs for why
+  // this is a function call here rather than a second hook on this matcher.
+  // Computed lazily (only at an actual allow site, never on a path that ends
+  // in deny()) so a premium spawn that gets denied never pays for an index
+  // read it will not use.
+  function withBrief(baseInput) {
+    // memory_search is the master switch for the whole feature; memory_brief
+    // is the narrower "append pointers to a spawn brief" behaviour. Both must
+    // be turned on — each defaults to false, so this is inert until both are.
+    if (!opt('memory_search', false) || !opt('memory_brief', false)) return baseInput;
+    try {
+      const mb = buildMemoryBrief({
+        prompt: brief,
+        cwd: p.cwd,
+        maxHits: opt('memory_brief_max_hits', 3),
+        minScore: opt('memory_brief_min_score', 25),
+        dataDirPath: dataDir(),
+      });
+      if (mb.block) return { ...(baseInput || input), prompt: `${input.prompt || ''}${mb.block}` };
+    } catch { /* fail open: no pointers, spawn proceeds untouched */ }
+    return baseInput;
+  }
+
   let fit = null;
   if (fitOn && model && !autofilled) {
     try {
@@ -137,7 +164,7 @@ try {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
   }
 
-  if (!isPremium(model)) allowWith(note, updatedInput);
+  if (!isPremium(model)) allowWith(note, withBrief(updatedInput));
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -198,7 +225,7 @@ try {
     if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
-  allowWith(note, updatedInput);
+  allowWith(note, withBrief(updatedInput));
 } catch {
   passthrough(); // never break a session
 }
