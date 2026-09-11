@@ -1,6 +1,6 @@
 ---
 name: memory-search
-description: Search the operator's WHOLE memory corpus — every project's memory/*.md under ~/.claude/projects/*/memory/, not just this one — with BM25 lexical ranking. Use when a task smells previously-solved, when you hit an unfamiliar error and want to know if another project already hit it, when recalling why a past decision was made, or when onboarding to a repo you have not worked in before. Triggers: "have I solved this before", "did we hit this error in another project", "what did we decide about X", "is there prior art for this", recalling a past fix across repos.
+description: Search the operator's WHOLE memory corpus — every project's memory/*.md under ~/.claude/projects/*/memory/, not just this one — with BM25 lexical ranking. Use when a task smells previously-solved, when you hit an unfamiliar error and want to know if another project already hit it, when recalling why a past decision was made, or when onboarding to a repo you have not worked in before. Triggers - "have I solved this before", "did we hit this error in another project", "what did we decide about X", "is there prior art for this", recalling a past fix across repos.
 ---
 
 # Memory search — cross-project technical recall
