@@ -26,11 +26,37 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 - **Applied?** `no` (a maintainer flips this to `yes` and removes the entry once folded in).
 ```
 
-**Placement note:** entries go under `## Entries` below, newest first — not above this section, and not below the fold history. Entries drifted out of that section in both the 2026-08-31 and 2026-09-07 folds, which is easy to do and harmless, but the queue reads correctly only when every pending entry lives in one place.
+**Placement note:** entries go under `## Entries
+
+## Entries
+
+### 2026-09-11 — An integration gate catches what a builder's self-report does not
+
+- **Trigger:** A builder agent reported `{{VALIDATE_CMD}}` as passing ("Validation passed") in its
+  completion report. An independent integration step run later, on the merged tree, found that same
+  command exiting non-zero: the skill it had just authored had YAML frontmatter with an unquoted
+  `Triggers: ` inside a plain scalar, which terminates the scalar. The skill would have loaded with
+  **empty metadata and never triggered** — a silent failure, not a crash. Everything else the builder
+  reported was accurate and independently reproduced, so this was not a careless agent; it was a
+  self-report of a check that was either run at the wrong moment or not re-run after a later edit.
+- **Is it generic?** Yes. Any pipeline where the agent that writes the code is also the agent that
+  reports the verification has this hole, regardless of tool or language. It is sharper for
+  **manifest/frontmatter validation** specifically, because the failure mode is silent degradation
+  rather than an error at runtime — nothing downstream would have complained.
+- **Target:** a new lesson under `lessons/agent-process/`.
+- **Proposed change:** *Re-run the validating command at the integration point, on the merged tree,
+  and treat the builder's report of it as a claim rather than a result.* A builder's self-verification
+  is still worth demanding — it catches most things cheaply and early — but it is evidence, not proof,
+  because it is taken at a moment the builder chooses and on a tree only the builder has seen. Put the
+  authoritative run where nothing can be edited after it: the same place the merge happens, with an
+  explicit "if this fails, do not publish" rule. Corollary for briefs: tell the integrator the expected
+  passing output, so a *changed* result is as visible as a failing one.
+- **Applied?** `no`
+
+` below, newest first — not above this section, and not below the fold history. Entries drifted out of that section in both the 2026-08-31 and 2026-09-07 folds, which is easy to do and harmless, but the queue reads correctly only when every pending entry lives in one place.
 
 ---
 
-## Entries
 ### 2026-09-09 — Never pipe a test gate through `tail`: you discard the evidence and the exit code
 
 - **Trigger:** a CI-style gate ran the unit suite as `<test-runner> 2>&1 | tail -6`. The run reported 2 failed test FILES, but `tail` kept only the summary and discarded the FAIL lines, so the failing files could never be named. Worse, the failure set turned out to be non-deterministic under load, so re-running could not recover the lost names — the evidence was gone permanently. A second defect rode along: in a pipeline the shell reports the LAST command's exit status, so `$?` was `tail`'s `0` and the gate looked like it passed.
@@ -79,7 +105,6 @@ Append a new dated entry at the **top** of the list (newest first), using the te
   > When you correct an ordering instruction, correct its REASON too, and say plainly what the old reason claimed and why it was wrong. Otherwise the discredited rationale gets reconstructed from memory and the safeguard is dropped as pointless.
 
 - **Applied?** `no`
-
 
 ### 2026-09-07 — Committing an analysis is not delivering it
 
@@ -175,4 +200,3 @@ sessions). Never for a sub-agent reporting to the thing that spawned it.
 **Generalization:** whenever a brief names a channel, ask whether the channel
 is guaranteed to exist in the context the agent will actually run in. A brief
 that depends on an unverified channel has no channel.
-
