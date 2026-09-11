@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -113,6 +113,30 @@
       "title": "Update notice",
       "description": "At session start, say when a newer plugin version is installed but this session is still running an older one. No side effects; updating itself is left to the harness and the daily local scout.",
       "default": true
+    },
+    "memory_search": {
+      "type": "boolean",
+      "title": "Memory search",
+      "description": "Master switch for BM25 retrieval over the operator's memory corpus. Gates the spawn-time memory brief below (memory_brief also has to be on). Does not gate scripts/memory-search.mjs itself — like memory-doctor.mjs, that CLI runs whenever invoked directly; this only controls automatic use from a hook. Read-only with respect to memory files; the index it builds is derived and disposable.",
+      "default": false
+    },
+    "memory_brief": {
+      "type": "boolean",
+      "title": "Memory brief at spawn",
+      "description": "Append at most memory_brief_max_hits relevant memory pointers to a subagent's brief when the spawn declares a prompt and the top BM25 hit clears memory_brief_min_score. Silent otherwise — most spawns get nothing appended. Requires memory_search to also be on (it is the master switch).",
+      "default": false
+    },
+    "memory_brief_max_hits": {
+      "type": "number",
+      "title": "Memory brief max hits",
+      "description": "How many memory pointers to append to a spawn brief at most.",
+      "default": 3
+    },
+    "memory_brief_min_score": {
+      "type": "number",
+      "title": "Memory brief minimum score",
+      "description": "Raw BM25 score (k1=1.2, b=0.75, summed over matched query terms) the top hit must clear before any pointer block is appended. Below this the brief is left untouched. Calibrated against this operator's real corpus (~435 files / 1400 chunks): realistic-length spawn briefs on a genuinely relevant topic scored 27-51 here, but same-length off-topic briefs scored up to 30 purely from a few incidentally rare shared words — there is no score that cleanly separates the two on this corpus, longer briefs simply accumulate more incidental overlap. 25 is set to favor silence: it costs some true positives (an on-topic but lower-scoring brief gets nothing) to keep the false-positive rate low, matching \"silence is the default state.\"",
+      "default": 25
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
