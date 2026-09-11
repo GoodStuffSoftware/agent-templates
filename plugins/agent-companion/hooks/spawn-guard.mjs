@@ -14,7 +14,7 @@ import {
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, effortFor,
   dataDir,
 } from './lib/context.mjs';
-import { buildMemoryBrief } from './lib/memory-brief.mjs';
+import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 
 const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
 
@@ -105,19 +105,36 @@ try {
   // read it will not use.
   function withBrief(baseInput) {
     // memory_search is the master switch for the whole feature; memory_brief
-    // is the narrower "append pointers to a spawn brief" behaviour. Both must
-    // be turned on — each defaults to false, so this is inert until both are.
+    // is the narrower "say something about memory at spawn time" behaviour.
+    // Both must be turned on — each defaults to false, so this is inert
+    // until both are. memory_brief_mode then picks WHICH behaviour runs:
+    //   "nudge"    (default) — threshold-free, relevance-blind capability
+    //               mention. See lib/memory-brief.mjs for why this is the
+    //               default: BM25 score does not separate relevance from
+    //               brief length on this corpus, and there is no threshold
+    //               that fixes it.
+    //   "pointers" — the original BM25-ranked, minScore-gated block.
+    //   "off"      — memory_brief is on but neither behaviour runs.
     if (!opt('memory_search', false) || !opt('memory_brief', false)) return baseInput;
+    const mode = String(opt('memory_brief_mode', 'nudge')).toLowerCase();
+    if (mode === 'off') return baseInput;
     try {
-      const mb = buildMemoryBrief({
-        prompt: brief,
-        cwd: p.cwd,
-        maxHits: opt('memory_brief_max_hits', 3),
-        minScore: opt('memory_brief_min_score', 25),
-        dataDirPath: dataDir(),
-      });
-      if (mb.block) return { ...(baseInput || input), prompt: `${input.prompt || ''}${mb.block}` };
-    } catch { /* fail open: no pointers, spawn proceeds untouched */ }
+      if (mode === 'pointers') {
+        const mb = buildMemoryBrief({
+          prompt: brief,
+          cwd: p.cwd,
+          maxHits: opt('memory_brief_max_hits', 3),
+          minScore: opt('memory_brief_min_score', 25),
+          dataDirPath: dataDir(),
+        });
+        if (mb.block) return { ...(baseInput || input), prompt: `${input.prompt || ''}${mb.block}` };
+        return baseInput;
+      }
+      // "nudge", and any unrecognised value — fail toward the safe default
+      // rather than silently doing nothing for a typo'd config value.
+      const nudge = buildMemoryNudge({ cwd: p.cwd, dataDirPath: dataDir() });
+      if (nudge) return { ...(baseInput || input), prompt: `${input.prompt || ''}${nudge}` };
+    } catch { /* fail open: nothing appended, spawn proceeds untouched */ }
     return baseInput;
   }
 

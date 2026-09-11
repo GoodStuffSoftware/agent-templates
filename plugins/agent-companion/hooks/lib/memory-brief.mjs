@@ -1,23 +1,47 @@
-// Deliverable 2 — targeted memory pointers appended to a spawn brief.
+// Deliverable 2 — targeted memory pointers appended to a spawn brief — plus
+// deliverable "nudge mode", a second, threshold-free behaviour below.
 //
-// This is a PURE FUNCTION, not a second PreToolUse hook on ^Agent$.
+// These are PURE FUNCTIONS, not a second PreToolUse hook on ^Agent$.
 // spawn-guard.mjs already returns hookSpecificOutput.updatedInput on that
 // matcher, to autofill `model` from the routing table (its fit_autofill
 // path). A second hook on the same matcher returning its own updatedInput
 // could silently clobber that — one PreToolUse response wins, the other's
 // updatedInput is simply dropped, and a live cost-control feature (the model
 // autofill) goes quiet with no error anywhere. So this lives here instead:
-// spawn-guard.mjs calls buildMemoryBrief() and merges the result into the
-// SAME updatedInput object that carries the model change. Exactly one
-// updatedInput per spawn, carrying both.
+// spawn-guard.mjs calls buildMemoryBrief() or buildMemoryNudge() and merges
+// the result into the SAME updatedInput object that carries the model
+// change. Exactly one updatedInput per spawn, carrying both.
 //
 // Silence is the default state. ~77 spawns/24h on this machine is a lot of
 // chances to be noise, so nothing is appended unless the top hit clears
 // minScore, and the function fails open (returns no block) on anything it
 // cannot do quickly — including a stale index, which it will happily serve
 // rather than block the spawn to rebuild.
+//
+// --- Why pointer mode (BM25 + minScore) is gated off by default -----------
+//
+// Measured on this operator's real corpus, top BM25 score (k1=1.2, b=0.75):
+//   on-topic, long                 21.63
+//   off-topic but plausible dev text, long   17.65
+//   nonsense, long                  6.71
+//   on-topic, short                10.70
+// BM25 is a SUM over matched query terms, so it scales with brief length
+// almost as much as with relevance — the on-topic SHORT brief (10.70) scores
+// below the off-topic LONG one (17.65). No fixed threshold separates "about
+// a documented topic" from "long enough to accumulate a few incidentally
+// rare shared words": the shipped default of 25 sits above the genuinely
+// on-topic long case too, so pointer mode is silent even when it should not
+// be. Relative gating (top-hit / median-hit ratio) was tried as a fix and is
+// WORSE, not better — on this same data the nonsense query produced the
+// HIGHEST ratio observed (1.33), i.e. relative gating is most confident
+// exactly when it is most wrong. The fix is not a better threshold; there
+// isn't one. It is to stop asking a score to decide relevance at this layer
+// at all — see buildMemoryNudge() below, which asks nothing of the kind and
+// is the default (`memory_brief_mode: "nudge"`). Do not re-derive this by
+// re-tuning minScore; the next tuning pass will hit the same wall.
 
-import { basename } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadOrBuildIndex, search, memoryRoot } from './memory-index.mjs';
 
 const MAX_BLOCK_CHARS = 1200;
@@ -103,4 +127,82 @@ export function buildMemoryBrief({
   if (block.length > MAX_BLOCK_CHARS) block = `${block.slice(0, MAX_BLOCK_CHARS - 1)}…`;
 
   return { block, hits: top };
+}
+
+// --- Nudge mode (threshold-free, the default) ------------------------------
+//
+// See the module banner above for why: relevance is not this layer's job to
+// judge from a score. This asks nothing of the index but cheap metadata —
+// how many files exist, for which projects — and never ranks or filters by
+// content. It is either silent (no corpus anywhere relevant) or says the
+// same thing regardless of what the brief is about, which is the point: it
+// cannot be wrong the way a score-gated block can be.
+
+// ${CLAUDE_PLUGIN_ROOT} is set by the harness for the hook process itself
+// (see hooks.json / self-update.mjs), which is exactly the context this runs
+// in — spawn-guard.mjs is invoked as a hook. The import.meta.url fallback
+// mirrors context.mjs's modelTiers() for the same "no env var" case (e.g. a
+// direct script invocation for tests), walking up from hooks/lib/ to the
+// plugin root the same two levels.
+function pluginRoot() {
+  const envRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  if (envRoot) return envRoot;
+  return join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+}
+
+// Pure aside from the cached-index read: given cwd and the plugin's data
+// dir, returns a single nudge line, or '' when there is nothing to nudge
+// about (no memory files for this project AND none for any other project).
+// No scoring, no threshold, no relevance judgement — just a file count.
+export function buildMemoryNudge({ cwd, root, dataDirPath }) {
+  if (!dataDirPath) return '';
+
+  let index;
+  try {
+    ({ index } = loadOrBuildIndex({
+      root: root || memoryRoot(),
+      dataDirPath,
+      forceRebuild: false,
+      rebuildIfStale: false, // same rule as pointers mode: never block a spawn on a reindex
+    }));
+  } catch {
+    return ''; // fail open
+  }
+
+  // index.files is keyed by relKey = `${project}/${fileRel}` (memory-index.mjs)
+  // — split on the first '/' to recover per-project file counts without a
+  // second filesystem walk.
+  const counts = new Map();
+  for (const relKey of Object.keys(index?.files || {})) {
+    const slash = relKey.indexOf('/');
+    if (slash < 0) continue;
+    const project = relKey.slice(0, slash);
+    counts.set(project, (counts.get(project) || 0) + 1);
+  }
+  if (!counts.size) return '';
+
+  const leaf = projectLeaf(cwd).toLowerCase();
+  let hereProject = null;
+  let hereCount = 0;
+  if (leaf) {
+    for (const [project, n] of counts) {
+      if (project.toLowerCase().includes(leaf)) { hereProject = project; hereCount = n; break; }
+    }
+  }
+  const otherCount = counts.size - (hereProject ? 1 : 0);
+  if (hereCount === 0 && otherCount === 0) return '';
+
+  const here = hereCount > 0 ? `${hereCount} here` : '0 here';
+  const others = `${otherCount} elsewhere`;
+  const script = join(pluginRoot(), 'scripts', 'memory-search.mjs');
+
+  // Worded as an available capability, not an instruction or established
+  // fact — the agent decides whether its task is unfamiliar enough to use
+  // it. Relevance-blind by design: this line is the same whether the brief
+  // is on-topic, off-topic, or nonsense (see calibration table above). Kept
+  // short deliberately — the resolved script path below is the variable
+  // part of this line's length and cannot be shortened further, so the
+  // fixed wording stays terse to leave it room.
+  return `\n\n[agent-companion: searchable memory files exist (${here}, ${others}) — ` +
+    `if unfamiliar with this task, try: node ${script} "<query>" [--project <name>]]`;
 }
