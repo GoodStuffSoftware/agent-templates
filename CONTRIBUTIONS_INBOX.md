@@ -4,6 +4,14 @@ A holding area for generic improvements contributed back from real projects when
 
 **This is a queue, not a home.** A change isn't "done" while it's only in the inbox.
 
+## 2026-09-09 landing-crew session ({{PROJECT}})
+
+- **A merge box that rebases sources itself will refuse anything it cannot auto-resolve; rebase locally onto the CURRENT integration tip immediately before every trigger.** Observed: a one-commit branch three docs commits behind was refused. Pattern: backup ref, local rebase, push --force-with-lease, trigger; repeat per landing because each merge moves the tip.
+- **Hold long waits in a cheap foreground worker, not a background loop in the lead.** A haiku-tier agent runs a node poll script (2-minute interval, ~9.5-minute runs, exit 0 on idle / 3 on still-running) and returns once with the verdict; the lead blocks on it. Background shell loops time out and wake the lead for empty turns, and can die with the host.
+- **Shared-box E2E capacity degrades across an evening of gates** (free memory 6.6 GB to 2.9 GB, auto-reduced from 4 workers to 1); timing-sensitive cases then fail 3 of 3. Read the runner plan lines before blaming the test, and card the orphan reaper.
+- **Deferred connector-prefixed MCP tools surface only after the first tool call**; a "plugin needs authentication" banner is a separate login. Search the toolset for the capability name under any prefix before falling back to REST.
+- **Stack a small reviewed fix under a larger reviewed branch so one gate lands both** when gates are the bottleneck; keep them as distinct commits.
+
 ## How to add an entry
 
 Append a new dated entry at the **top** of the list (newest first), using the template below. Before adding it, run `node scripts/leak-check.mjs` — the entry must contain no real-world tokens (generalize specifics to `{{PLACEHOLDERS}}` or generic examples first).
@@ -23,6 +31,55 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 ---
 
 ## Entries
+### 2026-09-09 — Never pipe a test gate through `tail`: you discard the evidence and the exit code
+
+- **Trigger:** a CI-style gate ran the unit suite as `<test-runner> 2>&1 | tail -6`. The run reported 2 failed test FILES, but `tail` kept only the summary and discarded the FAIL lines, so the failing files could never be named. Worse, the failure set turned out to be non-deterministic under load, so re-running could not recover the lost names — the evidence was gone permanently. A second defect rode along: in a pipeline the shell reports the LAST command's exit status, so `$?` was `tail`'s `0` and the gate looked like it passed.
+- **Is it generic?** Yes. Stripped: the runner, the project, the specific failing files. The kernel is about how you capture output from any gate that can fail: truncation is destructive when the interesting content is in the middle, and pipelines lie about exit codes by default. Applies to test runners, linters, builds, deploy scripts — anything whose failure detail you might need after the fact.
+- **Target:** a new tagged file under `lessons/` — tags `testing`, `ci`, `shell`, `diagnostics`.
+- **Proposed change:**
+
+  > **Capture gate output in full; never truncate it in the pipeline.**
+  >
+  > Write the complete output to a file and read the file:
+  >
+  > ```bash
+  > {{RUNNER}} > "{{OUT}}" 2>&1; status=$?
+  > grep -nE 'FAIL|Error|✕' "{{OUT}}" | head -40
+  > ```
+  >
+  > Two distinct failures come from `{{RUNNER}} | tail -N`:
+  > 1. **The evidence is destroyed.** Failure detail is emitted *before* the summary, so a tail window sized to catch the summary discards exactly the part naming what broke. When the failure is non-deterministic, re-running does not recover it — that information is gone for good.
+  > 2. **The exit code is wrong.** A shell pipeline reports the LAST command's status, so a failing run piped into a succeeding `tail`/`head`/`grep` looks like success. Capture the status from the runner directly, or set `pipefail` where the shell supports it.
+  >
+  > Truncate only when *displaying* something you have already stored. The stored artifact is the source of truth; the terminal view is a convenience.
+  >
+  > Corollary for flaky suites: when a failure will not reproduce, the run that captured it was your only sample. Treat full-output capture as a precondition for investigating flakiness at all, not as something to add after a flake appears.
+
+- **Applied?** `no`
+
+### 2026-09-08 — A denylist security rule makes DEPLOY ORDER a security property
+
+- **Trigger:** a spec's deploy note said a new server-trusted field was "admin-only either way, so there is no client-facing window", and justified the rules-before-code ordering as mere tidiness. It was false. The document's rules had no key *allowlist* — only a *denylist* of fields the owner may not write — so any field not named in that list was fully client-writable. The rules deploy was the only thing making the field admin-only. Shipping the writing code first would have opened a live self-grant window on a paid entitlement, repeatable from throwaway accounts until the cap drained. The reviewer proved it by deleting the field from the denylist and watching every deny assertion flip to "Expected request to fail, but it succeeded". The *instruction* had been right all along; the *reason* attached to it told operators the order did not matter.
+- **Is it generic?** Yes. Stripped: the product, the field name, the entitlement, the vendor's rules language. The reusable kernel is a property of allowlist-vs-denylist authorization generally — under a denylist, a field is server-trusted only from the moment its denylist entry is LIVE, so the write-side deploy must never precede the policy deploy. A second, sharper kernel: a correct instruction paired with a false justification is more dangerous than no instruction, because the justification is what a future engineer reasons from when deciding whether the instruction still applies.
+- **Target:** a new tagged file under `lessons/` — tags `security`, `deploy-ordering`, `authorization`, `documentation`.
+- **Proposed change:**
+
+  > **Under a denylist, deploy order is a security property.**
+  >
+  > When an authorization policy protects fields by naming what callers may NOT write (a denylist) rather than what they MAY write (an allowlist), every field not yet named is writable by default. A "server-only" field is therefore server-only only from the moment its policy entry is DEPLOYED — not from the moment it is committed.
+  >
+  > So: **deploy the policy before the code that writes the field.** Reversing it opens a window in which clients can forge the field themselves. The window is invisible in code review, because the repository shows policy and code landing together.
+  >
+  > Check for this whenever adding a field to `{{POLICY_FILE}}`: does the rule enumerate permitted keys, or merely forbidden ones? Confirm it by DELETING your field from the denylist and re-running the negative tests — if they still pass, they were never testing your field.
+  >
+  > Two traps observed together:
+  > - **A parity test between a constant and the policy FILE proves nothing about the DEPLOYED policy.** Those are different artifacts, and the gap between them is exactly the deploy-ordering window. If you need the guarantee, assert against the live policy.
+  > - **Create and update paths can carry different preconditions.** A field may be adequately guarded on update yet plantable on create, where fewer clauses apply — often by a brand-new account, which is the cheapest attacker to be.
+  >
+  > When you correct an ordering instruction, correct its REASON too, and say plainly what the old reason claimed and why it was wrong. Otherwise the discredited rationale gets reconstructed from memory and the safeguard is dropped as pointless.
+
+- **Applied?** `no`
+
 
 ### 2026-09-07 — Committing an analysis is not delivering it
 
@@ -88,3 +145,34 @@ _Append new entries above this line, newest first._
 - The twelve entries dated 2026-08-17 through 2026-08-22 were folded into `lessons/` on 2026-08-24 (`Applied? yes`, entries removed). Ten landed as new lesson files (`staff-the-shared-layer-before-fanning-out`, `background-agents-die-with-their-host`, `absence-observed-is-not-absence-explained`, `review-docs-against-the-code-seam`, `resumed-session-has-birth-capabilities`, `fresh-fire-wake-handle-costs-a-session`, `delete-the-test-with-its-dead-subject`, `a-pure-wrapper-dies-with-its-service`, `bulk-edit-success-log-is-not-evidence`, `rebuild-an-unrepresentable-tree-with-plumbing`). Two were folded BY MEANING into existing lessons rather than duplicated: "assert the wire effect, not the local variable" into `assert-the-resolved-value-not-the-declaration` (third case added, title widened, `corroborated` raised to 3), and "resurrect stopped subagents by messaging them" into `recovery-from-silent-teammates` (`corroborated` raised to 2). The same fold added eight lessons harvested from the source project's merge history and decision ledger, and extended `verify-at-destination-prove-the-target` with the transforming-intermediary case. Note: the entry on fresh-fire wake handles AMENDED its sibling — a fresh session acts FOR a session-bound durable name without registering, because reclaim-by-register enumerates to `<name>-N`; both lessons landed carrying the corrected version.
 - The eleven entries dated 2026-08-26 through 2026-08-30 were folded into `lessons/` on 2026-08-31 (`Applied? yes`, entries removed). Nine landed as new lesson files (`same-machine-peers-use-the-harness-channel`, `a-local-path-is-not-a-shared-artifact`, `a-gate-that-exists-vs-a-gate-that-covers`, `lockstep-failure-means-shared-singleton`, `run-the-formats-own-validator`, `a-silent-guard-needs-a-canary`, `an-omitted-worker-tier-inherits-the-leads`, `grep-the-shipped-artifact-not-the-docs`, `read-which-error-fired-before-theorising`). Two entries — "fail-open error handling hides the bug that caused the failure" and "enforcement fails open; detection must not" — were folded BY MEANING into ONE lesson, `fail-open-on-the-action-never-on-the-record`, because both reduce to the same split (fail open on the ACTION, record on the DETECTION path); they are the same kernel observed from inside a guard and from its design, so the lesson carries both incidents rather than being counted twice. The closest dedup call was `a-gate-that-exists-vs-a-gate-that-covers` against the existing `guard-coverage-enumerate-issuing-surfaces`: same abstract shape (a guard's coverage is narrower than its rule), but different domain, different scope tag, and different actionable method — landed as a separate lesson with reciprocal cross-links rather than folded in. The same fold added four lessons harvested from the source project's merge history and decision ledger (`commit-before-you-mutate-to-test`, `recursive-delete-follows-a-reparse-point`, `exempt-the-generated-field-not-the-file`, `delegate-wide-queries-the-result-set-lands-in-you`) and extended four existing lessons with new cases (`assert-the-resolved-value-not-the-declaration` → 4, `budget-fan-out-against-host-memory` → 2, `latch-once-only-guards-after-success` → 2, `fan-out-multiplier-at-the-delivery-boundary` → 3).
 - The seven entries dated 2026-09-01 through 2026-09-06 were folded into `lessons/` on 2026-09-07 (`Applied? yes`, entries removed) — five from the `## Entries` section plus two that had drifted above and below it. Six landed as new lesson files (`gate-the-write-not-the-aftermath`, `one-switch-two-effects-autoupdate`, `unauthenticated-tool-layer-is-not-a-wall`, `fixed-overlay-cannot-scroll-the-page`, `settle-the-first-spa-navigation`, `partial-emulation-hides-a-whole-tier`). The seventh — the byte-order-mark on written files — was folded BY MEANING into `powershell-pipe-bom-breaks-json` rather than duplicated: that lesson already owned the same byte on the INPUT side, so its title widened to cover both directions and it gained the write-side failures (`corroborated` raised to 2). The same fold added seven lessons harvested from the source project's memory files, decision ledger and merge history (`a-read-that-opens-an-edit-is-a-write`, `a-checkout-is-not-the-running-system`, `promoter-strategy-must-match-target-history`, `bucket-by-the-other-systems-calendar`, `a-category-warning-does-not-name-the-token`, `notes-span-from-the-last-delivered-version`, `find-the-asset-before-you-generate-it`) and extended eight existing lessons with new cases (`shell-read-encoding-double-encodes` → 2, `never-test-in-a-live-deployment-tree` → 2, `reviewer-matches-the-tier-it-reviews` → 2, `record-intentional-absence` → 2, `did-not-run-is-a-third-outcome` → 2, `shared-container-pays-every-dependency` → 2, `review-docs-against-the-code-seam` → 2, `a-silent-guard-needs-a-canary` → 2). Two dedup calls are worth recording: a candidate "enumerate a telemetry pipeline's deliberate suppressors before declaring it broken" was folded into `a-silent-guard-needs-a-canary` rather than landed separately, because both reduce to "an absence carries no information about its own cause"; and `a-checkout-is-not-the-running-system` was kept separate from `grep-the-shipped-artifact-not-the-docs` — same family, but one says the installed artifact beats the docs and the other says your working copy is not the installed artifact, with different methods (fetch and query the live system versus grep the binary) and reciprocal cross-links.
+
+## 2026-09-11 — A sub-agent reporting to its spawner needs no address, and giving it one causes misroutes
+
+**Shape:** orchestration / briefing.
+
+Harness-agnostic briefing advice of the form *"report via SendMessage to
+`{{ORCHESTRATOR_ALIAS}}`; if that does not resolve, use `{{FALLBACK_ALIAS}}`"*
+assumes the spawner is addressable by name. A session started from a
+background-task chip is not — it carries a human-readable title, not an agent
+name, so **both** aliases fail.
+
+Observed: a writer sub-agent inside such a session found neither address,
+searched session transcripts for one that mentioned its worktree name, and
+delivered its completion report to the **grandparent** session that had written
+the plan. That session had no authority over the work and had to relay it back
+down. One wasted hop, and a report that nearly went unread entirely.
+
+**The fix is to remove the address, not to improve it.** A sub-agent spawned
+with the Agent tool returns its final message to its spawner automatically —
+that return value is the channel, and it cannot misroute. Brief sub-agents to:
+
+- put their ENTIRE report in their final assistant message
+- write anything long to a file in the branch, and name the path
+
+Reserve named-address messaging for genuine peers (standing teammates, other
+sessions). Never for a sub-agent reporting to the thing that spawned it.
+
+**Generalization:** whenever a brief names a channel, ask whether the channel
+is guaranteed to exist in the context the agent will actually run in. A brief
+that depends on an unverified channel has no channel.
+
