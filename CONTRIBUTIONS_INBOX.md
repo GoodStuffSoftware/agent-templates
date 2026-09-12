@@ -30,6 +30,39 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-09-11 — A case-insensitive platform hides a case-sensitive bug
+
+- **Trigger:** A helper built an environment-variable name from a lowercase
+  identifier — `{{ENV_PREFIX}}_${lowercaseKey}` — while the platform that sets
+  the variable uppercases the key itself
+  (`{{ENV_PREFIX}}_${lowercaseKey.toUpperCase()}`). `process.env` property
+  lookup is case-insensitive on {{OS_A}} but case-sensitive on {{OS_B}} and
+  {{OS_C}}, so the lookup worked by accident on a {{OS_A}} development machine
+  and silently returned every option's default everywhere else, including
+  cloud and hosted runtimes. The bug was latent for months because no config
+  value had ever actually been set until a real user set one from a
+  non-{{OS_A}} host.
+- **Is it generic?** Yes — strip the specific env-var prefix and the plugin
+  name; the reusable kernel is platform-dependent case sensitivity around any
+  identifier a program builds itself (env var names, file paths, headers),
+  verified only on the one platform where the mismatch happens not to matter.
+- **Target:** a new lesson under `lessons/env/`.
+- **Proposed change:** the lesson is that **a case-insensitive platform hides
+  a case-sensitive bug**. Code that builds an environment-variable name from a
+  lowercase identifier, when the platform that exports it uppercases the key,
+  works perfectly on {{OS_A}} and fails silently everywhere else — no error,
+  just defaults, so it survives every local test on the developer's own
+  machine and only appears on a different OS, typically in CI or a hosted
+  runtime nobody debugs interactively. Generalize past env vars: whenever
+  correctness depends on case, path separators, or line endings, "it works on
+  my machine" is evidence about the platform, not the code — and a config
+  value that silently falls back to a default is far more dangerous than one
+  that throws, because nothing ever reports it. Fix pattern: normalize the
+  case (or separator/line-ending) explicitly at the lookup site instead of
+  relying on the platform to paper over the mismatch, and prefer failing
+  loudly over falling back silently when a value was supposed to be set.
+- **Applied?** `no`
+
 ### 2026-09-11 — A version bump does not invalidate every downstream cache
 
 - **Trigger:** a plugin published through a marketplace was updated and verified green by every

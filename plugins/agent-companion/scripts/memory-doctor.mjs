@@ -19,13 +19,14 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { opt } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes(n);
 const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 
-const HISTORICAL = (process.env.CLAUDE_PLUGIN_OPTION_memory_archive_prefixes
-  || 'findings_,bugs,handoff-').split(',').map((s) => s.trim()).filter(Boolean);
+const HISTORICAL = opt('memory_archive_prefixes', 'findings_,bugs,handoff-')
+  .split(',').map((s) => s.trim()).filter(Boolean);
 
 // The character class here is load-bearing. An earlier version used [^)]+ ,
 // which matches across newlines — so ONE unbalanced "(" anywhere in the file

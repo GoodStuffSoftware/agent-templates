@@ -19,7 +19,7 @@ import { homedir } from 'node:os';
 import { execFileSync, execSync } from 'node:child_process';
 
 import {
-  classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir,
+  classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir, opt,
 } from '../hooks/lib/context.mjs';
 import {
   memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
@@ -46,7 +46,7 @@ export function memoryDirFor(target) {
 }
 
 function historicalPrefixes() {
-  return (process.env.CLAUDE_PLUGIN_OPTION_memory_archive_prefixes || 'findings_,bugs,handoff-')
+  return opt('memory_archive_prefixes', 'findings_,bugs,handoff-')
     .split(',').map((s) => s.trim()).filter(Boolean);
 }
 
@@ -143,7 +143,7 @@ const instructionBudget = {
   vendor: 'anthropic',
   fixable: false,
   run(ctx) {
-    const budget = Number(process.env.CLAUDE_PLUGIN_OPTION_memory_budget_tokens || 3000);
+    const budget = opt('memory_budget_tokens', 3000);
     const cands = [
       ['project CLAUDE.md', join(ctx.target, 'CLAUDE.md')],
       ['global CLAUDE.md', join(homedir(), '.claude', 'CLAUDE.md')],

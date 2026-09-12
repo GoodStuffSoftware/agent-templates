@@ -46,8 +46,8 @@ function findMemoryIndex(cwd) {
 function countUnreachable(indexPath) {
   try {
     const idx = readFileSync(indexPath, 'utf8');
-    const historical = (process.env.CLAUDE_PLUGIN_OPTION_memory_archive_prefixes
-      || 'findings_,bugs,handoff-').split(',').map((s) => s.trim()).filter(Boolean);
+    const historical = opt('memory_archive_prefixes', 'findings_,bugs,handoff-')
+      .split(',').map((s) => s.trim()).filter(Boolean);
     return readdirSync(dirname(indexPath))
       .filter((f) => f.endsWith('.md') && f !== 'MEMORY.md')
       .filter((f) => !historical.some((p) => f.startsWith(p)))

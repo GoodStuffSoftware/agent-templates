@@ -159,15 +159,22 @@ files:
 ```json
 {
   "pluginConfigs": {
-    "agent-companion": {
-      "delegation_guard": true,
-      "delegation_threshold": 4,
-      "premium_max_concurrent": 2,
-      "memory_budget_tokens": 3000
+    "agent-companion@agent-templates": {
+      "options": {
+        "delegation_guard": true,
+        "delegation_threshold": 4,
+        "premium_max_concurrent": 2,
+        "memory_budget_tokens": 3000
+      }
     }
   }
 }
 ```
+
+Omitting the `options` wrapper fails **silently** — the block is not
+recognised, no error is raised, and every option falls back to its default.
+`pluginConfigs` is honoured only in **user** or **managed** settings; it has no
+effect in project or local scope.
 
 ## State
 

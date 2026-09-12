@@ -31,7 +31,9 @@ it. The README's "five stale-state traps" section covers the variants.
 
 ## 1. Choose options
 
-Every feature is a toggle under `pluginConfigs` in `settings.json`; the
+Every feature is a toggle under `pluginConfigs.<qualified-plugin-id>.options`
+in `settings.json` — the `options` wrapper is required, omitting it fails
+silently, and `pluginConfigs` only takes effect in user or managed scope; the
 defaults are the recommended ones. Two are worth a conscious decision:
 
 - `telemetry_endpoint` — empty means telemetry stays on this machine. Set it
