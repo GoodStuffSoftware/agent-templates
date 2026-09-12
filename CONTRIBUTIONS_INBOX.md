@@ -31,6 +31,50 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 ---
 
 ## Entries
+
+### 2026-09-11 — Order a worker's brief push-first, verify-second; telling it not to park does not work
+
+- **Trigger:** Four times in one day, workers on a delivery-oriented project did correct work and then stopped one step short of delivering it: a fix left uncommitted behind a lint false positive, a test run started on a branch with no diff, five correct fixes committed but not pushed, and a fix applied then abandoned while the agent "waits for the background notification." Every brief already carried **PUSH EARLY** and **deliver RESULTS, not a promise of results**, in bold, at the top. It kept happening. The common factor was not disobedience: every brief was ordered *make the change -> verify -> commit -> push*, where verification was the long step (a full by-name test-suite comparison, a 14-way concurrent reproduction). A long final step invites backgrounding, and a backgrounded final step ends the turn holding the deliverable.
+- **Is it generic?** Yes. Stripped: the project, the repository, the specific verification commands, the tooling. The reusable kernel is that **brief ORDERING beats brief EXHORTATION** — when an instruction fights the natural shape of the step you asked for last, the shape wins, and adding emphasis to the same ordering produces the same outcome. The fix is structural: have the worker commit and push BEFORE the expensive verification, so that a parked or dead turn is harmless rather than lossy. Pushing a branch is not landing it; it is free, reversible, and reviewable by someone else if the worker dies — which is a live risk, since a backgrounded agent also dies with its host process. An unpushed correct fix is indistinguishable from no fix. Applies to any orchestrator briefing any worker that produces a durable artifact behind a slow verification gate.
+- **Target:** a new tagged file under `lessons/` — tags `agent-process`, `orchestration`, `delegation`.
+- **Proposed change:**
+
+  **Order the brief so that parking is harmless.** Sequence every builder brief as:
+
+  1. Make the change.
+  2. **Commit and push immediately**, before any long verification. Record the resulting revision id.
+  3. THEN run the expensive verification.
+  4. If it fails, amend or add a commit and push again.
+
+  **Corollary for the verification step:** name the failure mode explicitly and forbid retry-until-clean — *"report the REAL number; if it fails again, paste the failure; do not round up and do not re-run until you get a clean result."* A worker that silently re-runs a flaky verification until it passes has destroyed the evidence you commissioned it to gather.
+
+  **Corollary for the orchestrator:** a worker reporting *"running in the background, I'll report when it finishes"* has parked, not progressed. Re-brief it immediately with the remaining steps — a direct message is both the probe and the cure. Do not re-send the same ordering with more emphasis and expect a different result.
+- **Applied?** `no`
+
+
+### 2026-09-11 — "Adopted from §N" is a claim about a document you must actually open
+
+- **Trigger:** A scoping note recorded that five numbered sections of an external partner specification had been "adopted wholesale," and a decision log cited them as settled. Writing ADRs against those citations, a cheap verification pass found the citations were only partly load-bearing: one section specified a real flow and a service surface but **no field schema and no threshold** for the one parameter the design turned on; another enumerated dependent object types but gave **no traversal mechanism** for reaching them; and a third — credited in the decision log as the source of an entire retention model — contained no such policy at all. The same log stated three entries later that the partner "has no retention policy," flatly contradicting its own earlier attribution. Nobody had noticed, because nobody had opened the cited section since writing the citation.
+- **Is it generic?** Yes. Stripped: the project, the domain, the partner, the section numbers, the subject matter. The reusable kernel is that **a citation hardens into an assumption of completeness the moment it enters a decision record.** Downstream readers treat "adopted from §N" as meaning §N is implementable, and nobody re-checks. The cost of verifying is minutes at a cheap model tier; the cost of not verifying is a builder discovering mid-implementation that the adopted design has a hole exactly where its load-bearing parameter should be — and a decision log that misattributes authorship of a design, which matters because it changes whether the design has ever been validated in the field. Applies to any project adopting an external spec, an RFC, vendor documentation, or a predecessor's or partner's design.
+- **Target:** a new tagged file under `lessons/` — tags `architecture`, `documentation`, `research`, `agent-process`.
+- **Proposed change:**
+
+  **Before a citation to an external spec goes into an ADR or decision log, verify the cited section with a three-verdict rubric.** This is cheap-tier delegable work; the judgement is in reading the verdicts, not producing them.
+
+  | Verdict | Means |
+  |---|---|
+  | **FULL** | Present and specific enough to implement from. Requires verbatim quotes — if the checker cannot quote implementable content, it is not FULL. |
+  | **PARTIAL** | The section exists but is a headline, a principle, or a flow without the schema/threshold/mechanism needed to build it. **"Mentions the concept" is PARTIAL, never FULL.** |
+  | **ABSENT** | No such section, or the content attributed to it is not there. |
+
+  Rules that follow:
+
+  - **Only a FULL section may be cited as "adopted."** A PARTIAL one is cited as *"the principle is adopted; the mechanism is an open decision"* — and the open decision goes on the register with options, not into the ADR as if settled.
+  - **A principle that deliberately declines to choose between mechanisms is FULL as a principle and ABSENT as a decision.** Do not let your own summary silently upgrade "must satisfy property X" into "use mechanism Y" — check whether the source chose, or whether your notes chose on its behalf and then forgot.
+  - **When your summary and the source disagree, the source wins and the summary gets corrected in the same pass.** Counts and enumerations drift in summarization (a taxonomy summarized as "twenty types" enumerated twenty-five). Builders must be told to transcribe from the source, because a summary that is wrong by five is wrong in a way nobody will question.
+  - **Grep the decision log for other claims about the same source.** The contradiction above was discoverable from the log alone, with no access to the external document — two entries about the same spec asserting incompatible things. Where one attribution is wrong, check its neighbours.
+
+- **Applied?** `no`
 ### 2026-09-09 — Never pipe a test gate through `tail`: you discard the evidence and the exit code
 
 - **Trigger:** a CI-style gate ran the unit suite as `<test-runner> 2>&1 | tail -6`. The run reported 2 failed test FILES, but `tail` kept only the summary and discarded the FAIL lines, so the failing files could never be named. Worse, the failure set turned out to be non-deterministic under load, so re-running could not recover the lost names — the evidence was gone permanently. A second defect rode along: in a pipeline the shell reports the LAST command's exit status, so `$?` was `tail`'s `0` and the gate looked like it passed.
