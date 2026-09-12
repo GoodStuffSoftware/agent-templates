@@ -42,7 +42,10 @@
 
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadOrBuildIndex, search, memoryRoot } from './memory-index.mjs';
+import {
+  loadOrBuildIndex, search, memoryRoot,
+  findRepoRoot, loadOrBuildRepoIndex,
+} from './memory-index.mjs';
 
 const MAX_BLOCK_CHARS = 1200;
 const SNIPPET_CHARS = 150;
@@ -74,18 +77,46 @@ function projectLeaf(cwd) {
   return basename(String(cwd).replace(/\\/g, '/'));
 }
 
+// Load the repo-scope chunk pool for a brief-building call (pointers or
+// nudge). Shared so both modes fail open identically: no repo found, repo
+// scope turned off, or any error along the way all just contribute nothing,
+// same as an absent/empty user corpus does.
+function repoChunksFor({
+  cwd, dataDirPath, repoEnabled, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
+}) {
+  if (repoEnabled === false) return { chunks: [], found: null };
+  try {
+    const found = findRepoRoot(cwd);
+    if (!found) return { chunks: [], found: null };
+    const { index } = loadOrBuildRepoIndex({
+      root: found.root,
+      dataDirPath,
+      globs: repoGlobs,
+      maxFileBytes: repoMaxFileBytes,
+      maxTotalBytes: repoMaxTotalBytes,
+      forceRebuild: false,
+      rebuildIfStale: false, // same rule as the user scope: never block a spawn on a reindex
+    });
+    return { chunks: index?.chunks || [], found };
+  } catch {
+    return { chunks: [], found: null }; // fail open
+  }
+}
+
 // Pure: given a spawn brief and the tunables spawn-guard.mjs read from opt(),
 // returns { block, hits }. `block` is '' when nothing clears minScore — the
-// caller appends it to the prompt only when non-empty.
+// caller appends it to the prompt only when non-empty. Searches BOTH scopes
+// (user + repo) as one combined pool, same as the CLI's --scope all.
 export function buildMemoryBrief({
   prompt, cwd, maxHits = 3, minScore = 25, root, dataDirPath,
+  repoEnabled = true, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
 }) {
   const text = String(prompt || '');
   if (!text.trim() || !dataDirPath) return { block: '', hits: [] };
 
-  let index;
+  let userChunks = [];
   try {
-    ({ index } = loadOrBuildIndex({
+    const { index } = loadOrBuildIndex({
       root: root || memoryRoot(),
       dataDirPath,
       forceRebuild: false,
@@ -93,25 +124,38 @@ export function buildMemoryBrief({
       // hung spawn. A cache that does not exist yet still gets built once
       // (loadOrBuildIndex always builds when there is nothing to serve).
       rebuildIfStale: false,
-    }));
-  } catch {
-    return { block: '', hits: [] }; // fail open
-  }
-  if (!index?.chunks?.length) return { block: '', hits: [] };
+    });
+    userChunks = index?.chunks || [];
+  } catch { /* fail open: user scope contributes nothing */ }
+
+  const { chunks: repoChunks, found: repoFound } = repoChunksFor({
+    cwd, dataDirPath, repoEnabled, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
+  });
+
+  const pool = [...userChunks, ...repoChunks];
+  if (!pool.length) return { block: '', hits: [] };
 
   // Cast a slightly wider net than maxHits so the local-project boost below
   // has candidates to promote past a marginally higher-scoring cross-project
   // hit, then trim to maxHits after boosting.
-  const hits = search(index.chunks, text, { limit: Math.max(20, maxHits * 5) });
+  const hits = search(pool, text, { limit: Math.max(20, maxHits * 5) });
   if (!hits.length || hits[0].score < minScore) return { block: '', hits: [] };
 
   const leaf = projectLeaf(cwd).toLowerCase();
   const boosted = hits
-    .map((h) => ({ ...h, local: !!leaf && h.chunk.project.toLowerCase().includes(leaf) }))
+    .map((h) => ({ ...h, local: h.chunk.scope === 'user' && !!leaf && h.chunk.project.toLowerCase().includes(leaf) }))
     .sort((a, z) => (z.score * (z.local ? LOCAL_PROJECT_BOOST : 1)) - (a.score * (a.local ? LOCAL_PROJECT_BOOST : 1)));
 
   const top = boosted.slice(0, Math.max(1, maxHits));
   const lines = top.map((h) => {
+    if (h.chunk.scope === 'repo') {
+      // A worktree's own content is real and worth finding, but it is not
+      // yet on the main line — the label says so rather than letting a
+      // reader mistake in-flight work for what main actually has.
+      const wt = repoFound?.isWorktree ? ` [unmerged:${repoFound.branch || '?'}]` : '';
+      const heading = h.chunk.heading ? ` · ${h.chunk.heading}` : '';
+      return `- repo${wt} · ${h.chunk.file}${heading} — "${snippet(h.chunk.text)}"`;
+    }
     const tag = h.local ? '' : ' [cross-project]';
     const heading = h.chunk.heading ? ` · ${h.chunk.heading}` : '';
     return `- ${h.chunk.project}${tag} · ${h.chunk.file}${heading} — "${snippet(h.chunk.text)}"`;
@@ -150,14 +194,20 @@ function pluginRoot() {
   return join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 }
 
-// Pure aside from the cached-index read: given cwd and the plugin's data
+// Pure aside from the cached-index reads: given cwd and the plugin's data
 // dir, returns a single nudge line, or '' when there is nothing to nudge
-// about (no memory files for this project AND none for any other project).
-// No scoring, no threshold, no relevance judgement — just a file count.
-export function buildMemoryNudge({ cwd, root, dataDirPath }) {
+// about in EITHER scope (no user-corpus files for this project or any
+// other, AND no repo resolved / repo has nothing matching its globs). No
+// scoring, no threshold, no relevance judgement — just file counts, for
+// both scopes, which is why this survives a cloud session where the user
+// corpus is simply absent: the user half degrades to all-zero and the repo
+// half still has something to say.
+export function buildMemoryNudge({
+  cwd, root, dataDirPath, repoEnabled = true, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
+}) {
   if (!dataDirPath) return '';
 
-  let index;
+  let index = null;
   try {
     ({ index } = loadOrBuildIndex({
       root: root || memoryRoot(),
@@ -166,7 +216,7 @@ export function buildMemoryNudge({ cwd, root, dataDirPath }) {
       rebuildIfStale: false, // same rule as pointers mode: never block a spawn on a reindex
     }));
   } catch {
-    return ''; // fail open
+    index = null; // fail open: user half contributes nothing, repo half still can
   }
 
   // index.files is keyed by relKey = `${project}/${fileRel}` (memory-index.mjs)
@@ -179,7 +229,6 @@ export function buildMemoryNudge({ cwd, root, dataDirPath }) {
     const project = relKey.slice(0, slash);
     counts.set(project, (counts.get(project) || 0) + 1);
   }
-  if (!counts.size) return '';
 
   const leaf = projectLeaf(cwd).toLowerCase();
   let hereProject = null;
@@ -190,10 +239,19 @@ export function buildMemoryNudge({ cwd, root, dataDirPath }) {
     }
   }
   const otherCount = counts.size - (hereProject ? 1 : 0);
-  if (hereCount === 0 && otherCount === 0) return '';
+
+  const { chunks: repoChunks, found: repoFound } = repoChunksFor({
+    cwd, dataDirPath, repoEnabled, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
+  });
+  const repoFileCount = new Set(repoChunks.map((c) => c.file)).size;
+
+  if (hereCount === 0 && otherCount === 0 && repoFileCount === 0) return '';
 
   const here = hereCount > 0 ? `${hereCount} here` : '0 here';
   const others = `${otherCount} elsewhere`;
+  const repoPart = repoFound?.isWorktree
+    ? `${repoFileCount} repo (unmerged:${repoFound.branch || '?'})`
+    : `${repoFileCount} repo`;
   const script = join(pluginRoot(), 'scripts', 'memory-search.mjs');
 
   // Worded as an available capability, not an instruction or established
@@ -203,6 +261,6 @@ export function buildMemoryNudge({ cwd, root, dataDirPath }) {
   // short deliberately — the resolved script path below is the variable
   // part of this line's length and cannot be shortened further, so the
   // fixed wording stays terse to leave it room.
-  return `\n\n[agent-companion: searchable memory files exist (${here}, ${others}) — ` +
-    `if unfamiliar with this task, try: node ${script} "<query>" [--project <name>]]`;
+  return `\n\n[agent-companion: memory — user ${here}, ${others}; ${repoPart} — ` +
+    `unfamiliar? try: node ${script} "<query>" --scope all]`;
 }

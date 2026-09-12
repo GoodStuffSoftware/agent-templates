@@ -15,6 +15,7 @@ import {
   dataDir,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
+import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 
 const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
 
@@ -118,6 +119,21 @@ try {
     if (!opt('memory_search', false) || !opt('memory_brief', false)) return baseInput;
     const mode = String(opt('memory_brief_mode', 'nudge')).toLowerCase();
     if (mode === 'off') return baseInput;
+
+    // Repo scope config — shared by both modes below. memory_search_repo
+    // (default true) is a separate switch from the memory_search/memory_brief
+    // gates already checked above — those two turn the WHOLE spawn-time
+    // feature on or off; this one only decides whether the repo half
+    // contributes once the feature is already running (the CLI's --scope
+    // flag reads the same opt() independently of memory_search entirely,
+    // since it is not gated by the spawn-time feature at all).
+    const repoOpts = {
+      repoEnabled: opt('memory_search_repo', true),
+      repoGlobs: parseRepoGlobs(opt('memory_search_repo_globs', DEFAULT_REPO_GLOBS.join(','))),
+      repoMaxFileBytes: Math.max(1, opt('memory_search_max_file_kb', 256)) * 1024,
+      repoMaxTotalBytes: Math.max(1, opt('memory_search_max_repo_mb', 8)) * 1024 * 1024,
+    };
+
     try {
       if (mode === 'pointers') {
         const mb = buildMemoryBrief({
@@ -126,13 +142,14 @@ try {
           maxHits: opt('memory_brief_max_hits', 3),
           minScore: opt('memory_brief_min_score', 25),
           dataDirPath: dataDir(),
+          ...repoOpts,
         });
         if (mb.block) return { ...(baseInput || input), prompt: `${input.prompt || ''}${mb.block}` };
         return baseInput;
       }
       // "nudge", and any unrecognised value — fail toward the safe default
       // rather than silently doing nothing for a typo'd config value.
-      const nudge = buildMemoryNudge({ cwd: p.cwd, dataDirPath: dataDir() });
+      const nudge = buildMemoryNudge({ cwd: p.cwd, dataDirPath: dataDir(), ...repoOpts });
       if (nudge) return { ...(baseInput || input), prompt: `${input.prompt || ''}${nudge}` };
     } catch { /* fail open: nothing appended, spawn proceeds untouched */ }
     return baseInput;

@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -143,6 +143,30 @@
       "title": "Memory brief minimum score (pointers mode only)",
       "description": "Applies only when memory_brief_mode is \"pointers\"; nudge mode ignores this and uses no score at all. Raw BM25 score (k1=1.2, b=0.75, summed over matched query terms) the top hit must clear before any pointer block is appended. Below this the brief is left untouched. Calibrated against this operator's real corpus: a genuinely on-topic long brief scored 21.63, an off-topic-but-plausible long brief scored 17.65, a nonsense long brief scored 6.71, and a genuinely on-topic SHORT brief scored only 10.70 — below the off-topic long case. BM25 sums over query terms, so score tracks brief length almost as much as relevance; no fixed threshold separates the two on this corpus (25 sits above the on-topic long case itself), and relative gating (top/median ratio) is worse — the nonsense query produced the highest ratio measured (1.33). This is why memory_brief_mode defaults to \"nudge\" instead of tuning this number further.",
       "default": 25
+    },
+    "memory_search_repo": {
+      "type": "boolean",
+      "title": "Memory search repo scope",
+      "description": "Also index the checked-out repository itself (walking up from cwd to the nearest .git) alongside the operator's user-scope memory corpus. This is the ONLY scope available in a cloud session, where ~/.claude/projects does not exist. A repo root that is itself a git worktree is indexed as its own in-flight branch content; its own .claude/worktrees/** (sibling checkouts of OTHER branches) is always excluded so they are never duplicated into the same index.",
+      "default": true
+    },
+    "memory_search_repo_globs": {
+      "type": "string",
+      "title": "Repo scope globs",
+      "description": "Comma-separated glob list, resolved against the repo root. A hardcoded .claude/** glob finds files in some repos and nothing in others (repos vary in whether they keep a .claude/ directory at all), so this is configurable rather than assumed.",
+      "default": "CLAUDE.md,CLAUDE.local.md,.claude/**/*.md,docs/**/*.md,lessons/**/*.md"
+    },
+    "memory_search_max_file_kb": {
+      "type": "number",
+      "title": "Repo scope max file size (KB)",
+      "description": "Skip any repo-scope file larger than this before indexing it. Skipped files are counted, not silently dropped — --stats reports how many.",
+      "default": 256
+    },
+    "memory_search_max_repo_mb": {
+      "type": "number",
+      "title": "Repo scope max total size (MB)",
+      "description": "Cap on total bytes indexed from the repo scope across all matched files. A docs/ tree alone can reach several MB on a large repo, so this cap is mandatory rather than advisory: once reached, further files stop being added and the index is marked partial/truncated so a caller can say so instead of silently under-reporting.",
+      "default": 8
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",

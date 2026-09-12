@@ -1,14 +1,36 @@
 ---
 name: memory-search
-description: Search the operator's WHOLE memory corpus — every project's memory/*.md under ~/.claude/projects/*/memory/, not just this one — with BM25 lexical ranking. Use when a task smells previously-solved, when you hit an unfamiliar error and want to know if another project already hit it, when recalling why a past decision was made, or when onboarding to a repo you have not worked in before. Triggers - "have I solved this before", "did we hit this error in another project", "what did we decide about X", "is there prior art for this", recalling a past fix across repos.
+description: Search the operator's WHOLE memory corpus — every project's memory/*.md under ~/.claude/projects/*/memory/ (the "user" scope), plus the checked-out repository's own CLAUDE.md, .claude/, docs/, and lessons/ (the "repo" scope) — with BM25 lexical ranking. Use when a task smells previously-solved, when you hit an unfamiliar error and want to know if another project already hit it, when recalling why a past decision was made, or when onboarding to a repo you have not worked in before. Triggers - "have I solved this before", "did we hit this error in another project", "what did we decide about X", "is there prior art for this", recalling a past fix across repos.
 ---
 
 # Memory search — cross-project technical recall
 
-A BM25 index over every project's `memory/*.md`, ranked by chunk (not whole
-file) with a project, file, and heading-trail breadcrumb on every hit. It
-exists for the gap this project's own loaded memory can't fill: what got
-solved, decided, or learned somewhere else.
+A BM25 index over two independent scopes, ranked by chunk (not whole file)
+with a breadcrumb on every hit:
+
+- **user** — every project's `memory/*.md` under `~/.claude/projects/*/memory/`.
+  The operator's auto memory. Lives on this machine only.
+- **repo** — the checked-out repository itself (`CLAUDE.md`, `CLAUDE.local.md`,
+  `.claude/**/*.md`, `docs/**/*.md`, `lessons/**/*.md` by default, configurable).
+  Covers content this plugin does not otherwise put in context: agent
+  definitions that load only when that agent runs, skills that contribute only
+  their description until invoked, nested `CLAUDE.md` files, and `docs/`.
+
+Both are searched together by default. This exists for the gap neither this
+project's own loaded memory nor the always-loaded instruction files can fill:
+what got solved, decided, or learned somewhere else — or somewhere in this
+same repo that just isn't in context right now.
+
+## The cloud-session limitation
+
+**In a cloud session there is no `~/.claude/projects` at all** — the user
+scope comes back empty, always. The repo scope still works fully, because the
+cloned repository is right there. This means cross-project recall (the
+original point of this tool) is simply unavailable in the cloud; what remains
+is recall within the current repo, which is still real and often enough
+(agent/skill/docs content that is not in this session's context). Do not treat
+an empty user-scope result in the cloud as "nothing was ever solved" — it may
+just mean the machine that holds that memory is not this one.
 
 ## When to reach for it
 
@@ -48,27 +70,52 @@ $AC = (Get-ChildItem "$env:USERPROFILE/.claude/plugins/marketplaces/*/plugins/ag
 ## How to invoke
 
 ```bash
-node "$AC/scripts/memory-search.mjs" "<query>"
+node "$AC/scripts/memory-search.mjs" "<query>"                  # both scopes
+node "$AC/scripts/memory-search.mjs" "<query>" --scope repo     # this repo only
+node "$AC/scripts/memory-search.mjs" "<query>" --scope user     # user corpus only
 node "$AC/scripts/memory-search.mjs" "<query>" --project best-sudoku
 node "$AC/scripts/memory-search.mjs" "<query>" --limit 5 --json
 node "$AC/scripts/memory-search.mjs" --stats
 ```
 
-`--project` is a case-insensitive substring match against the project's
-directory name — no need for the exact encoded path. `--limit` defaults to 10.
-`--json` gives machine-readable hits (score, project, file, heading, snippet)
-for a caller that wants to post-process rather than read prose. `--stats`
-reports corpus size (projects, files, chunks) with no query, useful for
-sanity-checking that the index sees anything at all.
+`--scope user|repo|all` picks which corpus to search; default `all` searches
+both together as one ranked pool. `--project` is a case-insensitive substring
+match against the user scope's project directory name — it has no effect on
+repo-scope hits, which have no per-project structure. `--limit` defaults to
+10. `--json` gives machine-readable hits (score, scope, place, file, heading,
+snippet) for a caller that wants to post-process rather than read prose.
+`--stats` reports both scopes' size separately (projects/files/chunks for
+user; files/chunks/skipped-for-size/truncated for repo) with no query, useful
+for sanity-checking that either corpus sees anything at all. `--cwd <path>`
+resolves the repo scope from a directory other than the current one — the
+spawn-time hook needs this since its cwd is the spawning agent's, not this
+script's own.
+
+## Repo scope: what it covers, and the worktree caveat
+
+The repo scope resolves by walking up from cwd to the nearest `.git` and
+indexes `CLAUDE.md`, `CLAUDE.local.md`, `.claude/**/*.md`, `docs/**/*.md`, and
+`lessons/**/*.md` under that root by default (configurable via
+`memory_search_repo_globs`; per-file and total-size caps apply and are
+reported by `--stats`). **If that root is itself a git worktree**, its
+`.git` is a file rather than a directory, and it has its own checked-out
+branch distinct from the main checkout — a repo-scope hit found there is
+labeled `[worktree:<branch>]` (or `[unmerged:<branch>]` in a spawn brief),
+because that content is real and searchable but not yet on the main line. The
+scope always excludes its own `.claude/worktrees/**` — those are SIBLING
+checkouts of other branches, and indexing them from here would duplicate the
+whole repository once per worktree and swamp the ranking.
 
 ## How to read results
 
-Each hit is `score  project · file · heading trail`, followed by a snippet.
-These are **pointers, not the content itself** — open the file at the given
-heading for the real thing before acting on it. Memories carry **no expiry**:
-a hit may describe a decision that was later reversed, a bug since fixed, or a
-constraint that no longer holds. Check the date and surrounding context in the
-file itself; do not treat a hit as current just because it ranked highly.
+Each hit is `score  place · heading trail`, followed by a snippet, where
+`place` is `project · file` for a user-scope hit or `repo[:worktree tag] ·
+file` (relative to the repo root) for a repo-scope hit. These are **pointers,
+not the content itself** — open the file at the given heading for the real
+thing before acting on it. Memories carry **no expiry**: a hit may describe a
+decision that was later reversed, a bug since fixed, or a constraint that no
+longer holds. Check the date and surrounding context in the file itself; do
+not treat a hit as current just because it ranked highly.
 
 ## The honest limitation
 
