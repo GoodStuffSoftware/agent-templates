@@ -24,8 +24,10 @@ node "$AC/scripts/audit.mjs" --only plugin-manifest,guard-canary
 `guard-canary` must PASS. If it SKIPs, the hooks are not wired — usually a
 stale marketplace cache. The fix, in order, is `claude plugin marketplace update
 <marketplace>`, then `claude plugin update agent-companion@<marketplace>`, then a
-restart (desktop) or `/reload-plugins` (CLI). Re-run the canary. The README's
-"four stale-state traps" section covers the variants.
+restart (desktop) or `/reload-plugins` (CLI). Re-run the canary. If the plugin
+is also used from claude.ai, its marketplace cache is separate and has to be
+removed and re-added there — the local update sequence above does not reach
+it. The README's "five stale-state traps" section covers the variants.
 
 ## 1. Choose options
 

@@ -30,6 +30,27 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 
 ## Entries
 
+### 2026-09-11 — A version bump does not invalidate every downstream cache
+
+- **Trigger:** a plugin published through a marketplace was updated and verified green by every
+  local check — the marketplace cache commit, the installed-version report, the manifest version
+  match — yet a separate hosted client that also consumes the same marketplace kept serving the
+  previous version's hooks and skills. The update sequence run on the local machine never touched
+  the hosted client's own cache; it is a different cache, on a different machine, with no shared
+  refresh path. The fix that worked was removing the hosted client's copy of the marketplace and
+  re-adding it — a version bump alone did not invalidate it.
+- **Is it generic?** Yes — it applies to any artifact distributed through a cache that more than
+  one client consumes independently, not just this plugin system.
+- **Target:** a new lesson under `lessons/agent-process/`.
+- **Proposed change:** the lesson is that **"verified" is scoped to the cache you verified**. When
+  one artifact is consumed by two clients with independent caches, a green check on one says
+  nothing about the other, and the failure is silent on the stale side — it serves old code rather
+  than erroring. Enumerate every consumer of a published artifact and verify each one separately,
+  or state plainly which ones were not checked. Corollary: a version bump does not necessarily
+  invalidate a downstream cache; some caches require explicit removal and re-add rather than an
+  update-in-place.
+- **Applied?** `no`
+
 ### 2026-09-11 — An integration gate catches what a builder's self-report does not
 
 - **Trigger:** A builder agent reported `{{VALIDATE_CMD}}` as passing ("Validation passed") in its

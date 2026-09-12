@@ -259,9 +259,9 @@ arm hooks is to start a new session. Skills still hot-load either way, so an
 in-flight agent keeps the diagnostics regardless; it is only the *enforcement*
 that waits.
 
-### Four separate stale-state traps
+### Five separate stale-state traps
 
-Updating this plugin touches four independent caches, and skipping any one
+Updating this plugin touches five independent caches, and skipping any one
 leaves you running old code **with no error at all**:
 
 | # | Step | Symptom if skipped |
@@ -270,11 +270,16 @@ leaves you running old code **with no error at all**:
 | 2 | `claude plugin update <plugin>@<marketplace>` | cache is current, installed version is not |
 | 3 | `/reload-plugins`, or a new session | new version installed, old hooks still bound |
 | 4 | check the running session's own age | a session predating the install never had hooks at all |
+| 5 | remove and re-add the marketplace on claude.ai | cloud sessions keep loading the previous version's hooks and skills while every local check — `claude plugin list`, the marketplace cache commit, the manifest check — reports the new version |
 
-Two traps within the traps: `claude plugin update` needs the **fully qualified**
+Three traps within the traps: `claude plugin update` needs the **fully qualified**
 `plugin@marketplace` — the bare name fails with a misleading *"Plugin not
-found"*. And `claude plugin details` reads the **cache**, not the installed copy,
-so it will happily describe components that are not actually running.
+found"*. `claude plugin details` reads the **cache**, not the installed copy,
+so it will happily describe components that are not actually running. And the
+local verification commands above cannot see the claude.ai cache at all —
+"verified locally" says nothing about what a cloud session is running. A
+version bump alone does not invalidate it either; the marketplace has to be
+removed and re-added on the claude.ai side.
 
 Verify what is real rather than what is reported:
 
