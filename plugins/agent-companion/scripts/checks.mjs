@@ -12,13 +12,18 @@
 // prevent.
 
 import {
-  readFileSync, existsSync, readdirSync, mkdirSync, renameSync, copyFileSync, writeFileSync,
+  readFileSync, existsSync, readdirSync, mkdirSync, renameSync, copyFileSync, writeFileSync, statSync,
 } from 'node:fs';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync, execSync } from 'node:child_process';
 
-import { classifyModel, classifyEffort, isModelAvailable, effortSupported } from '../hooks/lib/context.mjs';
+import {
+  classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir, opt,
+} from '../hooks/lib/context.mjs';
+import {
+  memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
+} from '../hooks/lib/memory-index.mjs';
 
 const est = (s) => Math.ceil(s.length / 4);
 const DATED_MODEL = /-\d{6,8}$/;
@@ -41,7 +46,7 @@ export function memoryDirFor(target) {
 }
 
 function historicalPrefixes() {
-  return (process.env.CLAUDE_PLUGIN_OPTION_memory_archive_prefixes || 'findings_,bugs,handoff-')
+  return opt('memory_archive_prefixes', 'findings_,bugs,handoff-')
     .split(',').map((s) => s.trim()).filter(Boolean);
 }
 
@@ -138,7 +143,7 @@ const instructionBudget = {
   vendor: 'anthropic',
   fixable: false,
   run(ctx) {
-    const budget = Number(process.env.CLAUDE_PLUGIN_OPTION_memory_budget_tokens || 3000);
+    const budget = opt('memory_budget_tokens', 3000);
     const cands = [
       ['project CLAUDE.md', join(ctx.target, 'CLAUDE.md')],
       ['global CLAUDE.md', join(homedir(), '.claude', 'CLAUDE.md')],
@@ -511,6 +516,354 @@ const routingDoc = {
   },
 };
 
+// --- 9. memory index ceiling ----------------------------------------------
+// Claude Code's native auto-memory loader only reads the FIRST 200 lines or
+// the first 25KB of MEMORY.md, whichever it hits first, and everything past
+// that point is dropped SILENTLY on the next load — no error, no warning, no
+// trace in the transcript. This is the same failure shape the rest of this
+// plugin exists to catch (a rule believed to be in effect that quietly is
+// not), just triggered by size instead of a missing link. The thresholds
+// below sit a little inside the real 200-line / 25KB cliff on purpose: WARN
+// fires while there is still room to trim, FAIL fires before content is
+// actually being clipped rather than after.
+const MEMORY_CEILING_FAIL_BYTES = 24576; // 24 KiB
+const MEMORY_CEILING_FAIL_LINES = 190;
+const MEMORY_CEILING_WARN_BYTES = 20480; // 20 KiB
+const MEMORY_CEILING_WARN_LINES = 160;
+
+const memoryIndexCeiling = {
+  id: 'memory-index-ceiling',
+  title: 'Memory index load ceiling',
+  vendor: 'anthropic',
+  fixable: false,
+  run(ctx) {
+    const root = memoryRoot();
+    let files;
+    try {
+      files = discoverFiles(root).filter((f) => f.fileRel === 'MEMORY.md');
+    } catch {
+      return { status: 'skip', findings: ['could not enumerate the memory corpus'] };
+    }
+    if (!files.length) return { status: 'skip', findings: ['no MEMORY.md found under any project memory directory'] };
+
+    const rows = files.map((f) => {
+      let lines = 0;
+      try {
+        // `wc -l`-style count: a trailing newline (the common case) ends the
+        // last line rather than starting an extra empty one.
+        const parts = readFileSync(f.absPath, 'utf8').split(/\r?\n/);
+        lines = (parts.length && parts[parts.length - 1] === '') ? parts.length - 1 : parts.length;
+      } catch { /* size-only */ }
+      const bytes = f.size;
+      const status = (bytes >= MEMORY_CEILING_FAIL_BYTES || lines >= MEMORY_CEILING_FAIL_LINES)
+        ? 'fail'
+        : (bytes >= MEMORY_CEILING_WARN_BYTES || lines >= MEMORY_CEILING_WARN_LINES) ? 'warn' : 'ok';
+      return {
+        project: f.project,
+        bytes,
+        lines,
+        status,
+        pctBytes: +((bytes / MEMORY_CEILING_FAIL_BYTES) * 100).toFixed(1),
+        pctLines: +((lines / MEMORY_CEILING_FAIL_LINES) * 100).toFixed(1),
+      };
+    });
+    rows.sort((a, b) => b.bytes - a.bytes);
+
+    const findings = rows.map((r) => `${r.project}: ${r.bytes}B / ${r.lines} lines`
+      + ` — ${r.pctBytes}% of the ${MEMORY_CEILING_FAIL_BYTES}B cliff, ${r.pctLines}% of the ${MEMORY_CEILING_FAIL_LINES}-line cliff`
+      + (r.status !== 'ok' ? ` [${r.status.toUpperCase()}]` : ''));
+    const worst = rows[0];
+    findings.push(`worst offender: ${worst.project} (${worst.bytes}B / ${worst.lines} lines, `
+      + `${worst.pctBytes}% / ${worst.pctLines}% of the hard ceiling)`);
+
+    const failing = rows.filter((r) => r.status === 'fail');
+    const warning = rows.filter((r) => r.status === 'warn');
+    return {
+      status: failing.length ? 'fail' : (warning.length ? 'warn' : 'ok'),
+      findings,
+      data: { rows, worst },
+    };
+  },
+};
+
+// --- 10. memory store forks -------------------------------------------------
+// The auto-memory directory is keyed by an encoding of the working-directory
+// path (":\/ " -> "-"), so the SAME project reached via two different paths —
+// a Windows drive letter, a WSL mount, a native Linux path — silently becomes
+// two or more independent stores with no cross-link between them. Detected
+// with three cheap filesystem signals only: no index, no embeddings. Strictly
+// read-only and proposal-only — this check never moves or deletes a file.
+function normalizedProjectKey(dirName) {
+  // Windows: "<drive>--Users-<user>-<rest>".
+  let m = dirName.match(/^[A-Za-z]--Users-[^-]+-(.+)$/);
+  if (m) return m[1];
+  // Any path that resolves through a home directory (WSL, native Linux,
+  // macOS): "...-home-<user>-<rest>". Deliberately unanchored at the front —
+  // WSL distro-prefix spellings vary (--wsl--Ubuntu-, --wsl-localhost-ubuntu-,
+  // ...) and the home segment is the reliable landmark, not the distro name.
+  m = dirName.match(/-home-[^-]+-(.+)$/);
+  if (m) return m[1];
+  // No recognised prefix: leave it unchanged. An unnormalised name only ever
+  // matches itself — prefer missing a fork over inventing one.
+  return dirName;
+}
+
+function fmtLocalDate(ms) {
+  if (!ms) return '(no files)';
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
+
+const memoryStoreForks = {
+  id: 'memory-store-forks',
+  title: 'Memory store forks (one project, multiple paths)',
+  vendor: 'anthropic',
+  fixable: false,
+  run(ctx) {
+    const root = memoryRoot();
+    let entries;
+    try {
+      entries = readdirSync(root, { withFileTypes: true });
+    } catch {
+      return { status: 'skip', findings: ['could not read the memory projects root'] };
+    }
+
+    const stores = [];
+    const now = Date.now();
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const mdir = join(root, e.name, 'memory');
+      if (!existsSync(mdir)) continue;
+      let files;
+      try { files = readdirSync(mdir).filter((f) => f.endsWith('.md')); } catch { continue; }
+      let totalBytes = 0;
+      let newestMs = 0;
+      let recent90d = 0;
+      for (const f of files) {
+        let st;
+        try { st = statSync(join(mdir, f)); } catch { continue; } // unreadable: skip, don't guess
+        totalBytes += st.size;
+        if (st.mtimeMs > newestMs) newestMs = st.mtimeMs;
+        if (now - st.mtimeMs <= NINETY_DAYS_MS) recent90d++;
+      }
+      stores.push({
+        project: e.name,
+        mdir,
+        files: new Set(files),
+        fileCount: files.length,
+        totalBytes,
+        newestMs,
+        recent90d,
+        key: normalizedProjectKey(e.name),
+      });
+    }
+    if (!stores.length) return { status: 'skip', findings: ['no memory stores found under the projects root'] };
+
+    const groups = new Map();
+    for (const s of stores) {
+      if (!groups.has(s.key)) groups.set(s.key, []);
+      groups.get(s.key).push(s);
+    }
+    const forkGroups = [...groups.values()].filter((g) => g.length > 1);
+    if (!forkGroups.length) {
+      return { status: 'ok', findings: ['no project reached from more than one path — no forks detected'] };
+    }
+
+    const findings = [];
+    const data = [];
+    for (const group of forkGroups) {
+      // Newest mtime is what distinguishes live from dead — a store nobody
+      // has written to in months is not "smaller", it is abandoned.
+      const sorted = [...group].sort((a, b) => b.newestMs - a.newestMs);
+      const [live, ...dead] = sorted;
+      findings.push(`FORK GROUP "${live.key}": ${group.length} stores share this project`);
+      for (const s of sorted) {
+        const role = s === live ? 'LIVE (newest)' : 'looks dead';
+        findings.push(`  [${role}] ${s.project} — ${s.fileCount} files, ${s.totalBytes}B, `
+          + `newest ${fmtLocalDate(s.newestMs)}, ${s.recent90d} file(s) touched in the last 90d`);
+      }
+
+      const groupData = { key: live.key, live: live.project, dead: [] };
+      for (const d of dead) {
+        const uniqueToDead = [...d.files].filter((f) => !live.files.has(f));
+        const uniqueToLive = [...live.files].filter((f) => !d.files.has(f));
+        const overlap = [...d.files].filter((f) => live.files.has(f));
+        let identical = 0;
+        let deadLarger = 0;
+        let liveLarger = 0;
+        const deadLargerFiles = [];
+        for (const f of overlap) {
+          try {
+            const a = readFileSync(join(d.mdir, f));
+            const b = readFileSync(join(live.mdir, f));
+            if (a.equals(b)) { identical++; continue; }
+            if (a.length > b.length) { deadLarger++; deadLargerFiles.push(f); } else { liveLarger++; }
+          } catch { /* unreadable: leave it out rather than guess */ }
+        }
+        findings.push(`  ${d.project} vs live: ${uniqueToDead.length} file(s) unique to this store, `
+          + `${uniqueToLive.length} unique to live; of ${overlap.length} shared: ${identical} identical, `
+          + `${liveLarger} live-larger, ${deadLarger} DEAD-LARGER`);
+        if (deadLargerFiles.length) {
+          findings.push('    inspect before archiving — dead copy is larger, may hold content the live '
+            + `store lost: ${deadLargerFiles.join(', ')}`);
+        }
+        groupData.dead.push({
+          store: d.project,
+          fileCount: d.fileCount,
+          bytes: d.totalBytes,
+          newest: fmtLocalDate(d.newestMs),
+          uniqueToDead: uniqueToDead.length,
+          uniqueToLive: uniqueToLive.length,
+          overlap: overlap.length,
+          identical,
+          liveLarger,
+          deadLarger,
+          deadLargerFiles,
+        });
+      }
+      findings.push(`  PROPOSAL (nothing moved): ${live.project} looks live; `
+        + `${dead.map((d) => d.project).join(', ')} look dead. Inspect the dead-larger file(s) above by `
+        + 'hand before archiving anything — memory-doctor.mjs is the precedent for a non-destructive move, '
+        + 'but running it is a separate, human-approved step.');
+      data.push(groupData);
+    }
+
+    return { status: 'warn', findings, data: { groups: data } };
+  },
+};
+
+// --- 11. memory near-duplicates ---------------------------------------------
+// Surfaces memories that may say the same thing twice, or disagree, for a
+// human or a model to adjudicate. Reuses the BM25 engine in
+// hooks/lib/memory-index.mjs rather than scoring similarity a second way.
+//
+// Calling search() once per chunk against the FULL corpus re-tokenizes every
+// other chunk on every call — ~87s measured against the real ~1400-chunk
+// corpus. Building a coarse inverted index once and handing search() only
+// each chunk's own small candidate pool keeps the exact same scoring
+// function — nothing about BM25 is reimplemented, only candidate
+// generation — and drops that to ~3s.
+const NEAR_DUP_THRESHOLD = 80;
+const NEAR_DUP_CAP = 20;
+const NEAR_DUP_SIG_TERMS = 12;
+const NEAR_DUP_MAX_CANDIDATES = 200;
+
+const memoryNearDuplicates = {
+  id: 'memory-near-duplicates',
+  title: 'Memory near-duplicates',
+  vendor: 'anthropic',
+  fixable: false,
+  run(ctx) {
+    const root = memoryRoot();
+    let index;
+    try {
+      ({ index } = loadOrBuildIndex({ root, dataDirPath: dataDir(), rebuildIfStale: true }));
+    } catch {
+      return { status: 'skip', findings: ['could not build the memory index'] };
+    }
+    const chunks = (index && index.chunks) || [];
+    if (chunks.length < 2) return { status: 'skip', findings: ['not enough indexed content to compare'] };
+
+    let tokSets;
+    try {
+      tokSets = chunks.map((c) => new Set(tokenize(c.text)));
+    } catch {
+      return { status: 'skip', findings: ['could not tokenize the corpus'] };
+    }
+    const df = new Map();
+    for (const set of tokSets) for (const t of set) df.set(t, (df.get(t) || 0) + 1);
+    const postings = new Map();
+    for (let i = 0; i < tokSets.length; i++) {
+      for (const t of tokSets[i]) {
+        if (!postings.has(t)) postings.set(t, []);
+        postings.get(t).push(i);
+      }
+    }
+    const candidatesFor = (i) => {
+      const terms = [...tokSets[i]].sort((a, b) => (df.get(a) || 0) - (df.get(b) || 0)).slice(0, NEAR_DUP_SIG_TERMS);
+      const seen = new Set();
+      for (const t of terms) {
+        for (const j of postings.get(t) || []) {
+          if (j === i) continue;
+          seen.add(j);
+          if (seen.size >= NEAR_DUP_MAX_CANDIDATES) break;
+        }
+        if (seen.size >= NEAR_DUP_MAX_CANDIDATES) break;
+      }
+      return [...seen];
+    };
+
+    const isArchive = (f) => /(^|\/)archive\//.test(f);
+    const sameFile = (a, b) => a.project === b.project && a.file === b.file;
+    // A pair sharing a filename is the SAME memory living in more than one
+    // place — an archive/ copy left next to its live twin, or exactly the
+    // cross-store forks memory-store-forks already finds and byte-compares
+    // precisely. Reporting it again here would just echo that check with a
+    // fuzzier instrument; this check's job is DIFFERENT memories that may
+    // overlap or disagree, so same-name-different-location pairs are left out.
+    const sameNameElsewhere = (a, b) => !sameFile(a, b) && basename(a.file) === basename(b.file);
+
+    let candidateError = false;
+    const best = new Map(); // "i-j" (i<j) -> highest score seen for that pair
+    for (let i = 0; i < chunks.length; i++) {
+      const cand = candidatesFor(i);
+      if (!cand.length) continue;
+      const pool = cand.map((j) => chunks[j]);
+      let hits;
+      try {
+        hits = search(pool, chunks[i].text, { limit: 8 });
+      } catch { candidateError = true; continue; }
+      for (const h of hits) {
+        const j = cand[pool.indexOf(h.chunk)];
+        const a = chunks[i];
+        const b = chunks[j];
+        if (sameFile(a, b)) continue;
+        if (isArchive(a.file) && isArchive(b.file)) continue;
+        if (sameNameElsewhere(a, b)) continue;
+        if (h.score < NEAR_DUP_THRESHOLD) continue;
+        const key = i < j ? `${i}-${j}` : `${j}-${i}`;
+        const prev = best.get(key);
+        if (!prev || h.score > prev) best.set(key, h.score);
+      }
+    }
+    if (candidateError && best.size === 0) {
+      return { status: 'skip', findings: ['similarity search failed for every chunk'] };
+    }
+
+    const pairs = [...best.entries()]
+      .map(([k, score]) => { const [i, j] = k.split('-').map(Number); return { i, j, score }; })
+      .sort((a, b) => b.score - a.score);
+
+    const findings = [
+      'High lexical similarity means NEAR-DUPLICATION, not contradiction: two memories that '
+      + 'disagree about the same flag or fact can score just as high as two that agree. This '
+      + 'check can only say a pair is worth a human or model look — never that they contradict.',
+    ];
+    if (!pairs.length) {
+      findings.push(`no pairs scored >= ${NEAR_DUP_THRESHOLD} across ${chunks.length} chunks — nothing to review`);
+      return { status: 'ok', findings, data: { threshold: NEAR_DUP_THRESHOLD, total: 0 } };
+    }
+
+    findings.push(`${pairs.length} pair(s) scored >= ${NEAR_DUP_THRESHOLD} `
+      + `(threshold tuned against this operator's real ${chunks.length}-chunk corpus); `
+      + `showing the top ${Math.min(NEAR_DUP_CAP, pairs.length)}:`);
+    for (const p of pairs.slice(0, NEAR_DUP_CAP)) {
+      const a = chunks[p.i];
+      const b = chunks[p.j];
+      findings.push(`  ${p.score.toFixed(1).padStart(6)}  [${a.project}/${a.file}${a.heading ? ` > ${a.heading}` : ''}]`
+        + `  <->  [${b.project}/${b.file}${b.heading ? ` > ${b.heading}` : ''}]`);
+    }
+
+    return {
+      status: 'warn',
+      findings,
+      data: { threshold: NEAR_DUP_THRESHOLD, total: pairs.length, shown: pairs.slice(0, NEAR_DUP_CAP) },
+    };
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
@@ -520,4 +873,7 @@ export const CHECKS = [
   spawnAudit,
   pluginManifests,
   routingDoc,
+  memoryIndexCeiling,
+  memoryStoreForks,
+  memoryNearDuplicates,
 ];

@@ -79,6 +79,27 @@ you expected to run reports `SKIP`, find out why before concluding anything.
   only check that distinguishes "no violations" from "not running".
 - **spawn-audit** — recorded spawn mix; flags inherited-model spawns and an
   unused cheap tier.
+- **memory-index-ceiling** — Claude Code's native memory loader only reads the
+  first 200 lines or 25KB of `MEMORY.md`, whichever hits first, and drops
+  everything past that SILENTLY on the next load. Measures every project's
+  index against that cliff (with a margin: WARN/FAIL trigger a bit inside the
+  real limit) and names the worst offender. Read-only; not fixable — trimming
+  an index is a judgement call, not a mechanical repair.
+- **memory-store-forks** — the memory directory is keyed by an encoding of the
+  working-directory path, so the same project opened from two paths (a
+  Windows drive letter, a WSL mount, a native Linux path) becomes two
+  unlinked stores. Groups stores by a normalised project name, picks the
+  newest-modified as live, and byte-compares the rest against it: file-set
+  overlap, identical counts, and — the only ones worth a human's time — files
+  where the OLDER store's copy is *larger*. Proposes only; never merges or
+  archives.
+- **memory-near-duplicates** — reuses the BM25 engine from
+  `hooks/lib/memory-index.mjs` to find chunks in *different* files that score
+  above a tuned similarity threshold, capped to the top matches. High lexical
+  similarity means near-duplication, not contradiction — two memories that
+  disagree about the same fact can score just as high as two that agree, so
+  this only flags a pair as worth a human or model look. Read-only; not
+  fixable — consolidating overlapping memories needs judgement.
 
 ## Fixing
 

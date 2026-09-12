@@ -26,11 +26,91 @@ Append a new dated entry at the **top** of the list (newest first), using the te
 - **Applied?** `no` (a maintainer flips this to `yes` and removes the entry once folded in).
 ```
 
-**Placement note:** entries go under `## Entries` below, newest first — not above this section, and not below the fold history. Entries drifted out of that section in both the 2026-08-31 and 2026-09-07 folds, which is easy to do and harmless, but the queue reads correctly only when every pending entry lives in one place.
+**Placement note:** entries go under `## Entries
+
+## Entries
+
+### 2026-09-11 — A case-insensitive platform hides a case-sensitive bug
+
+- **Trigger:** A helper built an environment-variable name from a lowercase
+  identifier — `{{ENV_PREFIX}}_${lowercaseKey}` — while the platform that sets
+  the variable uppercases the key itself
+  (`{{ENV_PREFIX}}_${lowercaseKey.toUpperCase()}`). `process.env` property
+  lookup is case-insensitive on {{OS_A}} but case-sensitive on {{OS_B}} and
+  {{OS_C}}, so the lookup worked by accident on a {{OS_A}} development machine
+  and silently returned every option's default everywhere else, including
+  cloud and hosted runtimes. The bug was latent for months because no config
+  value had ever actually been set until a real user set one from a
+  non-{{OS_A}} host.
+- **Is it generic?** Yes — strip the specific env-var prefix and the plugin
+  name; the reusable kernel is platform-dependent case sensitivity around any
+  identifier a program builds itself (env var names, file paths, headers),
+  verified only on the one platform where the mismatch happens not to matter.
+- **Target:** a new lesson under `lessons/env/`.
+- **Proposed change:** the lesson is that **a case-insensitive platform hides
+  a case-sensitive bug**. Code that builds an environment-variable name from a
+  lowercase identifier, when the platform that exports it uppercases the key,
+  works perfectly on {{OS_A}} and fails silently everywhere else — no error,
+  just defaults, so it survives every local test on the developer's own
+  machine and only appears on a different OS, typically in CI or a hosted
+  runtime nobody debugs interactively. Generalize past env vars: whenever
+  correctness depends on case, path separators, or line endings, "it works on
+  my machine" is evidence about the platform, not the code — and a config
+  value that silently falls back to a default is far more dangerous than one
+  that throws, because nothing ever reports it. Fix pattern: normalize the
+  case (or separator/line-ending) explicitly at the lookup site instead of
+  relying on the platform to paper over the mismatch, and prefer failing
+  loudly over falling back silently when a value was supposed to be set.
+- **Applied?** `no`
+
+### 2026-09-11 — A version bump does not invalidate every downstream cache
+
+- **Trigger:** a plugin published through a marketplace was updated and verified green by every
+  local check — the marketplace cache commit, the installed-version report, the manifest version
+  match — yet a separate hosted client that also consumes the same marketplace kept serving the
+  previous version's hooks and skills. The update sequence run on the local machine never touched
+  the hosted client's own cache; it is a different cache, on a different machine, with no shared
+  refresh path. The fix that worked was removing the hosted client's copy of the marketplace and
+  re-adding it — a version bump alone did not invalidate it.
+- **Is it generic?** Yes — it applies to any artifact distributed through a cache that more than
+  one client consumes independently, not just this plugin system.
+- **Target:** a new lesson under `lessons/agent-process/`.
+- **Proposed change:** the lesson is that **"verified" is scoped to the cache you verified**. When
+  one artifact is consumed by two clients with independent caches, a green check on one says
+  nothing about the other, and the failure is silent on the stale side — it serves old code rather
+  than erroring. Enumerate every consumer of a published artifact and verify each one separately,
+  or state plainly which ones were not checked. Corollary: a version bump does not necessarily
+  invalidate a downstream cache; some caches require explicit removal and re-add rather than an
+  update-in-place.
+- **Applied?** `no`
+
+### 2026-09-11 — An integration gate catches what a builder's self-report does not
+
+- **Trigger:** A builder agent reported `{{VALIDATE_CMD}}` as passing ("Validation passed") in its
+  completion report. An independent integration step run later, on the merged tree, found that same
+  command exiting non-zero: the skill it had just authored had YAML frontmatter with an unquoted
+  `Triggers: ` inside a plain scalar, which terminates the scalar. The skill would have loaded with
+  **empty metadata and never triggered** — a silent failure, not a crash. Everything else the builder
+  reported was accurate and independently reproduced, so this was not a careless agent; it was a
+  self-report of a check that was either run at the wrong moment or not re-run after a later edit.
+- **Is it generic?** Yes. Any pipeline where the agent that writes the code is also the agent that
+  reports the verification has this hole, regardless of tool or language. It is sharper for
+  **manifest/frontmatter validation** specifically, because the failure mode is silent degradation
+  rather than an error at runtime — nothing downstream would have complained.
+- **Target:** a new lesson under `lessons/agent-process/`.
+- **Proposed change:** *Re-run the validating command at the integration point, on the merged tree,
+  and treat the builder's report of it as a claim rather than a result.* A builder's self-verification
+  is still worth demanding — it catches most things cheaply and early — but it is evidence, not proof,
+  because it is taken at a moment the builder chooses and on a tree only the builder has seen. Put the
+  authoritative run where nothing can be edited after it: the same place the merge happens, with an
+  explicit "if this fails, do not publish" rule. Corollary for briefs: tell the integrator the expected
+  passing output, so a *changed* result is as visible as a failing one.
+- **Applied?** `no`
+
+` below, newest first — not above this section, and not below the fold history. Entries drifted out of that section in both the 2026-08-31 and 2026-09-07 folds, which is easy to do and harmless, but the queue reads correctly only when every pending entry lives in one place.
 
 ---
 
-## Entries
 
 ### 2026-09-11 — Order a worker's brief push-first, verify-second; telling it not to park does not work
 
@@ -123,7 +203,6 @@ Append a new dated entry at the **top** of the list (newest first), using the te
   > When you correct an ordering instruction, correct its REASON too, and say plainly what the old reason claimed and why it was wrong. Otherwise the discredited rationale gets reconstructed from memory and the safeguard is dropped as pointless.
 
 - **Applied?** `no`
-
 
 ### 2026-09-07 — Committing an analysis is not delivering it
 
@@ -219,4 +298,3 @@ sessions). Never for a sub-agent reporting to the thing that spawned it.
 **Generalization:** whenever a brief names a channel, ask whether the channel
 is guaranteed to exist in the context the agent will actually run in. A brief
 that depends on an unverified channel has no channel.
-
