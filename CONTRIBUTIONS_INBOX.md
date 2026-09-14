@@ -1,5 +1,75 @@
 # Contributions Inbox
 
+## 2026-09-14 — A CLI-style script with no main-module guard runs on import
+
+**Lesson:** a script that doubles as a CLI (bottom dispatch on process.argv) and has never been imported hides a landmine: the first test that imports it executes the dispatch inside the test runner, against the developer machine's real state. Observed: a test import of {{LISTENER_SCRIPT}} took a real process lock, read a real credential from {{HOME_DIR}} and made a real network call to {{PRODUCTION_HOST}} (no damage only because that credential was already revoked).
+
+**Rule for agents:** before the first test import of any script under {{SCRIPTS_DIR}}, read its tail for an is-main-module guard; if absent, add the guard plus a witness that a bare import runs nothing, BEFORE the import. Tests inject the home directory and the network client; never the real machine.
+
+**Tags:** testing, agent-process, safety
+
+## 2026-09-13 - publishing model-written summaries of private work, and a deferred-tool false alarm ({{PROJECT}})
+
+- **When an LLM summarises mixed public/private data, withhold at the PAYLOAD, never redact in the prompt.** Asked for a
+  public "what I have been working on" digest with private repos redacted, the obvious build feeds every commit subject to
+  the model and tells it to hide the names. Demonstrated against real history, that publishes a production incident and its
+  date, a just-closed vulnerability class, an abuse vector and key-lifecycle details - while hiding only the repo NAME, which
+  is the least sensitive field. Invert it: public sources contribute full text, private sources contribute ONLY derived
+  aggregates (a count, a conventional-commit type histogram). Read the sensitive text to compute the aggregate, then drop it.
+  The model cannot leak what it never received, so a reworded prompt, a model swap or a hostile commit message cannot widen
+  the hole. Rich prose and leakage are the SAME property - if the output is vivid, check what you fed it.
+- **Ship a payload-audit hatch with any such boundary.** `PAYLOAD_ONLY=1` prints the exact bytes about to be sent and exits.
+  It is the only check that actually proves the boundary, it is one `if` block, and it is what a reviewer runs after editing
+  the file. Pair it with a fixture env var that substitutes a canned string for the model call so the output filter can be
+  exercised - including against deliberately leaky prose - without spending a request.
+- **A rare-token canary is a regression detector, and mis-tuning it gets it deleted.** Flagging output words that occur only
+  in the withheld corpus catches a future edit that starts forwarding the sensitive text. First tuning flagged ordinary
+  English ("run", "day", "open", "shape") because those appear in all prose, and would have blocked every legitimate run -
+  a gate that always fires gets removed, leaving nothing. Tune for near-zero false positives: drop short words, carry a real
+  common-word list, and fail on two distinct hits OR one long (>=8 char) jargon token. Say in the comment that it is a
+  backstop, not the primary defence, so nobody mistakes it for the guarantee.
+- **State security downgrades in the doc that teaches the setup, not just the commit.** Adding per-day counts forced a token
+  from metadata-only to contents-read: the promise changed from "the credential cannot read your code" to "the script reads
+  it and does not forward it". Scope the broader credential to the allowlisted resources only so the allowlist is enforced by
+  the credential rather than by code, and rewrite the setup doc's old "do NOT grant this" instruction instead of leaving it
+  to contradict the running config.
+- **Deferred connector tools can appear MID-SESSION; re-search before reporting a capability dead.** A bare-name tool search
+  returned nothing, the server read `! Needs authentication`, and the session was non-interactive - so the capability was
+  reported blocked, with the REST fallback ruled out because the machine held an oauth-shaped credential rather than a flat
+  bearer. The tools then arrived later in the same session under a per-connector UUID prefix. Existing guidance says to prove
+  absence by searching the bare tool name; add that absence is a point-in-time result, not a permanent one. Re-search before
+  any turn that depends on the capability, and prefer work that does not need it meanwhile - the task itself was never blocked.
+## 2026-09-13 - four orchestration lessons from a 30-card landing day ({{PROJECT}})
+
+- **A fix commit's root-cause claim is a guarantee to prove.** Before writing "root cause: X", revert ONLY X on the
+  committed tree and show the named test goes red. A fix credited a watch flag plus a test-setup reset; reverting both
+  left the full suite green - the real fix was a fake-timer buffer for jitter inside the test. The reviewer's mutation
+  caught it; the writer's own commit message did not.
+- **Backgrounded runs do not just park the agent - they can die with it.** When a parked agent is stopped, its
+  backgrounded test runs leave truncated logs with no summary and no exit file. A finisher must check for a live PID
+  first and treat a log without a summary as NOT RUN, then rerun that piece in the foreground.
+- **Check teammate weight with a routing tool, not by taste.** Run the routing recommender before every spawn and cite
+  its verdict in the brief; the table's floors (critical consequence forces the premium tier regardless of size;
+  a diagnostic fix sits one effort notch above a builder definition pinned at high) are what taste forgets. Effort
+  is frontmatter-locked, so "the right weight" means picking the right DEFINITION, not only the model.
+- **An unquoted heredoc executes backticks.** Writing a log entry with `<<EOF` (to interpolate a date) executed every
+  backtick-quoted word as a command and dropped it from the text. Compute the timestamp into a variable first, write
+  the block with a QUOTED heredoc carrying a placeholder, then substitute the placeholder.
+
+## {{DATE}} - a fresh service instance can print a first-run credential at boot; never let an agent see its stdout
+
+- **Lesson:** services with fail-closed first-run provisioning (no credential file -> generate one and PRINT it once) will leak that
+  credential into an agent's tool output whenever the agent boots a throwaway instance for a measurement or a smoke and reads its
+  stdout, or when the boot FAILS after the print (a missing build artifact did exactly that: four throwaway instances, four tokens
+  in the transcript). Two agents hit it in one day on {{PROJECT}}.
+- **Technique:** in every brief that boots an ephemeral instance: (1) satisfy every boot precondition first (build the artifact
+  the server asserts on) so the boot cannot fail-after-print; (2) start the instance with stdout+stderr redirected to a file; (3)
+  never cat/tail/Get-Content that file - grep it ONLY for the readiness line or the bound port; (4) if a credential is printed
+  anyway: kill that instance by its real PID (not the wrapper), delete its data dir so the printed value has no backing store, and
+  report it as an incident rather than treating it as fine. Put the rule in the shared brief rules file so every spawn inherits it.
+- **Tags:** ephemeral-instances, secrets-hygiene, measurement-briefs, agent-process-shape
+
+
 A holding area for generic improvements contributed back from real projects when no pull-request workflow is available. Entries here are **not yet applied** — a maintainer folds each one into its proper template/shared file (see [CONTRIBUTING.md](CONTRIBUTING.md) → "Where it goes") and then removes it from this file.
 
 **This is a queue, not a home.** A change isn't "done" while it's only in the inbox.
@@ -298,3 +368,33 @@ sessions). Never for a sub-agent reporting to the thing that spawned it.
 **Generalization:** whenever a brief names a channel, ask whether the channel
 is guaranteed to exist in the context the agent will actually run in. A brief
 that depends on an unverified channel has no channel.
+
+## 2026-09-14 — Brief for the decision, not for your conclusion
+
+**Shape:** orchestration / briefing.
+
+A lead researching a question, reaching an answer, and then writing that answer
+into a worker's brief as an instruction is not delegation — it is handing over
+typing. Two harms, both observed in one session:
+
+1. **The lead's conclusion can be stale where fresh research would not be.** The
+   prescribed transport was copied from a working local codebase whose pattern
+   predated a spec revision. A worker told to "use what `{{PRECEDENT_REPO}}`
+   uses" cannot discover that; a worker told to "verify what the spec calls for
+   now" can.
+2. **The precedent may not transfer, and only the brief can flag that.** Here a
+   single-operator internal tool was being offered as the template for
+   multi-tenant consumer software — same protocol, materially different problem.
+
+**Write it as:** requirements and constraints, then local precedent offered
+explicitly as *evidence to be sceptical of* with a stated reason it might not
+transfer, then a required ADR listing the alternatives actually evaluated.
+Judgement stays with the worker; acceptance criteria stay with the lead.
+
+**Corollary that saves more time than the rule itself:** name the research that
+already exists. A brief sent a worker to determine platform capabilities that
+twelve dated, sourced files in the project's own research directory already
+answered. Scope fresh work only to what is genuinely time-sensitive — and check
+status headers before citing, because one of those files read
+`Status: IN PROGRESS` and had been treated as complete for a week.
+
