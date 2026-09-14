@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-07
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 A "promote branch A into branch B" automation implements one strategy. If it **rebases** and the target's history is built from **merge commits**, the rebase replays your commits over commits that already contain them, and it fails — with a conflict message about renames, deletes or binaries — *before any test runs*. The error names files, so it reads as a content conflict in your change. It is not: it is a strategy mismatch, and no amount of conflict resolution fixes it.
 
@@ -24,3 +24,5 @@ Three things the automation did not do, observed across one release:
 - **Rebase a lagging source branch onto the target's tip yourself**, back it up first, and re-run — a descendant goes straight into the gate ([[push-rebased-branch-before-gates]] where a project has such a rule).
 - Enumerate every **side effect your process expects but the tool does not perform** — release markers, tags, changelog promotion, notifications — and either automate them or put them in the runbook. Verify at the destination, never from the tool's success ([[verify-at-destination-prove-the-target]], [[green-means-not-broken]]).
 - Before any destructive git against a pushed ref (the force-with-lease in step 2), create **and push** a dated backup ref and confirm the push landed. That is one command and it is the difference between a recoverable and an unrecoverable mistake.
+
+**Second case — rebase immediately before EVERY trigger, not once per branch.** An automated merge service that rebases sources itself refuses anything it cannot auto-resolve; a one-commit branch sitting three documentation commits behind the tip was refused outright. The working pattern is per-landing, not per-branch: back up the ref, rebase locally onto the CURRENT integration tip, force-with-lease, trigger — and repeat for the next branch, **because each landing moves the tip.** A rebase done at the start of a landing session is stale by the second merge.

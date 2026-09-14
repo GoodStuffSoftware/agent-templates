@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 Before reporting something verified, name the failure class you are ruling out and confirm your check can actually observe it. A gate is blind outside its class, and green from a blind gate is not weak evidence — it is none.
 
@@ -28,3 +28,7 @@ The incident that bought this: a UI was completely dead for hours while a syntax
 - **Verify a conditional path by constructing its precondition.** A feature that fires zero times against real data is not thereby broken; the honest verification is a synthetic case that satisfies the trigger, plus a diagnostic showing why the real data does not. Reporting "fires 0 times, therefore broken" and reporting "fires 0 times, therefore fine" are the same unverified guess.
 - **Prove the check can fail on the condition it names.** A second incident: a live post-deploy check written to catch one specific shipping mistake was found, on inspection, to be incapable of detecting it — it asserted on a surface that is not present for the state it was testing (a signed-out visitor sees a gate, not the content the assertion looked for). A check aimed at a failure it cannot observe is worse than no check, because its row in the report is indistinguishable from a real one ([[did-not-run-is-a-third-outcome]]).
 - When a defect escapes every gate, the durable fix is a NEW gate that can see that class, and its acceptance criterion is that it fails on the original defect. Add it to the blocking set, never the advisory set — an advisory warning is exactly what everyone was already ignoring.
+
+**Third case — a decision rule written against a report row the instrument never emits.** A campaign kill rule read "stop unless at least one attributable acquisition appears in the platform's acquisition-by-source report." That report never produced the channel row in question for this product, despite the upstream link being configured, so the rule could neither pass nor fail: **a rule on an instrument that cannot emit the signal is unfalsifiable, and an unfalsifiable rule silently becomes "keep spending."** The replacement measured raw daily acquisitions against a pre-change baseline — a coarser instrument that actually produces numbers.
+
+Before writing any threshold rule, confirm the instrument has ever produced the field you are thresholding on, for this subject, in a window you can check ([[assert-the-guard-saw-something]]).

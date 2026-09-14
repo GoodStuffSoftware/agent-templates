@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-10
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 Three separate identity bugs landed in one codebase in one week, each one an author deriving identity from a convenient string instead of from an authenticated credential: a transport class treated as an ownership signal; a garbage-collection tombstone's actor field read as the record's owner; a requested name treated as proof of the caller. A fourth was caught *before* it was written — the proposed fix for the third would have had to parse an identifier out of a token name, because the object carrying the real identity was dropped before reaching the request context.
 
@@ -22,3 +22,5 @@ That is the finding: **the codebase had made the wrong implementation the only a
 - Derive identity from the authenticated credential, never from a parameter naming the subject. A filter like `?subject={{ID}}` read off the request is not a restriction; it is a lookup by any caller. If it must exist, validate it against the authenticated identity rather than trusting it.
 
 Related: [[safeguard-the-operation-not-the-entry-point]] is about WHERE a check goes; this one is about whether the correct call is *possible* at the call site. See also [[externally-asserted-fields-are-not-self-reportable]].
+
+**Second case, the safety-critical form: a hazard and its guard ship in the SAME release.** A change added a server-trusted field whose protection depended on a policy deploy; the verifier that would prove the protection was live had been split into a separate tracking item, to land later. Splitting them leaves a live gap for exactly as long as the second item waits — the guard for a window that the first change opens is not follow-up work, it is part of the change. The tell was a reviewer asking *"why are there more items?"*: proliferation of tracking items after a review is often evidence that one change was cut along the wrong seam. See [[stack-work-behind-a-serialized-gate]] and [[under-a-denylist-deploy-order-is-a-security-property]].

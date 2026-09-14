@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-31
 provenance: [contrib-1]
-corroborated: 1
+corroborated: 2
 ---
 A sub-agent spawned without an explicit model/tier setting inherits the MAIN session's. So a premium lead silently makes every worker premium, and one expensive decision becomes N of them without anyone deciding anything.
 
@@ -20,3 +20,7 @@ The incident: four top-tier agents ran concurrently on a task that warranted non
 - **Audit defaults as a separate pass from auditing rules.** For each spawn site, ask what happens when each optional field is omitted, and whether that is the value you would have chosen.
 - The reviewer is the one exception where inheritance is directionally right — but state it deliberately rather than relying on the default to produce it ([[reviewer-matches-the-tier-it-reviews]]).
 - Related: [[team-vs-subagent-gate]] (whether to spawn at all) and [[budget-fan-out-against-host-memory]] (the other resource an unbounded fan-out spends).
+
+**Second case — check a teammate's weight with a routing tool, not by taste.** Run the routing recommender before every spawn and cite its verdict in the brief. The routing table's floors are exactly what taste forgets: a critical consequence forces the premium tier regardless of how small the task looks, and a diagnostic fix sits one effort notch above a builder definition pinned at a fixed effort.
+
+That last point has a structural consequence: where effort is locked in an agent definition's frontmatter, **"picking the right weight" means picking the right DEFINITION, not only the right model.** Choosing a builder definition and asking for higher effort in the brief does not raise it.

@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-24
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 3
 ---
 A release-verification channel reused an existing assertion whose rule was *this artifact is always backed by the staging environment*. That rule is correct for the sideload distribution path it was written for — a developer-only channel where a production-backed build would be a mistake.
 
@@ -22,3 +22,8 @@ On a production release it inverts. The production artifact is *supposed* to be 
 - **Prefer a rule parameterised on the target over a rule naming a constant.** "Requires this environment's own backend AND forbids the other" catches both mis-wirings and reads correctly in every context; "always staging" catches one and lies in the other.
 - **Treat a red on a known-good artifact as a defect IN THE CHECK, with the same urgency as a missed defect.** Log it, fix it, and say so — a check nobody trusts is a check you are paying for and not getting ([[green-means-not-broken]] covers the opposite direction; both erode the same signal).
 - Related: [[match-instrument-to-failure-class]] and [[monitor-default-target-is-part-of-the-finding]].
+
+**Two further cases, both ending in the same place — a red that everyone learns to route around:**
+
+- **A freshness gate in an environment that structurally cannot be fresh.** A release check required a derived aggregate to be under a certain age. In production, ordinary traffic refreshes it constantly and the guard is meaningful. In the pre-production environment nobody uses, the aggregate is always stale — so every release touching the policy file failed on a structurally normal condition. Resolution: keep the channel RUNNING and REPORTING in both places, but make it advisory where the refreshing behaviour does not exist and required where it does. A guard whose signal is produced by real usage cannot be required in an environment with no usage.
+- **A canary tuned so loosely that it fires on every legitimate run.** A rare-token check meant to catch a regression first flagged ordinary English words, because those appear in all prose. It would have blocked every correct run — and a gate that always fires gets removed, leaving nothing behind it. Tune such a check for near-zero false positives (drop short words, carry a common-word list, require two distinct hits or one long jargon token) and label it in the source as a backstop rather than the guarantee.

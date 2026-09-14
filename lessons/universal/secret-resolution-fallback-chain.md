@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-07-27
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 When many small entry points need the same credential — hooks, supervised daemons, one-shot scripts a scheduler spawns, CLIs run by hand — requiring each of them to find a named environment variable already injected makes every new environment a configuration chore and every rotation an edit in N places. One environment that misses the injection fails quietly and differently from the rest.
 
@@ -32,3 +32,7 @@ Cache the result per process, *including* the empty one, so a missing or broken 
 - Reach for a remote store over its REST API rather than by shelling out to a vendor CLI, unless that CLI is installed everywhere the chain runs. A missing binary is otherwise an invisible extra requirement on every future host.
 - Keep the bootstrap credential itself out of the chain's outputs — it is the one value that still has to be present in the environment, and that is the point.
 - Document the secret id, not the secret, in the repo.
+
+**Third case — mirror the chain across sibling environments, and document the order once.** A resolution chain was implemented carefully for one environment and never mirrored to its sibling, so the same script failed to find a credential that was present on the machine in a slightly different place. The fix was to make both paths use the same ordered chain, including the home-directory fallback, and to write the order down in a single place both call sites point at.
+
+**Environments that share a script share its resolution contract.** A fallback added for one and not the other is a latent failure that appears only when someone runs the less-travelled path — usually during an incident.

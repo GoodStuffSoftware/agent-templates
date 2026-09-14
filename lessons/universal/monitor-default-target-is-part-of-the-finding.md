@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-17
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 Before believing a health, parity, or uptime alarm, find out what it actually probed. Resolver defaults are where monitors lie without any bug being present.
 
@@ -25,3 +25,7 @@ A second incident, same shape from the other end: a release verifier was pointed
 - **Know which numbers are cosmetic.** Decorative figures (commit counts, drift sizes) are often computed from a different source than the verdict and may be marked non-authoritative in the checker's own source. Do not read a big number as severity.
 
 **Rule:** an alarm should report *what it probed* — resolved URL, resolved directory, and how each was chosen — alongside what it found. Without that, a reader cannot distinguish a broken deployment from a misaimed monitor. Related: [[probe-behaviour-not-version-stamps]] ranks the evidence once you know the target; [[verify-at-destination-prove-the-target]] and [[verify-actual-bound-url]] cover proving the target from the other side.
+
+**Third case — a release verifier that resolved its target from ambient default configuration.** One channel of a multi-channel release check read the project id from the repository's default-project config file instead of from the environment flag the run was invoked with, so it queried the pre-production environment even under the production flag. The production release failed on a stale figure belonging to a different environment; the real production value was an order of magnitude healthier. Every other channel in the same run was correct, which is what made it convincing.
+
+**The rule this adds:** any check that accepts a target as an argument must resolve EVERY sub-check from that argument, and each sub-check must report the target it actually probed. A default-resolution path inside one channel is invisible from the outside and turns a green-or-red verdict into a statement about the wrong system.

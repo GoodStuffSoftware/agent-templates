@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-10
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 A tool server can serve ONE endpoint and filter its listing BY CALLER SCOPE. What you see is a function of your token, not of what exists.
 
@@ -21,3 +21,7 @@ The incident: a server exposed 41 tools across four scopes. The full-scope beare
 - Before concluding a capability was removed, check whether a *differently scoped* credential exists. State the finding as "not visible to {{SCOPE}}", never "gone" ([[scope-a-broken-finding-to-the-measured-path]]).
 - **Never carry an argument set over from a predecessor tool of the same name.** Read the current schema. Where schemas are strict (`additionalProperties: false`), a stale argument is a hard rejection — which is the *lucky* outcome; the dangerous one is an argument that was quietly dropped and whose absence changes what the call acts on.
 - Distinguish a "not armed / not permitted" refusal from an "in-flight lock" refusal when both return the same status code. Polling clears one and never clears the other.
+
+**Second case: absence is point-in-time, not permanent.** A session searched for a capability by its bare tool name, found nothing, read the server as needing authentication, and reported the capability blocked — ruling out the REST fallback too, because the machine held an OAuth-shaped credential rather than a flat bearer. The tools then arrived **later in the same session**, under a per-connector prefix, once a first tool call had caused the connector's surface to load. A second session hit the same shape and carded it.
+
+So the existing guidance — prove absence by searching the bare tool name under ANY prefix, not just the one you expect — needs a time dimension: **a negative listing result expires.** Re-search immediately before any turn that depends on the capability, and meanwhile prefer work that does not need it. In both incidents the task itself was never actually blocked.

@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-07-07
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 Default every user-facing update to three slots: **what happened, what's next, what needs the user.** Suppress troubleshooting narratives, resolved dead-ends, and debugging detail — they spend the user's attention and bury the ask. Exactly two exception classes earn an explicit flag inside an update:
 
@@ -21,3 +21,4 @@ Everything below outcome level lives in files — teammate reports, the decision
 - Template each update: what happened / what's next / what needs you (omit empty slots).
 - Prefix the exceptions explicitly: "worth your attention: …" / "want your take: …".
 - Route detail to its durable home instead of the conversation: reports → files ([[teammate-reports-to-files]]); decisions → the ledger ([[no-stall-decision-protocol]]); in-progress state → the handoff doc ([[handoff-doc-live-state]]).
+- **Carve out the deliverable.** This rule governs PROCESS noise. When the thing the task exists to produce is itself an interpretation — a read, a recommendation, a verdict — it is reproduced in full, not compressed to its headline ([[deliver-the-judgment-not-a-pointer-to-it]]).

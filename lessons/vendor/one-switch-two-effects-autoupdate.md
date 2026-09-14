@@ -20,3 +20,5 @@ Three separable traps in one incident: **one switch with two effects**, **a stal
 - A marketplace entry that declares no `version` is invisible to the host's plugin directory across releases. Declare it and keep it equal to the plugin manifest's own version; the CLI validator enforces the equality once both exist.
 - **Grep the shipped bundle for the feature's strings before building a replacement for it.** The auto-updater already existed; only its gate was closed. Building a second one would have been pure cost ([[grep-the-shipped-artifact-not-the-docs]]).
 - Related: [[probe-behaviour-not-version-stamps]] and [[assert-the-resolved-value-not-the-declaration]] — the version you read from a manifest is a declaration, not what is loaded.
+
+**Neighbouring lesson:** where this one is about a single switch with two effects, [[a-version-bump-does-not-invalidate-every-cache]] covers the other half of the same family — one published artifact consumed through several INDEPENDENT caches, where verifying the update on your own machine says nothing about a hosted client holding its own copy.

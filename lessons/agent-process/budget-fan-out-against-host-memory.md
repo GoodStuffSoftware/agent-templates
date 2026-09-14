@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-10
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 Each concurrent agent is a full OS process with its own footprint (a few hundred MB is typical). Deciding how wide to fan out is therefore a resource decision as much as a parallelism one, and on a constrained host the two answers differ sharply.
 
@@ -32,3 +32,7 @@ The incident: an orchestrator fanned out a large number of parallel agents on a 
 - **Size from AVAILABLE capacity, not installed capacity.** A planner that divides total RAM by a per-worker estimate produces a constant — it cannot see the other fleet, the other project's suite, or the browser. The same formula against *free* memory produces a number that moves with the machine, which is the whole point. This holds for any automated width decision: worker counts, batch sizes, connection pools.
 - When every member of a fan-out fails identically rather than some of them, stop blaming capacity — that distribution is a shared-singleton signature ([[lockstep-failure-means-shared-singleton]]).
 - The durable fix is on the test side too: a hardcoded millisecond budget that only passes on an idle box is a latent failure, not a measurement — see [[measure-gates-under-normal-load]].
+
+**Third case — capacity DEGRADES across a long session, so a budget set at the start is wrong by the end.** Over an evening of successive integration gates on a shared machine, free memory fell from about 6.6 GB to about 2.9 GB and the test runner silently auto-reduced its parallelism from four workers to one. Timing-sensitive cases then failed three times out of three. Nothing in the failures pointed at memory.
+
+**Read the runner's own plan lines before blaming a test** — most runners print the worker count they settled on, and a reduced count is the finding. Then reclaim the capacity (finish or stop idle agents, reap orphaned processes from dead runs) rather than re-running into the same wall ([[a-default-timeout-shorter-than-cold-start-manufactures-flakes]]).

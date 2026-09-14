@@ -1,12 +1,12 @@
 ---
 id: resolve-the-reply-to-address
-title: Don't hardcode the reply-to address in a briefing template — resolve it, or make the brief self-healing
+title: Resolve a brief's reply-to address — and for a sub-agent reporting to its spawner, remove it entirely
 scope: [agent-process]
 requires: {}
 status: active
 since: 2026-08-10
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 Briefing doctrine likes to end with a required closing line: "report back via {{MESSAGE_TOOL}} to {{ORCHESTRATOR_NAME}} when done." The instruction is right. The hardcoded name in it is a bet that every future session has the same topology, and that bet loses quietly.
 
@@ -22,3 +22,9 @@ The incident: a doctrine file instructed, verbatim, that every subagent brief mu
 3. Generalises past addressing: **whenever a template embeds an identifier that is resolved at runtime — an address, a branch, a port, a path, a channel — either resolve it at the point of use or make the instruction degrade gracefully.** Prefer the failure that is loud over the one that looks like waiting.
 
 Related: [[static-instructions-teach-discovery]] (the same rule for capability surfaces), [[recovery-from-silent-teammates]] (what to do once a report never arrives), [[teammate-reports-to-files]].
+
+**Amendment (second case): for a SUB-AGENT reporting to the thing that spawned it, the fix is to remove the address, not to improve it.** Harness-agnostic advice of the form *"report to {{ORCHESTRATOR_ALIAS}}; if that does not resolve, use {{FALLBACK_ALIAS}}"* still assumes the spawner is addressable by name. A session started from a background-task chip is not — it carries a human-readable title, not an agent name — so **both** aliases fail. Observed: a writer sub-agent inside such a session found neither address, searched session transcripts for one that mentioned its worktree, and delivered its completion report to the **grandparent** session that had written the plan. That session had no authority over the work and had to relay it back down: one wasted hop, and a report that nearly went unread.
+
+A sub-agent spawned with a spawn tool returns its final message to its spawner automatically. **That return value is the channel, and it cannot misroute.** Brief sub-agents to put their ENTIRE report in their final message, and to write anything long to a file in the branch and name the path ([[teammate-reports-to-files]]). Reserve named-address messaging for genuine peers — standing teammates, other sessions — never for a sub-agent reporting upward. Some hosts disable named messaging for sub-agents outright, which makes an addressed report silently unreachable.
+
+**The general form:** whenever a brief names a channel, ask whether that channel is guaranteed to exist in the context the agent will actually run in. A brief that depends on an unverified channel has no channel.

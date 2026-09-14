@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-24
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 Five parallel background workers — one holding a local worktree, four in remote sandboxes, carrying hours of build scope between them — were lost in one moment when the orchestrating session's host application restarted between turns. None had pushed. Zero work survived, and there was nothing to recover from: no branch, no report, no partial diff.
 
@@ -20,3 +20,7 @@ The mistaken premise was that "remote" meant "independent". It does not. An agen
 - **Pair a long worker with a durable collector.** A reviewer session watching the remote, or a durable message inbox the worker writes to, so finished work is picked up even when the worker and the lead both die. Anything whose only delivery path is a live parent is a single point of failure with no alarm.
 - **When the parent dies, the remote is the only evidence.** Recovery starts with enumerating remote branches, not with asking the workers — see [[check-before-duplicating-a-peers-work]] for the same enumeration used to avoid the opposite mistake.
 - Related: [[handoff-doc-live-state]] (keeping the live state where a successor can find it).
+
+**Second case — a backgrounded run does not just park the agent; it dies with it.** When a parked agent was stopped, its backgrounded test runs left truncated logs with no summary line and no exit-status file. Nothing reported a failure, because nothing reported anything.
+
+So a finisher picking up that work must: check for a live process id first; treat **a log with no summary as NOT RUN**, never as inconclusive and never as passed ([[did-not-run-is-a-third-outcome]]); and re-run that piece in the foreground. And whoever holds a long wait should not be the agent that owns the work at all ([[hold-a-wait-in-a-cheap-foreground-worker]]).
