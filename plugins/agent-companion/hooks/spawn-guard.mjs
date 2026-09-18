@@ -9,10 +9,11 @@
 // answer, filled in where the spawn left the model blank and enforced where
 // the spawn named a premium tier its own declared weight does not support.
 
+import { createHash } from 'node:crypto';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, effortFor,
-  dataDir,
+  effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
@@ -166,6 +167,38 @@ try {
   }
 
   if (opt('spawn_telemetry', true) && !isCanary) {
+    // --- Schema v2 additions: who is spawning, and at what effort ----------
+    // The caller's OWN transcript (not the new subagent's — it does not exist
+    // yet at PreToolUse time), read via a bounded tail so this never risks the
+    // hook's timeout on a large session.
+    const callerTranscript = callerTranscriptPath(p);
+    const callerMeta = callerTranscript ? lastAssistantMeta(callerTranscript) : null;
+    const callerModel = (callerMeta && callerMeta.model) || null;
+    const callerEffort = p.effort?.level || (callerMeta && callerMeta.effort) || null;
+
+    const description = typeof input.description === 'string' ? input.description : null;
+    const descSha = description ? createHash('sha256').update(description).digest('hex').slice(0, 16) : null;
+    const descLen = description ? description.length : null;
+
+    // spawn_effort: the SPAWN's own effort, not the caller's. The agent's own
+    // frontmatter wins when it declares one. A model with an empty `efforts`
+    // list in the tier table (haiku) takes no effort parameter at all, so
+    // there is nothing to inherit. Otherwise built-in types run at whatever
+    // effort the caller itself is running (measured 285 of 285 in practice).
+    const noEffortModel = !!model && (() => {
+      const sup = effortSupported(model, 'high');
+      return !sup.ok && sup.supported.length === 0;
+    })();
+    let spawnEffort = null;
+    let spawnEffortSource = 'none';
+    if (def?.effort) {
+      spawnEffort = def.effort;
+      spawnEffortSource = 'definition';
+    } else if (!noEffortModel && callerEffort) {
+      spawnEffort = callerEffort;
+      spawnEffortSource = 'inherited';
+    }
+
     appendLog('spawns.jsonl', {
       at: new Date().toISOString(),
       session_id: sid,
@@ -176,7 +209,18 @@ try {
       model_autofilled: autofilled,       // the guard set it from the table
       inherited: trulyInherited,          // true when NEITHER the spawn nor the definition named one
       subagent_type: input.subagent_type,
-      effort: p.effort?.level,
+      run_in_background: typeof input.run_in_background === 'boolean' ? input.run_in_background : null,
+      isolation: input.isolation ?? null,
+      name: input.name ?? null,
+      team_name: input.team_name ?? null,
+      desc_sha: descSha,       // sha256(description).slice(0,16) — hashed, never stored raw
+      desc_len: descLen,
+      caller_is_subagent: !!p.agent_id,
+      caller_agent_id: p.agent_id || null,
+      caller_model: callerModel,
+      caller_effort: callerEffort,        // the CALLER's effort — what v1 `effort` held
+      spawn_effort: spawnEffort,          // the SPAWN's own effort
+      spawn_effort_source: spawnEffortSource, // definition | inherited | none
       effort_definition: def?.effort || null,
       declared_weight: declaredWeight,   // null when the brief did not say
       declared_kind: declaredKind,

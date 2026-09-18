@@ -49,14 +49,12 @@
 //
 // Zero side effects, zero tokens on a quiet day. Fails open on every error.
 
-import {
-  readFileSync, openSync, fstatSync, readSync, closeSync,
-} from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import {
-  readStdin, opt, passthrough, stateFile, readJson, writeJson,
+  readStdin, opt, passthrough, stateFile, readJson, writeJson, tailRecords,
 } from './lib/context.mjs';
 
 // Overridable only for tests (the plugin's verification suite needs to point
@@ -219,39 +217,23 @@ const TAIL_BYTES = 128 * 1024;
 
 function newestReloadTimestamp(transcriptPath) {
   if (!transcriptPath) return null;
-  let fd;
-  try {
-    fd = openSync(transcriptPath, 'r');
-    const { size } = fstatSync(fd);
-    if (size === 0) return null;
-    const start = Math.max(0, size - TAIL_BYTES);
-    const len = size - start;
-    const buf = Buffer.alloc(len);
-    readSync(fd, buf, 0, len, start);
-    const lines = buf.toString('utf8').split('\n');
-    // A tail read that doesn't start at byte 0 may begin mid-line; drop that
-    // fragment rather than risk a false JSON.parse on a truncated record.
-    if (start > 0) lines.shift();
-
-    let best = null;
-    for (const line of lines) {
-      const t = line.trim();
-      // Cheap substring pre-filter before paying for JSON.parse on every line.
-      if (!t || t[0] !== '{' || !t.includes('"subtype":"local_command"') || !t.includes('Reloaded: ')) continue;
-      let rec;
-      try { rec = JSON.parse(t); } catch { continue; }
-      if (rec && rec.type === 'system' && rec.subtype === 'local_command'
-        && typeof rec.content === 'string' && rec.content.includes('Reloaded: ') && rec.timestamp) {
-        const ms = Date.parse(rec.timestamp);
-        if (!Number.isNaN(ms) && (best === null || ms > best)) best = ms;
-      }
+  // Mechanism (open/fstat/seek-to-tail/readSync/drop-first-fragment/close) now
+  // lives in the shared tailRecords() helper in lib/context.mjs; this keeps
+  // only the pre-filter and the record-shape check that are specific to the
+  // `Reloaded: ` marker. Behaviour is unchanged.
+  const records = tailRecords(transcriptPath, {
+    bytes: TAIL_BYTES,
+    filter: (line) => line.includes('"subtype":"local_command"') && line.includes('Reloaded: '),
+  });
+  let best = null;
+  for (const rec of records) {
+    if (rec && rec.type === 'system' && rec.subtype === 'local_command'
+      && typeof rec.content === 'string' && rec.content.includes('Reloaded: ') && rec.timestamp) {
+      const ms = Date.parse(rec.timestamp);
+      if (!Number.isNaN(ms) && (best === null || ms > best)) best = ms;
     }
-    return best;
-  } catch {
-    return null; // missing/unreadable transcript: no marker, stay silent about it
-  } finally {
-    if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
   }
+  return best;
 }
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;

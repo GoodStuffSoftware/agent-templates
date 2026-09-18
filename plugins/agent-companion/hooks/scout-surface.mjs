@@ -11,7 +11,8 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, opt, dataDirs, passthrough } from './lib/context.mjs';
+import { readStdin, opt, dataDirs, stateDir, passthrough } from './lib/context.mjs';
+import { syncLegacy } from './lib/state-sync.mjs';
 
 const MAX_AGE_DAYS = 7;
 
@@ -19,16 +20,30 @@ try {
   readStdin();
   if (!opt('scout_surface', true)) passthrough();
 
-  // Several data dirs can exist (one per marketplace, plus -inline). Take the
-  // freshest scout result across all of them.
+  // Recover any durable history left behind under the (pre-0.17.0) plugin
+  // data directory before reading anything. Fully fail-open on its own; a
+  // SessionStart hook must never block or throw because import had a bad day.
+  try { syncLegacy(); } catch { /* fail open */ }
+
+  // scout-latest.json now lives under the durable state root. Fall back to
+  // the legacy per-marketplace scan only when that has not been written yet
+  // (e.g. the very first run before any scout or import has happened).
   let latest = null;
-  for (const d of dataDirs()) {
-    const f = join(d, 'scout-latest.json');
-    if (!existsSync(f)) continue;
-    try {
-      const j = JSON.parse(readFileSync(f, 'utf8'));
-      if (!latest || Date.parse(j.checkedAt) > Date.parse(latest.checkedAt)) latest = j;
-    } catch { /* unreadable: skip */ }
+  const primary = join(stateDir(), 'scout-latest.json');
+  if (existsSync(primary)) {
+    try { latest = JSON.parse(readFileSync(primary, 'utf8')); } catch { /* fall through */ }
+  }
+  if (!latest) {
+    // Several data dirs can exist (one per marketplace, plus -inline). Take
+    // the freshest scout result across all of them.
+    for (const d of dataDirs()) {
+      const f = join(d, 'scout-latest.json');
+      if (!existsSync(f)) continue;
+      try {
+        const j = JSON.parse(readFileSync(f, 'utf8'));
+        if (!latest || Date.parse(j.checkedAt) > Date.parse(latest.checkedAt)) latest = j;
+      } catch { /* unreadable: skip */ }
+    }
   }
   if (!latest || !Array.isArray(latest.signals) || latest.signals.length === 0) passthrough();
 

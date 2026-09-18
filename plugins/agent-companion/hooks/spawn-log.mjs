@@ -12,7 +12,9 @@ try {
       session_id: p.session_id,
       agent_id: p.agent_id,
       agent_type: p.agent_type,
-      effort: p.effort?.level,
+      effort: p.effort?.level, // the effort the harness reported AT SubagentStart
+      transcript_path: p.transcript_path || null,
+      agent_transcript_path: p.agent_transcript_path || null,
     });
   }
 } catch { /* fail open */ }

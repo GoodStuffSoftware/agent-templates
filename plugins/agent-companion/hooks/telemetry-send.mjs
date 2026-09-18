@@ -30,7 +30,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readStdin, opt, dataDir, stateFile, readJson, writeJson, passthrough } from './lib/context.mjs';
+import { readStdin, opt, telemetryDir, stateFile, readJson, writeJson, passthrough } from './lib/context.mjs';
 
 const FILES = ['spawns.jsonl', 'subagent-starts.jsonl', 'unknown-agent-types.jsonl', 'denials.jsonl'];
 const TIMEOUT_MS = 3000;
@@ -68,7 +68,7 @@ try {
   const intervalMin = IS_CLOUD
     ? Math.max(1, opt('telemetry_interval_cloud_min', 10))
     : Math.max(1, opt('telemetry_interval_local_min', 60));
-  const dir = dataDir();
+  const dir = telemetryDir(); // spawns/subagent-starts/unknown-agent-types/denials now live here
   const tenant = String(opt('telemetry_tenant', 'default'));
 
   const idFile = stateFile('upload-state.json');

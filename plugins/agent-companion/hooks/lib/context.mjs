@@ -6,10 +6,14 @@
 // cost of under-enforcing is a missed nudge; the cost of over-enforcing is a
 // wedged agent. The daily calibration routine is what catches under-enforcement.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import {
+  readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync,
+  openSync, fstatSync, readSync, closeSync,
+} from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 
 // Agent types observed in the shipped binary (2.1.220). The binary tests the
 // main thread with `agentType === "main"`, but mainThreadAgentType is settable
@@ -36,10 +40,16 @@ export function modelTiers() {
   try { cfg = JSON.parse(readFileSync(shipped, 'utf8')); } catch { /* use defaults */ }
   // The override merges BY ALIAS, so adding one model does not require
   // restating the table - a table you must retype is one you will not update.
-  try {
-    const over = JSON.parse(readFileSync(join(dataDir(), 'model-tiers.json'), 'utf8'));
-    cfg = { ...cfg, ...over, tiers: { ...(cfg.tiers || {}), ...(over.tiers || {}) } };
-  } catch { /* no override: expected */ }
+  // The operator override lives under the durable state root (stateRoot()) so
+  // it survives a plugin uninstall same as everything else there; the legacy
+  // location under dataDir() is still honoured as a fallback so an override
+  // written before this version keeps working until it is migrated.
+  let over = null;
+  try { over = JSON.parse(readFileSync(join(stateRoot(), 'model-tiers.json'), 'utf8')); } catch { /* try legacy */ }
+  if (!over) {
+    try { over = JSON.parse(readFileSync(join(dataDir(), 'model-tiers.json'), 'utf8')); } catch { /* no override: expected */ }
+  }
+  if (over) cfg = { ...cfg, ...over, tiers: { ...(cfg.tiers || {}), ...(over.tiers || {}) } };
   _tiers = cfg;
   return _tiers;
 }
@@ -241,7 +251,61 @@ export function readStdin() {
   }
 }
 
-const DATA_ROOT = join(homedir(), '.claude', 'plugins', 'data');
+// ---------------------------------------------------------------------------
+// Durable-state resolvers. THIS is the only place in the plugin that computes
+// any of these paths — every hook and script goes through these functions.
+// Everything here is computed AT CALL TIME (nothing cached at module load), so
+// a test can set the override env vars per-test and get an isolated tree.
+//
+// A plugin uninstall deletes the ENTIRE plugin data directory
+// (~/.claude/plugins/data/agent-companion-<marketplace>/) — that is where
+// CLAUDE_PLUGIN_DATA points, and it is not this plugin's to keep safe. Durable
+// telemetry and state therefore live under a SEPARATE root
+// (~/.claude/agent-companion/, "state root") that no uninstall path touches.
+// dataDir()/dataDirs() below keep their old meaning — the plugin data
+// directory — and are used only for disposable, regenerable caches now.
+export function homeRoot() {
+  return process.env.AGENT_COMPANION_HOME_OVERRIDE || homedir();
+}
+export function claudeDir() {
+  return process.env.CLAUDE_CONFIG_DIR || join(homeRoot(), '.claude');
+}
+export function pluginDataRoot() {
+  return join(claudeDir(), 'plugins', 'data');
+}
+
+const STATE_ROOT_README = [
+  'agent-companion durable state.',
+  '',
+  'This holds the plugin\'s durable telemetry (telemetry/) and small mutable',
+  'state (state/) — kept OUTSIDE the plugin data directory so a plugin',
+  'uninstall never deletes it. Safe to delete this whole directory to reset',
+  'all history; the plugin recreates it on next use.',
+].join('\n') + '\n';
+
+export function stateRoot() {
+  const d = process.env.AGENT_COMPANION_STATE_DIR || join(claudeDir(), 'agent-companion');
+  try {
+    mkdirSync(d, { recursive: true });
+    const readme = join(d, 'README.txt');
+    if (!existsSync(readme)) {
+      try { writeFileSync(readme, STATE_ROOT_README, { flag: 'wx' }); } catch { /* race or unwritable: fine */ }
+    }
+  } catch { /* fail open: the caller's own read/write also fails open */ }
+  return d;
+}
+
+export function telemetryDir() {
+  const d = join(stateRoot(), 'telemetry');
+  try { mkdirSync(d, { recursive: true }); } catch { /* fail open */ }
+  return d;
+}
+
+export function stateDir() {
+  const d = join(stateRoot(), 'state');
+  try { mkdirSync(d, { recursive: true }); } catch { /* fail open */ }
+  return d;
+}
 
 // Inside a hook the harness sets CLAUDE_PLUGIN_DATA and this is exact. The
 // fallback matters for READERS — the audit, the doctor, the scout — which run
@@ -250,9 +314,13 @@ const DATA_ROOT = join(homedir(), '.claude', 'plugins', 'data');
 // directory that did not exist and reporting a clean bill of health against
 // nothing at all. A silent wrong answer, which is the failure this plugin is
 // supposed to catch, not commit.
+//
+// USED ONLY FOR DISPOSABLE CACHES NOW (memory-index*.json, refactor-prompt.md,
+// transcript-harvest/, the legacy model-tiers.json override location). Durable
+// telemetry and state live under stateRoot() instead — see above.
 export function dataDir() {
   const d = process.env.CLAUDE_PLUGIN_DATA || preferredDataDir()
-    || join(DATA_ROOT, 'agent-companion-agent-templates');
+    || join(pluginDataRoot(), 'agent-companion-agent-templates');
   try { mkdirSync(d, { recursive: true }); } catch { /* fail open */ }
   return d;
 }
@@ -279,14 +347,16 @@ function preferredDataDir() {
 }
 
 // The same plugin can accumulate SEVERAL data directories — one per marketplace
-// it was loaded from, plus `-inline` for a dev/--plugin-dir load. Telemetry
-// splits across them, so a reader that looks at only one under-reports without
-// any sign that it did. Readers should aggregate across all of them.
+// it was loaded from, plus `-inline` for a dev/--plugin-dir load. This is now
+// also the source list the one-time/incremental import (state-sync.mjs) reads
+// from to recover durable history that predates this version. Readers of
+// disposable caches should still aggregate across all of them.
 export function dataDirs() {
+  const root = pluginDataRoot();
   try {
-    return readdirSync(DATA_ROOT)
+    return readdirSync(root)
       .filter((d) => d === 'agent-companion' || d.startsWith('agent-companion-'))
-      .map((d) => join(DATA_ROOT, d))
+      .map((d) => join(root, d))
       .filter((d) => { try { return statSync(d).isDirectory(); } catch { return false; } });
   } catch {
     return [];
@@ -343,6 +413,26 @@ export function agentDefinition(type, cwd) {
   return null;
 }
 
+// Session ids that must never be treated as real activity: the guard-canary
+// probe (checks.mjs, session_id starting `canary`) and this plugin's own test
+// fixtures (`verify-`, `test-`, `fixture-`). Canary rows are dropped entirely,
+// same as before this change — a probe must not inflate the metric it is
+// checked against. The other three prefixes are NOT dropped: they are
+// recorded, but routed to telemetry/fixtures.jsonl instead of the production
+// stream, so a verification run can never again pollute real history the way
+// `verify-opt-case-test-1` and `verify-nudge-session` once did.
+function isCanarySession(sid) {
+  return /^canary/i.test(String(sid || ''));
+}
+export function isFixtureSession(sid) {
+  return /^(canary|verify-|test-|fixture-)/i.test(String(sid || ''));
+}
+
+function agentTypeMarkerName(t) {
+  const safe = String(t).replace(/[^A-Za-z0-9._-]/g, '_');
+  return `${safe}-${createHash('sha1').update(String(t)).digest('hex').slice(0, 8)}.seen`;
+}
+
 // Enforcement fails open on unknown types, but detection must not. Record them
 // so the daily scout can dispatch a harness-surface review.
 //
@@ -350,16 +440,39 @@ export function agentDefinition(type, cwd) {
 // is a PROJECT-DEFINED agent, not drift — recording those buried the real signal
 // under a project's own roster. And the same type was appended dozens of times
 // in an afternoon; drift is a set, not a stream, so each type is recorded once.
+//
+// Dedup used to be read-check-append with no lock: two hook processes racing
+// on the same brand-new type could both pass the check before either had
+// appended, producing two rows for one type. It is now a `wx` (create,
+// exclusive) marker file per type under state/agent-types/ — atomic on both
+// Windows and POSIX — so only the ONE process whose create wins ever appends.
 export function noteAgentType(p) {
   const t = p.agent_type;
   if (!t || KNOWN_AGENT_TYPES.has(t)) return;
   if (agentDefinition(t, p.cwd)) return; // defined somewhere: known, not drift
+  const sid = p.session_id;
   try {
-    const f = join(dataDir(), 'unknown-agent-types.jsonl');
-    let seen = '';
-    try { seen = readFileSync(f, 'utf8'); } catch { /* first one */ }
-    if (seen.includes(`"agent_type":"${t}"`)) return;
-    writeFileSync(f, JSON.stringify({ at: new Date().toISOString(), agent_type: t }) + '\n', { flag: 'a' });
+    if (isCanarySession(sid)) return; // probes must not create markers or rows
+    const row = { at: new Date().toISOString(), agent_type: t };
+    if (isFixtureSession(sid)) {
+      // A fixture/verification session's sighting must never touch production
+      // dedup state — a marker created here would silently suppress a REAL
+      // sighting of the same type later. Record it for visibility only.
+      try {
+        writeFileSync(join(telemetryDir(), 'fixtures.jsonl'),
+          JSON.stringify({ v: TELEMETRY_SCHEMA, ...row, session_id: String(sid), stream: 'unknown-agent-types.jsonl' }) + '\n',
+          { flag: 'a' });
+      } catch { /* fail open */ }
+      return;
+    }
+    const dir = join(stateDir(), 'agent-types');
+    try { mkdirSync(dir, { recursive: true }); } catch { /* fail open */ }
+    try {
+      writeFileSync(join(dir, agentTypeMarkerName(t)), '', { flag: 'wx' });
+    } catch {
+      return; // EEXIST (already seen) or any other error: fail open, no append
+    }
+    appendLog('unknown-agent-types.jsonl', row);
   } catch { /* fail open */ }
 }
 
@@ -368,8 +481,11 @@ export function isPremium(model) {
   return classifyModel(model).premium;
 }
 
+// Small mutable state (streak counters, cursors, snapshots) — under the
+// durable state root, not the plugin data directory, so it survives an
+// uninstall same as telemetry does.
 export function stateFile(name) {
-  return join(dataDir(), name);
+  return join(stateDir(), name);
 }
 
 export function readJson(file, fallback) {
@@ -449,12 +565,22 @@ export function evaluateFit({ model, effort = '', weight, kind = 'bounded', cons
   };
 }
 
-export const TELEMETRY_SCHEMA = 1;
+export const TELEMETRY_SCHEMA = 2;
 
+// Append-only telemetry — durable, under telemetry/. A canary probe's row is
+// dropped (as always). A fixture/verification session's row is redirected to
+// telemetry/fixtures.jsonl (with the destination stream name stamped onto it)
+// instead of ever touching the production stream — see isFixtureSession above.
 export function appendLog(name, record) {
   try {
     const stamped = { v: TELEMETRY_SCHEMA, ...record };
-    writeFileSync(stateFile(name), JSON.stringify(stamped) + '\n', { flag: 'a' });
+    const sid = record?.session_id;
+    if (isCanarySession(sid)) return;
+    if (isFixtureSession(sid)) {
+      writeFileSync(join(telemetryDir(), 'fixtures.jsonl'), JSON.stringify({ ...stamped, stream: name }) + '\n', { flag: 'a' });
+      return;
+    }
+    writeFileSync(join(telemetryDir(), name), JSON.stringify(stamped) + '\n', { flag: 'a' });
   } catch { /* fail open */ }
 }
 
@@ -463,16 +589,89 @@ export function appendLog(name, record) {
 // nothing to deny — which is exactly the signal the calibration canary exists
 // to raise. Call this BEFORE deny(), which exits the process.
 export function recordDenial(guard, payload, detail) {
-  const sid = String(payload?.session_id ?? '');
-  if (sid.startsWith('canary')) return; // probes must not inflate their own metric
   appendLog('denials.jsonl', {
     at: new Date().toISOString(),
-    session_id: sid,
+    session_id: String(payload?.session_id ?? ''),
     agent_type: payload?.agent_type,
+    tool_name: payload?.tool_name,
     guard,
     outcome: 'deny',
     detail: String(detail ?? '').slice(0, 300),
   });
+}
+
+// Bounded, positioned tail-read of a JSONL transcript: opens the file, seeks
+// to `size - bytes`, reads only that tail, and parses lines that pass a cheap
+// substring pre-filter before paying for JSON.parse. Never reads the whole
+// file, never throws, returns [] on any error. Records come back oldest-first
+// (newest last), matching file order. Generalised from the mechanism
+// self-update.mjs used for its own narrower purpose (the newest `Reloaded: `
+// marker) so a second caller does not have to reimplement seek-to-tail.
+export function tailRecords(path, { bytes = 131072, filter = () => true, max = Infinity } = {}) {
+  let fd;
+  try {
+    fd = openSync(path, 'r');
+    const { size } = fstatSync(fd);
+    if (size === 0) return [];
+    const start = Math.max(0, size - bytes);
+    const len = size - start;
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, start);
+    const lines = buf.toString('utf8').split('\n');
+    // A tail read that doesn't start at byte 0 may begin mid-line; drop that
+    // fragment rather than risk a false JSON.parse on a truncated record.
+    if (start > 0) lines.shift();
+    const out = [];
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t || t[0] !== '{' || !filter(t)) continue;
+      let rec;
+      try { rec = JSON.parse(t); } catch { continue; }
+      out.push(rec);
+      if (out.length >= max) break;
+    }
+    return out;
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
+// The last `type:"assistant"` record's model and effort, read via the bounded
+// tail-read above. `model` comes from `message.model`; `effort` is the
+// record's own TOP-LEVEL `effort` field (distinct from `message.model`, which
+// lives one level down). Returns null when the transcript is missing, empty,
+// or has no assistant record in the tail window.
+export function lastAssistantMeta(path) {
+  if (!path) return null;
+  const records = tailRecords(path, { filter: (line) => line.includes('"type":"assistant"') });
+  if (!records.length) return null;
+  const last = records[records.length - 1];
+  const model = last && last.message && typeof last.message.model === 'string' ? last.message.model : null;
+  const effort = last && typeof last.effort === 'string' ? last.effort : null;
+  return { model, effort };
+}
+
+// Which transcript belongs to the SPAWN'S CALLER (not the new subagent, which
+// does not exist yet at PreToolUse time). Preference order, per the PreToolUse
+// payload shape:
+//   1. p.agent_transcript_path, when the payload carries one.
+//   2. When the caller is itself a sub-agent (p.agent_id set), the nested
+//      per-agent transcript the harness writes alongside the parent's —
+//      <dirname(transcript_path)>/<basename(transcript_path,'.jsonl')>/subagents/agent-<agent_id>.jsonl
+//      — but only if that file actually exists; a constructed path is a guess,
+//      not a fact.
+//   3. p.transcript_path (the plain top-level case: caller is the main thread).
+export function callerTranscriptPath(p) {
+  if (p && p.agent_transcript_path) return p.agent_transcript_path;
+  if (p && p.agent_id && p.transcript_path) {
+    const dir = dirname(p.transcript_path);
+    const base = basename(p.transcript_path, '.jsonl');
+    const candidate = join(dir, base, 'subagents', `agent-${p.agent_id}.jsonl`);
+    if (existsSync(candidate)) return candidate;
+  }
+  return (p && p.transcript_path) || null;
 }
 
 export function allow() {
