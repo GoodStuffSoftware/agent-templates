@@ -41,6 +41,7 @@ import {
   memoryRoot, loadOrBuildIndex, search, corpusStats, indexCachePath,
   findRepoRoot, loadOrBuildRepoIndex, corpusStatsRepo, repoIndexCachePath, parseRepoGlobs,
   DEFAULT_REPO_GLOBS, DEFAULT_REPO_MAX_FILE_BYTES, DEFAULT_REPO_MAX_TOTAL_BYTES,
+  breadcrumb, displayText, getMergeStatus, mergeStatusLabel,
 } from '../hooks/lib/memory-index.mjs';
 
 // A small hand-rolled parser rather than has()/val(): this is the first
@@ -104,6 +105,9 @@ const repoGlobs = parseRepoGlobs(opt('memory_search_repo_globs', DEFAULT_REPO_GL
 const repoMaxFileBytes = Math.max(1, opt('memory_search_max_file_kb', DEFAULT_REPO_MAX_FILE_BYTES / 1024)) * 1024;
 const repoMaxTotalBytes = Math.max(1, opt('memory_search_max_repo_mb', DEFAULT_REPO_MAX_TOTAL_BYTES / (1024 * 1024))) * 1024 * 1024;
 const repoFound = repoEnabled ? findRepoRoot(cwdArg) : null;
+// Never fetches (see the banner in hooks/lib/memory-index.mjs) — compared
+// against the LOCAL copy of origin's refs, i.e. as of the last fetch/clone.
+const mergeStatus = repoFound ? getMergeStatus(repoFound.root, dataDirPath) : null;
 
 let repoIndex = null;
 let repoRebuilt = false;
@@ -122,8 +126,9 @@ if (wantRepo && repoFound) {
 function scopeLabel(h) {
   const scope = h.chunk.scope || 'user';
   if (scope === 'repo') {
-    const wt = repoFound?.isWorktree ? ` [worktree:${repoFound.branch || '?'}]` : '';
-    return { scope, place: `repo${wt} · ${h.chunk.file}` };
+    const label = mergeStatusLabel(mergeStatus);
+    const tag = label ? ` [${label}]` : '';
+    return { scope, place: `repo${tag} · ${h.chunk.file}` };
   }
   return { scope, place: `${h.chunk.project} · ${h.chunk.file}` };
 }
@@ -142,6 +147,9 @@ if (statsOnly) {
           root: repoFound.root,
           isWorktree: repoFound.isWorktree,
           branch: repoFound.branch,
+          defaultRef: mergeStatus?.defaultRef ?? null,
+          ahead: mergeStatus?.ahead ?? null,
+          unmergedLabel: mergeStatusLabel(mergeStatus) || null,
           cache: repoIndexCachePath(dataDirPath, repoFound.root),
           builtAt: repoIndex.builtAt,
           rebuilt: repoRebuilt,
@@ -170,7 +178,13 @@ if (statsOnly) {
     } else {
       const s = corpusStatsRepo(repoIndex);
       console.log(`  repo scope — ${s.root}`);
-      console.log(`    worktree   : ${s.isWorktree ? `yes (branch ${s.branch || '?'}) — unmerged in-flight work` : 'no'}`);
+      console.log(`    worktree   : ${s.isWorktree ? `yes (branch ${s.branch || '?'})` : 'no'}`);
+      if (mergeStatus) {
+        const label = mergeStatusLabel(mergeStatus) || 'none (up to date)';
+        console.log(`    vs default : ${mergeStatus.defaultRef} — ${mergeStatus.ahead} commit(s) ahead — ${label}`);
+      } else {
+        console.log('    vs default : unknown (detached HEAD, no default ref found, or git error)');
+      }
       console.log(`    files      : ${s.files}${s.skippedForSize ? ` (${s.skippedForSize} skipped for size)` : ''}`);
       console.log(`    chunks     : ${s.chunks}`);
       console.log(`    source     : ${s.bytes} bytes${s.truncated ? ' — TRUNCATED by the total-size cap, index is partial' : ''}`);
@@ -198,7 +212,7 @@ if (jsonOut) {
     hits: hits.map((h) => {
       const { scope, place } = scopeLabel(h);
       return {
-        score: h.score, scope, place, file: h.chunk.file, heading: h.chunk.heading, snippet: snippet(h.chunk.text),
+        score: h.score, scope, place, file: h.chunk.file, heading: breadcrumb(h.chunk), snippet: snippet(displayText(h.chunk)),
       };
     }),
   }, null, 2));
@@ -211,8 +225,8 @@ if (!hits.length) {
 }
 
 for (const h of hits) {
-  const heading = h.chunk.heading ? h.chunk.heading : '(no heading)';
+  const heading = breadcrumb(h.chunk);
   const { place } = scopeLabel(h);
   console.log(`${h.score.toFixed(3).padStart(7)}  ${place} · ${heading}`);
-  console.log(`        "${snippet(h.chunk.text)}"`);
+  console.log(`        "${snippet(displayText(h.chunk))}"`);
 }

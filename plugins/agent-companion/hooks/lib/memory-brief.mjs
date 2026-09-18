@@ -45,6 +45,7 @@ import { fileURLToPath } from 'node:url';
 import {
   loadOrBuildIndex, search, memoryRoot,
   findRepoRoot, loadOrBuildRepoIndex,
+  breadcrumb, displayText, getMergeStatus, mergeStatusLabel,
 } from './memory-index.mjs';
 
 const MAX_BLOCK_CHARS = 1200;
@@ -84,10 +85,10 @@ function projectLeaf(cwd) {
 function repoChunksFor({
   cwd, dataDirPath, repoEnabled, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
 }) {
-  if (repoEnabled === false) return { chunks: [], found: null };
+  if (repoEnabled === false) return { chunks: [], found: null, mergeStatus: null };
   try {
     const found = findRepoRoot(cwd);
-    if (!found) return { chunks: [], found: null };
+    if (!found) return { chunks: [], found: null, mergeStatus: null };
     const { index } = loadOrBuildRepoIndex({
       root: found.root,
       dataDirPath,
@@ -97,9 +98,13 @@ function repoChunksFor({
       forceRebuild: false,
       rebuildIfStale: false, // same rule as the user scope: never block a spawn on a reindex
     });
-    return { chunks: index?.chunks || [], found };
+    // Never fetches (see the banner in memory-index.mjs) — as-of-last-fetch,
+    // same as everything else this hook can see about the remote.
+    let mergeStatus = null;
+    try { mergeStatus = getMergeStatus(found.root, dataDirPath); } catch { mergeStatus = null; }
+    return { chunks: index?.chunks || [], found, mergeStatus };
   } catch {
-    return { chunks: [], found: null }; // fail open
+    return { chunks: [], found: null, mergeStatus: null }; // fail open
   }
 }
 
@@ -128,7 +133,7 @@ export function buildMemoryBrief({
     userChunks = index?.chunks || [];
   } catch { /* fail open: user scope contributes nothing */ }
 
-  const { chunks: repoChunks, found: repoFound } = repoChunksFor({
+  const { chunks: repoChunks, mergeStatus } = repoChunksFor({
     cwd, dataDirPath, repoEnabled, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
   });
 
@@ -148,17 +153,19 @@ export function buildMemoryBrief({
 
   const top = boosted.slice(0, Math.max(1, maxHits));
   const lines = top.map((h) => {
+    const bc = ` · ${breadcrumb(h.chunk)}`;
+    const text2 = snippet(displayText(h.chunk));
     if (h.chunk.scope === 'repo') {
-      // A worktree's own content is real and worth finding, but it is not
-      // yet on the main line — the label says so rather than letting a
-      // reader mistake in-flight work for what main actually has.
-      const wt = repoFound?.isWorktree ? ` [unmerged:${repoFound.branch || '?'}]` : '';
-      const heading = h.chunk.heading ? ` · ${h.chunk.heading}` : '';
-      return `- repo${wt} · ${h.chunk.file}${heading} — "${snippet(h.chunk.text)}"`;
+      // The repo root's own content is real and worth finding, but it may
+      // not yet be on the main line — the label says so ONLY when HEAD is
+      // actually ahead of a resolved default ref (see getMergeStatus), never
+      // just because this happens to be a worktree.
+      const label = mergeStatusLabel(mergeStatus);
+      const tag = label ? ` [${label}]` : '';
+      return `- repo${tag} · ${h.chunk.file}${bc} — "${text2}"`;
     }
     const tag = h.local ? '' : ' [cross-project]';
-    const heading = h.chunk.heading ? ` · ${h.chunk.heading}` : '';
-    return `- ${h.chunk.project}${tag} · ${h.chunk.file}${heading} — "${snippet(h.chunk.text)}"`;
+    return `- ${h.chunk.project}${tag} · ${h.chunk.file}${bc} — "${text2}"`;
   });
 
   let block = [
@@ -240,7 +247,7 @@ export function buildMemoryNudge({
   }
   const otherCount = counts.size - (hereProject ? 1 : 0);
 
-  const { chunks: repoChunks, found: repoFound } = repoChunksFor({
+  const { chunks: repoChunks, mergeStatus } = repoChunksFor({
     cwd, dataDirPath, repoEnabled, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
   });
   const repoFileCount = new Set(repoChunks.map((c) => c.file)).size;
@@ -249,9 +256,11 @@ export function buildMemoryNudge({
 
   const here = hereCount > 0 ? `${hereCount} here` : '0 here';
   const others = `${otherCount} elsewhere`;
-  const repoPart = repoFound?.isWorktree
-    ? `${repoFileCount} repo (unmerged:${repoFound.branch || '?'})`
-    : `${repoFileCount} repo`;
+  // Only says "unmerged" when HEAD is actually ahead of a resolved default
+  // ref (getMergeStatus) — never asserted from worktree-ness alone, and
+  // never fetched: as-of-last-fetch, same as the rest of this line.
+  const mergeLabel = mergeStatusLabel(mergeStatus);
+  const repoPart = mergeLabel ? `${repoFileCount} repo (${mergeLabel})` : `${repoFileCount} repo`;
   const script = join(pluginRoot(), 'scripts', 'memory-search.mjs');
 
   // Worded as an available capability, not an instruction or established

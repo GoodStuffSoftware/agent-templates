@@ -19,6 +19,7 @@ import {
 } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 
 // --- Corpus location -------------------------------------------------------
 
@@ -160,6 +161,74 @@ function splitLarge(chunk, max = MAX_CHUNK_CHARS) {
   return bounded.map((text) => ({ heading: chunk.heading, text }));
 }
 
+// --- Frontmatter -------------------------------------------------------
+//
+// Most memory files are frontmatter-led (name/description keys, then prose)
+// with no markdown headings at all, so chunkFile() above hands back a single
+// chunk with an empty heading trail whose raw text starts with the "---"
+// block itself. Parsed ONCE per file here and carried on every chunk from
+// that file (fmName/fmDescription/fmFirstLine) — this is DISPLAY-ONLY:
+// chunk.text is left exactly as chunkFile produced it, so the frontmatter
+// stays fully part of what BM25 matches against (name/description are
+// excellent match terms, and part of why ranking is already good). Handles
+// both LF and CRLF line endings — files on this machine have both.
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+
+export function parseFrontmatter(text) {
+  const s = String(text);
+  const m = s.match(FRONTMATTER_RE);
+  if (!m) return { name: '', description: '', firstLine: '' };
+  const fm = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = line.match(/^(\w[\w-]*):\s*(.*)$/);
+    if (kv) fm[kv[1]] = kv[2].trim();
+  }
+  let firstLine = '';
+  for (const line of s.slice(m[0].length).split(/\r?\n/)) {
+    const t = line.trim();
+    if (t) { firstLine = t; break; }
+  }
+  return { name: fm.name || '', description: fm.description || '', firstLine };
+}
+
+// --- Breadcrumb / snippet display fallbacks ---------------------------------
+//
+// A heading trail is the best breadcrumb when one exists. Below that, a
+// frontmatter-led file's own `name` (a short slug/title) is far more useful
+// than the literal string "(no heading)", which asserts nothing at all.
+// `description` is the next-best thing, truncated so a long one-liner
+// doesn't blow out a display line. The filename stem is the last resort,
+// always available, never empty.
+function fileStem(fileRel) {
+  const base = String(fileRel).split('/').pop() || String(fileRel);
+  return base.replace(/\.[^.]+$/, '');
+}
+
+export function breadcrumb(chunk, max = 80) {
+  if (chunk.heading) return chunk.heading;
+  if (chunk.fmName) return chunk.fmName;
+  if (chunk.fmDescription) {
+    const d = chunk.fmDescription;
+    return d.length > max ? `${d.slice(0, max - 1)}…` : d;
+  }
+  return fileStem(chunk.file);
+}
+
+// A chunk whose raw text STARTS with the frontmatter delimiter is the file's
+// first chunk (frontmatter is always at the top) — its raw text opens with
+// "---\nname: ...\n---", which is useless as a snippet. Swap in the
+// frontmatter description, or the first real prose line when there is no
+// description, so the snippet shows content instead of YAML keys.
+const FRONTMATTER_START_RE = /^---\r?\n/;
+
+export function displayText(chunk) {
+  if (FRONTMATTER_START_RE.test(chunk.text)) {
+    if (chunk.fmDescription) return chunk.fmDescription;
+    if (chunk.fmFirstLine) return chunk.fmFirstLine;
+  }
+  return chunk.text;
+}
+
 // --- Index build / cache ---------------------------------------------------
 
 const INDEX_SCHEMA = 1;
@@ -172,6 +241,8 @@ export function buildIndex(root) {
     fileMeta[f.relKey] = { mtimeMs: f.mtimeMs, size: f.size };
     let text;
     try { text = readFileSync(f.absPath, 'utf8'); } catch { continue; }
+    let fm = { name: '', description: '', firstLine: '' };
+    try { fm = parseFrontmatter(text); } catch { /* fail open: no fm fields */ }
     for (const c of chunkFile(text)) {
       if (!c.text) continue;
       // scope: 'user' is additive — existing readers (checks.mjs et al.) only
@@ -180,6 +251,7 @@ export function buildIndex(root) {
       // still tell the two apart on a hit (see the Repo scope section below).
       chunks.push({
         scope: 'user', project: f.project, file: f.fileRel, heading: c.heading, text: c.text,
+        fmName: fm.name, fmDescription: fm.description, fmFirstLine: fm.firstLine,
       });
     }
   }
@@ -456,6 +528,116 @@ function worktreeInfo(dir, gitStat) {
   }
 }
 
+// --- Merge status (ahead-of-default label) ---------------------------------
+//
+// Whether a repo root's checked-out branch is "ahead of the default branch"
+// is a fact about ANY repo root, not just a worktree — an ordinary clone on a
+// feature branch is in exactly the same "not yet on the main line" state.
+// This is therefore its own check, independent of worktreeInfo() above:
+// worktree-ness stays its own --stats field, and this never asserts
+// "unmerged" without having actually compared HEAD against a resolved
+// default ref.
+//
+// NEVER fetches — this runs inside a hook on every subagent spawn, and a
+// network call there would be both slow and a surprise. Every comparison is
+// against the LOCAL copy of `origin`'s refs, i.e. as of whatever the last
+// `git fetch` (or clone) happened to leave behind — a label built from this
+// is itself "as of last fetch," not "as of right now."
+
+// Run `git <args>` in `cwd`, no shell, with a short timeout so one hung
+// invocation can never hang a spawn on this. Any non-zero exit, timeout, or
+// missing git is "could not verify" to every caller here — never thrown.
+function runGit(cwd, args) {
+  try {
+    const r = spawnSync('git', args, {
+      cwd, timeout: 2000, encoding: 'utf8', windowsHide: true,
+    });
+    if (r.error || r.status !== 0) return null;
+    return String(r.stdout || '').trim();
+  } catch {
+    return null;
+  }
+}
+
+// The local copy of the default branch ref — origin/HEAD's symbolic target
+// when set (what `git clone` / `git remote set-head -a` leave behind),
+// falling back through the common conventions when it is not set or stale.
+// Never touches the network (see banner above).
+function resolveDefaultRef(root) {
+  const sym = runGit(root, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+  if (sym) {
+    const m = sym.match(/^refs\/remotes\/(.+)$/);
+    if (m && runGit(root, ['rev-parse', '--verify', '--quiet', m[1]])) return m[1];
+  }
+  for (const candidate of ['origin/main', 'origin/master', 'main', 'master']) {
+    if (runGit(root, ['rev-parse', '--verify', '--quiet', candidate])) return candidate;
+  }
+  return null;
+}
+
+// One cache file per repo root (hashed, same convention as the index caches
+// above) so several checked-out repos or worktrees never share a cache.
+export function mergeStatusCachePath(dataDirPath, root) {
+  const hash = createHash('sha256').update(String(root)).digest('hex').slice(0, 16);
+  return join(dataDirPath, `memory-merge-status-${hash}.json`);
+}
+
+// Returns null — "could not verify, say nothing" — on a detached HEAD, no
+// resolvable default ref, or any git error. Otherwise
+// { branch, defaultRef, ahead }. Cached in the plugin data dir keyed on the
+// HEAD sha *and* the default ref's sha, so an unchanged repo (the common case
+// across a burst of spawns) never re-runs `rev-list` at all.
+export function getMergeStatus(root, dataDirPath) {
+  if (!root) return null;
+  try {
+    const headSha = runGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+    if (!headSha) return null;
+    const branch = runGit(root, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+    if (!branch) return null; // detached HEAD: no branch name to label
+
+    const defaultRef = resolveDefaultRef(root);
+    if (!defaultRef) return null; // no default to compare against: no label
+    const defaultSha = runGit(root, ['rev-parse', '--verify', '--quiet', defaultRef]);
+    if (!defaultSha) return null;
+
+    const cachePath = dataDirPath ? mergeStatusCachePath(dataDirPath, root) : null;
+    if (cachePath) {
+      try {
+        const cached = JSON.parse(readFileSync(cachePath, 'utf8'));
+        if (cached && cached.headSha === headSha && cached.defaultSha === defaultSha
+          && cached.defaultRef === defaultRef && cached.branch === branch
+          && Number.isFinite(cached.result?.ahead)) {
+          return cached.result;
+        }
+      } catch { /* no usable cache yet */ }
+    }
+
+    const aheadStr = runGit(root, ['rev-list', '--count', `${defaultRef}..HEAD`]);
+    const ahead = Number(aheadStr);
+    if (!Number.isFinite(ahead)) return null;
+    const result = { branch, defaultRef, ahead };
+
+    if (cachePath) {
+      try {
+        writeFileSync(cachePath, JSON.stringify({
+          headSha, defaultSha, defaultRef, branch, result,
+        }));
+      } catch { /* fail open: just skip caching */ }
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+// "" when there is nothing unmerged to say — 0 commits ahead, or
+// getMergeStatus could not verify at all. Silence is correct there; a wrong
+// claim is not.
+export function mergeStatusLabel(status) {
+  if (!status || !status.ahead) return '';
+  return `unmerged:${status.branch} (+${status.ahead})`;
+}
+
 // Discover repo-scope files under `root` matching `globs`, applying the
 // per-file size cap and the total-bytes cap. Deterministic: candidates are
 // sorted by relative path before either cap is applied, so which files land
@@ -544,6 +726,8 @@ export function buildRepoIndex(root, opts = {}) {
     fileMeta[f.relPath] = { mtimeMs: f.mtimeMs, size: f.size };
     let text;
     try { text = readFileSync(f.absPath, 'utf8'); } catch { continue; }
+    let fm = { name: '', description: '', firstLine: '' };
+    try { fm = parseFrontmatter(text); } catch { /* fail open: no fm fields */ }
     for (const c of chunkFile(text)) {
       if (!c.text) continue;
       // scope: 'repo' up front on every chunk — this is the field a caller
@@ -552,6 +736,7 @@ export function buildRepoIndex(root, opts = {}) {
       // scripts/memory-search.mjs and hooks/lib/memory-brief.mjs).
       chunks.push({
         scope: 'repo', project: 'repo', file: f.relPath, heading: c.heading, text: c.text,
+        fmName: fm.name, fmDescription: fm.description, fmFirstLine: fm.firstLine,
       });
     }
   }
