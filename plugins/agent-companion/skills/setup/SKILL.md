@@ -23,11 +23,16 @@ node "$AC/scripts/audit.mjs" --only plugin-manifest,guard-canary
 
 `guard-canary` must PASS. If it SKIPs, the hooks are not wired — usually a
 stale marketplace cache. The fix, in order, is `claude plugin marketplace update
-<marketplace>`, then `claude plugin update agent-companion@<marketplace>`, then a
-restart (desktop) or `/reload-plugins` (CLI). Re-run the canary. If the plugin
-is also used from claude.ai, its marketplace cache is separate and has to be
-removed and re-added there — the local update sequence above does not reach
-it. The README's "five stale-state traps" section covers the variants.
+<marketplace>`, then `claude plugin update agent-companion@<marketplace>`, then
+`/reload-plugins` — verified 2026-09-18 to load an updated version (hooks,
+skills, and config) into a RUNNING session on both desktop and CLI, no restart,
+as long as Claude Code is >= 2.1.260; a restart is the fallback where the
+command is unavailable. Re-run the canary. Prefer update-then-reload over
+uninstall-and-reinstall: a CLI `claude plugin uninstall` wipes this plugin's
+`pluginConfigs`, so any chosen options silently revert to defaults. If the
+plugin is also used from claude.ai, its marketplace cache is separate and has
+to be removed and re-added there — the local update sequence above does not
+reach it. The README's "five stale-state traps" section covers the variants.
 
 ## 1. Choose options
 
@@ -124,11 +129,13 @@ sessions: Claude Code's own plugin autoupdater runs at startup. Desktop
 sessions: the app runs them with the auto-updater switched off, so the daily
 local scout runs the two built-in commands (`claude plugin marketplace update`,
 `claude plugin update`) at the start of each run. The plugin adds only a
-notice (`update_notice`, default on): at session start it says when a newer
-version is installed but this session is still running an older one, because
-"installed" and "loaded" differ by a restart nobody is reminded to do. A
-second install of the same plugin at project scope shadows the user-scope one
-and never updates; `claude plugin list` shows both if so.
+notice (`version_notice`, default on): at session start, and again on the
+first prompt after, it says when THIS SESSION is running an older copy than
+what is installed, because "installed" and "loaded" differ by a
+`/reload-plugins` (or restart) nobody is reminded to run — and a stale parent
+session's sub-agents inherit its stale hooks too. A second install of the
+same plugin at project scope shadows the user-scope one and never updates;
+`claude plugin list` shows both if so.
 
 Releasing: bump `version` in **both** `plugin.json` and the plugin's entry in
 `marketplace.json` — Claude Code reads the first, the claude.ai plugin

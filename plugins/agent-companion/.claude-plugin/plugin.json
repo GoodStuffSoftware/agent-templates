@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -108,10 +108,10 @@
       "description": "When a spawn declares WEIGHT but names no model, set the model from the routing table instead of letting it inherit the lead’s tier. Premium results still require a WARRANT line.",
       "default": true
     },
-    "update_notice": {
+    "version_notice": {
       "type": "boolean",
-      "title": "Update notice",
-      "description": "At session start, say when a newer plugin version is installed but this session is still running an older one. No side effects; updating itself is left to the harness and the daily local scout.",
+      "title": "Version divergence notice",
+      "description": "Tell the user, once per session per (running, installed) version pair, when the plugin copy THIS SESSION is running is older than what is installed — an update landed while the session was running, or (rarely, on desktop) a per-session bundle stayed stale across a restart. Fires at session start and again on the next prompt, so a stale mid-session update is caught, not just a stale startup. Read-only and user-facing only (never added to model context, zero tokens); default ON because it is the one thing that prevents a session and every sub-agent it spawns from silently running stale hooks and skills for hours.",
       "default": true
     },
     "memory_search": {
