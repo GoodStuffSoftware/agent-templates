@@ -231,7 +231,20 @@ export function displayText(chunk) {
 
 // --- Index build / cache ---------------------------------------------------
 
-const INDEX_SCHEMA = 1;
+// Bump this whenever the SHAPE of a cached chunk or cache record changes —
+// a new field, a renamed one, anything a reader downstream now assumes is
+// there. Freshness below is judged only against SOURCE files (mtime/size,
+// or head/default sha for the merge-status cache); none of that can notice
+// that the code which turns a source file into a cached record changed.
+// That gap is exactly what shipped in 0.13.1: it added fmName/fmDescription/
+// fmFirstLine to every chunk without bumping this constant, so an
+// already-built cache kept passing its freshness check and every hit kept
+// rendering the pre-frontmatter way (filename breadcrumb, raw "---" YAML
+// snippet) until someone ran `--rebuild` by hand. Every loader that reads a
+// cache here must compare its stored `schema` against this constant and
+// treat a mismatch — including a cache with no `schema` key at all, i.e.
+// written by older code than that check — as stale.
+const INDEX_SCHEMA = 2;
 
 export function buildIndex(root) {
   const files = discoverFiles(root);
@@ -280,10 +293,12 @@ export function saveCache(dataDirPath, index) {
   try { writeFileSync(indexCachePath(dataDirPath), JSON.stringify(index)); } catch { /* fail open */ }
 }
 
-// True when the cache is missing, unusable, or the source file set no longer
-// matches: any file added, removed, or newer (mtime/size changed).
+// True when the cache is missing, unusable, built by code with a different
+// (or absent — pre-schema-check) chunk/record shape, or the source file set
+// no longer matches: any file added, removed, or newer (mtime/size changed).
 export function needsRebuild(cache, root) {
   if (!cache || !Array.isArray(cache.chunks) || !cache.files) return true;
+  if (cache.schema !== INDEX_SCHEMA) return true;
   const files = discoverFiles(root);
   const curKeys = new Set(files.map((f) => f.relKey));
   const cacheKeys = Object.keys(cache.files);
@@ -604,7 +619,8 @@ export function getMergeStatus(root, dataDirPath) {
     if (cachePath) {
       try {
         const cached = JSON.parse(readFileSync(cachePath, 'utf8'));
-        if (cached && cached.headSha === headSha && cached.defaultSha === defaultSha
+        if (cached && cached.schema === INDEX_SCHEMA
+          && cached.headSha === headSha && cached.defaultSha === defaultSha
           && cached.defaultRef === defaultRef && cached.branch === branch
           && Number.isFinite(cached.result?.ahead)) {
           return cached.result;
@@ -620,7 +636,7 @@ export function getMergeStatus(root, dataDirPath) {
     if (cachePath) {
       try {
         writeFileSync(cachePath, JSON.stringify({
-          headSha, defaultSha, defaultRef, branch, result,
+          schema: INDEX_SCHEMA, headSha, defaultSha, defaultRef, branch, result,
         }));
       } catch { /* fail open: just skip caching */ }
     }
@@ -794,10 +810,12 @@ export function saveRepoCache(dataDirPath, root, index) {
   try { writeFileSync(repoIndexCachePath(dataDirPath, root), JSON.stringify(index)); } catch { /* fail open */ }
 }
 
-// True when the cache is missing, unusable, built with different config
-// (globs/caps changed), or the source file set no longer matches.
+// True when the cache is missing, unusable, built by code with a different
+// (or absent) chunk/record shape, built with different config (globs/caps
+// changed), or the source file set no longer matches.
 export function needsRepoRebuild(cache, root, opts = {}) {
   if (!cache || !Array.isArray(cache.chunks) || !cache.files) return true;
+  if (cache.schema !== INDEX_SCHEMA) return true;
   const globs = opts.globs && opts.globs.length ? opts.globs : DEFAULT_REPO_GLOBS;
   const maxFileBytes = opts.maxFileBytes || DEFAULT_REPO_MAX_FILE_BYTES;
   const maxTotalBytes = opts.maxTotalBytes || DEFAULT_REPO_MAX_TOTAL_BYTES;
