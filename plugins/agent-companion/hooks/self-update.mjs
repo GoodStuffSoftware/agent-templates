@@ -69,6 +69,53 @@ function installedPluginsPath() {
   return process.env.AGENT_COMPANION_INSTALLED_PLUGINS_OVERRIDE
     || join(homeRoot(), '.claude', 'plugins', 'installed_plugins.json');
 }
+// Same AGENT_COMPANION_HOME_OVERRIDE covers these two — a test fixture is one
+// directory standing in for ~, not three separate knobs to keep in sync.
+function settingsJsonPath() {
+  return join(homeRoot(), '.claude', 'settings.json');
+}
+function globalHookPath() {
+  return join(homeRoot(), '.claude', 'hooks', 'agent-companion-staleness.mjs');
+}
+
+// GLOBAL HOOK HANDOFF — see shims/global-hooks/agent-companion-staleness.mjs
+// for the full mechanism. Short version: a plugin-registered hook's own path
+// is bound to one installed-plugin-cache folder for the life of a session, so
+// THIS script — whose job is noticing staleness — is itself subject to the
+// staleness it reports. The global shim lives at a fixed path instead and
+// re-resolves the installed copy fresh on every run, so it can never go
+// stale. Once that shim is registered as a user-level hook, both it AND this
+// plugin-registered copy fire on the same events, and they must not produce
+// two notices. Only the plugin-registered copy can see what THIS session
+// actually loaded (via import.meta.url in runningPlugin(), below) — that is
+// the self-check, and it is the one thing timestamps alone cannot catch (an
+// app-extracted bundle that was already stale at startup). So the split is:
+// the plugin-registered copy detects the global hook, records what it loaded
+// for this session_id, and says nothing; the global invocation (marker env
+// set by the shim) does the full check — timestamps across all plugins, plus
+// the self-check using the recorded loaded version — and emits the one
+// merged notice. Cheap, read-only parse; called on every invocation, so kept
+// to a single small file read.
+function globalHookRegistered() {
+  try {
+    const settings = JSON.parse(readFileSync(settingsJsonPath(), 'utf8'));
+    const target = normalizePath(globalHookPath());
+    for (const event of ['SessionStart', 'UserPromptSubmit']) {
+      const groups = settings?.hooks?.[event];
+      if (!Array.isArray(groups)) continue;
+      for (const g of groups) {
+        const hks = Array.isArray(g?.hooks) ? g.hooks : [];
+        for (const h of hks) {
+          const args = Array.isArray(h?.args) ? h.args : [];
+          if (args.some((a) => normalizePath(a) === target)) return true;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false; // no settings.json, malformed, whatever: act as not-installed
+  }
+}
 
 // The running copy, read from ITS OWN plugin.json — not from CLAUDE_PLUGIN_ROOT
 // alone and not from parsing the cache path, both of which assume a specific
@@ -244,7 +291,7 @@ try {
   const sessionId = String(p.session_id || 'unknown');
   const cwd = p.cwd || process.cwd();
   const { file, state } = loadState();
-  const rec = state[sessionId] || { loadedAt: null, shown: [] };
+  const rec = state[sessionId] || { loadedAt: null, shown: [], loadedVersion: null };
 
   if (p.hook_event_name === 'SessionStart') {
     // Only a real load moves loadedAt. `clear`/`compact` are not plugin
@@ -267,6 +314,20 @@ try {
   }
 
   const running = runningPlugin();
+  const isGlobalInvocation = !!process.env.AGENT_COMPANION_GLOBAL_HOOK;
+
+  // Handoff: a plugin-registered invocation, once the global hook exists,
+  // only ever records what it loaded and stays silent — see the
+  // globalHookRegistered() comment above for why. Skipped entirely when we
+  // ARE the global invocation (no point checking our own registration).
+  if (!isGlobalInvocation && globalHookRegistered()) {
+    if (running) rec.loadedVersion = running.version;
+    rec.at = Date.now();
+    state[sessionId] = rec;
+    writeJson(file, state);
+    passthrough();
+  }
+
   const entries = effectiveEntries(loadInstalledPlugins(), cwd);
 
   const staleMap = new Map(); // baseName -> entry
@@ -275,7 +336,28 @@ try {
   }
   // Self-check: merges into the SAME map, so a stale self-bundle plus a stale
   // other plugin still produce exactly one notice.
-  if (running) {
+  if (isGlobalInvocation) {
+    // Under the shim, `running` always resolves to the INSTALLED copy (the
+    // shim always imports that one), so running-vs-entry here would compare
+    // a version to itself. The only honest signal is what THIS session's own
+    // plugin-registered hook actually loaded, recorded above by that
+    // invocation before it handed off. It can be missing on the very first
+    // SessionStart if the global hook happens to fire before the
+    // plugin-registered one — harness ordering between a plugin hook and a
+    // user-level hook on the same event is not guaranteed. Left unchecked
+    // that one time is fine: both fire again on the next UserPromptSubmit,
+    // by which point the recording has certainly happened, so the self-check
+    // is delayed at most one turn, never lost.
+    const selfName = running ? running.name : 'agent-companion';
+    if (rec.loadedVersion) {
+      const entry = entries.get(selfName);
+      if (entry) {
+        const cmp = compareSemver(rec.loadedVersion, entry.version);
+        if (cmp !== null && cmp < 0) staleMap.set(selfName, entry);
+      }
+    }
+  } else if (running) {
+    // No global hook installed: exactly today's 0.15.0 behaviour.
     const entry = entries.get(running.name);
     if (entry) {
       const cmp = compareSemver(running.version, entry.version);

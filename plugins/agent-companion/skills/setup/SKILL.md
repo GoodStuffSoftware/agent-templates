@@ -137,6 +137,25 @@ run — and a stale parent session's sub-agents inherit its stale hooks too. A
 second install of the same plugin at project scope shadows the user-scope one
 and never updates; `claude plugin list` shows both if so.
 
+### Install the global hook — makes the checker itself un-stale-able
+
+`version_notice`'s checker lives inside the plugin, so — like every other
+hook — it is bound to whichever installed-plugin-cache folder a session
+loaded at startup: a stale session runs a stale checker. One command installs
+it instead as a user-level hook at a fixed path
+(`~/.claude/hooks/agent-companion-staleness.mjs`) that never needs updating,
+because it re-resolves the currently installed agent-companion fresh on every
+run rather than running whatever copy this session happened to load:
+
+```bash
+node "$AC/scripts/install-global-hooks.mjs"
+```
+
+Idempotent (safe to re-run), backs up `settings.json` first, and `--dry-run`
+previews the change without touching anything. `--uninstall` removes it.
+Optional — `version_notice` already works without it, just one
+`/reload-plugins` behind on the one thing only a fresh load can see.
+
 Releasing: bump `version` in **both** `plugin.json` and the plugin's entry in
 `marketplace.json` — Claude Code reads the first, the claude.ai plugin
 directory keys on the second, and the manifest check fails if they differ.
