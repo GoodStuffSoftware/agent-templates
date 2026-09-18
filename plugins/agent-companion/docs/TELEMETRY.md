@@ -165,7 +165,7 @@ whose.
 | `desc_len` | number \| null | the description's length, or null |
 | `caller_is_subagent` | boolean | true when the payload carries `agent_id` (the caller is itself a subagent) |
 | `caller_agent_id` | string \| null | `agent_id` of the caller, when it is a subagent |
-| `caller_model` | string \| null | the CALLER's own model, read from the last assistant record of the caller's transcript (bounded tail-read) |
+| `caller_model` | string \| null | the CALLER's own model, read from the last assistant record of the caller's transcript (bounded tail-read). The harness writes the CURRENT assistant turn to the transcript only after PreToolUse hooks return, so this is the model of the caller's PREVIOUS turn. A spawn made on a session's very first turn therefore logs `null`, and a `/model` switch shows up one turn late. |
 | `caller_effort` | string \| null | the CALLER's effort — what v1's `effort` field held |
 | `spawn_effort` | string \| null | the SPAWNED agent's own effort: the agent definition's frontmatter effort if it has one; null if the resolved model takes no effort parameter (e.g. haiku); otherwise the caller's effort (built-in types run at the caller's effort) |
 | `spawn_effort_source` | `definition` \| `inherited` \| `none` | which of the three rules above produced `spawn_effort` |
