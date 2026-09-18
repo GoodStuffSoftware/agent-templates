@@ -130,12 +130,12 @@ sessions: the app runs them with the auto-updater switched off, so the daily
 local scout runs the two built-in commands (`claude plugin marketplace update`,
 `claude plugin update`) at the start of each run. The plugin adds only a
 notice (`version_notice`, default on): at session start, and again on the
-first prompt after, it says when THIS SESSION is running an older copy than
-what is installed, because "installed" and "loaded" differ by a
-`/reload-plugins` (or restart) nobody is reminded to run — and a stale parent
-session's sub-agents inherit its stale hooks too. A second install of the
-same plugin at project scope shadows the user-scope one and never updates;
-`claude plugin list` shows both if so.
+first prompt after, it says when ANY installed plugin — not just this one —
+was updated after this session last loaded its plugins, because "installed"
+and "loaded" differ by a `/reload-plugins` (or restart) nobody is reminded to
+run — and a stale parent session's sub-agents inherit its stale hooks too. A
+second install of the same plugin at project scope shadows the user-scope one
+and never updates; `claude plugin list` shows both if so.
 
 Releasing: bump `version` in **both** `plugin.json` and the plugin's entry in
 `marketplace.json` — Claude Code reads the first, the claude.ai plugin

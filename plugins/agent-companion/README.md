@@ -34,7 +34,7 @@ It was built after two observed failures:
 | `memory_doctor` | Detects memory files on disk that the index does not link — **unreachable rules** — plus broken index links. Repairs non-destructively. | no |
 | `spawn_telemetry` | Records every spawn (model, agent type, effort) for the calibration routine. | no |
 | `scout_surface` | At session start, surfaces unresolved signals from the last locally scheduled scout run. Silent on a quiet day. | no |
-| `version_notice` | At session start and on the next prompt, says once per (running, installed) pair when THIS SESSION's copy is older than what is installed — catches a stale parent (and everything it spawns) mid-session, not just at startup. Updating itself is the harness's job: the native autoupdater in terminal sessions, the built-in `plugin update` commands run by the daily local scout in desktop sessions. | no |
+| `version_notice` | At session start and on the next prompt, says once per (plugin, lastUpdated) pair when ANY installed plugin — not just this one — was updated after this session last loaded its plugins (session start, or the last `/reload-plugins`), catching a stale parent (and everything it spawns) mid-session, not just at startup. Also keeps this plugin's own running-vs-installed self-check, merged into the same notice when both fire, for the one case timestamps alone miss: a desktop session that loaded a stale app-extracted bundle at startup. Updating itself is the harness's job: the native autoupdater in terminal sessions, the built-in `plugin update` commands run by the daily local scout in desktop sessions. | no |
 | `fit_guard` | Best fit at the spawn, both directions. A brief that declares `WEIGHT:` gets its model graded against the routing table: under- and cheap-over-provisioned spawns are announced; a premium model over-provisioned for its own declared weight is denied with the correction. | premium-over only |
 | `fit_autofill` | A spawn that declares `WEIGHT:` but names no model gets the table's model filled in, instead of inheriting the lead's tier by accident. | no |
 
@@ -189,7 +189,7 @@ Written under `${CLAUDE_PLUGIN_DATA}` (survives upgrades, removed on uninstall):
 | `premium-window.json` | rolling window used to approximate premium concurrency |
 | `refactor-prompt.md` | generated when an instruction file is over budget or memory is unreachable |
 | `baseline.json` | previous harness version + counters, for daily drift detection |
-| `version-notice-shown.json` | per-session record of which (running, installed) version pairs already got the staleness notice; pruned after a week |
+| `version-notice-state.json` | per-session `loadedAt` (when this session last loaded its plugins) plus which (plugin, lastUpdated) pairs already got the staleness notice; pruned after a week |
 
 ## Install
 
