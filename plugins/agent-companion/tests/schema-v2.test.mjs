@@ -148,3 +148,87 @@ test('spawn_effort_source: definition | inherited | none', () => {
     cleanup();
   }
 });
+
+test('caller is a sub-agent: caller_model comes from the NESTED agent transcript, not the parent', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    // Parent (top-level) transcript: a different model, so we can tell which
+    // file caller_model actually came from.
+    const parentTranscript = join(dir, 'parent-session.jsonl');
+    fakeTranscript(parentTranscript, { model: 'claude-parent-should-not-be-used', effort: 'low' });
+
+    // Nested per-agent transcript, at the exact path callerTranscriptPath()
+    // constructs: <dirname>/<basename-without-.jsonl>/subagents/agent-<id>.jsonl
+    const agentId = 'agent-race-77';
+    const nestedDir = join(dir, 'parent-session', 'subagents');
+    mkdirSync(nestedDir, { recursive: true });
+    const nestedTranscript = join(nestedDir, `agent-${agentId}.jsonl`);
+    fakeTranscript(nestedTranscript, { model: 'claude-nested-sub-agent-model', effort: 'xhigh' });
+
+    const payload = {
+      session_id: 'sess-v2-subagent-caller',
+      agent_type: 'subagent',
+      agent_id: agentId,
+      cwd: dir,
+      transcript_path: parentTranscript, // no agent_transcript_path: forces the nested-path construction
+      tool_input: { subagent_type: 'general-purpose', prompt: 'a sub-agent spawning another agent' },
+    };
+    const res = runHook('hooks/spawn-guard.mjs', payload, {
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+    });
+    assert.equal(res.status, 0, `spawn-guard exited ${res.status}: ${res.stderr}`);
+
+    const rows = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'));
+    assert.equal(rows.length, 1);
+    const row = rows[0];
+    assert.equal(row.caller_is_subagent, true);
+    assert.equal(row.caller_agent_id, agentId);
+    assert.equal(row.caller_model, 'claude-nested-sub-agent-model', 'caller_model must come from the NESTED transcript, not the parent');
+    assert.equal(row.caller_effort, 'xhigh');
+  } finally {
+    cleanup();
+  }
+});
+
+test('transcript with no assistant record in the tail window: caller_model/caller_effort are null, no throw', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const transcriptPath = join(dir, 'no-assistant-in-tail.jsonl');
+
+    // A real assistant record exists, but it is followed by enough filler to
+    // push it entirely out of the 128 KB tail-read window.
+    const earlyAssistant = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', model: 'claude-should-be-out-of-window', content: [{ type: 'text', text: 'old' }] },
+      effort: 'high',
+      timestamp: '2026-09-18T09:00:00.000Z',
+    });
+    const fillerLine = JSON.stringify({ type: 'user', message: { role: 'user', content: 'x'.repeat(200) }, timestamp: '2026-09-18T09:30:00.000Z' });
+    // ~200KB of filler lines, comfortably over the 128KB tail-read window.
+    const fillerCount = Math.ceil((200 * 1024) / (fillerLine.length + 1));
+    const filler = Array.from({ length: fillerCount }, () => fillerLine);
+
+    writeFileSync(transcriptPath, `${[earlyAssistant, ...filler].join('\n')}\n`);
+
+    const payload = {
+      session_id: 'sess-v2-no-assistant-tail',
+      agent_type: 'main',
+      cwd: dir,
+      transcript_path: transcriptPath,
+      tool_input: { subagent_type: 'general-purpose', prompt: 'no assistant record in the tail window' },
+    };
+    const res = runHook('hooks/spawn-guard.mjs', payload, {
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+    });
+    assert.equal(res.status, 0, `spawn-guard must not throw: ${res.stderr}`);
+    assert.equal(res.stderr, '', 'spawn-guard must not write to stderr');
+
+    const rows = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'));
+    assert.equal(rows.length, 1);
+    const row = rows[0];
+    assert.equal(row.caller_model, null);
+    assert.equal(row.caller_effort, null);
+  } finally {
+    cleanup();
+  }
+});

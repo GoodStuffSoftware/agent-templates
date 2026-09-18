@@ -394,7 +394,7 @@ export function agentDefinition(type, cwd) {
   if (!type) return null;
   const roots = [
     cwd && join(cwd, '.claude', 'agents'),
-    join(homedir(), '.claude', 'agents'),
+    join(claudeDir(), 'agents'),
   ].filter(Boolean);
   for (const root of roots) {
     const file = join(root, `${type}.md`);

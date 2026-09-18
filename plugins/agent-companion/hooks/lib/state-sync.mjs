@@ -53,15 +53,30 @@ function acquireLock() {
   const payload = { pid: process.pid, at: Date.now() };
   if (tryCreateLock(lockFile, payload)) return lockFile;
 
-  let info = null;
-  try { info = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { /* unreadable: treat as held */ }
-  const age = info && typeof info.at === 'number' ? Date.now() - info.at : -1;
-  if (age < 0 || age <= LOCK_STALE_MS) return null; // held, and not stale (or we can't tell)
+  // Prefer the `at` recorded inside the lock's own JSON content; if that
+  // content is corrupt or unreadable, fall back to the lock FILE's mtime for
+  // the staleness test. Without this fallback a corrupt lock (unparseable
+  // JSON — a torn write, disk corruption, whatever) reads as "always held":
+  // JSON.parse failing left `age` permanently at -1 with nothing to ever
+  // break the deadlock, so a sync stopped permanently instead of just once.
+  let lockAt = null;
+  try {
+    const info = JSON.parse(readFileSync(lockFile, 'utf8'));
+    if (info && typeof info.at === 'number') lockAt = info.at;
+  } catch { /* corrupt or unreadable content: fall through to mtime below */ }
+  if (lockAt == null) {
+    try { lockAt = statSync(lockFile).mtimeMs; } catch { /* lock file gone entirely: treat as takeable below */ }
+  }
 
-  // Stale: take it over.
-  try { unlinkSync(lockFile); } catch { /* another process may already have released it */ }
-  if (tryCreateLock(lockFile, payload)) return lockFile;
-  return null; // lost the race to someone else
+  // lockAt still null means the lock file itself is gone (raced away by
+  // whoever held it) — nothing to be stale about, so it is immediately
+  // takeable rather than permanently blocking.
+  const age = lockAt == null ? Infinity : Date.now() - lockAt;
+  if (age <= LOCK_STALE_MS) return null; // genuinely held, and not stale
+
+  // Stale (or gone): take it over.
+  try { unlinkSync(lockFile); } catch { /* another process may already have released it, or it never existed */ }
+  return tryCreateLock(lockFile, payload) ? lockFile : null;
 }
 
 // --- bounded incremental file scan --------------------------------------
@@ -234,13 +249,15 @@ function applyUnknownAgentTypes(parsed, counts) {
   try { mkdirSync(typesDir, { recursive: true }); } catch { /* fail open */ }
 
   const seenTypes = new Set();
-  try {
-    for (const l of readFileSync(destPath, 'utf8').split('\n')) {
-      const t = l.trim();
-      if (!t) continue;
-      try { const r = JSON.parse(t); if (r && r.agent_type) seenTypes.add(r.agent_type); } catch { /* skip */ }
-    }
-  } catch { /* none yet */ }
+  if (parsed.length) {
+    try {
+      for (const l of readFileSync(destPath, 'utf8').split('\n')) {
+        const t = l.trim();
+        if (!t) continue;
+        try { const r = JSON.parse(t); if (r && r.agent_type) seenTypes.add(r.agent_type); } catch { /* skip */ }
+      }
+    } catch { /* none yet */ }
+  }
 
   let dupes = 0;
   let fixtures = 0;

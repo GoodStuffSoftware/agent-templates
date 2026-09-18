@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, existsSync } from 'node:fs';
+import { rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 
@@ -8,6 +8,15 @@ test('spawns.jsonl survives a plugin uninstall (rm -rf on the plugin data dir)',
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const pluginDataDir = join(dir, '.claude', 'plugins', 'data', 'agent-companion-x');
+
+    // Seed the plugin data dir the way a real installed plugin would have
+    // (a disposable cache file) BEFORE the hook runs — with the guard's
+    // default config, spawn-guard.mjs never itself calls dataDir() (that only
+    // happens when memory_search/memory_brief are both on), so the directory
+    // is not guaranteed to exist otherwise. Seeding it here makes the
+    // "simulated uninstall" below a real rm -rf on real content, not a no-op.
+    mkdirSync(pluginDataDir, { recursive: true });
+    writeFileSync(join(pluginDataDir, 'refactor-prompt.md'), 'pre-existing disposable cache content');
 
     const payload = {
       session_id: 'sess-uninstall-1',
@@ -30,8 +39,9 @@ test('spawns.jsonl survives a plugin uninstall (rm -rf on the plugin data dir)',
     assert.equal(before[0].session_id, 'sess-uninstall-1');
 
     // This is exactly what a plugin uninstall does: delete the whole plugin
-    // data directory.
-    assert.ok(existsSync(pluginDataDir) || true); // dir may or may not exist yet, both are fine
+    // data directory. Confirm there is real content there first, so the
+    // "simulated uninstall" below is actually destroying something.
+    assert.ok(existsSync(join(pluginDataDir, 'refactor-prompt.md')), 'seeded plugin-data-dir content should exist before the simulated uninstall');
     rmSync(pluginDataDir, { recursive: true, force: true });
     assert.ok(!existsSync(pluginDataDir), 'plugin data dir should be gone (simulated uninstall)');
 

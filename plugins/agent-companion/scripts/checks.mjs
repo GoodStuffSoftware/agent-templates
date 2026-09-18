@@ -15,7 +15,6 @@ import {
   readFileSync, existsSync, readdirSync, mkdirSync, renameSync, copyFileSync, writeFileSync, statSync,
 } from 'node:fs';
 import { join, basename } from 'node:path';
-import { homedir } from 'node:os';
 import { execFileSync, execSync } from 'node:child_process';
 
 import {
@@ -152,7 +151,7 @@ const instructionBudget = {
     const budget = opt('memory_budget_tokens', 3000);
     const cands = [
       ['project CLAUDE.md', join(ctx.target, 'CLAUDE.md')],
-      ['global CLAUDE.md', join(homedir(), '.claude', 'CLAUDE.md')],
+      ['global CLAUDE.md', join(claudeDir(), 'CLAUDE.md')],
     ];
     if (ctx.memoryDir) cands.push(['memory index', join(ctx.memoryDir, 'MEMORY.md')]);
 

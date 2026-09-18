@@ -24,7 +24,7 @@ import {
 } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
+import { claudeDir } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -37,8 +37,12 @@ const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SHIM_SOURCE = join(pluginRoot, 'shims', 'global-hooks', 'agent-companion-staleness.mjs');
 const SHIM_FILENAME = 'agent-companion-staleness.mjs';
 
-const settingsPath = resolve(val('--settings') || join(homedir(), '.claude', 'settings.json'));
-const hooksDir = resolve(val('--hooks-dir') || join(homedir(), '.claude', 'hooks'));
+// --settings/--hooks-dir stay the primary override for real installer use;
+// claudeDir() (AGENT_COMPANION_HOME_OVERRIDE / CLAUDE_CONFIG_DIR-aware) is
+// only the fallback default, so real-world behaviour is unchanged but a test
+// can redirect this without either flag.
+const settingsPath = resolve(val('--settings') || join(claudeDir(), 'settings.json'));
+const hooksDir = resolve(val('--hooks-dir') || join(claudeDir(), 'hooks'));
 const shimDest = join(hooksDir, SHIM_FILENAME);
 
 const EVENTS = ['SessionStart', 'UserPromptSubmit'];

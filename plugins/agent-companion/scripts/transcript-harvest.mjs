@@ -66,8 +66,7 @@ import {
 } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join, dirname, resolve } from 'node:path';
-import { homedir } from 'node:os';
-import { dataDir } from '../hooks/lib/context.mjs';
+import { dataDir, claudeDir } from '../hooks/lib/context.mjs';
 
 // --- Corpus location ---------------------------------------------------
 
@@ -77,7 +76,7 @@ import { dataDir } from '../hooks/lib/context.mjs';
 // AGENT_COMPANION_MEMORY_ROOT override, for the same reason: tests need a
 // scratch corpus, not the operator's real sessions.
 function transcriptsRoot() {
-  return process.env.AGENT_COMPANION_TRANSCRIPTS_ROOT || join(homedir(), '.claude', 'projects');
+  return process.env.AGENT_COMPANION_TRANSCRIPTS_ROOT || join(claudeDir(), 'projects');
 }
 
 // --- Arg parsing (mirrors scripts/memory-search.mjs's parser) -----------

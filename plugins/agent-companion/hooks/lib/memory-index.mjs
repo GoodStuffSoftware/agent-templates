@@ -17,16 +17,20 @@ import {
 import {
   join, relative, sep, resolve, dirname,
 } from 'node:path';
-import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { claudeDir } from './context.mjs';
 
 // --- Corpus location -------------------------------------------------------
 
 // AGENT_COMPANION_MEMORY_ROOT exists so tests can point this at a scratch
-// corpus instead of the operator's real ~/.claude/projects.
+// corpus instead of the operator's real ~/.claude/projects. claudeDir()
+// itself honours AGENT_COMPANION_HOME_OVERRIDE/CLAUDE_CONFIG_DIR — this used
+// to call raw homedir() directly, so a full audit.mjs run (which builds
+// ctx.memoryDir unconditionally) read and could print the REAL operator's
+// memory files even with the override set.
 export function memoryRoot() {
-  return process.env.AGENT_COMPANION_MEMORY_ROOT || join(homedir(), '.claude', 'projects');
+  return process.env.AGENT_COMPANION_MEMORY_ROOT || join(claudeDir(), 'projects');
 }
 
 // Walk <root>/<project>/memory/** for *.md files, recursing into

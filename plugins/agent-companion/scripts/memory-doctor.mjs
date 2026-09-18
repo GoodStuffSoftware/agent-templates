@@ -18,8 +18,7 @@ import {
   readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, renameSync, copyFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { opt } from '../hooks/lib/context.mjs';
+import { opt, claudeDir } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes(n);
@@ -38,7 +37,7 @@ function resolveDir() {
   const explicit = val('--dir');
   if (explicit) return explicit;
   const enc = process.cwd().replace(/[:\/]/g, '-');
-  const d = join(homedir(), '.claude', 'projects', enc, 'memory');
+  const d = join(claudeDir(), 'projects', enc, 'memory');
   return existsSync(d) ? d : null;
 }
 

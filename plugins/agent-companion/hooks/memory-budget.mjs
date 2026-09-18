@@ -15,8 +15,7 @@
 
 import { readFileSync, existsSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { homedir } from 'node:os';
-import { readStdin, opt, dataDir, passthrough } from './lib/context.mjs';
+import { readStdin, opt, dataDir, claudeDir, passthrough } from './lib/context.mjs';
 
 const est = (s) => Math.ceil(s.length / 4); // ~4 chars/token; fine for an alarm
 
@@ -25,7 +24,7 @@ function encodeProjectDir(cwd) {
 }
 
 function findMemoryIndex(cwd) {
-  const base = join(homedir(), '.claude', 'projects');
+  const base = join(claudeDir(), 'projects');
   const direct = join(base, encodeProjectDir(cwd), 'memory', 'MEMORY.md');
   if (existsSync(direct)) return direct;
   try {
@@ -67,7 +66,7 @@ try {
 
   const candidates = [
     ['project CLAUDE.md', join(cwd, 'CLAUDE.md')],
-    ['global CLAUDE.md', join(homedir(), '.claude', 'CLAUDE.md')],
+    ['global CLAUDE.md', join(claudeDir(), 'CLAUDE.md')],
   ];
   const mem = findMemoryIndex(cwd);
   if (mem) candidates.push(['memory index', mem]);
