@@ -888,7 +888,7 @@ const telemetryCoverageCheck = {
   async run(ctx) {
     let result;
     try {
-      result = await telemetryCoverage({ days: ctx.days || 7 });
+      result = await telemetryCoverage({ days: ctx.days || 7, partialRatio: opt('coverage_partial_ratio', 0.5) });
     } catch (e) {
       return { status: 'skip', findings: [`coverage check failed: ${e.message}`] };
     }

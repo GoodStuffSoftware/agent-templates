@@ -167,6 +167,12 @@
       "title": "Repo scope max total size (MB)",
       "description": "Cap on total bytes indexed from the repo scope across all matched files. A docs/ tree alone can reach several MB on a large repo, so this cap is mandatory rather than advisory: once reached, further files stop being added and the index is marked partial/truncated so a caller can say so instead of silently under-reporting.",
       "default": 8
+    },
+    "coverage_partial_ratio": {
+      "type": "number",
+      "title": "Telemetry coverage partial-day ratio",
+      "description": "A day is flagged 'partial' (not fully silent, but under-recorded) when spawns.jsonl has fewer than this fraction of that day's real Agent tool_use calls seen in transcripts. Used by the telemetry-coverage audit check and the enforcement_silent scout signal.",
+      "default": 0.5
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",

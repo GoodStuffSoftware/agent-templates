@@ -13,7 +13,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir } from '../hooks/lib/context.mjs';
+import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
 
@@ -194,7 +194,10 @@ try {
 // the full-depth version of this check has no such cap (see the
 // telemetry-coverage audit check).
 try {
-  const coverage = await telemetryCoverage({ days: daysArg, maxMs: 20000, maxFiles: 5000, maxBytes: 2 * 1024 * 1024 * 1024 });
+  const coverage = await telemetryCoverage({
+    days: daysArg, maxMs: 20000, maxFiles: 5000, maxBytes: 2 * 1024 * 1024 * 1024,
+    partialRatio: opt('coverage_partial_ratio', 0.5),
+  });
   const bad = coverage.days.filter((d) => d.status === 'silent' || d.status === 'partial');
   if (bad.length) {
     const label = bad.map((d) => `${d.day}(${d.status})`).join(', ');
