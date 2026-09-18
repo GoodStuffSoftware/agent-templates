@@ -80,7 +80,7 @@ nothing changed, say nothing.
 node "$AC/scripts/detect.mjs"
 ```
 
-Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`.
+Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`, `enforcement_silent`.
 
 ## STEP 2 — lineup and pricing diff (the one check that needs the web)
 
@@ -113,6 +113,7 @@ Not a summary, not a confirmation. Silence is the success case.
 | `inherited_model_spawns` | report the count; spawns with no model inherit the lead's tier — the mechanism behind unexamined premium fan-out |
 | `harness_version_unreadable` | report it; do not guess |
 | `plugin_version_behind` | the installed plugin is older than the current copy. Cloud: the claude.ai plugin directory needs its **Sync** pressed on the marketplace page — cloud sessions are running the old guards until then. Local: `claude plugin marketplace update`, `claude plugin update`, restart |
+| `enforcement_silent` | report which day(s) and their status; transcripts show real `Agent` spawns but `spawns.jsonl` has no matching rows for that day — the guard may have stopped recording (renamed matcher, exception before the append, telemetry flag off) even though spawning itself is fine. Run `node "$AC/scripts/audit.mjs" --only telemetry-coverage,guard-canary` for the detail |
 
 **Canary** — proves the guards still fire rather than merely exist:
 

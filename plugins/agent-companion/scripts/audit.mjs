@@ -19,11 +19,11 @@
 // Exit codes: 0 normally; 1 only with --strict and at least one failure. An
 // audit that cannot run a check reports 'skip' and never pretends it passed.
 
-import { existsSync, mkdirSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
 import { CHECKS, memoryDirFor } from './checks.mjs';
+import { dataDir as resolveDataDir, stateRoot, telemetryDir, stateDir } from '../hooks/lib/context.mjs';
+import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -32,9 +32,18 @@ const list = (n) => (val(n) || '').split(',').map((s) => s.trim()).filter(Boolea
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const target = resolve(val('--dir') || process.cwd());
-const dataDir = process.env.CLAUDE_PLUGIN_DATA
-  || join(homedir(), '.claude', 'plugins', 'data', 'agent-companion');
-try { mkdirSync(dataDir, { recursive: true }); } catch { /* non-fatal */ }
+
+// Recover any durable history left in the legacy plugin data directory before
+// any check reads durable state. Fails open on its own.
+try { syncLegacy(); } catch { /* fail open */ }
+
+// The ONE resolver (hooks/lib/context.mjs) — this used to compute its own,
+// hardcoded-to-the-bare-dir copy, so outside a hook (no CLAUDE_PLUGIN_DATA)
+// it silently read/wrote the wrong sibling directory. dataDir() is now used
+// only for disposable caches; durable state comes from stateRoot()/
+// telemetryDir()/stateDir().
+const dataDir = resolveDataDir();
+const days = Number(val('--days')) || 7;
 
 if (has('--list')) {
   console.log('Available checks:\n');
@@ -66,6 +75,10 @@ const ctx = {
   target,
   pluginRoot,
   dataDir,
+  stateRoot: stateRoot(),
+  telemetryDir: telemetryDir(),
+  stateDir: stateDir(),
+  days,
   memoryDir: memoryDirFor(target),
   fix: has('--fix'),
 };
@@ -74,7 +87,10 @@ const results = [];
 for (const check of selected) {
   let r;
   try {
-    r = check.run(ctx);
+    // Awaiting a plain (non-Promise) return value is a no-op, so this stays
+    // compatible with every synchronous check — only telemetry-coverage's
+    // run() is actually async (it streams transcripts with readline).
+    r = await check.run(ctx);
   } catch (e) {
     // A check that throws is reported as an error, never silently skipped —
     // a swallowed exception is indistinguishable from a clean result.
@@ -83,8 +99,8 @@ for (const check of selected) {
   let fixed = null;
   if (ctx.fix && check.fix && (r.status === 'fail' || r.status === 'warn')) {
     try {
-      fixed = check.fix(ctx, r);
-      const after = check.run(ctx);
+      fixed = await check.fix(ctx, r);
+      const after = await check.run(ctx);
       r = { ...after, findingsBeforeFix: r.findings };
     } catch (e) {
       fixed = [`fix threw: ${e.message}`];

@@ -19,20 +19,26 @@ import { homedir } from 'node:os';
 import { execFileSync, execSync } from 'node:child_process';
 
 import {
-  classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir, opt,
+  classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir, opt, claudeDir,
 } from '../hooks/lib/context.mjs';
 import {
   memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
 } from '../hooks/lib/memory-index.mjs';
+import { telemetryCoverage } from './lib/coverage.mjs';
 
 const est = (s) => Math.ceil(s.length / 4);
 const DATED_MODEL = /-\d{6,8}$/;
 
+// audit.mjs computes ctx.memoryDir = memoryDirFor(target) UNCONDITIONALLY for
+// every run, even `--only spawn-audit` — so this must honour
+// AGENT_COMPANION_HOME_OVERRIDE (via claudeDir()) rather than raw homedir(),
+// or a test invoking audit.mjs with any --only filter still reads the real
+// ~/.claude/projects tree despite the override being set.
 export function memoryDirFor(target) {
   const enc = target.replace(/[:\\/]/g, '-');
-  const direct = join(homedir(), '.claude', 'projects', enc, 'memory');
+  const direct = join(claudeDir(), 'projects', enc, 'memory');
   if (existsSync(direct)) return direct;
-  const base = join(homedir(), '.claude', 'projects');
+  const base = join(claudeDir(), 'projects');
   try {
     const leaf = target.split(/[\\/]/).filter(Boolean).pop();
     for (const c of readdirSync(base)) {
@@ -292,7 +298,10 @@ const harnessDrift = {
     } catch {
       return { status: 'skip', findings: ['could not run `claude --version`'] };
     }
-    const bl = join(ctx.dataDir, 'baseline.json');
+    // baseline.json has exactly ONE writer path now: stateFile('baseline.json'),
+    // i.e. ctx.stateDir here and scripts/detect.mjs's own write — both durable,
+    // both under the state root, so the two can no longer diverge.
+    const bl = join(ctx.stateDir, 'baseline.json');
     let prev = {};
     try { if (existsSync(bl)) prev = JSON.parse(readFileSync(bl, 'utf8')); } catch { /* ignore */ }
 
@@ -301,11 +310,11 @@ const harnessDrift = {
       findings.push(`version changed: ${prev.version} -> ${version} - re-verify hook matchers, run the canary`);
     }
     try {
-      mkdirSync(ctx.dataDir, { recursive: true });
+      mkdirSync(ctx.stateDir, { recursive: true });
       writeFileSync(bl, JSON.stringify({ ...prev, version }, null, 2));
     } catch { /* ignore */ }
 
-    const unknownFile = join(ctx.dataDir, 'unknown-agent-types.jsonl');
+    const unknownFile = join(ctx.telemetryDir, 'unknown-agent-types.jsonl');
     if (existsSync(unknownFile)) {
       const types = new Set(
         readFileSync(unknownFile, 'utf8').split('\n').filter(Boolean)
@@ -371,7 +380,7 @@ const spawnAudit = {
   vendor: 'anthropic',
   fixable: false,
   run(ctx) {
-    const f = join(ctx.dataDir, 'spawns.jsonl');
+    const f = join(ctx.telemetryDir, 'spawns.jsonl');
     if (!existsSync(f)) return { status: 'skip', findings: ['no spawn telemetry recorded yet'] };
     const rows = readFileSync(f, 'utf8').split('\n').filter(Boolean)
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
@@ -864,6 +873,33 @@ const memoryNearDuplicates = {
   },
 };
 
+// --- 12. telemetry coverage ------------------------------------------------
+// spawns.jsonl is the guard's own account of what it saw — a guard that has
+// gone silent (renamed matcher, a config flag flipped off, an exception
+// before the append) produces exactly the same empty log as a quiet day.
+// Transcripts are independent ground truth: every real `Agent` tool_use call
+// is written there by the harness, outside this plugin's control. This check
+// is not fixable — a silent guard needs a person to look at it, not a repair.
+const telemetryCoverageCheck = {
+  id: 'telemetry-coverage',
+  title: 'Guard telemetry coverage vs. transcripts',
+  vendor: 'anthropic',
+  fixable: false,
+  async run(ctx) {
+    let result;
+    try {
+      result = await telemetryCoverage({ days: ctx.days || 7 });
+    } catch (e) {
+      return { status: 'skip', findings: [`coverage check failed: ${e.message}`] };
+    }
+    const bad = result.days.filter((d) => d.status === 'silent' || d.status === 'partial');
+    const findings = bad.map((d) => `${d.day}: ${d.status.toUpperCase()} — ${d.transcriptSpawns} transcript Agent spawn(s), `
+      + `${d.telemetryRows} spawns.jsonl row(s)${d.partialDay ? ' (today, still in progress)' : ''}`);
+    if (result.truncated) findings.push('transcript walk was truncated by the file/byte cap — coverage may be undercounted');
+    return { status: bad.length ? 'warn' : 'ok', findings, data: result };
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
@@ -876,4 +912,5 @@ export const CHECKS = [
   memoryIndexCeiling,
   memoryStoreForks,
   memoryNearDuplicates,
+  telemetryCoverageCheck,
 ];

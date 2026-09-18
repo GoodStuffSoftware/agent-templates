@@ -11,37 +11,40 @@
 // Emits JSON to stdout: { changed: bool, signals: [...], baseline: {...} }
 
 import { execSync } from 'node:child_process';
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { modelTiers, dataDir as resolveDataDir, dataDirs } from '../hooks/lib/context.mjs';
+import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir } from '../hooks/lib/context.mjs';
+import { syncLegacy } from '../hooks/lib/state-sync.mjs';
+import { telemetryCoverage } from './lib/coverage.mjs';
 
-// CLAUDE_PLUGIN_DATA is set for hooks only. A scheduled session or a skill
-// runs this from Bash with no such variable, and a naive fallback lands in a
-// different directory from the one the hooks write to — zero spawns, zero
-// denials, a scout reporting calm about data it never read. Resolve it the
-// same way the hooks do.
-const dataDir = resolveDataDir();
-try { mkdirSync(dataDir, { recursive: true }); } catch {}
+const argv = process.argv.slice(2);
+const daysArg = (() => {
+  const i = argv.indexOf('--days');
+  return i >= 0 ? Number(argv[i + 1]) : 7;
+})();
 
-// Telemetry splits across every data dir the plugin was ever loaded from
-// (one per marketplace, plus -inline). State (baseline, scout-latest) lives in
-// the live one; reads aggregate across all of them, or a scout under-reports
-// with no sign that it did.
-const readDirs = [...new Set([dataDir, ...dataDirs()])];
+// Recover any durable history left in the legacy plugin data directory FIRST.
+// Fails open on its own (locked / errored -> {skipped}); the scout still runs
+// against whatever is already in the state root.
+const syncResult = syncLegacy();
+
+// Durable state now lives under the state root (survives a plugin uninstall),
+// not the plugin data directory — see hooks/lib/context.mjs. detect.mjs reads
+// ONLY telemetryDir()/state, no more per-marketplace union: the import above
+// has already merged every legacy sibling directory into this one place.
+const telemetryDir = resolveTelemetryDir();
 function readJsonl(name) {
   const out = [];
-  for (const d of readDirs) {
-    const f = join(d, name);
-    if (!existsSync(f)) continue;
-    for (const l of readFileSync(f, 'utf8').split('\n')) {
-      if (!l) continue;
-      try { out.push(JSON.parse(l)); } catch { /* torn line */ }
-    }
+  const f = join(telemetryDir, name);
+  if (!existsSync(f)) return out;
+  for (const l of readFileSync(f, 'utf8').split('\n')) {
+    if (!l) continue;
+    try { out.push(JSON.parse(l)); } catch { /* torn line */ }
   }
   return out;
 }
 
-const baselineFile = join(dataDir, 'baseline.json');
+const baselineFile = stateFile('baseline.json');
 const baseline = existsSync(baselineFile)
   ? JSON.parse(readFileSync(baselineFile, 'utf8'))
   : {};
@@ -160,8 +163,12 @@ try {
 // script's own manifest (the current copy) with what the harness has installed.
 try {
   const own = JSON.parse(readFileSync(join(import.meta.dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8'));
-  const home = process.env.USERPROFILE || process.env.HOME || '';
-  const inst = JSON.parse(readFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
+  // Was process.env.USERPROFILE || process.env.HOME directly — bypassed
+  // AGENT_COMPANION_HOME_OVERRIDE entirely, so a test (or this script's own
+  // manual verification) read the REAL ~/.claude/plugins/installed_plugins.json
+  // even with the override set. claudeDir() honours the override like every
+  // other path in this plugin.
+  const inst = JSON.parse(readFileSync(join(claudeDir(), 'plugins', 'installed_plugins.json'), 'utf8'));
   const entries = Object.entries(inst.plugins || inst).filter(([k]) => k.startsWith(`${own.name}@`));
   const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
   for (const [key, val] of entries) {
@@ -179,15 +186,40 @@ try {
   next.pluginVersion = own.version;
 } catch { /* no install record here (a bare checkout): not a signal */ }
 
+// --- 7. Enforcement silent (telemetry coverage vs. transcripts) --------
+// spawns.jsonl going quiet looks identical whether nothing was spawned or the
+// guard stopped recording. Transcripts are independent ground truth. Bounded
+// to 20s / 5,000 files / 2GB here specifically — this is the DAILY scout, and
+// a slow signal that blocks the quiet-day fast path defeats the point of it;
+// the full-depth version of this check has no such cap (see the
+// telemetry-coverage audit check).
+try {
+  const coverage = await telemetryCoverage({ days: daysArg, maxMs: 20000, maxFiles: 5000, maxBytes: 2 * 1024 * 1024 * 1024 });
+  const bad = coverage.days.filter((d) => d.status === 'silent' || d.status === 'partial');
+  if (bad.length) {
+    const label = bad.map((d) => `${d.day}(${d.status})`).join(', ');
+    sig('enforcement_silent',
+      `${bad.length} day(s) in the last ${daysArg} had spawns but no guard telemetry: ${label}`
+      + (coverage.truncated ? ' (transcript walk truncated by caps)' : ''),
+      'telemetry-coverage');
+  }
+} catch { /* coverage check unreadable: not a signal, does not block the scout */ }
+
 writeFileSync(baselineFile, JSON.stringify({ ...baseline, ...next }, null, 2));
 
 // Persist the latest result too. A locally SCHEDULED scout has no human at the
 // keyboard when it runs; writing this lets the SessionStart hook surface any
 // unresolved signal in the next interactive session — the zero-token way for a
 // scheduled check to reach a person without waking a model to relay it.
+const scoutResult = { checkedAt: now, changed: signals.length > 0, signals };
 try {
-  writeFileSync(join(dataDir, 'scout-latest.json'),
-    JSON.stringify({ checkedAt: now, changed: signals.length > 0, signals }, null, 2));
+  writeFileSync(stateFile('scout-latest.json'), JSON.stringify(scoutResult, null, 2));
+} catch { /* reporting still goes to stdout */ }
+
+// Append-only run history — scout-latest.json is overwritten every run and
+// keeps no history of its own; this is the record of every past run.
+try {
+  appendFileSync(stateFile('scout-history.jsonl'), `${JSON.stringify(scoutResult)}\n`);
 } catch { /* reporting still goes to stdout */ }
 
 process.stdout.write(JSON.stringify({
@@ -195,4 +227,5 @@ process.stdout.write(JSON.stringify({
   checkedAt: now,
   signals,
   baseline: next,
+  syncLegacy: syncResult,
 }, null, 2));
