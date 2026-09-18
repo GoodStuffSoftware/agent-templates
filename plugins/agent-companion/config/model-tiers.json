@@ -1,7 +1,7 @@
 {
   "version": 4,
   "updated": "2026-09-04",
-  "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to $CLAUDE_PLUGIN_DATA/model-tiers.json; it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
+  "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to ~/.claude/agent-companion/state/model-tiers.json (a legacy copy at $CLAUDE_PLUGIN_DATA/model-tiers.json is still honoured as a fallback); it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
   "tiers": {
     "haiku": {
       "rank": 1,

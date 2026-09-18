@@ -79,9 +79,11 @@ correctly. This plugin exists partly because a routing table sat wrong for a
 whole model generation without anyone noticing.
 
 Override without waiting for a release by writing a file of the same shape to
-`$CLAUDE_PLUGIN_DATA/model-tiers.json`. It merges **by alias**, so adding one
-model needs one entry, not a restatement of the table — a table you have to
-retype is a table you will not update:
+`~/.claude/agent-companion/state/model-tiers.json` (a legacy copy at
+`$CLAUDE_PLUGIN_DATA/model-tiers.json` is still honoured as a fallback, so an
+override written before 0.17.0 keeps working). It merges **by alias**, so
+adding one model needs one entry, not a restatement of the table — a table
+you have to retype is a table you will not update:
 
 ```json
 { "tiers": { "newtier": { "rank": 2, "premium": false, "match": "newtier" } } }
@@ -178,18 +180,36 @@ effect in project or local scope.
 
 ## State
 
-Written under `${CLAUDE_PLUGIN_DATA}` (survives upgrades, removed on uninstall):
+**Durable telemetry and state live OUTSIDE the plugin data directory**, under
+`~/.claude/agent-companion/` (override: `AGENT_COMPANION_STATE_DIR`, or
+`CLAUDE_CONFIG_DIR`-relative) — survives upgrades AND uninstalls. A plugin
+uninstall only ever deletes `${CLAUDE_PLUGIN_DATA}`
+(`~/.claude/plugins/data/agent-companion-<marketplace>/`), which is now used
+solely for disposable caches. See `docs/TELEMETRY.md` for the full layout,
+the legacy-data import, and the schema.
 
-| File | Contents |
-|---|---|
-| `spawns.jsonl` | every `Agent` spawn: model, subagent type, effort |
-| `subagent-starts.jsonl` | post-spawn confirmation |
-| `unknown-agent-types.jsonl` | agent types not in the known set |
-| `delegation-streak.json` | per-session main-thread streak counter |
-| `premium-window.json` | rolling window used to approximate premium concurrency |
-| `refactor-prompt.md` | generated when an instruction file is over budget or memory is unreachable |
-| `baseline.json` | previous harness version + counters, for daily drift detection |
-| `version-notice-state.json` | per-session `loadedAt` (when this session last loaded its plugins), which (plugin, lastUpdated) pairs already got the staleness notice, and — once the global hook is installed — the `loadedVersion` this session's plugin-registered hook recorded for the self-check handoff; pruned after a week |
+| File | Location | Contents |
+|---|---|---|
+| `telemetry/spawns.jsonl` | state root | every `Agent` spawn: model, subagent type, caller/spawn effort (v2) |
+| `telemetry/subagent-starts.jsonl` | state root | post-spawn confirmation |
+| `telemetry/denials.jsonl` | state root | every guard denial |
+| `telemetry/unknown-agent-types.jsonl` | state root | agent types not in the known set |
+| `telemetry/fixtures.jsonl` | state root | rows from `verify-`/`test-`/`fixture-` sessions, routed here instead of a production stream |
+| `state/delegation-streak.json` | state root | per-session main-thread streak counter |
+| `state/premium-window.json` | state root | rolling window used to approximate premium concurrency |
+| `state/baseline.json` | state root | previous harness version + counters, for daily drift detection |
+| `state/scout-latest.json` | state root | most recent calibration-scout result (overwritten each run) |
+| `state/scout-history.jsonl` | state root | append-only: one line per scout run |
+| `state/version-notice-state.json` | state root | per-session `loadedAt`, which (plugin, lastUpdated) pairs already got the staleness notice, and — once the global hook is installed — the `loadedVersion` recorded for the self-check handoff; pruned after a week |
+| `state/upload-state.json` | state root | opt-in telemetry-upload cursor |
+| `state/import-cursors.json` | state root | legacy-import cursors, keyed by source file path |
+| `state/migrated.json` | state root | written once, after the first legacy-data import |
+| `state/model-tiers.json` | state root | operator override of `config/model-tiers.json` (optional); a legacy copy under the plugin data dir is still honoured as a fallback |
+| `state/agent-types/*.seen` | state root | one marker file per seen unknown agent type (race-free dedup) |
+| `migration/backup-<stamp>/...` | state root | verbatim backup of each legacy dir's durable files, taken before the first import |
+| `refactor-prompt.md` | plugin data dir | generated when an instruction file is over budget or memory is unreachable |
+| `memory-index*.json`, `memory-merge-status-*.json` | plugin data dir | disposable, regenerable memory-search caches |
+| `transcript-harvest/` | plugin data dir | human-reviewed transcript digests |
 
 ## Install
 
@@ -323,7 +343,7 @@ claude plugin list
 After installing or reloading:
 
 ```bash
-ls ~/.claude/plugins/data/agent-companion/
+ls ~/.claude/agent-companion/telemetry/
 ```
 
 Files there mean hooks have fired. A missing or empty directory after real work

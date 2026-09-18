@@ -1,0 +1,28 @@
+name: agent-companion-tests
+
+# Runs the agent-companion plugin's zero-dependency test suite (node:test).
+# Every test isolates itself under a fresh temp dir via
+# AGENT_COMPANION_HOME_OVERRIDE / AGENT_COMPANION_STATE_DIR, so this never
+# touches anything outside the checkout.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run agent-companion test suite
+        # An explicit glob (shell-expanded, not Node's own directory-argument
+        # handling) so this is not sensitive to a platform's own glob
+        # resolution inside the test runner.
+        run: node --test plugins/agent-companion/tests/*.test.mjs
