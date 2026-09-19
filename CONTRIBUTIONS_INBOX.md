@@ -1,5 +1,110 @@
 # Contributions Inbox
 
+## 2026-09-19 - an empty error log is not evidence of health: audit what the code CAPTURES ({{PROJECT}})
+
+- **A live, correct crash pipeline can record nothing and still be read as "no problems".** A {{APP}} owner suspected a
+  broken sign-in because conversions were low. The error backlog held zero auth entries, and an agent nearly reported
+  that as health. Reading the code showed the auth error mapper sent only a small config-class set of error codes to the
+  capture API; every other failure (blocked popup, closed popup, network, rate limit, unsupported environment, and the
+  default branch) became UI text only, and the redirect-completion handler swallowed its errors with no UI and no
+  telemetry. Absence of records was a property of the instrumentation, not of the system.
+- **Rule: before reporting "no errors in X", enumerate what reaches X.** Grep every catch/error branch on the path and
+  classify each as captured / beaconed / user-visible only / silently swallowed. Report the silent set as a finding in
+  its own right. The same applies to a metric that reads zero: prove the emitter can fire at all (a sibling event that
+  DOES land is the cheapest control) before concluding the underlying behaviour never happened.
+- **Pair it with a known-good positive control.** The owner had signed in that day. Checking that one known event
+  through every layer (identity provider, database record, analytics) separated "the funnel is empty" from "the
+  measurement is broken" in one pass, and found a second, unrelated gap: one analytics surface had been silent for days.
+- **When instrumentation is the gap, ship the capture BEFORE the fix.** Otherwise the fix cannot be evaluated, and a
+  config change with a visible cost (here, a domain move that logs every existing user out once) gets argued from
+  theory. Fingerprint the new signal into the existing dedup model (one row per unique error with counts and
+  first/last-seen timestamps) rather than adding a per-occurrence log, so volume stays gate-able.
+
+## 2026-09-19 - a forked child registered as ephemeral cannot be messaged by its parent ({{PROJECT}})
+
+- **An ephemeral bus identity is send-only.** A parent forked a child session and briefed it to register on the agent bus as
+  ephemeral (the usual shape for a one-task worker). When the parent later had context for the child, the send was
+  refused (`skipped: ephemeral`), with nothing queued. If the parent may need to reach the child, brief a non-ephemeral
+  registration under a stable name. For a child on the same machine, the session channel (list sessions by title, then
+  send a message into that session) works as a fallback and queues behind the current turn of the child.
+
+## 2026-09-19 - contributing to someone else's codebase: reuse their helpers, prove "ours is better" ({{PROJECT}})
+
+- **Workers extending an upstream author's code tend to invent a new helper every time.** Across a multi-agent session
+  on a third-party plugin/loader codebase, one-shot workers kept writing their own widgets, config accessors and utility
+  structs, even where the author's SDK or other repos already had one. Two copies of the same widget even landed in two
+  sibling repos. Every parallel system makes an upstream contribution harder to accept. Put three rules in every writer
+  brief: use the author's helpers unchanged by default (search their SDK, headers and sibling repos first); keep your own
+  only with a concrete advantage (correctness, thread safety, no per-frame I/O); factor out a helper at 3+ repeats.
+- **Gate the change with an adversarial helper-reuse review before pushing.** Use verdicts REUSE-AVAILABLE /
+  MODIFIED-THEIR-HELPER / PARALLEL-SYSTEM / OURS-BETTER / NEEDS-HELPER / JUSTIFIED-NEW. The reviewer must try to refute
+  each finding (is the helper reachable, equivalent, thread-safe for this caller?) before it counts. "Different style" is
+  never OURS-BETTER.
+- **Check the author's own docs before assuming a platform limit.** A worker hand-drew an icon because "the font has no
+  glyphs beyond ASCII". The author's docs said the UI library loads any glyph from the bundled icon font on demand, so
+  one character would have done it.
+
+## 2026-09-18 - a quarantined file resurrected by a copy-only sync, and a focus-steal traced by wake timing ({{PROJECT}})
+
+- **A local quarantine does not hold while a copy-only sync still has the file remotely.** A stale app-state file was
+  moved out of the live store to stop a side effect. Weeks later it was back, with its ORIGINAL modification time, because
+  the roaming sync tool pushes with `copy` (never deletes on the remote) and a later pull restored the remote copy. The
+  tell is a file mtime older than the quarantine date. Fix it on both sides: move the remote copy to a quarantine path too,
+  or write a newer local version (e.g. set the state via the app) so newest-wins overwrites the remote. Check that the
+  tool's exclude setting is actually wired before relying on it; here it was declared but never consumed.
+- **Trace an intermittent focus-steal by what starts just BEFORE the stealing window, not by what runs a lot.** Poll the
+  foreground window plus new-process creation (with parent chains) into a log. The busiest process near each event (shell
+  spawns every few seconds) was a coincidental match. The real signal was a service instance (a UNC-path filesystem
+  redirector) starting a fraction of a second before every VM wake, at a fixed ~35s cadence. Validate a watcher script with
+  a parse check before backgrounding it: a non-ASCII dash broke a PowerShell 5.1 script, and the watcher "ran" while
+  capturing nothing.
+- **When polling can't name the culprit, a built-in kernel file trace can - no third-party tools.** A long-running process
+  opening a path shows no process-start event, so process watchers only narrow the field. On Windows, one elevated
+  script names it: `logman start <name> -p Microsoft-Windows-Kernel-File 0x90 0x4 -o <file>.etl -ets` (keywords =
+  FILENAME + CREATE), snapshot the process list during the window, `logman stop`, then `Get-WinEvent -Path <etl> -Oldest`
+  and keep events whose string properties match the path. It showed the app's main process opening a stale session's
+  working folder, which several rounds of elimination had only suspected.
+
+## 2026-09-18 - least privilege for a model-in-the-loop CI job ({{PROJECT}})
+
+- **Routine/agent creation APIs can attach every account connector by default - read the created object back.** A
+  scheduled cloud agent created with no connector list returned with all of the account's connectors attached (mail,
+  file storage, calendar, an internal ops bus). Its tool allowlist did not remove them. An agent meant only to write
+  prose from a file had mail access. Always read back the created object and explicitly clear or enumerate connectors.
+- **Repository secrets are readable by a workflow file pushed to ANY branch.** If an automated agent can push branches
+  (even a restricted namespace), it can push a workflow that prints the repo's secrets. Put the secrets in a deployment
+  environment restricted to the default branch, and trigger the privileged job by schedule or from the default branch -
+  never by the agent's push, because a push-triggered run executes the PUSHED branch's copy of the workflow.
+- **A leak gate must not print what it blocked when its log is public.** On a public repository, CI logs are public; a
+  gate that echoes the offending text or the blocked output publishes the leak it stopped. Report the category only in
+  CI (detect via the CI env var) and show detail only locally.
+- **Shape a canary to the threat it detects.** A regression that forwards private text reproduces PHRASES; single-word
+  overlap with a corpus of full-sentence commit messages is mostly coincidence and made the gate fire on innocent
+  output. Fail on shared word-trigrams (containing at least one distinctive word) or on a cluster of 3+ distinctive
+  words; log, do not fail, on one or two.
+- **State isolation claims at the strength you can prove.** "The agent cannot reach X" was true of the tokens we issued
+  but not provable about the platform integration that also grants access. Write the property as it holds and name what
+  must be confirmed, rather than letting the stronger claim stand in docs.
+
+## 2026-09-18 - versions pinned from memory, and "not configured" failing like "broken" ({{PROJECT}})
+
+- **Never pin a version from memory - look it up in the same step you write it.** A CI workflow was written with
+  a runtime version that was already deprecated on the runners, and an SDK dependency range pinned 57 minor versions
+  behind current - both from recall, in a session that HAD looked up the model IDs it used. Recall is training-data
+  stale by construction. The lookup is one command (`npm view <pkg> version`, the runtime's release index JSON,
+  `gh api repos/<owner>/<repo>/releases/latest`), so make it part of writing the pin, not a later audit. For runtimes
+  with LTS lines, treat "current" as newest LTS unless told otherwise, and say which you chose.
+- **A scheduled job must distinguish "not set up yet" from "broken".** A digest workflow shipped before its secrets
+  existed failed every night: one failure email per day and a row of red crosses on a public repo, for nothing that was
+  actually wrong. Gate the work steps on the secrets being present (job-level env from the secrets context, step-level
+  `if:` on that env) and emit a notice when skipping; keep checkout and install unconditional so a skipped run still
+  proves the toolchain installs. Fail loudly only when configured-and-failing - that is the case worth an email.
+- **Evaluate the executor against the task's TRUE consequence, not the convenient one.** Deleting a handful of failed CI
+  run records was first classified "low" and evaluated as a fit for the cheapest tier; re-classified honestly as a
+  destructive op, the routing table asked for the top tier. The resolution was not to spawn a premium worker for five
+  commands but to note the lead was already on that tier and do the one destructive step there, with a per-item check
+  before each delete - and push everything else down. Classify first, then find the cheapest executor at that tier.
+
 A holding area for generic improvements contributed back from real projects when no pull-request workflow is available. Entries here are **not yet applied** — a maintainer folds each one into its proper template/shared file (see [CONTRIBUTING.md](CONTRIBUTING.md) → "Where it goes") and then removes it from this file.
 
 **This is a queue, not a home.** A change isn't "done" while it's only in the inbox.
