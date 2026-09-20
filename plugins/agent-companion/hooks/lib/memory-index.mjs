@@ -878,3 +878,155 @@ export function corpusStatsRepo(index) {
     truncated: !!index?.truncated,
   };
 }
+
+// =========================================================================
+// --- Memory scope resolution ("here") --------------------------------------
+//
+// Which on-disk project directory under `root` (memoryRoot()) is THIS
+// session's own memory store — the "N here" the nudge reports, and the
+// project a spawn brief's local-project boost prefers. This used to be a
+// substring guess against basename(cwd) (projectLeaf(), formerly in
+// memory-brief.mjs) — correct only because it happened to assume the
+// SESSION TRANSCRIPT naming rule (literal cwd, encoded) also governs auto
+// memory. It does not: a git WORKTREE session's transcript is written to the
+// worktree-encoded directory, but its auto memory resolves back to the MAIN
+// repository's directory — confirmed directly (a worktree session's own
+// system prompt names the main repo's memory/ as its store). A
+// worktree-encoded store therefore exists on disk, empty, right next to the
+// real one, and the old guess found THAT one: "user 0 here" when the real
+// answer was double digits.
+//
+// Precedence, matching what Claude Code documents
+// [https://code.claude.com/docs/en/memory.md]:
+//   a) an explicit harness/operator signal — CLAUDE_CODE_PROJECT_DIR_NAME
+//      (env, v2.1.234+) or `autoMemoryDirectory` from settings.json — used
+//      VERBATIM as the directory name, no further encoding: the harness (or
+//      the operator, via settings) already named it, so there is nothing
+//      left for us to derive.
+//   b) cwd is inside a git worktree: resolve to the MAIN working tree
+//      (the parent of `git rev-parse --path-format=absolute
+//      --git-common-dir`) and encode THAT instead of the worktree's own
+//      path. Any offset between cwd and its own checkout root is preserved
+//      onto the main tree, so a session launched in a subdirectory of a
+//      worktree resolves to the same subdirectory of the main tree, not its
+//      bare root. mainWorktreeDir() returns null for an ordinary
+//      (non-worktree) checkout — there, the main tree IS the checkout root,
+//      so this candidate would just duplicate (c); leaving it out keeps the
+//      reported `source` honest instead of claiming "worktree-main" for a
+//      session that was never in a worktree at all.
+//   c) the literal cwd, encoded — today's only behaviour, kept as the final
+//      fallback.
+//
+// Each candidate is checked against disk and skipped if nothing exists
+// there — a resolution that names a directory with nothing behind it must
+// fall through to the next one, not report a confident zero. This is the
+// fallback the bug fix specifically requires: a resolution that yields an
+// empty directory when a populated one is available is the defect, not a
+// feature to preserve. The final candidate (c) is always returned even when
+// it too does not exist on disk — "nothing here yet" is allowed to be the
+// honest final answer, just never one reached by discarding a better
+// candidate first.
+//
+// This is the ONE function every consumer calls to answer that question —
+// the nudge, the pointers-mode local-project boost, and
+// scripts/memory-search.mjs's --here flag. None of them may re-derive it
+// independently; see hooks/spawn-guard.mjs's module banner for why exactly
+// one source of truth matters here specifically (the spawn-time hook merges
+// several features into a single updatedInput).
+
+// One character class, one pass, no collapsing: every character outside
+// [A-Za-z0-9] becomes its own literal "-". Reproduces the harness's own
+// project-directory encoding exactly — verified against every directory
+// name actually present under this operator's ~/.claude/projects/,
+// including WSL-style keys (e.g. a "\\wsl$\Ubuntu\home\<user>\dev\<repo>"
+// path encodes to "--wsl--Ubuntu-home-<user>-dev-<repo>", and a bare
+// "/home/<user>/dev/<repo>" path to "-home-<user>-dev-<repo>") and worktree
+// keys (e.g. "C--Users-<user>-dev-<repo>--claude-worktrees-<branch>"). A
+// literal path separator, a drive-letter colon, and the "." before
+// ".claude" all fall into the same non-alnum bucket and each becomes its
+// own dash — that is why "\.claude\" encodes to "--claude-" (two dashes),
+// not "-.claude-": do not "simplify" this to collapse runs of dashes.
+export function encodeProjectDir(p) {
+  return String(p || '').replace(/[^A-Za-z0-9]/g, '-');
+}
+
+// `autoMemoryDirectory` from settings.json, read-only, checked in the same
+// precedence Claude Code documents for settings generally: project-local,
+// then project-shared, then user. A project checkout's own settings files
+// live under cwd's .claude/ — present in a worktree checkout too, since
+// settings.json is ordinarily version-controlled — so this never reads
+// anywhere outside claudeDir() and cwd itself, and any parse failure just
+// tries the next candidate rather than throwing.
+function readAutoMemoryDirectorySetting(cwd) {
+  const candidates = [];
+  if (cwd) {
+    candidates.push(join(cwd, '.claude', 'settings.local.json'));
+    candidates.push(join(cwd, '.claude', 'settings.json'));
+  }
+  candidates.push(join(claudeDir(), 'settings.json'));
+  for (const file of candidates) {
+    try {
+      const s = JSON.parse(readFileSync(file, 'utf8'));
+      const v = s && typeof s.autoMemoryDirectory === 'string' ? s.autoMemoryDirectory.trim() : '';
+      if (v) return v;
+    } catch { /* unreadable, missing, or malformed: try the next candidate */ }
+  }
+  return null;
+}
+
+// The main working tree for cwd's repo, offset-preserved — null when cwd is
+// not inside a git repo, git is unavailable, or cwd's own checkout root
+// (--show-toplevel) already IS the main tree (an ordinary, non-worktree
+// checkout: nothing for this candidate to add over the literal-cwd
+// fallback). Same fail-quiet discipline as runGit() above (short timeout,
+// never throws). Uses git's OWN answer for both the shared .git dir and the
+// current checkout's toplevel rather than re-deriving either from the .git
+// FILE worktreeInfo() reads — git already gets Windows path/casing quirks
+// right and there is no reason to duplicate that parsing here.
+function mainWorktreeDir(cwd) {
+  const commonDir = runGit(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (!commonDir) return null; // not a git repo, or git unavailable
+  const toplevel = runGit(cwd, ['rev-parse', '--show-toplevel']);
+  if (!toplevel) return null; // can't tell whether cwd's checkout IS the main tree already
+  const mainRoot = dirname(commonDir);
+  const resolvedMainRoot = resolve(mainRoot);
+  const resolvedToplevel = resolve(toplevel);
+  // Case-insensitive compare for the "is this actually a worktree" check
+  // only (Windows paths are case-insensitive) — the path used to BUILD the
+  // result below keeps its original casing from git.
+  if (resolvedMainRoot.toLowerCase() === resolvedToplevel.toLowerCase()) return null;
+  const offset = relative(resolvedToplevel, resolve(cwd));
+  return offset ? join(mainRoot, offset) : mainRoot;
+}
+
+export function resolveMemoryScopeDir({ cwd, root } = {}) {
+  const memRoot = root || memoryRoot();
+  const exists = (dir) => {
+    if (!dir) return false;
+    try { return existsSync(join(memRoot, dir)); } catch { return false; }
+  };
+
+  const candidates = [];
+
+  const envName = String(process.env.CLAUDE_CODE_PROJECT_DIR_NAME || '').trim();
+  if (envName) candidates.push({ dir: envName, source: 'env:CLAUDE_CODE_PROJECT_DIR_NAME' });
+
+  const settingName = readAutoMemoryDirectorySetting(cwd);
+  if (settingName) candidates.push({ dir: settingName, source: 'settings:autoMemoryDirectory' });
+
+  if (cwd) {
+    const mainDir = mainWorktreeDir(cwd);
+    if (mainDir) candidates.push({ dir: encodeProjectDir(mainDir), source: 'worktree-main' });
+  }
+
+  const literal = cwd ? { dir: encodeProjectDir(cwd), source: 'literal' } : { dir: '', source: 'none' };
+  candidates.push(literal);
+
+  for (const c of candidates) {
+    if (exists(c.dir)) return c;
+  }
+  // Nothing on disk matched any candidate — return the most literal guess
+  // rather than nothing, so a caller always has SOME directory name to
+  // report a (possibly genuinely zero) count against.
+  return literal;
+}

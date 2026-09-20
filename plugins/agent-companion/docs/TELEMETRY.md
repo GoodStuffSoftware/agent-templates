@@ -175,6 +175,14 @@ whose.
 | `declared_consequence` | string or null | consequence declared in the brief (`CONSEQUENCE:` routine, elevated, critical) |
 | `fit` | `over`, `under`, `fit`, `unknown`, or null | the spawn compared to the routing table for its declared weight; null when no weight was declared |
 | `fit_expected` | string or null | what the table routed that weight to, e.g. `sonnet/high` |
+| `memory_addition_mode` | `nudge` \| `pointers` \| `nudge(unrecognised:<value>)` \| null | which `memory_brief_mode` behaviour ran for this spawn; null when `memory_search`/`memory_brief` are off or mode is `"off"` — distinct from `memory_addition_attached: false`, which means it ran and had nothing to say |
+| `memory_addition_attached` | boolean \| null | whether a nudge line or pointers block was actually appended to the spawn's prompt |
+| `memory_addition_here_count` | number \| null | nudge mode only: file count `resolveMemoryScopeDir()` found for THIS project's own memory store |
+| `memory_addition_other_count` | number \| null | nudge mode only: how many OTHER projects have a memory store |
+| `memory_addition_repo_count` | number \| null | nudge/pointers: repo-scope file count matched (see `memory_search_repo_globs`) |
+| `memory_addition_hit_count` | number \| null | pointers mode only: how many ranked hits were included in the block |
+| `memory_addition_top_score` | number \| null | pointers mode only: the top BM25 score that cleared `memory_brief_min_score` |
+| `memory_addition_here_source` | string \| null | which precedence candidate `resolveMemoryScopeDir()` used: `env:CLAUDE_CODE_PROJECT_DIR_NAME`, `settings:autoMemoryDirectory`, `worktree-main`, `literal`, or `none`. A worktree spawn showing `worktree-main` here is the worktree-scope bug fix (see hooks/lib/memory-index.mjs) working as intended — `literal` on a worktree spawn would mean it regressed. |
 
 **`model: "(inherited)"` is the field that matters most.** It means no model
 was specified, so the spawn silently ran at the *lead's* tier. That is the

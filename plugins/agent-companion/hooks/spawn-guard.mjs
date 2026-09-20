@@ -99,61 +99,80 @@ try {
   }
 
   // --- Memory brief (deliverable 2) --------------------------------------
-  // Appends AT MOST once, into the SAME updatedInput fit_autofill may already
-  // be building above — see the module banner in lib/memory-brief.mjs for why
-  // this is a function call here rather than a second hook on this matcher.
-  // Computed lazily (only at an actual allow site, never on a path that ends
-  // in deny()) so a premium spawn that gets denied never pays for an index
-  // read it will not use.
-  function withBrief(baseInput) {
-    // memory_search is the master switch for the whole feature; memory_brief
-    // is the narrower "say something about memory at spawn time" behaviour.
-    // Both must be turned on — each defaults to false, so this is inert
-    // until both are. memory_brief_mode then picks WHICH behaviour runs:
-    //   "nudge"    (default) — threshold-free, relevance-blind capability
-    //               mention. See lib/memory-brief.mjs for why this is the
-    //               default: BM25 score does not separate relevance from
-    //               brief length on this corpus, and there is no threshold
-    //               that fixes it.
-    //   "pointers" — the original BM25-ranked, minScore-gated block.
-    //   "off"      — memory_brief is on but neither behaviour runs.
-    if (!opt('memory_search', false) || !opt('memory_brief', false)) return baseInput;
+  // Computed ONCE, here — not lazily inside each allow branch the way this
+  // used to work — because the spawn-telemetry row below needs the nudge's
+  // OWN facts (mode, whether anything was attached, the counts it reported)
+  // to make delivery observable at all: before this, spawns.jsonl carried
+  // zero keys naming the memory feature, so confirming a nudge actually
+  // reached a subagent's prompt required a live echo probe rather than a
+  // telemetry query. Computing this ahead of the deny checks below does mean
+  // a spawn later denied for an unrelated reason (fit/warrant/cap) still
+  // pays for this — accepted, because loadOrBuildIndex with
+  // rebuildIfStale:false is a single cached JSON read in the steady state,
+  // not the full corpus rebuild the original lazy-computation comment was
+  // guarding against; the one truly expensive build (no cache yet) happens
+  // once ever, not per spawn.
+  //
+  // memory_search is the master switch for the whole feature; memory_brief
+  // is the narrower "say something about memory at spawn time" behaviour.
+  // Both must be turned on — each defaults to false, so this is inert until
+  // both are. memory_brief_mode then picks WHICH behaviour runs:
+  //   "nudge"    (default) — threshold-free, relevance-blind capability
+  //               mention. See lib/memory-brief.mjs for why this is the
+  //               default: BM25 score does not separate relevance from
+  //               brief length on this corpus, and there is no threshold
+  //               that fixes it.
+  //   "pointers" — the original BM25-ranked, minScore-gated block.
+  //   "off"      — memory_brief is on but neither behaviour runs.
+  let memoryAddition = ''; // exact string appended to the prompt; '' = nothing to add
+  let memoryFacts = null;  // telemetry-shaped facts; null = the feature never ran for this spawn
+  if (opt('memory_search', false) && opt('memory_brief', false)) {
     const mode = String(opt('memory_brief_mode', 'nudge')).toLowerCase();
-    if (mode === 'off') return baseInput;
+    if (mode !== 'off') {
+      // Repo scope config — shared by both modes below. memory_search_repo
+      // (default true) is a separate switch from the memory_search/memory_brief
+      // gates already checked above — those two turn the WHOLE spawn-time
+      // feature on or off; this one only decides whether the repo half
+      // contributes once the feature is already running (the CLI's --scope
+      // flag reads the same opt() independently of memory_search entirely,
+      // since it is not gated by the spawn-time feature at all).
+      const repoOpts = {
+        repoEnabled: opt('memory_search_repo', true),
+        repoGlobs: parseRepoGlobs(opt('memory_search_repo_globs', DEFAULT_REPO_GLOBS.join(','))),
+        repoMaxFileBytes: Math.max(1, opt('memory_search_max_file_kb', 256)) * 1024,
+        repoMaxTotalBytes: Math.max(1, opt('memory_search_max_repo_mb', 8)) * 1024 * 1024,
+      };
 
-    // Repo scope config — shared by both modes below. memory_search_repo
-    // (default true) is a separate switch from the memory_search/memory_brief
-    // gates already checked above — those two turn the WHOLE spawn-time
-    // feature on or off; this one only decides whether the repo half
-    // contributes once the feature is already running (the CLI's --scope
-    // flag reads the same opt() independently of memory_search entirely,
-    // since it is not gated by the spawn-time feature at all).
-    const repoOpts = {
-      repoEnabled: opt('memory_search_repo', true),
-      repoGlobs: parseRepoGlobs(opt('memory_search_repo_globs', DEFAULT_REPO_GLOBS.join(','))),
-      repoMaxFileBytes: Math.max(1, opt('memory_search_max_file_kb', 256)) * 1024,
-      repoMaxTotalBytes: Math.max(1, opt('memory_search_max_repo_mb', 8)) * 1024 * 1024,
-    };
+      try {
+        if (mode === 'pointers') {
+          const mb = buildMemoryBrief({
+            prompt: brief,
+            cwd: p.cwd,
+            maxHits: opt('memory_brief_max_hits', 3),
+            minScore: opt('memory_brief_min_score', 25),
+            dataDirPath: dataDir(),
+            ...repoOpts,
+          });
+          memoryAddition = mb.block || '';
+          memoryFacts = { mode: 'pointers', ...mb.facts };
+        } else {
+          // "nudge", and any unrecognised value — fail toward the safe
+          // default rather than silently doing nothing for a typo'd config.
+          const nudge = buildMemoryNudge({ cwd: p.cwd, dataDirPath: dataDir(), ...repoOpts });
+          memoryAddition = nudge.text || '';
+          memoryFacts = { mode: mode === 'nudge' ? 'nudge' : `nudge(unrecognised:${mode})`, ...nudge.facts };
+        }
+      } catch { /* fail open: nothing appended, spawn proceeds untouched */ }
+    }
+  }
 
-    try {
-      if (mode === 'pointers') {
-        const mb = buildMemoryBrief({
-          prompt: brief,
-          cwd: p.cwd,
-          maxHits: opt('memory_brief_max_hits', 3),
-          minScore: opt('memory_brief_min_score', 25),
-          dataDirPath: dataDir(),
-          ...repoOpts,
-        });
-        if (mb.block) return { ...(baseInput || input), prompt: `${input.prompt || ''}${mb.block}` };
-        return baseInput;
-      }
-      // "nudge", and any unrecognised value — fail toward the safe default
-      // rather than silently doing nothing for a typo'd config value.
-      const nudge = buildMemoryNudge({ cwd: p.cwd, dataDirPath: dataDir(), ...repoOpts });
-      if (nudge) return { ...(baseInput || input), prompt: `${input.prompt || ''}${nudge}` };
-    } catch { /* fail open: nothing appended, spawn proceeds untouched */ }
-    return baseInput;
+  // Merges the already-computed addition into the SAME updatedInput
+  // fit_autofill may already be building above — see the module banner in
+  // lib/memory-brief.mjs for why this must stay a plain merge rather than a
+  // second hook on this matcher: exactly one updatedInput per spawn.
+  function withMemoryAddition(baseInput) {
+    if (!memoryAddition) return baseInput;
+    return { ...(baseInput || input), prompt: `${input.prompt || ''}${memoryAddition}` };
   }
 
   let fit = null;
@@ -227,6 +246,24 @@ try {
       declared_consequence: declaredConsequence,
       fit: autofilled ? 'fit' : fit ? fit.verdict : null, // over | under | fit | unknown, when a weight was declared
       fit_expected: routeLabel || null,
+      // --- Memory nudge/brief observability -------------------------------
+      // null across the board when the feature never ran for this spawn
+      // (memory_search/memory_brief off, or mode "off") — distinct from
+      // `attached: false`, which means it ran and had nothing to say.
+      memory_addition_mode: memoryFacts ? memoryFacts.mode : null,
+      memory_addition_attached: memoryFacts ? !!memoryFacts.attached : null,
+      // nudge-mode facts (null when the row came from pointers mode instead)
+      memory_addition_here_count: (memoryFacts && typeof memoryFacts.hereCount === 'number') ? memoryFacts.hereCount : null,
+      memory_addition_other_count: (memoryFacts && typeof memoryFacts.otherCount === 'number') ? memoryFacts.otherCount : null,
+      memory_addition_repo_count: (memoryFacts && typeof memoryFacts.repoFileCount === 'number') ? memoryFacts.repoFileCount : null,
+      // pointers-mode facts (null when the row came from nudge mode instead)
+      memory_addition_hit_count: (memoryFacts && typeof memoryFacts.hitCount === 'number') ? memoryFacts.hitCount : null,
+      memory_addition_top_score: (memoryFacts && typeof memoryFacts.topScore === 'number') ? memoryFacts.topScore : null,
+      // shared: which candidate resolveMemoryScopeDir() actually used — see
+      // its precedence in hooks/lib/memory-index.mjs. This is the field that
+      // makes the worktree-scope bug fix itself observable going forward:
+      // "worktree-main" firing on a worktree spawn is the fix working.
+      memory_addition_here_source: memoryFacts ? (memoryFacts.hereSource || null) : null,
     });
   }
 
@@ -242,7 +279,7 @@ try {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
   }
 
-  if (!isPremium(model)) allowWith(note, withBrief(updatedInput));
+  if (!isPremium(model)) allowWith(note, withMemoryAddition(updatedInput));
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -303,7 +340,7 @@ try {
     if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
-  allowWith(note, withBrief(updatedInput));
+  allowWith(note, withMemoryAddition(updatedInput));
 } catch {
   passthrough(); // never break a session
 }
