@@ -282,11 +282,12 @@ distributed* plugin, and turning this on writes a second, permanent, git-
 versioned copy of someone's personal memory corpus to disk. That is a bigger
 default-behavior change than a read-only ranking index (which is itself
 already default-off), so it inherits the same default and the same
-justification. Scripts remain directly runnable regardless of the option
-(`node scripts/memory-vault.mjs sync` runs when invoked by hand or by name,
-exactly like `memory-doctor.mjs` and `memory-search.mjs` already do) — the
-option gates only the *automatic*, unattended path (the scheduled routine
-step below).
+justification. Unlike `memory-doctor.mjs` and `memory-search.mjs` — which do
+not check a master on/off option in their CLI path at all — `sync()` checks
+`opt('memory_vault', false)` as the first line of the function, so a hand run
+with the option off (by name, by hand, or by the scheduled routine) is a
+no-op: nothing is copied and nothing is committed. Set the option, or its
+`CLAUDE_PLUGIN_OPTION_MEMORY_VAULT` environment variable, to actually sync.
 
 ## Scheduling — reusing the existing cadence instead of inventing a second one
 

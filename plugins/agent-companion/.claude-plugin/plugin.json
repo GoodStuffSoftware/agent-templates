@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -69,7 +69,7 @@
     "memory_vault": {
       "type": "boolean",
       "title": "Memory vault backup",
-      "description": "Keep a local git history of the memory corpus (~/.claude/projects/*/memory/) in a separate repository under ~/.claude/agent-companion/memory-vault/, so a rewrite or truncation is no longer unrecoverable. Strictly read-only against the live corpus — it is a mirrored copy, never a git working tree of the corpus itself (see docs/adr/0001-memory-corpus-backup-vault.md). DEFAULT OFF, like memory_search/memory_brief, because this plugin is distributed publicly and turning this on writes a second, permanent, versioned copy of someone's personal memory to disk. Gates only the AUTOMATIC path (the scheduled routine step); `node scripts/memory-vault.mjs sync` still runs when invoked by hand or by name, same as memory-doctor.mjs and memory-search.mjs.",
+      "description": "Keep a local git history of the memory corpus (~/.claude/projects/*/memory/) in a separate repository under ~/.claude/agent-companion/memory-vault/, so a rewrite or truncation is no longer unrecoverable. Strictly read-only against the live corpus — it is a mirrored copy, never a git working tree of the corpus itself (see docs/adr/0001-memory-corpus-backup-vault.md). DEFAULT OFF, like memory_search/memory_brief, because this plugin is distributed publicly and turning this on writes a second, permanent, versioned copy of someone's personal memory to disk. `sync()` checks this option as its first line, so a hand run of `node scripts/memory-vault.mjs sync` with the option off is a no-op — set this option, or CLAUDE_PLUGIN_OPTION_MEMORY_VAULT, to actually sync. Stricter than memory-doctor.mjs and memory-search.mjs, which do not gate their CLI path on a master option at all.",
       "default": false
     },
     "telemetry_endpoint": {
