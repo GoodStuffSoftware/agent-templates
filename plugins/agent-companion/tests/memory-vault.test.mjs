@@ -11,6 +11,7 @@ import {
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { makeFixture, runScript } from './helpers.mjs';
+import { scanForSecrets } from '../scripts/memory-vault.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
 
@@ -254,6 +255,59 @@ test('a file that looks like it carries a live credential is excluded from the c
   } finally {
     fx.cleanup();
   }
+});
+
+// --- secrets gate: private-key-block false-positive fix --------------------
+// Confirmed false positive on the real corpus: a bare PEM header appearing
+// in PROSE (not an actual key) was flagging and silently excluding the file
+// from the vault. These fixtures reproduce the two real-world SHAPES —
+// sanitised, not copies of the operator's actual files — plus a fabricated,
+// real-shaped block that must still be caught.
+
+test('a PEM header quoted in prose (single line, no END marker, no body) does not flag private-key-block', () => {
+  const text = 'A clap-based CLI rejects a positional value beginning with `-`; for '
+    + 'example, passing `-----BEGIN PRIVATE KEY-----` as a bare argument is parsed '
+    + 'as an unknown flag rather than a value.';
+  assert.ok(!scanForSecrets(text).includes('private-key-block'));
+});
+
+test('a PEM header inside an SDK call signature with an elided body does not flag private-key-block', () => {
+  const text = 'client = RESTClient(api_key="...", api_secret="-----BEGIN EC PRIVATE KEY-----\\n...")';
+  assert.ok(!scanForSecrets(text).includes('private-key-block'));
+});
+
+test('a fabricated, real-shaped PEM block (BEGIN + multi-line base64 body + END) still flags private-key-block', () => {
+  const fakeLine = 'X'.repeat(64); // fabricated filler, not real key material
+  const text = `Rotated the deploy key:\n-----BEGIN RSA PRIVATE KEY-----\n${fakeLine}\n${fakeLine}\n-----END RSA PRIVATE KEY-----\n`;
+  assert.ok(scanForSecrets(text).includes('private-key-block'));
+});
+
+test('a mismatched BEGIN/END key type with a plausible body does not flag (not a valid PEM block)', () => {
+  const fakeLine = 'Y'.repeat(64);
+  const text = `-----BEGIN RSA PRIVATE KEY-----\n${fakeLine}\n${fakeLine}\n-----END EC PRIVATE KEY-----\n`;
+  assert.ok(!scanForSecrets(text).includes('private-key-block'));
+});
+
+// --- secrets gate: AWS documented example credential ------------------------
+
+test('AWS\'s own canonical example access key id does not flag aws-access-key-id', () => {
+  const text = 'export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE  # from the SigV4 docs, not a real key';
+  assert.ok(!scanForSecrets(text).includes('aws-access-key-id'));
+});
+
+test('AWS\'s own canonical example secret access key does not flag aws-secret-style', () => {
+  const text = 'aws_secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"';
+  assert.ok(!scanForSecrets(text).includes('aws-secret-style'));
+});
+
+test('an AKIA-shaped key that is NOT the documented example still flags aws-access-key-id', () => {
+  const text = 'export AWS_ACCESS_KEY_ID=AKIAZZZZZZZZZZZZZZZZ';
+  assert.ok(scanForSecrets(text).includes('aws-access-key-id'));
+});
+
+test('an aws-secret-key-shaped value that is NOT the documented example still flags aws-secret-style', () => {
+  const text = `aws_secret_access_key: "${'z'.repeat(40)}"`;
+  assert.ok(scanForSecrets(text).includes('aws-secret-style'));
 });
 
 // --- empty-enumeration safety guard ---------------------------------------

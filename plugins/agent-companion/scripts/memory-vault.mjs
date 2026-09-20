@@ -18,10 +18,13 @@
 //   node memory-vault.mjs status [--json]  report vault state
 //
 // `sync` self-gates on the memory_vault plugin option (default OFF — see the
-// ADR's "Why default-OFF"). It still runs, and does something, whenever it is
-// invoked directly (by name, by hand, or by the scheduled routine) — same
-// convention as memory-doctor.mjs and memory-search.mjs: the OPTION gates
-// automatic/unattended use, not the script itself.
+// ADR's "Why default-OFF"): `sync()` checks `opt('memory_vault', false)` as
+// its first line, so a hand run with the option off is a no-op regardless of
+// how it is invoked (by name, by hand, or by the scheduled routine). This is
+// STRICTER than memory-doctor.mjs and memory-search.mjs, which do not check a
+// master on/off option in their CLI path at all — do not assume parity with
+// those two scripts here. Set the option (or its CLAUDE_PLUGIN_OPTION_
+// env var) before a manual run if you want `sync` to actually write.
 
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync,
@@ -43,24 +46,96 @@ const SCHEMA = 1;
 // file from the commit (the vault's prior copy, if any, is left untouched)
 // and is reported by LABEL and FILE PATH only — the matched text itself is
 // never logged, written, or returned from this module.
+//
+// This corpus is operational notes, not source code — PEM headers, example
+// tokens and documented env-var names show up in PROSE routinely (explaining
+// a CLI flag, quoting an SDK call signature, walking through a setup step).
+// A pattern that matches on SHAPE ALONE, with no evidence the shape is a real
+// secret rather than a description of one, will keep false-positiving on
+// that kind of note. Each entry below is either a plain regex (kept because
+// its shape is specific enough — a fixed prefix plus a length floor, e.g.
+// `AKIA` + 16 chars, `sk-ant-` + 20 chars, a 3-part JWT — that prose is very
+// unlikely to produce it by accident) or a `(text) => boolean` matcher that
+// additionally requires evidence of REALNESS beyond shape. See the two
+// matcher functions below for exactly what evidence each one demands.
+
+// AWS's own documentation reuses ONE canonical, publicly-known example
+// credential pair everywhere (S3/IAM tutorials, the SigV4 reference, etc.).
+// Excluding these two EXACT strings removes a documented, widely-repeated
+// false positive without narrowing detection of any real key: a real key can
+// never be byte-for-byte identical to a string AWS itself tells the world is
+// a placeholder.
+const AWS_DOC_EXAMPLE_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
+const AWS_DOC_EXAMPLE_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+
+function hasRealAwsAccessKeyId(text) {
+  const re = /\bAKIA[0-9A-Z]{16}\b/g;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m[0] !== AWS_DOC_EXAMPLE_ACCESS_KEY_ID) return true;
+  }
+  return false;
+}
+
+function hasRealAwsSecretStyle(text) {
+  const re = /\baws(?:.{0,20})?(?:secret|access)[_-]?key\b.{0,5}[:=]\s*['"]?([A-Za-z0-9/+=]{30,})/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m[1] !== AWS_DOC_EXAMPLE_SECRET_ACCESS_KEY) return true;
+  }
+  return false;
+}
+
+// private-key-block — THE confirmed false positive this rewrite exists for.
+// A bare `-----BEGIN ... PRIVATE KEY-----` header, alone, is common in prose
+// that merely MENTIONS a PEM header: explaining that a CLI rejects a
+// positional value starting with `-` (using the header as the illustration),
+// or quoting an SDK call signature with the body elided (`"...\n"`). Neither
+// case is a key. A genuine key always has all three of: a BEGIN marker, a
+// matching END marker of the SAME key type, and a base64 body of its own
+// between them spanning multiple lines — never a single line, never elided.
+// Require all three; anything less does not flag.
+function hasRealPrivateKeyBlock(text) {
+  const re = /-----BEGIN ((?:RSA|EC|OPENSSH|DSA|PGP) )?PRIVATE KEY-----([\s\S]*?)-----END \1PRIVATE KEY-----/g;
+  let m;
+  while ((m = re.exec(text))) {
+    if (isPlausibleKeyBody(m[2])) return true;
+  }
+  return false;
+}
+
+// A plausible body: 2+ lines that are THEMSELVES pure base64 alphabet (no
+// prose, no elision markers) and long enough to be real key material — PEM
+// wraps at 64 chars/line, so a genuine multi-line body always has several
+// long, pure-base64 lines. An elided body ("...", "<redacted>", "$VAR", a
+// lone ellipsis) never produces 2 such lines, so it never qualifies.
+function isPlausibleKeyBody(body) {
+  const lines = body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const base64Line = /^[A-Za-z0-9+/]{20,}={0,2}$/;
+  return lines.filter((l) => base64Line.test(l)).length >= 2;
+}
+
 const SECRET_PATTERNS = [
-  ['aws-access-key-id', /\bAKIA[0-9A-Z]{16}\b/],
-  ['aws-secret-style', /\baws(.{0,20})?(secret|access)[_-]?key\b.{0,5}[:=]\s*['"]?[A-Za-z0-9/+=]{30,}/i],
+  ['aws-access-key-id', hasRealAwsAccessKeyId],
+  ['aws-secret-style', hasRealAwsSecretStyle],
   ['anthropic-api-key', /\bsk-ant-[A-Za-z0-9_-]{20,}\b/],
   ['openai-api-key', /\bsk-[A-Za-z0-9]{20,}\b/],
   ['github-token', /\bgh[pousr]_[A-Za-z0-9]{30,}\b/],
   ['github-fine-grained', /\bgithub_pat_[A-Za-z0-9_]{20,}\b/],
   ['slack-token', /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/],
-  ['private-key-block', /-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/],
+  ['private-key-block', hasRealPrivateKeyBlock],
   ['jwt-like', /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/],
+  // Left as plain shape matches deliberately — see the module comment above
+  // for why these two are NOT converted to realness-checking matchers.
   ['connection-string-cred', /:\/\/[^/\s:@]+:[^/\s@]+@/],
   ['secret-assignment', /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*['"][A-Za-z0-9_\-/+=]{16,}['"]/i],
 ];
 
 export function scanForSecrets(text) {
   const hits = [];
-  for (const [label, re] of SECRET_PATTERNS) {
-    if (re.test(text)) hits.push(label);
+  for (const [label, matcher] of SECRET_PATTERNS) {
+    const isHit = typeof matcher === 'function' ? matcher(text) : matcher.test(text);
+    if (isHit) hits.push(label);
   }
   return hits;
 }
