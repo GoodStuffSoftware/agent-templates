@@ -28,7 +28,14 @@ try {
   const streak = prev + 1;
 
   if (streak >= threshold) {
-    writeJson(f, { ...st, [sid]: { streak: 0, firedAt: Date.now() } });
+    // `fired` is a COUNT, not a flag, and it is why this hook writes it at all:
+    // the standing-rules engine reads it as the 'delegation-drift' gate, so a
+    // session that has actually drifted starts getting a one-line reminder on
+    // every prompt, while a session that never drifted pays nothing. A rule
+    // written in a document is read once and then competes with everything
+    // that follows it; this one arrives exactly when it has been earned.
+    const fired = (st[sid]?.fired || 0) + 1;
+    writeJson(f, { ...st, [sid]: { streak: 0, firedAt: Date.now(), fired } });
     recordDenial('delegation', p, `${streak} consecutive ${p.tool_name} calls on the main thread`);
     deny(
       `Delegation guard: that is ${streak} execution-class tool calls in a row on the MAIN thread ` +
@@ -41,7 +48,7 @@ try {
     );
   }
 
-  writeJson(f, { ...st, [sid]: { streak, firedAt: st[sid]?.firedAt } });
+  writeJson(f, { ...st, [sid]: { streak, firedAt: st[sid]?.firedAt, fired: st[sid]?.fired || 0 } });
   allow();
 } catch {
   passthrough(); // never break a session

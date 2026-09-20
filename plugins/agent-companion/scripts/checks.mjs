@@ -15,6 +15,7 @@ import {
   readFileSync, existsSync, readdirSync, mkdirSync, renameSync, copyFileSync, writeFileSync, statSync,
 } from 'node:fs';
 import { join, basename } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { execFileSync, execSync } from 'node:child_process';
 
 import {
@@ -899,12 +900,178 @@ const telemetryCoverageCheck = {
   },
 };
 
+// --- 13. brevity canary ---------------------------------------------------
+// guardCanary (above) proves the spawn/delegation guards still fire. This
+// proves the OTHER live-wiring path added alongside them: the reporting
+// contract (hooks/lib/brevity.mjs) actually reaching a spawned agent's own
+// prompt, and the standing-rules engine (hooks/lib/rules.mjs) actually
+// injecting - and, just as important, actually staying silent when nothing
+// matches. A feature that is installed but never wired into the prompt a
+// subagent receives produces the same "nothing to report" silence as one
+// that was never built, so this spawns the real hooks as child processes and
+// inspects their actual stdout rather than reading config and assuming it
+// is honoured.
+//
+// Every payload's session_id starts with "canary": isCanarySession() in
+// hooks/lib/context.mjs drops any telemetry row keyed on such a session_id
+// before it is ever written (appendLog, noteAgentType), so these probes can
+// never inflate the very telemetry the audit (and this check) reads back -
+// the same convention guardCanary relies on above, and for the same reason:
+// a probe that pollutes the metric it exists to check is the failure this
+// plugin exists to catch, not commit.
+//
+// Same env-isolation convention as guardCanary: no override is set here, so
+// each hook reads the CALLER's real ~/.claude/agent-companion/config
+// (brevity on/off, standing rules), exactly as it would for a live spawn.
+// That is deliberate parity with guardCanary, not an oversight - but it does
+// mean an operator who has genuinely turned a feature off will see this
+// check report it as "not reaching a spawn", which is the literal truth for
+// their configuration, not a false alarm.
+const brevityCanary = {
+  id: 'brevity-canary',
+  title: 'Reporting contract actually reaches a spawn',
+  vendor: 'anthropic',
+  fixable: false,
+  async run(ctx) {
+    const hooks = join(ctx.pluginRoot, 'hooks');
+    if (!existsSync(hooks)) return { status: 'skip', findings: ['plugin hooks directory not found'] };
+
+    const required = [
+      'spawn-guard.mjs',
+      'standing-rules.mjs',
+      'subagent-brevity.mjs',
+      join('lib', 'brevity.mjs'),
+      join('lib', 'rules.mjs'),
+    ];
+    const missing = required.filter((f) => !existsSync(join(hooks, f)));
+    if (missing.length) return { status: 'skip', findings: [`required module(s) missing: ${missing.join(', ')}`] };
+
+    // Read the marker straight from the module that owns it, rather than
+    // hardcoding the string here - via a DYNAMIC import, not a static one, so
+    // a broken or moved brevity.mjs SKIPs this one check instead of taking
+    // every other check in this file down with it at module-load time (the
+    // same reasoning lib/rules.mjs's own banner gives for its own dynamic
+    // import of brevity.mjs).
+    let CONTRACT_MARKER;
+    try {
+      ({ CONTRACT_MARKER } = await import(pathToFileURL(join(hooks, 'lib', 'brevity.mjs')).href));
+      if (!CONTRACT_MARKER) throw new Error('CONTRACT_MARKER export is missing or empty');
+    } catch (e) {
+      return { status: 'skip', findings: [`could not read CONTRACT_MARKER from hooks/lib/brevity.mjs: ${e.message}`] };
+    }
+
+    const findings = [];
+
+    const probe = (script, payload, args = []) => {
+      try {
+        const out = execFileSync('node', [join(hooks, script), ...args], {
+          input: JSON.stringify(payload), encoding: 'utf8', timeout: 15000,
+        });
+        return out.trim() ? JSON.parse(out) : null; // null: ran fine, said nothing
+      } catch {
+        return undefined; // did not run, or produced unparseable output
+      }
+    };
+
+    // --- 1. spawn-guard.mjs: cheap-model spawn is allowed AND rewritten ----
+    const spawnOut = probe('spawn-guard.mjs', {
+      session_id: 'canary-brevity-spawn',
+      agent_type: 'main',
+      tool_input: {
+        model: 'claude-haiku-4-5',
+        subagent_type: 'general-purpose',
+        prompt: 'canary probe for the reporting contract - deliberately unremarkable content',
+      },
+    });
+    if (spawnOut === undefined) {
+      findings.push('spawn-guard.mjs: did not run at all on the canary payload');
+    } else if (spawnOut?.hookSpecificOutput?.permissionDecision !== 'allow') {
+      findings.push('spawn-guard.mjs: did NOT allow a cheap-model canary spawn - expected permissionDecision "allow"');
+    } else {
+      const rewritten = String(spawnOut.hookSpecificOutput?.updatedInput?.prompt || '');
+      if (!rewritten.includes(CONTRACT_MARKER)) {
+        findings.push('spawn-guard.mjs: allowed the canary spawn but the prompt was NOT rewritten with the reporting contract - the contract is INERT: installed but never reaching a real spawn');
+      }
+    }
+
+    // --- 2. standing-rules.mjs --event session-start: fires unconditionally
+    const ssOut = probe('standing-rules.mjs', { session_id: 'canary-brevity-session-start' }, ['--event', 'session-start']);
+    if (ssOut === undefined) {
+      findings.push('standing-rules.mjs --event session-start: did not run at all');
+    } else if (!ssOut?.hookSpecificOutput?.additionalContext) {
+      findings.push('standing-rules.mjs --event session-start: emitted no additionalContext - the built-in session-start rules (e.g. "delegate-first", gate: null) never fired');
+    }
+
+    // --- 3. standing-rules.mjs --event user-prompt: both directions -------
+    let copyablePromptThen = null;
+    try {
+      const { readRules } = await import(pathToFileURL(join(hooks, 'lib', 'rules.mjs')).href);
+      const rule = readRules().rules.find((r) => r.id === 'copyable-prompt');
+      if (rule && rule.enabled) copyablePromptThen = rule.then;
+    } catch { /* handled below by the finding this produces when it stays null */ }
+
+    if (!copyablePromptThen) {
+      findings.push('standing-rules.mjs: could not read an enabled "copyable-prompt" built-in rule to probe against - skipping the user-prompt directions');
+    } else {
+      const matchOut = probe(
+        'standing-rules.mjs',
+        { session_id: 'canary-brevity-user-prompt-match', prompt: 'Please write me a prompt for onboarding a new hire.' },
+        ['--event', 'user-prompt'],
+      );
+      if (matchOut === undefined) {
+        findings.push('standing-rules.mjs --event user-prompt (matching case): did not run at all');
+      } else if (!String(matchOut?.hookSpecificOutput?.additionalContext || '').includes(copyablePromptThen)) {
+        findings.push("standing-rules.mjs --event user-prompt: a prompt matching the built-in \"copyable-prompt\" rule did NOT surface that rule's directive - the rule engine is not firing");
+      }
+
+      const noMatchOut = probe(
+        'standing-rules.mjs',
+        { session_id: 'canary-brevity-user-prompt-nomatch', prompt: 'canary marker: filler text about lunch and the weather, nothing rule-shaped here' },
+        ['--event', 'user-prompt'],
+      );
+      if (noMatchOut === undefined) {
+        findings.push('standing-rules.mjs --event user-prompt (non-matching case): did not run at all');
+      } else if (noMatchOut !== null) {
+        findings.push('standing-rules.mjs --event user-prompt: a prompt matching NO rule still emitted additionalContext - the rule engine is firing on everything, which is as broken as never firing');
+      }
+    }
+
+    // --- 4. subagent-brevity.mjs --event start: no double-injection --------
+    const alreadyHas = probe('subagent-brevity.mjs', {
+      session_id: 'canary-brevity-sub-a',
+      agent_id: 'canary-brevity-agent-a',
+      agent_type: 'general-purpose',
+      agent_prompt: `some prior brief text\n\n${CONTRACT_MARKER}\nalready injected by spawn-guard`,
+    }, ['--event', 'start']);
+    if (alreadyHas === undefined) {
+      findings.push('subagent-brevity.mjs --event start (already-injected case): did not run at all');
+    } else if (alreadyHas !== null) {
+      findings.push('subagent-brevity.mjs --event start: re-injected the contract into a prompt that already had it - double-injection, paying the token cost twice');
+    }
+
+    const missingIt = probe('subagent-brevity.mjs', {
+      session_id: 'canary-brevity-sub-b',
+      agent_id: 'canary-brevity-agent-b',
+      agent_type: 'general-purpose',
+      agent_prompt: 'some prior brief text with no reporting contract in it at all',
+    }, ['--event', 'start']);
+    if (missingIt === undefined) {
+      findings.push('subagent-brevity.mjs --event start (missing case): did not run at all');
+    } else if (!String(missingIt?.hookSpecificOutput?.additionalContext || '').includes(CONTRACT_MARKER)) {
+      findings.push('subagent-brevity.mjs --event start: a prompt with no reporting contract was not topped up - the self-heal path is inert');
+    }
+
+    return { status: findings.length ? 'fail' : 'ok', findings };
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
   agentDefs,
   harnessDrift,
   guardCanary,
+  brevityCanary,
   spawnAudit,
   pluginManifests,
   routingDoc,

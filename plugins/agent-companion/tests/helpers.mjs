@@ -61,9 +61,14 @@ export function makeFixture() {
 // stdin — the same shape the real harness uses. `env` is merged OVER the
 // current process.env, so AGENT_COMPANION_* overrides set by makeFixture()
 // carry through unless explicitly overridden here.
-export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000 } = {}) {
+//
+// `args` passes argv through to the script. Hooks that serve more than one
+// event take the event name from argv rather than sniffing the payload (see
+// hooks/standing-rules.mjs and hooks/subagent-brevity.mjs), so a test that
+// cannot set argv cannot reach either of their branches.
+export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, args = [] } = {}) {
   const script = join(PLUGIN_ROOT, hookRelPath);
-  const res = spawnSync(process.execPath, [script], {
+  const res = spawnSync(process.execPath, [script, ...args], {
     input: payload === undefined ? '' : JSON.stringify(payload),
     encoding: 'utf8',
     cwd: cwd || PLUGIN_ROOT,

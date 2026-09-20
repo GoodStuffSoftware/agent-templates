@@ -1,6 +1,6 @@
 ---
 name: ac
-description: Short entry point for the agent-companion plugin — "/ac recommend …", "/ac evaluate …", "/ac routing", "/ac audit …", "/ac setup", "/ac scout". Forwards to the matching agent-companion skill and passes the arguments through. Installed at user level (~/.claude/skills/ac) by the plugin's setup skill, because a skill inside a plugin is always namespaced by the plugin's name.
+description: Short entry point for the agent-companion plugin — "/ac recommend …", "/ac evaluate …", "/ac routing", "/ac audit …", "/ac brevity …", "/ac rules …", "/ac setup", "/ac scout". Forwards to the matching agent-companion skill and passes the arguments through. Installed at user level (~/.claude/skills/ac) by the plugin's setup skill, because a skill inside a plugin is always namespaced by the plugin's name.
 ---
 
 # ac — agent-companion, short form
@@ -21,6 +21,8 @@ through unchanged.
 | `evaluate <args>` | `agent-companion:evaluate` | `node "$AC/scripts/evaluate.mjs" <args>` |
 | `routing` or `table` | `agent-companion:routing-table` | `node "$AC/scripts/routing-table.mjs"` |
 | `audit <args>` | `agent-companion:audit` | `node "$AC/scripts/audit.mjs" <args>` |
+| `brevity <args>` or `quiet <args>` | `agent-companion:brevity` | `node "$AC/scripts/brevity.mjs" <args>` |
+| `rules <args>` | `agent-companion:standing-rules` | `node "$AC/scripts/rules.mjs" <args>` |
 | `setup` | `agent-companion:setup` | — |
 | `scout` | `agent-companion:calibration-scout` | — |
 | *(nothing)* | print this table | — |

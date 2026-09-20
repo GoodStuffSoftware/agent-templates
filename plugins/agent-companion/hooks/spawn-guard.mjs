@@ -17,6 +17,8 @@ import {
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
+import { buildContract } from './lib/brevity.mjs';
+import { matchRules, renderRules } from './lib/rules.mjs';
 
 const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
 
@@ -166,13 +168,42 @@ try {
     }
   }
 
-  // Merges the already-computed addition into the SAME updatedInput
+  // Everything appended to the spawn brief is merged into the SAME updatedInput
   // fit_autofill may already be building above — see the module banner in
   // lib/memory-brief.mjs for why this must stay a plain merge rather than a
   // second hook on this matcher: exactly one updatedInput per spawn.
-  function withMemoryAddition(baseInput) {
-    if (!memoryAddition) return baseInput;
-    return { ...(baseInput || input), prompt: `${input.prompt || ''}${memoryAddition}` };
+  //
+  // THREE features append now, which adds a hazard two did not have: each one
+  // rebuilding the prompt from `input.prompt` independently would make the LAST
+  // one win and silently drop the others, with no error anywhere. So they
+  // accumulate into one suffix and the prompt is rebuilt exactly once, below.
+  function withAdditions(baseInput) {
+    let suffix = '';
+
+    // 1. The reporting contract — the operator's token spend is dominated by
+    //    subagents narrating their journey when only blockers and an outcome
+    //    were wanted. Global switch, per-agent override in either direction,
+    //    and a peer-brevity clause that holds even when the contract is off.
+    //    See lib/brevity.mjs.
+    try {
+      suffix += buildContract(input.subagent_type) || '';
+    } catch { /* fail open: no contract, spawn proceeds untouched */ }
+
+    // 2. Operator-authored standing rules scoped to spawns, their conditions
+    //    matched against this brief's own text. See lib/rules.mjs.
+    try {
+      if (opt('standing_rules', true)) {
+        const hits = matchRules({ scope: 'spawn', text: brief, sessionId: sid });
+        suffix += renderRules(hits, { maxChars: opt('standing_rules_max_chars', 2000) }) || '';
+      }
+    } catch { /* fail open */ }
+
+    // 3. The memory addition, already computed above so its facts can reach
+    //    the telemetry row whether or not this spawn is ultimately allowed.
+    suffix += memoryAddition || '';
+
+    if (!suffix) return baseInput;
+    return { ...(baseInput || input), prompt: `${input.prompt || ''}${suffix}` };
   }
 
   let fit = null;
@@ -279,7 +310,7 @@ try {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
   }
 
-  if (!isPremium(model)) allowWith(note, withMemoryAddition(updatedInput));
+  if (!isPremium(model)) allowWith(note, withAdditions(updatedInput));
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -340,7 +371,7 @@ try {
     if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
-  allowWith(note, withMemoryAddition(updatedInput));
+  allowWith(note, withAdditions(updatedInput));
 } catch {
   passthrough(); // never break a session
 }

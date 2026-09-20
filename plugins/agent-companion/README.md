@@ -37,9 +37,81 @@ It was built after two observed failures:
 | `version_notice` | At session start and on the next prompt, says once per (plugin, lastUpdated) pair when ANY installed plugin — not just this one — was updated after this session last loaded its plugins (session start, or the last `/reload-plugins`), catching a stale parent (and everything it spawns) mid-session, not just at startup. Also keeps this plugin's own running-vs-installed self-check, merged into the same notice when both fire, for the one case timestamps alone miss: a desktop session that loaded a stale app-extracted bundle at startup. Updating itself is the harness's job: the native autoupdater in terminal sessions, the built-in `plugin update` commands run by the daily local scout in desktop sessions. Install the global hook (see below) to run this checker itself from a fixed path that is never stale. | no |
 | `fit_guard` | Best fit at the spawn, both directions. A brief that declares `WEIGHT:` gets its model graded against the routing table: under- and cheap-over-provisioned spawns are announced; a premium model over-provisioned for its own declared weight is denied with the correction. | premium-over only |
 | `fit_autofill` | A spawn that declares `WEIGHT:` but names no model gets the table's model filled in, instead of inheriting the lead's tier by accident. | no |
+| `brevity` | Appends a short reporting contract to every spawned agent's brief — status line, blockers in full, outcome as facts, no narration — plus a peer-brevity clause on inter-agent messages. | no (an opt-in sub-toggle can block once per agent) |
+| `standing_rules` | Injects operator-authored "always do X if Y" rules at session start, on matching prompts, and into matching spawn briefs. | no |
 
 Premium tiers are **capped and audited, never banned**. The failure mode was
 unexamined defaults, not the model itself.
+
+## Brevity — the reporting contract
+
+The operator's token spend is dominated by subagents narrating their journey — tool-by-tool recaps, resolved dead ends, restatements of the brief — when the caller wanted a status line, blockers, and an outcome stated as fact. `brevity` appends a short reporting contract to every spawned agent's brief: STATUS (done/blocked/partial), blockers in full and never compressed, then the outcome as facts, with long output moved to a file instead of inlined. A separate peer-brevity clause covers agent-to-agent messages: one screen at most, no recap of context the recipient already has.
+
+### Precedence, and why it is bidirectional
+
+Three layers, most specific first:
+
+| Layer | Set by | Beats |
+|---|---|---|
+| per-agent | `agents.<type>` in `config/brevity.json` | everything |
+| runtime global | `global` in the same file | the plugin option |
+| plugin option | `brevity` in settings | — |
+
+The per-agent layer resolves in **both directions**: an override can force one agent type ON while the global switch is off, or force it OFF while the global switch is on. A switch that can only ever mute cannot express "brevity everywhere except the one agent type that still needs to narrate" — or its mirror, "brevity nowhere except this one noisy type."
+
+### Three tie-in points
+
+1. **Spawn time** (`hooks/spawn-guard.mjs`) — the primary path. The contract is appended to the brief the subagent actually receives, merged into the same `updatedInput` rewrite that fills in the routing table's model; spawn-guard owns the single `PreToolUse` response for the `Agent` matcher, so a second hook writing its own `updatedInput` would silently clobber this instead of adding to it.
+2. **SubagentStart self-heal** (`hooks/subagent-brevity.mjs`) — checks the prompt the subagent actually received for the exact contract marker. If it is present, the spawn-time rewrite worked and nothing more happens; if it is missing — a different hook's rewrite won, or a stale plugin copy ran — it injects the contract as `additionalContext` instead. That marker check runs before the telemetry write below it, because injecting the same text twice would double the token cost of a feature whose only job is cutting it.
+3. **SubagentStop telemetry** (`hooks/subagent-brevity.mjs`) — every stop appends one row to `telemetry/brevity.jsonl`: agent type, report length, whether the contract was on, whether it was gated. This is what makes "brevity made reports shorter" a checked claim rather than a believed one.
+
+### Peer brevity is deliberately separate
+
+`brevity_peer` stays on even when the reporting contract is off for a given agent, because succinct agent-to-agent messages were asked for unconditionally — exempting one noisy agent type from the reporting contract should not also license it to write long messages to its peers.
+
+### The experimental stop gate
+
+`brevity_stop_gate` is off by default. When on, a final report over `brevity_report_max_chars` gets one `SubagentStop` block decision, feeding the same subagent a request to restate it in the contract shape. It defaults off because that costs a full extra turn — the subagent re-reads its own report and rewrites it — and only pays off where reports are routinely enormous. It is hard-capped at one block per agent (an exclusive-create marker file, the same race-free dedup pattern used for unknown-agent-type tracking), so it can never loop even if the rewritten report is still judged too long.
+
+Drive all of this from `/agent-companion:brevity` (`node scripts/brevity.mjs`) — the skill has the exact commands.
+
+## Standing rules
+
+A rule written into `CLAUDE.md` is read once, at the top of a session, and then competes with everything that follows it — the same adherence problem described above. A standing rule is instead re-injected by a hook exactly when its condition is met, so it arrives at the moment it is relevant instead of hours earlier and forgotten.
+
+A rule is two independent conditions plus a directive:
+
+- **`when`** — a regex tested against the *text* of what is happening: the user's prompt, or a spawn brief. Answers "is this turn about X?"
+- **`gate`** — a *session state* check, independent of any text. Answers "is this session in a shape where the rule is worth its tokens?"
+
+The split exists because some rules need to fire on content regardless of history (`copyable-prompt`), and at least one needs to fire on history regardless of content (`delegate-reminder`, below) — a single condition type cannot express both.
+
+Four scopes, each deciding what `when` is tested against and where the directive lands:
+
+| scope | `when` tested against | injected into |
+|---|---|---|
+| `user-prompt` | the prompt just submitted | the main session, that turn |
+| `always` | *(ignored — fires every turn)* | the main session, every turn |
+| `session-start` | *(ignored — fires once)* | the main session, at start |
+| `spawn` | the brief of an agent being spawned | that subagent's prompt |
+
+Five rules ship built in:
+
+| id | scope | fires |
+|---|---|---|
+| `copyable-prompt` | `user-prompt` | the user asks for a prompt — puts the whole thing in one fenced block, commentary outside it |
+| `lead-brevity` | `session-start` | every session, while brevity resolves on globally |
+| `delegate-first` | `session-start` | every session — the orchestrator rules, restated where they are actually read |
+| `delegate-reminder` | `always` | gated — see below |
+| `agent-brevity` | `spawn` | disabled by default; reserved so the `spawn` scope shows up in `rules list` |
+
+### `delegate-reminder` — the direct answer to "my delegation rules stop being followed"
+
+This is the only shipped `always`-scope rule, and it is gated on purpose: its `delegation-drift` gate is satisfied only once `delegation_guard` has actually caught this session running execution-class tool calls on the main thread. Until then it injects nothing — a session that never drifts pays nothing for it. Once it fires, it repeats on every subsequent turn for the rest of the session.
+
+That behaviour is exactly what a document read once at session start cannot have. A written rule's influence only ever decays as more context piles on top of it; a hook-injected rule can instead be conditional on the session's own behaviour — silent when it is not needed, and reappearing on every turn exactly when it has been earned, for as long as the behaviour it is correcting persists.
+
+Drive this from `/agent-companion:standing-rules` (`node scripts/rules.mjs`) — the skill has `add`/`test`/`enable`/`disable`.
 
 ## Memory doctor
 
@@ -166,7 +238,15 @@ files:
         "delegation_guard": true,
         "delegation_threshold": 4,
         "premium_max_concurrent": 2,
-        "memory_budget_tokens": 3000
+        "memory_budget_tokens": 3000,
+        "brevity": true,
+        "brevity_peer": true,
+        "brevity_reinforce": true,
+        "brevity_telemetry": true,
+        "brevity_stop_gate": false,
+        "brevity_report_max_chars": 4000,
+        "standing_rules": true,
+        "standing_rules_max_chars": 2000
       }
     }
   }
@@ -188,13 +268,18 @@ uninstall only ever deletes `${CLAUDE_PLUGIN_DATA}`
 solely for disposable caches. See `docs/TELEMETRY.md` for the full layout,
 the legacy-data import, and the schema.
 
+`config/` is the one directory under the state root that is **user-authored** rather than derived: `brevity.json` and `standing-rules.json` hold the operator's own overrides. Unlike `telemetry/` and `state/`, which are safe to delete to reset history, deleting `config/` throws away choices, not just history.
+
 | File | Location | Contents |
 |---|---|---|
+| `config/brevity.json` | state root | operator's runtime global override and per-agent overrides for the reporting contract |
+| `config/standing-rules.json` | state root | operator's rule additions and overrides; built-ins stay in code, so only a diff is written |
 | `telemetry/spawns.jsonl` | state root | every `Agent` spawn: model, subagent type, caller/spawn effort (v2) |
 | `telemetry/subagent-starts.jsonl` | state root | post-spawn confirmation |
 | `telemetry/denials.jsonl` | state root | every guard denial |
 | `telemetry/unknown-agent-types.jsonl` | state root | agent types not in the known set |
 | `telemetry/fixtures.jsonl` | state root | rows from `verify-`/`test-`/`fixture-` sessions, routed here instead of a production stream |
+| `telemetry/brevity.jsonl` | state root | one row per `SubagentStart` self-heal and per `SubagentStop`: agent type, report length, whether the contract was on, whether it was gated |
 | `state/delegation-streak.json` | state root | per-session main-thread streak counter |
 | `state/premium-window.json` | state root | rolling window used to approximate premium concurrency |
 | `state/baseline.json` | state root | previous harness version + counters, for daily drift detection |
@@ -362,6 +447,8 @@ node "$AC/scripts/audit.mjs" --only guard-canary
 | `evaluate` | `/ac evaluate --model <alias> --type <task-type>` | is what is running (or being spawned) right for it: over, under, or fit |
 | `routing-table` | `/ac routing` | the current table, rendered from config |
 | `audit` | `/ac audit --dir <project>` | the composable hygiene audit; `--fix` for the fixable checks |
+| `brevity` | `/ac brevity` | is the reporting contract on, for whom, and which layer is winning |
+| `standing-rules` | `/ac rules` | which "always do X if Y" rules exist, and whether one would fire on given text |
 | `setup` | `/ac setup` | the setup steps on a new machine, both scouts included |
 | `calibration-scout` | `/ac scout` | the daily drift scout, run by hand |
 

@@ -278,9 +278,13 @@ const STATE_ROOT_README = [
   'agent-companion durable state.',
   '',
   'This holds the plugin\'s durable telemetry (telemetry/) and small mutable',
-  'state (state/) — kept OUTSIDE the plugin data directory so a plugin',
-  'uninstall never deletes it. Safe to delete this whole directory to reset',
-  'all history; the plugin recreates it on next use.',
+  'state (state/) — plus USER-AUTHORED configuration (config/) — kept',
+  'OUTSIDE the plugin data directory so a plugin uninstall never deletes it.',
+  '',
+  'telemetry/ and state/ are derived: safe to delete to reset all history,',
+  'and the plugin recreates them on next use. config/ is NOT derived — it',
+  'holds choices you made (brevity toggles, standing rules), so deleting it',
+  'reverts them to defaults.',
 ].join('\n') + '\n';
 
 export function stateRoot() {
@@ -303,6 +307,17 @@ export function telemetryDir() {
 
 export function stateDir() {
   const d = join(stateRoot(), 'state');
+  try { mkdirSync(d, { recursive: true }); } catch { /* fail open */ }
+  return d;
+}
+
+// USER-AUTHORED configuration — the one directory under the state root whose
+// contents a person chose rather than the plugin derived. Kept separate from
+// state/ precisely so the "safe to delete to reset history" advice that
+// applies to telemetry/ and state/ does not quietly also throw away the
+// operator's brevity toggles and standing rules.
+export function configDir() {
+  const d = join(stateRoot(), 'config');
   try { mkdirSync(d, { recursive: true }); } catch { /* fail open */ }
   return d;
 }

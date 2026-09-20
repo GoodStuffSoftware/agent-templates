@@ -1,7 +1,7 @@
 {
   "name": "agent-companion",
-  "version": "0.18.0",
-  "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, watches instruction budget, and detects harness drift.",
+  "version": "0.19.0",
+  "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
   },
@@ -173,6 +173,54 @@
       "title": "Telemetry coverage partial-day ratio",
       "description": "A day is flagged 'partial' (not fully silent, but under-recorded) when spawns.jsonl has fewer than this fraction of that day's real Agent tool_use calls seen in transcripts. Used by the telemetry-coverage audit check and the enforcement_silent scout signal.",
       "default": 0.5
+    },
+    "brevity": {
+      "type": "boolean",
+      "title": "Reporting contract",
+      "description": "Append a short reporting contract to every spawned agent’s brief: status line, blockers in full, outcome as facts, no progress narration. This is the global default — `brevity off` at the CLI overrides it at runtime, and a per-agent entry overrides both, in either direction.",
+      "default": true
+    },
+    "brevity_peer": {
+      "type": "boolean",
+      "title": "Peer brevity (always)",
+      "description": "Agent-to-agent messages are a decision or a fact, one screen at most. Deliberately SEPARATE from the reporting contract: turning the contract off for an agent still leaves this clause in place, because succinctness between agents was asked for unconditionally.",
+      "default": true
+    },
+    "brevity_reinforce": {
+      "type": "boolean",
+      "title": "Reporting contract self-heal",
+      "description": "At SubagentStart, re-inject the contract as context ONLY when it is absent from the prompt the subagent actually received — i.e. when the spawn-time rewrite did not take (another hook’s updatedInput won, or a stale plugin copy ran). Never double-injects.",
+      "default": true
+    },
+    "brevity_telemetry": {
+      "type": "boolean",
+      "title": "Report-length telemetry",
+      "description": "Record each subagent’s final-report length, agent type, and whether the contract was on, to telemetry/brevity.jsonl. This is what makes the feature auditable rather than merely believed: which agent types are actually verbose, and whether the contract moved the number.",
+      "default": true
+    },
+    "brevity_stop_gate": {
+      "type": "boolean",
+      "title": "Over-long report gate (experimental)",
+      "description": "Block a final report longer than brevity_report_max_chars ONCE per agent and ask for it again in the contract shape. Off by default because a SubagentStop block feeds the reason back to the same subagent, costing it a full extra turn — it only pays off where reports are routinely enormous. Capped at one block per agent so it can never loop.",
+      "default": false
+    },
+    "brevity_report_max_chars": {
+      "type": "number",
+      "title": "Over-long report threshold (characters)",
+      "description": "Final-report length above which brevity_stop_gate fires. Ignored while that gate is off.",
+      "default": 4000
+    },
+    "standing_rules": {
+      "type": "boolean",
+      "title": "Standing rules",
+      "description": "Operator-authored “always do X if Y” rules, injected at session start, on matching prompts, and into matching spawn briefs. Conditions are a regex over the text (`when`) plus an optional session-state gate. Edit with scripts/rules.mjs; five rules ship built in.",
+      "default": true
+    },
+    "standing_rules_max_chars": {
+      "type": "number",
+      "title": "Standing rules budget (characters)",
+      "description": "Ceiling on the rendered rule block per injection. Rules past the ceiling are dropped and the count is stated, so a budget overrun is visible rather than silent.",
+      "default": 2000
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
