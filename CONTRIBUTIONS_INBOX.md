@@ -35,6 +35,104 @@
 - **User-authored config does not belong in a directory you have told people is safe to delete.** Derived state and
   telemetry can carry "delete this to reset". The moment operator choices land in that same tree, the advice starts
   destroying work. Separate them by directory and say which is which in the README that sits beside them.
+## 2026-09-20 - an anomalous COUNT can be a property of the data, not of the actor ({{PROJECT}})
+
+- **Two sessions spent half a day investigating a visitor when the answer was the fill level of a
+  list.** A single device produced 21 impressions of an earned prompt in under four hours. That rate
+  reads as automation, so both sessions chased the device: bot, crawler, VPN, household. The real
+  cause was that the prompt fires when a result "would have placed" on a capped top-20 leaderboard,
+  every board was far below 20, and below the cap nothing is ever trimmed - so EVERY qualifying
+  result places and the prompt fires after every single game. The count was never evidence about the
+  visitor at all.
+- **Rule: before attributing an anomalous rate to an actor, check whether the emitting condition is
+  trivially satisfiable right now.** A threshold that is never reached, a quota never hit, a list
+  never full, a dedup window that never closes on an empty dataset: any of these turns "fires when X
+  is notable" into "fires always", and the resulting volume looks like abuse. Ask "what fraction of
+  events would satisfy this condition today?" before profiling who generated them.
+- **The same emptiness produces a user-facing lie.** While the list is below its cap, telling a user
+  their result "would have placed" is technically true and practically false, because the UI shows
+  only the top ten and they will not be on it. A claim about placement has to survive contact with
+  what the user finds when they look. The fix that generalises is to gate the CLAIM on the condition
+  that makes it meaningful (only claim a placement once the board holds at least as many entries as
+  the UI displays), not on the mechanism that makes it technically accurate.
+- **Cross-team corollary:** neither session could have solved this alone - one held the prompt's
+  firing logic, the other had traced the leaderboard cap while fixing unrelated copy. The tell that
+  it was worth crossing the boundary was a shared number that neither team's own model explained.
+
+## 2026-09-20 - one endpoint, two MCP server entries: a tool prefix is not a stable name ({{PROJECT}})
+
+- **The same MCP endpoint can be reached through two server entries with INDEPENDENT auth states, and only
+  one needs to work.** A plugin bundled its own server entry for `{{MCP_URL}}`; the operator also had a
+  first-party connector to the identical URL. `{{CLI}} mcp list` showed the connector `Connected` and the
+  plugin entry `! Needs authentication` — forever, because they do not share tokens. The plugin entry never
+  had to be signed in; the connector served every tool. Signing it in would have changed nothing.
+- **Agents read that warning as an outage.** Across 53 transcripts, ~42 of ~68 "I cannot reach {{SERVICE}}"
+  reports traced to this single belief: ~30 misreading the unauthenticated duplicate entry, ~12 hunting for a
+  hardcoded, plugin-scoped tool name. The service was healthy in all of them. **A startup notice naming an
+  unauthorized server is not evidence that the capability is unavailable** — check whether another entry
+  already serves the same URL before reporting a blockage or prescribing a sign-in.
+- **Never hardcode a tool prefix in a hook, a matcher, a skill or a doc.** A plugin-bundled server yields a
+  stable `mcp__plugin_{{PLUGIN}}_{{SERVER}}__*`; a connector to the very same URL yields
+  `mcp__{{CONNECTOR_UUID}}__*`, and that UUID is per-connector and per-machine, so no fixed string matches it.
+  Instructions must name the BARE tool name and both shapes, and say to search the toolset — including
+  DEFERRED tools, which a startup tool list does not show — before concluding a tool is absent.
+- **Grep for the contradiction inside your own artifact.** One file asserted the prefix was stable "on every
+  machine, forever" and built its design rationale on that; a sibling config file in the same directory
+  already documented that a differently-declared server arrives under a prefix the hook does not match. The
+  codebase knew the truth and the load-bearing comment did not. When a claim appears as a RATIONALE, grep the
+  repo for its own counter-example before trusting it.
+- **Do not broaden a security matcher to fix a documentation bug.** The tempting repair is widening an
+  auto-approval regex to accept the connector prefix. That prefix is an arbitrary UUID carrying no
+  plugin-specific marker, so a generic match auto-approves ANY server exposing a same-named tool. Correct the
+  instructions; leave the approval surface narrow and record the rejection as a decision.
+- **A hook that derives identity from the CURRENT working directory drifts.** The same hook proposed a
+  registration name built from `cwd`; after a lead's directory moved into an unrelated folder, it asked that
+  lead to register under a different project's identity. Derive session identity once, from the session.
+
+## 2026-09-19 - a gate that runs after the thing it gates is a report, not a gate ({{PROJECT}})
+
+- **Ask "does this actually block?" as a reviewer's headline question, not as a diff read.** A release
+  verification script gained a new `required: true` channel meant to refuse a production promotion. It refused
+  nothing: the deploy script invoked verification AFTER the deploy step, so a failure produced a distinct
+  "deployed but unverified" exit code. The channel existed, was required, and its own comment claimed it blocked.
+  Only executing the real CLI proved otherwise. Wherever a check is added to an existing pipeline, make the
+  reviewer state the call ORDER it verified, by reading the invocation chain and then running it.
+- **A guard that reads ambient `HEAD` is not reading the thing being promoted.** The acknowledgement token was
+  parsed out of `git log -1 HEAD` in whatever checkout invoked the deploy. In the real workflow the promotion
+  commit is authored in a dedicated worktree while the deploy runs on a different machine's checkout, so the
+  escape hatch had no structural connection to the commit it was meant to annotate. Pass the target ref
+  explicitly and offer an env-var override; resolve precedence in a named function and unit-test the
+  ref-is-not-HEAD case, which is the one that silently passes otherwise.
+- **Cover the second entry point.** The same pipeline had a promotion path that never invoked the deploy script
+  at all (a manual merge in a dedicated worktree), so a gate wired only into the deploy script guarded one of two
+  doors. Enumerate every path that reaches the protected action before deciding where a gate lives.
+- **Auto-filing a ticket is "noticed", not "triaged".** The first live run filed tracking issues for the two
+  blocking items, and the gate immediately went green because an open ticket counted as clearance. The daily job
+  had triaged on the operator's behalf before any human looked. Separate the two questions explicitly in code:
+  an open ticket prevents DUPLICATE FILING; only a closed ticket, a status change made by a person, or an
+  explicit acknowledgement should CLEAR a gate.
+- **Calibrate thresholds against the real data before shipping them.** The pre-existing severity rule required an
+  all-time count of 25 to escalate; the largest count in the entire production dataset was 13, so the rule had
+  never once fired. Require the implementer to report the actual class distribution across every real record, and
+  treat "would block everything on day one" and "would block nothing ever" as equally broken.
+
+## 2026-09-19 - a test that spawns git inside a hook operates on the REAL repo ({{PROJECT}})
+
+- **Git sets `GIT_DIR` in a hook's environment, and a spawned child inherits it; the inherited `GIT_DIR` beats the
+  child's `cwd`.** A regression test built a throwaway fixture repo in a temp directory with `git init` / `git
+  config` / `git branch -m`. Run directly it was harmless. Run from a pre-push hook it re-initialised the shared
+  repository: `core.bare` flipped to `true`, which every linked worktree reads, so `git status` / `git diff` /
+  `git add` broke simultaneously across ~80 worktrees and every concurrent agent session on the machine.
+- **Strip every `GIT_*` variable from the child environment and pass `-C <fixture>` explicitly.** Relying on `cwd`
+  is what makes the failure invisible until it runs in the one context that matters.
+- **The quiet damage is authorship, and no agent report will mention it.** The fixture's `git config user.email`
+  landed in the shared config and two genuine, already-pushed work commits on two branches were authored under a
+  test identity. Both agents reported success. It surfaced only from an independent
+  `git log --format='%an <%ae>'` sweep across every branch touched that session. **After any incident involving
+  shared VCS config, audit metadata on every commit produced in the window, not just the working tree.**
+- **Repair metadata with an acceptance test that proves content did not move:** amend or cherry-pick to fix the
+  author, then require `git diff <old-tip> <new-tip>` to be EMPTY before the force-push, plus a backup ref pushed
+  and verified first.
 
 ## 2026-09-19 - a check whose expected value came from the thing being checked cannot fail ({{PROJECT}})
 
