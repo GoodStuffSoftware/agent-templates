@@ -81,6 +81,23 @@ export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, 
   return { status: res.status, stdout: res.stdout, stderr: res.stderr, json, error: res.error };
 }
 
+// Run any plugin script (not just a hook) as a child process with CLI args,
+// no stdin payload. Same shape as runHook but for scripts that take argv
+// instead of a JSON payload on stdin (e.g. memory-vault.mjs, memory-doctor.mjs).
+export function runScript(scriptRelPath, args = [], { env = {}, cwd, timeout = 15000 } = {}) {
+  const script = join(PLUGIN_ROOT, scriptRelPath);
+  const res = spawnSync(process.execPath, [script, ...args], {
+    encoding: 'utf8',
+    cwd: cwd || PLUGIN_ROOT,
+    env: { ...process.env, ...env },
+    timeout,
+  });
+  const out = (res.stdout || '').trim();
+  let json = null;
+  if (out) { try { json = JSON.parse(out); } catch { /* not JSON: leave null */ } }
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr, json, error: res.error };
+}
+
 export function readJsonl(file) {
   let text = '';
   try { text = readFileSync(file, 'utf8'); } catch { return []; }

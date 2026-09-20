@@ -25,6 +25,7 @@ import {
   memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
 } from '../hooks/lib/memory-index.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
+import { status as memoryVaultStatus } from './memory-vault.mjs';
 
 const est = (s) => Math.ceil(s.length / 4);
 const DATED_MODEL = /-\d{6,8}$/;
@@ -1065,6 +1066,54 @@ const brevityCanary = {
   },
 };
 
+// --- 14. memory vault drift --------------------------------------------
+// See docs/adr/0001-memory-corpus-backup-vault.md. Not fixable from here —
+// same posture as telemetry-coverage: a stale or uninitialized vault needs
+// `node scripts/memory-vault.mjs sync`/`init` run by a person or the
+// scheduled routine, not an automatic repair from an audit pass.
+const MEMORY_VAULT_STALE_DAYS = 2; // daily cadence; one day's grace before warning
+const memoryVaultDrift = {
+  id: 'memory-vault-drift',
+  title: 'Memory vault backup drift',
+  vendor: 'anthropic',
+  fixable: false,
+  run(ctx) {
+    if (!opt('memory_vault', false)) {
+      return { status: 'skip', findings: ['memory vault is disabled (memory_vault option is off)'] };
+    }
+    let s;
+    try {
+      s = memoryVaultStatus();
+    } catch (e) {
+      return { status: 'skip', findings: [`could not read vault status: ${e.message}`] };
+    }
+    if (!s.initialized) {
+      return {
+        status: 'warn',
+        findings: [`vault not initialized at ${s.dir} — run: node scripts/memory-vault.mjs init`],
+        data: s,
+      };
+    }
+    const findings = [`${s.fileCount} file(s) tracked across ${s.projectCount} project(s) at ${s.dir}`];
+    if (s.dirty) {
+      findings.push('vault working tree has uncommitted changes — a previous sync may have been '
+        + 'interrupted; run `node scripts/memory-vault.mjs sync` again or inspect manually');
+      return { status: 'fail', findings, data: s };
+    }
+    if (!s.lastCommit) {
+      findings.push('vault initialized but never synced — run: node scripts/memory-vault.mjs sync');
+      return { status: 'warn', findings, data: s };
+    }
+    findings.push(`last synced ${s.staleDays}d ago: ${s.lastCommit.sha.slice(0, 12)} "${s.lastCommit.subject}"`);
+    if (s.staleDays !== null && s.staleDays > MEMORY_VAULT_STALE_DAYS) {
+      findings.push(`stale — more than ${MEMORY_VAULT_STALE_DAYS}d since the last sync; confirm the `
+        + 'locally scheduled calibration scout is still running (it drives this on the daily cadence)');
+      return { status: 'warn', findings, data: s };
+    }
+    return { status: 'ok', findings, data: s };
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
@@ -1079,4 +1128,5 @@ export const CHECKS = [
   memoryStoreForks,
   memoryNearDuplicates,
   telemetryCoverageCheck,
+  memoryVaultDrift,
 ];
