@@ -1,5 +1,31 @@
 # Contributions Inbox
 
+## 2026-09-20 - assert the MUTATION landed, or a green mutation run proves nothing ({{PROJECT}})
+
+- **A mutation harness that cannot mutate is the same defect as a test that cannot fail, moved one
+  level up into the evidence.** A writer mutation-testing its own guard tests dropped the
+  `assert old_string in source` check from its patch script, so the replacement silently no-opped.
+  The run came back green, which it read as "the test is sound". It was proving nothing at all. With
+  the assertion restored the numbers were unambiguous and the test was in fact broken.
+- **Rule: before believing a green mutation result, prove the mutation was applied.** Assert the
+  target string was present and the file actually changed, the same way you assert a push moved the
+  remote ref rather than trusting exit 0. Both failure shapes are "the tool reported success and did
+  nothing", and on one card both bit the same agent within an hour.
+- **Budget for the pattern rather than treating each as a surprise.** On a single card FIVE tests
+  were found that could not fail: an assertion built from the transform it was testing; a
+  case-sensitive assertion against a lowercasing step; a test that seeded state so the broken branch
+  was never reached; a layout assertion using a DOCUMENT-relative bounding box that passed against a
+  deliberately broken layout; and the no-op harness above. TWO were written by an agent that had
+  already been warned about the pattern, in the same session, after fixing someone else's instance
+  of it. Warning does not prevent it. Only running the mutation does.
+- **The tell is almost always the same: the test was written from the FIX rather than from the BUG.**
+  You write the code, then write a test describing what the code now does, and it agrees with itself
+  forever. Writing the test from the failure mode first - "what exactly would a broken version do,
+  and does this assertion see it?" - is what breaks the loop.
+- **Corollary for reviewers:** ask which tests were NOT mutated, and whether any surviving test
+  shares the shape of a flaw already found. A list of what was checked is weaker evidence than a list
+  of what was not.
+
 ## 2026-09-20 - a rule in a document is read once; a rule in a hook arrives when it is earned ({{PROJECT}})
 
 - **"I have rules all over and they stop being followed" is a structural complaint, not a discipline one.** A standing
