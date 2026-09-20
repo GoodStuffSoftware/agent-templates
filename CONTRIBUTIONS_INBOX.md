@@ -1,5 +1,49 @@
 # Contributions Inbox
 
+## 2026-09-19 - a check whose expected value came from the thing being checked cannot fail ({{PROJECT}})
+
+- **The shape to hunt for: an assertion derived from the implementation it is supposed to test.** A sanitizer replaced
+  punctuation with hyphens; its unit test asserted the output did not contain `@` or the domain, and passed *because*
+  the transform had removed exactly those characters. Content survived, readable, and was newly shipped to a public
+  unauthenticated endpoint. Fix the guarantee rather than the wording: validate the whole input against the real shape
+  of what is allowed and bucket everything else, then rewrite the test to assert on what SURVIVES, not on what is
+  absent.
+- **It recurs one level up, in the reviewer.** The same session's reviewer pre-computed the expected post-rebase file
+  byte-for-byte and SENT IT to the implementer before checking the work. A later match would have proven transcription,
+  not correctness. Verify against sources neither party authored (what the upstream ref actually contains), and treat a
+  matching hash as a bonus rather than as the evidence. That reviewer's own independent check then came back FAIL while
+  the hash matched; the fault was a bug in its own checker. Had it trusted the hash it would have been right by luck.
+- **Mutation-test every guard test: break the production code, confirm the named test goes red, restore.** In one batch
+  five of six mutations were caught by the specifically-named test; the sixth slipped past the test named for exactly
+  that job because of a case-sensitivity blind spot, and was only caught by two unrelated tests. Ask a reviewer which
+  tests it did NOT mutate, and whether any surviving test shares the flaw shape it already found.
+- **Do not let a bound be specified by someone who has not counted.** A reviewer-specified length bound would have
+  silently bucketed a real, valid, longer value into the catch-all, deleting a whole failure mode from the data with no
+  symptom. The implementer checked the actual vocabulary, widened the bound and added a test asserting every known key
+  survives validation. Guard the class, not the instance.
+
+## 2026-09-19 - prove outcomes by the result, never by an exit code ({{PROJECT}})
+
+- **A push exited 141 (SIGPIPE) with the pre-push gate already GREEN and a "recorded green pass" log line, while the
+  remote ref had not moved.** Twice on one branch. A green gate plus a plausible exit code both read as success and
+  neither was. Every brief that asks a worker to push must require the remote ref and the local ref reported side by
+  side with an explicit MATCH / DOES NOT MATCH; "pushed, exit 0" is not evidence. Generalises: a `204` from an ingest
+  endpoint means the payload was accepted, not that the record exists.
+- **A diff against a base that moved renders the missing commits as DELETIONS.** Diffing a feature branch against an
+  advanced integration tip showed ~2400 deletions across unrelated subsystems and read exactly like a worker having
+  destroyed half the repo; the true diff against the actual merge base was 42 deletions. Check the merge base before
+  believing a large deletion count, and before accusing anyone.
+- **Untracked scratch files silently defeat a clean-tree-gated CI short-circuit.** Two audit notes written into a
+  worktree by an earlier agent kept the tree dirty, so the pre-push "inherited green" path never fired and every push
+  ran a full suite: roughly six unnecessary runs at four to six minutes each. The fix was two `rm` commands. Orchestrators
+  should send agent scratch output to a scratch directory OUTSIDE the repo, and check `git status --porcelain` including
+  untracked when test runs seem unexpectedly slow.
+- **When a release carries no version bump, build a version-independent deploy marker.** Confirm a unique string from the
+  new code is ABSENT from every served bundle chunk immediately before deploying; its appearance afterwards then proves
+  the code is live regardless of what any version field says. Take the baseline on the exact host you will test, not a
+  sibling host you assume serves the same build - and note that an app resolving an API endpoint relative to its own
+  origin means probing the endpoint on the wrong host proves nothing.
+
 ## 2026-09-19 - an empty error log is not evidence of health: audit what the code CAPTURES ({{PROJECT}})
 
 - **A live, correct crash pipeline can record nothing and still be read as "no problems".** A {{APP}} owner suspected a
