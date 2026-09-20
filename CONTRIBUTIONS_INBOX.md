@@ -1,5 +1,41 @@
 # Contributions Inbox
 
+## 2026-09-20 - a rule in a document is read once; a rule in a hook arrives when it is earned ({{PROJECT}})
+
+- **"I have rules all over and they stop being followed" is a structural complaint, not a discipline one.** A standing
+  instruction written into an always-loaded file is read at position zero and then competes with every token that
+  follows it; by mid-session it has lost. The fix is not a louder rule or a third copy of it - it is re-injection at
+  the moment the rule is relevant, from a hook that runs every turn. Anything that must hold for a whole session and
+  cannot survive on attention alone belongs in the harness, not in prose.
+- **Split a rule's condition in two: TEXT and STATE.** A text condition (regex over the prompt, or over a worker's
+  brief) asks "is this turn about X?". A state condition asks "is this session in a state where the rule is worth its
+  tokens?". Keeping them separate is what makes an always-on rule affordable: the one rule that fires on every single
+  turn costs nothing until its state gate is satisfied.
+- **Gate the nag on evidence the enforcement layer already collects.** A guard that nudges the main thread after N
+  consecutive execution-class tool calls already knows whether this session has drifted; have it record a COUNT rather
+  than a flag, and let the reminder rule read it. The result is silent in a well-behaved session and repeats every turn
+  in one that has actually misbehaved. A constant reminder is a tax everyone learns to skim; an adaptive one arrives
+  exactly when it has been earned, and keeps arriving while the behaviour lasts.
+- **A per-scope override must be bidirectional, or it is a mute button.** "Global on, this one off" is the obvious
+  half. "Global off, this one on" is the half that makes the feature usable, because it lets a single exception be
+  carved out without abandoning the policy. Test both directions explicitly - an implementation where the global
+  switch short-circuits first passes the obvious test and fails the useful one.
+- **A self-healing injection must check whether its own earlier injection landed, not re-run blindly.** Where a
+  pre-spawn hook rewrites a worker's brief and a start-of-worker hook can also inject context, the second one should
+  look for its own marker in the prompt the worker ACTUALLY received and stay silent when it is there. That converts a
+  belt-and-braces duplicate into a repair that only fires when the primary path failed. Doubly true when the feature
+  exists to reduce token cost: one that pays its own tax twice refutes itself.
+- **Where several features append to one tool-input rewrite, accumulate a suffix - never rebuild from the original.**
+  Two independent features each doing `{...input, field: original + mine}` makes the LAST one win and drops the other
+  with no error anywhere. One hook owns the rewrite, every feature contributes a string, the field is rebuilt once.
+- **Ship the probe that proves the feature is LIVE, not merely installed.** A canary that runs the real hook as a child
+  process and asserts the injected marker appears in the rewritten input catches the failure that matters - an inert
+  feature that is present, configured and doing nothing. Validate the canary by deliberately neutering the production
+  path and confirming it goes red; a canary never seen to fail is decoration.
+- **User-authored config does not belong in a directory you have told people is safe to delete.** Derived state and
+  telemetry can carry "delete this to reset". The moment operator choices land in that same tree, the advice starts
+  destroying work. Separate them by directory and say which is which in the README that sits beside them.
+
 ## 2026-09-19 - a check whose expected value came from the thing being checked cannot fail ({{PROJECT}})
 
 - **The shape to hunt for: an assertion derived from the implementation it is supposed to test.** A sanitizer replaced
