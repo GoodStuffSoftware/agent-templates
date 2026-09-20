@@ -661,6 +661,14 @@ unless noted, and has the same boundary: adopt only after the operator accepts t
    - AC: reference files load on demand.
    - AC: contradictions (a) to (d) and (f) from §5 G9 are resolved.
    - AC: the break-even delegation rule replaces "always delegate any file read".
+   - AC: the doctrine states that a spawned sub-agent must not be briefed to call
+     `{{BUS}}` coordination tools directly. Their connector prefix is a per-connector UUID that the
+     plugin's pre-approval hook deliberately does not match, so on a machine without an allow-list
+     entry for that exact prefix the call PROMPTS — and a prompt in a non-interactive sub-agent is a
+     hang, not an error. Sub-agents that need the bus use its REST API through a shell; bus calls
+     otherwise stay in the lead. (Reported by the `{{BUS}}` lead, 2026-09-20.)
+   - AC: the doctrine's capability check is "search the BARE tool name under any prefix", never a
+     fixed prefix and never the startup toolset, because connector tools are usually deferred.
    - AC: the before/after token counts are recorded.
 10. **Default model for unpinned spawns (P10).**
     - AC: a spawn with no model, whose type pins none, is autofilled to sonnet with a one-line note.
