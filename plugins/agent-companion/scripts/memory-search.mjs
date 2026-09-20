@@ -41,7 +41,7 @@ import {
   memoryRoot, loadOrBuildIndex, search, corpusStats, indexCachePath,
   findRepoRoot, loadOrBuildRepoIndex, corpusStatsRepo, repoIndexCachePath, parseRepoGlobs,
   DEFAULT_REPO_GLOBS, DEFAULT_REPO_MAX_FILE_BYTES, DEFAULT_REPO_MAX_TOTAL_BYTES,
-  breadcrumb, displayText, getMergeStatus, mergeStatusLabel,
+  breadcrumb, displayText, getMergeStatus, mergeStatusLabel, resolveMemoryScopeDir,
 } from '../hooks/lib/memory-index.mjs';
 
 // A small hand-rolled parser rather than has()/val(): this is the first
@@ -69,10 +69,24 @@ const args = parseArgs(process.argv.slice(2));
 const jsonOut = args.flags.has('--json');
 const forceRebuild = args.flags.has('--rebuild');
 const statsOnly = args.flags.has('--stats');
+// --here scopes the user-scope pool to THIS session's own project, resolved
+// the same way hooks/lib/memory-brief.mjs's nudge/pointers modes do (see
+// resolveMemoryScopeDir() in hooks/lib/memory-index.mjs) — an EXACT match
+// against the resolved directory, not the fuzzy substring --project does.
+// This is the fix made reachable from the CLI: from a worktree cwd,
+// --project <name> already worked by luck (a substring match against the
+// whole corpus), but there was no way to ask "just my own project" and get
+// the MAIN repo's store instead of the empty worktree-encoded one.
+const hereFlag = args.flags.has('--here');
 const projectFilter = args.values['--project'] || null;
 const limit = Math.max(1, Number(args.values['--limit']) || 10);
 const query = args.positional[0] || '';
 const cwdArg = args.values['--cwd'] || process.cwd();
+// Computed unconditionally (cheap — existsSync checks plus, at most, two
+// short-timeout git calls) rather than only when --here is passed, so
+// --stats can always show which store this cwd resolves to — the exact
+// before/after check for the worktree-scope bug this flag exists to fix.
+const hereScope = resolveMemoryScopeDir({ cwd: cwdArg, root: memoryRoot() });
 
 const scopeArg = (args.values['--scope'] || 'all').toLowerCase();
 if (!['user', 'repo', 'all'].includes(scopeArg)) {
@@ -133,12 +147,25 @@ function scopeLabel(h) {
   return { scope, place: `${h.chunk.project} · ${h.chunk.file}` };
 }
 
+// File count for hereScope.dir, from the already-loaded user index — same
+// relKey-prefix counting buildMemoryNudge() uses, so --stats reports the
+// exact same number a spawn's nudge line would.
+function hereFileCount(index, dir) {
+  if (!dir) return 0;
+  let n = 0;
+  for (const relKey of Object.keys(index?.files || {})) {
+    if (relKey.slice(0, relKey.indexOf('/')) === dir) n++;
+  }
+  return n;
+}
+
 if (statsOnly) {
   if (jsonOut) {
     const out = {};
     if (wantUser) {
       out.user = {
         root, cache: indexCachePath(dataDirPath), builtAt: userIndex.builtAt, rebuilt: userRebuilt, ...corpusStats(userIndex),
+        here: { ...hereScope, fileCount: hereFileCount(userIndex, hereScope.dir) },
       };
     }
     if (wantRepo) {
@@ -171,6 +198,7 @@ if (statsOnly) {
     console.log(`    source     : ${s.bytes} bytes`);
     console.log(`    index      : ${s.indexBytes} bytes (${indexCachePath(dataDirPath)})`);
     console.log(`    built      : ${userIndex.builtAt}${userRebuilt ? ' (just rebuilt)' : ' (from cache)'}`);
+    console.log(`    here       : ${hereScope.dir || '(none)'} — ${hereFileCount(userIndex, hereScope.dir)} file(s) [resolved via ${hereScope.source}]`);
   }
   if (wantRepo) {
     if (!repoFound) {
@@ -196,7 +224,7 @@ if (statsOnly) {
 }
 
 if (!query.trim()) {
-  console.error('memory-search: need a query — node memory-search.mjs "<query>" [--scope user|repo|all] [--project x] [--limit n] [--json] [--rebuild] [--stats] [--cwd path]');
+  console.error('memory-search: need a query — node memory-search.mjs "<query>" [--scope user|repo|all] [--project x] [--here] [--limit n] [--json] [--rebuild] [--stats] [--cwd path]');
   process.exit(2);
 }
 
@@ -204,11 +232,21 @@ const pool = [];
 if (wantUser) pool.push(...(userIndex.chunks || []));
 if (wantRepo && repoIndex) pool.push(...(repoIndex.chunks || []));
 
-const hits = search(pool, query, { limit, projectFilter });
+// --here narrows the USER-scope half of the pool to an EXACT match against
+// resolveMemoryScopeDir()'s answer — see its precedence in
+// hooks/lib/memory-index.mjs. Repo-scope chunks are left alone: repo scope
+// already resolves to exactly one repo for this cwd (findRepoRoot above),
+// so it is already "here" by construction and has no cross-project mixing
+// to narrow.
+const searchPool = hereFlag
+  ? pool.filter((c) => c.scope !== 'user' || c.project === hereScope.dir)
+  : pool;
+
+const hits = search(searchPool, query, { limit, projectFilter });
 
 if (jsonOut) {
   console.log(JSON.stringify({
-    query, scope: scopeArg, project: projectFilter, limit, count: hits.length,
+    query, scope: scopeArg, project: projectFilter, here: hereFlag ? hereScope : null, limit, count: hits.length,
     hits: hits.map((h) => {
       const { scope, place } = scopeLabel(h);
       return {
@@ -220,7 +258,8 @@ if (jsonOut) {
 }
 
 if (!hits.length) {
-  console.log(`memory-search: no matches for "${query}"${projectFilter ? ` in project~="${projectFilter}"` : ''} (scope=${scopeArg})`);
+  const hereNote = hereFlag ? ` --here=${hereScope.dir || '(none)'}` : '';
+  console.log(`memory-search: no matches for "${query}"${projectFilter ? ` in project~="${projectFilter}"` : ''} (scope=${scopeArg}${hereNote})`);
   process.exit(0);
 }
 
