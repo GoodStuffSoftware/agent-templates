@@ -40,12 +40,13 @@
 // is the default (`memory_brief_mode: "nudge"`). Do not re-derive this by
 // re-tuning minScore; the next tuning pass will hit the same wall.
 
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   loadOrBuildIndex, search, memoryRoot,
   findRepoRoot, loadOrBuildRepoIndex,
   breadcrumb, displayText, getMergeStatus, mergeStatusLabel,
+  resolveMemoryScopeDir,
 } from './memory-index.mjs';
 
 const MAX_BLOCK_CHARS = 1200;
@@ -65,17 +66,6 @@ const LOCAL_PROJECT_BOOST = 1.5; // prefer the caller's own project, don't exclu
 function snippet(text, max = SNIPPET_CHARS) {
   const flat = String(text).replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-}
-
-// cwd is a full path (WSL or Windows); the project match is a best-effort
-// substring check against the last path segment, same leniency the --project
-// CLI flag already uses. There is no reliable inverse of the harness's own
-// project-dir encoding available here (see memory-budget.mjs's fallback for
-// the same problem), and a soft substring preference is enough for "prefer",
-// which is all this needs — it is not gating anything.
-function projectLeaf(cwd) {
-  if (!cwd) return '';
-  return basename(String(cwd).replace(/\\/g, '/'));
 }
 
 // Load the repo-scope chunk pool for a brief-building call (pointers or
@@ -117,7 +107,8 @@ export function buildMemoryBrief({
   repoEnabled = true, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
 }) {
   const text = String(prompt || '');
-  if (!text.trim() || !dataDirPath) return { block: '', hits: [] };
+  const emptyFacts = { attached: false };
+  if (!text.trim() || !dataDirPath) return { block: '', hits: [], facts: emptyFacts };
 
   let userChunks = [];
   try {
@@ -138,17 +129,22 @@ export function buildMemoryBrief({
   });
 
   const pool = [...userChunks, ...repoChunks];
-  if (!pool.length) return { block: '', hits: [] };
+  if (!pool.length) return { block: '', hits: [], facts: emptyFacts };
 
   // Cast a slightly wider net than maxHits so the local-project boost below
   // has candidates to promote past a marginally higher-scoring cross-project
   // hit, then trim to maxHits after boosting.
   const hits = search(pool, text, { limit: Math.max(20, maxHits * 5) });
-  if (!hits.length || hits[0].score < minScore) return { block: '', hits: [] };
+  if (!hits.length || hits[0].score < minScore) return { block: '', hits: [], facts: emptyFacts };
 
-  const leaf = projectLeaf(cwd).toLowerCase();
+  // The resolved "here" directory (see memory-index.mjs's module banner for
+  // the precedence and why an exact match replaced a substring guess) — the
+  // same helper buildMemoryNudge() and memory-search.mjs's --here use, so a
+  // worktree session boosts the MAIN repo's memory, not a same-named but
+  // empty worktree-encoded store.
+  const scope = resolveMemoryScopeDir({ cwd, root: root || memoryRoot() });
   const boosted = hits
-    .map((h) => ({ ...h, local: h.chunk.scope === 'user' && !!leaf && h.chunk.project.toLowerCase().includes(leaf) }))
+    .map((h) => ({ ...h, local: h.chunk.scope === 'user' && !!scope.dir && h.chunk.project === scope.dir }))
     .sort((a, z) => (z.score * (z.local ? LOCAL_PROJECT_BOOST : 1)) - (a.score * (a.local ? LOCAL_PROJECT_BOOST : 1)));
 
   const top = boosted.slice(0, Math.max(1, maxHits));
@@ -177,7 +173,17 @@ export function buildMemoryBrief({
   ].join('\n');
   if (block.length > MAX_BLOCK_CHARS) block = `${block.slice(0, MAX_BLOCK_CHARS - 1)}…`;
 
-  return { block, hits: top };
+  return {
+    block,
+    hits: top,
+    facts: {
+      attached: true,
+      hitCount: top.length,
+      topScore: hits[0].score,
+      hereProject: scope.dir || null,
+      hereSource: scope.source,
+    },
+  };
 }
 
 // --- Nudge mode (threshold-free, the default) ------------------------------
@@ -202,17 +208,23 @@ function pluginRoot() {
 }
 
 // Pure aside from the cached-index reads: given cwd and the plugin's data
-// dir, returns a single nudge line, or '' when there is nothing to nudge
-// about in EITHER scope (no user-corpus files for this project or any
-// other, AND no repo resolved / repo has nothing matching its globs). No
-// scoring, no threshold, no relevance judgement — just file counts, for
-// both scopes, which is why this survives a cloud session where the user
-// corpus is simply absent: the user half degrades to all-zero and the repo
-// half still has something to say.
+// dir, returns { text, facts }. `text` is a single nudge line, or '' when
+// there is nothing to nudge about in EITHER scope (no user-corpus files for
+// this project or any other, AND no repo resolved / repo has nothing
+// matching its globs). No scoring, no threshold, no relevance judgement —
+// just file counts, for both scopes, which is why this survives a cloud
+// session where the user corpus is simply absent: the user half degrades to
+// all-zero and the repo half still has something to say. `facts` is always
+// populated (even when `text` is '') so a caller — hooks/spawn-guard.mjs —
+// can log what this function found regardless of whether it decided to say
+// anything, which is the observability half of this fix: before it, nothing
+// in spawns.jsonl named the memory feature at all, so confirming delivery
+// required a live echo probe.
 export function buildMemoryNudge({
   cwd, root, dataDirPath, repoEnabled = true, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
 }) {
-  if (!dataDirPath) return '';
+  const emptyFacts = { attached: false };
+  if (!dataDirPath) return { text: '', facts: emptyFacts };
 
   let index = null;
   try {
@@ -237,14 +249,14 @@ export function buildMemoryNudge({
     counts.set(project, (counts.get(project) || 0) + 1);
   }
 
-  const leaf = projectLeaf(cwd).toLowerCase();
-  let hereProject = null;
-  let hereCount = 0;
-  if (leaf) {
-    for (const [project, n] of counts) {
-      if (project.toLowerCase().includes(leaf)) { hereProject = project; hereCount = n; break; }
-    }
-  }
+  // The resolved "here" directory — see memory-index.mjs's module banner.
+  // An EXACT match against counts' keys, not a substring guess: the whole
+  // point of resolveMemoryScopeDir() is that it already names the real
+  // on-disk directory, so a fuzzy match would just reintroduce the same
+  // class of bug (matching a same-named-but-wrong store) one layer down.
+  const scope = resolveMemoryScopeDir({ cwd, root: root || memoryRoot() });
+  const hereProject = scope.dir && counts.has(scope.dir) ? scope.dir : null;
+  const hereCount = hereProject ? counts.get(hereProject) : 0;
   const otherCount = counts.size - (hereProject ? 1 : 0);
 
   const { chunks: repoChunks, mergeStatus } = repoChunksFor({
@@ -252,7 +264,16 @@ export function buildMemoryNudge({
   });
   const repoFileCount = new Set(repoChunks.map((c) => c.file)).size;
 
-  if (hereCount === 0 && otherCount === 0 && repoFileCount === 0) return '';
+  const facts = {
+    attached: false,
+    hereCount,
+    otherCount,
+    repoFileCount,
+    hereProject: hereProject || null,
+    hereSource: scope.source,
+  };
+
+  if (hereCount === 0 && otherCount === 0 && repoFileCount === 0) return { text: '', facts };
 
   const here = hereCount > 0 ? `${hereCount} here` : '0 here';
   const others = `${otherCount} elsewhere`;
@@ -263,6 +284,8 @@ export function buildMemoryNudge({
   const repoPart = mergeLabel ? `${repoFileCount} repo (${mergeLabel})` : `${repoFileCount} repo`;
   const script = join(pluginRoot(), 'scripts', 'memory-search.mjs');
 
+  facts.attached = true;
+
   // Worded as an available capability, not an instruction or established
   // fact — the agent decides whether its task is unfamiliar enough to use
   // it. Relevance-blind by design: this line is the same whether the brief
@@ -270,6 +293,7 @@ export function buildMemoryNudge({
   // short deliberately — the resolved script path below is the variable
   // part of this line's length and cannot be shortened further, so the
   // fixed wording stays terse to leave it room.
-  return `\n\n[agent-companion: memory — user ${here}, ${others}; ${repoPart} — ` +
+  const text = `\n\n[agent-companion: memory — user ${here}, ${others}; ${repoPart} — ` +
     `unfamiliar? try: node ${script} "<query>" --scope all]`;
+  return { text, facts };
 }
