@@ -74,6 +74,30 @@ If the second command reports a version change, that is a finding: say the
 new version and that the desktop app needs a restart to load it. If it reports
 nothing changed, say nothing.
 
+**Local only — sync the memory vault backup.** This is the plugin's only
+autonomous daily execution path, so it is also the memory vault's — see
+`docs/adr/0001-memory-corpus-backup-vault.md`. Out of scope in cloud: the
+vault needs the real `~/.claude/projects/` tree, which does not exist there.
+Run it unconditionally; the script itself checks the `memory_vault` option
+and does nothing when it is off, so there is nothing to gate here:
+
+```bash
+node "$AC/scripts/memory-vault.mjs" sync --json
+```
+
+Report only when there is something to act on:
+- `"aborted": true` — say so verbatim; it means the corpus enumerated to zero
+  files while the vault already had content, and the sync refused to treat
+  that as a mass deletion. This needs a human look, not a retry.
+- `"flagged" > 0` — say how many files were excluded from this commit for
+  looking like they carry a live credential (`node "$AC/scripts/audit.mjs"
+  --only memory-vault-drift` does not surface this; only the sync output
+  does), and that they need rotation-or-clear review. Never repeat the
+  matched text itself, only the file list `sync` printed.
+- Anything else (`"committed": true` with 0 flagged, or `"skipped": "disabled"`
+  or `"skipped": "locked"`) — say nothing; a quiet backup is the success case,
+  same as the rest of this routine.
+
 ## STEP 1 — deterministic detection (no judgement yet)
 
 ```bash
@@ -131,4 +155,4 @@ node "$AC/scripts/audit.mjs" --only guard-canary,harness-drift,routing-doc
 
 - Every signal here is deterministic by design. Your judgement is for what a signal WARRANTS, not for whether something changed — if you find yourself deciding "that probably isn't a real change," it is.
 - A `SKIP` from the audit is not a `PASS`. If a check you expected to run could not, that is itself the finding.
-- Do not modify `config/model-tiers.json`, agent definitions, or any repo from this routine. Report the precise change; leave the edit to a session that can review and commit it.
+- Do not modify `config/model-tiers.json`, agent definitions, or any repo from this routine. Report the precise change; leave the edit to a session that can review and commit it. The memory vault sync above is the one deliberate exception — it commits to its OWN separate repository, never to `agent-templates` or any project repo, and never writes to the live memory corpus itself (see the ADR).

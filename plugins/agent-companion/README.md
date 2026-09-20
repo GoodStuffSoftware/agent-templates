@@ -37,6 +37,7 @@ It was built after two observed failures:
 | `version_notice` | At session start and on the next prompt, says once per (plugin, lastUpdated) pair when ANY installed plugin — not just this one — was updated after this session last loaded its plugins (session start, or the last `/reload-plugins`), catching a stale parent (and everything it spawns) mid-session, not just at startup. Also keeps this plugin's own running-vs-installed self-check, merged into the same notice when both fire, for the one case timestamps alone miss: a desktop session that loaded a stale app-extracted bundle at startup. Updating itself is the harness's job: the native autoupdater in terminal sessions, the built-in `plugin update` commands run by the daily local scout in desktop sessions. Install the global hook (see below) to run this checker itself from a fixed path that is never stale. | no |
 | `fit_guard` | Best fit at the spawn, both directions. A brief that declares `WEIGHT:` gets its model graded against the routing table: under- and cheap-over-provisioned spawns are announced; a premium model over-provisioned for its own declared weight is denied with the correction. | premium-over only |
 | `fit_autofill` | A spawn that declares `WEIGHT:` but names no model gets the table's model filled in, instead of inheriting the lead's tier by accident. | no |
+| `memory_vault` | Keeps a local git history of the memory corpus in a separate repository, so a rewrite or truncation is no longer unrecoverable. Strictly read-only against the live corpus. **Off by default** — see [Memory vault](#memory-vault). | no |
 
 Premium tiers are **capped and audited, never banned**. The failure mode was
 unexamined defaults, not the model itself.
@@ -68,6 +69,80 @@ judgement, and doing it wrong loses knowledge permanently.
 
 Note the tradeoff: re-linking unreachable rules makes the index *larger*.
 Reachability and size are separate problems, and this tool only fixes the first.
+
+## Memory vault
+
+The corpus at `~/.claude/projects/*/memory/` was never under version control —
+a rewritten `MEMORY.md` carries no history, so there is no way to tell what
+changed or whether anything was lost. `memory_vault` (off by default — see
+[Features](#features)) fixes that with a **mirrored** local git repository,
+not a git working tree on the corpus itself: see
+[`docs/adr/0001-memory-corpus-backup-vault.md`](../../docs/adr/0001-memory-corpus-backup-vault.md)
+for why the live corpus is never a working tree, and what that decision costs.
+
+```bash
+node scripts/memory-vault.mjs init            # create the vault (idempotent)
+node scripts/memory-vault.mjs sync             # copy + commit what changed
+node scripts/memory-vault.mjs sync --json      # same, machine-readable
+node scripts/memory-vault.mjs status           # report vault state
+```
+
+**Read-only against the corpus, always.** Every read goes through the same
+`discoverFiles()` reader the audit and memory-search already use — nothing
+here can call a git command, `writeFileSync`, or `unlink` against
+`~/.claude/projects/**`. The vault itself lives at
+`~/.claude/agent-companion/memory-vault/` (`stateRoot()`, survives an
+uninstall same as telemetry — see [State](#state)), mirroring the corpus
+under `projects/<project>/memory/**`, so `git log -p` works on a path that
+matches the original:
+
+```bash
+git -C ~/.claude/agent-companion/memory-vault log -p -- projects/<project>/memory/MEMORY.md
+```
+
+**What each `sync` does:**
+
+- Copies every readable file under a project's `memory/` into the vault,
+  **excluding** anything that trips the secrets gate below.
+- Removes, from the vault, any file no longer present in the live corpus —
+  so a deletion is a *recorded* commit, not a silent gap; the last known
+  content stays recoverable with `git show <sha>^:<path>`.
+- Commits once, with a message stating how many files were added, modified,
+  and deleted, and which projects were touched — **only if something
+  changed**. A `sync` with nothing new stages and commits nothing.
+- Refuses to treat a suspiciously empty enumeration (corpus root briefly
+  unreadable) as "everything was deleted" — if the corpus reports zero files
+  while the vault already holds tracked content, the sync aborts untouched
+  rather than mass-deleting the vault's history.
+
+**Secrets gate, on every sync, not a one-off.** Before a file is written into
+the vault, its content is checked against a fixed set of credential-shaped
+patterns (cloud provider keys, private-key headers, bearer/JWT tokens,
+embedded connection-string credentials, generic `secret:`/`token:`/
+`password:` assignments). A match excludes that one file from the commit —
+reported by file path and pattern label only, never the matched text — and
+leaves whatever the vault already had for it untouched.
+
+**Never a session transcript.** Transcripts live at
+`~/.claude/projects/<project>/*.jsonl`, a *sibling* of that project's
+`memory/` directory, never inside it — structurally outside every path this
+feature reads. `tests/memory-vault.test.mjs` proves it directly: a fixture
+`.jsonl` file placed next to a `memory/` directory never appears anywhere in
+the vault's working tree or git history after `init` + `sync`.
+
+**Scheduling.** No new scheduler was created. `sync` runs from the existing
+daily calibration scout's **local-only** step (see
+[Routines](#routines) — the vault needs the real `~/.claude/projects/` tree,
+which does not exist in a cloud sandbox) and self-gates on the
+`memory_vault` option, exactly like every other opt-in hook here.
+
+**Adding a remote is a separate, manual step** — this feature only ever
+creates and commits to a purely local repository:
+
+```bash
+git -C ~/.claude/agent-companion/memory-vault remote add origin <url>
+git -C ~/.claude/agent-companion/memory-vault push -u origin main
+```
 
 ## Model tiers are data, not code
 
@@ -206,6 +281,9 @@ the legacy-data import, and the schema.
 | `state/migrated.json` | state root | written once, after the first legacy-data import |
 | `state/model-tiers.json` | state root | operator override of `config/model-tiers.json` (optional); a legacy copy under the plugin data dir is still honoured as a fallback |
 | `state/agent-types/*.seen` | state root | one marker file per seen unknown agent type (race-free dedup) |
+| `memory-vault/` | state root | the vault repo itself — a separate git repository, see [Memory vault](#memory-vault) |
+| `state/memory-vault-sync.lock` | state root | held for the duration of one `memory-vault.mjs sync`; stale after 120s and taken over |
+| `state/memory-vault-status.json` | state root | fast-read cache of the vault's last sync outcome (git history is the source of truth, not this file) |
 | `migration/backup-<stamp>/...` | state root | verbatim backup of each legacy dir's durable files, taken before the first import |
 | `refactor-prompt.md` | plugin data dir | generated when an instruction file is over budget or memory is unreachable |
 | `memory-index*.json`, `memory-merge-status-*.json` | plugin data dir | disposable, regenerable memory-search caches |
@@ -379,6 +457,10 @@ drifting in a hand-maintained file the scheduler happens to point at.
 |---|---|---|
 | Calibration scout | daily | `Run /agent-companion:calibration-scout` |
 | Project audit | weekly, or on demand | `Run /agent-companion:audit for <project path>` |
+
+The calibration scout's **local-only** step also drives `memory_vault`'s
+`sync` (see [Memory vault](#memory-vault)) — no second scheduler was added
+for it; it self-gates on the option and is silent when off or unchanged.
 
 The scout is deliberately silent when nothing changed — it reports only on a
 real signal, so a daily cadence does not become noise you learn to ignore.
