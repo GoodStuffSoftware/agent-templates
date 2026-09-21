@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-24
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 One expiry field on a user record was fed by three independent sources: two payment platforms and an administrative grant. The revocation path wrote an absolute past date. So refunding one small monthly purchase also destroyed time bought on the *other* platform and any promotional grant the user held — and a PARTIAL refund did exactly the same thing as a full one.
 
@@ -22,3 +22,9 @@ The same field had a second, opposite bug at the other end of the same fix. The 
 - **Fence it with a test that sums to the exact purchased period** across two successive partial reversals. The single-reversal case passes under both the correct and the double-counting implementation.
 - **Extract the arithmetic into pure, clock-injected helpers.** Money arithmetic buried in an event handler cannot be tested without the handler's whole import graph, so it does not get tested.
 - Related: [[shared-sequential-id-needs-one-allocator]] (a shared value with no single owner) and [[derive-at-read-time-over-storing]] (whether to store the accumulator at all).
+
+**The same kernel shows up outside money, on a rewritten tool-input field.** Several independent hooks each appended their own text to one field on the same tool call, and each was written as "take the current value, append mine." Whichever hook ran last won outright — its append became the final field, and every earlier hook's contribution was silently dropped, with no error anywhere, because "take the current value" for the last hook meant "the original value," not "the original plus what the previous hook already appended," once ordering or a re-read raced against it.
+
+**How to apply (continued):**
+- Where several independent features each contribute to ONE rewritten field, put a single owner in charge of the rewrite. Every feature contributes a string to an accumulated suffix (or list, or delta); the owner rebuilds the field exactly once from the original value plus the full accumulated contribution.
+- Never let a feature read-modify-write the shared field directly — "append mine to whatever is there now" is only safe when exactly one writer ever touches the field per event. With two or more, the last writer's read is stale the instant a peer has already written, and the failure looks like nothing happened rather than like a conflict.

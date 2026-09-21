@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-10
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 Three separate safeguards in one repo were each found, independently, to be bypassable the same way — and nobody noticed they were one problem until the third turned up.
 
@@ -27,5 +27,9 @@ Three separate safeguards in one repo were each found, independently, to be bypa
 **When the operation-level guard lands, expect it to break things that were already broken.** Adding one such guard produced 22 new test failures across 9 files — every one of them a test that had been silently resolving to a real default database all along. Fix the callers, not the guard: rescoping it means weakening the check so it stops detecting the exact condition it was built to detect.
 
 **And make the guard's own failure legible.** In that same case the guard's exception was swallowed by a documented never-throws `try/catch` upstream and surfaced as an unrelated `Cannot read properties of undefined`. A guard that fails closed but sends people looking in the wrong place is worse than one that is merely absent — emit a distinctive, greppable line to stderr *before* throwing, so the diagnosis survives the catch.
+
+**A fourth case, from the same family, at pipeline scope rather than function scope:** the release pipeline that owned the two guards above had a SECOND promotion path that never invoked the gated deploy script at all — a manual merge performed directly in a dedicated worktree, entirely outside the deploy entry point the guard was wired into. A gate placed only in the deploy script guarded exactly one of the two doors that reached production; the other stood open the whole time, unnoticed because nobody had written down that it existed.
+
+- **Enumerate every path that reaches the protected action, in writing, BEFORE deciding where the gate lives.** "The deploy script" and "the operation deploy performs" are not the same set of entry points until someone has actually listed the other ways to reach that operation — a manual merge, a hand-run migration, an admin console action, a second script that happens to share the same target.
 
 Related: [[ship-the-safe-handle-first]], [[guard-coverage-enumerate-issuing-surfaces]], [[match-instrument-to-failure-class]], [[lifecycle-hook-runs-in-production-installs]].

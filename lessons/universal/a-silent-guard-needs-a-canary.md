@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-31
 provenance: [contrib-1, contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 Some guards are measured by what does NOT happen: denial counts, violation counts, alert counts. For those, silence has two causes that look identical from the metric — the guard is working and nobody is violating, or the guard stopped matching and everybody is.
 
@@ -30,3 +30,12 @@ The incident that bought this: enforcement hooks written against a platform whos
 
 Write the list next to the verification procedure, and choose a probe that evades every entry on it — otherwise the first honest test reads as a broken pipeline and someone "fixes" a working system.
 - Related: [[assert-the-guard-saw-something]] and [[did-not-run-is-a-third-outcome]].
+
+**A fifth suppressor, and the one hardest to see, is coverage that looks complete but isn't: only a narrow subset of failure codes is wired to the capture path at all.** An application owner suspected a broken sign-in because conversions were low; the error backlog held zero auth entries, and an agent nearly reported that as health. Reading the code showed the auth error mapper sent only a small configuration-class set of codes to the capture API — every other failure (blocked popup, closed popup, network error, rate limit, unsupported environment, and the default branch) became interface text only, with nothing captured and nothing beaconed. Worse, the redirect-completion handler swallowed its own errors with an empty catch: no interface message, no telemetry, nothing. Absence of records was a property of the instrumentation, not of the failure rate.
+
+- **Before reporting "no errors in X", enumerate what actually reaches X.** Grep every catch block and error branch on the path and classify each as captured / beaconed / user-visible-only / silently swallowed, and report the silently-swallowed set as a finding in its own right, whether or not it explains the original question.
+- An error handler that converts a failure into a fallback flow makes that **whole fallback** dark if the fallback's own outcome is itself discarded — the failure didn't go uncaptured, it went two hops further before vanishing.
+- Pair the audit with a known-good **positive control**: one event you personally caused, traced by hand through every layer of the pipeline. This separates "the funnel is genuinely empty" from "the measurement is broken," and in this incident the same control also exposed a second, unrelated silent surface that had gone dark for days.
+- When instrumentation turns out to be the gap, **ship the capture before the fix**. Without it, the fix cannot be evaluated on evidence, and a change with a visible user-facing cost gets argued from theory instead of from data.
+
+Related: [[a-queue-gated-on-identity-cannot-record-identity-failures]].

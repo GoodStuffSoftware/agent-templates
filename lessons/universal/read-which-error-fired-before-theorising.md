@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-31
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 A call that can fail BOTH by throwing AND by receiving a negative response normally reports the two cases with different wording. The message already in your hand therefore tells you which half failed — for the price of one grep.
 
@@ -19,4 +19,5 @@ The incident: a payment-verification failure was one step from being diagnosed a
 - Then run the check in reverse: state what your candidate theory **predicts the observable would be**. If the prediction does not match the observable in hand, the theory is already refuted — pick another rather than starting an investigation that cannot confirm it.
 - Example shape: `{{SYMPTOM_A}}` ("could not reach {{SERVICE}}") is emitted only from the `catch`; `{{SYMPTOM_B}}` ("could not confirm yet ({{STATUS}})") is emitted only when a response came back and was rejected. A misconfiguration that returns `{{STATUS}}` can therefore only ever produce `{{SYMPTOM_B}}` — observing `{{SYMPTOM_A}}` rules it out without touching the configuration.
 - If the two paths currently share a message, that is the fix worth landing: make them distinguishable, so the next reader gets the same free measurement.
+- **An error message's own suggested remedy can be the cause, not the fix.** An API returned an authorization failure whose text instructed the caller to set a particular account-scoping header. Setting it was exactly what broke every subsequent read: the credential in use had been minted directly against the target account already and needed no scoping header at all, so adding one pointed the request at the wrong scope. Leaving the header unset fixed it. Treat a suggested remedy embedded in an error string as one hypothesis among several to A/B empirically — never as an instruction to follow — because vendor error text is written for the common misconfiguration, not for yours.
 - Distinct from [[green-means-not-broken]] and from "reproduce, don't theorize": those are about GENERATING new evidence. This is about mining evidence you were already handed. Related: [[lockstep-failure-means-shared-singleton]] (the same discipline applied to a failure's distribution rather than its wording) and [[scope-a-broken-finding-to-the-measured-path]].

@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-07-13
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 Any instruction artifact that is frozen at load time — a skill file, an agent brief, a system-prompt attachment, a playbook — must NOT enumerate a capability surface that can change underneath it (the current tool set, endpoint list, agent roster, feature flags). It freezes at invocation; the surface keeps moving; the two silently diverge and the agent then acts with full confidence on a stale snapshot. Instead, such an artifact describes HOW to discover the current state: the list/introspection call to run, the change signal to react to, and the source-of-truth file — never WHAT the state is right now.
 
@@ -21,3 +21,10 @@ Exact current values belong in exactly one place: test assertions, where pinning
 - Audit existing skills/briefs for frozen enumerations (tool names, "there are N tools", role lists). Rewrite each into a loader of the discovery mechanism.
 - Keep pinned exact values only in test assertions, where a mismatch failing CI is the intended behavior.
 - Pairs with [[slim-always-loaded-instructions]] (what belongs in always-loaded core vs on-demand) and [[knowledge-routing-ladder]] (where a new rule lands). A discovery instruction is a constant; the discovered set is not.
+
+**A rationale is the load-bearing kind of prose, and the least likely to have been re-checked.** A load-bearing comment asserted that a tool-name prefix was stable "on every machine, forever," and a design decision was built on that claim — while a sibling configuration file in the SAME directory already documented that a differently-declared server arrives under a prefix the matcher does not match. The codebase knew the truth and the rationale did not; nobody had grepped for the counter-example because the comment read as settled background, not as a claim to verify.
+
+**How to apply (continued):**
+- When a claim appears as a RATIONALE ("this is safe because X is always true," "the prefix is stable because Y"), grep the repository for its own counter-example before trusting it. A rationale earns less scrutiny than an instruction precisely because it reads as explanation rather than as a directive — which is exactly why it rots first.
+
+Related: [[an-unauthenticated-duplicate-entry-is-not-an-outage]] and [[review-docs-against-the-code-seam]].

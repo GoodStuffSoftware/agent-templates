@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]
-corroborated: 3
+corroborated: 4
 ---
 Before generalizing a capability failure, enumerate the delivery paths that capability actually has. An instrument observes only the path it was built for, and a second path that works shows up as SILENCE in the first path's log — which is often the healthy steady state for a pull-based transport.
 
@@ -33,3 +33,7 @@ The split costs one line and preserves the reason to look.
 - Watch these phrasings, which almost always outrun their evidence: "nothing else uses this", "this is the only caller", "no other instances", "the class is closed", "it's not used anywhere", "the suite is green".
 - Apply it to your own inertness proofs. A guard justified by "no current caller does X, so this refusal changes nothing" is the same shape: state what the enumeration covered (statically visible literal call sites) and what it could not (specs built at runtime, values arriving from variables, injected fakes that bypass the real implementation, callers added after the grep ran).
 - Related: [[proxy-mediated-liveness-measures-the-proxy]] covers the specific case where the working path's participants never appear in the server's registry at all.
+
+**A related discipline scopes not the search but the CLAIM: state an isolation or safety property at the strength you can actually prove.** "The agent cannot reach {{RESOURCE}}" was true of the tokens that had been issued, but was not provable about a platform integration that also grants access through a different route entirely. Write the property as it holds — "no issued token grants access" — and name what remains unconfirmed, rather than letting the stronger, unqualified claim stand in a document that a later reader will treat as settled.
+
+A lightweight habit makes this routine: tag each claim in a findings document **MEASURED** / **NOT MEASURED** / **INFERENCE**, and refuse to let a policy decision lean on a claim tagged INFERENCE when a claim with its own primary justification is available to lean on instead. The tag costs a few characters and prevents an inferred claim from quietly doing the work of a measured one.

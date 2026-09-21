@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-31
 provenance: [contrib-1]
-corroborated: 1
+corroborated: 2
 ---
 Fail-open and fail-silent are separable, and conflating them is what makes fail-open dangerous. The safety property you want — *never block real work* — does not require the diagnostic property you get by accident — *never report why*.
 
@@ -24,3 +24,8 @@ The same split shows up at design time, one level out. A guard that must restric
 - Verify a guard with an input **designed to trip it**. A clean run over clean input proves nothing, because a completely dead guard produces the identical result.
 - Distinguish the three outcomes in the guard's own reporting: allowed, denied, *could not evaluate*. Folding the third into the first is [[did-not-run-is-a-third-outcome]].
 - Related: [[guard-hooks-deny-teach-ack]] (fail open on hook error is right — this is the missing half of it), [[a-silent-guard-needs-a-canary]] (the ongoing-monitoring version of the same ambiguity), and [[assert-the-guard-saw-something]] (the same hazard in the guard's input rather than its error path).
+
+**Two gates in one release pipeline were deliberately given OPPOSITE policies, and that was correct.** The test gate fails CLOSED — a test failure or a broken test runner blocks the release, full stop. The observability gate fails OPEN — a credentials failure or a read error against the monitoring dependency reports an explicit `NOT_RUN` and lets the release proceed, because a monitoring outage that has nothing to do with the code should never wedge every release behind it.
+
+- **Choose fail-open versus fail-closed on the blast-radius axis — what a false BLOCK costs against what a false PASS costs — never on "consistency with the sibling gate."** Two gates protecting different failure classes (code correctness versus an external monitoring dependency) have no reason to share a policy, and forcing them to match trades away the property each one exists for.
+- The fail-open gate must still emit a third outcome rather than silently folding into a pass — [[did-not-run-is-a-third-outcome]] — otherwise "the observability check didn't run" and "the observability check ran and found nothing wrong" become indistinguishable, which is the exact silent-no-op failure this lesson opens with.

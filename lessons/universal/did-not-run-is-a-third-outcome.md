@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-17
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 A verification suite has three outcomes per check, not two: **pass**, **fail**, and **did-not-run**. Compute the aggregate verdict from the absence of *both* failures and did-not-runs. "No failures" is not "verified" — it is also what a suite that executed nothing reports.
 
@@ -24,4 +24,13 @@ A week of hardening one release-verification harness produced the same fix five 
 - Carry the REASON into the verdict. A summariser that reports a boolean loses the one field that lets a reader tell a real red from an unconfigured runner — and a wrapper that drops it can mask a red entirely.
 - Track how long each check has been did-not-run, and treat a long-dormant one as unverified code, not as a passing check. Exercise it deliberately rather than discovering its defects on the day it finally matters.
 - When two checks inspect the same thing and disagree — one reports did-not-run, the other passes by reasoning that the artifact "must exist" — the disagreement is the tell. The one that inferred is the one that is wrong.
+
+**A did-not-run that gets reported as a FAILURE is just as damaging as one folded into a pass — it manufactures alarms instead of hiding gaps.** A scheduled digest job shipped before its own credentials existed, and failed every night: one failure email per day and a row of red crosses on a public repository, for nothing that was actually wrong. The job never distinguished "not set up yet" from "broken," so it reported the louder of the two by default.
+
+- Gate the work steps on the credentials being present — a job-level environment populated from the secrets context, step-level conditions guarded on that environment — and emit an explicit notice when skipping, rather than attempting the step and letting it fail on a missing credential.
+- Keep checkout and dependency install **unconditional**, even when the credentialed steps are skipped, so a skipped run still proves the toolchain installs cleanly. A did-not-run leg should still exercise everything it safely can.
+- Reserve a loud failure for **configured-and-failing** — that is the only case actually worth an alert; "not configured yet" is did-not-run and should read that way in every channel that reports it.
+
+Second corroboration of the same shape: a release gate that reports an explicit **NOT_RUN** when its data source is unreachable, rather than collapsing to a pass (hiding the gap) or a block (manufacturing a false alarm on an outage of the reporting path itself, not of the release).
+
 - Related: [[assert-the-guard-saw-something]] (the single-guard version of the same bug), [[match-instrument-to-failure-class]], [[green-means-not-broken]].
