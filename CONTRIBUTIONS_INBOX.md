@@ -22,7 +22,15 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
-_(empty — everything queued through 2026-09-21 was folded; see the fold history below.)_
+### 2026-09-21 — a version pin can be EOL while still resolving — check the release schedule, not just the version index
+
+- **Trigger:** Refreshing a pinned CI runtime version by asking only "what's the newest LTS?" answers the wrong question — it says what to move *to*, never how urgent the move is. Auditing a Node pin in a GitHub Actions workflow, as part of an otherwise routine bump, turned up a release line that had already reached end-of-life almost five months earlier. Nothing was failing, so nothing had surfaced it.
+- **Is it generic?** Yes. Stripped: the specific repository, workflow file, and exact version numbers. Kept, as a worked example: the two-source method below, and the concrete magnitude (five months past end-of-life, invisible because nothing broke). The kernel generalizes past Node to any dependency with a published support calendar.
+- **Target:** a new tagged file under `lessons/universal/` — related to but distinct from the existing `look-up-a-version-in-the-step-that-writes-it` lesson, which covers picking a value at write time; this one covers auditing a pin that already exists and already resolves. Maintainer's call whether it folds in by meaning or lands separately.
+- **Proposed change:**
+  - **Main lesson.** A runtime's version index (e.g. Node's `dist` index) lists every release line that ever shipped, including dead ones — it has no opinion about support status, so a pin on a long-dead line looks perfectly valid there. The support window lives in a *separate* artifact: the project's release schedule, with per-line `lts`, `maintenance`, and `end` dates. Fetch both and cross-reference — an `end` date in the past means the pin is on an unsupported runtime and the bump is a security item, not housekeeping. "Is there a newer version" and "is my current version still supported" are two different questions with two different sources; answering only the first tells you where to go, never how late you already are. This generalizes past runtimes to any dependency with a published support calendar — database engines, distro base images, framework LTS lines all split "what exists" from "what is still supported" the same way.
+  - **Secondary lesson, same task.** When confirming that a floating major-version tag actually exists before pinning to it, sort the tag list on the *tag*, not the line. `git ls-remote` output starts with the SHA, so a naive version-sort over the raw output sorts hex, and a `head`/`tail` slice of that is an arbitrary subset — absence from that subset proves nothing about whether the tag exists. Query the specific ref directly (`git ls-remote origin refs/tags/{{TAG}}`) instead of sorting-and-slicing.
+- **Applied?** `no`
 
 ---
 
