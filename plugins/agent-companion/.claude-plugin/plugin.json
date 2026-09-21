@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -112,6 +112,24 @@
       "type": "boolean",
       "title": "Best-fit autofill",
       "description": "When a spawn declares WEIGHT but names no model, set the model from the routing table instead of letting it inherit the lead’s tier. Premium results still require a WARRANT line.",
+      "default": true
+    },
+    "foreground_guard": {
+      "type": "string",
+      "title": "Foreground-spawn guard",
+      "description": "How to treat a MAIN-SESSION spawn that is not run_in_background: true. A foreground spawn blocks the lead's entire turn until it returns — measured baseline: most main-session spawns run foreground, and individual foreground spawns have locked the operator out for 18-27 minutes, unable to act on messages sent mid-turn. \"off\": nothing. \"warn\" (default): a systemMessage naming the cost and the fix, zero model tokens. \"block\": deny unless the brief states a line of the form `FOREGROUND: <why>`, escapable exactly like the premium warrant. Either way, a spawn whose resolved model is the plugin's own cheapest known tier (haiku) is exempt — cheapest is also fastest, so blocking the lead's turn for one is genuinely low-cost; an unknown or unresolved model is never exempt. This is NOT Anthropic guidance — Claude Code publishes no foreground-vs-background recommendation, so this default is this plugin's own operating decision.",
+      "default": "warn"
+    },
+    "isolation_demotion_notice": {
+      "type": "boolean",
+      "title": "Isolation demotion notice",
+      "description": "Tell the caller when a spawn passes BOTH name and isolation: per agent-teams.md, passing isolation on the call makes it an ordinary subagent rather than a teammate even though it is named, so it silently will not be addressable by that name afterward. Pure information, never blocks, effectively free to compute.",
+      "default": true
+    },
+    "shared_tree_notice": {
+      "type": "boolean",
+      "title": "Shared-tree spawn notice",
+      "description": "Tell the caller when a spawn has NEITHER a name NOR isolation: it runs in the lead's own working tree (can commit there, moving HEAD) and has no address to re-brief it later — the worst-of-both-worlds shape. Deliberately narrow (unnamed AND unisolated only, not every unisolated spawn — most unisolated spawns are harmless reads) so the notice stays rare enough to read rather than becoming background noise.",
       "default": true
     },
     "version_notice": {

@@ -14,6 +14,7 @@ import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, effortFor,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
+  classifyModel, modelTiers,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
@@ -36,6 +37,15 @@ function allowWith(systemMessage, updatedInput) {
     },
   }));
   process.exit(0);
+}
+
+// Several independent features each have their own opinion about the ONE
+// systemMessage this hook may emit (the best-fit note below, and the three
+// spawn-shape gates). Combined in one place so a second note added later
+// does not silently clobber the first the way a second updatedInput would.
+function combineNotes(...parts) {
+  const joined = parts.filter(Boolean).join('\n\n');
+  return joined || null;
 }
 
 try {
@@ -206,6 +216,93 @@ try {
     return { ...(baseInput || input), prompt: `${input.prompt || ''}${suffix}` };
   }
 
+  // --- Spawn-shape gating (Gates 1-3) -------------------------------------
+  // Three checks on HOW a spawn is shaped, orthogonal to WHAT MODEL runs it
+  // (the fit/warrant/cap checks below this one). Measured from
+  // ~/.claude/agent-companion/telemetry/spawns.jsonl (the 194+ rows that
+  // carry run_in_background): most main-session spawns run FOREGROUND,
+  // which blocks the lead's entire turn until the agent returns — three
+  // such spawns on 2026-09-20/21 locked the operator out for 18, 26.7 and
+  // 25.8 minutes apiece, unable to act on four messages sent mid-turn.
+  // Every spawn that passed `isolation` was also named, and per
+  // agent-teams.md that silently demotes it from teammate to ordinary
+  // subagent regardless of the name. And a chunk of spawns were both
+  // unnamed AND unisolated: sharing the lead's own working tree (can commit
+  // there, moving HEAD) with no address to re-brief them afterward.
+  //
+  // Anthropic publishes no foreground-vs-background guidance. Gate 1 is
+  // this plugin's own operating decision, and its message says so.
+  const callerIsSubagent = !!p.agent_id; // identical to spawns.jsonl's own caller_is_subagent
+  const runsInBackground = input.run_in_background === true;
+  const gate1Applicable = !callerIsSubagent && !runsInBackground;
+
+  // Exemption: the resolved model (post-autofill — what will ACTUALLY run)
+  // is the plugin's own cheapest KNOWN tier per config/model-tiers.json
+  // ("reads, searches, single commands" — haiku today, whichever alias
+  // ranks lowest if the table changes). Cheapest is also the fastest to
+  // return, so blocking the lead's turn for one is genuinely low-cost. This
+  // reuses the plugin's own existing tier classification instead of a new
+  // prompt-length/content heuristic nobody could inspect, and — like
+  // classifyModel() itself — an unknown or still-unresolved model is NEVER
+  // exempt: fail toward the gate firing, not toward silence. Measured
+  // against the real corpus: 19 of 148 raw-applicable foreground spawns
+  // were haiku-tier — a real minority carve-out, not a loophole that
+  // swallows the gate.
+  let gate1CheapExempt = false;
+  try {
+    const modelClass = classifyModel(model);
+    const ranks = Object.values(modelTiers().tiers || {})
+      .map((t) => t.rank)
+      .filter((r) => typeof r === 'number');
+    const cheapestRank = ranks.length ? Math.min(...ranks) : null;
+    gate1CheapExempt = !!(modelClass.known && cheapestRank !== null && modelClass.rank === cheapestRank);
+  } catch { /* fail open: not exempt */ }
+  const gate1Exempt = gate1Applicable && gate1CheapExempt;
+
+  const gate1ModeRaw = String(opt('foreground_guard', 'warn')).toLowerCase();
+  // Unrecognised value: fail toward the default, same direction
+  // memory_brief_mode takes for a typo'd config rather than going silent.
+  const gate1Mode = ['off', 'warn', 'block'].includes(gate1ModeRaw) ? gate1ModeRaw : 'warn';
+  const gate1Live = gate1Applicable && !gate1Exempt && gate1Mode !== 'off';
+  const gate1Justified = /FOREGROUND\s*:/i.test(brief);
+  let gate1Action = 'none'; // none | warn | block — what THIS spawn actually gets
+  if (gate1Live) {
+    gate1Action = gate1Mode === 'block' ? (gate1Justified ? 'none' : 'block') : 'warn';
+  }
+
+  // Gate 2: pure information, always cheap to compute, never blocks. Cites
+  // agent-teams.md directly so the claim is checkable, not just asserted.
+  const gate2Fired = opt('isolation_demotion_notice', true) && !!input.name && !!input.isolation;
+
+  // Gate 3: scoped narrowly to the exact worst-of-both-worlds shape measured
+  // above — unnamed AND unisolated. Considered and rejected a subagent_type
+  // "plausibly read-only" refinement: even Explore, the built-in read-only
+  // search agent, keeps Bash — only Edit/Write/NotebookEdit are withheld —
+  // so it can still write a file via shell redirection. subagent_type is
+  // not a reliable write/no-write signal even for a built-in type, let
+  // alone a project-defined one whose tool grants this hook cannot see.
+  // Narrow-and-honest beats broad-and-guessed, so this stays exactly the
+  // unnamed-and-unisolated case rather than trying to also exclude
+  // "probably read-only" types on weak evidence.
+  const gate3Fired = opt('shared_tree_notice', true) && !input.name && !input.isolation;
+
+  const gate1WarnMsg = gate1Action === 'warn'
+    ? 'agent-companion: this spawn runs in the FOREGROUND and will block the lead\'s entire turn until it returns ' +
+      '(not Anthropic guidance - this plugin\'s own operating decision: most main-session spawns measured this way ' +
+      'ran foreground, and single foreground spawns have locked the operator out for 18-27 minutes). If the result ' +
+      'is not needed before the lead can continue, add run_in_background: true.'
+    : '';
+  const gate2Msg = gate2Fired
+    ? `agent-companion: this spawn names "${input.name}" AND passes isolation - per agent-teams.md, passing ` +
+      'isolation on the call makes it an ORDINARY SUBAGENT rather than a teammate even though it is named, so it ' +
+      'will not be addressable by that name afterward.'
+    : '';
+  const gate3Msg = gate3Fired
+    ? 'agent-companion: this spawn has no name and no isolation - it runs in the LEAD\'S OWN working tree (it can ' +
+      'commit and move HEAD there) and has no address to re-brief it later. Consider isolation: "worktree" and/or a name.'
+    : '';
+  const gateMessage = [gate1WarnMsg, gate2Msg, gate3Msg].filter(Boolean).join('\n\n');
+
   let fit = null;
   if (fitOn && model && !autofilled) {
     try {
@@ -295,7 +392,33 @@ try {
       // makes the worktree-scope bug fix itself observable going forward:
       // "worktree-main" firing on a worktree spawn is the fix working.
       memory_addition_here_source: memoryFacts ? (memoryFacts.hereSource || null) : null,
+      // --- Spawn-shape gate outcomes (additive v2 fields) -----------------
+      gate1_mode: gate1Mode,             // off | warn | block — the configured mode
+      gate1_applicable: gate1Applicable, // main-session caller, not already backgrounded
+      gate1_exempt: gate1Exempt,         // applicable, but excused: resolved model is the cheapest known tier
+      gate1_action: gate1Action,         // none | warn | block — what THIS spawn actually got
+      gate2_fired: gate2Fired,           // name+isolation both set: teammate silently demoted to subagent
+      gate3_fired: gate3Fired,           // unnamed AND unisolated: shares the lead's tree, unaddressable
     });
+  }
+
+  // --- Gate 1, block mode --------------------------------------------------
+  // Checked before the isPremium() early-return just below: spawn SHAPE is
+  // orthogonal to model TIER, so this must apply the same way to a premium
+  // spawn and a cheap one, not only to whichever one isPremium() lets fall
+  // through to the fit/warrant/cap checks.
+  if (gate1Action === 'block') {
+    recordDenial('foreground', p, `main-session foreground spawn (${input.subagent_type || 'an agent'}), no FOREGROUND justification`);
+    deny(
+      'Foreground guard: this is a MAIN-SESSION spawn with no run_in_background, so it will block the lead\'s ' +
+      'entire turn until it returns.\n\n' +
+      'Not Anthropic guidance - this plugin\'s own operating decision, from a measured baseline where most ' +
+      'main-session spawns ran foreground and individual foreground spawns cost the operator 18-27 minutes of ' +
+      'lockout apiece, unable to act on messages sent mid-turn.\n\n' +
+      'Either add run_in_background: true, or add a line to the brief:\n' +
+      '  FOREGROUND: <why this result is needed before the lead can continue>\n\n' +
+      'If you cannot write that line honestly, background it.'
+    );
   }
 
   const who = input.subagent_type || 'an agent';
@@ -310,7 +433,7 @@ try {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
   }
 
-  if (!isPremium(model)) allowWith(note, withAdditions(updatedInput));
+  if (!isPremium(model)) allowWith(combineNotes(note, gateMessage), withAdditions(updatedInput));
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -371,7 +494,7 @@ try {
     if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
-  allowWith(note, withAdditions(updatedInput));
+  allowWith(combineNotes(note, gateMessage), withAdditions(updatedInput));
 } catch {
   passthrough(); // never break a session
 }

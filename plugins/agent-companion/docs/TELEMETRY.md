@@ -183,6 +183,12 @@ whose.
 | `memory_addition_hit_count` | number \| null | pointers mode only: how many ranked hits were included in the block |
 | `memory_addition_top_score` | number \| null | pointers mode only: the top BM25 score that cleared `memory_brief_min_score` |
 | `memory_addition_here_source` | string \| null | which precedence candidate `resolveMemoryScopeDir()` used: `env:CLAUDE_CODE_PROJECT_DIR_NAME`, `settings:autoMemoryDirectory`, `worktree-main`, `literal`, or `none`. A worktree spawn showing `worktree-main` here is the worktree-scope bug fix (see hooks/lib/memory-index.mjs) working as intended — `literal` on a worktree spawn would mean it regressed. |
+| `gate1_mode` | `off` \| `warn` \| `block` | the configured `foreground_guard` mode at spawn time |
+| `gate1_applicable` | boolean | true when the caller is the main session (`caller_is_subagent` false) and `run_in_background` is not `true` — the raw population Gate 1 considers, before the exemption |
+| `gate1_exempt` | boolean | applicable, but excused: the resolved `model` (post-autofill) classifies as the plugin's own cheapest known tier (haiku) per `config/model-tiers.json` |
+| `gate1_action` | `none` \| `warn` \| `block` | what THIS spawn actually got, after mode and exemption: `none` when not applicable, exempt, mode is `off`, or a `block`-mode spawn carried a `FOREGROUND:` justification |
+| `gate2_fired` | boolean | `name` and `isolation` were both set — per agent-teams.md this spawn is an ordinary subagent, not a teammate, despite being named |
+| `gate3_fired` | boolean | neither `name` nor `isolation` was set — this spawn shares the lead's own working tree and has no address to re-brief it later |
 
 **`model: "(inherited)"` is the field that matters most.** It means no model
 was specified, so the spawn silently ran at the *lead's* tier. That is the
@@ -218,7 +224,7 @@ with no corresponding start was denied or failed.
 | `session_id` | string | session it fired in |
 | `agent_type` | string | the agent whose call was denied |
 | `tool_name` | string \| null | the tool the call was for (`Agent`, `Bash`, …) |
-| `guard` | string | `delegation`, `fit`, `warrant`, or `premium-cap` |
+| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, or `foreground` |
 | `outcome` | string | currently always `deny` |
 | `detail` | string | short reason, truncated to 300 chars |
 
