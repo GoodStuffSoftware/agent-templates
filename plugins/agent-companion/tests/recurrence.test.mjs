@@ -8,7 +8,13 @@
 // never assistant/user prose), Fix 2 (prefix-variant collapsing without
 // erasing the error class), Fix 3 (--since / mtime filtering), the
 // min-sessions floor, the CLI (--json purity, human table, the write
-// location), and detect.mjs's baseline-diffing "only what's NEW" behaviour.
+// location), Fix 5/Change 1 (--init is the only full scan; a bare/default
+// invocation with no cursor refuses rather than falling back to one), and
+// detect.mjs's baseline-diffing "only what's NEW, and only environment-
+// class" behaviour, including that the known-set — not mtime-skipping —
+// is what keeps an already-notified signature from surfacing again.
+// Classification itself (guard/harness/environment/unknown) is unit-tested
+// separately in recurrence-classify.test.mjs.
 //
 // No test touches the real ~/.claude — every fixture uses makeFixture() and
 // an explicit `root` (scanRecurrence tests) or AGENT_COMPANION_TRANSCRIPTS_ROOT
@@ -222,7 +228,12 @@ test('recurrence.mjs CLI: --json prints ONLY a parseable {ranked, meta} payload 
     }
     writeFileSync(join(proj, 's.jsonl'), lines);
 
-    const res = runScript('scripts/recurrence.mjs', ['--json', '--min-sessions', '3'], {
+    // --since is an explicit human override and bypasses the cursor
+    // requirement (2026-09-22 refinement: default/bare mode now requires a
+    // cursor from --init — see the dedicated "no cursor" tests below). This
+    // test's own focus is --json purity, not the cursor gate, so --since is
+    // the minimal fix that keeps it exercising a real scan.
+    const res = runScript('scripts/recurrence.mjs', ['--json', '--min-sessions', '3', '--since', '2000-01-01'], {
       env: {
         AGENT_COMPANION_TRANSCRIPTS_ROOT: root,
         CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'),
@@ -239,12 +250,14 @@ test('recurrence.mjs CLI: --json prints ONLY a parseable {ranked, meta} payload 
   }
 });
 
-test('recurrence.mjs CLI: default (human) mode prints the ranked-table header', () => {
+test('recurrence.mjs CLI: human-table mode (--since) prints the ranked-table header', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const root = join(dir, 'corpus');
     mkdirSync(root, { recursive: true });
-    const res = runScript('scripts/recurrence.mjs', [], {
+    // --since substitutes for the now-required cursor — see the "no cursor"
+    // tests below for the bare-invocation behaviour this test used to cover.
+    const res = runScript('scripts/recurrence.mjs', ['--since', '2000-01-01'], {
       env: {
         AGENT_COMPANION_TRANSCRIPTS_ROOT: root,
         CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'),
@@ -265,7 +278,7 @@ test('recurrence.mjs CLI: default write location is under the plugin DATA dir, n
     const root = join(dir, 'corpus');
     mkdirSync(root, { recursive: true });
     const pluginData = join(dir, '.claude', 'plugins', 'data', 'agent-companion-x');
-    const res = runScript('scripts/recurrence.mjs', [], {
+    const res = runScript('scripts/recurrence.mjs', ['--since', '2000-01-01'], {
       env: { AGENT_COMPANION_TRANSCRIPTS_ROOT: root, CLAUDE_PLUGIN_DATA: pluginData },
     });
     assert.equal(res.status, 0, `stderr: ${res.stderr}`);
@@ -285,30 +298,108 @@ test('recurrence.mjs CLI: default write location is under the plugin DATA dir, n
   }
 });
 
-// --- detect.mjs wiring: only what's NEW -------------------------------------
+// --- Change 1: full scan is --init-ONLY; no cursor means no scan -----------
 
-test('detect.mjs: recurring_failures fires once for a new signature, then stays silent', () => {
+test('recurrence.mjs CLI: bare invocation with no cursor performs no scan and writes nothing', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const root = join(dir, 'corpus');
+    const proj = join(root, 'proj');
+    mkdirSync(proj, { recursive: true });
+    // A signature that WOULD be found if this accidentally fell back to a
+    // full scan — proves silence here is "refused to scan", not "scanned
+    // and found nothing".
+    let lines = '';
+    for (const sid of ['nc1', 'nc2', 'nc3']) {
+      lines += `${toolResultLine({ sessionId: sid, timestamp: '2026-09-01T00:00:00Z', text: 'fatal: reference is not a tree: would-be-found-branch' })}\n`;
+    }
+    writeFileSync(join(proj, 's.jsonl'), lines);
+
+    const pluginData = join(dir, '.claude', 'plugins', 'data', 'agent-companion-x');
+    const res = runScript('scripts/recurrence.mjs', [], {
+      env: { AGENT_COMPANION_TRANSCRIPTS_ROOT: root, CLAUDE_PLUGIN_DATA: pluginData },
+    });
+    assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+    assert.match(res.stderr, /no cursor yet/i, `expected the no-cursor hint on stderr: ${JSON.stringify(res.stderr)}`);
+    assert.doesNotMatch(res.stderr, /wrote \d+ row\(s\)/, 'must not have written a scan artifact — that would mean it scanned');
+    assert.doesNotMatch(res.stdout, /would-be-found-branch/, 'the recurring signature must not appear anywhere — it was never scanned');
+  } finally {
+    cleanup();
+  }
+});
+
+test('recurrence.mjs CLI: --init performs the full scan, classifies rows, and establishes the cursor', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const root = join(dir, 'corpus');
     const proj = join(root, 'proj');
     mkdirSync(proj, { recursive: true });
     let lines = '';
-    for (const sid of ['d1', 'd2', 'd3']) {
-      lines += `${toolResultLine({ sessionId: sid, timestamp: '2026-09-01T00:00:00Z', text: 'fatal: detect wiring failure' })}\n`;
+    for (const sid of ['i1', 'i2', 'i3']) {
+      lines += `${toolResultLine({ sessionId: sid, timestamp: '2026-09-01T00:00:00Z', text: 'fatal: reference is not a tree: init-branch-name' })}\n`;
     }
     writeFileSync(join(proj, 's.jsonl'), lines);
 
+    const pluginData = join(dir, '.claude', 'plugins', 'data', 'agent-companion-x');
+    const env = { AGENT_COMPANION_TRANSCRIPTS_ROOT: root, CLAUDE_PLUGIN_DATA: pluginData };
+    const res = runScript('scripts/recurrence.mjs', ['--init'], { env });
+    assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+    assert.match(res.stdout, /rows per class/i, JSON.stringify(res.stdout));
+    assert.match(res.stdout, /seeded as known/i, JSON.stringify(res.stdout));
+
+    // A cursor now exists: a bare (no --init, no --since) run must proceed
+    // (incrementally) instead of refusing.
+    const res2 = runScript('scripts/recurrence.mjs', [], { env });
+    assert.equal(res2.status, 0, `stderr: ${res2.stderr}`);
+    assert.doesNotMatch(res2.stderr, /no cursor yet/i, `expected the cursor from --init to satisfy the gate: ${JSON.stringify(res2.stderr)}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// --- detect.mjs wiring: only what's NEW -------------------------------------
+
+test('detect.mjs: recurring_failures needs --init first (no cursor = no signal, no scan), then fires once and stays silent — even under known-set re-scan', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const root = join(dir, 'corpus');
+    const proj = join(root, 'proj');
+    mkdirSync(proj, { recursive: true });
     const env = {
       AGENT_COMPANION_TRANSCRIPTS_ROOT: root,
       CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'),
     };
 
+    // Change 1: with no cursor, the check must emit no signal at all (never
+    // "ran and found nothing") and say so in its own return value.
+    const run0 = runScript('scripts/detect.mjs', [], { env });
+    assert.equal(run0.status, 0, `stderr: ${run0.stderr}`);
+    assert.equal(
+      (run0.json.signals || []).find((s) => s.kind === 'recurring_failures'),
+      undefined,
+      `must not fire with no cursor: ${JSON.stringify(run0.json.signals)}`,
+    );
+    assert.equal(run0.json.baseline?.recurrenceStatus, 'no-cursor', JSON.stringify(run0.json.baseline));
+
+    // Establish the cursor (against an empty corpus) via --init.
+    const initRes = runScript('scripts/recurrence.mjs', ['--init'], { env });
+    assert.equal(initRes.status, 0, `stderr: ${initRes.stderr}`);
+
+    // Write the recurring failure to a FRESH file (mtime after the cursor)
+    // so the incremental scan actually sees it — a file already present
+    // before --init's full scan would be older than the cursor and
+    // invisible to the incremental path, same as any real transcript.
+    let lines = '';
+    for (const sid of ['d1', 'd2', 'd3']) {
+      lines += `${toolResultLine({ sessionId: sid, timestamp: '2026-09-01T00:00:00Z', text: 'fatal: detect wiring failure' })}\n`;
+    }
+    writeFileSync(join(proj, 'new.jsonl'), lines);
+
     const run1 = runScript('scripts/detect.mjs', [], { env });
     assert.equal(run1.status, 0, `stderr: ${run1.stderr}`);
     assert.ok(run1.json, `detect.mjs did not emit JSON: ${run1.stdout}`);
     const sig1 = (run1.json.signals || []).find((s) => s.kind === 'recurring_failures');
-    assert.ok(sig1, `expected a recurring_failures signal on the first run: ${JSON.stringify(run1.json.signals)}`);
+    assert.ok(sig1, `expected a recurring_failures signal once a new environment-class signature crosses the threshold: ${JSON.stringify(run1.json.signals)}`);
     assert.equal(sig1.dispatch, 'gotcha-capture');
     assert.match(sig1.detail, /detect wiring failure/);
 
@@ -316,6 +407,17 @@ test('detect.mjs: recurring_failures fires once for a new signature, then stays 
     assert.equal(run2.status, 0, `stderr: ${run2.stderr}`);
     const sig2 = (run2.json.signals || []).find((s) => s.kind === 'recurring_failures');
     assert.equal(sig2, undefined, `must be silent once already reported: ${JSON.stringify(run2.json.signals)}`);
+
+    // Stronger proof: touch the SAME file forward so an incremental scan
+    // WOULD re-read it, and confirm it is still silent — proving the
+    // known-set, not mtime-skipping, is what suppresses it. This is
+    // Change 2's core promise: "a signature in it never surfaces again".
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(join(proj, 'new.jsonl'), future, future);
+    const run3 = runScript('scripts/detect.mjs', [], { env });
+    assert.equal(run3.status, 0, `stderr: ${run3.stderr}`);
+    const sig3 = (run3.json.signals || []).find((s) => s.kind === 'recurring_failures');
+    assert.equal(sig3, undefined, `known-set must suppress re-notification even when the file is re-scanned: ${JSON.stringify(run3.json.signals)}`);
   } finally {
     cleanup();
   }
@@ -327,19 +429,23 @@ test('detect.mjs: recurrence_scan=false gates the check off without advancing it
     const root = join(dir, 'corpus');
     const proj = join(root, 'proj');
     mkdirSync(proj, { recursive: true });
+    const pluginData = join(dir, '.claude', 'plugins', 'data', 'agent-companion-x');
+    const baseEnv = { AGENT_COMPANION_TRANSCRIPTS_ROOT: root, CLAUDE_PLUGIN_DATA: pluginData };
+
+    // Establish the cursor first — gating is orthogonal to Change 1's
+    // cursor requirement, so this test isolates its own concern (does OFF
+    // silently consume the cursor) from that one.
+    const initRes = runScript('scripts/recurrence.mjs', ['--init'], { env: baseEnv });
+    assert.equal(initRes.status, 0, `stderr: ${initRes.stderr}`);
+
     let lines = '';
     for (const sid of ['g1', 'g2', 'g3']) {
       lines += `${toolResultLine({ sessionId: sid, timestamp: '2026-09-01T00:00:00Z', text: 'fatal: reference is not a tree: gated-branch-name' })}\n`;
     }
-    writeFileSync(join(proj, 's.jsonl'), lines);
+    writeFileSync(join(proj, 'new.jsonl'), lines);
 
-    const pluginData = join(dir, '.claude', 'plugins', 'data', 'agent-companion-x');
     const offRun = runScript('scripts/detect.mjs', [], {
-      env: {
-        AGENT_COMPANION_TRANSCRIPTS_ROOT: root,
-        CLAUDE_PLUGIN_DATA: pluginData,
-        CLAUDE_PLUGIN_OPTION_RECURRENCE_SCAN: 'false',
-      },
+      env: { ...baseEnv, CLAUDE_PLUGIN_OPTION_RECURRENCE_SCAN: 'false' },
     });
     assert.equal(offRun.status, 0, `stderr: ${offRun.stderr}`);
     assert.equal(
@@ -351,9 +457,7 @@ test('detect.mjs: recurrence_scan=false gates the check off without advancing it
     // Gate back on: the still-new signature must now surface — proving the
     // gated-off run never silently consumed it (the cursor-vs-checkedAt bug
     // this wiring specifically guards against).
-    const onRun = runScript('scripts/detect.mjs', [], {
-      env: { AGENT_COMPANION_TRANSCRIPTS_ROOT: root, CLAUDE_PLUGIN_DATA: pluginData },
-    });
+    const onRun = runScript('scripts/detect.mjs', [], { env: baseEnv });
     assert.equal(onRun.status, 0, `stderr: ${onRun.stderr}`);
     const sig = (onRun.json.signals || []).find((s) => s.kind === 'recurring_failures');
     assert.ok(sig, `expected the gated signature to surface once re-enabled: ${JSON.stringify(onRun.json.signals)}`);

@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.22.0",
+  "version": "0.24.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -105,7 +105,13 @@
     "recurrence_scan": {
       "type": "boolean",
       "title": "Recurrence scan",
-      "description": "At each scout run, scan session transcripts (scripts/recurrence.mjs, called in-process) for failure signatures that recur across 3+ distinct sessions — the signal that a gotcha keeps happening rather than having been hit once (see docs/adr/0002-stack-scoped-gotcha-retrieval.md). Scans incrementally from this check's own last-scan cursor; a full corpus walk is the one-time fallback on the very first run, measured at ~90s on a 9.2GB corpus and deliberately not time-boxed, since a truncated first walk would create a permanent blind spot. Reports a signal ONLY for a signature crossing the threshold for the FIRST time since the last check — the already-reported set is tracked as capped hashes in the scout baseline, never raw signature text or file paths — so a corpus that already has hundreds of qualifying signatures is not re-announced every morning. Deterministic and silent by default: the ordinary daily case is 'nothing new crossed', which reports nothing.",
+      "description": "At each scout run, scan session transcripts (scripts/recurrence.mjs, called in-process) for failure signatures that recur across 3+ distinct sessions — the signal that a gotcha keeps happening rather than having been hit once (see docs/adr/0002-stack-scoped-gotcha-retrieval.md). Requires a cursor from a one-time `node scripts/recurrence.mjs --init` (run by a person, or the setup skill): with no cursor this check does nothing and says so — it never performs the full corpus walk itself (that used to be an automatic first-run fallback, measured at ~90s on a 9.2GB corpus; doing that unattended was the exact risk this option's behaviour was changed to remove). Every row is classified guard / harness / environment / unknown (scripts/lib/recurrence-classify.mjs) and only `environment` — a real external-world failure, not this operator's own guard denying something or Claude Code's own tool-layer complaining — can fire a signal. Reports ONLY for such a signature crossing the threshold for the FIRST time since the last check, or since `--init` seeded it as already understood; already-accounted-for signatures are tracked as capped hashes in the scout baseline, never raw signature text or file paths. Deterministic and silent by default: the ordinary daily case is 'nothing new crossed', which reports nothing.",
+      "default": true
+    },
+    "gotcha_retrieval": {
+      "type": "boolean",
+      "title": "Gotcha retrieval",
+      "description": "At PostToolUseFailure (Bash/PowerShell/Edit/Write/NotebookEdit), literally match the failure's normalized error text against `symptoms:` keys authored on existing lessons or memory files and, on a hit, inject the matched entry's title and body into context via additionalContext — see docs/adr/0002-stack-scoped-gotcha-retrieval.md. Matching is a plain substring test, never scored: a symptom key is a near-unique fingerprint, not a topic, which is why this is safe to default on where the BM25 topical modes (memory_search/memory_brief) are not. Provably inert until a human authors at least one `symptoms:` key — on a fresh corpus this is a silent no-op regardless of the setting, which is why the default differs from those. A miss (no key matched) is logged, never to the repo, as the capture-on-miss backfill signal for which gotcha to write up next.",
       "default": true
     },
     "fit_guard": {

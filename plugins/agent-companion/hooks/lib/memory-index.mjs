@@ -171,28 +171,87 @@ function splitLarge(chunk, max = MAX_CHUNK_CHARS) {
 // with no markdown headings at all, so chunkFile() above hands back a single
 // chunk with an empty heading trail whose raw text starts with the "---"
 // block itself. Parsed ONCE per file here and carried on every chunk from
-// that file (fmName/fmDescription/fmFirstLine) — this is DISPLAY-ONLY:
-// chunk.text is left exactly as chunkFile produced it, so the frontmatter
-// stays fully part of what BM25 matches against (name/description are
-// excellent match terms, and part of why ranking is already good). Handles
-// both LF and CRLF line endings — files on this machine have both.
+// that file (fmName/fmDescription/fmFirstLine/fmSymptoms/fmSessions) — this
+// is DISPLAY-ONLY: chunk.text is left exactly as chunkFile produced it, so
+// the frontmatter stays fully part of what BM25 matches against
+// (name/description are excellent match terms, and part of why ranking is
+// already good). Handles both LF and CRLF line endings — files on this
+// machine have both.
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+
+// docs/adr/0002-stack-scoped-gotcha-retrieval.md, Decision part 1 / Build
+// order Phase 1: a `symptoms:` key on a memory file needs either inline-list
+// syntax (`symptoms: [a, b]`) or block-list continuation lines
+// (`symptoms:\n  - a\n  - b`) — the general loop below is otherwise a
+// single-line-scalar-per-key reader (unlike scripts/compose.mjs's already-
+// generic one) and would silently yield an empty value for the block form,
+// so `symptoms:` gets its own small, index-based lookahead, mirroring
+// compose.mjs's own block-list handling. Every other key is untouched:
+// still one scalar per line, still silently dropped from the return value
+// unless named below.
+const EMPTY_FRONTMATTER = {
+  name: '', description: '', firstLine: '', symptoms: [], sessions: 0,
+};
 
 export function parseFrontmatter(text) {
   const s = String(text);
   const m = s.match(FRONTMATTER_RE);
-  if (!m) return { name: '', description: '', firstLine: '' };
+  if (!m) return { ...EMPTY_FRONTMATTER };
   const fm = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = line.match(/^(\w[\w-]*):\s*(.*)$/);
-    if (kv) fm[kv[1]] = kv[2].trim();
+  const lines = m[1].split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length) {
+    const kv = lines[i].match(/^(\w[\w-]*):\s*(.*)$/);
+    if (!kv) { i++; continue; }
+    const key = kv[1];
+    const rest = kv[2].trim();
+    if (key === 'symptoms') {
+      if (rest.startsWith('[') && rest.endsWith(']')) {
+        fm.symptoms = rest.slice(1, -1).split(',').map((x) => x.trim()).filter(Boolean);
+        i++;
+      } else if (rest === '') {
+        const block = [];
+        let j = i + 1;
+        while (j < lines.length && /^\s*-\s+/.test(lines[j])) {
+          block.push(lines[j].replace(/^\s*-\s+/, '').trim());
+          j++;
+        }
+        fm.symptoms = block;
+        i = j;
+      } else {
+        // A bare scalar with no brackets and no block — one key, not zero.
+        fm.symptoms = [rest];
+        i++;
+      }
+      continue;
+    }
+    fm[key] = rest;
+    i++;
   }
   let firstLine = '';
   for (const line of s.slice(m[0].length).split(/\r?\n/)) {
     const t = line.trim();
     if (t) { firstLine = t; break; }
   }
-  return { name: fm.name || '', description: fm.description || '', firstLine };
+  const sessions = Number(fm.sessions);
+  return {
+    // lessons/ frontmatter names this field `title:`, not `name:` (see
+    // scripts/compose.mjs's required-field check) — falling back to it
+    // means a matched LESSON's own title surfaces as a breadcrumb/gotcha
+    // title instead of a bare filename stem, the same way a memory file's
+    // `name:` already does.
+    name: fm.name || fm.title || '',
+    description: fm.description || '',
+    firstLine,
+    // How many distinct real sessions recurrence.mjs measured this
+    // gotcha's underlying failure recurring in, as of `since:` — optional,
+    // authored by hand from a `recurrence.mjs --init` run (see
+    // docs/adr/0002-stack-scoped-gotcha-retrieval.md). Absent on every
+    // pre-existing file; defaults to 0, the correct "no signal" value for
+    // gotcha-retrieval.mjs's match tie-break.
+    sessions: Number.isFinite(sessions) ? sessions : 0,
+    symptoms: Array.isArray(fm.symptoms) ? fm.symptoms : [],
+  };
 }
 
 // --- Breadcrumb / snippet display fallbacks ---------------------------------
@@ -248,7 +307,14 @@ export function displayText(chunk) {
 // cache here must compare its stored `schema` against this constant and
 // treat a mismatch — including a cache with no `schema` key at all, i.e.
 // written by older code than that check — as stale.
-const INDEX_SCHEMA = 2;
+//
+// 2 -> 3 (docs/adr/0002-stack-scoped-gotcha-retrieval.md): added
+// fmSymptoms/fmSessions to every chunk, the same shape of change 0.13.1
+// already taught this constant to guard against — an unbumped schema here
+// would mean gotcha-retrieval.mjs finds zero symptom-bearing chunks against
+// an already-built cache even after real `symptoms:` keys are seeded, and
+// nothing would say why.
+const INDEX_SCHEMA = 3;
 
 export function buildIndex(root) {
   const files = discoverFiles(root);
@@ -258,7 +324,7 @@ export function buildIndex(root) {
     fileMeta[f.relKey] = { mtimeMs: f.mtimeMs, size: f.size };
     let text;
     try { text = readFileSync(f.absPath, 'utf8'); } catch { continue; }
-    let fm = { name: '', description: '', firstLine: '' };
+    let fm = { ...EMPTY_FRONTMATTER };
     try { fm = parseFrontmatter(text); } catch { /* fail open: no fm fields */ }
     for (const c of chunkFile(text)) {
       if (!c.text) continue;
@@ -269,6 +335,7 @@ export function buildIndex(root) {
       chunks.push({
         scope: 'user', project: f.project, file: f.fileRel, heading: c.heading, text: c.text,
         fmName: fm.name, fmDescription: fm.description, fmFirstLine: fm.firstLine,
+        fmSymptoms: fm.symptoms, fmSessions: fm.sessions,
       });
     }
   }
@@ -746,7 +813,7 @@ export function buildRepoIndex(root, opts = {}) {
     fileMeta[f.relPath] = { mtimeMs: f.mtimeMs, size: f.size };
     let text;
     try { text = readFileSync(f.absPath, 'utf8'); } catch { continue; }
-    let fm = { name: '', description: '', firstLine: '' };
+    let fm = { ...EMPTY_FRONTMATTER };
     try { fm = parseFrontmatter(text); } catch { /* fail open: no fm fields */ }
     for (const c of chunkFile(text)) {
       if (!c.text) continue;
@@ -757,6 +824,7 @@ export function buildRepoIndex(root, opts = {}) {
       chunks.push({
         scope: 'repo', project: 'repo', file: f.relPath, heading: c.heading, text: c.text,
         fmName: fm.name, fmDescription: fm.description, fmFirstLine: fm.firstLine,
+        fmSymptoms: fm.symptoms, fmSessions: fm.sessions,
       });
     }
   }

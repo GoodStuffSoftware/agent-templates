@@ -416,15 +416,22 @@ Falsifiable conditions, strongest first.
    `agent_prompt`) behaviorally depends on that routing being correct — it is corroborating,
    not independent proof, since it rests on the same unverified assumption rather than a
    separate confirmation of it.
-   **The settling experiment:** register a probe hook on `PostToolUseFailure`, matcher
-   `Bash`, that emits a unique marker string via `additionalContext`. Spawn a subagent
-   and have it run a command that exits 1. Grep the subagent's own transcript and the
-   parent's transcript for the marker. Presence in the former and absence in the latter
-   confirms per-agent routing for this event specifically, closing the gap between
-   "strong evidence" and "proven." **Graceful degradation if it lands in the parent
-   instead:** the feature is diminished, not useless — the lead session still sees the
-   gotcha and can relay it, so even the worst-case answer leaves this worth shipping,
-   just less automatically than hoped for subagent-heavy sessions.
+   **How to read the answer out of the transcripts (2026-09-22 revision — this used to
+   be a blocking synthetic probe; see Build order, Phase 1, for why it no longer is):**
+   the shipped hook already emits `[agent-companion: gotcha]` via `additionalContext` on
+   every real match, whether the failure happened on the main thread or inside a
+   subagent, with `agent_id`/`agent_type` present on the payload whenever it fires
+   inside one. That is the same check the old synthetic probe would have performed,
+   available for free from ordinary use instead of a one-off setup: once a real
+   `PostToolUseFailure` has matched a seeded symptom inside a subagent, grep that
+   subagent's own transcript and its parent's transcript for the marker. Presence in the
+   former and absence in the latter confirms per-agent routing for this event
+   specifically, closing the gap between "strong evidence" and "proven" — a real failure
+   and a real transcript are strictly more faithful evidence than a contrived `exit 1`
+   run once and thrown away. **Graceful degradation if it lands in the parent instead:**
+   the feature is diminished, not useless — the lead session still sees the gotcha and
+   can relay it, so even the worst-case answer leaves this worth shipping, just less
+   automatically than hoped for subagent-heavy sessions.
 2. **Symptom keys proving too variable to match literally.** Locale-dependent error
    text, absolute paths embedded in the message, a version number that changes every
    release, and the encoding damage in Decision part 3 are all ways a real symptom key
@@ -452,22 +459,34 @@ Falsifiable conditions, strongest first.
 
 ## Build order
 
-Phases in execution order. The empirical probe is first because every other phase
-assumes its answer, even in the degraded case.
+Phases in execution order. There used to be a blocking "Phase 0" synthetic experiment
+ahead of Phase 1, gating the routing question in "What would have to be true for this to
+be wrong," item 1. It is gone as of 2026-09-22 — see Phase 1 below for the replacement —
+so execution now starts directly at the frontmatter change, and nothing downstream waits
+on a one-off probe that a real failure will exercise just as well.
 
-**Phase 0 — Run the settling experiment.** The probe described in "What would have to be
-true," item 1. Its outcome does not block starting Phase 1 (frontmatter changes are
-useful regardless), but it must land before Phase 3, because Phase 3 is the point where
-this feature starts claiming to deliver content to the agent that failed — a claim this
-phase either confirms or downgrades to "delivers to the lead" before anyone builds on top
-of the stronger version.
+**Phase 1 — Frontmatter, shipped instrumented instead of gated on a synthetic probe.**
+Add `symptoms:` as a documented optional key. No change needed to `scripts/compose.mjs`'s
+frontmatter reader (already generic over keys and list shapes). Extend
+`hooks/lib/memory-index.mjs`'s `parseFrontmatter()` to surface `symptoms` in its return
+value, and to follow `- item` continuation lines for it specifically (or require
+inline-list syntax on memory files and document that constraint) — both are small,
+mechanical, and testable in isolation from everything else.
 
-**Phase 1 — Frontmatter.** Add `symptoms:` as a documented optional key. No change
-needed to `scripts/compose.mjs`'s frontmatter reader (already generic over keys and list
-shapes). Extend `hooks/lib/memory-index.mjs`'s `parseFrontmatter()` to surface `symptoms`
-in its return value, and to follow `- item` continuation lines for it specifically (or
-require inline-list syntax on memory files and document that constraint) — both are
-small, mechanical, and testable in isolation from everything else.
+This phase also absorbs the old, separate "Phase 0" gate. That phase existed to settle
+the open question in "What would have to be true for this to be wrong," item 1 — whether
+a `PostToolUseFailure` hook's `additionalContext`, firing inside a subagent, lands in
+that subagent's own transcript or the parent's — via a dedicated synthetic probe (a
+planted marker, a contrived `exit 1`) run once before anything else could build on the
+answer. The replacement decision: ship the hook instrumented from Phase 3 onward and let
+the routing question answer itself from real use, because every ordinary
+`PostToolUseFailure` firing inside a subagent thereafter is a trial of exactly the same
+mechanism the synthetic probe would have exercised — a real failure with a real
+transcript to grep is strictly more faithful evidence than a one-off contrived run, and
+it costs nothing extra to collect since the hook is shipping regardless. There is no
+longer a gate to clear before Phase 3; Phase 3 ships on schedule, and "What would have to
+be true for this to be wrong" item 1 now describes how to read the answer out of the
+transcripts this produces, not a precondition for shipping it.
 
 **Phase 2 — The literal-match engine, as pure functions.** Normalization (Unicode
 normalization plus the mojibake repair from Decision part 3), the minimum-length and

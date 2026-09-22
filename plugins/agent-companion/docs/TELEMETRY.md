@@ -53,8 +53,13 @@ plugin recreates it (empty) on next use.
 **Still in the plugin data directory** (disposable, regenerable caches —
 these do NOT need to survive an uninstall): `memory-index.json`,
 `memory-index-repo-*.json`, `memory-merge-status-*.json`,
-`refactor-prompt.md`, `transcript-harvest/`. See the README "State" table for
-the full list.
+`refactor-prompt.md`, `transcript-harvest/`, `recurrence-scan/` (recurrence
+scan artifacts: `scan-<stamp>.json` from an ordinary/incremental run;
+`init-latest.json`, a fixed name always holding the latest `--init` result,
+which `--backfill` reads instead of ever re-scanning; and
+`backfill-candidates-<stamp>.json`, written only by `--backfill --yes` — see
+`scripts/recurrence.mjs` and `scripts/lib/recurrence-classify.mjs`). See the
+README "State" table for the full list.
 
 ## Recovering pre-0.17.0 history (the legacy import)
 
@@ -263,6 +268,25 @@ counters. Rewritten each run of the calibration scout. Has exactly ONE writer
 path now (`stateFile('baseline.json')`), used identically by
 `scripts/detect.mjs` and the `harness-drift` audit check, so the two can no
 longer disagree about what the baseline is.
+
+Three fields belong to the recurrence-scan feature specifically (see
+`scripts/recurrence.mjs` and `scripts/lib/recurrence-classify.mjs` — not
+restated here beyond the shape):
+
+| field | type | meaning |
+|---|---|---|
+| `recurrenceLastScan` | ISO 8601 string \| absent | the cursor: transcripts are re-scanned only from this point forward. Absent until a human (or the setup skill) runs `node scripts/recurrence.mjs --init` — with no cursor, `scripts/detect.mjs`'s `recurring_failures` check does nothing rather than fall back to a full corpus scan |
+| `recurrenceKnown` | string[] | the known-set: capped 16-hex-char hashes (never raw signature text or a file path) of signatures that must not surface as a `recurring_failures` signal again — seeded at `--init` from this machine's own guard denials, Claude Code's own tool-layer errors, and whatever the memory corpus already documents, then grown as the daily check notifies about a genuinely new one |
+| `recurrenceInit` | object \| absent | a small summary of the most recent `--init` run (`at`, per-class row counts, per-source seed counts) — informational only, nothing reads it back |
+
+`recurrenceLastScan`/`recurrenceKnown` have TWO writer paths into this same
+file, both going through the read-merge-write helpers `recurrence.mjs`
+exports (`loadRecurrenceState()`/`saveRecurrenceState()`) or, from inside
+`detect.mjs`, its own existing `baseline`/`next` accumulator (never a
+second independent read-merge-write — that would race the unconditional
+write at the bottom of `detect.mjs` and be silently reverted by it):
+`recurrence.mjs`'s own CLI (`--init`, and the default/incremental path) and
+`scripts/detect.mjs`'s in-process `recurring_failures` check.
 
 ### `scout-history.jsonl` — append-only scout run history
 

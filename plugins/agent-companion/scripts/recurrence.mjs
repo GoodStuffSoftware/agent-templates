@@ -52,6 +52,39 @@
 // who clones the library. dataDir() is already documented as exactly the
 // right place for a disposable, regenerable artifact like this one.
 //
+// FIX 5 — full scan is an --init-ONLY operation now (2026-09-22 refinement).
+// Fix 3 above originally made an absent cursor fall back to a full scan
+// silently — right for a human's first-ever run, wrong for the DAILY scout,
+// which would otherwise repeat that ~90s unattended walk every morning it
+// has no cursor (e.g. after a state reset). The CLI's default/incremental
+// path and detect.mjs's in-process check now both REQUIRE a cursor
+// (state written by `--init`) and refuse — printing a one-line hint,
+// scanning nothing — rather than guess. `--init` is the one deliberate
+// full scan: it also classifies every row (guard / harness / environment /
+// unknown — see scripts/lib/recurrence-classify.mjs) and seeds a
+// persistent known-set from what is genuinely already understood (this
+// machine's own guard denials, Claude Code's own tool-layer errors, and
+// whatever the memory corpus already documents) so the real backlog —
+// undocumented `environment`-class rows — is what survives, not buried
+// under everything the first scan happens to find. An explicit `--since`
+// still bypasses the cursor requirement, same as always: a human asking a
+// direct question is not the unattended case this fix targets.
+//
+// FIX 6 — `--backfill` never spends a token on its own. The scan (and
+// classification, and known-set seeding) is deterministic and free; only a
+// MODEL reading candidate excerpts to draft symptom keys costs the
+// operator's subscription allowance, and this script has no model access
+// of its own (zero dependencies) to do that even if it wanted to. So
+// `--backfill` alone only ever prints an estimate — candidate count,
+// approximate excerpt volume, a pointer to
+// plugins/agent-companion/docs/USAGE-ACCOUNTING.md for how allowance is
+// actually weighted — and stops. `--backfill --yes` writes the reviewed
+// candidate set to disk for a SEPARATE, subsequent agent-driven pass to
+// read and draft from; it still never calls a model itself. Reads
+// `--init`'s own persisted output (`init-latest.json`) rather than
+// scanning again, so it can never become a second unattended full-scan
+// path — see FIX 5.
+//
 // scanRecurrence() below is exported and used TWO ways: this file's own CLI
 // (writes an artifact, prints a table or --json), and scripts/detect.mjs's
 // "recurring_failures" scout check, which imports it directly and calls it
@@ -62,24 +95,42 @@
 // lessons/universal/a-cli-script-without-a-main-guard-runs-on-import.md:
 // everything CLI-shaped (argv parsing, stdout, process.exit, file writes)
 // sits behind an is-main-module guard at the bottom, so `import
-// './recurrence.mjs'` from detect.mjs runs nothing on its own.
+// './recurrence.mjs'` from detect.mjs runs nothing on its own. The same is
+// true of `--backfill`'s model-spend gate specifically: it lives ENTIRELY
+// inside runCli()/runBackfill() below the guard, is never exported, and
+// detect.mjs's import of this file names only { scanRecurrence } — there is
+// no path from the scout into it.
 //
 // Zero dependencies: Node builtins only.
 //
 // Usage:
-//   node recurrence.mjs                                # full scan, human table
-//   node recurrence.mjs --since 2026-09-01              # incremental
+//   node recurrence.mjs --init                          # the one full scan: classify + seed known-set + write cursor
+//   node recurrence.mjs                                  # incremental; refuses if --init has never run
+//   node recurrence.mjs --since 2026-09-01                # explicit human override, cursor or not
 //   node recurrence.mjs --min-sessions 5 --top 10
-//   node recurrence.mjs --json                          # full ranked array + scan metadata
-//   node recurrence.mjs --out ./scan.json                # override the write location
+//   node recurrence.mjs --json                            # full ranked array + scan metadata
+//   node recurrence.mjs --out ./scan.json                  # override the write location
+//   node recurrence.mjs --backfill                         # estimate only, writes nothing
+//   node recurrence.mjs --backfill --yes                    # write the reviewed candidate set
 
 import {
-  readdirSync, statSync, createReadStream, mkdirSync, writeFileSync,
+  readdirSync, statSync, createReadStream, mkdirSync, writeFileSync, readFileSync,
 } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { dataDir, claudeDir } from '../hooks/lib/context.mjs';
+import { createHash } from 'node:crypto';
+import {
+  dataDir, claudeDir, stateFile, readJson, writeJson,
+} from '../hooks/lib/context.mjs';
+import { stripNoisePrefixes } from '../hooks/lib/text-normalize.mjs';
+import {
+  harvestGuardMarkers, classifyRows, sortForDisplay, defaultGuardMarkerDirs,
+} from './lib/recurrence-classify.mjs';
+import {
+  loadOrBuildIndex, search, memoryRoot, findRepoRoot, loadOrBuildRepoIndex,
+  DEFAULT_REPO_GLOBS, DEFAULT_REPO_MAX_FILE_BYTES, DEFAULT_REPO_MAX_TOTAL_BYTES,
+} from '../hooks/lib/memory-index.mjs';
 
 // Same override transcript-harvest.mjs reads, for the same reason: tests
 // (and detect.mjs, when it wants to) need a scratch corpus, never the
@@ -146,26 +197,14 @@ const PATTERNS = [
 
 // --- FIX 2: collapse prefix variants of the SAME failure ----------------
 //
-// Covers exactly the label-wrapper prefixes PATTERNS above can each latch
-// onto independently (Error:/error TS####: from pattern 1, the errno codes
-// from pattern 2, fatal: from pattern 4) — a bounded, named list, not a
-// blanket "strip anything before a colon" rule that would also eat the
-// error CLASS off SyntaxError:/TypeError:/etc. and wrongly merge genuinely
-// different failures.
-const NOISE_PREFIX_RE = /^(?:error\s*(?:ts\d+)?|enoent|eacces|eperm|econnrefused|etimedout|eaddrinuse|eexist|fatal)\s*:\s*/i;
-
-function stripNoisePrefixes(s) {
-  let out = String(s).trim();
-  // A message can stack more than one label ("Error: ENOENT: …") — strip
-  // until nothing more matches. The equality check guarantees termination;
-  // the iteration cap is defensive belt-and-braces, not load-bearing.
-  for (let i = 0; i < 5; i++) {
-    const next = out.replace(NOISE_PREFIX_RE, '').trim();
-    if (next === out) break;
-    out = next;
-  }
-  return out;
-}
+// stripNoisePrefixes() (the label-wrapper strip — Error:/error TS####: from
+// pattern 1, the errno codes from pattern 2, fatal: from pattern 4) now
+// lives in hooks/lib/text-normalize.mjs, shared with
+// hooks/gotcha-retrieval.mjs's own normalizer — see that ADR
+// (docs/adr/0002-stack-scoped-gotcha-retrieval.md, Decision part 3) for why
+// there must be exactly one implementation of this, not two that could
+// silently drift apart. Imported above; nothing else in this section
+// changed.
 
 // Collapse the variable parts so the same failure in two repos is one row.
 export function signature(s) {
@@ -299,6 +338,52 @@ export async function scanRecurrence({
   };
 }
 
+// --- Known-set + cursor (Change 1/2 — see FIX 5 above) --------------------
+//
+// Shared, in that exact word, with scripts/detect.mjs's in-process scout
+// check: both read/write these same three fields on the SAME file
+// (stateFile('baseline.json')) through these two functions, so there is
+// exactly one merge discipline for them even though two different entry
+// points (this file's `--init`/default CLI, and detect.mjs's daily check)
+// call in. baseline.json already documents "exactly ONE writer path" for
+// itself (docs/TELEMETRY.md) — that was about collapsing several possible
+// FILE LOCATIONS to one, not about limiting it to one caller, and a
+// read-merge-write through these two functions preserves that discipline:
+// neither caller ever touches a field it does not own.
+//
+// recurrenceKnown holds hashes only (hashSig below), never raw signature
+// text or a file path — same privacy posture the pre-refinement
+// recurrenceSeen field already had (see docs/TELEMETRY.md).
+const RECURRENCE_KNOWN_CAP = 2000; // headroom over a real corpus's observed recurring-signature count
+const RECURRENCE_STATE_KEYS = ['recurrenceLastScan', 'recurrenceKnown', 'recurrenceInit'];
+
+export function hashSig(s) {
+  return createHash('sha1').update(String(s)).digest('hex').slice(0, 16);
+}
+
+export function loadRecurrenceState() {
+  const baseline = readJson(stateFile('baseline.json'), {});
+  return {
+    recurrenceLastScan: baseline.recurrenceLastScan || null,
+    recurrenceKnown: Array.isArray(baseline.recurrenceKnown) ? baseline.recurrenceKnown : [],
+    recurrenceInit: baseline.recurrenceInit || null,
+  };
+}
+
+export function saveRecurrenceState(patch) {
+  const file = stateFile('baseline.json');
+  const baseline = readJson(file, {});
+  const next = { ...baseline };
+  for (const k of RECURRENCE_STATE_KEYS) {
+    if (patch[k] !== undefined) next[k] = patch[k];
+  }
+  writeJson(file, next);
+}
+
+export function capKnown(hashes) {
+  return [...new Set(hashes)].slice(-RECURRENCE_KNOWN_CAP);
+}
+
 // --- CLI -----------------------------------------------------------------
 // Everything below this line is a side effect (argv, stdout, file writes,
 // process.exit) and must never run just because something imported this
@@ -309,8 +394,28 @@ export async function scanRecurrence({
 function normalizePath(p) { return String(p || '').replace(/\\/g, '/').toLowerCase(); }
 const isMain = process.argv[1] && normalizePath(process.argv[1]) === normalizePath(fileURLToPath(import.meta.url));
 
+// Declared before the isMain call below, not after: `const` is block-scoped
+// with a temporal dead zone, unlike the `function` declarations further
+// down (fully hoisted, so their later position is fine) — runCli() can
+// reference NO_CURSOR_HINT the instant it runs, and it runs on the very
+// next line.
+const NO_CURSOR_HINT = 'recurrence: no cursor yet — run `node recurrence.mjs --init` once (or use the setup skill) to establish the known-set and cursor. Refusing to run an unattended full scan (see FIX 5 in this file\'s module banner).';
+
 if (isMain) {
   await runCli();
+}
+
+function writeScanArtifact(fileName, payload) {
+  const outDir = join(dataDir(), 'recurrence-scan');
+  try { mkdirSync(outDir, { recursive: true }); } catch { /* best effort */ }
+  const outPath = join(outDir, fileName);
+  try {
+    writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
+    return outPath;
+  } catch (e) {
+    console.error(`recurrence: could not write ${outPath}: ${e.message}`);
+    return null;
+  }
 }
 
 async function runCli() {
@@ -324,33 +429,58 @@ async function runCli() {
     flags.add(a);
   }
 
-  let sinceMs = -Infinity;
-  if (values['--since']) {
-    const parsed = Date.parse(values['--since']);
-    if (Number.isNaN(parsed)) {
-      console.error(`recurrence: --since "${values['--since']}" is not a parseable date (use an ISO date like 2026-08-01)`);
-      process.exit(2);
-    }
-    sinceMs = parsed;
+  if (flags.has('--backfill')) {
+    await runBackfill({ proceedYes: flags.has('--yes') });
+    return;
   }
+
+  const isInit = flags.has('--init');
   const minSessions = values['--min-sessions'] ? Math.max(1, Number(values['--min-sessions']) || 3) : 3;
   const top = values['--top'] ? Math.max(1, Number(values['--top']) || 30) : 30;
   const asJson = flags.has('--json');
   const outArg = values['--out'] || null;
 
+  const state = loadRecurrenceState();
+  let sinceMs;
+  if (isInit) {
+    sinceMs = -Infinity; // the one deliberate full scan — see FIX 5
+  } else if (values['--since']) {
+    const parsed = Date.parse(values['--since']);
+    if (Number.isNaN(parsed)) {
+      console.error(`recurrence: --since "${values['--since']}" is not a parseable date (use an ISO date like 2026-08-01)`);
+      process.exit(2);
+    }
+    sinceMs = parsed; // explicit human intent always bypasses the cursor requirement
+  } else if (state.recurrenceLastScan) {
+    sinceMs = Date.parse(state.recurrenceLastScan);
+  } else {
+    console.error(NO_CURSOR_HINT);
+    if (asJson) process.stdout.write(JSON.stringify({ ranked: [], meta: { scope: 'no-cursor' } }));
+    return;
+  }
+
   const result = await scanRecurrence({ sinceMs, minSessions });
 
+  // Classification is cheap (regex + a dozen small hook-source reads) and
+  // safe to run unconditionally — unlike the memory-corpus "already
+  // captured" check (init-only; see finishInit below), it never touches the
+  // memory corpus, so there is no cost reason to gate it to --init.
+  const { markers: guardMarkers } = harvestGuardMarkers(defaultGuardMarkerDirs());
+  const { rows: classified, counts } = classifyRows(result.ranked, guardMarkers);
+
+  if (isInit) {
+    await finishInit({ result, classified, counts, known: new Set(state.recurrenceKnown || []) });
+    return;
+  }
+
+  // --- default/incremental (and explicit --since) reporting --------------
   // FIX 4: default write location is the plugin's disposable data
   // directory, exactly mirroring transcript-harvest.mjs's own digest
   // location and naming (see that script, and this file's module banner,
   // for why: this artifact holds real paths, repo names, and URLs that
   // must never land in a public library's repo).
-  const outDir = join(dataDir(), 'recurrence-scan');
-  try { mkdirSync(outDir, { recursive: true }); } catch { /* best effort */ }
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const defaultPath = join(outDir, `scan-${stamp}.json`);
-  const outPath = outArg ? resolve(outArg) : defaultPath;
-
+  const outPath = outArg ? resolve(outArg) : join(dataDir(), 'recurrence-scan', `scan-${stamp}.json`);
   // Same best-effort guard transcript-harvest.mjs uses: --out is a
   // power-user escape hatch, and this script has no reliable way to know
   // where "the repo" is when invoked standalone, so it checks the one
@@ -358,19 +488,24 @@ async function runCli() {
   // is never a valid --out target.
   const repoGuessRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
   if (outArg && resolve(outPath).toLowerCase().startsWith(repoGuessRoot.toLowerCase())) {
-    console.error(`recurrence: WARNING — --out resolves inside what looks like the plugin's own repo (${repoGuessRoot}). This scan can contain absolute paths, real repository names, and remote URLs pulled from the operator's own transcripts. Writing it into a repo risks committing it (node scripts/leak-check.mjs would fail). Strongly prefer the default location (${defaultPath}).`);
+    console.error(`recurrence: WARNING — --out resolves inside what looks like the plugin's own repo (${repoGuessRoot}). This scan can contain absolute paths, real repository names, and remote URLs pulled from the operator's own transcripts. Writing it into a repo risks committing it (node scripts/leak-check.mjs would fail). Strongly prefer the default location.`);
   }
 
-  const payload = { meta: result.meta, ranked: result.ranked };
-  try {
-    writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
+  const payload = { meta: result.meta, ranked: classified };
+  if (outArg) {
+    try {
+      writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
+      console.error(`recurrence: wrote ${classified.length} row(s) to ${outPath}`);
+    } catch (e) {
+      console.error(`recurrence: could not write ${outPath}: ${e.message}`);
+    }
+  } else {
+    const written = writeScanArtifact(`scan-${stamp}.json`, payload);
     // Confirmation always goes to stderr, never stdout: --json's stdout
     // must be nothing but the JSON payload, or a caller piping it into
     // JSON.parse (detect.mjs does not — it imports scanRecurrence()
     // directly — but a human scripting against the CLI might) breaks.
-    console.error(`recurrence: wrote ${result.ranked.length} row(s) to ${outPath}`);
-  } catch (e) {
-    console.error(`recurrence: could not write ${outPath}: ${e.message}`);
+    if (written) console.error(`recurrence: wrote ${classified.length} row(s) to ${written}`);
   }
 
   if (asJson) {
@@ -380,15 +515,163 @@ async function runCli() {
 
   const m = result.meta;
   console.log(`recurrence: scanned ${m.filesScanned.toLocaleString()}/${m.filesFound.toLocaleString()} transcript(s) (${m.scope}${m.since ? ` since ${m.since}` : ''}), ${(m.bytesRead / 1e9).toFixed(2)} GB, ${(m.elapsedMs / 1000).toFixed(1)}s`);
-  console.log(`distinct signatures: ${m.distinctSignatures.toLocaleString()} | recurring in ${minSessions}+ sessions: ${m.recurringCount.toLocaleString()}\n`);
-  console.log('sess  proj  hits  first..last            signature');
-  for (const r of result.ranked.slice(0, top)) {
+  console.log(`distinct signatures: ${m.distinctSignatures.toLocaleString()} | recurring in ${minSessions}+ sessions: ${m.recurringCount.toLocaleString()}`);
+  console.log(`class counts — environment: ${counts.environment} | unknown: ${counts.unknown} | harness: ${counts.harness} | guard: ${counts.guard}`);
+  console.log('(showing NEW activity since the cursor above, not the full corpus — re-run with --init for the full picture)\n');
+  console.log('cls  sess  proj  hits  first..last            signature');
+  for (const r of sortForDisplay(classified).slice(0, top)) {
     console.log(
+      r.class.slice(0, 3).padEnd(4),
       String(r.sessions).padStart(4),
       String(r.projects).padStart(5),
       String(r.hits).padStart(5),
       ` ${r.first}..${r.last}`,
-      ' ' + r.sample.slice(0, 96),
+      ' ' + r.sample.slice(0, 90),
     );
+  }
+}
+
+// The one full-scan report: classify everything, seed the known-set from
+// what is genuinely already understood (NOT from everything the scan
+// found — that would bury the real backlog under noise, see Change 2 in
+// the brief this implements), write the cursor, and leave a full-picture
+// artifact (`init-latest.json`, fixed name, always the latest) for
+// --backfill to read without ever scanning on its own.
+async function finishInit({ result, classified, counts, known }) {
+  const guardRows = classified.filter((r) => r.class === 'guard');
+  const harnessRows = classified.filter((r) => r.class === 'harness');
+  const candidates = classified.filter((r) => r.class === 'environment' || r.class === 'unknown');
+
+  // Seed source 3: already documented in the memory corpus. Deliberately
+  // --init-only — re-running BM25 search per candidate (search() retokenizes
+  // its whole pool per call, see hooks/lib/memory-index.mjs) hundreds of
+  // times on every DAILY incremental run would cost real CPU for no benefit
+  // an occasional, human-invoked --init does not already provide just as
+  // well. Reuses buildMemoryBrief()'s own calibrated minScore (25) rather
+  // than deriving a new threshold — see hooks/lib/memory-brief.mjs's module
+  // banner for the calibration finding that makes a fresh threshold here a
+  // waste of effort: raw BM25 tracks query length almost as much as
+  // relevance, and there is no better fixed number to find.
+  const MEMORY_MIN_SCORE = 25;
+  const memoryCapturedSigs = new Set();
+  try {
+    const dataDirPath = dataDir();
+    const { index: userIndex } = loadOrBuildIndex({
+      root: memoryRoot(), dataDirPath, forceRebuild: false, rebuildIfStale: true,
+    });
+    let repoChunks = [];
+    try {
+      const found = findRepoRoot(process.cwd());
+      if (found) {
+        const { index: repoIndex } = loadOrBuildRepoIndex({
+          root: found.root,
+          dataDirPath,
+          globs: DEFAULT_REPO_GLOBS,
+          maxFileBytes: DEFAULT_REPO_MAX_FILE_BYTES,
+          maxTotalBytes: DEFAULT_REPO_MAX_TOTAL_BYTES,
+          forceRebuild: false,
+          rebuildIfStale: true,
+        });
+        repoChunks = repoIndex?.chunks || [];
+      }
+    } catch { /* repo scope contributes nothing */ }
+    const pool = [...(userIndex?.chunks || []), ...repoChunks];
+    if (pool.length) {
+      for (const row of candidates) {
+        const hits = search(pool, row.sample, { limit: 3 });
+        if (hits.length && hits[0].score >= MEMORY_MIN_SCORE) memoryCapturedSigs.add(row.sig);
+      }
+    }
+  } catch { /* memory corpus unreadable: contributes nothing, --init still finishes */ }
+  const memoryRows = candidates.filter((r) => memoryCapturedSigs.has(r.sig));
+
+  const newlyKnown = [...guardRows, ...harnessRows, ...memoryRows].map((r) => hashSig(r.sig));
+  const mergedKnown = capKnown([...known, ...newlyKnown]);
+
+  const now = new Date().toISOString();
+  const initSummary = {
+    at: now,
+    totalRows: classified.length,
+    counts,
+    seeded: {
+      guard: guardRows.length, harness: harnessRows.length, memory: memoryRows.length, total: newlyKnown.length,
+    },
+  };
+  saveRecurrenceState({ recurrenceLastScan: now, recurrenceKnown: mergedKnown, recurrenceInit: initSummary });
+  const written = writeScanArtifact('init-latest.json', { meta: result.meta, rows: classified });
+
+  const m = result.meta;
+  console.log(`recurrence --init: full scan of ${m.filesScanned.toLocaleString()} transcript(s), ${(m.bytesRead / 1e9).toFixed(2)} GB, ${(m.elapsedMs / 1000).toFixed(1)}s`);
+  console.log(`rows per class — environment: ${counts.environment} | unknown: ${counts.unknown} | harness: ${counts.harness} | guard: ${counts.guard} (total ${classified.length})`);
+  console.log(`seeded as known — guard: ${guardRows.length} | harness: ${harnessRows.length} | already-in-memory: ${memoryRows.length} | total newly known: ${newlyKnown.length} (known-set now ${mergedKnown.length})`);
+  if (written) console.log(`full picture written to ${written} (read by --backfill; never re-scanned)`);
+  console.log('classification is heuristic and WILL misfile some rows — that is what the "unknown" bucket is for (fails toward review, never toward silent exclusion).\n');
+
+  const topEnv = classified.filter((r) => r.class === 'environment').sort((a, b) => b.sessions - a.sessions).slice(0, 10);
+  console.log(`top ${topEnv.length} environment-class row(s) by distinct sessions:`);
+  for (const r of topEnv) {
+    const tag = memoryCapturedSigs.has(r.sig) ? '[already in memory]' : '[not yet documented]';
+    console.log(`  ${String(r.sessions).padStart(3)} sessions  ${r.first}..${r.last}  ${tag}`);
+    console.log(`      "${r.sample.slice(0, 110)}"`);
+  }
+}
+
+// --backfill: estimate-then-gate, per Change 4. Reads --init's own
+// init-latest.json rather than scanning — see FIX 6 above for why this
+// function must never itself walk the transcript corpus. Everything here
+// runs below the isMain guard and is never exported, so nothing in
+// detect.mjs's scout path (which imports only { scanRecurrence } from this
+// file) can reach it.
+async function runBackfill({ proceedYes }) {
+  const initPath = join(dataDir(), 'recurrence-scan', 'init-latest.json');
+  let initData;
+  try {
+    initData = JSON.parse(readFileSync(initPath, 'utf8'));
+  } catch {
+    console.error(NO_CURSOR_HINT);
+    console.error('recurrence --backfill: no init-latest.json found — --backfill reads --init\'s own output and never scans on its own.');
+    return;
+  }
+
+  const state = loadRecurrenceState();
+  const known = new Set(state.recurrenceKnown || []);
+  // Only `environment` is a gotcha candidate (Change 3) — `unknown` rows are
+  // not spent on until a human (or a re-run of --init after the memory
+  // corpus grows) resolves the ambiguity.
+  const candidates = (initData.rows || []).filter((r) => r.class === 'environment' && !known.has(hashSig(r.sig)));
+
+  // Rough and clearly labeled as such — this number exists only to show the
+  // shape (big vs small) before anyone commits to spending anything. See
+  // plugins/agent-companion/docs/USAGE-ACCOUNTING.md for how allowance is
+  // ACTUALLY accounted (weighted by model + effort, not raw token count) —
+  // deliberately not restated here.
+  const EXCERPTS_PER_CANDIDATE = 3;
+  const ASSUMED_CHARS_PER_EXCERPT = 400;
+  const estExcerpts = candidates.reduce((a, r) => a + Math.min(EXCERPTS_PER_CANDIDATE, Math.max(1, r.hits || 1)), 0);
+  const estChars = estExcerpts * ASSUMED_CHARS_PER_EXCERPT;
+  const estTokens = Math.round(estChars / 4);
+
+  console.log(`recurrence --backfill: ${candidates.length} candidate(s) not yet known (environment-class, from the --init run at ${initData.meta?.scannedAt || 'an unknown time'}).`);
+  console.log(`estimated excerpt volume: ~${estExcerpts} excerpt(s), ~${estChars.toLocaleString()} chars, ~${estTokens.toLocaleString()} tokens (rough — assumes up to ${EXCERPTS_PER_CANDIDATE} excerpts/candidate at ~${ASSUMED_CHARS_PER_EXCERPT} chars each).`);
+  console.log('The scan above cost zero tokens. Drafting symptom keys from these excerpts is the ONLY step that spends the operator\'s subscription allowance, weighted by model and effort, not raw tokens — see plugins/agent-companion/docs/USAGE-ACCOUNTING.md.');
+
+  if (!proceedYes) {
+    console.log('\nDry run — nothing written. Re-run with `--backfill --yes` to write the reviewed candidate set for a subsequent drafting pass.');
+    return;
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const payload = {
+    preparedAt: new Date().toISOString(),
+    sourceInitAt: initData.meta?.scannedAt || null,
+    estimate: {
+      candidates: candidates.length, excerpts: estExcerpts, chars: estChars, tokens: estTokens,
+    },
+    candidates,
+  };
+  const written = writeScanArtifact(`backfill-candidates-${stamp}.json`, payload);
+  if (written) {
+    console.log(`\nWrote ${candidates.length} candidate(s) to ${written}.`);
+    console.log('This script does not draft anything itself (zero dependencies, no model access) — a separate, subsequent agent-driven pass reads this file to draft symptom keys.');
   }
 }

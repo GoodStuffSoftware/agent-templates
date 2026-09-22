@@ -13,11 +13,13 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
-import { scanRecurrence } from './recurrence.mjs';
+import {
+  scanRecurrence, hashSig, capKnown,
+} from './recurrence.mjs';
+import { harvestGuardMarkers, classifyRows, defaultGuardMarkerDirs } from './lib/recurrence-classify.mjs';
 
 const argv = process.argv.slice(2);
 const daysArg = (() => {
@@ -213,72 +215,85 @@ try {
 // --- 8. Recurring failures (capture-on-miss precursor) ------------------
 // Recurrence across DISTINCT SESSIONS is the signal that says "we solved
 // this before and had to solve it again" — see
-// docs/adr/0002-stack-scoped-gotcha-retrieval.md. On this operator's corpus
-// there are already 600+ signatures over threshold, so reporting the
-// CURRENT list every morning would repeat the same signal forever and train
-// the reader to ignore this scout entirely — worse than no notice, because
-// it would also bury the genuine drift signals above. So the baseline
-// remembers which signatures have ALREADY been surfaced — a capped set of
-// short hashes, never raw signature text and never a file path, so this
-// stays small and carries nothing sensitive — and this check fires ONLY for
-// a signature that crosses minSessions for the FIRST time since the last
-// run. When nothing new crossed, it emits no signal at all; silence is this
+// docs/adr/0002-stack-scoped-gotcha-retrieval.md. Measured on a real
+// corpus, most of what recurs is NOT a gotcha — this operator's own guard
+// hooks correctly refusing something, or Claude Code's own tool layer
+// complaining about agent behaviour — so this check classifies every row
+// (scripts/lib/recurrence-classify.mjs: guard / harness / environment /
+// unknown) and treats ONLY `environment` as a candidate signal. Reporting
+// the CURRENT list every morning would also repeat the same signal forever
+// and train the reader to ignore this scout entirely, so a persistent
+// known-set (recurrenceKnown — capped short hashes, never raw signature
+// text or a file path) remembers what has already been surfaced OR was
+// seeded as already-understood at `--init`; this check fires ONLY for an
+// `environment`-class signature that is genuinely new. Silence is this
 // check's default state, same as every other check in this file.
 //
-// Scans incrementally via --since this check's OWN last-scan cursor
-// (baseline.recurrenceLastScan — see below for why that is a separate field
-// from the shared baseline.checkedAt every run of this file advances).
-// scanRecurrence() is called directly, in-process — same shape
-// telemetryCoverage() above uses, no subprocess. On an ordinary day that is
-// a handful of files touched since yesterday: a fraction of a second. The
-// one exception is the very first run ever, when there is no prior cursor:
-// Fix 3's own fallback in recurrence.mjs is a full corpus walk, measured at
-// ~90s on this operator's 9.2GB corpus. That walk is deliberately NOT
-// time-boxed here, unlike telemetryCoverage's 20s cap above — a truncated
-// first walk would leave a PERMANENT blind spot, because --since judges a
-// file too old to revisit once its mtime predates the cutoff, not just too
-// old for today; a one-time 90s cost on the first run is preferable to
-// silently never finishing the corpus.
-const RECURRENCE_SEEN_CAP = 2000; // headroom over today's ~600 recurring sigs; see below
-function hashSig(s) {
-  // 16 hex chars (64 bits) — enough to make an accidental collision among a
-  // few thousand entries astronomically unlikely, short enough to keep
-  // baseline.json small. The signature TEXT is already normalised (paths,
-  // hex, numbers stripped — see recurrence.mjs's signature()) before it
-  // ever reaches here, so even the pre-image is not raw failure output.
-  return createHash('sha1').update(String(s)).digest('hex').slice(0, 16);
-}
+// 2026-09-22 refinement — full scan is an --init-ONLY operation. This check
+// used to fall back to a full ~90s/9GB corpus walk whenever it found no
+// prior cursor (recurrence.mjs's old Fix 3 fallback). That is exactly the
+// kind of unannounced I/O an unattended daily scout must never do. `--init`
+// (run by a person, or the setup skill — never by this scout) is now the
+// only place a full scan happens; it also seeds recurrenceKnown from what
+// is genuinely already known (see recurrence.mjs's finishInit()). Without
+// that cursor, this check does nothing and says so — no sig(), which would
+// repeat forever, but a `next.recurrenceStatus` note or the console.error
+// hint below cover "I could not run" for anyone actually watching.
 if (opt('recurrence_scan', true)) {
   try {
-    // Deliberately its OWN timestamp, not the shared baseline.checkedAt
-    // every run of this file advances unconditionally. Reusing the shared
-    // one would make --since track "since detect.mjs last ran" rather than
-    // "since this check last actually scanned" — indistinguishable most
-    // days, but silently wrong the day someone flips recurrence_scan off
-    // and back on: checkedAt keeps advancing while this check is skipped,
-    // so re-enabling it would resume from a cutoff newer than its true last
-    // scan and permanently miss whatever changed in between (--since can
-    // only move a file out of scope, never back in). A dedicated cursor,
-    // written only when the scan actually runs, closes that gap.
-    const scan = await scanRecurrence({
-      sinceMs: baseline.recurrenceLastScan ? Date.parse(baseline.recurrenceLastScan) : -Infinity,
-      minSessions: 3,
-    });
-    const known = new Set(baseline.recurrenceSeen || []);
-    const fresh = scan.ranked.filter((r) => !known.has(hashSig(r.sig)));
-    if (fresh.length) {
-      const sample = fresh.slice(0, 3).map((r) => `"${r.sig.slice(0, 50)}" (${r.sessions} sessions)`).join('; ');
-      sig('recurring_failures',
-        `${fresh.length} new recurring failure signature(s) crossed 3+ sessions since the last scan: ${sample}`,
-        'gotcha-capture');
+    // Read/write through the SAME baseline/next accumulator every other
+    // check in this file uses — never a separate read-merge-write of
+    // baseline.json, which would race the unconditional
+    // `writeFileSync(baselineFile, {...baseline, ...next})` at the bottom
+    // of this file and get silently reverted by it. recurrence.mjs's own
+    // CLI (`--init`, default mode) is a different process invocation with
+    // no such accumulator, so it uses loadRecurrenceState()/
+    // saveRecurrenceState() directly instead — see that file.
+    if (!baseline.recurrenceLastScan) {
+      next.recurrenceStatus = 'no-cursor';
+      console.error('recurrence: no cursor yet — run `node scripts/recurrence.mjs --init` once (or the setup skill) to establish the known-set and cursor. Skipping (no scan performed).');
+    } else {
+      // Deliberately its OWN cursor, not the shared baseline.checkedAt every
+      // run of this file advances unconditionally. Reusing the shared one
+      // would make --since track "since detect.mjs last ran" rather than
+      // "since this check last actually scanned" — indistinguishable most
+      // days, but silently wrong the day someone flips recurrence_scan off
+      // and back on: checkedAt keeps advancing while this check is skipped,
+      // so re-enabling it would resume from a cutoff newer than its true
+      // last scan and permanently miss whatever changed in between
+      // (--since can only move a file out of scope, never back in).
+      const scan = await scanRecurrence({
+        sinceMs: Date.parse(baseline.recurrenceLastScan),
+        minSessions: 3,
+      });
+      const { markers: guardMarkers } = harvestGuardMarkers(defaultGuardMarkerDirs());
+      const { rows: classified } = classifyRows(scan.ranked, guardMarkers);
+      const known = new Set(baseline.recurrenceKnown || []);
+
+      // Only `environment` is a gotcha candidate. `unknown` rows stay part
+      // of the visible backlog (`--top`/`--init`'s own report) for a
+      // human's periodic review rather than paging the daily scout about
+      // something this check cannot confidently place — see
+      // recurrence-classify.mjs's module banner.
+      const fresh = classified.filter((r) => r.class === 'environment' && !known.has(hashSig(r.sig)));
+      if (fresh.length) {
+        const sample = fresh.slice(0, 3).map((r) => `"${r.sig.slice(0, 50)}" (${r.sessions} sessions)`).join('; ');
+        sig('recurring_failures',
+          `${fresh.length} new recurring environment-class failure signature(s) crossed 3+ sessions since the last scan: ${sample}`,
+          'gotcha-capture');
+      }
+      // Grow the known-set with everything confirmed noise (guard/harness —
+      // structurally identifiable regardless of whether --init happened to
+      // see this exact wording) plus whatever was just notified about, so
+      // neither surfaces again. Not-yet-notified `environment` rows and all
+      // `unknown` rows are deliberately left OUT of this growth: they stay
+      // the visible backlog until a human resolves them.
+      const noise = classified.filter((r) => r.class === 'guard' || r.class === 'harness').map((r) => hashSig(r.sig));
+      const notified = fresh.map((r) => hashSig(r.sig));
+      next.recurrenceKnown = capKnown([...known, ...noise, ...notified]);
+      next.recurrenceLastScan = now;
+      next.recurrenceStatus = 'ok';
     }
-    // Capped so baseline.json cannot grow without bound. A signature the cap
-    // evicts (oldest-appended first) that is STILL recurring gets reported
-    // once more when next seen — the honest cost of a bounded set, and one
-    // the cap size keeps rare: ~2000 slots against ~600 signatures in use
-    // today is months of headroom at this corpus's observed growth rate.
-    next.recurrenceSeen = [...known, ...fresh.map((r) => hashSig(r.sig))].slice(-RECURRENCE_SEEN_CAP);
-    next.recurrenceLastScan = now;
   } catch { /* recurrence scan unreadable: not a signal, does not block the scout */ }
 }
 

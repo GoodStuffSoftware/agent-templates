@@ -12,6 +12,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-condition-never-binding-fires-always` — An anomalous count can be a property of the data, not of the actor — check whether the emitting condition is trivially satisfiable — [universal] — active
 - `a-copy-only-sync-resurrects-what-you-deleted` — A local quarantine does not hold while a copy-only sync still has the file remotely — [universal] — active
 - `a-default-timeout-shorter-than-cold-start-manufactures-flakes` — A default test timeout shorter than a cold process spawn manufactures flakes — the red file is rarely the changed one — [universal] — active
+- `a-deleted-cwd-still-answers-until-a-child-process-uses-it` — A shell can keep running after its working directory is deleted — the failure surfaces one command later, in a child process, not at the delete — [universal, stack:git] — active
 - `a-detector-contains-what-it-detects` — A detector contains what it detects — scope the exception to the one file and rule, never disable the check — [universal] — active
 - `a-fresh-grant-403s-during-propagation` — An access error immediately after setup is not proof the setup was wrong — and a name inferred from the wrong identifier 404s like a missing resource — [universal] — active
 - `a-gate-that-exists-vs-a-gate-that-covers` — Verify a guard's COVERAGE, not just its ability to fail — grep for the underlying command, never the declared script aliases — [universal] — active
@@ -85,6 +86,8 @@ One line per lesson: `id — title — [scope] — status`.
 - `discovered-staleness-in-scope` — Staleness discovered while doing a task is in scope — fix it, and prefer de-hardcoding over re-editing the value — [universal] — active
 - `docs-living-or-historical` — Classify every docs directory as LIVING or HISTORICAL RECORD and maintain each by its class — [universal] — active
 - `e2e-spec-registration-required` — Register every new E2E spec in the test runner's config — an unregistered spec silently never runs — [stack:playwright] — active
+- `eisdir-means-a-file-path-resolved-to-a-directory` — EISDIR means the path you opened as a file IS a directory — the bug is upstream, in how the path was built or selected — [universal] — active
+- `enoent-names-the-lookup-not-the-cause` — ENOENT names the failed lookup, not why the path is missing — check what should have created it first — [universal] — active
 - `enumerate-cleanup-candidates-from-both-sides` — A cleanup tool that enumerates from one side misses everything whose other side is already gone — [universal, stack:git] — active
 - `exempt-the-generated-field-not-the-file` — Exempt the generated FIELD, not the file that holds it — a file-level exemption smuggles every hand-authored change beside it — [universal] — active
 - `exit-code-void-when-output-stream-closes` — A long command's exit code carries no information once something closed its output stream — verify the effect, not the summary — [universal] — active
@@ -99,6 +102,8 @@ One line per lesson: `id — title — [scope] — status`.
 - `fixed-overlay-cannot-scroll-the-page` — A `position: fixed` overlay cannot make the page scroll — the overflow is in the normal flow underneath — [stack:css] — active
 - `fresh-fire-wake-handle-costs-a-session` — A fresh-fire wake handle turns every message into a session spawn — act for the name, never re-register it — [agent-process] — active
 - `gate-the-write-not-the-aftermath` — A check that runs after the thing it gates is decoration — assert before the write, and verify the call ORDER before the deploy — [universal] — active
+- `git-fatal-not-a-git-repository-names-the-cwd-not-the-intent` — "git's \"not a git repository\" names where the command ran, not which repo you meant" — [universal, stack:git] — active
+- `git-remote-read-failure-is-not-always-auth` — "git's \"could not read from remote repository\" is a transport failure, not necessarily an auth failure" — [universal, stack:git] — active
 - `github-actions-path-glob-semantics` — GitHub Actions path filters — `*` does not cross `/`, `**` does; don't port globs between systems — [stack:github-actions] — active
 - `green-means-not-broken` — A passing gate means not-broken, not right — the failure space has three members — [universal] — active
 - `grep-the-shipped-artifact-not-the-docs` — For an integration keyed on an exact identifier, the installed artifact is authoritative — and agent disagreement is a signal to go read it — [agent-process] — active
@@ -127,6 +132,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `never-test-in-a-live-deployment-tree` — A deployment directory that is also a checkout is production, not a workspace — [universal] — active
 - `no-self-waking-bus-poller` — Never arm a self-waking timer to poll a coordination bus — drain a durable inbox and let a token-free daemon hold the watch — [agent-process] — active
 - `no-stall-decision-protocol` — On an unanswered user-decision point, take the best reversible default, log it durably, and continue — [agent-process] — active
+- `node-module-resolution-wording-differs-by-module-system` — Node's "module not found" wording differs by module system — CJS names a module, ESM names a package — [universal] — active
 - `non-painting-browser-pane-lies` — Don't trust geometry from an agent-driven browser pane that isn't painting — [agent-process] — active
 - `normalize-before-declaring-difference` — Normalize line endings before calling two copies different — and archive rather than delete when you act on the answer — [universal] — active
 - `notes-span-from-the-last-delivered-version` — Generated release notes span from the version that channel last received — not from the previous version number — [universal] — active
@@ -204,6 +210,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `verify-tools-then-fall-back-to-a-builtin-agent-type` — A custom agent type can come up missing its declared tools — verify tools as the literal first instruction, then respawn as a built-in type — [agent-process] — active
 - `version-bump-at-integration` — Version bumps happen at the integration point, not on feature branches — [universal, stack:git] — active
 - `windows-home-config-glob` — On Windows, the agent tool's Glob may not traverse the user-profile config dir — [env:windows, vendor:anthropic] — active
+- `windows-shell-command-not-found-wording-varies-by-shell` — "Windows' \"command not found\" wording depends on which shell ran it — PowerShell and cmd.exe never say the same thing" — [env:windows] — active
 - `windows-shell-layers-mangle-your-arguments` — Every shell layer between you and the tool rewrites your arguments — leading slashes, carets and drive paths — [env:windows] — active
 - `withhold-at-the-payload-not-in-the-prompt` — When a model summarizes mixed public and private data, withhold at the PAYLOAD — never redact in the prompt — [universal] — active
 - `write-target-in-initial-brief` — Bake the write-target into a writer's initial brief; never redirect mid-flight — [agent-process] — active

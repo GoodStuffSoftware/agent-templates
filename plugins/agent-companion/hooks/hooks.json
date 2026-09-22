@@ -159,6 +159,21 @@
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "^(Bash|PowerShell|Edit|Write|NotebookEdit)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/gotcha-retrieval.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
