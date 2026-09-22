@@ -27,6 +27,20 @@ export function assertNotRealHome(p, label) {
   }
 }
 
+// The operator's REAL .claude root(s), captured AT MODULE LOAD — i.e. before
+// makeFixture() deletes CLAUDE_CONFIG_DIR from process.env. context.mjs's
+// claudeDir() resolves CLAUDE_CONFIG_DIR first and only then falls back to
+// <homedir()>/.claude, so a resolver that skipped the override could land under
+// EITHER, and a leak detector has to watch both. assertNotRealHome() above
+// deliberately keeps checking <homedir()>/.claude only, so its behaviour for
+// its existing callers is unchanged.
+export const REAL_CLAUDE_DIRS = Object.freeze([...new Set([
+  REAL_CLAUDE,
+  ...(process.env.CLAUDE_CONFIG_DIR
+    ? [process.env.CLAUDE_CONFIG_DIR.replace(/\\/g, '/').replace(/\/+$/, '')]
+    : []),
+].filter(Boolean))]);
+
 const ENV_KEYS = ['AGENT_COMPANION_HOME_OVERRIDE', 'AGENT_COMPANION_STATE_DIR', 'CLAUDE_PLUGIN_DATA', 'CLAUDE_CONFIG_DIR'];
 
 // Fresh temp dir + the standard env overrides. Returns { dir, stateDir,
