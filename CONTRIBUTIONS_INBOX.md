@@ -1,5 +1,74 @@
 # Contributions Inbox
 
+## 2026-09-22 - a size cap that locked the whole record, and a kill switch that only half worked ({{PROJECT}})
+
+- **A constraint evaluated over the whole POST-STATE rather than over the DELTA turns a local violation into a
+  global lock-out.** A document-store rule capped a collection-valued field at N entries, written as "the
+  resulting record's field has size <= N". Any write that did not mention the field still carried the old
+  oversized value into the post-state, so once a record was over the cap EVERY write to it was refused:
+  logins, settings, counters, and the durable write queue's own flush. The owner is told nothing and the record
+  stops syncing permanently. The tell is that the denial reason is the same for a write that has nothing to do
+  with the constrained field.
+- **The fix is a RATCHET, not a bigger number.** Allow the write if the resulting size is within the cap **or**
+  does not INCREASE the size: `!(field in after) || after.field.size() <= N || (field in before && after.field.size()
+  <= before.field.size())`. The bound survives as `size <= max(N, size_before)`, monotonically non-increasing while
+  above N. It is a **strict widening**, so it cannot break any existing client and needs no migration and no
+  compatibility floor bump - and it retroactively repairs every stuck record on deploy, which means the fix and the
+  repair are the same action. The number had already been raised twice; a third raise would have moved the wall
+  without removing the failure mode.
+- **Type-test the pre-image, or the ratchet's own bound is a lie.** `size()` is usually polymorphic. If the
+  pre-image holds a string or array rather than the collection type, its `.size()` still returns a number, and the
+  ratchet will happily authorise a new collection that large. Add `before.field is <type>` to the ratchet term. This
+  one IS load-bearing, unlike the presence guard below - and the way to know which is which is to delete it and run
+  the table.
+- **Do not assume a guard is load-bearing because it reads like one.** The same work shipped a `field in before`
+  presence guard with a comment calling it the only thing preventing an authorization hole. It was not. Deleting it
+  changed the verdict in ZERO of 25 adversarial inputs: dereferencing a missing property raises an evaluation
+  error, and an evaluation error denies too. The guard was error hygiene, and a dedicated test "proving" it passed
+  for an unrelated reason. **Establish load-bearingness by removing the term and running the cases, then restoring
+  it. Exactly the cases that depend on it should flip, and the count that does NOT flip matters as much as the count
+  that does** - it shows the term does one specific thing rather than broadly changing behaviour.
+- **When a claim is refuted, the correction pass follows the PROSE and skips the SUMMARY.** That wrong guard claim
+  was corrected in the code comment, the test comment, the design doc and the runbook. It survived in a fifth place:
+  the acceptance-criteria table at the foot of the same design doc, which also still carried pre-correction counts
+  from the same blind spot. A status-looking table reads as METADATA rather than as prose making a claim, so nobody
+  re-reads it when the claim it encodes is refuted. Two thorough correction passes and an adversarial review all
+  walked past it. **Treat summary tables, acceptance-criteria rows, index entries and status columns as claims, and
+  when you fix a claim grep for its NUMBERS and its NOUNS across the whole artifact.**
+- **THE ROOT PATTERN, and it is not really about tables: a REACHABILITY or NECESSITY claim asserted by
+  enumerating the terms you were thinking about.** Three separate wrong claims on one small change, all the same
+  shape - "without this guard X is possible" (false), "X is not reachable" (false), "adding this closes nothing"
+  (false). Every time, the term that refuted the claim was **the one adjacent to the change** - the author
+  enumerated the terms they had in mind, stopped, and the missed term was the new one. A summary table hides a
+  claim by dressing it as metadata; an enumeration argument hides the case you did not enumerate. Both are cheap
+  to execute against: in all three instances the refuting variant was one run. **Any sentence of the form "X
+  cannot happen" or "this term does nothing" is a test, not a statement. Write the variant, run it, and read
+  which cases move.**
+- **A case you already examined and CLEARED is not cleared - you cleared it against ONE failure mode.** The
+  sharpest version of the above, and it came from the author of the wrong claim. The refuting case was in hand
+  during the first analysis: the transition was written down explicitly, scored for SIZE INFLATION, correctly
+  found not to cause any, and dismissed. It was never scored for the FREEZE TRANSITION, which was the failure the
+  whole change existed to remove. Right case, wrong question - which is worse than missing it, because a case you
+  have looked at feels retired. **When a change addresses failure mode B, re-walk the cases you cleared under
+  failure mode A; "I already considered that" is the sentence to distrust most.** A corollary for reviewers:
+  ask which QUESTION each case was scored against, not merely whether it was considered.
+- **Ask why the constraint exists before proposing to remove it.** Here the obvious alternatives both failed on
+  evidence: moving the field to a sub-collection turned out to be REVERTING a consolidation the project had already
+  completed (the old shape was still in the ruleset, half-drained), and dropping the cap entirely was worse than it
+  looked, because the store has a hard per-record size limit that no rule change can raise - an uncapped field is
+  not unbounded, it is bounded by a ceiling with no recourse at all. **Check the git history of the constraint
+  before designing around it; the history usually contains the rejected design.**
+- **A kill switch is only as good as the earliest branch that can fire a side effect.** The same work found a
+  trigger with a "close the promotion" flag used as the standard safety procedure before bulk writes. The flag did
+  stop the grant. It did not stop the notification email, because the email branch ran and returned BEFORE the
+  closed-flag check, gated only on "already granted, not yet notified". **When you rely on a disable flag, read the
+  handler from the top and confirm nothing with a side effect returns above the check** - and note whether the flag
+  is asymmetric: here disabling took effect immediately while re-enabling took a cache TTL.
+- **Unfreezing records re-arms every trigger that fires on writing them.** A change that makes previously-blocked
+  writes succeed is not only a permissions change: every `onWrite`-style trigger that evaluates the whole post-state
+  now runs for that cohort, for the first time in however long they were stuck. Enumerate those triggers before
+  deploying, not after.
+
 A holding area for generic improvements contributed back from real projects when no pull-request workflow is available. Entries here are **not yet applied** — a maintainer folds each one into its proper template/shared file (see [CONTRIBUTING.md](CONTRIBUTING.md) → "Where it goes") and then removes it from this file.
 
 **This is a queue, not a home.** A change isn't "done" while it's only in the inbox.
@@ -21,6 +90,29 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 **Placement note:** every pending entry goes under `## Entries` below, newest first — not above that section, and not below the fold history. Entries drifted out of it in the 2026-08-31, 2026-09-07 and 2026-09-14 folds, which is easy to do and harmless, but the queue reads correctly only when every pending entry lives in one place. A free-form entry is fine too — the template is a convenience, not a schema.
 
 ## Entries
+
+### 2026-09-22 — a green suite is not evidence that a guard guards
+
+- **Trigger:** A regression test's header comment claimed it guarded against a specific, already-fixed bug — a directory resolver that read the raw OS home directory instead of an override-aware path, so a sandboxed run could silently fall back onto the real user's files. The suite was green. Reinjecting the exact pre-fix line back into the resolver — the same code the original fix had deleted — left the whole suite green while the tool under test read the real home directory during a sandboxed run. The test had never been capable of catching the bug its own header described.
+- **Is it generic?** Yes. Stripped: the specific tool, its scanning feature, the resolver's actual name, and the real directory paths involved. Kept: the general shape of a boundary guard whose regression test was never proven to fire, the two concrete leak channels that defeated a naive output-scanning guard, the class of test pollution caused by a third-party CLI's own first-run writes, and a timezone-comparison error from a follow-up investigation into the same incident.
+- **Target:** four related but distinct additions to `lessons/universal/`. The first is close to the existing `a-silent-guard-needs-a-canary` — both conclude that a guard's silence, or a suite's greenness, is not self-evidencing and needs a deliberate adversarial probe — but that lesson currently frames the canary as a production-monitoring device; maintainer's call whether this widens it to cover regression-test guards too, or lands as a cross-linked sibling. The third is related to `neutralize-ambient-env-in-negative-tests` and `an-inherited-env-var-beats-the-child-cwd`, but the contamination source here is a third-party binary's own writes into the asserted-empty directory, not an inherited variable changing which code path runs — likely a sibling rather than a fold. The second and fourth look like new kernels with no close existing match.
+- **Proposed change:**
+  - **Prove a guard by reinjecting the bug it names.** A test whose header claims to guard a specific past defect is itself unverified until something makes it fail on purpose. Give every such test a sensitivity control: take the exact code the original fix removed, put it back, and assert the suite now goes red. If it stays green, the guard was never wired to the failure mode it claims to cover — and "all tests pass" looks identical whether the guard works or has quietly gone inert, because nothing else will ever surface the difference.
+  - **Scanning output for a path cannot detect a read that emits an encoded or summarized form of it.** The guard above worked by substring-scanning a tool's JSON output for the real home-directory path. It missed the leak on two separate channels: one emitted the directory name with its path separators replaced by dashes — an encoded form containing none of the original path's substrings — and a second emitted only a human-readable label, no path text at all. Both channels read the protected tree and printed nothing a scanner could match. When the property under test is "this process must not touch location X," assert on the filesystem access itself — trace the read/write entry points, or point the process's home at a sentinel directory and assert the sentinel stays untouched — rather than scanning what it chose to print, which is never guaranteed to be the same set as what it touched.
+  - **A "did not touch directory D" assertion can be tripped by a third-party CLI the process shells out to.** The corrected version of the test above pointed the process's home at a sentinel directory and asserted it stayed empty. It failed on any machine that happened to have some external CLI installed, because the tool under test shells out to that CLI, and the CLI does its own first-run initialization in whatever home directory it is handed — writing its own config and a backup file into the sentinel. CI never caught this because the CI image does not have that CLI installed, so the failure surfaced only on developers' own machines. Two rules follow: strip any third-party binary the code under test may invoke from `PATH` before asserting what your own code touched, so the assertion measures your code and not a dependency's; and treat a test that is green in CI but red locally as a strong lead in itself — the environment difference is usually the finding, not noise to route around.
+  - **An API timestamp and a git timestamp are usually in different time zones — normalize before comparing, or prefer a structural check.** A follow-up investigation into this same incident concluded the test had regressed, reasoning that a CI run timestamped 22:52 must postdate a commit that added the test at 19:15, which would mean the test once existed and passed. Both numbers were accurate and the conclusion was still wrong: the run's timestamp was UTC, the commit's was local at a `-0400` offset, and correcting for the offset put the run about 23 minutes *before* the commit — the test had never run there at all. Normalize both sides to one zone before doing timestamp arithmetic, and prefer a direct structural check over arithmetic wherever one is available: whether a file exists at a given commit, or whether one commit is an ancestor of another, answers the real question with no offset to get wrong. A cheap corroborating signal was available too — the supposedly-passing historical runs showed a noticeably lower test count than the current suite, which alone should have cast doubt on the story.
+- **Applied?** `no`
+
+### 2026-09-22 — `git status` cannot detect a pending line-ending renormalisation
+
+- **Trigger:** A backup repository that copies files in verbatim added a `.gitattributes` under `core.autocrlf=true`. Its safety gate for "will this touch any files I didn't mean to touch" was "run `git status --short` first, and stop if anything besides the new `.gitattributes` shows as changed." The gate came back clean — only the new, untracked `.gitattributes` appeared. A direct comparison of real bytes against the stored blobs, run out of caution rather than because the gate raised anything, found 11 tracked files whose stored bytes already differed from the real working-tree bytes: CRLF-native files that had silently been stored CR-stripped.
+- **Is it generic?** Yes. Stripped: the specific repository, its purpose, and which files were affected. Kept: the mechanism and the two-command check, which apply to any git repository with `core.autocrlf` enabled and any change that alters what gets filtered — a new or edited `.gitattributes`, a `.gitattributes` merge, or a global `core.autocrlf` flip.
+- **Target:** a new tagged file under `lessons/universal/` — a gotcha about the git content-filter / stat-cache interaction, not a scaffolding change.
+- **Proposed change:**
+  - **Main lesson.** `git status` and `git diff` both compare through git's content filters (the pair `core.autocrlf` installs), and `git status` additionally trusts its stat cache (size + mtime) before it even decides to re-read a file. Adding or editing `.gitattributes` invalidates neither, so both commands can be confidently wrong about whether the stored bytes match the real bytes: a file can report **clean** while its raw bytes differ from its committed blob (stale stat cache never re-triggered the read), and a file can report **modified** while `git diff` shows no hunks at all, because `autocrlf` converts the working copy back before comparing, masking the very difference in question. A gate written as "`git status --short`, stop if anything unexpected shows" is not merely weak here — it is structurally unable to answer the question it was asked.
+  - **The reliable check** bypasses filters on both sides: `git hash-object --no-filters <path>` against the blob hash `git ls-files -s <path>` already recorded — equivalently, diff `git show HEAD:<path>` against the raw file bytes. Neither side runs a content filter, so the comparison answers "do the stored bytes equal the real bytes" instead of "do the filtered views match."
+  - **Generalizable rule.** When the question is "do the stored bytes equal the real bytes," never ask `git status` or `git diff`. Ask `git hash-object --no-filters` versus `git ls-files -s`. And when adding or changing line-ending policy (`.gitattributes`, `core.autocrlf`) in a repository that already has history, expect the next commit to contain a correction for every file the old filtering had been silently altering — say so in that commit's own message up front, or it reads as a mystery diff later.
+- **Applied?** `no`
 
 ### 2026-09-21 — a version pin can be EOL while still resolving — check the release schedule, not just the version index
 
