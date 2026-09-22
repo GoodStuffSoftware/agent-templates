@@ -10,7 +10,7 @@
 // operator's real data.
 
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -34,10 +34,13 @@ export function assertNotRealHome(p, label) {
 // EITHER, and a leak detector has to watch both. assertNotRealHome() above
 // deliberately keeps checking <homedir()>/.claude only, so its behaviour for
 // its existing callers is unchanged.
+// resolve() first: CLAUDE_CONFIG_DIR may be relative, or carry a trailing "/"
+// or "/.". A relative root left as-is would match nearly every fixture path and
+// turn the leak detector into a blanket failure.
 export const REAL_CLAUDE_DIRS = Object.freeze([...new Set([
   REAL_CLAUDE,
   ...(process.env.CLAUDE_CONFIG_DIR
-    ? [process.env.CLAUDE_CONFIG_DIR.replace(/\\/g, '/').replace(/\/+$/, '')]
+    ? [resolve(process.env.CLAUDE_CONFIG_DIR).replace(/\\/g, '/')]
     : []),
 ].filter(Boolean))]);
 
