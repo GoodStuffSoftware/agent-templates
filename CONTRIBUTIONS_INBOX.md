@@ -1,5 +1,49 @@
 # Contributions Inbox
 
+## 2026-09-22 - a source-read that felt like proof, and the one command that disproved it ({{PROJECT}})
+
+- **The claim:** an affected-test selector computed its file list as `git diff --name-only $base` with
+  `base = @{u}`. Since `git diff` against a single ref is a raw two-tree comparison, ancestry-blind, it looked
+  certain that after a rebase `@{u}` was a stale pre-rebase sha, the diff would sweep in every replayed upstream
+  file, and therefore EVERY rebased branch would be reclassified as run-everything. It was backed by a source read
+  AND a live `git diff` against a real pre-rebase backup ref that returned 33 files including several
+  run-everything triggers. It was stated to a release coordinator as a planning constraint. **It was wrong.**
+- **Why it was wrong:** the project creates worktrees with `git worktree add -b <branch> <path> <upstream>`, which
+  sets `branch.<name>.merge` to the SHARED integration ref. So `@{u}` tracked the integration branch, not a pushed
+  copy of the feature branch — it is live, it moves on fetch, and after a rebase ONTO that same ref the upstream
+  and the merge-base re-converge immediately. No stale snapshot ever existed.
+- **The command that settled it, which should have come first:** run the classifier itself on a branch confirmed
+  rebased (check the reflog for `rebase (finish)`) and read the file list it actually derives. One invocation. It
+  returned only the branch's own files. **Reading the mechanism told me what the code COULD do; running it told me
+  what it DOES.** The live `git diff` felt like empirical confirmation and was not, because it never checked what
+  `@{u}` resolved to in a real worktree — it tested the half of the theory that was true.
+- **The real rule, found by the peer who disagreed:** the selector's safe-keys list for the manifest was exactly
+  `{scripts, version}`, so any other top-level manifest change classifies run-everything, and the lockfile maps to
+  run-everything outright. A branch carrying an inherited dev-dependency plus its lockfile entry is expensive
+  permanently, however docs-like it looks. **Sort expected gate cost by manifest and lockfile touches, not by how
+  code-like a branch appears.**
+- **Process lesson:** when two agents hold different mechanisms for the same observation, do not pick the better
+  story. Find the input that the two theories predict differently, and go get it. Here the discriminator was a
+  branch that was cheap on its own content AND confirmed rebased; a branch that was expensive either way would
+  have proved nothing, and that is the branch the first investigation happened to look at.
+## 2026-09-21 - fixing a UI bug by re-layout, when the framework already had the answer ({{PROJECT}})
+
+- **A layout fix that hand-computes widths and offsets will look right in isolation and wrong together.** A config page
+  in a third-party app had two real problems: long labels clipped, and sliders stretching the full width. The fix
+  measured a label column, capped slider width and computed a number-box width from text size. Each piece worked. Taken
+  together the controls no longer shared a left edge, rows jammed against section rules, and it stopped looking like the
+  author's code. The original had used the framework's own defaults almost everywhere (a plain same-line call, align-to-
+  frame-padding, fill-the-column item width) and had exactly one magic number. Rule the operator set afterwards: use the
+  defaults, and change the smallest element that actually fixes the problem. If one value must change, push and pop that
+  single style var so it stays scoped and visible.
+- **Verify UI by looking at a render, not by reading the diff.** Two rounds of "fixed" here were verified by reading
+  code, and both shipped visible defects (clipped description text, a control drawn in the wrong column). What ended it
+  was a standalone preview harness: a small app that compiles the real UI source unmodified, stubs its dependencies,
+  feeds it fake data, and writes a PNG. It caught a third defect the operator had not reported yet, and it turns a
+  "relaunch the app and eyeball it" loop into seconds. Worth building as soon as a UI is being iterated more than twice.
+- **For before/after screenshots, build "before" from the upstream tag in a throwaway worktree.** Capturing "before"
+  from your own branch is not a comparison, it is a claim.
+
 A holding area for generic improvements contributed back from real projects when no pull-request workflow is available. Entries here are **not yet applied** — a maintainer folds each one into its proper template/shared file (see [CONTRIBUTING.md](CONTRIBUTING.md) → "Where it goes") and then removes it from this file.
 
 **This is a queue, not a home.** A change isn't "done" while it's only in the inbox.
