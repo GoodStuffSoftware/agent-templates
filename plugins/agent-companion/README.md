@@ -368,7 +368,7 @@ the legacy-data import, and the schema.
 | `state/agent-types/*.seen` | state root | one marker file per seen unknown agent type (race-free dedup) |
 | `memory-vault/` | state root | the vault repo itself — a separate git repository, see [Memory vault](#memory-vault) |
 | `state/memory-vault-sync.lock` | state root | held for the duration of one `memory-vault.mjs sync`; stale after 120s and taken over |
-| `state/memory-vault-status.json` | state root | fast-read cache of the vault's last sync outcome (git history is the source of truth, not this file) |
+| `state/memory-vault-status.json` | state root | fast-read cache of the vault's last sync outcome, plus a record of every sync ATTEMPT — including the ones turned away before doing any work, which is how a sync that silently stopped running becomes reportable (git history is the source of truth for content, not this file) |
 | `migration/backup-<stamp>/...` | state root | verbatim backup of each legacy dir's durable files, taken before the first import |
 | `refactor-prompt.md` | plugin data dir | generated when an instruction file is over budget or memory is unreachable |
 | `memory-index*.json`, `memory-merge-status-*.json` | plugin data dir | disposable, regenerable memory-search caches |

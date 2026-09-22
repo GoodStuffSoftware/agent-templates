@@ -23,8 +23,14 @@
 // how it is invoked (by name, by hand, or by the scheduled routine). This is
 // STRICTER than memory-doctor.mjs and memory-search.mjs, which do not check a
 // master on/off option in their CLI path at all — do not assume parity with
-// those two scripts here. Set the option (or its CLAUDE_PLUGIN_OPTION_
-// env var) before a manual run if you want `sync` to actually write.
+// those two scripts here. opt() reads the option from settings.json as well as
+// from CLAUDE_PLUGIN_OPTION_*, so enabling it in Claude Code is enough; the
+// env var remains a per-invocation override.
+//
+// A gate that says no still writes to state/memory-vault-status.json. A sync
+// that is turned away used to leave NO trace at all, which made "the option
+// never reached this context" look identical to "nobody ran a sync" — see
+// writeStatusCache() below.
 
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync,
@@ -39,7 +45,8 @@ import { memoryRoot, discoverFiles } from '../hooks/lib/memory-index.mjs';
 
 const MARKER_NAME = '.memory-vault.json';
 const LOCK_STALE_MS = 120000;
-const SCHEMA = 1;
+const SCHEMA = 1;          // .memory-vault.json marker — do NOT bump with the status cache
+const STATUS_SCHEMA = 2;   // memory-vault-status.json — see writeStatusCache()
 
 // --- Secrets gate ------------------------------------------------------
 // Standing gate, run on every sync, not a one-off. A match excludes that ONE
@@ -315,11 +322,22 @@ function buildCommitMessage({
 // "disabled" or "nothing changed" — those are normal outcomes, not errors.
 export function sync() {
   if (!opt('memory_vault', false)) {
-    return { skipped: 'disabled', message: 'memory-vault: disabled (memory_vault option is off) — no-op' };
+    // Record the attempt BEFORE returning. This is the whole point: a sync
+    // that is turned away has to leave a trace, or an option that never
+    // reaches this context is indistinguishable from nobody running a sync.
+    const rec = writeStatusCache({ outcome: 'skipped', reason: 'disabled' });
+    return {
+      skipped: 'disabled', consecutiveSkips: rec.consecutiveSkips,
+      message: 'memory-vault: disabled (memory_vault option is off) — no-op',
+    };
   }
 
   if (!acquireLock()) {
-    return { skipped: 'locked', message: 'memory-vault: another sync is already running — skipped' };
+    const rec = writeStatusCache({ outcome: 'skipped', reason: 'locked' });
+    return {
+      skipped: 'locked', consecutiveSkips: rec.consecutiveSkips,
+      message: 'memory-vault: another sync is already running — skipped',
+    };
   }
 
   try {
@@ -336,6 +354,7 @@ export function sync() {
     // failure) must never be read as "everything was deleted." Abort with
     // nothing touched rather than mass-delete the vault's tracked content.
     if (live.length === 0 && vaultHasContent) {
+      writeStatusCache({ outcome: 'aborted', reason: 'empty-enumeration-guard' });
       return {
         aborted: true,
         reason: 'empty-enumeration-guard',
@@ -408,8 +427,12 @@ export function sync() {
     const now = new Date().toISOString();
     if (!staged) {
       writeStatusCache({
-        lastSyncAt: now, committed: false, filesTracked: walkAllFiles(projectsRoot).length,
-        flagged: flagged.length, readErrors: readErrors.length,
+        outcome: 'ran',
+        now,
+        run: {
+          lastSyncAt: now, committed: false, filesTracked: walkAllFiles(projectsRoot).length,
+          flagged: flagged.length, readErrors: readErrors.length,
+        },
       });
       return {
         committed: false, added: 0, modified: 0, removed: 0,
@@ -428,10 +451,14 @@ export function sync() {
     const sha = git(['-C', dir, 'rev-parse', 'HEAD']).trim();
 
     writeStatusCache({
-      lastSyncAt: now, lastCommitSha: sha, committed: true,
-      filesTracked: walkAllFiles(projectsRoot).length,
-      added: added.length, modified: modified.length, removed: removed.length,
-      flagged: flagged.length, readErrors: readErrors.length, projectsTouched,
+      outcome: 'ran',
+      now,
+      run: {
+        lastSyncAt: now, lastCommitSha: sha, committed: true,
+        filesTracked: walkAllFiles(projectsRoot).length,
+        added: added.length, modified: modified.length, removed: removed.length,
+        flagged: flagged.length, readErrors: readErrors.length, projectsTouched,
+      },
     });
 
     return {
@@ -442,21 +469,99 @@ export function sync() {
         + `+${added.length} ~${modified.length} -${removed.length} `
         + `(${flagged.length} flagged, ${readErrors.length} read error(s))`,
     };
+  } catch (e) {
+    // A throw is exactly as silent as a skip from the drift check's point of
+    // view, so it leaves a trace too — and then propagates unchanged.
+    writeStatusCache({ outcome: 'error', reason: String(e?.message || e).slice(0, 200) });
+    throw e;
   } finally {
     releaseLock();
   }
 }
 
-function writeStatusCache(obj) {
-  try { writeFileSync(statusCacheFile(), JSON.stringify({ v: SCHEMA, ...obj }, null, 2)); } catch { /* best effort cache */ }
+// --- status cache ---------------------------------------------------------
+// This file is the ONLY trace a sync leaves behind, and it used to be written
+// exclusively AFTER the memory_vault gate inside sync(). So a sync that was
+// turned away wrote NOTHING, and "the option never reached the scheduled
+// context" looked exactly like "nobody has run a sync lately." The
+// memory-vault-drift check could not tell the two apart and so could not
+// report either one.
+//
+// v:2 records every ATTEMPT alongside the last successful RUN, and the two
+// sets never overwrite each other:
+//
+//   lastSyncAt, lastCommitSha, committed, filesTracked, added, modified,
+//   removed, flagged, readErrors, projectsTouched
+//       Unchanged v:1 meaning — the last sync that actually ran, written with
+//       exactly the fields v:1 wrote. A v:1 reader works against a v:2 file
+//       verbatim, and a v:1 file read by v:2 code simply has no attempt
+//       record yet.
+//   lastAttemptAt, lastAttemptOutcome, lastAttemptReason, consecutiveSkips
+//       EVERY call to sync(), including the ones that return before doing any
+//       work at all: disabled, locked, aborted, thrown.
+//
+// The divergence between the two is the signal. Attempted a minute ago, last
+// succeeded never (or long ago) is what an option that is not reaching the
+// context that syncs actually looks like from the outside.
+//
+// This does not make a healthy backup noisy. A sync that runs writes outcome
+// 'ran' and consecutiveSkips 0 every time, and the drift check stays silent
+// on exactly that — silence remains the success case.
+function readStatusCache() {
+  try {
+    const obj = JSON.parse(readFileSync(statusCacheFile(), 'utf8'));
+    return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : null;
+  } catch { return null; } // absent or malformed: same as no history
+}
+
+// `run` carries the fields of a sync that actually did the work and REPLACES
+// the previous run's fields wholesale, exactly as v:1 did. Omit it for an
+// attempt that was turned away and the previous run's fields are carried
+// forward untouched, so a skip can never erase the record of the last real
+// backup.
+function writeStatusCache({ outcome, reason = null, run = null, now = new Date().toISOString() }) {
+  const prev = readStatusCache() || {};
+  const {
+    v: _v, lastAttemptAt: _at, lastAttemptOutcome: _oc,
+    lastAttemptReason: _rs, consecutiveSkips: _cs, ...prevRun
+  } = prev;
+  const priorSkips = Number.isFinite(prev.consecutiveSkips) ? prev.consecutiveSkips : 0;
+  const record = {
+    v: STATUS_SCHEMA,
+    ...(run || prevRun),
+    lastAttemptAt: now,
+    lastAttemptOutcome: outcome,
+    lastAttemptReason: reason,
+    consecutiveSkips: outcome === 'ran' ? 0 : priorSkips + 1,
+  };
+  try { writeFileSync(statusCacheFile(), JSON.stringify(record, null, 2)); } catch { /* best effort cache */ }
+  return record;
 }
 
 // --- status ------------------------------------------------------------
 export function status() {
   const dir = vaultDir();
   const enabled = opt('memory_vault', false);
+  // The attempt record is read FIRST and reported on BOTH paths. A sync that
+  // is turned away never creates the vault, so the uninitialized case is
+  // precisely where "something tried and was refused" needs to be visible —
+  // returning a bare {initialized:false} there is how the skip stayed silent.
+  const cache = readStatusCache();
+  const daysSince = (iso) => {
+    const t = Date.parse(iso || '');
+    return Number.isFinite(t) ? +((Date.now() - t) / 86400000).toFixed(2) : null;
+  };
+  const attempt = {
+    lastSyncAt: cache?.lastSyncAt || null,
+    lastAttemptAt: cache?.lastAttemptAt || null,
+    lastAttemptOutcome: cache?.lastAttemptOutcome || null,
+    lastAttemptReason: cache?.lastAttemptReason || null,
+    consecutiveSkips: Number.isFinite(cache?.consecutiveSkips) ? cache.consecutiveSkips : 0,
+    runDaysAgo: daysSince(cache?.lastSyncAt),
+    attemptDaysAgo: daysSince(cache?.lastAttemptAt),
+  };
   if (!isOurVault(dir)) {
-    return { enabled, initialized: false, dir };
+    return { enabled, initialized: false, dir, ...attempt };
   }
   let dirty = false;
   let lastCommit = null;
@@ -471,19 +576,24 @@ export function status() {
   const projectsRoot = join(dir, 'projects');
   const fileCount = existsSync(projectsRoot) ? walkAllFiles(projectsRoot).filter((f) => f.endsWith('.md')).length : 0;
   const projectCount = existsSync(projectsRoot) ? readdirSync(projectsRoot).length : 0;
-  let cache = null;
-  try { cache = JSON.parse(readFileSync(statusCacheFile(), 'utf8')); } catch { /* no cache yet */ }
   const ageMs = lastCommit ? Date.now() - Date.parse(lastCommit.date) : null;
   return {
     enabled, initialized: true, dir, dirty, lastCommit, fileCount, projectCount,
-    lastSyncAt: cache?.lastSyncAt || null,
+    ...attempt,
     staleDays: ageMs === null ? null : +(ageMs / 86400000).toFixed(2),
   };
 }
 
 // --- CLI ---------------------------------------------------------------
 function printSync(r) {
-  if (r.skipped) { console.log(r.message); return; }
+  if (r.skipped) {
+    console.log(r.message);
+    if (r.consecutiveSkips > 1) {
+      console.log(`  ${r.consecutiveSkips} consecutive sync attempts have now done no work `
+        + '(recorded in state/memory-vault-status.json; the audit\'s memory-vault-drift check reads it)');
+    }
+    return;
+  }
   if (r.aborted) { console.error(r.message); return; }
   console.log(r.message);
   if (r.flagged) {
@@ -491,11 +601,25 @@ function printSync(r) {
   }
 }
 
+// A sync that did no work is printed on BOTH the initialized and the
+// uninitialized path, because "nothing here" plus "something tried and was
+// refused" is the diagnosis; either half alone is not.
+function printAttempt(r) {
+  if (!r.lastAttemptAt) return;
+  if (r.lastAttemptOutcome === 'ran') return; // healthy: stays quiet
+  const why = r.lastAttemptReason ? ` (${r.lastAttemptReason})` : '';
+  console.log(`  last attempt   : ${r.lastAttemptAt} — ${r.lastAttemptOutcome}${why}`);
+  console.log(`  no-work runs   : ${r.consecutiveSkips} consecutive`);
+  if (r.lastSyncAt) console.log(`  last real sync : ${r.lastSyncAt}`);
+  else console.log('  last real sync : (never)');
+}
+
 function printStatus(r) {
   console.log(`memory-vault — ${r.dir}`);
   console.log(`  option enabled : ${r.enabled}`);
   console.log(`  initialized    : ${r.initialized}`);
-  if (!r.initialized) return;
+  if (!r.initialized) { printAttempt(r); return; }
+  printAttempt(r);
   console.log(`  tracked files  : ${r.fileCount} across ${r.projectCount} project(s)`);
   console.log(`  working tree   : ${r.dirty ? 'DIRTY (uncommitted changes present)' : 'clean'}`);
   if (r.lastCommit) {

@@ -1072,25 +1072,74 @@ const brevityCanary = {
 // `node scripts/memory-vault.mjs sync`/`init` run by a person or the
 // scheduled routine, not an automatic repair from an audit pass.
 const MEMORY_VAULT_STALE_DAYS = 2; // daily cadence; one day's grace before warning
+// A single 'locked' is an ordinary race between two syncs. A run of them is not.
+const MEMORY_VAULT_SKIP_RUN = 2;
 const memoryVaultDrift = {
   id: 'memory-vault-drift',
   title: 'Memory vault backup drift',
   vendor: 'anthropic',
   fixable: false,
   run(ctx) {
-    if (!opt('memory_vault', false)) {
-      return { status: 'skip', findings: ['memory vault is disabled (memory_vault option is off)'] };
-    }
+    // Read the vault's own record FIRST, before any gate. This check used to
+    // open with `if (!opt('memory_vault', false)) return skip` — and it is
+    // reachable only through audit.mjs, which is CLI-only, so for as long as
+    // opt() could not see settings.json the one check written to notice a
+    // vault that had stopped backing up skipped before it looked at anything.
+    // The option still decides the verdict, but it no longer decides alone:
+    // sync() now records every attempt, and a record that CONTRADICTS how the
+    // option reads here is reported whichever way it resolves.
     let s;
     try {
       s = memoryVaultStatus();
     } catch (e) {
       return { status: 'skip', findings: [`could not read vault status: ${e.message}`] };
     }
+    const enabled = !!s.enabled;
+    const attempt = s.lastAttemptAt
+      ? `last sync attempt ${s.lastAttemptAt} → ${s.lastAttemptOutcome}`
+        + `${s.lastAttemptReason ? ` (${s.lastAttemptReason})` : ''}`
+      : 'no sync attempt has ever been recorded';
+
+    // The unambiguous contradiction: the option reads ON here, and the last
+    // attempt was refused because it read OFF there. One option, two answers.
+    // That is an option failing to reach the context that runs the sync, and
+    // it cannot be a setting anyone chose — so it is reported on the first
+    // audit after it happens, with no staleness window to wait out.
+    if (enabled && s.lastAttemptReason === 'disabled') {
+      return {
+        status: 'fail',
+        findings: [
+          `memory_vault reads ON here but the last sync attempt was refused as disabled — ${attempt}`,
+          `${s.consecutiveSkips} consecutive attempt(s) have done no work; the option is not `
+            + 'reaching the context that runs the sync (a scheduled or CLI run sees no '
+            + 'CLAUDE_PLUGIN_OPTION_* env vars — those exist only inside hooks)',
+          s.lastSyncAt
+            ? `the last sync that actually ran was ${s.lastSyncAt} (${s.runDaysAgo}d ago)`
+            : 'no sync has ever actually run',
+        ],
+        data: s,
+      };
+    }
+
+    if (!enabled) {
+      // Deliberately off stays a skip — but the trace goes into the report, so
+      // a vault that WAS being backed up and is now being turned away is
+      // visible as something other than an absence.
+      const findings = ['memory vault is disabled (memory_vault option is off)', attempt];
+      if (s.lastSyncAt) {
+        findings.push(`the vault has been synced before (last real run ${s.lastSyncAt}, `
+          + `${s.runDaysAgo}d ago) — if that was not meant to stop, re-enable the memory_vault option`);
+      }
+      return { status: 'skip', findings };
+    }
+
     if (!s.initialized) {
       return {
         status: 'warn',
-        findings: [`vault not initialized at ${s.dir} — run: node scripts/memory-vault.mjs init`],
+        findings: [
+          `vault not initialized at ${s.dir} — run: node scripts/memory-vault.mjs init`,
+          attempt,
+        ],
         data: s,
       };
     }
@@ -1104,10 +1153,32 @@ const memoryVaultDrift = {
       findings.push('vault initialized but never synced — run: node scripts/memory-vault.mjs sync');
       return { status: 'warn', findings, data: s };
     }
-    findings.push(`last synced ${s.staleDays}d ago: ${s.lastCommit.sha.slice(0, 12)} "${s.lastCommit.subject}"`);
+    findings.push(`last commit ${s.staleDays}d ago: ${s.lastCommit.sha.slice(0, 12)} "${s.lastCommit.subject}"`);
+
+    // Attempts that keep doing no work, for a reason OTHER than the option.
+    // The transient case is carried in the REASON ('locked'), not the outcome
+    // ('skipped'), so it is the reason that has to earn the grace.
+    if (s.lastAttemptOutcome && s.lastAttemptOutcome !== 'ran'
+      && (s.lastAttemptReason !== 'locked' || s.consecutiveSkips >= MEMORY_VAULT_SKIP_RUN)) {
+      findings.push(`${attempt}; ${s.consecutiveSkips} consecutive attempt(s) have done no work`);
+      return { status: 'warn', findings, data: s };
+    }
+
     if (s.staleDays !== null && s.staleDays > MEMORY_VAULT_STALE_DAYS) {
-      findings.push(`stale — more than ${MEMORY_VAULT_STALE_DAYS}d since the last sync; confirm the `
-        + 'locally scheduled calibration scout is still running (it drives this on the daily cadence)');
+      // An old last COMMIT is not by itself an old backup. A vault whose
+      // corpus has not changed commits nothing, and warning on that would
+      // teach the operator to ignore this check. Now that every sync that
+      // runs records lastSyncAt — including the ones that find nothing to do —
+      // the two can finally be told apart.
+      if (s.runDaysAgo !== null && s.runDaysAgo <= MEMORY_VAULT_STALE_DAYS) {
+        findings.push(`no commit in ${s.staleDays}d, but a sync ran ${s.runDaysAgo}d ago and found `
+          + 'nothing to commit — the corpus is simply unchanged');
+        return { status: 'ok', findings, data: s };
+      }
+      findings.push(`stale — more than ${MEMORY_VAULT_STALE_DAYS}d since the last sync `
+        + `(${s.runDaysAgo === null ? 'no successful run has ever been recorded' : `last real run ${s.runDaysAgo}d ago`}); `
+        + 'confirm the locally scheduled calibration scout is still running '
+        + '(it drives this on the daily cadence)');
       return { status: 'warn', findings, data: s };
     }
     return { status: 'ok', findings, data: s };
