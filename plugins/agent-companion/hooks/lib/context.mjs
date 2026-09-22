@@ -10,7 +10,7 @@ import {
   readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync,
   openSync, fstatSync, readSync, closeSync,
 } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -378,16 +378,164 @@ export function dataDirs() {
   }
 }
 
-// userConfig keys surface as CLAUDE_PLUGIN_OPTION_<KEY> env vars, and Claude
-// Code uppercases <KEY> (e.g. `webhook_url` -> CLAUDE_PLUGIN_OPTION_WEBHOOK_URL).
-// process.env property lookup is case-insensitive on Windows but
-// case-sensitive on Linux/macOS, so a lowercase-only lookup here would work on
-// Windows and silently fall back to the default everywhere else. Try the
-// uppercased name first, then the verbatim key, so this is correct regardless
-// of which case the harness actually used.
+// OPTIONS. Two sources, and the gap between them is the whole reason this is
+// more than one line.
+//
+// Inside a HOOK, userConfig keys surface as CLAUDE_PLUGIN_OPTION_<KEY> env
+// vars, and Claude Code uppercases <KEY> (e.g. `webhook_url` ->
+// CLAUDE_PLUGIN_OPTION_WEBHOOK_URL). process.env property lookup is
+// case-insensitive on Windows but case-sensitive on Linux/macOS, so a
+// lowercase-only lookup here would work on Windows and silently fall back to
+// the default everywhere else. Try the uppercased name first, then the
+// verbatim key, so this is correct regardless of which case the harness used.
+//
+// OUTSIDE a hook the harness exports none of them. Every CLI entry point —
+// the audit, the doctor, memory-search, memory-vault, the scheduled sync —
+// therefore resolved EVERY option to its shipped default, including options
+// the operator had explicitly switched on in settings.json. Nothing threw and
+// nothing logged: a default-OFF feature simply never ran, which is exactly the
+// silent wrong answer this plugin exists to catch. The memory-vault-drift
+// check was blinded by its own copy of the bug — it re-read
+// opt('memory_vault', false), skipped, and so could not report the drift it
+// was written to find. So the environment is the FIRST source, not the only
+// one, and the operator's settings.json is the fallback behind it.
+//
+// Resolution order, highest first:
+//   1. CLAUDE_PLUGIN_OPTION_<KEY> (uppercased), then ..._<key> (verbatim)
+//   2. pluginConfigs["<plugin>@<marketplace>"].options[<key>] in
+//      settings.local.json, then settings.json, under claudeDir()
+//   3. the caller's `fallback`
+// The env var deliberately still wins: it is the authoritative hook-context
+// signal, and callers set it to steer a single invocation.
+//
+// NOTHING BELOW MAY THROW. A missing file, an unreadable one, malformed JSON,
+// a missing key and a permission error all resolve to the caller's fallback,
+// because a hook that throws breaks the operator's tool call.
+const SETTINGS_FILES = ['settings.local.json', 'settings.json'];
+
+// The plugin root is derived from the copy of this file that is actually
+// executing, so it is right for an installed plugin, a --plugin-dir load and
+// a source checkout alike. It never changes within a process.
+let _pluginRoot = null;
+function pluginRootDir() {
+  if (!_pluginRoot) _pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  return _pluginRoot;
+}
+
+// Read the plugin's own name from the manifest beside this code rather than
+// hardcoding it, so a rename cannot desynchronise the settings lookup from the
+// key Claude Code writes.
+let _pluginName = null;
+function pluginName() {
+  if (_pluginName) return _pluginName;
+  let name = 'agent-companion';
+  try {
+    const m = JSON.parse(readFileSync(join(pluginRootDir(), '.claude-plugin', 'plugin.json'), 'utf8'));
+    if (typeof m?.name === 'string' && m.name.trim()) name = m.name.trim();
+  } catch { /* this file lives inside the plugin: the shipped name is right */ }
+  _pluginName = name;
+  return name;
+}
+
+// Which marketplace THIS copy was loaded from. A TIE-BREAKER only — it is used
+// to order candidate pluginConfigs keys, never to require a match, so a wrong
+// guess costs nothing when only one config exists. A source checkout carries
+// the marketplace manifest somewhere above the plugin; an installed plugin
+// sits at <cache>/<marketplace>/<plugin>/<version>/ with no manifest above it.
+let _marketplace = null;
+function currentMarketplace() {
+  if (_marketplace !== null) return _marketplace;
+  _marketplace = '';
+  const root = pluginRootDir();
+  try {
+    let d = root;
+    for (let i = 0; i < 6; i += 1) {
+      const mf = join(d, '.claude-plugin', 'marketplace.json');
+      if (existsSync(mf)) {
+        const n = JSON.parse(readFileSync(mf, 'utf8'))?.name;
+        if (typeof n === 'string' && n.trim()) { _marketplace = n.trim(); return _marketplace; }
+      }
+      const up = dirname(d);
+      if (up === d) break;
+      d = up;
+    }
+  } catch { /* fall through to the path-shape guess */ }
+  try { _marketplace = basename(dirname(dirname(root))) || ''; } catch { _marketplace = ''; }
+  return _marketplace;
+}
+
+// Parsed settings, cached per file and invalidated by the file's own stat.
+// spawn-guard.mjs calls opt() ~20 times on every Agent tool call, so reading
+// and parsing settings.json once per call is not an option on that hot path.
+// Keying the cache on (mtimeMs, size) rather than on "have we read this once"
+// means it cannot serve a value that disagrees with what is on disk — any
+// edit re-parses on the next call — and it keeps the per-test isolation the
+// rest of this file relies on, where every resolver recomputes at call time.
+const _settingsCache = new Map(); // path -> { mtimeMs, size, parsed }
+function readSettings(file) {
+  let st = null;
+  try { st = statSync(file); } catch { return null; } // absent: the common case
+  const hit = _settingsCache.get(file);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.parsed;
+  let parsed = null;
+  try {
+    const obj = JSON.parse(readFileSync(file, 'utf8'));
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) parsed = obj;
+  } catch { /* unreadable or malformed: indistinguishable from absent, on purpose */ }
+  _settingsCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, parsed });
+  return parsed;
+}
+
+// pluginConfigs keys are marketplace-qualified ("<plugin>@<marketplace>") and
+// the qualifier is NOT fixed — the same plugin loaded from another marketplace
+// gets another key, and an unqualified "<plugin>" is possible too. So match on
+// the plugin part and order the candidates deterministically: the marketplace
+// this copy came from first, then the rest by name. Only a config that
+// actually DEFINES the key counts, so a second, emptier config for the same
+// plugin can never shadow the one the operator filled in.
+function optionFromSettings(key) {
+  const name = pluginName();
+  const preferred = `${name}@${currentMarketplace()}`;
+  for (const file of SETTINGS_FILES) {
+    const configs = readSettings(join(claudeDir(), file))?.pluginConfigs;
+    if (!configs || typeof configs !== 'object') continue;
+    const matches = Object.keys(configs)
+      .filter((k) => k === name || k.startsWith(`${name}@`))
+      .sort((a, b) => {
+        if (a === b) return 0;
+        if (a === preferred) return -1;
+        if (b === preferred) return 1;
+        return a < b ? -1 : 1;
+      });
+    for (const k of matches) {
+      const options = configs[k]?.options;
+      if (options && typeof options === 'object'
+        && Object.prototype.hasOwnProperty.call(options, key)) return options[key];
+    }
+  }
+  return undefined;
+}
+
+// settings.json holds real JSON types; the environment holds strings only.
+// Rendering the JSON value as its string form puts BOTH through the identical
+// coercion in opt(), so a JSON `true` and the string "true" resolve the same
+// way and there is no second, divergent set of rules to keep in step. A null,
+// object or array value counts as not set at all.
+function scalarOrUndefined(v) {
+  if (v === null || v === undefined) return undefined;
+  if (typeof v === 'string') return v;
+  if (typeof v === 'boolean') return String(v);
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  return undefined;
+}
+
 export function opt(key, fallback) {
-  const raw = process.env[`CLAUDE_PLUGIN_OPTION_${key.toUpperCase()}`]
-    ?? process.env[`CLAUDE_PLUGIN_OPTION_${key}`];
+  let raw;
+  try {
+    raw = process.env[`CLAUDE_PLUGIN_OPTION_${key.toUpperCase()}`]
+      ?? process.env[`CLAUDE_PLUGIN_OPTION_${key}`];
+    if (raw === undefined) raw = scalarOrUndefined(optionFromSettings(key));
+  } catch { raw = undefined; } // fail toward the default, never into the hook
   if (raw === undefined || raw === '') return fallback;
   if (typeof fallback === 'boolean') return !/^(false|0|no|off)$/i.test(raw);
   if (typeof fallback === 'number') {
