@@ -152,24 +152,31 @@ function plantSentinelHome() {
   return { sentinel, claudeDir: join(sentinel, '.claude'), memory };
 }
 
-// name + size + content digest for every entry, so ANY write, rewrite or
-// deletion under the sentinel shows up — not just a new top-level file.
+// A { name -> signature } map over every entry, so ANY write, rewrite or
+// deletion under the sentinel shows up — not just a new top-level file. Kept as
+// a map rather than formatted strings because a home path may contain spaces.
 function inventory(dir) {
-  const entries = [];
+  const entries = new Map();
   const walk = (d, rel, depth) => {
     if (depth > 8) return;
     for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
       const p = join(d, e.name);
       const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) { entries.push(`${r}/`); walk(p, r, depth + 1); }
-      else entries.push(`${r} ${statSync(p).size} ${createHash('sha256').update(readFileSync(p)).digest('hex').slice(0, 16)}`);
+      if (e.isDirectory()) { entries.set(`${r}/`, 'dir'); walk(p, r, depth + 1); }
+      else entries.set(r, `${statSync(p).size}:${createHash('sha256').update(readFileSync(p)).digest('hex').slice(0, 16)}`);
     }
   };
   walk(dir, '', 0);
   return entries;
 }
 
-const names = (inv) => inv.map((e) => e.split(' ')[0]);
+// What changed between two inventories, as three sorted name lists.
+function inventoryDelta(before, after) {
+  const added = [...after.keys()].filter((n) => !before.has(n)).sort();
+  const removed = [...before.keys()].filter((n) => !after.has(n)).sort();
+  const changed = [...after.keys()].filter((n) => before.has(n) && before.get(n) !== after.get(n)).sort();
+  return { added, removed, changed };
+}
 
 // --- 1. the real boundary --------------------------------------------------
 
@@ -221,14 +228,10 @@ test('audit.mjs --json neither reads nor writes a decoy home planted at HOME/USE
     assert.equal(realHits.length, 0, `real .claude path in output at: ${pointers(realHits)}`);
 
     // Write side: catches a touch that prints nothing at all.
-    const after = inventory(sentinel);
-    const before = names(planted);
-    const added = names(after).filter((n) => !before.includes(n));
-    const removed = before.filter((n) => !names(after).includes(n));
-    const changed = after.filter((e) => !planted.includes(e) && !added.includes(e.split(' ')[0]));
+    const { added, removed, changed } = inventoryDelta(planted, inventory(sentinel));
     assert.deepEqual(added, [], `audit.mjs wrote into the home directory: ${added.join(', ')}`);
     assert.deepEqual(removed, [], `audit.mjs deleted from the home directory: ${removed.join(', ')}`);
-    assert.deepEqual(changed.map((e) => e.split(' ')[0]), [], 'audit.mjs modified a file in the home directory');
+    assert.deepEqual(changed, [], `audit.mjs modified a file in the home directory: ${changed.join(', ')}`);
   } finally {
     rmSync(sentinel, { recursive: true, force: true, maxRetries: 3 });
     cleanup();
@@ -268,7 +271,7 @@ test('SENSITIVITY CONTROL: defeating the isolation makes the detector fire', () 
     );
 
     // Write side MUST fire too — both halves of case 2 are live.
-    const added = names(inventory(sentinel)).filter((n) => !names(planted).includes(n));
+    const { added } = inventoryDelta(planted, inventory(sentinel));
     assert.ok(added.length > 0, 'DETECTOR IS INERT: an unisolated audit wrote nothing into the home directory');
 
     // And the control itself stayed off the real boundary.
