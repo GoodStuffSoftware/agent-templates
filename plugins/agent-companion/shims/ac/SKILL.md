@@ -23,6 +23,7 @@ through unchanged.
 | `audit <args>` | `agent-companion:audit` | `node "$AC/scripts/audit.mjs" <args>` |
 | `brevity <args>` or `quiet <args>` | `agent-companion:brevity` | `node "$AC/scripts/brevity.mjs" <args>` |
 | `rules <args>` | `agent-companion:standing-rules` | `node "$AC/scripts/rules.mjs" <args>` |
+| `recurrence <args>` | `agent-companion:recurrence` | `node "$AC/scripts/recurrence.mjs" <args>` |
 | `setup` | `agent-companion:setup` | — |
 | `scout` | `agent-companion:calibration-scout` | — |
 | *(nothing)* | print this table | — |

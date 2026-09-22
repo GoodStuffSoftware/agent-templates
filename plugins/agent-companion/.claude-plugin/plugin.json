@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -100,6 +100,12 @@
       "type": "boolean",
       "title": "Scout surface",
       "description": "At session start, surface unresolved signals from the last locally scheduled scout run. Silent when the scout found nothing.",
+      "default": true
+    },
+    "recurrence_scan": {
+      "type": "boolean",
+      "title": "Recurrence scan",
+      "description": "At each scout run, scan session transcripts (scripts/recurrence.mjs, called in-process) for failure signatures that recur across 3+ distinct sessions — the signal that a gotcha keeps happening rather than having been hit once (see docs/adr/0002-stack-scoped-gotcha-retrieval.md). Scans incrementally from this check's own last-scan cursor; a full corpus walk is the one-time fallback on the very first run, measured at ~90s on a 9.2GB corpus and deliberately not time-boxed, since a truncated first walk would create a permanent blind spot. Reports a signal ONLY for a signature crossing the threshold for the FIRST time since the last check — the already-reported set is tracked as capped hashes in the scout baseline, never raw signature text or file paths — so a corpus that already has hundreds of qualifying signatures is not re-announced every morning. Deterministic and silent by default: the ordinary daily case is 'nothing new crossed', which reports nothing.",
       "default": true
     },
     "fit_guard": {
