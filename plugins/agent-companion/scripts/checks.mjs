@@ -1155,6 +1155,17 @@ const memoryVaultDrift = {
     }
     findings.push(`last commit ${s.staleDays}d ago: ${s.lastCommit.sha.slice(0, 12)} "${s.lastCommit.subject}"`);
 
+    // A vault without `* -text` restores whatever core.autocrlf feels like
+    // rather than what was backed up. It looks perfectly healthy until the
+    // day it is restored, so the check has to say so while there is still
+    // another copy of the corpus to compare against.
+    if (s.byteExact === false) {
+      findings.push('vault has no .gitattributes disabling line-ending conversion — a checkout can '
+        + 'rewrite LF-native stores to CRLF, so restored files would not be byte-identical to what '
+        + 'was backed up; run: node scripts/memory-vault.mjs init');
+      return { status: 'warn', findings, data: s };
+    }
+
     // Attempts that keep doing no work, for a reason OTHER than the option.
     // The transient case is carried in the REASON ('locked'), not the outcome
     // ('skipped'), so it is the reason that has to earn the grace.

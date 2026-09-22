@@ -187,6 +187,21 @@ git -C ~/.claude/agent-companion/memory-vault log -p -- projects/<project>/memor
   while the vault already holds tracked content, the sync aborts untouched
   rather than mass-deleting the vault's history.
 
+**Bytes in, the same bytes out.** `init` writes a `.gitattributes` containing
+`* -text`, which turns off git's line-ending conversion in both directions.
+Without it `core.autocrlf` (true by default on Windows) commits an LF-native
+store as LF and *checks it back out as CRLF* — nothing errors, nothing warns,
+and the rewrite is only visible at restore time, the one moment the vault is
+the last remaining copy. `status` reports `byte-exact`, and the audit's
+`memory-vault-drift` check warns if it is ever missing.
+
+A vault created before this existed gets the file added by re-running `init`
+— but only when it would change nothing: every tracked file's working-tree
+bytes are compared against its committed blob first, and if any differ (the
+signature of content that *would* be renormalised) the backfill refuses and
+says so rather than rewriting what was backed up. Existing history is never
+rewritten either way.
+
 **Secrets gate, on every sync, not a one-off.** Before a file is written into
 the vault, its content is checked against a fixed set of credential-shaped
 patterns (cloud provider keys, private-key headers, bearer/JWT tokens,
