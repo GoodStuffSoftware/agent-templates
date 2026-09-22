@@ -35,6 +35,23 @@
   re-reads it when the claim it encodes is refuted. Two thorough correction passes and an adversarial review all
   walked past it. **Treat summary tables, acceptance-criteria rows, index entries and status columns as claims, and
   when you fix a claim grep for its NUMBERS and its NOUNS across the whole artifact.**
+- **THE ROOT PATTERN, and it is not really about tables: a REACHABILITY or NECESSITY claim asserted by
+  enumerating the terms you were thinking about.** Three separate wrong claims on one small change, all the same
+  shape - "without this guard X is possible" (false), "X is not reachable" (false), "adding this closes nothing"
+  (false). Every time, the term that refuted the claim was **the one adjacent to the change** - the author
+  enumerated the terms they had in mind, stopped, and the missed term was the new one. A summary table hides a
+  claim by dressing it as metadata; an enumeration argument hides the case you did not enumerate. Both are cheap
+  to execute against: in all three instances the refuting variant was one run. **Any sentence of the form "X
+  cannot happen" or "this term does nothing" is a test, not a statement. Write the variant, run it, and read
+  which cases move.**
+- **A case you already examined and CLEARED is not cleared - you cleared it against ONE failure mode.** The
+  sharpest version of the above, and it came from the author of the wrong claim. The refuting case was in hand
+  during the first analysis: the transition was written down explicitly, scored for SIZE INFLATION, correctly
+  found not to cause any, and dismissed. It was never scored for the FREEZE TRANSITION, which was the failure the
+  whole change existed to remove. Right case, wrong question - which is worse than missing it, because a case you
+  have looked at feels retired. **When a change addresses failure mode B, re-walk the cases you cleared under
+  failure mode A; "I already considered that" is the sentence to distrust most.** A corollary for reviewers:
+  ask which QUESTION each case was scored against, not merely whether it was considered.
 - **Ask why the constraint exists before proposing to remove it.** Here the obvious alternatives both failed on
   evidence: moving the field to a sub-collection turned out to be REVERTING a consolidation the project had already
   completed (the old shape was still in the ruleset, half-drained), and dropping the cap entirely was worse than it
