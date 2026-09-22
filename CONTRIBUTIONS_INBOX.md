@@ -1,48 +1,56 @@
 # Contributions Inbox
 
-## 2026-09-22 - a source-read that felt like proof, and the one command that disproved it ({{PROJECT}})
+## 2026-09-22 - a size cap that locked the whole record, and a kill switch that only half worked ({{PROJECT}})
 
-- **The claim:** an affected-test selector computed its file list as `git diff --name-only $base` with
-  `base = @{u}`. Since `git diff` against a single ref is a raw two-tree comparison, ancestry-blind, it looked
-  certain that after a rebase `@{u}` was a stale pre-rebase sha, the diff would sweep in every replayed upstream
-  file, and therefore EVERY rebased branch would be reclassified as run-everything. It was backed by a source read
-  AND a live `git diff` against a real pre-rebase backup ref that returned 33 files including several
-  run-everything triggers. It was stated to a release coordinator as a planning constraint. **It was wrong.**
-- **Why it was wrong:** the project creates worktrees with `git worktree add -b <branch> <path> <upstream>`, which
-  sets `branch.<name>.merge` to the SHARED integration ref. So `@{u}` tracked the integration branch, not a pushed
-  copy of the feature branch — it is live, it moves on fetch, and after a rebase ONTO that same ref the upstream
-  and the merge-base re-converge immediately. No stale snapshot ever existed.
-- **The command that settled it, which should have come first:** run the classifier itself on a branch confirmed
-  rebased (check the reflog for `rebase (finish)`) and read the file list it actually derives. One invocation. It
-  returned only the branch's own files. **Reading the mechanism told me what the code COULD do; running it told me
-  what it DOES.** The live `git diff` felt like empirical confirmation and was not, because it never checked what
-  `@{u}` resolved to in a real worktree — it tested the half of the theory that was true.
-- **The real rule, found by the peer who disagreed:** the selector's safe-keys list for the manifest was exactly
-  `{scripts, version}`, so any other top-level manifest change classifies run-everything, and the lockfile maps to
-  run-everything outright. A branch carrying an inherited dev-dependency plus its lockfile entry is expensive
-  permanently, however docs-like it looks. **Sort expected gate cost by manifest and lockfile touches, not by how
-  code-like a branch appears.**
-- **Process lesson:** when two agents hold different mechanisms for the same observation, do not pick the better
-  story. Find the input that the two theories predict differently, and go get it. Here the discriminator was a
-  branch that was cheap on its own content AND confirmed rebased; a branch that was expensive either way would
-  have proved nothing, and that is the branch the first investigation happened to look at.
-## 2026-09-21 - fixing a UI bug by re-layout, when the framework already had the answer ({{PROJECT}})
-
-- **A layout fix that hand-computes widths and offsets will look right in isolation and wrong together.** A config page
-  in a third-party app had two real problems: long labels clipped, and sliders stretching the full width. The fix
-  measured a label column, capped slider width and computed a number-box width from text size. Each piece worked. Taken
-  together the controls no longer shared a left edge, rows jammed against section rules, and it stopped looking like the
-  author's code. The original had used the framework's own defaults almost everywhere (a plain same-line call, align-to-
-  frame-padding, fill-the-column item width) and had exactly one magic number. Rule the operator set afterwards: use the
-  defaults, and change the smallest element that actually fixes the problem. If one value must change, push and pop that
-  single style var so it stays scoped and visible.
-- **Verify UI by looking at a render, not by reading the diff.** Two rounds of "fixed" here were verified by reading
-  code, and both shipped visible defects (clipped description text, a control drawn in the wrong column). What ended it
-  was a standalone preview harness: a small app that compiles the real UI source unmodified, stubs its dependencies,
-  feeds it fake data, and writes a PNG. It caught a third defect the operator had not reported yet, and it turns a
-  "relaunch the app and eyeball it" loop into seconds. Worth building as soon as a UI is being iterated more than twice.
-- **For before/after screenshots, build "before" from the upstream tag in a throwaway worktree.** Capturing "before"
-  from your own branch is not a comparison, it is a claim.
+- **A constraint evaluated over the whole POST-STATE rather than over the DELTA turns a local violation into a
+  global lock-out.** A document-store rule capped a collection-valued field at N entries, written as "the
+  resulting record's field has size <= N". Any write that did not mention the field still carried the old
+  oversized value into the post-state, so once a record was over the cap EVERY write to it was refused:
+  logins, settings, counters, and the durable write queue's own flush. The owner is told nothing and the record
+  stops syncing permanently. The tell is that the denial reason is the same for a write that has nothing to do
+  with the constrained field.
+- **The fix is a RATCHET, not a bigger number.** Allow the write if the resulting size is within the cap **or**
+  does not INCREASE the size: `!(field in after) || after.field.size() <= N || (field in before && after.field.size()
+  <= before.field.size())`. The bound survives as `size <= max(N, size_before)`, monotonically non-increasing while
+  above N. It is a **strict widening**, so it cannot break any existing client and needs no migration and no
+  compatibility floor bump - and it retroactively repairs every stuck record on deploy, which means the fix and the
+  repair are the same action. The number had already been raised twice; a third raise would have moved the wall
+  without removing the failure mode.
+- **Type-test the pre-image, or the ratchet's own bound is a lie.** `size()` is usually polymorphic. If the
+  pre-image holds a string or array rather than the collection type, its `.size()` still returns a number, and the
+  ratchet will happily authorise a new collection that large. Add `before.field is <type>` to the ratchet term. This
+  one IS load-bearing, unlike the presence guard below - and the way to know which is which is to delete it and run
+  the table.
+- **Do not assume a guard is load-bearing because it reads like one.** The same work shipped a `field in before`
+  presence guard with a comment calling it the only thing preventing an authorization hole. It was not. Deleting it
+  changed the verdict in ZERO of 25 adversarial inputs: dereferencing a missing property raises an evaluation
+  error, and an evaluation error denies too. The guard was error hygiene, and a dedicated test "proving" it passed
+  for an unrelated reason. **Establish load-bearingness by removing the term and running the cases, then restoring
+  it. Exactly the cases that depend on it should flip, and the count that does NOT flip matters as much as the count
+  that does** - it shows the term does one specific thing rather than broadly changing behaviour.
+- **When a claim is refuted, the correction pass follows the PROSE and skips the SUMMARY.** That wrong guard claim
+  was corrected in the code comment, the test comment, the design doc and the runbook. It survived in a fifth place:
+  the acceptance-criteria table at the foot of the same design doc, which also still carried pre-correction counts
+  from the same blind spot. A status-looking table reads as METADATA rather than as prose making a claim, so nobody
+  re-reads it when the claim it encodes is refuted. Two thorough correction passes and an adversarial review all
+  walked past it. **Treat summary tables, acceptance-criteria rows, index entries and status columns as claims, and
+  when you fix a claim grep for its NUMBERS and its NOUNS across the whole artifact.**
+- **Ask why the constraint exists before proposing to remove it.** Here the obvious alternatives both failed on
+  evidence: moving the field to a sub-collection turned out to be REVERTING a consolidation the project had already
+  completed (the old shape was still in the ruleset, half-drained), and dropping the cap entirely was worse than it
+  looked, because the store has a hard per-record size limit that no rule change can raise - an uncapped field is
+  not unbounded, it is bounded by a ceiling with no recourse at all. **Check the git history of the constraint
+  before designing around it; the history usually contains the rejected design.**
+- **A kill switch is only as good as the earliest branch that can fire a side effect.** The same work found a
+  trigger with a "close the promotion" flag used as the standard safety procedure before bulk writes. The flag did
+  stop the grant. It did not stop the notification email, because the email branch ran and returned BEFORE the
+  closed-flag check, gated only on "already granted, not yet notified". **When you rely on a disable flag, read the
+  handler from the top and confirm nothing with a side effect returns above the check** - and note whether the flag
+  is asymmetric: here disabling took effect immediately while re-enabling took a cache TTL.
+- **Unfreezing records re-arms every trigger that fires on writing them.** A change that makes previously-blocked
+  writes succeed is not only a permissions change: every `onWrite`-style trigger that evaluates the whole post-state
+  now runs for that cohort, for the first time in however long they were stuck. Enumerate those triggers before
+  deploying, not after.
 
 A holding area for generic improvements contributed back from real projects when no pull-request workflow is available. Entries here are **not yet applied** — a maintainer folds each one into its proper template/shared file (see [CONTRIBUTING.md](CONTRIBUTING.md) → "Where it goes") and then removes it from this file.
 
