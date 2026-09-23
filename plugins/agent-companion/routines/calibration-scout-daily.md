@@ -151,8 +151,12 @@ the regular per-hit dedupe, and only once per repo.
 
 **LOCAL and CLOUD sweep differently, and this difference is load-bearing, not
 cosmetic.** LOCAL clones each configured repo's origin default branch into a
-throwaway dir and runs that repo's own `scripts/leak-check.mjs` against the
-clone. CLOUD must NEVER do that: a cloud routine already runs from a fresh
+throwaway dir and scans the clone with the plugin's own checker; that repo's
+own `scripts/leak-check.mjs` also runs only if the repo is listed in
+`publication_leak_strict_repos` AND its real origin is an https/ssh
+github.com URL owned by the operator or their orgs. That gate is the only
+control — the script runs as the operator and can read anything the
+operator can; its temp HOME is not isolation. CLOUD must NEVER clone: a cloud routine already runs from a fresh
 checkout of its OWN source repo, and cloning a SECOND copy of a repo into a
 temp dir and executing a script from it is exactly the "code from external"
 shape the cloud sandbox's classifier denies — **confirmed live**: the

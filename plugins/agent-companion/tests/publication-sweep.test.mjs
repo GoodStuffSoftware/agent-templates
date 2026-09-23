@@ -912,3 +912,108 @@ test('N1 detect.mjs: a publication_leak alert for a PUBLIC repo keeps repo, file
     assert.doesNotMatch(leak.detail, /<repo-url>/);
   } finally { cleanup(); repo.cleanup(); }
 });
+
+// --- third adversarial review: N4 — the execution gate's URL shapes ----------
+
+const N4_OPTS = (src) => ({ strictRepoUrls: [src], allowedOwners: new Set(['myorg']), resolvedSource: src });
+
+test('N4: the own-script gate accepts https://github.com/o/r (with or without .git / userinfo)', async () => {
+  const { mayExecuteTargetScript, ownerOf } = await import('../scripts/lib/publication-sweep.mjs');
+  for (const src of ['https://github.com/myorg/zbrepo.git', 'https://github.com/myorg/zbrepo', 'https://x-access-token:zbfake@github.com/myorg/zbrepo.git']) {
+    assert.equal(ownerOf(src), 'myorg', src);
+    assert.equal(mayExecuteTargetScript(src, N4_OPTS(src)), true, src);
+  }
+});
+
+test('N4: the own-script gate accepts ssh://git@github.com/o/r', async () => {
+  const { mayExecuteTargetScript } = await import('../scripts/lib/publication-sweep.mjs');
+  const src = 'ssh://git@github.com/myorg/zbrepo.git';
+  assert.equal(mayExecuteTargetScript(src, N4_OPTS(src)), true);
+});
+
+test('N4: the own-script gate accepts scp-form git@github.com:o/r', async () => {
+  const { mayExecuteTargetScript } = await import('../scripts/lib/publication-sweep.mjs');
+  const src = 'git@github.com:myorg/zbrepo.git';
+  assert.equal(mayExecuteTargetScript(src, N4_OPTS(src)), true);
+});
+
+test('N4: the own-script gate rejects http://', async () => {
+  const { mayExecuteTargetScript, ownerOf } = await import('../scripts/lib/publication-sweep.mjs');
+  const src = 'http://github.com/myorg/zbrepo.git';
+  assert.equal(ownerOf(src), null);
+  assert.equal(mayExecuteTargetScript(src, N4_OPTS(src)), false);
+});
+
+test('N4: the own-script gate rejects git://', async () => {
+  const { mayExecuteTargetScript, ownerOf } = await import('../scripts/lib/publication-sweep.mjs');
+  const src = 'git://github.com/myorg/zbrepo.git';
+  assert.equal(ownerOf(src), null);
+  assert.equal(mayExecuteTargetScript(src, N4_OPTS(src)), false);
+});
+
+test('N4: the own-script gate rejects file://', async () => {
+  const { mayExecuteTargetScript, ownerOf } = await import('../scripts/lib/publication-sweep.mjs');
+  const src = 'file://github.com/myorg/zbrepo.git';
+  assert.equal(ownerOf(src), null);
+  assert.equal(mayExecuteTargetScript(src, N4_OPTS(src)), false);
+});
+
+test('N4: the own-script gate rejects scheme-less github.com/o/r (git reads it as a local path)', async () => {
+  const { mayExecuteTargetScript, ownerOf } = await import('../scripts/lib/publication-sweep.mjs');
+  for (const src of ['github.com/myorg/zbrepo', 'github.com/myorg/zbrepo.git']) {
+    assert.equal(ownerOf(src), null, src);
+    assert.equal(mayExecuteTargetScript(src, N4_OPTS(src)), false, src);
+  }
+});
+
+test('N4: the own-script gate rejects other ssh users/hosts and a dot-only repo name', async () => {
+  const { ownerOf } = await import('../scripts/lib/publication-sweep.mjs');
+  assert.equal(ownerOf('ssh://zbuser@github.com/myorg/zbrepo.git'), null);
+  assert.equal(ownerOf('git@github.com.evil.example:myorg/zbrepo.git'), null);
+  assert.equal(ownerOf('https://github.com/myorg/..'), null);
+});
+
+// --- third adversarial review: N5 (docs), N6/N7 (accepted behaviour, pinned) --
+
+test('N5: docs never present the child\'s temp HOME as isolation, and name the only control', () => {
+  const files = {
+    lib: readFileSync(join(PLUGIN_ROOT, 'scripts', 'lib', 'publication-sweep.mjs'), 'utf8'),
+    skill: readFileSync(join(PLUGIN_ROOT, 'skills', 'setup', 'SKILL.md'), 'utf8'),
+    options: readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'),
+    routine: readFileSync(join(PLUGIN_ROOT, 'routines', 'calibration-scout-daily.md'), 'utf8'),
+  };
+  for (const [name, body] of Object.entries(files)) {
+    const flat = body.replace(/\s*(?:\/\/)?\s*\n\s*(?:\/\/)?\s*/g, ' ');
+    assert.match(flat, /(?:no|not) isolation/i, `${name}: must say the temp HOME is not isolation`);
+    assert.match(flat, /only control/i, `${name}: must name listing + verified owner as the only control`);
+    assert.match(flat, /https/i, `${name}: must say the verified owner comes from an https/ssh github.com URL`);
+    assert.doesNotMatch(flat, /(?:isolated|sandboxed) (?:temp )?HOME|HOME (?:isolation|sandbox)/i, `${name}: temp HOME described as isolation`);
+  }
+  // The routine used to say LOCAL runs every repo's own script, ungated.
+  assert.doesNotMatch(files.routine.replace(/\s+/g, ' '), /throwaway dir and runs that repo's own/);
+});
+
+test('N6: an accepted token that MOVES within the same file keeps its fingerprint — silent until the 7-day re-fire', async () => {
+  const { fingerprintHits, filterNewOrStale } = await import('../scripts/lib/publication-sweep.mjs');
+  const key = Buffer.alloc(32, 7);
+  const before = fingerprintHits('repo-a', [{ rel: 'NOTES.md', line: 2, label: 'l', token: 'zbtok', text: 'x' }], { key });
+  const moved = fingerprintHits('repo-a', [{ rel: 'NOTES.md', line: 40, label: 'l', token: 'zbtok', text: 'y' }], { key });
+  assert.equal(moved[0].fingerprint, before[0].fingerprint);
+  const now = Date.parse('2026-06-15T00:00:00Z');
+  const day = 24 * 60 * 60 * 1000;
+  assert.deepEqual(filterNewOrStale(moved, { [before[0].fingerprint]: new Date(now - 3 * day).toISOString() }, { now }), []);
+  assert.equal(filterNewOrStale(moved, { [before[0].fingerprint]: new Date(now - 7 * day).toISOString() }, { now }).length, 1);
+});
+
+test('N7: a trusted target script\'s own "leak-check: OK" is accepted, and the plugin checker still reports its hits', async () => {
+  const okScript = ['#!/usr/bin/env node', 'console.log("leak-check: OK — no real-world tokens found.");', ''].join('\n');
+  const repo = buildRepoWith({ 'scripts/leak-check.mjs': okScript, 'NOTES.md': `${SYNTHETIC_LEAK_LINE}\n` });
+  try {
+    const url = 'https://github.com/myorg/zbokrepo.git';
+    const r = await withGithubAlias(repo.bareDir, url, () => sweepRepo(url, {
+      strictRepoUrls: [url], allowedOwners: new Set(['myorg']), devRoots: [],
+    }));
+    assert.equal(r.error, null, 'the OK line is trusted — no error');
+    assert.ok(r.hits.some((h) => h.label === 'private-path:windows-profile'), 'the plugin checker ran anyway and its hit survives the OK');
+  } finally { repo.cleanup(); }
+});

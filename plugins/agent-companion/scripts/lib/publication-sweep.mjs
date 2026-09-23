@@ -62,9 +62,28 @@ export function isStrictRepo(cloneDir, repoEntry, strictRepoUrls = []) {
 // directory name says nothing about who controls the code in it (a checkout
 // under a dir that happens to be named like a trusted owner can have any
 // stranger's repo as its origin).
+//
+// Only three exact shapes count, matched on the RAW source (never on the
+// normalized form, which strips any scheme and so cannot tell them apart):
+//   https://[userinfo@]github.com/<owner>/<repo>[.git][/]
+//   ssh://git@github.com[:22]/<owner>/<repo>[.git][/]
+//   git@github.com:<owner>/<repo>[.git]           (scp form)
+// Everything else has no owner: http:// and git:// (unauthenticated
+// transports a network attacker can answer), file://, and a scheme-less
+// "github.com/<owner>/<repo>" — which git clones as a RELATIVE LOCAL PATH,
+// i.e. a directory anyone could have created to look like a trusted repo.
+const GITHUB_SOURCE_RES = [
+  /^https:\/\/(?:[^@/\s]+@)?github\.com\/([A-Za-z0-9-]+)\/([\w.-]+?)(?:\.git)?\/?$/i,
+  /^ssh:\/\/git@github\.com(?::22)?\/([A-Za-z0-9-]+)\/([\w.-]+?)(?:\.git)?\/?$/i,
+  /^git@github\.com:([A-Za-z0-9-]+)\/([\w.-]+?)(?:\.git)?\/?$/i,
+];
 export function ownerOf(source) {
-  const m = /^github\.com\/([^/]+)\/[^/]+$/.exec(normalizeGitUrl(source));
-  return m ? m[1].toLowerCase() : null;
+  const s = String(source || '').trim();
+  for (const re of GITHUB_SOURCE_RES) {
+    const m = re.exec(s);
+    if (m && !/^\.+$/.test(m[2])) return m[1].toLowerCase();
+  }
+  return null;
 }
 
 // Never execute code from a swept repo by default. A target's own
@@ -73,15 +92,17 @@ export function ownerOf(source) {
 //      merely auto-detected as strict via its own file/marker — an
 //      operator has to have named it), AND
 //   2. the source it is ACTUALLY cloned from (`resolvedSource`: a local
-//      entry's real origin URL, see resolveCloneSource()) is a github.com
-//      repo whose owner is the authenticated user or one of their orgs
+//      entry's real origin URL, see resolveCloneSource()) is an https:// or
+//      ssh (ssh://git@ / scp git@github.com:) github.com URL — see ownerOf()
+//      — whose owner is the authenticated user or one of their orgs
 //      (`allowedOwners`). The configured text is never trusted for this —
 //      only the URL the code really comes from.
-// This listing + verified-owner gate IS the protection. The child's
-// environment is scrubbed and its HOME points at an empty temp dir (see
-// sweepRepo()), but that is hygiene, not a sandbox: the script runs as the
-// operator and can still read any file the operator can, credential files
-// under the real home included.
+// This listing + verified https/ssh github.com owner is the ONLY control.
+// There is no isolation: the child runs as the operator and can read
+// anything the operator can — credential files, other repos, the real home
+// by absolute path. Its trimmed env and temp HOME (see sweepRepo()) only
+// keep a script that naively reads "~" or $TOKEN from picking the operator's
+// up by accident; they do not contain a script that goes looking.
 export function mayExecuteTargetScript(repoEntry, { strictRepoUrls = [], allowedOwners, resolvedSource } = {}) {
   const source = resolvedSource ?? resolveCloneSource(repoEntry);
   const keys = new Set([normalizeGitUrl(repoEntry), normalizeGitUrl(source)]);
@@ -96,8 +117,9 @@ export function mayExecuteTargetScript(repoEntry, { strictRepoUrls = [], allowed
 // PATH/TEMP/SYSTEMROOT-shaped vars and LEAK_CHECK_* only. No tokens, no
 // operator-specific env carried over from this process. HOME/USERPROFILE are
 // listed so a caller can see them here, but sweepRepo() overrides both with
-// an empty temp dir. None of this stops the script from reading files by
-// absolute path — see mayExecuteTargetScript() for what actually protects.
+// an empty temp dir. This is not isolation: the script can still read
+// anything the operator can, by absolute path — see
+// mayExecuteTargetScript() for the only control.
 const MINIMAL_ENV_KEYS = ['PATH', 'Path', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'SYSTEMROOT', 'SystemRoot', 'ComSpec', 'windir'];
 export function scrubbedEnv(extra = {}) {
   const env = {};
@@ -122,6 +144,12 @@ function rawOsHandles() {
 // before scanning anything". A run counts only with its closing summary
 // line (`leak-check: OK` / `leak-check: FAILED`) or at least one parsed hit;
 // anything else is an error, never a clean result.
+//
+// A trusted script's own `leak-check: OK` line is taken at its word — only
+// a script that passed mayExecuteTargetScript(), or the cloud session's own
+// checkout's script, ever gets here — and the
+// plugin's own checker always runs on the same clone regardless, so that OK
+// can never suppress the plugin checker's findings.
 export function interpretTargetScan(scan) {
   const out = `${scan.stdout || ''}\n${scan.stderr || ''}`;
   const firstErr = (scan.stderr || '').split(/\r?\n/).find((l) => l.trim()) || scan.error?.message || 'no output';
@@ -190,7 +218,10 @@ function parseHits(output) {
 // Fingerprint = HMAC(key, repo + file + label + token + occurrence) —
 // deliberately NOT the line number, so a hit that merely SHIFTED LINE (an
 // unrelated edit earlier in the file) still dedupes against its prior
-// acceptance instead of firing again as "new".
+// acceptance instead of firing again as "new". The accepted cost: an
+// already-accepted token that MOVES within the same file (same file, label,
+// token and occurrence) keeps its fingerprint too, so it does not fire as
+// new — it resurfaces only with the 7-day re-fire (filterNewOrStale()).
 //
 // KEYED, not a bare hash: the baseline that stores fingerprints is state on
 // disk, and an unkeyed sha256 of (repo, file, label, token) can be confirmed
@@ -337,12 +368,12 @@ function runPluginChecker(cloneDir, repoEntry, {
 // The target's OWN scripts/leak-check.mjs is NEVER executed unless
 // `mayExecuteTargetScript()` says so: the repo must be EXPLICITLY listed in
 // `strictRepoUrls` (publication_leak_strict_repos) AND the source it is
-// really cloned from must be a github.com repo owned by the authenticated
-// user or one of their orgs (`allowedOwners`). That gate is the protection.
-// When it passes, the script runs with a scrubbed env and HOME/USERPROFILE
-// pointed at an empty temp dir — hygiene against a script that reads "~"
-// naively, NOT a sandbox (it still runs as the operator and can read any
-// file by absolute path). The operator's real dev roots, projects dir and
+// really cloned from must be an https/ssh github.com repo owned by the
+// authenticated user or one of their orgs (`allowedOwners`). That gate is
+// the only control. When it passes, the script runs with a trimmed env and
+// HOME/USERPROFILE pointed at an empty temp dir — which is NOT isolation:
+// it still runs as the operator and can read anything the operator can,
+// by absolute path. The operator's real dev roots, projects dir and
 // OS handle are handed over explicitly via LEAK_CHECK_*, so the derived-name
 // coverage is the same as a run under the real HOME.
 //
