@@ -15,18 +15,29 @@ either.
 
 - **CLI version** — check `claude --version` against
   `config/model-tiers.json`'s `aliasResolution.minClaudeCodeVersion`.
+- **Authentication for a LIVE run (not --dry-run): just be logged in.**
+  Default behavior does NOT redirect HOME/USERPROFILE, so your normal OAuth
+  session (`claude /login`) is used as-is — no extra setup. If a run comes
+  back with `status=auth_error` in the console line (or `auth_error:true`
+  in `results.jsonl`), the batch has already aborted — see docs/BENCHMARK.md
+  "Preconditions" before re-invoking. Only pass `--isolate-home` if you
+  specifically want per-run HOME isolation, and only with `ANTHROPIC_API_KEY`
+  set (refused otherwise).
 - **Full model IDs, not bare aliases**, for anything an alias might float
   across (`claude-opus-5-5` vs `claude-opus-5`, not `opus`) — `bench/runner.mjs`'s
   `CELLS` table already does this; don't override it with a bare alias.
 - **Prove effort via the transcript, never the run's own JSON** —
-  `--output-format json` has no `effort` field. See docs/BENCHMARK.md.
+  `--output-format json` has no `effort` field. See docs/BENCHMARK.md. By
+  default the transcript lands under your REAL `~/.claude/projects/**`
+  (only under a throwaway one with `--isolate-home`) — each result row's
+  `transcript_home`/`sandbox_cwd`/`session_id` together give the exact path.
 - **Spawn `claude.exe`, never `claude.cmd`, and hide the window.**
   `bench/runner.mjs`'s `resolveClaudeBin()` + `windowsHide: true` handle
   this already — verify you're calling through `scripts/benchmark.mjs` or
   `bench/runner.mjs` directly, not re-implementing the spawn.
-- **Every run gets its own HOME/USERPROFILE.** The benchmarked process can
-  never touch the operator's real `~/.claude` — see docs/BENCHMARK.md
-  "Sandbox isolation". Do not disable this for convenience.
+- **Every run gets its own sandboxed working directory** (always, not
+  opt-in) — see docs/BENCHMARK.md "Sandbox isolation". Do not disable this
+  for convenience.
 
 ## (2) Plan first, always
 

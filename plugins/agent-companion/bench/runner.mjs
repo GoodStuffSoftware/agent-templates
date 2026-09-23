@@ -131,7 +131,7 @@ export function defaultResultsRoot() {
 }
 
 export function parseArgs(argv) {
-  const out = { cells: "all", tasks: "all", reps: 3, repStart: 1, out: null, maxBudgetUsd: null };
+  const out = { cells: "all", tasks: "all", reps: 3, repStart: 1, out: null, maxBudgetUsd: null, isolateHome: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--cells") out.cells = argv[++i];
@@ -140,9 +140,46 @@ export function parseArgs(argv) {
     else if (a === "--rep-start") out.repStart = Number(argv[++i]);
     else if (a === "--out") out.out = argv[++i];
     else if (a === "--max-budget-usd") out.maxBudgetUsd = Number(argv[++i]);
+    else if (a === "--isolate-home") out.isolateHome = true;
     else throw new Error("unknown arg: " + a);
   }
   return out;
+}
+
+// --isolate-home only works with env-var auth (ANTHROPIC_API_KEY), which
+// survives the HOME/USERPROFILE redirect -- an OAuth credentials file does
+// not (it lives under HOME). Refuse to even start rather than silently
+// burning a whole batch on auth_error rows. Shared by both entry points
+// (this module's own main() and scripts/benchmark.mjs).
+export function checkIsolateHomePreflight(isolateHome) {
+  if (isolateHome && !process.env.ANTHROPIC_API_KEY) {
+    throw new Error(
+      "--isolate-home requires ANTHROPIC_API_KEY to be set (OAuth login sessions live under HOME, " +
+      "which --isolate-home redirects away from). Set ANTHROPIC_API_KEY, or drop --isolate-home to use " +
+      "your normal OAuth session (the default, unredirected, path).",
+    );
+  }
+}
+
+// Distinct console status per run -- an auth_error or a genuine api-level
+// error must never look like a plain pass=false task failure at a glance.
+export function formatRunLine(row, elapsedMs) {
+  const status = row.auth_error ? "auth_error" : (row.is_error ? `error(${row.terminal_reason || row.subtype || "unknown"})` : "ok");
+  return `pass=${row.pass} cost=$${row.cost_usd} turns=${row.num_turns} status=${status} (${elapsedMs}ms)`;
+}
+
+// Printed once, immediately, when a run's row.auth_error is true -- the
+// batch aborts right after this (see both main()s below).
+export function authErrorAbortMessage(row) {
+  return [
+    "",
+    `AUTH ERROR: ${row.cell} / ${row.task} / rep${row.rep} failed authentication (not logged in / 401), cost $0 -- the model was never reached.`,
+    "Aborting the batch immediately. This run is excluded from pass-rate math (see rebuildSummary()).",
+    row.isolate_home
+      ? "Running with --isolate-home: check that ANTHROPIC_API_KEY is set and valid."
+      : "Live runs need your normal OAuth session visible to the spawned process (`claude /login`), " +
+        "or pass --isolate-home with ANTHROPIC_API_KEY set. See docs/BENCHMARK.md \"Preconditions\".",
+  ].join("\n");
 }
 
 export function resolveList(spec, table) {
@@ -150,21 +187,44 @@ export function resolveList(spec, table) {
   return spec.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-// A fresh, throwaway HOME/USERPROFILE for EVERY run, never the operator's
-// real one. `--setting-sources ""` (below) already skips reading this
-// machine's hooks/CLAUDE.md/plugins/skills, but it does NOT stop the
-// spawned process from WRITING a session transcript under
-// <home>/.claude/projects/** -- that is core session logging, not a
-// "setting source". Without this, a benchmark run (especially an
-// unattended one, which is exactly what --batch-by/--resume enable) would
-// silently accumulate real transcript files under the operator's actual
-// ~/.claude. Cleaned up alongside the sandbox in the run's `finally`.
-function makeFakeHome() {
+// A fresh, throwaway HOME/USERPROFILE, used ONLY when the caller opts into
+// --isolate-home. NOT the default -- see runClaude()'s banner below for why.
+// Cleaned up alongside the sandbox in the run's `finally`.
+export function makeFakeHome() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-home-"));
   return dir;
 }
 
-function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, fakeHome }) {
+// Text/shape signatures of an auth/login failure, as distinct from a
+// genuine model or task failure. Found empirically (2026-09-23): every run
+// under a redirected HOME failed with `is_error:true`,
+// `terminal_reason:"api_error"`, `cost_usd:0`, and an answer text of
+// "Not logged in · Please run /login" -- because OAuth-login sessions
+// store credentials under HOME (~/.claude/.credentials.json), which a
+// redirected HOME strips. A $0-cost api_error with this shape is not the
+// model failing the task; the model was never reached. Exported so tests
+// can probe it directly against a fixture JSON blob, no process spawn
+// required.
+const AUTH_ERROR_TEXT_RE = /not logged in|please run \/login|invalid api key|authentication_error|\b401\b/i;
+
+export function isAuthError({ json, answerText, stdout, err } = {}) {
+  const haystack = [answerText, stdout, err].filter(Boolean).join("\n");
+  if (AUTH_ERROR_TEXT_RE.test(haystack)) return true;
+  const isError = json ? !!json.is_error : true;
+  if (!isError) return false;
+  const costUsd = json ? json.total_cost_usd : null;
+  const terminalReason = (json && json.terminal_reason) || null;
+  const subtype = (json && json.subtype) || null;
+  // A zero/unknown-cost api_error on its own is a weaker signal than the
+  // text match above (a genuine API outage could look like this too), but
+  // it is exactly the shape the OAuth-stripped-by-HOME-redirect failure
+  // takes when the answer text isn't captured (e.g. malformed stdout) --
+  // still worth flagging as auth_error rather than a silent task failure.
+  if ((terminalReason === "api_error" || subtype === "api_error") && (costUsd === 0 || costUsd == null)) return true;
+  return false;
+}
+
+function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fakeHome }) {
   return new Promise((resolve) => {
     const args = [
       "-p", prompt,
@@ -177,20 +237,39 @@ function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, fakeHome }) {
     ];
     if (effort) args.push("--effort", effort);
     const startedAt = Date.now();
-    const env = {
-      ...process.env,
-      HOME: fakeHome,
-      USERPROFILE: fakeHome,
-      CLAUDE_CONFIG_DIR: path.join(fakeHome, ".claude"),
-    };
-    // Windows resolves the user profile via HOMEDRIVE+HOMEPATH separately
-    // from USERPROFILE in some code paths -- set both so nothing falls
-    // through to the real profile. fakeHome is always an absolute
-    // `<drive>:\...` path here (os.tmpdir()-derived), so a plain 2-char
-    // slice for the drive and the remainder for the path is exact.
-    if (process.platform === "win32") {
-      env.HOMEDRIVE = fakeHome.slice(0, 2);
-      env.HOMEPATH = fakeHome.slice(2);
+    // DEFAULT: no HOME/USERPROFILE redirection -- matches the proven
+    // pre-port harness (bench/effort-grid, 300+ live runs), which spawned
+    // with only a sandboxed cwd + `--setting-sources ""` and the operator's
+    // real, inherited env. `--setting-sources ""` already skips reading
+    // this machine's hooks/CLAUDE.md/plugins/skills (the "setting sources"
+    // this CLI knows about); it does NOT touch credential resolution. Most
+    // operators authenticate via OAuth (`claude /login`), which stores its
+    // session under the real HOME -- redirecting HOME strips that
+    // credential and every live run fails with an auth error instead of
+    // making a model call (see isAuthError() above; found 2026-09-23).
+    //
+    // OPT-IN: --isolate-home redirects HOME/USERPROFILE to a fresh
+    // throwaway dir per run, same as this module did unconditionally
+    // before this fix. It only works when the operator authenticates via
+    // ANTHROPIC_API_KEY (an env var, which DOES survive the redirect via
+    // `{...process.env}` below) rather than an OAuth credentials file --
+    // callers MUST refuse to start with --isolate-home when no API key is
+    // set (see scripts/benchmark.mjs's preflight check). Never copy
+    // credential files into the fake home; only env-var auth is supported.
+    const env = { ...process.env };
+    if (isolateHome) {
+      env.HOME = fakeHome;
+      env.USERPROFILE = fakeHome;
+      env.CLAUDE_CONFIG_DIR = path.join(fakeHome, ".claude");
+      // Windows resolves the user profile via HOMEDRIVE+HOMEPATH separately
+      // from USERPROFILE in some code paths -- set both so nothing falls
+      // through to the real profile. fakeHome is always an absolute
+      // `<drive>:\...` path here (os.tmpdir()-derived), so a plain 2-char
+      // slice for the drive and the remainder for the path is exact.
+      if (process.platform === "win32") {
+        env.HOMEDRIVE = fakeHome.slice(0, 2);
+        env.HOMEPATH = fakeHome.slice(2);
+      }
     }
     execFile(
       getClaudeBin(), args,
@@ -216,15 +295,17 @@ function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, fakeHome }) {
   });
 }
 
-export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersDir, maxBudgetUsdCeiling }) {
+export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersDir, maxBudgetUsdCeiling, isolateHome = false }) {
   const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-" + cellId + "-" + taskId + "-"));
-  const fakeHome = makeFakeHome();
+  // Only made (and only cleaned up) when isolateHome is set -- the default
+  // path spawns with the real, inherited HOME/USERPROFILE (see runClaude()).
+  const fakeHome = isolateHome ? makeFakeHome() : null;
   let meta;
   try {
     meta = task.setup(sandboxDir);
   } catch (e) {
     rmrf(sandboxDir);
-    rmrf(fakeHome);
+    if (fakeHome) rmrf(fakeHome);
     throw e;
   }
   const promptText = task.prompt(meta);
@@ -242,6 +323,7 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
     model: cell.model,
     effort: cell.effort,
     maxBudgetUsd: effectiveBudget,
+    isolateHome,
     fakeHome,
   });
 
@@ -271,8 +353,16 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
     JSON.stringify({ runId, answerText, tree: finalTree }, null, 2),
   );
 
+  // Resolve BEFORE the sandbox is torn down, so a caller reading this row
+  // straight off results.jsonl can go find the transcript without having
+  // to re-derive the isolateHome decision: `<transcript_home>/.claude/
+  // projects/<encoded(sandbox_cwd)>/<session_id>.jsonl` -- real HOME by
+  // default, the fake one only when isolateHome was set. See
+  // docs/BENCHMARK.md "Effort is proven via the transcript".
+  const transcriptHome = isolateHome ? fakeHome : (process.env.HOME || process.env.USERPROFILE || os.homedir());
+
   rmrf(sandboxDir);
-  rmrf(fakeHome);
+  if (fakeHome) rmrf(fakeHome);
 
   const usage = (json && json.usage) || {};
   const modelUsage = (json && json.modelUsage) || {};
@@ -307,6 +397,12 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
     subtype: (json && json.subtype) || null,
     terminal_reason: (json && json.terminal_reason) || null,
     session_id: (json && json.session_id) || null,
+    // Distinct from a genuine task/model failure -- see isAuthError() above
+    // and scripts/benchmark.mjs's abort-on-first-auth_error handling.
+    auth_error: isAuthError({ json, answerText, stdout, err }),
+    isolate_home: isolateHome,
+    transcript_home: transcriptHome,
+    sandbox_cwd: sandboxDir,
     exec_err: err,
     detail: scoreResult.detail ?? null,
   };
@@ -347,7 +443,18 @@ function planUsageMultiplier(fullModelId) {
 export function rebuildSummary(outDir) {
   const jsonlPath = path.join(outDir, "results.jsonl");
   if (!fs.existsSync(jsonlPath)) return;
-  const rows = fs.readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const allRows = fs.readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+
+  // Auth/login failures never reached the model -- excluded from pass-rate
+  // and every other quality/cost stat below, so one botched-auth batch
+  // can't be misread as "the model failed every task" (0% pass, cost $0).
+  // Still counted and called out in the summary header. See isAuthError()
+  // and scripts/benchmark.mjs's abort-on-first-auth_error handling --
+  // a batch aborts as soon as one appears, so this is normally 0 or 1 row,
+  // but rebuildSummary() also replays historical results.jsonl files that
+  // may carry more from before this fix.
+  const authErrorRows = allRows.filter((r) => r.auth_error);
+  const rows = allRows.filter((r) => !r.auth_error);
 
   const byCellTask = new Map();
   for (const r of rows) {
@@ -429,9 +536,18 @@ export function rebuildSummary(outDir) {
   const lines = [
     "* claim_honest is EXPERIMENTAL — a word-bag heuristic known to under-read on long/hedged answers. See docs/BENCHMARK.md before treating a low rate as a quality finding.",
     "",
+  ];
+  if (authErrorRows.length > 0) {
+    lines.push(
+      `AUTH ERROR: ${authErrorRows.length} run(s) failed authentication (not logged in / 401) and were EXCLUDED from every stat below -- ` +
+      "they never reached the model. See docs/BENCHMARK.md \"Preconditions\" before trusting this summary.",
+      "",
+    );
+  }
+  lines.push(
     header.join(" | "),
     header.map(() => "---").join(" | "),
-  ];
+  );
   for (const r of summaryRows) {
     lines.push([
       r.cell, r.task, r.n,
@@ -451,6 +567,7 @@ export function rebuildSummary(outDir) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  checkIsolateHomePreflight(args.isolateHome);
   const cellIds = resolveList(args.cells, CELLS);
   const taskIds = resolveList(args.tasks, TASKS);
   // RESULTS NEVER GO IN THE REPO. --out, when given, may be relative (to
@@ -479,8 +596,13 @@ async function main() {
         const t0 = Date.now();
         process.stdout.write("[" + new Date().toISOString() + "] START " + cellId + " / " + taskId + " / rep" + rep + " ... ");
         try {
-          const row = await runOne({ cellId, cell, taskId, task, rep, outDir, answersDir });
-          process.stdout.write("pass=" + row.pass + " cost=$" + row.cost_usd + " turns=" + row.num_turns + " (" + (Date.now() - t0) + "ms)\n");
+          const row = await runOne({ cellId, cell, taskId, task, rep, outDir, answersDir, isolateHome: args.isolateHome });
+          process.stdout.write(formatRunLine(row, Date.now() - t0) + "\n");
+          if (row.auth_error) {
+            console.error(authErrorAbortMessage(row));
+            rebuildSummary(outDir);
+            process.exit(1);
+          }
         } catch (e) {
           process.stdout.write("ERROR: " + ((e && e.stack) || e) + "\n");
           fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify({

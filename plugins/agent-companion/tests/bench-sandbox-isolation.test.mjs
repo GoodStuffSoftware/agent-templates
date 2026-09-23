@@ -1,9 +1,13 @@
-// Sandbox isolation: every run gets a throwaway sandbox AND a throwaway
-// HOME/USERPROFILE, and a task-pack extraction never produces a .git
-// directory. No test here makes a real model call — bench/runner.mjs's
-// runClaude() is exercised only for its ENV-BUILDING logic (by reaching in
-// and re-deriving what it would set — see the isolated re-implementation
-// note below), never by actually spawning claude.
+// Sandbox isolation: every run gets a throwaway sandbox (always), and a
+// throwaway HOME/USERPROFILE ONLY when --isolate-home is passed (opt-in,
+// not the default — see bench/runner.mjs's runClaude() banner and
+// docs/BENCHMARK.md "Preconditions" for why the default changed to NOT
+// redirect HOME). A task-pack extraction never produces a .git directory.
+// No test here makes a real model call — bench/runner.mjs's runClaude() is
+// exercised only for its ENV-BUILDING logic (by reaching in and
+// re-deriving what it would set when isolateHome is true — see the
+// isolated re-implementation note below), never by actually spawning
+// claude.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, existsSync, rmSync } from 'node:fs';

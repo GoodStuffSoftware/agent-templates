@@ -5,7 +5,8 @@
 // (the plugin data dir, never a path under PLUGIN_ROOT).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { relative, isAbsolute } from 'node:path';
+import { relative, isAbsolute, join } from 'node:path';
+import { writeFileSync, mkdirSync } from 'node:fs';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 
 function dryRun(args, env = {}) {
@@ -118,6 +119,67 @@ test('--phase changes the default out-dir\'s phase label', () => {
     });
     assert.equal(res.status, 0, res.stderr);
     assert.match(res.stdout, /benchmarks[\\/]real-\d{4}-\d{2}-\d{2}/);
+  } finally {
+    cleanup();
+  }
+});
+
+// --dry-run --resume must honor the resume marker and show only what's
+// left, not the full original plan re-printed as if nothing had run yet
+// (LOW finding: the dry-run branch used to exit BEFORE resume filtering ran
+// at all, so `--dry-run --resume` was misleading mid-batch).
+test('--dry-run --resume shows only the remaining cells, not the full original grid', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const outDir = join(dir, 'resume-test');
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, '.batch-state.json'), JSON.stringify({ completedCells: ['haiku'] }));
+
+    const res = runScript('scripts/benchmark.mjs', [
+      '--dry-run', '--resume', '--cells', 'haiku,sonnet-medium', '--tasks', 'lookup', '--reps', '1', '--out-dir', outDir,
+    ]);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /Resuming: 1\/2 cell\(s\) remaining \(sonnet-medium\)/);
+    // haiku is marked complete -- must not appear in the planned-run lines.
+    assert.doesNotMatch(res.stdout, /haiku \/ lookup/);
+    assert.match(res.stdout, /sonnet-medium \/ lookup \/ rep1/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('--dry-run --resume with every requested cell already complete prints "Nothing to resume" and shows no plan', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const outDir = join(dir, 'resume-test-done');
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, '.batch-state.json'), JSON.stringify({ completedCells: ['haiku', 'sonnet-medium'] }));
+
+    const res = runScript('scripts/benchmark.mjs', [
+      '--dry-run', '--resume', '--cells', 'haiku,sonnet-medium', '--tasks', 'lookup', '--reps', '1', '--out-dir', outDir,
+    ]);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /Nothing to resume/);
+    assert.doesNotMatch(res.stdout, /->  claude/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('--dry-run WITHOUT --resume is unaffected by an existing .batch-state.json (shows the full grid)', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const outDir = join(dir, 'resume-test-ignored');
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, '.batch-state.json'), JSON.stringify({ completedCells: ['haiku'] }));
+
+    const res = runScript('scripts/benchmark.mjs', [
+      '--dry-run', '--cells', 'haiku,sonnet-medium', '--tasks', 'lookup', '--reps', '1', '--out-dir', outDir,
+    ]);
+    assert.equal(res.status, 0, res.stderr);
+    assert.doesNotMatch(res.stdout, /Resuming:/);
+    assert.match(res.stdout, /haiku \/ lookup \/ rep1/);
+    assert.match(res.stdout, /sonnet-medium \/ lookup \/ rep1/);
   } finally {
     cleanup();
   }

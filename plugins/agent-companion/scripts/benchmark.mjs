@@ -3,13 +3,20 @@
 //
 // bench/runner.mjs carries the proven mechanics (headless `claude -p
 // --output-format json`, full model ids, effort proven from the transcript,
-// spawn claude.exe never claude.cmd, HOME/USERPROFILE sandboxing,
-// --setting-sources "", --max-budget-usd). This script is the CLI layer on
-// top: task-family expansion, a global runaway-budget ceiling, --dry-run
-// (plan only, zero model calls), and --batch-by/--resume so a driving agent
-// can check plan usage between batches instead of one process running the
-// whole grid unattended. See docs/BENCHMARK.md before a real run and
-// skills/model-benchmark/SKILL.md for the operating procedure.
+// spawn claude.exe never claude.cmd, --setting-sources "", --max-budget-usd).
+// This script is the CLI layer on top: task-family expansion, a global
+// runaway-budget ceiling, --dry-run (plan only, zero model calls), and
+// --batch-by/--resume so a driving agent can check plan usage between
+// batches instead of one process running the whole grid unattended. See
+// docs/BENCHMARK.md before a real run and skills/model-benchmark/SKILL.md
+// for the operating procedure.
+//
+// HOME/USERPROFILE: by DEFAULT this does NOT redirect them -- a live run
+// uses your normal, already-authenticated OAuth session (`claude /login`),
+// same as the proven pre-port harness. Pass --isolate-home to redirect to a
+// throwaway HOME per run instead (only works with ANTHROPIC_API_KEY auth;
+// refused otherwise). See docs/BENCHMARK.md "Preconditions" and "Sandbox
+// isolation" before choosing.
 //
 // Usage:
 //   node benchmark.mjs --dry-run --cells all --tasks all --reps 1
@@ -19,13 +26,14 @@
 //   node benchmark.mjs --resume --out-dir <dir from the previous invocation>
 //
 // Exit codes: 0 on a completed (or paused-for-resume) run or a dry-run;
-// 2 on a usage error.
+// 1 if a live run aborts on an auth error; 2 on a usage error.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CELLS, TASKS, resolveList, runOne, rebuildSummary, defaultResultsRoot,
+  checkIsolateHomePreflight, formatRunLine, authErrorAbortMessage,
 } from '../bench/runner.mjs';
 import { loadPack, buildTaskFromPack } from '../bench/task-packs/lib.mjs';
 
@@ -77,6 +85,9 @@ function printHelp() {
                                  runnable set, selectable via --tasks by their own manifest id.
   --pack-repo <path>              Source repo for --task-pack's runtime git-show extraction.
                                  Required whenever --task-pack is given.
+  --isolate-home                 Redirect HOME/USERPROFILE to a throwaway dir per run (opt-in;
+                                 default is your normal OAuth session, unredirected). Requires
+                                 ANTHROPIC_API_KEY -- refused otherwise. See docs/BENCHMARK.md.
   --list                         Print available cells, task ids, and task families, then exit.
   --help                         Print this text and exit.
 `);
@@ -86,7 +97,7 @@ function parseArgs(argv) {
   const out = {
     cells: 'all', tasks: 'all', reps: 1, repStart: 1, outDir: null, phase: 'pilot',
     maxBudgetUsd: null, dryRun: false, batchByCell: false, resume: false, list: false, help: false,
-    taskPacks: [], packRepo: null,
+    taskPacks: [], packRepo: null, isolateHome: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -103,6 +114,7 @@ function parseArgs(argv) {
     else if (a === '--list') out.list = true;
     else if (a === '--task-pack') out.taskPacks.push(...argv[++i].split(',').map((s) => s.trim()).filter(Boolean));
     else if (a === '--pack-repo') out.packRepo = argv[++i];
+    else if (a === '--isolate-home') out.isolateHome = true;
     else if (a === '--help' || a === '-h') out.help = true;
     else usageError(`unknown arg: ${a}`);
   }
@@ -175,6 +187,12 @@ async function main() {
     process.exit(0);
   }
 
+  try {
+    checkIsolateHomePreflight(args.isolateHome);
+  } catch (e) {
+    usageError(e.message);
+  }
+
   const cellIds = resolveList(args.cells, CELLS);
   for (const id of cellIds) if (!CELLS[id]) usageError(`unknown cell: "${id}" (--list to see valid cells)`);
   const tasksMap = loadTaskMap(args);
@@ -187,6 +205,23 @@ async function main() {
 
   const totalRuns = cellIds.length * taskIds.length * args.reps;
 
+  // Resume filtering happens BEFORE the --dry-run branch (and before it
+  // decides what to print) so `--dry-run --resume` shows only the plan for
+  // what's actually left, not the full original grid re-printed as if
+  // nothing had run yet. readBatchState() tolerates a missing/nonexistent
+  // outDir (falls back to { completedCells: [] }), so this is safe to do
+  // even before outDir is ever created.
+  let cellsToRun = cellIds;
+  let resumeNote = null;
+  if (args.resume) {
+    const state = readBatchState(outDir);
+    const done = new Set(state.completedCells || []);
+    cellsToRun = cellIds.filter((id) => !done.has(id));
+    resumeNote = cellsToRun.length === 0
+      ? 'Nothing to resume — every requested cell is already marked complete in ' + batchStatePath(outDir)
+      : `Resuming: ${cellsToRun.length}/${cellIds.length} cell(s) remaining (${cellsToRun.join(', ')}).`;
+  }
+
   if (args.dryRun) {
     console.log('DRY RUN — plan only, no model calls will be made.\n');
     console.log(`out dir:  ${outDir}`);
@@ -196,8 +231,11 @@ async function main() {
     console.log(`total runs: ${totalRuns}`);
     if (args.maxBudgetUsd != null) console.log(`global --max-budget-usd ceiling: $${args.maxBudgetUsd}`);
     if (args.batchByCell) console.log('batching: one cell per invocation (--batch-by cell)');
-    console.log('\nPlanned runs (cell / task / rep -> claude args):');
-    for (const cellId of cellIds) {
+    if (args.isolateHome) console.log('--isolate-home: HOME/USERPROFILE will be redirected per run (requires ANTHROPIC_API_KEY)');
+    if (resumeNote) console.log(resumeNote);
+    if (args.resume && cellsToRun.length === 0) process.exit(0);
+    console.log('\nPlanned runs (cell / task / rep -> claude args)' + (args.resume ? ', remaining cells only' : '') + ':');
+    for (const cellId of cellsToRun) {
       const cell = CELLS[cellId];
       for (const taskId of taskIds) {
         const task = tasksMap[taskId];
@@ -223,17 +261,12 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(answersDir, { recursive: true });
 
-  let cellsToRun = cellIds;
   if (args.resume) {
-    const state = readBatchState(outDir);
-    const done = new Set(state.completedCells || []);
-    cellsToRun = cellIds.filter((id) => !done.has(id));
+    console.log(resumeNote);
     if (cellsToRun.length === 0) {
-      console.log('Nothing to resume — every requested cell is already marked complete in ' + batchStatePath(outDir));
       rebuildSummary(outDir);
       process.exit(0);
     }
-    console.log(`Resuming: ${cellsToRun.length}/${cellIds.length} cell(s) remaining (${cellsToRun.join(', ')}).`);
   }
 
   for (const cellId of cellsToRun) {
@@ -248,8 +281,14 @@ async function main() {
           const row = await runOne({
             cellId, cell, taskId, task, rep, outDir, answersDir,
             maxBudgetUsdCeiling: args.maxBudgetUsd,
+            isolateHome: args.isolateHome,
           });
-          process.stdout.write(`pass=${row.pass} cost=$${row.cost_usd} turns=${row.num_turns} (${Date.now() - t0}ms)\n`);
+          process.stdout.write(formatRunLine(row, Date.now() - t0) + '\n');
+          if (row.auth_error) {
+            console.error(authErrorAbortMessage(row));
+            rebuildSummary(outDir);
+            process.exit(1);
+          }
         } catch (e) {
           process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
           fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify({

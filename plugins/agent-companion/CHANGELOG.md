@@ -2,6 +2,69 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.25.1 — 2026-09-23
+
+Fixes a HIGH finding from adversarial review of 0.25.0's benchmark port: the
+live path (`node scripts/benchmark.mjs` without `--dry-run`) could not make
+a real model call for an operator authenticated the normal way (OAuth via
+`claude /login`), and nothing told you why — every run silently reported a
+0%-pass, $0-cost "completed" batch instead of an auth error. Patch bump —
+bugfix, no new capability beyond the opt-in flag below.
+
+### Fixed
+
+- **`bench/runner.mjs` no longer redirects `HOME`/`USERPROFILE` by
+  default.** The previous unconditional redirect (added in 0.25.0 for
+  transcript-isolation reasons) stripped OAuth credentials, which live
+  under `HOME` (`~/.claude/.credentials.json`) — every live run failed
+  authentication before reaching the model. The default now matches the
+  proven pre-port harness (`bench/effort-grid`, 300+ live runs): a
+  sandboxed working directory per run, `--setting-sources ""`, and the
+  operator's real, inherited env. Session transcripts (needed for effort
+  proof) now land under the operator's REAL `~/.claude/projects/**` by
+  default — each `results.jsonl` row carries `transcript_home`,
+  `sandbox_cwd`, and `session_id` so the exact transcript path is always
+  derivable, never guessed.
+- **`--isolate-home`** (new, opt-in): redirects `HOME`/`USERPROFILE` to a
+  fresh throwaway dir per run, same mechanism as the old default. Only
+  works with `ANTHROPIC_API_KEY`-based auth (an env var survives the
+  redirect; an OAuth credentials file does not) — `scripts/benchmark.mjs`
+  refuses to start with `--isolate-home` when `ANTHROPIC_API_KEY` isn't
+  set, rather than silently producing a batch of auth failures.
+- **Auth/login failures are now a distinct `auth_error` status, not a
+  silent task failure.** `bench/runner.mjs`'s new `isAuthError()` detects
+  the failure shape (`"Not logged in"`/`"Please run /login"`/`401` text, or
+  an `api_error` terminal_reason/subtype at `$0`/null cost) from either the
+  run's own JSON or raw stdout. `scripts/benchmark.mjs` (and
+  `bench/runner.mjs`'s own `main()`) abort the batch immediately on the
+  first `auth_error` row with a clear message
+  (`authErrorAbortMessage()`), instead of burning the rest of the plan.
+  `rebuildSummary()` excludes `auth_error` rows from pass-rate and every
+  other stat, and flags the excluded count at the top of `summary.md`. The
+  per-run console line now shows `status=ok` / `status=auth_error` /
+  `status=error(<terminal_reason>)` (`formatRunLine()`) instead of a bare
+  `pass=false cost=$0`, so an auth failure can never be misread as the
+  model failing every task at a glance.
+- **`--dry-run --resume` now honors the resume marker.** Previously the
+  `--dry-run` branch exited before `--resume`'s cell-filtering logic ran at
+  all, so it always showed the full original grid, including cells already
+  marked complete — misleading as a "what's left" preview mid-batch.
+  Resume filtering now happens before the dry-run branch, and a dry run
+  with `--resume` prints the same `Resuming: N/M cell(s) remaining (...)`
+  line the real run does, then plans only the remaining cells.
+- `docs/BENCHMARK.md` and `skills/model-benchmark/SKILL.md` updated to
+  match: a new "Preconditions: authentication for a LIVE run" section,
+  corrected "Effort is proven via the transcript" (real home by default)
+  and "Sandbox isolation" (HOME redirection is opt-in) sections.
+- Tests: `tests/bench-auth-error.test.mjs` (new — `isAuthError()`
+  classification including the exact reproduced shape, `checkIsolateHomePreflight()`
+  refusal/acceptance including at the CLI layer, `formatRunLine()`/
+  `authErrorAbortMessage()` distinct-status output, `rebuildSummary()`'s
+  pass-rate exclusion math); `tests/bench-dry-run.test.mjs` (new cases for
+  `--dry-run --resume`, `--dry-run --resume` with nothing left, and
+  `--dry-run` without `--resume` being unaffected by a stale marker).
+  Suite: 323/0 (was 302/0).
+
 ## 0.25.0 — 2026-09-23
 
 Moves the model x effort benchmark (previously `bench/effort-grid` on a

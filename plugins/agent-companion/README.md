@@ -273,11 +273,13 @@ backed by a real, in-plugin model x effort benchmark, not intuition:
 `scripts/benchmark.mjs` (plan/budget/order/fairness — `/ac benchmark` or the
 `model-benchmark` skill) drives `bench/runner.mjs`'s proven mechanics
 (headless `claude -p`, full model ids, effort proven from the transcript,
-`claude.exe` never `claude.cmd`, a throwaway sandbox AND a throwaway
-HOME/USERPROFILE per run — the benchmarked process can never touch the
-operator's real `~/.claude`) against a synthetic task set (easy/hard
-variants, `bench/tasks/`) plus real-history tasks mined from this repo's own
-fix commits.
+`claude.exe` never `claude.cmd`, a throwaway sandbox per run, your normal
+OAuth session by default — `--isolate-home` opts into a throwaway
+HOME/USERPROFILE too, requires `ANTHROPIC_API_KEY`) against a synthetic task
+set (easy/hard variants, `bench/tasks/`) plus real-history tasks mined from
+this repo's own fix commits. An auth/login failure is classified distinctly
+(`status=auth_error`) and aborts the batch immediately rather than being
+misread as a 0%-pass run — see docs/BENCHMARK.md "Preconditions".
 
 **Results never live in this repo.** They land under the plugin's data dir
 (`benchmarks/<phase>-<date>/` — the same `dataDir()` resolver every other

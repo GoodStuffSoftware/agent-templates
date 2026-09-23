@@ -6,6 +6,40 @@ Read this first; go to PROCESS-NOTES.md for the "why" behind any one of
 these, or for the real measured numbers from the 2026-09-23 pilot/hard/real
 phases (kept out of this repo — see "Where results live" below).
 
+## Preconditions: authentication for a LIVE run
+
+**Live runs use your normal, already-authenticated Claude Code session by
+default.** `scripts/benchmark.mjs`/`bench/runner.mjs` do NOT redirect
+`HOME`/`USERPROFILE` unless you pass `--isolate-home` — matching the proven
+pre-port harness (`bench/effort-grid`, 300+ live runs). If you're logged in
+via `claude /login` (OAuth, the common case), a plain live run just works;
+no extra setup needed.
+
+**Found the hard way, 2026-09-23:** an earlier version of this runner
+redirected `HOME`/`USERPROFILE` to a throwaway dir on EVERY run
+unconditionally. OAuth sessions store their credential under `HOME`
+(`~/.claude/.credentials.json`), so every "live" run under that redirect
+silently failed authentication instead of making a model call —
+`is_error:true`, `terminal_reason:"api_error"`, `cost_usd:0`, answer text
+`"Not logged in · Please run /login"` — and looked like a 0%-pass benchmark
+run rather than an auth failure. `scripts/benchmark.mjs` now classifies this
+shape as a distinct `auth_error` status (`bench/runner.mjs`'s
+`isAuthError()`), aborts the batch immediately on the first one instead of
+burning the rest of the plan, and excludes any such row from pass-rate math
+(`rebuildSummary()`). The per-run console line also shows `status=ok` /
+`status=auth_error` / `status=error(<reason>)` instead of a bare
+`pass=false`, so an auth failure can never be misread as the model failing
+every task.
+
+**`--isolate-home`** is still available, opt-in, for when you genuinely want
+per-run HOME isolation (e.g. running a large unattended batch and you'd
+rather the spawned process never touch `~/.claude` at all for any reason).
+It **only works with `ANTHROPIC_API_KEY`-based auth** — an env var survives
+the redirect (`{...process.env}` carries it through), an OAuth credentials
+file does not. `scripts/benchmark.mjs` refuses to start with `--isolate-home`
+when `ANTHROPIC_API_KEY` isn't set, rather than silently producing a batch
+of `auth_error` rows.
+
 ## Ceiling effects are the default outcome, not an edge case
 
 Every hand-authored synthetic task built for this benchmark (lookup, verify,
@@ -62,11 +96,21 @@ prompt was fixed and the 3 affected cells were re-run.
 `--effort <level>` is a real per-run CLI flag; `--output-format json`'s
 result object has **no `effort` field at all**. Proof lives in the
 session's own transcript, at
-`<fake-HOME>/.claude/projects/<encoded-cwd>/<session_id>.jsonl`'s
-session-init line: `"effort":"low"|"medium"|"high"|"xhigh"`. (`<fake-HOME>`
-because this plugin's runner redirects HOME/USERPROFILE per run — see
-"Sandbox isolation" below; the transcript still gets written, just never
-under the operator's real `~/.claude`.)
+`<transcript-home>/.claude/projects/<encoded-cwd>/<session_id>.jsonl`'s
+session-init line: `"effort":"low"|"medium"|"high"|"xhigh"`.
+
+**By default (no `--isolate-home`) `<transcript-home>` is your REAL home** —
+the runner does not redirect `HOME`/`USERPROFILE` (see "Preconditions"
+above), so the transcript lands under your actual `~/.claude/projects/**`,
+same as any other Claude Code session you've ever run. `<encoded-cwd>` is
+still unique per run (each run gets its own throwaway sandbox directory —
+see "Sandbox isolation" below), so there's no collision risk even though
+it's not a fake home. Every saved `results.jsonl` row carries
+`transcript_home`, `sandbox_cwd`, and `session_id` together, so the exact
+transcript path is always directly derivable from the row, no guessing
+required. Only with `--isolate-home` does `<transcript-home>` become the
+run's throwaway fake home instead (cleaned up after the run finishes —
+copy the transcript out first if you need it).
 
 **A "surprising" identical result across efforts is not automatically a
 bug** — check the transcript before assuming one. `sonnet-low/medium/high`
@@ -141,18 +185,29 @@ word "fail"; "false-positive" matching bare "false"; methodology text like
 
 ## Sandbox isolation
 
-Every run gets its own throwaway sandbox (`os.tmpdir()`-based, `rm -rf`'d
-after) AND its own throwaway HOME/USERPROFILE (`bench/runner.mjs`'s
-`makeFakeHome()`) — the spawned `claude` process can never write a session
-transcript, or read `--setting-sources`-skipped config, under the
-operator's real `~/.claude`. `--setting-sources ""` already skips reading
-hooks/CLAUDE.md/plugins/skills (cuts cache-creation tokens roughly 10x on a
-trivial prompt, and keeps the benchmarked model from seeing this machine's
-own stack) — the HOME redirect covers what that flag does NOT: the
-transcript write itself, which is core session logging, not a "setting
-source". `tests/bench-sandbox-isolation.test.mjs` asserts both: no `.git`
-directory survives extraction into a sandbox, and `HOME`/`USERPROFILE` in
-the env passed to the spawned process never equal the real ones.
+Every run ALWAYS gets its own throwaway working-directory sandbox
+(`os.tmpdir()`-based, `rm -rf`'d after) — this is unconditional, not
+opt-in. `--setting-sources ""` skips reading this machine's hooks/CLAUDE.md/
+plugins/skills (cuts cache-creation tokens roughly 10x on a trivial prompt,
+and keeps the benchmarked model from seeing this machine's own stack).
+
+**HOME/USERPROFILE redirection is opt-in (`--isolate-home`), not the
+default** — see "Preconditions" above for why: OAuth credentials live under
+`HOME`, so redirecting it strips auth for the common case. By default the
+spawned `claude` process writes its session transcript under your REAL
+`~/.claude/projects/**`, same as any other session (necessary anyway --
+that's where "Effort is proven via the transcript" above reads from). Pass
+`--isolate-home` (with `ANTHROPIC_API_KEY` set) to redirect `HOME`/
+`USERPROFILE` to a fresh throwaway dir per run instead, same mechanism as
+before (`bench/runner.mjs`'s `makeFakeHome()`), for when you want the
+spawned process to never touch `~/.claude` at all.
+
+`tests/bench-sandbox-isolation.test.mjs` asserts the `--isolate-home` env-
+building shape (a fresh fake `HOME`/`USERPROFILE` distinct from the real
+ones) and that a task-pack extraction never produces a `.git` directory.
+`tests/bench-auth-error.test.mjs` covers the auth-error classification,
+abort, and `--isolate-home`-without-a-key refusal from "Preconditions"
+above.
 
 ## No visible windows
 
