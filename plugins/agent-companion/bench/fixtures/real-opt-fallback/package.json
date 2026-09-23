@@ -1,0 +1,6 @@
+{
+  "name": "real-opt-fallback-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test" }
+}

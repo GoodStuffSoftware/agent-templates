@@ -1,0 +1,6 @@
+{
+  "name": "real-secret-scan-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test" }
+}

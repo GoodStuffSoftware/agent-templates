@@ -1,0 +1,185 @@
+# Model x effort benchmark — consolidated lessons
+
+The full, blow-by-blow build log lives in `bench/PROCESS-NOTES.md` — this
+page distills what a future re-run actually needs, in the order it needs it.
+Read this first; go to PROCESS-NOTES.md for the "why" behind any one of
+these, or for the real measured numbers from the 2026-09-23 pilot/hard/real
+phases (kept out of this repo — see "Where results live" below).
+
+## Ceiling effects are the default outcome, not an edge case
+
+Every hand-authored synthetic task built for this benchmark (lookup, verify,
+procedure, diagnosis, instruction-logic — even after a full "hard" redesign:
+8-file multi-hop verify, 13-step outcome-dependent procedure, 3-file/3-hop
+diagnosis with a red herring, 17-rule/19-record instruction-logic with a
+3-deep precedence chain) hit 100% pass for every Sonnet and Opus cell at
+every effort level, across 3 reps. Only Haiku ever failed, and only on the
+file-operation procedure task.
+
+**A model x effort benchmark meant to separate paid tiers needs tasks
+calibrated against the tier you actually expect to fail sometimes** —
+calibrate against opus-high/xhigh, not against what feels hard to a human.
+Tokens/turns/cost still separate cells cleanly even when pass/fail is
+saturated (2-4x spread was typical) — that data stays useful as an
+effort-compliance proxy, but stop treating it as a capability signal once
+nothing fails. This is why the `real-*` tasks exist: real capability
+separation needed tasks mined from actual bug-fix commits, not synthetic
+fixtures both the model and its training data are well-practiced at.
+
+## The fairness rule: re-score vs re-run
+
+A held-out hidden test may only assert behavior the report/prompt states or
+implies — never something you know from the diff or commit message that the
+prompt never mentioned. Before re-running a cell over a suspected scorer/
+test bug, **audit first**: check whether every OTHER cell solved the same
+task with the same prompt. If stronger cells also fail, or fail
+inconsistently, suspect the scorer/prompt, not the model.
+
+Then choose by WHICH kind of bug it is:
+
+- **Test-wording bug** (the model did the right thing, phrased differently
+  than a literal regex expected — e.g. `/INHERIT/` case-sensitive rejecting
+  a correct "it will inherit...") → **re-score, never re-run**:
+  `node bench/rescore.mjs <resultsDir>` replays `score()` against every
+  saved `answers/<runId>.json` (full answer text + final sandbox tree), no
+  model calls, no cost. Relax the assertion to check the CONCEPT, not the
+  exact phrase, then re-score.
+- **Genuine prompt under-specification** (the fixture has a shape the prompt
+  never told the model how to handle — e.g. a bare repo with no `origin`
+  remote configured on itself, and the prompt never said what to do then) →
+  **fix the prompt and re-run** the affected cells. The model didn't have
+  the information before, so a saved answer is not a fair replay target;
+  delete its row/answer rather than re-scoring it.
+
+Real example of each, from the 2026-09-23 rep: `real-effort-note` was a
+wording bug (case-sensitive regex) — re-scored, 3 cells flipped to pass, no
+re-run. `real-publication-sweep` was a genuine gap (the prompt never said
+what to do about a bare `origin.git` repo with no remote of its own) — the
+prompt was fixed and the 3 affected cells were re-run.
+
+## Effort is proven via the transcript, never the run's own JSON
+
+`--effort <level>` is a real per-run CLI flag; `--output-format json`'s
+result object has **no `effort` field at all**. Proof lives in the
+session's own transcript, at
+`<fake-HOME>/.claude/projects/<encoded-cwd>/<session_id>.jsonl`'s
+session-init line: `"effort":"low"|"medium"|"high"|"xhigh"`. (`<fake-HOME>`
+because this plugin's runner redirects HOME/USERPROFILE per run — see
+"Sandbox isolation" below; the transcript still gets written, just never
+under the operator's real `~/.claude`.)
+
+**A "surprising" identical result across efforts is not automatically a
+bug** — check the transcript before assuming one. `sonnet-low/medium/high`
+once produced byte-identical, fully correct 10-claim verify answers (same
+token count, same turns, same cost). Before concluding effort wasn't
+applied: 3 distinct session ids, 3 distinct transcript `effort` values, 3
+answer texts diffed and found byte-identical. Conclusion: real convergent
+behavior on a saturated task (see "Ceiling effects" above), not a broken
+flag.
+
+## Known flag gaps in this CLI generation
+
+- **No `--max-turns` flag exists** (checked via `claude -p --help`) — older
+  docs describe one; do not assume it still exists without checking
+  `--help` first on whatever build you're running.
+- **`--settings '{"maxTurns":N}'` is silently ignored** — verified
+  empirically: a 4-step task hit `num_turns:12` despite `maxTurns:1`.
+- **The only working per-run runaway guard is `--max-budget-usd`.** When
+  hit, the run terminates early with `terminal_reason: "budget_exhausted"`,
+  `is_error: true`. Sized per task in each task module's `maxBudgetUsd`;
+  `scripts/benchmark.mjs --max-budget-usd` applies an additional global
+  ceiling on top (the tighter of the two always wins — see
+  `bench/runner.mjs`'s `runOne()`).
+- **`bench/rescore.mjs` cannot re-score a task-pack run.** Task-pack tasks
+  (`bench/task-packs/`) are merged into the runnable set only at
+  `scripts/benchmark.mjs`'s CLI layer (they need a `--pack-repo` path
+  `bench/runner.mjs`'s own static `TASKS` map has no way to supply) — a
+  saved pack-task answer must be re-scored by hand for now.
+
+## The Windows spawn fix
+
+`node:child_process.execFile("claude", ...)` on Windows resolves to
+`claude.cmd` (the npm-style shim), and `execFile` cannot run `.cmd`/`.bat`
+files without `shell: true` — which risks cmd.exe re-interpreting a long,
+multi-line, quote-heavy task prompt. Fix (`bench/runner.mjs`'s
+`resolveClaudeBin()`): run `where claude.cmd` once, take its directory, and
+append the known relative path to the bundled `claude.exe`
+(`node_modules/@anthropic-ai/claude-code/bin/claude.exe`, the same path
+`claude.cmd`'s own batch script uses internally). Override with `CLAUDE_BIN`
+if the install layout differs. Resolution is **lazy** (only on the first
+actual `runClaude()` call, not at module import) specifically so
+`--dry-run` and every offline test can import `bench/runner.mjs` — for
+`CELLS`/`TASKS`/`parseArgs`/`defaultResultsRoot()` — without a `claude`
+binary needing to be resolvable at all.
+
+## Never park a batch on a background notification
+
+Run cells in the foreground, or poll the results file directly. A
+notification tells you a batch finished, not that its output is sane —
+always check `results.jsonl`/`summary.md` yourself before treating a batch
+as good. `scripts/benchmark.mjs --batch-by cell` writes a
+`.batch-state.json` marker and **exits after each cell** for exactly this
+reason: it hands control back to the driving agent, which should read
+`get_usage` and the just-written `summary.md` before deciding whether to
+`--resume`.
+
+## `claim_honest`: useful, not reliable on long answers
+
+`claim_honest` compares the model's own `CLAIM:` line against the actual
+pass/fail verdict via a word-bag heuristic (`bench/tasks/common.mjs`). It is
+a useful secondary signal, but real-history task answers ran 29-57%
+`claim_honest` even when fully correct — multi-paragraph root-cause
+explanations with hedged, uncertain language trip the heuristic far more
+than short declarative pilot-task answers do. **Don't read a low
+`claim_honest` rate as a quality problem without checking the actual claim
+text.** The heuristic itself needed three rounds of adversarial fixes
+against REAL model output (not just hypothetical bad answers) before it was
+trustworthy at all — see `bench/PROCESS-NOTES.md` lesson 4 for the exact
+false-negative classes found (a "0 fail" success statement matching the bare
+word "fail"; "false-positive" matching bare "false"; methodology text like
+"did not run any code" matching a negation phrase).
+
+## Sandbox isolation
+
+Every run gets its own throwaway sandbox (`os.tmpdir()`-based, `rm -rf`'d
+after) AND its own throwaway HOME/USERPROFILE (`bench/runner.mjs`'s
+`makeFakeHome()`) — the spawned `claude` process can never write a session
+transcript, or read `--setting-sources`-skipped config, under the
+operator's real `~/.claude`. `--setting-sources ""` already skips reading
+hooks/CLAUDE.md/plugins/skills (cuts cache-creation tokens roughly 10x on a
+trivial prompt, and keeps the benchmarked model from seeing this machine's
+own stack) — the HOME redirect covers what that flag does NOT: the
+transcript write itself, which is core session logging, not a "setting
+source". `tests/bench-sandbox-isolation.test.mjs` asserts both: no `.git`
+directory survives extraction into a sandbox, and `HOME`/`USERPROFILE` in
+the env passed to the spawned process never equal the real ones.
+
+## No visible windows
+
+Every spawn passes `windowsHide: true` (`bench/runner.mjs`'s `runClaude()`)
+— a batch of dozens of runs must never pop a console window per run.
+`tests/no-visible-windows.test.mjs` (existing, plugin-wide) statically
+greps every `execFile`/`spawn` call for this; the bench spawn is covered by
+the same check.
+
+## Where results live
+
+**Never in this repo.** Default output is the plugin's data dir
+(`dataDir()`, the same resolver every other script here uses) under
+`benchmarks/<phase>-<date>/`, holding `results.jsonl`, `summary.json`,
+`summary.md`, and `answers/` (saved full answer text + final sandbox tree
+per run, for `bench/rescore.mjs`). Override with `--out-dir`. The
+2026-09-23 pilot/hard/real result directories referenced throughout
+`bench/PROCESS-NOTES.md` were produced under the OLD (pre-plugin-migration)
+location and are deliberately NOT carried into this repo — they contain
+local paths. Re-running with `scripts/benchmark.mjs` produces fresh results
+in the current, repo-safe location.
+
+## `claim_honest` experimental status
+
+Mark `claim_honest` **experimental** in any summary you write by hand or
+generate: it is a heuristic word-bag classifier, not a verified signal, and
+its false-negative rate on hedged/long answers is a known, only partially
+fixed limitation (see above). `scripts/benchmark.mjs`'s generated
+`summary.md`/`summary.json` label it this way already — do not strip that
+label when hand-editing a summary for a report.

@@ -1,0 +1,6 @@
+{
+  "name": "real-publication-sweep-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test" }
+}

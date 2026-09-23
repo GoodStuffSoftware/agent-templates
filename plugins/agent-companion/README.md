@@ -266,6 +266,37 @@ and the fan-out cap during exactly the window in which nobody has updated the
 table yet. So it fails toward the expensive assumption, and the audit tells you
 the table needs an entry rather than quietly applying the strict path.
 
+## Model benchmark
+
+The routing table's `taskTypes.*.override` entries (routing trials) are
+backed by a real, in-plugin model x effort benchmark, not intuition:
+`scripts/benchmark.mjs` (plan/budget/order/fairness — `/ac benchmark` or the
+`model-benchmark` skill) drives `bench/runner.mjs`'s proven mechanics
+(headless `claude -p`, full model ids, effort proven from the transcript,
+`claude.exe` never `claude.cmd`, a throwaway sandbox AND a throwaway
+HOME/USERPROFILE per run — the benchmarked process can never touch the
+operator's real `~/.claude`) against a synthetic task set (easy/hard
+variants, `bench/tasks/`) plus real-history tasks mined from this repo's own
+fix commits.
+
+**Results never live in this repo.** They land under the plugin's data dir
+(`benchmarks/<phase>-<date>/` — the same `dataDir()` resolver every other
+script here uses), never committed.
+
+**Adding a new real-history task never means committing extracted source.**
+`bench/task-packs/` is a FORMAT plus a builder
+(`node bench/task-packs/build-pack.mjs`) that extracts a fix commit's parent
+state at RUN TIME (`git show <ref>:<path>`, never `git clone`), verifies
+fail-at-parent/pass-at-fix before the pack is usable, and stores only a
+hand-written symptom-only report, a hidden test, and two base64-encoded git
+refs — a plaintext SHA is exactly the shape this repo's own
+`scripts/leak-check.mjs` bans.
+
+See [`docs/BENCHMARK.md`](docs/BENCHMARK.md) for consolidated lessons
+(ceiling effects, the fairness rule, known CLI flag gaps) and
+[`skills/model-benchmark/SKILL.md`](skills/model-benchmark/SKILL.md) for the
+operating procedure.
+
 ## Telemetry (optional, off by default)
 
 **With no `telemetry_endpoint` set, this plugin makes no network calls at all.**
@@ -553,6 +584,7 @@ node "$AC/scripts/audit.mjs" --only guard-canary
 | `standing-rules` | `/ac rules` | which "always do X if Y" rules exist, and whether one would fire on given text |
 | `setup` | `/ac setup` | the setup steps on a new machine, both scouts included |
 | `calibration-scout` | `/ac scout` | the daily drift scout, run by hand |
+| `model-benchmark` | `/ac benchmark` | re-running the model x effort benchmark: plan, budget, order, fairness, reporting |
 
 The full form is `/agent-companion:<skill>`. `/ac` is a user-level forwarder
 that the setup skill installs from `shims/ac/`; a skill inside a plugin is

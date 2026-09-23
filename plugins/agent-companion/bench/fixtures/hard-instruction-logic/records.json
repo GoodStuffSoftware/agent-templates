@@ -1,0 +1,21 @@
+[
+  { "id": 1, "name": "auth.js", "ext": "js", "lines": 340, "modified_days_ago": 12, "owner": "priya", "has_tests": true },
+  { "id": 2, "name": "auth.test.js", "ext": "test.js", "lines": 410, "modified_days_ago": 12, "owner": "unassigned", "has_tests": false },
+  { "id": 3, "name": "billing.js", "ext": "js", "lines": 150, "modified_days_ago": 140, "owner": "unassigned", "has_tests": false },
+  { "id": 4, "name": "CHANGELOG.md", "ext": "md", "lines": 60, "modified_days_ago": 5, "owner": "priya", "has_tests": false },
+  { "id": 5, "name": "_scratch.js", "ext": "js", "lines": 20, "modified_days_ago": 1, "owner": "unassigned", "has_tests": false },
+  { "id": 6, "name": "reporting.js", "ext": "js", "lines": 95, "modified_days_ago": 200, "owner": "dan", "has_tests": true },
+  { "id": 7, "name": "onboarding.md", "ext": "md", "lines": 320, "modified_days_ago": 25, "owner": "dan", "has_tests": false },
+  { "id": 8, "name": "search.js", "ext": "js", "lines": 260, "modified_days_ago": 95, "owner": "unassigned", "has_tests": false },
+  { "id": 9, "name": "search.test.js", "ext": "test.js", "lines": 300, "modified_days_ago": 8, "owner": "unassigned", "has_tests": false },
+  { "id": 10, "name": "legacy.md", "ext": "md", "lines": 10, "modified_days_ago": 400, "owner": "dan", "has_tests": false },
+  { "id": 11, "name": "worker.js", "ext": "js", "lines": 50, "modified_days_ago": 150, "owner": "priya", "has_tests": false },
+  { "id": 12, "name": "gateway.js", "ext": "js", "lines": 250, "modified_days_ago": 20, "owner": "priya", "has_tests": false },
+  { "id": 13, "name": "old_gateway.test.js", "ext": "test.js", "lines": 90, "modified_days_ago": 200, "owner": "unassigned", "has_tests": false },
+  { "id": 14, "name": "release-notes.md", "ext": "md", "lines": 10, "modified_days_ago": 30, "owner": "priya", "has_tests": false },
+  { "id": 15, "name": "metrics.js", "ext": "js", "lines": 200, "modified_days_ago": 90, "owner": "dan", "has_tests": false },
+  { "id": 16, "name": "cache.js", "ext": "js", "lines": 10, "modified_days_ago": 210, "owner": "priya", "has_tests": false },
+  { "id": 17, "name": "_internal_helpers.js", "ext": "js", "lines": 500, "modified_days_ago": 500, "owner": "unassigned", "has_tests": false },
+  { "id": 18, "name": "playbook.md", "ext": "md", "lines": 15, "modified_days_ago": 500, "owner": "dan", "has_tests": false },
+  { "id": 19, "name": "migration.js", "ext": "js", "lines": 400, "modified_days_ago": 3, "owner": "priya", "has_tests": true }
+]

@@ -25,6 +25,7 @@ through unchanged.
 | `rules <args>` | `agent-companion:standing-rules` | `node "$AC/scripts/rules.mjs" <args>` |
 | `setup` | `agent-companion:setup` | — |
 | `scout` | `agent-companion:calibration-scout` | — |
+| `benchmark <args>` | `agent-companion:model-benchmark` | `node "$AC/scripts/benchmark.mjs" <args>` |
 | *(nothing)* | print this table | — |
 
 Invoke the plugin skill with the Skill tool when it is loaded in this session.

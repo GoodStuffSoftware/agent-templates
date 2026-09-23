@@ -1,0 +1,6 @@
+{
+  "name": "real-misleading-report-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test" }
+}

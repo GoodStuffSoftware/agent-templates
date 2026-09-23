@@ -1,0 +1,13 @@
+{
+  "id": "leak-check-gitignore-fix",
+  "parentRefB64": "NzM2NmI0ZV4=",
+  "fixRefB64": "NzM2NmI0ZQ==",
+  "files": [
+    "scripts/leak-check.mjs"
+  ],
+  "leakPhrases": [
+    "PROVENANCE.local.md",
+    "even though CI was green"
+  ],
+  "maxBudgetUsd": 0.6
+}

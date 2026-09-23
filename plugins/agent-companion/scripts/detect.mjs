@@ -67,6 +67,23 @@ function sig(kind, detail, dispatch) {
   signals.push({ kind, detail, dispatch });
 }
 
+// Advisory-only, additive signal: SUGGESTS the model-benchmark skill, never
+// runs it (a real benchmark spends model calls and plan usage — this script
+// only ever hashes/counts/diffs, per its own file banner). Fired alongside
+// three conditions the operator asked this scout to flag: a genuinely new
+// model alias in the routing table's own lineup (1c, below), an alias/
+// version-floor drift signal (1 and 1b, this section), or a routing trial
+// past its reviewBy (5b, below). Kept as its OWN signal kind with its OWN
+// dispatch rather than folded into those signals' existing `dispatch`
+// strings, because those are asserted exactly by tests/alias-version-floor
+// and tests/routing-trial — changing them would be an unrelated behavior
+// change to what those signals already mean.
+function suggestModelBenchmark(reason) {
+  sig('model_benchmark_suggested',
+    `${reason} — consider running the model-benchmark skill to refresh the routing table's evidence. Suggestion only: this scout never runs it itself.`,
+    'model-benchmark');
+}
+
 // --- 1. Harness version ------------------------------------------------
 // The highest-value check. A renamed matcher or a new hook event does not
 // error — the guards just stop firing, silently.
@@ -76,6 +93,7 @@ try {
   if (baseline.version && baseline.version !== v) {
     sig('harness_version_changed', `${baseline.version} -> ${v}`,
       'harness-surface-diff + guardrail-canary');
+    suggestModelBenchmark(`Claude Code version changed (${baseline.version} -> ${v})`);
   }
 } catch {
   next.version = baseline.version ?? null;
@@ -107,9 +125,37 @@ try {
       `running Claude Code ${next.version} is below the ${floor} floor config/model-tiers.json's alias facts assume — ` +
       (cfg.aliasResolution.note || 'aliases (e.g. `opus`) may still resolve to an OLDER model than the routing table claims'),
       'routing-review');
+    suggestModelBenchmark(`running Claude Code ${next.version} is below the alias-resolution floor ${floor}`);
   }
   // floor present but running version unreadable this run: section 1 above
   // already raised harness_version_unreadable — nothing further to add here.
+} catch { /* config unreadable: the audit reports that separately */ }
+
+// --- 1c. New model in the routing table's lineup ------------------------
+// A model alias can be ADDED to config/model-tiers.json's `tiers` (a new
+// release, or an existing one flipped `available: true`) without the
+// benchmark ever having run a single cell against it — bench/runner.mjs's
+// own CELLS table is a SEPARATE, hand-maintained list, so nothing connects
+// "the routing table now names this alias" to "the benchmark evidence
+// backing taskTypes.*.override actually covers it." Same freshness pattern
+// as section 2's unknown-agent-types check: track the known set, fire only
+// on a genuinely NEW arrival, never re-fire once seen.
+try {
+  const cfg = modelTiers();
+  const availableAliases = Object.entries(cfg.tiers || {})
+    .filter(([, spec]) => spec.available !== false)
+    .map(([alias]) => alias)
+    .sort();
+  const seenAliases = new Set(baseline.knownModelAliases || []);
+  const freshAliases = availableAliases.filter((a) => !seenAliases.has(a));
+  next.knownModelAliases = availableAliases;
+  // First run ever (no baseline.knownModelAliases at all): every alias is
+  // "fresh" by construction, and that is not a real signal — it would fire
+  // on every fresh install. Only fire once a baseline actually existed.
+  if (baseline.knownModelAliases && freshAliases.length) {
+    sig('new_model_in_lineup', `new model alias/tier in config/model-tiers.json: ${freshAliases.join(', ')}`, 'routing-review');
+    suggestModelBenchmark(`new model alias/tier in the lineup: ${freshAliases.join(', ')}`);
+  }
 } catch { /* config unreadable: the audit reports that separately */ }
 
 // --- 2. Unknown agent types -------------------------------------------
@@ -225,6 +271,7 @@ try {
       sig('routing_trial_review_due',
         `${name} routing trial due for review: compare spawn telemetry outcomes and escalation rates since ${ov.trialSince || 'trial start'} (reviewBy ${ov.reviewBy} has passed)`,
         'routing-review');
+      suggestModelBenchmark(`${name}'s routing trial reviewBy (${ov.reviewBy}) has passed`);
     }
   }
 } catch { /* config unreadable: the audit reports that separately */ }

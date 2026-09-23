@@ -548,6 +548,12 @@
       ]
     }
   },
+  "planUsageMultipliers": {
+    "note": "Relative PLAN-USAGE burn per unit of (price-weighted) token cost -- NOT api dollar pricing. Plan usage windows deplete at a rate the sticker price does not predict, per the operator's own in-app observation. Keyed by tier alias (see tiers, above); a tier with no entry here gets no plan-usage index computed by bench/runner.mjs's rebuildSummary() rather than a guessed number -- fail toward 'unknown', not toward inventing a multiplier nobody measured.",
+    "sonnet": { "multiplier": 1.0, "source": "baseline (defined as 1.0); every other multiplier here is relative to it", "date": "2026-09-23" },
+    "opus": { "multiplier": 1.5, "source": "in-app tooltip, 2026-09-23, undocumented, may be introductory", "date": "2026-09-23" }
+  },
+  "planUsageMultipliersNote": "Measured 2026-09-23: Opus 5.5 = 1.5x Sonnet 5 per an in-app plan-usage tooltip reading (API pricing is 2x -- the plan-usage rate and the dollar rate are NOT the same number, which is the whole reason this table exists separately from `tiers.*.resolvesTo.pricing`). This may be an introductory rate; re-check before relying on it for a long-lived decision. No haiku or fable reading exists yet -- do not extrapolate one.",
   "calibration": {
     "reviewer-effort-direction": {
       "question": "Does a reviewer at HIGHER effort than the writer catch more, or less?",

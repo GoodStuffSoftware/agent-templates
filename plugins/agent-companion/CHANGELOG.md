@@ -2,6 +2,90 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.25.0 — 2026-09-23
+
+Moves the model x effort benchmark (previously `bench/effort-grid` on a
+separate branch, never in the plugin) into `plugins/agent-companion/` so the
+routing trial's evidence can be regenerated in place instead of living on a
+branch nobody re-runs (minor bump — new files/command/skill, no existing
+behavior changed).
+
+### Added
+
+- **`bench/`**: the benchmark runner, scorers, rescore tool, and the
+  synthetic task set (6 easy + 4 hard variants + 7 real-history tasks mined
+  from this repo's own fix commits), ported from `bench/effort-grid` with
+  three real fixes made along the way, not just a copy:
+  - **Sandbox isolation.** Every run now gets a throwaway HOME/USERPROFILE
+    (`bench/runner.mjs`'s `makeFakeHome()`), not just a throwaway working
+    directory — the benchmarked process can never write a session
+    transcript, or read anything `--setting-sources ""` doesn't already
+    skip, under the operator's real `~/.claude`.
+  - **`windowsHide: true` on every spawn** (`claude`, `git`, `node --test`) —
+    the original harness's own skill draft had flagged this as something to
+    verify before a large batch, not something already done.
+  - **`runNodeTest()` no longer leaks `NODE_TEST_*` env vars into the
+    nested `node --test` it spawns** (`bench/tasks/common.mjs`) — found
+    while writing `tests/bench-scorers.test.mjs`: several `real-*` tasks
+    silently scored every answer as `pass:true` with empty test output
+    when `runNodeTest()`'s own caller was itself running under `node
+    --test`, because the child process inherited `NODE_TEST_CONTEXT=
+    child-v8` and treated itself as a test-runner worker instead of doing a
+    normal standalone run. Invisible in a real benchmark run (never itself
+    under `node --test`), but would have made every scorer test in this
+    release lie.
+  - `CLAUDE_BIN` resolution is now **lazy** (only on the first actual model
+    call), so `bench/runner.mjs` stays importable — for `CELLS`/`TASKS`/
+    `--dry-run`/tests — with no `claude` binary on PATH at all.
+- **`scripts/benchmark.mjs`**: the operator-facing entry point. Task-family
+  expansion (`--tasks easy|hard|real|all`, or literal ids), a global
+  `--max-budget-usd` ceiling (tighter of it and each task's own), `--dry-run`
+  (prints the full plan — cell x task x rep counts and exact args — with
+  ZERO model calls), and `--batch-by cell`/`--resume` so a driving agent can
+  check plan usage between batches instead of one process running an
+  unattended multi-hour grid.
+- **`bench/task-packs/`**: a FORMAT plus a builder
+  (`build-pack.mjs`/`verify-pack.mjs`) for adding more real-history tasks
+  WITHOUT ever committing extracted source. A pack extracts a fix commit's
+  parent state at RUN TIME (`git show <ref>:<path>`, never `git clone`),
+  verifies fail-at-parent/pass-at-fix before it's usable, and stores only a
+  hand-written symptom-only report, a hidden test, and two BASE64-ENCODED
+  git refs (a plaintext SHA is exactly the shape this repo's own
+  `scripts/leak-check.mjs` bans). One tiny example pack included
+  (`examples/leak-check-gitignore-fix`, built from this repo's own history),
+  verified and committed with no extracted source.
+- **`config/model-tiers.json`: `planUsageMultipliers`** — Opus 5.5 = 1.5x
+  Sonnet 5, source "in-app tooltip, 2026-09-23, undocumented, may be
+  introductory" (per the operator's own measurement). `bench/runner.mjs`'s
+  `rebuildSummary()` now reports a `plan_usage_index` per cell/task
+  alongside the existing token-cost `relative_cost_index`, and marks
+  `claim_honest_rate` `claim_honest_experimental: true` — it is a word-bag
+  heuristic, not a verified signal (see `docs/BENCHMARK.md`).
+- **`docs/BENCHMARK.md`**: consolidated lessons from the original harness's
+  `PROCESS-NOTES.md` (kept in full at `bench/PROCESS-NOTES.md`) — ceiling
+  effects, the re-score-vs-re-run fairness rule, known CLI flag gaps, the
+  Windows spawn fix, sandbox isolation, and `claim_honest`'s experimental
+  status.
+- **`skills/model-benchmark/SKILL.md`**: rewritten to point at the in-plugin
+  command and docs instead of a separate branch; procedure-first, under 150
+  lines. Registered in the README skill table and `/ac benchmark`
+  (`shims/ac/SKILL.md`).
+- **`scripts/detect.mjs`**: the daily scout now SUGGESTS (never runs) the
+  model-benchmark skill — a new `model_benchmark_suggested` signal fires
+  alongside a genuinely new model alias in the routing table's lineup (new
+  `new_model_in_lineup` check), an alias-resolution-floor or harness-version
+  drift signal, or a routing trial past its `reviewBy`.
+- Tests (all new, no real model call in any of them): `--dry-run` plan
+  correctness and results-path-outside-the-repo
+  (`tests/bench-dry-run.test.mjs`), scorer golden/adversarial coverage for
+  every task (`tests/bench-scorers.test.mjs`), sandbox isolation and the
+  task-pack `.git`-absence guard (`tests/bench-sandbox-isolation.test.mjs`),
+  the task-pack leak guard and CLI wiring
+  (`tests/bench-task-pack.test.mjs`), the scout's benchmark-suggestion
+  signals (`tests/model-benchmark-suggestion.test.mjs`), and a static
+  `windowsHide: true` check over every spawn in `bench/`
+  (`tests/no-visible-windows.test.mjs`). 302/0 (was 227/0 after 0.24.3).
+
 ## 0.24.3 — 2026-09-23
 
 Enforcement gap fix: the 0.24.2 routing trial (`taskTypes.*.override`) was
