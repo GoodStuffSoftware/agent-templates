@@ -72,6 +72,43 @@ try {
   sig('harness_version_unreadable', 'could not run `claude --version`', 'manual-check');
 }
 
+// --- 1b. Alias-resolution version floor ---------------------------------
+// config/model-tiers.json's `aliasResolution.minClaudeCodeVersion` records
+// the Claude Code version its per-alias `resolvesTo` facts (price, default
+// effort, context, ...) hold from — per that config's own note, `opus`
+// resolved to Opus 5 instead of Opus 5.5 on any build below v2.1.280. That
+// floor was recorded as DATA but never checked against the running harness
+// anywhere, so an operator two patch versions behind it (a real, live-
+// verified case, not hypothetical) got routing advice for a model their
+// `opus` alias might not actually resolve to, with nothing surfacing the
+// gap. Reuses the version string section 1 above already fetched — no
+// second `claude --version` call.
+function parseSemver(s) {
+  const m = String(s || '').match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+function semverBelow(a, b) {
+  for (let i = 0; i < 3; i += 1) {
+    if (a[i] < b[i]) return true;
+    if (a[i] > b[i]) return false;
+  }
+  return false;
+}
+try {
+  const cfg = modelTiers();
+  const floor = cfg.aliasResolution?.minClaudeCodeVersion;
+  const floorParsed = parseSemver(floor);
+  const running = parseSemver(next.version);
+  if (floor && floorParsed && running && semverBelow(running, floorParsed)) {
+    sig('alias_resolution_below_version_floor',
+      `running Claude Code ${next.version} is below the ${floor} floor config/model-tiers.json's alias facts assume — ` +
+      (cfg.aliasResolution.note || 'aliases (e.g. `opus`) may still resolve to an OLDER model than the routing table claims'),
+      'routing-review');
+  }
+  // floor present but running version unreadable this run: section 1 above
+  // already raised harness_version_unreadable — nothing further to add here.
+} catch { /* config unreadable: the audit reports that separately */ }
+
 // --- 2. Unknown agent types -------------------------------------------
 // Enforcement fails open on these by design; detection must not.
 const unknownRecords = readJsonl('unknown-agent-types.jsonl');
