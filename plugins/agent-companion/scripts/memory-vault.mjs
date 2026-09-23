@@ -36,7 +36,7 @@ import {
   readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync,
 } from 'node:fs';
 import { join, dirname, relative, sep } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSyncHidden } from './lib/proc.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   opt, stateRoot, stateDir,
@@ -162,7 +162,7 @@ function statusCacheFile() {
 }
 
 function git(args, opts = {}) {
-  return execFileSync('git', args, { encoding: 'utf8', ...opts });
+  return execFileSyncHidden('git', args, { encoding: 'utf8', ...opts });
 }
 
 function isOurVault(dir) {

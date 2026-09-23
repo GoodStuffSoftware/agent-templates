@@ -16,7 +16,7 @@ import {
 } from 'node:fs';
 import { join, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { execFileSync, execSync } from 'node:child_process';
+import { execSyncHidden, execFileSyncHidden } from './lib/proc.mjs';
 
 import {
   classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir, opt, claudeDir,
@@ -356,7 +356,7 @@ const harnessDrift = {
       // execSync, not execFileSync: on Windows `claude` is a .cmd shim, which
       // only resolves through a shell. execFileSync silently failed here and the
       // check reported SKIP — a drift detector that never runs is worse than none.
-      version = execSync('claude --version', { encoding: 'utf8', timeout: 20000 }).trim();
+      version = execSyncHidden('claude --version', { encoding: 'utf8', timeout: 20000 }).trim();
     } catch {
       return { status: 'skip', findings: ['could not run `claude --version`'] };
     }
@@ -405,7 +405,7 @@ const guardCanary = {
 
     const probe = (script, payload) => {
       try {
-        const out = execFileSync('node', [join(hooks, script)], {
+        const out = execFileSyncHidden('node', [join(hooks, script)], {
           input: JSON.stringify(payload), encoding: 'utf8', timeout: 15000,
         });
         return out.trim() ? JSON.parse(out) : null;
@@ -528,7 +528,7 @@ const pluginManifests = {
       try {
         // --strict so warnings (unknown fields, missing metadata) surface here
         // rather than at publish time. execSync for the Windows .cmd shim.
-        out = execSync(`claude plugin validate "${path}" --strict`, { encoding: 'utf8', timeout: 60000 });
+        out = execSyncHidden(`claude plugin validate "${path}" --strict`, { encoding: 'utf8', timeout: 60000 });
       } catch (e) {
         failed = true;
         const text = `${e.stdout || ''}${e.stderr || ''}`.trim() || e.message;
@@ -583,7 +583,7 @@ const routingDoc = {
     if (!existsSync(script)) return { status: 'skip', findings: ['routing-table.mjs not found'] };
     let fresh;
     try {
-      fresh = execSync(`node "${script}"`, { encoding: 'utf8', timeout: 20000 });
+      fresh = execSyncHidden(`node "${script}"`, { encoding: 'utf8', timeout: 20000 });
     } catch (e) {
       return { status: 'error', findings: [`renderer threw: ${e.message}`] };
     }
@@ -1043,7 +1043,7 @@ const brevityCanary = {
 
     const probe = (script, payload, args = []) => {
       try {
-        const out = execFileSync('node', [join(hooks, script), ...args], {
+        const out = execFileSyncHidden('node', [join(hooks, script), ...args], {
           input: JSON.stringify(payload), encoding: 'utf8', timeout: 15000,
         });
         return out.trim() ? JSON.parse(out) : null; // null: ran fine, said nothing

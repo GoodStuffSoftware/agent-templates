@@ -2,6 +2,35 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.24.2 — 2026-09-23
+
+Windows flashing-console-window fix (patch bump — hardening only, no
+behavior change on any platform where a hidden console was never visible).
+
+### Fixed
+
+- **`scripts/checks.mjs`, `scripts/detect.mjs`, `scripts/memory-vault.mjs`:
+  every `execSync`/`execFileSync` call now carries `windowsHide: true`.**
+  These are CLI/audit-tool call sites (`claude --version`, `claude plugin
+  validate`, `git`, self-probing a hook script via `node`), not on the
+  SessionStart/PreToolUse-Agent hook path itself -- that path
+  (`hooks/lib/memory-index.mjs`'s `runGit()`, reached from `spawn-guard.mjs`
+  on every subagent spawn) already carried the flag. Added for the same
+  reason regardless: on Windows, whichever process actually allocates a
+  console does not honor a flag set on an ancestor process, and these
+  scripts run via `/audit`, the calibration scout, and memory-vault sync --
+  all of which can run unattended.
+- **New `scripts/lib/proc.mjs`.** Thin `execSyncHidden`/`execFileSyncHidden`/
+  `spawnSyncHidden` wrappers, one place that hardcodes the flag, used by all
+  three files above.
+- **New `tests/no-visible-windows.test.mjs`.** Statically asserts every
+  `spawn`/`spawnSync`/`exec`/`execSync`/`execFile`/`execFileSync` call under
+  `hooks/` and `scripts/` carries `windowsHide` in its own argument list, so
+  a future call site cannot silently reopen this. Verified against a real
+  regression (removing the existing flag from `memory-index.mjs`'s
+  `runGit()` made the test fail with the exact call site and line).
+
+
 ## 0.24.1 — 2026-09-23
 
 Folds a measured 30-day cache-TTL finding into the routing model (patch

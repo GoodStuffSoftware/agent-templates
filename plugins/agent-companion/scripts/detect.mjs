@@ -10,7 +10,7 @@
 //
 // Emits JSON to stdout: { changed: bool, signals: [...], baseline: {...} }
 
-import { execSync } from 'node:child_process';
+import { execSyncHidden } from './lib/proc.mjs';
 import { readFileSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -63,7 +63,7 @@ function sig(kind, detail, dispatch) {
 // The highest-value check. A renamed matcher or a new hook event does not
 // error — the guards just stop firing, silently.
 try {
-  const v = execSync('claude --version', { encoding: 'utf8', timeout: 20000 }).trim();
+  const v = execSyncHidden('claude --version', { encoding: 'utf8', timeout: 20000 }).trim();
   next.version = v;
   if (baseline.version && baseline.version !== v) {
     sig('harness_version_changed', `${baseline.version} -> ${v}`,
