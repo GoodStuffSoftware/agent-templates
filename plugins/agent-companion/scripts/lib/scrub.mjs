@@ -66,6 +66,13 @@ const GH_TOKEN_RE = /(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[
 //     ":<digit>" (read as a file:line reference) is left as-is.
 //   * A deeper path on a public repo URL (…/blob/main/x) is not "exactly a
 //     public owner/repo" and is scrubbed to <repo-url> — safe, less readable.
+//   * F3: malformed URL userinfo can partly survive — an unescaped "@" in
+//     the password (https://u:p@ss@github.com/o/r), a space in it, or
+//     bracketed userinfo. None is a valid URL and git never produces one.
+//   * F4: some private owner/repo forms survive — a trailing slash
+//     (org/repo/), a longer bare path (org/repo/docs/x.md:3), and scp form
+//     on a non-GitHub host (host.internal:org/repo). Every error form git
+//     actually emits is scrubbed.
 
 const PATH_RES = [
   // Windows absolute path with / or 1-4 backslashes (JSON-escaped forms too).

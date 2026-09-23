@@ -437,6 +437,13 @@ if (publicationSweepOn && cloud) {
     // 'extra' entries are excluded on purpose: they were never confirmed
     // public by discovery, so they get no free pass.
     publicationPublicNames = publicNameTokens(merged.filter((r) => r.source !== 'extra'));
+    // Known residue F5 (accepted): repos from `extra` entries here, and from
+    // an explicit publication_leak_repos list in the cloud branch above, are
+    // never marked known-public, so their alerts read
+    // "<repo-url> — rel:line [label]" (file/line kept, repo name hidden) —
+    // safe but weaker. Unverified: if a cloud session's origin is a
+    // proxy-style URL rather than github.com/o/r, the cloud default (no
+    // explicit list) sweeps nothing.
     knownPublicForScrub = merged.filter((r) => r.source !== 'extra').flatMap((r) => [r.htmlUrl, r.fullName]);
 
     // gh missing/unauthenticated: note it ONCE (not daily), same
