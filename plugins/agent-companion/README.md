@@ -40,6 +40,7 @@ It was built after two observed failures:
 | `brevity` | Appends a short reporting contract to every spawned agent's brief — status line, blockers in full, outcome as facts, no narration — plus a peer-brevity clause on inter-agent messages. | no (an opt-in sub-toggle can block once per agent) |
 | `standing_rules` | Injects operator-authored "always do X if Y" rules at session start, on matching prompts, and into matching spawn briefs. | no |
 | `memory_vault` | Keeps a local git history of the memory corpus in a separate repository, so a rewrite or truncation is no longer unrecoverable. Strictly read-only against the live corpus. **Off by default** — see [Memory vault](#memory-vault). | no |
+| `capacity_probe` | At session start, a one-line estimate of how many concurrent Claude Code SESSIONS this machine can carry right now (free memory / cpu count -> a concurrency budget and an idle-teammates-ok vs stop-between-rounds policy). Counts OS-level session processes (excludes the desktop app); in-process subagents/teammates share their parent session's process rather than counting separately. Read-only, cheap, wrapped so a slow or failing probe never blocks the hook. `scripts/capacity.mjs` also runs standalone (`--text`, `--per-agent-mb`, `--headroom-gb`, `--threshold`). | no |
 
 Premium tiers are **capped and audited, never banned**. The failure mode was
 unexamined defaults, not the model itself.

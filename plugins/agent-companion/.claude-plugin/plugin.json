@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -245,6 +245,30 @@
       "title": "Standing rules budget (characters)",
       "description": "Ceiling on the rendered rule block per injection. Rules past the ceiling are dropped and the count is stated, so a budget overrun is visible rather than silent.",
       "default": 2000
+    },
+    "capacity_probe": {
+      "type": "boolean",
+      "title": "Machine capacity probe",
+      "description": "At session start, surface a compact line estimating how many concurrent Claude Code SESSIONS this machine can carry right now, derived from free memory, cpu count, and (best-effort) a count of live Claude Code session processes (excludes the desktop app and its Electron helpers; does not separately count in-process subagents/teammates, which share their parent session’s process and memory). Read-only and cheap; wrapped so a slow or failing probe never blocks the hook.",
+      "default": true
+    },
+    "capacity_per_agent_mb": {
+      "type": "number",
+      "title": "Per-session memory estimate (MB)",
+      "description": "How much resident memory one Claude Code session process is assumed to cost. Used to convert free memory into a concurrency budget: floor((free - headroom) / perSession). Default 350, calibrated from WorkingSetSize on a real machine running 10 sessions (2026-09-23): min 219MB, median 346MB, max 679MB — replaces an earlier untested 300MB guess. Does not separately budget for in-process subagents/teammates: they run inside their parent session’s process, so heavy in-process fan-out shows up as that session needing a bigger estimate here, not as more sessions.",
+      "default": 350
+    },
+    "capacity_headroom_gb": {
+      "type": "number",
+      "title": "Capacity headroom override (GB)",
+      "description": "Memory reserved for the OS and the current session before any of it counts toward the concurrency budget. 0 (default) computes it instead: max(4, 25% of total memory).",
+      "default": 0
+    },
+    "capacity_concurrency_threshold": {
+      "type": "number",
+      "title": "Idle-teammate concurrency threshold",
+      "description": "Concurrency budget at or above which the probe reports policy \"idle-teammates-ok\"; below it, \"stop-between-rounds\".",
+      "default": 12
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
