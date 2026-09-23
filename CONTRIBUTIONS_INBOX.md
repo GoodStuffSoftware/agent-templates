@@ -1,5 +1,33 @@
 # Contributions Inbox
 
+## 2026-09-22 - the cheapest tier validates, it does not execute a procedure ({{PROJECT}})
+
+- **A validator and an operator are different jobs, and the cheap tier only does the first.** A cheapest-tier
+  session read pages and confirmed strings reliably, then failed at running a build script through a vendor
+  console: read the script, Preview, read the log, Run, then verify a dozen named settings in a separate UI and
+  report each one. It had to be re-spawned a tier up mid-task. Nothing in that list is individually hard; the
+  difficulty is holding a long ordered procedure across tool boundaries without silently dropping a step.
+- **The predictive line:** "look at this and tell me exactly what it says" is cheapest-tier work. "Do these nine
+  things in order, in a live system, and prove each one" is not, however trivial each action looks, because the
+  failure mode is omission rather than a wrong answer. Browser-driven work skews it further, since every step is a
+  fresh round trip and state must be re-established each time.
+- **Route on that, not on apparent difficulty:** reads, string checks, screenshots and "confirm X is still true" to
+  the cheap tier; anything that CHANGES a live system, or must be done in a fixed order and proven step by step, a
+  tier up.
+
+## 2026-09-22 - a check that cannot fail is not a check ({{PROJECT}})
+
+- **A crashing checker reads as a passing check.** On {{PLATFORM}} a `grep -iF` combination aborts (SIGABRT, exit
+  134) while `-i` and `-F` each work alone. A boundary test written as `grep -qiF "$needle" file && fail` therefore
+  reported a clean pass for every needle, because the crash is neither 0 nor 1. Before trusting a check that is
+  SUPPOSED to find nothing, feed it something you know is present and watch it fire; a zero result means nothing
+  until the detector has been demonstrated. Prefer exit codes you have seen both ways over a silent green.
+- **Read only the default branch and you will miss the work that matters.** A daily activity digest read each
+  repository's default branch, so a week of contribution work on a fork was invisible: a fork's default branch
+  mirrors upstream, and the real commits sat on side branches. Listing branches does not scale (repos here carry
+  100+); the repository ACTIVITY feed answers it in one call per repo, naming the branch, the actor and the time,
+  so only branches the owner actually pushed to are followed, then deduped by sha.
+
 ## 2026-09-22 - a size cap that locked the whole record, and a kill switch that only half worked ({{PROJECT}})
 
 - **A constraint evaluated over the whole POST-STATE rather than over the DELTA turns a local violation into a
