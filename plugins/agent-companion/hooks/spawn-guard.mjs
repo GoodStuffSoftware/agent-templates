@@ -90,8 +90,16 @@ try {
   const declaredKind = km ? km[1].toLowerCase() : null;
   const cm = brief.match(/\bCONSEQUENCE\s*:\s*(routine|elevated|critical)\b/i);
   const declaredConsequence = cm ? cm[1].toLowerCase() : null;
-  const em = brief.match(/\bEFFORT\s*:\s*(low|medium|high|xhigh|max)\b/i);
-  const declaredEffort = em ? em[1].toLowerCase() : null;
+  // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
+  // model, weight, kind and consequence — all of which the ORCHESTRATOR
+  // controls by what it writes into the brief text — effort is locked to the
+  // spawned agent's OWN definition frontmatter; no documented Claude Code
+  // mechanism turns free text in a prompt into a per-spawn effort parameter.
+  // An earlier version of this hook let an "EFFORT: <level>" line in the
+  // brief silence the no-effort warning below, which was actively
+  // misleading: it told the caller they had fixed the effort-inheritance
+  // hazard when the subagent still ran at whatever effort the orchestrating
+  // session happened to be at (review finding M1, 2026-09-23).
 
   // --- Best fit ----------------------------------------------------------
   // The table's answer for the declared weight, used two ways: filled in where
@@ -125,18 +133,20 @@ try {
   // effort axis, and it applies to every effort-taking model, not only opus:
   // an orchestrator cranked to `max` silently pushes every effort-less
   // subagent (sonnet or opus) to `max` too, and vice versa. "Stated" means
-  // the agent definition's own frontmatter, or an EFFORT: line in the brief.
-  // Read AFTER autofill so an autofilled model (e.g. weight 5, no model
-  // named) is covered too, not just an explicitly-named one. Haiku is
-  // excluded — it takes no effort parameter, so there is nothing to inherit.
+  // ONLY the agent definition's own `effort:` frontmatter — brief text
+  // cannot set it (see the note above declaredWeight/declaredKind/
+  // declaredConsequence). Read AFTER autofill so an autofilled model (e.g.
+  // weight 5, no model named) is covered too, not just an explicitly-named
+  // one. Haiku is excluded — it takes no effort parameter, so there is
+  // nothing to inherit.
   const modelTakesEffort = !!model && effortSupported(model, 'high').ok;
-  const effortStatedSomewhere = !!(def?.effort || declaredEffort);
+  const effortStatedSomewhere = !!def?.effort;
   const noEffortStatedNote = (modelTakesEffort && !effortStatedSomewhere)
-    ? `agent-companion: this spawn resolves to ${classifyModel(model).alias || model} with no effort stated ` +
-      'anywhere (agent definition frontmatter, or an EFFORT: line in the brief) — it will INHERIT the ' +
-      'orchestrating session\'s current effort rather than any model default, which couples this subagent\'s ' +
-      'depth of thinking to whatever the caller happens to be running at. State it explicitly: add ' +
-      '"EFFORT: <low|medium|high|xhigh|max>" to the brief, or set `effort:` in the agent definition frontmatter.'
+    ? `agent-companion: this spawn resolves to ${classifyModel(model).alias || model} with no effort stated in ` +
+      'its agent definition — it will INHERIT the orchestrating session\'s current effort rather than any model ' +
+      'default, which couples this subagent\'s depth of thinking to whatever the caller happens to be running ' +
+      'at. State it explicitly by setting `effort:` in the agent definition frontmatter — a brief-level ' +
+      '"EFFORT:" line does NOT set it; effort is locked to the definition, not the spawn call.'
     : null;
 
   // --- Memory brief (deliverable 2) --------------------------------------

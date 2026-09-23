@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 
 test('spawn resolving to opus with no effort anywhere gets the no-effort-stated warning', () => {
   const { dir, cleanup } = makeFixture();
@@ -33,13 +33,21 @@ test('spawn resolving to opus with no effort anywhere gets the no-effort-stated 
   }
 });
 
-test('an EFFORT: line in the brief silences the no-effort-stated warning', () => {
-  const { dir, cleanup } = makeFixture();
+test('an EFFORT: line in the BRIEF does NOT silence the warning — brief text cannot set effort (review M1)', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
   try {
+    const transcriptPath = join(dir, 'transcript.jsonl');
+    writeFileSync(transcriptPath, `${JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', model: 'claude-sonnet-4-6', content: [{ type: 'text', text: 'ok' }] },
+      effort: 'medium',
+      timestamp: '2026-09-23T10:00:00.000Z',
+    })}\n`);
     const payload = {
       session_id: 'sess-opus-effort-stated',
       agent_type: 'main',
       cwd: dir,
+      transcript_path: transcriptPath,
       tool_input: {
         subagent_type: 'general-purpose',
         model: 'opus',
@@ -51,7 +59,14 @@ test('an EFFORT: line in the brief silences the no-effort-stated warning', () =>
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
-    assert.doesNotMatch(msg, /resolves to opus with no effort stated/);
+    // The warning still fires — an EFFORT: line in the brief is not a real
+    // effort-setting mechanism, only `effort:` in the agent definition is.
+    assert.match(msg, /resolves to opus with no effort stated in its agent definition/);
+    assert.match(msg, /brief-level "EFFORT:" line does NOT set it/);
+    // Telemetry must stay honest: effective_effort reflects what ACTUALLY
+    // runs (inherited from the session), not the EFFORT: line's claim.
+    const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
+    assert.equal(row.effective_effort, 'inherited(medium)');
   } finally {
     cleanup();
   }
