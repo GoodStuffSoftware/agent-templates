@@ -169,7 +169,7 @@
       "efforts": ["low", "medium", "high", "xhigh", "max"],
       "defaultEffort": "high",
       "thinking": "adaptive is the ONLY on-mode; omitting `thinking` entirely runs WITHOUT thinking - must be set explicitly. xhigh recommended for coding/agentic use.",
-      "note": "Not validated by this table's effort checks for the thinking-omission hazard (agent definition frontmatter here carries no `thinking` field to check) - flagged in docs/proposed/global-doctrine-reweight.patch as a known gap, not silently assumed safe."
+      "note": "Not validated by this table's effort checks for the thinking-omission hazard (agent definition frontmatter here carries no `thinking` field to check) - flagged as a known gap in the operator's global-doctrine patch, which is kept outside this repo, not silently assumed safe."
     },
     "opus-4-7": {
       "match": "claude-opus-4-7",
@@ -471,7 +471,7 @@
       "figures": "Cache-hit ratio 99.8% under a 5-minute gap, 13.3% in the 5-60 minute gap, 4.4% beyond 60 minutes — the 5-minute cliff is real. Switching every subagent to 1h is roughly cost-neutral overall (-0.46% of subagent cost, -$32/30d). By model tier: Opus 5.5 -12.0%, Opus 5 -4.7%, Opus 4.8 +4.1%, Sonnet 5 +2.9%, Haiku 4.5 +15.9%. Opus-tier-only 1h (this recommendation's scope): -2.1% of subagent cost (-$144/30d). Break-even: 1h wins for a tier once 5-60m rewrites exceed roughly 39.5% of that tier's cache-write tokens (~1.0-1.1% of requests); observed 35.7% overall, but Opus 5 alone was already at 51.5% (above break-even) while Sonnet sat at 29.3% (below it). By agent type, the pattern is architects/reviewers save under 1h (project-specific architect roles measured -12.9% and -6.1%, project-specific reviewer roles -4.2% to -4.9%) while one-shot builders/general-purpose workers cost more (a project-specific sonnet builder role +8.2%, general-purpose@opus +6.9%)."
     },
     "remeasureDate": "2026-10-07",
-    "remeasureNote": "Re-run the report's scripts (~/.claude/reports/2026-09-23-subagent-cache-ttl-scripts/) after two weeks of the resume-window doctrine change (see docs/proposed/global-doctrine-reweight.patch). Turn on the global 1h setting (`subagentPromptCacheTtl`) if subagent rewrites in the 5-60m band exceed ~40% of write tokens overall, or if Sonnet alone crosses the ~39.5% break-even.",
+    "remeasureNote": "Re-run the report's scripts (~/.claude/reports/2026-09-23-subagent-cache-ttl-scripts/) after two weeks of the resume-window doctrine change (the doctrine patch is kept outside this repo). Turn on the global 1h setting (`subagentPromptCacheTtl`) if subagent rewrites in the 5-60m band exceed ~40% of write tokens overall, or if Sonnet alone crosses the ~39.5% break-even.",
     "docsVerifiedLive": {
       "date": "2026-09-23",
       "frontmatterField": "`experimental.cacheTtl` — a nested map key under the subagent frontmatter's `experimental` field, values `5m` or `1h` only (anything else ignored). Requires Claude Code v2.1.248+. Ignored for `1h` while the subscription is on usage credits.",

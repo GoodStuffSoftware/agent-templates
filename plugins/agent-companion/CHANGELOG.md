@@ -52,6 +52,16 @@ bump — advisory-only detection surface, no breaking change).
   stopping, or when its definition runs on a 1h cache) and corrects the
   "caching is already solved" line (the hit ratio is high; the misses are
   the 5–60 minute rewrites).
+- **`docs/proposed/global-doctrine-reweight.patch`: removed from this
+  public repo.** The file quoted lines from the operator's private
+  `~/.claude/CLAUDE.md` and `team-orchestration` SKILL.md, including the
+  operator's name -- content that does not belong in a public repo. Copied
+  byte-identical to the operator's own `~/.claude/proposed/` directory and
+  `git rm`'d here; the doctrine patch is kept outside this repo from now
+  on. References to its in-repo path elsewhere in this plugin's docs and
+  config were updated to point at "the operator's global-doctrine patch,
+  kept outside this repo" instead of the removed path. (The file is still
+  recoverable from this branch's git history if needed.)
 
 ## 0.24.0 — 2026-09-23
 
