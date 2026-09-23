@@ -109,6 +109,13 @@ console.log(`  all 1-hour                   : ${fmtUsd(result.policy.allOneHour)
 console.log(`  1h for opus/fable tier only  : ${fmtUsd(result.policy.oneHourOpusFableOnly)}  (${fmtPct(result.policy.opusFableOnlyDeltaPct)})`);
 console.log('');
 
+console.log('-- break-even: observed rewrite share vs. required, per tier (always shown) --');
+for (const b of result.breakEvenByTier) {
+  console.log(`  ${b.alias.padEnd(12)} observed=${b.observedPct.toFixed(1).padEnd(6)}% breakeven=${b.breakEvenPct.toFixed(1).padEnd(6)}% `
+    + `spend-share=${b.spendSharePct.toFixed(1).padEnd(6)}% delta=${fmtPct(b.deltaPct)}`);
+}
+console.log('');
+
 console.log(`VERDICT: ${result.verdict}`);
 
 process.exit(0);

@@ -47,6 +47,19 @@
 // conversation (which already gets a 1h TTL on a subscription plan within
 // plan usage, 5m otherwise; see docs/en/prompt-caching). Main-session data is
 // read separately, only for the confirmatory 5m/1h write split.
+//
+// --- What this analysis CANNOT see, and why the verdict is conservative ----
+//
+// `subagentPromptCacheTtl` also governs compaction, session-title generation,
+// and workflow requests — none of which are ordinary subagent transcripts, so
+// none of them are counted anywhere above. Those are overwhelmingly ONE-SHOT
+// writes (a compaction summary or a title is generated once and never read
+// back through the cache), which under a 1h TTL pay the full 2x write cost
+// with essentially no compensating read to earn it back. This is a real cost
+// the totals above do not include, in the direction that makes a 1h TTL look
+// BETTER than it will actually be — so the verdict thresholds below are
+// deliberately asymmetric (harder to recommend "set it" than to recommend
+// "don't"), not symmetric around zero.
 
 import {
   readFileSync, readdirSync, statSync, createReadStream, existsSync,
@@ -54,10 +67,23 @@ import {
 import { createInterface } from 'node:readline';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { claudeDir } from '../../hooks/lib/context.mjs';
-import { stateRoot } from '../../hooks/lib/context.mjs';
+import { claudeDir, stateRoot, KNOWN_AGENT_TYPES } from '../../hooks/lib/context.mjs';
 
 export const SYNTHETIC_MODEL = '<synthetic>';
+export const NO_META_AGENT_TYPE = '(no meta)';
+
+// --- Verdict thresholds (named constants, not magic numbers) ---------------
+//
+// SET_GLOBALLY_DELTA_PCT / DONT_SET_DELTA_PCT are deliberately NOT mirror
+// images of each other in spirit even though they are the same magnitude:
+// -1% is the bar to recommend the change, +1% is the bar to rule it out
+// outright — the wide middle between them (and any tier disagreement) falls
+// through to the per-agent-definition recommendation instead of a global
+// call, because the helper-request cost above is real but unmeasured here.
+export const SET_GLOBALLY_DELTA_PCT = -1.0;
+export const DONT_SET_DELTA_PCT = 1.0;
+export const MIN_TIER_SPEND_SHARE_PCT = 5; // a tier must carry this much of total $ spend to veto/confirm the global call
+export const MIN_REQUESTS_FOR_AGENT_ROW = 500; // per-agent-definition recommendation floor
 const FIVE_MIN_MS = 5 * 60 * 1000;
 const SIXTY_MIN_MS = 60 * 60 * 1000;
 
@@ -187,7 +213,7 @@ export function discoverFiles(root, { sinceMs = -Infinity, maxFiles = 20000, max
         try { meta = JSON.parse(readFileSync(metaPath, 'utf8')); } catch { /* missing/unreadable sidecar: fail open to unknowns */ }
         consider(join(subDir, s.name), subagent.push.bind(subagent), {
           project: proj.name,
-          agentType: meta.agentType || 'unknown',
+          agentType: meta.agentType || NO_META_AGENT_TYPE,
           declaredModel: meta.model || null,
         });
       }
@@ -366,6 +392,81 @@ function rowFromAgg(label, agg, price) {
   };
 }
 
+// --- Verdict -----------------------------------------------------------
+//
+// A pure function over already-aggregated rows (not transcripts), so it is
+// directly testable with hand-built inputs instead of needing a synthetic
+// transcript for every branch.
+//
+// Decision order (see the module header for why this is asymmetric, not a
+// symmetric ±X% band):
+//   1. global delta <= SET_GLOBALLY_DELTA_PCT AND no tier carrying >=
+//      MIN_TIER_SPEND_SHARE_PCT of spend has a POSITIVE delta -> set it
+//      globally. The spend-share guard exists because a global average can
+//      be dragged negative by a small, cheap tier while the tier that
+//      actually carries the operator's spend goes the other way.
+//   2. global delta >= DONT_SET_DELTA_PCT AND the opus/fable-only policy is
+//      also non-negative -> don't set it, full stop. Checking the
+//      opus/fable-only policy too means a global "don't" is not reversed by
+//      a premium-tier-only pocket of savings that a per-agent override
+//      could still capture.
+//   3. otherwise (tiers disagree, or |global| is inside the dead zone) ->
+//      recommend `experimental: { cacheTtl: "1h" }` on specific NAMED agent
+//      definitions: negative delta, at least MIN_REQUESTS_FOR_AGENT_ROW
+//      requests (a small sample is not worth a standing config change), and
+//      an agentType that actually HAS an editable frontmatter file — a
+//      harness built-in (general-purpose, Explore, ...) or a subagent with
+//      no sidecar metadata at all (NO_META_AGENT_TYPE) cannot be pointed at
+//      a definition to edit, so both are excluded regardless of their delta.
+export function computeVerdict({
+  perModel, perAgentModel, totals, policy, excludedAgentTypes = KNOWN_AGENT_TYPES,
+}) {
+  const fmtPct = (n) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+
+  if (!perModel.length) {
+    return { text: 'no priced subagent requests in the window — nothing to recommend', breakEvenByTier: [] };
+  }
+
+  const totalSpend = totals.costToday;
+  const breakEvenByTier = perModel.map((r) => ({
+    alias: r.label,
+    observedPct: r.convOverWritePct,
+    breakEvenPct: r.breakEvenPct,
+    spendSharePct: totalSpend > 0 ? (r.costToday / totalSpend) * 100 : 0,
+    deltaPct: r.deltaPct,
+  }));
+
+  const bigTiersPositive = breakEvenByTier.filter(
+    (r) => r.spendSharePct >= MIN_TIER_SPEND_SHARE_PCT && r.deltaPct > 0,
+  );
+
+  let text;
+  if (totals.deltaPct <= SET_GLOBALLY_DELTA_PCT && bigTiersPositive.length === 0) {
+    text = `set subagentPromptCacheTtl to "1h" globally — observed delta ${fmtPct(totals.deltaPct)}, `
+      + `no tier at >=${MIN_TIER_SPEND_SHARE_PCT}% of spend shows a positive delta`;
+  } else if (totals.deltaPct >= DONT_SET_DELTA_PCT && policy.opusFableOnlyDeltaPct >= 0) {
+    text = `don't set subagentPromptCacheTtl — observed delta ${fmtPct(totals.deltaPct)}, `
+      + `and the opus/fable-only policy is also non-negative (${fmtPct(policy.opusFableOnlyDeltaPct)})`;
+  } else {
+    const candidates = perAgentModel.filter((r) => {
+      if (r.deltaPct >= 0) return false;
+      if (r.requests < MIN_REQUESTS_FOR_AGENT_ROW) return false;
+      const agentType = r.label.split(' → ')[0];
+      if (agentType === NO_META_AGENT_TYPE || excludedAgentTypes.has(agentType)) return false;
+      return true;
+    });
+    if (!candidates.length) {
+      text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}) — no named agent definition `
+        + `clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests with a negative delta to warrant a per-agent override`;
+    } else {
+      text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}) — set `
+        + 'experimental: { cacheTtl: "1h" } on: '
+        + candidates.map((r) => `${r.label} (${fmtPct(r.deltaPct)}, today $${r.costToday.toFixed(2)} -> 1h $${r.cost1h.toFixed(2)})`).join('; ');
+    }
+  }
+  return { text, breakEvenByTier };
+}
+
 export async function computeCacheTtl({
   days = 30,
   now = new Date(),
@@ -435,7 +536,7 @@ export async function computeCacheTtl({
       if (!perModel.has(cls.alias)) perModel.set(cls.alias, emptyAgg());
       addRequestToAgg(perModel.get(cls.alias), r);
 
-      const amKey = `${r.agentType || 'unknown'} → ${cls.alias}`;
+      const amKey = `${r.agentType || NO_META_AGENT_TYPE} → ${cls.alias}`;
       if (!perAgentModel.has(amKey)) perAgentModel.set(amKey, emptyAgg());
       addRequestToAgg(perAgentModel.get(amKey), r);
     }
@@ -501,22 +602,13 @@ export async function computeCacheTtl({
   const toolWaitPct = percentiles(toolWaits, [10, 50, 90]);
   const topTools = [...toolNameCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
 
-  // --- Verdict --------------------------------------------------------------
-  const negativeDeltaAgentModels = perAgentModelRows.filter((r) => r.deltaPct < 0 && r.requests > 0);
-  let verdict;
-  if (perModel.size === 0) {
-    verdict = 'no priced subagent requests in the window — nothing to recommend';
-  } else if (globalDeltaPct < -0.05) {
-    verdict = `set subagentPromptCacheTtl to "1h" globally — observed delta ${globalDeltaPct.toFixed(2)}%`;
-  } else if (globalDeltaPct > 0.05) {
-    verdict = `leave subagentPromptCacheTtl at its default (5m) — observed delta ${globalDeltaPct.toFixed(2)}%`;
-  } else if (negativeDeltaAgentModels.length) {
-    verdict = `global delta is roughly neutral (${globalDeltaPct.toFixed(2)}%) — set experimental.cacheTtl: "1h" only on the `
-      + `${negativeDeltaAgentModels.length} agent definition(s) whose own delta is negative: `
-      + `${negativeDeltaAgentModels.slice(0, 6).map((r) => r.label).join(', ')}${negativeDeltaAgentModels.length > 6 ? ', ...' : ''}`;
-  } else {
-    verdict = `global delta is roughly neutral (${globalDeltaPct.toFixed(2)}%) and no agent×model combination shows a negative delta — no change recommended`;
-  }
+  // --- Verdict ----------------------------------------------------------
+  const { text: verdict, breakEvenByTier } = computeVerdict({
+    perModel: perModelRows,
+    perAgentModel: perAgentModelRows,
+    totals: { costToday: costTodayTotal, deltaPct: globalDeltaPct },
+    policy: { opusFableOnlyDeltaPct: opusFableDeltaPct },
+  });
 
   return {
     windowDays: days,
@@ -567,6 +659,7 @@ export async function computeCacheTtl({
       allOneHourDeltaPct: globalDeltaPct,
       opusFableOnlyDeltaPct: opusFableDeltaPct,
     },
+    breakEvenByTier,
     verdict,
   };
 }

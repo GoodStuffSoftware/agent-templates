@@ -1231,6 +1231,10 @@ const cacheTtlCheck = {
         + `(${result.totals.band560Requests} requests)`,
       `cost today $${result.totals.costToday.toFixed(2)} -> with 1h $${result.totals.cost1h.toFixed(2)} `
         + `(${result.totals.deltaPct >= 0 ? '+' : ''}${result.totals.deltaPct.toFixed(2)}%)`,
+      // Always shown, regardless of which verdict branch fired: per-tier
+      // observed rewrite share vs. the share required to break even.
+      `break-even per tier: ${result.breakEvenByTier.map((b) => `${b.alias} obs=${b.observedPct.toFixed(1)}% `
+        + `be=${b.breakEvenPct.toFixed(1)}%`).join(', ')}`,
       `verdict: ${result.verdict}`,
     ];
     if (result.unknownModels.length) {

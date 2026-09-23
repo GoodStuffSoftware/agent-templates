@@ -271,6 +271,32 @@ cost with 1h  = I·in + (W-conv)·2·in + (R+conv)·rm·in + O·out
 break-even    = 0.75 / (2 - rm)         (as a share of write tokens)
 ```
 
+**What this cannot see — and why the verdict is conservative, not symmetric.**
+`subagentPromptCacheTtl` also governs compaction, session-title generation,
+and workflow requests, none of which show up as ordinary subagent
+transcripts, so none of them are in any total above. Those are almost
+entirely ONE-SHOT writes — a compaction summary or a title is generated once
+and never read back through the cache — so under a 1h TTL they pay the full
+2x write cost with essentially nothing to earn it back. That is a real cost
+this analysis cannot measure, and it only ever pushes in one direction: it
+makes a 1h TTL look better here than it will actually be. The verdict
+thresholds below account for that by being harder to satisfy in the
+"set it" direction than in the "don't" direction, rather than a symmetric
+±X% band.
+
+**The verdict** picks one of three shapes, using named thresholds (all in
+`scripts/lib/cache-ttl.mjs`, `computeVerdict()`):
+
+| Condition | Verdict |
+|---|---|
+| global delta ≤ `SET_GLOBALLY_DELTA_PCT` (-1.0%) **and** no model tier carrying ≥ `MIN_TIER_SPEND_SHARE_PCT` (5%) of spend has a *positive* delta | set `subagentPromptCacheTtl` to `"1h"` globally |
+| global delta ≥ `DONT_SET_DELTA_PCT` (+1.0%) **and** the opus/fable-only policy is also non-negative | don't set it, full stop |
+| otherwise — tiers disagree, or the global delta sits inside the ±1% dead zone | don't set it globally; instead list every `agentType × model` row with a negative delta, at least `MIN_REQUESTS_FOR_AGENT_ROW` (500) requests, and a **named, editable** agent definition — excluding harness built-ins (`general-purpose`, `Explore`, `Plan`, ...; reuses `KNOWN_AGENT_TYPES` from `hooks/lib/context.mjs`) and subagents with no sidecar `.meta.json` at all (`(no meta)`), neither of which has any frontmatter to set `experimental: { cacheTtl: "1h" }` on |
+
+The break-even line (observed rewrite share vs. the share required, per
+tier) is always printed alongside the verdict, regardless of which branch
+fired — it's the number that explains the call, not just the conclusion.
+
 **What the report covers:** totals and a band table; the sanity check
 (observed `cache_read / (read+write)` per band — near 100% under 5 minutes,
 near 0% at 5-60, proving the cliff exists); a breakdown of WHY a 5-60 minute

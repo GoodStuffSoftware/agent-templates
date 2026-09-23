@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { makeFixture } from './helpers.mjs';
 import {
   parseFile, computeCacheTtl, classifyPricing, breakEvenSharePct, clamp,
-  costToday, costWith1h, pricingTable,
+  costToday, costWith1h, pricingTable, computeVerdict,
+  SET_GLOBALLY_DELTA_PCT, DONT_SET_DELTA_PCT, MIN_TIER_SPEND_SHARE_PCT, MIN_REQUESTS_FOR_AGENT_ROW,
+  NO_META_AGENT_TYPE,
 } from '../scripts/lib/cache-ttl.mjs';
 
 // --- fixture builders --------------------------------------------------------
@@ -314,6 +316,120 @@ test('computeCacheTtl end-to-end: main split, subagent aggregation, verdict pres
   } finally {
     cleanup();
   }
+});
+
+// --- computeVerdict: pure function over hand-built rows, one test per branch
+
+function modelRow(label, { requests = 1000, costToday: today = 100, deltaPct = 0 } = {}) {
+  return {
+    label, requests, band560Requests: 0, writeMTok: 1, convMTok: 0, convOverWritePct: 0,
+    breakEvenPct: 39.5, costToday: today, cost1h: today * (1 + deltaPct / 100), deltaPct,
+  };
+}
+
+function agentRow(label, { requests = 1000, costToday: today = 100, deltaPct = 0 } = {}) {
+  return {
+    label, requests, band560Requests: 0, writeMTok: 1, convMTok: 0, convOverWritePct: 0,
+    breakEvenPct: 39.5, costToday: today, cost1h: today * (1 + deltaPct / 100), deltaPct,
+  };
+}
+
+test('verdict: set globally when delta clears the threshold and no big tier is positive', () => {
+  const perModel = [modelRow('sonnet-5', { costToday: 900, deltaPct: -1.5 }), modelRow('opus-5', { costToday: 100, deltaPct: -3 })];
+  const v = computeVerdict({
+    perModel,
+    perAgentModel: [],
+    totals: { costToday: 1000, deltaPct: SET_GLOBALLY_DELTA_PCT - 0.5 },
+    policy: { opusFableOnlyDeltaPct: -2 },
+  });
+  assert.match(v.text, /set subagentPromptCacheTtl to "1h" globally/);
+  assert.equal(v.breakEvenByTier.length, 2, 'break-even lines are always returned alongside the verdict');
+});
+
+test('verdict: a big tier with a positive delta vetoes the global "set it" call even past the threshold', () => {
+  // Global delta clears SET_GLOBALLY_DELTA_PCT, but sonnet-5 carries far more
+  // than MIN_TIER_SPEND_SHARE_PCT of spend and is itself positive -> must not
+  // recommend setting it globally, even though the total looks good enough.
+  const perModel = [
+    modelRow('sonnet-5', { costToday: 900, deltaPct: 3 }), // 90% of spend, POSITIVE
+    modelRow('opus-5', { costToday: 100, deltaPct: -20 }), // 10% of spend, very negative
+  ];
+  const v = computeVerdict({
+    perModel,
+    perAgentModel: [],
+    totals: { costToday: 1000, deltaPct: SET_GLOBALLY_DELTA_PCT - 1 },
+    policy: { opusFableOnlyDeltaPct: -5 },
+  });
+  assert.doesNotMatch(v.text, /set subagentPromptCacheTtl to "1h" globally/);
+});
+
+test('verdict: don\'t set when delta is comfortably positive and opus/fable-only is also non-negative', () => {
+  const perModel = [modelRow('sonnet-5', { costToday: 1000, deltaPct: 3 })];
+  const v = computeVerdict({
+    perModel,
+    perAgentModel: [],
+    totals: { costToday: 1000, deltaPct: DONT_SET_DELTA_PCT + 0.5 },
+    policy: { opusFableOnlyDeltaPct: 0.2 },
+  });
+  assert.match(v.text, /don't set subagentPromptCacheTtl — observed delta/);
+});
+
+test('verdict: dead zone with tier disagreement -> per-agent recommendation, built-ins and no-meta excluded', () => {
+  const perModel = [modelRow('sonnet-5', { costToday: 1000, deltaPct: 0.2 })];
+  const perAgentModel = [
+    agentRow('bsk-architect → opus-5', { requests: 2000, costToday: 500, deltaPct: -8 }), // qualifies
+    agentRow('bsk-reviewer → sonnet-5', { requests: 600, costToday: 50, deltaPct: -1 }), // qualifies
+    agentRow('general-purpose → opus-5', { requests: 5000, costToday: 800, deltaPct: -30 }), // built-in: excluded
+    agentRow(`${NO_META_AGENT_TYPE} → opus-5`, { requests: 9000, costToday: 900, deltaPct: -40 }), // no meta: excluded
+    agentRow('bsk-debugger → sonnet-5', { requests: 100, costToday: 10, deltaPct: -50 }), // too few requests: excluded
+    agentRow('bsk-builder → sonnet-5', { requests: 3000, costToday: 30, deltaPct: 5 }), // positive delta: excluded
+  ];
+  const v = computeVerdict({
+    perModel,
+    perAgentModel,
+    totals: { costToday: 1000, deltaPct: 0.2 }, // inside the dead zone
+    policy: { opusFableOnlyDeltaPct: -1 },
+  });
+  assert.match(v.text, /don't set subagentPromptCacheTtl globally/);
+  assert.match(v.text, /experimental: \{ cacheTtl: "1h" \}/);
+  assert.match(v.text, /bsk-architect/);
+  assert.match(v.text, /bsk-reviewer/);
+  assert.doesNotMatch(v.text, /general-purpose/);
+  assert.doesNotMatch(v.text, new RegExp(NO_META_AGENT_TYPE.replace(/[()]/g, '\\$&')));
+  assert.doesNotMatch(v.text, /bsk-debugger/, 'below the request floor must be excluded');
+  assert.doesNotMatch(v.text, /bsk-builder/, 'a positive delta must be excluded even in the per-agent branch');
+});
+
+test('verdict: dead zone with no qualifying candidate falls back to an explanatory "don\'t set" message', () => {
+  const perModel = [modelRow('sonnet-5', { costToday: 1000, deltaPct: 0.1 })];
+  const perAgentModel = [
+    agentRow('general-purpose → opus-5', { requests: 5000, costToday: 800, deltaPct: -10 }), // built-in
+    agentRow('bsk-debugger → sonnet-5', { requests: 100, costToday: 10, deltaPct: -5 }), // too few requests
+  ];
+  const v = computeVerdict({
+    perModel,
+    perAgentModel,
+    totals: { costToday: 1000, deltaPct: 0.1 },
+    policy: { opusFableOnlyDeltaPct: 0 },
+  });
+  assert.match(v.text, /don't set subagentPromptCacheTtl globally/);
+  assert.match(v.text, new RegExp(`no named agent definition clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests`));
+});
+
+test('verdict: no priced subagent requests -> nothing to recommend, empty break-even', () => {
+  const v = computeVerdict({
+    perModel: [], perAgentModel: [], totals: { costToday: 0, deltaPct: 0 }, policy: { opusFableOnlyDeltaPct: 0 },
+  });
+  assert.match(v.text, /nothing to recommend/);
+  assert.deepEqual(v.breakEvenByTier, []);
+});
+
+test('MIN_TIER_SPEND_SHARE_PCT / MIN_REQUESTS_FOR_AGENT_ROW are the documented magnitudes', () => {
+  // Guards against a silent rename/renumbering that would desync the README table.
+  assert.equal(MIN_TIER_SPEND_SHARE_PCT, 5);
+  assert.equal(MIN_REQUESTS_FOR_AGENT_ROW, 500);
+  assert.equal(SET_GLOBALLY_DELTA_PCT, -1.0);
+  assert.equal(DONT_SET_DELTA_PCT, 1.0);
 });
 
 test('window filtering: requests before the cutoff are excluded, file mtime does not leak them in', async () => {
