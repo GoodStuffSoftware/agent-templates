@@ -8,7 +8,7 @@ since: 2026-09-21
 provenance: [contrib-2]
 corroborated: 1
 ---
-The same MCP endpoint was reachable through two registrations at once — a plugin bundled its own server entry for the URL, and the operator also had a first-party connector to the identical URL. The command-line listing showed the connector Connected and the plugin entry needing authentication, permanently, because the two do not share tokens. The plugin entry never had to be signed in; the connector served every tool; signing the duplicate in would have changed nothing.
+The same MCP endpoint was reachable through two registrations at once — a plugin bundled its own server entry for the URL, and the operator also had a first-party connector to the identical URL. The command-line listing showed the connector Connected and the plugin entry needing authentication, permanently, because the two do not share tokens. The plugin entry never had to be signed in, because the connector served every tool. Signing the duplicate in was still worth offering as an optional one-time step: it cleared the recurring "requires authentication" notice and delivered the tools under the plugin's own pre-approved names. Calling that sign-in useless is what kept agents from ever suggesting it.
 
 **Agents read that warning as an outage.** Across a sample of transcripts, most "I cannot reach the service" reports traced to this single belief — the large majority from misreading the unauthenticated duplicate, a smaller share from hunting for a hardcoded plugin-scoped tool name that no longer matched. The service was healthy in every one of them.
 
