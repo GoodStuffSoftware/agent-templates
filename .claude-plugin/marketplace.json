@@ -7,7 +7,7 @@
     {
       "name": "agent-companion",
       "source": "./plugins/agent-companion",
-      "version": "0.23.1",
+      "version": "0.24.0",
       "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift."
     }
   ],

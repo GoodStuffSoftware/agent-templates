@@ -93,7 +93,7 @@ test('sweepRepo: a clean repo sweeps silent', async () => {
   } finally { repo.cleanup(); }
 });
 
-test('sweepRepo: missing scripts/leak-check.mjs in the published tree is an error, not a crash', async () => {
+test('sweepRepo: a repo with NO leak-check of its own is still scanned, by the plugin\'s own generic checker', async () => {
   const base = mkdtempSync(join(tmpdir(), 'ac-pubsweep-test-'));
   try {
     const bareDir = join(base, 'origin.git');
@@ -103,13 +103,14 @@ test('sweepRepo: missing scripts/leak-check.mjs in the published tree is an erro
     git(['init', '--quiet', '-b', 'main', workDir]);
     git(['remote', 'add', 'origin', bareDir], workDir);
     const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
-    writeFileSync(join(workDir, 'README.md'), 'no leak-check here\n');
+    // No scripts/ directory at all — this repo ships no leak-check.mjs.
+    writeFileSync(join(workDir, 'README.md'), `no leak-check here, but here's a path: ${SYNTHETIC_LEAK_LINE}\n`);
     git(['add', '-A'], workDir, gitEnv);
     git(['commit', '--quiet', '-m', 'init'], workDir, gitEnv);
     git(['push', '--quiet', 'origin', 'main'], workDir, gitEnv);
     const result = await sweepRepo(bareDir, {});
-    assert.equal(result.hits.length, 0);
-    assert.match(result.error, /leak-check\.mjs/);
+    assert.equal(result.error, null, 'no own checker is normal, not an error');
+    assert.ok(result.hits.some((h) => h.label === 'private-path:windows-profile'), 'the plugin\'s own generic checker must still catch it');
   } finally { try { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); } catch { /* ignore */ } }
 });
 
@@ -153,6 +154,9 @@ test('detect.mjs: a configured leaky repo fires publication_leak once, then dedu
     const env = {
       ...process.env,
       AGENT_COMPANION_HOME_OVERRIDE: dir,
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_SWEEP: 'true',
+      AGENT_COMPANION_DISCOVERY_NO_GH: '1',
+      AGENT_COMPANION_DISCOVERY_DEV_ROOT: join(dir, 'no-dev-root'),
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: repo.bareDir,
     };
     const runA = runScript('scripts/detect.mjs', [], { env, timeout: 60000 });
@@ -175,6 +179,9 @@ test('detect.mjs: an unreachable configured repo reports publication_leak_sweep_
     const env = {
       ...process.env,
       AGENT_COMPANION_HOME_OVERRIDE: dir,
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_SWEEP: 'true',
+      AGENT_COMPANION_DISCOVERY_NO_GH: '1',
+      AGENT_COMPANION_DISCOVERY_DEV_ROOT: join(dir, 'no-dev-root'),
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: join(dir, 'nope', 'does-not-exist.git'),
     };
     const res = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
@@ -252,6 +259,9 @@ test('detect.mjs (cloud): scans the checkout in place, skips a non-matching conf
       ...process.env,
       AGENT_COMPANION_HOME_OVERRIDE: dir,
       CLAUDE_CODE_REMOTE_SESSION_ID: 'test-cloud-session',
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_SWEEP: 'true',
+      AGENT_COMPANION_DISCOVERY_NO_GH: '1',
+      AGENT_COMPANION_DISCOVERY_DEV_ROOT: join(dir, 'no-dev-root'),
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: `${repo.bareDir},${otherRepo}`,
     };
     // cwd is the "session checkout" — detect.mjs must scan THIS in place and
@@ -266,6 +276,89 @@ test('detect.mjs (cloud): scans the checkout in place, skips a non-matching conf
     assert.match(noteSig.detail, new RegExp(otherRepo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.ok(!res.json.signals.some((s) => s.kind === 'publication_leak_sweep_error'), 'the skipped repo must not be reported as an error — it was never attempted');
   } finally { cleanup(); repo.cleanup(); }
+});
+
+test('detect.mjs: publication_leak_sweep off (default) — the master switch, not just an empty repo list', async () => {
+  const { dir, cleanup } = makeFixture();
+  const repo = buildLeakyRepo();
+  try {
+    const env = {
+      ...process.env,
+      AGENT_COMPANION_HOME_OVERRIDE: dir,
+      // publication_leak_sweep left OFF on purpose, even though a repo IS configured.
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: repo.bareDir,
+    };
+    const res = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    assert.equal(res.status, 0);
+    assert.ok(!res.json.signals.some((s) => s.kind.startsWith('publication_leak')), 'off is off, regardless of publication_leak_repos');
+  } finally { cleanup(); repo.cleanup(); }
+});
+
+test('detect.mjs: auto-discovery via the dev-root fallback fires publication_repo_newly_public once, then dedupes', async () => {
+  const { dir, cleanup } = makeFixture();
+  const devRoot = join(dir, 'discover-dev-root');
+  mkdirSync(devRoot, { recursive: true });
+  const projDir = join(devRoot, 'auto-discovered-proj');
+  mkdirSync(projDir, { recursive: true });
+  git(['init', '--quiet', '-b', 'main'], projDir);
+  writeFileSync(join(projDir, 'README.md'), 'clean\n');
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
+  git(['add', '-A'], projDir, gitEnv);
+  git(['commit', '--quiet', '-m', 'init'], projDir, gitEnv);
+  git(['remote', 'add', 'origin', 'git@github.com:example-org/auto-discovered-proj.git'], projDir);
+  try {
+    const env = {
+      ...process.env,
+      AGENT_COMPANION_HOME_OVERRIDE: dir,
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_SWEEP: 'true',
+      AGENT_COMPANION_DISCOVERY_NO_GH: '1',
+      AGENT_COMPANION_DISCOVERY_DEV_ROOT: devRoot,
+      AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY: '1', // every candidate treated as public, no network
+    };
+    const runA = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    assert.equal(runA.status, 0, runA.stderr);
+    const newPub = runA.json.signals.find((s) => s.kind === 'publication_repo_newly_public');
+    assert.ok(newPub, `expected publication_repo_newly_public, got: ${JSON.stringify(runA.json.signals)}`);
+    assert.match(newPub.detail, /example-org\/auto-discovered-proj/);
+
+    const runB = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    assert.equal(runB.status, 0, runB.stderr);
+    assert.ok(
+      !runB.json.signals.some((s) => s.kind === 'publication_repo_newly_public'),
+      'the same repo must not re-fire as "newly public" once acknowledged',
+    );
+  } finally { cleanup(); }
+});
+
+test('detect.mjs: publication_leak_repos excludes (!entry) remove a discovered repo from the sweep', async () => {
+  const { dir, cleanup } = makeFixture();
+  const devRoot = join(dir, 'discover-dev-root');
+  mkdirSync(devRoot, { recursive: true });
+  const projDir = join(devRoot, 'excluded-proj');
+  mkdirSync(projDir, { recursive: true });
+  git(['init', '--quiet', '-b', 'main'], projDir);
+  writeFileSync(join(projDir, 'README.md'), 'clean\n');
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
+  git(['add', '-A'], projDir, gitEnv);
+  git(['commit', '--quiet', '-m', 'init'], projDir, gitEnv);
+  git(['remote', 'add', 'origin', 'git@github.com:example-org/excluded-proj.git'], projDir);
+  try {
+    const env = {
+      ...process.env,
+      AGENT_COMPANION_HOME_OVERRIDE: dir,
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_SWEEP: 'true',
+      AGENT_COMPANION_DISCOVERY_NO_GH: '1',
+      AGENT_COMPANION_DISCOVERY_DEV_ROOT: devRoot,
+      AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY: '1',
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: '!example-org/excluded-proj',
+    };
+    const res = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(
+      !res.json.signals.some((s) => s.kind === 'publication_repo_newly_public'),
+      'an excluded repo must never be discovered/covered at all',
+    );
+  } finally { cleanup(); }
 });
 
 test('leak-sweep-canary.mjs: full mode passes', () => {

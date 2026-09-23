@@ -121,13 +121,33 @@ Then read `$AC/config/model-tiers.json` and answer, concretely:
 
 Treat each `yes` as a signal named `lineup_drift`. Do NOT edit the config from this routine — report the exact diff and the exact field to change. A human or a session with the repo checked out makes the change; the `routing-doc` audit check then regenerates the doc.
 
-## STEP 2.5 — publication-leak sweep (backstop, only if configured)
+## STEP 2.5 — publication-leak sweep (backstop, only if enabled)
 
 This is an AFTER-THE-FACT backstop for a real-name leak that reached origin
 despite the local pre-push gate — it never blocks a push, it only notices
-one already published. It is OFF by default and stays silent unless the
-`publication_leak_repos` plugin option names at least one repo (a local
-checkout path, or a git URL — comma-separated for more than one).
+one already published. It is OFF BY DEFAULT via the `publication_leak_sweep`
+master switch (this feature clones/fetches repos and calls the GitHub API,
+so it needs an explicit opt-in even though nobody has to list repos by hand).
+
+**Which repos get swept is AUTO-DISCOVERED, not configured.** When the
+switch is on, LOCAL unions:
+- every public repo the operator can push to (owned + org-member), via `gh`
+  if installed and authenticated — skipping archived repos and forks;
+- every path in `~/.claude.json`'s `projects` map (real paths Claude Code
+  has actually worked in — not a derivation) that resolves to a git repo
+  with a public GitHub origin, worktrees deduped to their main checkout;
+  falls back to walking the dev root (same formula leak-check.mjs uses)
+  only if `~/.claude.json` is missing or unparseable.
+
+`publication_leak_repos` is now an EXTRA/EXCLUDE list on top of discovery: a
+plain entry (`owner/repo`, a URL, or a local path) ADDS a repo discovery
+missed (a fork you genuinely push original commits to, an archived repo you
+still want covered); a `!`-prefixed entry (`!owner/repo`) EXCLUDES one
+discovery found. Leave it empty to sweep exactly what discovery finds.
+
+A repo newly discovered as PUBLIC fires `publication_repo_newly_public` —
+the highest-risk moment, since nobody has swept it before — separately from
+the regular per-hit dedupe, and only once per repo.
 
 **LOCAL and CLOUD sweep differently, and this difference is load-bearing, not
 cosmetic.** LOCAL clones each configured repo's origin default branch into a
@@ -161,11 +181,13 @@ one, not `$AC`, since `$AC` is the one that's missing it):
 if [ -f "$AC/scripts/lib/publication-sweep.mjs" ]; then
   : # STEP 1 already swept correctly (clone locally, in-place in the cloud) — nothing more to do here
 elif [ -n "$PUBLICATION_LEAK_REPOS_FALLBACK" ]; then
-  # Old installed plugin: no sweep support. Run it ad hoc using THIS checkout's
-  # sweep library (not $AC's — that's the one missing it). Set
-  # $PUBLICATION_LEAK_REPOS_FALLBACK only when you know the option is
-  # configured but $AC predates it; leave it unset otherwise (silent is
-  # correct then too — this is a stopgap, not a substitute for updating $AC).
+  # Old installed plugin: no sweep support AND no auto-discovery support —
+  # this fallback can only sweep the EXPLICIT repo(s) you name in
+  # $PUBLICATION_LEAK_REPOS_FALLBACK, using THIS checkout's sweep library
+  # (not $AC's — that's the one missing it). Set it only when you know the
+  # sweep should be running but $AC predates the feature; leave it unset
+  # otherwise (silent is correct then too — this is a stopgap, not a
+  # substitute for updating $AC, and it never auto-discovers anything).
   node -e "
     import('$(pwd)/plugins/agent-companion/scripts/lib/publication-sweep.mjs').then(async (m) => {
       const repos = process.env.PUBLICATION_LEAK_REPOS_FALLBACK.split(',').map(s => s.trim()).filter(Boolean);
@@ -208,7 +230,8 @@ Not a summary, not a confirmation. Silence is the success case.
 | `enforcement_silent` | report which day(s) and their status; transcripts show real `Agent` spawns but `spawns.jsonl` has no matching rows for that day — the guard may have stopped recording (renamed matcher, exception before the append, telemetry flag off) even though spawning itself is fine. Run `node "$AC/scripts/audit.mjs" --only telemetry-coverage,guard-canary` for the detail |
 | `publication_leak` | report each repo/file/line/label, and that it is a NEW hit (not previously accepted) in a repo listed under `publication_leak_repos` — a real name reached origin past the local pre-push gate. This needs a human decision (genericize and push a fix, or accept and let it fall into the baseline); do not edit or push on the routine's own authority |
 | `publication_leak_sweep_error` | report which repo(s) the sweep could not reach and why (bad path/URL, missing `scripts/leak-check.mjs` in that repo, clone failure, or — cloud only — the checkout's `HEAD` not matching origin's default branch) — a repo listed in the option that can no longer be swept is itself a finding, not silence |
-| `publication_leak_sweep_note` | cloud only, and only when the SET of skipped repos changed since the last run: report which configured repo(s) are not being swept because they are not this cloud session's own checkout. Informational — the cloud sweep is only ever going to cover the one repo it's checked out, so this just makes that scope explicit rather than silently narrower than the option implies |
+| `publication_leak_sweep_note` | two cases, both informational and each fired only ONCE per change (not daily): (1) cloud only, when the SET of skipped repos changes — which configured repo(s) aren't swept because they aren't this cloud session's own checkout; (2) local only, when gh discovery is unavailable (not installed / not authenticated) and the message changes — the sweep degraded to `~/.claude.json`-or-dev-root discovery only, missing any public repo `gh` alone would have found |
+| `publication_repo_newly_public` | a repo discovery just found is being swept for the FIRST time — the highest-risk moment, since nobody has ever checked it. Report the repo(s) by name; this needs a look, not necessarily action — most of the time it just means "yes, that's expected," but the one time it isn't is exactly what this exists to catch |
 
 **Canary** — proves the guards still fire rather than merely exist:
 

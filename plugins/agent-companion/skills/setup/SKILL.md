@@ -167,11 +167,24 @@ directory keys on the second, and the manifest check fails if they differ.
 
 ## Publication-leak sweep (optional)
 
-Off by default. If you maintain one or more PUBLIC repos and want the daily
-scout to check what is actually published — not the local working tree — for
-a real-name leak that slipped past a local pre-push gate, set
-`publication_leak_repos` to a comma-separated list of local checkout paths
-and/or git URLs.
+Off by default via the `publication_leak_sweep` master switch — this feature
+clones/fetches repos and, locally, calls the GitHub API, so it needs an
+explicit opt-in. Once on, the daily scout checks what is actually
+PUBLISHED — not the local working tree — for a real-name leak that slipped
+past a local pre-push gate, across repos it finds FOR YOU:
+
+- every public repo you can push to (owned + org-member), via `gh` if
+  installed and authenticated — archived repos and forks are skipped;
+- every path in `~/.claude.json`'s `projects` map that resolves to a git
+  repo with a public GitHub origin (worktrees dedupe to their main
+  checkout) — falling back to a dev-root walk only if `~/.claude.json` is
+  missing or unparseable.
+
+You never have to list repos by hand. `publication_leak_repos` is now an
+extra/exclude list ON TOP of that discovery: a plain entry (`owner/repo`, a
+URL, or a local path) adds one discovery missed; a `!`-prefixed entry
+(`!owner/repo`) excludes one discovery found. Leave it empty to sweep
+exactly what discovery finds.
 
 **Local and cloud sweep differently, and it matters.** Locally, the scout
 fetches each repo's default branch AS PUBLISHED into a throwaway clone and
@@ -180,11 +193,13 @@ does NOT happen: a cloud routine already runs from a checkout of its own
 source repo, and cloning a second copy of a repo and executing a script from
 it is exactly the "code from external" shape the cloud sandbox's classifier
 denies — confirmed live, the clone-based approach was blocked outright there.
-So the cloud sweep instead scans, IN PLACE, whichever ONE configured repo IS
-this session's own checkout (after confirming `HEAD` matches origin's default
-branch), always with `--no-derived` (no dev root in the cloud to derive real
-project names from anyway). Any other configured repo is reported once as
-`skipped` in the cloud, not fetched or cloned.
+So the cloud sweep instead scans, IN PLACE, whichever ONE entry (from
+`publication_leak_repos` only — the cloud never runs auto-discovery at all,
+there is no dev root and gh is not assumed available there) IS this session's
+own checkout (after confirming `HEAD` matches origin's default branch),
+always with `--no-derived` (no dev root in the cloud to derive real project
+names from anyway). Any other entry is reported once as `skipped` in the
+cloud, not fetched or cloned.
 
 Either way, `publication_leak` fires only for hits not already accepted in a
 prior run (see the routine's dispatch table).

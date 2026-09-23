@@ -61,6 +61,21 @@
 // entry instead (see `fromHex`). Never add a derived (machine) name here
 // either: derived names are discovered at run time precisely so that the list
 // is never committed.
+//
+// RELATIONSHIP TO plugins/agent-companion/scripts/lib/leak-scan-core.mjs:
+// that module is a DELIBERATELY SEPARATE, independently-maintained copy of
+// this file's classes 2-4 (derived names, private paths, warnings) and the
+// scan/enumerate machinery, owned by the public agent-companion plugin so it
+// can scan a THIRD-PARTY repo's tree with no leak-check of its own (see that
+// file's header). It is NOT imported here on purpose: this file's whole
+// value — "copy scripts/leak-check.mjs into any repo and it just runs" — is
+// zero-dependency portability, and the plugin's publication-leak sweep
+// literally exercises that by copying just this one file into a throwaway
+// repo (see leak-sweep-canary.mjs). An import back to the plugin would break
+// that the moment this file is copied anywhere else. Keep the two in sync by
+// hand when the generic classes change; this file's class 1 (the literal
+// list above) and EXEMPT map stay here only — they are this repo's private
+// data and must never appear in the public plugin.
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep, resolve, basename, dirname, isAbsolute } from "node:path";

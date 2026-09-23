@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.23.1",
+  "version": "0.24.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -246,10 +246,16 @@
       "description": "Ceiling on the rendered rule block per injection. Rules past the ceiling are dropped and the count is stated, so a budget overrun is visible rather than silent.",
       "default": 2000
     },
+    "publication_leak_sweep": {
+      "type": "boolean",
+      "title": "Publication-leak sweep enabled",
+      "description": "Master switch. OFF by default: this feature clones/fetches repos and, locally, calls the GitHub API (via `gh` if installed) to auto-discover which ones — real network and process activity a public plugin should not perform until an operator opts in. When on, LOCAL auto-discovers every public repo you can push to (owned + org-member, via `gh`) PLUS any local checkout under your dev root whose origin is a public GitHub repo, unions and dedupes them, and sweeps all of them daily. Use `publication_leak_repos` to add repos discovery would miss or exclude ones it shouldn't cover. See \"Publication-leak sweep\" in the setup skill before turning this on.",
+      "default": false
+    },
     "publication_leak_repos": {
       "type": "string",
-      "title": "Publication-leak sweep repos",
-      "description": "Comma-separated list of public repos for the daily scout to sweep for real-name leaks AFTER THE FACT — a backstop, not a substitute for a local pre-push gate. Each entry is a local checkout path or a git URL. EMPTY BY DEFAULT: the sweep is fully disabled and silent until this is set. LOCAL: the scout fetches each repo's origin default branch into a throwaway clone and runs THAT repo's own scripts/leak-check.mjs against it. CLOUD: never clones (a cloud sandbox's classifier denies clone-then-execute) — it scans, in place, whichever ONE configured repo IS the cloud session's own checkout, after confirming HEAD matches origin's default branch, always with --no-derived; any other configured repo is skipped there, not fetched. Fires the publication_leak signal only for hits not already accepted in a prior run (fingerprinted in the scout's baseline), so a standing accepted finding does not re-fire daily.",
+      "title": "Publication-leak sweep: extra / excluded repos",
+      "description": "Only consulted when publication_leak_sweep is on. Comma-separated. A plain entry (a local checkout path, `owner/repo`, or a full git URL) is ADDED to auto-discovery — never filtered, so this is also how to cover a fork or archived repo discovery skips on purpose. A `!`-prefixed entry (`!owner/repo`, `!<url>`, or `!<local path>`) is EXCLUDED from whatever discovery found. Leave empty to sweep exactly what auto-discovery finds. LOCAL: each covered repo's origin default branch is fetched into a throwaway clone and scanned by the PLUGIN's own generic checker (derived names, private paths — always) plus that repo's own scripts/leak-check.mjs when it has one (most won't; that's normal, not an error). CLOUD: never clones (the sandbox's classifier denies clone-then-execute) — it scans, in place and --no-derived, only the ONE covered repo that IS the cloud session's own checkout, after confirming HEAD matches origin's default branch; any other covered repo is skipped there, not fetched. Fires publication_leak only for hits not already accepted in a prior run, and publication_repo_newly_public the first time a covered repo is seen as public — the highest-risk moment, so that one is never deduped away.",
       "default": ""
     }
   },
