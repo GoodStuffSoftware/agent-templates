@@ -45,6 +45,7 @@ defaults are the recommended ones. Two are worth a conscious decision:
   only if an Agent Audit ingest exists to receive it; the token goes in the
   `AGENT_AUDIT_TOKEN` environment variable, never in plugin config.
 - `premium_max_concurrent` — the Fable/Opus instance cap. Default 2.
+- `capacity_probe` — a session-start line estimating how many concurrent subagents THIS machine can carry (from free memory and cpu count), with a policy of idle-teammates-ok or stop-between-rounds. Useful alongside `premium_max_concurrent` when sizing fan-out width: `node scripts/capacity.mjs --text`.
 
 ## 2. Schedule the local scout — desktop scheduled task
 
