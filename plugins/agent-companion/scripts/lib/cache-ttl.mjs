@@ -84,6 +84,7 @@ export const SET_GLOBALLY_DELTA_PCT = -1.0;
 export const DONT_SET_DELTA_PCT = 1.0;
 export const MIN_TIER_SPEND_SHARE_PCT = 5; // a tier must carry this much of total $ spend to veto/confirm the global call
 export const MIN_REQUESTS_FOR_AGENT_ROW = 500; // per-agent-definition recommendation floor
+export const MIN_AGENT_SAVING_PCT = 1.0; // a candidate needs at least this much saving — a -0.24% "saving" is noise, not a reason to edit a definition
 const FIVE_MIN_MS = 5 * 60 * 1000;
 const SIXTY_MIN_MS = 60 * 60 * 1000;
 
@@ -238,7 +239,8 @@ export async function parseFile(path, { kind, agentType = null } = {}) {
   }
 
   const requests = [];
-  let lastUserRec = null; // { ts, hasToolResult, isMeta }
+  let lastUserRec = null; // { ts, hasToolResult, isMeta, isCompaction }
+  let pendingCompactBoundary = false; // saw a system compact_boundary; the NEXT user line is presumed to be its summary
   let current = null; // in-progress request accumulator
   let prevFinalized = null; // previous FINALIZED request, for gap/cause/conv
 
@@ -252,8 +254,17 @@ export async function parseFile(path, { kind, agentType = null } = {}) {
     if (prevFinalized != null && Number.isFinite(ts) && Number.isFinite(prevFinalized.startTs)) {
       gapMs = ts - prevFinalized.startTs;
       band = bandFor(gapMs);
-      if (band === '5to60') {
-        const connUser = current.connectingUser;
+      const connUser = current.connectingUser;
+      if (connUser?.isCompaction) {
+        // Compaction forces a fresh write no matter what the TTL is set to —
+        // the OLD cache is discarded along with the summarised context, not
+        // merely expired, so there is nothing a longer TTL could have kept
+        // warm. Checked FIRST (compaction outranks every other cause), and
+        // convertedTokens stays 0 in EVERY band, including 5-60, where the
+        // ordinary clamp formula would otherwise credit the 1h TTL with
+        // "saving" a write that was never avoidable in the first place.
+        cause = { type: 'compaction' };
+      } else if (band === '5to60') {
         if (connUser?.hasToolResult) {
           cause = { type: 'long-tool-call', toolNames: [...prevFinalized.toolUseNames], waitMs: gapMs };
         } else if (prevFinalized.lastBlockType === 'text' && connUser?.isMeta) {
@@ -284,12 +295,28 @@ export async function parseFile(path, { kind, agentType = null } = {}) {
     let rec;
     try { rec = JSON.parse(line); } catch { continue; }
 
+    // A compact_boundary system record is immediately followed by a
+    // synthetic user record carrying the compaction summary (see
+    // transcript-harvest.mjs, which relies on the same adjacency). Track it
+    // so the NEXT user line is flagged even on the rare chance the harness
+    // ever drops the isCompactSummary flag but keeps the boundary marker —
+    // isCompactSummary on the user record itself is still the primary,
+    // authoritative signal below.
+    if (rec.type === 'system' && rec.subtype === 'compact_boundary') {
+      pendingCompactBoundary = true;
+      continue;
+    }
+
     if (rec.type === 'user') {
       const content = rec.message?.content;
       const hasToolResult = Array.isArray(content) && content.some((b) => b && b.type === 'tool_result');
-      lastUserRec = { ts: Date.parse(rec.timestamp), hasToolResult, isMeta: rec.isMeta === true };
+      const isCompaction = rec.isCompactSummary === true || pendingCompactBoundary;
+      lastUserRec = { ts: Date.parse(rec.timestamp), hasToolResult, isMeta: rec.isMeta === true, isCompaction };
+      pendingCompactBoundary = false;
       continue;
     }
+
+    pendingCompactBoundary = false; // any other intervening line breaks the adjacency
 
     if (rec.type !== 'assistant') continue;
     const model = rec.message?.model;
@@ -412,12 +439,14 @@ function rowFromAgg(label, agg, price) {
 //      could still capture.
 //   3. otherwise (tiers disagree, or |global| is inside the dead zone) ->
 //      recommend `experimental: { cacheTtl: "1h" }` on specific NAMED agent
-//      definitions: negative delta, at least MIN_REQUESTS_FOR_AGENT_ROW
-//      requests (a small sample is not worth a standing config change), and
-//      an agentType that actually HAS an editable frontmatter file — a
-//      harness built-in (general-purpose, Explore, ...) or a subagent with
-//      no sidecar metadata at all (NO_META_AGENT_TYPE) cannot be pointed at
-//      a definition to edit, so both are excluded regardless of their delta.
+//      definitions: delta at or past -MIN_AGENT_SAVING_PCT (a -0.24% "saving"
+//      is noise, not a reason to edit a definition), at least
+//      MIN_REQUESTS_FOR_AGENT_ROW requests (a small sample is not worth a
+//      standing config change), and an agentType that actually HAS an
+//      editable frontmatter file — a harness built-in (general-purpose,
+//      Explore, ...) or a subagent with no sidecar metadata at all
+//      (NO_META_AGENT_TYPE) cannot be pointed at a definition to edit, so
+//      both are excluded regardless of their delta.
 export function computeVerdict({
   perModel, perAgentModel, totals, policy, excludedAgentTypes = KNOWN_AGENT_TYPES,
 }) {
@@ -449,7 +478,7 @@ export function computeVerdict({
       + `and the opus/fable-only policy is also non-negative (${fmtPct(policy.opusFableOnlyDeltaPct)})`;
   } else {
     const candidates = perAgentModel.filter((r) => {
-      if (r.deltaPct >= 0) return false;
+      if (r.deltaPct > -MIN_AGENT_SAVING_PCT) return false; // e.g. -0.24% is noise, not a saving worth a standing config edit
       if (r.requests < MIN_REQUESTS_FOR_AGENT_ROW) return false;
       const agentType = r.label.split(' → ')[0];
       if (agentType === NO_META_AGENT_TYPE || excludedAgentTypes.has(agentType)) return false;
@@ -492,7 +521,7 @@ export async function computeCacheTtl({
     lt5: { readSum: 0, prefixSum: 0 },
     '5to60': { readSum: 0, prefixSum: 0 },
   };
-  const causeCounts = { 'long-tool-call': 0, 'resume-by-lead': 0, unknown: 0 };
+  const causeCounts = { 'long-tool-call': 0, 'resume-by-lead': 0, unknown: 0, compaction: 0 };
   const toolWaits = [];
   const toolNameCounts = new Map();
   let subagentWrite1hTotal = 0;
@@ -525,7 +554,14 @@ export async function computeCacheTtl({
         sanity[r.band].prefixSum += r.usage.read + r.usage.write;
       }
 
-      if (r.band === '5to60' && r.cause) {
+      // Compaction is counted regardless of band — it can land in any of the
+      // three, and forces a fresh write in all of them (convertedTokens is
+      // already forced to 0 in parseFile). The other causes are meaningful
+      // only inside the 5-60min band, where a rewrite is genuinely a TTL
+      // question rather than a cold-start or a compaction-forced one.
+      if (r.cause?.type === 'compaction') {
+        causeCounts.compaction += 1;
+      } else if (r.band === '5to60' && r.cause) {
         causeCounts[r.cause.type] = (causeCounts[r.cause.type] || 0) + 1;
         if (r.cause.type === 'long-tool-call') {
           toolWaits.push(r.cause.waitMs);

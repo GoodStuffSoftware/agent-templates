@@ -110,7 +110,7 @@ you expected to run reports `SKIP`, find out why before concluding anything.
   only the check's ability to run is graded. Read-only; not fixable — this
   never writes a setting or an agent definition, and never will. Runs
   standalone too: `node "$AC/scripts/cache-ttl.mjs" --days 30 [--json]`. See
-  `plugins/agent-companion/README.md#cache-ttl` for the method.
+  `plugins/agent-companion/README.md#cache-ttl-analysis` for the method.
 
 ## Fixing
 

@@ -67,6 +67,7 @@ console.log('-- 5-60min gap causes --');
 console.log(`  long tool call      : ${result.causes.counts['long-tool-call'] || 0}`);
 console.log(`  resume by lead      : ${result.causes.counts['resume-by-lead'] || 0}`);
 console.log(`  unknown             : ${result.causes.counts.unknown || 0}`);
+console.log(`  compaction (any band, conv forced to 0) : ${result.causes.counts.compaction || 0}`);
 console.log(`  tool wait p10/p50/p90: ${fmtMs(result.causes.toolWaitMsP10)} / ${fmtMs(result.causes.toolWaitMsP50)} / ${fmtMs(result.causes.toolWaitMsP90)}`);
 if (result.causes.topTools.length) {
   console.log(`  top tools waited on : ${result.causes.topTools.map(([t, c]) => `${t}(${c})`).join(', ')}`);

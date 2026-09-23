@@ -1237,6 +1237,10 @@ const cacheTtlCheck = {
         + `be=${b.breakEvenPct.toFixed(1)}%`).join(', ')}`,
       `verdict: ${result.verdict}`,
     ];
+    if (result.causes.counts.compaction) {
+      findings.push(`${result.causes.counts.compaction} request(s) followed a compaction (any band) — `
+        + 'converted tokens forced to 0 for those, since compaction rewrites regardless of TTL');
+    }
     if (result.unknownModels.length) {
       findings.push(`${result.unknownModels.length} unknown model(s) excluded from every total: `
         + `${result.unknownModels.map((u) => u.model).join(', ')}`);

@@ -7,18 +7,26 @@ import {
   parseFile, computeCacheTtl, classifyPricing, breakEvenSharePct, clamp,
   costToday, costWith1h, pricingTable, computeVerdict,
   SET_GLOBALLY_DELTA_PCT, DONT_SET_DELTA_PCT, MIN_TIER_SPEND_SHARE_PCT, MIN_REQUESTS_FOR_AGENT_ROW,
-  NO_META_AGENT_TYPE,
+  MIN_AGENT_SAVING_PCT, NO_META_AGENT_TYPE,
 } from '../scripts/lib/cache-ttl.mjs';
 
 // --- fixture builders --------------------------------------------------------
 
-function userLine(ts, { toolResult = false, isMeta = false, text = 'hi' } = {}) {
+function userLine(ts, { toolResult = false, isMeta = false, isCompactSummary = false, text = 'hi' } = {}) {
   const content = toolResult
     ? [{ type: 'tool_result', tool_use_id: 'tu-1', content: 'ok' }]
     : [{ type: 'text', text }];
   const rec = { type: 'user', timestamp: ts, message: { role: 'user', content } };
   if (isMeta) rec.isMeta = true;
+  if (isCompactSummary) rec.isCompactSummary = true;
   return JSON.stringify(rec);
+}
+
+function compactBoundaryLine(ts) {
+  return JSON.stringify({
+    type: 'system', subtype: 'compact_boundary', timestamp: ts,
+    compactMetadata: { trigger: 'auto', preTokens: 100000, postTokens: 5000 },
+  });
 }
 
 // usage keys: input, write5m, write1h, read, output — write total is derived
@@ -95,6 +103,124 @@ test('band classification at 4:59 / 5:01 / 60:01', async () => {
       assert.equal(requests[0].band, null, 'the first request in a file has no gap');
       assert.equal(requests[1].band, c.expect, `gap of ${c.label} must classify as ${c.expect}`);
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test('band classification at the EXACT boundaries: 5:00 and 60:00 are inclusive into the 5-60min band', async () => {
+  // Documented semantics (see bandFor() in lib/cache-ttl.mjs): lt5 is gap <
+  // 5:00 (strictly), 5to60 is [5:00, 60:00] inclusive on BOTH ends, gt60 is
+  // gap > 60:00 (strictly). Pinned here so a future refactor cannot silently
+  // flip either boundary without a test noticing.
+  const { dir, cleanup } = makeFixture();
+  try {
+    const cases = [
+      { label: '5-00-exact', gapMs: 5 * 60000, expect: '5to60' },
+      { label: '60-00-exact', gapMs: 60 * 60000, expect: '5to60' },
+    ];
+    for (const c of cases) {
+      const file = join(dir, `boundary-${c.label}.jsonl`);
+      writeLines(file, [
+        userLine(plusMs(0)),
+        assistantLine(plusMs(0), { requestId: 'r1', input: 10, write5m: 10 }),
+        userLine(plusMs(c.gapMs), { isMeta: true }),
+        assistantLine(plusMs(c.gapMs), { requestId: 'r2', input: 10, write5m: 10 }),
+      ]);
+      const requests = await parseFile(file, { kind: 'subagent', agentType: 'worker' });
+      assert.equal(requests[1].band, c.expect, `gap of exactly ${c.label} must classify as ${c.expect}`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('compaction: forces cause "compaction" and convertedTokens 0 even inside the 5-60min band', async () => {
+  // Magnitudes echo a real observed compaction on this machine: a huge
+  // pre-compaction read (a long-lived cache) followed by a big fresh write
+  // and a much smaller read after the summary replaces the old context. The
+  // NAIVE clamp formula would credit this with a large "conversion" (using
+  // the old, huge prevPrefix) — which would be wrong, because the write was
+  // forced by the compaction, not by a TTL that a longer setting could have
+  // avoided.
+  const { dir, cleanup } = makeFixture();
+  try {
+    const file = join(dir, 'compaction.jsonl');
+    writeLines(file, [
+      userLine(plusMs(0)),
+      assistantLine(plusMs(0), { requestId: 'r1', input: 500, write5m: 722, read: 165418 }),
+      compactBoundaryLine(plusMs(10 * 60000)),
+      userLine(plusMs(10 * 60000), { isCompactSummary: true }),
+      assistantLine(plusMs(10 * 60000), { requestId: 'r2', input: 200, write5m: 44383, read: 16953 }),
+    ]);
+    const requests = await parseFile(file, { kind: 'subagent', agentType: 'worker' });
+    assert.equal(requests[1].band, '5to60', 'the fixture gap lands in the band conversion would normally apply to');
+    assert.equal(requests[1].cause.type, 'compaction');
+    assert.equal(requests[1].convertedTokens, 0, 'compaction always forces a fresh write; nothing is "converted"');
+  } finally {
+    cleanup();
+  }
+});
+
+test('compaction: also detected via the compact_boundary marker alone (isCompactSummary-flag fallback)', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const file = join(dir, 'compaction-fallback.jsonl');
+    writeLines(file, [
+      userLine(plusMs(0)),
+      assistantLine(plusMs(0), { requestId: 'r1', input: 10, write5m: 100, read: 5000 }),
+      compactBoundaryLine(plusMs(10 * 60000)),
+      // No isCompactSummary flag on this line -- boundary adjacency alone must still flag it.
+      userLine(plusMs(10 * 60000)),
+      assistantLine(plusMs(10 * 60000), { requestId: 'r2', input: 10, write5m: 900, read: 100 }),
+    ]);
+    const requests = await parseFile(file, { kind: 'subagent', agentType: 'worker' });
+    assert.equal(requests[1].cause.type, 'compaction');
+    assert.equal(requests[1].convertedTokens, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('compaction outside the 5-60min band is still counted as a compaction cause', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const file = join(dir, 'compaction-gt60.jsonl');
+    writeLines(file, [
+      userLine(plusMs(0)),
+      assistantLine(plusMs(0), { requestId: 'r1', input: 10, write5m: 100, read: 5000 }),
+      compactBoundaryLine(plusMs(90 * 60000)),
+      userLine(plusMs(90 * 60000), { isCompactSummary: true }),
+      assistantLine(plusMs(90 * 60000), { requestId: 'r2', input: 10, write5m: 900, read: 100 }),
+    ]);
+    const requests = await parseFile(file, { kind: 'subagent', agentType: 'worker' });
+    assert.equal(requests[1].band, 'gt60');
+    assert.equal(requests[1].cause.type, 'compaction', 'compaction is flagged regardless of band');
+    assert.equal(requests[1].convertedTokens, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('resume guard: previous turn ending in NON-text, next input isMeta, no tool_result -> must NOT classify as resume', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const file = join(dir, 'resume-guard.jsonl');
+    writeLines(file, [
+      userLine(plusMs(0)),
+      // Previous request ends with a tool_use block, not text.
+      assistantLine(plusMs(0), {
+        requestId: 'r1', input: 10, write5m: 10,
+        blocks: [{ type: 'tool_use', id: 'tu-1', name: 'Bash', input: {} }],
+      }),
+      // Connecting line IS isMeta, but carries no tool_result either.
+      userLine(plusMs(12 * 60000), { isMeta: true }),
+      assistantLine(plusMs(12 * 60000), { requestId: 'r2', input: 10, write5m: 10 }),
+    ]);
+    const requests = await parseFile(file, { kind: 'subagent', agentType: 'worker' });
+    assert.equal(requests[1].band, '5to60');
+    assert.notEqual(requests[1].cause.type, 'resume-by-lead', 'resume-by-lead REQUIRES the previous turn to have ended in text');
+    assert.equal(requests[1].cause.type, 'unknown');
   } finally {
     cleanup();
   }
@@ -377,12 +503,12 @@ test('verdict: don\'t set when delta is comfortably positive and opus/fable-only
 test('verdict: dead zone with tier disagreement -> per-agent recommendation, built-ins and no-meta excluded', () => {
   const perModel = [modelRow('sonnet-5', { costToday: 1000, deltaPct: 0.2 })];
   const perAgentModel = [
-    agentRow('bsk-architect → opus-5', { requests: 2000, costToday: 500, deltaPct: -8 }), // qualifies
-    agentRow('bsk-reviewer → sonnet-5', { requests: 600, costToday: 50, deltaPct: -1 }), // qualifies
+    agentRow('widget-architect → opus-5', { requests: 2000, costToday: 500, deltaPct: -8 }), // qualifies
+    agentRow('widget-reviewer → sonnet-5', { requests: 600, costToday: 50, deltaPct: -1 }), // qualifies
     agentRow('general-purpose → opus-5', { requests: 5000, costToday: 800, deltaPct: -30 }), // built-in: excluded
     agentRow(`${NO_META_AGENT_TYPE} → opus-5`, { requests: 9000, costToday: 900, deltaPct: -40 }), // no meta: excluded
-    agentRow('bsk-debugger → sonnet-5', { requests: 100, costToday: 10, deltaPct: -50 }), // too few requests: excluded
-    agentRow('bsk-builder → sonnet-5', { requests: 3000, costToday: 30, deltaPct: 5 }), // positive delta: excluded
+    agentRow('widget-debugger → sonnet-5', { requests: 100, costToday: 10, deltaPct: -50 }), // too few requests: excluded
+    agentRow('widget-builder → sonnet-5', { requests: 3000, costToday: 30, deltaPct: 5 }), // positive delta: excluded
   ];
   const v = computeVerdict({
     perModel,
@@ -392,19 +518,19 @@ test('verdict: dead zone with tier disagreement -> per-agent recommendation, bui
   });
   assert.match(v.text, /don't set subagentPromptCacheTtl globally/);
   assert.match(v.text, /experimental: \{ cacheTtl: "1h" \}/);
-  assert.match(v.text, /bsk-architect/);
-  assert.match(v.text, /bsk-reviewer/);
+  assert.match(v.text, /widget-architect/);
+  assert.match(v.text, /widget-reviewer/);
   assert.doesNotMatch(v.text, /general-purpose/);
   assert.doesNotMatch(v.text, new RegExp(NO_META_AGENT_TYPE.replace(/[()]/g, '\\$&')));
-  assert.doesNotMatch(v.text, /bsk-debugger/, 'below the request floor must be excluded');
-  assert.doesNotMatch(v.text, /bsk-builder/, 'a positive delta must be excluded even in the per-agent branch');
+  assert.doesNotMatch(v.text, /widget-debugger/, 'below the request floor must be excluded');
+  assert.doesNotMatch(v.text, /widget-builder/, 'a positive delta must be excluded even in the per-agent branch');
 });
 
 test('verdict: dead zone with no qualifying candidate falls back to an explanatory "don\'t set" message', () => {
   const perModel = [modelRow('sonnet-5', { costToday: 1000, deltaPct: 0.1 })];
   const perAgentModel = [
     agentRow('general-purpose → opus-5', { requests: 5000, costToday: 800, deltaPct: -10 }), // built-in
-    agentRow('bsk-debugger → sonnet-5', { requests: 100, costToday: 10, deltaPct: -5 }), // too few requests
+    agentRow('widget-debugger → sonnet-5', { requests: 100, costToday: 10, deltaPct: -5 }), // too few requests
   ];
   const v = computeVerdict({
     perModel,
@@ -424,12 +550,58 @@ test('verdict: no priced subagent requests -> nothing to recommend, empty break-
   assert.deepEqual(v.breakEvenByTier, []);
 });
 
-test('MIN_TIER_SPEND_SHARE_PCT / MIN_REQUESTS_FOR_AGENT_ROW are the documented magnitudes', () => {
+test('MIN_TIER_SPEND_SHARE_PCT / MIN_REQUESTS_FOR_AGENT_ROW / MIN_AGENT_SAVING_PCT are the documented magnitudes', () => {
   // Guards against a silent rename/renumbering that would desync the README table.
   assert.equal(MIN_TIER_SPEND_SHARE_PCT, 5);
   assert.equal(MIN_REQUESTS_FOR_AGENT_ROW, 500);
+  assert.equal(MIN_AGENT_SAVING_PCT, 1.0);
   assert.equal(SET_GLOBALLY_DELTA_PCT, -1.0);
   assert.equal(DONT_SET_DELTA_PCT, 1.0);
+});
+
+// --- Verdict: EXACT boundaries, semantics pinned as INCLUSIVE on every one -
+
+test('verdict boundary: global delta of EXACTLY -1.0% (== SET_GLOBALLY_DELTA_PCT) qualifies for "set it"', () => {
+  const perModel = [modelRow('sonnet-5', { costToday: 1000, deltaPct: -1.0 })];
+  const v = computeVerdict({
+    perModel, perAgentModel: [], totals: { costToday: 1000, deltaPct: SET_GLOBALLY_DELTA_PCT },
+    policy: { opusFableOnlyDeltaPct: -1 },
+  });
+  assert.match(v.text, /set subagentPromptCacheTtl to "1h" globally/, '<= is inclusive: exactly -1.0% must qualify');
+});
+
+test('verdict boundary: global delta of EXACTLY +1.0% (== DONT_SET_DELTA_PCT) qualifies for "don\'t set"', () => {
+  const perModel = [modelRow('sonnet-5', { costToday: 1000, deltaPct: 1.0 })];
+  const v = computeVerdict({
+    perModel, perAgentModel: [], totals: { costToday: 1000, deltaPct: DONT_SET_DELTA_PCT },
+    policy: { opusFableOnlyDeltaPct: 0 },
+  });
+  assert.match(v.text, /don't set subagentPromptCacheTtl — observed delta/, '>= is inclusive: exactly +1.0% must qualify');
+});
+
+test('verdict boundary: a tier at EXACTLY 5% spend share (== MIN_TIER_SPEND_SHARE_PCT) and positive still vetoes "set it"', () => {
+  const perModel = [
+    modelRow('sonnet-5', { costToday: 50, deltaPct: 2 }), // exactly 5% of 1000, POSITIVE
+    modelRow('opus-5', { costToday: 950, deltaPct: -20 }),
+  ];
+  const v = computeVerdict({
+    perModel, perAgentModel: [], totals: { costToday: 1000, deltaPct: SET_GLOBALLY_DELTA_PCT - 1 },
+    policy: { opusFableOnlyDeltaPct: -5 },
+  });
+  assert.doesNotMatch(v.text, /set subagentPromptCacheTtl to "1h" globally/, '>= is inclusive: exactly 5% share must still veto');
+});
+
+test('verdict boundary: a candidate at EXACTLY -1.0% (== MIN_AGENT_SAVING_PCT) qualifies; one at -0.99% does not', () => {
+  const perModel = [modelRow('sonnet-5', { costToday: 1000, deltaPct: 0.2 })]; // dead zone
+  const perAgentModel = [
+    agentRow('widget-architect → sonnet-5', { requests: 1000, costToday: 100, deltaPct: -1.0 }), // exactly at the floor
+    agentRow('widget-reviewer → sonnet-5', { requests: 1000, costToday: 100, deltaPct: -0.99 }), // just short
+  ];
+  const v = computeVerdict({
+    perModel, perAgentModel, totals: { costToday: 1000, deltaPct: 0.2 }, policy: { opusFableOnlyDeltaPct: -0.5 },
+  });
+  assert.match(v.text, /widget-architect/, 'exactly -MIN_AGENT_SAVING_PCT must qualify');
+  assert.doesNotMatch(v.text, /widget-reviewer/, 'a saving smaller than MIN_AGENT_SAVING_PCT must not qualify');
 });
 
 test('window filtering: requests before the cutoff are excluded, file mtime does not leak them in', async () => {

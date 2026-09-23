@@ -291,7 +291,14 @@ thresholds below account for that by being harder to satisfy in the
 |---|---|
 | global delta ≤ `SET_GLOBALLY_DELTA_PCT` (-1.0%) **and** no model tier carrying ≥ `MIN_TIER_SPEND_SHARE_PCT` (5%) of spend has a *positive* delta | set `subagentPromptCacheTtl` to `"1h"` globally |
 | global delta ≥ `DONT_SET_DELTA_PCT` (+1.0%) **and** the opus/fable-only policy is also non-negative | don't set it, full stop |
-| otherwise — tiers disagree, or the global delta sits inside the ±1% dead zone | don't set it globally; instead list every `agentType × model` row with a negative delta, at least `MIN_REQUESTS_FOR_AGENT_ROW` (500) requests, and a **named, editable** agent definition — excluding harness built-ins (`general-purpose`, `Explore`, `Plan`, ...; reuses `KNOWN_AGENT_TYPES` from `hooks/lib/context.mjs`) and subagents with no sidecar `.meta.json` at all (`(no meta)`), neither of which has any frontmatter to set `experimental: { cacheTtl: "1h" }` on |
+| otherwise — tiers disagree, or the global delta sits inside the ±1% dead zone | don't set it globally; instead list every `agentType × model` row with a delta at or past `-MIN_AGENT_SAVING_PCT` (1.0% — a -0.24% "saving" is noise, not a reason to edit a definition), at least `MIN_REQUESTS_FOR_AGENT_ROW` (500) requests, and a **named, editable** agent definition — excluding harness built-ins (`general-purpose`, `Explore`, `Plan`, ...; reuses `KNOWN_AGENT_TYPES` from `hooks/lib/context.mjs`) and subagents with no sidecar `.meta.json` at all (`(no meta)`), neither of which has any frontmatter to set `experimental: { cacheTtl: "1h" }` on |
+
+A **compaction** immediately before a request (`isCompactSummary: true` on
+the synthetic user record, or its preceding `compact_boundary` system
+marker) forces a fresh cache write regardless of TTL — the old cache is
+discarded along with the summarised context, not merely expired — so its
+`convertedTokens` is pinned to 0 in every band and it is counted separately
+in the cause breakdown rather than folded into "unknown".
 
 The break-even line (observed rewrite share vs. the share required, per
 tier) is always printed alongside the verdict, regardless of which branch
