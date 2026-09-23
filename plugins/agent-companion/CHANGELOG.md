@@ -2,6 +2,51 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.24.0 — 2026-09-23
+
+Implements the operator-approved SPAWNING RULE (three checks; minor bump —
+new detection surface, no breaking change to any existing check's shape).
+
+### Added
+
+- **`hooks/spawn-guard.mjs`: missing-model warning.** A spawn naming no
+  model anywhere (neither the spawn parameter nor its definition) is now
+  flagged even when the brief declares no `WEIGHT:` — previously silent,
+  since `fit_autofill` only fills a model in off a declared weight. The
+  existing "no effort stated" warning's wording is unified around, and
+  cites, the same rule.
+- **`hooks/spawn-guard.mjs`: build-version-floor warning.** An opus/fable
+  spawn from a session whose own Claude Code build is below
+  `config/model-tiers.json`'s `aliasResolution.minClaudeCodeVersion` is
+  flagged, reading the build from the CALLING session's own transcript
+  (`sessionBuildVersion()`, new in `hooks/lib/context.mjs`) rather than
+  shelling out to `claude --version` — a session's build can differ from
+  what's on PATH (the desktop app bundles its own), and a session keeps
+  the build it started with. Falls back to silence when unreadable, never
+  a guess.
+- **`scripts/lib/model-mismatch.mjs` + the `model-resolution-mismatch`
+  audit check.** Verifies the model a spawn actually ran on (its subagent
+  transcript's own resolved model) against what its definition's alias
+  should resolve to. Correlates `spawns.jsonl` telemetry to subagent
+  transcripts by nearest timestamp within a session (no field links the
+  two directly), matched by closest-pair-first rather than
+  per-row-in-order — the latter produced a measured false positive on real
+  data under near-simultaneous spawns. Bounded to a fixed 48h window
+  regardless of `--days` (an unbounded transcript walk over every project
+  measured over two minutes).
+- `parseSemver`/`semverBelow` moved from `scripts/detect.mjs` into
+  `hooks/lib/context.mjs`, now shared by the scout's harness-version
+  signal, the new spawn-guard warning, and the new audit check, so "below
+  the floor" cannot drift into separate definitions.
+- `docs/proposed/global-doctrine-reweight.patch`: extended with a new
+  "The SPAWNING RULE" subsection in the `team-orchestration` SKILL.md hunk
+  and a second pointer sentence in the CLAUDE.md hunk (still a pointer,
+  not a restatement — CLAUDE.md stays slim). Verified applying cleanly
+  against fresh copies of both real target files.
+- README: new "Spawning rule" section; Features table row.
+- 17 new tests (`tests/spawning-rule.test.mjs`,
+  `tests/model-mismatch.test.mjs`); full suite 173/0 (was 156/0).
+
 ## 0.23.0 — 2026-09-23
 
 Re-weighted `config/model-tiers.json` against the current Anthropic lineup
