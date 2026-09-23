@@ -122,3 +122,29 @@ test('N2: a scheme-less github.com/o/r is scrubbed unless known public', () => {
 test('N2: rates and file:line references are not mistaken for owner/repo pairs', () => {
   assert.equal(scrubMy('12 runs/7d; see docs/guide.md:4'), '12 runs/7d; see docs/guide.md:4');
 });
+
+// --- final review F2: bare GitHub tokens are redacted anywhere --------------
+
+const FAKE20 = 'zbFAKE0123456789abcdefXY';
+const GHP = ['gh', 'p_'].join('') + FAKE20;
+const GHS = ['gh', 's_'].join('') + FAKE20;
+const PAT = ['github', '_pat_'].join('') + `11${FAKE20}_zb${FAKE20}`;
+
+test('F2: a bare classic GitHub token (ghp_/ghs_…) anywhere in text becomes <token>', () => {
+  assert.equal(scrubMy(`GH_TOKEN=${GHP} failed`), 'GH_TOKEN=<token> failed');
+  assert.equal(scrubMy(`auth: ${GHS}`), 'auth: <token>');
+});
+
+test('F2: a bare fine-grained github_pat_ token becomes <token>', () => {
+  assert.equal(scrubMy(`token ${PAT} rejected`), 'token <token> rejected');
+});
+
+test('F2: a token used as URL userinfo is still dropped with the URL handling intact', () => {
+  assert.equal(scrubMy(`https://${GHP}@github.com/myorg/privrepo`), '<repo-url>');
+  assert.equal(scrubMy(`https://${GHP}@github.com/myorg/zbpublic`), 'https://github.com/myorg/zbpublic');
+  assert.equal(scrubMy(`x-access-token:${PAT}@github.com/myorg/privrepo`), '<repo-url>');
+});
+
+test('F2: short gh_-looking words are not tokens', () => {
+  assert.equal(scrubMy('ghp_short and gho_ and github_pat_x'), 'ghp_short and gho_ and github_pat_x');
+});

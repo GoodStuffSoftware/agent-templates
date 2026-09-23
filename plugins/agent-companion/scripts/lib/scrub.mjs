@@ -53,6 +53,20 @@ const REPO_REF_RE = new RegExp([
 const BARE_PAIR_RE = /(?<![\w.@/\\:%<>-])([A-Za-z0-9][\w-]*)\/([\w-]+(?:\.[\w-]+)*)(?![\w/\\-]|\.\w|:\d)/g;
 const RATE_RE = /^\d+[a-z]{0,3}$/i;
 
+// A bare GitHub token anywhere in the text (classic ghp_/gho_/ghu_/ghs_/ghr_
+// and fine-grained github_pat_), wherever it stands. Runs right AFTER the
+// repo-reference pass (which already dropped every URL's userinfo, and must
+// see "token@host" intact to recognise the URL at all — a "<token>@host"
+// no longer parses as a URL, which would leave a private repo readable).
+const GH_TOKEN_RE = /(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g;
+
+// Known residue (reviewed, accepted — not bugs to rediscover):
+//   * A bare owner/repo pair is recognised heuristically: a private pair
+//     whose repo half looks like a rate ("x/24h") or that is followed by
+//     ":<digit>" (read as a file:line reference) is left as-is.
+//   * A deeper path on a public repo URL (…/blob/main/x) is not "exactly a
+//     public owner/repo" and is scrubbed to <repo-url> — safe, less readable.
+
 const PATH_RES = [
   // Windows absolute path with / or 1-4 backslashes (JSON-escaped forms too).
   [/(?<![A-Za-z0-9])[A-Za-z]:(?:\\{1,4}|\/)[^\s"'<>|;,]*/g, '<path>'],
@@ -98,6 +112,7 @@ export function makeScrubber({ users = [], names = [], joined = [], publicUrls =
   return (text) => {
     let s = String(text ?? '');
     s = s.replace(REPO_REF_RE, repoRef);
+    s = s.replace(GH_TOKEN_RE, '<token>');
     for (const [re, mark] of PATH_RES) s = s.replace(re, mark);
     s = s.replace(BARE_PAIR_RE, (m, owner, repo) => (RATE_RE.test(repo) || isPublic('github.com', `${owner}/${repo}`) ? m : '<repo>'));
     for (const re of userRes) s = s.replace(re, '<user>');

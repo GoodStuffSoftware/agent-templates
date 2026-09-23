@@ -164,6 +164,12 @@ export async function defaultCheckVisibility(owner, repo, { fetchFn = globalThis
 //     unswept. If an expired cached true exists, it is returned instead of
 //     null (a repo last seen public keeps being swept through a transient
 //     outage), but the lookup still counts as unknown.
+//
+// Known residue (reviewed, accepted): detect.mjs caches the gh repo LIST
+// itself for 24h. A repo that only gh discovery would find (no local
+// checkout, not in ~/.claude.json) and that turns public inside that window
+// is picked up when the list next refreshes — up to a day — not on the
+// very next run. Local checkouts are unaffected (rechecked every run).
 // Returns { check(owner, repo) -> Promise<boolean|null>, stats }.
 export function cachedVisibility(checkFn = defaultCheckVisibility, cache = {}, { ttlMs = 24 * 60 * 60 * 1000, now = () => Date.now() } = {}) {
   const stats = { unknown: 0, cached: 0, fetched: 0 };
