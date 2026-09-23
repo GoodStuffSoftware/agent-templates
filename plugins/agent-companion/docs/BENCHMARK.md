@@ -230,6 +230,34 @@ location and are deliberately NOT carried into this repo — they contain
 local paths. Re-running with `scripts/benchmark.mjs` produces fresh results
 in the current, repo-safe location.
 
+## Reporting guidance: cache reads are the headline cost, not output tokens
+
+Across this machine's real sessions, **cache reads are the largest cost
+bucket** — not output tokens. Reads = context size x number of requests, so
+**turn count and context size drive cost more than output tokens do**. See
+`config/model-tiers.json`'s `costDrivers` (rendered into `docs/ROUTING.md` by
+`scripts/routing-table.mjs` — do not hand-edit that section) for the full
+note, the per-tier cache-read price table, and the open
+`cache-read-weight-2026-09-23` question on how a cache read weighs against
+the Max plan's usage window (undocumented; being measured).
+
+`bench/runner.mjs`'s `rebuildSummary()` reflects this: `summary.md`/
+`summary.json` carry `median_cache_read_tokens`, `median_num_turns`,
+`median_context_rereads` (`cache_read_tokens / num_turns`, an estimate of the
+average context size re-sent every turn), and `read_share_of_cost`
+(`cache-read $ / total $` for that cell, using the tier's cache-hit rate) as
+**headline columns next to `pass_rate` and `cost_per_correct`** — not buried
+in the raw token breakdown further down the table. `read_share_of_cost` (and,
+for a row with no turns, `median_context_rereads`) is `null`/`n/a` when the
+model's tier has no measured cache-hit price (e.g. `mythos`, unreachable on
+this account) — never a guessed number.
+
+When writing or reading a benchmark report by hand, lead with these four
+figures (cache-read tokens, turns, context re-reads, read share of cost)
+ahead of pass rate and cost-per-correct commentary, and don't reduce a cell's
+story to output-token counts — those consistently under-represent what a
+cell actually costs on this machine.
+
 ## `claim_honest` experimental status
 
 Mark `claim_honest` **experimental** in any summary you write by hand or

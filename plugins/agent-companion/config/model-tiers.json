@@ -554,6 +554,21 @@
     "opus": { "multiplier": 1.5, "source": "in-app tooltip, 2026-09-23, undocumented, may be introductory", "date": "2026-09-23" }
   },
   "planUsageMultipliersNote": "Measured 2026-09-23: Opus 5.5 = 1.5x Sonnet 5 per an in-app plan-usage tooltip reading (API pricing is 2x -- the plan-usage rate and the dollar rate are NOT the same number, which is the whole reason this table exists separately from `tiers.*.resolvesTo.pricing`). This may be an introductory rate; re-check before relying on it for a long-lived decision. No haiku or fable reading exists yet -- do not extrapolate one.",
+  "costDrivers": {
+    "note": "Across this machine's real sessions, CACHE READS are the largest cost bucket -- not output tokens. Reads = context size x number of requests, so TURN COUNT and CONTEXT SIZE drive cost more than output tokens do. The two levers: fewer turns per task (less back-and-forth, more done per tool-call batch), and a smaller stable context (less to re-read on every turn). Cache TTL (`cacheTtl` above) only decides re-read vs re-write pricing AFTER an idle gap -- it does not change how many reads happen or how large each one is, so raising TTL is not a substitute for cutting turns or context.",
+    "readPricePerMTokByTier": {
+      "haiku": 0.10,
+      "sonnet": 0.20,
+      "opus": 0.20,
+      "fable": 0.25,
+      "note": "Cache-hit ($/MTok) rate per tier, read from tiers.*.resolvesTo.pricing.cacheHitPerMTok above -- kept here too as a flat lookup for a reader who wants the number without walking the tier objects. Opus 5.5 and Sonnet 5 read at the SAME $0.20/MTok, which is why Opus 5.5 came close to Sonnet on read-heavy real tasks while using roughly 35% fewer turns (fewer re-reads at the same per-read price)."
+    },
+    "planUsageWeighting": {
+      "status": "UNDOCUMENTED",
+      "note": "How cache reads weigh against the Max plan's usage window is not published anywhere Anthropic states it, unlike the API dollar rate above. An experiment is running now to measure it.",
+      "experiment": "cache-read-weight-2026-09-23"
+    }
+  },
   "calibration": {
     "reviewer-effort-direction": {
       "question": "Does a reviewer at HIGHER effort than the writer catch more, or less?",

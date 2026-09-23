@@ -440,6 +440,44 @@ function planUsageMultiplier(fullModelId) {
   return typeof entry?.multiplier === "number" ? entry.multiplier : null;
 }
 
+// Cache reads are the largest real cost bucket on this machine (see
+// docs/BENCHMARK.md and config/model-tiers.json's costDrivers) -- reads =
+// context size x number of requests, so turn count and context size drive
+// spend more than output tokens do. cacheHitPerMTok comes from the SAME
+// tiers.*.resolvesTo.pricing table planUsageMultiplier() reads next to,
+// resolved by tier alias so a rate change in the config needs no code edit.
+function cacheReadPricePerMTok(fullModelId) {
+  const alias = classifyModel(fullModelId).alias;
+  const tier = (modelTiers().tiers || {})[alias];
+  const rate = tier?.resolvesTo?.pricing?.cacheHitPerMTok;
+  return typeof rate === "number" ? rate : null;
+}
+
+// Read share of cost for ONE run: what fraction of that run's total API
+// dollar cost was spent re-reading cached context, vs writing new context or
+// generating output. null when the model's cache-read rate is unmeasured or
+// the row lacks cost/token data to compute it -- never a guessed number.
+function readCostShare(row) {
+  const rate = cacheReadPricePerMTok(row.requested_model);
+  if (rate == null) return null;
+  const cacheRead = row.cache_read_tokens;
+  const cost = row.cost_usd;
+  if (typeof cacheRead !== "number" || typeof cost !== "number" || cost <= 0) return null;
+  const readCostUsd = (cacheRead * rate) / 1e6;
+  return readCostUsd / cost;
+}
+
+// Context re-reads for ONE run: cache_read_tokens / num_turns approximates
+// the average context size re-sent to the model on every turn (a cache read
+// resends the whole cached prefix each time). null when either figure is
+// missing or turns is zero.
+function contextRereads(row) {
+  const cacheRead = row.cache_read_tokens;
+  const turns = row.num_turns;
+  if (typeof cacheRead !== "number" || typeof turns !== "number" || turns <= 0) return null;
+  return cacheRead / turns;
+}
+
 export function rebuildSummary(outDir) {
   const jsonlPath = path.join(outDir, "results.jsonl");
   if (!fs.existsSync(jsonlPath)) return;
@@ -502,6 +540,15 @@ export function rebuildSummary(outDir) {
     // unmeasured -- see planUsageMultiplier() above.
     const cellMultiplier = planUsageMultiplier(group[0]?.requested_model);
     const planUsageIndex = (relIndex != null && cellMultiplier != null) ? relIndex * cellMultiplier : null;
+    // HEADLINE cost-driver stats (see config/model-tiers.json's costDrivers):
+    // cache reads are the largest real cost bucket on this machine, and reads
+    // = context size x number of requests, so turn count and re-read size
+    // matter more to spend than output tokens do. Computed per-run, then
+    // medianed across the group like every other stat here -- null entries
+    // (unmeasured cache-read price for this tier, or a row missing turns/
+    // cost) are dropped before the median rather than treated as zero.
+    const medContextRereads = median(group.map(contextRereads).filter((v) => v != null));
+    const medReadShareOfCost = median(group.map(readCostShare).filter((v) => v != null));
 
     summaryRows.push({
       cell, task, n: group.length,
@@ -518,6 +565,8 @@ export function rebuildSummary(outDir) {
       median_cache_write_tokens: medCacheWrite,
       median_output_tokens: medOut,
       median_num_turns: medTurns,
+      median_context_rereads: medContextRereads,
+      read_share_of_cost: medReadShareOfCost,
       median_duration_ms: medDuration,
       median_cost_usd: medCost,
       cost_per_correct_usd: costPerCorrect,
@@ -532,9 +581,21 @@ export function rebuildSummary(outDir) {
   // also fetch a separate top-level note.
   fs.writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summaryRows, null, 2));
 
-  const header = ["cell", "task", "n", "pass_rate", "claim_honest*", "scope_ok", "med_out_tok", "med_turns", "med_cost_usd", "cost_per_correct", "rel_cost_idx", "plan_usage_idx"];
+  // Cache-read tokens, turns, context re-reads, and read-share-of-cost are
+  // HEADLINE columns (next to pass_rate and cost_per_correct) -- not buried
+  // in the token breakdown -- because cache reads are the largest real cost
+  // bucket on this machine and turn count / context size are the actual
+  // spend levers (see config/model-tiers.json's costDrivers and
+  // docs/BENCHMARK.md's reporting guidance).
+  const header = [
+    "cell", "task", "n", "pass_rate",
+    "med_cache_read_tok", "med_turns", "ctx_rereads", "read_share_cost",
+    "cost_per_correct",
+    "claim_honest*", "scope_ok", "med_out_tok", "med_cost_usd", "rel_cost_idx", "plan_usage_idx",
+  ];
   const lines = [
     "* claim_honest is EXPERIMENTAL — a word-bag heuristic known to under-read on long/hedged answers. See docs/BENCHMARK.md before treating a low rate as a quality finding.",
+    "ctx_rereads = median(cache_read_tokens / num_turns) per run, an estimate of the average context size re-sent every turn. read_share_cost = median share of that run's dollar cost spent on cache reads (cache_read_tokens x this tier's cache-hit rate, from config/model-tiers.json). Both are \"n/a\" when the tier's cache-hit price is unmeasured.",
     "",
   ];
   if (authErrorRows.length > 0) {
@@ -552,12 +613,15 @@ export function rebuildSummary(outDir) {
     lines.push([
       r.cell, r.task, r.n,
       (r.pass_rate * 100).toFixed(0) + "%",
+      r.median_cache_read_tokens ?? "n/a",
+      r.median_num_turns ?? "n/a",
+      r.median_context_rereads != null ? Math.round(r.median_context_rereads) : "n/a",
+      r.read_share_of_cost != null ? (r.read_share_of_cost * 100).toFixed(0) + "%" : "n/a",
+      r.cost_per_correct_usd != null ? "$" + r.cost_per_correct_usd.toFixed(3) : "n/a",
       r.claim_honest_rate != null ? (r.claim_honest_rate * 100).toFixed(0) + "%" : "n/a",
       r.scope_ok_rate != null ? (r.scope_ok_rate * 100).toFixed(0) + "%" : "n/a",
       r.median_output_tokens ?? "n/a",
-      r.median_num_turns ?? "n/a",
       r.median_cost_usd != null ? "$" + r.median_cost_usd.toFixed(3) : "n/a",
-      r.cost_per_correct_usd != null ? "$" + r.cost_per_correct_usd.toFixed(3) : "n/a",
       r.relative_cost_index != null ? r.relative_cost_index.toFixed(2) + "x" : "n/a",
       r.plan_usage_index != null ? r.plan_usage_index.toFixed(2) + "x" : "n/a (unmeasured tier)",
     ].join(" | "));

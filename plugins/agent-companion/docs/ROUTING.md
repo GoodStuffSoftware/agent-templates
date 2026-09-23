@@ -159,6 +159,21 @@ These task types resolve to a benchmark-backed (model, effort) pair that superse
 - **`verify`** — Same benchmark evidence as explore/mechanical-edit/subagent-worker: Sonnet 5 passed every synthetic task at every effort; Haiku 4.5 cost roughly 2x Sonnet per task and was the only model to fail. Haiku remains available only as an explicit choice, not this type's default.
 - **`operate`** — Was weight 3 sonnet/medium. Benchmark evidence: Sonnet 5 at low effort passed every procedure tested; medium used roughly 2x low's tokens (~1.56x plan usage) with no quality gain. Where medium cost more than low with no quality gain, don't use medium.
 
+## Cost drivers
+
+Across this machine's real sessions, CACHE READS are the largest cost bucket -- not output tokens. Reads = context size x number of requests, so TURN COUNT and CONTEXT SIZE drive cost more than output tokens do. The two levers: fewer turns per task (less back-and-forth, more done per tool-call batch), and a smaller stable context (less to re-read on every turn). Cache TTL (`cacheTtl` above) only decides re-read vs re-write pricing AFTER an idle gap -- it does not change how many reads happen or how large each one is, so raising TTL is not a substitute for cutting turns or context.
+
+| Tier | Cache-read price ($/MTok) |
+|---|---|
+| `haiku` | $0.1 |
+| `sonnet` | $0.2 |
+| `opus` | $0.2 |
+| `fable` | $0.25 |
+
+Cache-hit ($/MTok) rate per tier, read from tiers.*.resolvesTo.pricing.cacheHitPerMTok above -- kept here too as a flat lookup for a reader who wants the number without walking the tier objects. Opus 5.5 and Sonnet 5 read at the SAME $0.20/MTok, which is why Opus 5.5 came close to Sonnet on read-heavy real tasks while using roughly 35% fewer turns (fewer re-reads at the same per-read price).
+
+**Plan-usage weighting of cache reads: UNDOCUMENTED.** How cache reads weigh against the Max plan's usage window is not published anywhere Anthropic states it, unlike the API dollar rate above. An experiment is running now to measure it. (experiment: `cache-read-weight-2026-09-23`)
+
 ## What is actually known about `fable`
 
 - OFFICIAL (whats-new-fable-5-1): prefers whole-file rewrites, fewer progress updates, less parallel tool batching. Whole-file rewrites make it a poor fit for scoped or mechanical edits even when a warrant exists.

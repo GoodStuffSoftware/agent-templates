@@ -5,7 +5,41 @@ All notable changes to the `agent-companion` plugin. Dates are UTC.
 ## Unreleased
 
 Windows flashing-console-window fix (hardening only, no behavior change on
-any platform where a hidden console was never visible).
+any platform where a hidden console was never visible). Also surfaces cache
+reads as the headline benchmark/routing cost signal (see below).
+
+### Added
+
+- **Cache-read tokens, turns, and derived cost-driver stats are now HEADLINE
+  columns in the benchmark summary**, not buried in the token breakdown.
+  `bench/runner.mjs`'s `rebuildSummary()` computes, per (cell, task):
+  `median_context_rereads` (`cache_read_tokens / num_turns`, an estimate of
+  the average context size re-sent every turn) and `read_share_of_cost`
+  (`cache-read $ / total $`, using the model's tier cache-hit price from
+  `config/model-tiers.json`) — both `null`/`n/a` when the tier's cache-hit
+  price is unmeasured, never a guessed number. `summary.md`'s columns are
+  reordered so `med_cache_read_tok`, `med_turns`, `ctx_rereads`, and
+  `read_share_cost` sit next to `pass_rate` and `cost_per_correct`.
+  `summary.json` gains the same two new fields on every row. Reasoning:
+  across this machine's real sessions, cache reads are the largest cost
+  bucket — reads = context size x number of requests, so turn count and
+  context size drive cost more than output tokens do.
+- **`config/model-tiers.json`: new `costDrivers` block.** States the reads-
+  dominate finding, the two actual cost levers (turn count, context size),
+  that cache TTL only decides re-read vs re-write pricing after an idle gap
+  (not a substitute for cutting turns/context), the per-tier cache-read
+  price table, and that plan-usage weighting of cache reads is
+  **UNDOCUMENTED**, pending experiment `cache-read-weight-2026-09-23`.
+  Rendered into `docs/ROUTING.md`'s new "Cost drivers" section by
+  `scripts/routing-table.mjs` (generated, not hand-edited).
+- **`docs/BENCHMARK.md`: new "Reporting guidance: cache reads are the
+  headline cost, not output tokens" section**, telling a human writing or
+  reading a benchmark report to lead with cache-read tokens, turns, context
+  re-reads, and read share of cost, ahead of output-token commentary.
+- **New `tests/bench-summary-cost-drivers.test.mjs`.** Unit-level coverage of
+  the two new `rebuildSummary()` fields: correct math for a measured tier
+  (sonnet), `null`/`n/a` for a tier with no measured cache-hit price
+  (mythos), and `null`/`n/a` when a row is missing turns/cache-read tokens.
 
 ### Fixed
 

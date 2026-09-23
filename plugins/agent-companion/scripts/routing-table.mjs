@@ -188,6 +188,30 @@ if (cfg.taskTypes) {
   }
 }
 
+if (cfg.costDrivers) {
+  const cd = cfg.costDrivers;
+  L.push(`## Cost drivers`);
+  L.push(``);
+  if (cd.note) L.push(cd.note);
+  L.push(``);
+  if (cd.readPricePerMTokByTier) {
+    L.push(`| Tier | Cache-read price ($/MTok) |`);
+    L.push(`|---|---|`);
+    for (const [alias, price] of Object.entries(cd.readPricePerMTokByTier)) {
+      if (alias === 'note') continue;
+      L.push(`| \`${alias}\` | $${price} |`);
+    }
+    L.push(``);
+    if (cd.readPricePerMTokByTier.note) L.push(cd.readPricePerMTokByTier.note);
+    L.push(``);
+  }
+  if (cd.planUsageWeighting) {
+    const w = cd.planUsageWeighting;
+    L.push(`**Plan-usage weighting of cache reads: ${w.status || 'UNKNOWN'}.** ${w.note || ''}${w.experiment ? ` (experiment: \`${w.experiment}\`)` : ''}`);
+    L.push(``);
+  }
+}
+
 const fableNotes = cfg.tiers?.fable?.behaviorNotes;
 if (Array.isArray(fableNotes) && fableNotes.length) {
   L.push(`## What is actually known about \`fable\``);
