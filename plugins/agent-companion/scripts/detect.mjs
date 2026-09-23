@@ -12,10 +12,46 @@
 
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt } from '../hooks/lib/context.mjs';
+import { join, basename } from 'node:path';
+import { userInfo, homedir } from 'node:os';
+import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, homeRoot, stateRoot } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
+import {
+  sweepAll, sweepAllCloud, filterNewOrStale, normalizeGitUrl, loadFingerprintKey,
+} from './lib/publication-sweep.mjs';
+import {
+  discoverViaGh, discoverOwners, discoverFromClaudeProjects, discoverLocalCheckouts,
+  defaultDevRoots, parseExtraSpec, publicNameTokens, defaultCheckVisibility, cachedVisibility,
+} from './lib/repo-discovery.mjs';
+import { deriveTokens } from './lib/leak-scan-core.mjs';
+import { makeScrubber } from './lib/scrub.mjs';
+
+// The operator's raw OS handle(s), for scrubbing signal text.
+function rawOsHandles() {
+  const out = [];
+  try { out.push(userInfo().username); } catch { /* no passwd entry */ }
+  for (const k of ['USERNAME', 'USER']) if (process.env[k]) out.push(process.env[k]);
+  out.push(basename(homedir()));
+  return [...new Set(out.filter(Boolean))];
+}
+
+const splitListLocal = (v) => (v ? String(v).split(/[,;]/).map((s) => s.trim()).filter(Boolean) : []);
+
+// publication_leak_token_file: an operator-authored private-token file, fed
+// into EVERY sweep scan (universal — applies regardless of strict). Default
+// ~/.claude/agent-companion/leak-tokens.txt (the state root's config-shaped
+// location) IF it exists; the option overrides the path. Never required —
+// most operators have none, and a missing file is silently treated as "no
+// token file", not an error.
+function publicationTokenFile() {
+  const configured = opt('publication_leak_token_file', '');
+  if (configured) return configured;
+  const defaultPath = join(stateRoot(), 'leak-tokens.txt');
+  return existsSync(defaultPath) ? defaultPath : null;
+}
+
+const existsSyncSafe = existsSync;
 
 const argv = process.argv.slice(2);
 const daysArg = (() => {
@@ -53,8 +89,18 @@ const signals = [];
 const now = new Date().toISOString();
 const next = { checkedAt: now };
 
+// Signal text is SCRUBBED before it leaves this process (see the end of this
+// file): a git error message, a configured repo path or a hit sample can
+// otherwise carry the operator's own machine layout — profile paths in any
+// escaping, dev-root paths naming private projects, path-encoded project
+// dirs, the OS handle, private repo URLs, private project names — into a
+// push notification or scout-surface line. Scrubbing happens once, at the
+// end, because only then is the set of KNOWN-PUBLIC repos (which stay
+// readable) complete. Applied to EVERY signal, not just publication-leak
+// ones. See lib/scrub.mjs.
+let knownPublicForScrub = [];
 function sig(kind, detail, dispatch) {
-  signals.push({ kind, detail, dispatch });
+  signals.push({ kind, detail: String(detail ?? ''), dispatch });
 }
 
 // --- 1. Harness version ------------------------------------------------
@@ -140,8 +186,10 @@ try {
     const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
     const days = Math.round((Date.parse(spec.retiresAfter) - todayUtc) / 86400000);
     const staged = !!(spec.replacement && spec.replacement.model);
+    // "model (effort x)", not "model/x": the signal scrubber (lib/scrub.mjs)
+    // treats a bare a/b pair as a possibly-private owner/repo.
     const plan = staged
-      ? `replacement staged: ${spec.replacement.model}${spec.replacement.effort ? '/' + spec.replacement.effort : ''} takes over automatically from ${spec.retiresAfter}`
+      ? `replacement staged: ${spec.replacement.model}${spec.replacement.effort ? ` (effort ${spec.replacement.effort})` : ''} takes over automatically from ${spec.retiresAfter}`
       : 'NO replacement staged — routing rows on this alias resolve to nothing after that date';
     if (days < 0 && !staged) {
       // Past the date with nothing staged is the one case that warrants daily noise.
@@ -207,6 +255,347 @@ try {
       'telemetry-coverage');
   }
 } catch { /* coverage check unreadable: not a signal, does not block the scout */ }
+
+// --- 8. Publication-leak sweep -----------------------------------------
+// OFF BY DEFAULT (publication_leak_sweep) — this feature clones/fetches
+// repos and, locally, calls the GitHub API, so it needs an explicit opt-in
+// even though the sweep list itself is auto-discovered.
+//
+// LOCAL: auto-discovers every public repo the operator can push to (gh api,
+// owned + org-member, skipping archived/forks) UNIONED with local checkouts
+// under the dev root whose origin is a public GitHub repo — see
+// repo-discovery.mjs. The gh LIST is cached for 24h (baseline) since it can
+// span dozens of repos and gh is rate-limited. A LOCAL CHECKOUT not already
+// known public has its visibility rechecked on every run (only a public
+// answer is cached — see cachedVisibility()), so a repo newly turned public
+// is swept on the next run, never delayed by a cache. publication_leak_repos
+// adds repos discovery would miss and excludes ones (via `!entry`) it
+// shouldn't cover. Each covered repo's origin default branch is fetched into
+// a throwaway clone and scanned by the plugin's own generic checker plus its
+// own leak-check.mjs when it has one.
+//
+// CLOUD never discovers or clones — a cloud routine already runs from a
+// checkout of ITS OWN source repo, and cloning a SECOND copy of a repo into
+// a temp dir and executing a script from it is exactly the "code from
+// external" shape the cloud sandbox's classifier denies, even when the
+// source is that repo's own origin. So in the cloud, publication_leak_repos
+// is read as a plain list (no discovery, `!excludes` ignored — nothing to
+// exclude from) and only the ONE entry that IS this session's own checkout
+// gets scanned — in place, after confirming HEAD matches origin's default
+// branch, always with --no-derived. Any OTHER entry is reported `skipped`
+// rather than fetched or cloned.
+const publicationSweepOn = !!opt('publication_leak_sweep', false);
+const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
+let publicationRepos = [];
+let publicationPublicNames = []; // every discovered-public name — exempt from the derived-name class (see repo-discovery.mjs's publicNameTokens)
+let publicationAllowedOwners = new Set(); // item 2: the authenticated user + their orgs — gates target-script execution
+// Visibility results are cached in the baseline, but ONLY a public answer
+// (for 24h): not-public and unknown answers are never cached, so a repo that
+// is not known public is rechecked on every run and one that turns public is
+// swept on the very next run. A warm run only calls the API for repos not
+// (yet) known public.
+// A candidate whose visibility could not be determined (offline,
+// rate-limited, API error) is NOT swept — never assumed public — so the
+// count is surfaced as its own signal below instead of silently dropping.
+const visibilityCache = { ...(baseline.publicationVisibilityCache || {}) };
+// AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY: test-only escape hatch — '1'
+// treats every candidate as public, 'unknown' as undeterminable; neither
+// makes a network call.
+const mockVisibilityEnv = process.env.AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY;
+const baseVisibility = mockVisibilityEnv === '1' ? async () => true
+  : mockVisibilityEnv === 'unknown' ? async () => null
+    : defaultCheckVisibility;
+const visibility = cachedVisibility(baseVisibility, visibilityCache);
+if (publicationSweepOn && cloud) {
+  publicationRepos = parseExtraSpec(opt('publication_leak_repos', '')).include;
+  publicationAllowedOwners = new Set(splitListLocal(opt('publication_leak_owners', '')).map((s) => s.toLowerCase()));
+  // Default (no include list): sweep the session's own checkout, but ONLY
+  // if it is actually public — no discovery needed for that, cwd's own
+  // origin is right there. Never defaults to sweeping a private repo.
+  if (publicationRepos.length === 0) {
+    try {
+      const originUrl = execSync('git remote get-url origin', { cwd: process.cwd(), encoding: 'utf8', timeout: 15000 }).trim();
+      const norm = normalizeGitUrl(originUrl); // "github.com/owner/repo"
+      const m = /^github\.com\/([^/]+)\/([^/]+)$/.exec(norm);
+      if (m) {
+        const isPublic = await visibility.check(m[1], m[2]);
+        if (isPublic === true) {
+          publicationRepos = [originUrl];
+          knownPublicForScrub = [originUrl];
+        }
+      }
+    } catch { /* no origin readable here: nothing to default to, stays empty/silent */ }
+  }
+} else if (publicationSweepOn) {
+  try {
+    const { include, exclude } = parseExtraSpec(opt('publication_leak_repos', ''));
+
+    // The gh LIST (owned + org-member public repos) is the one part of
+    // discovery expensive/rate-limited enough to cache. 24h TTL; a run that
+    // fails (gh missing/unauthenticated) is never cached as a success.
+    const ghCache = baseline.publicationGhCache;
+    const cacheFresh = ghCache?.ok && (Date.now() - Date.parse(ghCache.at || 0)) < 24 * 60 * 60 * 1000;
+    let ghRepos;
+    let ghNote;
+    // AGENT_COMPANION_DISCOVERY_NO_GH: test/offline escape hatch — skip the
+    // real `gh` invocation and take the "gh unavailable" degrade path
+    // deterministically, instead of depending on whether this machine
+    // happens to have gh installed/authenticated.
+    if (cacheFresh) {
+      ghRepos = ghCache.repos;
+      ghNote = null;
+      next.publicationGhCache = ghCache; // keep as-is; still fresh
+    } else if (process.env.AGENT_COMPANION_DISCOVERY_NO_GH) {
+      ghRepos = [];
+      ghNote = process.env.AGENT_COMPANION_DISCOVERY_NO_GH === '1' ? 'gh is not installed' : String(process.env.AGENT_COMPANION_DISCOVERY_NO_GH);
+      next.publicationGhCache = { at: now, ok: false, repos: [] };
+    } else {
+      const gh = discoverViaGh({});
+      ghRepos = gh.ok ? gh.repos : [];
+      ghNote = gh.ok ? null : gh.reason;
+      next.publicationGhCache = { at: now, ok: gh.ok, repos: ghRepos };
+    }
+
+    // The trusted-owner set (item 2): a locally-discovered repo is kept
+    // ONLY if its owner is the authenticated gh user or an org they belong
+    // to. gh available: discoverOwners() (accurate). gh unavailable:
+    // publication_leak_owners (explicit), unioned with the owners already
+    // present in the gh-discovered repo list itself (the "owner set seen
+    // across the operator's own repos' remotes" fallback — those repos were
+    // already vetted by the gh affiliation query). Empty either way =
+    // exclude every local-checkout candidate (safe default: never sweep an
+    // unverified third party just because it sits in a local checkout).
+    const ghOwnersResult = process.env.AGENT_COMPANION_DISCOVERY_NO_GH || cacheFresh
+      ? { ok: false, owners: [] }
+      : discoverOwners({});
+    const explicitOwners = splitListLocal(opt('publication_leak_owners', ''));
+    const ghRepoOwners = ghRepos.map((r) => (r.fullName || '').split('/')[0]).filter(Boolean);
+    const allowedOwners = new Set(
+      [...ghOwnersResult.owners, ...explicitOwners, ...ghRepoOwners].map((s) => s.toLowerCase()),
+    );
+    publicationAllowedOwners = allowedOwners;
+
+    // Local visibility goes through `visibility` (public answers cached
+    // 24h; not-public and unknown ones rechecked every run — see above).
+    //
+    // PRIMARY: ~/.claude.json's `projects` map — real paths Claude Code has
+    // actually worked in. AGENT_COMPANION_DISCOVERY_CLAUDE_JSON overrides the
+    // path (tests point this at a synthetic fixture file; production leaves
+    // it unset and gets homeRoot()/.claude.json, honouring a test fixture's
+    // isolated home the same as every other resolver in this plugin).
+    const claudeJsonPath = process.env.AGENT_COMPANION_DISCOVERY_CLAUDE_JSON || join(homeRoot(), '.claude.json');
+    const primary = await discoverFromClaudeProjects({ claudeJsonPath, checkVisibility: visibility.check });
+    let localRepos = primary.ok ? primary.repos : [];
+    let localSource = 'claude-json';
+    if (!primary.ok) {
+      // FALLBACK: ~/.claude.json missing/unparseable — walk the dev root
+      // instead (see discoverLocalCheckouts()'s header for why this, not a
+      // decode of ~/.claude/projects/<encoded> names). Dev root(s) resolve
+      // through homeRoot(); AGENT_COMPANION_DISCOVERY_DEV_ROOT overrides them
+      // (comma-separated) — the test escape hatch, mirroring leak-check.mjs's
+      // own LEAK_CHECK_DEV_ROOT.
+      const devRootOverride = process.env.AGENT_COMPANION_DISCOVERY_DEV_ROOT;
+      const devRoots = devRootOverride
+        ? devRootOverride.split(/[,;]/).map((s) => s.trim()).filter(Boolean)
+        : defaultDevRoots({ home: homeRoot() });
+      localRepos = await discoverLocalCheckouts({ devRoots, checkVisibility: visibility.check });
+      localSource = 'dev-root-fallback';
+    }
+
+    // A bare `owner/repo` shorthand (not an existing local path) expands to
+    // an https URL so it normalizes/clones like any other entry — applied
+    // to BOTH include and exclude, so `!owner/repo` actually matches a
+    // discovered `https://github.com/owner/repo` entry rather than silently
+    // never excluding anything.
+    const expandShorthand = (raw) => (/^[\w.-]+\/[\w.-]+$/.test(raw) && !existsSyncSafe(raw) ? `https://github.com/${raw}.git` : raw);
+    const excludeKeys = new Set(exclude.map((e) => normalizeGitUrl(expandShorthand(e))));
+    const merged = [];
+    const seen = new Set();
+    const add = (r, source) => {
+      const key = normalizeGitUrl(r.htmlUrl || r);
+      if (seen.has(key) || excludeKeys.has(key)) return;
+      seen.add(key);
+      merged.push({ fullName: r.fullName || r, htmlUrl: r.htmlUrl || r, source });
+    };
+    for (const r of ghRepos) add(r, 'gh'); // already owner-restricted by the gh API query itself
+    for (const r of localRepos) {
+      // item 2: exclude a third-party repo merely cloned locally — only
+      // keep it if its owner is verified trusted.
+      const owner = (r.fullName || '').split('/')[0]?.toLowerCase();
+      if (!owner || !allowedOwners.has(owner)) continue;
+      add(r, 'local-checkout');
+    }
+    for (const raw of include) {
+      add({ fullName: raw, htmlUrl: expandShorthand(raw) }, 'extra');
+    }
+
+    publicationRepos = merged.map((r) => r.htmlUrl);
+    // A name that is itself public is not a leak: every discovered repo's
+    // name/owner/"owner/repo" is exempt from the derived-name class in
+    // both checkers (this plugin's own, and the target's own leak-check.mjs
+    // via LEAK_CHECK_OWN_NAMES) — see publicNameTokens()'s own header.
+    // 'extra' entries are excluded on purpose: they were never confirmed
+    // public by discovery, so they get no free pass.
+    publicationPublicNames = publicNameTokens(merged.filter((r) => r.source !== 'extra'));
+    // Known residue F5 (accepted): repos from `extra` entries here, and from
+    // an explicit publication_leak_repos list in the cloud branch above, are
+    // never marked known-public, so their alerts read
+    // "<repo-url> — rel:line [label]" (file/line kept, repo name hidden) —
+    // safe but weaker. Unverified: if a cloud session's origin is a
+    // proxy-style URL rather than github.com/o/r, the cloud default (no
+    // explicit list) sweeps nothing.
+    knownPublicForScrub = merged.filter((r) => r.source !== 'extra').flatMap((r) => [r.htmlUrl, r.fullName]);
+
+    // gh missing/unauthenticated: note it ONCE (not daily), same
+    // "changed since baseline" treatment as the skip-notes below.
+    const prevGhNote = baseline.publicationGhNote || null;
+    next.publicationGhNote = ghNote;
+    if (ghNote && ghNote !== prevGhNote) {
+      sig('publication_leak_sweep_note', `gh discovery unavailable — swept via local-checkout discovery only: ${ghNote}`, 'none');
+    }
+
+    // A repo newly seen as PUBLIC is the highest-risk moment (nobody has
+    // swept it before) — fire a distinct signal, never deduped by the
+    // regular per-hit baseline, and remember it permanently so it doesn't
+    // re-fire once acknowledged.
+    const knownPublic = new Set(baseline.publicationKnownPublicRepos || []);
+    const nowPublicKeys = merged.filter((r) => r.source !== 'extra').map((r) => normalizeGitUrl(r.htmlUrl));
+    const newlyPublic = merged.filter((r) => r.source !== 'extra' && !knownPublic.has(normalizeGitUrl(r.htmlUrl)));
+    next.publicationKnownPublicRepos = [...new Set([...knownPublic, ...nowPublicKeys])];
+    if (newlyPublic.length) {
+      sig('publication_repo_newly_public',
+        `${newlyPublic.length} repo(s) newly seen as public and now covered by the sweep: ${newlyPublic.map((r) => r.fullName).join(', ')}`,
+        'manual-check');
+    }
+  } catch (err) {
+    sig('publication_leak_sweep_error', `discovery crashed: ${err.message || err}`, 'manual-check');
+  }
+}
+if (publicationSweepOn) {
+  next.publicationVisibilityCache = visibilityCache;
+  const unknown = visibility.stats.unknown;
+  if (unknown > 0) {
+    // Count only — never names: which repos exist is itself private.
+    sig('publication_leak_visibility_unknown',
+      `${unknown} candidate repo(s) had unknown visibility this run (offline, rate-limited or API error) and were NOT swept; retried next run`,
+      'manual-check');
+  }
+}
+if (publicationRepos.length) {
+  try {
+    // Per-machine HMAC key for hit fingerprints (see fingerprintHit()).
+    const fingerprintKey = loadFingerprintKey(stateRoot());
+    const { results } = cloud
+      ? await sweepAllCloud(publicationRepos, {
+        cwd: process.cwd(), tokenFile: publicationTokenFile(), publicNames: publicationPublicNames, fingerprintKey,
+      })
+      : await sweepAll(publicationRepos, {
+        publicNames: publicationPublicNames,
+        strictRepoUrls: splitListLocal(opt('publication_leak_strict_repos', '')),
+        allowedOwners: publicationAllowedOwners,
+        tokenFile: publicationTokenFile(),
+        fingerprintKey,
+      });
+    // seenByRepo[repo] is { fingerprint: lastSeenISO } (not a flat
+    // array/Set) — the timestamp is what makes the weekly re-fire (item 7)
+    // possible: a standing accepted finding is re-surfaced once its record
+    // turns 7+ days old, so a missed/dismissed notification is never
+    // permanently silent. Every fingerprint reported THIS run (new,
+    // re-fired, or unchanged) has its timestamp refreshed to now.
+    const seenByRepo = baseline.publicationLeakSeen || {};
+    const nextSeenByRepo = {};
+    const allNewHits = [];
+    const errors = [];
+    const skipped = [];
+    for (const r of results) {
+      if (r.skipped) { skipped.push(r); continue; }
+      // An error is always reported, but hits found alongside it (e.g. the
+      // plugin checker's, when the target's own script crashed) are still
+      // real findings and are processed, not dropped with the error.
+      if (r.error) errors.push(`${r.repo}: ${r.error}`);
+      if (r.error && r.hits.length === 0) continue;
+      const prevMap = seenByRepo[r.repo] || {};
+      const fresh = filterNewOrStale(r.hits, prevMap, { maxAgeDays: 7, now: Date.now() });
+      const freshFps = new Set(fresh.map((h) => h.fingerprint));
+      const nextMap = {};
+      for (const h of r.hits) nextMap[h.fingerprint] = freshFps.has(h.fingerprint) ? now : (prevMap[h.fingerprint] || now);
+      nextSeenByRepo[r.repo] = nextMap;
+      for (const h of fresh) allNewHits.push({ repo: r.repo, ...h });
+    }
+    // Repos that errored OR were skipped this run keep their LAST successful
+    // baseline rather than being wiped to empty, so a transient failure (or
+    // simply running in cloud, where most configured repos are always
+    // "skipped") doesn't make every hit look "new" again on a run that later
+    // succeeds.
+    for (const r of results) {
+      if (!seenByRepo[r.repo]) continue;
+      if (r.skipped || (r.error && r.hits.length === 0)) nextSeenByRepo[r.repo] = seenByRepo[r.repo];
+      // Errored WITH partial hits: keep the old acceptances too, so a finding
+      // the failed checker would have reported is not "new" next run.
+      else if (r.error) nextSeenByRepo[r.repo] = { ...seenByRepo[r.repo], ...nextSeenByRepo[r.repo] };
+    }
+    next.publicationLeakSeen = nextSeenByRepo;
+
+    if (allNewHits.length) {
+      // `<repo> — <rel>:<line> [label]`: the repo is separated from the file
+      // by whitespace, never glued on with ":" — a repo URL immediately
+      // followed by ":README.md:3" reads (to a URL matcher, and to a person)
+      // as one URL, and the scrubber would then replace repo, file and line
+      // with a single <repo-url>, leaving the alert unactionable.
+      const sample = allNewHits.slice(0, 5)
+        .map((h) => `${h.repo} — ${h.rel}:${h.line} [${h.label}]`).join('; ');
+      const more = allNewHits.length > 5 ? ` +${allNewHits.length - 5} more` : '';
+      sig('publication_leak',
+        `${allNewHits.length} new leak hit(s) across ${publicationRepos.length} configured repo(s)` +
+        (cloud ? ' (cloud, in-place, --no-derived)' : '') +
+        `: ${sample}${more}`,
+        'manual-check');
+    }
+    if (errors.length) {
+      sig('publication_leak_sweep_error',
+        `sweep could not complete for ${errors.length} of ${publicationRepos.length} repo(s): ${errors.join('; ')}`,
+        'manual-check');
+    }
+    // Skips are expected in cloud (every configured repo but the session's
+    // own is always skipped there) and would fire every single day if
+    // treated as a normal signal, so only report when the SET of skip notes
+    // actually changed since the last run — a newly-added or newly-removed
+    // skipped repo is worth a line; the steady state is not.
+    const skipNotes = {};
+    for (const r of skipped) skipNotes[r.repo] = r.note;
+    next.publicationLeakSkipped = skipNotes;
+    const prevSkipNotes = baseline.publicationLeakSkipped || {};
+    const skipKeys = new Set([...Object.keys(skipNotes), ...Object.keys(prevSkipNotes)]);
+    const skipChanged = [...skipKeys].some((k) => skipNotes[k] !== prevSkipNotes[k]);
+    if (skipChanged && skipped.length) {
+      sig('publication_leak_sweep_note',
+        `${skipped.length} configured repo(s) not swept this run: ${skipped.map((r) => `${r.repo} (${r.note})`).join('; ')}`,
+        'none');
+    }
+  } catch (err) {
+    sig('publication_leak_sweep_error', `sweep crashed: ${err.message || err}`, 'manual-check');
+  }
+}
+
+// Scrub every signal's text now that the known-public set is final.
+{
+  let scrub;
+  try {
+    const users = rawOsHandles();
+    const home = homeRoot();
+    const tokens = deriveTokens({
+      devRoots: defaultDevRoots({ home }),
+      claudeProjectsDir: join(claudeDir(), 'projects'),
+      users,
+      publicNames: knownPublicForScrub.flatMap((r) => [r, ...String(r).split('/')]),
+    });
+    scrub = makeScrubber({ users, names: tokens.names, joined: tokens.joined, publicUrls: knownPublicForScrub });
+  } catch {
+    // Deriving private names failed: still scrub paths/handles/URLs.
+    scrub = makeScrubber({ users: rawOsHandles(), publicUrls: knownPublicForScrub });
+  }
+  for (const s of signals) s.detail = scrub(s.detail);
+}
 
 writeFileSync(baselineFile, JSON.stringify({ ...baseline, ...next }, null, 2));
 
