@@ -432,6 +432,21 @@ Falsifiable conditions, strongest first.
    the feature is diminished, not useless — the lead session still sees the gotcha and
    can relay it, so even the worst-case answer leaves this worth shipping, just less
    automatically than hoped for subagent-heavy sessions.
+   **Check-up 2026-09-23 — NO DATA; still open.** The one-day follow-up grepped every
+   local transcript for the marker. None of the hits came from a real firing. Each one
+   was the build session's own text: its brief, the hook source, test assertions, and
+   manual `node hooks/gotcha-retrieval.mjs < payload` runs whose stdout came back as an
+   ordinary `tool_result`. None was a hook attachment. The check used each record's
+   `isSidechain` field, with `agentId` as a cross-check. It found zero
+   `"hookEvent":"PostToolUseFailure"` attachment records anywhere. That is not because
+   nothing failed: 51 transcripts written since the ship contain `"is_error":true` tool
+   results. The hook could not have fired. The installed plugin is `0.22.0` at
+   `82f1782`, which is `main`, and this branch (`5de1869`) is not merged. So no installed
+   copy of `hooks/gotcha-retrieval.mjs` exists, and no `gotcha-capture/misses.jsonl`
+   exists under any `plugins/data/agent-companion-*` directory. The `gotcha_retrieval`
+   option is at its default (on), and 7 lessons on this branch carry `symptoms:` keys,
+   so merging and reinstalling is enough to start collecting. The reading method above
+   still holds. Re-run it once the hook has been installed for a while.
 2. **Symptom keys proving too variable to match literally.** Locale-dependent error
    text, absolute paths embedded in the message, a version number that changes every
    release, and the encoding damage in Decision part 3 are all ways a real symptom key
