@@ -231,6 +231,74 @@ git -C ~/.claude/agent-companion/memory-vault remote add origin <url>
 git -C ~/.claude/agent-companion/memory-vault push -u origin main
 ```
 
+## Cache TTL analysis
+
+`node scripts/cache-ttl.mjs` (also `/agent-companion:audit --only cache-ttl`)
+answers one question: would setting `subagentPromptCacheTtl` to `"1h"` save
+or cost THIS operator money, measured against their own transcripts? Read-only
+— it never writes a setting or an agent definition, and never will.
+
+**Why this is not obvious.** Every subagent request writes its prompt cache
+with a 5-minute TTL by default. A cache write costs 1.25x the base input
+price under a 5m TTL, 2x under a 1h TTL — strictly more per write. But a 1h
+TTL keeps the cache warm through gaps a 5m TTL would have let expire, turning
+what would have been a fresh (2x-costing) write into a cheap read (a small
+fraction of input price). Whether the extra write cost gets paid back depends
+entirely on this operator's own gap distribution between subagent requests —
+which is exactly what this check measures instead of assumes.
+
+**The three gap bands, and why only one of them matters:**
+
+| Gap between requests | Under either TTL | 1h changes anything? |
+|---|---|---|
+| under 5 minutes | cache still warm | no — sanity check, not the opportunity |
+| 5–60 minutes | 5m cache expired, so today it rewrites | **yes** — this is the band 1h can pay off in |
+| over 60 minutes | cold under either TTL | no |
+
+For a request in the 5-60 minute band, `convertedTokens` is how many of its
+write tokens would instead have been reads under a 1h TTL:
+`clamp(prevPrefix - read, 0, write)`, where `prevPrefix` is the previous
+request's `input + write + read` — clamped because the conversion can never
+exceed either what the cache actually held or what this request actually
+wrote.
+
+**Cost formulas** (`in`/`out` are $/MTok from `config/model-pricing.json`,
+`rm` is that model's cache-read multiplier):
+
+```
+cost today    = I·in + W·1.25·in + R·rm·in + O·out
+cost with 1h  = I·in + (W-conv)·2·in + (R+conv)·rm·in + O·out
+break-even    = 0.75 / (2 - rm)         (as a share of write tokens)
+```
+
+**What the report covers:** totals and a band table; the sanity check
+(observed `cache_read / (read+write)` per band — near 100% under 5 minutes,
+near 0% at 5-60, proving the cliff exists); a breakdown of WHY a 5-60 minute
+gap happened (a long tool call the previous turn was waiting on, vs. the lead
+resuming a turn that had already ended) plus tool-wait p10/p50/p90; per-model
+and per-agentType×model deltas against the model's own break-even; the
+main-session 5m/1h write split (confirms the setting cannot touch the main
+conversation, and flags it if subagents are already partly writing 1h via an
+agent's own `experimental.cacheTtl` frontmatter); a three-way policy
+comparison (all-5m / all-1h / 1h only for the opus/fable tier); and a
+one-line verdict. Unknown models are excluded from every dollar total and
+listed separately — there is no safe number to guess for an unpriced model.
+
+```bash
+node scripts/cache-ttl.mjs                  # last 30 days, human report
+node scripts/cache-ttl.mjs --days 60 --json  # a different window, machine-readable
+```
+
+**Pricing is data, not code** — same rule as `config/model-tiers.json`, and
+deliberately a SEPARATE table: `model-tiers.json` classifies generic routing
+aliases (haiku/sonnet/opus/fable) for the spawn guards, which is coarser than
+pricing needs (opus-5 and opus-5-5 route to the same guard tier but do not
+cost the same; fable-5 and fable-5-1 share a sticker price but differ in
+cache-read multiplier). Extend `config/model-pricing.json` for a new model's
+price; override without a release by writing the same shape to
+`~/.claude/agent-companion/state/model-pricing.json` (merged by alias, like
+every other override in this plugin).
+
 ## Model tiers are data, not code
 
 Which models count as premium, and how they rank against each other, lives in
