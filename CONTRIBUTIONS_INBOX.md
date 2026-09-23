@@ -1,5 +1,40 @@
 # Contributions Inbox
 
+## 2026-09-23 - a longer subagent cache TTL is a bet on gaps; measure the gap bands before flipping it ({{PROJECT}})
+
+- **Subagents sit in a different cache bucket from the main conversation.** On a subscription the main session gets a 1-hour prompt cache, but subagents, teammates, workflows and helpers get 5 minutes unless a setting extends it. A 1h write bills at about 2x input versus 1.25x for a 5m write, while a read is about 0.1x or less. So the longer TTL raises the price of EVERY subagent write, and pays back only on requests that arrive 5-60 minutes after the previous one on the same prefix.
+- **Measure it; don't reason about it.** Walk each subagent transcript's requests in order, taking cache_creation (it carries a 5m/1h split), cache_read and timestamps. Bucket each request by its gap to the previous request: under 5m (hit either way), 5-60m (miss today, hit with 1h), over 60m (miss either way). The tokens 1h would convert are min(cache_write, previous prefix - cache_read) in the 5-60m band. Sanity check: read / previous-prefix should be ~100% under 5m and near 0 at 5-60m, which proves the cliff is real.
+- **Break-even is a token share, not a request share.** 1h wins when 5-60m rewrites exceed about 0.75 / (2 - read multiplier), roughly 39% of a tier's cache-write tokens. On one operator's 30 days that share was 36% overall, so the global switch was a wash (-0.5%). It was above break-even for long-lived top-tier agents (architects, reviewers: -5 to -13%) and below it for short one-shot workers (+5 to +16%). The answer is a per-agent-definition TTL, not a global flag.
+- **The 5-60m gaps have two sources:** a single long shell call inside a turn (tests, builds, CI waits; median just past 7 minutes, so barely over the cliff), and the lead resuming a stopped worker. A resume after the cliff rewrites the worker's whole transcript (hundreds of K tokens), which costs MORE than a fresh spawn. So a "reuse the same worker for follow-ups" rule and a 5-minute cache work against each other: either resume within the window, or give that agent the longer TTL.
+
+## 2026-09-22 - the cheapest tier validates, it does not execute a procedure ({{PROJECT}})
+
+- **A validator and an operator are different jobs, and the cheap tier only does the first.** A cheapest-tier
+  session read pages and confirmed strings reliably, then failed at running a build script through a vendor
+  console: read the script, Preview, read the log, Run, then verify a dozen named settings in a separate UI and
+  report each one. It had to be re-spawned a tier up mid-task. Nothing in that list is individually hard; the
+  difficulty is holding a long ordered procedure across tool boundaries without silently dropping a step.
+- **The predictive line:** "look at this and tell me exactly what it says" is cheapest-tier work. "Do these nine
+  things in order, in a live system, and prove each one" is not, however trivial each action looks, because the
+  failure mode is omission rather than a wrong answer. Browser-driven work skews it further, since every step is a
+  fresh round trip and state must be re-established each time.
+- **Route on that, not on apparent difficulty:** reads, string checks, screenshots and "confirm X is still true" to
+  the cheap tier; anything that CHANGES a live system, or must be done in a fixed order and proven step by step, a
+  tier up.
+
+## 2026-09-22 - a check that cannot fail is not a check ({{PROJECT}})
+
+- **A crashing checker reads as a passing check.** On {{PLATFORM}} a `grep -iF` combination aborts (SIGABRT, exit
+  134) while `-i` and `-F` each work alone. A boundary test written as `grep -qiF "$needle" file && fail` therefore
+  reported a clean pass for every needle, because the crash is neither 0 nor 1. Before trusting a check that is
+  SUPPOSED to find nothing, feed it something you know is present and watch it fire; a zero result means nothing
+  until the detector has been demonstrated. Prefer exit codes you have seen both ways over a silent green.
+- **Read only the default branch and you will miss the work that matters.** A daily activity digest read each
+  repository's default branch, so a week of contribution work on a fork was invisible: a fork's default branch
+  mirrors upstream, and the real commits sat on side branches. Listing branches does not scale (repos here carry
+  100+); the repository ACTIVITY feed answers it in one call per repo, naming the branch, the actor and the time,
+  so only branches the owner actually pushed to are followed, then deduped by sha.
+
 ## 2026-09-22 - a size cap that locked the whole record, and a kill switch that only half worked ({{PROJECT}})
 
 - **A constraint evaluated over the whole POST-STATE rather than over the DELTA turns a local violation into a
@@ -100,6 +135,18 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
   - **Main lesson.** A capability benchmark built from hand-authored synthetic tasks, calibrated against what feels hard to the person writing them, saturates for frontier models far sooner than expected — every model/effort combination above the cheapest tier can converge on 100% pass, even after deliberately hardening the tasks (more files, more hops, longer precedence chains), because the model and its training data are well-practiced at exactly this shape of hand-built exercise. When that happens, pass/fail stops separating the tiers a benchmark exists to compare, but it is NOT the only signal left: tokens, turns, and cost still separate cells cleanly (2-4x spreads were typical) even when every cell passes — treat that as a proxy for effort/verbosity compliance, not a capability signal, and report it as such rather than discarding a saturated rep's data.
   - **Recovering real pass/fail signal.** Real capability separation needs tasks the model cannot have over-practiced on: mine them from a project's own real bug-fix commits instead of hand-authoring them. Extract the buggy function(s) verbatim into a standalone fixture (not the whole file/tree, if the original lives inside a large cross-imported codebase — document the simplification per task), hand-translate the real regression test's assertions into a self-contained hidden test (verify each translated assertion against BOTH the real parent commit, which must still fail it, and the real fix commit, fetched fresh rather than retyped), and grep-assert that no dated/diagnostic language from the sourcing commit (commit body, changelog, docs) leaked into the sandbox the model sees.
   - **Fairness rule this method depends on.** A held-out hidden test may only assert behavior the task's own prompt states or implies — never something the fixer knows from the original diff or commit message that the prompt never told the model. When a real-history-derived cell fails, audit before concluding a genuine capability gap: (a) if every other cell also failed, or the failure is on exact wording rather than substance, it's a **test-wording bug** — relax the assertion to check the concept and re-score the saved answer, no re-run needed; (b) if the fixture has a shape the prompt never told the model how to handle, it's **genuine prompt under-specification** — fix the prompt and re-run only the affected cells, since the model didn't have the information before and a saved answer isn't a fair replay target; (c) only rule it a real gap once every OTHER cell, at every other tier, solved the identical prompt against the identical fixture — if a stronger cell shows the same gap, or succeeds inconsistently, suspect the scorer or prompt first.
+- **Applied?** `no`
+
+### 2026-09-23 — reuse the same worker across follow-ups; stop it between rounds, don't keep it idle
+
+- **Trigger:** An orchestrator treated a worker's completion report as the end of the task rather than a checkpoint. Follow-up work on the same change — review findings, a mid-task scope change, a live-test failure — kept spawning a fresh worker instead of resuming the one that already held the design and had already walked the dead ends. One worker resumed across four follow-up rounds (a mid-task scope change, a cloud permission-classifier denial, an in-place redesign, and an auto-discovery requirement) each landed in minutes, because the resumed worker never had to rediscover context a fresh spawn would pay for twice: once to explore, once to re-derive what the last worker already ruled out.
+- **Is it generic?** Yes. Stripped: the specific project, worker names, and task content. Kept: the resume-vs-spawn decision rule, the cost basis behind it, and the boundary conditions where a fresh spawn is still correct.
+- **Target:** a new tagged file under `lessons/universal/` — an orchestration-pattern gotcha, not scaffolding. Related to existing teammate-lifecycle guidance but the kernel here (checkpoint vs. task-end framing, plus the cache-window cost argument) looks distinct enough to stand alone; maintainer's call on cross-linking.
+- **Proposed change:**
+  - **A worker's report is a checkpoint, not task end.** Send follow-ups — review findings, scope changes, live-test failures — to the SAME named worker by resuming it, rather than spawning a fresh one that must rediscover the design and the dead ends already ruled out. The lead declares completion, not the worker's first report. State this in the brief up front: "your report is a checkpoint — expect follow-ups until I say the task is complete."
+  - **Cost basis.** A resumed worker's own cache window is 5 minutes by default, separate from and shorter than the main conversation's — not the roughly one-hour window this entry originally claimed. A `subagentPromptCacheTtl: "1h"` setting extends a worker's window to an hour, at a higher rate for the 1h cache writes. Resume inside that window and the transcript re-read lands at cache rate; resume after it has expired and the transcript re-read pays a full cache rewrite, same as a fresh spawn's initial read — the savings come from skipping re-exploration, not from the cache alone. A fresh spawn separately pays a token floor for its initial system/tool setup (on the order of tens of thousands of tokens) plus the time cost of re-exploring what the previous worker already found.
+  - **Go fresh when:** the worker's cache window has expired, the next task is unrelated to the prior one, the transcript is near auto-compaction, or the next step is a review — a reviewer must not be the same agent as the writer it is reviewing. If follow-ups routinely land more than 5 minutes apart, set `subagentPromptCacheTtl: "1h"` rather than accepting a full cache rewrite on every resume.
+  - **Stopped-and-resumed versus kept-idle is a capability choice, not a cost one.** A teammate left idle sends a single notification when it finishes and stops, carrying its final answer, and makes no further model calls while idle — a later message wakes it with its saved conversation intact. Neither a stopped-and-resumed worker nor an idle one keeps the prompt cache warm past its window, so the two cost roughly the same. Choose based on capability instead: an idle teammate is still a live process (memory matters at fleet scale on small machines, minor on large ones), teammates cannot nest — only an interactive top-level session can hold them, so non-interactive/SDK sessions get none — passing isolation demotes a teammate to a subagent sharing a working tree, and any idle teammate dies with the lead's own process regardless. Reserve always-alive teammates for the cases where direct peer-to-peer messaging earns its keep, such as a writer/reviewer pair working concurrently — not as a default holding pattern between rounds of the same task.
 - **Applied?** `no`
 
 ### 2026-09-22 — a green suite is not evidence that a guard guards

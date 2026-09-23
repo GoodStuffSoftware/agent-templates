@@ -30,7 +30,7 @@
 // Usage:
 //   node memory-search.mjs "<query>"
 //   node memory-search.mjs "<query>" --scope repo
-//   node memory-search.mjs "<query>" --project best-sudoku
+//   node memory-search.mjs "<query>" --project <name>
 //   node memory-search.mjs "<query>" --limit 5 --json
 //   node memory-search.mjs "<query>" --rebuild
 //   node memory-search.mjs --stats

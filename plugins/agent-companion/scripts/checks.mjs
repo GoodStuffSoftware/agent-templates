@@ -27,6 +27,7 @@ import {
 } from '../hooks/lib/memory-index.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
 import { scanModelMismatches } from './lib/model-mismatch.mjs';
+import { computeCacheTtl, transcriptsRoot as cacheTtlTranscriptsRoot } from './lib/cache-ttl.mjs';
 import { status as memoryVaultStatus } from './memory-vault.mjs';
 
 const est = (s) => Math.ceil(s.length / 4);
@@ -1319,6 +1320,63 @@ const modelResolutionMismatch = {
   },
 };
 
+// --- 16. cache-ttl: would a 1h subagent prompt-cache TTL save or cost -------
+//
+// Read-only, informational — never fail/warn on the FINDING itself (a
+// negative or positive delta is a fact about the operator's own traffic, not
+// a hygiene problem). Only the check's own ability to run is graded: skip
+// with nothing to analyse, warn if the transcript walk was truncated by the
+// file/byte cap (the numbers may be undercounted), otherwise ok.
+//
+// Uses its OWN default window (30 days — this is a monthly-usage question,
+// not the audit's general 7-day hygiene default) unless the caller explicitly
+// passed --days, in which case that value is honoured through --only cache-ttl too.
+const cacheTtlCheck = {
+  id: 'cache-ttl',
+  title: 'Subagent prompt-cache TTL: would 1h save or cost usage',
+  vendor: 'anthropic',
+  fixable: false,
+  async run(ctx) {
+    const days = ctx.daysExplicit ? ctx.days : 30;
+    let result;
+    try {
+      result = await computeCacheTtl({ days, transcriptsRoot: cacheTtlTranscriptsRoot() });
+    } catch (e) {
+      return { status: 'skip', findings: [`cache-ttl analysis failed: ${e.message}`] };
+    }
+    if (result.subagentRequestsScanned === 0) {
+      return { status: 'skip', findings: [`no priced subagent requests in the last ${days}d`], data: result };
+    }
+    const findings = [
+      `${result.subagentRequestsScanned} subagent requests over ${days}d — `
+        + `write ${result.totals.writeMTok.toFixed(3)} MTok, converted ${result.totals.convMTok.toFixed(3)} MTok `
+        + `(${result.totals.convOverWritePct.toFixed(1)}% of write) in the 5-60min band `
+        + `(${result.totals.band560Requests} requests)`,
+      `cost today $${result.totals.costToday.toFixed(2)} -> with 1h $${result.totals.cost1h.toFixed(2)} `
+        + `(${result.totals.deltaPct >= 0 ? '+' : ''}${result.totals.deltaPct.toFixed(2)}%)`,
+      // Always shown, regardless of which verdict branch fired: per-tier
+      // observed rewrite share vs. the share required to break even.
+      `break-even per tier: ${result.breakEvenByTier.map((b) => `${b.alias} obs=${b.observedPct.toFixed(1)}% `
+        + `be=${b.breakEvenPct.toFixed(1)}%`).join(', ')}`,
+      `verdict: ${result.verdict}`,
+    ];
+    if (result.causes.counts.compaction) {
+      findings.push(`${result.causes.counts.compaction} request(s) followed a compaction (any band) — `
+        + 'converted tokens forced to 0 for those, since compaction rewrites regardless of TTL');
+    }
+    if (result.unknownModels.length) {
+      findings.push(`${result.unknownModels.length} unknown model(s) excluded from every total: `
+        + `${result.unknownModels.map((u) => u.model).join(', ')}`);
+    }
+    if (result.subagentsAlreadyWriting1h) {
+      findings.push(`subagents are already writing some 1h cache (${result.subagentWrite1hMTok.toFixed(3)} MTok) — `
+        + 'the setting may already be partly in effect');
+    }
+    if (result.truncated) findings.push('transcript walk was truncated by the file/byte cap — numbers may be undercounted');
+    return { status: result.truncated ? 'warn' : 'ok', findings, data: result };
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
@@ -1335,4 +1393,5 @@ export const CHECKS = [
   telemetryCoverageCheck,
   memoryVaultDrift,
   modelResolutionMismatch,
+  cacheTtlCheck,
 ];

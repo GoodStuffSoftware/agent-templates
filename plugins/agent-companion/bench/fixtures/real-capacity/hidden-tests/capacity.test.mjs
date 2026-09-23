@@ -54,8 +54,8 @@ test('computeBudget: end-to-end on a generous machine', () => {
 // macOS equivalents.
 
 const WIN_SESSION = {
-  executablePath: String.raw`C:\Users\devuser\AppData\Roaming\Claude\claude-code\2.1.280\claude.exe`,
-  commandLine: String.raw`"C:\Users\devuser\AppData\Roaming\Claude\claude-code\2.1.280\claude.exe" --output-format stream-json`,
+  executablePath: String.raw`C:\Users\you\AppData\Roaming\Claude\claude-code\2.1.280\claude.exe`,
+  commandLine: String.raw`"C:\Users\you\AppData\Roaming\Claude\claude-code\2.1.280\claude.exe" --output-format stream-json`,
 };
 
 const WIN_DESKTOP_MAIN = {
@@ -65,7 +65,7 @@ const WIN_DESKTOP_MAIN = {
 
 const WIN_DESKTOP_HELPER = {
   executablePath: String.raw`C:\Program Files\WindowsApps\Claude_2.7032.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe`,
-  commandLine: String.raw`"C:\Program Files\WindowsApps\Claude_2.7032.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe" --type=renderer --user-data-dir="C:\Users\devuser\AppData\Roaming\Claude"`,
+  commandLine: String.raw`"C:\Program Files\WindowsApps\Claude_2.7032.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe" --type=renderer --user-data-dir="C:\Users\you\AppData\Roaming\Claude"`,
 };
 
 const POSIX_SESSION_BINARY = {

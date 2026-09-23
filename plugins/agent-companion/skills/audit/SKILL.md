@@ -100,6 +100,17 @@ you expected to run reports `SKIP`, find out why before concluding anything.
   disagree about the same fact can score just as high as two that agree, so
   this only flags a pair as worth a human or model look. Read-only; not
   fixable — consolidating overlapping memories needs judgement.
+- **cache-ttl** — would a 1-hour `subagentPromptCacheTtl` save or cost this
+  operator money, measured against their own transcripts (default 30-day
+  window, not the audit's usual 7)? Reports totals, a band table, the sanity
+  check that proves the 5-minute cache cliff, gap-cause and tool-wait
+  breakdowns, per-model and per-agentType×model deltas, a three-way policy
+  comparison (all-5m / all-1h / 1h-for-opus-and-fable-only), and a one-line
+  verdict. Purely informational — the finding itself never fails or warns;
+  only the check's ability to run is graded. Read-only; not fixable — this
+  never writes a setting or an agent definition, and never will. Runs
+  standalone too: `node "$AC/scripts/cache-ttl.mjs" --days 30 [--json]`. See
+  `plugins/agent-companion/README.md#cache-ttl-analysis` for the method.
 
 ## Fixing
 

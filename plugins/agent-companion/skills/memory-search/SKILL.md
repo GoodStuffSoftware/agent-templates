@@ -73,7 +73,7 @@ $AC = (Get-ChildItem "$env:USERPROFILE/.claude/plugins/marketplaces/*/plugins/ag
 node "$AC/scripts/memory-search.mjs" "<query>"                  # both scopes
 node "$AC/scripts/memory-search.mjs" "<query>" --scope repo     # this repo only
 node "$AC/scripts/memory-search.mjs" "<query>" --scope user     # user corpus only
-node "$AC/scripts/memory-search.mjs" "<query>" --project best-sudoku
+node "$AC/scripts/memory-search.mjs" "<query>" --project <name>
 node "$AC/scripts/memory-search.mjs" "<query>" --limit 5 --json
 node "$AC/scripts/memory-search.mjs" --stats
 ```

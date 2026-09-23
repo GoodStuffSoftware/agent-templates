@@ -8,7 +8,7 @@
 // .cmd/.bat shim -- pops a real, focus-stealing window unless windowsHide
 // rides the SAME spawn that creates it. A flag set on an outer/ancestor
 // process does not propagate through a shell hop or an unflagged child.
-// Measured on this machine (best-sudoku, 2026-09-20) and documented in
+// Measured on this machine ({{PROJECT}}, 2026-09-20) and documented in
 // ~/.claude/skills/team-orchestration/SKILL.md under "A dev server must
 // open NO window".
 //

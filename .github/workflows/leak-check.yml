@@ -20,5 +20,10 @@ jobs:
         with:
           node-version: 24
 
+      - name: Run leak-check tests
+        run: node --test scripts/tests/*.test.mjs
+
+      # No dev root exists on the runner, so derived-name checks print a note
+      # and find nothing; the static token, SHA and private-path checks run.
       - name: Run leak-check
         run: node scripts/leak-check.mjs

@@ -56,7 +56,7 @@
 // Usage:
 //   node transcript-harvest.mjs                      # harvest everything, write a digest
 //   node transcript-harvest.mjs --stats               # measure the corpus, write nothing
-//   node transcript-harvest.mjs --project best-sudoku --limit 5
+//   node transcript-harvest.mjs --project <name> --limit 5
 //   node transcript-harvest.mjs --since 2026-08-01
 //   node transcript-harvest.mjs --out ./digest.md
 //   node transcript-harvest.mjs --include-subagents   # also scan the (huge) subagent half
