@@ -2,6 +2,57 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.24.1 — 2026-09-23
+
+Folds a measured 30-day cache-TTL finding into the routing model (patch
+bump — advisory-only detection surface, no breaking change).
+
+### Added
+
+- **`config/model-tiers.json`: `cacheTtl` block.** Per-definition
+  prompt-cache-TTL recommendation — default `5m`; `1h` recommended only for
+  opus-tier, long-lived roles (architect/reviewer/lead), with the generic
+  `ac-*` ladder workers explicitly excluded (one-shot, so `1h`'s 2x write
+  multiplier has nothing to earn back). Records the evidence (30-day
+  measurement, 1,407 subagent transcripts, `~/.claude/reports/2026-09-23-subagent-cache-ttl.md`)
+  and a re-measure date of 2026-10-07. Frontmatter shape/precedence/pricing
+  verified live 2026-09-23 against code.claude.com/docs/en/sub-agents,
+  code.claude.com/docs/en/prompt-caching, and
+  platform.claude.com/docs/en/build-with-claude/prompt-caching — the
+  `experimental.cacheTtl` field (nested, `5m`/`1h` only, requires Claude
+  Code v2.1.248+) matches what the earlier finding described.
+- **`scripts/checks.mjs` (`agent-defs`): cache-TTL advisory.** An opus-tier
+  definition whose name or description marks it long-lived
+  (architect/reviewer/lead) with no `cacheTtl` set gets a suggestion to add
+  `experimental: { cacheTtl: "1h" }`. A haiku or `ac-*` ladder definition
+  already set to `1h` gets a note that it likely costs more, not less.
+  Both are advisory findings (`warn`, never `fail`) — new
+  `tests/cache-ttl-advisory.test.mjs`.
+- **`tests/model-mismatch.test.mjs`: replaced the toothless
+  "near-simultaneous spawns" test.** Its own comment admitted a naive
+  per-row-in-order matcher passed it too, so it never exercised the swap
+  bug the shipped delta-sorted matcher exists to prevent. The new fixture
+  is built so a naive matcher provably mis-pairs (verified by hand: it
+  produces 2 false `alias_mismatch` findings), while the shipped matcher
+  produces zero.
+
+### Fixed
+
+- **`docs/proposed/global-doctrine-reweight.patch`: line-ending bug.** The
+  header wrongly claimed both target files (CLAUDE.md and
+  `skills/team-orchestration/SKILL.md`) use CRLF; CLAUDE.md is pure LF.
+  Corrected the header and the apply instructions: the patch is stored as
+  plain LF throughout (this repo's own `.gitattributes` forces
+  `*.patch text eol=lf`, which silently strips any literal `\r` a tracked
+  `.patch` file's content might otherwise carry — verified by staging a
+  byte-preserved draft and reading the blob back), and applying it now
+  documents the two invocations (with per-file `core.autocrlf` handling)
+  verified byte-exact against both real targets. Also amends the SKILL.md
+  "resume by name" guidance (resume only within 5 minutes of a worker
+  stopping, or when its definition runs on a 1h cache) and corrects the
+  "caching is already solved" line (the hit ratio is high; the misses are
+  the 5–60 minute rewrites).
+
 ## 0.24.0 — 2026-09-23
 
 Implements the operator-approved SPAWNING RULE (three checks; minor bump —

@@ -455,6 +455,42 @@
     }
   },
   "taskTypesNote": "A task type is a named preset over (weight, kind, consequence). Resolve it through the same grid as everything else; do not special-case it. \"parity\" as a weight means: match the writer being reviewed. \"inherit\" as a consequence means: take the consequence of the change under review. Provenance is recorded per entry because these WILL go stale - the scout re-checks the lineup, and a routing review should re-read the sources, not the table.",
+  "cacheTtl": {
+    "default": "5m",
+    "note": "Per-definition prompt-cache TTL recommendation. Not enforced by any guard — set it yourself in a subagent's own frontmatter as a NESTED key, `experimental: { cacheTtl: \"1h\" }` (i.e. `cacheTtl` lives under `experimental`, not at the top level of the frontmatter). Requires Claude Code v2.1.248+; Claude Code ignores `1h` there while the subscription is drawing on usage credits (falls back to 5m). Default stays 5m for every definition unless called out below.",
+    "recommendOneHourFor": {
+      "criterion": "opus-tier definitions (model resolves to the `opus` alias or an opus reference id) whose name or description marks them long-lived / resumed — architect, reviewer, lead roles",
+      "examples": ["{{PROJECT}}-architect", "{{PROJECT}}-reviewer @opus"],
+      "why": "These are the roles the evidence shows actually get resumed more than 5 minutes after their last turn, or sit through long tool waits (test suites, builds, CI). 1h converts what would be a full ~250-340K-token rewrite into a cheap cache read."
+    },
+    "ladderWorkersExcludedNote": "The generic ac-* ladder workers (ac-haiku, ac-sonnet-*, ac-opus-*) are ONE-SHOT: spawned fresh per delegated task and essentially never resumed past 5 minutes. 1h's 2x write multiplier has nothing to earn back for them, so they stay on the 5m default even at opus tiers (ac-opus-high, ac-opus-xhigh, ac-opus-max) — this is a deliberate exception to the opus-tier recommendation above, not an oversight.",
+    "evidence": {
+      "report": "~/.claude/reports/2026-09-23-subagent-cache-ttl.md",
+      "date": "2026-09-23",
+      "method": "30-day measurement (2026-08-24 to 2026-09-23), 1,407 subagent transcripts with billable requests, 100% of in-window subagent transcripts, 84,843 subagent requests reconstructed from usage fields.",
+      "figures": "Cache-hit ratio 99.8% under a 5-minute gap, 13.3% in the 5-60 minute gap, 4.4% beyond 60 minutes — the 5-minute cliff is real. Switching every subagent to 1h is roughly cost-neutral overall (-0.46% of subagent cost, -$32/30d). By model tier: Opus 5.5 -12.0%, Opus 5 -4.7%, Opus 4.8 +4.1%, Sonnet 5 +2.9%, Haiku 4.5 +15.9%. Opus-tier-only 1h (this recommendation's scope): -2.1% of subagent cost (-$144/30d). Break-even: 1h wins for a tier once 5-60m rewrites exceed roughly 39.5% of that tier's cache-write tokens (~1.0-1.1% of requests); observed 35.7% overall, but Opus 5 alone was already at 51.5% (above break-even) while Sonnet sat at 29.3% (below it). By agent type, the pattern is architects/reviewers save under 1h (project-specific architect roles measured -12.9% and -6.1%, project-specific reviewer roles -4.2% to -4.9%) while one-shot builders/general-purpose workers cost more (a project-specific sonnet builder role +8.2%, general-purpose@opus +6.9%)."
+    },
+    "remeasureDate": "2026-10-07",
+    "remeasureNote": "Re-run the report's scripts (~/.claude/reports/2026-09-23-subagent-cache-ttl-scripts/) after two weeks of the resume-window doctrine change (see docs/proposed/global-doctrine-reweight.patch). Turn on the global 1h setting (`subagentPromptCacheTtl`) if subagent rewrites in the 5-60m band exceed ~40% of write tokens overall, or if Sonnet alone crosses the ~39.5% break-even.",
+    "docsVerifiedLive": {
+      "date": "2026-09-23",
+      "frontmatterField": "`experimental.cacheTtl` — a nested map key under the subagent frontmatter's `experimental` field, values `5m` or `1h` only (anything else ignored). Requires Claude Code v2.1.248+. Ignored for `1h` while the subscription is on usage credits.",
+      "precedence": [
+        "FORCE_PROMPT_CACHING_5M=1 (forces 5m everywhere)",
+        "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL (the subagent bucket's env var)",
+        "subagentPromptCacheTtl (the subagent bucket's setting)",
+        "a subagent definition's own experimental.cacheTtl frontmatter — THIS recommendation lives here, and is overridden by any of the three controls above",
+        "ENABLE_PROMPT_CACHING_1H=1 (requests 1h everywhere)",
+        "the bucket default: 5m for subagents/workflows/forks/compaction/titles regardless of subscription, vs 1h for the main conversation on a subscription within plan usage"
+      ],
+      "oneHourWriteMultiplier": "1h cache writes bill at 2x the base input-token price, vs 1.25x for 5m writes; cache reads are 0.1x base input either way. No long-context surcharge.",
+      "sources": [
+        "https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields",
+        "https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself",
+        "https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing"
+      ]
+    }
+  },
   "calibration": {
     "reviewer-effort-direction": {
       "question": "Does a reviewer at HIGHER effort than the writer catch more, or less?",

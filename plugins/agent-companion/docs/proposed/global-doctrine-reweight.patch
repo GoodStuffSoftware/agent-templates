@@ -4,19 +4,13 @@
 # Originally produced while re-weighting agent-companion's model-routing
 # table (config/model-tiers.json v5, 2026-09-23) against the current
 # Anthropic lineup; extended 2026-09-23 (same day) to add the
-# operator-approved SPAWNING RULE. NOT applied by this branch or by any
-# script here — review each hunk and apply by hand once satisfied, from the
-# global Claude config directory ({{USER_CLAUDE_DIR}}, i.e. ~/.claude on
-# this operator's machine). Both target files on disk use CRLF line
-# endings; these diffs are LF-normalized for readability, so apply with
-# `git apply --whitespace=fix -p1` (verified against fresh copies of both
-# real files, 2026-09-23 — `git apply --check` exits 0). Hunks use a
-# 1-line context window (not git's default 3) deliberately: the wider
-# default pulled an unrelated, operator-specific paragraph two lines above
-# the "Model routing" heading into the diff as unchanged context, which
-# has no business being copied into this repo (see CONTRIBUTING's
-# leak-check note) — 1 line of context is still enough for `git apply` to
-# locate every hunk unambiguously against the real files.
+# operator-approved SPAWNING RULE, and extended again 2026-09-23 (same day)
+# to fold in the measured cache-TTL finding (config/model-tiers.json's new
+# `cacheTtl` block) and to fix a line-ending bug in this file's own header
+# (see "Line endings and how to apply" below). NOT applied by this branch or
+# by any script here — review each hunk and apply by hand once satisfied,
+# from the global Claude config directory ({{USER_CLAUDE_DIR}}, i.e. ~/.claude
+# on this operator's machine).
 #
 # Targets, both outside this repo, under {{USER_CLAUDE_DIR}}:
 #   1. skills/team-orchestration/SKILL.md — the "Model Tier Assignment" /
@@ -25,24 +19,94 @@
 #      plugin). Re-pointed at config/model-tiers.json / docs/ROUTING.md as
 #      the single source of truth, keeping only qualitative facts (ratios,
 #      the haiku retirement date, the effort-inheritance correction) that
-#      are worth reading at a glance without opening the plugin. Now also
-#      adds a new "#### The SPAWNING RULE" subsection stating the three
+#      are worth reading at a glance without opening the plugin. Adds a new
+#      "#### The SPAWNING RULE" subsection stating the three
 #      operator-approved checks and which plugin component enforces each.
+#      Also corrects the "Caching is already solved" bullet — the 30-day
+#      cache-TTL measurement (2026-09-23) found the overall HIT ratio is
+#      genuinely high (99.8% under 5 minutes), but that number was hiding
+#      the real cost: subagents default to a 5-minute cache TTL regardless
+#      of subscription, and 5–60 minute gaps (a long tool wait, or a lead
+#      resuming a worker after its turn ended) rewrote 35.7% of all
+#      subagent cache-write tokens over the 30-day window — see
+#      config/model-tiers.json's `cacheTtl` block for the full figures. And
+#      amends the "Workers stay on the task until the LEAD closes it"
+#      resume-by-name guidance: resume only within that 5-minute window, or
+#      when the worker's own definition sets `experimental.cacheTtl: 1h`;
+#      past that, a resume rewrites ~250-340K tokens (measured), which
+#      costs MORE than a fresh spawn's ~35K-token cold start, so a fresh
+#      spawn with a file-based handoff is cheaper outside the window.
 #   2. CLAUDE.md — the "Model routing" one-liner said "1-2 -> haiku/low",
 #      but haiku takes no effort parameter at all; fixed, and pointed at
-#      the plugin for the numbers instead of restating them. Now also adds
-#      a second, ≤2-line sentence to the same paragraph pointing at the
-#      SPAWNING RULE's full text in `team-orchestration` — CLAUDE.md stays
-#      a pointer, not a restatement, per this file's own slimming note.
+#      the plugin for the numbers instead of restating them. Adds a second,
+#      pure-pointer sentence to the same paragraph naming the SPAWNING
+#      RULE's full text location in `team-orchestration` — CLAUDE.md stays
+#      a pointer, not a restatement, per this file's own slimming note (an
+#      earlier draft of this line restated the rule's three checks inline;
+#      trimmed to a bare pointer on review).
+#
+# Line endings and how to apply (CORRECTED 2026-09-23 — an earlier version
+# of this header wrongly claimed BOTH target files use CRLF; that was false
+# and, combined with a single blanket `git apply` invocation, risks
+# CORRUPTING CLAUDE.md, which is pure LF on disk, into CRLF on apply).
+# Verified live against fresh copies of both real files, 2026-09-23:
+#   - CLAUDE.md is PURE LF.
+#   - skills/team-orchestration/SKILL.md is CRLF.
+# This repo's own .gitattributes forces `*.patch text eol=lf`, so every hunk
+# below is stored as plain LF regardless of which target it's against —
+# that's not a shortcut, it's required (an embedded \r inside a tracked
+# *.patch file's content is indistinguishable from a line ending to git's
+# own normalization and gets silently stripped on `git add` here; verified
+# 2026-09-23 by staging a byte-preserved CRLF-hunk draft of this file and
+# reading back the blob with `git show :<path>` — 0 embedded \r survived).
+# The correctness question is therefore entirely about HOW YOU APPLY an
+# all-LF patch to two targets with different real line endings, not about
+# what bytes this file stores. Verified 2026-09-23, byte-exact against
+# hand-built expected copies of both real files (`diff -q`: no difference):
+# a SINGLE `git apply --whitespace=fix -p1` invocation correctly
+# reconstructs SKILL.md's real CRLF from this all-LF patch (git's own
+# whitespace-fix path restores the target's existing line-ending
+# convention) — but the SAME invocation, in the SAME run, also rewrites
+# CLAUDE.md's genuine LF to CRLF wherever this operator's machine has
+# `core.autocrlf=true` (confirmed set globally here), because that
+# conversion happens at git's working-tree-write step for anything it
+# treats as "text" and is orthogonal to what the patch itself contains.
+# Apply as TWO invocations instead, one per target, from
+# {{USER_CLAUDE_DIR}}:
+#
+#   git -c core.autocrlf=false apply --whitespace=fix -p1 --include=CLAUDE.md THIS_FILE
+#   git apply --whitespace=fix -p1 --include='skills/team-orchestration/SKILL.md' THIS_FILE
+#
+# The first invocation's `-c core.autocrlf=false` is what keeps CLAUDE.md
+# LF; the second needs the operator's normal (autocrlf-enabled) settings so
+# `--whitespace=fix` performs the CRLF reconstruction SKILL.md needs — don't
+# add `-c core.autocrlf=false` to the second invocation, and don't reach for
+# `core.whitespace=cr-at-eol` as a shortcut to unify the two into one
+# invocation (tried 2026-09-23: it made the SKILL.md hunk fail to match
+# entirely on this git version, worse than the problem it was meant to
+# solve).
+#
+# Hunks use a 1-line context window (not git's default 3) deliberately: the
+# wider default pulled an unrelated, operator-specific paragraph two lines
+# above the "Model routing" heading into the diff as unchanged context,
+# which has no business being copied into this repo (see CONTRIBUTING's
+# leak-check note) — 1 line of context is still enough for `git apply` to
+# locate every hunk unambiguously against the real files.
 #
 # Source facts: plugins/agent-companion/config/model-tiers.json (this
 # branch), live-fetched 2026-09-23 from platform.claude.com and
 # code.claude.com — see that config's `aliasResolution` and per-tier
-# `resolvesTo` blocks for citations. SPAWNING RULE evidence: this branch's
+# `resolvesTo` blocks for citations, and its new `cacheTtl` block
+# (`docsVerifiedLive`) for the prompt-cache-TTL frontmatter/precedence/
+# pricing citations. SPAWNING RULE evidence: this branch's
 # hooks/spawn-guard.mjs and scripts/lib/model-mismatch.mjs, and a live
 # audit probe on this machine (2026-09-23) that found 17 real
 # stale-generation spawns from sessions on Claude Code 2.1.275, below the
-# 2.1.280 alias-resolution floor.
+# 2.1.280 alias-resolution floor. Cache-TTL evidence: a 30-day measurement
+# over 1,407 subagent transcripts, 2026-09-23,
+# ~/.claude/reports/2026-09-23-subagent-cache-ttl.md (operator-local; not
+# copied into this repo — see config/model-tiers.json's `cacheTtl.evidence`
+# for the figures this patch and that config both cite).
 
 --- a/CLAUDE.md
 +++ b/CLAUDE.md
@@ -50,8 +114,8 @@
  ### Model routing — lowest sufficient tier
 -Score task weight 1–5; route 1–2 → haiku/low, 3 → sonnet/medium, 4 → sonnet-or-opus/high, 5 → opus/xhigh (`max` only for frontier problems). Round down on uncertainty; escalate on failure. Details + cost table: `team-orchestration` skill.
 +Score task weight 1–5; route 1–2 → haiku (no effort parameter — not "haiku/low"; haiku takes none), 3 → sonnet/medium, 4 → sonnet-or-opus/high, 5 → opus/xhigh (`max` only for frontier problems). A subagent def with no stated effort INHERITS the session's effort, not a model default — state it explicitly. Round down on uncertainty; escalate on failure. Source of truth for prices, per-model effort support, and the full grid: `agent-companion` plugin's `config/model-tiers.json` / `docs/ROUTING.md` (run `node scripts/recommend.mjs`), not a copy here. Process detail: `team-orchestration` skill.
-+Every spawn must name a definition stating BOTH model and effort, and a build below the alias-resolution floor must be restarted before opus/fable work — the operator-approved SPAWNING RULE, enforced by agent-companion's spawn-guard/audit; full text in `team-orchestration`.
-
++The operator-approved SPAWNING RULE is enforced by `agent-companion` at spawn time; full text: `team-orchestration`.
+ 
 --- a/skills/team-orchestration/SKILL.md
 +++ b/skills/team-orchestration/SKILL.md
 @@ -31,3 +31,3 @@
@@ -59,14 +123,14 @@
 -| 1-2 | `haiku` | *(none)* | Reads, searches, single commands. Haiku takes NO effort parameter - it has one mode, so declaring an effort there is a line that does nothing. |
 +| 1-2 | `haiku` | *(none)* | Reads, searches, single commands, verification (see "haiku validates, it does not OPERATE" below). Haiku takes NO effort parameter - it has one mode, so declaring an effort there is a line that does nothing. |
  | 3 | `sonnet` | `medium` | Bounded edits, short scripts - light reasoning |
-@@ -37,17 +37,23 @@
-
+@@ -37,19 +37,25 @@
+ 
 -Set `model` and `effort` in sub-agent frontmatter (`.claude/agents/<name>.md`). NOTE: the Agent tool can override `model` per-spawn but NOT `effort` - effort is locked to frontmatter; to run an agent at a different effort, edit its file (or define a sibling agent).
-+Set `model` and `effort` in sub-agent frontmatter (`.claude/agents/<name>.md`). NOTE: the Agent tool can override `model` per-spawn but NOT `effort` — a subagent definition with no `effort` frontmatter INHERITS the orchestrating session's current effort (per Claude Code's own sub-agents docs), not any model default; state it explicitly rather than relying on inheritance.
-
++Set `model` and `effort` in sub-agent frontmatter (`.claude/agents/<name>.md`). NOTE: the Agent tool can override `model` per-spawn but NOT `effort` — a subagent definition with no `effort` frontmatter INHERITS the orchestrating session’s current effort (per Claude Code’s own sub-agents docs), not any model default; state it explicitly rather than relying on inheritance.
+ 
 -#### Cost reality - calibrated for the Claude 5 generation (reviewed 2026-08-28)
 +#### The SPAWNING RULE (operator-approved 2026-09-23)
-
+ 
 -| Alias | In $/MTok | Out $/MTok | Note |
 -|---|---|---|---|
 -| `haiku` (4.5) | $1 | $5 | 200K context; everything else is 1M |
@@ -74,7 +138,8 @@
 -| `opus` (5) | $5 | $25 | cache-hit $0.50 |
 -| `fable` (5) | **$10** | **$50** | 2x Opus, 5x Sonnet, 10x Haiku |
 +Three checks, enforced by the `agent-companion` plugin (warn-only — a false block stops legitimate work more than a bad spawn costs):
-+
+ 
+-- **`fable` is an exception, not a tier.** It sits in the same alias namespace as `opus`/`sonnet`/`haiku`, so it is one word away at every spawn, but it belongs to no weight on the scale. Spawning it requires a stated warrant naming the weight and why a cheaper tier cannot do the job. This is enforced, not merely requested - see the `agent-companion` plugin.
 +1. **Every spawn names a definition stating BOTH model and effort** (a ladder `ac-*` def or a project def). A spawn with no model, or a definition with no effort, inherits the lead's model and effort — that counts as a violation, not a safety margin. `hooks/spawn-guard.mjs` warns on either gap.
 +2. **Build check before opus/fable-tier work.** If the SESSION's own Claude Code build is below `config/model-tiers.json`'s `aliasResolution.minClaudeCodeVersion`, restart the session before spawning — don't pin around it. Measured 2026-09-23: subagents from sessions on build 2.1.275 resolved `opus` to Opus 5, while sessions on 2.1.280 got Opus 5.5 — same alias, different model, no error either way. The desktop app bundles its own build separate from the `claude` CLI on PATH, and a session keeps the build it started with, so this is read from the SESSION's own transcript, never from `claude --version`.
 +3. **Verify the resolved model.** The model a spawn actually ran on (from its subagent transcript) must match what its definition's alias resolves to on that build. `scripts/audit.mjs`'s `model-resolution-mismatch` check scans recent history (bounded to ~48h) and flags mismatches with the session build that produced them.
@@ -82,8 +147,7 @@
 +#### Cost reality — SOURCE OF TRUTH IS THE PLUGIN, not this table (corrected 2026-09-23)
 +
 +**Do not hand-maintain prices here.** The `agent-companion` plugin's `config/model-tiers.json` is the canonical, live-sourced routing table (asOf date, source URL, and minimum Claude Code version recorded per alias), and `docs/ROUTING.md` in that plugin is generated from it — run `node scripts/routing-table.mjs` there, or `node scripts/recommend.mjs --type <task-type>`, rather than reading numbers off this page. This section previously carried its own price table (reviewed 2026-08-28); it went stale exactly the way the plugin's own README warns a hardcoded copy will, and is replaced with a pointer plus the qualitative facts worth keeping in a page read at session start:
-
--- **`fable` is an exception, not a tier.** It sits in the same alias namespace as `opus`/`sonnet`/`haiku`, so it is one word away at every spawn, but it belongs to no weight on the scale. Spawning it requires a stated warrant naming the weight and why a cheaper tier cannot do the job. This is enforced, not merely requested - see the `agent-companion` plugin.
++
 +- **`haiku` retires no sooner than 2026-10-15**, with no successor announced as of 2026-09-23 — the plugin's routing table stages a fallback (`sonnet` at `low` effort) automatically; nothing to do here unless a new Haiku ships, in which case update the plugin's config, not this file.
 +- **`opus` is currently ~2x `sonnet`** on list price (was ~2.5x under the previous generation) — the gap narrowed, it did not widen; don't assume an old "2.5x" ratio when reasoning about cost tradeoffs.
 +- **`fable` is currently ~2.5x `opus`** on list price (was ~2x) — the gap WIDENED, which strengthens the warrant bar below: prefer trying a higher-effort `opus` brief first (Anthropic's own escalation criterion is "at higher effort still falls short," not "this looks hard").
@@ -94,5 +158,11 @@
 +- **Pin by alias, never by version - but `fable` vs `opus` is an ALIAS difference, not a version one.** Within a family, pinning an older version saves nothing and adds deprecation risk. Across families it is a real cost lever (see the plugin's table for the current ratio), so "version is a non-lever" does NOT license reaching for `fable`.
 +- **Cost levers are tier + effort + prompt caching.** `effort` scales ALL output (thinking + answer + tool calls) — see the plugin's per-alias `resolvesTo.defaultEffort` and effort-support list for what each current model actually accepts (older pinned versions differ: e.g. Opus 4.6 and Sonnet 4.6 have no `xhigh`). `max` adds significant cost for relatively small quality gains - reserve it for genuinely frontier problems. Use `low` for subagents doing simple work.
  - **Delegation is cheap only if the WORKER is cheap.** Every fresh subagent spawn pays a cold cache write; subagents were measured at 38.9% of a 30-day spend. The old line "over-delegation just wastes a haiku agent" holds ONLY when the agent is actually haiku. Under model inheritance, over-delegation is expensive - which is why the explicit-model rule above matters more than the delegate-everything rule.
- - **Caching is already solved; do not spend effort there.** Measured hit ratio 95.9% overall, uniform across models. The remaining levers are tier mix and turn volume, not prompt-prefix tuning.
+-- **Caching is already solved; do not spend effort there.** Measured hit ratio 95.9% overall, uniform across models. The remaining levers are tier mix and turn volume, not prompt-prefix tuning.
++- **Caching's hit ratio is high; the misses are what cost money.** Under 5 minutes, 99.8% hit. Past it, subagents (5m TTL by default, regardless of subscription) rewrite instead of reading — 5–60 minute gaps produced 35.7% of all subagent cache-write tokens over 30 days (measured 2026-09-23, `~/.claude/reports/2026-09-23-subagent-cache-ttl.md`). See the resume-window rule below and the plugin's `config/model-tiers.json` `cacheTtl` block before assuming caching needs no attention.
  - **On a Max subscription the currency is the usage allowance, not dollars.** Same levers; the goal is to stretch the allowance and avoid throttling. Size the lead to the session, recover the lead's cost via delegation depth + worker effort (not by downgrading the decision-maker), default Opus agents to `xhigh` not `max`, leave fast mode off unless speed is needed NOW, and lean on cheaper tiers for reads/searches/reviews.
+@@ -254,3 +260,3 @@
+ 
+-**Workers stay on the task until the LEAD closes it (Mike, 2026-09-23).** A worker's "done" is a checkpoint report, not the end of its assignment. Spawn workers named and backgrounded from main so they are addressable; the lead keeps sending follow-ups (review findings, scope changes, live-test failures) to the SAME worker, which already holds the design and the dead ends, instead of spawning a fresh one that must rediscover them. The task is complete only when the lead says so; brief every worker: *"your report is a checkpoint — expect follow-ups on this task until I say it is complete."* Cost basis: a resume re-reads the whole transcript, but while the worker's prompt cache is warm that read is billed at cache rate (about 0.1x input), which Mike judged fine ("if it's cached it's fine"). **The worker's cache window is NOT the lead's:** per the agent-teams docs, a teammate's/subagent's requests fall outside the main conversation's TTL bucket and hold for **5 minutes by default**, even on a subscription; `subagentPromptCacheTtl: "1h"` in settings extends it (1h cache writes bill higher). Without that setting, a follow-up sent more than ~5 min after the worker stopped pays a full cache rewrite of its transcript. Go fresh instead only when: the worker has been idle past the cache window, the follow-up is unrelated work, the transcript is nearing auto-compaction, or the next step is a REVIEW (a reviewer must not be the writer). Observed 2026-09-23 (agent-templates leak sweep): one sonnet worker carried four follow-up rounds — a mid-task scope change, a live cloud-classifier denial, an in-place cloud redesign, repo auto-discovery — each landing in minutes because nothing had to be re-learned.
++**Workers stay on the task until the LEAD closes it (Mike, 2026-09-23).** A worker's "done" is a checkpoint report, not the end of its assignment. Spawn workers named and backgrounded from main so they are addressable; the lead keeps sending follow-ups (review findings, scope changes, live-test failures) to the SAME worker, which already holds the design and the dead ends, instead of spawning a fresh one that must rediscover them. The task is complete only when the lead says so; brief every worker: *"your report is a checkpoint — expect follow-ups on this task until I say it is complete."* Cost basis: a resume re-reads the whole transcript, but while the worker's prompt cache is warm that read is billed at cache rate (about 0.1x input), which Mike judged fine ("if it's cached it's fine"). **The worker's cache window is NOT the lead's:** per the agent-teams docs, a teammate's/subagent's requests fall outside the main conversation's TTL bucket and hold for **5 minutes by default**, even on a subscription; `subagentPromptCacheTtl: "1h"` in settings extends it (1h cache writes bill higher). Without that setting, a follow-up sent more than ~5 min after the worker stopped pays a full cache rewrite of its transcript. **Resume by name only within that 5-minute window, or when the worker’s own definition sets `experimental.cacheTtl: 1h`** — past 5 minutes on the default TTL, a resume rewrites roughly 250–340K tokens (measured 2026-09-23, `~/.claude/reports/2026-09-23-subagent-cache-ttl.md`), which costs MORE than a fresh spawn’s ~35K-token cold start; past that window, a fresh spawn with a file-based handoff (point it at the stopped worker’s report/handoff file, don’t resume) is cheaper. Go fresh instead only when: the worker has been idle past the cache window, the follow-up is unrelated work, the transcript is nearing auto-compaction, or the next step is a REVIEW (a reviewer must not be the writer). Observed 2026-09-23 (agent-templates leak sweep): one sonnet worker carried four follow-up rounds — a mid-task scope change, a live cloud-classifier denial, an in-place cloud redesign, repo auto-discovery — each landing in minutes because nothing had to be re-learned.
+ **Size to the MACHINE, measured at session start, not to a remembered box (Mike, 2026-09-23).** Process-count limits (concurrent agents, idle teammates kept alive) scale with the host's RAM, and one fixed number is wrong on every box but one. Before a wide fan-out or before choosing to hold workers idle, read the host's capacity: agent-companion's `node "$AC/scripts/capacity.mjs"` once it ships (reports total/free RAM, a concurrency budget and an idle-teammate policy); until then `Get-CimInstance Win32_OperatingSystem | Select TotalVisibleMemorySize,FreePhysicalMemory` (KB) or `free -g`. Budget ~300 MB per live agent process, keep 25% of total RAM (min 4 GB) as headroom. Where the budget comfortably exceeds the planned width, idle teammates are fine; where it's tight (16 GB-class boxes), stop workers between rounds and keep concurrency low.

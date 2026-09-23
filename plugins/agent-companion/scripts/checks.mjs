@@ -70,6 +70,21 @@ function frontmatter(text) {
   return out;
 }
 
+// The prompt-cache TTL lives NESTED under `experimental` (`experimental: {
+// cacheTtl: "1h" }` inline, or a block-style `experimental:` map with an
+// indented `cacheTtl:` line below it) — frontmatter() above is a flat,
+// single-line parser and does not descend into it. Search the frontmatter
+// block text directly instead of hand-rolling a YAML parser for one field.
+// Per code.claude.com/docs/en/sub-agents, the only valid values are 5m/1h;
+// anything else is ignored by Claude Code, so an unrecognised value here is
+// treated the same as absent rather than guessed at.
+function cacheTtlFrontmatter(text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return null;
+  const ttl = m[1].match(/cacheTtl:\s*["']?(5m|1h)["']?/);
+  return ttl ? ttl[1] : null;
+}
+
 // --- 1. memory index reachability ---------------------------------------
 const memoryIndex = {
   id: 'memory-index',
@@ -191,9 +206,14 @@ const agentDefs = {
     for (const d of dirs) {
       for (const f of readdirSync(d).filter((x) => x.endsWith('.md'))) {
         count++;
-        const fm = frontmatter(readFileSync(join(d, f), 'utf8'));
+        const raw = readFileSync(join(d, f), 'utf8');
+        const fm = frontmatter(raw);
         const rel = join(basename(d), f);
-        roster.push({ name: fm.name || f.replace(/\.md$/, ''), model: fm.model || '', effort: fm.effort || '', rel });
+        const name = fm.name || f.replace(/\.md$/, '');
+        const cacheTtl = cacheTtlFrontmatter(raw);
+        roster.push({
+          name, model: fm.model || '', effort: fm.effort || '', rel, cacheTtl,
+        });
         // An omitted model inherits the LEAD's tier - the most expensive
         // default available, and the mechanism behind unexamined premium fan-out.
         if (!fm.model) findings.push(`${rel}: NO model - inherits the lead's tier`);
@@ -218,6 +238,30 @@ const agentDefs = {
           findings.push(`${rel}: pinned to FABLE - needs a written warrant or a downgrade`);
         }
         if (fm.effort === 'max') findings.push(`${rel}: effort=max - reserve for frontier work`);
+
+        // Cache-TTL advisory (ADVISORY ONLY — never flips status to 'fail',
+        // see the `bad` regex below, which this intentionally does not
+        // match). Evidence: ~/.claude/reports/2026-09-23-subagent-cache-ttl.md
+        // (30-day measurement, config/model-tiers.json's `cacheTtl` block
+        // carries the full figures/citations). The generic ac-* ladder
+        // workers are one-shot and excluded from the opus-tier suggestion
+        // even when pinned to opus, per that same block.
+        const isLadderWorker = /^ac-/i.test(name);
+        const modelAlias = fm.model ? classifyModel(fm.model).alias : null;
+        const isOpusTier = modelAlias === 'opus';
+        const isLongLivedRole = /architect|review|lead/i.test(name) || /architect|review|lead/i.test(fm.description || '');
+        if (isOpusTier && isLongLivedRole && !isLadderWorker && !cacheTtl) {
+          findings.push(
+            `${rel}: opus-tier, long-lived role (architect/reviewer/lead) with no cache TTL set — `
+            + 'consider experimental: { cacheTtl: "1h" } (see config/model-tiers.json cacheTtl.evidence; measured Opus 5.5 -12%, Opus 5 -4.7% under 1h)',
+          );
+        }
+        if (cacheTtl === '1h' && (modelAlias === 'haiku' || isLadderWorker)) {
+          findings.push(
+            `${rel}: cacheTtl set to "1h" on a haiku or one-shot ladder definition — likely costs MORE, not less `
+            + '(measured Haiku +15.9% under 1h; one-shot workers pay the 2x write rate every spawn and rarely idle past 5 minutes)',
+          );
+        }
       }
     }
     // Reviewer parity: a reviewer is sized to the writer it gates, never
