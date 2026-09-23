@@ -38,6 +38,19 @@ either.
 - **Every run gets its own sandboxed working directory** (always, not
   opt-in) — see docs/BENCHMARK.md "Sandbox isolation". Do not disable this
   for convenience.
+- **One process per measured conversation.** Separate `claude -p` processes
+  (including `--resume`) do NOT reliably share prompt cache even with
+  byte-identical content — `bench/runner.mjs`'s own cells are fine (one
+  process per task already), but a probe that needs to measure ACROSS turns
+  must use a single persistent process (`--input-format stream-json
+  --output-format stream-json --verbose`, one turn fed at a time), not one
+  `claude -p` call per turn. See docs/BENCHMARK.md "Caching".
+- **Check the cache hit rate before trusting a batch's cost numbers.**
+  `summary.md`/`summary.json`'s `cache_hit_rate` (and the `CACHE ANOMALY:
+  check harness` block, when triggered) flags any cell under 0.85 — that
+  usually means the harness broke caching for that run, not that the model
+  or task genuinely cost more. Investigate before citing cost/plan-usage
+  figures from a flagged cell.
 
 ## (2) Plan first, always
 

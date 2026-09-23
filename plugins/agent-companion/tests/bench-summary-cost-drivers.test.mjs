@@ -47,15 +47,19 @@ test('rebuildSummary computes median_context_rereads and read_share_of_cost for 
     const cols = headerLine.split(' | ').map((s) => s.trim());
     const idxPassRate = cols.indexOf('pass_rate');
     const idxCacheRead = cols.indexOf('med_cache_read_tok');
+    const idxHitRate = cols.indexOf('hit_rate');
     const idxTurns = cols.indexOf('med_turns');
     const idxRereads = cols.indexOf('ctx_rereads');
     const idxReadShare = cols.indexOf('read_share_cost');
     const idxCostPerCorrect = cols.indexOf('cost_per_correct');
-    for (const i of [idxCacheRead, idxTurns, idxRereads, idxReadShare]) {
+    for (const i of [idxCacheRead, idxHitRate, idxTurns, idxRereads, idxReadShare]) {
       assert.ok(i > idxPassRate, 'headline cost-driver column must come after pass_rate');
       assert.ok(i < idxCostPerCorrect, 'headline cost-driver column must come before cost_per_correct');
     }
-    assert.match(md, /1000000 \| 10 \| 100000 \| 20%/);
+    assert.ok(idxHitRate > idxCacheRead, 'hit_rate sits next to cache reads, per the brief');
+    // 1,000,000 reads over a 1,000,100-token denominator (100 uncached input,
+    // 0 writes) rounds to 100%.
+    assert.match(md, /1000000 \| 100% \| 10 \| 100000 \| 20%/);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

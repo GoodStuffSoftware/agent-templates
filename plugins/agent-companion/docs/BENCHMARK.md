@@ -230,6 +230,59 @@ location and are deliberately NOT carried into this repo — they contain
 local paths. Re-running with `scripts/benchmark.mjs` produces fresh results
 in the current, repo-safe location.
 
+## Caching
+
+**Separate `claude -p` processes do not reliably share prompt cache, even
+with byte-identical content — including `--resume`.** Found during the
+`cache-read-weight-2026-09-23` experiment (see below): a harness that shells
+out one `claude -p` (or `claude -p --resume <id>`) per measured turn produces
+mostly cache MISSES on every turn after the first, because each process is a
+fresh instance regardless of whether the prior turn's session id is resumed.
+This showed up as an Opus 5.5 arm whose cache reads stayed pinned near the
+base-prefix size while cache-creation tokens kept climbing turn over turn —
+the anomaly the hit-rate column below exists to catch automatically. The
+plugin's own normal interactive sessions and `bench/runner.mjs`'s benchmark
+cells are NOT affected — each is already a single process for the whole
+task/conversation (91-96% hit rate observed across every 2026-09-23
+benchmark cell; see the hard/real task tables in `bench/PROCESS-NOTES.md`).
+The gotcha is specific to a harness that deliberately measures multiple
+turns via multiple separate process invocations.
+
+**The fix: one persistent process per measured conversation, not one process
+per turn.** Run `claude` with `--input-format stream-json --output-format
+stream-json --verbose`, feed one user turn at a time on stdin as the process
+stays alive, and read each turn's assistant/result events from stdout as
+they arrive. A single long-lived process caches the same way an ordinary
+interactive session does — confirmed in the same experiment: the
+2026-09-23 interactive Opus 5.5 session on this machine hit 99.7%, and
+switching the multi-turn probe to this persistent-process technique
+recovered normal turn-over-turn cache writes instead of the anomaly above.
+Use this technique whenever a benchmark or probe needs to measure something
+that only shows up ACROSS turns (e.g. plan-usage weighting, multi-turn cost
+curves) — one `claude -p` per turn is fine for `bench/runner.mjs`'s own
+single-shot-per-task cells, because there the whole task IS one turn's worth
+of one process's lifetime.
+
+**Cache reads vs writes on plan usage (`cache-read-weight-2026-09-23`,
+low-to-moderate confidence).** Plan metering of cache READS looks roughly
+API-price-proportional: 40.1M Sonnet 5 cache reads moved the 5-hour usage
+meter ≈2 points (≈0.05 pts per 1M reads, range 0.025-0.075). ≈3.95M cache
+WRITES moved it ≈4 points — per token, writes cost roughly 20x what reads
+do, which is the same direction and a similar order of magnitude as the API
+list-price ratio (cache write $0.20-0.25/MTok vs cache read $0.20-0.25/MTok
+at 5m TTL being 1.25x base input while a read is 0.1x base input, ⇒ roughly
+12.5x on list price). **The practical conclusion: cache MISSES (re-writes)
+are the expensive event on this plan, not reads** — a harness or workflow
+that keeps triggering fresh cache writes (cold starts, the multi-process
+gotcha above, TTL expiry) costs far more plan usage than one that reuses a
+warm cache across many reads. The Opus 5.5-vs-Sonnet-5 per-read plan-usage
+ratio is still UNMEASURED — the Opus arm of this experiment hit the
+cross-process caching anomaly above before a clean reading could be taken.
+See `config/model-tiers.json`'s `costDrivers.planUsageWeighting` (status
+`MEASURED-PARTIAL`) for the same figures kept as machine-readable config,
+and the raw run data under this machine's
+`benchmarks/cache-read-weight-2026-09-23/` data directory.
+
 ## Reporting guidance: cache reads are the headline cost, not output tokens
 
 Across this machine's real sessions, **cache reads are the largest cost
@@ -242,15 +295,26 @@ note, the per-tier cache-read price table, and the open
 the Max plan's usage window (undocumented; being measured).
 
 `bench/runner.mjs`'s `rebuildSummary()` reflects this: `summary.md`/
-`summary.json` carry `median_cache_read_tokens`, `median_num_turns`,
-`median_context_rereads` (`cache_read_tokens / num_turns`, an estimate of the
-average context size re-sent every turn), and `read_share_of_cost`
-(`cache-read $ / total $` for that cell, using the tier's cache-hit rate) as
-**headline columns next to `pass_rate` and `cost_per_correct`** — not buried
-in the raw token breakdown further down the table. `read_share_of_cost` (and,
-for a row with no turns, `median_context_rereads`) is `null`/`n/a` when the
-model's tier has no measured cache-hit price (e.g. `mythos`, unreachable on
-this account) — never a guessed number.
+`summary.json` carry `median_cache_read_tokens`, `cache_hit_rate`,
+`median_num_turns`, `median_context_rereads` (`cache_read_tokens /
+num_turns`, an estimate of the average context size re-sent every turn), and
+`read_share_of_cost` (`cache-read $ / total $` for that cell, using the
+tier's cache-hit rate) as **headline columns next to `pass_rate` and
+`cost_per_correct`** — not buried in the raw token breakdown further down the
+table. `read_share_of_cost` (and, for a row with no turns,
+`median_context_rereads`) is `null`/`n/a` when the model's tier has no
+measured cache-hit price (e.g. `mythos`, unreachable on this account) — never
+a guessed number.
+
+`cache_hit_rate` (`cache_read_tokens / (cache_read_tokens +
+cache_creation_tokens + input_tokens)`, medianed like every other per-run
+stat) exists specifically to catch the cross-process caching gotcha above:
+any cell whose median hit rate falls below 0.85 is marked `cache_anomaly:
+true` in `summary.json`, gets a `⚠` next to its `hit_rate` cell in
+`summary.md`, and is called out in a `CACHE ANOMALY: check harness` block
+above the table. **Check this before trusting a cell's cost numbers** — a low
+hit rate usually means the harness failed to share prompt cache across that
+run's requests, not that the model or task genuinely re-read more context.
 
 When writing or reading a benchmark report by hand, lead with these four
 figures (cache-read tokens, turns, context re-reads, read share of cost)

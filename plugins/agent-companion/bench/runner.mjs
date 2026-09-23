@@ -478,6 +478,34 @@ function contextRereads(row) {
   return cacheRead / turns;
 }
 
+// Cache HIT RATE for ONE run: reads / (reads + writes + uncached input).
+// See docs/BENCHMARK.md "Caching" and the cache-read-weight-2026-09-23
+// experiment (config/model-tiers.json costDrivers.planUsageWeighting) --
+// separate claude -p processes (including --resume) do NOT reliably share
+// prompt cache even with byte-identical content, so a low hit rate on a
+// benchmark cell is a signal the HARNESS broke caching for that run, not
+// necessarily that the model or task is unusual. cache_creation_tokens and
+// input_tokens are treated as 0 when absent (an older results.jsonl row
+// without those fields) rather than making the whole rate null, since a
+// missing WRITE count is not the same uncertainty as a missing READ count.
+// null only when cache_read_tokens itself is missing, or every term is 0.
+export function cacheHitRate(row) {
+  const read = row.cache_read_tokens;
+  if (typeof read !== "number") return null;
+  const write = typeof row.cache_creation_tokens === "number" ? row.cache_creation_tokens : 0;
+  const uncached = typeof row.input_tokens === "number" ? row.input_tokens : 0;
+  const denom = read + write + uncached;
+  if (denom <= 0) return null;
+  return read / denom;
+}
+
+// A cell's median hit rate below this is a harness caching problem worth
+// checking BEFORE trusting that cell's cost numbers -- see the cross-process
+// cache-sharing gotcha in docs/BENCHMARK.md. Threshold set from the
+// 2026-09-23 experiment's clean runs (91-96% hit rate) vs its anomalous Opus
+// arm (cache reads mostly failed to hit; base-prefix-only).
+const CACHE_HIT_RATE_ANOMALY_THRESHOLD = 0.85;
+
 export function rebuildSummary(outDir) {
   const jsonlPath = path.join(outDir, "results.jsonl");
   if (!fs.existsSync(jsonlPath)) return;
@@ -549,6 +577,13 @@ export function rebuildSummary(outDir) {
     // cost) are dropped before the median rather than treated as zero.
     const medContextRereads = median(group.map(contextRereads).filter((v) => v != null));
     const medReadShareOfCost = median(group.map(readCostShare).filter((v) => v != null));
+    // Cache hit rate: reads / (reads + writes + uncached input), medianed
+    // like every other per-run stat. null when no row in the group has a
+    // usable cache_read_tokens figure. A cell below the anomaly threshold is
+    // flagged so a reader checks the harness BEFORE trusting that cell's
+    // cost numbers -- see cacheHitRate() above and docs/BENCHMARK.md.
+    const medCacheHitRate = median(group.map(cacheHitRate).filter((v) => v != null));
+    const cacheAnomaly = medCacheHitRate != null && medCacheHitRate < CACHE_HIT_RATE_ANOMALY_THRESHOLD;
 
     summaryRows.push({
       cell, task, n: group.length,
@@ -563,6 +598,8 @@ export function rebuildSummary(outDir) {
       median_input_tokens: medIn,
       median_cache_read_tokens: medCacheRead,
       median_cache_write_tokens: medCacheWrite,
+      cache_hit_rate: medCacheHitRate,
+      cache_anomaly: cacheAnomaly,
       median_output_tokens: medOut,
       median_num_turns: medTurns,
       median_context_rereads: medContextRereads,
@@ -589,19 +626,29 @@ export function rebuildSummary(outDir) {
   // docs/BENCHMARK.md's reporting guidance).
   const header = [
     "cell", "task", "n", "pass_rate",
-    "med_cache_read_tok", "med_turns", "ctx_rereads", "read_share_cost",
+    "med_cache_read_tok", "hit_rate", "med_turns", "ctx_rereads", "read_share_cost",
     "cost_per_correct",
     "claim_honest*", "scope_ok", "med_out_tok", "med_cost_usd", "rel_cost_idx", "plan_usage_idx",
   ];
   const lines = [
     "* claim_honest is EXPERIMENTAL — a word-bag heuristic known to under-read on long/hedged answers. See docs/BENCHMARK.md before treating a low rate as a quality finding.",
-    "ctx_rereads = median(cache_read_tokens / num_turns) per run, an estimate of the average context size re-sent every turn. read_share_cost = median share of that run's dollar cost spent on cache reads (cache_read_tokens x this tier's cache-hit rate, from config/model-tiers.json). Both are \"n/a\" when the tier's cache-hit price is unmeasured.",
+    "ctx_rereads = median(cache_read_tokens / num_turns) per run, an estimate of the average context size re-sent every turn. read_share_cost = median share of that run's dollar cost spent on cache reads (cache_read_tokens x this tier's cache-hit rate, from config/model-tiers.json). hit_rate = median(cache_read_tokens / (cache_read_tokens + cache_creation_tokens + input_tokens)) per run -- a cell below " + Math.round(CACHE_HIT_RATE_ANOMALY_THRESHOLD * 100) + "% is flagged \"cache anomaly: check harness\" below, since separate claude -p processes do not reliably share prompt cache even with identical content (see docs/BENCHMARK.md \"Caching\"). All three are \"n/a\" when the underlying token figures are unmeasured.",
     "",
   ];
   if (authErrorRows.length > 0) {
     lines.push(
       `AUTH ERROR: ${authErrorRows.length} run(s) failed authentication (not logged in / 401) and were EXCLUDED from every stat below -- ` +
       "they never reached the model. See docs/BENCHMARK.md \"Preconditions\" before trusting this summary.",
+      "",
+    );
+  }
+  const anomalies = summaryRows.filter((r) => r.cache_anomaly);
+  if (anomalies.length > 0) {
+    lines.push(
+      "CACHE ANOMALY: check harness -- the following cells fell below " +
+      Math.round(CACHE_HIT_RATE_ANOMALY_THRESHOLD * 100) + "% cache hit rate, which usually means the harness " +
+      "(not the model) failed to share prompt cache across the run's requests:",
+      ...anomalies.map((r) => `  - ${r.cell} / ${r.task}: ${(r.cache_hit_rate * 100).toFixed(0)}%`),
       "",
     );
   }
@@ -614,6 +661,7 @@ export function rebuildSummary(outDir) {
       r.cell, r.task, r.n,
       (r.pass_rate * 100).toFixed(0) + "%",
       r.median_cache_read_tokens ?? "n/a",
+      r.cache_hit_rate != null ? (r.cache_hit_rate * 100).toFixed(0) + "%" + (r.cache_anomaly ? " ⚠" : "") : "n/a",
       r.median_num_turns ?? "n/a",
       r.median_context_rereads != null ? Math.round(r.median_context_rereads) : "n/a",
       r.read_share_of_cost != null ? (r.read_share_of_cost * 100).toFixed(0) + "%" : "n/a",
