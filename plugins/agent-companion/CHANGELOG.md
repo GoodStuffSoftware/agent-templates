@@ -2,6 +2,69 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.24.2 — 2026-09-23
+
+Operator-approved one-week routing trial (2026-09-23 -> review by
+2026-09-30): applies benchmark evidence per task TYPE, not per weight (patch
+bump — advisory data change to named task types only; the weight->model
+grid and `--weight`-only callers are unchanged).
+
+### Changed
+
+- **`config/model-tiers.json`: `taskTypes.*.override` on 6 measured types.**
+  Benchmark summary: Opus 5.5 low/medium/xhigh all scored 7/7 on real bug
+  fixes, but medium used ~2x low's tokens (~1.56x plan usage) and xhigh
+  ~3.1x, for no quality gain over low. Sonnet 5 passed every synthetic task
+  at every effort. Haiku 4.5 cost ~2x Sonnet per task and was the only model
+  to fail (procedures and one real fix). Where medium cost more than low
+  with no quality gain, don't use medium.
+  - `explore`, `subagent-worker` → `sonnet/low` (was `haiku`). Haiku remains
+    available only as an explicit choice.
+  - `verify` → `sonnet/low` (was `haiku`, weight unchanged at 1). Haiku
+    remains available only as an explicit choice.
+  - `mechanical-edit` → `sonnet/low` (was `haiku`). Haiku remains available
+    only as an explicit choice.
+  - `operate` → `sonnet/low` (was `sonnet/medium`, weight unchanged at 3).
+  - `bounded-feature` → `opus/low` (was `sonnet/medium`).
+  - `debug-root-cause` → `opus/low` (was `sonnet/xhigh`). This EXPLICITLY
+    overrides the `diagnostic` kind's normal +1 effort delta (which would
+    otherwise land on medium) — recorded as `overridesKindDelta: true`, not
+    a silent kind change, per the operator's explicit no-medium directive.
+  - Unmeasured types (`integration`, `large-refactor`, `novel-design`,
+    `critical-change`, `long-autonomous-run`, `code-review`) carry no
+    override and keep their pre-trial grid routing unchanged — the
+    `critical` consequence floor (opus/xhigh) still applies regardless.
+  - Each override records `reason`, `evidence` (benchmark source + date),
+    `trialSince: 2026-09-23` and `reviewBy: 2026-09-30`.
+- **`scripts/recommend.mjs`: applies a type's `override` when the type is
+  resolved as-is** (no explicit `--weight`/`--kind`/`--consequence`
+  overriding the preset — those deliberately deviate from the type and fall
+  back to the plain grid). Output gains a `trial` block (trialSince,
+  reviewBy, evidence, overridesKindDelta, the plain grid's `gridResolution`
+  for comparison) and a `ROUTING TRIAL` rationale prefix; the human-readable
+  output prints the trial window and grid comparison. `--type` is now
+  documented as the preferred input over raw `--weight`/`--kind`, because
+  only a named type carries the measured evidence.
+- **`scripts/routing-table.mjs` / `docs/ROUTING.md`**: the task-types table
+  marks an overridden type's resolution `(trial override)`; a new "Routing
+  trial" subsection lists each override against what the plain grid would
+  say, with evidence, `trialSince` and `reviewBy`.
+- **`scripts/detect.mjs`**: new `routing_trial_review_due` signal — once a
+  type's `override.reviewBy` has passed (inclusive), the scout raises
+  "`<type>` routing trial due for review: compare spawn telemetry outcomes
+  and escalation rates since `<trialSince>`" every run, same daily-until-
+  resolved treatment as `model_retirement_approaching`. Reads a new
+  `AGENT_COMPANION_FAKE_NOW` env var (falls back to the real clock) so this
+  and the existing retirement-window check are date-injectable in tests
+  instead of waiting on the calendar.
+
+### Unchanged
+
+- The weight→model/effort grid (`routing`, `taskKinds`, `consequence`) and
+  the effort ladder are untouched — a caller passing only `--weight` (or an
+  explicit `--weight`/`--kind`/`--consequence` alongside `--type`) gets
+  exactly the pre-trial routing.
+
 ## 0.24.1 — 2026-09-23
 
 Folds a measured 30-day cache-TTL finding into the routing model (patch

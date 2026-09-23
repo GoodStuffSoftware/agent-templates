@@ -46,7 +46,18 @@ test('every ladder rung names an agent definition file that actually exists with
 });
 
 test('recommend.mjs prints the namespaced spawnable agent name for a routed task', () => {
+  // bounded-feature is under the 2026-09-23 routing trial (config/model-tiers.json
+  // taskTypes.bounded-feature.override, reviewBy 2026-09-30): opus/low, not
+  // the plain grid's sonnet/medium — see verify-vs-operate.test.mjs and
+  // routing-table-docs.test.mjs for the same trial on other types.
   const res = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--json']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-opus-low');
+  assert.equal(res.json.rung, 6);
+});
+
+test('an explicit --kind bypasses the bounded-feature trial override and falls back to the plain grid', () => {
+  const res = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--kind', 'bounded', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-sonnet-medium');
   assert.equal(res.json.rung, 3);

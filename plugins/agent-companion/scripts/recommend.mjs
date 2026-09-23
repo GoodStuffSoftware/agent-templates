@@ -42,7 +42,10 @@ if (typeName && !t) {
 }
 
 // Explicit flags override the preset; the preset fills what is not given.
-let weight = val('--weight') !== undefined ? Number(val('--weight')) : t?.weight;
+const weightExplicit = val('--weight') !== undefined;
+const kindExplicit = val('--kind') !== undefined;
+const consequenceExplicit = val('--consequence') !== undefined;
+let weight = weightExplicit ? Number(val('--weight')) : t?.weight;
 let kind = val('--kind') || t?.kind || 'bounded';
 let consequence = val('--consequence') || t?.consequence || 'routine';
 if (consequence === 'inherit') consequence = 'routine';
@@ -66,10 +69,32 @@ if (weight === 'parity') {
     console.error('need --type <task-type> or --weight 1-5 (see --list)');
     process.exit(2);
   }
-  const r = effortFor(weight, kind, consequence);
-  out.model = r.model;
-  out.effort = r.effort;
-  out.rationale = r.rationale;
+  // A ROUTING TRIAL override on the named type: a benchmark-backed (model,
+  // effort) pair that supersedes this type's own weight/kind/consequence grid
+  // resolution — see taskTypesNote in config/model-tiers.json. It applies only
+  // when the type is resolved as-is; an explicit --weight/--kind/--consequence
+  // is a deliberate deviation from the preset and falls back to the plain grid.
+  const asIs = !weightExplicit && !kindExplicit && !consequenceExplicit;
+  const ov = t?.override;
+  if (ov && asIs) {
+    const natural = effortFor(weight, kind, consequence);
+    const naturalLabel = `${natural.model}${natural.effort ? '/' + natural.effort : ''}`;
+    out.model = ov.model;
+    out.effort = ov.effort || '';
+    out.rationale = `ROUTING TRIAL (since ${ov.trialSince}, review by ${ov.reviewBy}): ${ov.reason} Grid would otherwise resolve to ${naturalLabel}.`;
+    out.trial = {
+      trialSince: ov.trialSince,
+      reviewBy: ov.reviewBy,
+      evidence: ov.evidence || null,
+      overridesKindDelta: !!ov.overridesKindDelta,
+      gridResolution: naturalLabel,
+    };
+  } else {
+    const r = effortFor(weight, kind, consequence);
+    out.model = r.model;
+    out.effort = r.effort;
+    out.rationale = r.rationale;
+  }
 }
 
 // Ladder rung: the ordered cheapest-to-dearest view of the same (model,
@@ -119,6 +144,13 @@ if (out.spawnAgentNamespaced) {
   console.log(`spawn as:       no ladder rung mapped for ${out.model}${out.effort ? '/' + out.effort : ''} — spawn with model="${out.model}"${out.effort ? ` and an agent definition carrying effort: ${out.effort}` : ''}`);
 }
 console.log(`reviewer:       ${out.reviewer.model} at effort ${out.reviewer.effort}`);
+if (out.trial) {
+  console.log(`\nROUTING TRIAL — this type's output is a benchmark override, not the plain grid:`);
+  console.log(`  trial window:  ${out.trial.trialSince} -> review by ${out.trial.reviewBy}`);
+  console.log(`  grid would say: ${out.trial.gridResolution}`);
+  if (out.trial.overridesKindDelta) console.log(`  explicitly overrides the kind's effort delta (see rationale above)`);
+  if (out.trial.evidence?.source) console.log(`  evidence:      ${out.trial.evidence.source} (${out.trial.evidence.date || 'undated'})`);
+}
 if (out.warrantRequired) {
   console.log(`\nPREMIUM TIER — a warrant is required on the spawn brief:`);
   console.log(`  ${out.warrantTemplate}`);

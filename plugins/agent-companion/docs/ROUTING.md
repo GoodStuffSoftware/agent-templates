@@ -1,6 +1,6 @@
 # Model routing table
 
-_Generated from `config/model-tiers.json` v5 (updated 2026-09-23) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
+_Generated from `config/model-tiers.json` v6 (updated 2026-09-23) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
 
 ## Tiers
 
@@ -101,41 +101,63 @@ Example: a one-line production migration is `mechanical` by kind (effort down) b
 
 ## Task types → routing (the task model list)
 
-Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. `parity` weight = match the writer being reviewed; `inherit` consequence = take the change's consequence.
+Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. `parity` weight = match the writer being reviewed; `inherit` consequence = take the change's consequence. **`--type` is the preferred input over raw `--weight`/`--kind`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.
 
 | Task type | Weight | Kind | Consequence | Resolves to | What it is |
 |---|---|---|---|---|---|
-| `explore` | 1 | `mechanical` | `routine` | `haiku` | read-only search: where is X, what touches Y, does Z exist |
-| `mechanical-edit` | 2 | `mechanical` | `routine` | `haiku` | rename, config edit, reformat, apply a known migration recipe |
-| `bounded-feature` | 3 | `bounded` | `routine` | `sonnet/medium` | a feature against a clear spec, 1-3 files, known shape |
+| `explore` | 1 | `mechanical` | `routine` | `sonnet/low` _(trial override)_ | read-only search: where is X, what touches Y, does Z exist |
+| `mechanical-edit` | 2 | `mechanical` | `routine` | `sonnet/low` _(trial override)_ | rename, config edit, reformat, apply a known migration recipe |
+| `bounded-feature` | 3 | `bounded` | `routine` | `opus/low` _(trial override)_ | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | 4 | `bounded` | `elevated` | `sonnet/high` | multi-file, cross-referencing, touches shared config or things other agents depend on |
-| `debug-root-cause` | 4 | `diagnostic` | `routine` | `sonnet/xhigh` | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
+| `debug-root-cause` | 4 | `diagnostic` | `routine` | `opus/low` _(trial override)_ | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
 | `large-refactor` | 5 | `bounded` | `elevated` | `opus/xhigh` | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
 | `novel-design` | 5 | `novel-design` | `elevated` | `opus/max` | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
 | `critical-change` | 4 | `bounded` | `critical` | `opus/xhigh` | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
 | `code-review` | parity | `diagnostic` | `inherit` | _writer's model; effort ≥ writer_ | adversarial review of a diff; sized to the writer it gates |
 | `long-autonomous-run` | 5 | `bounded` | `elevated` | `opus/xhigh` | an agent session expected to run for hours with minimal supervision |
-| `subagent-worker` | 2 | `mechanical` | `routine` | `haiku` | a delegated worker doing a bounded, well-specified piece of a larger task |
-| `verify` | 1 | `mechanical` | `routine` | `haiku` | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
-| `operate` | 3 | `bounded` | `routine` | `sonnet/medium` | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
+| `subagent-worker` | 2 | `mechanical` | `routine` | `sonnet/low` _(trial override)_ | a delegated worker doing a bounded, well-specified piece of a larger task |
+| `verify` | 1 | `mechanical` | `routine` | `sonnet/low` _(trial override)_ | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
+| `operate` | 3 | `bounded` | `routine` | `sonnet/low` _(trial override)_ | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
 
 <details><summary>Provenance per task type</summary>
 
 - **`explore`** — OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven.
 - **`mechanical-edit`** — COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate.
 - **`bounded-feature`** — OFFICIAL choosing-a-model: Sonnet for everyday code generation and agentic tool use. COMMUNITY: Sonnet 5 delivers near-Opus coding at Sonnet price; escalate to Opus when the spec is incomplete or moves mid-run.
-- **`integration`** — Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time.
+- **`integration`** — Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged.
 - **`debug-root-cause`** — COMMUNITY: Sonnet 5 praised first-hand for tracing brownfield failures to root causes rather than patching symptoms. Escalate to Opus when evidence conflicts or constraints are hidden.
-- **`large-refactor`** — OFFICIAL choosing-a-model: Opus for large-scale refactoring and complex systems engineering.
-- **`novel-design`** — Our kind axis. OFFICIAL: Opus for complex systems engineering. Fable only with a warrant - and per the procedural-discipline finding, first try a brief that carries the verification checklist on Opus.
-- **`critical-change`** — Consequence axis (arXiv 2606.04402: consequence is orthogonal to difficulty). The floor raises even a one-line change to opus/xhigh.
-- **`code-review`** — Our reviewer-parity rule. BENCHMARK (CodeRabbit, semi-vendor): review precision tops out ~37% across every model tested and no model wins both precision and recall - so tier choice does not make review sufficient; adversarial framing and a human gate on critical changes still matter. CAVEAT under calibration: one first-hand report (Wavect) found HIGH effort slower AND lower-recall than LOW on review. See calibration.
-- **`long-autonomous-run`** — OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default.
+- **`large-refactor`** — OFFICIAL choosing-a-model: Opus for large-scale refactoring and complex systems engineering. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged.
+- **`novel-design`** — Our kind axis. OFFICIAL: Opus for complex systems engineering. Fable only with a warrant - and per the procedural-discipline finding, first try a brief that carries the verification checklist on Opus. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged.
+- **`critical-change`** — Consequence axis (arXiv 2606.04402: consequence is orthogonal to difficulty). The floor raises even a one-line change to opus/xhigh. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; the critical floor (opus/xhigh) stays regardless.
+- **`code-review`** — Our reviewer-parity rule. BENCHMARK (CodeRabbit, semi-vendor): review precision tops out ~37% across every model tested and no model wins both precision and recall - so tier choice does not make review sufficient; adversarial framing and a human gate on critical changes still matter. CAVEAT under calibration: one first-hand report (Wavect) found HIGH effort slower AND lower-recall than LOW on review. See calibration. UNBENCHMARKED by the 2026-09-23 effort-grid trial (parity-sized, not a fixed model/effort) — routing unchanged.
+- **`long-autonomous-run`** — OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged.
 - **`subagent-worker`** — OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded.
 - **`verify`** — Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). The defining trait is that nothing changes: the task ends when the answer is read back, not when a step is performed.
 - **`operate`** — Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). A sequence of trivial-looking steps against a live system is not a verify task: ordering mistakes, partial failures, and side effects compound in a way a single read-only check cannot, so this floors at sonnet even though no one step looks hard. Raise weight/consequence further when a step is itself destructive, production-facing, or irreversible (critical-change already covers that).
 
 </details>
+
+### Routing trial (benchmark overrides, not the plain grid)
+
+These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit `--weight`/`--kind`/`--consequence` falls back to the plain grid. Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.
+
+| Task type | Trial | Grid would say | Since | Review by | Evidence |
+|---|---|---|---|---|---|
+| `explore` | `sonnet/low` | `haiku` | 2026-09-23 | 2026-09-30 | operator benchmark, bench/effort-grid results dirs (kept outside this repo) (2026-09-23) |
+| `mechanical-edit` | `sonnet/low` | `haiku` | 2026-09-23 | 2026-09-30 | operator benchmark, bench/effort-grid results dirs (kept outside this repo) (2026-09-23) |
+| `bounded-feature` | `opus/low` | `sonnet/medium` | 2026-09-23 | 2026-09-30 | operator benchmark, bench/effort-grid results dirs (kept outside this repo) (2026-09-23) |
+| `debug-root-cause` | `opus/low _(overrides kind delta)_` | `sonnet/xhigh` | 2026-09-23 | 2026-09-30 | operator benchmark, bench/effort-grid results dirs (kept outside this repo) (2026-09-23) |
+| `subagent-worker` | `sonnet/low` | `haiku` | 2026-09-23 | 2026-09-30 | operator benchmark, bench/effort-grid results dirs (kept outside this repo) (2026-09-23) |
+| `verify` | `sonnet/low` | `haiku` | 2026-09-23 | 2026-09-30 | operator benchmark, bench/effort-grid results dirs (kept outside this repo) (2026-09-23) |
+| `operate` | `sonnet/low` | `sonnet/medium` | 2026-09-23 | 2026-09-30 | operator benchmark, bench/effort-grid results dirs (kept outside this repo) (2026-09-23) |
+
+- **`explore`** — Benchmark evidence, not the old haiku default: Sonnet 5 passed every synthetic task at every effort tested, and Haiku 4.5 cost roughly 2x Sonnet per task while being the only model to fail (procedures and one real fix). Haiku remains available only as an explicit choice, not this type's default.
+- **`mechanical-edit`** — Same benchmark evidence as explore/verify/subagent-worker: Sonnet 5 passed every synthetic task at every effort; Haiku 4.5 cost roughly 2x Sonnet per task and was the only model to fail. Haiku remains available only as an explicit choice, not this type's default.
+- **`bounded-feature`** — Benchmark evidence: Opus 5.5 at low/medium/xhigh effort all scored 7/7 on real bug fixes, but medium used roughly 2x low's tokens (~1.56x plan usage) and xhigh ~3.1x, for no quality gain over low. Where medium cost more than low with no quality gain, don't use medium.
+- **`debug-root-cause`** — EXPLICIT override of the diagnostic kind's normal +1 effort bump (which would otherwise push this to medium), not a silent kind change: the operator benchmark showed Opus 5.5 low/medium/xhigh all 7/7 on real bug fixes, with medium costing ~1.56x plan usage and xhigh ~3.1x for no quality gain over low. The operator directive was explicit: no medium.
+- **`subagent-worker`** — Same benchmark evidence as explore/verify/mechanical-edit: Sonnet 5 passed every synthetic task at every effort; Haiku 4.5 cost roughly 2x Sonnet per task and was the only model to fail. Haiku remains available only as an explicit choice, not this type's default.
+- **`verify`** — Same benchmark evidence as explore/mechanical-edit/subagent-worker: Sonnet 5 passed every synthetic task at every effort; Haiku 4.5 cost roughly 2x Sonnet per task and was the only model to fail. Haiku remains available only as an explicit choice, not this type's default.
+- **`operate`** — Was weight 3 sonnet/medium. Benchmark evidence: Sonnet 5 at low effort passed every procedure tested; medium used roughly 2x low's tokens (~1.56x plan usage) with no quality gain. Where medium cost more than low with no quality gain, don't use medium.
 
 ## What is actually known about `fable`
 

@@ -52,7 +52,15 @@ const baseline = existsSync(baselineFile)
   : {};
 
 const signals = [];
-const now = new Date().toISOString();
+// A fake clock for date-dependent signals (retirement windows, routing-trial
+// review dates) — tests inject AGENT_COMPANION_FAKE_NOW rather than waiting
+// on the real calendar or reimplementing "days until" against Date.now().
+// Unset in production, where this is exactly `new Date()`.
+function nowDate() {
+  const fake = process.env.AGENT_COMPANION_FAKE_NOW;
+  return fake ? new Date(fake) : new Date();
+}
+const now = nowDate().toISOString();
 const next = { checkedAt: now };
 
 function sig(kind, detail, dispatch) {
@@ -172,7 +180,7 @@ try {
     if (!spec.retiresAfter) continue;
     // Calendar days, not elapsed hours: "30 days out" must mean the calendar
     // day 30 days before, whatever time of day the scout happens to run.
-    const n = new Date();
+    const n = nowDate();
     const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
     const days = Math.round((Date.parse(spec.retiresAfter) - todayUtc) / 86400000);
     const staged = !!(spec.replacement && spec.replacement.model);
@@ -191,6 +199,32 @@ try {
     } else if (days > RETIRE_DAILY_WINDOW && days <= 60 && RETIRE_MILESTONES.has(days)) {
       sig('model_retirement_approaching',
         `${alias} retires in ${days} day(s) (${spec.retiresAfter}); ${plan}`, staged ? 'none' : 'routing-review');
+    }
+  }
+} catch { /* config unreadable: the audit reports that separately */ }
+
+// --- 5b. Routing trial due for review -----------------------------------
+// A taskType's `override` (config/model-tiers.json's routing trial: a
+// benchmark-backed (model, effort) pair standing in for the plain
+// weight/kind/consequence grid — see taskTypesNote) carries a `reviewBy`
+// date. Past that date the override is still live and still routing spawns —
+// nothing expires it automatically, unlike a tier's retiresAfter — so this is
+// the one signal standing between "trial" and "silently permanent." Uses
+// nowDate() (fake-clock injectable) rather than the real calendar so a test
+// can assert the finding fires without waiting on 2026-09-30.
+try {
+  const cfg = modelTiers();
+  const n = nowDate();
+  const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+  for (const [name, t] of Object.entries(cfg.taskTypes || {})) {
+    const ov = t.override;
+    if (!ov || !ov.reviewBy) continue;
+    const reviewUtc = Date.parse(ov.reviewBy);
+    if (Number.isNaN(reviewUtc)) continue;
+    if (todayUtc >= reviewUtc) {
+      sig('routing_trial_review_due',
+        `${name} routing trial due for review: compare spawn telemetry outcomes and escalation rates since ${ov.trialSince || 'trial start'} (reviewBy ${ov.reviewBy} has passed)`,
+        'routing-review');
     }
   }
 } catch { /* config unreadable: the audit reports that separately */ }

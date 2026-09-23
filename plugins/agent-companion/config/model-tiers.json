@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "updated": "2026-09-23",
   "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to ~/.claude/agent-companion/state/model-tiers.json (a legacy copy at $CLAUDE_PLUGIN_DATA/model-tiers.json is still honoured as a fallback); it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
   "aliasResolution": {
@@ -367,94 +367,151 @@
       "kind": "mechanical",
       "consequence": "routine",
       "summary": "read-only search: where is X, what touches Y, does Z exist",
-      "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven."
+      "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven.",
+      "override": {
+        "model": "sonnet",
+        "effort": "low",
+        "reason": "Benchmark evidence, not the old haiku default: Sonnet 5 passed every synthetic task at every effort tested, and Haiku 4.5 cost roughly 2x Sonnet per task while being the only model to fail (procedures and one real fix). Haiku remains available only as an explicit choice, not this type's default.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
     },
     "mechanical-edit": {
       "weight": 2,
       "kind": "mechanical",
       "consequence": "routine",
       "summary": "rename, config edit, reformat, apply a known migration recipe",
-      "provenance": "COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate."
+      "provenance": "COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate.",
+      "override": {
+        "model": "sonnet",
+        "effort": "low",
+        "reason": "Same benchmark evidence as explore/verify/subagent-worker: Sonnet 5 passed every synthetic task at every effort; Haiku 4.5 cost roughly 2x Sonnet per task and was the only model to fail. Haiku remains available only as an explicit choice, not this type's default.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
     },
     "bounded-feature": {
       "weight": 3,
       "kind": "bounded",
       "consequence": "routine",
       "summary": "a feature against a clear spec, 1-3 files, known shape",
-      "provenance": "OFFICIAL choosing-a-model: Sonnet for everyday code generation and agentic tool use. COMMUNITY: Sonnet 5 delivers near-Opus coding at Sonnet price; escalate to Opus when the spec is incomplete or moves mid-run."
+      "provenance": "OFFICIAL choosing-a-model: Sonnet for everyday code generation and agentic tool use. COMMUNITY: Sonnet 5 delivers near-Opus coding at Sonnet price; escalate to Opus when the spec is incomplete or moves mid-run.",
+      "override": {
+        "model": "opus",
+        "effort": "low",
+        "reason": "Benchmark evidence: Opus 5.5 at low/medium/xhigh effort all scored 7/7 on real bug fixes, but medium used roughly 2x low's tokens (~1.56x plan usage) and xhigh ~3.1x, for no quality gain over low. Where medium cost more than low with no quality gain, don't use medium.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
     },
     "integration": {
       "weight": 4,
       "kind": "bounded",
       "consequence": "elevated",
       "summary": "multi-file, cross-referencing, touches shared config or things other agents depend on",
-      "provenance": "Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time."
+      "provenance": "Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged."
     },
     "debug-root-cause": {
       "weight": 4,
       "kind": "diagnostic",
       "consequence": "routine",
       "summary": "a specific failure, unexplained regression, flaky test - the answer exists and must be found",
-      "provenance": "COMMUNITY: Sonnet 5 praised first-hand for tracing brownfield failures to root causes rather than patching symptoms. Escalate to Opus when evidence conflicts or constraints are hidden."
+      "provenance": "COMMUNITY: Sonnet 5 praised first-hand for tracing brownfield failures to root causes rather than patching symptoms. Escalate to Opus when evidence conflicts or constraints are hidden.",
+      "override": {
+        "model": "opus",
+        "effort": "low",
+        "overridesKindDelta": true,
+        "reason": "EXPLICIT override of the diagnostic kind's normal +1 effort bump (which would otherwise push this to medium), not a silent kind change: the operator benchmark showed Opus 5.5 low/medium/xhigh all 7/7 on real bug fixes, with medium costing ~1.56x plan usage and xhigh ~3.1x for no quality gain over low. The operator directive was explicit: no medium.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
     },
     "large-refactor": {
       "weight": 5,
       "kind": "bounded",
       "consequence": "elevated",
       "summary": "large-scale refactor across a module or subsystem; the target shape is known, the surface is wide",
-      "provenance": "OFFICIAL choosing-a-model: Opus for large-scale refactoring and complex systems engineering."
+      "provenance": "OFFICIAL choosing-a-model: Opus for large-scale refactoring and complex systems engineering. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged."
     },
     "novel-design": {
       "weight": 5,
       "kind": "novel-design",
       "consequence": "elevated",
       "summary": "a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape",
-      "provenance": "Our kind axis. OFFICIAL: Opus for complex systems engineering. Fable only with a warrant - and per the procedural-discipline finding, first try a brief that carries the verification checklist on Opus."
+      "provenance": "Our kind axis. OFFICIAL: Opus for complex systems engineering. Fable only with a warrant - and per the procedural-discipline finding, first try a brief that carries the verification checklist on Opus. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged."
     },
     "critical-change": {
       "weight": 4,
       "kind": "bounded",
       "consequence": "critical",
       "summary": "production data, migrations, destructive ops, auth, billing, secrets - regardless of size",
-      "provenance": "Consequence axis (arXiv 2606.04402: consequence is orthogonal to difficulty). The floor raises even a one-line change to opus/xhigh."
+      "provenance": "Consequence axis (arXiv 2606.04402: consequence is orthogonal to difficulty). The floor raises even a one-line change to opus/xhigh. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; the critical floor (opus/xhigh) stays regardless."
     },
     "code-review": {
       "weight": "parity",
       "kind": "diagnostic",
       "consequence": "inherit",
       "summary": "adversarial review of a diff; sized to the writer it gates",
-      "provenance": "Our reviewer-parity rule. BENCHMARK (CodeRabbit, semi-vendor): review precision tops out ~37% across every model tested and no model wins both precision and recall - so tier choice does not make review sufficient; adversarial framing and a human gate on critical changes still matter. CAVEAT under calibration: one first-hand report (Wavect) found HIGH effort slower AND lower-recall than LOW on review. See calibration."
+      "provenance": "Our reviewer-parity rule. BENCHMARK (CodeRabbit, semi-vendor): review precision tops out ~37% across every model tested and no model wins both precision and recall - so tier choice does not make review sufficient; adversarial framing and a human gate on critical changes still matter. CAVEAT under calibration: one first-hand report (Wavect) found HIGH effort slower AND lower-recall than LOW on review. See calibration. UNBENCHMARKED by the 2026-09-23 effort-grid trial (parity-sized, not a fixed model/effort) — routing unchanged."
     },
     "long-autonomous-run": {
       "weight": 5,
       "kind": "bounded",
       "consequence": "elevated",
       "summary": "an agent session expected to run for hours with minimal supervision",
-      "provenance": "OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default."
+      "provenance": "OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged."
     },
     "subagent-worker": {
       "weight": 2,
       "kind": "mechanical",
       "consequence": "routine",
       "summary": "a delegated worker doing a bounded, well-specified piece of a larger task",
-      "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded."
+      "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded.",
+      "override": {
+        "model": "sonnet",
+        "effort": "low",
+        "reason": "Same benchmark evidence as explore/verify/mechanical-edit: Sonnet 5 passed every synthetic task at every effort; Haiku 4.5 cost roughly 2x Sonnet per task and was the only model to fail. Haiku remains available only as an explicit choice, not this type's default.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
     },
     "verify": {
       "weight": 1,
       "kind": "mechanical",
       "consequence": "routine",
       "summary": "confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing",
-      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). The defining trait is that nothing changes: the task ends when the answer is read back, not when a step is performed."
+      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). The defining trait is that nothing changes: the task ends when the answer is read back, not when a step is performed.",
+      "override": {
+        "model": "sonnet",
+        "effort": "low",
+        "reason": "Same benchmark evidence as explore/mechanical-edit/subagent-worker: Sonnet 5 passed every synthetic task at every effort; Haiku 4.5 cost roughly 2x Sonnet per task and was the only model to fail. Haiku remains available only as an explicit choice, not this type's default.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
     },
     "operate": {
       "weight": 3,
       "kind": "bounded",
       "consequence": "routine",
       "summary": "execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation",
-      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). A sequence of trivial-looking steps against a live system is not a verify task: ordering mistakes, partial failures, and side effects compound in a way a single read-only check cannot, so this floors at sonnet even though no one step looks hard. Raise weight/consequence further when a step is itself destructive, production-facing, or irreversible (critical-change already covers that)."
+      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). A sequence of trivial-looking steps against a live system is not a verify task: ordering mistakes, partial failures, and side effects compound in a way a single read-only check cannot, so this floors at sonnet even though no one step looks hard. Raise weight/consequence further when a step is itself destructive, production-facing, or irreversible (critical-change already covers that).",
+      "override": {
+        "model": "sonnet",
+        "effort": "low",
+        "reason": "Was weight 3 sonnet/medium. Benchmark evidence: Sonnet 5 at low effort passed every procedure tested; medium used roughly 2x low's tokens (~1.56x plan usage) with no quality gain. Where medium cost more than low with no quality gain, don't use medium.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
     }
   },
-  "taskTypesNote": "A task type is a named preset over (weight, kind, consequence). Resolve it through the same grid as everything else; do not special-case it. \"parity\" as a weight means: match the writer being reviewed. \"inherit\" as a consequence means: take the consequence of the change under review. Provenance is recorded per entry because these WILL go stale - the scout re-checks the lineup, and a routing review should re-read the sources, not the table.",
+  "taskTypesNote": "A task type is a named preset over (weight, kind, consequence). Resolve it through the same grid as everything else; do not special-case it. \"parity\" as a weight means: match the writer being reviewed. \"inherit\" as a consequence means: take the consequence of the change under review. Provenance is recorded per entry because these WILL go stale - the scout re-checks the lineup, and a routing review should re-read the sources, not the table. `--type` is now the PREFERRED input over `--weight`/`--kind` alone, because a named type is the only place the measured evidence (`override`, below) attaches — resolving by raw weight/kind bypasses it and falls back to the grid. An entry may carry an `override` block ({model, effort, reason, evidence, trialSince, reviewBy}, plus `overridesKindDelta: true` where it deliberately bypasses the kind's effort delta) recording a ROUTING TRIAL: a benchmark-backed (model, effort) pair that supersedes this entry's own weight/kind/consequence grid resolution for the stated trial window. It applies only when the type is resolved as-is (no explicit --weight/--kind/--consequence overriding the preset); passing an explicit weight/kind/consequence answers a different question and falls back to the plain grid. The weight/kind/consequence fields on an overridden entry are kept unchanged for provenance and for `--list`/weight-only callers — only the resolved (model, effort) changes. A type with no `override` is UNBENCHMARKED by this trial and keeps its grid-resolved routing unchanged; say so explicitly rather than leaving it ambiguous.",
   "cacheTtl": {
     "default": "5m",
     "note": "Per-definition prompt-cache TTL recommendation. Not enforced by any guard — set it yourself in a subagent's own frontmatter as a NESTED key, `experimental: { cacheTtl: \"1h\" }` (i.e. `cacheTtl` lives under `experimental`, not at the top level of the frontmatter). Requires Claude Code v2.1.248+; Claude Code ignores `1h` there while the subscription is drawing on usage credits (falls back to 5m). Default stays 5m for every definition unless called out below.",

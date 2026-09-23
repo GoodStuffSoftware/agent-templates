@@ -140,15 +140,19 @@ if (cfg.reviewerParity) {
 if (cfg.taskTypes) {
   L.push(`## Task types → routing (the task model list)`);
   L.push(``);
-  L.push(`Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. \`parity\` weight = match the writer being reviewed; \`inherit\` consequence = take the change's consequence.`);
+  L.push(`Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. \`parity\` weight = match the writer being reviewed; \`inherit\` consequence = take the change's consequence. **\`--type\` is the preferred input over raw \`--weight\`/\`--kind\`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.`);
   L.push(``);
   L.push(`| Task type | Weight | Kind | Consequence | Resolves to | What it is |`);
   L.push(`|---|---|---|---|---|---|`);
   for (const [name, t] of Object.entries(cfg.taskTypes)) {
     let resolved = '—';
     if (typeof t.weight === 'number') {
-      const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
-      resolved = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
+      if (t.override) {
+        resolved = `\`${t.override.model}${t.override.effort ? '/' + t.override.effort : ''}\` _(trial override)_`;
+      } else {
+        const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
+        resolved = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
+      }
     } else if (t.weight === 'parity') {
       resolved = '_writer\'s model; effort ≥ writer_';
     }
@@ -161,6 +165,27 @@ if (cfg.taskTypes) {
   L.push(``);
   L.push(`</details>`);
   L.push(``);
+
+  const overridden = Object.entries(cfg.taskTypes).filter(([, t]) => t.override);
+  if (overridden.length) {
+    L.push(`### Routing trial (benchmark overrides, not the plain grid)`);
+    L.push(``);
+    L.push(`These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit \`--weight\`/\`--kind\`/\`--consequence\` falls back to the plain grid. Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.`);
+    L.push(``);
+    L.push(`| Task type | Trial | Grid would say | Since | Review by | Evidence |`);
+    L.push(`|---|---|---|---|---|---|`);
+    for (const [name, t] of overridden) {
+      const ov = t.override;
+      const grid = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
+      const gridLabel = `${grid.model}${grid.effort ? '/' + grid.effort : ''}`;
+      const trialLabel = `${ov.model}${ov.effort ? '/' + ov.effort : ''}` + (ov.overridesKindDelta ? ' _(overrides kind delta)_' : '');
+      const evid = ov.evidence ? `${ov.evidence.source || ''}${ov.evidence.date ? ' (' + ov.evidence.date + ')' : ''}` : '—';
+      L.push(`| \`${name}\` | \`${trialLabel}\` | \`${gridLabel}\` | ${ov.trialSince || '—'} | ${ov.reviewBy || '—'} | ${evid} |`);
+    }
+    L.push(``);
+    for (const [name, t] of overridden) L.push(`- **\`${name}\`** — ${t.override.reason}`);
+    L.push(``);
+  }
 }
 
 const fableNotes = cfg.tiers?.fable?.behaviorNotes;
