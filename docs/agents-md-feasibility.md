@@ -56,6 +56,8 @@ The recommended shape is **version-independent**, so the unresolved version ques
 |---|---|---|---|
 | **OpenAI Codex** | Yes, default | **No — zero awareness** | **Silently truncates at 32 KiB** (`project_doc_max_bytes`). The request to add a warning was closed *not planned* (#7138, 2026-03-02); #13386 remains open. Treat as permanent. |
 | **GitHub Copilot** | Yes, default | **Yes — but only in agent modes** (see below) | Also reads `.claude/CLAUDE.md`, `.claude/rules/*.md`, `~/.claude/CLAUDE.md`, and `.claude/skills`. `.github/copilot-instructions.md` and path-scoped `.instructions.md` outrank `AGENTS.md`. Nested `AGENTS.md` still experimental in VS Code. |
+| **Google Antigravity** | Yes — confirmed in the shipped binary | **No — zero hits anywhere** | Reads `AGENTS.md` and `GEMINI.md` as "Rules". Precedence vs. a coexisting `GEMINI.md`, and a claimed 12,000-character cap, are single-source and UNVERIFIED. |
+| Gemini Code Assist / Android Studio | Yes, default | — | A real divergence inside Google's own product line. |
 
 **Copilot's `CLAUDE.md` ingestion is surface-specific, not universal** — corrected from an earlier reading. Per GitHub's own support matrix:
 
@@ -69,8 +71,6 @@ The recommended shape is **version-independent**, so the unresolved version ques
 | github.com Copilot Chat (web) | **No** |
 | Copilot Code Review | **No**, on any surface |
 | Visual Studio (the IDE) | **No** — absent from the matrix |
-| **Google Antigravity** | Yes — confirmed in the shipped binary | **No — zero hits anywhere** | Reads `AGENTS.md` and `GEMINI.md` as "Rules". Precedence vs. a coexisting `GEMINI.md`, and a claimed 12,000-character cap, are single-source and UNVERIFIED. |
-| Gemini Code Assist / Android Studio | Yes, default | — | A real divergence inside Google's own product line. |
 
 ### Content compatibility
 
