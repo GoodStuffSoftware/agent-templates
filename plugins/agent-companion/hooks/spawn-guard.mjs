@@ -90,6 +90,8 @@ try {
   const declaredKind = km ? km[1].toLowerCase() : null;
   const cm = brief.match(/\bCONSEQUENCE\s*:\s*(routine|elevated|critical)\b/i);
   const declaredConsequence = cm ? cm[1].toLowerCase() : null;
+  const em = brief.match(/\bEFFORT\s*:\s*(low|medium|high|xhigh|max)\b/i);
+  const declaredEffort = em ? em[1].toLowerCase() : null;
 
   // --- Best fit ----------------------------------------------------------
   // The table's answer for the declared weight, used two ways: filled in where
@@ -109,6 +111,25 @@ try {
     autofilled = true;
     updatedInput = { ...input, model };
   }
+
+  // Opus 5.5 defaults to MEDIUM effort (one level below Opus 5's old HIGH
+  // default, per the effort docs checked live 2026-09-23) — a spawn that
+  // resolves to opus with no effort stated ANYWHERE silently gets a weaker
+  // default than whoever wrote the brief likely assumed. "Stated" means the
+  // agent definition's own frontmatter, or an EFFORT: line in the brief
+  // itself — not the caller's own inherited effort, because relying on
+  // inheritance by accident is the exact anti-pattern the model-inheritance
+  // check above exists to close for the model axis; this closes it for effort.
+  // Read AFTER autofill so an autofilled opus (weight 5, no model named) is
+  // covered too, not just an explicitly-named opus.
+  const opusResolved = classifyModel(model).alias === 'opus';
+  const opusEffortStated = !!(def?.effort || declaredEffort);
+  const opusEffortNote = (opusResolved && !opusEffortStated)
+    ? 'agent-companion: this spawn resolves to opus with no effort stated anywhere (agent definition frontmatter, ' +
+      'or an EFFORT: line in the brief). Opus 5.5 defaults to MEDIUM effort — one level below Opus 5\'s old HIGH ' +
+      'default — so an unstated effort now means less thinking than it used to. State it explicitly: add ' +
+      '"EFFORT: <low|medium|high|xhigh|max>" to the brief, or set `effort:` in the agent definition frontmatter.'
+    : null;
 
   // --- Memory brief (deliverable 2) --------------------------------------
   // Computed ONCE, here — not lazily inside each allow branch the way this
@@ -433,7 +454,7 @@ try {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
   }
 
-  if (!isPremium(model)) allowWith(combineNotes(note, gateMessage), withAdditions(updatedInput));
+  if (!isPremium(model)) allowWith(combineNotes(note, gateMessage, opusEffortNote), withAdditions(updatedInput));
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -494,7 +515,7 @@ try {
     if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
-  allowWith(combineNotes(note, gateMessage), withAdditions(updatedInput));
+  allowWith(combineNotes(note, gateMessage, opusEffortNote), withAdditions(updatedInput));
 } catch {
   passthrough(); // never break a session
 }

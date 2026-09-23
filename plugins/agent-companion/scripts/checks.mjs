@@ -200,7 +200,9 @@ const agentDefs = {
         // would push people into writing one that does nothing — which is the
         // very confusion this check exists to remove.
         if (!fm.effort && fm.model && effortSupported(fm.model, 'high').ok) {
-          findings.push(`${rel}: no effort set`);
+          findings.push(/opus/i.test(fm.model)
+            ? `${rel}: no effort set on an opus definition — Opus 5.5 defaults to MEDIUM (one level below Opus 5's old HIGH default); state it explicitly`
+            : `${rel}: no effort set`);
         }
         if (fm.model && DATED_MODEL.test(fm.model)) {
           findings.push(`${rel}: dated model id "${fm.model}" - pin by alias instead`);
