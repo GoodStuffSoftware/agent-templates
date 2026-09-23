@@ -2,6 +2,86 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.27.1 — 2026-09-23
+
+Folds in the `cache-read-weight-2026-09-23` experiment's findings and an
+operator-endorsed routing trial v2. No schema/behavior changes beyond the
+benchmark summary and the routing table's data.
+
+### Added
+
+- **Benchmark: per-cell cache HIT RATE column.** `bench/runner.mjs`'s
+  `cacheHitRate()` computes `cache_read_tokens / (cache_read_tokens +
+  cache_creation_tokens + input_tokens)`, medianed per (cell, task) into a new
+  `cache_hit_rate` field in `summary.json` and a `hit_rate` column in
+  `summary.md`, sitting next to `med_cache_read_tok` and `med_turns`. Any cell
+  whose median hit rate falls under 0.85 is marked `cache_anomaly: true`, gets
+  a `⚠` marker in the table, and is called out in a `CACHE ANOMALY: check
+  harness` block above the table — a low hit rate usually means the harness
+  broke prompt-cache sharing for that run, not that the model or task
+  genuinely re-read more context. New `tests/bench-cache-hit-rate.test.mjs`.
+- **`docs/BENCHMARK.md`: new "Caching" section.** Documents the cross-process
+  caching gotcha found while running `cache-read-weight-2026-09-23` (separate
+  `claude -p` processes, including `--resume`, do not reliably share prompt
+  cache even with byte-identical content), the fix (a single persistent
+  process via `--input-format stream-json --output-format stream-json
+  --verbose`, one turn fed at a time, for any probe that measures across
+  turns), and the plan-usage read/write weight finding below.
+- **`skills/model-benchmark/SKILL.md`: two new preconditions.** "One process
+  per measured conversation" (link to the Caching section) and "check the
+  cache hit rate before trusting a batch's cost numbers" (the new
+  `cache_hit_rate`/`CACHE ANOMALY` output).
+- **`config/model-tiers.json`'s `costDrivers.planUsageWeighting` moves from
+  `UNDOCUMENTED` to `MEASURED-PARTIAL`.** Plan metering of cache reads is
+  roughly API-price-proportional (low-to-moderate confidence): 40.1M Sonnet 5
+  cache reads moved the 5-hour usage meter ~2 points (~0.05 pts/1M reads,
+  range 0.025-0.075); ~3.95M cache writes moved it ~4 points, so per token
+  writes cost roughly 20x reads — the same direction and a similar order of
+  magnitude as the API list-price ratio (~12.5x). Conclusion recorded:
+  **cache MISSES (re-writes) are the expensive event, not reads.** The Opus
+  5.5-vs-Sonnet-5 per-read ratio stays UNMEASURED — the Opus arm of the
+  experiment hit the cross-process caching anomaly above before a clean
+  reading could be taken. `planUsageMultipliers` keeps Opus 5.5 = 1.5x Sonnet
+  5 (in-app tooltip, undocumented, unchanged) with a new note that this is an
+  aggregate token-mix index, not a read-specific weight.
+- **ROUTING TRIAL v2 (operator-endorsed, same window: since 2026-09-23,
+  review by 2026-09-30).** Opus 5.5 at low effort measured cheaper than every
+  Sonnet setting on easy and hard tasks (API 0.90x/0.75x vs Sonnet low
+  0.99x/0.89x), about even on plan usage for real fixes, faster, with roughly
+  half the turns, and equally correct; cache reads cost about the API ratio.
+  This plan carries no separate Opus weekly usage window, so there is no
+  separate-bucket reason to keep routing these types to Sonnet:
+  - `explore`, `mechanical-edit`, `subagent-worker`, `verify`, `operate` move
+    from v1's `sonnet/low` to `opus/low`.
+  - `bounded-feature` and `debug-root-cause` were already `opus/low` (v1) and
+    are unchanged.
+  - `integration` (previously unmeasured, grid-resolved `sonnet/high`) gets
+    its own override to `opus/high` — model only, not effort, since the
+    elevated-consequence floor already puts effort at `high`. Reason:
+    operator first-hand evidence that Sonnet struggles on some of the
+    operator's multi-file technical work, not a benchmark finding.
+  - `large-refactor` (grid `opus/xhigh`) and `novel-design` (grid `opus/max`
+    via its kind's +2 delta) both move down to `opus/high`, the trial's
+    middle ground: real-task data showed `xhigh` costing roughly 3.1x `low`'s
+    tokens for no quality gain over `low`, and effort scaling specifically on
+    architecture/novel-design work is itself unmeasured, so `max`/`xhigh`
+    isn't paid for on an unverified assumption.
+  - `critical-change` (consequence floor: `opus/xhigh`) and
+    `long-autonomous-run` (already grid-resolves to `opus/xhigh`) are
+    deliberately left alone.
+  - A new **operator routing note** — "architecture and deep technical work
+    stay on Opus; Sonnet gets confused on some of the operator's
+    technical/architecture work (operator-observed 2026-09-23); do not route
+    architecture off Opus on benchmark evidence alone" — is attached to
+    `novel-design`, `large-refactor`, and `integration`.
+  - `docs/ROUTING.md` regenerated from the updated config.
+  - `tests/routing-trial.test.mjs` and `tests/verify-vs-operate.test.mjs`
+    updated for the new resolved (model, effort) pairs; `tests/
+    trial-fit-resolver.test.mjs`, `scripts/evaluate.mjs`, and
+    `hooks/spawn-guard.mjs`'s fit check pick up every override automatically
+    through the shared `resolveExpected()` resolver (no code changes needed
+    there).
+
 ## 0.27.0 — 2026-09-23
 
 Consolidated release folding in the routing lineup re-base, the ordered
