@@ -7,6 +7,22 @@
 // resolved (model, effort) for every changed type, the explicit no-medium
 // override on debug-root-cause, that unmeasured types are untouched, and that
 // the scout raises a finding once reviewBy has passed.
+//
+// v2 (same trial window, operator-endorsed): Opus 5.5 low measured cheaper
+// than every Sonnet setting on easy/hard tasks and about even on plan usage
+// for real fixes, with roughly half the turns and equal correctness, and
+// this plan has no separate Opus weekly window -- so explore,
+// mechanical-edit, subagent-worker, verify, and operate move from v1's
+// sonnet/low to opus/low. integration, large-refactor, and novel-design pick
+// up their own v2 overrides too: integration (unmeasured by benchmark) moves
+// model-only to opus/high on operator first-hand evidence that Sonnet
+// struggles on some of the operator's multi-file technical work;
+// large-refactor and novel-design (both already opus-routed) move from their
+// natural xhigh/max down to opus/high, the trial's middle ground, because
+// xhigh measured ~3.1x low's tokens for no quality gain and effort scaling on
+// architecture work itself is unmeasured. critical-change (consequence floor)
+// and long-autonomous-run (already grid-resolves to opus/xhigh) are
+// deliberately left alone.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -16,13 +32,16 @@ import { PLUGIN_ROOT, makeFixture, runScript } from './helpers.mjs';
 const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
 
 const CHANGED = [
-  ['explore', 'sonnet', 'low'],
-  ['mechanical-edit', 'sonnet', 'low'],
-  ['subagent-worker', 'sonnet', 'low'],
-  ['verify', 'sonnet', 'low'],
-  ['operate', 'sonnet', 'low'],
+  ['explore', 'opus', 'low'],
+  ['mechanical-edit', 'opus', 'low'],
+  ['subagent-worker', 'opus', 'low'],
+  ['verify', 'opus', 'low'],
+  ['operate', 'opus', 'low'],
   ['bounded-feature', 'opus', 'low'],
   ['debug-root-cause', 'opus', 'low'],
+  ['integration', 'opus', 'high'],
+  ['large-refactor', 'opus', 'high'],
+  ['novel-design', 'opus', 'high'],
 ];
 
 for (const [type, model, effort] of CHANGED) {
@@ -36,6 +55,34 @@ for (const [type, model, effort] of CHANGED) {
     assert.equal(res.json.trial.reviewBy, '2026-09-30');
   });
 }
+
+test('novel-design explicitly overrides the novel-design kind\'s +2 effort delta, not a silent kind change', () => {
+  const res = runScript('scripts/recommend.mjs', ['--type', 'novel-design', '--json']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.json.model, 'opus');
+  assert.equal(res.json.effort, 'high');
+  assert.equal(res.json.trial.overridesKindDelta, true);
+  // weight 5 -> xhigh, pushed up two ranks by the novel-design kind's +2
+  // delta, clamped at max -- the override is a deliberate departure from
+  // that escalation, not an unlabelled one.
+  assert.equal(res.json.trial.gridResolution, 'opus/max');
+});
+
+test('large-refactor overrides the plain weight-5 xhigh resolution down to high (no kind delta involved)', () => {
+  const res = runScript('scripts/recommend.mjs', ['--type', 'large-refactor', '--json']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.json.model, 'opus');
+  assert.equal(res.json.effort, 'high');
+  assert.equal(res.json.trial.gridResolution, 'opus/xhigh');
+});
+
+test('integration overrides only the MODEL, not the effort — it already floors at high via the elevated consequence', () => {
+  const res = runScript('scripts/recommend.mjs', ['--type', 'integration', '--json']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.json.model, 'opus');
+  assert.equal(res.json.effort, 'high');
+  assert.equal(res.json.trial.gridResolution, 'sonnet/high');
+});
 
 test('debug-root-cause explicitly overrides the diagnostic kind\'s +1 effort delta, not a silent kind change', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'debug-root-cause', '--json']);
@@ -57,9 +104,6 @@ test('debug-root-cause never resolves to medium effort regardless of how it is r
 });
 
 const UNMEASURED = [
-  ['integration', 4, 'bounded', 'elevated'],
-  ['large-refactor', 5, 'bounded', 'elevated'],
-  ['novel-design', 5, 'novel-design', 'elevated'],
   ['critical-change', 4, 'bounded', 'critical'],
   ['long-autonomous-run', 5, 'bounded', 'elevated'],
 ];
