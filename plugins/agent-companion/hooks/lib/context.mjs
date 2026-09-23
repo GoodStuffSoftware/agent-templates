@@ -33,6 +33,23 @@ export const KNOWN_AGENT_TYPES = new Set([
 // routing table that had been wrong for a whole model generation; hardcoding
 // the same knowledge here would rebuild that trap one layer down.
 let _tiers = null;
+// Semver comparison shared by every alias-resolution-floor check: the daily
+// scout's harness-version signal (scripts/detect.mjs), the spawn-time warning
+// (hooks/spawn-guard.mjs), and the audit's resolved-model mismatch check
+// (scripts/lib/model-mismatch.mjs). Kept in ONE place rather than three
+// copies that could drift on what counts as "below".
+export function parseSemver(s) {
+  const m = String(s || '').match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+export function semverBelow(a, b) {
+  for (let i = 0; i < 3; i += 1) {
+    if (a[i] < b[i]) return true;
+    if (a[i] > b[i]) return false;
+  }
+  return false;
+}
+
 export function modelTiers() {
   if (_tiers) return _tiers;
   const shipped = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'model-tiers.json');
@@ -864,6 +881,27 @@ export function lastAssistantMeta(path) {
   const model = last && last.message && typeof last.message.model === 'string' ? last.message.model : null;
   const effort = last && typeof last.effort === 'string' ? last.effort : null;
   return { model, effort };
+}
+
+// The Claude Code BUILD a transcript was written under. Every non-queue
+// record the harness writes carries a top-level `version` string (verified
+// directly against real transcripts, both top-level sessions and nested
+// `subagents/agent-<id>.jsonl` files) — SPAWNING RULE 2 (operator-approved
+// 2026-09-23) needs this to decide whether the CALLING session predates
+// config/model-tiers.json's aliasResolution.minClaudeCodeVersion floor,
+// because a session keeps the build it started with and the desktop app
+// bundles its own build separate from the `claude` CLI on PATH: shelling out
+// to `claude --version` (what scripts/detect.mjs does for the daily scout)
+// answers a different question than "what build is THIS session on". Read
+// via the same bounded tail as lastAssistantMeta() — the build does not
+// change mid-session, so any record in the tail window carries the answer.
+// Returns null when the path is missing, unreadable, or carries no version.
+export function sessionBuildVersion(path) {
+  if (!path) return null;
+  const records = tailRecords(path, { filter: (line) => line.includes('"version":') });
+  if (!records.length) return null;
+  const last = records[records.length - 1];
+  return typeof last.version === 'string' ? last.version : null;
 }
 
 // Which transcript belongs to the SPAWN'S CALLER (not the new subagent, which

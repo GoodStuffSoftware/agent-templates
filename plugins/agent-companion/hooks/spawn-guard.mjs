@@ -8,13 +8,27 @@
 // many run at once, and — when the brief declares a weight — the table's own
 // answer, filled in where the spawn left the model blank and enforced where
 // the spawn named a premium tier its own declared weight does not support.
+//
+// SPAWNING RULE (operator-approved 2026-09-23) — this hook implements rules 1
+// and 2; rule 3 (resolved-model verification) lives in the audit, since it
+// needs the SPAWNED agent's own transcript, which does not exist yet at
+// PreToolUse time:
+//   1. Every spawn names a definition that states BOTH model and effort (a
+//      ladder ac-* def or a project def). A spawn with no model, or a
+//      definition with no effort, inherits the lead's model and effort and
+//      counts as a violation.
+//   2. Build check before opus-tier work: if the SESSION's Claude Code build
+//      is below aliasResolution.minClaudeCodeVersion, restart the session
+//      before spawning; don't pin around it.
+// This hook WARNS, never blocks, on either rule — a false block stops
+// legitimate work; these are detection, not enforcement.
 
 import { createHash } from 'node:crypto';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, effortFor,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
-  classifyModel, modelTiers,
+  classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
@@ -142,12 +156,70 @@ try {
   const modelTakesEffort = !!model && effortSupported(model, 'high').ok;
   const effortStatedSomewhere = !!def?.effort;
   const noEffortStatedNote = (modelTakesEffort && !effortStatedSomewhere)
-    ? `agent-companion: this spawn resolves to ${classifyModel(model).alias || model} with no effort stated in ` +
-      'its agent definition — it will INHERIT the orchestrating session\'s current effort rather than any model ' +
-      'default, which couples this subagent\'s depth of thinking to whatever the caller happens to be running ' +
-      'at. State it explicitly by setting `effort:` in the agent definition frontmatter — a brief-level ' +
-      '"EFFORT:" line does NOT set it; effort is locked to the definition, not the spawn call.'
+    ? `agent-companion (SPAWNING RULE 1): this spawn resolves to ${classifyModel(model).alias || model} with no ` +
+      'effort stated in its agent definition — it will INHERIT the orchestrating session\'s current effort ' +
+      'rather than any model default, which couples this subagent\'s depth of thinking to whatever the caller ' +
+      'happens to be running at. That counts as a rule-1 violation: every spawn must name a definition that ' +
+      'states BOTH model and effort. State it explicitly by setting `effort:` in the agent definition ' +
+      'frontmatter — a brief-level "EFFORT:" line does NOT set it; effort is locked to the definition, not the ' +
+      'spawn call.'
     : null;
+
+  // --- Missing model (SPAWNING RULE 1, other half) ------------------------
+  // The autofill note below already covers the case where a WEIGHT was
+  // declared and the table filled the model in; this covers the case that
+  // note misses entirely — no weight declared, so autofill never ran, and
+  // the spawn simply names no model anywhere. `trulyInherited` was already
+  // computed above (neither the spawn parameter nor the definition named
+  // one); read here, after autofill, so an autofilled spawn does not also
+  // get this more generic note layered on top of its own.
+  const missingModelNote = (trulyInherited && !autofilled)
+    ? 'agent-companion (SPAWNING RULE 1): this spawn names no model, and its definition' +
+      (input.subagent_type ? ` ("${input.subagent_type}")` : '') +
+      ' states none either — it will inherit the lead\'s current model rather than a stated one. Every spawn ' +
+      'must name a definition that states BOTH model and effort; name a model at the spawn site or in the ' +
+      'agent definition\'s frontmatter.'
+    : null;
+
+  // --- Build-version floor (SPAWNING RULE 2) -------------------------------
+  // config/model-tiers.json's aliasResolution.minClaudeCodeVersion records the
+  // Claude Code build its per-alias `resolvesTo` facts hold from: below it,
+  // `opus` resolved to Opus 5 instead of Opus 5.5 (measured 2026-09-23, see
+  // the config's own note). scripts/detect.mjs already raises this for the
+  // daily scout by shelling out to `claude --version` — but that answers "what
+  // build is the `claude` CLI on PATH", not "what build is THIS session on",
+  // and the two differ: the desktop app bundles its own build, and a session
+  // keeps the build it started with regardless of what gets installed later.
+  // So this reads the CALLING session's own transcript instead (via
+  // sessionBuildVersion(), a bounded tail-read of the `version` field every
+  // harness-written record carries) and only warns when it can actually read
+  // one — an unreadable transcript reports "unknown" and stays silent, per the
+  // rule's own "fall back to unknown, don't warn" instruction, rather than
+  // guessing. Scoped to opus/fable only: those are the tiers the config's
+  // aliasResolution note actually documents a below-floor behaviour for.
+  const resolvedAlias = model ? classifyModel(model).alias : '';
+  let buildFloorNote = null;
+  if (resolvedAlias === 'opus' || resolvedAlias === 'fable') {
+    try {
+      const cfg = modelTiers();
+      const floor = cfg.aliasResolution?.minClaudeCodeVersion;
+      const floorParsed = parseSemver(floor);
+      if (floorParsed) {
+        const transcriptPath = callerTranscriptPath(p);
+        const sessionVersion = transcriptPath ? sessionBuildVersion(transcriptPath) : null;
+        const runningParsed = parseSemver(sessionVersion);
+        if (runningParsed && semverBelow(runningParsed, floorParsed)) {
+          buildFloorNote = `agent-companion (SPAWNING RULE 2): this spawn resolves to ${resolvedAlias}, and the ` +
+            `CALLING session (read from ${transcriptPath}) is on Claude Code ${sessionVersion}, below the ` +
+            `${floor} floor config/model-tiers.json's alias facts assume — ` +
+            `${cfg.aliasResolution.note || 'the alias may resolve to an older model than the routing table claims.'} ` +
+            'Restart the session on a current build before spawning opus/fable-tier work; do not pin around it.';
+        }
+        // sessionVersion unreadable ("unknown" per the rule): stay silent
+        // rather than guess — the same fail-open posture every guard here takes.
+      }
+    } catch { /* config or transcript unreadable: fail open, no note */ }
+  }
 
   // --- Memory brief (deliverable 2) --------------------------------------
   // Computed ONCE, here — not lazily inside each allow branch the way this
@@ -496,7 +568,7 @@ try {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
   }
 
-  if (!isPremium(model)) allowWith(combineNotes(note, gateMessage, noEffortStatedNote), withAdditions(updatedInput));
+  if (!isPremium(model)) allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote), withAdditions(updatedInput));
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -557,7 +629,7 @@ try {
     if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
-  allowWith(combineNotes(note, gateMessage, noEffortStatedNote), withAdditions(updatedInput));
+  allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote), withAdditions(updatedInput));
 } catch {
   passthrough(); // never break a session
 }

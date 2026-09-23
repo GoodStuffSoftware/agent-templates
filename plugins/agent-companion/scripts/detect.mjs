@@ -13,7 +13,9 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt } from '../hooks/lib/context.mjs';
+import {
+  modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
+} from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
 
@@ -83,17 +85,10 @@ try {
 // `opus` alias might not actually resolve to, with nothing surfacing the
 // gap. Reuses the version string section 1 above already fetched — no
 // second `claude --version` call.
-function parseSemver(s) {
-  const m = String(s || '').match(/(\d+)\.(\d+)\.(\d+)/);
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
-}
-function semverBelow(a, b) {
-  for (let i = 0; i < 3; i += 1) {
-    if (a[i] < b[i]) return true;
-    if (a[i] > b[i]) return false;
-  }
-  return false;
-}
+// parseSemver/semverBelow now live in hooks/lib/context.mjs — shared with
+// hooks/spawn-guard.mjs's own build-floor warning and the audit's
+// resolved-model mismatch check, so the "below the floor" definition cannot
+// drift into three separate copies.
 try {
   const cfg = modelTiers();
   const floor = cfg.aliasResolution?.minClaudeCodeVersion;

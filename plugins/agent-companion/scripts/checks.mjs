@@ -26,6 +26,7 @@ import {
   memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
 } from '../hooks/lib/memory-index.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
+import { scanModelMismatches } from './lib/model-mismatch.mjs';
 import { status as memoryVaultStatus } from './memory-vault.mjs';
 
 const est = (s) => Math.ceil(s.length / 4);
@@ -1229,6 +1230,51 @@ const memoryVaultDrift = {
   },
 };
 
+// --- 15. resolved-model mismatch (SPAWNING RULE 3) ------------------------
+// Rules 1 and 2 of the operator-approved SPAWNING RULE (2026-09-23) are
+// enforced at spawn time in hooks/spawn-guard.mjs. Rule 3 — the model a
+// spawn actually ran on must match what its definition's alias resolves to
+// on the build that session ran — cannot be: the SPAWNED agent's own
+// transcript does not exist until after the spawn is already approved. This
+// check reads it back after the fact, bounded to a recent window (default
+// 48h; see scripts/lib/model-mismatch.mjs for the correlation method and its
+// known limits) so it stays fast enough for a routine audit pass.
+const modelResolutionMismatch = {
+  id: 'model-resolution-mismatch',
+  title: 'Resolved model matches definition (SPAWNING RULE 3)',
+  vendor: 'anthropic',
+  fixable: false,
+  async run(ctx) {
+    let result;
+    try {
+      // Deliberately NOT derived from ctx.days (defaults to 7 for the other
+      // checks) — a background grep over every project's transcripts took
+      // over two minutes in practice, and this check exists to be safe to
+      // run routinely, not to be a full-depth report. 48h fixed, regardless
+      // of --days.
+      result = await scanModelMismatches({ hours: 48 });
+    } catch (e) {
+      return { status: 'skip', findings: [`mismatch scan failed: ${e.message}`] };
+    }
+    if (!result.matched && !result.mismatches.length) {
+      return {
+        status: 'skip',
+        findings: ['no correlated spawn/transcript pairs in the scan window — nothing to compare'],
+        data: result,
+      };
+    }
+    const findings = result.mismatches.map((m) => (m.kind === 'alias_mismatch'
+      ? `${m.session_id} @ ${m.at}: requested "${m.requested}" (${m.requestedAlias}) but ran on ` +
+        `"${m.actual}" (${m.actualAlias}) — session build ${m.buildVersion || 'unknown'} — ${m.file}`
+      : `${m.session_id} @ ${m.at}: requested "${m.requested}" resolved to a SUPERSEDED generation ` +
+        `"${m.actual}" (${m.supersededBy}) — session build ${m.buildVersion || 'unknown'}` +
+        `${m.belowFloor ? ' (below the alias-resolution floor: expected, but confirms the hazard is live)' : ' (at/above the floor: this should NOT still be happening)'} — ${m.file}`));
+    findings.push(`${result.matched} spawn/transcript pair(s) correlated, ${result.unmatched} spawn row(s) had no matching transcript within tolerance`);
+    if (result.truncated) findings.push('scan was truncated by the file/byte/time cap — some recent activity may be uncounted');
+    return { status: result.mismatches.length ? 'warn' : 'ok', findings, data: result };
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
@@ -1244,4 +1290,5 @@ export const CHECKS = [
   memoryNearDuplicates,
   telemetryCoverageCheck,
   memoryVaultDrift,
+  modelResolutionMismatch,
 ];
