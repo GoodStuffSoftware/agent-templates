@@ -1,43 +1,171 @@
-// Static test: every process-spawning call in bench/ must pass
-// `windowsHide: true`. A benchmark batch spawns dozens of `claude`
-// processes (plus git/node helper calls) in a row -- on Windows, a spawn
-// with no windowsHide option pops a visible console window per process,
-// which is disruptive at that volume and was an open gap in the original
-// bench/effort-grid harness (its own model-benchmark skill draft flagged
-// this as something to VERIFY, not something already fixed — see
-// docs/BENCHMARK.md "No visible windows"). This test makes it a checked
-// invariant instead of a thing to remember to verify by hand.
+// Static guard against the Windows flashing-console-window bug class.
 //
-// Deliberately a plain source-text grep, not an AST parse: the invariant is
-// "this exact option, spelled this exact way, appears somewhere in the same
-// call" and a regex over the call's own text is simpler and more direct
-// than parsing for the same answer.
+// Background: on Windows, whichever process actually ALLOCATES a console
+// (git.exe, node.exe, a shell resolving a .cmd/.bat shim) pops a real,
+// focus-stealing window unless windowsHide rides the SAME child_process call
+// that creates it -- a flag on an outer/ancestor spawn does not propagate.
+// See scripts/lib/proc.mjs's module banner and
+// ~/.claude/skills/team-orchestration/SKILL.md ("A dev server must open NO
+// window") for the full mechanism and how it was found (best-sudoku,
+// 2026-09-20). bench/ carries the same risk at higher volume: a benchmark
+// batch spawns dozens of `claude` processes (plus git/node helper calls) in
+// a row, so a missing flag there is disruptive, not just cosmetic -- see
+// docs/BENCHMARK.md "No visible windows".
+//
+// This test walks every *.mjs file under hooks/, scripts/, and bench/
+// (skipping their own tests/, node_modules/, and bench/fixtures/) and fails
+// if any bare spawn/spawnSync/exec/execSync/execFile/execFileSync call does
+// not carry windowsHide somewhere in its own argument list. It is a static
+// text/brace scan, not a type checker -- good enough to catch "someone added
+// a new child_process call and forgot the flag," which is the failure mode
+// this guards against, without needing a JS parser dependency.
+//
+// Deliberately does NOT flag:
+//  - the underscore-aliased calls inside scripts/lib/proc.mjs itself
+//    (`_execSync(...)`, `_execFileSync(...)`, `_spawnSync(...)`) -- those are
+//    the one sanctioned place raw node:child_process is invoked, and they
+//    hardcode windowsHide in their own call. The regex only matches BARE
+//    names immediately preceded by a non-identifier, non-dot character, so
+//    `_execSync(` and `execSyncHidden(` both fail to match.
+//  - `something.exec(...)` (e.g. RegExp#exec, seen in hooks/self-update.mjs
+//    and scripts/memory-vault.mjs) -- excluded by the same "not preceded by
+//    `.`" rule, since node:child_process's functions are always called bare
+//    (imported by name), never as a method, in this codebase.
+//  - matches inside //-comments and /* */-comments -- blanked to
+//    same-length whitespace (newlines preserved, so line numbers stay
+//    accurate) before the call regex runs. Deliberately NOT attempting to
+//    strip string/template-literal text the same way: an earlier version of
+//    this test did, and a markdown-fence regex literal elsewhere in this
+//    very plugin (``` inside a RegExp, e.g. `/^```/`) desynced a hand-rolled
+//    backtick scanner and silently blanked out hundreds of lines of REAL
+//    code, including an actual spawnSync(...) call -- turning this guard
+//    into a no-op false negative, which is a far worse failure than the
+//    false positive it was trying to avoid. So string/template contents are
+//    left in place, and prose false positives (e.g. "N spawn(s) in 24h" in
+//    a findings message) are filtered out instead by the looksLikeRealCall()
+//    heuristic below: every real call site in this codebase either takes no
+//    arguments, or its argument list contains a quote character or a comma;
+//    "(s)" (bare single-letter, no quote, no comma) does not.
+//  - anything under bench/fixtures/ -- those are simulated target codebases
+//    (fake repos a benchmarked agent operates on), not real spawn sites of
+//    this plugin's own tooling. Their child_process calls belong to fixture
+//    content, not to code this guard is responsible for; bench/tasks/,
+//    bench/task-packs/, and bench/runner.mjs (the actual harness code that
+//    spawns `claude`/git/node) are still fully covered.
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { PLUGIN_ROOT } from './helpers.mjs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const FILES = [
-  'bench/runner.mjs',
-  'bench/tasks/common.mjs',
-  'bench/task-packs/lib.mjs',
-  'bench/task-packs/examples/leak-check-gitignore-fix/hidden-test.mjs',
-];
+const here = dirname(fileURLToPath(import.meta.url));
+const pluginRoot = join(here, '..');
 
-// Matches an execFile(...)/execFileSync(...)/spawn(...) call's full argument
-// list, non-greedy up to the matching close-paren of a SIMPLE (no nested
-// parens inside a string literal containing ")") call -- true for every
-// call site in this codebase, verified by inspection.
-const CALL_RE = /\b(?:execFile|execFileSync|spawn)\s*\(([\s\S]*?)\)\s*;/g;
+const CHECKED_DIRS = ['hooks', 'scripts', 'bench'];
+const SKIP_DIR_NAMES = new Set(['node_modules', 'tests', '__tests__', 'fixtures']);
 
-for (const rel of FILES) {
-  test(`${rel}: every execFile/execFileSync/spawn call sets windowsHide: true`, () => {
-    const text = readFileSync(join(PLUGIN_ROOT, rel), 'utf8');
-    const calls = [...text.matchAll(CALL_RE)];
-    assert.ok(calls.length > 0, `expected at least one execFile/execFileSync/spawn call in ${rel} — update FILES/CALL_RE if the call shape changed`);
-    for (const m of calls) {
-      assert.match(m[0], /windowsHide\s*:\s*true/, `call without windowsHide:true in ${rel}:\n  ${m[0].replace(/\s+/g, ' ').slice(0, 200)}`);
+function walkMjs(dir, out = []) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (SKIP_DIR_NAMES.has(entry.name)) continue;
+      walkMjs(join(dir, entry.name), out);
+      continue;
     }
-  });
+    if (entry.isFile() && entry.name.endsWith('.mjs')) out.push(join(dir, entry.name));
+  }
+  return out;
 }
+
+// Blank //-line and /* block */ comments to same-length whitespace,
+// preserving every newline so line numbers computed against the result
+// still match the original file. Deliberately does NOT touch string,
+// template, or regex literals -- see the module banner above for why a
+// fuller scanner is actively dangerous here.
+function stripComments(src) {
+  const out = Array.from(src);
+  const n = out.length;
+  let i = 0;
+  const blank = (from, to) => {
+    for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' ';
+  };
+  while (i < n) {
+    const c = src[i];
+    const c2 = src[i + 1];
+    if (c === '/' && c2 === '/') {
+      const start = i;
+      while (i < n && src[i] !== '\n') i++;
+      blank(start, i);
+    } else if (c === '/' && c2 === '*') {
+      const start = i;
+      i += 2;
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i = Math.min(i + 2, n);
+      blank(start, i);
+    } else {
+      i++;
+    }
+  }
+  return out.join('');
+}
+
+// Bare function names only, not preceded by an identifier char, $, or `.`
+// -- excludes both the proc.mjs underscore aliases/Hidden wrappers and any
+// obj.exec(-style method call (RegExp#exec, etc).
+const CALL_RE = /(?<![\w$.])(spawnSync|spawn|execFileSync|execFile|execSync|exec)\(/g;
+
+// From the index of an opening `(`, return the substring up to its matching
+// closing `)`, tracking (), [], {} depth together.
+function extractCallArgs(src, openParenIdx) {
+  let depth = 0;
+  for (let i = openParenIdx; i < src.length; i++) {
+    const c = src[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') {
+      depth--;
+      if (depth === 0) return src.slice(openParenIdx, i + 1);
+    }
+  }
+  return src.slice(openParenIdx); // unbalanced (shouldn't happen in valid JS) -- fail open to "no windowsHide found"
+}
+
+// Every real child_process call site in this codebase either takes zero
+// arguments or has an argument list containing a quote character or a comma
+// (a command name, then options). A bare single-letter/short-identifier
+// argument list with neither is the signature of a prose false positive
+// like "N spawn(s) in 24h" surviving comment-stripping, not a real call.
+function looksLikeRealCall(argsText) {
+  const inner = argsText.slice(1, -1);
+  return inner.trim() === '' || /['"`,]/.test(inner);
+}
+
+test('every child_process call in hooks/, scripts/, and bench/ carries windowsHide', () => {
+  const violations = [];
+
+  for (const dirName of CHECKED_DIRS) {
+    const dir = join(pluginRoot, dirName);
+    for (const file of walkMjs(dir)) {
+      const original = readFileSync(file, 'utf8');
+      const src = stripComments(original);
+      let m;
+      CALL_RE.lastIndex = 0;
+      while ((m = CALL_RE.exec(src))) {
+        const openParenIdx = m.index + m[0].length - 1;
+        const argsText = extractCallArgs(src, openParenIdx);
+        if (!looksLikeRealCall(argsText)) continue;
+        if (!argsText.includes('windowsHide')) {
+          const line = src.slice(0, m.index).split('\n').length;
+          violations.push(`${file.replace(pluginRoot, '.')}:${line}: \`${m[1]}(\` has no windowsHide in its arguments`);
+        }
+      }
+    }
+  }
+
+  assert.deepEqual(
+    violations,
+    [],
+    `child_process call(s) missing windowsHide (Windows flashing-console-window risk):\n${violations.join('\n')}`,
+  );
+});
