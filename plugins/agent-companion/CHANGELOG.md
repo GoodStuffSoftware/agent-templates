@@ -2,6 +2,43 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.24.3 — 2026-09-23
+
+Enforcement gap fix: the 0.24.2 routing trial (`taskTypes.*.override`) was
+only ever consulted by `scripts/recommend.mjs`. `scripts/evaluate.mjs` and
+`hooks/spawn-guard.mjs`'s fit check both computed their own "expected"
+(model, effort) straight from the plain grid, so a spawn that correctly
+FOLLOWED a trial — e.g. `debug-root-cause` on `opus/low` — was judged
+over/under-provisioned against a grid answer the trial had already
+superseded (patch bump — closes an enforcement gap, no config schema
+change).
+
+### Changed
+
+- **New shared resolver: `resolveExpected()` in `hooks/lib/context.mjs`.**
+  The one place that turns (task type | weight/kind/consequence) into an
+  effective (model, effort), override included. `scripts/recommend.mjs`,
+  `scripts/evaluate.mjs`, and `hooks/spawn-guard.mjs`'s fit check now all go
+  through it instead of three independent computations.
+- **`hooks/spawn-guard.mjs` now understands `TYPE: <task-type>` in a spawn
+  brief**, alongside the existing `WEIGHT:`/`KIND:`/`CONSEQUENCE:` lines — a
+  brief that names only a type gets that type's own weight/kind/consequence
+  preset (and its trial override, if any) filled in, the same way
+  `recommend.mjs --type` already worked. An explicit `WEIGHT:`/`KIND:`/
+  `CONSEQUENCE:` alongside `TYPE:` is a deliberate deviation from the named
+  preset and bypasses the override, per `taskTypesNote` in
+  `config/model-tiers.json`.
+- **`telemetry/spawns.jsonl` schema (additive): `declared_type`,
+  `fit_trial`.** `declared_type` is the brief's `TYPE:` line, if any;
+  `fit_trial` is true when the fit verdict was judged against a trial
+  override rather than the plain grid.
+- Tests: `tests/trial-fit-resolver.test.mjs` — every overridden task type is
+  judged `fit` through both `evaluate.mjs` and `spawn-guard.mjs` when the
+  spawn follows the trial, `debug-root-cause`'s plain-grid answer
+  (`sonnet/xhigh`) is now correctly judged `under` against the trial's
+  `opus/low`, and every unmeasured type resolves identically to a raw
+  `--weight`/`--kind`/`--consequence` call through both scripts.
+
 ## 0.24.2 — 2026-09-23
 
 Operator-approved one-week routing trial (2026-09-23 -> review by

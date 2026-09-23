@@ -15,7 +15,7 @@
 //   node recommend.mjs --type code-review --writer opus/xhigh
 //   add --json for machine-readable output
 
-import { modelTiers, effortFor, classifyModel, classifyEffort, rungFor } from '../hooks/lib/context.mjs';
+import { modelTiers, resolveExpected, classifyModel, classifyEffort, rungFor } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -45,9 +45,12 @@ if (typeName && !t) {
 const weightExplicit = val('--weight') !== undefined;
 const kindExplicit = val('--kind') !== undefined;
 const consequenceExplicit = val('--consequence') !== undefined;
-let weight = weightExplicit ? Number(val('--weight')) : t?.weight;
-let kind = val('--kind') || t?.kind || 'bounded';
-let consequence = val('--consequence') || t?.consequence || 'routine';
+const explicitWeight = weightExplicit ? Number(val('--weight')) : undefined;
+const explicitKind = kindExplicit ? val('--kind') : undefined;
+const explicitConsequence = consequenceExplicit ? val('--consequence') : undefined;
+let weight = weightExplicit ? explicitWeight : t?.weight;
+let kind = kindExplicit ? explicitKind : (t?.kind || 'bounded');
+let consequence = consequenceExplicit ? explicitConsequence : (t?.consequence || 'routine');
 if (consequence === 'inherit') consequence = 'routine';
 
 const out = { taskType: typeName || null, weight, kind, consequence };
@@ -73,28 +76,19 @@ if (weight === 'parity') {
   // effort) pair that supersedes this type's own weight/kind/consequence grid
   // resolution — see taskTypesNote in config/model-tiers.json. It applies only
   // when the type is resolved as-is; an explicit --weight/--kind/--consequence
-  // is a deliberate deviation from the preset and falls back to the plain grid.
-  const asIs = !weightExplicit && !kindExplicit && !consequenceExplicit;
-  const ov = t?.override;
-  if (ov && asIs) {
-    const natural = effortFor(weight, kind, consequence);
-    const naturalLabel = `${natural.model}${natural.effort ? '/' + natural.effort : ''}`;
-    out.model = ov.model;
-    out.effort = ov.effort || '';
-    out.rationale = `ROUTING TRIAL (since ${ov.trialSince}, review by ${ov.reviewBy}): ${ov.reason} Grid would otherwise resolve to ${naturalLabel}.`;
-    out.trial = {
-      trialSince: ov.trialSince,
-      reviewBy: ov.reviewBy,
-      evidence: ov.evidence || null,
-      overridesKindDelta: !!ov.overridesKindDelta,
-      gridResolution: naturalLabel,
-    };
-  } else {
-    const r = effortFor(weight, kind, consequence);
-    out.model = r.model;
-    out.effort = r.effort;
-    out.rationale = r.rationale;
-  }
+  // is a deliberate deviation from the preset and falls back to the plain
+  // grid. resolveExpected() is the SHARED resolver (hooks/lib/context.mjs) —
+  // scripts/evaluate.mjs and hooks/spawn-guard.mjs's fit check go through the
+  // identical function, so a trial-conforming spawn is judged consistently
+  // wherever the table is consulted, not just here.
+  const resolved = resolveExpected({
+    type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
+    weightExplicit, kindExplicit, consequenceExplicit,
+  });
+  out.model = resolved.model;
+  out.effort = resolved.effort;
+  out.rationale = resolved.rationale;
+  if (resolved.trial) out.trial = resolved.trial;
 }
 
 // Ladder rung: the ordered cheapest-to-dearest view of the same (model,

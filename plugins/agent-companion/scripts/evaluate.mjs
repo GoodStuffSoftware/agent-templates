@@ -15,7 +15,7 @@
 //   add --json for machine-readable output
 // Exit code: 0 fit, 1 over-provisioned, 2 under-provisioned, 3 usage error
 
-import { modelTiers, evaluateFit } from '../hooks/lib/context.mjs';
+import { modelTiers, evaluateFit, resolveExpected } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -37,9 +37,16 @@ if (typeName && !t) {
   console.error(`unknown task type "${typeName}" — see recommend.mjs --list`);
   process.exit(3);
 }
-const weight = val('--weight') !== undefined ? Number(val('--weight')) : t?.weight;
-const kind = val('--kind') || t?.kind || 'bounded';
-let consequence = val('--consequence') || t?.consequence || 'routine';
+const weightExplicit = val('--weight') !== undefined;
+const kindExplicit = val('--kind') !== undefined;
+const consequenceExplicit = val('--consequence') !== undefined;
+const explicitWeight = weightExplicit ? Number(val('--weight')) : undefined;
+const explicitKind = kindExplicit ? val('--kind') : undefined;
+const explicitConsequence = consequenceExplicit ? val('--consequence') : undefined;
+
+const weight = weightExplicit ? explicitWeight : t?.weight;
+const kind = kindExplicit ? explicitKind : (t?.kind || 'bounded');
+let consequence = consequenceExplicit ? explicitConsequence : (t?.consequence || 'routine');
 if (consequence === 'inherit') consequence = 'routine';
 
 let fit;
@@ -61,7 +68,18 @@ if (weight === 'parity') {
     console.error('need --type <task-type> or --weight 1-5 (see recommend.mjs --list)');
     process.exit(3);
   }
-  fit = evaluateFit({ model, effort, weight, kind, consequence });
+  // resolveExpected() is the SHARED resolver (hooks/lib/context.mjs) — the
+  // SAME function scripts/recommend.mjs and hooks/spawn-guard.mjs's fit
+  // check go through, so a taskTypes.<type>.override ROUTING TRIAL (see
+  // taskTypesNote in config/model-tiers.json) is applied here too instead of
+  // silently falling back to the plain grid the way a direct effortFor()
+  // call would. Passed as `expected` so evaluateFit() uses it as-is rather
+  // than recomputing its own (override-blind) default internally.
+  const expected = resolveExpected({
+    type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
+    weightExplicit, kindExplicit, consequenceExplicit,
+  });
+  fit = evaluateFit({ model, effort, weight, kind, consequence, expected });
 }
 
 const out = { ...fit, inputs: { taskType: typeName || null, weight, kind, consequence } };

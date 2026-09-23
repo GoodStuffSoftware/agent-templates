@@ -26,7 +26,7 @@
 import { createHash } from 'node:crypto';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, effortFor,
+  appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveExpected,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
 } from './lib/context.mjs';
@@ -99,11 +99,22 @@ try {
   // task turned out to need. Capture it whenever it IS stated.
   const brief = String(input.prompt || '');
   const wm = brief.match(/\b(?:WARRANT|WEIGHT)\s*:\s*(?:weight\s*)?([1-5])\b/i);
-  const declaredWeight = wm ? Number(wm[1]) : null;
+  let declaredWeight = wm ? Number(wm[1]) : null;
+  const weightWasDeclared = declaredWeight !== null;
   const km = brief.match(/\bKIND\s*:\s*(mechanical|bounded|diagnostic|novel-design)\b/i);
-  const declaredKind = km ? km[1].toLowerCase() : null;
+  let declaredKind = km ? km[1].toLowerCase() : null;
+  const kindWasDeclared = declaredKind !== null;
   const cm = brief.match(/\bCONSEQUENCE\s*:\s*(routine|elevated|critical)\b/i);
-  const declaredConsequence = cm ? cm[1].toLowerCase() : null;
+  let declaredConsequence = cm ? cm[1].toLowerCase() : null;
+  const consequenceWasDeclared = declaredConsequence !== null;
+  // TYPE: names a config/model-tiers.json taskTypes preset (taskTypesNote) —
+  // the only place a benchmark-backed ROUTING TRIAL override attaches.
+  // Declaring it alone (no WEIGHT/KIND/CONSEQUENCE) lets a brief pick up the
+  // type's own weight/kind/consequence preset AND its override, same as
+  // `recommend.mjs --type`; declaring WEIGHT/KIND/CONSEQUENCE alongside it is
+  // a deliberate deviation and bypasses the override, same rule as there.
+  const tm = brief.match(/\bTYPE\s*:\s*([a-z][a-z0-9-]*)\b/i);
+  const declaredType = tm ? tm[1].toLowerCase() : null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
@@ -116,13 +127,43 @@ try {
   // session happened to be at (review finding M1, 2026-09-23).
 
   // --- Best fit ----------------------------------------------------------
-  // The table's answer for the declared weight, used two ways: filled in where
-  // the spawn left the model blank (the inheritance hazard, closed at its
-  // source), and as the yardstick for a model the spawn did name.
-  const fitOn = opt('fit_guard', true) && !!declaredWeight;
+  // The table's answer for the declared weight (or named type), used two
+  // ways: filled in where the spawn left the model blank (the inheritance
+  // hazard, closed at its source), and as the yardstick for a model the
+  // spawn did name. resolveExpected() is the SHARED resolver
+  // (hooks/lib/context.mjs) — scripts/recommend.mjs and scripts/evaluate.mjs
+  // go through the identical function, so a taskTypes.<type>.override
+  // ROUTING TRIAL is applied here too: a spawn that correctly follows a
+  // trial (e.g. TYPE: debug-root-cause on opus/low) is judged against the
+  // trial's own (model, effort), not the plain grid's.
+  let typeWeight = null;
+  if (declaredType) {
+    try { typeWeight = modelTiers().taskTypes?.[declaredType]?.weight ?? null; } catch { /* table unreadable */ }
+  }
+  const fitOn = opt('fit_guard', true) && (weightWasDeclared || typeof typeWeight === 'number');
   let route = null;
   if (fitOn) {
-    try { route = effortFor(declaredWeight, declaredKind || 'bounded', declaredConsequence || 'routine'); } catch { /* table unreadable */ }
+    try {
+      const resolved = resolveExpected({
+        type: declaredType,
+        weight: declaredWeight, kind: declaredKind, consequence: declaredConsequence,
+        weightExplicit: weightWasDeclared, kindExplicit: kindWasDeclared, consequenceExplicit: consequenceWasDeclared,
+      });
+      if (resolved.model) {
+        route = resolved;
+        // A brief that named only TYPE gets its weight/kind/consequence
+        // filled in from the type's own preset, same coalescing
+        // `recommend.mjs --type` already does — every message and telemetry
+        // field below that reads declaredWeight/Kind/Consequence picks this
+        // up unchanged rather than needing its own type-aware branch.
+        if (!weightWasDeclared) declaredWeight = resolved.weight;
+        if (!kindWasDeclared) declaredKind = resolved.kind;
+        if (!consequenceWasDeclared) declaredConsequence = resolved.consequence;
+      }
+      // resolved.model === '' means no routing row (e.g. a parity-sized type,
+      // or an unrecognised TYPE with no WEIGHT to fall back on) — leave
+      // route null, same as the old "no weight declared" no-op path.
+    } catch { /* table unreadable */ }
   }
   const routeLabel = route?.model ? `${route.model}${route.effort ? '/' + route.effort : ''}` : '';
 
@@ -420,6 +461,11 @@ try {
       fit = evaluateFit({
         model, effort: def?.effort || '', weight: declaredWeight,
         kind: declaredKind || 'bounded', consequence: declaredConsequence || 'routine',
+        // `route` was already resolved via resolveExpected() above (override
+        // included) — pass it through as `expected` so evaluateFit() judges
+        // against it directly instead of recomputing an override-blind
+        // default from the plain grid.
+        expected: route,
       });
     } catch { /* table unreadable: the audit reports that separately */ }
   }
@@ -504,9 +550,11 @@ try {
       spawn_effort_source: spawnEffortSource, // definition | inherited | none
       effective_effort: effectiveEffort,      // definition value, "inherited(<parent effort|unknown>)", or null (no-effort model)
       effort_definition: def?.effort || null,
-      declared_weight: declaredWeight,   // null when the brief did not say
+      declared_weight: declaredWeight,   // null when the brief did not say (may be filled from declared_type's own preset)
       declared_kind: declaredKind,
       declared_consequence: declaredConsequence,
+      declared_type: declaredType,       // null when the brief named no TYPE: preset
+      fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid
       fit: autofilled ? 'fit' : fit ? fit.verdict : null, // over | under | fit | unknown, when a weight was declared
       fit_expected: routeLabel || null,
       // --- Memory nudge/brief observability -------------------------------

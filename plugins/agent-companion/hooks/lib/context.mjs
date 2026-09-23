@@ -288,6 +288,79 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
     rationale: `weight ${weight} routes to ${routeLabel}${lifted}; ${why}${floored} -> ${model}/${effortFinal}`,
   };
 }
+// Resolve a task's expected (model, effort) — the ONE place every reader of
+// the routing table computes "what does this task currently route to", so a
+// benchmark-backed ROUTING TRIAL override (taskTypes.<type>.override — see
+// config/model-tiers.json's taskTypesNote) is honoured identically wherever
+// the table is consulted. Before this existed, only scripts/recommend.mjs
+// applied the override inline; scripts/evaluate.mjs and
+// hooks/spawn-guard.mjs's fit check both called effortFor() directly against
+// the plain grid, so a spawn that correctly FOLLOWED a trial (e.g.
+// debug-root-cause on opus/low) was judged under-provisioned against the
+// grid's opus/medium instead of being recognised as fit.
+//
+// `type` names a config/model-tiers.json taskTypes entry (null/unknown skips
+// straight to the plain grid via weight/kind/consequence alone).
+// weight/kind/consequence are the type's own preset UNLESS the matching
+// *Explicit flag is set, in which case the explicit value is used AND the
+// override is bypassed — an explicit weight/kind/consequence is a
+// deliberate deviation from the named preset and answers a different
+// question than the type as declared (taskTypesNote), exactly the same rule
+// recommend.mjs already applied inline.
+//
+// Returns the same shape effortFor() does — { model, effort, rationale } —
+// plus the weight/kind/consequence actually resolved and `trial` (the
+// override's metadata, or null when none applied / none exists for this
+// type). `model` is '' when no routing row could be resolved (e.g. weight
+// missing, non-numeric, or out of 1-5 range) — callers treat that as "no
+// route", same as effortFor()'s own failure shape.
+//
+// Does NOT handle weight:"parity" (reviewer sizing) — that needs a --writer
+// no caller here can supply generically; callers check for it themselves
+// (see recommend.mjs and evaluate.mjs) before ever calling this.
+export function resolveExpected({
+  type = null, weight, kind, consequence,
+  weightExplicit = false, kindExplicit = false, consequenceExplicit = false,
+} = {}) {
+  const cfg = modelTiers();
+  const t = type ? (cfg.taskTypes || {})[type] : null;
+  const w = weightExplicit ? weight : (t ? t.weight : weight);
+  const k = kindExplicit ? (kind || 'bounded') : (kind || t?.kind || 'bounded');
+  let c = consequenceExplicit ? (consequence || 'routine') : (consequence || t?.consequence || 'routine');
+  if (c === 'inherit') c = 'routine';
+
+  if (typeof w !== 'number' || !(w >= 1 && w <= 5)) {
+    return { model: '', effort: '', rationale: `no routing row for weight ${JSON.stringify(w ?? null)}`, weight: w, kind: k, consequence: c, trial: null };
+  }
+
+  // asIs: none of weight/kind/consequence was an explicit deviation from the
+  // named type's own preset — the only shape in which its override applies.
+  const asIs = !weightExplicit && !kindExplicit && !consequenceExplicit;
+  const ov = t?.override;
+  if (ov && asIs) {
+    const natural = effortFor(w, k, c);
+    const naturalLabel = `${natural.model}${natural.effort ? '/' + natural.effort : ''}`;
+    return {
+      model: ov.model,
+      effort: ov.effort || '',
+      rationale: `ROUTING TRIAL (since ${ov.trialSince}, review by ${ov.reviewBy}): ${ov.reason} Grid would otherwise resolve to ${naturalLabel}.`,
+      weight: w,
+      kind: k,
+      consequence: c,
+      trial: {
+        trialSince: ov.trialSince,
+        reviewBy: ov.reviewBy,
+        evidence: ov.evidence || null,
+        overridesKindDelta: !!ov.overridesKindDelta,
+        gridResolution: naturalLabel,
+      },
+    };
+  }
+
+  const r = effortFor(w, k, c);
+  return { ...r, weight: w, kind: k, consequence: c, trial: null };
+}
+
 // Find the ladder rung matching a resolved (model, effort) pair — the
 // ordered, cheapest-to-dearest view of the same routing grid, each mapped to
 // a spawnable generic worker definition (see config/model-tiers.json's
