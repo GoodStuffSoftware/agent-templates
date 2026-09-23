@@ -80,7 +80,7 @@
         "defaultEffort": "medium",
         "thinking": "adaptive, always on, cannot disable"
       },
-      "effortWarning": "Opus 5.5 defaults to MEDIUM effort — one level below Opus 5's old HIGH default (checked live 2026-09-23, https://platform.claude.com/docs/en/build-with-claude/effort). Anything that spawns or defines an opus agent must state effort explicitly rather than relying on the default; spawn-guard.mjs warns and the agent-defs audit check flags a definition pinned to opus with no effort."
+      "effortWarning": "Opus 5.5's OWN API default is MEDIUM effort — one level below Opus 5's old HIGH default (checked live 2026-09-23, https://platform.claude.com/docs/en/build-with-claude/effort) — but that default is reached only for a bare API call outside any Claude Code session. CORRECTED 2026-09-23 (effort-versions.md research): a Claude Code subagent DEFINITION with no `effort` frontmatter does NOT fall back to this model default; per code.claude.com/docs/en/sub-agents it INHERITS the orchestrating session's current effort. Every effort-taking model has this hazard, not just opus — state effort explicitly rather than relying on inheritance; spawn-guard.mjs warns and the agent-defs audit check flags any definition with a model but no effort, opus included."
     },
     "fable": {
       "rank": 4,

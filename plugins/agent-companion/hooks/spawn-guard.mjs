@@ -112,22 +112,30 @@ try {
     updatedInput = { ...input, model };
   }
 
-  // Opus 5.5 defaults to MEDIUM effort (one level below Opus 5's old HIGH
-  // default, per the effort docs checked live 2026-09-23) — a spawn that
-  // resolves to opus with no effort stated ANYWHERE silently gets a weaker
-  // default than whoever wrote the brief likely assumed. "Stated" means the
-  // agent definition's own frontmatter, or an EFFORT: line in the brief
-  // itself — not the caller's own inherited effort, because relying on
-  // inheritance by accident is the exact anti-pattern the model-inheritance
-  // check above exists to close for the model axis; this closes it for effort.
-  // Read AFTER autofill so an autofilled opus (weight 5, no model named) is
-  // covered too, not just an explicitly-named opus.
-  const opusResolved = classifyModel(model).alias === 'opus';
-  const opusEffortStated = !!(def?.effort || declaredEffort);
-  const opusEffortNote = (opusResolved && !opusEffortStated)
-    ? 'agent-companion: this spawn resolves to opus with no effort stated anywhere (agent definition frontmatter, ' +
-      'or an EFFORT: line in the brief). Opus 5.5 defaults to MEDIUM effort — one level below Opus 5\'s old HIGH ' +
-      'default — so an unstated effort now means less thinking than it used to. State it explicitly: add ' +
+  // A subagent definition with no `effort` frontmatter does NOT fall back to
+  // the model's own API default — per Claude Code's sub-agents docs, effort
+  // "inherits from session" when nothing else sets it: it runs at whatever
+  // effort the ORCHESTRATING SESSION currently has. (An earlier version of
+  // this note claimed the model default applied here — e.g. "opus falls back
+  // to 5.5's medium" — which is wrong for a spawn made through this hook; the
+  // model's own default is reached only for a bare API call outside any
+  // Claude Code session, which this is not.) That makes an unstated effort
+  // implicit and coupled to caller state rather than pinned — the same shape
+  // of hazard as an unstated MODEL inheriting the lead's tier, just on the
+  // effort axis, and it applies to every effort-taking model, not only opus:
+  // an orchestrator cranked to `max` silently pushes every effort-less
+  // subagent (sonnet or opus) to `max` too, and vice versa. "Stated" means
+  // the agent definition's own frontmatter, or an EFFORT: line in the brief.
+  // Read AFTER autofill so an autofilled model (e.g. weight 5, no model
+  // named) is covered too, not just an explicitly-named one. Haiku is
+  // excluded — it takes no effort parameter, so there is nothing to inherit.
+  const modelTakesEffort = !!model && effortSupported(model, 'high').ok;
+  const effortStatedSomewhere = !!(def?.effort || declaredEffort);
+  const noEffortStatedNote = (modelTakesEffort && !effortStatedSomewhere)
+    ? `agent-companion: this spawn resolves to ${classifyModel(model).alias || model} with no effort stated ` +
+      'anywhere (agent definition frontmatter, or an EFFORT: line in the brief) — it will INHERIT the ' +
+      'orchestrating session\'s current effort rather than any model default, which couples this subagent\'s ' +
+      'depth of thinking to whatever the caller happens to be running at. State it explicitly: add ' +
       '"EFFORT: <low|medium|high|xhigh|max>" to the brief, or set `effort:` in the agent definition frontmatter.'
     : null;
 
@@ -370,22 +378,24 @@ try {
     // effective_effort: what will ACTUALLY run, for joining against a
     // transcript's own output_tokens later to get tokens-per-effort per
     // model — session transcripts do not record effort themselves, so this
-    // is the only place that fact is captured. Two cases: the agent
-    // definition names one explicitly (same value as spawn_effort/
-    // definition above), or it does not, in which case the harness applies
-    // the MODEL's own API default — recorded as "unset(model-default:<level>)"
-    // rather than left null, so a later join can tell "ran at medium because
-    // nobody said otherwise" apart from "ran at medium because someone typed
-    // medium". Pulled from config/model-tiers.json's resolvesTo.defaultEffort
-    // (data, not hardcoded) so it stays correct as the lineup changes. A model
-    // that takes no effort parameter at all (haiku) has nothing to default.
+    // is the only place that fact is captured.
+    //
+    // CORRECTED premise (was: "falls back to the model's own API default").
+    // Per Claude Code's sub-agents docs (code.claude.com/docs/en/sub-agents,
+    // quoted directly): a subagent definition with no `effort` frontmatter
+    // "inherits from session" — it runs at whatever effort the ORCHESTRATING
+    // SESSION currently has, not the model's bare API default. The model
+    // default is reached only when NOTHING else sets a level (a bare API call
+    // outside any Claude Code session), which does not describe a spawn made
+    // through this hook. So an unstated effort is recorded as
+    // "inherited(<parent session's effort, or 'unknown' if the hook payload
+    // does not expose it>)" — the same shape as `caller_effort` above, which
+    // is exactly the fact being inherited here.
     let effectiveEffort = null;
     if (def?.effort) {
       effectiveEffort = def.effort;
     } else if (!noEffortModel && model) {
-      const tierSpec = (modelTiers().tiers || {})[classifyModel(model).alias] || {};
-      const apiDefault = tierSpec.resolvesTo?.defaultEffort || null;
-      effectiveEffort = apiDefault ? `unset(model-default:${apiDefault})` : 'unset(model-default:unknown)';
+      effectiveEffort = `inherited(${callerEffort || 'unknown'})`;
     }
 
     appendLog('spawns.jsonl', {
@@ -410,7 +420,7 @@ try {
       caller_effort: callerEffort,        // the CALLER's effort — what v1 `effort` held
       spawn_effort: spawnEffort,          // the SPAWN's own effort
       spawn_effort_source: spawnEffortSource, // definition | inherited | none
-      effective_effort: effectiveEffort,      // definition value, "unset(model-default:<level>)", or null (no-effort model)
+      effective_effort: effectiveEffort,      // definition value, "inherited(<parent effort|unknown>)", or null (no-effort model)
       effort_definition: def?.effort || null,
       declared_weight: declaredWeight,   // null when the brief did not say
       declared_kind: declaredKind,
@@ -476,7 +486,7 @@ try {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
   }
 
-  if (!isPremium(model)) allowWith(combineNotes(note, gateMessage, opusEffortNote), withAdditions(updatedInput));
+  if (!isPremium(model)) allowWith(combineNotes(note, gateMessage, noEffortStatedNote), withAdditions(updatedInput));
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -537,7 +547,7 @@ try {
     if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
-  allowWith(combineNotes(note, gateMessage, opusEffortNote), withAdditions(updatedInput));
+  allowWith(combineNotes(note, gateMessage, noEffortStatedNote), withAdditions(updatedInput));
 } catch {
   passthrough(); // never break a session
 }

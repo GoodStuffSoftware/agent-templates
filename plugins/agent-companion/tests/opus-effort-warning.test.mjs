@@ -1,13 +1,14 @@
-// Opus 5.5 defaults to MEDIUM effort (one level below Opus 5's old HIGH
-// default). A spawn that resolves to opus with no effort stated anywhere
-// should be warned, not silently under-provisioned.
+// A subagent definition with no `effort` frontmatter INHERITS the
+// orchestrating session's effort (per Claude Code's sub-agents docs), not
+// any model default — so a spawn with no effort stated anywhere should be
+// warned, on every effort-taking model, not just opus.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
 
-test('spawn resolving to opus with no effort anywhere gets the opus-effort warning', () => {
+test('spawn resolving to opus with no effort anywhere gets the no-effort-stated warning', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const payload = {
@@ -26,13 +27,13 @@ test('spawn resolving to opus with no effort anywhere gets the opus-effort warni
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
     assert.match(msg, /resolves to opus with no effort stated/);
-    assert.match(msg, /MEDIUM effort/);
+    assert.match(msg, /INHERIT/);
   } finally {
     cleanup();
   }
 });
 
-test('an EFFORT: line in the brief silences the opus-effort warning', () => {
+test('an EFFORT: line in the brief silences the no-effort-stated warning', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const payload = {
@@ -56,7 +57,7 @@ test('an EFFORT: line in the brief silences the opus-effort warning', () => {
   }
 });
 
-test('an agent definition with effort: set in frontmatter silences the opus-effort warning', () => {
+test('an agent definition with effort: set in frontmatter silences the no-effort-stated warning', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const agentsDir = join(dir, '.claude', 'agents');
@@ -85,7 +86,7 @@ test('an agent definition with effort: set in frontmatter silences the opus-effo
   }
 });
 
-test('a non-opus spawn never gets the opus-effort warning', () => {
+test('a sonnet spawn with no effort anywhere ALSO gets the warning — the hazard is not opus-only', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const payload = {
@@ -99,7 +100,27 @@ test('a non-opus spawn never gets the opus-effort warning', () => {
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
-    assert.doesNotMatch(msg, /resolves to opus with no effort stated/);
+    assert.match(msg, /resolves to sonnet with no effort stated/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a haiku spawn never gets the no-effort-stated warning — it takes no effort parameter', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const payload = {
+      session_id: 'sess-haiku-no-effort',
+      agent_type: 'main',
+      cwd: dir,
+      tool_input: { subagent_type: 'general-purpose', model: 'haiku', prompt: 'a quick read' },
+    };
+    const res = runHook('hooks/spawn-guard.mjs', payload, {
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const msg = res.json?.systemMessage || '';
+    assert.doesNotMatch(msg, /no effort stated/);
   } finally {
     cleanup();
   }

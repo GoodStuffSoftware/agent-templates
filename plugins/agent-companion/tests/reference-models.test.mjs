@@ -47,7 +47,7 @@ test('effort max on claude-opus-4-6 is accepted (max IS in that generation\'s li
   } finally { cleanup(); }
 });
 
-test('a definition pinned to opus with no effort names the medium-default reason', () => {
+test('a definition pinned to opus with no effort names the session-inheritance reason', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const agentsDir = join(dir, '.claude', 'agents');
@@ -56,8 +56,23 @@ test('a definition pinned to opus with no effort names the medium-default reason
     const result = runAgentDefsAudit(dir, { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') });
     assert.ok(result, 'agent-defs check did not run');
     assert.ok(
-      result.findings.some((f) => /no effort set on an opus definition/.test(f) && /MEDIUM/.test(f)),
-      `expected the opus-specific no-effort finding; got: ${JSON.stringify(result.findings)}`,
+      result.findings.some((f) => /no effort set/.test(f) && /inherits the orchestrating session/.test(f)),
+      `expected the session-inheritance no-effort finding; got: ${JSON.stringify(result.findings)}`,
+    );
+  } finally { cleanup(); }
+});
+
+test('a definition pinned to SONNET with no effort ALSO names the session-inheritance reason — not opus-only', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const agentsDir = join(dir, '.claude', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, 'noeffort2.md'), '---\nname: noeffort2\nmodel: sonnet\n---\nbody\n');
+    const result = runAgentDefsAudit(dir, { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') });
+    assert.ok(result, 'agent-defs check did not run');
+    assert.ok(
+      result.findings.some((f) => /noeffort2/.test(f) && /inherits the orchestrating session/.test(f)),
+      `expected the session-inheritance no-effort finding on the sonnet def too; got: ${JSON.stringify(result.findings)}`,
     );
   } finally { cleanup(); }
 });

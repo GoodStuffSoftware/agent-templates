@@ -200,10 +200,15 @@ const agentDefs = {
         // a single mode has nothing to declare, and demanding a value there
         // would push people into writing one that does nothing — which is the
         // very confusion this check exists to remove.
+        // CORRECTED (was: "opus falls back to Opus 5.5's medium default").
+        // Per Claude Code's sub-agents docs, a definition with no `effort`
+        // INHERITS THE ORCHESTRATING SESSION'S effort — not the model's own
+        // API default, which is reached only outside any Claude Code
+        // session. This is the same inheritance hazard as an unstated
+        // MODEL, just on the effort axis, and applies to every
+        // effort-taking model, not only opus.
         if (!fm.effort && fm.model && effortSupported(fm.model, 'high').ok) {
-          findings.push(/opus/i.test(fm.model)
-            ? `${rel}: no effort set on an opus definition — Opus 5.5 defaults to MEDIUM (one level below Opus 5's old HIGH default); state it explicitly`
-            : `${rel}: no effort set`);
+          findings.push(`${rel}: no effort set — inherits the orchestrating session's effort rather than any model default`);
         }
         if (fm.model && DATED_MODEL.test(fm.model)) {
           findings.push(`${rel}: dated model id "${fm.model}" - pin by alias instead`);
