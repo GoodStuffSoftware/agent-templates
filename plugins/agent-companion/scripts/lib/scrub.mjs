@@ -4,10 +4,13 @@
 // A git error message, a configured repo path or a hit sample can carry the
 // operator's own layout: a profile path (in any escaping), a dev-root path
 // naming a private project, a path-encoded ~/.claude/projects entry, the OS
-// handle glued to other text, a private repo's URL, or a private project
-// name. Every one of those is replaced with a neutral marker. A repo URL or
-// name that is KNOWN PUBLIC (passed in by the caller) is left alone — it is
-// what the operator needs to read to act on the signal.
+// handle glued to other text, a private repo's URL or owner/repo pair, a
+// credential embedded in a URL, or a private project name. Every one of those
+// is replaced with a neutral marker. A repo URL or owner/repo pair that is
+// KNOWN PUBLIC (passed in by the caller) is left readable — it is what the
+// operator needs to act on the signal — but ALWAYS loses its userinfo
+// (`https://<token>@host/...` → `https://host/...`): a credential is never
+// public, whatever repo it is attached to.
 //
 // Zero dependencies beyond this plugin's own leak-scan-core.mjs.
 
@@ -16,8 +19,40 @@ import { normalizeGitUrl } from './publication-sweep.mjs';
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// https://host/owner/repo(.git) · ssh://git@host/owner/repo · git@host:owner/repo
-const REPO_URL_RE = /\b(?:https?|ssh|git):\/\/[^\s"'<>()]+|\b[\w.-]+@[\w.-]+:[\w.-]+\/[\w.-]+(?:\.git)?/gi;
+// ---- repo references ------------------------------------------------------
+// One alternation, one left-to-right pass, so text a branch has already
+// decided on (a kept public URL) is never re-scanned by a later branch.
+// Every branch stops at whitespace, a quote, a bracket, and `:` in the path
+// part — so `<url>:README.md:3` or `<url>: clone failed` never folds the
+// file/line or the message into the URL.
+const HOST = '[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+';
+const USERINFO = '[^\\s/@"\'<>()\\[\\]]+@';
+const SEG = '[\\w-]+(?:\\.[\\w-]+)*'; // owner or repo name, never ending in "."
+const GIT_HOSTS = '(?:[A-Za-z0-9-]+\\.)*(?:github\\.com|gitlab\\.com|bitbucket\\.org)';
+const NAMED_HOST = '[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,}'; // dotted, alphabetic TLD
+const REPO_REF_RE = new RegExp([
+  // 1. scheme://[userinfo@]host[:port][/path] — any scheme with an authority.
+  `\\b([a-z][a-z0-9+.-]*):\\/\\/(${USERINFO})?(${HOST}(?::\\d+)?)((?:\\/[^\\s"'<>()\\[\\]:;,]*)?)`,
+  // 2. scp form: [userinfo@]host:owner/repo(.git)
+  `(?<![\\w.@/-])(${USERINFO})(${HOST}):(${SEG}\\/${SEG})(?![\\w/-])`,
+  // 3. scheme-less host: [userinfo@]<host>/owner/repo[/more] for any named
+  //    host, or github.com:owner/repo (no user) for a known git host. A
+  //    longer path is taken whole (and so is only ever kept if it is exactly
+  //    a public owner/repo).
+  `(?<![\\w.@/-])(${USERINFO})?(${GIT_HOSTS}(?=:)|${NAMED_HOST}(?=\\/))[/:](${SEG}(?:\\/${SEG})+)(?![\\w-])`,
+  // 4. any other userinfo@host/ — strip the userinfo, keep the rest to the later passes.
+  `(?<![\\w.@/-])${USERINFO}(?=${HOST}\\/)`,
+].join('|'), 'gi');
+
+// A bare owner/repo pair ("repository myorg/privrepo not found"). Runs AFTER
+// the path passes (so path fragments are already markers) and never inside a
+// longer path: not preceded by a path/URL character, not followed by another
+// segment. Not treated as a repo reference:
+//   * a `<rel>:<line>` file reference (a hit sample's file, e.g. docs/x.md:3);
+//   * a rate like "spawns/24h" / "runs/7d" (right side a number + short unit).
+const BARE_PAIR_RE = /(?<![\w.@/\\:%<>-])([A-Za-z0-9][\w-]*)\/([\w-]+(?:\.[\w-]+)*)(?![\w/\\-]|\.\w|:\d)/g;
+const RATE_RE = /^\d+[a-z]{0,3}$/i;
+
 const PATH_RES = [
   // Windows absolute path with / or 1-4 backslashes (JSON-escaped forms too).
   [/(?<![A-Za-z0-9])[A-Za-z]:(?:\\{1,4}|\/)[^\s"'<>|;,]*/g, '<path>'],
@@ -38,17 +73,33 @@ const PATH_RES = [
 //               non-alphanumerics ("<u>_dev", "<u>-laptop", "<u>.local").
 //   names:      derived PRIVATE project names (already public-subtracted by
 //               the caller) — replaced by their compiled matchers.
-//   publicUrls: repo URLs / owner/repo names known public; URLs normalizing
-//               to one of them are kept, every other repo URL is replaced.
+//   publicUrls: repo URLs / owner/repo names known public; a repo reference
+//               (URL in any form, or a bare owner/repo pair) normalizing to
+//               one of them is kept (minus any userinfo), every other one is
+//               replaced with <repo-url> / <repo>.
 export function makeScrubber({ users = [], names = [], joined = [], publicUrls = [] } = {}) {
   const publicKeys = new Set(publicUrls.map((u) => normalizeGitUrl(/^[\w.-]+\/[\w.-]+$/.test(u) ? `https://github.com/${u}` : u)));
+  const isPublic = (host, path) => publicKeys.has(normalizeGitUrl(`https://${host}/${String(path || '').replace(/^\/+/, '')}`));
   const userRes = [...new Set(users.map((u) => String(u || '').trim()).filter((u) => u.length >= 3))]
     .map((u) => new RegExp(`(?<![A-Za-z0-9])${esc(u)}(?![A-Za-z0-9])`, 'gi'));
   const nameRes = compileDerived({ names, joined }).map((d) => d.re);
+
+  const repoRef = (m, scheme, _ui1, host1, path1, _ui2, host2, path2, _ui3, host3, path3) => {
+    if (scheme !== undefined) {
+      // Peel trailing sentence punctuation off the path so "…/repo." stays readable.
+      const [, path, tail] = /^(.*?)([.]*)$/.exec(path1);
+      return isPublic(host1, path) ? `${scheme}://${host1}${path}${tail}` : `<repo-url>${tail}`;
+    }
+    if (host2 !== undefined) return isPublic(host2, path2) ? `git@${host2}:${path2}` : '<repo-url>';
+    if (host3 !== undefined) return isPublic(host3, path3) ? `${host3}/${path3}` : '<repo-url>';
+    return ''; // branch 4: bare userinfo before a host — drop it
+  };
+
   return (text) => {
     let s = String(text ?? '');
-    s = s.replace(REPO_URL_RE, (m) => (publicKeys.has(normalizeGitUrl(m.replace(/[.,;:]+$/, ''))) ? m : '<repo-url>'));
+    s = s.replace(REPO_REF_RE, repoRef);
     for (const [re, mark] of PATH_RES) s = s.replace(re, mark);
+    s = s.replace(BARE_PAIR_RE, (m, owner, repo) => (RATE_RE.test(repo) || isPublic('github.com', `${owner}/${repo}`) ? m : '<repo>'));
     for (const re of userRes) s = s.replace(re, '<user>');
     for (const re of nameRes) s = s.replace(re, '<name>');
     return s;

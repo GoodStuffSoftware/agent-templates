@@ -873,3 +873,42 @@ test('leak-sweep-canary.mjs: reduced mode passes', () => {
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /OK/);
 });
+
+// --- third adversarial review: N1 — the full detect -> scrub path ------------
+
+test('N1 detect.mjs: a publication_leak alert for a PUBLIC repo keeps repo, file and line after scrubbing', async () => {
+  const { dir, cleanup } = makeFixture();
+  const repo = buildRepoWith({ 'README.md': `line one\nline two\n${SYNTHETIC_LEAK_LINE}\n` });
+  const devRoot = join(dir, 'discover-dev-root');
+  const projDir = join(devRoot, 'zbpubrepo');
+  mkdirSync(projDir, { recursive: true });
+  git(['init', '--quiet', '-b', 'main'], projDir);
+  writeFileSync(join(projDir, 'x.txt'), 'x\n');
+  git(['add', '-A'], projDir, repo.gitEnv);
+  git(['commit', '--quiet', '-m', 'init'], projDir, repo.gitEnv);
+  // scp-form origin: the https insteadOf below must not rewrite discovery's view of it.
+  git(['remote', 'add', 'origin', 'git@github.com:myorg/zbpubrepo.git'], projDir);
+  try {
+    const env = {
+      ...process.env,
+      AGENT_COMPANION_HOME_OVERRIDE: dir,
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_SWEEP: 'true',
+      AGENT_COMPANION_DISCOVERY_NO_GH: '1',
+      AGENT_COMPANION_DISCOVERY_DEV_ROOT: devRoot,
+      AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY: '1',
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_OWNERS: 'myorg',
+      // The sweep clones the discovered https URL; git rewrites it to the
+      // local bare repo for this child only — no network.
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: `url.${pathToFileURL(repo.bareDir).href}.insteadOf`,
+      GIT_CONFIG_VALUE_0: 'https://github.com/myorg/zbpubrepo',
+    };
+    const res = runScript('scripts/detect.mjs', [], { env, timeout: 60000 });
+    assert.equal(res.status, 0, res.stderr);
+    const leak = res.json.signals.find((s) => s.kind === 'publication_leak');
+    assert.ok(leak, `expected publication_leak, got: ${JSON.stringify(res.json.signals)}`);
+    const want = 'https://github.com/myorg/zbpubrepo — README.md:3 [private-path:windows-profile]';
+    assert.ok(leak.detail.includes(want), `expected "${want}" in: ${leak.detail}`);
+    assert.doesNotMatch(leak.detail, /<repo-url>/);
+  } finally { cleanup(); repo.cleanup(); }
+});

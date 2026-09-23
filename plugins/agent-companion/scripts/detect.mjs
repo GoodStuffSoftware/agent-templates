@@ -186,8 +186,10 @@ try {
     const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
     const days = Math.round((Date.parse(spec.retiresAfter) - todayUtc) / 86400000);
     const staged = !!(spec.replacement && spec.replacement.model);
+    // "model (effort x)", not "model/x": the signal scrubber (lib/scrub.mjs)
+    // treats a bare a/b pair as a possibly-private owner/repo.
     const plan = staged
-      ? `replacement staged: ${spec.replacement.model}${spec.replacement.effort ? '/' + spec.replacement.effort : ''} takes over automatically from ${spec.retiresAfter}`
+      ? `replacement staged: ${spec.replacement.model}${spec.replacement.effort ? ` (effort ${spec.replacement.effort})` : ''} takes over automatically from ${spec.retiresAfter}`
       : 'NO replacement staged — routing rows on this alias resolve to nothing after that date';
     if (days < 0 && !staged) {
       // Past the date with nothing staged is the one case that warrants daily noise.
@@ -526,8 +528,13 @@ if (publicationRepos.length) {
     next.publicationLeakSeen = nextSeenByRepo;
 
     if (allNewHits.length) {
+      // `<repo> — <rel>:<line> [label]`: the repo is separated from the file
+      // by whitespace, never glued on with ":" — a repo URL immediately
+      // followed by ":README.md:3" reads (to a URL matcher, and to a person)
+      // as one URL, and the scrubber would then replace repo, file and line
+      // with a single <repo-url>, leaving the alert unactionable.
       const sample = allNewHits.slice(0, 5)
-        .map((h) => `${h.repo}:${h.rel}:${h.line} [${h.label}]`).join('; ');
+        .map((h) => `${h.repo} — ${h.rel}:${h.line} [${h.label}]`).join('; ');
       const more = allNewHits.length > 5 ? ` +${allNewHits.length - 5} more` : '';
       sig('publication_leak',
         `${allNewHits.length} new leak hit(s) across ${publicationRepos.length} configured repo(s)` +

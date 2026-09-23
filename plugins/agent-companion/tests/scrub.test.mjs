@@ -66,3 +66,59 @@ test('L2: ordinary signal text passes through unchanged', () => {
   const t = '3 spawns/24h; 1 premium; 0 with no explicit model';
   assert.equal(scrub(t), t);
 });
+
+// --- third adversarial review: N1 (repo:file:line eaten), N2 (userinfo, scheme-less, bare pairs) ---
+
+const scrubMy = makeScrubber({ users: [USER], names: [PRIV], publicUrls: ['https://github.com/myorg/zbpublic', 'myorg/zbpublic'] });
+
+test('N1: a public repo URL glued to :file:line keeps repo, file and line (the URL stops at ":")', () => {
+  assert.equal(scrubMy('https://github.com/myorg/zbpublic:README.md:3 [x]'), 'https://github.com/myorg/zbpublic:README.md:3 [x]');
+  assert.equal(scrubMy('https://github.com/myorg/zbhidden:README.md:3 [x]'), '<repo-url>:README.md:3 [x]');
+});
+
+test('N1: the detect.mjs sample shape "<repo> — <rel>:<line> [label]" survives scrubbing for a public repo', () => {
+  const t = 'https://github.com/myorg/zbpublic — README.md:3 [private-path:windows-profile]; https://github.com/myorg/zbpublic — docs/guide.md:12 [y]';
+  assert.equal(scrubMy(t), t);
+});
+
+test('N2: userinfo is always stripped — token@ on a known-public https URL', () => {
+  const s = scrubMy('clone https://ghp_zbfaketoken@github.com/myorg/zbpublic.git');
+  assert.doesNotMatch(s, /ghp_zbfaketoken/);
+  assert.equal(s, 'clone https://github.com/myorg/zbpublic.git');
+});
+
+test('N2: userinfo is always stripped — user:token@ on a known-public https URL', () => {
+  const s = scrubMy('https://x-oauth-basic:ghp_zbfaketoken@github.com/myorg/zbpublic');
+  assert.equal(s, 'https://github.com/myorg/zbpublic');
+});
+
+test('N2: userinfo is always stripped — scheme-less user:token@github.com/o/r (public kept, private scrubbed)', () => {
+  assert.equal(scrubMy('x-oauth-basic:ghp_zbfaketoken@github.com/myorg/zbpublic'), 'github.com/myorg/zbpublic');
+  assert.equal(scrubMy('x-oauth-basic:ghp_zbfaketoken@github.com/myorg/privrepo'), '<repo-url>');
+});
+
+test('N2: userinfo is always stripped — scp form with a token user, and a private https URL with a token', () => {
+  assert.equal(scrubMy('ghp_zbfaketoken@github.com:myorg/zbpublic.git'), 'git@github.com:myorg/zbpublic.git');
+  const s = scrubMy("fatal: repository 'https://ghp_zbfaketoken@github.com/myorg/privrepo/' not found");
+  assert.equal(s, "fatal: repository '<repo-url>' not found");
+});
+
+test('N2: userinfo is stripped on a non-git host too', () => {
+  const s = scrubMy('ghp_zbfaketoken@gitea.example.org/myorg/privrepo');
+  assert.doesNotMatch(s, /ghp_zbfaketoken|privrepo/);
+});
+
+test('N2: a bare owner/repo pair is scrubbed unless known public', () => {
+  assert.equal(scrubMy('repository myorg/privrepo not found'), 'repository <repo> not found');
+  assert.equal(scrubMy('repository myorg/zbpublic not found'), 'repository myorg/zbpublic not found');
+});
+
+test('N2: a scheme-less github.com/o/r is scrubbed unless known public', () => {
+  assert.equal(scrubMy('remote github.com/myorg/privrepo'), 'remote <repo-url>');
+  assert.equal(scrubMy('remote github.com:myorg/privrepo'), 'remote <repo-url>');
+  assert.equal(scrubMy('remote github.com/myorg/zbpublic fine'), 'remote github.com/myorg/zbpublic fine');
+});
+
+test('N2: rates and file:line references are not mistaken for owner/repo pairs', () => {
+  assert.equal(scrubMy('12 runs/7d; see docs/guide.md:4'), '12 runs/7d; see docs/guide.md:4');
+});
