@@ -70,6 +70,41 @@ export function classifyModel(model) {
   return { alias: '', rank: 0, premium: cfg.unknownIsPremium !== false, known: false };
 }
 
+// Reference entries for OLDER, non-routable pinned model ids (config's
+// `referenceModels`) — kept SEPARATE from `tiers` so they never affect
+// classifyModel()'s alias matching (an "opus" tier match is deliberately
+// broad and already classifies a dated opus id as premium correctly). Their
+// only job is precise EFFORT validation for a definition pinned to a full id:
+// e.g. Opus 4.6 and Sonnet 4.6 have no `xhigh`, which the current `opus`/
+// `sonnet` tier's (wider) effort list would not catch.
+export function classifyReferenceModel(model) {
+  const cfg = modelTiers();
+  const m = String(model || '');
+  if (!m) return null;
+  for (const [key, spec] of Object.entries(cfg.referenceModels || {})) {
+    try {
+      if (new RegExp(spec.match || key, 'i').test(m)) return { key, ...spec };
+    } catch { /* bad regex in an override: skip it, fail open */ }
+  }
+  return null;
+}
+
+// Same shape as effortSupported(), but checked against a reference entry's
+// OWN effort list when the model matches one, instead of the current alias
+// tier's list. Returns null (not a result) when the model matches no
+// reference entry, so a caller can fall back to effortSupported() unchanged.
+export function referenceEffortSupported(model, effort) {
+  const ref = classifyReferenceModel(model);
+  if (!ref) return null;
+  const e = String(effort || '').toLowerCase();
+  const list = Array.isArray(ref.efforts) ? ref.efforts : [];
+  if (!e) return { ok: true, supported: list, reason: 'no effort set' };
+  if (list.length === 0) return { ok: false, supported: [], reason: `${ref.displayName || ref.key} takes no effort parameter` };
+  return list.includes(e)
+    ? { ok: true, supported: list, reason: '' }
+    : { ok: false, supported: list, reason: `${ref.displayName || ref.key} supports ${list.join(', ')} (no ${e})` };
+}
+
 // Effort is a separate axis from model and scales ALL output - thinking,
 // answer, and tool calls alike. Ranking it lets the audit compare two agents'
 // effort the way it compares their tiers, which is what the reviewer-parity
@@ -236,6 +271,21 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
     rationale: `weight ${weight} routes to ${routeLabel}${lifted}; ${why}${floored} -> ${model}/${effortFinal}`,
   };
 }
+// Find the ladder rung matching a resolved (model, effort) pair — the
+// ordered, cheapest-to-dearest view of the same routing grid, each mapped to
+// a spawnable generic worker definition (see config/model-tiers.json's
+// `ladder`/`ladderNote`). Effort '' / null both mean "this model takes none"
+// and match a rung whose own effort is null (haiku). Returns null when
+// nothing in the ladder matches — fable, an unknown model, or a model/effort
+// combination the ladder does not carry a rung for.
+export function rungFor(model, effort) {
+  const cfg = modelTiers();
+  const ladder = Array.isArray(cfg.ladder) ? cfg.ladder : [];
+  const alias = classifyModel(model).alias || String(model || '');
+  const e = effort ? String(effort).toLowerCase() : null;
+  return ladder.find((r) => r.model === alias && (r.effort || null) === e) || null;
+}
+
 export function readStdin() {
   try {
     let raw = readFileSync(0, 'utf8') || '';

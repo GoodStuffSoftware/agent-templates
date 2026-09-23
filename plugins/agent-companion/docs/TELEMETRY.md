@@ -169,6 +169,7 @@ whose.
 | `caller_effort` | string \| null | the CALLER's effort — what v1's `effort` field held |
 | `spawn_effort` | string \| null | the SPAWNED agent's own effort: the agent definition's frontmatter effort if it has one; null if the resolved model takes no effort parameter (e.g. haiku); otherwise the caller's effort (built-in types run at the caller's effort) |
 | `spawn_effort_source` | `definition` \| `inherited` \| `none` | which of the three rules above produced `spawn_effort` |
+| `effective_effort` | string \| null | what will ACTUALLY run: the agent definition's own effort when it names one (same value as `spawn_effort` in that case); otherwise `"unset(model-default:<level>)"`, where `<level>` is that model's own API default effort from `config/model-tiers.json`'s `tiers.<alias>.resolvesTo.defaultEffort` (e.g. `unset(model-default:medium)` for an opus spawn with no stated effort, since Opus 5.5 defaults to medium); `null` when the resolved model takes no effort parameter at all (haiku). Exists so a later join against a transcript's `output_tokens` can compute tokens-per-effort per model — transcripts do not record effort themselves, and `spawn_effort`'s `inherited` case does not distinguish "the caller happened to be running at X" from "this model would have defaulted to X anyway", which `effective_effort` does. |
 | `effort_definition` | string \| null | the effort named in the agent definition, if any |
 | `declared_weight` | 1-5 or null | task weight declared in the brief (`WEIGHT:` or `WARRANT: weight N`) |
 | `declared_kind` | string or null | task kind declared in the brief (`KIND:`) |
@@ -275,6 +276,35 @@ longer disagree about what the baseline is.
 One line per `scripts/detect.mjs` run — the same object written to
 `scout-latest.json` at that moment, which is itself overwritten every run and
 keeps no history of its own.
+
+## Spawn nesting depth — NOT logged, and why
+
+`spawns.jsonl` does not carry a `depth` field (how many spawn-levels deep this
+subagent is: 0 for a main-session spawn, 1 for a subagent's own spawn, and so
+on). This was checked against the actual PreToolUse payload rather than
+assumed missing:
+
+- The payload carries `agent_id` (set only when the CALLER is itself a
+  subagent) and, via `callerTranscriptPath()`, at most ONE level of nested
+  transcript path (`<dirname>/<basename>/subagents/agent-<id>.jsonl`). That
+  scheme has no slot for a grandparent id — a subagent-of-a-subagent's
+  transcript path does not encode its own caller's caller, so the path alone
+  cannot be walked upward to recover full lineage.
+- `caller_is_subagent` (already logged) is therefore only a **1-bit**
+  signal — "this spawn's caller was itself a subagent" — not a depth count.
+  A caller at depth 1 and a caller at depth 4 both log `caller_is_subagent:
+  true` with nothing to tell them apart.
+- No other field in the PreToolUse payload (`p`) carries an integer depth,
+  a parent chain, or a session-lineage id at all.
+
+**What would be needed:** either (a) the harness adding a `depth` (or
+`agent_depth`) integer to the PreToolUse payload directly, so this hook could
+log it verbatim with no inference, or (b) the harness encoding full lineage
+in the transcript path scheme (e.g. `.../subagents/agent-<id>/subagents/agent-<id2>.jsonl`)
+so `callerTranscriptPath()` could walk it and count segments. Neither exists
+in the harness surface this plugin can observe today (checked 2026-09-23).
+Tracked as a gap, not silently worked around with a value that looks like
+depth but is not one.
 
 ## Enforcement-silent coverage
 

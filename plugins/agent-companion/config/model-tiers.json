@@ -134,6 +134,81 @@
       }
     }
   },
+  "referenceModels": {
+    "opus-5": {
+      "match": "claude-opus-5(?!-5)",
+      "displayName": "Opus 5",
+      "routable": false,
+      "pricing": { "inputPerMTok": 5, "outputPerMTok": 25, "cacheHitPerMTok": 0.50, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive by default (unlike 4.8/4.7); can disable only at <= high, 400 error at xhigh/max",
+      "note": "Superseded by Opus 5.5. The `opus` alias resolved here on Claude Code < v2.1.280 — kept as a reference entry so an agent definition pinned to the dated id (not the alias) still classifies correctly and its effort is validated against what THIS model actually supports, not the current `opus` tier's list."
+    },
+    "fable-5": {
+      "match": "claude-fable-5(?!-1)",
+      "displayName": "Fable 5",
+      "routable": false,
+      "pricing": { "inputPerMTok": 10, "outputPerMTok": 50, "cacheHitPerMTok": 1.00, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive, always on",
+      "note": "Superseded by Fable 5.1. Cache-hit pricing is the 0.1x rate, NOT Fable 5.1's 0.025x rate — do not reuse 5.1's cache economics for a definition pinned to this id."
+    },
+    "opus-4-8": {
+      "match": "claude-opus-4-8",
+      "displayName": "Opus 4.8",
+      "routable": false,
+      "pricing": { "inputPerMTok": 5, "outputPerMTok": 25, "cacheHitPerMTok": 0.50, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive is the ONLY on-mode; omitting `thinking` entirely runs WITHOUT thinking - must be set explicitly. xhigh recommended for coding/agentic use.",
+      "note": "Not validated by this table's effort checks for the thinking-omission hazard (agent definition frontmatter here carries no `thinking` field to check) - flagged in docs/proposed/global-doctrine-reweight.patch as a known gap, not silently assumed safe."
+    },
+    "opus-4-7": {
+      "match": "claude-opus-4-7",
+      "displayName": "Opus 4.7",
+      "routable": false,
+      "pricing": { "inputPerMTok": 5, "outputPerMTok": 25, "cacheHitPerMTok": 0.50, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "defaultEffort": "high",
+      "thinking": "same as 4.8 - adaptive is the only on-mode; omitting `thinking` runs WITHOUT it. xhigh recommended.",
+      "note": "Same thinking-omission caveat as opus-4-8."
+    },
+    "opus-4-6": {
+      "match": "claude-opus-4-6",
+      "displayName": "Opus 4.6",
+      "routable": false,
+      "pricing": { "inputPerMTok": 5, "outputPerMTok": 25, "cacheHitPerMTok": 0.50, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive recommended; budget_tokens still functional as a transitional escape hatch",
+      "note": "NO xhigh — this generation stops at max/high/medium/low. An agent definition pinned to this id with effort: xhigh is invalid on this model, not just 'more than needed'; validated via referenceModels, not the current opus tier's effort list."
+    },
+    "sonnet-4-6": {
+      "match": "claude-sonnet-4-6",
+      "displayName": "Sonnet 4.6",
+      "routable": false,
+      "pricing": { "inputPerMTok": 3, "outputPerMTok": 15, "cacheHitPerMTok": 0.30, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive recommended (medium recommended default in practice); budget_tokens still functional",
+      "note": "NO xhigh, same as opus-4-6 — validated against this list, not the current sonnet tier's (which does have xhigh)."
+    }
+  },
+  "referenceModelsNote": "Non-routable reference entries for OLDER pinned model ids, so an agent definition pinned to a full/dated id (not an alias) is classified as premium/non-premium correctly by classifyModel() (unchanged — these ids already match the current alias tier's regex loosely) AND has its EFFORT validated against what that specific model actually supports via classifyReferenceModel()/referenceEffortSupported() in hooks/lib/context.mjs, rather than against the current alias tier's (possibly wider) effort list. Source: live-docs.md §1, fetched 2026-09-23. Not part of `routing` — nothing routes here, they exist only for validation of an id someone already pinned.",
   "availabilityNote": "An entry with available:false is still classified, but an agent definition pinned to it is a finding. A model you cannot reach fails at spawn time with nothing having warned you beforehand, and the failure surfaces as a broken agent rather than as a configuration mistake. Set available:false for anything outside your plan.",
   "unknownIsPremium": true,
   "unknownNote": "A model matching no entry is treated as PREMIUM and flagged. Defaulting an unrecognised model to cheap would let a new top-tier model bypass the warrant and the cap on the day it ships — the exact window in which nobody has updated the table yet. Fail toward the expensive assumption; the cost of a spurious warrant is one line in a brief.",
@@ -190,6 +265,19 @@
     }
   },
   "routingNote": "Task weight 1-5 maps to a model AND an effort. Round DOWN when uncertain and escalate on failure; over-provisioning is a rule violation, not a safety margin. Weight 4 may take opus where blast radius warrants it. Nothing routes to fable — it is an exception, not a row.",
+  "ladder": [
+    { "rung": 1, "model": "haiku", "effort": null, "agent": "ac-haiku" },
+    { "rung": 2, "model": "sonnet", "effort": "low", "agent": "ac-sonnet-low" },
+    { "rung": 3, "model": "sonnet", "effort": "medium", "agent": "ac-sonnet-medium" },
+    { "rung": 4, "model": "sonnet", "effort": "high", "agent": "ac-sonnet-high" },
+    { "rung": 5, "model": "sonnet", "effort": "xhigh", "agent": "ac-sonnet-xhigh" },
+    { "rung": 6, "model": "opus", "effort": "low", "agent": "ac-opus-low" },
+    { "rung": 7, "model": "opus", "effort": "medium", "agent": "ac-opus-medium" },
+    { "rung": 8, "model": "opus", "effort": "high", "agent": "ac-opus-high" },
+    { "rung": 9, "model": "opus", "effort": "xhigh", "agent": "ac-opus-xhigh" },
+    { "rung": 10, "model": "opus", "effort": "max", "agent": "ac-opus-max" }
+  ],
+  "ladderNote": "The routing grid (weight x kind, floored by consequence) still picks (model, effort) exactly as before — this ladder does not change that logic, it is the ORDERED VIEW of the same (model, effort) pairs, cheapest to dearest, each mapped to a spawnable generic worker definition under agents/ (namespaced <plugin>:<agent> when spawned from outside this repo, e.g. agent-companion:ac-sonnet-medium) because the Agent tool has no per-spawn effort parameter — effort is locked to whichever definition's frontmatter is used. Fable is deliberately NOT a rung: it sits outside the ladder as a warranted exception (see the fable tier's warrantCriterion), never a routine destination. The CURRENT weight defaults (1-2 haiku, 3 sonnet/medium=rung 3, 4 sonnet/high=rung 4, 5 opus/xhigh=rung 9) are UNCHANGED by adding this view — see `routing` and `taskKinds` for what actually picks a rung; a pending research finding may revise those defaults later as a pure data edit, without touching the ladder shape itself. Consequence floors already raise the rung the same way they raise effort/model in effortFor(): `elevated` floors effort at `high` (>= rung 4 within whichever model the weight already picked), `critical` floors the model at opus AND the effort at xhigh (>= rung 9).",
   "taskKinds": {
     "mechanical": {
       "effortDelta": -1,

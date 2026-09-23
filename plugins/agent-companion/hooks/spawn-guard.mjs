@@ -367,6 +367,27 @@ try {
       spawnEffortSource = 'inherited';
     }
 
+    // effective_effort: what will ACTUALLY run, for joining against a
+    // transcript's own output_tokens later to get tokens-per-effort per
+    // model — session transcripts do not record effort themselves, so this
+    // is the only place that fact is captured. Two cases: the agent
+    // definition names one explicitly (same value as spawn_effort/
+    // definition above), or it does not, in which case the harness applies
+    // the MODEL's own API default — recorded as "unset(model-default:<level>)"
+    // rather than left null, so a later join can tell "ran at medium because
+    // nobody said otherwise" apart from "ran at medium because someone typed
+    // medium". Pulled from config/model-tiers.json's resolvesTo.defaultEffort
+    // (data, not hardcoded) so it stays correct as the lineup changes. A model
+    // that takes no effort parameter at all (haiku) has nothing to default.
+    let effectiveEffort = null;
+    if (def?.effort) {
+      effectiveEffort = def.effort;
+    } else if (!noEffortModel && model) {
+      const tierSpec = (modelTiers().tiers || {})[classifyModel(model).alias] || {};
+      const apiDefault = tierSpec.resolvesTo?.defaultEffort || null;
+      effectiveEffort = apiDefault ? `unset(model-default:${apiDefault})` : 'unset(model-default:unknown)';
+    }
+
     appendLog('spawns.jsonl', {
       at: new Date().toISOString(),
       session_id: sid,
@@ -389,6 +410,7 @@ try {
       caller_effort: callerEffort,        // the CALLER's effort — what v1 `effort` held
       spawn_effort: spawnEffort,          // the SPAWN's own effort
       spawn_effort_source: spawnEffortSource, // definition | inherited | none
+      effective_effort: effectiveEffort,      // definition value, "unset(model-default:<level>)", or null (no-effort model)
       effort_definition: def?.effort || null,
       declared_weight: declaredWeight,   // null when the brief did not say
       declared_kind: declaredKind,

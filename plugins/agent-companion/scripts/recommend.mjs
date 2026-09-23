@@ -15,7 +15,7 @@
 //   node recommend.mjs --type code-review --writer opus/xhigh
 //   add --json for machine-readable output
 
-import { modelTiers, effortFor, classifyModel, classifyEffort } from '../hooks/lib/context.mjs';
+import { modelTiers, effortFor, classifyModel, classifyEffort, rungFor } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -72,6 +72,18 @@ if (weight === 'parity') {
   out.rationale = r.rationale;
 }
 
+// Ladder rung: the ordered cheapest-to-dearest view of the same (model,
+// effort) pair, mapped to a spawnable generic worker definition — because the
+// Agent tool has no per-spawn effort parameter, effort is locked to whichever
+// definition's frontmatter is used. null when the result is fable (outside
+// the ladder by design) or otherwise unmapped.
+const rung = out.model !== 'fable' ? rungFor(out.model, out.effort) : null;
+if (rung) {
+  out.rung = rung.rung;
+  out.spawnAgent = rung.agent;
+  out.spawnAgentNamespaced = `agent-companion:${rung.agent}`;
+}
+
 const cls = classifyModel(out.model);
 out.premium = cls.premium;
 out.warrantRequired = cls.premium;
@@ -101,6 +113,11 @@ console.log(`recommendation: ${out.model}${eff}`);
 if (out.taskType) console.log(`task type:      ${out.taskType}`);
 console.log(`inputs:         weight=${out.weight} kind=${out.kind} consequence=${out.consequence}`);
 console.log(`why:            ${out.rationale}`);
+if (out.spawnAgentNamespaced) {
+  console.log(`spawn as:       subagent_type: "${out.spawnAgentNamespaced}"  (ladder rung ${out.rung}/10)`);
+} else if (out.model !== 'fable') {
+  console.log(`spawn as:       no ladder rung mapped for ${out.model}${out.effort ? '/' + out.effort : ''} — spawn with model="${out.model}"${out.effort ? ` and an agent definition carrying effort: ${out.effort}` : ''}`);
+}
 console.log(`reviewer:       ${out.reviewer.model} at effort ${out.reviewer.effort}`);
 if (out.warrantRequired) {
   console.log(`\nPREMIUM TIER — a warrant is required on the spawn brief:`);

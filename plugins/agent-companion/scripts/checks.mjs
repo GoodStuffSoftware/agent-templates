@@ -20,6 +20,7 @@ import { execFileSync, execSync } from 'node:child_process';
 
 import {
   classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir, opt, claudeDir,
+  referenceEffortSupported,
 } from '../hooks/lib/context.mjs';
 import {
   memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
@@ -245,8 +246,16 @@ const agentDefs = {
       // Effort availability is per-model. An effort a model does not accept is
       // not "less thinking" — it is a parameter that model ignores, so the
       // definition reads as a deliberate choice that has no effect.
+      //
+      // A definition pinned to an OLDER full/dated id (e.g. claude-opus-4-6)
+      // still matches the current "opus" tier's broad regex, whose effort
+      // list (low/medium/high/xhigh/max) is Opus 5.5's, not that older
+      // model's — Opus 4.6 has no xhigh. referenceEffortSupported() checks
+      // config's `referenceModels` first and returns null when the id
+      // matches none, so this falls back to the tier-based check unchanged
+      // for every alias and unpinned id.
       if (a.model && a.effort) {
-        const sup = effortSupported(a.model, a.effort);
+        const sup = referenceEffortSupported(a.model, a.effort) || effortSupported(a.model, a.effort);
         if (!sup.ok) findings.push(`${a.rel}: effort "${a.effort}" on "${a.model}" — ${sup.reason}`);
       }
     }
@@ -408,6 +417,23 @@ const spawnAudit = {
     }
     if (!rows.some((r) => /haiku/i.test(r.model || ''))) {
       findings.push('no haiku spawns recorded - the cheapest tier is going unused');
+    }
+    // Rung-level effort drift: right MODEL tier, but effort below the ladder
+    // rung the routing table recommended for the declared weight. `fit` from
+    // evaluateFit() already folds a model mismatch and an effort mismatch
+    // into one "under" verdict; this narrows to the effort-only case (model
+    // alias matches fit_expected's own model) so a genuinely under-tiered
+    // model is not double-counted here.
+    const effortOnlyUnder = declared.filter((r) => {
+      if (r.fit !== 'under' || !r.fit_expected || !r.model) return false;
+      const expModel = String(r.fit_expected).split('/')[0];
+      return classifyModel(r.model).alias === expModel;
+    });
+    if (effortOnlyUnder.length) {
+      findings.push(
+        `${effortOnlyUnder.length} spawn(s) ran at the right model but a lower effort than the recommended ` +
+        `ladder rung (e.g. sonnet/medium spawned where the table said sonnet/high) - see fit_expected per row`,
+      );
     }
     return {
       status: (inherited.length || rows.some((r) => r.fit === 'under')) ? 'warn' : 'ok',
