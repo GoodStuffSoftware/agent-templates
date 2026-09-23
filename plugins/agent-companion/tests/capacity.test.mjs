@@ -21,6 +21,8 @@ import {
   buildReport,
   formatText,
   formatHookLine,
+  isClaudeCodeSessionProcess,
+  isElectronDesktopProcess,
 } from '../scripts/capacity.mjs';
 
 const PLUGIN = 'agent-companion';
@@ -133,25 +135,126 @@ test('computeBudget: liveAgentProcesses defaults to null (probe skipped or faile
 });
 
 // ---------------------------------------------------------------------------
+// computeBudget: default perAgentMB (calibrated from real WorkingSetSize
+// measurements -- see the file header in scripts/capacity.mjs)
+// ---------------------------------------------------------------------------
+
+test('computeBudget: default perAgentMB is 350 (calibrated median), not the old 300 guess', () => {
+  const withDefault = computeBudget({ totalGB: 64, freeGB: 41 });
+  const explicit350 = computeBudget({ totalGB: 64, freeGB: 41, perAgentMB: 350 });
+  assert.equal(withDefault.perAgentMB, 350);
+  assert.equal(withDefault.concurrencyBudget, explicit350.concurrencyBudget);
+});
+
+// ---------------------------------------------------------------------------
+// Process matcher: Claude Code session vs. the Claude desktop (Electron) app
+// and its helpers. Synthetic executablePath/commandLine strings only -- the
+// real process table is never touched here. Shapes below are taken directly
+// from a real machine's process list (2026-09-23): 16 desktop/Electron
+// processes and 10 claude-code session processes, disambiguated only by
+// ExecutablePath/CommandLine, never by process Name alone (Name is
+// "claude.exe" for BOTH the desktop app and every session on Windows).
+// ---------------------------------------------------------------------------
+
+const WIN_SESSION = {
+  executablePath: String.raw`C:\Users\devuser\AppData\Roaming\Claude\claude-code\2.1.280\claude.exe`,
+  commandLine: String.raw`"C:\Users\devuser\AppData\Roaming\Claude\claude-code\2.1.280\claude.exe" --output-format stream-json`,
+};
+
+const WIN_DESKTOP_MAIN = {
+  executablePath: String.raw`C:\Program Files\WindowsApps\Claude_2.7032.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe`,
+  commandLine: String.raw`"C:\Program Files\WindowsApps\Claude_2.7032.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe" `,
+};
+
+const WIN_DESKTOP_HELPER = {
+  executablePath: String.raw`C:\Program Files\WindowsApps\Claude_2.7032.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe`,
+  commandLine: String.raw`"C:\Program Files\WindowsApps\Claude_2.7032.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe" --type=renderer --user-data-dir="C:\Users\devuser\AppData\Roaming\Claude"`,
+};
+
+const POSIX_SESSION_BINARY = {
+  commandLine: '/usr/local/bin/claude --output-format stream-json --print',
+};
+
+const POSIX_SESSION_NPM_PKG = {
+  commandLine: 'node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js --output-format stream-json',
+};
+
+const POSIX_ELECTRON_MAC = {
+  commandLine: '/Applications/Claude.app/Contents/MacOS/Claude',
+};
+
+const POSIX_ELECTRON_MAC_HELPER = {
+  commandLine: '/Applications/Claude.app/Contents/Frameworks/Claude Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer) --type=renderer',
+};
+
+const POSIX_UNRELATED = {
+  commandLine: '/usr/bin/node /opt/some-other-app/server.js --port 3000',
+};
+
+test('isClaudeCodeSessionProcess: matches a Windows claude-code session by ExecutablePath', () => {
+  assert.equal(isClaudeCodeSessionProcess(WIN_SESSION), true);
+});
+
+test('isClaudeCodeSessionProcess: excludes the Windows desktop Electron main process', () => {
+  assert.equal(isClaudeCodeSessionProcess(WIN_DESKTOP_MAIN), false);
+});
+
+test('isClaudeCodeSessionProcess: excludes a Windows desktop Electron helper (--type=renderer etc.)', () => {
+  assert.equal(isClaudeCodeSessionProcess(WIN_DESKTOP_HELPER), false);
+});
+
+test('isClaudeCodeSessionProcess: matches the POSIX claude CLI binary', () => {
+  assert.equal(isClaudeCodeSessionProcess(POSIX_SESSION_BINARY), true);
+});
+
+test('isClaudeCodeSessionProcess: matches a POSIX @anthropic-ai/claude-code npm invocation', () => {
+  assert.equal(isClaudeCodeSessionProcess(POSIX_SESSION_NPM_PKG), true);
+});
+
+test('isClaudeCodeSessionProcess: excludes the macOS desktop Electron app bundle', () => {
+  assert.equal(isClaudeCodeSessionProcess(POSIX_ELECTRON_MAC), false);
+});
+
+test('isClaudeCodeSessionProcess: excludes a macOS desktop Electron helper', () => {
+  assert.equal(isClaudeCodeSessionProcess(POSIX_ELECTRON_MAC_HELPER), false);
+});
+
+test('isClaudeCodeSessionProcess: an unrelated node process matches neither shape', () => {
+  assert.equal(isClaudeCodeSessionProcess(POSIX_UNRELATED), false);
+});
+
+test('isElectronDesktopProcess: true for Windows desktop main + helper, false for a session', () => {
+  assert.equal(isElectronDesktopProcess(WIN_DESKTOP_MAIN), true);
+  assert.equal(isElectronDesktopProcess(WIN_DESKTOP_HELPER), true);
+  assert.equal(isElectronDesktopProcess(WIN_SESSION), false);
+});
+
+test('isElectronDesktopProcess: true for macOS desktop bundle + helper, false for a session', () => {
+  assert.equal(isElectronDesktopProcess(POSIX_ELECTRON_MAC), true);
+  assert.equal(isElectronDesktopProcess(POSIX_ELECTRON_MAC_HELPER), true);
+  assert.equal(isElectronDesktopProcess(POSIX_SESSION_BINARY), false);
+});
+
+// ---------------------------------------------------------------------------
 // formatText / formatHookLine
 // ---------------------------------------------------------------------------
 
-test('formatText: renders GB, cpu count, agent count and policy', () => {
+test('formatText: renders GB, cpu count, session count and policy', () => {
   const r = computeBudget({ totalGB: 32, freeGB: 20, cpuCount: 8, perAgentMB: 300, concurrencyThreshold: 12 });
   r.liveAgentProcesses = 4;
   const text = formatText(r);
   assert.match(text, /32 GB total/);
   assert.match(text, /20 GB free/);
   assert.match(text, /8 cpus/);
-  assert.match(text, /4 live agent process/);
-  assert.match(text, new RegExp(`budget ${r.concurrencyBudget} concurrent agents`));
+  assert.match(text, /4 live Claude Code session process/);
+  assert.match(text, new RegExp(`budget ${r.concurrencyBudget} concurrent sessions`));
   assert.match(text, /idle-teammates-ok/);
 });
 
 test('formatText: renders "unknown" when the process count is null', () => {
   const r = computeBudget({ totalGB: 32, freeGB: 20 });
   const text = formatText(r);
-  assert.match(text, /unknown live agent process/);
+  assert.match(text, /unknown live Claude Code session process/);
 });
 
 test('formatHookLine: short, prefixed, and matches the plugin’s existing SessionStart line style', () => {
@@ -160,7 +263,7 @@ test('formatHookLine: short, prefixed, and matches the plugin’s existing Sessi
   assert.match(line, /^\[agent-companion\] capacity: /);
   assert.match(line, /64 GB total/);
   assert.match(line, /41 GB free/);
-  assert.match(line, new RegExp(`budget ${r.concurrencyBudget} concurrent agents`));
+  assert.match(line, new RegExp(`budget ${r.concurrencyBudget} concurrent Claude Code sessions`));
   assert.match(line, /idle teammates OK/);
   assert.ok(line.length < 200, `hook line should stay compact, got ${line.length} chars: ${line}`);
 });
@@ -242,7 +345,7 @@ test('CLI: --text prints a single human-readable line, not JSON', () => {
   assert.equal(res.json, null, 'text output should not parse as JSON');
   assert.match(out, /GB total/);
   assert.match(out, /GB free/);
-  assert.match(out, /concurrent agents/);
+  assert.match(out, /concurrent sessions/);
 });
 
 test('CLI: --per-agent-mb / --headroom-gb / --threshold flags apply', () => {

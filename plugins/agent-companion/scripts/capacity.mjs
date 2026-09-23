@@ -1,23 +1,49 @@
 #!/usr/bin/env node
 // Machine-capacity probe -- a cheap, dependency-free estimate of how many
-// concurrent subagents this machine can reasonably carry right now.
+// concurrent Claude Code SESSIONS this machine can reasonably carry right
+// now.
+//
+// What the budget counts, precisely: OS-level Claude Code session processes
+// -- the top-level `claude` process for each running session (main threads,
+// and split-pane teammates, which are each "a full, independent Claude Code
+// session" per code.claude.com/docs/en/agent-teams.md). It does NOT count
+// in-process teammates or ordinary subagents individually: per that same
+// doc, in-process teammates "run inside your main terminal" and a teammate's
+// own subagents "run in the foreground, because a teammate's background work
+// can't outlive the lead's process" -- i.e. they share their parent
+// session's OS process and its memory footprint rather than costing a
+// process of their own. So perAgentMB is calibrated against, and the whole
+// budget describes, concurrent SESSION processes; fanning out many in-process
+// subagents/teammates inside one session shows up as that one session's RSS
+// growing, not as additional counted processes.
 //
 // This is a GUESS, not a scheduler. It reads os.totalmem()/os.freemem()
 // (works on Windows too -- freemem() reports the OS "available" counter,
 // not just unused pages, which is the number that matters for "can I start
 // another process") plus cpu/parallelism, converts free memory into a
-// concurrency budget using a per-agent memory estimate, and classifies the
+// concurrency budget using a per-session memory estimate, and classifies the
 // result into a short policy string the SessionStart hook (and the operator)
 // can act on without doing the arithmetic themselves.
 //
 // Everything that touches the real machine is isolated behind two functions
 // -- collectSystemStats() and countLiveAgentProcesses() -- so tests exercise
 // the actual decision logic (computeBudget/buildReport) with synthetic
-// inputs and never depend on the machine they happen to run on.
+// inputs and never depend on the machine they happen to run on. The process
+// MATCHER (isClaudeCodeSessionProcess/isElectronDesktopProcess) is exported
+// separately so it too can be tested with synthetic path/command-line
+// strings for both platforms without touching the real process table.
 //
-// Process counting is best-effort and OS-specific (wmic on Windows, ps
-// elsewhere). It is never allowed to throw or hang the caller: a short
-// timeout plus a catch-all means a failure here degrades to
+// perAgentMB default: measured on a live desktop machine running 10 real
+// Claude Code sessions (2026-09-23) via WorkingSetSize -- min 219MB, median
+// 346MB, max 679MB. 350 (rounded up from the median) replaces the earlier
+// 300MB placeholder; see the commit that introduced this comment for the
+// full measurement. Session RSS varies a lot with context size and how much
+// in-process subagent/teammate work that session is carrying, so this stays
+// a rough default, overridable via capacity_per_agent_mb / --per-agent-mb.
+//
+// Process counting is best-effort and OS-specific (PowerShell + WMI on
+// Windows, ps elsewhere). It is never allowed to throw or hang the caller: a
+// short timeout plus a catch-all means a failure here degrades to
 // liveAgentProcesses: null, not a broken probe.
 
 import { totalmem, freemem, cpus, availableParallelism as osAvailableParallelism } from 'node:os';
@@ -38,10 +64,10 @@ export function computeHeadroomGB(totalGB, { minGB = 4, fraction = 0.25 } = {}) 
   return Math.max(minGB, totalGB * fraction);
 }
 
-// budget = floor((free - headroom) / perAgent), clamped to >= 1. A machine
+// budget = floor((free - headroom) / perSession), clamped to >= 1. A machine
 // that is technically over its headroom still gets a budget of 1 -- "you can
 // run one more, carefully" is a more useful answer than "zero", which reads
-// as "do not spawn anything" when the real situation is "spawn cautiously".
+// as "do not start anything" when the real situation is "start cautiously".
 export function computeConcurrencyBudget(freeGB, headroomGB, perAgentGB) {
   const usable = freeGB - headroomGB;
   const raw = Math.floor(usable / perAgentGB);
@@ -68,7 +94,7 @@ export function computeBudget({
   cpuCount = null,
   availableParallelism = null,
   liveAgentProcesses = null,
-  perAgentMB = 300,
+  perAgentMB = 350,
   headroomGB = null,
   concurrencyThreshold = 12,
 }) {
@@ -117,19 +143,67 @@ export function collectSystemStats() {
   return { totalBytes, freeBytes, cpuCount, availableParallelism };
 }
 
-// Best-effort count of currently-running Claude Code agent processes.
-// Windows: PowerShell + Get-CimInstance Win32_Process, filtered to node.exe,
-// projecting CommandLine. Name alone (tasklist) cannot distinguish a Claude
-// Code agent from any other node.exe process, so the command line is what is
-// actually needed. wmic (the traditional source for this) is absent on
-// current Windows builds; Get-CimInstance is its supported replacement and
-// needs no elevation. If PowerShell itself is unavailable, this fails to
-// null rather than guessing from Name alone.
-// POSIX: `ps -eo args` grepped for a claude CLI invocation.
+// ---------------------------------------------------------------------------
+// Process matcher. A Claude Code SESSION process vs. the Claude desktop
+// (Electron) app and its helper processes -- measured against this machine's
+// real process table (2026-09-23):
+//
+//   - Session:  <home>\AppData\Roaming\Claude\claude-code\<version>\claude.exe
+//               (Windows), or a `claude` CLI / `@anthropic-ai/claude-code`
+//               invocation on POSIX.
+//   - Desktop:  <install>\WindowsApps\Claude_<version>...\app\Claude.exe on
+//               Windows, or a `*.app/Contents/...` bundle on macOS, PLUS its
+//               Electron helper processes (crashpad-handler, gpu-process,
+//               utility, renderer, ...), all of which carry a `--type=...`
+//               flag and none of which are session processes.
+//
+// Both matchers take {executablePath, commandLine} so a caller with only one
+// of the two (POSIX `ps` gives a command line but no separate executable
+// path) still works -- exported separately from countLiveAgentProcesses so
+// tests can exercise them with synthetic strings for both platforms without
+// touching the real process table.
+export function isElectronDesktopProcess({ executablePath = '', commandLine = '' } = {}) {
+  const path = String(executablePath || '');
+  const cmd = String(commandLine || '');
+  if (/[\\/]WindowsApps[\\/]Claude_/i.test(path)) return true; // Windows Store install path
+  if (/\.app[\\/]Contents[\\/]/i.test(path) || /\.app[\\/]Contents[\\/]/i.test(cmd)) return true; // macOS bundle
+  if (/--type=/.test(cmd)) return true; // Electron helper flag: crashpad-handler/gpu-process/utility/renderer/...
+  return false;
+}
+
+export function isClaudeCodeSessionProcess({ executablePath = '', commandLine = '' } = {}) {
+  if (isElectronDesktopProcess({ executablePath, commandLine })) return false;
+  const path = String(executablePath || '');
+  const cmd = String(commandLine || '');
+  // Windows: .../claude-code/<version>/claude.exe (forward or back slashes).
+  if (/[\\/]claude-code[\\/][^\\/]+[\\/]claude\.exe$/i.test(path.trim())) return true;
+  // POSIX / any platform: an @anthropic-ai/claude-code install path anywhere
+  // in the executable path or command line ...
+  if (/claude-code/i.test(path) || /claude-code/i.test(cmd)) return true;
+  // ... or the bare `claude` CLI binary/shim as the invoked command (first
+  // path segment before the first space/EOL is exactly "claude").
+  if (/(^|[\\/])claude(\s|$)/i.test(cmd.trim())) return true;
+  return false;
+}
+
+// Best-effort count of currently-running Claude Code SESSION processes (see
+// the matcher block above for exactly what counts). Excludes the Claude
+// desktop app and its Electron helper processes.
+//
+// Windows: PowerShell + Get-CimInstance Win32_Process, filtered to
+// Name='claude.exe' (matches the session binary AND the desktop app's
+// Claude.exe -- WMI name matching is case-insensitive on Windows -- so the
+// matcher above does the real discrimination), projecting both
+// ExecutablePath and CommandLine as JSON. `wmic` (the traditional source for
+// this) is absent on current Windows builds; Get-CimInstance is its
+// supported replacement and needs no elevation. If PowerShell itself is
+// unavailable, this fails to null rather than guessing from Name alone.
+//
+// POSIX: `ps -eo args` grepped through the same matcher (command line only;
+// there is no separate ExecutablePath column here).
+//
 // Hard timeout so a slow or hung process-listing tool can never stall a
 // SessionStart hook or a probe run -- this must degrade to null, never hang.
-const AGENT_CMDLINE_PATTERN = /claude[-_]?code|anthropic-ai.claude-code|\bclaude\.(js|mjs|cmd|exe)\b/i;
-
 export function countLiveAgentProcesses({ timeoutMs = 1500 } = {}) {
   try {
     if (process.platform === 'win32') {
@@ -137,17 +211,24 @@ export function countLiveAgentProcesses({ timeoutMs = 1500 } = {}) {
         'powershell',
         [
           '-NoProfile', '-NonInteractive', '-Command',
-          'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Select-Object -ExpandProperty CommandLine',
+          "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" "
+          + '| Select-Object ExecutablePath,CommandLine | ConvertTo-Json -Compress',
         ],
         { encoding: 'utf8', timeout: timeoutMs, windowsHide: true },
       );
-      const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      const hits = lines.filter((l) => AGENT_CMDLINE_PATTERN.test(l));
-      return hits.length;
+      const trimmed = out.trim();
+      if (!trimmed) return 0;
+      let parsed;
+      try { parsed = JSON.parse(trimmed); } catch { return null; } // malformed output: do not guess
+      const rows = Array.isArray(parsed) ? parsed : [parsed];
+      return rows.filter((r) => isClaudeCodeSessionProcess({
+        executablePath: r?.ExecutablePath, commandLine: r?.CommandLine,
+      })).length;
     }
     const out = execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8', timeout: timeoutMs });
     const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const hits = lines.filter((l) => AGENT_CMDLINE_PATTERN.test(l) && !/\bps\s+-eo\b/.test(l));
+    const hits = lines.filter((l) => !/^COMMAND$/i.test(l) && !/\bps\s+-eo\b/.test(l)
+      && isClaudeCodeSessionProcess({ commandLine: l }));
     return hits.length;
   } catch {
     return null; // no tool available, timed out, or denied -- best effort only
@@ -172,7 +253,7 @@ export function buildReport({
     : null;
 
   const optHeadroom = opt('capacity_headroom_gb', 0);
-  const resolvedPerAgentMB = perAgentMB ?? opt('capacity_per_agent_mb', 300);
+  const resolvedPerAgentMB = perAgentMB ?? opt('capacity_per_agent_mb', 350);
   const resolvedHeadroomGB = headroomGB ?? (optHeadroom > 0 ? optHeadroom : null);
   const resolvedThreshold = concurrencyThreshold ?? opt('capacity_concurrency_threshold', 12);
 
@@ -189,20 +270,23 @@ export function buildReport({
 }
 
 export function formatText(report) {
-  const agents = report.liveAgentProcesses == null ? 'unknown' : String(report.liveAgentProcesses);
+  const sessions = report.liveAgentProcesses == null ? 'unknown' : String(report.liveAgentProcesses);
   return `${report.totalGB} GB total, ${report.freeGB} GB free, ${report.cpus ?? '?'} cpus, `
-    + `${agents} live agent process(es) -> budget ${report.concurrencyBudget} concurrent agents `
+    + `${sessions} live Claude Code session process(es) -> budget ${report.concurrencyBudget} concurrent sessions `
     + `(${report.policy})`;
 }
 
 // Short line for the SessionStart context, matching the style of the other
 // "[agent-companion] ..." lines the plugin already injects (scout-surface,
 // memory-budget). Deliberately compact -- this shares an instruction budget
-// with the other hooks firing at the same event.
+// with the other hooks firing at the same event. Says "sessions", not
+// "agents": the budget counts OS-level Claude Code session processes, not
+// in-process subagents/teammates, which share their parent session's process
+// and memory instead of costing one of their own -- see the file header.
 export function formatHookLine(report) {
   const policyLabel = report.policy === 'idle-teammates-ok' ? 'idle teammates OK' : 'stop teammates between rounds';
   return `[agent-companion] capacity: ${report.totalGB} GB total, ${report.freeGB} GB free `
-    + `-> budget ${report.concurrencyBudget} concurrent agents; ${policyLabel}`;
+    + `-> budget ${report.concurrencyBudget} concurrent Claude Code sessions; ${policyLabel}`;
 }
 
 // ---------------------------------------------------------------------------

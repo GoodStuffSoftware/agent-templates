@@ -249,14 +249,14 @@
     "capacity_probe": {
       "type": "boolean",
       "title": "Machine capacity probe",
-      "description": "At session start, surface a compact line estimating how many concurrent subagents this machine can carry right now, derived from free memory, cpu count, and (best-effort) a count of live agent processes. Read-only and cheap; wrapped so a slow or failing probe never blocks the hook.",
+      "description": "At session start, surface a compact line estimating how many concurrent Claude Code SESSIONS this machine can carry right now, derived from free memory, cpu count, and (best-effort) a count of live Claude Code session processes (excludes the desktop app and its Electron helpers; does not separately count in-process subagents/teammates, which share their parent session’s process and memory). Read-only and cheap; wrapped so a slow or failing probe never blocks the hook.",
       "default": true
     },
     "capacity_per_agent_mb": {
       "type": "number",
-      "title": "Per-agent memory estimate (MB)",
-      "description": "How much resident memory one subagent is assumed to cost. Used to convert free memory into a concurrency budget: floor((free - headroom) / perAgent).",
-      "default": 300
+      "title": "Per-session memory estimate (MB)",
+      "description": "How much resident memory one Claude Code session process is assumed to cost. Used to convert free memory into a concurrency budget: floor((free - headroom) / perSession). Default 350, calibrated from WorkingSetSize on a real machine running 10 sessions (2026-09-23): min 219MB, median 346MB, max 679MB — replaces an earlier untested 300MB guess. Does not separately budget for in-process subagents/teammates: they run inside their parent session’s process, so heavy in-process fan-out shows up as that session needing a bigger estimate here, not as more sessions.",
+      "default": 350
     },
     "capacity_headroom_gb": {
       "type": "number",
