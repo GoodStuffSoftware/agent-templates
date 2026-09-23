@@ -151,31 +151,39 @@ export async function defaultCheckVisibility(owner, repo, { fetchFn = globalThis
 
 // Wrap a checkVisibility function with a cache (`cache` is a plain object,
 // persisted by the caller — detect.mjs keeps it in baseline.json):
-//   * a KNOWN answer (true/false) is reused for `ttlMs` (default 24h), so a
-//     warm run makes no API calls and an unauthenticated one stays under
-//     the 60 requests/hour limit;
+//   * ONLY a PUBLIC answer (true) is cached, and reused for `ttlMs`
+//     (default 24h) — a warm run makes no API call for a repo already known
+//     public, which keeps an unauthenticated run under 60 requests/hour;
+//   * a NOT-PUBLIC answer (false) is never cached: a repo that is not known
+//     public is rechecked on EVERY run, so a repo the operator makes public
+//     is swept on the very next run, not up to a day later. A false answer
+//     also drops any cached true for that repo (it went private);
 //   * an UNKNOWN answer (null: offline, rate-limited, API error) is never
-//     cached — it is retried next run — and is counted in `stats.unknown`
-//     so the caller can say how many candidates went unswept. If an expired
-//     KNOWN answer exists, it is returned instead of null (a repo last seen
-//     public keeps being swept through a transient outage), but the lookup
-//     still counts as unknown.
+//     cached either — it is retried next run — and is counted in
+//     `stats.unknown` so the caller can say how many candidates went
+//     unswept. If an expired cached true exists, it is returned instead of
+//     null (a repo last seen public keeps being swept through a transient
+//     outage), but the lookup still counts as unknown.
 // Returns { check(owner, repo) -> Promise<boolean|null>, stats }.
 export function cachedVisibility(checkFn = defaultCheckVisibility, cache = {}, { ttlMs = 24 * 60 * 60 * 1000, now = () => Date.now() } = {}) {
   const stats = { unknown: 0, cached: 0, fetched: 0 };
   const check = async (owner, repo) => {
     const key = `${owner}/${repo}`.toLowerCase();
     const prev = cache[key];
-    const fresh = prev && typeof prev.public === 'boolean' && now() - Date.parse(prev.at) < ttlMs;
-    if (fresh) { stats.cached++; return prev.public; }
+    const knownPublic = !!prev && prev.public === true;
+    if (knownPublic && now() - Date.parse(prev.at) < ttlMs) { stats.cached++; return true; }
     const v = await checkFn(owner, repo);
     stats.fetched++;
-    if (v === true || v === false) {
-      cache[key] = { public: v, at: new Date(now()).toISOString() };
-      return v;
+    if (v === true) {
+      cache[key] = { public: true, at: new Date(now()).toISOString() };
+      return true;
+    }
+    if (v === false) {
+      delete cache[key]; // never cache not-public; drop a stale true
+      return false;
     }
     stats.unknown++;
-    return prev && typeof prev.public === 'boolean' ? prev.public : null;
+    return knownPublic ? true : null;
   };
   return { check, stats };
 }

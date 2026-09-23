@@ -265,9 +265,10 @@ try {
 // owned + org-member, skipping archived/forks) UNIONED with local checkouts
 // under the dev root whose origin is a public GitHub repo — see
 // repo-discovery.mjs. The gh LIST is cached for 24h (baseline) since it can
-// span dozens of repos and gh is rate-limited; each LOCAL CHECKOUT's
-// visibility is rechecked every run regardless (cheap, one call each) so a
-// repo newly turned public is never delayed by the cache. publication_leak_repos
+// span dozens of repos and gh is rate-limited. A LOCAL CHECKOUT not already
+// known public has its visibility rechecked on every run (only a public
+// answer is cached — see cachedVisibility()), so a repo newly turned public
+// is swept on the next run, never delayed by a cache. publication_leak_repos
 // adds repos discovery would miss and excludes ones (via `!entry`) it
 // shouldn't cover. Each covered repo's origin default branch is fetched into
 // a throwaway clone and scanned by the plugin's own generic checker plus its
@@ -288,10 +289,11 @@ const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
 let publicationRepos = [];
 let publicationPublicNames = []; // every discovered-public name — exempt from the derived-name class (see repo-discovery.mjs's publicNameTokens)
 let publicationAllowedOwners = new Set(); // item 2: the authenticated user + their orgs — gates target-script execution
-// Visibility results are cached in the baseline: a KNOWN answer (public or
-// not) for 24h, an unknown one never (retried next run). Keeps a run under
-// the 60 req/h unauthenticated API limit once warm. Cost: a repo that turns
-// public is picked up within a day rather than on the very next run.
+// Visibility results are cached in the baseline, but ONLY a public answer
+// (for 24h): not-public and unknown answers are never cached, so a repo that
+// is not known public is rechecked on every run and one that turns public is
+// swept on the very next run. A warm run only calls the API for repos not
+// (yet) known public.
 // A candidate whose visibility could not be determined (offline,
 // rate-limited, API error) is NOT swept — never assumed public — so the
 // count is surfaced as its own signal below instead of silently dropping.
@@ -373,8 +375,8 @@ if (publicationSweepOn && cloud) {
     );
     publicationAllowedOwners = allowedOwners;
 
-    // Local visibility goes through `visibility` (known answers cached 24h,
-    // unknown ones retried every run — see above).
+    // Local visibility goes through `visibility` (public answers cached
+    // 24h; not-public and unknown ones rechecked every run — see above).
     //
     // PRIMARY: ~/.claude.json's `projects` map — real paths Claude Code has
     // actually worked in. AGENT_COMPANION_DISCOVERY_CLAUDE_JSON overrides the

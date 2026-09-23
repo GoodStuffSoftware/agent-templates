@@ -473,7 +473,7 @@ the legacy-data import, and the schema.
 | `telemetry/brevity.jsonl` | state root | one row per `SubagentStart` self-heal and per `SubagentStop`: agent type, report length, whether the contract was on, whether it was gated |
 | `state/delegation-streak.json` | state root | per-session main-thread streak counter |
 | `state/premium-window.json` | state root | rolling window used to approximate premium concurrency |
-| `state/baseline.json` | state root | previous harness version + counters, for daily drift detection; also the publication-leak sweep's per-repo hit fingerprints (keyed HMACs, not guessable hashes), so an accepted finding doesn't re-fire daily, and its repo-visibility cache (known answers kept 24h, unknown ones retried) |
+| `state/baseline.json` | state root | previous harness version + counters, for daily drift detection; also the publication-leak sweep's per-repo hit fingerprints (keyed HMACs, not guessable hashes), so an accepted finding doesn't re-fire daily, and its repo-visibility cache (only public answers kept, for 24h; not-public and unknown ones are rechecked every run, so a repo made public is swept on the next run) |
 | `leak-fingerprint.key` | state root | per-machine random key for those hit fingerprints, created on the first sweep (owner-only permissions) |
 | `state/scout-latest.json` | state root | most recent calibration-scout result (overwritten each run) |
 | `state/scout-history.jsonl` | state root | append-only: one line per scout run |

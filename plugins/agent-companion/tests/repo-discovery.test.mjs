@@ -146,7 +146,7 @@ test('defaultDevRoots: never returns the home dir itself', () => {
 
 // --- second adversarial review: M5 (visibility unknown), L3 (dev root) ----
 
-test('M5: cachedVisibility caches KNOWN answers for the TTL, never unknown ones, and counts unknowns', async () => {
+test('M5/N3: cachedVisibility caches only PUBLIC answers for the TTL, never not-public or unknown ones, and counts unknowns', async () => {
   const { cachedVisibility } = await import('../scripts/lib/repo-discovery.mjs');
   let calls = 0;
   const answers = { 'zb/pub': true, 'zb/priv': false, 'zb/offline': null };
@@ -159,14 +159,14 @@ test('M5: cachedVisibility caches KNOWN answers for the TTL, never unknown ones,
   assert.equal(await v.check('zb', 'offline'), null);
   assert.equal(calls, 3);
   assert.equal(v.stats.unknown, 1);
-  assert.deepEqual(Object.keys(cache).sort(), ['zb/priv', 'zb/pub'], 'unknown is never cached');
+  assert.deepEqual(Object.keys(cache).sort(), ['zb/pub'], 'N3: only a public answer is cached — not-public and unknown never are');
 
-  // Second run within the TTL: known answers come from the cache (0 calls),
-  // the unknown one is retried.
+  // Second run within the TTL: the public answer comes from the cache; the
+  // not-public (N3) and unknown ones are both rechecked.
   const v2 = cachedVisibility(fn, cache, { now: () => t + 60 * 60 * 1000 });
   await v2.check('zb', 'pub'); await v2.check('zb', 'priv'); await v2.check('zb', 'offline');
-  assert.equal(calls, 4, 'only the unknown repo was re-fetched');
-  assert.equal(v2.stats.cached, 2);
+  assert.equal(calls, 5, 'the not-public and the unknown repo were re-fetched; the public one was not');
+  assert.equal(v2.stats.cached, 1);
   assert.equal(v2.stats.unknown, 1);
 
   // After the TTL a known answer is re-fetched; if that fetch fails, the
@@ -176,6 +176,32 @@ test('M5: cachedVisibility caches KNOWN answers for the TTL, never unknown ones,
   const v3 = cachedVisibility(fn, cache, { now: () => t });
   assert.equal(await v3.check('zb', 'pub'), true, 'stale-but-known public keeps being swept through an outage');
   assert.equal(v3.stats.unknown, 1);
+});
+
+test('N3: a repo that turns public is seen as public on the NEXT run — a not-public answer is never cached', async () => {
+  const { cachedVisibility } = await import('../scripts/lib/repo-discovery.mjs');
+  let isPublic = false;
+  let calls = 0;
+  const fn = async () => { calls++; return isPublic; };
+  const cache = {};
+  const t = Date.parse('2026-01-01T00:00:00Z');
+  assert.equal(await cachedVisibility(fn, cache, { now: () => t }).check('myorg', 'zbnewpub'), false);
+  assert.deepEqual(cache, {}, 'false is never cached');
+  isPublic = true; // operator flips it public one minute later
+  assert.equal(await cachedVisibility(fn, cache, { now: () => t + 60 * 1000 }).check('myorg', 'zbnewpub'), true);
+  assert.equal(calls, 2, 'the second run rechecked instead of reusing a cached false');
+  assert.equal(cache['myorg/zbnewpub'].public, true);
+});
+
+test('N3: a pre-existing cached false (old baseline) is ignored and a public answer replaces it; a false answer drops a stale true', async () => {
+  const { cachedVisibility } = await import('../scripts/lib/repo-discovery.mjs');
+  const t = Date.parse('2026-01-01T00:00:00Z');
+  const cache = { 'myorg/zbold': { public: false, at: new Date(t).toISOString() } };
+  assert.equal(await cachedVisibility(async () => true, cache, { now: () => t + 1000 }).check('myorg', 'zbold'), true);
+  assert.equal(cache['myorg/zbold'].public, true);
+  const later = t + 25 * 60 * 60 * 1000;
+  assert.equal(await cachedVisibility(async () => false, cache, { now: () => later }).check('myorg', 'zbold'), false);
+  assert.equal(cache['myorg/zbold'], undefined, 'a repo that went private loses its cached true');
 });
 
 test('M5: discovery with unknown visibility sweeps nothing but the caller can see the count', async () => {
