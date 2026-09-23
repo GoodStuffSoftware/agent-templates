@@ -177,7 +177,11 @@ function runCli(scanRoot, extraArgs = [], env = {}) {
 
 function scanTree(files) {
   const root = tmp("scan");
-  for (const [name, body] of Object.entries(files)) writeFileSync(join(root, name), body);
+  for (const [name, body] of Object.entries(files)) {
+    const full = join(root, name);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, body);
+  }
   return root;
 }
 
@@ -233,4 +237,49 @@ test("CLI: --no-derived skips derivation but keeps path checks", () => {
   assert.equal(r.code, 1);
   assert.doesNotMatch(r.err, /derived-project-name/);
   assert.match(r.err, /private-path:macos-home/);
+});
+
+test("CLI: --own-names exempts a PUBLIC sibling name (not a leak) but a different derived name still fires", () => {
+  const { dev, projects } = fakeWorld();
+  const args = ["--dev-root", dev, "--claude-projects", projects, "--user", FAKE_USER];
+  // "snorfblat" and "zorvex-quill" are both real derived names in this fixture
+  // world (see fakeWorld()/TOKENS below). --own-names marks "snorfblat" as a
+  // known-PUBLIC name (e.g. a sibling repo discovery already confirmed) —
+  // it must stop firing, while "zorvex-quill" (not in --own-names) still does.
+  const r = runCli(
+    scanTree({ "a.md": "mentions snorfblat and also zorvex-quill\n" }),
+    [...args, "--own-names", "snorfblat"],
+  );
+  assert.equal(r.code, 1);
+  assert.doesNotMatch(r.err, /\[derived-project-name\]\s+snorfblat/, "a --own-names entry must not fire as a leak");
+  assert.match(r.err, /\[derived-project-name\]\s+zorvex-quill/, "an unrelated derived name must still fire");
+});
+
+test("CLI: LEAK_CHECK_OWN_NAMES env does the same as --own-names", () => {
+  const { dev, projects } = fakeWorld();
+  const args = ["--dev-root", dev, "--claude-projects", projects, "--user", FAKE_USER];
+  const r = runCli(scanTree({ "a.md": "snorfblat only\n" }), args, { LEAK_CHECK_OWN_NAMES: "snorfblat" });
+  assert.equal(r.code, 0, r.err);
+});
+
+test("CLI: vendor/minified/lockfile paths are skipped for every class, including git-sha-like", () => {
+  const missing = join(tmp("none"), "nope");
+  const args = ["--dev-root", missing, "--claude-projects", missing, "--user", "runner"];
+  // 40 hex chars, assembled from 2-char pieces so no contiguous hex run of
+  // 7+ chars ever appears literally in THIS file's own source (this file is
+  // itself scanned by the whole-repo leak-check — see the header note).
+  const leakyHex = ["01", "23", "45", "67", "89", "ab", "cd", "ef", "01", "23", "45", "67", "89", "ab", "cd", "ef", "01", "23", "45", "67"].join("");
+  const r = runCli(scanTree({
+    "vendor/lib.js": `const h = "${leakyHex}";\n`,
+    "node_modules/pkg/index.js": `const h = "${leakyHex}";\n`,
+    "dist/bundle.min.js": `const h = "${leakyHex}";\n`,
+    "package-lock.json": `{"h": "${leakyHex}"}\n`,
+    "src/real.js": `const h = "${leakyHex}";\n`,
+  }), args);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /src\/real\.js/, "a normal source file must still be scanned");
+  assert.doesNotMatch(r.err, /vendor\/lib\.js/);
+  assert.doesNotMatch(r.err, /node_modules\/pkg\/index\.js/);
+  assert.doesNotMatch(r.err, /dist\/bundle\.min\.js/);
+  assert.doesNotMatch(r.err, /package-lock\.json/);
 });

@@ -361,6 +361,58 @@ test('detect.mjs: publication_leak_repos excludes (!entry) remove a discovered r
   } finally { cleanup(); }
 });
 
+test('sweepRepo: publicNames exempts a PUBLIC sibling name from BOTH checkers, but a private-looking derived name still fires', async () => {
+  // Both names must be DERIVABLE in the first place (real child dirs of a
+  // dev root) for this to test the exemption rather than trivially passing
+  // because neither was ever a candidate.
+  const devRootDir = mkdtempSync(join(tmpdir(), 'ac-pubsweep-devroot-'));
+  const PUBLIC_NAME = 'zzzpublicsiblingproj';
+  const PRIVATE_NAME = 'zzzprivateonlyproj';
+  mkdirSync(join(devRootDir, PUBLIC_NAME), { recursive: true });
+  mkdirSync(join(devRootDir, PRIVATE_NAME), { recursive: true });
+  const repo = buildLeakyRepo(`mentions our sibling ${PUBLIC_NAME} here\nand also a private name: ${PRIVATE_NAME}\n`);
+  try {
+    const result = await sweepRepo(repo.bareDir, {
+      devRoots: [devRootDir],
+      publicNames: [PUBLIC_NAME, `example-org/${PUBLIC_NAME}`],
+    });
+    assert.equal(result.error, null);
+    assert.ok(
+      !result.hits.some((h) => h.label === 'derived-project-name' && h.token.toLowerCase() === PUBLIC_NAME),
+      'a discovered-public sibling name must never fire as a leak',
+    );
+    assert.ok(
+      result.hits.some((h) => h.label === 'derived-project-name' && h.token.toLowerCase() === PRIVATE_NAME),
+      'a derived name NOT in publicNames must still fire — proves the fixture actually exercises the derived-name class',
+    );
+  } finally { repo.cleanup(); rmSync(devRootDir, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
+test('leak-scan-core scanRepo: vendor/minified/lockfile paths are skipped for every class', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'ac-corevendor-'));
+  try {
+    // Assembled from 2-char pieces — no contiguous 7+ char hex run appears
+    // literally in this file's own source (it is itself leak-checked).
+    const leakyHex = ['01', '23', '45', '67', '89', 'ab', 'cd', 'ef', '01', '23', '45', '67', '89', 'ab', 'cd', 'ef', '01', '23', '45', '67'].join('');
+    mkdirSync(join(base, 'vendor'), { recursive: true });
+    mkdirSync(join(base, 'dist'), { recursive: true });
+    writeFileSync(join(base, 'vendor', 'lib.js'), `const h = "${leakyHex}";\n`);
+    writeFileSync(join(base, 'dist', 'bundle.min.js'), `const h = "${leakyHex}";\n`);
+    writeFileSync(join(base, 'package-lock.json'), `{"h":"${leakyHex}"}\n`);
+    writeFileSync(join(base, 'real.js'), `const h = "${leakyHex}";\n`);
+    git(['init', '--quiet', '-b', 'main'], base);
+    git(['add', '-A'], base, { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' });
+    git(['commit', '--quiet', '-m', 'init'], base, { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' });
+    const { scanRepo } = await import('../scripts/lib/leak-scan-core.mjs');
+    const { hits } = scanRepo({ root: base, devRoots: [], noDerived: true });
+    const rels = hits.map((h) => h.rel);
+    assert.ok(rels.includes('real.js'));
+    assert.ok(!rels.includes('vendor/lib.js'));
+    assert.ok(!rels.includes('dist/bundle.min.js'));
+    assert.ok(!rels.includes('package-lock.json'));
+  } finally { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
 test('leak-sweep-canary.mjs: full mode passes', () => {
   const res = spawnSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'leak-sweep-canary.mjs')], {
     encoding: 'utf8', timeout: 60000,

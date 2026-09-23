@@ -18,7 +18,7 @@ import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
 import { sweepAll, sweepAllCloud, filterNew, normalizeGitUrl } from './lib/publication-sweep.mjs';
 import {
-  discoverViaGh, discoverFromClaudeProjects, discoverLocalCheckouts, defaultDevRoots, parseExtraSpec,
+  discoverViaGh, discoverFromClaudeProjects, discoverLocalCheckouts, defaultDevRoots, parseExtraSpec, publicNameTokens,
 } from './lib/repo-discovery.mjs';
 
 const existsSyncSafe = existsSync;
@@ -244,6 +244,7 @@ try {
 const publicationSweepOn = !!opt('publication_leak_sweep', false);
 const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
 let publicationRepos = [];
+let publicationPublicNames = []; // every discovered-public name — exempt from the derived-name class (see repo-discovery.mjs's publicNameTokens)
 if (publicationSweepOn && cloud) {
   publicationRepos = parseExtraSpec(opt('publication_leak_repos', '')).include;
 } else if (publicationSweepOn) {
@@ -333,6 +334,13 @@ if (publicationSweepOn && cloud) {
     }
 
     publicationRepos = merged.map((r) => r.htmlUrl);
+    // A name that is itself public is not a leak: every discovered repo's
+    // name/owner/"owner/repo" is exempt from the derived-name class in
+    // both checkers (this plugin's own, and the target's own leak-check.mjs
+    // via LEAK_CHECK_OWN_NAMES) — see publicNameTokens()'s own header.
+    // 'extra' entries are excluded on purpose: they were never confirmed
+    // public by discovery, so they get no free pass.
+    publicationPublicNames = publicNameTokens(merged.filter((r) => r.source !== 'extra'));
 
     // gh missing/unauthenticated: note it ONCE (not daily), same
     // "changed since baseline" treatment as the skip-notes below.
@@ -363,7 +371,7 @@ if (publicationRepos.length) {
   try {
     const { results } = cloud
       ? await sweepAllCloud(publicationRepos, { cwd: process.cwd() })
-      : await sweepAll(publicationRepos, {});
+      : await sweepAll(publicationRepos, { publicNames: publicationPublicNames });
     const seenByRepo = baseline.publicationLeakSeen || {};
     const nextSeenByRepo = {};
     const allNewHits = [];

@@ -225,6 +225,28 @@ export async function discoverLocalCheckouts({
   return found;
 }
 
+// A name that is itself PUBLIC is not a leak — the derived-name class exists
+// to catch someone's REAL, otherwise-unpublished project names/handles, not
+// to flag one public repo for mentioning another by name (siblings
+// referencing each other in a README/CHANGELOG/wrangler.toml is completely
+// normal). Turns a discovered-repo list into the flat token set a leak-check
+// `ownNames` list expects: each repo's bare name, its owner, and the full
+// "owner/repo" — every one of those becomes exempt, and because the
+// exemption is SEGMENT-based (see leak-check.mjs's ownSegments), a prefix
+// shared by two public names (two repos both starting "gss-") is
+// automatically exempt too, with no extra logic needed.
+export function publicNameTokens(discovered) {
+  const out = new Set();
+  for (const r of discovered || []) {
+    const full = r.fullName || r;
+    if (!full || typeof full !== 'string') continue;
+    out.add(full);
+    const parts = full.split('/');
+    if (parts.length === 2) { out.add(parts[0]); out.add(parts[1]); }
+  }
+  return [...out];
+}
+
 // --- union / dedupe / extra+exclude ----------------------------------------
 
 // `extraSpec`: the publication_leak_repos option value — a comma/semicolon

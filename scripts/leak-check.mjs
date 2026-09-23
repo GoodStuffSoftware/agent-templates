@@ -50,6 +50,16 @@
 //                                                       write it from a secret at run time.
 //   --user <name>[,<name>]   LEAK_CHECK_USER            OS user handle(s) (default: derived
 //                                                       from the OS)
+//   --own-names <n>[,<n>]    LEAK_CHECK_OWN_NAMES       extra names EXEMPT from class 2 (never
+//                                                       treated as a leak here) on top of this
+//                                                       repo's own name/owner. A caller with a
+//                                                       list of other PUBLIC names (e.g. the
+//                                                       agent-companion sweep, which knows every
+//                                                       repo it discovered as public) passes them
+//                                                       here so a public name mentioned in this
+//                                                       repo is never flagged as someone's real
+//                                                       private project name. Default: only this
+//                                                       repo's own name/owner is exempt, as before.
 //   --no-derived             LEAK_CHECK_NO_DERIVED=1    skip class 2 entirely
 //   --show-derived                                      print the derived token COUNTS by
 //                                                       source (never the tokens) to stderr
@@ -584,6 +594,13 @@ export function scanText(text, { rel = "", derived = [], isSelf = false } = {}) 
 const IGNORE_DIRS = new Set([".git", "node_modules"]);
 // Heuristic: skip obvious binaries by extension.
 const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|woff2?|ttf|eot|zip|gz|mp4|mov)$/i;
+// Vendored/minified/generated content: skipped for EVERY class, not just
+// git-sha-like — a minified bundle or a lockfile is never going to carry a
+// real leak worth reporting. Simpler than a per-class exemption, and it also
+// removes a large source of git-sha-like noise (hashes, integrity strings)
+// at the same time.
+const SKIP_PATH_RE = /(^|\/)(vendor|node_modules|dist|build)\//i;
+const SKIP_FILE_RE = /\.min\.(js|css)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Cargo\.lock|Gemfile\.lock|poetry\.lock)$/i;
 
 // Fallback enumerator (used only if git is unavailable): walk the working tree,
 // skipping .git and node_modules. This does NOT honor the rest of .gitignore, so
@@ -670,6 +687,7 @@ function parseArgs(argv) {
     else if (a === "--claude-projects") opts.claudeProjects = val();
     else if (a === "--token-file") opts.tokenFile = val();
     else if (a === "--user") opts.user = val();
+    else if (a === "--own-names") opts.ownNames = val();
     else if (a === "--no-derived") opts.noDerived = true;
     else if (a === "--show-derived") opts.showDerived = true;
     else throw new Error(`unknown option ${a}`);
@@ -707,9 +725,11 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       try { users.push(userInfo().username); } catch { /* no passwd entry */ }
       users.push(basename(home));
     }
+    const extraOwnNames = splitList(opts.ownNames || env.LEAK_CHECK_OWN_NAMES);
+    const ownNames = [...new Set([...ownRepoNames(root), ...extraOwnNames])];
     let tokens;
     try {
-      tokens = deriveTokens({ devRoots, claudeProjectsDir, tokenFile, users, ownNames: ownRepoNames(root), scanRoot: root });
+      tokens = deriveTokens({ devRoots, claudeProjectsDir, tokenFile, users, ownNames, scanRoot: root });
     } catch (err) {
       console.error(`leak-check: ${err.message}`);
       return 2;
@@ -736,6 +756,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     // EXEMPT keys are written with forward slashes; normalize or the exemption
     // silently never matches on Windows.
     const rel = relative(root, file).split(sep).join("/");
+    if (SKIP_PATH_RE.test(rel) || SKIP_FILE_RE.test(rel)) continue;
     let text;
     try {
       text = readFileSync(file, "utf8");

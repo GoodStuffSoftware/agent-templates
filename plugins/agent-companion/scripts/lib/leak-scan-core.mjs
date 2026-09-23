@@ -355,6 +355,13 @@ export function scanText(text, { rel = '', derived = [], literals = [], exempt =
 
 const IGNORE_DIRS = new Set(['.git', 'node_modules']);
 const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|woff2?|ttf|eot|zip|gz|mp4|mov)$/i;
+// Vendored/minified/generated content: skipped for EVERY class, not just
+// git-sha-like. A minified bundle or a lockfile is never going to carry a
+// real leak worth reporting, and skipping it entirely (rather than only
+// for one class) is the simpler rule and also cuts a large source of
+// git-sha-like noise (hashes, integrity strings) at the same time.
+const SKIP_PATH_RE = /(^|\/)(vendor|node_modules|dist|build|\.git)\//i;
+const SKIP_FILE_RE = /\.min\.(js|css)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Cargo\.lock|Gemfile\.lock|poetry\.lock)$/i;
 // Skip anything absurdly large — a generic sweep over an UNKNOWN repo has no
 // business reading a multi-hundred-MB file line by line.
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -438,6 +445,8 @@ export function scanRepo({
   const warnings = [];
   for (const file of listCommittableFiles(resolvedRoot)) {
     if (BINARY_EXT.test(file)) continue;
+    const relForSkip = relative(resolvedRoot, file).split(sep).join('/');
+    if (SKIP_PATH_RE.test(relForSkip) || SKIP_FILE_RE.test(relForSkip)) continue;
     let st;
     try { st = statSync(file); } catch { continue; }
     if (st.size > MAX_FILE_BYTES) continue;
