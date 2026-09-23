@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -245,6 +245,12 @@
       "title": "Standing rules budget (characters)",
       "description": "Ceiling on the rendered rule block per injection. Rules past the ceiling are dropped and the count is stated, so a budget overrun is visible rather than silent.",
       "default": 2000
+    },
+    "publication_leak_repos": {
+      "type": "string",
+      "title": "Publication-leak sweep repos",
+      "description": "Comma-separated list of public repos for the daily scout to sweep for real-name leaks AFTER THE FACT — a backstop, not a substitute for a local pre-push gate. Each entry is a local checkout path (its `origin` remote is read and fetched — the checkout itself is never scanned, only what origin actually has) or a git URL. EMPTY BY DEFAULT: the sweep is fully disabled and silent until this is set. The scout fetches each repo's default branch AS PUBLISHED into a throwaway clone and runs THAT repo's own scripts/leak-check.mjs against it. Fires the publication_leak signal only for hits not already accepted in a prior run (fingerprinted in the scout's baseline), so a standing accepted finding does not re-fire daily. In a cloud run (no dev root to derive real project names from) the sweep runs in reduced mode: path and fixed-token checks only.",
+      "default": ""
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",

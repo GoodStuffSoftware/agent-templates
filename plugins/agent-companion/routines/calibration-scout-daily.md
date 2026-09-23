@@ -121,6 +121,56 @@ Then read `$AC/config/model-tiers.json` and answer, concretely:
 
 Treat each `yes` as a signal named `lineup_drift`. Do NOT edit the config from this routine — report the exact diff and the exact field to change. A human or a session with the repo checked out makes the change; the `routing-doc` audit check then regenerates the doc.
 
+## STEP 2.5 — publication-leak sweep (backstop, only if configured)
+
+This is an AFTER-THE-FACT backstop for a real-name leak that reached origin
+despite the local pre-push gate — it never blocks a push, it only notices
+one already published. It is OFF by default and stays silent unless the
+`publication_leak_repos` plugin option names at least one repo (a local
+checkout path, or a git URL — comma-separated for more than one).
+
+```bash
+node "$AC/scripts/detect.mjs"
+```
+
+already ran this in STEP 1 if `$AC` is the CURRENT plugin copy (it emits a
+`publication_leak` signal, dispatched below, and a `publication_leak_sweep_error`
+signal if a configured repo could not be swept). **If `$AC` is an OLDER
+installed copy that predates this feature** (detect.mjs's JSON has no
+`publicationLeakSeen` key in `baseline` and the option is set, or `$AC/scripts/lib/publication-sweep.mjs`
+does not exist), STEP 1 silently did not sweep. Fall back to running it
+directly instead of skipping it:
+
+```bash
+if [ -f "$AC/scripts/lib/publication-sweep.mjs" ] && [ -n "$(node -e "
+  import('${AC}/hooks/lib/context.mjs').then(m => process.stdout.write(String(m.opt('publication_leak_repos','')||'')))
+" 2>/dev/null)" ]; then
+  : # STEP 1 already swept via detect.mjs — nothing more to do here
+elif [ -n "$PUBLICATION_LEAK_REPOS_FALLBACK" ]; then
+  # Old installed plugin: no sweep support. Run it ad hoc, repo by repo, using
+  # the CURRENT checkout's own sweep library so the mechanism still runs even
+  # though the installed copy can't. $PUBLICATION_LEAK_REPOS_FALLBACK is a
+  # comma-separated list — set this only if you know the option is configured
+  # but $AC predates it; leave it unset otherwise (silent is correct then too).
+  node -e "
+    import('$(pwd)/plugins/agent-companion/scripts/lib/publication-sweep.mjs').then(async (m) => {
+      const repos = process.env.PUBLICATION_LEAK_REPOS_FALLBACK.split(',').map(s => s.trim()).filter(Boolean);
+      const reduced = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
+      const { results } = await m.sweepAll(repos, { reduced });
+      for (const r of results) {
+        if (r.error) { console.log('publication-leak sweep error:', r.repo, r.error); continue; }
+        if (r.hits.length) console.log('publication-leak hit(s):', r.repo, JSON.stringify(r.hits.map(h => ({ rel: h.rel, line: h.line, label: h.label }))));
+      }
+    });
+  "
+fi
+```
+
+The fallback has no baseline, so treat any hit it prints as unconfirmed-new
+and say so — do not claim dedupe you didn't run. This is a stopgap only
+until the installed plugin catches up; prefer the STEP 1 path whenever `$AC`
+supports it.
+
 ## STEP 3 — if `changed` is false AND lineup matches: stop. Emit nothing.
 
 Not a summary, not a confirmation. Silence is the success case.
@@ -138,12 +188,33 @@ Not a summary, not a confirmation. Silence is the success case.
 | `harness_version_unreadable` | report it; do not guess |
 | `plugin_version_behind` | the installed plugin is older than the current copy. Cloud: the claude.ai plugin directory needs its **Sync** pressed on the marketplace page — cloud sessions are running the old guards until then. Local: `claude plugin marketplace update`, `claude plugin update`, restart |
 | `enforcement_silent` | report which day(s) and their status; transcripts show real `Agent` spawns but `spawns.jsonl` has no matching rows for that day — the guard may have stopped recording (renamed matcher, exception before the append, telemetry flag off) even though spawning itself is fine. Run `node "$AC/scripts/audit.mjs" --only telemetry-coverage,guard-canary` for the detail |
+| `publication_leak` | report each repo/file/line/label, and that it is a NEW hit (not previously accepted) in a repo listed under `publication_leak_repos` — a real name reached origin past the local pre-push gate. This needs a human decision (genericize and push a fix, or accept and let it fall into the baseline); do not edit or push on the routine's own authority |
+| `publication_leak_sweep_error` | report which repo(s) the sweep could not reach and why (bad path/URL, missing `scripts/leak-check.mjs` in that repo, clone failure) — a repo listed in the option that can no longer be swept is itself a finding, not silence |
 
 **Canary** — proves the guards still fire rather than merely exist:
 
 ```bash
 node "$AC/scripts/audit.mjs" --only guard-canary,harness-drift,routing-doc
 ```
+
+**Sweep canary** — run this as part of STEP 2.5 whenever `publication_leak_repos`
+is non-empty, even on a day the sweep itself found nothing: a sweep that stays
+silent because it is broken looks identical to one that is silent because
+everything is clean, and only the canary tells them apart.
+
+```bash
+if [ -f "$AC/scripts/leak-sweep-canary.mjs" ]; then
+  if [ -n "$CLAUDE_CODE_REMOTE_SESSION_ID" ]; then
+    node "$AC/scripts/leak-sweep-canary.mjs" --reduced
+  else
+    node "$AC/scripts/leak-sweep-canary.mjs"
+  fi
+fi
+```
+
+Exit 0 with `OK` on stdout = the sweep pipeline works. Any other exit is
+itself a finding — report it verbatim as "leak sweep broken: <reason>", even
+on an otherwise quiet day; never let a broken canary pass as silence.
 
 ## STEP 5 — deliver
 

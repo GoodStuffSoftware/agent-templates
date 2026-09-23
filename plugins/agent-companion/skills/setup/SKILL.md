@@ -45,6 +45,11 @@ defaults are the recommended ones. Two are worth a conscious decision:
   only if an Agent Audit ingest exists to receive it; the token goes in the
   `AGENT_AUDIT_TOKEN` environment variable, never in plugin config.
 - `premium_max_concurrent` — the Fable/Opus instance cap. Default 2.
+- `publication_leak_repos` — EMPTY BY DEFAULT (sweep off, silent). A
+  comma-separated list of public repos (local checkout paths and/or git URLs)
+  the daily scout should sweep for real-name leaks that reached origin — an
+  after-the-fact backstop, not a substitute for a local pre-push gate. See
+  "Publication-leak sweep" below before turning this on.
 
 ## 2. Schedule the local scout — desktop scheduled task
 
@@ -159,6 +164,35 @@ Optional — `version_notice` already works without it, just one
 Releasing: bump `version` in **both** `plugin.json` and the plugin's entry in
 `marketplace.json` — Claude Code reads the first, the claude.ai plugin
 directory keys on the second, and the manifest check fails if they differ.
+
+## Publication-leak sweep (optional)
+
+Off by default. If you maintain one or more PUBLIC repos and want the daily
+scout to check what is actually published — not the local working tree — for
+a real-name leak that slipped past a local pre-push gate, set
+`publication_leak_repos` to a comma-separated list of local checkout paths
+and/or git URLs. The scout then fetches each repo's default branch AS
+PUBLISHED into a throwaway clone and runs THAT repo's own
+`scripts/leak-check.mjs` against it, firing `publication_leak` only for hits
+not already accepted in a prior run (see the routine's dispatch table). A
+cloud run has no dev root to derive real project names from, so it sweeps in
+reduced mode there (path and fixed-token checks only) — the routine text says
+so explicitly when it does.
+
+This is a backstop, not a gate: it never blocks a push, it only notices one
+already live. Verify it actually works with the sweep canary before relying
+on it:
+
+```bash
+node "$AC/scripts/leak-sweep-canary.mjs"            # full mode
+node "$AC/scripts/leak-sweep-canary.mjs" --reduced   # cloud-shaped mode
+```
+
+Both must print `OK` and exit 0 — that proves the whole pipeline (clone,
+run the target's own script, parse hits, dedupe against a baseline) actually
+catches a synthetic leak, not just that the option exists. Both routine
+templates run this canary automatically whenever the option is set; a
+canary failure is reported as "leak sweep broken", never silently dropped.
 
 ## What "set up" means
 

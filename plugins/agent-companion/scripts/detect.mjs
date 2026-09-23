@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
+import { sweepAll, filterNew } from './lib/publication-sweep.mjs';
 
 const argv = process.argv.slice(2);
 const daysArg = (() => {
@@ -207,6 +208,54 @@ try {
       'telemetry-coverage');
   }
 } catch { /* coverage check unreadable: not a signal, does not block the scout */ }
+
+// --- 8. Publication-leak sweep -----------------------------------------
+// EMPTY option (the default) = disabled, silent, zero git activity. Set by
+// the operator via the publication_leak_repos plugin option — never hardcoded
+// here, this plugin is public and generic. A cloud run has no dev root to
+// derive real project names from, so it sweeps in reduced mode (path/fixed
+// checks only) rather than silently skipping the whole thing.
+const publicationRepos = String(opt('publication_leak_repos', ''))
+  .split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+if (publicationRepos.length) {
+  const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
+  try {
+    const { results } = await sweepAll(publicationRepos, { reduced: cloud });
+    const seenByRepo = baseline.publicationLeakSeen || {};
+    const nextSeenByRepo = {};
+    const allNewHits = [];
+    const errors = [];
+    for (const r of results) {
+      if (r.error) { errors.push(`${r.repo}: ${r.error}`); continue; }
+      nextSeenByRepo[r.repo] = r.hits.map((h) => h.fingerprint);
+      const fresh = filterNew(r.hits, seenByRepo[r.repo] || []);
+      for (const h of fresh) allNewHits.push({ repo: r.repo, ...h });
+    }
+    // Repos that errored keep their LAST successful baseline rather than
+    // being wiped to empty, so a transient clone failure doesn't make every
+    // hit look "new" again on the next run that succeeds.
+    for (const r of results) if (r.error && seenByRepo[r.repo]) nextSeenByRepo[r.repo] = seenByRepo[r.repo];
+    next.publicationLeakSeen = nextSeenByRepo;
+
+    if (allNewHits.length) {
+      const sample = allNewHits.slice(0, 5)
+        .map((h) => `${h.repo}:${h.rel}:${h.line} [${h.label}]`).join('; ');
+      const more = allNewHits.length > 5 ? ` +${allNewHits.length - 5} more` : '';
+      sig('publication_leak',
+        `${allNewHits.length} new leak hit(s) across ${publicationRepos.length} swept repo(s)` +
+        (cloud ? ' (reduced mode: no derived-name check — no dev root in the cloud)' : '') +
+        `: ${sample}${more}`,
+        'manual-check');
+    }
+    if (errors.length) {
+      sig('publication_leak_sweep_error',
+        `sweep could not complete for ${errors.length} of ${publicationRepos.length} repo(s): ${errors.join('; ')}`,
+        'manual-check');
+    }
+  } catch (err) {
+    sig('publication_leak_sweep_error', `sweep crashed: ${err.message || err}`, 'manual-check');
+  }
+}
 
 writeFileSync(baselineFile, JSON.stringify({ ...baseline, ...next }, null, 2));
 
