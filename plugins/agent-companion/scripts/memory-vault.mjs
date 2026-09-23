@@ -125,14 +125,8 @@ function isPlausibleKeyBody(body) {
 const SECRET_PATTERNS = [
   ['aws-access-key-id', hasRealAwsAccessKeyId],
   ['aws-secret-style', hasRealAwsSecretStyle],
-  // (?:) between \b and the literal is a no-op for the regex (empty
-  // non-capturing group) but breaks up the contiguous source-text shape
-  // that follows the escape — on a machine whose real derived agent-prefix
-  // happens to coincide with those letters, the leak-check's derived-prefix
-  // class would otherwise flag this line as if it were a real prefix leak
-  // rather than an API-key pattern.
-  ['anthropic-api-key', /\b(?:)sk-ant-[A-Za-z0-9_-]{20,}\b/],
-  ['openai-api-key', /\b(?:)sk-[A-Za-z0-9]{20,}\b/],
+  ['anthropic-api-key', /\bsk-ant-[A-Za-z0-9_-]{20,}\b/],
+  ['openai-api-key', /\bsk-[A-Za-z0-9]{20,}\b/],
   ['github-token', /\bgh[pousr]_[A-Za-z0-9]{30,}\b/],
   ['github-fine-grained', /\bgithub_pat_[A-Za-z0-9_]{20,}\b/],
   ['slack-token', /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/],

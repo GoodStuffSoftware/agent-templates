@@ -129,13 +129,19 @@ test("placeholdered and generic text passes", () => {
 });
 
 // Adversarial-review regression: a real derived name/prefix wrapped in
-// braces, or immediately after a backslash, must NOT be treated as
+// braces, or immediately after a PATH backslash, must NOT be treated as
 // generic/placeholder-shaped — that would be a way to silently hide a leak.
+// (Second review, M1: a backslash after a quote/backtick/slash is a regex or
+// string ESCAPE, not a path separator, so the original `\bqz-` inside
+// backticks is now deliberately NOT a hit — see the M1 cases below. The
+// path-shaped backslash forms stay hits.)
 test("a braced lowercase name and a backslash-preceded prefix are NOT treated as placeholders", () => {
-  const line = "{{zorvex-quill}} is real; so is `\\bqz-ant`.";
+  const line = "{{zorvex-quill}} is real; so is " + ["D:", "dev", "bqz-ant"].join(BS) + ".";
   const r = scanWith(line, TOKENS);
   assert.ok(r.hits.some((h) => h.label === "derived-project-name" && h.token === "zorvex-quill"));
   assert.ok(r.hits.some((h) => h.label === "derived-prefix" && h.token === "bqz-"));
+  const escaped = scanWith("so is `" + BS + "bqz-ant`.", TOKENS);
+  assert.ok(!escaped.hits.some((h) => h.label === "derived-prefix"), "a backtick-then-backslash is an escape, not a path (M1)");
 });
 
 const LEAKS = [

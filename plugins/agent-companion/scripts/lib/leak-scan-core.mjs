@@ -23,10 +23,10 @@
 //
 // Zero dependencies beyond Node builtins.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, realpathSync } from 'node:fs';
 import { join, relative, sep, resolve, basename, dirname, isAbsolute } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { homedir, userInfo } from 'node:os';
+import { homedir, userInfo, tmpdir } from 'node:os';
 
 // --- Class 3: private absolute paths ----------------------------------------
 export const PLACEHOLDER_USERS = new Set([
@@ -55,7 +55,7 @@ export const PLACEHOLDER_PROJECTS = new Set([
 // derived-user-handle token; only the path-shaped classes see it here).
 export function isPlaceholderSegment(seg, set, realUsers) {
   if (!seg) return true;
-  const s = seg.replace(/^["'`(]+|["'`),.;:]+$/g, '');
+  const s = seg.replace(/^["'`(]+|["'`),.;:]+$/g, '').replace(/^([^%].*?)%$/, '$1'); // trailing % = next %2F separator
   if (!s) return true;
   if (realUsers && realUsers.has(s.toLowerCase())) return false;
   if (/^[<{%$[*]/.test(s)) return true;
@@ -95,7 +95,7 @@ export const PATH_PATTERNS = [
     new RegExp(String.raw`\\\\[A-Za-z0-9.\-]+\\[A-Za-z]\$\\Users\\${SEG}`, 'gi'), 1, PLACEHOLDER_USERS],
   // URL-percent-encoded: C%3A%5CUsers%5C<name>, %2FUsers%2F<name>
   ['private-path:url-encoded',
-    new RegExp(String.raw`(?:[A-Za-z]${ECOLON}${ESEP}Users${ESEP}|${ESEP}Users${ESEP})${SEG}`, 'gi'), 1, PLACEHOLDER_USERS],
+    new RegExp(String.raw`(?:[A-Za-z]${ECOLON}${ESEP}Users${ESEP}|${ESEP}(?:Users|home)${ESEP})${SEG}`, 'gi'), 1, PLACEHOLDER_USERS],
   // CORP\<user> — a Windows domain-qualified account name. Domain kept
   // ALL-CAPS (the near-universal real-world convention) to avoid matching
   // ordinary "Word\word" prose that happens to use a backslash. The
@@ -224,6 +224,7 @@ export function deriveTokens({
   const prefixCounts = new Map();
   const counts = { devRootDirs: 0, claudeProjects: 0, agentPrefixes: 0, clusterTokens: 0, tokenFile: 0, users: 0 };
   const usersOut = new Set();
+  const realUsers = new Set(); // every raw OS handle passed in `users`, generic-looking or not (path classes only)
   const explicit = new Set();
 
   const addName = (raw) => {
@@ -291,8 +292,24 @@ export function deriveTokens({
 
   for (const u of users) if (isUsableUser(u)) usersOut.add(u.toLowerCase());
   counts.users = usersOut.size;
+  // realUsers: EVERY raw handle, BEFORE the isUsableUser() filter — a real
+  // handle that looks generic ("admin", "dev") never becomes a bare-word
+  // token, but must still defeat the placeholder exemption in the path
+  // classes (isPlaceholderSegment).
+  for (const u of users) {
+    const s = String(u || '').trim().toLowerCase();
+    if (s && /^[a-z0-9._$-]+$/.test(s)) realUsers.add(s);
+  }
 
   let names = [...rawNames.values()].filter((n) => explicit.has(n.toLowerCase()) || isUsableName(n, ownSegments));
+
+  // EXACT-only public-name subtraction — names only, never prefixes, never
+  // by segment — applied BEFORE clustering and collapsing: collapsing drops
+  // a longer name covered by a shorter kept one, so subtracting afterwards
+  // would take a PRIVATE "<public>-<more>" down with the public name.
+  const exactPublic = new Set(publicNames.map(exactNameKey).filter(Boolean));
+  const isPublicName = (n) => exactPublic.has(exactNameKey(n));
+  names = names.filter((n) => !isPublicName(n));
 
   const firstSeg = new Map();
   for (const n of rawNames.values()) {
@@ -305,21 +322,25 @@ export function deriveTokens({
     const c = seconds.size;
     if (c < 2 || GENERIC_WORDS.has(seg) || TEMP_SEGMENTS.has(seg) || ownSegments.has(seg) || ownSegments.has(`=${seg}`)) continue;
     if (seg.length >= 5 && isUsableName(seg, ownSegments)) {
-      if (!names.some((n) => n.toLowerCase() === seg)) { names.push(seg); counts.clusterTokens++; }
+      if (!isPublicName(seg) && !names.some((n) => n.toLowerCase() === seg)) { names.push(seg); counts.clusterTokens++; }
     } else if (isUsablePrefix(seg, ownSegments) && !prefixCounts.has(seg)) {
       prefixCounts.set(seg, 1); counts.clusterTokens++;
     }
   }
 
   names.sort((a, b) => segmentsOf(a).length - segmentsOf(b).length || a.length - b.length);
+  // A dropped name is remembered with its coverer in `joined` so its
+  // separator-less joined form still gets a matcher (see compileDerived()).
   const kept = [];
+  const joined = [];
   for (const n of names) {
     const segs = segmentsOf(n);
-    const covered = kept.some((k) => {
+    const cover = kept.find((k) => {
       const ks = segmentsOf(k);
       return ks.length <= segs.length && ks.every((s, i) => s === segs[i]);
     });
-    if (!covered) kept.push(n);
+    if (!cover) kept.push(n);
+    else if (segmentsOf(cover).length < segs.length) joined.push([cover, n]);
   }
 
   for (const n of kept) {
@@ -332,40 +353,66 @@ export function deriveTokens({
 
   const prefixes = [...prefixCounts.keys()].filter((p) => prefixCounts.get(p) >= 99 || isUsablePrefix(p, ownSegments));
   counts.agentPrefixes = prefixes.length;
-  // EXACT-only public-name subtraction — applied HERE, after everything
-  // else, to `names` only. Never applied to `prefixes`: a prefix is short
-  // by nature (2-16 chars) and matching it against a public name by
-  // anything looser than "this exact string is the whole public name" would
-  // silently exempt private prefixes that merely share a segment.
-  const exactPublic = new Set(publicNames.map(exactNameKey));
-  const namesOut = exactPublic.size ? kept.filter((n) => !exactPublic.has(exactNameKey(n))) : kept;
 
-  return { names: namesOut, prefixes, users: [...usersOut], notes, counts };
+  return { names: kept, joined, prefixes, users: [...usersOut], realUsers: [...realUsers], notes, counts };
 }
 
 export function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Word-boundary lookbehind/lookahead. Deliberately does NOT exclude a
-// preceding backslash — `\` is a PATH SEPARATOR, not a word character, and
-// excluding it silently missed every derived name after one (`D:\dev\
-// <project>\x`, `C:\src\<project>`), exactly the shape a real Windows-path
-// leak takes. Trailing boundary excludes a following lowercase letter/digit
-// (blocks matching inside a longer lowercase word) but NOT an uppercase
-// letter, so a camelCase continuation (`ZorblApi` after name "zorbl") still
-// counts as a match rather than being treated as "inside a bigger word".
-const LEAD = '(?<![A-Za-z0-9])';
+// A case-INSENSITIVE literal written without the `i` flag ("ab" -> "[aA][bB]").
+// The derived matchers are compiled case-SENSITIVE so the trailing boundary
+// below can tell a lowercase continuation from an uppercase one; the `i`
+// flag would fold the two together and silently block camelCase.
+export function ciLiteral(s) {
+  let out = '';
+  for (const ch of String(s)) {
+    const lo = ch.toLowerCase();
+    const up = ch.toUpperCase();
+    out += lo !== up && lo.length === 1 && up.length === 1 ? `[${lo}${up}]` : escapeRe(ch);
+  }
+  return out;
+}
+
+// LEAD: not preceded by a letter/digit. A preceding BACKSLASH is a boundary
+// only when it is a PATH separator — the 1-4 backslashes are preceded by a
+// path-segment character (letter, digit, . _ $ ~ % -) or by a drive-letter
+// colon ("D:"). Anywhere else (start of line, a quote, "/", "(", "[", "|",
+// "?:" ...) the backslash is a regex/string ESCAPE and the letters glued to
+// it are an escape sequence, not a name. Caught: D:\dev\<name>, D:\<name>,
+// "D:\\dev\\<name>", the quadrupled-backslash form, CORP\<name>. Not caught
+// (accepted): an escape spelled "\n<name>" (the n is a letter, so the letter
+// lookbehind wins) and a UNC path whose HOST is the name.
+//
+// TRAIL: not followed by a LOWERCASE letter or digit — an uppercase letter
+// is a camelCase word boundary, so "ZorblApi" / "FrobnicatorService" match
+// while "Zorbls" (a longer lowercase word) does not. Only meaningful because
+// the regexes are case-sensitive (see ciLiteral above).
+const LEAD = String.raw`(?<![A-Za-z0-9])(?<!(?:^|[^A-Za-z0-9._$~%\-:\\]|(?<![A-Za-z]):)\\{1,4})`;
 const TRAIL = '(?![a-z0-9])';
 
-export function compileDerived({ names = [], prefixes = [], users = [] }) {
+function nameBody(segs) {
+  const allowSpace = !segs.every((s) => GENERIC_WORDS.has(s));
+  return segs.map(ciLiteral).join(allowSpace ? '[-_. ]?' : '[-_.]?');
+}
+
+export function compileDerived({ names = [], prefixes = [], users = [], joined = [] }) {
   const out = [];
   for (const n of names) {
-    const segs = segmentsOf(n);
-    const allowSpace = !segs.every((s) => GENERIC_WORDS.has(s));
-    const sepRe = allowSpace ? '[-_. ]?' : '[-_.]?';
-    const body = segs.map(escapeRe).join(sepRe);
-    out.push({ label: 'derived-project-name', re: new RegExp(`${LEAD}${body}${TRAIL}`, 'gi') });
+    out.push({ label: 'derived-project-name', re: new RegExp(`${LEAD}${nameBody(segmentsOf(n))}${TRAIL}`, 'g') });
+  }
+  // A name dropped by the collapse step, written JOINED onto its coverer
+  // with no separator ("zorblapi"): the coverer's matcher cannot see it (a
+  // lowercase letter follows), so match exactly that joined form. The first
+  // tail letter is lowercase-only — an uppercase one is already the
+  // coverer's own camelCase hit.
+  for (const [cover, full] of joined) {
+    const cs = segmentsOf(cover);
+    const tail = segmentsOf(full).slice(cs.length).join('');
+    if (!tail) continue;
+    const tailRe = escapeRe(tail[0]) + ciLiteral(tail.slice(1));
+    out.push({ label: 'derived-project-name', re: new RegExp(`${LEAD}${nameBody(cs)}${tailRe}${TRAIL}`, 'g') });
   }
   for (const p of prefixes) {
     // Matches the prefix followed by `-` or `_` in ANY shape: mid-identifier
@@ -373,26 +420,29 @@ export function compileDerived({ names = [], prefixes = [], users = [] }) {
     // ("`zb-`", "\"zb-\"", "zb- ", "ZB_"). No lookahead requiring more
     // identifier characters to follow — that requirement is exactly what
     // silently missed a bare `zb-` in a fenced code span or a quoted value.
-    out.push({ label: 'derived-prefix', re: new RegExp(`${LEAD}${escapeRe(p)}[-_]`, 'gi') });
+    out.push({ label: 'derived-prefix', re: new RegExp(`${LEAD}${ciLiteral(p)}[-_]`, 'g') });
   }
   for (const u of users) {
-    out.push({ label: 'derived-user-handle', re: new RegExp(`${LEAD}${escapeRe(u)}${TRAIL}`, 'gi') });
+    out.push({ label: 'derived-user-handle', re: new RegExp(`${LEAD}${ciLiteral(u)}${TRAIL}`, 'g') });
   }
   return out;
 }
 
-// Only a genuine placeholder IDENTIFIER is exempt — UPPER_SNAKE_CASE or a
-// TitleCase/PascalCase Word (the two shapes a real template placeholder
-// convention actually uses), so it must START with an uppercase letter and
-// contain only letters/digits/underscore/hyphen after that. This excludes a
-// braced Windows profile path or other real path (path separators/colons
-// are never a valid placeholder identifier character) and a bare lowercase
-// word (wrapping a REAL derived name in braces must never be a way to hide
-// it from this scan) — see leak-scan-core.test.mjs for worked examples;
-// this comment avoids writing either shape literally, since this file is
-// itself scanned.
-export function maskPlaceholders(line) {
-  return line.replace(/\{\{[A-Z][A-Za-z0-9_-]*\}\}/g, (m) => ' '.repeat(m.length));
+// Only a genuine placeholder is exempt: an IDENTIFIER — UPPER_SNAKE_CASE or
+// a TitleCase/PascalCase Word, so it must START with an uppercase letter and
+// contain only letters/digits/underscore/hyphen after that — whose inner
+// text matches NO derived token and NO path pattern. A braced real path, a
+// braced lowercase real name, and a braced TitleCase/UPPER real name are all
+// still scanned: wrapping a real leak in braces must never hide it (see
+// leak-scan-core.test.mjs for worked examples; this comment avoids writing
+// those shapes literally, since this file is itself scanned).
+export function maskPlaceholders(line, derived = []) {
+  return line.replace(/\{\{[A-Z][A-Za-z0-9_-]*\}\}/g, (m) => {
+    const inner = m.slice(2, -2);
+    if (derived.some(({ re }) => inner.search(re) !== -1)) return m;
+    if (PATH_PATTERNS.some(([, re]) => inner.search(re) !== -1)) return m;
+    return ' '.repeat(m.length);
+  });
 }
 
 // Scan one file's text. `literals` is CALLER-SUPPLIED (empty by default here
@@ -430,7 +480,7 @@ export function scanText(text, {
   const lines = text.split(/\r?\n/);
   const exemptLabels = exempt[rel];
   lines.forEach((rawLine, i) => {
-    const line = maskPlaceholders(rawLine);
+    const line = maskPlaceholders(rawLine, derived);
     const lower = line.toLowerCase();
     const push = (arr, label, token) => arr.push({ rel, line: i + 1, label, token, text: rawLine.trim() });
 
@@ -498,6 +548,29 @@ export function listCommittableFiles(root) {
   }
 }
 
+// A DEFAULT dev root (never an explicit devRoots option) must be a place the
+// operator keeps projects — never the home dir itself, a filesystem root, a
+// temp dir (or anything inside one), or a system dir. A scan root that sits
+// directly under %TEMP% (every test fixture, every sweep clone) would
+// otherwise make the whole temp dir a "dev root": thousands of unrelated
+// child dirs derived as project names, each probed for .claude/agents.
+export function isUnsafeDevRoot(p, home = homedir()) {
+  const norm = (x) => {
+    let r = resolve(x);
+    try { r = realpathSync.native(r); } catch { /* missing: compare as given */ }
+    return r.replace(/[\\/]+$/, '').toLowerCase();
+  };
+  const d = norm(p);
+  if (!d || d === norm(home)) return true;
+  if (dirname(resolve(p)) === resolve(p)) return true; // a filesystem root
+  const inside = (a, b) => a === b || a.startsWith(`${b}\\`) || a.startsWith(`${b}/`);
+  const temps = [tmpdir(), process.env.TEMP, process.env.TMP, process.env.TMPDIR, '/tmp', '/var/tmp', '/private/tmp'];
+  for (const t of temps) if (t && inside(d, norm(t))) return true;
+  const systems = [process.env.SystemRoot, process.env.windir, process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.ProgramData];
+  for (const t of systems) if (t && inside(d, norm(t))) return true;
+  return false;
+}
+
 export function mainCheckoutDir(root) {
   try {
     const common = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -544,20 +617,25 @@ export function scanRepo({
   let derived = [];
   const notes = [];
   let derivedCounts = null;
-  let realUsers = new Set();
+  // The operator's RAW OS handle(s), before any generic-word filtering —
+  // computed even under noDerived, because they feed the PATH classes (a
+  // real handle that looks generic, e.g. "admin", must still make its own
+  // profile path a hit), not only the derived bare-word class.
+  let users = usersOpt;
+  if (!users) {
+    users = [];
+    try { users.push(userInfo().username); } catch { /* no passwd entry */ }
+    for (const k of ['USERNAME', 'USER']) if (process.env[k]) users.push(process.env[k]);
+    users.push(basename(home));
+  }
+  let realUsers = new Set(users.map((u) => String(u).trim().toLowerCase()).filter((u) => /^[a-z0-9._$-]+$/.test(u)));
   if (!noDerived) {
     let devRoots = devRootsOpt;
     if (!devRoots) {
       devRoots = [...new Set([dirname(mainCheckoutDir(resolvedRoot)), join(home, 'dev')].map((p) => resolve(p)))]
-        .filter((p) => p.toLowerCase() !== home.toLowerCase());
+        .filter((p) => !isUnsafeDevRoot(p, home));
     }
     const claudeProjectsDir = claudeProjectsDirOpt || join(home, '.claude', 'projects');
-    let users = usersOpt;
-    if (!users) {
-      users = [];
-      try { users.push(userInfo().username); } catch { /* no passwd entry */ }
-      users.push(basename(home));
-    }
     const ownNames = ownNamesOpt || ownRepoNames(resolvedRoot);
 
     // Universal pass: token-file names/prefixes + OS user handle ONLY —
@@ -567,18 +645,20 @@ export function scanRepo({
     const universal = deriveTokens({ devRoots: [], claudeProjectsDir: null, tokenFile, users, ownNames, publicNames, scanRoot: resolvedRoot });
     notes.push(...universal.notes);
     let names = universal.names;
+    let joined = universal.joined;
     let prefixes = universal.prefixes;
     derivedCounts = universal.counts;
-    realUsers = new Set(universal.users.map((u) => u.toLowerCase()));
+    realUsers = new Set([...realUsers, ...universal.realUsers, ...universal.users.map((u) => u.toLowerCase())]);
 
     if (strict) {
       const full = deriveTokens({ devRoots, claudeProjectsDir, tokenFile, users, ownNames, publicNames, scanRoot: resolvedRoot });
       names = [...new Set([...names, ...full.names])];
+      joined = [...joined, ...full.joined];
       prefixes = [...new Set([...prefixes, ...full.prefixes])];
       derivedCounts = full.counts;
       notes.push(...full.notes);
     }
-    derived = compileDerived({ names, prefixes, users: universal.users });
+    derived = compileDerived({ names, joined, prefixes, users: universal.users });
   }
 
   const hits = [];
