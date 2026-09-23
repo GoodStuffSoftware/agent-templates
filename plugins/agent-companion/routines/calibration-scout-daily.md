@@ -192,8 +192,21 @@ elif [ -n "$PUBLICATION_LEAK_REPOS_FALLBACK" ]; then
   # sweep should be running but $AC predates the feature; leave it unset
   # otherwise (silent is correct then too — this is a stopgap, not a
   # substitute for updating $AC, and it never auto-discovers anything).
+  # Everything it prints goes through THIS checkout's scrub.mjs first (the
+  # same scrubber detect.mjs applies to its signals): a repo name, a path or
+  # a git error message must never reach the run output raw.
   node -e "
-    import('$(pwd)/plugins/agent-companion/scripts/lib/publication-sweep.mjs').then(async (m) => {
+    const lib = '$(pwd)/plugins/agent-companion/scripts/lib/';
+    Promise.all(['publication-sweep.mjs', 'scrub.mjs', 'leak-scan-core.mjs', 'repo-discovery.mjs'].map((f) => import(lib + f))).then(async ([m, sc, core, disc]) => {
+      const os = await import('node:os');
+      const path = await import('node:path');
+      const users = [...new Set([os.userInfo().username, process.env.USERNAME, process.env.USER, path.basename(os.homedir())].filter(Boolean))];
+      let scrub;
+      try {
+        const t = core.deriveTokens({ devRoots: disc.defaultDevRoots({ home: os.homedir() }), claudeProjectsDir: path.join(os.homedir(), '.claude', 'projects'), users });
+        scrub = sc.makeScrubber({ users, names: t.names, joined: t.joined });
+      } catch { scrub = sc.makeScrubber({ users }); }
+      const say = (...parts) => console.log(scrub(parts.join(' ')));
       const repos = process.env.PUBLICATION_LEAK_REPOS_FALLBACK.split(',').map(s => s.trim()).filter(Boolean);
       const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
       // CLOUD: sweepAllCloud() — in-place scan of the session's OWN checkout
@@ -201,9 +214,9 @@ elif [ -n "$PUBLICATION_LEAK_REPOS_FALLBACK" ]; then
       // LOCAL: sweepAll() — clones each configured repo's origin, as usual.
       const { results } = cloud ? await m.sweepAllCloud(repos, { cwd: process.cwd() }) : await m.sweepAll(repos, {});
       for (const r of results) {
-        if (r.skipped) { console.log('publication-leak: not swept —', r.repo, '(' + r.note + ')'); continue; }
-        if (r.error) { console.log('publication-leak sweep error:', r.repo, r.error); continue; }
-        if (r.hits.length) console.log('publication-leak hit(s):', r.repo, JSON.stringify(r.hits.map(h => ({ rel: h.rel, line: h.line, label: h.label }))));
+        if (r.skipped) { say('publication-leak: not swept —', r.repo, '(' + r.note + ')'); continue; }
+        if (r.error) { say('publication-leak sweep error:', r.repo, '—', r.error); continue; }
+        if (r.hits.length) say('publication-leak hit(s):', r.repo, '—', r.hits.map(h => h.rel + ':' + h.line + ' [' + h.label + ']').join('; '));
       }
     });
   "

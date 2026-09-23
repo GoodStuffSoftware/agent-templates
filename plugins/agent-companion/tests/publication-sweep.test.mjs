@@ -1055,3 +1055,48 @@ test('F1: the exact public name itself is still exempt in the plugin core sweep'
   assert.equal(r.error, null, r.error);
   assert.ok(!r.hits.some((h) => h.label.startsWith('derived-') && /^acme-?tools$/i.test(h.token)), JSON.stringify(r.hits));
 });
+
+// --- final review note (b): the routine's old-plugin fallback scrubs its output
+
+function routineFallbackScript() {
+  const body = readFileSync(join(PLUGIN_ROOT, 'routines', 'calibration-scout-daily.md'), 'utf8').replace(/\r\n/g, '\n');
+  const m = /elif \[ -n "\$PUBLICATION_LEAK_REPOS_FALLBACK" \]; then[\s\S]*?node -e "\n([\s\S]*?)\n {2}"\nfi/.exec(body);
+  assert.ok(m, 'fallback node -e block not found in the routine template');
+  return m[1];
+}
+
+test('note (b): the routine fallback prints only through scrub.mjs (doc-level)', () => {
+  const js = routineFallbackScript();
+  assert.match(js, /scrub\.mjs/);
+  assert.match(js, /makeScrubber/);
+  assert.doesNotMatch(js.replace(/const say = \(\.\.\.parts\) => console\.log\(scrub\(/, ''), /console\.(log|error)\(/,
+    'every printed line must go through say() -> scrub()');
+});
+
+test('note (b): the routine fallback, run for real, never prints a private repo name raw', () => {
+  const repoRoot = join(PLUGIN_ROOT, '..', '..');
+  const js = routineFallbackScript().replace('$(pwd)', pathToFileURL(repoRoot).href);
+  const home = mkdtempSync(join(tmpdir(), 'ac-fallback-home-'));
+  try {
+    const res = spawnSync(process.execPath, ['-e', js], {
+      cwd: home,
+      encoding: 'utf8',
+      timeout: 60000,
+      env: {
+        ...process.env,
+        HOME: home, USERPROFILE: home,
+        GIT_TERMINAL_PROMPT: '0',
+        // Rewrite the private URL to a local path that does not exist: the
+        // clone fails fast, offline, and git's error names the repo.
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: `url.${pathToFileURL(join(home, 'missing')).href}/.insteadOf`,
+        GIT_CONFIG_VALUE_0: 'https://github.com/myorg/',
+        PUBLICATION_LEAK_REPOS_FALLBACK: 'https://github.com/myorg/zbprivrepo.git',
+      },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /publication-leak sweep error:/);
+    assert.doesNotMatch(res.stdout, /zbprivrepo/, res.stdout);
+    assert.match(res.stdout, /<repo-url>/);
+  } finally { rmSync(home, { recursive: true, force: true, maxRetries: 3 }); }
+});
