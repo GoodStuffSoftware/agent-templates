@@ -16,6 +16,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
   sweepRepo, sweepRepoInPlace, sweepAllCloud, isSessionCheckout, normalizeGitUrl,
@@ -35,6 +36,51 @@ function git(args, cwd, env) {
   if (res.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
   return res;
 }
+
+// Target-script execution requires the clone source to be a github.com URL
+// with a trusted owner (M2). Tests reach a LOCAL bare repo under such a URL
+// by having git rewrite the URL prefix for this process only
+// (url.<base>.insteadOf via GIT_CONFIG_* env) — no network, and the real
+// ownership gate runs unmodified.
+async function withGithubAlias(bareDir, url, fn) {
+  const keys = ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = `url.${pathToFileURL(bareDir).href}.insteadOf`;
+  process.env.GIT_CONFIG_VALUE_0 = url;
+  try { return await fn(); } finally {
+    for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
+}
+
+// A bare origin whose default branch holds `files` (path -> content).
+function buildRepoWith(files) {
+  const base = mkdtempSync(join(tmpdir(), 'ac-pubsweep-test-'));
+  const bareDir = join(base, 'origin.git');
+  const workDir = join(base, 'work');
+  git(['init', '--quiet', '--bare', '--initial-branch=main', bareDir]);
+  mkdirSync(workDir, { recursive: true });
+  git(['init', '--quiet', '-b', 'main', workDir]);
+  git(['remote', 'add', 'origin', bareDir], workDir);
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
+  for (const [rel, body] of Object.entries(files)) {
+    mkdirSync(join(workDir, rel, '..'), { recursive: true });
+    writeFileSync(join(workDir, rel), body);
+  }
+  git(['add', '-A'], workDir, gitEnv);
+  git(['commit', '--quiet', '-m', 'init'], workDir, gitEnv);
+  git(['push', '--quiet', 'origin', 'main'], workDir, gitEnv);
+  return { base, bareDir, workDir, gitEnv, cleanup: () => { try { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); } catch { /* ignore */ } } };
+}
+
+// A target script that proves it ran by emitting a hit only it produces.
+const MARKER_SCRIPT = [
+  '#!/usr/bin/env node',
+  'console.log("  NOTES.md:1  [zb-own-script-ran]  x  ::  x");',
+  'console.log("leak-check: FAILED — 1 hit(s)");',
+  'process.exitCode = 1;',
+  '',
+].join('\n');
 
 // Build a throwaway bare "origin" whose default branch's NOTES.md carries a
 // synthetic (never a real-looking) private-path leak, plus a copy of this
@@ -179,10 +225,11 @@ test('item 6: a bad target-script invocation (exit 2) does not stop the plugin c
     git(['add', '-A'], workDir, gitEnv);
     git(['commit', '--quiet', '-m', 'init'], workDir, gitEnv);
     git(['push', '--quiet', 'origin', 'main'], workDir, gitEnv);
-    const result = await sweepRepo(bareDir, {
-      strictRepoUrls: [bareDir],
-      allowedOwners: new Set([(await import('../scripts/lib/publication-sweep.mjs')).ownerOf(bareDir)]),
-    });
+    const url = 'https://github.com/zbtrusted/zbexit2.git';
+    const result = await withGithubAlias(bareDir, url, () => sweepRepo(url, {
+      strictRepoUrls: [url],
+      allowedOwners: new Set(['zbtrusted']),
+    }));
     assert.ok(result.error, 'the exit-2 must be reported');
     assert.match(result.error, /exit 2/);
     assert.ok(result.hits.some((h) => h.label === 'private-path:windows-profile'), 'the plugin checker must still have run and found the real leak');
@@ -230,6 +277,147 @@ test('item 7: filterNewOrStale re-fires a still-present hit once its baseline re
   const staleSeen = { [hit.fingerprint]: new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString() }; // 8 days old
   assert.deepEqual(filterNewOrStale([hit], staleSeen, { maxAgeDays: 7, now }), [hit], 'an 8-day-old accepted hit must re-fire (weekly cadence)');
   assert.deepEqual(filterNewOrStale([hit], {}, { maxAgeDays: 7, now }), [hit], 'never-seen is always new');
+});
+
+// --- second adversarial review: M2, M4, L1 ---------------------------------
+
+test('M2: a local checkout under a dir named like a trusted owner, whose origin is a stranger\'s repo, is NOT executable', async () => {
+  const { mayExecuteTargetScript, resolveCloneSource, ownerOf } = await import('../scripts/lib/publication-sweep.mjs');
+  const base = mkdtempSync(join(tmpdir(), 'ac-m2-'));
+  try {
+    const checkout = join(base, 'zbtrusted', 'zbrepo');
+    mkdirSync(checkout, { recursive: true });
+    git(['init', '--quiet', '-b', 'main'], checkout);
+    git(['remote', 'add', 'origin', 'https://github.com/zbstranger/zbrepo.git'], checkout);
+    assert.equal(ownerOf(checkout), null, 'a local path has no owner — its directory name proves nothing');
+    assert.equal(ownerOf(resolveCloneSource(checkout)), 'zbstranger', 'the owner comes from the real origin');
+    const opts = { strictRepoUrls: [checkout], allowedOwners: new Set(['zbtrusted']) };
+    assert.equal(mayExecuteTargetScript(checkout, opts), false, 'trusted-looking dir name + stranger origin = never executed');
+    assert.equal(mayExecuteTargetScript(checkout, { ...opts, allowedOwners: new Set(['zbstranger']) }), true,
+      'the same entry IS executable once the REAL origin owner is the trusted one');
+    // Non-github hosts and bare paths never have an owner.
+    assert.equal(ownerOf('https://gitlab.com/zbtrusted/zbrepo.git'), null);
+    assert.equal(ownerOf(join(base, 'zbtrusted', 'origin.git')), null);
+  } finally { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
+test('M2: end to end — a listed stranger-owned repo\'s script never runs; a trusted-owner one does', async () => {
+  const repo = buildRepoWith({ 'scripts/leak-check.mjs': MARKER_SCRIPT, 'NOTES.md': 'clean\n' });
+  try {
+    const strangerUrl = 'https://github.com/zbstranger/zbrepo.git';
+    const denied = await withGithubAlias(repo.bareDir, strangerUrl, () => sweepRepo(strangerUrl, {
+      strictRepoUrls: [strangerUrl], allowedOwners: new Set(['zbtrusted']), devRoots: [],
+    }));
+    assert.equal(denied.error, null, denied.error);
+    assert.ok(!denied.hits.some((h) => h.label === 'zb-own-script-ran'), 'the stranger\'s script must not have executed');
+
+    const trustedUrl = 'https://github.com/zbtrusted/zbrepo.git';
+    const allowed = await withGithubAlias(repo.bareDir, trustedUrl, () => sweepRepo(trustedUrl, {
+      strictRepoUrls: [trustedUrl], allowedOwners: new Set(['zbtrusted']), devRoots: [],
+    }));
+    assert.equal(allowed.error, null, allowed.error);
+    assert.ok(allowed.hits.some((h) => h.label === 'zb-own-script-ran'), 'a listed, trusted-owner repo\'s script does run');
+  } finally { repo.cleanup(); }
+});
+
+test('M3: the executed target script sees a temp HOME, no inherited secrets, and the real LEAK_CHECK_* context', async () => {
+  const probe = [
+    '#!/usr/bin/env node',
+    'import { homedir } from "node:os";',
+    'const home = homedir();',
+    'const leaked = Object.keys(process.env).filter((k) => k === "ZB_SECRET_TOKEN");',
+    'const tag = [home.includes("ac-pubsweep-") ? "temphome" : "realhome", leaked.length ? "secret" : "nosecret", process.env.LEAK_CHECK_USER ? "user" : "nouser"].join("-");',
+    'console.log(`  NOTES.md:1  [zb-probe]  ${tag}  ::  x`);',
+    'console.log("leak-check: FAILED — 1 hit(s)");',
+    'process.exitCode = 1;',
+    '',
+  ].join('\n');
+  const repo = buildRepoWith({ 'scripts/leak-check.mjs': probe, 'NOTES.md': 'clean\n' });
+  process.env.ZB_SECRET_TOKEN = 'zb-should-not-pass';
+  try {
+    const url = 'https://github.com/zbtrusted/zbprobe.git';
+    const r = await withGithubAlias(repo.bareDir, url, () => sweepRepo(url, {
+      strictRepoUrls: [url], allowedOwners: new Set(['zbtrusted']), devRoots: [],
+    }));
+    assert.equal(r.error, null, r.error);
+    const probeHit = r.hits.find((h) => h.label === 'zb-probe');
+    assert.ok(probeHit, JSON.stringify(r.hits));
+    assert.equal(probeHit.token, 'temphome-nosecret-user');
+  } finally { delete process.env.ZB_SECRET_TOKEN; repo.cleanup(); }
+});
+
+test('M4: a target script that CRASHES (exit 1, no summary, no hits) is a sweep error, not clean-plus-plugin-hits', async () => {
+  const crash = '#!/usr/bin/env node\nthrow new Error("zb boom");\n';
+  const repo = buildRepoWith({ 'scripts/leak-check.mjs': crash, 'NOTES.md': `${SYNTHETIC_LEAK_LINE}\n` });
+  try {
+    const url = 'https://github.com/zbtrusted/zbcrash.git';
+    const r = await withGithubAlias(repo.bareDir, url, () => sweepRepo(url, {
+      strictRepoUrls: [url], allowedOwners: new Set(['zbtrusted']), devRoots: [],
+    }));
+    assert.ok(r.error, 'a crash must surface as an error');
+    assert.match(r.error, /crashed/);
+    assert.ok(r.hits.some((h) => h.label === 'private-path:windows-profile'), 'the plugin checker still ran and its hits are kept');
+  } finally { repo.cleanup(); }
+});
+
+test('M4: sweepRepoInPlace applies the same rule (crash = error)', async () => {
+  const crash = '#!/usr/bin/env node\nthrow new Error("zb boom");\n';
+  const repo = buildRepoWith({ 'scripts/leak-check.mjs': crash, 'NOTES.md': 'clean\n' });
+  try {
+    const r = await sweepRepoInPlace(repo.bareDir, repo.workDir, {});
+    assert.ok(r.error);
+    assert.match(r.error, /crashed/);
+  } finally { repo.cleanup(); }
+});
+
+test('M4: interpretTargetScan — summary line or parsed hits required', async () => {
+  const { interpretTargetScan } = await import('../scripts/lib/publication-sweep.mjs');
+  const hitLine = '  a.md:1  [x]  t  ::  t';
+  assert.equal(interpretTargetScan({ status: 0, stdout: 'leak-check: OK — none.\n', stderr: '' }).error, null);
+  assert.ok(interpretTargetScan({ status: 0, stdout: '', stderr: '' }).error, 'exit 0 with no OK line');
+  assert.equal(interpretTargetScan({ status: 1, stdout: '', stderr: `leak-check: FAILED — 1 hit(s):\n${hitLine}\n` }).hits.length, 1);
+  assert.ok(interpretTargetScan({ status: 1, stdout: '', stderr: 'Error: boom\n    at x' }).error, 'crash');
+  assert.ok(interpretTargetScan({ status: 1, stdout: '', stderr: 'leak-check: FAILED — 3 hit(s):\n' }).error, 'FAILED but unparseable');
+  assert.ok(interpretTargetScan({ status: null, signal: 'SIGTERM', stdout: '', stderr: '' }).error, 'timeout/kill');
+});
+
+test('L1: fingerprints are keyed — a different key gives a different fingerprint; no key = stable per process', async () => {
+  const { randomBytes } = await import('node:crypto');
+  const hit = { rel: 'NOTES.md', line: 1, label: 'derived-project-name', token: 'zorbl' };
+  const k1 = randomBytes(32);
+  const k2 = randomBytes(32);
+  assert.equal(fingerprintHit('r', hit, { key: k1 }), fingerprintHit('r', hit, { key: k1 }));
+  assert.notEqual(fingerprintHit('r', hit, { key: k1 }), fingerprintHit('r', hit, { key: k2 }), 'unguessable without the key');
+  assert.equal(fingerprintHit('r', hit), fingerprintHit('r', hit), 'default per-process key is stable within the run');
+  const { createHash } = await import('node:crypto');
+  const tokenHash = createHash('sha256').update('zorbl').digest('hex');
+  const unkeyed = createHash('sha256').update(`r\u0000NOTES.md\u0000derived-project-name\u0000${tokenHash}`).digest('hex').slice(0, 24);
+  assert.notEqual(fingerprintHit('r', hit, { key: k1 }), unkeyed, 'the old guessable construction no longer matches');
+});
+
+test('L1: loadFingerprintKey creates a 32-byte key once and returns the same key after', async () => {
+  const { loadFingerprintKey } = await import('../scripts/lib/publication-sweep.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'ac-fpkey-'));
+  try {
+    const a = loadFingerprintKey(dir);
+    const b = loadFingerprintKey(dir);
+    assert.equal(a.length, 32);
+    assert.ok(a.equals(b), 'persisted, not regenerated');
+    assert.match(readFileSync(join(dir, 'leak-fingerprint.key'), 'utf8'), /^[0-9a-f]{64}$/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('L1: a SECOND occurrence of an accepted token in the same file is a new fingerprint; a line shift is not', async () => {
+  const { fingerprintHits } = await import('../scripts/lib/publication-sweep.mjs');
+  const h = (line) => ({ rel: 'NOTES.md', line, label: 'derived-project-name', token: 'zorbl', text: 'x' });
+  const accepted = fingerprintHits('r', [h(3)]).map((x) => x.fingerprint);
+  const shifted = fingerprintHits('r', [h(9)]).map((x) => x.fingerprint);
+  assert.deepEqual(shifted, accepted, 'a line shift alone keeps the fingerprint');
+  const twice = fingerprintHits('r', [h(9), h(20)]);
+  const fresh = filterNew(twice, accepted);
+  assert.equal(fresh.length, 1, 'the added copy fires once');
+  const twiceAbove = fingerprintHits('r', [h(1), h(9)]);
+  assert.equal(filterNew(twiceAbove, accepted).length, 1, 'a copy added ABOVE the accepted one also fires exactly once');
 });
 
 test('detect.mjs: publication_leak_repos empty (default) — no signal, no git activity', async () => {
@@ -426,6 +614,39 @@ test('detect.mjs: auto-discovery via the dev-root fallback fires publication_rep
       !runB.json.signals.some((s) => s.kind === 'publication_repo_newly_public'),
       'the same repo must not re-fire as "newly public" once acknowledged',
     );
+  } finally { cleanup(); }
+});
+
+test('M5 detect.mjs: unknown visibility fires publication_leak_visibility_unknown with a count and no names', async () => {
+  const { dir, cleanup } = makeFixture();
+  const devRoot = join(dir, 'discover-dev-root');
+  mkdirSync(devRoot, { recursive: true });
+  const projDir = join(devRoot, 'zbunknownproj');
+  mkdirSync(projDir, { recursive: true });
+  git(['init', '--quiet', '-b', 'main'], projDir);
+  writeFileSync(join(projDir, 'README.md'), 'clean\n');
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
+  git(['add', '-A'], projDir, gitEnv);
+  git(['commit', '--quiet', '-m', 'init'], projDir, gitEnv);
+  git(['remote', 'add', 'origin', 'git@github.com:example-org/zbunknownproj.git'], projDir);
+  try {
+    const env = {
+      ...process.env,
+      AGENT_COMPANION_HOME_OVERRIDE: dir,
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_SWEEP: 'true',
+      AGENT_COMPANION_DISCOVERY_NO_GH: '1',
+      AGENT_COMPANION_DISCOVERY_DEV_ROOT: devRoot,
+      AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY: 'unknown',
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_OWNERS: 'example-org',
+    };
+    const res = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    assert.equal(res.status, 0, res.stderr);
+    const unk = res.json.signals.find((s) => s.kind === 'publication_leak_visibility_unknown');
+    assert.ok(unk, `expected publication_leak_visibility_unknown, got: ${JSON.stringify(res.json.signals)}`);
+    assert.match(unk.detail, /^1 candidate repo/);
+    assert.doesNotMatch(unk.detail, /zbunknownproj|example-org/, 'count only, never names');
+    assert.ok(!res.json.signals.some((s) => s.kind === 'publication_repo_newly_public'), 'unknown is never treated as public');
+    assert.deepEqual(res.json.baseline.publicationVisibilityCache, {}, 'an unknown answer is never cached');
   } finally { cleanup(); }
 });
 

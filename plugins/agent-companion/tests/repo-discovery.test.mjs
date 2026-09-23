@@ -143,3 +143,58 @@ test('defaultDevRoots: never returns the home dir itself', () => {
   const roots = defaultDevRoots({ cwd: '/somewhere/else', home: '/home/example' });
   assert.ok(!roots.includes('/home/example'));
 });
+
+// --- second adversarial review: M5 (visibility unknown), L3 (dev root) ----
+
+test('M5: cachedVisibility caches KNOWN answers for the TTL, never unknown ones, and counts unknowns', async () => {
+  const { cachedVisibility } = await import('../scripts/lib/repo-discovery.mjs');
+  let calls = 0;
+  const answers = { 'zb/pub': true, 'zb/priv': false, 'zb/offline': null };
+  const fn = async (o, r) => { calls++; return answers[`${o}/${r}`]; };
+  const cache = {};
+  let t = Date.parse('2026-01-01T00:00:00Z');
+  const v = cachedVisibility(fn, cache, { now: () => t });
+  assert.equal(await v.check('zb', 'pub'), true);
+  assert.equal(await v.check('zb', 'priv'), false);
+  assert.equal(await v.check('zb', 'offline'), null);
+  assert.equal(calls, 3);
+  assert.equal(v.stats.unknown, 1);
+  assert.deepEqual(Object.keys(cache).sort(), ['zb/priv', 'zb/pub'], 'unknown is never cached');
+
+  // Second run within the TTL: known answers come from the cache (0 calls),
+  // the unknown one is retried.
+  const v2 = cachedVisibility(fn, cache, { now: () => t + 60 * 60 * 1000 });
+  await v2.check('zb', 'pub'); await v2.check('zb', 'priv'); await v2.check('zb', 'offline');
+  assert.equal(calls, 4, 'only the unknown repo was re-fetched');
+  assert.equal(v2.stats.cached, 2);
+  assert.equal(v2.stats.unknown, 1);
+
+  // After the TTL a known answer is re-fetched; if that fetch fails, the
+  // stale known answer is used but the lookup still counts as unknown.
+  answers['zb/pub'] = null;
+  t += 25 * 60 * 60 * 1000;
+  const v3 = cachedVisibility(fn, cache, { now: () => t });
+  assert.equal(await v3.check('zb', 'pub'), true, 'stale-but-known public keeps being swept through an outage');
+  assert.equal(v3.stats.unknown, 1);
+});
+
+test('M5: discovery with unknown visibility sweeps nothing but the caller can see the count', async () => {
+  const { cachedVisibility } = await import('../scripts/lib/repo-discovery.mjs');
+  const base = mkdtempSync(join(tmpdir(), 'rd-m5-'));
+  try {
+    makeRepo(base, 'zbone', 'git@github.com:zbowner/zbone.git');
+    makeRepo(base, 'zbtwo', 'https://github.com/zbowner/zbtwo.git');
+    const v = cachedVisibility(async () => null, {});
+    const found = await discoverLocalCheckouts({ devRoots: [base], checkVisibility: v.check });
+    assert.deepEqual(found, []);
+    assert.equal(v.stats.unknown, 2);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('L3: defaultDevRoots never returns the temp dir when cwd sits directly under it', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'rd-l3-'));
+  try {
+    const roots = defaultDevRoots({ cwd, home: join(tmpdir(), 'rd-l3-home') });
+    assert.deepEqual(roots, [], `no temp-dir roots expected, got ${JSON.stringify(roots)}`);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});

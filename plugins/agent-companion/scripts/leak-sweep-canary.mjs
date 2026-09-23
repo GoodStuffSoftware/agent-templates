@@ -47,7 +47,7 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { sweepRepo, sweepRepoInPlace, filterNew, ownerOf } from './lib/publication-sweep.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -69,6 +69,7 @@ function fail(reason) {
 // Synthetic pieces — never a literal recognisable token in this source file.
 const P = (...parts) => parts.join('');
 const SYN_USER = P('zzz', 'canary', 'user');
+const SYN_OWNER = P('zzz', 'canary', 'owner');
 const SYN_PROJECT = P('zzz', 'canary', 'proj', 'widgets'); // 4+ letters, not a GENERIC_WORDS segment
 const PRIVATE_PATH_LEAK = P('C:', '\\Users\\', SYN_USER, '\\dev\\thing\\notes.txt');
 
@@ -115,7 +116,14 @@ try {
     'const devRoots = process.env.LEAK_CHECK_DEV_ROOT ? process.env.LEAK_CHECK_DEV_ROOT.split(",").filter(Boolean) : [];',
     'const claudeProjectsDir = process.env.LEAK_CHECK_CLAUDE_PROJECTS || null;',
     'const { hits } = scanRepo({ root, devRoots, claudeProjectsDir, noDerived, strict: true });',
+    // A marker hit only THIS script emits: the canary asserts it arrives,
+    // proving the target-script path really ran (the plugin checker alone
+    // would otherwise produce the very same private-path hit).
+    'if (hits.length) hits.push({ rel: "NOTES.md", line: 1, label: "canary-own-script-ran", token: "x", text: "x" });',
     'for (const h of hits) console.log(`  ${h.rel}:${h.line}  [${h.label}]  ${h.token}  ::  ${h.text}`);',
+    // The closing summary line the sweep requires (a run without one reads
+    // as a crash, never as clean — see interpretTargetScan()).
+    'console.log(hits.length ? `leak-check: FAILED — ${hits.length} hit(s)` : "leak-check: OK — no real-world tokens found.");',
     'process.exitCode = hits.length ? 1 : 0;',
     '',
   ].join('\n');
@@ -137,30 +145,39 @@ try {
 
   if (!reduced) mkdirSync(join(devRootDir, SYN_PROJECT), { recursive: true });
   // Never execute a swept repo's own script by default — the canary must
-  // ALSO prove that opt-in path works, so it explicitly lists bareDir and
-  // "owns" it (same shape a real publication_leak_strict_repos + verified
-  // owner would take).
+  // ALSO prove that opt-in path works. Execution requires the clone SOURCE
+  // to be a github.com repo with a trusted owner, so full mode sweeps a
+  // github.com URL under a synthetic owner and, for THIS process only, has
+  // git rewrite that URL prefix to the local bare repo (url.<base>.insteadOf
+  // via GIT_CONFIG_* env) — no network, and the real ownership gate is
+  // exercised rather than bypassed.
+  const CANARY_URL = `https://github.com/${SYN_OWNER}/${SYN_OWNER}-origin.git`;
+  if (!reduced) {
+    process.env.GIT_CONFIG_COUNT = '1';
+    process.env.GIT_CONFIG_KEY_0 = `url.${pathToFileURL(bareDir).href}.insteadOf`;
+    process.env.GIT_CONFIG_VALUE_0 = CANARY_URL;
+  }
   const sweepOpts = {
     env: {
       LEAK_CHECK_DEV_ROOT: devRootDir,
       LEAK_CHECK_CLAUDE_PROJECTS: join(base, 'no-claude-projects'),
       LEAK_CHECK_CORE_PATH: coreModulePath,
     },
-    strictRepoUrls: [bareDir],
-    allowedOwners: new Set([ownerOf(bareDir)]),
+    strictRepoUrls: [CANARY_URL],
+    allowedOwners: new Set([ownerOf(CANARY_URL)]),
   };
   // FULL mode: sweepRepo() clones bareDir into ITS OWN throwaway dir (the
   // local production path). REDUCED mode: sweepRepoInPlace() scans workDir
   // ITSELF — workDir's origin remote already points at bareDir, so it IS
   // "this checkout", and no clone happens anywhere in this branch.
-  const doSweep = () => (reduced ? sweepRepoInPlace(bareDir, workDir, {}) : sweepRepo(bareDir, sweepOpts));
+  const doSweep = () => (reduced ? sweepRepoInPlace(bareDir, workDir, {}) : sweepRepo(CANARY_URL, sweepOpts));
 
   // --- 1. hit reported -----------------------------------------------------
   const runA = await doSweep();
   if (runA.error) throw new Error(`sweep of the leak commit errored: ${runA.error}`);
   const wantLabels = reduced
-    ? ['private-path:windows-profile']
-    : ['private-path:windows-profile', 'derived-project-name'];
+    ? ['private-path:windows-profile', 'canary-own-script-ran']
+    : ['private-path:windows-profile', 'derived-project-name', 'canary-own-script-ran'];
   for (const label of wantLabels) {
     if (!runA.hits.some((h) => h.label === label)) {
       fail(`leak commit swept clean of the "${label}" class — the sweep is not catching what it should`);

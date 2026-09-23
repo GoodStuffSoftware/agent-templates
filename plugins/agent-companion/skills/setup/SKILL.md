@@ -197,11 +197,16 @@ exactly what discovery finds.
 clones each covered repo's default branch AS PUBLISHED into a throwaway dir
 and scans it with the PLUGIN's own generic checker only — that is the only
 checker that runs unless you opt a repo in twice: it must be listed in
-`publication_leak_strict_repos` AND owned by you or one of your orgs
+`publication_leak_strict_repos` AND the URL it is actually cloned from (a
+local checkout's real `origin`, never the configured text or a directory
+name) must be a github.com repo owned by you or one of your orgs
 (`publication_leak_owners`). Only then does that repo's own
-`scripts/leak-check.mjs` also run, and even then with a scrubbed minimal
-environment (PATH/HOME/TEMP/SYSTEMROOT and the sweep's own LEAK_CHECK_* vars
-only — no tokens, no other env). In the cloud, target-script execution is
+`scripts/leak-check.mjs` also run. **That listing plus the verified owner is
+the whole protection.** The script gets a trimmed environment (PATH/TEMP/
+SYSTEMROOT-style vars and the sweep's own LEAK_CHECK_* only) and a HOME that
+points at an empty temp dir, but it still runs as you: it can read any file
+you can, credential files under your real home included. Only list repos
+whose code you would run anyway. In the cloud, target-script execution is
 unaffected by that gate (the cloud only ever scans the session's own
 checkout in place, never a clone of anything — see below), but nothing there
 executes a SECOND repo's code either.

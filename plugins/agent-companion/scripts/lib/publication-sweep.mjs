@@ -31,11 +31,16 @@
 // path) is recorded as an error and never stops the others.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { tmpdir, homedir } from 'node:os';
-import { createHash } from 'node:crypto';
-import { scanRepo as coreScanRepo, ownRepoNames as coreOwnRepoNames, mainCheckoutDir as coreMainCheckoutDir } from './leak-scan-core.mjs';
+import {
+  mkdtempSync, mkdirSync, rmSync, existsSync, statSync, readFileSync, writeFileSync,
+} from 'node:fs';
+import { join, dirname, basename } from 'node:path';
+import { tmpdir, homedir, userInfo } from 'node:os';
+import { createHmac, randomBytes } from 'node:crypto';
+import {
+  scanRepo as coreScanRepo, ownRepoNames as coreOwnRepoNames, mainCheckoutDir as coreMainCheckoutDir,
+  isUnsafeDevRoot,
+} from './leak-scan-core.mjs';
 
 // A repo opts into the strict (derived-name/prefix + git-sha-like) CLASS
 // GATING by shipping its own scripts/leak-check.mjs, carrying this marker
@@ -52,11 +57,14 @@ export function isStrictRepo(cloneDir, repoEntry, strictRepoUrls = []) {
   return strictRepoUrls.some((s) => normalizeGitUrl(s) === key);
 }
 
-// The owner segment of a normalized "host/owner/repo" URL, or null.
-export function ownerOf(repoEntry) {
-  const norm = normalizeGitUrl(repoEntry);
-  const parts = norm.split('/');
-  return parts.length >= 2 ? parts[parts.length - 2].toLowerCase() : null;
+// The GitHub owner of a clone source, or null. ONLY a github.com URL has an
+// owner here: a local path, a bare repo, or any other host has none — its
+// directory name says nothing about who controls the code in it (a checkout
+// under a dir that happens to be named like a trusted owner can have any
+// stranger's repo as its origin).
+export function ownerOf(source) {
+  const m = /^github\.com\/([^/]+)\/[^/]+$/.exec(normalizeGitUrl(source));
+  return m ? m[1].toLowerCase() : null;
 }
 
 // Never execute code from a swept repo by default. A target's own
@@ -64,28 +72,77 @@ export function ownerOf(repoEntry) {
 //   1. the repo is EXPLICITLY listed in publication_leak_strict_repos (NOT
 //      merely auto-detected as strict via its own file/marker — an
 //      operator has to have named it), AND
-//   2. its owner is the authenticated user or one of their orgs
-//      (`allowedOwners`) — a third-party repo cloned locally is never
-//      executed, no matter how it got into the sweep list.
-export function mayExecuteTargetScript(repoEntry, { strictRepoUrls = [], allowedOwners } = {}) {
-  const key = normalizeGitUrl(repoEntry);
-  const explicitlyListed = strictRepoUrls.some((s) => normalizeGitUrl(s) === key);
+//   2. the source it is ACTUALLY cloned from (`resolvedSource`: a local
+//      entry's real origin URL, see resolveCloneSource()) is a github.com
+//      repo whose owner is the authenticated user or one of their orgs
+//      (`allowedOwners`). The configured text is never trusted for this —
+//      only the URL the code really comes from.
+// This listing + verified-owner gate IS the protection. The child's
+// environment is scrubbed and its HOME points at an empty temp dir (see
+// sweepRepo()), but that is hygiene, not a sandbox: the script runs as the
+// operator and can still read any file the operator can, credential files
+// under the real home included.
+export function mayExecuteTargetScript(repoEntry, { strictRepoUrls = [], allowedOwners, resolvedSource } = {}) {
+  const source = resolvedSource ?? resolveCloneSource(repoEntry);
+  const keys = new Set([normalizeGitUrl(repoEntry), normalizeGitUrl(source)]);
+  const explicitlyListed = strictRepoUrls.some((s) => keys.has(normalizeGitUrl(s)));
   if (!explicitlyListed) return false;
   if (!allowedOwners || allowedOwners.size === 0) return false; // no verified owner set: safe default is never
-  const owner = ownerOf(repoEntry);
+  const owner = ownerOf(source);
   return !!owner && allowedOwners.has(owner);
 }
 
-// Minimal, scrubbed environment for executing a target repo's own script —
-// PATH/HOME/USERPROFILE/TEMP/SYSTEMROOT and the LEAK_CHECK_* vars this
-// sweep itself sets, nothing else. No tokens, no credentials, no
-// operator-specific env carried over from this process.
+// Minimal environment for executing a target repo's own script —
+// PATH/TEMP/SYSTEMROOT-shaped vars and LEAK_CHECK_* only. No tokens, no
+// operator-specific env carried over from this process. HOME/USERPROFILE are
+// listed so a caller can see them here, but sweepRepo() overrides both with
+// an empty temp dir. None of this stops the script from reading files by
+// absolute path — see mayExecuteTargetScript() for what actually protects.
 const MINIMAL_ENV_KEYS = ['PATH', 'Path', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'SYSTEMROOT', 'SystemRoot', 'ComSpec', 'windir'];
 export function scrubbedEnv(extra = {}) {
   const env = {};
   for (const k of MINIMAL_ENV_KEYS) if (process.env[k] !== undefined) env[k] = process.env[k];
   for (const [k, v] of Object.entries(extra)) if (k.startsWith('LEAK_CHECK_')) env[k] = v;
   return env;
+}
+
+// The operator's raw OS handle(s) — what leak-check.mjs would derive for
+// itself from the real home, handed to a child whose HOME is a temp dir.
+function rawOsHandles() {
+  const out = [];
+  try { out.push(userInfo().username); } catch { /* no passwd entry */ }
+  for (const k of ['USERNAME', 'USER']) if (process.env[k]) out.push(process.env[k]);
+  out.push(basename(homedir()));
+  return [...new Set(out.filter(Boolean))];
+}
+
+// Interpret a target leak-check run. exit 0 = clean, 1 = hits, 2 = bad
+// invocation — but a script that CRASHES also exits 1 (Node's uncaught
+// exception code), so exit status alone cannot tell "found leaks" from "died
+// before scanning anything". A run counts only with its closing summary
+// line (`leak-check: OK` / `leak-check: FAILED`) or at least one parsed hit;
+// anything else is an error, never a clean result.
+export function interpretTargetScan(scan) {
+  const out = `${scan.stdout || ''}\n${scan.stderr || ''}`;
+  const firstErr = (scan.stderr || '').split(/\r?\n/).find((l) => l.trim()) || scan.error?.message || 'no output';
+  if (scan.status !== 0 && scan.status !== 1) {
+    return { hits: [], error: `target leak-check invocation failed (exit ${scan.status ?? scan.signal ?? 'none'}): ${firstErr}` };
+  }
+  const hits = parseHits(out);
+  if (scan.status === 0 && !/^leak-check: OK\b/m.test(out)) {
+    return { hits, error: `target leak-check exited 0 without its closing "leak-check: OK" line: ${firstErr}` };
+  }
+  if (scan.status === 1 && hits.length === 0) {
+    // FAILED with nothing parseable is just as unusable as a crash: the
+    // findings exist but cannot be reported, so it must not read as clean.
+    return {
+      hits: [],
+      error: /^leak-check: FAILED\b/m.test(out)
+        ? 'target leak-check reported FAILED but no hit line could be parsed'
+        : `target leak-check exited 1 with no "leak-check: FAILED" summary and no parsed hit — it crashed: ${firstErr}`,
+    };
+  }
+  return { hits, error: null };
 }
 
 function run(cmd, args, opts = {}) {
@@ -101,7 +158,7 @@ function run(cmd, args, opts = {}) {
 // `origin` remote — we read ITS url so we clone from the real origin, never
 // from the possibly-ahead-of-origin local branch) or a git URL / local bare
 // repo path used directly as the clone source.
-function resolveCloneSource(entry) {
+export function resolveCloneSource(entry) {
   const looksLocal = existsSync(entry);
   if (looksLocal && statSync(entry).isDirectory()) {
     const originUrl = run('git', ['-C', entry, 'remote', 'get-url', 'origin']);
@@ -130,16 +187,67 @@ function parseHits(output) {
   return hits;
 }
 
-// Fingerprint = repo + file + label + sha256(token) — deliberately NOT the
-// line number, so a hit that merely SHIFTED LINE (an unrelated edit earlier
-// in the file) still dedupes against its prior acceptance instead of firing
-// again as "new". The token itself is hashed rather than stored raw: the
-// baseline that stores this is state, and a fingerprint should identify
-// "this spot flagged again", not carry the leaked value around a second
-// time (double-hashing costs nothing here and keeps that property).
-export function fingerprintHit(repo, hit) {
-  const tokenHash = createHash('sha256').update(String(hit.token || '')).digest('hex');
-  return createHash('sha256').update(`${repo}\u0000${hit.rel}\u0000${hit.label}\u0000${tokenHash}`).digest('hex').slice(0, 24);
+// Fingerprint = HMAC(key, repo + file + label + token + occurrence) —
+// deliberately NOT the line number, so a hit that merely SHIFTED LINE (an
+// unrelated edit earlier in the file) still dedupes against its prior
+// acceptance instead of firing again as "new".
+//
+// KEYED, not a bare hash: the baseline that stores fingerprints is state on
+// disk, and an unkeyed sha256 of (repo, file, label, token) can be confirmed
+// by anyone holding the baseline and a candidate list of names ("is
+// <name> in this repo's accepted hits?"). The key is a per-machine random
+// secret — loadFingerprintKey() creates it once in the state dir. Callers
+// that pass no key (tests, the canary) get a per-PROCESS random key:
+// stable within one run, never persisted.
+//
+// `occurrence` (0, 1, 2 … — the Nth hit of the same file+label+token, in
+// line order): a SECOND occurrence of an already-accepted token in the same
+// file is a distinct fingerprint, so it fires as new instead of silently
+// riding on the first one's acceptance. Line shifts keep the ordinal stable;
+// if a new copy lands ABOVE the accepted one, the ordinals swap and exactly
+// one hit (the count went up by one) fires — the right number either way.
+const PROCESS_FINGERPRINT_KEY = randomBytes(32);
+export function fingerprintHit(repo, hit, { key = PROCESS_FINGERPRINT_KEY, occurrence = 0 } = {}) {
+  return createHmac('sha256', key)
+    .update(`${repo}\u0000${hit.rel}\u0000${hit.label}\u0000${String(hit.token || '')}\u0000${occurrence}`)
+    .digest('hex').slice(0, 24);
+}
+
+// Fingerprint a hit list, numbering repeat occurrences per file+label+token
+// in line order (see fingerprintHit()).
+export function fingerprintHits(repo, hits, { key } = {}) {
+  const order = hits.map((h, i) => ({ h, i })).sort((a, b) => (a.h.rel < b.h.rel ? -1 : a.h.rel > b.h.rel ? 1 : a.h.line - b.h.line || a.i - b.i));
+  const seen = new Map();
+  const out = new Array(hits.length);
+  for (const { h, i } of order) {
+    const k = `${h.rel}\u0000${h.label}\u0000${h.token}`;
+    const occurrence = seen.get(k) || 0;
+    seen.set(k, occurrence + 1);
+    out[i] = { ...h, fingerprint: fingerprintHit(repo, h, { key, occurrence }) };
+  }
+  return out;
+}
+
+// The per-machine fingerprint key: `<dir>/leak-fingerprint.key` (64 hex
+// chars), created with owner-only permissions on first use.
+export function loadFingerprintKey(dir) {
+  const file = join(dir, 'leak-fingerprint.key');
+  try {
+    const hex = readFileSync(file, 'utf8').trim();
+    if (/^[0-9a-f]{64}$/i.test(hex)) return Buffer.from(hex, 'hex');
+  } catch { /* first use */ }
+  const key = randomBytes(32);
+  mkdirSync(dir, { recursive: true });
+  try {
+    writeFileSync(file, key.toString('hex'), { flag: 'wx', mode: 0o600 });
+  } catch {
+    // Lost a creation race (or the file exists but is malformed): use
+    // whatever is on disk if valid, so two runs never disagree.
+    const hex = readFileSync(file, 'utf8').trim();
+    if (/^[0-9a-f]{64}$/i.test(hex)) return Buffer.from(hex, 'hex');
+    throw new Error(`fingerprint key file ${file} is malformed; delete it to regenerate`);
+  }
+  return key;
 }
 
 // hits (already fingerprinted) filtered down to ones NOT in `seen` (a Set or
@@ -179,7 +287,7 @@ export function filterNewOrStale(hits, seenMap, { maxAgeDays = 7, now = Date.now
 function defaultPluginCheckerDevRoots() {
   const home = homedir();
   return [...new Set([dirname(coreMainCheckoutDir(process.cwd())), join(home, 'dev')])]
-    .filter((p) => p.toLowerCase() !== home.toLowerCase());
+    .filter((p) => !isUnsafeDevRoot(p, home));
 }
 
 // Dedupe hits that fingerprint identically (the target's own leak-check and
@@ -200,7 +308,9 @@ function dedupeByFingerprint(hits) {
 // must never read as "clean": a repo whose checker crashed and one that is
 // genuinely spotless are different outcomes, and collapsing them into an
 // empty hit list would hide the failure from the operator entirely.
-function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = null, devRoots, publicNames = [], strict = false } = {}) {
+function runPluginChecker(cloneDir, repoEntry, {
+  noDerived = false, tokenFile = null, devRoots, publicNames = [], strict = false, fingerprintKey,
+} = {}) {
   try {
     const { hits } = coreScanRepo({
       root: cloneDir,
@@ -213,13 +323,8 @@ function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = 
       noDerived,
       strict,
     });
-    return {
-      hits: hits.map((h) => ({
-        rel: h.rel, line: h.line, label: h.label, token: h.token, text: h.text,
-        fingerprint: fingerprintHit(repoEntry, h),
-      })),
-      error: null,
-    };
+    const plain = hits.map((h) => ({ rel: h.rel, line: h.line, label: h.label, token: h.token, text: h.text }));
+    return { hits: fingerprintHits(repoEntry, plain, { key: fingerprintKey }), error: null };
   } catch (err) {
     return { hits: [], error: err.message || String(err) };
   }
@@ -231,13 +336,20 @@ function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = 
 //
 // The target's OWN scripts/leak-check.mjs is NEVER executed unless
 // `mayExecuteTargetScript()` says so: the repo must be EXPLICITLY listed in
-// `strictRepoUrls` (publication_leak_strict_repos) AND owned by the
-// authenticated user or one of their orgs (`allowedOwners`). `isStrictRepo`
-// (own script present / marker file / listed) only decides CLASS GATING —
-// whether the plugin checker's derived-name/prefix + git-sha-like classes
-// apply — and is pure file-existence detection, never execution. When the
-// target script exists but may not be executed, its presence still makes
-// the repo strict for the plugin checker; it just isn't run itself.
+// `strictRepoUrls` (publication_leak_strict_repos) AND the source it is
+// really cloned from must be a github.com repo owned by the authenticated
+// user or one of their orgs (`allowedOwners`). That gate is the protection.
+// When it passes, the script runs with a scrubbed env and HOME/USERPROFILE
+// pointed at an empty temp dir — hygiene against a script that reads "~"
+// naively, NOT a sandbox (it still runs as the operator and can read any
+// file by absolute path). The operator's real dev roots, projects dir and
+// OS handle are handed over explicitly via LEAK_CHECK_*, so the derived-name
+// coverage is the same as a run under the real HOME.
+//
+// `isStrictRepo` (own script present / marker file / listed) only decides
+// CLASS GATING — whether the plugin checker's derived-name/prefix +
+// git-sha-like classes apply — and is pure file-existence detection, never
+// execution.
 //
 // `reduced`: pass --no-derived to the plugin checker (no dev root here to
 // derive real project names from — the cloud routine's situation; kept as
@@ -245,9 +357,10 @@ function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = 
 // `tokenFile`: private token file for the PLUGIN's own checker.
 // `publicNames`: every OTHER repo discovery found to be public — exempt via
 // the plugin checker's exact-name subtraction (see leak-scan-core.mjs).
+// `fingerprintKey`: the per-machine HMAC key (see fingerprintHit()).
 export async function sweepRepo(repoEntry, {
   reduced = false, timeout = 120000, tokenFile = null, devRoots, publicNames = [],
-  strictRepoUrls = [], allowedOwners, env = {},
+  strictRepoUrls = [], allowedOwners, env = {}, fingerprintKey,
 } = {}) {
   const tmpRoot = mkdtempSync(join(tmpdir(), 'ac-pubsweep-'));
   const cloneDir = join(tmpRoot, 'repo');
@@ -261,7 +374,7 @@ export async function sweepRepo(repoEntry, {
       return { repo: repoEntry, hits: [], error: `clone failed: ${(clone.stderr || clone.error?.message || 'unknown error').split('\n')[0]}` };
     }
     const strict = isStrictRepo(cloneDir, repoEntry, strictRepoUrls);
-    const mayExecute = mayExecuteTargetScript(repoEntry, { strictRepoUrls, allowedOwners });
+    const mayExecute = mayExecuteTargetScript(repoEntry, { strictRepoUrls, allowedOwners, resolvedSource: source });
 
     let ownHits = [];
     let ownError = null;
@@ -269,24 +382,28 @@ export async function sweepRepo(repoEntry, {
     if (mayExecute && existsSync(leakCheck)) {
       const args = [leakCheck, '--root', cloneDir];
       if (reduced) args.push('--no-derived');
-      // Only LEAK_CHECK_* keys from `env` survive scrubbing (test/canary use
-      // this to set LEAK_CHECK_DEV_ROOT etc. on an isolated fixture — never
-      // a way to pass arbitrary env through to the target script).
-      const leakCheckEnv = { ...Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith('LEAK_CHECK_'))) };
+      const childHome = join(tmpRoot, 'home');
+      mkdirSync(childHome, { recursive: true });
+      const leakCheckEnv = {
+        LEAK_CHECK_DEV_ROOT: (devRoots || defaultPluginCheckerDevRoots()).join(','),
+        LEAK_CHECK_CLAUDE_PROJECTS: join(homedir(), '.claude', 'projects'),
+        LEAK_CHECK_USER: rawOsHandles().join(','),
+        // Only LEAK_CHECK_* keys from `env` survive scrubbing (test/canary
+        // use this to point at an isolated fixture — never a way to pass
+        // arbitrary env through to the target script).
+        ...Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith('LEAK_CHECK_'))),
+      };
       if (publicNames.length) leakCheckEnv.LEAK_CHECK_OWN_NAMES = publicNames.join(',');
-      const childEnv = scrubbedEnv(leakCheckEnv);
+      const childEnv = { ...scrubbedEnv(leakCheckEnv), HOME: childHome, USERPROFILE: childHome };
       const scan = run(process.execPath, args, { timeout, env: childEnv });
-      // exit 0 = clean, 1 = hits, 2 = bad invocation. A bad invocation is
-      // recorded as an error but does NOT stop the plugin checker below —
-      // one checker failing must never suppress the other's coverage.
-      if (scan.status !== 0 && scan.status !== 1) {
-        ownError = `target leak-check invocation failed (exit ${scan.status}): ${(scan.stderr || '').split('\n')[0] || 'unknown error'}`;
-      } else {
-        ownHits = parseHits(`${scan.stdout || ''}\n${scan.stderr || ''}`)
-          .map((h) => ({ ...h, fingerprint: fingerprintHit(repoEntry, h) }));
-      }
+      // A failed/crashed target run is recorded as an error but does NOT
+      // stop the plugin checker below — one checker failing must never
+      // suppress the other's coverage.
+      const own = interpretTargetScan(scan);
+      ownError = own.error;
+      ownHits = fingerprintHits(repoEntry, own.hits, { key: fingerprintKey });
     }
-    const plugin = runPluginChecker(cloneDir, repoEntry, { noDerived: reduced, tokenFile, devRoots, publicNames, strict });
+    const plugin = runPluginChecker(cloneDir, repoEntry, { noDerived: reduced, tokenFile, devRoots, publicNames, strict, fingerprintKey });
     if (plugin.error) {
       // The plugin checker is the one that ALWAYS runs — its failure must
       // never read as "repo is clean". Report it and stop; ownHits (if any)
@@ -371,7 +488,7 @@ export function isSessionCheckout(repoEntry, cwd) {
 // fetch — that would mean scanning something not actually published (a
 // mid-run rebase, a detached commit, a shallow oddity), which is worse than
 // reporting nothing this run.
-export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000, tokenFile = null, publicNames = [] } = {}) {
+export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000, tokenFile = null, publicNames = [], fingerprintKey } = {}) {
   try {
     const fetch = run('git', ['-C', cwd, 'fetch', '--quiet', 'origin'], { timeout });
     if (fetch.status !== 0) {
@@ -406,17 +523,16 @@ export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000, tokenF
     const leakCheck = join(cwd, 'scripts', 'leak-check.mjs');
     if (existsSync(leakCheck)) {
       const scan = run(process.execPath, [leakCheck, '--root', cwd, '--no-derived'], { timeout });
-      if (scan.status !== 0 && scan.status !== 1) {
-        ownError = `target leak-check invocation failed (exit ${scan.status}): ${(scan.stderr || '').split('\n')[0] || 'unknown error'}`;
-      } else {
-        ownHits = parseHits(`${scan.stdout || ''}\n${scan.stderr || ''}`)
-          .map((h) => ({ ...h, fingerprint: fingerprintHit(repoEntry, h) }));
-      }
+      // Same rule as sweepRepo(): no summary line and no parsed hit = the
+      // script crashed, which is an error, never "clean plus plugin hits".
+      const own = interpretTargetScan(scan);
+      ownError = own.error;
+      ownHits = fingerprintHits(repoEntry, own.hits, { key: fingerprintKey });
     }
     // Always ALSO run the plugin's own generic checker, --no-derived (no dev
     // root in the cloud), same as sweepRepo()'s local path. Its failure must
     // never read as clean (item 6) — report it rather than swallow it.
-    const plugin = runPluginChecker(cwd, repoEntry, { noDerived: true, tokenFile, publicNames });
+    const plugin = runPluginChecker(cwd, repoEntry, { noDerived: true, tokenFile, publicNames, fingerprintKey });
     if (plugin.error) {
       const combinedError = [ownError, `plugin checker crashed: ${plugin.error}`].filter(Boolean).join('; ');
       return { repo: repoEntry, hits: dedupeByFingerprint(ownHits), error: combinedError };
@@ -431,13 +547,13 @@ export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000, tokenF
 // Cloud entry point. Never clones: a configured repo that IS the session
 // checkout (cwd) is scanned in place; any other configured repo is reported
 // `skipped` with a one-line note — never fetched, never cloned.
-export async function sweepAllCloud(repos, { cwd = process.cwd(), timeout, tokenFile = null, publicNames = [] } = {}) {
+export async function sweepAllCloud(repos, { cwd = process.cwd(), timeout, tokenFile = null, publicNames = [], fingerprintKey } = {}) {
   const results = [];
   for (const repo of repos) {
     // eslint-disable-next-line no-await-in-loop
     if (isSessionCheckout(repo, cwd)) {
       // eslint-disable-next-line no-await-in-loop
-      results.push(await sweepRepoInPlace(repo, cwd, { timeout, tokenFile, publicNames }));
+      results.push(await sweepRepoInPlace(repo, cwd, { timeout, tokenFile, publicNames, fingerprintKey }));
     } else {
       results.push({
         repo, hits: [], error: null, skipped: true,
