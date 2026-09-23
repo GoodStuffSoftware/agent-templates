@@ -1,0 +1,17 @@
+# Force LF line endings for text this repo's tooling reads byte-exact
+# (generated docs compared against a fresh regeneration, unified diffs
+# applied with `git apply`, JSON parsed strictly, and script source). Without
+# this, a Windows checkout with the common `core.autocrlf=true` default
+# silently rewrites every LF in these files to CRLF on checkout — content
+# identical, bytes different — which breaks a byte-for-byte comparison
+# (docs/ROUTING.md vs a fresh `routing-table.mjs` run) and a unified diff's
+# own line-ending assumption (docs/proposed/*.patch) even though `git
+# status`/`git diff` report nothing wrong, because the stored blob is
+# untouched — only the working-tree copy is corrupted. Gate correctness
+# checks on blob OIDs (`git ls-files -s`), not on git status, for exactly
+# this reason.
+*.md    text eol=lf
+*.patch text eol=lf
+*.json  text eol=lf
+*.mjs   text eol=lf
+*.js    text eol=lf
