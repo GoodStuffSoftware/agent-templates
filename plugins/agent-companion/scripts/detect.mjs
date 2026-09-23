@@ -13,13 +13,30 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, homeRoot } from '../hooks/lib/context.mjs';
+import { userInfo } from 'node:os';
+import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, homeRoot, stateRoot } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
-import { sweepAll, sweepAllCloud, filterNew, normalizeGitUrl } from './lib/publication-sweep.mjs';
+import { sweepAll, sweepAllCloud, filterNewOrStale, normalizeGitUrl } from './lib/publication-sweep.mjs';
 import {
-  discoverViaGh, discoverFromClaudeProjects, discoverLocalCheckouts, defaultDevRoots, parseExtraSpec, publicNameTokens,
+  discoverViaGh, discoverOwners, discoverFromClaudeProjects, discoverLocalCheckouts,
+  defaultDevRoots, parseExtraSpec, publicNameTokens, defaultCheckVisibility,
 } from './lib/repo-discovery.mjs';
+
+const splitListLocal = (v) => (v ? String(v).split(/[,;]/).map((s) => s.trim()).filter(Boolean) : []);
+
+// publication_leak_token_file: an operator-authored private-token file, fed
+// into EVERY sweep scan (universal — applies regardless of strict). Default
+// ~/.claude/agent-companion/leak-tokens.txt (the state root's config-shaped
+// location) IF it exists; the option overrides the path. Never required —
+// most operators have none, and a missing file is silently treated as "no
+// token file", not an error.
+function publicationTokenFile() {
+  const configured = opt('publication_leak_token_file', '');
+  if (configured) return configured;
+  const defaultPath = join(stateRoot(), 'leak-tokens.txt');
+  return existsSync(defaultPath) ? defaultPath : null;
+}
 
 const existsSyncSafe = existsSync;
 
@@ -59,8 +76,25 @@ const signals = [];
 const now = new Date().toISOString();
 const next = { checkedAt: now };
 
+// Scrub local absolute paths and the real OS user handle out of signal text
+// before it ever lands in a signal/notification — a git error message (e.g.
+// a clone failure) or a locally-configured repo path can otherwise leak the
+// operator's own machine layout into a push notification or scout-surface
+// line. Applied to EVERY signal, not just publication-leak ones, since any
+// detail string could in principle carry a local path.
+const REAL_USER = (() => { try { return userInfo().username; } catch { return null; } })();
+function scrubText(text) {
+  let s = String(text ?? '');
+  s = s.replace(/[A-Za-z]:[\\/]Users[\\/][^\\/\s"']+(?:[\\/][^\s"']*)?/gi, '<home>');
+  s = s.replace(/\/(?:home|Users)\/[^/\s"']+(?:\/[^\s"']*)?/g, '<home>');
+  if (REAL_USER && REAL_USER.length >= 3) {
+    s = s.replace(new RegExp(`\\b${REAL_USER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), '<user>');
+  }
+  return s;
+}
+
 function sig(kind, detail, dispatch) {
-  signals.push({ kind, detail, dispatch });
+  signals.push({ kind, detail: scrubText(detail), dispatch });
 }
 
 // --- 1. Harness version ------------------------------------------------
@@ -245,8 +279,24 @@ const publicationSweepOn = !!opt('publication_leak_sweep', false);
 const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
 let publicationRepos = [];
 let publicationPublicNames = []; // every discovered-public name — exempt from the derived-name class (see repo-discovery.mjs's publicNameTokens)
+let publicationAllowedOwners = new Set(); // item 2: the authenticated user + their orgs — gates target-script execution
 if (publicationSweepOn && cloud) {
   publicationRepos = parseExtraSpec(opt('publication_leak_repos', '')).include;
+  publicationAllowedOwners = new Set(splitListLocal(opt('publication_leak_owners', '')).map((s) => s.toLowerCase()));
+  // Default (no include list): sweep the session's own checkout, but ONLY
+  // if it is actually public — no discovery needed for that, cwd's own
+  // origin is right there. Never defaults to sweeping a private repo.
+  if (publicationRepos.length === 0) {
+    try {
+      const originUrl = execSync('git remote get-url origin', { cwd: process.cwd(), encoding: 'utf8', timeout: 15000 }).trim();
+      const norm = normalizeGitUrl(originUrl); // "github.com/owner/repo"
+      const m = /^github\.com\/([^/]+)\/([^/]+)$/.exec(norm);
+      if (m) {
+        const isPublic = await defaultCheckVisibility(m[1], m[2]);
+        if (isPublic === true) publicationRepos = [originUrl];
+      }
+    } catch { /* no origin readable here: nothing to default to, stays empty/silent */ }
+  }
 } else if (publicationSweepOn) {
   try {
     const { include, exclude } = parseExtraSpec(opt('publication_leak_repos', ''));
@@ -276,6 +326,25 @@ if (publicationSweepOn && cloud) {
       ghNote = gh.ok ? null : gh.reason;
       next.publicationGhCache = { at: now, ok: gh.ok, repos: ghRepos };
     }
+
+    // The trusted-owner set (item 2): a locally-discovered repo is kept
+    // ONLY if its owner is the authenticated gh user or an org they belong
+    // to. gh available: discoverOwners() (accurate). gh unavailable:
+    // publication_leak_owners (explicit), unioned with the owners already
+    // present in the gh-discovered repo list itself (the "owner set seen
+    // across the operator's own repos' remotes" fallback — those repos were
+    // already vetted by the gh affiliation query). Empty either way =
+    // exclude every local-checkout candidate (safe default: never sweep an
+    // unverified third party just because it sits in a local checkout).
+    const ghOwnersResult = process.env.AGENT_COMPANION_DISCOVERY_NO_GH || cacheFresh
+      ? { ok: false, owners: [] }
+      : discoverOwners({});
+    const explicitOwners = splitListLocal(opt('publication_leak_owners', ''));
+    const ghRepoOwners = ghRepos.map((r) => (r.fullName || '').split('/')[0]).filter(Boolean);
+    const allowedOwners = new Set(
+      [...ghOwnersResult.owners, ...explicitOwners, ...ghRepoOwners].map((s) => s.toLowerCase()),
+    );
+    publicationAllowedOwners = allowedOwners;
 
     // Local visibility is cheap and ALWAYS rechecked fresh (never cached) —
     // this is what guarantees a repo newly turned public is covered on the
@@ -327,8 +396,14 @@ if (publicationSweepOn && cloud) {
       seen.add(key);
       merged.push({ fullName: r.fullName || r, htmlUrl: r.htmlUrl || r, source });
     };
-    for (const r of ghRepos) add(r, 'gh');
-    for (const r of localRepos) add(r, 'local-checkout');
+    for (const r of ghRepos) add(r, 'gh'); // already owner-restricted by the gh API query itself
+    for (const r of localRepos) {
+      // item 2: exclude a third-party repo merely cloned locally — only
+      // keep it if its owner is verified trusted.
+      const owner = (r.fullName || '').split('/')[0]?.toLowerCase();
+      if (!owner || !allowedOwners.has(owner)) continue;
+      add(r, 'local-checkout');
+    }
     for (const raw of include) {
       add({ fullName: raw, htmlUrl: expandShorthand(raw) }, 'extra');
     }
@@ -370,12 +445,19 @@ if (publicationSweepOn && cloud) {
 if (publicationRepos.length) {
   try {
     const { results } = cloud
-      ? await sweepAllCloud(publicationRepos, { cwd: process.cwd() })
+      ? await sweepAllCloud(publicationRepos, { cwd: process.cwd(), tokenFile: publicationTokenFile(), publicNames: publicationPublicNames })
       : await sweepAll(publicationRepos, {
         publicNames: publicationPublicNames,
-        strictRepoUrls: String(opt('publication_leak_strict_repos', ''))
-          .split(/[,;]/).map((s) => s.trim()).filter(Boolean),
+        strictRepoUrls: splitListLocal(opt('publication_leak_strict_repos', '')),
+        allowedOwners: publicationAllowedOwners,
+        tokenFile: publicationTokenFile(),
       });
+    // seenByRepo[repo] is { fingerprint: lastSeenISO } (not a flat
+    // array/Set) — the timestamp is what makes the weekly re-fire (item 7)
+    // possible: a standing accepted finding is re-surfaced once its record
+    // turns 7+ days old, so a missed/dismissed notification is never
+    // permanently silent. Every fingerprint reported THIS run (new,
+    // re-fired, or unchanged) has its timestamp refreshed to now.
     const seenByRepo = baseline.publicationLeakSeen || {};
     const nextSeenByRepo = {};
     const allNewHits = [];
@@ -384,8 +466,12 @@ if (publicationRepos.length) {
     for (const r of results) {
       if (r.skipped) { skipped.push(r); continue; }
       if (r.error) { errors.push(`${r.repo}: ${r.error}`); continue; }
-      nextSeenByRepo[r.repo] = r.hits.map((h) => h.fingerprint);
-      const fresh = filterNew(r.hits, seenByRepo[r.repo] || []);
+      const prevMap = seenByRepo[r.repo] || {};
+      const fresh = filterNewOrStale(r.hits, prevMap, { maxAgeDays: 7, now: Date.now() });
+      const freshFps = new Set(fresh.map((h) => h.fingerprint));
+      const nextMap = {};
+      for (const h of r.hits) nextMap[h.fingerprint] = freshFps.has(h.fingerprint) ? now : (prevMap[h.fingerprint] || now);
+      nextSeenByRepo[r.repo] = nextMap;
       for (const h of fresh) allNewHits.push({ repo: r.repo, ...h });
     }
     // Repos that errored OR were skipped this run keep their LAST successful

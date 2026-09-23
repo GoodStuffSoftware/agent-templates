@@ -117,15 +117,25 @@ test("placeholdered and generic text passes", () => {
     "Or C:" + BS + U + BS + "you" + BS + "dev" + BS + "acme, or C:/" + U + "/%USERNAME%/dev.",
     "On Linux: /ho" + "me/user/dev/acme; on macOS /" + U + "/you/dev; or $HOME/.claude.",
     "Memory lives at ~/.claude/projects/<encoded-cwd>/memory/MEMORY.md.",
-    "The project is {{PROJECT_NAME}} and its agents are {{PREFIX}}-builder, {{zorvex-quill}}.",
+    "The project is {{PROJECT_NAME}} and its agents are {{PREFIX}}-builder.",
     "See ~" + "/dev/acme or ~" + "/dev/<project> or ~" + "/dev/{{PROJECT}}.",
-    "A zorvex-quillion is not the project, nor is prezorvex-quill; `\\bqz-ant` is a regex escape.",
+    "A zorvex-quillion is not the project, nor is prezorvex-quill.",
     "Three worktrees and 4 projects is not a scale statement.",
     "The runner user and the admin user are generic.",
   ].join("\n");
   const r = scanWith(ok, TOKENS);
   assert.deepEqual(r.hits, []);
   assert.deepEqual(r.warnings, []);
+});
+
+// Adversarial-review regression: a real derived name/prefix wrapped in
+// braces, or immediately after a backslash, must NOT be treated as
+// generic/placeholder-shaped — that would be a way to silently hide a leak.
+test("a braced lowercase name and a backslash-preceded prefix are NOT treated as placeholders", () => {
+  const line = "{{zorvex-quill}} is real; so is `\\bqz-ant`.";
+  const r = scanWith(line, TOKENS);
+  assert.ok(r.hits.some((h) => h.label === "derived-project-name" && h.token === "zorvex-quill"));
+  assert.ok(r.hits.some((h) => h.label === "derived-prefix" && h.token === "bqz-"));
 });
 
 const LEAKS = [
@@ -262,7 +272,7 @@ test("CLI: LEAK_CHECK_OWN_NAMES env does the same as --own-names", () => {
   assert.equal(r.code, 0, r.err);
 });
 
-test("CLI: vendor/minified/lockfile paths are skipped for every class, including git-sha-like", () => {
+test("CLI: the vendor skip is SHA-ONLY and narrow (*.min.js/css, lockfiles, node_modules/) — everything else still scans", () => {
   const missing = join(tmp("none"), "nope");
   const args = ["--dev-root", missing, "--claude-projects", missing, "--user", "runner"];
   // 40 hex chars, assembled from 2-char pieces so no contiguous hex run of
@@ -270,7 +280,7 @@ test("CLI: vendor/minified/lockfile paths are skipped for every class, including
   // itself scanned by the whole-repo leak-check — see the header note).
   const leakyHex = ["01", "23", "45", "67", "89", "ab", "cd", "ef", "01", "23", "45", "67", "89", "ab", "cd", "ef", "01", "23", "45", "67"].join("");
   const r = runCli(scanTree({
-    "vendor/lib.js": `const h = "${leakyHex}";\n`,
+    "vendor/lib.js": `const h = "${leakyHex}";\n`, // NOT minified: git-sha-like still fires here
     "node_modules/pkg/index.js": `const h = "${leakyHex}";\n`,
     "dist/bundle.min.js": `const h = "${leakyHex}";\n`,
     "package-lock.json": `{"h": "${leakyHex}"}\n`,
@@ -278,7 +288,7 @@ test("CLI: vendor/minified/lockfile paths are skipped for every class, including
   }), args);
   assert.equal(r.code, 1, r.err);
   assert.match(r.err, /src\/real\.js/, "a normal source file must still be scanned");
-  assert.doesNotMatch(r.err, /vendor\/lib\.js/);
+  assert.match(r.err, /vendor\/lib\.js/, "plain vendor/ (not minified) still gets git-sha-like");
   assert.doesNotMatch(r.err, /node_modules\/pkg\/index\.js/);
   assert.doesNotMatch(r.err, /dist\/bundle\.min\.js/);
   assert.doesNotMatch(r.err, /package-lock\.json/);

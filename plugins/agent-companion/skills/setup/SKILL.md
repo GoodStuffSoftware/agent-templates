@@ -45,10 +45,15 @@ defaults are the recommended ones. Two are worth a conscious decision:
   only if an Agent Audit ingest exists to receive it; the token goes in the
   `AGENT_AUDIT_TOKEN` environment variable, never in plugin config.
 - `premium_max_concurrent` — the Fable/Opus instance cap. Default 2.
-- `publication_leak_repos` — EMPTY BY DEFAULT (sweep off, silent). A
-  comma-separated list of public repos (local checkout paths and/or git URLs)
-  the daily scout should sweep for real-name leaks that reached origin — an
-  after-the-fact backstop, not a substitute for a local pre-push gate. See
+- `publication_leak_sweep` — EMPTY/OFF BY DEFAULT (fully disabled, silent,
+  zero git/API activity). The master switch for the daily scout's
+  after-the-fact backstop against a real-name leak reaching origin — not a
+  substitute for a local pre-push gate. `publication_leak_repos` (extra/
+  exclude list), `publication_leak_strict_repos` (opt in to derived-name/
+  prefix + git-sha-like, and — combined with `publication_leak_owners` — the
+  only way a swept repo's own script is ever executed), `publication_leak_owners`
+  (trusted owner override when `gh` is unavailable), and
+  `publication_leak_token_file` are all related options. See
   "Publication-leak sweep" below before turning this on.
 
 ## 2. Schedule the local scout — desktop scheduled task
@@ -176,9 +181,11 @@ past a local pre-push gate, across repos it finds FOR YOU:
 - every public repo you can push to (owned + org-member), via `gh` if
   installed and authenticated — archived repos and forks are skipped;
 - every path in `~/.claude.json`'s `projects` map that resolves to a git
-  repo with a public GitHub origin (worktrees dedupe to their main
-  checkout) — falling back to a dev-root walk only if `~/.claude.json` is
-  missing or unparseable.
+  repo with a public GitHub origin AND whose owner is you or one of your
+  orgs (see `publication_leak_owners` below — a repo merely cloned locally
+  is never swept just because it sits on disk), worktrees deduping to their
+  main checkout — falling back to a dev-root walk only if `~/.claude.json`
+  is missing or unparseable.
 
 You never have to list repos by hand. `publication_leak_repos` is now an
 extra/exclude list ON TOP of that discovery: a plain entry (`owner/repo`, a
@@ -186,23 +193,36 @@ URL, or a local path) adds one discovery missed; a `!`-prefixed entry
 (`!owner/repo`) excludes one discovery found. Leave it empty to sweep
 exactly what discovery finds.
 
-**Local and cloud sweep differently, and it matters.** Locally, the scout
-fetches each repo's default branch AS PUBLISHED into a throwaway clone and
-runs THAT repo's own `scripts/leak-check.mjs` against it. In the cloud this
-does NOT happen: a cloud routine already runs from a checkout of its own
-source repo, and cloning a second copy of a repo and executing a script from
-it is exactly the "code from external" shape the cloud sandbox's classifier
-denies — confirmed live, the clone-based approach was blocked outright there.
-So the cloud sweep instead scans, IN PLACE, whichever ONE entry (from
-`publication_leak_repos` only — the cloud never runs auto-discovery at all,
-there is no dev root and gh is not assumed available there) IS this session's
-own checkout (after confirming `HEAD` matches origin's default branch),
-always with `--no-derived` (no dev root in the cloud to derive real project
-names from anyway). Any other entry is reported once as `skipped` in the
-cloud, not fetched or cloned.
+**A swept repo's own code is NEVER executed by default.** Locally, the scout
+clones each covered repo's default branch AS PUBLISHED into a throwaway dir
+and scans it with the PLUGIN's own generic checker only — that is the only
+checker that runs unless you opt a repo in twice: it must be listed in
+`publication_leak_strict_repos` AND owned by you or one of your orgs
+(`publication_leak_owners`). Only then does that repo's own
+`scripts/leak-check.mjs` also run, and even then with a scrubbed minimal
+environment (PATH/HOME/TEMP/SYSTEMROOT and the sweep's own LEAK_CHECK_* vars
+only — no tokens, no other env). In the cloud, target-script execution is
+unaffected by that gate (the cloud only ever scans the session's own
+checkout in place, never a clone of anything — see below), but nothing there
+executes a SECOND repo's code either.
+
+**Local and cloud sweep differently, and it matters.** In the cloud, cloning
+a second copy of a repo and executing a script from it is exactly the "code
+from external" shape the cloud sandbox's classifier denies — confirmed live,
+the clone-based approach was blocked outright there. So the cloud sweep
+never clones: with no `publication_leak_repos` entry given, it defaults to
+sweeping the session's OWN checkout IN PLACE, but only if that checkout is
+actually public; with an entry given, it scans, in place, whichever ONE
+entry IS this session's own checkout (after confirming `HEAD` matches
+origin's default branch), always with `--no-derived` (no dev root in the
+cloud to derive real project names from anyway). Any other entry is reported
+once as `skipped`, not fetched or cloned. Cloud auto-discovery never runs at
+all — there is no dev root and gh is not assumed available there.
 
 Either way, `publication_leak` fires only for hits not already accepted in a
-prior run (see the routine's dispatch table).
+prior run, and a still-present accepted hit re-fires at least once a week
+(so a missed notification is never permanently silent) — see the routine's
+dispatch table.
 
 **Not every class applies to every repo.** Derived project-name/prefix
 matching and git-sha-like only make sense for a repo whose whole PURPOSE is
@@ -213,8 +233,9 @@ those two classes there is mostly noise (measured on 8 real swept repos:
 about 90% of hits were exactly this false-positive shape). So a repo only
 gets those two classes if it OPTS IN — automatically when it ships its own
 `scripts/leak-check.mjs` or carries a `.leak-check-strict` marker file at
-its root, or explicitly via `publication_leak_strict_repos`. Every repo,
-opted in or not, still gets the UNIVERSAL classes: private paths (every
+its root, or explicitly via `publication_leak_strict_repos` (this is CLASS
+SCOPE only — it does not by itself authorize executing that script; see
+above). Every repo, opted in or not, still gets the UNIVERSAL classes: private paths (every
 shape), the OS user handle, and the private token file. A strict repo also
 exempts a pinned GitHub Actions SHA (`uses: owner/action@<sha>`) from
 git-sha-like — that's ownership metadata a workflow is supposed to carry.

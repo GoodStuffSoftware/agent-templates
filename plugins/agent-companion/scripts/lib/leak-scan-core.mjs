@@ -46,27 +46,64 @@ export const PLACEHOLDER_PROJECTS = new Set([
   'some-project', '...', '…', '*',
 ]);
 
-export function isPlaceholderSegment(seg, set) {
+// `realUsers`: the operator's ACTUAL OS handle(s) (lowercased), if given.
+// Checked FIRST and OVERRIDES the generic placeholder set — a real handle
+// that happens to look like a generic word ("admin", "guest", ...) must
+// still be caught in a private path (`C:\Users\admin\...`), even though the
+// separate BARE-WORD derived-user-handle class stays off for it (see
+// isUsableUser() — a generic-looking handle never becomes a standalone
+// derived-user-handle token; only the path-shaped classes see it here).
+export function isPlaceholderSegment(seg, set, realUsers) {
   if (!seg) return true;
   const s = seg.replace(/^["'`(]+|["'`),.;:]+$/g, '');
   if (!s) return true;
+  if (realUsers && realUsers.has(s.toLowerCase())) return false;
   if (/^[<{%$[*]/.test(s)) return true;
   return set.has(s.toLowerCase());
 }
 
-const SEP = String.raw`(?:\\\\|\\|/)`;
+// SEP matches a path separator in any shape a real leak can arrive in: a
+// forward slash, one backslash, a doubled/JSON-escaped backslash, or a
+// QUADRUPLED backslash (a Windows path re-escaped through a second layer of
+// JSON, e.g. a path embedded in a JSON string inside another JSON string).
+const SEP = String.raw`(?:\\\\\\\\|\\\\|\\|/)`;
+// URL-percent-encoded separator/colon forms: %5C/%2F for \ and /, %3A for :.
+const ESEP = String.raw`(?:%5[Cc]|%2[Ff])`;
+const ECOLON = String.raw`(?::|%3[Aa])`;
 const SEG = String.raw`([<{%$\[]?[A-Za-z0-9._\-…]+[>}%\]]?)`;
 export const PATH_PATTERNS = [
+  // C:\Users\<name>  C:/Users/<name>  "C:\\Users\\<name>"  C:\\\\Users\\\\<name>
   ['private-path:windows-profile',
     new RegExp(String.raw`(?<![A-Za-z0-9])[A-Za-z]:${SEP}Users${SEP}${SEG}`, 'gi'), 1, PLACEHOLDER_USERS],
+  // /home/<name> — no longer excluded when preceded by ':' (ssh://host:/home/<name>
+  // and similar host:path forms are exactly where this leaks).
   ['private-path:posix-home',
-    new RegExp(String.raw`(?<![A-Za-z0-9._\-~:])/home/${SEG}`, 'g'), 1, PLACEHOLDER_USERS],
+    new RegExp(String.raw`(?<![A-Za-z0-9._\-~])/home/${SEG}`, 'g'), 1, PLACEHOLDER_USERS],
   ['private-path:macos-home',
-    new RegExp(String.raw`(?<![A-Za-z0-9._\-~:])/Users/${SEG}`, 'g'), 1, PLACEHOLDER_USERS],
+    new RegExp(String.raw`(?<![A-Za-z0-9._\-~])/Users/${SEG}`, 'g'), 1, PLACEHOLDER_USERS],
+  // WSL: /mnt/c/Users/<name>
+  ['private-path:wsl-home',
+    new RegExp(String.raw`/mnt/[a-z]/Users/${SEG}`, 'gi'), 1, PLACEHOLDER_USERS],
   ['private-path:dev-project',
     new RegExp(String.raw`(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%)${SEP}(?:dev|code|src|projects|repos|work|git)${SEP}${SEG}`, 'gi'), 1, PLACEHOLDER_PROJECTS],
+  // ~/.claude/projects/C--Users-<name>-…  case-insensitive (lowercase
+  // "c--users-…" is exactly how some tools normalize a drive letter).
   ['private-path:encoded-claude-project',
-    new RegExp(String.raw`(?:(?<![A-Za-z0-9])[A-Za-z]--Users-|(?<![A-Za-z0-9])-(?:home|Users)-)([A-Za-z0-9_.]+)`, 'g'), 1, PLACEHOLDER_USERS],
+    new RegExp(String.raw`(?:(?<![A-Za-z0-9])[A-Za-z]--Users-|(?<![A-Za-z0-9])-(?:home|Users)-)([A-Za-z0-9_.]+)`, 'gi'), 1, PLACEHOLDER_USERS],
+  // UNC: \\host\c$\Users\<name>
+  ['private-path:unc',
+    new RegExp(String.raw`\\\\[A-Za-z0-9.\-]+\\[A-Za-z]\$\\Users\\${SEG}`, 'gi'), 1, PLACEHOLDER_USERS],
+  // URL-percent-encoded: C%3A%5CUsers%5C<name>, %2FUsers%2F<name>
+  ['private-path:url-encoded',
+    new RegExp(String.raw`(?:[A-Za-z]${ECOLON}${ESEP}Users${ESEP}|${ESEP}Users${ESEP})${SEG}`, 'gi'), 1, PLACEHOLDER_USERS],
+  // CORP\<user> — a Windows domain-qualified account name. Domain kept
+  // ALL-CAPS (the near-universal real-world convention) to avoid matching
+  // ordinary "Word\word" prose that happens to use a backslash. The
+  // segment after `\` requires 2+ chars — a single letter there is far
+  // more often a regex escape (`\s`, `\t`, `\d`, `\w`, `\b`, `\n`, `\r`)
+  // glued to more text than a one-character username.
+  ['private-path:domain-user',
+    new RegExp(String.raw`(?<![A-Za-z0-9])[A-Z][A-Z0-9]{1,14}\\([<{%$\[]?[A-Za-z0-9._\-…]{2,}[>}%\]]?)(?![A-Za-z0-9\\])`, 'g'), 1, PLACEHOLDER_USERS],
 ];
 
 // --- Class 4: machine-structure WARNINGS (never fail) -----------------------
@@ -165,8 +202,20 @@ export function decodeProjectDir(entry, devBaseNames = ['dev']) {
   return { user, project: rest || null };
 }
 
+// EXACT normalization for public-name subtraction only: lowercase and
+// squash every separator ([-_. \s]) away, so "acme-tools" / "acme_tools" /
+// "Acme Tools" all compare equal, but nothing SHORTER than the whole name
+// can match it — "acme" alone never equals "acme-tools" here. This is
+// deliberately NOT segment-based: a private agent-file prefix that happens
+// to share a segment with a public name (e.g. both start "acme-") must
+// never be exempted by this. See publication-sweep.mjs / repo-discovery.mjs
+// for where the public-name list itself comes from.
+export function exactNameKey(s) {
+  return String(s || '').toLowerCase().replace(/[-_.\s]+/g, '');
+}
+
 export function deriveTokens({
-  devRoots = [], claudeProjectsDir = null, tokenFile = null, users = [], ownNames = [], scanRoot = null,
+  devRoots = [], claudeProjectsDir = null, tokenFile = null, users = [], ownNames = [], publicNames = [], scanRoot = null,
 } = {}) {
   const notes = [];
   const ownSegments = new Set(ownNames.flatMap((n) => [...segmentsOf(n), `=${segmentsOf(n).join('')}`]));
@@ -283,12 +332,31 @@ export function deriveTokens({
 
   const prefixes = [...prefixCounts.keys()].filter((p) => prefixCounts.get(p) >= 99 || isUsablePrefix(p, ownSegments));
   counts.agentPrefixes = prefixes.length;
-  return { names: kept, prefixes, users: [...usersOut], notes, counts };
+  // EXACT-only public-name subtraction — applied HERE, after everything
+  // else, to `names` only. Never applied to `prefixes`: a prefix is short
+  // by nature (2-16 chars) and matching it against a public name by
+  // anything looser than "this exact string is the whole public name" would
+  // silently exempt private prefixes that merely share a segment.
+  const exactPublic = new Set(publicNames.map(exactNameKey));
+  const namesOut = exactPublic.size ? kept.filter((n) => !exactPublic.has(exactNameKey(n))) : kept;
+
+  return { names: namesOut, prefixes, users: [...usersOut], notes, counts };
 }
 
 export function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+// Word-boundary lookbehind/lookahead. Deliberately does NOT exclude a
+// preceding backslash — `\` is a PATH SEPARATOR, not a word character, and
+// excluding it silently missed every derived name after one (`D:\dev\
+// <project>\x`, `C:\src\<project>`), exactly the shape a real Windows-path
+// leak takes. Trailing boundary excludes a following lowercase letter/digit
+// (blocks matching inside a longer lowercase word) but NOT an uppercase
+// letter, so a camelCase continuation (`ZorblApi` after name "zorbl") still
+// counts as a match rather than being treated as "inside a bigger word".
+const LEAD = '(?<![A-Za-z0-9])';
+const TRAIL = '(?![a-z0-9])';
 
 export function compileDerived({ names = [], prefixes = [], users = [] }) {
   const out = [];
@@ -297,19 +365,34 @@ export function compileDerived({ names = [], prefixes = [], users = [] }) {
     const allowSpace = !segs.every((s) => GENERIC_WORDS.has(s));
     const sepRe = allowSpace ? '[-_. ]?' : '[-_.]?';
     const body = segs.map(escapeRe).join(sepRe);
-    out.push({ label: 'derived-project-name', re: new RegExp(`(?<![A-Za-z0-9\\\\])${body}(?![A-Za-z0-9])`, 'gi') });
+    out.push({ label: 'derived-project-name', re: new RegExp(`${LEAD}${body}${TRAIL}`, 'gi') });
   }
   for (const p of prefixes) {
-    out.push({ label: 'derived-prefix', re: new RegExp(`(?<![A-Za-z0-9\\\\])${escapeRe(p)}-(?=[A-Za-z0-9*])`, 'gi') });
+    // Matches the prefix followed by `-` or `_` in ANY shape: mid-identifier
+    // ("zb-builder"), or standalone/quoted/at end-of-line/before punctuation
+    // ("`zb-`", "\"zb-\"", "zb- ", "ZB_"). No lookahead requiring more
+    // identifier characters to follow — that requirement is exactly what
+    // silently missed a bare `zb-` in a fenced code span or a quoted value.
+    out.push({ label: 'derived-prefix', re: new RegExp(`${LEAD}${escapeRe(p)}[-_]`, 'gi') });
   }
   for (const u of users) {
-    out.push({ label: 'derived-user-handle', re: new RegExp(`(?<![A-Za-z0-9\\\\])${escapeRe(u)}(?![A-Za-z0-9])`, 'gi') });
+    out.push({ label: 'derived-user-handle', re: new RegExp(`${LEAD}${escapeRe(u)}${TRAIL}`, 'gi') });
   }
   return out;
 }
 
+// Only a genuine placeholder IDENTIFIER is exempt — UPPER_SNAKE_CASE or a
+// TitleCase/PascalCase Word (the two shapes a real template placeholder
+// convention actually uses), so it must START with an uppercase letter and
+// contain only letters/digits/underscore/hyphen after that. This excludes a
+// braced Windows profile path or other real path (path separators/colons
+// are never a valid placeholder identifier character) and a bare lowercase
+// word (wrapping a REAL derived name in braces must never be a way to hide
+// it from this scan) — see leak-scan-core.test.mjs for worked examples;
+// this comment avoids writing either shape literally, since this file is
+// itself scanned.
 export function maskPlaceholders(line) {
-  return line.replace(/\{\{[^{}]*\}\}/g, (m) => ' '.repeat(m.length));
+  return line.replace(/\{\{[A-Z][A-Za-z0-9_-]*\}\}/g, (m) => ' '.repeat(m.length));
 }
 
 // Scan one file's text. `literals` is CALLER-SUPPLIED (empty by default here
@@ -334,7 +417,14 @@ function isPinnedActionSha(line, matchIndex) {
 // exactly this). Universal regardless of `strict`: private-path (every
 // shape), the OS user handle, and the operator's private token file. See
 // scanRepo()'s header for how `derived`/`literals` are pre-filtered to match.
-export function scanText(text, { rel = '', derived = [], literals = [], exempt = {}, isSelf = false, strict = true } = {}) {
+// `noSha`: skip the git-sha-like class for this ONE file even in strict
+// mode — minified bundles/lockfiles/node_modules drown in legitimate
+// hashes; see SHA_SKIP_PATH_RE/SHA_SKIP_FILE_RE below. Every OTHER class
+// (path, handle, token-file, derived-name) still scans the file fully.
+// `realUsers`: passed straight to isPlaceholderSegment() — see its header.
+export function scanText(text, {
+  rel = '', derived = [], literals = [], exempt = {}, isSelf = false, strict = true, noSha = false, realUsers,
+} = {}) {
   const hits = [];
   const warnings = [];
   const lines = text.split(/\r?\n/);
@@ -350,7 +440,7 @@ export function scanText(text, { rel = '', derived = [], literals = [], exempt =
       while (idx !== -1) { push(hits, label, line.slice(idx, idx + needle.length)); idx = lower.indexOf(needle, idx + needle.length); }
     }
 
-    if (strict && !isSelf) {
+    if (strict && !isSelf && !noSha) {
       for (const m of line.matchAll(SHA_RE)) {
         if (isShaFalsePositive(m[0])) continue;
         if (isPinnedActionSha(line, m.index)) continue;
@@ -362,7 +452,7 @@ export function scanText(text, { rel = '', derived = [], literals = [], exempt =
 
     for (const [label, re, group, set] of PATH_PATTERNS) {
       for (const m of line.matchAll(re)) {
-        if (isPlaceholderSegment(m[group], set)) continue;
+        if (isPlaceholderSegment(m[group], set, realUsers)) continue;
         push(hits, label, m[0]);
       }
     }
@@ -374,13 +464,14 @@ export function scanText(text, { rel = '', derived = [], literals = [], exempt =
 
 const IGNORE_DIRS = new Set(['.git', 'node_modules']);
 const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|woff2?|ttf|eot|zip|gz|mp4|mov)$/i;
-// Vendored/minified/generated content: skipped for EVERY class, not just
-// git-sha-like. A minified bundle or a lockfile is never going to carry a
-// real leak worth reporting, and skipping it entirely (rather than only
-// for one class) is the simpler rule and also cuts a large source of
-// git-sha-like noise (hashes, integrity strings) at the same time.
-const SKIP_PATH_RE = /(^|\/)(vendor|node_modules|dist|build|\.git)\//i;
-const SKIP_FILE_RE = /\.min\.(js|css)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Cargo\.lock|Gemfile\.lock|poetry\.lock)$/i;
+// SHA-ONLY skip (item 4): a minified bundle, a lockfile, or anything under
+// node_modules/ is never going to carry a real leak worth reporting AS A
+// HASH — the git-sha-like class specifically drowns in legitimate
+// hashes/integrity strings there. Every OTHER class still scans these files
+// (and build/, dist/, vendor/, and sourcemaps) fully — a sourcemap is a
+// classic absolute-path leak vector and must never be skipped wholesale.
+const SHA_SKIP_PATH_RE = /(^|\/)node_modules\//i;
+const SHA_SKIP_FILE_RE = /\.min\.(js|css)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Cargo\.lock|Gemfile\.lock|poetry\.lock)$/i;
 // Skip anything absurdly large — a generic sweep over an UNKNOWN repo has no
 // business reading a multi-hundred-MB file line by line.
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -445,7 +536,7 @@ export function ownRepoNames(root) {
 // explicitly listed — see publication-sweep.mjs.
 export function scanRepo({
   root, devRoots: devRootsOpt, claudeProjectsDir: claudeProjectsDirOpt, tokenFile = null,
-  users: usersOpt, ownNames: ownNamesOpt, noDerived = false, literals = [], exempt = {},
+  users: usersOpt, ownNames: ownNamesOpt, publicNames = [], noDerived = false, literals = [], exempt = {},
   strict = true,
 }) {
   const resolvedRoot = resolve(root);
@@ -453,6 +544,7 @@ export function scanRepo({
   let derived = [];
   const notes = [];
   let derivedCounts = null;
+  let realUsers = new Set();
   if (!noDerived) {
     let devRoots = devRootsOpt;
     if (!devRoots) {
@@ -472,14 +564,15 @@ export function scanRepo({
     // devRoots/claudeProjectsDir deliberately empty here, so nothing derived
     // from "what other projects exist on this machine" leaks into the
     // always-on set.
-    const universal = deriveTokens({ devRoots: [], claudeProjectsDir: null, tokenFile, users, ownNames, scanRoot: resolvedRoot });
+    const universal = deriveTokens({ devRoots: [], claudeProjectsDir: null, tokenFile, users, ownNames, publicNames, scanRoot: resolvedRoot });
     notes.push(...universal.notes);
     let names = universal.names;
     let prefixes = universal.prefixes;
     derivedCounts = universal.counts;
+    realUsers = new Set(universal.users.map((u) => u.toLowerCase()));
 
     if (strict) {
-      const full = deriveTokens({ devRoots, claudeProjectsDir, tokenFile, users, ownNames, scanRoot: resolvedRoot });
+      const full = deriveTokens({ devRoots, claudeProjectsDir, tokenFile, users, ownNames, publicNames, scanRoot: resolvedRoot });
       names = [...new Set([...names, ...full.names])];
       prefixes = [...new Set([...prefixes, ...full.prefixes])];
       derivedCounts = full.counts;
@@ -492,12 +585,11 @@ export function scanRepo({
   const warnings = [];
   for (const file of listCommittableFiles(resolvedRoot)) {
     if (BINARY_EXT.test(file)) continue;
-    const relForSkip = relative(resolvedRoot, file).split(sep).join('/');
-    if (SKIP_PATH_RE.test(relForSkip) || SKIP_FILE_RE.test(relForSkip)) continue;
     let st;
     try { st = statSync(file); } catch { continue; }
     if (st.size > MAX_FILE_BYTES) continue;
     const rel = relative(resolvedRoot, file).split(sep).join('/');
+    const noSha = SHA_SKIP_PATH_RE.test(rel) || SHA_SKIP_FILE_RE.test(rel);
     let text;
     try { text = readFileSync(file, 'utf8'); } catch { continue; }
     // A file literally named .../scripts/leak-check.mjs is, by convention in
@@ -510,7 +602,7 @@ export function scanRepo({
     // for that one filename shape, same spirit as the original script's own
     // narrow "isSelf" carve-out, generalised to any repo's own copy.
     const isSelf = /(^|\/)scripts\/leak-check\.mjs$/.test(rel);
-    const r = scanText(text, { rel, derived, literals, exempt, isSelf, strict });
+    const r = scanText(text, { rel, derived, literals, exempt, isSelf, strict, noSha, realUsers });
     hits.push(...r.hits);
     warnings.push(...r.warnings);
   }

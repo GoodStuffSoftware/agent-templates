@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -261,7 +261,19 @@
     "publication_leak_strict_repos": {
       "type": "string",
       "title": "Publication-leak sweep: strict repos (derived names/prefixes + pinned-SHA-exempt git-sha-like)",
-      "description": "Comma-separated. Derived project-name/prefix matching and the git-sha-like class only apply to a repo whose whole PURPOSE is to be anonymous/generic (e.g. agent-templates itself) — an ordinary product repo legitimately names the operator's own product throughout (README, CHANGELOG, wrangler.toml, ...), and applying those classes there is mostly noise (measured: ~90% of hits across 8 real swept repos). A repo is strict automatically if it ships its own scripts/leak-check.mjs or carries a `.leak-check-strict` marker file at its root; list one here only to opt in without either. Every repo, strict or not, still gets the universal classes: private paths (every shape), the OS user handle, and the private token file. Strict repos additionally exempt a pinned GitHub Actions SHA (`uses: owner/action@<40-hex>`) from git-sha-like — that is ownership metadata a workflow is supposed to carry, not a leak.",
+      "description": "Comma-separated. Two SEPARATE things gate on this list, and only one of them is CLASS SCOPE: (1) derived project-name/prefix matching and the git-sha-like class only apply to a repo whose whole PURPOSE is to be anonymous/generic (e.g. agent-templates itself) — an ordinary product repo legitimately names the operator's own product throughout, and applying those classes there is mostly noise (measured: ~90% of hits across 8 real swept repos). A repo gets this class scope automatically if it ships its own scripts/leak-check.mjs or carries a `.leak-check-strict` marker file, or if listed here. (2) SEPARATELY, and far more consequentially: a repo's own scripts/leak-check.mjs is only ever EXECUTED (never by default) when it is EXPLICITLY listed here AND owned by the authenticated gh user or one of their orgs (see publication_leak_owners) — shipping the file, or the marker, is not enough on its own to authorize running it. Every repo, listed or not, still gets the universal classes: private paths (every shape), the OS user handle, and the private token file.",
+      "default": ""
+    },
+    "publication_leak_owners": {
+      "type": "string",
+      "title": "Publication-leak sweep: trusted owners",
+      "description": "Comma-separated GitHub owner/org logins trusted to (a) have their locally-discovered repos included in auto-discovery at all, and (b) have a publication_leak_strict_repos-listed repo's own script actually executed. Normally derived automatically: when `gh` is authenticated, from the account's own login + org memberships; when it is not, this option is the only source (falls back to the owners already seen in a successful gh-discovered repo list, if any). Only needed when gh is unavailable and local-checkout discovery or target-script execution should still work — leave empty otherwise.",
+      "default": ""
+    },
+    "publication_leak_token_file": {
+      "type": "string",
+      "title": "Publication-leak sweep: private token file",
+      "description": "Path to a private token file (same format as LEAK_CHECK_TOKEN_FILE: one name per line, `prefix: xyz` for a prefix) fed into EVERY sweep scan — universal, applies regardless of a repo's strict status. Default: ~/.claude/agent-companion/leak-tokens.txt, used automatically IF that file exists; set this only to point elsewhere. The file must live outside any repo the sweep scans (the same rule scripts/leak-check.mjs's own --token-file enforces).",
       "default": ""
     }
   },

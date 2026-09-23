@@ -43,12 +43,12 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  mkdtempSync, rmSync, mkdirSync, writeFileSync, copyFileSync, existsSync,
+  mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync,
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { sweepRepo, sweepRepoInPlace, filterNew } from './lib/publication-sweep.mjs';
+import { sweepRepo, sweepRepoInPlace, filterNew, ownerOf } from './lib/publication-sweep.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const reduced = process.argv.includes('--reduced');
@@ -87,12 +87,45 @@ try {
   run('git', ['-C', workDir, 'remote', 'add', 'origin', bareDir]);
   const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 'canary', GIT_AUTHOR_EMAIL: 'canary@example.invalid', GIT_COMMITTER_NAME: 'canary', GIT_COMMITTER_EMAIL: 'canary@example.invalid' };
 
-  // Commit a copy of THIS repo's own leak-check.mjs — the sweep must exercise
-  // the target repo running its OWN script, not this plugin's copy.
-  const realLeakCheck = join(__dirname, '..', '..', '..', 'scripts', 'leak-check.mjs');
-  if (!existsSync(realLeakCheck)) throw new Error(`cannot find scripts/leak-check.mjs at ${realLeakCheck} — canary must run from a full repo checkout`);
+  // A minimal "own script" for the throwaway repo — NOT a copy of
+  // agent-templates' scripts/leak-check.mjs (that path only exists in a
+  // full repo checkout; this canary must also run from an INSTALLED
+  // plugin, which ships leak-scan-core.mjs but not that repo-specific
+  // file). It imports THIS plugin's own bundled leak-scan-core.mjs by
+  // absolute path — the same generic engine the sweep's plugin checker
+  // uses — so the canary still genuinely exercises "the target's own
+  // script runs and its hits get parsed", without a checkout dependency.
+  const coreModulePath = join(__dirname, 'lib', 'leak-scan-core.mjs');
+  if (!existsSync(coreModulePath)) throw new Error(`cannot find lib/leak-scan-core.mjs at ${coreModulePath} — canary must run from beside its own lib/`);
+  // The real absolute path to leak-scan-core.mjs (on THIS machine) is
+  // passed via an ENV VAR, never embedded as literal committed source —
+  // this fake script gets committed INTO the throwaway repo and then
+  // SWEPT, so a hardcoded real path in its own source would be a
+  // self-inflicted leak (a real regression this fix caught while writing
+  // it: the absolute path contains the operator's real username).
+  const fakeOwnScript = [
+    '#!/usr/bin/env node',
+    'import { pathToFileURL } from "node:url";',
+    'const { scanRepo } = await import(pathToFileURL(process.env.LEAK_CHECK_CORE_PATH).href);',
+    'const root = process.argv[process.argv.indexOf("--root") + 1];',
+    'const noDerived = process.argv.includes("--no-derived");',
+    // Mirrors real leak-check.mjs's env-driven dev-root/claude-projects
+    // override, so the canary's LEAK_CHECK_DEV_ROOT (set via sweepOpts.env)
+    // still reaches this fake script exactly like the real one.
+    'const devRoots = process.env.LEAK_CHECK_DEV_ROOT ? process.env.LEAK_CHECK_DEV_ROOT.split(",").filter(Boolean) : [];',
+    'const claudeProjectsDir = process.env.LEAK_CHECK_CLAUDE_PROJECTS || null;',
+    'const { hits } = scanRepo({ root, devRoots, claudeProjectsDir, noDerived, strict: true });',
+    'for (const h of hits) console.log(`  ${h.rel}:${h.line}  [${h.label}]  ${h.token}  ::  ${h.text}`);',
+    'process.exitCode = hits.length ? 1 : 0;',
+    '',
+  ].join('\n');
   mkdirSync(join(workDir, 'scripts'), { recursive: true });
-  copyFileSync(realLeakCheck, join(workDir, 'scripts', 'leak-check.mjs'));
+  writeFileSync(join(workDir, 'scripts', 'leak-check.mjs'), fakeOwnScript);
+  // Reduced mode's sweepRepoInPlace() takes no `env` option and inherits
+  // this process's env for its child spawn — set it here so the fake
+  // script can resolve leak-scan-core.mjs there too, not only in full mode
+  // (which passes it explicitly via sweepOpts.env below).
+  process.env.LEAK_CHECK_CORE_PATH = coreModulePath;
 
   // --- commit 1: the leak -------------------------------------------------
   const leakLines = [`private path: ${PRIVATE_PATH_LEAK}`];
@@ -103,8 +136,18 @@ try {
   run('git', ['-C', workDir, 'push', '--quiet', 'origin', 'main'], { env: gitEnv });
 
   if (!reduced) mkdirSync(join(devRootDir, SYN_PROJECT), { recursive: true });
+  // Never execute a swept repo's own script by default — the canary must
+  // ALSO prove that opt-in path works, so it explicitly lists bareDir and
+  // "owns" it (same shape a real publication_leak_strict_repos + verified
+  // owner would take).
   const sweepOpts = {
-    env: { LEAK_CHECK_DEV_ROOT: devRootDir, LEAK_CHECK_CLAUDE_PROJECTS: join(base, 'no-claude-projects') },
+    env: {
+      LEAK_CHECK_DEV_ROOT: devRootDir,
+      LEAK_CHECK_CLAUDE_PROJECTS: join(base, 'no-claude-projects'),
+      LEAK_CHECK_CORE_PATH: coreModulePath,
+    },
+    strictRepoUrls: [bareDir],
+    allowedOwners: new Set([ownerOf(bareDir)]),
   };
   // FULL mode: sweepRepo() clones bareDir into ITS OWN throwaway dir (the
   // local production path). REDUCED mode: sweepRepoInPlace() scans workDir

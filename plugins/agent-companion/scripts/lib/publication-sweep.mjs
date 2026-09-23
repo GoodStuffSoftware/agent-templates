@@ -37,9 +37,12 @@ import { tmpdir, homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { scanRepo as coreScanRepo, ownRepoNames as coreOwnRepoNames, mainCheckoutDir as coreMainCheckoutDir } from './leak-scan-core.mjs';
 
-// A repo opts into the strict (derived-name/prefix + git-sha-like) classes
-// by shipping its own scripts/leak-check.mjs, carrying this marker file, or
-// being explicitly listed (publication_leak_strict_repos).
+// A repo opts into the strict (derived-name/prefix + git-sha-like) CLASS
+// GATING by shipping its own scripts/leak-check.mjs, carrying this marker
+// file, or being explicitly listed (publication_leak_strict_repos). This is
+// pure file-existence detection — it NEVER executes anything. Whether the
+// target's own script is actually RUN is a separate, narrower decision —
+// see mayExecuteTargetScript() below.
 export const STRICT_MARKER_FILE = '.leak-check-strict';
 
 export function isStrictRepo(cloneDir, repoEntry, strictRepoUrls = []) {
@@ -47,6 +50,42 @@ export function isStrictRepo(cloneDir, repoEntry, strictRepoUrls = []) {
   if (existsSync(join(cloneDir, STRICT_MARKER_FILE))) return true;
   const key = normalizeGitUrl(repoEntry);
   return strictRepoUrls.some((s) => normalizeGitUrl(s) === key);
+}
+
+// The owner segment of a normalized "host/owner/repo" URL, or null.
+export function ownerOf(repoEntry) {
+  const norm = normalizeGitUrl(repoEntry);
+  const parts = norm.split('/');
+  return parts.length >= 2 ? parts[parts.length - 2].toLowerCase() : null;
+}
+
+// Never execute code from a swept repo by default. A target's own
+// scripts/leak-check.mjs only runs when BOTH:
+//   1. the repo is EXPLICITLY listed in publication_leak_strict_repos (NOT
+//      merely auto-detected as strict via its own file/marker — an
+//      operator has to have named it), AND
+//   2. its owner is the authenticated user or one of their orgs
+//      (`allowedOwners`) — a third-party repo cloned locally is never
+//      executed, no matter how it got into the sweep list.
+export function mayExecuteTargetScript(repoEntry, { strictRepoUrls = [], allowedOwners } = {}) {
+  const key = normalizeGitUrl(repoEntry);
+  const explicitlyListed = strictRepoUrls.some((s) => normalizeGitUrl(s) === key);
+  if (!explicitlyListed) return false;
+  if (!allowedOwners || allowedOwners.size === 0) return false; // no verified owner set: safe default is never
+  const owner = ownerOf(repoEntry);
+  return !!owner && allowedOwners.has(owner);
+}
+
+// Minimal, scrubbed environment for executing a target repo's own script —
+// PATH/HOME/USERPROFILE/TEMP/SYSTEMROOT and the LEAK_CHECK_* vars this
+// sweep itself sets, nothing else. No tokens, no credentials, no
+// operator-specific env carried over from this process.
+const MINIMAL_ENV_KEYS = ['PATH', 'Path', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'SYSTEMROOT', 'SystemRoot', 'ComSpec', 'windir'];
+export function scrubbedEnv(extra = {}) {
+  const env = {};
+  for (const k of MINIMAL_ENV_KEYS) if (process.env[k] !== undefined) env[k] = process.env[k];
+  for (const [k, v] of Object.entries(extra)) if (k.startsWith('LEAK_CHECK_')) env[k] = v;
+  return env;
 }
 
 function run(cmd, args, opts = {}) {
@@ -91,13 +130,16 @@ function parseHits(output) {
   return hits;
 }
 
-// Fingerprint deliberately excludes the leaked token text itself — the
+// Fingerprint = repo + file + label + sha256(token) — deliberately NOT the
+// line number, so a hit that merely SHIFTED LINE (an unrelated edit earlier
+// in the file) still dedupes against its prior acceptance instead of firing
+// again as "new". The token itself is hashed rather than stored raw: the
 // baseline that stores this is state, and a fingerprint should identify
 // "this spot flagged again", not carry the leaked value around a second
-// time. rel + line + label is stable across runs of the same content and
-// changes if the leak moves or a different class fires at that spot.
+// time (double-hashing costs nothing here and keeps that property).
 export function fingerprintHit(repo, hit) {
-  return createHash('sha256').update(`${repo}\u0000${hit.rel}\u0000${hit.line}\u0000${hit.label}`).digest('hex').slice(0, 24);
+  const tokenHash = createHash('sha256').update(String(hit.token || '')).digest('hex');
+  return createHash('sha256').update(`${repo}\u0000${hit.rel}\u0000${hit.label}\u0000${tokenHash}`).digest('hex').slice(0, 24);
 }
 
 // hits (already fingerprinted) filtered down to ones NOT in `seen` (a Set or
@@ -107,6 +149,26 @@ export function fingerprintHit(repo, hit) {
 export function filterNew(hits, seen) {
   const seenSet = seen instanceof Set ? seen : new Set(seen || []);
   return hits.filter((h) => !seenSet.has(h.fingerprint));
+}
+
+// Weekly re-fire (default 7 days): a hit is treated as "new" again if either
+// it was never seen, OR the baseline's record of it is older than
+// `maxAgeDays`. This bounds how long a missed/dismissed notification can
+// stay permanently silent — an accepted finding gets re-surfaced at most
+// once a week, not never again. `seenMap` is `{ fingerprint: lastSeenISO }`
+// (not a flat array/Set — it needs the timestamp). Returns the hits to
+// treat as new/re-fired; the caller is expected to refresh `seenMap[fp]` to
+// "now" for every hit reported this run (new, re-fired, or unchanged),
+// which is what makes the 7-day clock restart on each sighting.
+export function filterNewOrStale(hits, seenMap, { maxAgeDays = 7, now = Date.now() } = {}) {
+  const map = seenMap || {};
+  const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+  return hits.filter((h) => {
+    const lastSeen = map[h.fingerprint];
+    if (!lastSeen) return true; // never seen: new
+    const age = now - Date.parse(lastSeen);
+    return !Number.isFinite(age) || age >= maxAgeMs; // stale record: re-fire
+  });
 }
 
 // Same default dev-root formula leak-check.mjs uses, rooted at THIS
@@ -134,8 +196,10 @@ function dedupeByFingerprint(hits) {
 }
 
 // Run the PLUGIN's own generic checker (leak-scan-core.mjs) against a clone.
-// Never throws — a checker failure here should not fail the whole sweep; it
-// just means this repo gets whatever the target's own script found, if any.
+// Returns { hits, error }. A checker EXCEPTION is reported as `error` — it
+// must never read as "clean": a repo whose checker crashed and one that is
+// genuinely spotless are different outcomes, and collapsing them into an
+// empty hit list would hide the failure from the operator entirely.
 function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = null, devRoots, publicNames = [], strict = false } = {}) {
   try {
     const { hits } = coreScanRepo({
@@ -149,64 +213,89 @@ function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = 
       noDerived,
       strict,
     });
-    return hits.map((h) => ({
-      rel: h.rel, line: h.line, label: h.label, token: h.token, text: h.text,
-      fingerprint: fingerprintHit(repoEntry, h),
-    }));
-  } catch {
-    return [];
+    return {
+      hits: hits.map((h) => ({
+        rel: h.rel, line: h.line, label: h.label, token: h.token, text: h.text,
+        fingerprint: fingerprintHit(repoEntry, h),
+      })),
+      error: null,
+    };
+  } catch (err) {
+    return { hits: [], error: err.message || String(err) };
   }
 }
 
-// Sweep ONE repo entry. Returns { repo, hits: [{rel,line,label,token,text,fingerprint}], error }.
-// Always runs the plugin's OWN generic checker against the clone; ALSO runs
-// the target's own scripts/leak-check.mjs when it has one (not having one is
-// normal, not an error — most repos don't ship their own).
-// `reduced`: pass --no-derived to both checkers (no dev root here to derive
-// real project names from — the cloud routine's situation; kept as an
-// option here too for a local operator who wants the same restriction).
-// `env`: extra env vars merged over process.env for the CHILD leak-check
-// process only (LEAK_CHECK_DEV_ROOT / LEAK_CHECK_TOKEN_FILE overrides,
-// used by tests/canary; production passes none and lets the target script
-// derive from THIS machine as usual).
-// `tokenFile`: private token file for the PLUGIN's own checker (never the
-// target repo's — that one reads its own LEAK_CHECK_TOKEN_FILE via `env`).
-// `publicNames`: every OTHER repo discovery found to be public (repo name,
-// owner, "owner/repo") — exempt here and forwarded to the target's own
-// script via LEAK_CHECK_OWN_NAMES, so a public repo naming a sibling public
-// repo is never flagged as a private-name leak by either checker.
-// `strictRepoUrls`: repos explicitly opted into the strict classes via the
-// publication_leak_strict_repos option, on top of the automatic triggers in
-// isStrictRepo() (own scripts/leak-check.mjs, or a .leak-check-strict marker
-// file in the clone).
-export async function sweepRepo(repoEntry, { reduced = false, env = {}, timeout = 120000, tokenFile = null, devRoots, publicNames = [], strictRepoUrls = [] } = {}) {
+// Sweep ONE repo entry. Returns { repo, hits: [{rel,line,label,token,text,fingerprint}], error, strict }.
+// ALWAYS runs the plugin's OWN generic checker against the clone — this is
+// the only checker that runs by default.
+//
+// The target's OWN scripts/leak-check.mjs is NEVER executed unless
+// `mayExecuteTargetScript()` says so: the repo must be EXPLICITLY listed in
+// `strictRepoUrls` (publication_leak_strict_repos) AND owned by the
+// authenticated user or one of their orgs (`allowedOwners`). `isStrictRepo`
+// (own script present / marker file / listed) only decides CLASS GATING —
+// whether the plugin checker's derived-name/prefix + git-sha-like classes
+// apply — and is pure file-existence detection, never execution. When the
+// target script exists but may not be executed, its presence still makes
+// the repo strict for the plugin checker; it just isn't run itself.
+//
+// `reduced`: pass --no-derived to the plugin checker (no dev root here to
+// derive real project names from — the cloud routine's situation; kept as
+// an option here too for a local operator who wants the same restriction).
+// `tokenFile`: private token file for the PLUGIN's own checker.
+// `publicNames`: every OTHER repo discovery found to be public — exempt via
+// the plugin checker's exact-name subtraction (see leak-scan-core.mjs).
+export async function sweepRepo(repoEntry, {
+  reduced = false, timeout = 120000, tokenFile = null, devRoots, publicNames = [],
+  strictRepoUrls = [], allowedOwners, env = {},
+} = {}) {
   const tmpRoot = mkdtempSync(join(tmpdir(), 'ac-pubsweep-'));
   const cloneDir = join(tmpRoot, 'repo');
   try {
     const source = resolveCloneSource(repoEntry);
-    const clone = run('git', ['clone', '--quiet', '--depth', '1', source, cloneDir], { timeout });
+    // `--` before the positional args: `source` is caller/config-derived
+    // (a repo URL or path from an option), so it must never be interpretable
+    // as a git flag (e.g. an entry starting with "--upload-pack=...").
+    const clone = run('git', ['clone', '--quiet', '--depth', '1', '--', source, cloneDir], { timeout });
     if (clone.status !== 0) {
       return { repo: repoEntry, hits: [], error: `clone failed: ${(clone.stderr || clone.error?.message || 'unknown error').split('\n')[0]}` };
     }
     const strict = isStrictRepo(cloneDir, repoEntry, strictRepoUrls);
+    const mayExecute = mayExecuteTargetScript(repoEntry, { strictRepoUrls, allowedOwners });
+
     let ownHits = [];
+    let ownError = null;
     const leakCheck = join(cloneDir, 'scripts', 'leak-check.mjs');
-    if (existsSync(leakCheck)) {
+    if (mayExecute && existsSync(leakCheck)) {
       const args = [leakCheck, '--root', cloneDir];
       if (reduced) args.push('--no-derived');
-      const childEnv = { ...process.env, ...env };
-      if (publicNames.length) childEnv.LEAK_CHECK_OWN_NAMES = publicNames.join(',');
+      // Only LEAK_CHECK_* keys from `env` survive scrubbing (test/canary use
+      // this to set LEAK_CHECK_DEV_ROOT etc. on an isolated fixture — never
+      // a way to pass arbitrary env through to the target script).
+      const leakCheckEnv = { ...Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith('LEAK_CHECK_'))) };
+      if (publicNames.length) leakCheckEnv.LEAK_CHECK_OWN_NAMES = publicNames.join(',');
+      const childEnv = scrubbedEnv(leakCheckEnv);
       const scan = run(process.execPath, args, { timeout, env: childEnv });
-      // exit 0 = clean, 1 = hits, 2 = bad invocation (treat as error, not hits).
+      // exit 0 = clean, 1 = hits, 2 = bad invocation. A bad invocation is
+      // recorded as an error but does NOT stop the plugin checker below —
+      // one checker failing must never suppress the other's coverage.
       if (scan.status !== 0 && scan.status !== 1) {
-        return { repo: repoEntry, hits: [], error: `leak-check invocation failed (exit ${scan.status}): ${(scan.stderr || '').split('\n')[0] || 'unknown error'}` };
+        ownError = `target leak-check invocation failed (exit ${scan.status}): ${(scan.stderr || '').split('\n')[0] || 'unknown error'}`;
+      } else {
+        ownHits = parseHits(`${scan.stdout || ''}\n${scan.stderr || ''}`)
+          .map((h) => ({ ...h, fingerprint: fingerprintHit(repoEntry, h) }));
       }
-      ownHits = parseHits(`${scan.stdout || ''}\n${scan.stderr || ''}`)
-        .map((h) => ({ ...h, fingerprint: fingerprintHit(repoEntry, h) }));
     }
-    const pluginHits = runPluginChecker(cloneDir, repoEntry, { noDerived: reduced, tokenFile, devRoots, publicNames, strict });
-    const hits = dedupeByFingerprint([...ownHits, ...pluginHits]);
-    return { repo: repoEntry, hits, error: null, strict };
+    const plugin = runPluginChecker(cloneDir, repoEntry, { noDerived: reduced, tokenFile, devRoots, publicNames, strict });
+    if (plugin.error) {
+      // The plugin checker is the one that ALWAYS runs — its failure must
+      // never read as "repo is clean". Report it and stop; ownHits (if any)
+      // are still real findings and are included.
+      const combinedError = [ownError, `plugin checker crashed: ${plugin.error}`].filter(Boolean).join('; ');
+      return { repo: repoEntry, hits: dedupeByFingerprint(ownHits), error: combinedError, strict };
+    }
+    const hits = dedupeByFingerprint([...ownHits, ...plugin.hits]);
+    return { repo: repoEntry, hits, error: ownError, strict };
   } catch (err) {
     return { repo: repoEntry, hits: [], error: err.message || String(err) };
   } finally {
@@ -282,7 +371,7 @@ export function isSessionCheckout(repoEntry, cwd) {
 // fetch — that would mean scanning something not actually published (a
 // mid-run rebase, a detached commit, a shallow oddity), which is worse than
 // reporting nothing this run.
-export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000 } = {}) {
+export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000, tokenFile = null, publicNames = [] } = {}) {
   try {
     const fetch = run('git', ['-C', cwd, 'fetch', '--quiet', 'origin'], { timeout });
     if (fetch.status !== 0) {
@@ -307,21 +396,33 @@ export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000 } = {})
           + `(${originHead ? originHead.slice(0, 10) : '?'}) — sweep skipped rather than scan something unpublished`,
       };
     }
+    // The cloud path never clones a third-party repo (sweepAllCloud only
+    // ever scans the session's OWN checkout in place — see its header), so
+    // the owner-gating item 2 requires for a CLONE never applies here: this
+    // is inherently the operator's own repo already. Its own script (if
+    // any) still runs, same as before.
     let ownHits = [];
+    let ownError = null;
     const leakCheck = join(cwd, 'scripts', 'leak-check.mjs');
     if (existsSync(leakCheck)) {
       const scan = run(process.execPath, [leakCheck, '--root', cwd, '--no-derived'], { timeout });
       if (scan.status !== 0 && scan.status !== 1) {
-        return { repo: repoEntry, hits: [], error: `leak-check invocation failed (exit ${scan.status}): ${(scan.stderr || '').split('\n')[0] || 'unknown error'}` };
+        ownError = `target leak-check invocation failed (exit ${scan.status}): ${(scan.stderr || '').split('\n')[0] || 'unknown error'}`;
+      } else {
+        ownHits = parseHits(`${scan.stdout || ''}\n${scan.stderr || ''}`)
+          .map((h) => ({ ...h, fingerprint: fingerprintHit(repoEntry, h) }));
       }
-      ownHits = parseHits(`${scan.stdout || ''}\n${scan.stderr || ''}`)
-        .map((h) => ({ ...h, fingerprint: fingerprintHit(repoEntry, h) }));
     }
     // Always ALSO run the plugin's own generic checker, --no-derived (no dev
-    // root in the cloud), same as sweepRepo()'s local path.
-    const pluginHits = runPluginChecker(cwd, repoEntry, { noDerived: true });
-    const hits = dedupeByFingerprint([...ownHits, ...pluginHits]);
-    return { repo: repoEntry, hits, error: null };
+    // root in the cloud), same as sweepRepo()'s local path. Its failure must
+    // never read as clean (item 6) — report it rather than swallow it.
+    const plugin = runPluginChecker(cwd, repoEntry, { noDerived: true, tokenFile, publicNames });
+    if (plugin.error) {
+      const combinedError = [ownError, `plugin checker crashed: ${plugin.error}`].filter(Boolean).join('; ');
+      return { repo: repoEntry, hits: dedupeByFingerprint(ownHits), error: combinedError };
+    }
+    const hits = dedupeByFingerprint([...ownHits, ...plugin.hits]);
+    return { repo: repoEntry, hits, error: ownError };
   } catch (err) {
     return { repo: repoEntry, hits: [], error: err.message || String(err) };
   }
@@ -330,13 +431,13 @@ export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000 } = {})
 // Cloud entry point. Never clones: a configured repo that IS the session
 // checkout (cwd) is scanned in place; any other configured repo is reported
 // `skipped` with a one-line note — never fetched, never cloned.
-export async function sweepAllCloud(repos, { cwd = process.cwd(), timeout } = {}) {
+export async function sweepAllCloud(repos, { cwd = process.cwd(), timeout, tokenFile = null, publicNames = [] } = {}) {
   const results = [];
   for (const repo of repos) {
     // eslint-disable-next-line no-await-in-loop
     if (isSessionCheckout(repo, cwd)) {
       // eslint-disable-next-line no-await-in-loop
-      results.push(await sweepRepoInPlace(repo, cwd, { timeout }));
+      results.push(await sweepRepoInPlace(repo, cwd, { timeout, tokenFile, publicNames }));
     } else {
       results.push({
         repo, hits: [], error: null, skipped: true,

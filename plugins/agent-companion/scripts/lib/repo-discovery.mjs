@@ -75,6 +75,30 @@ export function discoverViaGh({ exec = defaultExec, timeout = 60000 } = {}) {
   return { ok: true, repos, reason: null };
 }
 
+// The authenticated user's login + every org they belong to (lowercased) —
+// the trusted-owner set that gates BOTH which locally-discovered repos are
+// even considered, and (in publication-sweep.mjs) whether a target repo's
+// own script may ever be executed. `orgs` needs a scope gh may not have
+// (fine — the login alone still narrows things); a total gh failure
+// degrades to `{ ok: false, owners: [] }`, never throws.
+export function discoverOwners({ exec = defaultExec } = {}) {
+  let login;
+  try {
+    login = exec('gh', ['api', 'user', '--jq', '.login']).trim();
+  } catch (err) {
+    const msg = (err.stderr || err.message || String(err)).split('\n')[0];
+    const missing = err.code === 'ENOENT' || /command not found|not recognized/i.test(msg);
+    return { ok: false, owners: [], reason: missing ? 'gh is not installed' : `gh api user failed: ${msg}` };
+  }
+  const owners = new Set();
+  if (login) owners.add(login.toLowerCase());
+  try {
+    const orgsOut = exec('gh', ['api', 'user/orgs', '--jq', '.[].login']).trim();
+    for (const line of orgsOut.split(/\r?\n/)) if (line.trim()) owners.add(line.trim().toLowerCase());
+  } catch { /* org membership scope may be absent — login alone is still valid */ }
+  return { ok: owners.size > 0, owners: [...owners], reason: owners.size ? null : 'gh returned no usable login' };
+}
+
 // --- (b) local-checkout discovery -------------------------------------------
 
 // Same default dev-root formula leak-check.mjs uses: the main checkout's
@@ -229,12 +253,13 @@ export async function discoverLocalCheckouts({
 // to catch someone's REAL, otherwise-unpublished project names/handles, not
 // to flag one public repo for mentioning another by name (siblings
 // referencing each other in a README/CHANGELOG/wrangler.toml is completely
-// normal). Turns a discovered-repo list into the flat token set a leak-check
-// `ownNames` list expects: each repo's bare name, its owner, and the full
-// "owner/repo" — every one of those becomes exempt, and because the
-// exemption is SEGMENT-based (see leak-check.mjs's ownSegments), a prefix
-// shared by two public names (two repos both starting "gss-") is
-// automatically exempt too, with no extra logic needed.
+// normal). Turns a discovered-repo list into the flat token set the sweep's
+// EXACT public-name subtraction expects: each repo's bare name, its owner,
+// and the full "owner/repo". Matched by EXACT normalized equality only (see
+// deriveTokens()'s `publicNames` handling in leak-scan-core.mjs) — NEVER by
+// segment or prefix: a private agent-file prefix that happens to share a
+// segment with a public name (e.g. both start "acme-") must stay flagged,
+// not be silently exempted.
 export function publicNameTokens(discovered) {
   const out = new Set();
   for (const r of discovered || []) {

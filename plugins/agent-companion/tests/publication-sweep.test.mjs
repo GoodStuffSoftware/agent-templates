@@ -114,6 +114,81 @@ test('sweepRepo: a repo with NO leak-check of its own is still scanned, by the p
   } finally { try { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); } catch { /* ignore */ } }
 });
 
+// --- item 2: never execute a swept repo's own script by default ------------
+
+test('item 2: a repo WITH its own leak-check.mjs is NOT executed by default (no strictRepoUrls/allowedOwners) — plugin checker only', async () => {
+  const repo = buildLeakyRepo(); // buildLeakyRepo() commits a copy of THIS repo's own leak-check.mjs
+  try {
+    const result = await sweepRepo(repo.bareDir, {}); // no strictRepoUrls, no allowedOwners
+    assert.equal(result.error, null);
+    // Universal class (private-path) still fires via the PLUGIN checker —
+    // proves a real checker ran — but the target's own script never did.
+    assert.ok(result.hits.some((h) => h.label === 'private-path:windows-profile'));
+  } finally { repo.cleanup(); }
+});
+
+test('item 2: mayExecuteTargetScript requires BOTH explicit listing AND a verified owner', async () => {
+  const { mayExecuteTargetScript } = await import('../scripts/lib/publication-sweep.mjs');
+  const repo = 'https://github.com/someowner/somerepo.git';
+  assert.equal(mayExecuteTargetScript(repo, {}), false, 'neither listed nor owned');
+  assert.equal(mayExecuteTargetScript(repo, { strictRepoUrls: [repo] }), false, 'listed but no allowedOwners at all');
+  assert.equal(mayExecuteTargetScript(repo, { strictRepoUrls: [repo], allowedOwners: new Set(['someoneelse']) }), false, 'listed but wrong owner');
+  assert.equal(mayExecuteTargetScript(repo, { allowedOwners: new Set(['someowner']) }), false, 'owned but not explicitly listed');
+  assert.equal(mayExecuteTargetScript(repo, { strictRepoUrls: [repo], allowedOwners: new Set(['someowner']) }), true, 'listed AND owned');
+});
+
+test('item 2: scrubbedEnv keeps only PATH/HOME/TEMP/SYSTEMROOT-shaped vars and LEAK_CHECK_* — never arbitrary env', async () => {
+  const { scrubbedEnv } = await import('../scripts/lib/publication-sweep.mjs');
+  const env = scrubbedEnv({ LEAK_CHECK_DEV_ROOT: '/tmp/x', SOME_SECRET_TOKEN: 'should-not-appear' });
+  assert.equal(env.LEAK_CHECK_DEV_ROOT, '/tmp/x');
+  assert.equal(env.SOME_SECRET_TOKEN, undefined);
+  const allowed = new Set(['PATH', 'Path', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'SYSTEMROOT', 'SystemRoot', 'ComSpec', 'windir', 'LEAK_CHECK_DEV_ROOT']);
+  for (const k of Object.keys(env)) assert.ok(allowed.has(k), `unexpected key in scrubbed env: ${k}`);
+});
+
+// --- item 6: a checker exception must never read as clean -------------------
+
+test('item 6: a plugin-checker crash reports a sweep_error naming the repo, not silent hits: []', async () => {
+  const repo = buildLeakyRepo('nothing to see here');
+  try {
+    // Force a real, reachable exception in the plugin checker: an
+    // unreadable tokenFile makes deriveTokens() throw "cannot read token
+    // file ...", which scanRepo()/runPluginChecker() do not catch.
+    const badTokenFile = join(repo.base, 'does-not-exist-tokens.txt');
+    const result = await sweepRepo(repo.bareDir, { tokenFile: badTokenFile });
+    assert.ok(result.error, 'a checker exception must surface as .error, not read as clean');
+    assert.match(result.error, /plugin checker crashed/i);
+  } finally { repo.cleanup(); }
+});
+
+test('item 6: a bad target-script invocation (exit 2) does not stop the plugin checker from running', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'ac-pubsweep-test-'));
+  try {
+    const bareDir = join(base, 'origin.git');
+    const workDir = join(base, 'work');
+    git(['init', '--quiet', '--bare', '--initial-branch=main', bareDir]);
+    mkdirSync(workDir, { recursive: true });
+    git(['init', '--quiet', '-b', 'main', workDir]);
+    git(['remote', 'add', 'origin', bareDir], workDir);
+    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
+    // A "leak-check.mjs" that always exits 2 (a bad invocation), plus a real
+    // private-path leak the PLUGIN checker must still catch.
+    mkdirSync(join(workDir, 'scripts'), { recursive: true });
+    writeFileSync(join(workDir, 'scripts', 'leak-check.mjs'), '#!/usr/bin/env node\nprocess.exitCode = 2;\n');
+    writeFileSync(join(workDir, 'NOTES.md'), `${SYNTHETIC_LEAK_LINE}\n`);
+    git(['add', '-A'], workDir, gitEnv);
+    git(['commit', '--quiet', '-m', 'init'], workDir, gitEnv);
+    git(['push', '--quiet', 'origin', 'main'], workDir, gitEnv);
+    const result = await sweepRepo(bareDir, {
+      strictRepoUrls: [bareDir],
+      allowedOwners: new Set([(await import('../scripts/lib/publication-sweep.mjs')).ownerOf(bareDir)]),
+    });
+    assert.ok(result.error, 'the exit-2 must be reported');
+    assert.match(result.error, /exit 2/);
+    assert.ok(result.hits.some((h) => h.label === 'private-path:windows-profile'), 'the plugin checker must still have run and found the real leak');
+  } finally { try { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); } catch { /* ignore */ } }
+});
+
 test('sweepRepo: an unreachable repo reports an error and never throws', async () => {
   const base = mkdtempSync(join(tmpdir(), 'ac-pubsweep-test-'));
   try {
@@ -135,6 +210,26 @@ test('filterNew / fingerprintHit: stable across runs, dedupes a previously-seen 
   assert.deepEqual(filterNew(hits, []), hits, 'empty baseline: everything is new');
   assert.deepEqual(filterNew(hits, [fp1]), [], 'seen fingerprint: nothing new');
   assert.deepEqual(filterNew(hits, new Set([fp1])), [], 'accepts a Set too');
+});
+
+test('item 7: fingerprint tolerates a LINE SHIFT (same repo+file+label+token, different line)', () => {
+  const hitLine1 = { rel: 'NOTES.md', line: 1, label: 'private-path:windows-profile', token: 'x', text: 'x' };
+  const hitLine9 = { rel: 'NOTES.md', line: 9, label: 'private-path:windows-profile', token: 'x', text: 'x (shifted by an unrelated edit)' };
+  assert.equal(fingerprintHit('repo-a', hitLine1), fingerprintHit('repo-a', hitLine9), 'a line shift alone must not change the fingerprint');
+
+  const hitDifferentToken = { ...hitLine1, token: 'y' };
+  assert.notEqual(fingerprintHit('repo-a', hitLine1), fingerprintHit('repo-a', hitDifferentToken), 'a different token at the SAME location must still fire as new');
+});
+
+test('item 7: filterNewOrStale re-fires a still-present hit once its baseline record turns stale (weekly cadence)', async () => {
+  const { filterNewOrStale } = await import('../scripts/lib/publication-sweep.mjs');
+  const hit = { rel: 'NOTES.md', line: 1, label: 'private-path:windows-profile', token: 'x', text: 'x', fingerprint: fingerprintHit('repo-a', { rel: 'NOTES.md', line: 1, label: 'private-path:windows-profile', token: 'x' }) };
+  const now = Date.parse('2026-06-15T00:00:00Z');
+  const recentSeen = { [hit.fingerprint]: new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString() }; // 2 days old
+  assert.deepEqual(filterNewOrStale([hit], recentSeen, { maxAgeDays: 7, now }), [], 'a recently-accepted hit must not re-fire');
+  const staleSeen = { [hit.fingerprint]: new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString() }; // 8 days old
+  assert.deepEqual(filterNewOrStale([hit], staleSeen, { maxAgeDays: 7, now }), [hit], 'an 8-day-old accepted hit must re-fire (weekly cadence)');
+  assert.deepEqual(filterNewOrStale([hit], {}, { maxAgeDays: 7, now }), [hit], 'never-seen is always new');
 });
 
 test('detect.mjs: publication_leak_repos empty (default) — no signal, no git activity', async () => {
@@ -273,7 +368,10 @@ test('detect.mjs (cloud): scans the checkout in place, skips a non-matching conf
     assert.match(leakSig.detail, /cloud, in-place/);
     const noteSig = res.json.signals.find((s) => s.kind === 'publication_leak_sweep_note');
     assert.ok(noteSig, 'expected a note about the skipped (non-checkout) repo');
-    assert.match(noteSig.detail, new RegExp(otherRepo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    // item 16: signal text is scrubbed of local absolute paths before it
+    // ever lands in a signal — assert the SCRUBBED shape, not the raw path.
+    assert.match(noteSig.detail, /not this cloud session's own checkout/);
+    assert.doesNotMatch(noteSig.detail, /AppData/, 'a local absolute path must not appear raw in signal text');
     assert.ok(!res.json.signals.some((s) => s.kind === 'publication_leak_sweep_error'), 'the skipped repo must not be reported as an error — it was never attempted');
   } finally { cleanup(); repo.cleanup(); }
 });
@@ -314,6 +412,7 @@ test('detect.mjs: auto-discovery via the dev-root fallback fires publication_rep
       AGENT_COMPANION_DISCOVERY_NO_GH: '1',
       AGENT_COMPANION_DISCOVERY_DEV_ROOT: devRoot,
       AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY: '1', // every candidate treated as public, no network
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_OWNERS: 'example-org',
     };
     const runA = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
     assert.equal(runA.status, 0, runA.stderr);
@@ -350,6 +449,7 @@ test('detect.mjs: publication_leak_repos excludes (!entry) remove a discovered r
       AGENT_COMPANION_DISCOVERY_NO_GH: '1',
       AGENT_COMPANION_DISCOVERY_DEV_ROOT: devRoot,
       AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY: '1',
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_OWNERS: 'example-org',
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: '!example-org/excluded-proj',
     };
     const res = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
@@ -489,28 +589,51 @@ test('leak-scan-core scanRepo: git-sha-like is silent entirely when NOT strict, 
   } finally { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); }
 });
 
-test('leak-scan-core scanRepo: vendor/minified/lockfile paths are skipped for every class', async () => {
+test('leak-scan-core scanRepo: the vendor skip is SHA-ONLY and narrow — build/dist/vendor/sourcemaps still get every other class', async () => {
   const base = mkdtempSync(join(tmpdir(), 'ac-corevendor-'));
   try {
     // Assembled from 2-char pieces — no contiguous 7+ char hex run appears
     // literally in this file's own source (it is itself leak-checked).
     const leakyHex = ['01', '23', '45', '67', '89', 'ab', 'cd', 'ef', '01', '23', '45', '67', '89', 'ab', 'cd', 'ef', '01', '23', '45', '67'].join('');
+    const PRIVATE_PATH_LEAK = ['C:', '\\Users\\', 'zzz', 'vendortest', '\\dev\\thing'].join('');
     mkdirSync(join(base, 'vendor'), { recursive: true });
     mkdirSync(join(base, 'dist'), { recursive: true });
-    writeFileSync(join(base, 'vendor', 'lib.js'), `const h = "${leakyHex}";\n`);
-    writeFileSync(join(base, 'dist', 'bundle.min.js'), `const h = "${leakyHex}";\n`);
+    mkdirSync(join(base, 'build'), { recursive: true });
+    mkdirSync(join(base, 'node_modules', 'pkg'), { recursive: true });
+    writeFileSync(join(base, 'vendor', 'lib.js'), `const h = "${leakyHex}"; // ${PRIVATE_PATH_LEAK}\n`);
+    writeFileSync(join(base, 'dist', 'bundle.js.map'), `{"sources":["${PRIVATE_PATH_LEAK.replace(/\\/g, '\\\\')}"]}\n`);
+    writeFileSync(join(base, 'dist', 'bundle.min.js'), `const h = "${leakyHex}"; // ${PRIVATE_PATH_LEAK}\n`);
+    writeFileSync(join(base, 'node_modules', 'pkg', 'index.js'), `const h = "${leakyHex}"; // ${PRIVATE_PATH_LEAK}\n`);
     writeFileSync(join(base, 'package-lock.json'), `{"h":"${leakyHex}"}\n`);
+    writeFileSync(join(base, 'build', 'out.js'), `const h = "${leakyHex}"; // ${PRIVATE_PATH_LEAK}\n`);
     writeFileSync(join(base, 'real.js'), `const h = "${leakyHex}";\n`);
     git(['init', '--quiet', '-b', 'main'], base);
     git(['add', '-A'], base, { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' });
     git(['commit', '--quiet', '-m', 'init'], base, { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' });
     const { scanRepo } = await import('../scripts/lib/leak-scan-core.mjs');
     const { hits } = scanRepo({ root: base, devRoots: [], noDerived: true });
-    const rels = hits.map((h) => h.rel);
-    assert.ok(rels.includes('real.js'));
-    assert.ok(!rels.includes('vendor/lib.js'));
-    assert.ok(!rels.includes('dist/bundle.min.js'));
-    assert.ok(!rels.includes('package-lock.json'));
+    const byRel = (r, label) => hits.some((h) => h.rel === r && h.label === label);
+
+    assert.ok(byRel('real.js', 'git-sha-like'), 'an ordinary source file still gets git-sha-like');
+
+    // SHA-only skip applies to *.min.js/css, lockfiles, node_modules/ ONLY.
+    assert.ok(!byRel('dist/bundle.min.js', 'git-sha-like'), '*.min.js loses git-sha-like');
+    assert.ok(!byRel('node_modules/pkg/index.js', 'git-sha-like'), 'node_modules/ loses git-sha-like');
+    assert.ok(!byRel('package-lock.json', 'git-sha-like'), 'a lockfile loses git-sha-like');
+    // ...but plain vendor/ and build/ are NOT in the SHA skip list at all
+    // (only *.min.js/css, lockfiles, node_modules/ are) — proves the skip is
+    // narrow by FILE SHAPE, not "any vendor/build-output directory".
+    assert.ok(byRel('vendor/lib.js', 'git-sha-like'), 'vendor/ (not minified) still gets git-sha-like');
+    assert.ok(byRel('build/out.js', 'git-sha-like'), 'build/ still gets git-sha-like');
+
+    // ...but EVERY file still gets the private-path class, including the
+    // ones that lost git-sha-like, including a sourcemap (a classic
+    // absolute-path leak vector that must never be skipped wholesale).
+    assert.ok(byRel('vendor/lib.js', 'private-path:windows-profile'));
+    assert.ok(byRel('dist/bundle.min.js', 'private-path:windows-profile'));
+    assert.ok(byRel('dist/bundle.js.map', 'private-path:windows-profile'), 'a sourcemap must be scanned for private paths');
+    assert.ok(byRel('node_modules/pkg/index.js', 'private-path:windows-profile'));
+    assert.ok(byRel('build/out.js', 'private-path:windows-profile'));
   } finally { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); }
 });
 
