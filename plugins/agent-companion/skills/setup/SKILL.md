@@ -171,13 +171,23 @@ Off by default. If you maintain one or more PUBLIC repos and want the daily
 scout to check what is actually published — not the local working tree — for
 a real-name leak that slipped past a local pre-push gate, set
 `publication_leak_repos` to a comma-separated list of local checkout paths
-and/or git URLs. The scout then fetches each repo's default branch AS
-PUBLISHED into a throwaway clone and runs THAT repo's own
-`scripts/leak-check.mjs` against it, firing `publication_leak` only for hits
-not already accepted in a prior run (see the routine's dispatch table). A
-cloud run has no dev root to derive real project names from, so it sweeps in
-reduced mode there (path and fixed-token checks only) — the routine text says
-so explicitly when it does.
+and/or git URLs.
+
+**Local and cloud sweep differently, and it matters.** Locally, the scout
+fetches each repo's default branch AS PUBLISHED into a throwaway clone and
+runs THAT repo's own `scripts/leak-check.mjs` against it. In the cloud this
+does NOT happen: a cloud routine already runs from a checkout of its own
+source repo, and cloning a second copy of a repo and executing a script from
+it is exactly the "code from external" shape the cloud sandbox's classifier
+denies — confirmed live, the clone-based approach was blocked outright there.
+So the cloud sweep instead scans, IN PLACE, whichever ONE configured repo IS
+this session's own checkout (after confirming `HEAD` matches origin's default
+branch), always with `--no-derived` (no dev root in the cloud to derive real
+project names from anyway). Any other configured repo is reported once as
+`skipped` in the cloud, not fetched or cloned.
+
+Either way, `publication_leak` fires only for hits not already accepted in a
+prior run (see the routine's dispatch table).
 
 This is a backstop, not a gate: it never blocks a push, it only notices one
 already live. Verify it actually works with the sweep canary before relying

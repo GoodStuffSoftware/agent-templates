@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
-import { sweepAll, filterNew } from './lib/publication-sweep.mjs';
+import { sweepAll, sweepAllCloud, filterNew } from './lib/publication-sweep.mjs';
 
 const argv = process.argv.slice(2);
 const daysArg = (() => {
@@ -212,29 +212,45 @@ try {
 // --- 8. Publication-leak sweep -----------------------------------------
 // EMPTY option (the default) = disabled, silent, zero git activity. Set by
 // the operator via the publication_leak_repos plugin option — never hardcoded
-// here, this plugin is public and generic. A cloud run has no dev root to
-// derive real project names from, so it sweeps in reduced mode (path/fixed
-// checks only) rather than silently skipping the whole thing.
+// here, this plugin is public and generic.
+//
+// LOCAL clones each configured repo's origin default branch into a throwaway
+// dir and runs its own leak-check against that clone. CLOUD never clones —
+// a cloud routine already runs from a checkout of ITS OWN source repo, and
+// cloning a second copy of a repo into a temp dir and executing a script
+// from it is exactly the "code from external" shape the cloud sandbox's
+// classifier denies, even when the source is that repo's own origin. So in
+// the cloud, only the ONE configured repo entry that IS this session's own
+// checkout gets scanned — in place, after confirming HEAD matches origin's
+// default branch, always with --no-derived (no dev root here to derive real
+// project names from). Any OTHER configured repo is reported `skipped`
+// rather than fetched or cloned.
 const publicationRepos = String(opt('publication_leak_repos', ''))
   .split(/[,;]/).map((s) => s.trim()).filter(Boolean);
 if (publicationRepos.length) {
   const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
   try {
-    const { results } = await sweepAll(publicationRepos, { reduced: cloud });
+    const { results } = cloud
+      ? await sweepAllCloud(publicationRepos, { cwd: process.cwd() })
+      : await sweepAll(publicationRepos, {});
     const seenByRepo = baseline.publicationLeakSeen || {};
     const nextSeenByRepo = {};
     const allNewHits = [];
     const errors = [];
+    const skipped = [];
     for (const r of results) {
+      if (r.skipped) { skipped.push(r); continue; }
       if (r.error) { errors.push(`${r.repo}: ${r.error}`); continue; }
       nextSeenByRepo[r.repo] = r.hits.map((h) => h.fingerprint);
       const fresh = filterNew(r.hits, seenByRepo[r.repo] || []);
       for (const h of fresh) allNewHits.push({ repo: r.repo, ...h });
     }
-    // Repos that errored keep their LAST successful baseline rather than
-    // being wiped to empty, so a transient clone failure doesn't make every
-    // hit look "new" again on the next run that succeeds.
-    for (const r of results) if (r.error && seenByRepo[r.repo]) nextSeenByRepo[r.repo] = seenByRepo[r.repo];
+    // Repos that errored OR were skipped this run keep their LAST successful
+    // baseline rather than being wiped to empty, so a transient failure (or
+    // simply running in cloud, where most configured repos are always
+    // "skipped") doesn't make every hit look "new" again on a run that later
+    // succeeds.
+    for (const r of results) if ((r.error || r.skipped) && seenByRepo[r.repo]) nextSeenByRepo[r.repo] = seenByRepo[r.repo];
     next.publicationLeakSeen = nextSeenByRepo;
 
     if (allNewHits.length) {
@@ -242,8 +258,8 @@ if (publicationRepos.length) {
         .map((h) => `${h.repo}:${h.rel}:${h.line} [${h.label}]`).join('; ');
       const more = allNewHits.length > 5 ? ` +${allNewHits.length - 5} more` : '';
       sig('publication_leak',
-        `${allNewHits.length} new leak hit(s) across ${publicationRepos.length} swept repo(s)` +
-        (cloud ? ' (reduced mode: no derived-name check — no dev root in the cloud)' : '') +
+        `${allNewHits.length} new leak hit(s) across ${publicationRepos.length} configured repo(s)` +
+        (cloud ? ' (cloud, in-place, --no-derived)' : '') +
         `: ${sample}${more}`,
         'manual-check');
     }
@@ -251,6 +267,22 @@ if (publicationRepos.length) {
       sig('publication_leak_sweep_error',
         `sweep could not complete for ${errors.length} of ${publicationRepos.length} repo(s): ${errors.join('; ')}`,
         'manual-check');
+    }
+    // Skips are expected in cloud (every configured repo but the session's
+    // own is always skipped there) and would fire every single day if
+    // treated as a normal signal, so only report when the SET of skip notes
+    // actually changed since the last run — a newly-added or newly-removed
+    // skipped repo is worth a line; the steady state is not.
+    const skipNotes = {};
+    for (const r of skipped) skipNotes[r.repo] = r.note;
+    next.publicationLeakSkipped = skipNotes;
+    const prevSkipNotes = baseline.publicationLeakSkipped || {};
+    const skipKeys = new Set([...Object.keys(skipNotes), ...Object.keys(prevSkipNotes)]);
+    const skipChanged = [...skipKeys].some((k) => skipNotes[k] !== prevSkipNotes[k]);
+    if (skipChanged && skipped.length) {
+      sig('publication_leak_sweep_note',
+        `${skipped.length} configured repo(s) not swept this run: ${skipped.map((r) => `${r.repo} (${r.note})`).join('; ')}`,
+        'none');
     }
   } catch (err) {
     sig('publication_leak_sweep_error', `sweep crashed: ${err.message || err}`, 'manual-check');

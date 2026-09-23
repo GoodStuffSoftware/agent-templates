@@ -55,8 +55,8 @@ if [ -n "$CLAUDE_CODE_REMOTE_SESSION_ID" ]; then echo "PLATFORM=cloud"; else ech
 | | **cloud** — claude.ai routine | **local** — desktop scheduled task |
 |---|---|---|
 | Sandbox | fresh every run; nothing under the plugin data dir survives | persistent `~/.claude/plugins/data/agent-companion-*/` written by the hooks |
-| In scope | the lineup and pricing diff (STEP 2), `model_retirement_approaching`, the guard canary, `routing-doc` freshness | **everything** — including the stateful signals: `harness_version_changed`, `zero_denials`, `spawn_activity`, `inherited_model_spawns`, `new_agent_type` |
-| Out of scope | the stateful signals. They compare against a previous run and a fresh sandbox has none. They are *unobservable* here, which is different from quiet — never call them clean | STEP 2 is optional locally (the cloud run covers it daily); do it if WebFetch is available |
+| In scope | the lineup and pricing diff (STEP 2), `model_retirement_approaching`, the guard canary, `routing-doc` freshness; the publication-leak sweep (STEP 2.5) IN PLACE, scoped to this session's own checkout only, never a clone | **everything** — including the stateful signals: `harness_version_changed`, `zero_denials`, `spawn_activity`, `inherited_model_spawns`, `new_agent_type`; the publication-leak sweep (STEP 2.5) by cloning each configured repo's origin |
+| Out of scope | the stateful signals. They compare against a previous run and a fresh sandbox has none. They are *unobservable* here, which is different from quiet — never call them clean. Also: publication-leak sweeping any configured repo OTHER than this session's own checkout — never cloned in the cloud, reported `skipped` instead | STEP 2 is optional locally (the cloud run covers it daily); do it if WebFetch is available |
 
 Report within your scope, and name the platform in the first line of any output.
 
@@ -129,35 +129,53 @@ one already published. It is OFF by default and stays silent unless the
 `publication_leak_repos` plugin option names at least one repo (a local
 checkout path, or a git URL — comma-separated for more than one).
 
+**LOCAL and CLOUD sweep differently, and this difference is load-bearing, not
+cosmetic.** LOCAL clones each configured repo's origin default branch into a
+throwaway dir and runs that repo's own `scripts/leak-check.mjs` against the
+clone. CLOUD must NEVER do that: a cloud routine already runs from a fresh
+checkout of its OWN source repo, and cloning a SECOND copy of a repo into a
+temp dir and executing a script from it is exactly the "code from external"
+shape the cloud sandbox's classifier denies — **confirmed live**: the
+clone-based sweep was blocked outright in the actual cloud routine before
+this was fixed. So in the cloud, `detect.mjs` scans ONLY the one configured
+repo entry that IS this session's own checkout — in place, never fetched
+from or cloned as a second copy, after confirming `HEAD` matches origin's
+default branch, and always with `--no-derived` (no dev root in the cloud to
+derive real project names from anyway). Any OTHER configured repo is
+reported `skipped`, once, and does not fire daily.
+
 ```bash
 node "$AC/scripts/detect.mjs"
 ```
 
-already ran this in STEP 1 if `$AC` is the CURRENT plugin copy (it emits a
-`publication_leak` signal, dispatched below, and a `publication_leak_sweep_error`
-signal if a configured repo could not be swept). **If `$AC` is an OLDER
-installed copy that predates this feature** (detect.mjs's JSON has no
-`publicationLeakSeen` key in `baseline` and the option is set, or `$AC/scripts/lib/publication-sweep.mjs`
+already ran this in STEP 1 if `$AC` is the CURRENT plugin copy (it emits
+`publication_leak`, `publication_leak_sweep_error`, and
+`publication_leak_sweep_note`, all dispatched below). **If `$AC` is an OLDER
+installed copy that predates this feature** (`$AC/scripts/lib/publication-sweep.mjs`
 does not exist), STEP 1 silently did not sweep. Fall back to running it
-directly instead of skipping it:
+directly instead of skipping it — and the fallback must obey the SAME
+local-vs-cloud rule above, using the CURRENT checkout's sweep library (this
+one, not `$AC`, since `$AC` is the one that's missing it):
 
 ```bash
-if [ -f "$AC/scripts/lib/publication-sweep.mjs" ] && [ -n "$(node -e "
-  import('${AC}/hooks/lib/context.mjs').then(m => process.stdout.write(String(m.opt('publication_leak_repos','')||'')))
-" 2>/dev/null)" ]; then
-  : # STEP 1 already swept via detect.mjs — nothing more to do here
+if [ -f "$AC/scripts/lib/publication-sweep.mjs" ]; then
+  : # STEP 1 already swept correctly (clone locally, in-place in the cloud) — nothing more to do here
 elif [ -n "$PUBLICATION_LEAK_REPOS_FALLBACK" ]; then
-  # Old installed plugin: no sweep support. Run it ad hoc, repo by repo, using
-  # the CURRENT checkout's own sweep library so the mechanism still runs even
-  # though the installed copy can't. $PUBLICATION_LEAK_REPOS_FALLBACK is a
-  # comma-separated list — set this only if you know the option is configured
-  # but $AC predates it; leave it unset otherwise (silent is correct then too).
+  # Old installed plugin: no sweep support. Run it ad hoc using THIS checkout's
+  # sweep library (not $AC's — that's the one missing it). Set
+  # $PUBLICATION_LEAK_REPOS_FALLBACK only when you know the option is
+  # configured but $AC predates it; leave it unset otherwise (silent is
+  # correct then too — this is a stopgap, not a substitute for updating $AC).
   node -e "
     import('$(pwd)/plugins/agent-companion/scripts/lib/publication-sweep.mjs').then(async (m) => {
       const repos = process.env.PUBLICATION_LEAK_REPOS_FALLBACK.split(',').map(s => s.trim()).filter(Boolean);
-      const reduced = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
-      const { results } = await m.sweepAll(repos, { reduced });
+      const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
+      // CLOUD: sweepAllCloud() — in-place scan of the session's OWN checkout
+      // (process.cwd()) only, never a clone of anything.
+      // LOCAL: sweepAll() — clones each configured repo's origin, as usual.
+      const { results } = cloud ? await m.sweepAllCloud(repos, { cwd: process.cwd() }) : await m.sweepAll(repos, {});
       for (const r of results) {
+        if (r.skipped) { console.log('publication-leak: not swept —', r.repo, '(' + r.note + ')'); continue; }
         if (r.error) { console.log('publication-leak sweep error:', r.repo, r.error); continue; }
         if (r.hits.length) console.log('publication-leak hit(s):', r.repo, JSON.stringify(r.hits.map(h => ({ rel: h.rel, line: h.line, label: h.label }))));
       }
@@ -189,7 +207,8 @@ Not a summary, not a confirmation. Silence is the success case.
 | `plugin_version_behind` | the installed plugin is older than the current copy. Cloud: the claude.ai plugin directory needs its **Sync** pressed on the marketplace page — cloud sessions are running the old guards until then. Local: `claude plugin marketplace update`, `claude plugin update`, restart |
 | `enforcement_silent` | report which day(s) and their status; transcripts show real `Agent` spawns but `spawns.jsonl` has no matching rows for that day — the guard may have stopped recording (renamed matcher, exception before the append, telemetry flag off) even though spawning itself is fine. Run `node "$AC/scripts/audit.mjs" --only telemetry-coverage,guard-canary` for the detail |
 | `publication_leak` | report each repo/file/line/label, and that it is a NEW hit (not previously accepted) in a repo listed under `publication_leak_repos` — a real name reached origin past the local pre-push gate. This needs a human decision (genericize and push a fix, or accept and let it fall into the baseline); do not edit or push on the routine's own authority |
-| `publication_leak_sweep_error` | report which repo(s) the sweep could not reach and why (bad path/URL, missing `scripts/leak-check.mjs` in that repo, clone failure) — a repo listed in the option that can no longer be swept is itself a finding, not silence |
+| `publication_leak_sweep_error` | report which repo(s) the sweep could not reach and why (bad path/URL, missing `scripts/leak-check.mjs` in that repo, clone failure, or — cloud only — the checkout's `HEAD` not matching origin's default branch) — a repo listed in the option that can no longer be swept is itself a finding, not silence |
+| `publication_leak_sweep_note` | cloud only, and only when the SET of skipped repos changed since the last run: report which configured repo(s) are not being swept because they are not this cloud session's own checkout. Informational — the cloud sweep is only ever going to cover the one repo it's checked out, so this just makes that scope explicit rather than silently narrower than the option implies |
 
 **Canary** — proves the guards still fire rather than merely exist:
 
@@ -214,7 +233,17 @@ fi
 
 Exit 0 with `OK` on stdout = the sweep pipeline works. Any other exit is
 itself a finding — report it verbatim as "leak sweep broken: <reason>", even
-on an otherwise quiet day; never let a broken canary pass as silence.
+on an otherwise quiet day; never let a broken canary pass as silence. **This
+includes the environment refusing to run the canary command at all** — a
+cloud classifier denial, a permission refusal, a timeout, anything that means
+this bash block did not complete and print `OK`. Treat "the canary did not
+run" exactly the same as "the canary ran and failed": report "leak sweep
+broken: canary did not run (<what happened>)". A canary you could not run is
+not evidence the sweep works — the cloud production sweep in this file was
+specifically redesigned (STEP 2.5, in-place, no clone) after the ORIGINAL
+clone-based approach was denied by exactly this kind of cloud classifier, so
+a denial here is a real, expected failure mode to report, not a fluke to
+shrug off.
 
 ## STEP 5 — deliver
 

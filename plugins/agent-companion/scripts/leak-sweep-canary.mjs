@@ -18,13 +18,28 @@
 // written as a literal, so this file itself never contains a real-looking
 // private path or project name that the repo's OWN leak-check could flag.
 //
+// FULL mode exercises sweepRepo() — clone the configured repo's origin into
+// a throwaway dir, then run its script from THAT clone. This is the LOCAL
+// production path.
+//
+// REDUCED mode exercises sweepRepoInPlace() instead — NOT sweepRepo(). A
+// cloud sandbox already runs from a checkout of its own source repo, and a
+// clone-then-execute-from-the-clone (what sweepRepo() does, and what FULL
+// mode tests) is exactly the "code from external" shape a cloud session's
+// classifier can deny — confirmed live: the clone-based sweep was blocked
+// in the actual cloud routine. So reduced mode builds a throwaway "checkout"
+// directory directly (no clone involved at any point) and scans it in
+// place, the same way the cloud production path does. Never git-clones.
+//
 // Usage:
-//   node leak-sweep-canary.mjs             # full mode (private-path + derived-name classes)
-//   node leak-sweep-canary.mjs --reduced   # cloud-shaped mode: private-path class only, --no-derived
+//   node leak-sweep-canary.mjs             # full mode: clone + scan (local production path)
+//   node leak-sweep-canary.mjs --reduced   # cloud-shaped mode: in-place scan, no clone, --no-derived
 //
 // Exit 0 = the sweep pipeline works. Non-zero + one-line reason on stderr =
 // broken; treat that the same as a failed guard-canary (report it, do not
-// paper over it as "sweep found nothing").
+// paper over it as "sweep found nothing") — including a classifier DENIAL of
+// this script itself: if the environment blocks this canary from running at
+// all, that is "leak sweep broken", not silence (see the routine text).
 
 import { spawnSync } from 'node:child_process';
 import {
@@ -33,7 +48,7 @@ import {
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { sweepRepo, filterNew } from './lib/publication-sweep.mjs';
+import { sweepRepo, sweepRepoInPlace, filterNew } from './lib/publication-sweep.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const reduced = process.argv.includes('--reduced');
@@ -89,12 +104,16 @@ try {
 
   if (!reduced) mkdirSync(join(devRootDir, SYN_PROJECT), { recursive: true });
   const sweepOpts = {
-    reduced,
-    env: reduced ? {} : { LEAK_CHECK_DEV_ROOT: devRootDir, LEAK_CHECK_CLAUDE_PROJECTS: join(base, 'no-claude-projects') },
+    env: { LEAK_CHECK_DEV_ROOT: devRootDir, LEAK_CHECK_CLAUDE_PROJECTS: join(base, 'no-claude-projects') },
   };
+  // FULL mode: sweepRepo() clones bareDir into ITS OWN throwaway dir (the
+  // local production path). REDUCED mode: sweepRepoInPlace() scans workDir
+  // ITSELF — workDir's origin remote already points at bareDir, so it IS
+  // "this checkout", and no clone happens anywhere in this branch.
+  const doSweep = () => (reduced ? sweepRepoInPlace(bareDir, workDir, {}) : sweepRepo(bareDir, sweepOpts));
 
   // --- 1. hit reported -----------------------------------------------------
-  const runA = await sweepRepo(bareDir, sweepOpts);
+  const runA = await doSweep();
   if (runA.error) throw new Error(`sweep of the leak commit errored: ${runA.error}`);
   const wantLabels = reduced
     ? ['private-path:windows-profile']
@@ -124,7 +143,7 @@ try {
   run('git', ['-C', workDir, 'add', '-A'], { env: gitEnv });
   run('git', ['-C', workDir, 'commit', '--quiet', '-m', 'fix: remove the leak'], { env: gitEnv });
   run('git', ['-C', workDir, 'push', '--quiet', 'origin', 'main'], { env: gitEnv });
-  const runB = await sweepRepo(bareDir, sweepOpts);
+  const runB = await doSweep();
   if (runB.error) throw new Error(`sweep of the clean commit errored: ${runB.error}`);
   if (runB.hits.length !== 0) {
     fail(`clean commit still reported ${runB.hits.length} hit(s) — the sweep (or its target leak-check copy) is stuck`);
@@ -136,7 +155,7 @@ try {
   run('git', ['-C', workDir, 'add', '-A'], { env: gitEnv });
   run('git', ['-C', workDir, 'commit', '--quiet', '-m', 'leak returns'], { env: gitEnv });
   run('git', ['-C', workDir, 'push', '--quiet', 'origin', 'main'], { env: gitEnv });
-  const runC = await sweepRepo(bareDir, sweepOpts);
+  const runC = await doSweep();
   if (runC.error) throw new Error(`sweep of the reappeared leak errored: ${runC.error}`);
   if (runC.hits.length === 0) {
     fail('the leak reappeared but the sweep reported nothing at all — it is not re-scanning');

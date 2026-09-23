@@ -17,7 +17,10 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
-import { sweepRepo, filterNew, fingerprintHit } from '../scripts/lib/publication-sweep.mjs';
+import {
+  sweepRepo, sweepRepoInPlace, sweepAllCloud, isSessionCheckout, normalizeGitUrl,
+  filterNew, fingerprintHit,
+} from '../scripts/lib/publication-sweep.mjs';
 
 const REAL_LEAK_CHECK = join(PLUGIN_ROOT, '..', '..', 'scripts', 'leak-check.mjs');
 
@@ -178,6 +181,91 @@ test('detect.mjs: an unreachable configured repo reports publication_leak_sweep_
     assert.equal(res.status, 0);
     assert.ok(res.json.signals.some((s) => s.kind === 'publication_leak_sweep_error'));
   } finally { cleanup(); }
+});
+
+test('normalizeGitUrl: ssh, https and scp-style forms of the same repo compare equal', () => {
+  const a = normalizeGitUrl('git@github.com:example-org/example-repo.git');
+  const b = normalizeGitUrl('https://github.com/example-org/example-repo.git');
+  const c = normalizeGitUrl('https://github.com/example-org/example-repo');
+  const d = normalizeGitUrl('ssh://git@github.com/example-org/example-repo.git');
+  assert.equal(a, b);
+  assert.equal(a, c);
+  assert.equal(a, d);
+  assert.notEqual(a, normalizeGitUrl('git@github.com:someone-else/other-repo.git'));
+});
+
+test('isSessionCheckout: matches a repo entry equal to the checkout\'s own origin, not an unrelated one', () => {
+  const repo = buildLeakyRepo();
+  try {
+    assert.equal(isSessionCheckout(repo.bareDir, repo.workDir), true);
+    assert.equal(isSessionCheckout(join(repo.base, 'not-the-origin.git'), repo.workDir), false);
+  } finally { repo.cleanup(); }
+});
+
+test('sweepRepoInPlace: scans the checkout directly (no clone), always reduced', async () => {
+  const repo = buildLeakyRepo();
+  try {
+    const result = await sweepRepoInPlace(repo.bareDir, repo.workDir, {});
+    assert.equal(result.error, null);
+    assert.ok(result.hits.some((h) => h.label === 'private-path:windows-profile'));
+    // never a derived-project-name hit: sweepRepoInPlace always passes --no-derived
+    assert.ok(!result.hits.some((h) => h.label === 'derived-project-name'));
+  } finally { repo.cleanup(); }
+});
+
+test('sweepRepoInPlace: refuses to scan when HEAD does not match origin\'s default branch', async () => {
+  const repo = buildLeakyRepo();
+  try {
+    // Make an unpushed local commit so workDir's HEAD diverges from origin.
+    writeFileSync(join(repo.workDir, 'NOTES.md'), 'unpublished change\n');
+    git(['add', '-A'], repo.workDir, repo.gitEnv);
+    git(['commit', '--quiet', '-m', 'unpublished'], repo.workDir, repo.gitEnv);
+    const result = await sweepRepoInPlace(repo.bareDir, repo.workDir, {});
+    assert.equal(result.hits.length, 0);
+    assert.match(result.error, /does not match origin/);
+  } finally { repo.cleanup(); }
+});
+
+test('sweepAllCloud: the entry matching this checkout is scanned in place; a non-matching entry is skipped, never cloned', async () => {
+  const repo = buildLeakyRepo();
+  try {
+    const other = join(repo.base, 'definitely-not-this-checkout.git');
+    const { results } = await sweepAllCloud([repo.bareDir, other], { cwd: repo.workDir });
+    const matched = results.find((r) => r.repo === repo.bareDir);
+    const skipped = results.find((r) => r.repo === other);
+    assert.equal(matched.skipped, undefined);
+    assert.equal(matched.error, null);
+    assert.ok(matched.hits.some((h) => h.label === 'private-path:windows-profile'));
+    assert.equal(skipped.skipped, true);
+    assert.equal(skipped.hits.length, 0);
+    assert.equal(skipped.error, null);
+    assert.ok(skipped.note);
+  } finally { repo.cleanup(); }
+});
+
+test('detect.mjs (cloud): scans the checkout in place, skips a non-matching configured repo, never clones', async () => {
+  const { dir, cleanup } = makeFixture();
+  const repo = buildLeakyRepo();
+  try {
+    const otherRepo = join(repo.base, 'not-this-checkout.git');
+    const env = {
+      ...process.env,
+      AGENT_COMPANION_HOME_OVERRIDE: dir,
+      CLAUDE_CODE_REMOTE_SESSION_ID: 'test-cloud-session',
+      CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: `${repo.bareDir},${otherRepo}`,
+    };
+    // cwd is the "session checkout" — detect.mjs must scan THIS in place and
+    // must not attempt to clone otherRepo (which does not even exist).
+    const res = runScript('scripts/detect.mjs', [], { env, cwd: repo.workDir, timeout: 30000 });
+    assert.equal(res.status, 0, res.stderr);
+    const leakSig = res.json.signals.find((s) => s.kind === 'publication_leak');
+    assert.ok(leakSig, `expected publication_leak, got: ${JSON.stringify(res.json.signals)}`);
+    assert.match(leakSig.detail, /cloud, in-place/);
+    const noteSig = res.json.signals.find((s) => s.kind === 'publication_leak_sweep_note');
+    assert.ok(noteSig, 'expected a note about the skipped (non-checkout) repo');
+    assert.match(noteSig.detail, new RegExp(otherRepo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.ok(!res.json.signals.some((s) => s.kind === 'publication_leak_sweep_error'), 'the skipped repo must not be reported as an error — it was never attempted');
+  } finally { cleanup(); repo.cleanup(); }
 });
 
 test('leak-sweep-canary.mjs: full mode passes', () => {

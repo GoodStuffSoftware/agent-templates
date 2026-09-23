@@ -135,3 +135,116 @@ export async function sweepAll(repos, opts = {}) {
   }
   return { results };
 }
+
+// --- Cloud path: scan the SESSION'S OWN CHECKOUT in place, never clone ----
+//
+// A claude.ai cloud routine already runs from a fresh checkout of one repo
+// (its `source: git_repository`) — that IS the cwd. Cloning a SECOND copy of
+// that same repo into a temp dir and executing a script from it is exactly
+// the "code from external" shape the harness's cloud classifier denies, even
+// though the source is the repo's own origin. There is no reason to clone at
+// all here: the checkout already sits on disk, already at the commit the
+// session started from. So the cloud sweep never calls sweepRepo(); it scans
+// the checkout directory directly, and only for the ONE configured repo
+// entry that actually names this checkout — any other configured repo is a
+// DIFFERENT repo the cloud sandbox does not have on disk, and the cloud path
+// does not fetch it (that would be exactly the clone the classifier denies).
+// It is reported as skipped, not swept, and does not fire daily.
+
+// git@host:owner/repo(.git) | ssh://git@host/owner/repo(.git) | https://host/owner/repo(.git)
+// all normalize to "host/owner/repo" (lowercase, no .git, no trailing slash),
+// so the same repo configured either way compares equal.
+export function normalizeGitUrl(url) {
+  let u = String(url || '').trim();
+  if (!u) return '';
+  u = u.replace(/\\/g, '/').replace(/\/+$/, '').replace(/\.git$/i, '');
+  const scp = /^[\w.-]+@([\w.-]+):(.+)$/.exec(u); // git@host:owner/repo
+  if (scp) return `${scp[1]}/${scp[2]}`.toLowerCase();
+  u = u.replace(/^[a-z][\w+.-]*:\/\/(?:[^@/]+@)?/i, ''); // strip scheme://[user@]
+  return u.toLowerCase();
+}
+
+function originUrlOf(dir) {
+  const r = run('git', ['-C', dir, 'remote', 'get-url', 'origin']);
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+// Does `repoEntry` (a configured path or URL) identify the SAME repo as the
+// git checkout at `cwd`? Compared by normalized origin URL, so a local path,
+// an ssh URL and an https URL for the same repo all match.
+export function isSessionCheckout(repoEntry, cwd) {
+  const cwdOrigin = originUrlOf(cwd);
+  if (!cwdOrigin) return false;
+  const target = cwdOrigin;
+  const looksLocal = existsSync(repoEntry) && statSync(repoEntry).isDirectory();
+  const candidate = looksLocal ? (originUrlOf(repoEntry) || repoEntry) : repoEntry;
+  return normalizeGitUrl(candidate) === normalizeGitUrl(target) || normalizeGitUrl(repoEntry) === normalizeGitUrl(target);
+}
+
+// Scan `cwd` (the session's own checkout) in place. Always reduced
+// (--no-derived): a fresh cloud sandbox has no dev root to derive real
+// project names from, so that class is not runnable here regardless.
+// Refuses to scan if HEAD does not match origin's default branch after a
+// fetch — that would mean scanning something not actually published (a
+// mid-run rebase, a detached commit, a shallow oddity), which is worse than
+// reporting nothing this run.
+export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000 } = {}) {
+  try {
+    const fetch = run('git', ['-C', cwd, 'fetch', '--quiet', 'origin'], { timeout });
+    if (fetch.status !== 0) {
+      return { repo: repoEntry, hits: [], error: `git fetch origin failed: ${(fetch.stderr || fetch.error?.message || 'unknown error').split('\n')[0]}` };
+    }
+    let defaultBranch = null;
+    const symref = run('git', ['-C', cwd, 'symbolic-ref', 'refs/remotes/origin/HEAD']);
+    if (symref.status === 0) defaultBranch = symref.stdout.trim().replace(/^refs\/remotes\/origin\//, '');
+    if (!defaultBranch) {
+      const ls = run('git', ['-C', cwd, 'ls-remote', '--symref', 'origin', 'HEAD'], { timeout });
+      const m = /ref: refs\/heads\/(\S+)\s+HEAD/.exec(ls.stdout || '');
+      defaultBranch = m ? m[1] : null;
+    }
+    if (!defaultBranch) return { repo: repoEntry, hits: [], error: 'could not resolve origin default branch' };
+    const head = run('git', ['-C', cwd, 'rev-parse', 'HEAD']).stdout.trim();
+    const originHead = run('git', ['-C', cwd, 'rev-parse', `origin/${defaultBranch}`]).stdout.trim();
+    if (!head || !originHead || head !== originHead) {
+      return {
+        repo: repoEntry,
+        hits: [],
+        error: `checkout HEAD (${head ? head.slice(0, 10) : '?'}) does not match origin/${defaultBranch} `
+          + `(${originHead ? originHead.slice(0, 10) : '?'}) — sweep skipped rather than scan something unpublished`,
+      };
+    }
+    const leakCheck = join(cwd, 'scripts', 'leak-check.mjs');
+    if (!existsSync(leakCheck)) {
+      return { repo: repoEntry, hits: [], error: 'no scripts/leak-check.mjs in this checkout' };
+    }
+    const scan = run(process.execPath, [leakCheck, '--root', cwd, '--no-derived'], { timeout });
+    if (scan.status !== 0 && scan.status !== 1) {
+      return { repo: repoEntry, hits: [], error: `leak-check invocation failed (exit ${scan.status}): ${(scan.stderr || '').split('\n')[0] || 'unknown error'}` };
+    }
+    const hits = parseHits(`${scan.stdout || ''}\n${scan.stderr || ''}`)
+      .map((h) => ({ ...h, fingerprint: fingerprintHit(repoEntry, h) }));
+    return { repo: repoEntry, hits, error: null };
+  } catch (err) {
+    return { repo: repoEntry, hits: [], error: err.message || String(err) };
+  }
+}
+
+// Cloud entry point. Never clones: a configured repo that IS the session
+// checkout (cwd) is scanned in place; any other configured repo is reported
+// `skipped` with a one-line note — never fetched, never cloned.
+export async function sweepAllCloud(repos, { cwd = process.cwd(), timeout } = {}) {
+  const results = [];
+  for (const repo of repos) {
+    // eslint-disable-next-line no-await-in-loop
+    if (isSessionCheckout(repo, cwd)) {
+      // eslint-disable-next-line no-await-in-loop
+      results.push(await sweepRepoInPlace(repo, cwd, { timeout }));
+    } else {
+      results.push({
+        repo, hits: [], error: null, skipped: true,
+        note: 'not this cloud session\'s own checkout — the cloud sweep never clones another repo, only scans the one it already has',
+      });
+    }
+  }
+  return { results };
+}
