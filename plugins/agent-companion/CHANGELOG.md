@@ -2,11 +2,16 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## Unreleased
+## 0.27.0 — 2026-09-23
 
-Windows flashing-console-window fix (hardening only, no behavior change on
-any platform where a hidden console was never visible). Also surfaces cache
-reads as the headline benchmark/routing cost signal (see below).
+Consolidated release folding in the routing lineup re-base, the ordered
+effort ladder, the operator-approved routing trial (`review by
+2026-09-30`), the SPAWNING RULE, cache-TTL guidance (measure gap bands
+before flipping the subagent prompt-cache TTL), the model x effort
+benchmark's move into the plugin, the Windows flashing-console-window fix,
+and cache reads surfaced as the headline benchmark/routing cost-driver
+metric. Windows fix is hardening only — no behavior change on any platform
+where a hidden console was never visible.
 
 ### Added
 

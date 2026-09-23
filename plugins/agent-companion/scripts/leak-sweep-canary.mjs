@@ -54,7 +54,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const reduced = process.argv.includes('--reduced');
 
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30000, ...opts });
+  const res = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30000, windowsHide: true, ...opts });
   if (res.status !== 0) {
     throw new Error(`${cmd} ${args.join(' ')} failed: ${(res.stderr || res.error?.message || '').split('\n')[0]}`);
   }

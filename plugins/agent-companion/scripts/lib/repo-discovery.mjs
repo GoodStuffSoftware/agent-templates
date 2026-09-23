@@ -43,7 +43,7 @@ import { normalizeGitUrl } from './publication-sweep.mjs';
 import { isUnsafeDevRoot } from './leak-scan-core.mjs';
 
 function defaultExec(cmd, args, opts = {}) {
-  return execFileSync(cmd, args, { encoding: 'utf8', timeout: opts.timeout ?? 30000, stdio: ['ignore', 'pipe', 'pipe'] });
+  return execFileSync(cmd, args, { encoding: 'utf8', timeout: opts.timeout ?? 30000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
 }
 
 // --- (a) gh-based discovery --------------------------------------------------
@@ -58,7 +58,7 @@ export function discoverViaGh({ exec = defaultExec, timeout = 60000 } = {}) {
       'api', '--paginate',
       'user/repos?affiliation=owner,organization_member&visibility=public&per_page=100',
       '--jq', '.[] | {full_name, archived, fork, html_url}',
-    ], { timeout });
+    ], { timeout, windowsHide: true });
   } catch (err) {
     const msg = (err.stderr || err.message || String(err)).split('\n')[0];
     const missing = err.code === 'ENOENT' || /command not found|not recognized/i.test(msg);
@@ -85,7 +85,7 @@ export function discoverViaGh({ exec = defaultExec, timeout = 60000 } = {}) {
 export function discoverOwners({ exec = defaultExec } = {}) {
   let login;
   try {
-    login = exec('gh', ['api', 'user', '--jq', '.login']).trim();
+    login = exec('gh', ['api', 'user', '--jq', '.login'], { windowsHide: true }).trim();
   } catch (err) {
     const msg = (err.stderr || err.message || String(err)).split('\n')[0];
     const missing = err.code === 'ENOENT' || /command not found|not recognized/i.test(msg);
@@ -94,7 +94,7 @@ export function discoverOwners({ exec = defaultExec } = {}) {
   const owners = new Set();
   if (login) owners.add(login.toLowerCase());
   try {
-    const orgsOut = exec('gh', ['api', 'user/orgs', '--jq', '.[].login']).trim();
+    const orgsOut = exec('gh', ['api', 'user/orgs', '--jq', '.[].login'], { windowsHide: true }).trim();
     for (const line of orgsOut.split(/\r?\n/)) if (line.trim()) owners.add(line.trim().toLowerCase());
   } catch { /* org membership scope may be absent — login alone is still valid */ }
   return { ok: owners.size > 0, owners: [...owners], reason: owners.size ? null : 'gh returned no usable login' };
@@ -107,7 +107,7 @@ export function discoverOwners({ exec = defaultExec } = {}) {
 export function defaultDevRoots({ cwd = process.cwd(), home = homedir() } = {}) {
   let mainCheckout = cwd;
   try {
-    const common = execFileSync('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const common = execFileSync('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
     mainCheckout = dirname(common);
   } catch { /* not a repo: fall back to cwd itself */ }
   const roots = [...new Set([dirname(mainCheckout), join(home, 'dev')])];
@@ -117,7 +117,7 @@ export function defaultDevRoots({ cwd = process.cwd(), home = homedir() } = {}) 
 }
 
 function originUrlOf(dir, exec) {
-  try { return exec('git', ['-C', dir, 'remote', 'get-url', 'origin']).trim(); } catch { return null; }
+  try { return exec('git', ['-C', dir, 'remote', 'get-url', 'origin'], { windowsHide: true }).trim(); } catch { return null; }
 }
 
 // owner/repo for a github.com URL, or null for any other host.
@@ -217,11 +217,11 @@ export function readClaudeJsonProjectPaths({ claudeJsonPath, existsFn = existsSy
 // --git-common-dir, so three worktrees of the same repo dedupe to one entry.
 function resolveRepoAt(candidatePath, exec) {
   let top;
-  try { top = exec('git', ['-C', candidatePath, 'rev-parse', '--show-toplevel']).trim(); } catch { return null; }
+  try { top = exec('git', ['-C', candidatePath, 'rev-parse', '--show-toplevel'], { windowsHide: true }).trim(); } catch { return null; }
   if (!top) return null;
   let mainCheckout = top;
   try {
-    const common = exec('git', ['-C', top, 'rev-parse', '--path-format=absolute', '--git-common-dir']).trim();
+    const common = exec('git', ['-C', top, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { windowsHide: true }).trim();
     mainCheckout = dirname(common);
   } catch { /* not a worktree, or git too old for --path-format: top is fine */ }
   const origin = originUrlOf(mainCheckout, exec) || originUrlOf(top, exec);

@@ -538,9 +538,9 @@ function walk(dir, acc = []) {
 
 export function listCommittableFiles(root) {
   try {
-    const top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
     if (resolve(top).toLowerCase() !== resolve(root).toLowerCase()) throw new Error('scan root is not a git top-level');
-    const out = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+    const out = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     return out.split(/\r?\n/).filter(Boolean).map((rel) => join(root, rel));
   } catch (err) {
     console.error(`leak-scan: note — git enumeration failed (${err.message.split('\n')[0]}); falling back to a raw working-tree walk that does NOT honor .gitignore.`);
@@ -573,7 +573,7 @@ export function isUnsafeDevRoot(p, home = homedir()) {
 
 export function mainCheckoutDir(root) {
   try {
-    const common = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const common = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
     return dirname(resolve(common));
   } catch { return resolve(root); }
 }
@@ -583,7 +583,7 @@ function safeReaddirPlain(dir) { try { return readdirSync(dir, { withFileTypes: 
 export function ownRepoNames(root) {
   const names = new Set([basename(mainCheckoutDir(root))]);
   try {
-    const url = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const url = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
     const m = /([^/:]+)\/([^/:]+?)(?:\.git)?\/?$/.exec(url);
     if (m) { names.add(m[1]); names.add(m[2]); }
   } catch { /* no remote */ }

@@ -178,6 +178,7 @@ function run(cmd, args, opts = {}) {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     timeout: opts.timeout ?? 60000,
+    windowsHide: true,
     ...opts,
   });
 }

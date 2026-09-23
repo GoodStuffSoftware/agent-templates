@@ -225,7 +225,7 @@ export function countLiveAgentProcesses({ timeoutMs = 1500 } = {}) {
         executablePath: r?.ExecutablePath, commandLine: r?.CommandLine,
       })).length;
     }
-    const out = execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8', timeout: timeoutMs });
+    const out = execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true });
     const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     const hits = lines.filter((l) => !/^COMMAND$/i.test(l) && !/\bps\s+-eo\b/.test(l)
       && isClaudeCodeSessionProcess({ commandLine: l }));
