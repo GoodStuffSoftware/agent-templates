@@ -1,6 +1,6 @@
 # Model routing table
 
-_Generated from `config/model-tiers.json` v4 (updated 2026-09-04) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
+_Generated from `config/model-tiers.json` v5 (updated 2026-09-23) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
 
 ## Tiers
 
@@ -23,6 +23,36 @@ An unrecognised model is treated as **premium** and flagged — it fails toward 
 | `high` | 3 | the general sweet spot |
 | `xhigh` | 4 | recommended start for agentic work on current top tiers |
 | `max` | 5 | reserve for genuinely frontier problems; large cost for small gain |
+
+## Effort ladder (cheapest to dearest)
+
+The same routing grid's (model, effort) pairs, ordered, each mapped to a spawnable generic worker definition under `agents/` — namespaced `agent-companion:<agent>` when spawned from outside this repo. Fable stays outside the ladder as a warranted exception, never a routine destination.
+
+| Rung | Model | Effort | Spawn as |
+|---|---|---|---|
+| 1 | `haiku` | _none_ | `agent-companion:ac-haiku` |
+| 2 | `sonnet` | `low` | `agent-companion:ac-sonnet-low` |
+| 3 | `sonnet` | `medium` | `agent-companion:ac-sonnet-medium` |
+| 4 | `sonnet` | `high` | `agent-companion:ac-sonnet-high` |
+| 5 | `sonnet` | `xhigh` | `agent-companion:ac-sonnet-xhigh` |
+| 6 | `opus` | `low` | `agent-companion:ac-opus-low` |
+| 7 | `opus` | `medium` | `agent-companion:ac-opus-medium` |
+| 8 | `opus` | `high` | `agent-companion:ac-opus-high` |
+| 9 | `opus` | `xhigh` | `agent-companion:ac-opus-xhigh` |
+| 10 | `opus` | `max` | `agent-companion:ac-opus-max` |
+
+## Reference models (older pinned ids — not routable)
+
+Non-routable entries for OLDER full/dated model ids, kept only so an agent definition pinned to one of these has its effort validated against what THAT version actually supports, not the current alias tier's (possibly wider) list.
+
+| Key | Display name | Accepts effort | Note |
+|---|---|---|---|
+| `opus-5` | Opus 5 | low, medium, high, xhigh, max | Superseded by Opus 5.5. The `opus` alias resolved here on Claude Code < v2.1.280 — kept as a reference entry so an agent definition pinned to the dated id (not the alias) still classifies correctly and its effort is validated against what THIS model actually supports, not the current `opus` tier's list. |
+| `fable-5` | Fable 5 | low, medium, high, xhigh, max | Superseded by Fable 5.1. Cache-hit pricing is the 0.1x rate, NOT Fable 5.1's 0.025x rate — do not reuse 5.1's cache economics for a definition pinned to this id. |
+| `opus-4-8` | Opus 4.8 | low, medium, high, xhigh, max | Not validated by this table's effort checks for the thinking-omission hazard (agent definition frontmatter here carries no `thinking` field to check) - flagged in docs/proposed/global-doctrine-reweight.patch as a known gap, not silently assumed safe. |
+| `opus-4-7` | Opus 4.7 | low, medium, high, xhigh, max | Same thinking-omission caveat as opus-4-8. |
+| `opus-4-6` | Opus 4.6 | low, medium, high, max | NO xhigh — this generation stops at max/high/medium/low. An agent definition pinned to this id with effort: xhigh is invalid on this model, not just 'more than needed'; validated via referenceModels, not the current opus tier's effort list. |
+| `sonnet-4-6` | Sonnet 4.6 | low, medium, high, max | NO xhigh, same as opus-4-6 — validated against this list, not the current sonnet tier's (which does have xhigh). |
 
 ## Weight → model (base routing)
 
@@ -86,6 +116,8 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 | `code-review` | parity | `diagnostic` | `inherit` | _writer's model; effort ≥ writer_ | adversarial review of a diff; sized to the writer it gates |
 | `long-autonomous-run` | 5 | `bounded` | `elevated` | `opus/xhigh` | an agent session expected to run for hours with minimal supervision |
 | `subagent-worker` | 2 | `mechanical` | `routine` | `haiku` | a delegated worker doing a bounded, well-specified piece of a larger task |
+| `verify` | 1 | `mechanical` | `routine` | `haiku` | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
+| `operate` | 3 | `bounded` | `routine` | `sonnet/medium` | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
 
 <details><summary>Provenance per task type</summary>
 
@@ -100,13 +132,15 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 - **`code-review`** — Our reviewer-parity rule. BENCHMARK (CodeRabbit, semi-vendor): review precision tops out ~37% across every model tested and no model wins both precision and recall - so tier choice does not make review sufficient; adversarial framing and a human gate on critical changes still matter. CAVEAT under calibration: one first-hand report (Wavect) found HIGH effort slower AND lower-recall than LOW on review. See calibration.
 - **`long-autonomous-run`** — OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default.
 - **`subagent-worker`** — OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded.
+- **`verify`** — Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). The defining trait is that nothing changes: the task ends when the answer is read back, not when a step is performed.
+- **`operate`** — Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). A sequence of trivial-looking steps against a live system is not a verify task: ordering mistakes, partial failures, and side effects compound in a way a single read-only check cannot, so this floors at sonnet even though no one step looks hard. Raise weight/consequence further when a step is itself destructive, production-facing, or irreversible (critical-change already covers that).
 
 </details>
 
 ## What is actually known about `fable`
 
 - OFFICIAL (whats-new-fable-5-1): prefers whole-file rewrites, fewer progress updates, less parallel tool batching. Whole-file rewrites make it a poor fit for scoped or mechanical edits even when a warrant exists.
-- OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost. A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it.
+- OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost ($0.25/MTok, re-verified live 2026-09-23). A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it.
 - COMMUNITY, first-hand (Every.to, TheNeuronDaily): "sticks to what you tell it" is CONTESTED. Reports of overshooting explicit limits (1,000 words -> 1,288; 8-12 quotes -> 43, 5 fabricated) and unprompted style decisions. The friction is over-inference, not literalism. Do not route on an adherence claim.
 - COMMUNITY, first-hand (dev.to): the gap over Opus/Sonnet is procedural discipline, not intelligence - stating a hypothesis before editing, labelling claims VERIFIED/REASONED/ASSUMED. A brief that carries that checklist closes most of the gap on a cheaper tier, which is exactly what the warrant is meant to make you ask.
 
@@ -126,7 +160,7 @@ Real findings not settled enough to encode as rules. Each names the measurement 
 
 **Question:** Does Fable 5.1 cache-read pricing make long stable-prefix sessions competitive with Opus?
 
-**Tension:** Official: cache reads at a quarter of the cost. Our measured cache hit ratio is ~96%. But at max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity.
+**Tension:** Official: cache reads at a quarter of the cost ($0.25/MTok). Our measured cache hit ratio is ~96%. Fable is now 2.5x Opus on sticker price (was 2x, before Opus 5.5 dropped to $4/$20) - the cache discount has a wider gap to close than it did. At max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity.
 
 **Measure:** From telemetry: per-session cost by model with cache-read share. Compare fable vs opus on sessions of similar turn count.
 
@@ -146,6 +180,6 @@ Real findings not settled enough to encode as rules. Each names the measurement 
 
 **Measure:** From telemetry: warrant acceptance rate, and outcome of warranted Fable spawns vs Opus spawns with a checklist brief on the same task type.
 
-> ⚠ `haiku` retires no sooner than **2026-10-15**. Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window.
-> Staged replacement: **sonnet/low** — routing rows on `haiku` switch to it automatically from 2026-10-15. Pre-staged 2026-09-04: no successor Haiku announced. Sonnet 5 at low effort is the cheapest available tier that takes weight 1-2 work, at roughly 2x Haiku per token. When a new Haiku ships, add its tier and point this at it - the switch is data, not code.
+> ⚠ `haiku` retires no sooner than **2026-10-15**. Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. No successor Haiku has been announced (checked live 2026-09-23). Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window (now 30 days, not just fixed milestones — see scripts/detect.mjs).
+> Staged replacement: **sonnet/low** — routing rows on `haiku` switch to it automatically from 2026-10-15. Pre-staged 2026-09-04, re-verified 2026-09-23: still no successor Haiku announced. Sonnet 5 at low effort is the cheapest available tier that takes weight 1-2 work, at roughly 2x Haiku per token (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5). When a new Haiku ships, add its tier and point this at it - the switch is data, not code. This IS the weight 1-2 fallback if haiku disappears before a successor ships.
 

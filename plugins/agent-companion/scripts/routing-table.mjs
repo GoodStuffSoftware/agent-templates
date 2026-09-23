@@ -61,6 +61,33 @@ L.push(`|---|---|---|`);
 for (const [e, s] of efforts) L.push(`| \`${e}\` | ${s.rank} | ${s.note || ''} |`);
 L.push(``);
 
+if (Array.isArray(cfg.ladder) && cfg.ladder.length) {
+  L.push(`## Effort ladder (cheapest to dearest)`);
+  L.push(``);
+  L.push(`The same routing grid's (model, effort) pairs, ordered, each mapped to a spawnable generic worker definition under \`agents/\` — namespaced \`agent-companion:<agent>\` when spawned from outside this repo. Fable stays outside the ladder as a warranted exception, never a routine destination.`);
+  L.push(``);
+  L.push(`| Rung | Model | Effort | Spawn as |`);
+  L.push(`|---|---|---|---|`);
+  for (const r of cfg.ladder) {
+    L.push(`| ${r.rung} | \`${r.model}\` | ${r.effort ? `\`${r.effort}\`` : '_none_'} | \`agent-companion:${r.agent}\` |`);
+  }
+  L.push(``);
+}
+
+if (cfg.referenceModels && Object.keys(cfg.referenceModels).length) {
+  L.push(`## Reference models (older pinned ids — not routable)`);
+  L.push(``);
+  L.push(`Non-routable entries for OLDER full/dated model ids, kept only so an agent definition pinned to one of these has its effort validated against what THAT version actually supports, not the current alias tier's (possibly wider) list.`);
+  L.push(``);
+  L.push(`| Key | Display name | Accepts effort | Note |`);
+  L.push(`|---|---|---|---|`);
+  for (const [key, r] of Object.entries(cfg.referenceModels)) {
+    const eff = Array.isArray(r.efforts) ? (r.efforts.length ? r.efforts.join(', ') : '**none**') : '?';
+    L.push(`| \`${key}\` | ${r.displayName || key} | ${eff} | ${r.note || ''} |`);
+  }
+  L.push(``);
+}
+
 L.push(`## Weight → model (base routing)`);
 L.push(``);
 L.push(`| Weight | Model | Effort | Task shape |`);

@@ -444,14 +444,14 @@
       "kind": "mechanical",
       "consequence": "routine",
       "summary": "confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing",
-      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; CONTRIBUTIONS_INBOX @ 9b355e7). The defining trait is that nothing changes: the task ends when the answer is read back, not when a step is performed."
+      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). The defining trait is that nothing changes: the task ends when the answer is read back, not when a step is performed."
     },
     "operate": {
       "weight": 3,
       "kind": "bounded",
       "consequence": "routine",
       "summary": "execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation",
-      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; CONTRIBUTIONS_INBOX @ 9b355e7). A sequence of trivial-looking steps against a live system is not a verify task: ordering mistakes, partial failures, and side effects compound in a way a single read-only check cannot, so this floors at sonnet even though no one step looks hard. Raise weight/consequence further when a step is itself destructive, production-facing, or irreversible (critical-change already covers that)."
+      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). A sequence of trivial-looking steps against a live system is not a verify task: ordering mistakes, partial failures, and side effects compound in a way a single read-only check cannot, so this floors at sonnet even though no one step looks hard. Raise weight/consequence further when a step is itself destructive, production-facing, or irreversible (critical-change already covers that)."
     }
   },
   "taskTypesNote": "A task type is a named preset over (weight, kind, consequence). Resolve it through the same grid as everything else; do not special-case it. \"parity\" as a weight means: match the writer being reviewed. \"inherit\" as a consequence means: take the consequence of the change under review. Provenance is recorded per entry because these WILL go stale - the scout re-checks the lineup, and a routing review should re-read the sources, not the table.",
