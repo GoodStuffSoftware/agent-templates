@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.24.1",
+  "version": "0.25.0",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -255,7 +255,13 @@
     "publication_leak_repos": {
       "type": "string",
       "title": "Publication-leak sweep: extra / excluded repos",
-      "description": "Only consulted when publication_leak_sweep is on. Comma-separated. A plain entry (a local checkout path, `owner/repo`, or a full git URL) is ADDED to auto-discovery — never filtered, so this is also how to cover a fork or archived repo discovery skips on purpose. A `!`-prefixed entry (`!owner/repo`, `!<url>`, or `!<local path>`) is EXCLUDED from whatever discovery found. Leave empty to sweep exactly what auto-discovery finds. LOCAL: each covered repo's origin default branch is fetched into a throwaway clone and scanned by the PLUGIN's own generic checker (derived names, private paths — always) plus that repo's own scripts/leak-check.mjs when it has one (most won't; that's normal, not an error). CLOUD: never clones (the sandbox's classifier denies clone-then-execute) — it scans, in place and --no-derived, only the ONE covered repo that IS the cloud session's own checkout, after confirming HEAD matches origin's default branch; any other covered repo is skipped there, not fetched. Fires publication_leak only for hits not already accepted in a prior run, and publication_repo_newly_public the first time a covered repo is seen as public — the highest-risk moment, so that one is never deduped away.",
+      "description": "Only consulted when publication_leak_sweep is on. Comma-separated. A plain entry (a local checkout path, `owner/repo`, or a full git URL) is ADDED to auto-discovery — never filtered, so this is also how to cover a fork or archived repo discovery skips on purpose. A `!`-prefixed entry (`!owner/repo`, `!<url>`, or `!<local path>`) is EXCLUDED from whatever discovery found. Leave empty to sweep exactly what auto-discovery finds. LOCAL: each covered repo's origin default branch is fetched into a throwaway clone and scanned by the PLUGIN's own generic checker plus that repo's own scripts/leak-check.mjs when it has one (most won't; that's normal, not an error). Every repo gets the UNIVERSAL classes (private paths, the OS user handle, the private token file); derived project names/prefixes and git-sha-like are OPT-IN — see publication_leak_strict_repos. CLOUD: never clones (the sandbox's classifier denies clone-then-execute) — it scans, in place and --no-derived, only the ONE covered repo that IS the cloud session's own checkout, after confirming HEAD matches origin's default branch; any other covered repo is skipped there, not fetched. Fires publication_leak only for hits not already accepted in a prior run, and publication_repo_newly_public the first time a covered repo is seen as public — the highest-risk moment, so that one is never deduped away.",
+      "default": ""
+    },
+    "publication_leak_strict_repos": {
+      "type": "string",
+      "title": "Publication-leak sweep: strict repos (derived names/prefixes + pinned-SHA-exempt git-sha-like)",
+      "description": "Comma-separated. Derived project-name/prefix matching and the git-sha-like class only apply to a repo whose whole PURPOSE is to be anonymous/generic (e.g. agent-templates itself) — an ordinary product repo legitimately names the operator's own product throughout (README, CHANGELOG, wrangler.toml, ...), and applying those classes there is mostly noise (measured: ~90% of hits across 8 real swept repos). A repo is strict automatically if it ships its own scripts/leak-check.mjs or carries a `.leak-check-strict` marker file at its root; list one here only to opt in without either. Every repo, strict or not, still gets the universal classes: private paths (every shape), the OS user handle, and the private token file. Strict repos additionally exempt a pinned GitHub Actions SHA (`uses: owner/action@<40-hex>`) from git-sha-like — that is ownership metadata a workflow is supposed to carry, not a leak.",
       "default": ""
     }
   },

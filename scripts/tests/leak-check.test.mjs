@@ -283,3 +283,19 @@ test("CLI: vendor/minified/lockfile paths are skipped for every class, including
   assert.doesNotMatch(r.err, /dist\/bundle\.min\.js/);
   assert.doesNotMatch(r.err, /package-lock\.json/);
 });
+
+test("CLI: a pinned GitHub Actions SHA (uses: owner/action@<sha>) is exempt from git-sha-like", () => {
+  const missing = join(tmp("none"), "nope");
+  const args = ["--dev-root", missing, "--claude-projects", missing, "--user", "runner"];
+  const leakyHex = ["01", "23", "45", "67", "89", "ab", "cd", "ef", "01", "23", "45", "67", "89", "ab", "cd", "ef", "01", "23", "45", "67"].join("");
+  const clean = runCli(scanTree({
+    ".github/workflows/ci.yml": `      - uses: actions/checkout@${leakyHex}\n`,
+  }), args);
+  assert.equal(clean.code, 0, clean.err);
+  // Same hex, NOT shaped like a pinned action reference: still fires.
+  const leaky = runCli(scanTree({
+    "notes.txt": `random: ${leakyHex}\n`,
+  }), args);
+  assert.equal(leaky.code, 1);
+  assert.match(leaky.err, /git-sha-like/);
+});

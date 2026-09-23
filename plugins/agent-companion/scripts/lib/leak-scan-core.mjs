@@ -316,7 +316,25 @@ export function maskPlaceholders(line) {
 // — this module ships no one's real names). `exempt` maps a relative path to
 // the set of literal LABELS that file is allowed to carry (e.g. a LICENSE's
 // own copyright line) — same shape as agent-templates' EXEMPT map.
-export function scanText(text, { rel = '', derived = [], literals = [], exempt = {}, isSelf = false } = {}) {
+// A 40-hex-char pinned GitHub Actions SHA (`uses: owner/action@<sha>`) is
+// ownership metadata a workflow file is SUPPOSED to carry, not a leak.
+// Exempted only when the hex run is immediately preceded by `@` on a line
+// whose text up to that point ends a `uses: ...@` step reference.
+function isPinnedActionSha(line, matchIndex) {
+  const before = line.slice(0, matchIndex);
+  if (!before.endsWith('@')) return false;
+  return /uses:\s*[^\s@]+@$/.test(before);
+}
+
+// `strict`: gates the OPT-IN-ONLY classes — derived project names/prefixes
+// and git-sha-like. A repo whose whole purpose is to BE anonymous/generic
+// (agent-templates itself) wants those; an ordinary product repo legitimately
+// names the operator's own product everywhere and would otherwise drown in
+// false positives (measured: ~90% of hits across 8 real swept repos were
+// exactly this). Universal regardless of `strict`: private-path (every
+// shape), the OS user handle, and the operator's private token file. See
+// scanRepo()'s header for how `derived`/`literals` are pre-filtered to match.
+export function scanText(text, { rel = '', derived = [], literals = [], exempt = {}, isSelf = false, strict = true } = {}) {
   const hits = [];
   const warnings = [];
   const lines = text.split(/\r?\n/);
@@ -332,9 +350,10 @@ export function scanText(text, { rel = '', derived = [], literals = [], exempt =
       while (idx !== -1) { push(hits, label, line.slice(idx, idx + needle.length)); idx = lower.indexOf(needle, idx + needle.length); }
     }
 
-    if (!isSelf) {
+    if (strict && !isSelf) {
       for (const m of line.matchAll(SHA_RE)) {
         if (isShaFalsePositive(m[0])) continue;
+        if (isPinnedActionSha(line, m.index)) continue;
         push(hits, 'git-sha-like', m[0]);
       }
     }
@@ -412,9 +431,22 @@ export function ownRepoNames(root) {
 // committable files, scan each). Callers (agent-templates' leak-check.mjs,
 // the plugin's own leak-sweep) supply `literals`/`exempt` for anything
 // beyond the generic classes here.
+//
+// `strict` (default true — unchanged behaviour for a direct/CLI caller):
+// gates whether devRoot/~/.claude/projects-DERIVED project names/prefixes
+// are included, and (via `scanText`) whether git-sha-like runs at all.
+// UNIVERSAL regardless of `strict`: private-path (all shapes), the OS user
+// handle, and the operator's private token file — those come from a
+// SEPARATE deriveTokens() call that never touches devRoots/claudeProjectsDir,
+// so a token-file name or the OS handle is still caught even when `strict`
+// is false. `scanRepo()`'s caller (the publication-leak sweep) decides
+// `strict` per repo: true only for a repo that ships its own
+// scripts/leak-check.mjs, carries a `.leak-check-strict` marker file, or is
+// explicitly listed — see publication-sweep.mjs.
 export function scanRepo({
   root, devRoots: devRootsOpt, claudeProjectsDir: claudeProjectsDirOpt, tokenFile = null,
   users: usersOpt, ownNames: ownNamesOpt, noDerived = false, literals = [], exempt = {},
+  strict = true,
 }) {
   const resolvedRoot = resolve(root);
   const home = resolve(homedir());
@@ -435,10 +467,25 @@ export function scanRepo({
       users.push(basename(home));
     }
     const ownNames = ownNamesOpt || ownRepoNames(resolvedRoot);
-    const tokens = deriveTokens({ devRoots, claudeProjectsDir, tokenFile, users, ownNames, scanRoot: resolvedRoot });
-    notes.push(...tokens.notes);
-    derivedCounts = tokens.counts;
-    derived = compileDerived(tokens);
+
+    // Universal pass: token-file names/prefixes + OS user handle ONLY —
+    // devRoots/claudeProjectsDir deliberately empty here, so nothing derived
+    // from "what other projects exist on this machine" leaks into the
+    // always-on set.
+    const universal = deriveTokens({ devRoots: [], claudeProjectsDir: null, tokenFile, users, ownNames, scanRoot: resolvedRoot });
+    notes.push(...universal.notes);
+    let names = universal.names;
+    let prefixes = universal.prefixes;
+    derivedCounts = universal.counts;
+
+    if (strict) {
+      const full = deriveTokens({ devRoots, claudeProjectsDir, tokenFile, users, ownNames, scanRoot: resolvedRoot });
+      names = [...new Set([...names, ...full.names])];
+      prefixes = [...new Set([...prefixes, ...full.prefixes])];
+      derivedCounts = full.counts;
+      notes.push(...full.notes);
+    }
+    derived = compileDerived({ names, prefixes, users: universal.users });
   }
 
   const hits = [];
@@ -463,7 +510,7 @@ export function scanRepo({
     // for that one filename shape, same spirit as the original script's own
     // narrow "isSelf" carve-out, generalised to any repo's own copy.
     const isSelf = /(^|\/)scripts\/leak-check\.mjs$/.test(rel);
-    const r = scanText(text, { rel, derived, literals, exempt, isSelf });
+    const r = scanText(text, { rel, derived, literals, exempt, isSelf, strict });
     hits.push(...r.hits);
     warnings.push(...r.warnings);
   }

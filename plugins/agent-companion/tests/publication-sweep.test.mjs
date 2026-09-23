@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
   sweepRepo, sweepRepoInPlace, sweepAllCloud, isSessionCheckout, normalizeGitUrl,
-  filterNew, fingerprintHit,
+  filterNew, fingerprintHit, STRICT_MARKER_FILE,
 } from '../scripts/lib/publication-sweep.mjs';
 
 const REAL_LEAK_CHECK = join(PLUGIN_ROOT, '..', '..', 'scripts', 'leak-check.mjs');
@@ -386,6 +386,107 @@ test('sweepRepo: publicNames exempts a PUBLIC sibling name from BOTH checkers, b
       'a derived name NOT in publicNames must still fire — proves the fixture actually exercises the derived-name class',
     );
   } finally { repo.cleanup(); rmSync(devRootDir, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
+test('sweepRepo scoping: a NON-opt-in repo skips derived-name entirely but still catches a private path', async () => {
+  const devRootDir = mkdtempSync(join(tmpdir(), 'ac-pubsweep-devroot-'));
+  const PRIVATE_NAME = 'zzznonoptinprivateproj';
+  mkdirSync(join(devRootDir, PRIVATE_NAME), { recursive: true });
+  // No scripts/leak-check.mjs, no marker file — buildLeakyRepoBare() below
+  // builds a repo with NEITHER, unlike buildLeakyRepo() which always copies
+  // scripts/leak-check.mjs (making every other test's fixture "strict" by
+  // definition — this test needs the opposite).
+  const base = mkdtempSync(join(tmpdir(), 'ac-pubsweep-test-'));
+  try {
+    const bareDir = join(base, 'origin.git');
+    const workDir = join(base, 'work');
+    git(['init', '--quiet', '--bare', '--initial-branch=main', bareDir]);
+    mkdirSync(workDir, { recursive: true });
+    git(['init', '--quiet', '-b', 'main', workDir]);
+    git(['remote', 'add', 'origin', bareDir], workDir);
+    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
+    writeFileSync(join(workDir, 'NOTES.md'), `mentions ${PRIVATE_NAME} here\nand also ${SYNTHETIC_LEAK_LINE}\n`);
+    git(['add', '-A'], workDir, gitEnv);
+    git(['commit', '--quiet', '-m', 'init'], workDir, gitEnv);
+    git(['push', '--quiet', 'origin', 'main'], workDir, gitEnv);
+
+    const result = await sweepRepo(bareDir, { devRoots: [devRootDir] });
+    assert.equal(result.error, null);
+    assert.equal(result.strict, false, 'no own script, no marker, not listed — must not be strict');
+    assert.ok(
+      !result.hits.some((h) => h.label === 'derived-project-name'),
+      'derived-project-name must not fire at all for a non-opt-in repo',
+    );
+    assert.ok(
+      result.hits.some((h) => h.label === 'private-path:windows-profile'),
+      'a private-path hit is UNIVERSAL and must still fire regardless of strict',
+    );
+  } finally {
+    try { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); } catch { /* ignore */ }
+    rmSync(devRootDir, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('sweepRepo scoping: a .leak-check-strict marker file opts a repo in without its own leak-check.mjs', async () => {
+  const devRootDir = mkdtempSync(join(tmpdir(), 'ac-pubsweep-devroot-'));
+  const PRIVATE_NAME = 'zzzmarkeroptinproj';
+  mkdirSync(join(devRootDir, PRIVATE_NAME), { recursive: true });
+  const base = mkdtempSync(join(tmpdir(), 'ac-pubsweep-test-'));
+  try {
+    const bareDir = join(base, 'origin.git');
+    const workDir = join(base, 'work');
+    git(['init', '--quiet', '--bare', '--initial-branch=main', bareDir]);
+    mkdirSync(workDir, { recursive: true });
+    git(['init', '--quiet', '-b', 'main', workDir]);
+    git(['remote', 'add', 'origin', bareDir], workDir);
+    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
+    writeFileSync(join(workDir, STRICT_MARKER_FILE), '');
+    writeFileSync(join(workDir, 'NOTES.md'), `mentions ${PRIVATE_NAME} here\n`);
+    git(['add', '-A'], workDir, gitEnv);
+    git(['commit', '--quiet', '-m', 'init'], workDir, gitEnv);
+    git(['push', '--quiet', 'origin', 'main'], workDir, gitEnv);
+
+    const result = await sweepRepo(bareDir, { devRoots: [devRootDir] });
+    assert.equal(result.error, null);
+    assert.equal(result.strict, true, 'the marker file alone must opt the repo in');
+    assert.ok(
+      result.hits.some((h) => h.label === 'derived-project-name' && h.token.toLowerCase() === PRIVATE_NAME),
+      'derived-project-name must fire once opted in via the marker file',
+    );
+  } finally {
+    try { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); } catch { /* ignore */ }
+    rmSync(devRootDir, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('leak-scan-core scanText: a pinned GitHub Actions SHA is exempt from git-sha-like (strict only)', async () => {
+  const { scanText } = await import('../scripts/lib/leak-scan-core.mjs');
+  const pinned = ['01', '23', '45', '67', '89', 'ab', 'cd', 'ef', '01', '23', '45', '67', '89', 'ab', 'cd', 'ef', '01', '23', '45', '67'].join('');
+  const line = `      - uses: actions/checkout@${pinned}\n`;
+  const strictResult = scanText(line, { rel: '.github/workflows/ci.yml', strict: true });
+  assert.ok(!strictResult.hits.some((h) => h.label === 'git-sha-like'), 'a pinned action SHA must not fire even in strict mode');
+  // Same hex NOT after "uses: ...@" still fires in strict mode — proves the
+  // exemption is shape-specific, not "any 40-hex-char run in a yml file".
+  const otherLine = `      random: ${pinned}\n`;
+  const strictOther = scanText(otherLine, { rel: '.github/workflows/ci.yml', strict: true });
+  assert.ok(strictOther.hits.some((h) => h.label === 'git-sha-like'), 'an unrelated hex run must still fire in strict mode');
+});
+
+test('leak-scan-core scanRepo: git-sha-like is silent entirely when NOT strict, even for a plain hex run', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'ac-corestrict-'));
+  try {
+    const pinned = ['01', '23', '45', '67', '89', 'ab', 'cd', 'ef', '01', '23', '45', '67', '89', 'ab', 'cd', 'ef', '01', '23', '45', '67'].join('');
+    writeFileSync(join(base, 'notes.txt'), `random hex: ${pinned}\n`);
+    git(['init', '--quiet', '-b', 'main'], base);
+    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
+    git(['add', '-A'], base, gitEnv);
+    git(['commit', '--quiet', '-m', 'init'], base, gitEnv);
+    const { scanRepo } = await import('../scripts/lib/leak-scan-core.mjs');
+    const notStrict = scanRepo({ root: base, devRoots: [], strict: false });
+    assert.ok(!notStrict.hits.some((h) => h.label === 'git-sha-like'));
+    const strict = scanRepo({ root: base, devRoots: [], strict: true });
+    assert.ok(strict.hits.some((h) => h.label === 'git-sha-like'));
+  } finally { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); }
 });
 
 test('leak-scan-core scanRepo: vendor/minified/lockfile paths are skipped for every class', async () => {

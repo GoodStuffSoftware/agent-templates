@@ -204,6 +204,21 @@ cloud, not fetched or cloned.
 Either way, `publication_leak` fires only for hits not already accepted in a
 prior run (see the routine's dispatch table).
 
+**Not every class applies to every repo.** Derived project-name/prefix
+matching and git-sha-like only make sense for a repo whose whole PURPOSE is
+to be anonymous/generic — this repo, agent-templates, is the example. An
+ordinary product repo legitimately names the operator's own product
+everywhere (its own README, CHANGELOG, `wrangler.toml`, ...), and applying
+those two classes there is mostly noise (measured on 8 real swept repos:
+about 90% of hits were exactly this false-positive shape). So a repo only
+gets those two classes if it OPTS IN — automatically when it ships its own
+`scripts/leak-check.mjs` or carries a `.leak-check-strict` marker file at
+its root, or explicitly via `publication_leak_strict_repos`. Every repo,
+opted in or not, still gets the UNIVERSAL classes: private paths (every
+shape), the OS user handle, and the private token file. A strict repo also
+exempts a pinned GitHub Actions SHA (`uses: owner/action@<sha>`) from
+git-sha-like — that's ownership metadata a workflow is supposed to carry.
+
 This is a backstop, not a gate: it never blocks a push, it only notices one
 already live. Verify it actually works with the sweep canary before relying
 on it:

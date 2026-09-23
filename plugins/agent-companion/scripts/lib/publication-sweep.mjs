@@ -11,13 +11,20 @@
 // ships.
 //
 // Most swept repos have NO leak-check of their own — this plugin's own
-// generic checker (leak-scan-core.mjs: derived names/prefixes, private
-// paths, machine-structure warnings) ALWAYS runs against every clone, in
+// generic checker (leak-scan-core.mjs) ALWAYS runs against every clone, in
 // addition to the target's own script when it has one. Hits from both are
-// unioned and deduped by fingerprint, so a repo with its own leak-check gets
-// double coverage (its own class-1 literals PLUS this plugin's generic
-// classes) and a repo with none still gets the generic classes rather than
-// nothing.
+// unioned and deduped by fingerprint.
+//
+// STRICT vs UNIVERSAL classes (measured on 8 real repos: ~90% of hits were
+// exactly this false-positive shape). Derived project names/prefixes and
+// git-sha-like only matter for a repo whose whole PURPOSE is to be
+// anonymous/generic (agent-templates itself) — an ordinary product repo
+// legitimately names the operator's own product everywhere, in its own
+// README, CHANGELOG, wrangler.toml, etc. So those two classes are OPT-IN
+// per repo (`isStrictRepo()` below); every other repo gets only the
+// UNIVERSAL classes: private paths (every shape), the OS user handle, and
+// the operator's private token file if present — see leak-scan-core.mjs's
+// scanRepo() for how that split is implemented.
 //
 // Zero dependencies beyond `git` on PATH and Node builtins. Every repo is
 // swept independently; one repo's failure (network, missing script, bad
@@ -29,6 +36,18 @@ import { join, dirname } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { scanRepo as coreScanRepo, ownRepoNames as coreOwnRepoNames, mainCheckoutDir as coreMainCheckoutDir } from './leak-scan-core.mjs';
+
+// A repo opts into the strict (derived-name/prefix + git-sha-like) classes
+// by shipping its own scripts/leak-check.mjs, carrying this marker file, or
+// being explicitly listed (publication_leak_strict_repos).
+export const STRICT_MARKER_FILE = '.leak-check-strict';
+
+export function isStrictRepo(cloneDir, repoEntry, strictRepoUrls = []) {
+  if (existsSync(join(cloneDir, 'scripts', 'leak-check.mjs'))) return true;
+  if (existsSync(join(cloneDir, STRICT_MARKER_FILE))) return true;
+  const key = normalizeGitUrl(repoEntry);
+  return strictRepoUrls.some((s) => normalizeGitUrl(s) === key);
+}
 
 function run(cmd, args, opts = {}) {
   return spawnSync(cmd, args, {
@@ -117,7 +136,7 @@ function dedupeByFingerprint(hits) {
 // Run the PLUGIN's own generic checker (leak-scan-core.mjs) against a clone.
 // Never throws — a checker failure here should not fail the whole sweep; it
 // just means this repo gets whatever the target's own script found, if any.
-function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = null, devRoots, publicNames = [] } = {}) {
+function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = null, devRoots, publicNames = [], strict = false } = {}) {
   try {
     const { hits } = coreScanRepo({
       root: cloneDir,
@@ -128,6 +147,7 @@ function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = 
       // name is not a leak (see repo-discovery.mjs's publicNameTokens()).
       ownNames: [...new Set([...coreOwnRepoNames(cloneDir), ...publicNames])],
       noDerived,
+      strict,
     });
     return hits.map((h) => ({
       rel: h.rel, line: h.line, label: h.label, token: h.token, text: h.text,
@@ -155,7 +175,11 @@ function runPluginChecker(cloneDir, repoEntry, { noDerived = false, tokenFile = 
 // owner, "owner/repo") — exempt here and forwarded to the target's own
 // script via LEAK_CHECK_OWN_NAMES, so a public repo naming a sibling public
 // repo is never flagged as a private-name leak by either checker.
-export async function sweepRepo(repoEntry, { reduced = false, env = {}, timeout = 120000, tokenFile = null, devRoots, publicNames = [] } = {}) {
+// `strictRepoUrls`: repos explicitly opted into the strict classes via the
+// publication_leak_strict_repos option, on top of the automatic triggers in
+// isStrictRepo() (own scripts/leak-check.mjs, or a .leak-check-strict marker
+// file in the clone).
+export async function sweepRepo(repoEntry, { reduced = false, env = {}, timeout = 120000, tokenFile = null, devRoots, publicNames = [], strictRepoUrls = [] } = {}) {
   const tmpRoot = mkdtempSync(join(tmpdir(), 'ac-pubsweep-'));
   const cloneDir = join(tmpRoot, 'repo');
   try {
@@ -164,6 +188,7 @@ export async function sweepRepo(repoEntry, { reduced = false, env = {}, timeout 
     if (clone.status !== 0) {
       return { repo: repoEntry, hits: [], error: `clone failed: ${(clone.stderr || clone.error?.message || 'unknown error').split('\n')[0]}` };
     }
+    const strict = isStrictRepo(cloneDir, repoEntry, strictRepoUrls);
     let ownHits = [];
     const leakCheck = join(cloneDir, 'scripts', 'leak-check.mjs');
     if (existsSync(leakCheck)) {
@@ -179,9 +204,9 @@ export async function sweepRepo(repoEntry, { reduced = false, env = {}, timeout 
       ownHits = parseHits(`${scan.stdout || ''}\n${scan.stderr || ''}`)
         .map((h) => ({ ...h, fingerprint: fingerprintHit(repoEntry, h) }));
     }
-    const pluginHits = runPluginChecker(cloneDir, repoEntry, { noDerived: reduced, tokenFile, devRoots, publicNames });
+    const pluginHits = runPluginChecker(cloneDir, repoEntry, { noDerived: reduced, tokenFile, devRoots, publicNames, strict });
     const hits = dedupeByFingerprint([...ownHits, ...pluginHits]);
-    return { repo: repoEntry, hits, error: null };
+    return { repo: repoEntry, hits, error: null, strict };
   } catch (err) {
     return { repo: repoEntry, hits: [], error: err.message || String(err) };
   } finally {

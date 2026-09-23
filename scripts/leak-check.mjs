@@ -193,6 +193,14 @@ function isShaFalsePositive(match) {
   return false;
 }
 
+// A pinned GitHub Actions SHA (`uses: owner/action@<sha>`) is ownership
+// metadata a workflow file is SUPPOSED to carry, not a leak.
+function isPinnedActionSha(line, matchIndex) {
+  const before = line.slice(0, matchIndex);
+  if (!before.endsWith("@")) return false;
+  return /uses:\s*[^\s@]+@$/.test(before);
+}
+
 // --- Class 3: private absolute paths ----------------------------------------
 // A user-name segment is a PLACEHOLDER (exempt) when it is one of these generic
 // words, or is visibly templated: <you>, {{USER}}, %USERNAME%, $USER, ${USER}.
@@ -568,6 +576,7 @@ export function scanText(text, { rel = "", derived = [], isSelf = false } = {}) 
     if (!isSelf) {
       for (const m of line.matchAll(SHA_RE)) {
         if (isShaFalsePositive(m[0])) continue;
+        if (isPinnedActionSha(line, m.index)) continue;
         push(hits, "git-sha-like", m[0]);
       }
     }

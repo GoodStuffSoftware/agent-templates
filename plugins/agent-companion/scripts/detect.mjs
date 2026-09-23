@@ -371,7 +371,11 @@ if (publicationRepos.length) {
   try {
     const { results } = cloud
       ? await sweepAllCloud(publicationRepos, { cwd: process.cwd() })
-      : await sweepAll(publicationRepos, { publicNames: publicationPublicNames });
+      : await sweepAll(publicationRepos, {
+        publicNames: publicationPublicNames,
+        strictRepoUrls: String(opt('publication_leak_strict_repos', ''))
+          .split(/[,;]/).map((s) => s.trim()).filter(Boolean),
+      });
     const seenByRepo = baseline.publicationLeakSeen || {};
     const nextSeenByRepo = {};
     const allNewHits = [];
