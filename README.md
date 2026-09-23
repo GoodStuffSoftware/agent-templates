@@ -22,6 +22,7 @@ agent-templates/
     leak-check.yml        ← runs leak-check in CI on every push + pull request
   scripts/
     leak-check.mjs        ← fails if any file contains a real-world token
+    tests/                ← leak-check's own tests (node --test scripts/tests/*.test.mjs)
     compose.mjs           ← profile-matched lesson composition + INDEX + fan-out
   lessons/                ← KNOWLEDGE layer: one tagged lesson per file
     INDEX.md              ← generated: id — title — [scope] — status
@@ -109,6 +110,14 @@ node scripts/leak-check.mjs
 ```
 
 It exits nonzero (and prints `file:line`) if any file contains a real-world token (a project/product name, domain, user home path, handle, name, email, or a git-SHA-like hex run). Generic examples (`acme.com`, `C:\Users\you\dev\acme`, `{{PLACEHOLDER}}`) are fine. The same guard runs in CI on every push and pull request ([`.github/workflows/leak-check.yml`](.github/workflows/leak-check.yml)), so the no-project-specifics guarantee is enforced, not just a local convention.
+
+Beyond its fixed token list, the guard also:
+
+- **Derives your real project names at run time** — from the directories in your dev root (default: the parent of this checkout, plus `~/dev`), from the path-encoded names under `~/.claude/projects/`, from agent-file prefixes (a `<prefix>-` shared by 2+ files in a project's `.claude/agents/`), and from your OS user handle — and fails on any of them (word boundary, case-insensitive). The derived list is never written anywhere. Generic names (dictionary words, temp/scratch dirs, very short names) and this repo's own public names are stoplisted.
+- **Fails on private absolute paths** — a Windows profile path (`C:Users<name>…`, any slash or escaped form), `/home/<name>/`, `/Users/<name>/`, `~/dev/<project>`, and encoded `~/.claude/projects/C--Users-<name>-…` names. Placeholder users and projects (`you`, `user`, `<you>`, `%USERNAME%`, `$HOME`, `acme`) are fine.
+- **Warns (never fails)** on machine-structure detail, such as a concrete count of ten or more worktrees, projects or repos.
+
+Anything inside `{{…}}` is exempt. Where no dev root exists (a CI runner) the derived check prints a note and the static checks still run, so **run it locally before contributing — only your machine can catch a derived-name leak**. For another machine or CI, point `LEAK_CHECK_TOKEN_FILE` at a private token file **outside** the repo (one name per line, `prefix: xyz` for a prefix). Other overrides: `--dev-root` / `LEAK_CHECK_DEV_ROOT`, `--claude-projects` / `LEAK_CHECK_CLAUDE_PROJECTS`, `--user` / `LEAK_CHECK_USER`, `--no-derived`, and `--show-derived` (prints counts, never the names). Full reference: the header of [`scripts/leak-check.mjs`](scripts/leak-check.mjs); tests: `node --test scripts/tests/*.test.mjs`.
 
 ---
 
