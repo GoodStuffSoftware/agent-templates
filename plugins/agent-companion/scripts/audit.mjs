@@ -43,6 +43,7 @@ try { syncLegacy(); } catch { /* fail open */ }
 // only for disposable caches; durable state comes from stateRoot()/
 // telemetryDir()/stateDir().
 const dataDir = resolveDataDir();
+const daysExplicit = has('--days');
 const days = Number(val('--days')) || 7;
 
 if (has('--list')) {
@@ -79,6 +80,7 @@ const ctx = {
   telemetryDir: telemetryDir(),
   stateDir: stateDir(),
   days,
+  daysExplicit,
   memoryDir: memoryDirFor(target),
   fix: has('--fix'),
 };

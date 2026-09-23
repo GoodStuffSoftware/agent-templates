@@ -1,5 +1,12 @@
 # Contributions Inbox
 
+## 2026-09-23 - a longer subagent cache TTL is a bet on gaps; measure the gap bands before flipping it ({{PROJECT}})
+
+- **Subagents sit in a different cache bucket from the main conversation.** On a subscription the main session gets a 1-hour prompt cache, but subagents, teammates, workflows and helpers get 5 minutes unless a setting extends it. A 1h write bills at about 2x input versus 1.25x for a 5m write, while a read is about 0.1x or less. So the longer TTL raises the price of EVERY subagent write, and pays back only on requests that arrive 5-60 minutes after the previous one on the same prefix.
+- **Measure it; don't reason about it.** Walk each subagent transcript's requests in order, taking cache_creation (it carries a 5m/1h split), cache_read and timestamps. Bucket each request by its gap to the previous request: under 5m (hit either way), 5-60m (miss today, hit with 1h), over 60m (miss either way). The tokens 1h would convert are min(cache_write, previous prefix - cache_read) in the 5-60m band. Sanity check: read / previous-prefix should be ~100% under 5m and near 0 at 5-60m, which proves the cliff is real.
+- **Break-even is a token share, not a request share.** 1h wins when 5-60m rewrites exceed about 0.75 / (2 - read multiplier), roughly 39% of a tier's cache-write tokens. On one operator's 30 days that share was 36% overall, so the global switch was a wash (-0.5%). It was above break-even for long-lived top-tier agents (architects, reviewers: -5 to -13%) and below it for short one-shot workers (+5 to +16%). The answer is a per-agent-definition TTL, not a global flag.
+- **The 5-60m gaps have two sources:** a single long shell call inside a turn (tests, builds, CI waits; median just past 7 minutes, so barely over the cliff), and the lead resuming a stopped worker. A resume after the cliff rewrites the worker's whole transcript (hundreds of K tokens), which costs MORE than a fresh spawn. So a "reuse the same worker for follow-ups" rule and a 5-minute cache work against each other: either resume within the window, or give that agent the longer TTL.
+
 ## 2026-09-22 - the cheapest tier validates, it does not execute a procedure ({{PROJECT}})
 
 - **A validator and an operator are different jobs, and the cheap tier only does the first.** A cheapest-tier
