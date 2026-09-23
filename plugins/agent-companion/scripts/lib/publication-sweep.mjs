@@ -341,16 +341,27 @@ function dedupeByFingerprint(hits) {
 // empty hit list would hide the failure from the operator entirely.
 function runPluginChecker(cloneDir, repoEntry, {
   noDerived = false, tokenFile = null, devRoots, publicNames = [], strict = false, fingerprintKey,
+  claudeProjectsDir, users,
 } = {}) {
   try {
     const { hits } = coreScanRepo({
       root: cloneDir,
       devRoots: devRoots || defaultPluginCheckerDevRoots(),
       tokenFile,
-      // Every discovered-PUBLIC name is exempt here too, same as the
-      // clone's own name — a public repo mentioning another public repo by
-      // name is not a leak (see repo-discovery.mjs's publicNameTokens()).
-      ownNames: [...new Set([...coreOwnRepoNames(cloneDir), ...publicNames])],
+      // `claudeProjectsDir` / `users`: undefined = the operator's real
+      // ones (scanRepo()'s defaults); tests pass fixtures.
+      claudeProjectsDir,
+      users,
+      // The clone's OWN name stays on the segment-based ownNames
+      // self-exemption — exactly as scripts/leak-check.mjs does
+      // (ownRepoNames(root)). Every other discovered-PUBLIC name goes on the
+      // EXACT-only publicNames path — also exactly as leak-check.mjs does
+      // with LEAK_CHECK_OWN_NAMES. Never merge the two: ownNames matches
+      // per WORD, so a public "acme-tools" there would silently exempt a
+      // private derived name or prefix "acme" (see repo-discovery.mjs's
+      // publicNameTokens()).
+      ownNames: coreOwnRepoNames(cloneDir),
+      publicNames,
       noDerived,
       strict,
     });
@@ -391,7 +402,7 @@ function runPluginChecker(cloneDir, repoEntry, {
 // `fingerprintKey`: the per-machine HMAC key (see fingerprintHit()).
 export async function sweepRepo(repoEntry, {
   reduced = false, timeout = 120000, tokenFile = null, devRoots, publicNames = [],
-  strictRepoUrls = [], allowedOwners, env = {}, fingerprintKey,
+  strictRepoUrls = [], allowedOwners, env = {}, fingerprintKey, claudeProjectsDir, users,
 } = {}) {
   const tmpRoot = mkdtempSync(join(tmpdir(), 'ac-pubsweep-'));
   const cloneDir = join(tmpRoot, 'repo');
@@ -434,7 +445,9 @@ export async function sweepRepo(repoEntry, {
       ownError = own.error;
       ownHits = fingerprintHits(repoEntry, own.hits, { key: fingerprintKey });
     }
-    const plugin = runPluginChecker(cloneDir, repoEntry, { noDerived: reduced, tokenFile, devRoots, publicNames, strict, fingerprintKey });
+    const plugin = runPluginChecker(cloneDir, repoEntry, {
+      noDerived: reduced, tokenFile, devRoots, publicNames, strict, fingerprintKey, claudeProjectsDir, users,
+    });
     if (plugin.error) {
       // The plugin checker is the one that ALWAYS runs — its failure must
       // never read as "repo is clean". Report it and stop; ownHits (if any)

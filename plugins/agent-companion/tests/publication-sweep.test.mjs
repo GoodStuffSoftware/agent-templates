@@ -1017,3 +1017,41 @@ test('N7: a trusted target script\'s own "leak-check: OK" is accepted, and the p
     assert.ok(r.hits.some((h) => h.label === 'private-path:windows-profile'), 'the plugin checker ran anyway and its hit survives the OK');
   } finally { repo.cleanup(); }
 });
+
+// --- final review: F1 — public names must reach the core on the EXACT path ---
+
+const F1_PUBLIC = ['myorg/acme-tools', 'myorg', 'acme-tools'];
+
+async function f1Sweep(devDirs, body) {
+  const dev = mkdtempSync(join(tmpdir(), 'ac-f1-dev-'));
+  const projects = mkdtempSync(join(tmpdir(), 'ac-f1-proj-'));
+  for (const d of devDirs) mkdirSync(join(dev, d), { recursive: true });
+  const repo = buildRepoWith({ [STRICT_MARKER_FILE]: '', 'NOTES.md': body });
+  try {
+    return await sweepRepo(repo.bareDir, {
+      devRoots: [dev], claudeProjectsDir: projects, users: ['qzhandle'], publicNames: F1_PUBLIC,
+    });
+  } finally {
+    repo.cleanup();
+    rmSync(dev, { recursive: true, force: true });
+    rmSync(projects, { recursive: true, force: true });
+  }
+}
+
+test('F1: public repo "acme-tools" does NOT exempt the derived private PREFIX "acme" in the plugin core sweep', async () => {
+  const r = await f1Sweep(['acme-alpha', 'acme-beta'], 'the acme-gamma service is private\n');
+  assert.equal(r.error, null, r.error);
+  assert.ok(r.hits.some((h) => h.label === 'derived-prefix' && /acme/i.test(h.token)), JSON.stringify(r.hits));
+});
+
+test('F1: public repo "acme-tools" does NOT exempt the derived private NAME "acme" in the plugin core sweep', async () => {
+  const r = await f1Sweep(['acme'], 'we ported this from acme last year\n');
+  assert.equal(r.error, null, r.error);
+  assert.ok(r.hits.some((h) => h.label === 'derived-project-name' && /acme/i.test(h.token)), JSON.stringify(r.hits));
+});
+
+test('F1: the exact public name itself is still exempt in the plugin core sweep', async () => {
+  const r = await f1Sweep(['acme-tools', 'acme-tools-extra'], 'see acme-tools on github\n');
+  assert.equal(r.error, null, r.error);
+  assert.ok(!r.hits.some((h) => h.label.startsWith('derived-') && /^acme-?tools$/i.test(h.token)), JSON.stringify(r.hits));
+});

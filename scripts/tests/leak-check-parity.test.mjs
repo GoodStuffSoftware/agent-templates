@@ -203,3 +203,63 @@ test("CLI L3: a scan root directly under the temp dir never makes the temp dir a
   assert.equal(r.code, 0, r.err);
   assert.match(r.err, /"devRootDirs":0/);
 });
+
+// --- final review F1: the plugin SWEEP path and the CLI agree ---------------
+// Same fixture, same dev root / projects dir / user, same public-name list:
+// the plugin's sweepRepo() (public names on the exact path) and
+// scripts/leak-check.mjs (LEAK_CHECK_OWN_NAMES) must report the same hits.
+// Regression: the sweep once put public names on the per-WORD ownNames
+// path, so a public "acme-tools" silently exempted a private "acme".
+
+test("F1 parity: plugin sweepRepo and scripts/leak-check.mjs agree with the same public-name list", async () => {
+  const { sweepRepo, STRICT_MARKER_FILE } = await import("../../plugins/agent-companion/scripts/lib/publication-sweep.mjs");
+  const dev = tmp("f1dev");
+  for (const d of ["acme", "acme-alpha", "acme-beta", "zorbl-internal"]) mkdirSync(join(dev, d), { recursive: true });
+  const projects = tmp("f1proj");
+  const publicNames = ["myorg/acme-tools", "myorg", "acme-tools"];
+
+  const base = tmp("f1repo");
+  const bare = join(base, "origin.git");
+  const work = join(base, "work");
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x.invalid" };
+  const git = (args, cwd) => {
+    const r = spawnSync("git", args, { cwd, encoding: "utf8", env: gitEnv });
+    if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+  };
+  git(["init", "--quiet", "--bare", "--initial-branch=main", bare]);
+  mkdirSync(work, { recursive: true });
+  git(["init", "--quiet", "-b", "main"], work);
+  git(["remote", "add", "origin", bare], work);
+  writeFileSync(join(work, STRICT_MARKER_FILE), "");
+  writeFileSync(join(work, "NOTES.md"), [
+    "ported from acme last year",
+    "the acme-gamma service",
+    "see acme-tools and myorg/acme-tools on github",
+    "zorbl-internal notes",
+    `open ${["C:", U, "qzhandle", "dev", "x"].join(BS)}`,
+    "",
+  ].join("\n"));
+  git(["add", "-A"], work);
+  git(["commit", "--quiet", "-m", "x"], work);
+  git(["push", "--quiet", "origin", "main"], work);
+
+  const key = (h) => `${h.rel}:${h.line}:${h.label}:${String(h.token).toLowerCase()}`;
+  const swept = await sweepRepo(bare, { devRoots: [dev], claudeProjectsDir: projects, users: ["qzhandle"], publicNames });
+  assert.equal(swept.error, null, swept.error);
+  const pluginKeys = [...new Set(swept.hits.map(key))].sort();
+
+  const cli = runCli(work, [], {
+    LEAK_CHECK_DEV_ROOT: dev, LEAK_CHECK_CLAUDE_PROJECTS: projects, LEAK_CHECK_USER: "qzhandle",
+    LEAK_CHECK_OWN_NAMES: publicNames.join(","),
+  });
+  assert.equal(cli.code, 1, cli.err);
+  const HIT = /^ {2}(\S.*?):(\d+) {2}\[([^\]]+)\] {2}(.*?) {2}:: {2}/;
+  const cliKeys = [...new Set(cli.err.split(/\r?\n/).map((l) => HIT.exec(l)).filter(Boolean)
+    .map(([, rel, line, label, token]) => key({ rel, line, label, token })))].sort();
+
+  assert.deepEqual(pluginKeys, cliKeys);
+  assert.ok(pluginKeys.some((k) => /derived-project-name:acme$/.test(k)), `private "acme" must fire: ${pluginKeys}`);
+  // The exact public name is never itself a derived token (a private
+  // "acme" inside it on line 3 still fires — in both copies).
+  assert.ok(!pluginKeys.some((k) => /:acme-?tools$/.test(k)), `the exact public name must not be a token: ${pluginKeys}`);
+});
