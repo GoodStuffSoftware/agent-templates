@@ -1,7 +1,13 @@
 {
-  "version": 4,
-  "updated": "2026-09-04",
+  "version": 5,
+  "updated": "2026-09-23",
   "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to ~/.claude/agent-companion/state/model-tiers.json (a legacy copy at $CLAUDE_PLUGIN_DATA/model-tiers.json is still honoured as a fallback); it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
+  "aliasResolution": {
+    "asOf": "2026-09-23",
+    "minClaudeCodeVersion": "2.1.280",
+    "source": "https://code.claude.com/docs/en/model-config",
+    "note": "Below v2.1.280, `opus` resolved to Opus 5 instead of Opus 5.5 on the Anthropic API. Every `resolvesTo` block below is only correct on v2.1.280+. Aliases cannot be pinned — they always track the provider's current recommended version; pin with a full model id (e.g. claude-opus-5-5) or an ANTHROPIC_DEFAULT_*_MODEL env var instead."
+  },
   "tiers": {
     "haiku": {
       "rank": 1,
@@ -10,12 +16,23 @@
       "efforts": [],
       "effortsNote": "Haiku 4.5 takes no effort parameter. Setting one on a haiku agent is at best a no-op — the model has one mode, and asking for more thinking does not get any.",
       "note": "reads, searches, single commands",
+      "resolvesTo": {
+        "modelId": "claude-haiku-4-5",
+        "datedModelId": "claude-haiku-4-5-20251001",
+        "displayName": "Haiku 4.5",
+        "pricing": { "inputPerMTok": 1, "outputPerMTok": 5, "cacheHitPerMTok": 0.10, "currency": "USD" },
+        "contextTokens": 200000,
+        "maxOutputTokens": 64000,
+        "effortSupport": false,
+        "defaultEffort": null,
+        "thinking": "extended (manual budget_tokens, not adaptive)"
+      },
       "retiresAfter": "2026-10-15",
-      "retirementNote": "Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window.",
+      "retirementNote": "Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. No successor Haiku has been announced (checked live 2026-09-23). Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window (now 30 days, not just fixed milestones — see scripts/detect.mjs).",
       "replacement": {
         "model": "sonnet",
         "effort": "low",
-        "note": "Pre-staged 2026-09-04: no successor Haiku announced. Sonnet 5 at low effort is the cheapest available tier that takes weight 1-2 work, at roughly 2x Haiku per token. When a new Haiku ships, add its tier and point this at it - the switch is data, not code."
+        "note": "Pre-staged 2026-09-04, re-verified 2026-09-23: still no successor Haiku announced. Sonnet 5 at low effort is the cheapest available tier that takes weight 1-2 work, at roughly 2x Haiku per token (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5). When a new Haiku ships, add its tier and point this at it - the switch is data, not code. This IS the weight 1-2 fallback if haiku disappears before a successor ships."
       }
     },
     "sonnet": {
@@ -29,7 +46,17 @@
         "xhigh",
         "max"
       ],
-      "note": "bounded edits, short scripts, multi-file work"
+      "note": "bounded edits, short scripts, multi-file work",
+      "resolvesTo": {
+        "modelId": "claude-sonnet-5",
+        "displayName": "Sonnet 5",
+        "pricing": { "inputPerMTok": 2, "outputPerMTok": 10, "cacheHitPerMTok": 0.20, "currency": "USD" },
+        "contextTokens": 1000000,
+        "maxOutputTokens": 128000,
+        "effortSupport": true,
+        "defaultEffort": "high",
+        "thinking": "adaptive (can disable)"
+      }
     },
     "opus": {
       "rank": 3,
@@ -42,7 +69,18 @@
         "xhigh",
         "max"
       ],
-      "note": "architecture, novel debugging"
+      "note": "architecture, novel debugging",
+      "resolvesTo": {
+        "modelId": "claude-opus-5-5",
+        "displayName": "Opus 5.5",
+        "pricing": { "inputPerMTok": 4, "outputPerMTok": 20, "cacheHitPerMTok": 0.20, "currency": "USD" },
+        "contextTokens": 1000000,
+        "maxOutputTokens": 128000,
+        "effortSupport": true,
+        "defaultEffort": "medium",
+        "thinking": "adaptive, always on, cannot disable"
+      },
+      "effortWarning": "Opus 5.5 defaults to MEDIUM effort — one level below Opus 5's old HIGH default (checked live 2026-09-23, https://platform.claude.com/docs/en/build-with-claude/effort). Anything that spawns or defines an opus agent must state effort explicitly rather than relying on the default; spawn-guard.mjs warns and the agent-defs audit check flags a definition pinned to opus with no effort."
     },
     "fable": {
       "rank": 4,
@@ -57,9 +95,20 @@
       ],
       "effortsNote": "Thinking is always on; effort is the only depth control.",
       "note": "not a routing tier — an exception requiring a stated warrant",
+      "resolvesTo": {
+        "modelId": "claude-fable-5-1",
+        "displayName": "Fable 5.1",
+        "pricing": { "inputPerMTok": 10, "outputPerMTok": 50, "cacheHitPerMTok": 0.25, "currency": "USD" },
+        "contextTokens": 1000000,
+        "maxOutputTokens": 128000,
+        "effortSupport": true,
+        "defaultEffort": "high",
+        "thinking": "adaptive, always on, cannot disable"
+      },
+      "warrantCriterion": "Anthropic's own escalation criterion (choosing-a-model, checked live 2026-09-23): 'Use Claude Fable 5.1 ... when your evals on Claude Opus 5.5 at higher effort still fall short.' Fable is now 2.5x Opus on input/output price ($10/$50 vs Opus 5.5's $4/$20 — it was 2x when Opus priced at $5/$25), which strengthens the exception: the warrant is not 'this task is hard', it is 'Opus 5.5 at higher effort was demonstrably tried and fell short'.",
       "behaviorNotes": [
         "OFFICIAL (whats-new-fable-5-1): prefers whole-file rewrites, fewer progress updates, less parallel tool batching. Whole-file rewrites make it a poor fit for scoped or mechanical edits even when a warrant exists.",
-        "OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost. A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it.",
+        "OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost ($0.25/MTok, re-verified live 2026-09-23). A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it.",
         "COMMUNITY, first-hand (Every.to, TheNeuronDaily): \"sticks to what you tell it\" is CONTESTED. Reports of overshooting explicit limits (1,000 words -> 1,288; 8-12 quotes -> 43, 5 fabricated) and unprompted style decisions. The friction is over-inference, not literalism. Do not route on an adherence claim.",
         "COMMUNITY, first-hand (dev.to): the gap over Opus/Sonnet is procedural discipline, not intelligence - stating a hypothesis before editing, labelling claims VERIFIED/REASONED/ASSUMED. A brief that carries that checklist closes most of the gap on a cheaper tier, which is exactly what the warrant is meant to make you ask."
       ]
@@ -76,7 +125,13 @@
         "high",
         "xhigh",
         "max"
-      ]
+      ],
+      "resolvesTo": {
+        "modelId": null,
+        "displayName": "Mythos",
+        "pricing": null,
+        "note": "Not reachable on this account, so pricing/specs are UNVERIFIED — not fetched live. Fill in from the live docs the day access changes rather than guessing now."
+      }
     }
   },
   "availabilityNote": "An entry with available:false is still classified, but an agent definition pinned to it is a finding. A model you cannot reach fails at spawn time with nothing having warned you beforehand, and the failure surfaces as a broken agent rather than as a configuration mistake. Set available:false for anything outside your plan.",
@@ -295,6 +350,20 @@
       "consequence": "routine",
       "summary": "a delegated worker doing a bounded, well-specified piece of a larger task",
       "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded."
+    },
+    "verify": {
+      "weight": 1,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing",
+      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; CONTRIBUTIONS_INBOX @ 9b355e7). The defining trait is that nothing changes: the task ends when the answer is read back, not when a step is performed."
+    },
+    "operate": {
+      "weight": 3,
+      "kind": "bounded",
+      "consequence": "routine",
+      "summary": "execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation",
+      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; CONTRIBUTIONS_INBOX @ 9b355e7). A sequence of trivial-looking steps against a live system is not a verify task: ordering mistakes, partial failures, and side effects compound in a way a single read-only check cannot, so this floors at sonnet even though no one step looks hard. Raise weight/consequence further when a step is itself destructive, production-facing, or irreversible (critical-change already covers that)."
     }
   },
   "taskTypesNote": "A task type is a named preset over (weight, kind, consequence). Resolve it through the same grid as everything else; do not special-case it. \"parity\" as a weight means: match the writer being reviewed. \"inherit\" as a consequence means: take the consequence of the change under review. Provenance is recorded per entry because these WILL go stale - the scout re-checks the lineup, and a routing review should re-read the sources, not the table.",
@@ -307,7 +376,7 @@
     },
     "fable-cache-economics": {
       "question": "Does Fable 5.1 cache-read pricing make long stable-prefix sessions competitive with Opus?",
-      "tension": "Official: cache reads at a quarter of the cost. Our measured cache hit ratio is ~96%. But at max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity.",
+      "tension": "Official: cache reads at a quarter of the cost ($0.25/MTok). Our measured cache hit ratio is ~96%. Fable is now 2.5x Opus on sticker price (was 2x, before Opus 5.5 dropped to $4/$20) - the cache discount has a wider gap to close than it did. At max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity.",
       "measure": "From telemetry: per-session cost by model with cache-read share. Compare fable vs opus on sessions of similar turn count.",
       "status": "open"
     },
