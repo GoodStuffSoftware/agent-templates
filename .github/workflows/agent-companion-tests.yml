@@ -9,6 +9,7 @@ on:
   push:
     branches-ignore:
       - 'wip/**'
+      - 'backup/**'
   pull_request:
 
 jobs:
@@ -23,6 +24,10 @@ jobs:
           # shallow (depth-1) clone doesn't have that object, so
           # `git show <ref>:<path>` fails with "invalid object name". Full
           # history avoids that without pinning to a specific depth.
+          #
+          # scripts/ci-local.mjs's --ci-parity mode reads THIS number back
+          # out of this file at run time, so a future change here doesn't
+          # need a matching edit anywhere else to stay honest.
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -30,8 +35,10 @@ jobs:
         with:
           node-version: 24
 
+      # Calls the same entry point a contributor runs locally (by hand, or
+      # via .githooks/pre-push) -- see CONTRIBUTING.md. ci-local.mjs expands
+      # the plugins/agent-companion/tests/*.test.mjs glob itself, so this
+      # stays independent of any platform's own glob resolution inside the
+      # test runner.
       - name: Run agent-companion test suite
-        # An explicit glob (shell-expanded, not Node's own directory-argument
-        # handling) so this is not sensitive to a platform's own glob
-        # resolution inside the test runner.
-        run: node --test plugins/agent-companion/tests/*.test.mjs
+        run: node scripts/ci-local.mjs --suite agent-companion-tests
