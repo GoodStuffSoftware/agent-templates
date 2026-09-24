@@ -512,8 +512,11 @@ that determines whether the model's work is even salvageable:
       ORIGINAL failing row counts normally (a real failure is never lost),
       and the redundant `::rescore` row is excluded so the same underlying
       attempt is never double-counted.
-    - **No `::rescore` row exists at all** (the batch stopped before the
-      scheduler got to it — an `auth_error`/judge refusal/a weekly ceiling)
+    - **No `::rescore` row exists at all** (the cell's own `scheduleRuns()`
+      stopped admitting new runs before it got to this one — an
+      `auth_error` or a judge refusal; **not** a weekly ceiling, which is
+      only ever checked up front or between whole cells, never in the
+      middle of one still admitting runs — see "Resuming a batch" below)
       → fails OPEN: the original failure counts normally, and its retained
       sandbox is simply abandoned under the OS temp dir (harmless, if
       untidy — accepted rather than building a whole separate
@@ -575,10 +578,13 @@ unchanged byte-for-byte.
 `--resume` (`scripts/benchmark.mjs`) skips only the cells `.batch-state.json`
 already marks COMPLETE — a marker written after a cell's `scheduleRuns()`
 call fully drains its queue (see "Run every cell in the FOREGROUND" above). A
-cell that was interrupted before that point — an `auth_error`, a judge
-refusal, or a weekly ceiling hit while a `needs_rescore` solo retry was still
-QUEUED but never ADMITTED — is not marked complete, so `--resume` re-runs
-that WHOLE cell from scratch at the same `--rep-start`.
+cell that was interrupted before that point — an `auth_error` or a judge
+refusal while a `needs_rescore` solo retry was still QUEUED but never
+ADMITTED (the only two things wired into `shouldStop()` mid-cell; a weekly
+ceiling is checked only up front or between whole cells — see "Parallel
+runs" above — so it can end a BATCH of cells but never leave one single
+cell's own queue partially drained) — is not marked complete, so `--resume`
+re-runs that WHOLE cell from scratch at the same `--rep-start`.
 
 `run_id` is deterministic (`` `${cellId}__${taskId}__rep${rep}` ``) and
 `results.jsonl` is append-only, so that re-run's fresh row lands under the

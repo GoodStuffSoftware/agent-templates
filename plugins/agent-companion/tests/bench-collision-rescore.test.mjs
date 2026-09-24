@@ -302,4 +302,49 @@ test('FORMAT.md "Confirmation" section states the rescore exclude/count pairing 
   );
 });
 
+// --- Round 3 finding 5: docs/BENCHMARK.md wrongly listed "a weekly -------
+// ceiling" as a reason a queued needs_rescore retry can be abandoned.
+// scripts/benchmark.mjs only ever wires `auth_error` and a judge refusal
+// into scheduleRuns()'s `shouldStop()` (see runCell()'s `stopReason`) -- a
+// weekly ceiling is checked up front (no --batch-by cell) or between WHOLE
+// cells (with it), never in the middle of one cell's own scheduleRuns() call
+// that is still admitting runs. So a ceiling can end a batch of cells, but
+// it can never be the reason one specific cell's own queued rescore retry
+// was left unadmitted.
+test('docs/BENCHMARK.md no longer claims a weekly ceiling can abandon a queued rescore retry mid-cell', () => {
+  const benchmarkDoc = readFileSync(join(PLUGIN_ROOT, 'docs', 'BENCHMARK.md'), 'utf8');
+
+  const noRescoreRowBullet = benchmarkDoc.slice(
+    benchmarkDoc.indexOf('No `::rescore` row exists at all'),
+    benchmarkDoc.indexOf('fails OPEN'),
+  );
+  assert.ok(noRescoreRowBullet.length > 0, 'the "No ::rescore row exists at all" bullet exists');
+  assert.doesNotMatch(
+    noRescoreRowBullet,
+    /auth_error.\/judge refusal\/a weekly ceiling/,
+    'a weekly ceiling must not be listed as a reason a queued rescore was abandoned mid-cell',
+  );
+  assert.match(
+    noRescoreRowBullet,
+    /not.*a weekly ceiling, which is\s*\n?\s*only ever checked up front or between whole cells/is,
+    'must explain a weekly ceiling is checked only up front or between cells, never mid-cell',
+  );
+
+  const resumeSection = benchmarkDoc.slice(
+    benchmarkDoc.indexOf('### Resuming a batch'),
+    benchmarkDoc.indexOf('## Pre-run estimate'),
+  );
+  assert.ok(resumeSection.length > 0, 'the Resuming a batch section exists');
+  assert.doesNotMatch(
+    resumeSection,
+    /an `auth_error`, a judge\s*\n?\s*refusal, or a weekly ceiling hit/,
+    'the Resuming a batch section must not repeat the same wrong weekly-ceiling claim',
+  );
+  assert.match(
+    resumeSection,
+    /the only two things wired into `shouldStop\(\)` mid-cell/is,
+    'must name auth_error/judge refusal as the only two things that can leave a cell interrupted mid-queue',
+  );
+});
+
 console.log('bench-collision-rescore.test.mjs: round 2 solo re-score regression tests defined');
