@@ -275,6 +275,24 @@ path now (`stateFile('baseline.json')`), used identically by
 `scripts/detect.mjs` and the `harness-drift` audit check, so the two can no
 longer disagree about what the baseline is.
 
+**`ciStatusCache`** (object, keyed by `<owner>/<repo>` lowercased —
+`scripts/lib/ci-status.mjs`'s `repoCacheKey()`): the `main_ci_red` signal's
+own 10-minute cache, written by `scripts/detect.mjs`'s `ci_status_signal`
+check and read (cache only, never a `gh` call) by `hooks/scout-surface.mjs`'s
+SessionStart note. Each entry:
+
+| field | type | meaning |
+|---|---|---|
+| `checkedAt` | ISO 8601 string | when this entry was last written |
+| `ok` | boolean | `false` means `gh` was missing/unauthenticated/erroring (offline included) for this repo this run — `red`/`workflows` are absent |
+| `red` | boolean | present when `ok` is true: whether at least one active workflow's latest completed run on the default branch is in a red streak |
+| `workflows` | array | present when `ok` is true: the RED workflows only (never the green ones), each `{ name, redSince, latestUrl, failingRunCount, boundedByPage }` — see `checkRepoCiStatus()` in `scripts/lib/ci-status.mjs` |
+
+Entries persist across runs within the 10-minute TTL; a stale entry is
+replaced (not merged) on the next check, whether that check succeeds or
+degrades. Safe to delete like the rest of this file — the next run rebuilds
+whatever entries it covers.
+
 ### `scout-history.jsonl` — append-only scout run history
 
 One line per `scripts/detect.mjs` run — the same object written to

@@ -102,6 +102,12 @@
       "description": "At session start, surface unresolved signals from the last locally scheduled scout run. Silent when the scout found nothing.",
       "default": true
     },
+    "ci_status_signal": {
+      "type": "boolean",
+      "title": "Main-branch CI status signal",
+      "description": "Suggestion-only: detects when a repo's default branch has a red (failure/cancelled/timed_out) latest completed workflow run via `gh`, and surfaces it — as a `main_ci_red` signal in the daily scout, and as a cheap SessionStart note (read from a 10-minute cache only; never a network call from SessionStart itself) when the current project's cached status is red. Never re-runs, cancels, or fixes anything. Silent when `gh` is missing, unauthenticated, or offline. Scope: the current project's own repo, plus any repo already confirmed public by the publication-leak sweep (see `publication_leak_sweep`) — never a repo of unknown or private visibility beyond the current project itself.",
+      "default": true
+    },
     "fit_guard": {
       "type": "boolean",
       "title": "Best-fit guard",
