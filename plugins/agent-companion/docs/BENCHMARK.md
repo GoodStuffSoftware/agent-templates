@@ -388,6 +388,336 @@ ones) and that a task-pack extraction never produces a `.git` directory.
 abort, and `--isolate-home`-without-a-key refusal from "Preconditions"
 above.
 
+## Parallel runs
+
+**Parallel runs are fine now, ACROSS THE WHOLE GRID.** `scripts/benchmark.mjs
+--concurrency N` (default 1, fully sequential — the historical, unchanged
+behavior) runs up to N (cell, task, rep) runs at once through ONE
+`bench/scheduler.mjs` admission-control pool (`buildGlobalRunPlan()` +
+`runGlobalPool()`) that spans EVERY requested cell — not one pool per cell.
+An earlier version of this script ran one scheduler pool per cell (cells
+strictly one after another, however high `--concurrency` was set), which
+under-used a multi-pack, multi-cell round; two DIFFERENT cells' runs can now
+be active at the same time, bounded by `--concurrency` and the RAM gate,
+with resource conflicts (`bench/task-packs/FORMAT.md` "Resource
+declarations") respected across cells exactly the same way they always were
+within one (`resourcesConflict()` has never known what a "cell" is). This
+replaces any earlier "run one at a time" guidance for this benchmark
+specifically; the general FOREGROUND/no-monitors rule under "Operating
+rules" above still applies unchanged — parallelism here means concurrent
+`claude` child processes inside ONE foreground `scripts/benchmark.mjs`
+invocation, never a background job.
+
+**`--batch-by cell` opts OUT of the cross-cell pool, on purpose.** It exists
+to hand control back to the driving agent BETWEEN cells (a plan-usage
+checkpoint), which needs a real cell boundary to stop at — a single global
+pool spanning every cell has no such boundary mid-run. So with `--batch-by
+cell`, cells still run strictly one after another exactly as before, and
+`--concurrency` bounds each cell SEPARATELY, not the whole grid. Drop
+`--batch-by cell` (an unattended single invocation covering the whole
+`--cells` list) to get the cross-cell pool described above. Once a
+`--weekly-ceiling-pct` is reached: WITHOUT `--batch-by cell`, the check runs
+once up front (a single invocation's `--weekly-usage-pct` is a static
+reading — see its own help text — so there is no later point in one process
+where re-checking it could disagree); WITH it, the check still runs at every
+cell boundary as before. Either way: once the ceiling is reached (or an
+`auth_error`/judge refusal fires), no NEW run is launched, every already
+ACTIVE run is still awaited to completion, and the partial `summary.md` is
+written from whatever finished.
+
+Three safeguards make this safe rather than merely fast:
+
+1. **Per-run isolation.** Every run already gets its own throwaway sandbox
+   (unconditional, see "Sandbox isolation" below). `--concurrency > 1` adds a
+   per-run `TMP`/`TEMP`/`TMPDIR` (a sibling of the sandbox, never nested
+   inside it) and a `BENCH_PORT_BASE` reserved per concurrency SLOT (not per
+   run — a slot is only ever held by one active run), exported to the
+   spawned `claude` process's environment and passed as the 4th argument to
+   a task's/pack's `setup()`/`score()`. A pack that needs a port but does not
+   care which one should bind inside `[BENCH_PORT_BASE, BENCH_PORT_BASE +
+   200)` rather than a hardcoded number — see `bench/task-packs/FORMAT.md`
+   "Resource declarations" and its two worked fixture packs.
+2. **Resource declarations + the scheduler.** `manifest.resources` (or a
+   built-in task's own `resources` field) declares `fixedPorts`, `lockFiles`
+   and/or `exclusive`. The scheduler (`bench/scheduler.mjs`'s
+   `resourcesConflict()`) never co-schedules two runs whose declared
+   resources overlap. A pack that declares nothing at all is treated as
+   exclusive with OTHER RUNS OF THE SAME PACK (conservative default) — a
+   pack that has been reviewed and is genuinely safe to run alongside itself
+   opts out with an explicit `"resources": {}`.
+3. **Collision handling** — a run that fails for a reason that has nothing to
+   do with the model, because it happened to be sharing the machine. See its
+   own subsection right below; two DIFFERENT mechanisms exist, chosen by
+   WHEN in the run the collision happened.
+
+### Collision handling
+
+A collision never reached a genuine model/task verdict — it failed because
+of the machine it happened to share, not because of anything the model did.
+Both mechanisms below exclude a CONFIRMED collision from `pass_rate` and
+every other stat in `summary.md`/`summary.json` (the same treatment
+`auth_error` gets), and both keep every row involved in `results.jsonl` —
+nothing is ever silently dropped. (This is a different thing from
+`bench/rescore.mjs`'s manual re-score for a wording bug in the test itself —
+see "The fairness rule: re-score vs re-run" above. That is an operator
+choice, made after auditing a suspected scorer bug; everything below is
+fully automatic, made by the scheduler for every run, whether or not
+anything is actually wrong with the scorer.)
+
+**Which mechanism applies depends on WHEN the collision happened**, because
+that determines whether the model's work is even salvageable:
+
+- **Before the model's work completed** (`setup()` threw) — there is no
+  valid sandbox or answer to reuse, so the only option is a **full re-run,
+  alone**: `bench/runner.mjs` reads the STRUCTURAL `.code` Node itself
+  attaches to the exception (`EADDRINUSE`, a lock file's `EEXIST`/`EBUSY`,
+  ...) and hands only that to `bench/scheduler.mjs`'s `classifyCollision()`
+  — **never** the model's answer text or the exception's message string (an
+  earlier version of this function regexed both, and a model merely
+  *describing* an EADDRINUSE bug it had fixed, or a hidden test's own
+  assertion message quoting an expected error string, could flip a genuine
+  task FAILURE into an excluded `collision: true` row — 2026-09 adversarial
+  review finding). The scheduler automatically re-runs it exactly once,
+  ALONE (`resources.exclusive` forced `true`), with a FRESH sandbox and a
+  FRESH model call. This is also the fallback for a scoring-phase collision
+  that happened at `--concurrency 1` with nothing else genuinely active —
+  see below.
+- **After the model's work completed** (the run reached `score()`) — the
+  model's sandbox is already finished and isolated, so re-running the model
+  again would be wasteful AND biased (an outcome-based re-run skews toward
+  passing on a nondeterministic model, which re-scoring the identical
+  artifact cannot). Round 2 finding (2026-09 delta review): a REAL task
+  pack's `score()` never actually THROWS even on a genuine collision — its
+  hidden test catches its own subprocess's failure and returns a plain
+  `{ pass: false, detail }` (the dominant real-world "catch everything"
+  style; see the committed example pack's own `hidden-test.mjs`) — so the
+  structural-`.code` path above was dead code for every real pack; a genuine
+  port/lock collision inside a hidden test's own subprocess just looked like
+  an ordinary task failure. Instead: ANY run that FAILS while genuinely
+  co-scheduled (`--concurrency > 1` AND something else was actually active
+  when this run was admitted — `co_scheduled_run_ids` non-empty) gets its
+  row marked `needs_rescore: true`, its sandbox is deliberately NOT torn
+  down, and `bench/scheduler.mjs` automatically queues a solo retry
+  (`resources.exclusive` forced `true`, same as above) that calls
+  `bench/runner.mjs`'s `rescoreOne()` — which re-runs ONLY `task.score()`
+  against that SAME retained sandbox, with the SAME saved answer text, and
+  **never calls the model**. Both the original row and the `<run_id>::rescore`
+  row are kept in `results.jsonl`:
+    - **Re-score PASSES** → the original row is excluded (superseded); the
+      `::rescore` row (`pass: true`, `collision_rescored: true`, and the
+      ORIGINAL failure's own detail carried along under
+      `detail.original_failure_detail`) counts in its place. Same `n`,
+      corrected verdict, no extra tokens spent.
+    - **Re-score FAILS too** → nothing was actually a collision. The
+      ORIGINAL failing row counts normally (a real failure is never lost),
+      and the redundant `::rescore` row is excluded so the same underlying
+      attempt is never double-counted.
+    - **No `::rescore` row exists at all** (the cell's own `scheduleRuns()`
+      stopped admitting new runs before it got to this one — an
+      `auth_error` or a judge refusal; **not** a weekly ceiling, which is
+      only ever checked up front or between whole cells, never in the
+      middle of one still admitting runs — see "Resuming a batch" below)
+      → fails OPEN: the original failure counts normally, and its retained
+      sandbox is simply abandoned under the OS temp dir (harmless, if
+      untidy — accepted rather than building a whole separate
+      abandoned-retry cleanup pass for a rare case).
+
+  `summary.md` reports each outcome by name: `COLLISION` / `SUSPECTED
+  COLLISION, NOT CONFIRMED` for the legacy (pre-model) path, `RESCORED` /
+  `RE-SCORE CONFIRMED A REAL FAILURE` for this one.
+
+### Sandbox cleanup retry (Windows)
+
+A DIFFERENT kind of machine-sharing problem from collision handling above:
+not two runs fighting over the same port/lock, but a single run's OWN
+sandbox or per-run temp dir refusing to be *deleted* once the run is
+finished. Found live (2026-09-24): 3 reps of the same pack running
+concurrently on Windows, and removing a finished run's sandbox directory
+threw `EPERM` — a just-exited `claude` child process, an antivirus scanner,
+or Windows' own delayed directory-entry accounting can all hold a handle
+into (or a stale listing of) a directory for a few hundred milliseconds
+after the process that used it has already resolved.
+
+Every removal of a sandbox or per-run temp dir in this bench harness goes
+through ONE helper, `bench/tasks/common.mjs`'s `removeDirWithRetry()`:
+bounded retry-with-backoff (linear, a few seconds at most, ASYNC so a
+backoff wait never blocks the event loop and stalls every OTHER
+concurrently scheduled run) on exactly three transient codes —
+`EPERM`, `EBUSY`, `ENOTEMPTY` — and a fail-fast (no retry at all) for
+anything else. `bench/runner.mjs`'s `runOne()`/`rescoreOne()` call it
+through a `removeDirImpl` test seam (same style as `runOne()`'s own
+`runClaudeImpl`); every other removal in `bench/` (`bench/rescore.mjs`,
+`bench/task-packs/lib.mjs`, `bench/judge.mjs`'s per-vote temp cwd) goes
+through this module's synchronous `rmrf()`, which delegates the SAME
+retryable-code policy to `fs.rmSync`'s own `maxRetries`/`retryDelay`
+(confirmed by the Node.js docs to cover `EBUSY`/`EMFILE`/`ENFILE`/
+`ENOTEMPTY`/`EPERM` with a linear backoff) rather than reimplementing a
+second retry loop.
+
+**A cleanup failure that survives every retry NEVER changes the run's own
+verdict.** `pass`/`collision`/`needs_rescore` are all decided BEFORE cleanup
+ever runs — a leaked directory afterward is pure housekeeping, not a signal
+about the model or the task. Only the failing directory's bare OS error CODE
+(never a path — `results.jsonl` rows are sometimes shared) is recorded on
+the row as `cleanup_error`, and the run carries on normally. `rebuildSummary()`
+and `bench/estimate.mjs` both ignore this field for every stat they compute —
+a `cleanup_error` row counts toward `pass_rate`/medians/local-history exactly
+like any other row. When at least one row in a batch carries `cleanup_error`,
+`summary.md` prints a single `CLEANUP: N run(s) left a leaked sandbox/temp
+dir after cleanup failed even after retrying` line so it is visible without
+digging through `results.jsonl`, distinct from `COLLISION`/`RESCORED` above.
+
+**Coverage gap, by design: the model's OWN in-session commands.** Everything
+above is about the HARNESS's re-score/re-run machinery around `setup()`/
+`score()` — it says nothing about a port collision the MODEL itself hits
+while doing its own work inside the sandbox (e.g. running its own test suite
+as part of solving the task, before ever reaching the harness's scoring
+step). That kind of collision is invisible to `classifyCollision()`/
+`needs_rescore` entirely — it just shows up as whatever the model's own
+transcript/answer says happened, same as any other in-session hiccup. The
+only mitigation is UPSTREAM of collision detection: a pack whose own
+commands need a port should bind inside `[BENCH_PORT_BASE, BENCH_PORT_BASE +
+200)` (its concurrency SLOT's reserved range — see "Per-run isolation"
+above) rather than a hardcoded number, and/or declare `manifest.resources`
+accurately, so the SCHEDULER simply never puts two runs in a position to
+collide over the same port in the first place. There is no after-the-fact
+detection for a collision inside the model's own session.
+
+**Only `scripts/benchmark.mjs` supports `--concurrency`.** `bench/runner.mjs`'s
+own direct CLI (`node bench/runner.mjs ...`) is a bare-bones, fully-sequential
+single-process loop with no scheduler, no RAM gate, and no pre-run cost
+estimate wired up — routing `--concurrency` through it too would mean either
+duplicating all three, or silently running everything sequentially anyway
+while claiming to respect a concurrency flag it never actually gates. Track B
+adversarial review, fix #3: it REFUSES `--concurrency` (and `--per-agent-mb`/
+`--weekly-usage-pct`/`--weekly-ceiling-pct`/`--confirm-above-points`/
+`--confirm`, which only mean something alongside it) with a message pointing
+at `scripts/benchmark.mjs` — the same `bench/runner.mjs` `runOne()` mechanics
+underneath, but with the scheduler and both gates already wired up. Always
+use `scripts/benchmark.mjs` for anything beyond a single sequential cell.
+
+**Every results.jsonl row records `concurrency` and `co_scheduled_run_ids`.**
+Read these before comparing wall time across batches: a run's `duration_ms`
+under `--concurrency 4` is not comparable to the same task's `duration_ms`
+under `--concurrency 1` — parallel runs slow each other down (shared CPU,
+memory, and often shared rate limits). **Token-derived cost (`cost_usd`,
+`relative_cost_index`, `plan_usage_index`) stays the primary cost signal**
+under concurrency for exactly this reason: per-cell USAGE deltas (see
+"Caching" below) do not isolate cleanly when several runs share the machine
+at once, but each run's own token counts are unaffected by how many other
+runs happened to be active alongside it.
+
+A free-RAM capacity gate (`bench/scheduler.mjs`'s `makeCapacityGate()`,
+wrapping `scripts/capacity.mjs`'s existing per-agent-MB budget) is checked
+before every launch at `--concurrency > 1` — `--per-agent-mb` overrides the
+350MB default. The gate is not consulted at all at the default
+`--concurrency 1`, so the historical fully-sequential path's behavior is
+unchanged byte-for-byte.
+
+### Resuming a batch
+
+`--resume` (`scripts/benchmark.mjs`) skips only the cells `.batch-state.json`
+already marks COMPLETE — a marker written after a cell's `scheduleRuns()`
+call fully drains its queue (see "Run every cell in the FOREGROUND" above). A
+cell that was interrupted before that point — an `auth_error` or a judge
+refusal while a `needs_rescore` solo retry was still QUEUED but never
+ADMITTED (the only two things wired into `shouldStop()` mid-cell; a weekly
+ceiling is checked only up front or between whole cells — see "Parallel
+runs" above — so it can end a BATCH of cells but never leave one single
+cell's own queue partially drained) — is not marked complete, so `--resume`
+re-runs that WHOLE cell from scratch at the same `--rep-start`.
+
+`run_id` is deterministic (`` `${cellId}__${taskId}__rep${rep}` ``) and
+`results.jsonl` is append-only, so that re-run's fresh row lands under the
+exact SAME `run_id` as the earlier, abandoned attempt — two rows for one
+(cell, task, rep) slot, in the same file. `rebuildSummary()` dedupes this
+before anything else: a "complete" row (its own rescue, if any, either
+wasn't needed or actually ran to a `::rescore` verdict) beats an ABANDONED
+`needs_rescore` row (queued for a solo re-score that never got admitted);
+among rows of the same standing, the LAST one in file order — the most
+recent attempt — wins. The losing row is dropped entirely (never
+fail-open-counted alongside the winner) and `summary.md` prints a `RESUME
+DUPLICATE: N row(s)` banner naming the count, so a superseded duplicate is
+never silently invisible in the stats. This dedup runs on every
+`rebuildSummary()` call, whether or not `--resume` was ever used — a
+duplicate `run_id` from any other source is caught the same way.
+
+## Pre-run estimate and confirmation gate
+
+`bench/estimate.mjs` is a SHARED module (ADR 0003 slice 6's own git
+fix-commit-mining dry run reuses it) that turns a planned cell x task x rep
+grid into: wall time at the chosen `--concurrency`, tokens by class (input,
+cache-read, cache-write, output), an API-equivalent $ figure, and a
+weekly/5-hour usage-window points range (low-high). `scripts/benchmark.mjs`
+prints it both on `--dry-run` (plan only, zero model calls) and before ANY
+live run starts.
+
+**Where the numbers come from**, in priority order:
+
+1. **This machine's own local history** — `loadLocalHistory()` scans every
+   `results.jsonl` this machine already has under the plugin data dir
+   (`dataDir()/benchmarks/*/`, the same root `defaultResultsRoot()` writes
+   to), medianed per (task family, model, effort), excluding
+   `budget_exhausted`/`auth_error`/`collision` rows.
+2. **The shipped seed** (`bench/config/estimate-seed.json`) — medians
+   computed once from this operator's own 2026-09-23 pilot/hard/real/
+   architecture runs, committed as **numbers and the four generic family
+   labels only** (`easy-synthetic`, `hard-synthetic`, `real-bugfix`,
+   `architecture`) — no paths, pack, repo or project names, because this
+   repo is public. Used only when local history has nothing for that exact
+   cell yet (a fresh install).
+3. **A rough guess**, clearly labelled `"no local history, rough guess"`,
+   when neither has anything for that family at all.
+
+**Weekly-point anchors** (`bench/config/estimate-seed.json`'s
+`weeklyPointAnchors`) calibrate points-per-run for each family: 52 easy
+runs ≈ 1 point, 52 hard runs ≈ 2 points (64 opus-tier hard runs ≈ 3 points,
+used specifically for an Opus cell within `hard-synthetic`), 35 real
+bug-fix runs ≈ 4 points, and architecture calibration plus a head-to-head
+≈ 3 points. **These are upper bounds** — measured while other sessions were
+running concurrently — so `bench/estimate.mjs`'s `low` end is 60% of the
+anchor-derived `high` end, a documented round assumption, not a second
+measurement. Each cell's own rate is then scaled by its MEASURED `$` cost
+ratio to that family's sonnet/medium baseline — deliberately NOT the
+unconfirmed "Opus 5.5 = 1.5x Sonnet" in-app-tooltip figure, which is named
+(and marked unconfirmed) in the per-cell breakdown whenever an Opus cell's
+estimate is shown, but never used to compute it.
+
+**The 5-hour-window figure is `unknown` unless separately measured.** No
+`bench/config/estimate-seed.json` ships a `fiveHourPointAnchors` table today
+— only `weeklyPointAnchors`. An earlier version of `estimateRun()` printed
+the WEEKLY points figure again as the "5-hour-window" number, presented as a
+real measurement while actually being an unconfirmed guess dressed up as one
+(2026-09 adversarial review finding, Track B fix #4): the weekly and 5-hour
+windows meter usage over different reset periods, and nothing established
+they move at the same rate. `formatEstimate()` now prints
+`5-hour-window points: unknown (no measured 5-hour anchor configured)` until
+a real 5-hour anchor is measured and added to the seed under
+`fiveHourPointAnchors`, in the same `{ runs, points, note }` shape as
+`weeklyPointAnchors` — at which point `pointsPerRun({ ..., anchorsKey:
+"fiveHourPointAnchors" })` picks it up automatically.
+
+**The confirmation gate** (`shouldConfirm()`) always requires `--confirm`
+before a live run starts when: the estimate is above
+`--confirm-above-points` (default 2), any Fable cell is selected, or the
+projected weekly usage (`--weekly-usage-pct` + the estimate's high end)
+would reach/cross `--weekly-ceiling-pct`. The printed estimate includes a
+ready-to-paste cheaper `--cells` list (`suggestCheaperCellSet()`, Fable
+dropped first) when narrowing would help. `--dry-run` shows the identical
+estimate and gate state but never needs `--confirm` — it runs nothing
+regardless.
+
+**Live stop between batches**: with `--batch-by cell` and both
+`--weekly-usage-pct`/`--weekly-ceiling-pct` given, the ceiling is checked at
+every cell boundary; once reached, the script stops before starting the
+next cell, prints `CEILING REACHED` plus the partial `summary.md` path, and
+exits 0 (a clean stop, not an error).
+
+**This script cannot read plan usage itself.** `--weekly-usage-pct` is
+always supplied by the orchestrating skill/agent, which reads
+`mcp__ccd_session_mgmt__get_usage` and passes the reading through. Omit it
+and the estimate prints `unknown` for current/projected %, never a guess.
+
 ## No visible windows
 
 Every spawn passes `windowsHide: true` (`bench/runner.mjs`'s `runClaude()`)

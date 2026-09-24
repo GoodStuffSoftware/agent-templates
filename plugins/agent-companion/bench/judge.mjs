@@ -53,6 +53,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { classifyModel, classifyReferenceModel, isModelAvailable, effortSupported } from '../hooks/lib/context.mjs';
+import { removeDirWithRetry } from './tasks/common.mjs';
 
 // Bump whenever buildJudgePrompt()'s wording changes: every calibration
 // record is keyed on it, so a prompt change forces re-calibration rather than
@@ -286,7 +287,23 @@ export function parseVerdict(text) {
 // tools, no settings, no MCP, no session persistence, from an empty temp cwd.
 // `getBin` is injected (bench/runner.mjs's lazy resolver) to avoid a circular
 // import. Returns { text, cost_usd, is_error }.
-export function makeCliJudgeCaller(getBin) {
+// `removeDirImpl` is a test seam, same style as bench/runner.mjs's own
+// `removeDirImpl` on runOne()/rescoreOne() -- production callers always
+// omit it and get the real, retrying remover. Round 4 fix (2026-09 delta
+// review, Track B round 4 finding 2, MED): this used to clean up the vote's
+// temp cwd through bench/tasks/common.mjs's SYNCHRONOUS `rmrf()`, which
+// delegates its EPERM/EBUSY/ENOTEMPTY retry to `fs.rmSync`'s own
+// `maxRetries`/`retryDelay` -- a blocking, synchronous backoff wait that
+// stalls the event loop (and therefore every OTHER concurrently scheduled
+// run on Windows) for as long as the retry takes. `removeDirWithRetry()` is
+// the SAME retryable-code policy, but ASYNC -- its backoff `await`s a
+// `setTimeout` instead of blocking -- so a judge vote's own cleanup retry
+// never stalls a sibling run under `--concurrency > 1`. See
+// bench/runner.mjs's `runOne()`/`rescoreOne()`, which already went through
+// this async path; this was the one remaining synchronous cleanup call in
+// the concurrent run path (docs/BENCHMARK.md "Sandbox cleanup retry
+// (Windows)").
+export function makeCliJudgeCaller(getBin, { removeDirImpl = removeDirWithRetry } = {}) {
   return function callJudgeViaCli({ system, user, model, effort, maxBudgetUsd }) {
     return new Promise((resolve) => {
       const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-judge-'));
@@ -306,14 +323,19 @@ export function makeCliJudgeCaller(getBin) {
         cwd, env: { ...process.env }, encoding: 'utf8', maxBuffer: 1024 * 1024 * 16, timeout: 10 * 60 * 1000,
         windowsHide: true,
       }, (err, stdout) => {
-        try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
-        let json = null;
-        try { json = JSON.parse(stdout); } catch { json = null; }
-        resolve({
-          text: json ? String(json.result ?? '') : '',
-          cost_usd: json ? (json.total_cost_usd ?? null) : null,
-          is_error: json ? !!json.is_error : true,
-          error: err ? String(err.message || err) : null,
+        // removeDirWithRetry() NEVER throws/rejects (it returns
+        // { ok: false, code } on final failure) -- a judge vote's temp cwd
+        // leaking on a rare Windows failure is harmless, same acceptance as
+        // before this fix, so its result is intentionally not inspected.
+        removeDirImpl(cwd).then(() => {
+          let json = null;
+          try { json = JSON.parse(stdout); } catch { json = null; }
+          resolve({
+            text: json ? String(json.result ?? '') : '',
+            cost_usd: json ? (json.total_cost_usd ?? null) : null,
+            is_error: json ? !!json.is_error : true,
+            error: err ? String(err.message || err) : null,
+          });
         });
       });
     });

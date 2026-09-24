@@ -148,6 +148,12 @@ export function buildTaskFromPack(pack, { repoPath }) {
     __isPackTask: true,
     family: 'pack',
     rubric: pack.rubricText || null,
+    // Optional manifest.resources -- see FORMAT.md "Resource declarations".
+    // Undefined (not present at all) when the manifest omits it, which is
+    // the deliberate "no declaration" case bench/scheduler.mjs's
+    // resourcesConflict() treats as exclusive with other runs of this SAME
+    // pack id, never with a different pack.
+    resources: pack.resources,
     packSha256,
     judgeIdentity() {
       return packSha256;
