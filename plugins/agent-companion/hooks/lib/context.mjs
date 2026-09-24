@@ -400,9 +400,8 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 // spawn, and with no profile present the whole cost must stay one stat().
 const hasOwn = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
 const isPlainObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-function stateRootPath() {
-  return process.env.AGENT_COMPANION_STATE_DIR || join(claudeDir(), 'agent-companion');
-}
+// stateRootPath() (the side-effect-free state root) is the exported one
+// defined beside stateRoot() below; hoisted, so usable here.
 export function routingProfilePath() {
   return join(stateRootPath(), 'config', PROFILE_FILE);
 }
@@ -1368,8 +1367,16 @@ const STATE_ROOT_README = [
   'reverts them to defaults.',
 ].join('\n') + '\n';
 
+// The state root's PATH, with no side effect. stateRoot() below creates the
+// directory (and its README) on every call; a caller that must be able to
+// refuse BEFORE writing anything (memory-vault.mjs's ensureInit) resolves the
+// path through here instead.
+export function stateRootPath() {
+  return process.env.AGENT_COMPANION_STATE_DIR || join(claudeDir(), 'agent-companion');
+}
+
 export function stateRoot() {
-  const d = process.env.AGENT_COMPANION_STATE_DIR || join(claudeDir(), 'agent-companion');
+  const d = stateRootPath();
   try {
     mkdirSync(d, { recursive: true });
     const readme = join(d, 'README.txt');

@@ -13,8 +13,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { makeFixture, runScript } from './helpers.mjs';
 import { CHECKS } from '../scripts/checks.mjs';
+import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
 const DRIFT = CHECKS.find((c) => c.id === 'memory-vault-drift');
@@ -279,6 +281,34 @@ test('a corrupt status file does not stop a sync from running or recording', () 
     assert.equal(res.status, 0, `sync exited ${res.status}: ${res.stderr}`);
     assert.equal(res.json?.committed, true);
     assert.equal(readCache(fx).lastAttemptOutcome, 'ran');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// G5. status() now runs sync's read-only guards first and reports a vault that
+// fails them as refused. The drift check has to say so. Before the guards, it
+// reported whatever `git status` saw in that repository.
+test('memory-vault-drift FAILS, naming the guard, for a marker planted in a repository the plugin did not create', () => {
+  const fx = makeFixture();
+  try {
+    const vault = join(fx.stateDir, 'memory-vault');
+    mkdirSync(vault, { recursive: true });
+    const g = (args) => {
+      const r = spawnSync('git', args, { encoding: 'utf8', windowsHide: true, env: cleanGitEnv() });
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+    };
+    g(['init', '-q', '-b', 'main', vault]);
+    g(['-C', vault, 'config', 'user.name', 'owner']);
+    g(['-C', vault, 'config', 'user.email', 'owner@example.invalid']);
+    writeFileSync(join(vault, 'work.txt'), 'owner work\n');
+    g(['-C', vault, 'add', '-A']);
+    g(['-C', vault, 'commit', '-q', '-m', 'owner work']);
+    writeFileSync(join(vault, '.memory-vault.json'), JSON.stringify({ kind: 'agent-companion-memory-vault', schema: 1 }));
+    const r = runDrift({ vaultOn: true });
+    assert.equal(r.status, 'fail', JSON.stringify(r.findings));
+    assert.match(r.findings[0], /is refused by the memory-vault guards: refusing to write — .* is not a vault this plugin created/);
+    assert.equal(r.data?.dirty, undefined, 'no work-tree git call may run on a refused vault');
   } finally {
     fx.cleanup();
   }

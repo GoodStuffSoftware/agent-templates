@@ -20,6 +20,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as script from "../leak-check.mjs";
 import * as core from "../../plugins/agent-companion/scripts/lib/leak-scan-core.mjs";
+import { cleanGitEnv } from "../../plugins/agent-companion/scripts/lib/git-env.mjs";
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "leak-check.mjs");
 const BS = "\\";
@@ -175,10 +176,13 @@ for (const [name, m] of COPIES) {
 
 // --- CLI (scripts/leak-check.mjs only: the portable entry point) -----------
 
+// cleanGitEnv: the CLI's own `git ls-files` must list the fixture root, not a
+// repository named by an inherited GIT_DIR (see the F1 fixture below).
 function runCli(root, args, env = {}) {
   const res = spawnSync(process.execPath, [SCRIPT, "--root", root, ...args], {
     encoding: "utf8",
-    env: { ...process.env, LEAK_CHECK_DEV_ROOT: "", LEAK_CHECK_CLAUDE_PROJECTS: "", LEAK_CHECK_TOKEN_FILE: "", LEAK_CHECK_USER: "", ...env },
+    windowsHide: true,
+    env: cleanGitEnv(process.env, { LEAK_CHECK_DEV_ROOT: "", LEAK_CHECK_CLAUDE_PROJECTS: "", LEAK_CHECK_TOKEN_FILE: "", LEAK_CHECK_USER: "", ...env }),
   });
   return { code: res.status, out: res.stdout, err: res.stderr };
 }
@@ -221,9 +225,13 @@ test("F1 parity: plugin sweepRepo and scripts/leak-check.mjs agree with the same
   const base = tmp("f1repo");
   const bare = join(base, "origin.git");
   const work = join(base, "work");
-  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x.invalid" };
+  // cleanGitEnv, never a bare `...process.env`: this test runs from the
+  // pre-push hook, where git exports GIT_DIR, and an inherited GIT_DIR makes
+  // `git init <bare>`, `remote add`, `commit` and `push` act on THAT
+  // repository instead of these throwaway ones.
+  const gitEnv = cleanGitEnv(process.env, { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x.invalid" });
   const git = (args, cwd) => {
-    const r = spawnSync("git", args, { cwd, encoding: "utf8", env: gitEnv });
+    const r = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true, env: gitEnv });
     if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
   };
   git(["init", "--quiet", "--bare", "--initial-branch=main", bare]);
