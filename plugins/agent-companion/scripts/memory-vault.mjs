@@ -38,7 +38,7 @@ import {
 } from 'node:fs';
 import { join, dirname, relative, sep, resolve, isAbsolute } from 'node:path';
 import {
-  gitIsolated, enclosingGitRepo, samePath, isIdentityGitVar,
+  gitIsolated, isolatedWriteGitEnv, enclosingGitRepo, samePath, isIdentityGitVar,
 } from './lib/git-env.mjs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -269,14 +269,62 @@ function statusCacheFile({ create = true } = {}) {
 //   - Both also drop inherited GIT_AUTHOR_*/GIT_COMMITTER_* names, emails and
 //     dates (vaultEnv()), which would otherwise override the vault's own
 //     identity and the real commit time.
+//   - A call that can WRITE also drops GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM
+//     (isolatedWriteGitEnv()), so a config file an inherited variable points
+//     at cannot inject settings into what the vault stores. Which calls count
+//     as writes is decided by vaultGitWrites() below, from the subcommand:
+//     anything not known to be read-only is treated as a write.
+//   - Both run git's automatic housekeeping in the FOREGROUND
+//     (NO_DETACHED_HOUSEKEEPING). A commit can start `git maintenance run
+//     --auto` / `git gc --auto`, which by default detaches and keeps working
+//     on the vault's .git after the commit returns, so it could overlap the
+//     next sync. Undetached, it finishes inside the sync lock. Housekeeping
+//     itself stays on (gc.auto is NOT zeroed): the vault is long-lived and
+//     needs it.
+const NO_DETACHED_HOUSEKEEPING = Object.freeze([
+  '-c', 'maintenance.autoDetach=false', '-c', 'gc.autoDetach=false',
+]);
+
+// Subcommands the vault only ever uses to READ. `status` counts only with
+// --no-optional-locks (otherwise it refreshes and rewrites the index),
+// `hash-object` only without -w, and `config` only with a query flag.
+const READ_ONLY_SUBCOMMANDS = new Set(['rev-parse', 'log', 'rev-list', 'ls-files', 'diff', 'show', 'cat-file']);
+const CONFIG_QUERY = new Set(['--get', '--get-all', '--get-regexp', '--list', '-l']);
+
+// true unless `args` is recognisably read-only. The subcommand is the first
+// argument that is not a global option (`-c <kv>` and `-C <dir>` take a value).
+export function vaultGitWrites(args) {
+  const a = (args || []).map(String);
+  let i = 0;
+  for (; i < a.length; i++) {
+    if (a[i] === '-c' || a[i] === '-C') { i++; continue; }
+    if (!a[i].startsWith('-')) break;
+  }
+  const sub = a[i];
+  const rest = a.slice(i + 1);
+  if (READ_ONLY_SUBCOMMANDS.has(sub)) return false;
+  if (sub === 'status') return !a.slice(0, i).includes('--no-optional-locks');
+  if (sub === 'hash-object') return rest.includes('-w');
+  if (sub === 'config') return !rest.some((x) => CONFIG_QUERY.has(x));
+  return true;
+}
+
 function vaultEnv(env = process.env) {
   const out = {};
   for (const [k, v] of Object.entries(env || {})) if (!isIdentityGitVar(k)) out[k] = v;
   return out;
 }
 
+// The env a vault git child gets for `args`. gitIsolated() then applies
+// isolatedGitEnv() on top (repo-locating variables and config injection).
+export function vaultGitEnv(args, env = process.env) {
+  const out = vaultEnv(env);
+  return vaultGitWrites(args) ? isolatedWriteGitEnv(out) : out;
+}
+
 function git(args, opts = {}) {
-  return gitIsolated(args, { ...opts, env: vaultEnv(opts.env || process.env) });
+  const full = [...NO_DETACHED_HOUSEKEEPING, ...args];
+  return gitIsolated(full, { ...opts, env: vaultGitEnv(full, opts.env || process.env) });
 }
 
 // Relative hooksPath resolves against the vault's work tree. Never created:
@@ -303,11 +351,13 @@ function vaultGitDir(dir) {
 // core.fsmonitor=false: a global fsmonitor setting names a program (or starts
 // a daemon) that git would run against the vault. The vault needs none.
 function vaultGit(dir, args, opts = {}) {
-  return gitIsolated([
+  const full = [
+    ...NO_DETACHED_HOUSEKEEPING,
     '-c', 'core.longpaths=true', '-c', `core.hooksPath=${NO_HOOKS}`, '-c', 'core.fsmonitor=false',
     '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
     '-C', dir, '--git-dir=.git', '--work-tree=.', ...args,
-  ], { ...opts, env: vaultEnv(opts.env || process.env) });
+  ];
+  return gitIsolated(full, { ...opts, env: vaultGitEnv(full, opts.env || process.env) });
 }
 
 // Git for Windows finds a repository by checking <dir>\.git\objects against

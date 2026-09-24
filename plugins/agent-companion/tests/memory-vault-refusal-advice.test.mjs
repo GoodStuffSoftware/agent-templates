@@ -203,11 +203,11 @@ for (const change of [
       const before = commitCount(fx.vault);
       change[1](fx.vault);
       writeFileSync(join(fx.corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
-      // An identity for the unset case, so the commit itself can be made. It is
-      // passed only through a throwaway global config file.
-      const globalCfg = join(fx.dir, 'global.gitconfig');
-      writeFileSync(globalCfg, '[user]\n\tname = owner\n\temail = owner@example.invalid\n');
-      const res = runVault(fx, 'sync', { GIT_CONFIG_GLOBAL: globalCfg });
+      // An email for the unset case, so the commit itself can be made on a
+      // host with no global identity (CI). Vault writes ignore an env-named
+      // GIT_CONFIG_GLOBAL (0.29.2), so it comes from git's EMAIL fallback,
+      // which only applies when no user.email is configured anywhere.
+      const res = runVault(fx, 'sync', { EMAIL: 'owner@example.invalid' });
       assert.equal(res.status, 0, `a drifted identity must not refuse the vault:\n${res.stderr}`);
       assert.equal(res.json?.committed, true, res.stdout);
       assert.match(res.stderr, /note — .* is a vault this plugin created, but its local user\.email is/);

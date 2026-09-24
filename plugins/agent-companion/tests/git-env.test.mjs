@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { makeFixture } from './helpers.mjs';
 import {
   REPO_LOCATING_GIT_VARS, isRepoLocatingGitVar, cleanGitEnv, gitClean, enclosingGitRepo, samePath,
-  isolatedGitEnv, isConfigInjectionGitVar, isIdentityGitVar,
+  isolatedGitEnv, isConfigInjectionGitVar, isIdentityGitVar, isolatedWriteGitEnv, isConfigFileRedirectGitVar,
 } from '../scripts/lib/git-env.mjs';
 
 function git(args, cwd) {
@@ -114,6 +114,37 @@ test('isIdentityGitVar names exactly the author/committer name, email and date v
   }
   // The shared helpers still pass identity through; only the vault strips it.
   assert.equal(isolatedGitEnv({ GIT_AUTHOR_DATE: 'x' }).GIT_AUTHOR_DATE, 'x');
+});
+
+// 0.29.2: GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM name whole config files, so an
+// inherited one could inject any setting into a vault write.
+test('isolatedWriteGitEnv also drops GIT_CONFIG_GLOBAL/SYSTEM, in any case; isolatedGitEnv still keeps them', () => {
+  const input = {
+    PATH: '/bin',
+    GIT_DIR: '/elsewhere/.git',
+    GIT_CONFIG_PARAMETERS: "'core.hooksPath'='/elsewhere/hooks'",
+    GIT_CONFIG_GLOBAL: '/hostile/global',
+    git_config_system: '/hostile/system',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'a',
+    GIT_SSH_COMMAND: 'ssh',
+  };
+  const snapshot = { ...input };
+  const out = isolatedWriteGitEnv(input);
+  assert.deepEqual(input, snapshot, 'the input object must not be mutated');
+  assert.deepEqual(Object.keys(out).sort(), ['GIT_AUTHOR_NAME', 'GIT_CONFIG_NOSYSTEM', 'GIT_SSH_COMMAND', 'PATH']);
+  for (const k of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'Git_Config_Global', 'git_config_system']) {
+    assert.equal(isConfigFileRedirectGitVar(k), true, k);
+  }
+  for (const k of ['GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_GLOBALX']) {
+    assert.equal(isConfigFileRedirectGitVar(k), false, k);
+  }
+  // Overrides cannot smuggle one back in either.
+  assert.equal(isolatedWriteGitEnv({}, { GIT_CONFIG_GLOBAL: '/x' }).GIT_CONFIG_GLOBAL, undefined);
+  // Read paths are unchanged.
+  const read = isolatedGitEnv(input);
+  assert.equal(read.GIT_CONFIG_GLOBAL, '/hostile/global');
+  assert.equal(read.git_config_system, '/hostile/system');
 });
 
 test('cleanGitEnv defaults to process.env and returns a copy', () => {
