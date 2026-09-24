@@ -13,7 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -115,5 +115,105 @@ test('concurrent writers with every lock judged old never lose an update (owner 
     for (const c of codes) assert.equal(c.code, 0, c.err);
     assert.equal(Number(readFileSync(counter, 'utf8')), W * N, 'an update was lost: a live lock was broken');
     assert.deepEqual(readdirSync(s.dir).sort(), ['counter.txt', 'worker.mjs']);
+  } finally { s.cleanup(); }
+});
+
+// 0.29.0 final review F1: the put-back race. With 3 or more waiters racing a
+// crashed holder's lock, waiter C judged the dead lock stale; before C's
+// rename, another waiter B broke it and A created a live lock; C's rename
+// moved A's LIVE lock aside; before C put it back, D created a lock; the
+// put-back failed, and A and D both held the lock. Replayed deterministically
+// here: the helper's fs calls are wrapped so that B, A and D run at exactly
+// those instants, each through the helper's own acquireLock (B is a real
+// waiter following the same protocol, not a raw rename). Run in a child
+// process because the wrap patches node:fs for the whole process.
+test('F1: the put-back interleaving never leaves two holders (3+ waiters racing a crashed holder)', () => {
+  const s = scratch();
+  try {
+    const probe = join(s.dir, 'putback-probe.mjs');
+    writeFileSync(probe, `
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const [lock, deadPid] = process.argv.slice(2);
+      fs.writeFileSync(lock, JSON.stringify({ pid: Number(deadPid), token: 'crashed', at: Date.now() - 60000 }));
+      const realRename = fs.renameSync, realLink = fs.linkSync;
+      let mod; let stage = 0; const h = { A: null, B: null, D: null };
+      const opts = { waitMs: 0, staleMs: 1000 };
+      fs.renameSync = function (a, b) {
+        if (stage === 0 && String(b).endsWith('.stale')) {
+          stage = 1;
+          h.B = mod.acquireLock(lock, opts); // B: breaks the dead lock, if it may
+          h.A = mod.acquireLock(lock, opts); // A: takes the lock, if it is free
+          stage = 2;
+        }
+        return realRename(a, b);
+      };
+      fs.linkSync = function (a, b) {
+        if (stage === 2 && String(a).endsWith('.stale')) { stage = 3; h.D = mod.acquireLock(lock, opts); }
+        return realLink(a, b);
+      };
+      syncBuiltinESMExports();
+      mod = await import(${JSON.stringify(HELPER)});
+      h.C = mod.acquireLock(lock, { waitMs: 200, staleMs: 1000 });
+      const onDisk = fs.existsSync(lock) ? JSON.parse(fs.readFileSync(lock, 'utf8')).token : null;
+      const holders = Object.entries(h).filter(([, v]) => v).map(([k, v]) => ({ k, token: v.token }));
+      process.stdout.write(JSON.stringify({ stage, holders, onDisk }));
+    `);
+    const r = spawnSync(process.execPath, [probe, s.lock, String(deadPid())], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.ok(out.stage >= 1, 'the interleaving point was reached');
+    assert.ok(out.holders.length <= 1, `two holders at once: ${JSON.stringify(out)}`);
+    assert.equal(out.holders.length, 1, `somebody gets the lock once the dead one is broken: ${JSON.stringify(out)}`);
+    assert.equal(out.holders[0].token, out.onDisk, 'the one holder is the lock on disk');
+  } finally { s.cleanup(); }
+});
+
+// The same race under real concurrency: crashed holders leave dead-owner
+// locks while workers contend with a 50 ms stale time. Each critical section
+// takes an O_EXCL sentinel; an EEXIST means two holders overlapped. (The
+// deterministic replay above is the proof; this guards the whole protocol.)
+test('F1: workers racing crashed holders\' locks never overlap in the critical section', async () => {
+  const s = scratch();
+  try {
+    const child = join(s.dir, 'child.mjs');
+    writeFileSync(child, `
+      import { openSync, closeSync, unlinkSync } from 'node:fs';
+      import { join } from 'node:path';
+      import { acquireLock, releaseLock } from ${JSON.stringify(HELPER)};
+      const [dir, role, startAt] = process.argv.slice(2);
+      const lock = join(dir, 'x.lock'), cs = join(dir, 'cs.flag');
+      const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      while (Date.now() < Number(startAt)) { /* common start */ }
+      const opts = { waitMs: 8000, staleMs: 50 };
+      if (role === 'crash') { acquireLock(lock, opts); process.exit(0); }
+      const out = { overlaps: 0, got: 0 };
+      for (let i = 0; i < 5; i += 1) {
+        const h = acquireLock(lock, opts);
+        if (!h) continue;
+        out.got += 1;
+        let fd = null;
+        try { fd = openSync(cs, 'wx'); } catch (e) { if (e.code === 'EEXIST') out.overlaps += 1; }
+        sleep(3);
+        if (fd !== null) { closeSync(fd); for (let j = 0; j < 50; j += 1) { try { unlinkSync(cs); break; } catch { sleep(2); } } }
+        releaseLock(h);
+      }
+      process.stdout.write(JSON.stringify(out));
+    `);
+    let overlaps = 0; let got = 0;
+    for (let t = 0; t < 4; t += 1) {
+      const dir = join(s.dir, `t${t}`);
+      mkdirSync(dir);
+      const startAt = String(Date.now() + 700);
+      const run = (role) => new Promise((resolve) => {
+        const ch = spawn(process.execPath, [child, dir, role, startAt], { windowsHide: true });
+        let o = ''; ch.stdout.on('data', (d) => { o += d; });
+        ch.on('close', () => resolve(o));
+      });
+      const outs = await Promise.all([...Array(3)].map(() => run('crash')).concat([...Array(8)].map(() => run('work'))));
+      for (const o of outs.slice(3)) { const j = JSON.parse(o); overlaps += j.overlaps; got += j.got; }
+    }
+    assert.equal(overlaps, 0, 'two holders were in the critical section at once');
+    assert.ok(got > 0);
   } finally { s.cleanup(); }
 });
