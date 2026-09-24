@@ -293,27 +293,84 @@ function assertVaultGitDir(dir) {
 
 // A marker file is only a claim — one dropped into any repository (or copied
 // along with a directory) would otherwise hand that repository to sync. The
-// vault this file creates carries two things a planted marker does not: the
-// vault identity in its OWN config file, and a history rooted in the
-// initialize commit. Both are checked, read-only, before anything is written.
-function assertVaultIdentity(dir) {
-  const quiet = { stdio: ['ignore', 'pipe', 'ignore'] };
-  let email = '';
-  let roots = [];
-  try { email = vaultGit(dir, ['config', '--file', '.git/config', '--get', 'user.email'], quiet).trim(); } catch { /* unset */ }
+// vault this file creates is recognised by its HISTORY: every root commit is
+// the initialize commit. A planted marker does not bring that along. It is
+// checked read-only, before anything is written.
+//
+// The vault identity in the local config is NOT required. It is only the
+// author name on commits, and an owner may change it, for example to put their
+// own email on a vault they intend to push. Refusing such a vault turned a
+// working backup into one that the refusal told its owner to delete. A
+// changed identity is reported as a note, once per process, and the vault
+// stays in use.
+const QUIET = { stdio: ['ignore', 'pipe', 'ignore'] };
+const identityNoted = new Set();
+
+function vaultEmail(dir) {
+  try { return vaultGit(dir, ['config', '--file', '.git/config', '--get', 'user.email'], QUIET).trim(); } catch { return ''; }
+}
+
+function rootSubjects(dir) {
   try {
-    roots = vaultGit(dir, ['log', '--max-parents=0', '--format=%s', 'HEAD'], quiet)
+    return vaultGit(dir, ['log', '--max-parents=0', '--format=%s', 'HEAD'], QUIET)
       .split('\n').map((l) => l.trim()).filter(Boolean);
-  } catch { /* no commits */ }
+  } catch { return []; } // no commits
+}
+
+function assertVaultIdentity(dir) {
+  const email = vaultEmail(dir);
+  const roots = rootSubjects(dir);
   const rootsOk = roots.length > 0 && roots.every((s) => s === INIT_SUBJECT);
-  if (email !== VAULT_USER_EMAIL || !rootsOk) {
+  if (!rootsOk) {
     throw new Error(
       `refusing to write — ${dir} carries a memory-vault marker but is not a vault this plugin created `
-      + `(its own config ${email === VAULT_USER_EMAIL ? 'has' : 'lacks'} the vault identity; its history `
-      + `${rootsOk ? 'is' : 'is not'} rooted in "${INIT_SUBJECT}"). Nothing was changed. If this is `
-      + `your repository, remove the stray marker file. ${RELOCATE_ADVICE}`,
+      + `(its history ${roots.length ? 'is not' : 'has no commits, so it is not'} rooted in "${INIT_SUBJECT}"). `
+      + `Nothing was changed. ${keepOrClearAdvice(dir, { marker: true })}`,
     );
   }
+  if (email !== VAULT_USER_EMAIL && !identityNoted.has(resolve(dir))) {
+    identityNoted.add(resolve(dir));
+    process.stderr.write(
+      `memory-vault: note — ${dir} is a vault this plugin created, but its local user.email is `
+      + `${email ? `"${email}"` : 'unset'} rather than ${VAULT_USER_EMAIL}. The vault is still used; its `
+      + 'new commits carry the identity its config now names.\n',
+    );
+  }
+}
+
+// --- refusal advice: never "delete" a directory that holds history ---------
+// A refusal is read by a person or an agent, and both follow its advice. So a
+// refusal suggests deleting a directory ONLY when doing so cannot lose
+// anything: the directory's own .git (a real directory, not a link) has no
+// commits reachable from any ref or reflog, AND the directory holds nothing
+// besides that .git and the marker. For anything else, including history that
+// cannot be read, the advice is to move the directory aside by renaming it,
+// which keeps everything.
+function reachableCommits(dir) {
+  if (!isRealDir(vaultGitDir(dir))) return null;
+  try {
+    const n = Number(vaultGit(dir, ['rev-list', '--all', '--reflog', '--count'], QUIET).trim());
+    return Number.isFinite(n) ? n : null;
+  } catch { return null; }
+}
+
+function keepOrClearAdvice(dir, { marker = false } = {}) {
+  const extra = existsSync(dir) ? readdirSync(dir).filter((n) => n !== '.git' && n !== MARKER_NAME) : [];
+  const commits = reachableCommits(dir);
+  if (commits === 0 && extra.length === 0) {
+    return `It holds no commits and no files besides its empty .git${marker ? ` and ${MARKER_NAME}` : ''}, so `
+      + `deleting ${dir} and retrying loses nothing. ${RELOCATE_ADVICE}`;
+  }
+  const holds = [
+    commits === null ? 'a git history that could not be read' : commits > 0 ? `${commits} commit(s)` : '',
+    extra.length ? `files (${extra.slice(0, 5).join(', ')}${extra.length > 5 ? ', ...' : ''})` : '',
+  ].filter(Boolean).join(' and ');
+  const markerStep = marker
+    ? `If this is your own repository, the ${MARKER_NAME} file in it is stray: move that one file out of `
+      + 'the repository and keep everything else. '
+    : '';
+  return `KEEP this directory — it holds ${holds}. ${markerStep}To give the vault a fresh start here, move the `
+    + `directory aside by renaming it (for example to ${dir}.moved-aside) and retry. ${RELOCATE_ADVICE}`;
 }
 
 // A directory entry that is itself a directory — not a symlink or junction to
@@ -537,8 +594,7 @@ export function checkVaultLocation(dir = vaultDir()) {
     throw new Error(
       `refusing to initialize — ${dir} already holds a git repository but no memory-vault marker `
       + `(${MARKER_NAME}). Either an earlier initialization stopped part-way or this repository is not a `
-      + 'memory vault. Nothing was written. If it is a half-made vault, delete that directory and retry. '
-      + RELOCATE_ADVICE,
+      + `memory vault. Nothing was written. ${keepOrClearAdvice(dir)}`,
     );
   }
 
@@ -557,7 +613,8 @@ export function checkVaultLocation(dir = vaultDir()) {
     const sample = entries.slice(0, 5).join(', ') + (entries.length > 5 ? ', ...' : '');
     throw new Error(
       `refusing to initialize — ${dir} already exists and is not an agent-companion `
-      + `memory vault (found: ${sample}). Nothing was written. Move or remove it, or `
+      + `memory vault (found: ${sample}). Nothing was written. Keep what is there: move it aside by `
+      + `renaming it (for example to ${dir}.moved-aside) and retry, or `
       + `${RELOCATE_ADVICE.charAt(0).toLowerCase()}${RELOCATE_ADVICE.slice(1)}`,
     );
   }

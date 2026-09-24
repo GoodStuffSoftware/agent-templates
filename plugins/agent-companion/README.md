@@ -230,6 +230,15 @@ Windows cannot find a repository past that length, whatever `core.longpaths`
 says. Every git call the vault makes also ignores the caller's
 repo-locating `GIT_*` variables, inherited `-c` config, and hooks.
 
+The plugin recognises a vault it created by its history: every root commit
+is `memory-vault: initialize`. The identity in the vault's config does not
+count, so you can change the vault's `user.email`, for example before pushing
+it somewhere. The vault stays in use, and `sync` prints a one-line note. A
+refusal never tells you to delete a directory that holds commits or files. It
+tells you to move the directory aside by renaming it, which keeps everything
+in it. It suggests deleting only a directory with an empty `.git` and nothing
+else.
+
 **Moving the vault.** Set `AGENT_COMPANION_VAULT_DIR` to an absolute path to
 move the vault alone. This is the fix when the default location is refused,
 for example because `~/.claude` is itself a git repository:
