@@ -40,9 +40,9 @@
 
 import {
   readFileSync, writeFileSync, linkSync, unlinkSync, renameSync, openSync, writeSync, closeSync,
-  statSync, mkdirSync,
+  statSync, mkdirSync, readdirSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, basename, join } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
 
 // A breaker gives up (and the acquire loop retries) after this many dead
@@ -186,16 +186,51 @@ function breakStale(lockPath, seen, staleMs) {
   }
 }
 
+// Crash debris beside the lock, removed by the next process to take it once
+// older than DEBRIS_MAX_AGE_MS (0.29.0 final review F5): this helper's own
+// temp files (<lock>.<pid>.<hex>.new), moved stale locks (.stale) and claims
+// (<lock>.<id>.<k>.break), and the `.tmp` files of the files the lock guards
+// (<file>.<pid>.<hex>.tmp, the atomic-write temp names), passed as `debris`.
+// Taken under the lock and only when that old, so none can be in use: a
+// temp file lives for one write, a claim for one break, and a claim's lock
+// is long gone (while a lock is held, no claim on it can be taken).
+export const DEBRIS_MAX_AGE_MS = 10 * 60 * 1000;
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function sweepDebris(lockPath, debris) {
+  const dir = dirname(lockPath);
+  const own = escapeRe(basename(lockPath));
+  const res = [new RegExp(`^${own}\\.\\d+\\.[0-9a-f]+\\.(?:new|stale)$`), new RegExp(`^${own}\\.[0-9a-f]{16}\\.\\d+\\.break$`)];
+  for (const f of debris) {
+    if (dirname(f) === dir) res.push(new RegExp(`^${escapeRe(basename(f))}\\.\\d+\\.[0-9a-f]+\\.tmp$`));
+  }
+  let names;
+  try { names = readdirSync(dir); } catch { return; }
+  const now = Date.now();
+  for (const n of names) {
+    if (!res.some((re) => re.test(n))) continue;
+    const p = join(dir, n);
+    try {
+      const st = statSync(p);
+      if (st.isFile() && now - st.mtimeMs > DEBRIS_MAX_AGE_MS) unlinkSync(p);
+    } catch { /* gone, or busy: the next acquire retries */ }
+  }
+}
+
 // { handle } when acquired; { unusable: reason } when no lock can be created
 // at this path at all (answered at once: waiting cannot help); {} when
 // another holder kept it past waitMs.
-function acquire(lockPath, { waitMs, staleMs }) {
+function acquire(lockPath, { waitMs, staleMs, debris = [] }) {
   try { mkdirSync(dirname(lockPath), { recursive: true }); } catch { /* create reports it */ }
   const token = newToken();
   const deadline = Date.now() + waitMs;
   for (;;) {
     const got = tryCreate(lockPath, lockContent(token));
-    if (got === true) return { handle: { lockPath, token } };
+    if (got === true) {
+      sweepDebris(lockPath, debris);
+      return { handle: { lockPath, token } };
+    }
     if (got === null) return { unusable: 'the lock file cannot be created there' };
     const seen = readLock(lockPath);
     if (seen?.notFile) return { unusable: `something other than a lock file stands at the lock path (${seen.st.isDirectory() ? 'a directory' : 'not a regular file'})` };
@@ -210,8 +245,8 @@ function acquire(lockPath, { waitMs, staleMs }) {
 
 // Acquire: a handle { lockPath, token } or null when not acquired within
 // waitMs (or the lock cannot be created here at all).
-export function acquireLock(lockPath, { waitMs = 2000, staleMs = 5000 } = {}) {
-  return acquire(lockPath, { waitMs, staleMs }).handle || null;
+export function acquireLock(lockPath, { waitMs = 2000, staleMs = 5000, debris = [] } = {}) {
+  return acquire(lockPath, { waitMs, staleMs, debris }).handle || null;
 }
 
 // Release: unlink only while the lock still holds this handle's token. On
@@ -256,8 +291,8 @@ export class LockUnusableError extends Error {
 // be taken at this path, fn still runs, unlocked. Otherwise a timeout throws
 // LockTimeoutError and an unusable path LockUnusableError. fn must not exit
 // the process while holding the lock.
-export function withFileLock(lockPath, fn, { waitMs = 2000, staleMs = 5000, failOpen = true } = {}) {
-  const { handle = null, unusable } = acquire(lockPath, { waitMs, staleMs });
+export function withFileLock(lockPath, fn, { waitMs = 2000, staleMs = 5000, failOpen = true, debris = [] } = {}) {
+  const { handle = null, unusable } = acquire(lockPath, { waitMs, staleMs, debris });
   if (!handle && !failOpen) throw unusable ? new LockUnusableError(lockPath, unusable) : new LockTimeoutError(lockPath);
   try {
     return fn({ locked: !!handle });

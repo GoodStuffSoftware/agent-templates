@@ -59,11 +59,14 @@ function usage(msg) {
 
 function report(res, verb) {
   if (has('--json')) {
-    console.log(JSON.stringify({ ok: true, revision: res.revision, journal: res.entries.map((e) => ({ revision: e.revision, action: e.action, type: e.type })) }, null, 2));
+    console.log(JSON.stringify({ ok: true, revision: res.revision, journal: res.entries.map((e) => ({ revision: e.revision, action: e.action, type: e.type, ...(e.skipped ? { skipped: e.skipped } : {}) })) }, null, 2));
   } else {
     console.log(`${verb} — routing profile now at revision ${res.revision}.`);
     if (res.entries.length > 1) {
-      for (const e of res.entries.slice(0, -1)) console.log(`  (journalled first: revision ${e.revision} ${e.action})`);
+      for (const e of res.entries.slice(0, -1)) {
+        console.log(`  (journalled first: revision ${e.revision} ${e.action})`);
+        for (const s of e.skipped || []) console.log(`    the resolver skips the hand-edited ${s.type} row: ${s.reason}`);
+      }
     }
     if (!opt('routing_profile', true)) {
       console.log('  NOTE: the routing_profile option is OFF (kill switch) — the file is written but nothing routes through it until it is on.');

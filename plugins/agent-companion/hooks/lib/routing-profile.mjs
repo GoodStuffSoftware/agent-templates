@@ -144,9 +144,8 @@ export function typeShapeErrors(def) {
 // Nesting depth of JSON TEXT, measured without recursion (a deeply nested
 // value must not blow the stack here, the thing the check exists to
 // prevent). S2 review P7: a hand-edited profile nesting 20000 levels made
-// the writer throw an uncaught RangeError in JSON.stringify. Strings are
-// stripped by a native regex first, so the scan is over structure only: this
-// runs on the hook path, and an object walk cost ~0.9 ms cold (P9).
+// the writer throw an uncaught RangeError in JSON.stringify. A flat scan of
+// the text, not an object walk: an object walk cost ~0.9 ms cold (P9).
 export const MAX_PROFILE_DEPTH = 64;
 
 // The same limit on one parsed value (a row), walked without recursion.
@@ -160,16 +159,25 @@ export function valueDepthExceeds(v, limit) {
   }
   return false;
 }
+// One pass over the characters, skipping string contents (an escape skips
+// the character after it). No regex: a string-stripping regex overflowed the
+// regex engine's stack on a string value of a few MB, throwing a RangeError
+// (0.29.0 final review F5).
 export function textNestingDepth(text, limit = MAX_PROFILE_DEPTH) {
-  const t = String(text).replace(/"(?:[^"\\]|\\.)*"/g, '').replace(/[^[\]{}]/g, '');
+  const t = String(text);
   let d = 0;
   let max = 0;
+  let inString = false;
   for (let i = 0; i < t.length; i += 1) {
     const c = t.charCodeAt(i);
-    if (c === 123 || c === 91) {
+    if (inString) {
+      if (c === 92) i += 1; // backslash: the next character is escaped
+      else if (c === 34) inString = false;
+    } else if (c === 34) inString = true;
+    else if (c === 123 || c === 91) {
       d += 1;
       if (d > max) { max = d; if (max > limit) return max; }
-    } else d -= 1;
+    } else if (c === 125 || c === 93) d -= 1;
   }
   return max;
 }

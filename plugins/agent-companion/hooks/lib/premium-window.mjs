@@ -22,7 +22,7 @@ export const STATE_LOCK_WAIT_MS = 2000;
 export const STATE_LOCK_STALE_MS = 1000;
 export function withStateLock(file, fn) {
   return withFileLock(`${file}.lock`, () => fn(), {
-    waitMs: STATE_LOCK_WAIT_MS, staleMs: STATE_LOCK_STALE_MS, failOpen: true,
+    waitMs: STATE_LOCK_WAIT_MS, staleMs: STATE_LOCK_STALE_MS, failOpen: true, debris: [file],
   });
 }
 

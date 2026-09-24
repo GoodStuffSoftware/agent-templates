@@ -160,6 +160,30 @@ test('F3: a directory at the lock path is reported at once as unusable, never wa
   } finally { s.cleanup(); }
 });
 
+// 0.29.0 final review F5: crash debris (a temp file from a crash mid-create,
+// a moved stale lock, a dead breaker's claim, a guarded file's atomic-write
+// temp) used to accumulate for ever. The next process to take the lock
+// removes what is older than DEBRIS_MAX_AGE_MS, and nothing else.
+test('F5: the next acquire sweeps old crash debris beside the lock, and only that', async () => {
+  const s = scratch();
+  try {
+    const { DEBRIS_MAX_AGE_MS } = await import(HELPER);
+    assert.equal(typeof DEBRIS_MAX_AGE_MS, 'number');
+    const { utimesSync } = await import('node:fs');
+    const guarded = join(s.dir, 'state.json');
+    const old = new Date(Date.now() - DEBRIS_MAX_AGE_MS - 60_000);
+    const debris = ['x.lock.4242.0a1b2c3d.new', 'x.lock.4242.0a1b2c3d.stale', 'x.lock.0123456789abcdef.1.break', 'state.json.4242.9f8e7d6c.tmp'];
+    const keep = ['x.lock.notes', 'other.json.4242.9f8e7d6c.tmp', 'state.json', 'state.json.4242.9f8e7d6c.tmp.bak'];
+    for (const n of [...debris, ...keep]) { writeFileSync(join(s.dir, n), 'x'); utimesSync(join(s.dir, n), old, old); }
+    const fresh = ['x.lock.4243.0a1b2c3e.new', 'state.json.4243.9f8e7d6d.tmp'];
+    for (const n of fresh) writeFileSync(join(s.dir, n), 'x');
+    const h = acquireLock(s.lock, { waitMs: 200, debris: [guarded] });
+    assert.ok(h);
+    assert.deepEqual(readdirSync(s.dir).sort(), [...keep, ...fresh, 'x.lock'].sort());
+    releaseLock(h);
+  } finally { s.cleanup(); }
+});
+
 // 0.29.0 final review F1: the put-back race. With 3 or more waiters racing a
 // crashed holder's lock, waiter C judged the dead lock stale; before C's
 // rename, another waiter B broke it and A created a live lock; C's rename
