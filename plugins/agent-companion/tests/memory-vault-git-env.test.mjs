@@ -741,6 +741,40 @@ test('G7: the README documents setting AGENT_COMPANION_VAULT_DIR persistently fo
   assert.match(section, /setx AGENT_COMPANION_VAULT_DIR/);
 });
 
+// Round-2 info note. A commondir planted in the vault's own real .git makes
+// git read and write the named repository's refs and objects. The history
+// check alone does not catch it when the named repository is ANOTHER vault,
+// because that one is rooted in the initialize commit too, so the sync
+// committed into it.
+for (const cmd of ['sync', 'status']) {
+  test(`${cmd} refuses a vault whose .git carries a planted commondir, leaving the named repository byte-identical`, () => {
+    const fx = makeFixture();
+    try {
+      const corpus = makeCorpus(fx.dir);
+      const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
+      const other = join(fx.dir, 'other-vault');
+      const made = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env: { ...env, AGENT_COMPANION_VAULT_DIR: other }, timeout: 60000 });
+      assert.equal(made.status, 0, made.stderr);
+      const first = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+      assert.equal(first.status, 0, first.stderr);
+      const vault = join(fx.stateDir, 'memory-vault');
+      writeFileSync(join(vault, '.git', 'commondir'), `${join(other, '.git').replace(/\\/g, '/')}\n`);
+      writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
+      const treeBefore = hashTree(join(other, '.git'));
+      const headBefore = git(['-C', other, 'rev-parse', 'HEAD']);
+
+      const res = runScript(SCRIPT, [cmd, '--json'], { cwd: fx.dir, env, timeout: 60000 });
+
+      assert.equal(git(['-C', other, 'rev-parse', 'HEAD']), headBefore, 'the named repository gained a commit');
+      assert.deepEqual(hashTree(join(other, '.git')), treeBefore, 'the named repository .git must be byte-identical');
+      assert.notEqual(res.status, 0, `${cmd} must refuse: ${res.stdout}`);
+      assert.match(res.stderr, /has a commondir file/);
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
+
 test('an existing vault keeps working when its path is inside a repository (it created itself)', () => {
   const fx = makeFixture();
   try {

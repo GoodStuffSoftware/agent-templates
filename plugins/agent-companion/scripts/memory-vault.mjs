@@ -367,6 +367,16 @@ function assertVaultGitDir(dir) {
       + `junction, resolving to ${realOrResolved(expected)}). Nothing was changed.`,
     );
   }
+  // A real .git directory can still borrow another repository's refs and
+  // objects: a `commondir` file makes git treat it as a linked worktree's git
+  // dir, and every commit then lands in the repository it names. The vault
+  // never has one.
+  if (existsSync(join(expected, 'commondir'))) {
+    throw new Error(
+      `refusing to write — ${expected} has a commondir file, so git would read and write another `
+      + "repository's refs and objects through it, not the vault's own. Nothing was changed.",
+    );
+  }
 }
 
 // A marker file is only a claim — one dropped into any repository (or copied
