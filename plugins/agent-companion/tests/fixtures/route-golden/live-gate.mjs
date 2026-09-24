@@ -59,6 +59,12 @@ export async function stageResolver({ contextSource, configText }) {
   mkdirSync(join(dir, 'config'), { recursive: true });
   writeFileSync(join(dir, 'hooks', 'lib', 'context.mjs'), contextSource);
   writeFileSync(join(dir, 'config', 'model-tiers.json'), configText);
+  // The current resolver imports sibling modules (./routing-profile.mjs);
+  // stage each one it names from the real hooks/lib, byte for byte. The
+  // vendored reference names none, so it is staged alone as before.
+  for (const [, rel] of contextSource.matchAll(/from\s+['"]\.\/([\w.-]+\.mjs)['"]/g)) {
+    writeFileSync(join(dir, 'hooks', 'lib', rel), readFileSync(join(HERE, '..', '..', '..', 'hooks', 'lib', rel), 'utf8'));
+  }
   const mod = await import(pathToFileURL(join(dir, 'hooks', 'lib', 'context.mjs')).href);
   return { dir, mod, cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 3 }) };
 }

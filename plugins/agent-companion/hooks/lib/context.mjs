@@ -918,10 +918,15 @@ export function resolveRoute({
 
   // --- Pick the winning layer ---------------------------------------------
   let won = null;
+  // Layer 1 is decided first (so its skip reasons lead), but applied after
+  // the trial block below, which keeps that block exactly as slice 1 wrote
+  // it: the trial is still evaluated and explained, and is shadowed when a
+  // profile row wins.
+  let profWon = null;
   if (profileMayWin()) {
     profEntry.status = 'won';
     const e = profRow.effort || '';
-    won = {
+    profWon = {
       layer: 'profile',
       model: profRow.model,
       effort: e,
@@ -940,9 +945,7 @@ export function resolveRoute({
       trial: null,
     };
   }
-  if (ov && won) {
-    trialEntry.status = 'shadowed';
-  } else if (ov) {
+  if (ov) {
     if (!asIs) {
       trialEntry.status = 'skipped';
       skipped.push({ layer: 'trial', reason: departNote });
@@ -971,6 +974,10 @@ export function resolveRoute({
         };
       }
     }
+  }
+  if (profWon) {
+    if (won) trialEntry.status = 'shadowed';
+    won = profWon;
   }
   if (!won) {
     gridEntry.status = 'won';
