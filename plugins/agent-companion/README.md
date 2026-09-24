@@ -396,8 +396,24 @@ hand-written symptom-only report, a hidden test, and two base64-encoded git
 refs — a plaintext SHA is exactly the shape this repo's own
 `scripts/leak-check.mjs` bans.
 
+**Results carry their own uncertainty and provenance.** Summaries report
+pass@1 and pass@k with 95% Wilson intervals per cell and task family, and
+flag groups too small to separate. Every result row records the CLI version,
+the requested and resolved model, the effort, and content hashes of the
+task. An **optional rubric judge** grades design quality the hidden test
+cannot see. It is a separate score, never merged into pass/fail. It is blind,
+votes 3 times and passes on 2 of 3, must be different from and at least as
+strong as the model under test, and is refused until it has been
+**calibrated** against a task's real fix (must pass) and known-bad variants
+(must fail).
+
+**Routing canaries** (`evals/`) check that a live session consults the
+routing guidance and lands on the table's answer. They are a small
+`claude plugin eval` suite, run on demand and never automatically.
+
 See [`docs/BENCHMARK.md`](docs/BENCHMARK.md) for consolidated lessons
-(ceiling effects, the fairness rule, known CLI flag gaps) and
+(ceiling effects, statistics, the fairness rule, the rubric judge, the
+routing eval suite, known CLI flag gaps) and
 [`skills/model-benchmark/SKILL.md`](skills/model-benchmark/SKILL.md) for the
 operating procedure.
 

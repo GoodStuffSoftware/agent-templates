@@ -25,3 +25,15 @@ test('the generated table includes the effort ladder and reference-model section
   assert.match(out, /## Reference models \(older pinned ids — not routable\)/);
   assert.match(out, /opus-4-6/);
 });
+
+test('skills/recommend/SKILL.md carries a fresh generated task-type block (works with no shell)', () => {
+  const block = execFileSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'routing-table.mjs'), '--task-type-block'], {
+    encoding: 'utf8', cwd: PLUGIN_ROOT, timeout: 15000,
+  }).replace(/\r\n/g, '\n').trimEnd();
+  const skill = readFileSync(join(PLUGIN_ROOT, 'skills', 'recommend', 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+  assert.ok(skill.includes(block), 'recommend skill block is stale — run: node scripts/routing-table.mjs --sync-skill skills/recommend/SKILL.md');
+  // The canaries in evals/ depend on these two rows.
+  assert.match(block, /\| `debug-root-cause` \| `opus\/low`/);
+  assert.match(block, /\| `novel-design` \| `opus\/high`/);
+  assert.doesNotMatch(block, /\| `fable/, 'fable is never a route');
+});

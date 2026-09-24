@@ -60,6 +60,36 @@ nothing fails. This is why the `real-*` tasks exist: real capability
 separation needed tasks mined from actual bug-fix commits, not synthetic
 fixtures both the model and its training data are well-practiced at.
 
+## Statistics: pass@1, pass@k, and 95% intervals
+
+**Single-run results cannot separate close settings.** On the 2026-09-23 real
+tasks, Opus 5.5 at high passed 5/7 while Opus 5.5 at low passed 7/7. That read
+like "low beats high". It was variance: the 95% intervals are [36-92%] and
+[65-100%], and they overlap. Use **at least 3 reps** before comparing two
+adjacent effort levels (or two adjacent models), and compare intervals, not
+point estimates.
+
+`rebuildSummary()` (`bench/runner.mjs`, maths in `bench/stats.mjs`) reports
+this directly:
+
+- **pass@1** is the mean single-trial pass rate across reps (the number older
+  summaries called `pass_rate`; `summary.json` keeps `pass_rate` as an alias).
+  This is the SWE-bench-family label, so our numbers can be read next to
+  public ones.
+- **pass@k**, with k = the reps actually run, is the unbiased estimator
+  `1 - C(n-c, k) / C(n, k)`. At k = n it reads "passed at least once in k
+  tries". A large gap between pass@1 and pass@k means the cell is capable
+  but inconsistent.
+- **95% CI** is the Wilson score interval. It stays inside [0, 1] and behaves
+  at 0/n and n/n, which is where saturated cells sit.
+- A **cell x task-family** rollup (`summary-by-family.json`, plus the "By
+  task family" table in `summary.md`) pools each cell's runs per family
+  (easy / hard / real / pack). Per-task n is usually 1-3, too small for an
+  interval to mean anything. A family group with **fewer than 5 runs** is
+  marked **"n too small to separate"**. pass@1 there is the mean of per-task
+  rates, the interval is over the pooled runs, and pass@k uses k = the
+  smallest rep count among the family's tasks.
+
 ## The fairness rule: re-score vs re-run
 
 A held-out hidden test may only assert behavior the report/prompt states or
@@ -121,6 +151,28 @@ answer texts diffed and found byte-identical. Conclusion: real convergent
 behavior on a saturated task (see "Ceiling effects" above), not a broken
 flag.
 
+## Reproducibility metadata on every row
+
+When a score moves, the cause is one of three things: the harness changed,
+the task changed, or the model changed. Every `results.jsonl` row (including
+the error row written when `runOne()` itself throws) records enough to tell
+them apart:
+
+| Field | Tells you |
+|---|---|
+| `claude_cli_version` | the harness (`claude --version`, asked once per process; `null` if it could not be read, never guessed) |
+| `requested_model` / `resolved_model` | whether an alias floated to a different snapshot (`model_mismatch`) |
+| `requested_effort` | the effort asked for (proof it applied is still the transcript, above) |
+| `task_family` | easy / hard / real / pack, for the family rollup |
+| `task_prompt_sha256` | the exact prompt text the model received |
+| `task_fixture_sha256` | the starting sandbox tree, hashed after `setup()` and before the model runs |
+| `task_pack_sha256` | for a task pack: its manifest, brief (`report.md`), held-out test and rubric |
+| `task_rubric_sha256` | the rubric, when the task has one |
+| `task_content_sha256` | all of the above combined, one value to compare across batches |
+
+Two batches with the same `task_content_sha256` and `claude_cli_version`
+differ only in the model and in sampling.
+
 ## Known flag gaps in this CLI generation
 
 - **No `--max-turns` flag exists** (checked via `claude -p --help`) — older
@@ -177,16 +229,32 @@ actual `runClaude()` call, not at module import) specifically so
 `CELLS`/`TASKS`/`parseArgs`/`defaultResultsRoot()` — without a `claude`
 binary needing to be resolvable at all.
 
-## Never park a batch on a background notification
+## Operating rules for a benchmark agent
 
-Run cells in the foreground, or poll the results file directly. A
-notification tells you a batch finished, not that its output is sane —
-always check `results.jsonl`/`summary.md` yourself before treating a batch
-as good. `scripts/benchmark.mjs --batch-by cell` writes a
-`.batch-state.json` marker and **exits after each cell** for exactly this
-reason: it hands control back to the driving agent, which should read
-`get_usage` and the just-written `summary.md` before deciding whether to
-`--resume`.
+These rules come from running the benchmark. The operator observed each
+failure at least once.
+
+- **Run every cell in the FOREGROUND.** Do not start background jobs, and do
+  not arm monitors or watchers that notify on completion. Each notification
+  wakes the lead session, and that wake re-reads the lead's whole context: an
+  expensive turn that buys nothing a foreground run would not have given you.
+  A notification also only says a batch finished, not that its output is
+  sane. `scripts/benchmark.mjs --batch-by cell` writes a `.batch-state.json`
+  marker and **exits after each cell** for exactly this reason: control goes
+  back to the driving agent, which reads `get_usage` and the just-written
+  `summary.md`, then decides whether to `--resume`.
+- **Never `git stash`.** The stash stack is shared across every worktree and
+  every concurrent session on the machine, so a `stash pop` can apply another
+  session's work. To set changes aside, make a WIP commit, or leave
+  uncommitted work where it is.
+- **Budget caps scale with model price.** Every per-task `maxBudgetUsd` and
+  the global `--max-budget-usd` are in Sonnet dollars. The runner scales them
+  by the cell's price (see "Known flag gaps" below). Never hand-tune a cap
+  down for a pricier model: that is the unit error that cut Fable off
+  mid-task on 7 runs.
+- **Use at least 3 reps to compare adjacent settings.** One run each cannot
+  separate them. See "Statistics" above: Opus 5.5 high 5/7 vs low 7/7 was
+  variance.
 
 ## `claim_honest`: useful, not reliable on long answers
 
@@ -203,6 +271,96 @@ trustworthy at all — see `bench/PROCESS-NOTES.md` lesson 4 for the exact
 false-negative classes found (a "0 fail" success statement matching the bare
 word "fail"; "false-positive" matching bare "false"; methodology text like
 "did not run any code" matching a negation phrase).
+
+## Rubric judge (optional, a separate score)
+
+A hidden test answers "does it work". It cannot say whether the change fixed
+the real cause or special-cased the test, stayed in scope, or added needless
+complexity. Once every cell passes (the default outcome, see "Ceiling
+effects"), those are the only quality differences left.
+`bench/judge.mjs` grades a run's **change** (a unified diff of the sandbox,
+before -> after) against a **rubric that lives in the task definition**: a
+task pack's `rubric.md`, or a built-in task's `rubric` string. It is off
+unless you pass `--judge-model`, and it only runs on tasks that have a rubric.
+
+The rules, each enforced in code and covered by `tests/bench-judge.test.mjs`
+(every test stubs the judge; nothing there calls a model):
+
+1. **Different, and at least as strong.** The judge may not be the model
+   under test. Its tier rank must be at least the tested model's. A
+   superseded dated id (e.g. `claude-opus-5`) never judges the current model
+   of its own tier. Unknown or unavailable models are refused because their
+   strength cannot be established. The check runs against every selected
+   cell before the batch starts, and again against the RESOLVED model after
+   each run.
+2. **Three independent calls; pass on 2 of 3.** Each vote is a fresh
+   `claude -p` with no tools (`--tools ""`), no settings, no MCP, no session
+   persistence, and an empty working directory. This mirrors
+   `claude plugin eval`'s `llm` grader. A vote with no parseable verdict is
+   recorded as `null`, never guessed. With fewer than 2 readable votes the
+   run's `judge_pass` is `null`, and it is excluded from the judge rate.
+3. **Reason before the verdict.** The prompt asks for `REASONING:` first and a
+   single `VERDICT: PASS|FAIL` line last. Only the last verdict line counts.
+4. **Blind.** The prompt builder takes only the task brief, the rubric, the
+   diff and the candidate's final message. It has no parameter for model,
+   cell, effort, rep, cost or timing. Self-identification ("as Claude Opus
+   ...", model ids, `Co-Authored-By` lines) is scrubbed from the final
+   message. In the diff only attribution lines are scrubbed, because code
+   may legitimately name models. Two cells that make the same change produce
+   byte-identical judge input.
+5. **Capped.** Effort is limited to `low|medium|high` (default `medium`). The
+   per-vote budget defaults to $0.30 with a hard cap of $1.00, both in Sonnet
+   dollars and scaled by the judge's price like every task budget.
+   **Temperature is never sent.** Current judge-eligible models (Sonnet 5,
+   Opus 5/5.5, Fable 5/5.1) reject sampling parameters with an HTTP 400, and
+   `claude -p` exposes none. Setting one is refused rather than silently
+   ignored. Variance is controlled by fixed effort and the 3-vote majority.
+6. **Logged separately.** The judge fills its own columns: `judge_pass`,
+   `judge_votes`, `judge_invalid_votes`, `judge_cost_usd`, `judge_model`,
+   `judge_effort`, `judge_rubric_sha256`, `judge_prompt_sha256` and
+   `judge_input_truncated`. `summary.md` gets its own "Rubric judge" table.
+   Nothing ever reads or writes `pass`. pass@1 is always the hidden test's
+   verdict alone.
+
+**Calibration gate: an uncalibrated judge is never used.** A judge is trusted
+on a task only after it has scored that task's **known-good** as PASS and
+every **known-bad** as FAIL. For a task pack:
+
+- The known-good is the real fix commit's change (parent -> fix).
+- The known-bad cases are the unchanged parent, plus any **planted broken
+  variants** from `manifest.judgeCalibration.plantedBad`. Each variant is a
+  small find/replace applied to the fix. The example pack plants two: one
+  scans tracked files only, the other special-cases a filename. Both would
+  still pass a lenient hidden test, which is exactly the case the judge
+  exists for.
+- Every case carries the same neutral final message, so the judge can only
+  tell good from bad by the change itself.
+
+The trust record lives in `<data dir>/benchmarks/judge-calibrations.json`
+(override with `--judge-calibrations`). It is keyed on the task's content
+(pack hash), the rubric, the judge model, the judge effort and the prompt
+template version. Change any of them and the judge must be re-calibrated. A
+judge that passes everything, or fails everything, is written down as
+**untrusted** and is never honoured.
+
+```bash
+# 1. calibrate (real judge calls: 3 votes x (1 good + N bad) per rubric task)
+node scripts/benchmark.mjs --calibrate-judge --judge-model claude-opus-5-5 \
+  --task-pack bench/task-packs/examples/leak-check-gitignore-fix --pack-repo <repo> \
+  --tasks leak-check-gitignore-fix
+# 2. plan: shows the judge, the judged tasks, and anything that would be refused
+node scripts/benchmark.mjs --dry-run --cells sonnet-medium,sonnet-high \
+  --judge-model claude-opus-5-5 --task-pack ... --pack-repo <repo> --tasks leak-check-gitignore-fix
+# 3. run: refuses to start (exit 2) if any cell is ineligible or any rubric task is uncalibrated
+node scripts/benchmark.mjs --cells sonnet-medium,sonnet-high --judge-model claude-opus-5-5 ...
+```
+
+Refusals happen before any model call. `runOne()` also refuses on its own
+(error code `JUDGE_REFUSED`), and both main loops abort the batch on that code
+instead of logging a `pass:false` row. A misconfigured judge can never drag a
+cell's pass rate down. Note the consequence: a Fable 5.1 cell has no eligible
+judge on this account (Mythos is unavailable), so judge-graded batches stop
+at Opus.
 
 ## Sandbox isolation
 
@@ -351,3 +509,67 @@ its false-negative rate on hedged/long answers is a known, only partially
 fixed limitation (see above). `scripts/benchmark.mjs`'s generated
 `summary.md`/`summary.json` label it this way already — do not strip that
 label when hand-editing a summary for a report.
+
+## Routing eval suite (`claude plugin eval`)
+
+The model x effort grid measures what a cell can do once it has been chosen.
+It does not measure whether a live session actually **consults the routing
+guidance and lands on the right cell** when someone asks in plain language.
+That is a with-plugin vs without-plugin question, which is exactly what
+`claude plugin eval` is built for. It cannot sweep the grid itself (one
+pinned `--model` per invocation, no `--effort`), so the two harnesses stay
+separate.
+
+`evals/` holds five routing canaries:
+
+| Case | Asks | Passes when |
+|---|---|---|
+| `debug-routes-opus-low` | model/effort for a root-cause hunt | the final `ROUTE:` line is opus/low (the debug-root-cause trial override) |
+| `architecture-routes-opus-high` | model/effort for a new message-bus design | `ROUTE:` is opus/high (the novel-design trial override; the plain grid says opus/max) |
+| `trivial-read-not-fable` | model for "read the README, get the license", with a nudge toward Fable | a `ROUTE:` line names haiku/sonnet/opus, and never fable |
+| `fable-request-needs-warrant` | what a Fable spawn brief needs | the reply gives the `WARRANT:` line |
+| `unrelated-request-no-routing` | an unrelated question (HTTP 418) | it is answered, and the recommend skill does NOT fire |
+
+Graders are free (no judge model): `regex` over the final message, plus
+`tool_used: Skill` for the recommend skill. The **two-arm fairness rule**
+applies. A "the skill fired" grader can never pass without the plugin, so in
+a with/without run it is a plugin-fired indicator only, excluded from the
+score in both arms. The one grader that needs to count in both arms, the
+negative "must NOT fire" check, carries `arm: both` (with `min: 0`,
+`max: 0`), which is fair because the baseline cannot fire it either.
+
+**Found by this suite (2026-09-24):** in an eval sandbox the session has no
+shell and cannot read outside its working directory. The recommend skill's
+only routes to data (`recommend.mjs` and `docs/ROUTING.md`) were therefore
+unreachable, and the architecture canary answered opus/xhigh. The skill now
+carries a generated task-type table (`scripts/routing-table.mjs
+--sync-skill`, checked by the `routing-doc` audit check and
+`tests/routing-table-docs.test.mjs`).
+
+First real runs, `--runs 1`, Sonnet 5 under test, two arms (with/without):
+
+- Before the fix: 4/5 cases passed, mean Δ +0.30, $1.09.
+- After the fix: debug and architecture both pass with the plugin. Single
+  runs of the other cases varied (a with-arm run skipped the skill once),
+  which is why CI should use the default 3 runs and a threshold below 1.0.
+  Total $0.77.
+
+**Run it (suggested; never automatic):**
+
+```bash
+cd plugins/agent-companion
+claude plugin eval . --trust-plugin --json results.json --threshold 0.8 \
+  --model claude-sonnet-5 --no-publish --max-cost-usd 3
+```
+
+5 cases x 3 runs x 2 arms = 30 short runs, roughly $2-3 at list price. Exit
+codes: 0 pass, 1 below threshold or load error, 2 partial (cost ceiling hit
+or credential rejected). Pin `--model` so a model rollout is not mistaken for
+a plugin regression. Use `--ablation none` to halve the cost when you do not
+need Δ, and `--case <name> --runs 1` to iterate on one canary. Leave
+`partial: true` results out of any trend. Results land in `evals/results/`,
+which is gitignored. The calibration scout suggests this suite after a
+routing-relevant signal (see `skills/calibration-scout/SKILL.md`); it never
+runs it on its own. As a CI job, it needs a Claude Code install and
+`ANTHROPIC_API_KEY`. Keep it opt-in (manual dispatch), not on every push:
+each run is a real model call.

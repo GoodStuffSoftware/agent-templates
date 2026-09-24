@@ -2,6 +2,78 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.28.0 — 2026-09-24
+
+Folds proven evaluation practice into the model x effort benchmark. It
+compares against skill-creator's eval mode, `claude plugin eval`,
+Anthropic's develop-tests guidance, and SWE-bench practice.
+
+### Added
+
+- **Confidence intervals and pass@k** (`bench/stats.mjs`,
+  `rebuildSummary()`). Each cell x task row and a new cell x task-family
+  rollup (`summary-by-family.json`, plus a table in `summary.md`) carry
+  **pass@1** (the mean single-trial rate, formerly labelled `pass_rate`,
+  which `summary.json` keeps as an alias), a **95% Wilson interval**, and
+  **pass@k** with k = reps (the unbiased estimator). Family groups under 5
+  runs are flagged **"n too small to separate"**.
+- **Reproducibility metadata on every `results.jsonl` row**, including the
+  row written when `runOne()` throws: `claude_cli_version`, requested and
+  resolved model, requested effort, `task_family`, and sha256 hashes of the
+  prompt, the starting fixture tree, the task pack (manifest, brief,
+  held-out test, rubric), the rubric, and all of them combined
+  (`task_content_sha256`).
+- **Optional rubric judge** (`bench/judge.mjs`, `--judge-model`) for design
+  quality a hidden test cannot see. The rubric lives in the task (a pack's
+  `rubric.md`). The judge must be different from, and at least as strong
+  as, the model under test; it is checked per cell before the batch and
+  against the resolved model after each run. Three independent no-tool
+  `claude -p` calls, pass on 2 of 3, reasoning before the verdict. Blind:
+  no producer channel exists, and self-identification is scrubbed. Effort
+  and per-vote budget are capped, and temperature is never sent (current
+  models reject it). Results go to separate `judge_*` columns and their own
+  summary table, never merged into pass/fail.
+- **Judge calibration gate** (`--calibrate-judge`). A judge is trusted on a
+  task only after it passes the pack's real fix commit and fails both the
+  unchanged parent and every planted broken variant
+  (`manifest.judgeCalibration.plantedBad`). The trust record is keyed on
+  task content, rubric, judge model, effort and prompt template.
+  `scripts/benchmark.mjs` and `runOne()` refuse an uncalibrated or
+  ineligible judge before any model call (exit 2, or `JUDGE_REFUSED`, which
+  aborts without writing a row). The example pack ships a rubric and two
+  planted variants.
+- **Routing canaries as a `claude plugin eval` suite** (`evals/`, five
+  cases): debug to opus/low, architecture to opus/high, never fable for a
+  trivial read, a WARRANT for a fable request, and no routing skill on an
+  unrelated question (`arm: both`). Free graders only. Documented with an
+  opt-in CI invocation; the calibration scout suggests it after a
+  routing-relevant signal and never runs it. `tests/evals-suite.test.mjs`
+  checks the suite statically, including that each canary still matches
+  `config/model-tiers.json`.
+
+### Fixed
+
+- **The recommend skill had no routing data in a session without a shell.**
+  The first eval run found that in a sandbox with no shell and no reads
+  outside the working directory, neither `recommend.mjs` nor
+  `docs/ROUTING.md` was reachable, and the architecture canary answered
+  opus/xhigh. The skill now carries a generated task-type table
+  (`routing-table.mjs --task-type-block` / `--sync-skill`). The
+  `routing-doc` audit check flags it when stale and re-syncs it on `--fix`.
+
+### Docs
+
+- `docs/BENCHMARK.md`: statistics, reproducibility fields, the rubric judge
+  and calibration, the routing eval suite, and the operating rules for
+  benchmark agents. Those rules: run cells in the foreground with no
+  background jobs or monitors; never `git stash`; budget caps scale with
+  model price; use at least 3 reps before comparing adjacent efforts (Opus
+  5.5 high 5/7 vs low 7/7 was variance). The same rules are folded into the
+  `model-benchmark` skill.
+- `bench/task-packs/FORMAT.md`: private, extract-at-runtime packs are a
+  deliberate contamination control. Re-verify packs when a new model
+  generation ships. Documents `rubric.md` and `judgeCalibration`.
+
 ## 0.27.2 — 2026-09-23
 
 Fixes a live spawn-guard bug surfaced by routing trial v2 (0.27.1): most task

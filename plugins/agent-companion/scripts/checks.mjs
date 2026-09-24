@@ -588,20 +588,43 @@ const routingDoc = {
     } catch (e) {
       return { status: 'error', findings: [`renderer threw: ${e.message}`] };
     }
-    if (!existsSync(docPath)) {
-      return { status: 'warn', findings: ['docs/ROUTING.md does not exist - --fix generates it'], data: { fresh, docPath } };
-    }
+    // The recommend skill carries a generated task-type block too (so it
+    // works in a session with no shell) -- same staleness rule applies.
+    const skillPath = join(ctx.pluginRoot, 'skills', 'recommend', 'SKILL.md');
     const norm = (s) => s.replace(/\r\n/g, '\n');
+    const findings = [];
+    let skillStale = false;
+    if (existsSync(skillPath)) {
+      try {
+        const block = norm(execSyncHidden(`node "${script}" --task-type-block`, { encoding: 'utf8', timeout: 20000 })).trimEnd();
+        const skillText = norm(readFileSync(skillPath, 'utf8'));
+        if (!skillText.includes(block)) {
+          skillStale = true;
+          findings.push('skills/recommend/SKILL.md task-type block is STALE relative to config/model-tiers.json - --fix re-syncs it');
+        }
+      } catch (e) {
+        findings.push(`could not check the recommend skill block: ${e.message}`);
+      }
+    }
+    if (!existsSync(docPath)) {
+      return { status: 'warn', findings: ['docs/ROUTING.md does not exist - --fix generates it', ...findings], data: { fresh, docPath, script, skillPath, skillStale } };
+    }
     const same = norm(readFileSync(docPath, 'utf8')) === norm(fresh);
+    if (!same) findings.unshift('docs/ROUTING.md is STALE relative to config/model-tiers.json - readers see a table the guards no longer enforce; --fix regenerates');
     return {
-      status: same ? 'ok' : 'warn',
-      findings: same ? [] : ['docs/ROUTING.md is STALE relative to config/model-tiers.json - readers see a table the guards no longer enforce; --fix regenerates'],
-      data: { fresh, docPath },
+      status: findings.length ? 'warn' : 'ok',
+      findings,
+      data: { fresh, docPath, script, skillPath, skillStale },
     };
   },
   fix(ctx, prev) {
     writeFileSync(prev.data.docPath, prev.data.fresh);
-    return ['regenerated docs/ROUTING.md from config'];
+    const done = ['regenerated docs/ROUTING.md from config'];
+    if (prev.data.skillStale) {
+      execSyncHidden(`node "${prev.data.script}" --sync-skill "${prev.data.skillPath}"`, { encoding: 'utf8', timeout: 20000 });
+      done.push('re-synced the task-type block in skills/recommend/SKILL.md');
+    }
+    return done;
   },
 };
 

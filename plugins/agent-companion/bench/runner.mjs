@@ -42,7 +42,11 @@ import realEffortNoteTask from "./tasks/real-effort-note.mjs";
 import realPublicationSweepTask from "./tasks/real-publication-sweep.mjs";
 import realMisleadingReportTask from "./tasks/real-misleading-report.mjs";
 import realContradictorySpecTask from "./tasks/real-contradictory-spec.mjs";
-import { snapshotTree, rmrf } from "./tasks/common.mjs";
+import { snapshotTree, rmrf, GUARD_REL_PATH } from "./tasks/common.mjs";
+import { wilsonInterval, passAtK, formatInterval, MIN_N_TO_SEPARATE } from "./stats.mjs";
+import {
+  sha256, runJudge, treeDiff, checkJudgeEligibility, assertJudgeCalibrated, makeCliJudgeCaller,
+} from "./judge.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Resolve a real, directly-spawnable claude binary. On Windows, "claude"
@@ -75,9 +79,77 @@ export function resolveClaudeBin() {
 // `claude` binary at all -- resolution only has to succeed on the path that
 // actually spawns a model (runClaude()), never merely to inspect the plan.
 let _claudeBin = null;
-function getClaudeBin() {
+export function getClaudeBin() {
   if (!_claudeBin) _claudeBin = resolveClaudeBin();
   return _claudeBin;
+}
+
+// `claude --version`, resolved once per process and stamped on every
+// results.jsonl row (claude_cli_version) -- a harness change is one of the
+// three things a score shift can come from (harness, task content, model),
+// and a row that does not name its harness cannot rule it out. null when the
+// binary cannot be asked (never a guess).
+let _cliVersion;
+export function getClaudeCliVersion() {
+  if (_cliVersion !== undefined) return _cliVersion;
+  try {
+    const out = execFileSync(getClaudeBin(), ["--version"], { encoding: "utf8", windowsHide: true, timeout: 30000 });
+    _cliVersion = String(out).trim().split(/\r?\n/)[0] || null;
+  } catch {
+    _cliVersion = null;
+  }
+  return _cliVersion;
+}
+
+// The default judge transport (bench/judge.mjs): one fresh `claude -p` per
+// vote, spawned through the same lazily-resolved binary as a benchmark run.
+export const cliJudgeCaller = makeCliJudgeCaller(getClaudeBin);
+
+// Task families: the coarse unit a summary's confidence intervals are
+// reported over (per-task n is usually 1-3, far too small on its own).
+// Task-pack tasks report family "pack". Re-exported by scripts/benchmark.mjs,
+// which also uses these as --tasks shorthands.
+export const TASK_FAMILIES = {
+  easy: ["lookup", "verify", "procedure", "bounded-edit", "diagnosis", "instruction-logic"],
+  hard: ["hard-verify", "hard-procedure", "hard-diagnosis", "hard-instruction-logic"],
+  real: [
+    "real-capacity", "real-secret-scan", "real-opt-fallback", "real-effort-note",
+    "real-publication-sweep", "real-misleading-report", "real-contradictory-spec",
+  ],
+};
+
+export function taskFamilyOf(taskId, { task = null, row = null } = {}) {
+  if (row && row.task_family) return row.task_family;
+  if (task && task.family) return task.family;
+  for (const [fam, ids] of Object.entries(TASK_FAMILIES)) if (ids.includes(taskId)) return fam;
+  if ((task && task.__isPackTask) || (row && row.task_pack_sha256)) return "pack";
+  return "other";
+}
+
+// Stable content hash of a sandbox tree ({ relPath: content }): sorted keys,
+// so identical fixtures always hash identically regardless of walk order.
+export function treeSha256(tree) {
+  const keys = Object.keys(tree || {}).sort();
+  return sha256(JSON.stringify(keys.map((k) => [k, tree[k]])));
+}
+
+// Reproducibility metadata stamped on every results.jsonl row (Gap 4 of the
+// 2026-09 eval-practice review): enough to tell harness drift (CLI version)
+// from task-content drift (prompt/fixture/pack hashes) from a genuine model
+// snapshot change (requested vs resolved model id) when a score moves.
+export function reproMetadata({ promptText, initialTree, task, cliVersion }) {
+  const task_prompt_sha256 = sha256(promptText || "");
+  const task_fixture_sha256 = treeSha256(initialTree || {});
+  const task_pack_sha256 = task && task.packSha256 ? task.packSha256 : null;
+  const task_rubric_sha256 = task && task.rubric ? sha256(task.rubric) : null;
+  return {
+    claude_cli_version: cliVersion ?? null,
+    task_prompt_sha256,
+    task_fixture_sha256,
+    task_pack_sha256,
+    task_rubric_sha256,
+    task_content_sha256: sha256([task_prompt_sha256, task_fixture_sha256, task_pack_sha256 || "", task_rubric_sha256 || ""].join(":")),
+  };
 }
 
 
@@ -371,7 +443,31 @@ function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fake
   });
 }
 
-export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersDir, maxBudgetUsdCeiling, isolateHome = false }) {
+// `judge` (optional): { config, callJudge?, storeFile } -- see bench/judge.mjs.
+// When set and the task carries a rubric, the run's change is graded by the
+// rubric judge AFTER normal scoring, into separate judge_* columns; row.pass
+// is never touched. Refuses (throws, before any model call) when the judge
+// is not calibrated for this task or is not eligible to judge this cell's
+// model. `runClaudeImpl` and `cliVersion` are test seams: production callers
+// omit both.
+export async function runOne({
+  cellId, cell, taskId, task, rep, outDir, answersDir, maxBudgetUsdCeiling, isolateHome = false,
+  judge = null, runClaudeImpl = runClaude, cliVersion,
+}) {
+  const judgeActive = !!(judge && task.rubric);
+  if (judgeActive) {
+    // A refusal is a CONFIGURATION error, not a run failure: it carries
+    // code JUDGE_REFUSED so both main loops abort the batch instead of
+    // logging a pass:false row that would drag the cell's pass rate down.
+    const refuse = (msg) => Object.assign(new Error(msg), { code: "JUDGE_REFUSED" });
+    const elig = checkJudgeEligibility(judge.config.model, cell.model);
+    if (!elig.ok) throw refuse(`judge refused for cell ${cellId}: ${elig.reason}`);
+    try {
+      assertJudgeCalibrated({ taskId, task, config: judge.config, storeFile: judge.storeFile });
+    } catch (e) {
+      throw refuse(e.message);
+    }
+  }
   const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-" + cellId + "-" + taskId + "-"));
   // Only made (and only cleaned up) when isolateHome is set -- the default
   // path spawns with the real, inherited HOME/USERPROFILE (see runClaude()).
@@ -385,6 +481,19 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
     throw e;
   }
   const promptText = task.prompt(meta);
+  // Snapshot BEFORE the model touches anything: the fixture half of the
+  // reproducibility hash, and the "before" side of the judge's diff.
+  const initialTree = (() => {
+    try {
+      return snapshotTree(sandboxDir);
+    } catch {
+      return {};
+    }
+  })();
+  const repro = reproMetadata({
+    promptText, initialTree, task,
+    cliVersion: cliVersion !== undefined ? cliVersion : getClaudeCliVersion(),
+  });
 
   // The per-run runaway guard is the TIGHTER of the task's own calibrated
   // budget and an optional global ceiling (scripts/benchmark.mjs's
@@ -397,7 +506,7 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
     ? Math.min(scaledTaskBudget, scaledMaxBudgetUsd(maxBudgetUsdCeiling, cell.model))
     : scaledTaskBudget;
 
-  const { json, stdout, stderr, err, wallMs } = await runClaude({
+  const { json, stdout, stderr, err, wallMs } = await runClaudeImpl({
     cwd: sandboxDir,
     prompt: promptText,
     model: cell.model,
@@ -427,6 +536,53 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
     }
   })();
 
+  const usage = (json && json.usage) || {};
+  const modelUsage = (json && json.modelUsage) || {};
+  const modelKeys = Object.keys(modelUsage);
+  const resolvedModel = modelKeys[0] || null;
+  const mu = resolvedModel ? modelUsage[resolvedModel] : {};
+
+  // Rubric judge: a SEPARATE score. Runs on the final tree regardless of the
+  // hidden test's verdict (a passing hack and a failing-but-sound attempt are
+  // both worth a design read), never on an auth failure (no model output
+  // exists), and re-checks eligibility against the RESOLVED model, since an
+  // alias can resolve to something the judge may not grade.
+  let judgeFields = {};
+  if (judgeActive) {
+    const authFailed = isAuthError({ json, answerText, stdout, err });
+    const eligResolved = resolvedModel ? checkJudgeEligibility(judge.config.model, resolvedModel) : { ok: true };
+    const base = {
+      judge_model: judge.config.model,
+      judge_effort: judge.config.effort,
+      judge_rubric_sha256: sha256(task.rubric),
+    };
+    if (authFailed) {
+      judgeFields = { ...base, judge_pass: null, judge_votes: null, judge_skipped: "auth_error" };
+    } else if (!eligResolved.ok) {
+      judgeFields = { ...base, judge_pass: null, judge_votes: null, judge_skipped: "resolved-model: " + eligResolved.reason };
+    } else {
+      const { scaledJudgeBudget } = judge;
+      const verdict = await runJudge({
+        config: judge.config,
+        budgetUsd: typeof scaledJudgeBudget === "number" ? scaledJudgeBudget : scaledMaxBudgetUsd(judge.config.maxBudgetUsd, judge.config.model),
+        taskPrompt: promptText,
+        rubric: task.rubric,
+        diff: treeDiff(initialTree, finalTree, { exclude: [GUARD_REL_PATH] }),
+        finalMessage: answerText,
+        callJudge: judge.callJudge || cliJudgeCaller,
+      });
+      judgeFields = {
+        ...base,
+        judge_pass: verdict.pass,
+        judge_votes: verdict.votes,
+        judge_invalid_votes: verdict.invalid,
+        judge_cost_usd: verdict.cost_usd,
+        judge_input_truncated: verdict.truncated,
+        judge_prompt_sha256: verdict.prompt_sha256,
+      };
+    }
+  }
+
   const runId = cellId + "__" + taskId + "__rep" + rep;
   fs.writeFileSync(
     path.join(answersDir, runId + ".json"),
@@ -444,21 +600,17 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
   rmrf(sandboxDir);
   if (fakeHome) rmrf(fakeHome);
 
-  const usage = (json && json.usage) || {};
-  const modelUsage = (json && json.modelUsage) || {};
-  const modelKeys = Object.keys(modelUsage);
-  const resolvedModel = modelKeys[0] || null;
-  const mu = resolvedModel ? modelUsage[resolvedModel] : {};
-
   const row = {
     ts: new Date().toISOString(),
     cell: cellId,
     task: taskId,
+    task_family: taskFamilyOf(taskId, { task }),
     rep,
     requested_model: cell.model,
     resolved_model: resolvedModel,
     model_mismatch: resolvedModel !== null && resolvedModel !== cell.model,
     requested_effort: cell.effort,
+    ...repro,
     pass: !!scoreResult.pass,
     scope_ok: scoreResult.scope_ok,
     claim_honest: scoreResult.claim_honest,
@@ -491,10 +643,31 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
     sandbox_cwd: sandboxDir,
     exec_err: err,
     detail: scoreResult.detail ?? null,
+    // Rubric-judge columns (present only when a judge ran for this task).
+    // A SEPARATE score: never merged into `pass` above.
+    ...judgeFields,
   };
 
   fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify(row) + "\n");
   return row;
+}
+
+// The row written when runOne() itself throws (setup failure, a refused
+// judge, ...). Carries the same identifying/reproducibility fields a normal
+// row does where they are knowable without a run -- every results.jsonl row
+// names its harness, requested model and effort.
+export function harnessErrorRow({ cellId, cell, taskId, task, rep, error, cliVersion }) {
+  let version = cliVersion;
+  if (version === undefined) {
+    try { version = getClaudeCliVersion(); } catch { version = null; }
+  }
+  return {
+    ts: new Date().toISOString(), cell: cellId, task: taskId, task_family: taskFamilyOf(taskId, { task }), rep,
+    requested_model: cell ? cell.model : null, resolved_model: null, requested_effort: cell ? cell.effort : null,
+    claude_cli_version: version ?? null,
+    task_pack_sha256: task && task.packSha256 ? task.packSha256 : null,
+    pass: false, is_error: true, exec_err: String((error && error.message) || error),
+  };
 }
 
 function median(nums) {
@@ -631,6 +804,16 @@ export function rebuildSummary(outDir) {
     const cell = parts[0];
     const task = parts[1];
     const passRate = group.filter((r) => r.pass).length / group.length;
+    const nPass = group.filter((r) => r.pass).length;
+    // pass@1 = the mean single-trial pass rate across reps (the same number
+    // pass_rate always was, now labelled the way SWE-bench-family reports
+    // do); pass@k with k = the reps actually run = "passed at least once".
+    const passCi = wilsonInterval(nPass, group.length);
+    const passAtKValue = passAtK(group.length, nPass, group.length);
+    // Rubric judge: its own rate over the rows it actually graded
+    // (judge_pass true/false). null when no row in the group was judged.
+    const judged = group.filter((r) => r.judge_pass === true || r.judge_pass === false);
+    const judgePassRate = judged.length ? judged.filter((r) => r.judge_pass === true).length / judged.length : null;
     const honestDenom = group.filter((r) => r.claim_honest !== null).length;
     const claimHonestRate = honestDenom ? group.filter((r) => r.claim_honest === true).length / honestDenom : null;
     const scopeDenom = group.filter((r) => r.scope_ok !== null).length;
@@ -672,8 +855,17 @@ export function rebuildSummary(outDir) {
     const cacheAnomaly = medCacheHitRate != null && medCacheHitRate < CACHE_HIT_RATE_ANOMALY_THRESHOLD;
 
     summaryRows.push({
-      cell, task, n: group.length,
+      cell, task, task_family: taskFamilyOf(task, { row: group[0] }), n: group.length,
       pass_rate: passRate,
+      pass_at_1: passRate,
+      pass_ci95_low: passCi ? passCi.low : null,
+      pass_ci95_high: passCi ? passCi.high : null,
+      pass_at_k: passAtKValue,
+      k: group.length,
+      n_too_small: group.length < MIN_N_TO_SEPARATE,
+      // SEPARATE score from pass/pass@1 -- see bench/judge.mjs.
+      judge_n: judged.length,
+      judge_pass_rate: judgePassRate,
       // EXPERIMENTAL: a word-bag heuristic (bench/tasks/common.mjs), not a
       // verified signal -- known to under-read on long, hedged answers (see
       // docs/BENCHMARK.md). Never treat a low rate here as a quality
@@ -704,6 +896,16 @@ export function rebuildSummary(outDir) {
   // also fetch a separate top-level note.
   fs.writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summaryRows, null, 2));
 
+  // Cell x task-family rollup: the level at which confidence intervals are
+  // actually informative (per-task n is usually 1-3). pass@1 = mean over the
+  // family's tasks of each task's pass rate (equal to pooled passes/runs when
+  // reps are balanced); the 95% Wilson interval is over the pooled runs;
+  // pass@k uses k = the smallest rep count among the family's tasks, averaged
+  // over tasks. Written to its own file so summary.json stays the bare array
+  // it has always been.
+  const familyRows = buildFamilySummary(rows);
+  fs.writeFileSync(path.join(outDir, "summary-by-family.json"), JSON.stringify(familyRows, null, 2));
+
   // Cache-read tokens, turns, context re-reads, and read-share-of-cost are
   // HEADLINE columns (next to pass_rate and cost_per_correct) -- not buried
   // in the token breakdown -- because cache reads are the largest real cost
@@ -711,12 +913,14 @@ export function rebuildSummary(outDir) {
   // spend levers (see config/model-tiers.json's costDrivers and
   // docs/BENCHMARK.md's reporting guidance).
   const header = [
-    "cell", "task", "n", "pass_rate",
+    "cell", "task", "n", "pass@1", "95% CI", "pass@k",
     "med_cache_read_tok", "hit_rate", "med_turns", "ctx_rereads", "read_share_cost",
     "cost_per_correct",
     "claim_honest*", "scope_ok", "med_out_tok", "med_cost_usd", "rel_cost_idx", "plan_usage_idx",
   ];
   const lines = [
+    "pass@1 = mean single-trial pass rate across reps (what earlier summaries called pass_rate). pass@k = probability at least one of k reps passes, with k = the reps actually run (the unbiased estimator; k = n here, so it reads \"passed at least once\"). 95% CI = Wilson score interval. Cells with n < " + MIN_N_TO_SEPARATE + " cannot be separated from their neighbours -- read the family table below and compare intervals, not point estimates. Use >= 3 reps before comparing adjacent efforts.",
+    "",
     "* claim_honest is EXPERIMENTAL — a word-bag heuristic known to under-read on long/hedged answers. See docs/BENCHMARK.md before treating a low rate as a quality finding.",
     "ctx_rereads = median(cache_read_tokens / num_turns) per run, an estimate of the average context size re-sent every turn. read_share_cost = median share of that run's dollar cost spent on cache reads (cache_read_tokens x this tier's cache-hit rate, from config/model-tiers.json). hit_rate = median(cache_read_tokens / (cache_read_tokens + cache_creation_tokens + input_tokens)) per run -- a cell below " + Math.round(CACHE_HIT_RATE_ANOMALY_THRESHOLD * 100) + "% is flagged \"cache anomaly: check harness\" below, since separate claude -p processes do not reliably share prompt cache even with identical content (see docs/BENCHMARK.md \"Caching\"). All three are \"n/a\" when the underlying token figures are unmeasured.",
     "",
@@ -746,6 +950,8 @@ export function rebuildSummary(outDir) {
     lines.push([
       r.cell, r.task, r.n,
       (r.pass_rate * 100).toFixed(0) + "%",
+      formatInterval(r.pass_ci95_low != null ? { low: r.pass_ci95_low, high: r.pass_ci95_high } : null),
+      r.pass_at_k != null ? (r.pass_at_k * 100).toFixed(0) + "% (k=" + r.k + ")" : "n/a",
       r.median_cache_read_tokens ?? "n/a",
       r.cache_hit_rate != null ? (r.cache_hit_rate * 100).toFixed(0) + "%" + (r.cache_anomaly ? " ⚠" : "") : "n/a",
       r.median_num_turns ?? "n/a",
@@ -760,7 +966,82 @@ export function rebuildSummary(outDir) {
       r.plan_usage_index != null ? r.plan_usage_index.toFixed(2) + "x" : "n/a (unmeasured tier)",
     ].join(" | "));
   }
+
+  if (familyRows.length > 0) {
+    lines.push(
+      "",
+      "## By task family (cell x family)",
+      "",
+      "family | cell | tasks | runs | passes | pass@1 | 95% CI | pass@k | note",
+      "--- | --- | --- | --- | --- | --- | --- | --- | ---",
+    );
+    for (const f of familyRows) {
+      lines.push([
+        f.family, f.cell, f.tasks, f.runs, f.passes,
+        (f.pass_at_1 * 100).toFixed(0) + "%",
+        formatInterval(f.pass_ci95_low != null ? { low: f.pass_ci95_low, high: f.pass_ci95_high } : null),
+        f.pass_at_k != null ? (f.pass_at_k * 100).toFixed(0) + "% (k=" + f.k + ")" : "n/a",
+        f.n_too_small ? "n too small to separate" : "",
+      ].join(" | "));
+    }
+  }
+
+  const judgedRows = summaryRows.filter((r) => r.judge_n > 0);
+  if (judgedRows.length > 0) {
+    lines.push(
+      "",
+      "## Rubric judge (separate score -- never merged into pass@1)",
+      "",
+      "Blind 3-vote rubric grade of each run's CHANGE for design/scope quality the hidden test cannot see (bench/judge.mjs, docs/BENCHMARK.md \"Rubric judge\"). Only calibrated judges run; a run the judge could not grade (unparseable votes, auth error, ineligible resolved model) is excluded from judge_n.",
+      "",
+      "cell | task | judge_n | judge_pass | 95% CI",
+      "--- | --- | --- | --- | ---",
+    );
+    for (const r of judgedRows) {
+      const k = Math.round(r.judge_pass_rate * r.judge_n);
+      lines.push([
+        r.cell, r.task, r.judge_n,
+        (r.judge_pass_rate * 100).toFixed(0) + "%",
+        formatInterval(wilsonInterval(k, r.judge_n)),
+      ].join(" | "));
+    }
+  }
   fs.writeFileSync(path.join(outDir, "summary.md"), lines.join("\n") + "\n");
+}
+
+// Exported for tests. Groups non-auth-error rows by (cell, family) -- see the
+// rollup note in rebuildSummary().
+export function buildFamilySummary(rows) {
+  const byCellFamily = new Map();
+  for (const r of rows) {
+    const fam = taskFamilyOf(r.task, { row: r });
+    const key = r.cell + "::" + fam;
+    if (!byCellFamily.has(key)) byCellFamily.set(key, { cell: r.cell, family: fam, byTask: new Map() });
+    const g = byCellFamily.get(key);
+    if (!g.byTask.has(r.task)) g.byTask.set(r.task, []);
+    g.byTask.get(r.task).push(r);
+  }
+  const out = [];
+  for (const g of byCellFamily.values()) {
+    const perTask = [...g.byTask.values()].map((rs) => ({ n: rs.length, c: rs.filter((x) => x.pass).length }));
+    const runs = perTask.reduce((s, t) => s + t.n, 0);
+    const passes = perTask.reduce((s, t) => s + t.c, 0);
+    const k = Math.min(...perTask.map((t) => t.n));
+    const ci = wilsonInterval(passes, runs);
+    const passAt1 = perTask.reduce((s, t) => s + t.c / t.n, 0) / perTask.length;
+    const pk = perTask.map((t) => passAtK(t.n, t.c, k));
+    out.push({
+      cell: g.cell, family: g.family, tasks: perTask.length, runs, passes,
+      pass_at_1: passAt1,
+      pass_ci95_low: ci ? ci.low : null,
+      pass_ci95_high: ci ? ci.high : null,
+      pass_at_k: pk.every((v) => v != null) ? pk.reduce((s, v) => s + v, 0) / pk.length : null,
+      k,
+      n_too_small: runs < MIN_N_TO_SEPARATE,
+    });
+  }
+  out.sort((a, b) => (a.family + a.cell).localeCompare(b.family + b.cell));
+  return out;
 }
 
 async function main() {
@@ -802,10 +1083,13 @@ async function main() {
             process.exit(1);
           }
         } catch (e) {
+          if (e && e.code === "JUDGE_REFUSED") {
+            console.error("\nJUDGE REFUSED: " + e.message + "\nAborting the batch (no row written).");
+            rebuildSummary(outDir);
+            process.exit(1);
+          }
           process.stdout.write("ERROR: " + ((e && e.stack) || e) + "\n");
-          fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify({
-            ts: new Date().toISOString(), cell: cellId, task: taskId, rep, pass: false, is_error: true, exec_err: String((e && e.message) || e),
-          }) + "\n");
+          fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify(harnessErrorRow({ cellId, cell, taskId, task, rep, error: e })) + "\n");
         }
       }
     }

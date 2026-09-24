@@ -256,6 +256,14 @@ Not a summary, not a confirmation. Silence is the success case.
 node "$AC/scripts/audit.mjs" --only guard-canary,harness-drift,routing-doc
 ```
 
+**Routing eval suite: SUGGEST ONLY, never run it from this routine.** When
+`harness_version_changed`, `lineup_drift` or `model_retirement_approaching`
+fired, add one line to the report suggesting the operator run the routing
+canaries (`evals/`, a real-model `claude plugin eval` suite, about $2-3):
+`cd "$AC" && claude plugin eval . --trust-plugin --json results.json --threshold 0.8 --model claude-sonnet-5 --no-publish --max-cost-usd 3`.
+Details are in docs/BENCHMARK.md "Routing eval suite". Do not execute it:
+it spends real model budget, and this routine is deterministic by design.
+
 **Sweep canary** — run this as part of STEP 2.5 whenever `publication_leak_repos`
 is non-empty, even on a day the sweep itself found nothing: a sweep that stays
 silent because it is broken looks identical to one that is silent because

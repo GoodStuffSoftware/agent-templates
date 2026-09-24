@@ -56,6 +56,24 @@ Only for signals that fired:
 | `inherited_model_spawns` | routing review |
 | `spawn_activity` with `spend-deep-dive` | spend attribution |
 | `harness_version_unreadable` | report to the operator; do not guess |
+| `harness_version_changed`, `lineup_drift`, `model_retirement_approaching`, or any change to `config/model-tiers.json` | **suggest** the routing eval suite (below) in the report; never run it yourself |
+
+### routing eval suite — suggest only, never auto-run
+
+The canaries in `evals/` (`claude plugin eval`) check that a live session
+consults the routing guidance and lands on the trial routing: debug to
+opus/low, architecture to opus/high, never fable for a trivial read, and a
+warrant for any fable request. Each run is a real model call, so the scout
+**only suggests** it, in one report line, with the command:
+
+```bash
+cd "$AC" && claude plugin eval . --trust-plugin --json results.json --threshold 0.8 \
+  --model claude-sonnet-5 --no-publish --max-cost-usd 3
+```
+
+Exit 1 means a canary fell below threshold (routing guidance no longer
+reached, or no longer what the table says); exit 2 means the run was
+partial. docs/BENCHMARK.md "Routing eval suite" has the case list and costs.
 
 ### harness-surface diff
 

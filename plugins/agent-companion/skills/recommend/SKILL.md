@@ -22,6 +22,34 @@ PowerShell (forward slashes on purpose — they survive copy-paste):
 $AC = (Get-ChildItem "$env:USERPROFILE/.claude/plugins/marketplaces/*/plugins/agent-companion" -Directory | Select-Object -First 1).FullName
 ```
 
+## Quick answer for a named task type (no shell needed)
+
+When the task clearly matches one of these types, this table IS the answer —
+the same resolution `recommend.mjs --type <name>` prints, generated from the
+config. Use it directly when no shell is available (a read-only session, an
+eval sandbox); use the script for anything that needs `--weight`, `--kind`,
+`--consequence` or `--writer`.
+
+<!-- routing-table:task-types BEGIN (generated from config/model-tiers.json by scripts/routing-table.mjs --sync-skill; do not edit by hand) -->
+Config v7 (updated 2026-09-23). **Premium** = the spawn brief needs a `WARRANT:` line. Fable never appears here: it is a warranted exception, not a route.
+
+| Task type | Route | Premium | What it is |
+|---|---|---|---|
+| `explore` | `opus/low` (routing trial, review by 2026-09-30) | yes | read-only search: where is X, what touches Y, does Z exist |
+| `mechanical-edit` | `opus/low` (routing trial, review by 2026-09-30) | yes | rename, config edit, reformat, apply a known migration recipe |
+| `bounded-feature` | `opus/low` (routing trial, review by 2026-09-30) | yes | a feature against a clear spec, 1-3 files, known shape |
+| `integration` | `opus/high` (routing trial, review by 2026-09-30) | yes | multi-file, cross-referencing, touches shared config or things other agents depend on |
+| `debug-root-cause` | `opus/low` (routing trial, review by 2026-09-30) | yes | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
+| `large-refactor` | `opus/high` (routing trial, review by 2026-09-30) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
+| `novel-design` | `opus/high` (routing trial, review by 2026-09-30) | yes | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
+| `critical-change` | `opus/xhigh` | yes | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
+| `code-review` | writer's model; effort ≥ writer's | as writer | adversarial review of a diff; sized to the writer it gates |
+| `long-autonomous-run` | `opus/xhigh` | yes | an agent session expected to run for hours with minimal supervision |
+| `subagent-worker` | `opus/low` (routing trial, review by 2026-09-30) | yes | a delegated worker doing a bounded, well-specified piece of a larger task |
+| `verify` | `opus/low` (routing trial, review by 2026-09-30) | yes | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
+| `operate` | `opus/low` (routing trial, review by 2026-09-30) | yes | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
+<!-- routing-table:task-types END -->
+
 ## Step 1 — classify the task
 
 Pick the closest named task type:

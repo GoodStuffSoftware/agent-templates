@@ -10,6 +10,7 @@ directory holds only:
   manifest.json     # required — see schema below
   report.md          # required — hand-written, symptom-only bug report
   hidden-test.mjs     # required — the held-out check, see "Hidden test contract"
+  rubric.md           # optional — design rubric for the rubric judge, see "Rubric and judge calibration"
 ```
 
 Nothing else. In particular: **no extracted source files.** `setup()` pulls
@@ -20,6 +21,37 @@ this plugin is therefore just a report + a test + a pointer (two git refs
 and a file list); the actual buggy/fixed source lives only in the target
 repo's own history, exactly as the plugin's own leak-check policy requires
 (no proprietary or excessively identifying source content shipped here).
+
+## Contamination control is deliberate
+
+Sourcing packs from a **private, local repository and extracting them at run
+time** is not only a way to keep source out of this public repo. It is also
+the benchmark's contamination control. Public agentic-coding benchmarks
+(the SWE-bench family) lose signal once their tasks and fixes reach training
+corpora: a model that has seen the fix scores like a model that can find it.
+A fix commit that lives only in a private repo's history, and never in this
+plugin or anything public, is not in any training set. So a pass measures
+capability, not recall. The same reasoning is why `report.md` is written
+fresh (symptoms only) and `leakPhrases` keeps the commit's own wording out of
+the sandbox.
+
+The committed example pack (`examples/leak-check-gitignore-fix`) draws on
+this PUBLIC repository's own history. It demonstrates the mechanics only; it
+is not a contamination-controlled task, and its results say nothing about
+capability.
+
+Two consequences:
+
+- **Keep the source repo private.** If a pack's source repo is ever made
+  public, mirrored, or published, treat its packs as contaminated for every
+  model generation trained after that date, and retire or replace them.
+- **Re-verify packs when a new model generation ships.** Run
+  `verify-pack.mjs` against each pack (fail-at-parent / pass-at-fix must
+  still hold) and re-read `report.md` for anything that has since become
+  public knowledge. A sudden jump to 100% on a pack that older generations
+  failed is either real progress or memorisation. Before crediting the new
+  model, check whether the fix, or a discussion of it, became public between
+  the two generations.
 
 ## manifest.json schema
 
@@ -49,10 +81,18 @@ repo's own history, exactly as the plugin's own leak-check policy requires
                                           // at build time (a future edit to files[] could
                                           // reintroduce one)
   "maxBudgetUsd": 0.6,                    // per-run --max-budget-usd ceiling for this task
-  "expectedFiles": ["scripts/leak-check.mjs"]
+  "expectedFiles": ["scripts/leak-check.mjs"],
                                           // extra sandbox-relative paths the model is allowed to
                                           // touch/create beyond files[] itself and the guard file
                                           // (finalizeScore's scope check flags anything else)
+  "judgeCalibration": {                   // OPTIONAL, only meaningful with rubric.md
+    "plantedBad": [                       // known-bad variants of the FIX: each is one
+      { "note": "tracked files only",     // find/replace applied to the fix-ref content.
+        "file": "scripts/leak-check.mjs", // Keep find/replace SMALL -- a snippet, never
+        "find": "<exact text in the fix>",// extracted source
+        "replace": "<broken version>" }
+    ]
+  }
 }
 ```
 
@@ -106,6 +146,30 @@ A pack that fails any of these is not usable as a benchmark task — the
 hidden test either doesn't detect the real bug, or the fix doesn't actually
 satisfy it, or the sandbox leaks the answer. `build-pack.mjs` reports this
 loudly rather than silently writing a broken manifest.
+
+## Rubric and judge calibration
+
+`rubric.md` (optional) is the rubric the optional rubric judge
+(`bench/judge.mjs`, docs/BENCHMARK.md "Rubric judge") grades each run's
+change against. Use it for design quality the hidden test cannot see: fixing
+the real cause rather than special-casing the test, staying in scope, not
+weakening a check. Write concrete **PASS if ALL** and **FAIL if ANY**
+conditions. The same fairness rule as the hidden test applies: grade only
+what the report states or implies, never something only the fix commit
+knows.
+
+A pack with a rubric calibrates the judge for free. The real fix commit's
+change is the **known-good**. The unchanged parent, plus every
+`judgeCalibration.plantedBad` variant, are **known-bad**. The judge is
+trusted on the pack only after it passes the first and fails all the others
+(`scripts/benchmark.mjs --calibrate-judge`). The best planted variant is one
+a lenient hidden test would still pass, for example the example pack's
+"tracked files only" variant. That is exactly the case the judge exists to
+catch. A `find` string that no longer matches the fix fails calibration
+loudly rather than silently testing nothing. Editing `manifest.json`,
+`report.md`, `hidden-test.mjs` or `rubric.md` changes the pack's content hash
+(`packContentSha256()`, also logged on every result row as
+`task_pack_sha256`), which invalidates any earlier calibration.
 
 ## Building a new pack
 
