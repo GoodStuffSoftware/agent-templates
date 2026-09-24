@@ -1020,7 +1020,58 @@ const CACHE_HIT_RATE_ANOMALY_THRESHOLD = 0.85;
 export function rebuildSummary(outDir) {
   const jsonlPath = path.join(outDir, "results.jsonl");
   if (!fs.existsSync(jsonlPath)) return;
-  const allRows = fs.readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const rawRows = fs.readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+
+  // --resume dedup (round 3, 2026-09 delta review finding 3): run_id is
+  // deterministic (`${cellId}__${taskId}__rep${rep}`), and results.jsonl is
+  // append-only -- never rewritten. --resume only skips a cell whose
+  // .batch-state.json marks it fully COMPLETE; a cell interrupted
+  // (auth_error / a judge refusal / a weekly ceiling) while a needs_rescore
+  // retry was still QUEUED but never ADMITTED is not marked complete, so a
+  // later --resume re-runs that WHOLE cell from scratch at the SAME
+  // --rep-start -- producing a SECOND row under the exact SAME run_id as the
+  // first (abandoned) attempt. Without this dedup, that one (cell, task,
+  // rep) slot silently counts TWICE below (n off by one, a row that never
+  // actually finished averaged in with the real one). Any run_id with more
+  // than one row on disk is deduped here, before anything else in this
+  // function reads `allRows`: a "complete" row (its own rescue, if any,
+  // either wasn't needed or actually ran to a `::rescore` verdict) beats an
+  // ABANDONED needs_rescore row (queued for a solo re-score that never got
+  // admitted); among rows of the same standing, the LAST one in file order
+  // (the most recent attempt) wins. Every non-winning row is dropped
+  // entirely -- not even fail-open-counted -- and reported in its own
+  // summary.md banner below so a superseded duplicate is never silently
+  // invisible. See docs/BENCHMARK.md "Resuming a batch".
+  const runIdSet = new Set(rawRows.map((r) => r.run_id).filter(Boolean));
+  const isAbandonedNeedsRescore = (r) => r.needs_rescore && !r.is_rescore_retry && !runIdSet.has(r.run_id + "::rescore");
+  // A row with no `run_id` at all (older results.jsonl files predate the
+  // field, and plenty of test fixtures never set it) has nothing to dedupe
+  // against -- group ONLY rows that share a truthy run_id; every run_id-less
+  // row is its own singleton group so it is never merged with anything.
+  const groupsByRunId = new Map();
+  for (const r of rawRows) {
+    if (!r.run_id) { groupsByRunId.set(r, [r]); continue; }
+    if (!groupsByRunId.has(r.run_id)) groupsByRunId.set(r.run_id, []);
+    groupsByRunId.get(r.run_id).push(r);
+  }
+  const supersededRows = [];
+  const winners = new Set();
+  for (const group of groupsByRunId.values()) {
+    let winner = group[0];
+    for (let i = 1; i < group.length; i += 1) {
+      const candidate = group[i];
+      const winnerAbandoned = isAbandonedNeedsRescore(winner);
+      const candidateAbandoned = isAbandonedNeedsRescore(candidate);
+      if (winnerAbandoned && !candidateAbandoned) { winner = candidate; continue; }
+      if (!winnerAbandoned && candidateAbandoned) continue; // keep the current winner
+      winner = candidate; // same standing -- the later attempt wins
+    }
+    winners.add(winner);
+    if (group.length > 1) {
+      for (const r of group) if (r !== winner) supersededRows.push(r);
+    }
+  }
+  const allRows = rawRows.filter((r) => winners.has(r));
 
   // Auth/login failures never reached the model -- excluded from pass-rate
   // and every other quality/cost stat below, so one botched-auth batch
@@ -1246,6 +1297,16 @@ export function rebuildSummary(outDir) {
     "ctx_rereads = median(cache_read_tokens / num_turns) per run, an estimate of the average context size re-sent every turn. read_share_cost = median share of that run's dollar cost spent on cache reads (cache_read_tokens x this tier's cache-hit rate, from config/model-tiers.json). hit_rate = median(cache_read_tokens / (cache_read_tokens + cache_creation_tokens + input_tokens)) per run -- a cell below " + Math.round(CACHE_HIT_RATE_ANOMALY_THRESHOLD * 100) + "% is flagged \"cache anomaly: check harness\" below, since separate claude -p processes do not reliably share prompt cache even with identical content (see docs/BENCHMARK.md \"Caching\"). All three are \"n/a\" when the underlying token figures are unmeasured.",
     "",
   ];
+  if (supersededRows.length > 0) {
+    lines.push(
+      `RESUME DUPLICATE: ${supersededRows.length} row(s) shared a run_id with a later attempt at the same (cell, task, rep) ` +
+      "slot -- --resume re-ran a cell that was interrupted before it was marked complete (most often an abandoned " +
+      "needs_rescore retry that never got admitted). Only the winning attempt (the last complete row, or the last row " +
+      "overall when every attempt was abandoned) is counted anywhere below; every superseded row was dropped entirely, " +
+      "not fail-open-counted. See docs/BENCHMARK.md \"Resuming a batch\".",
+      "",
+    );
+  }
   if (authErrorRows.length > 0) {
     lines.push(
       `AUTH ERROR: ${authErrorRows.length} run(s) failed authentication (not logged in / 401) and were EXCLUDED from every stat below -- ` +

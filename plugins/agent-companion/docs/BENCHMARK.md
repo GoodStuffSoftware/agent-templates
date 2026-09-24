@@ -570,6 +570,31 @@ before every launch at `--concurrency > 1` — `--per-agent-mb` overrides the
 `--concurrency 1`, so the historical fully-sequential path's behavior is
 unchanged byte-for-byte.
 
+### Resuming a batch
+
+`--resume` (`scripts/benchmark.mjs`) skips only the cells `.batch-state.json`
+already marks COMPLETE — a marker written after a cell's `scheduleRuns()`
+call fully drains its queue (see "Run every cell in the FOREGROUND" above). A
+cell that was interrupted before that point — an `auth_error`, a judge
+refusal, or a weekly ceiling hit while a `needs_rescore` solo retry was still
+QUEUED but never ADMITTED — is not marked complete, so `--resume` re-runs
+that WHOLE cell from scratch at the same `--rep-start`.
+
+`run_id` is deterministic (`` `${cellId}__${taskId}__rep${rep}` ``) and
+`results.jsonl` is append-only, so that re-run's fresh row lands under the
+exact SAME `run_id` as the earlier, abandoned attempt — two rows for one
+(cell, task, rep) slot, in the same file. `rebuildSummary()` dedupes this
+before anything else: a "complete" row (its own rescue, if any, either
+wasn't needed or actually ran to a `::rescore` verdict) beats an ABANDONED
+`needs_rescore` row (queued for a solo re-score that never got admitted);
+among rows of the same standing, the LAST one in file order — the most
+recent attempt — wins. The losing row is dropped entirely (never
+fail-open-counted alongside the winner) and `summary.md` prints a `RESUME
+DUPLICATE: N row(s)` banner naming the count, so a superseded duplicate is
+never silently invisible in the stats. This dedup runs on every
+`rebuildSummary()` call, whether or not `--resume` was ever used — a
+duplicate `run_id` from any other source is caught the same way.
+
 ## Pre-run estimate and confirmation gate
 
 `bench/estimate.mjs` is a SHARED module (ADR 0003 slice 6's own git
