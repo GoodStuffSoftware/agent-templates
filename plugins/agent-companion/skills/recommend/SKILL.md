@@ -43,7 +43,7 @@ Config v7 (updated 2026-09-23). **Premium** = the spawn brief needs a `WARRANT:`
 | `large-refactor` | `opus/high` (routing trial, review by 2026-09-30) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
 | `novel-design` | `opus/high` (routing trial, review by 2026-09-30) | yes | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
 | `critical-change` | `opus/xhigh` | yes | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
-| `code-review` | writer's model; effort ≥ writer's | as writer | adversarial review of a diff; sized to the writer it gates |
+| `code-review` | writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's | as writer (opus if critical or fable) | adversarial review of a diff; sized to the writer it gates |
 | `long-autonomous-run` | `opus/xhigh` | yes | an agent session expected to run for hours with minimal supervision |
 | `subagent-worker` | `opus/low` (routing trial, review by 2026-09-30) | yes | a delegated worker doing a bounded, well-specified piece of a larger task |
 | `verify` | `opus/low` (routing trial, review by 2026-09-30) | yes | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |

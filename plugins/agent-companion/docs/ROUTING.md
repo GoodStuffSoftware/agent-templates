@@ -99,6 +99,8 @@ Example: a one-line production migration is `mechanical` by kind (effort down) b
 - Effort may exceed the writer's: **yes**
 - Effort may fall below the writer's: **no**
 
+That parity match is then floored, same as any other route (operator-decided 2026-09-24, see resolveRoute() in hooks/lib/context.mjs): a **critical** review is never sized below `opus`/`xhigh` (F1), never routed to fable — capped to the best available tier that is not one, which still demands its own WARRANT (F2) — and refused outright for a writer model outside the tier table, or unavailable with no staged replacement (F4). A per-user routing profile row for a parity type may only raise the resulting minimum effort further; it can never name a model.
+
 ## Task types → routing (the task model list)
 
 Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. `parity` weight = match the writer being reviewed; `inherit` consequence = take the change's consequence. **`--type` is the preferred input over raw `--weight`/`--kind`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.
@@ -113,7 +115,7 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 | `large-refactor` | 5 | `bounded` | `elevated` | `opus/high` _(trial override)_ | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
 | `novel-design` | 5 | `novel-design` | `elevated` | `opus/high` _(trial override)_ | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
 | `critical-change` | 4 | `bounded` | `critical` | `opus/xhigh` | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
-| `code-review` | parity | `diagnostic` | `inherit` | _writer's model; effort ≥ writer_ | adversarial review of a diff; sized to the writer it gates |
+| `code-review` | parity | `diagnostic` | `inherit` | _writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer_ | adversarial review of a diff; sized to the writer it gates |
 | `long-autonomous-run` | 5 | `bounded` | `elevated` | `opus/xhigh` | an agent session expected to run for hours with minimal supervision |
 | `subagent-worker` | 2 | `mechanical` | `routine` | `opus/low` _(trial override)_ | a delegated worker doing a bounded, well-specified piece of a larger task |
 | `verify` | 1 | `mechanical` | `routine` | `opus/low` _(trial override)_ | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |

@@ -92,8 +92,8 @@ function taskTypeBlock() {
         : `\`${tr.label}\`${profileMark(tr)}`;
       premium = premiumOf(tr.model) ? 'yes' : 'no';
     } else if (t.weight === 'parity') {
-      route = "writer's model; effort ≥ writer's";
-      premium = 'as writer';
+      route = "writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's";
+      premium = 'as writer (opus if critical or fable)';
     }
     B.push(`| \`${name}\` | ${route} | ${premium} | ${t.summary || ''} |`);
   }
@@ -233,6 +233,9 @@ if (cfg.reviewerParity) {
   L.push(`- Effort may exceed the writer's: **${p.effortMayExceed ? 'yes' : 'no'}**`);
   L.push(`- Effort may fall below the writer's: **${p.effortMayNotDrop ? 'no' : 'yes'}**`);
   L.push(``);
+  const critFloor = cfg.consequence?.critical || {};
+  L.push(`That parity match is then floored, same as any other route (operator-decided 2026-09-24, see resolveRoute() in hooks/lib/context.mjs): a **critical** review is never sized below \`${critFloor.modelFloor}\`/\`${critFloor.effortFloor}\` (F1), never routed to fable — capped to the best available tier that is not one, which still demands its own WARRANT (F2) — and refused outright for a writer model outside the tier table, or unavailable with no staged replacement (F4). A per-user routing profile row for a parity type may only raise the resulting minimum effort further; it can never name a model.`);
+  L.push(``);
 }
 
 if (cfg.taskTypes) {
@@ -252,7 +255,7 @@ if (cfg.taskTypes) {
         resolved = `\`${tr.label}\`${profileMark(tr)}`;
       }
     } else if (t.weight === 'parity') {
-      resolved = '_writer\'s model; effort ≥ writer_';
+      resolved = '_writer\'s model, floored to opus/xhigh if critical and never fable; effort ≥ writer_';
     }
     L.push(`| \`${name}\` | ${t.weight} | \`${t.kind}\` | \`${t.consequence}\` | ${resolved} | ${t.summary || ''} |`);
   }
