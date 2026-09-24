@@ -177,8 +177,11 @@ function lockFile() {
   return join(stateDir(), 'memory-vault-sync.lock');
 }
 
-function statusCacheFile() {
-  return join(stateDir(), 'memory-vault-status.json');
+// stateDir() creates the state root (README.txt, state/) as a side effect, so
+// it is only for WRITES. A read — `status`, or the drift check importing this
+// module — resolves the same path without creating anything.
+function statusCacheFile({ create = true } = {}) {
+  return join(create ? stateDir() : join(stateRootPath(), 'state'), 'memory-vault-status.json');
 }
 
 // --- git, pinned to the vault ---------------------------------------------
@@ -870,7 +873,7 @@ export function sync() {
 // on exactly that — silence remains the success case.
 function readStatusCache() {
   try {
-    const obj = JSON.parse(readFileSync(statusCacheFile(), 'utf8'));
+    const obj = JSON.parse(readFileSync(statusCacheFile({ create: false }), 'utf8'));
     return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : null;
   } catch { return null; } // absent or malformed: same as no history
 }

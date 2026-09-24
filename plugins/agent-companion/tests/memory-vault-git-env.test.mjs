@@ -326,6 +326,25 @@ for (const [label, setup] of [
   });
 }
 
+// status is read-only: it used to resolve the status file through stateDir(),
+// which creates the state root, its README.txt and state/ as a side effect.
+test('status creates nothing, even where init and sync would refuse', () => {
+  const fx = makeFixture();
+  try {
+    const { repo } = makeProject(fx.dir);
+    const stateDir = join(repo, 'nested', 'state');
+    const res = runScript(SCRIPT, ['status', '--json'], {
+      cwd: fx.dir,
+      env: { AGENT_COMPANION_STATE_DIR: stateDir, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.json?.initialized, false);
+    assert.ok(!existsSync(join(repo, 'nested')), 'status wrote into the project work tree');
+  } finally {
+    fx.cleanup();
+  }
+});
+
 // V8. The refusal used to recommend AGENT_COMPANION_STATE_DIR, which moves
 // ALL agent-companion state (config, toggles, standing rules), not just the
 // vault. AGENT_COMPANION_VAULT_DIR moves the vault alone.
