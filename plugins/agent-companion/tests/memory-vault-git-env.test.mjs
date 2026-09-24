@@ -617,6 +617,10 @@ test('G5: status still reports an ordinary vault, and a vault whose initialize c
 
     const sync = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
     assert.equal(sync.status, 0, sync.stderr);
+    // Finishing supplied the commit's name itself (0.29.1 integration: on a
+    // Linux host with an empty account name the commit failed with "empty
+    // ident name"; Windows masked it with the account's user name).
+    assert.equal(git(['-C', vault, 'config', '--file', join(vault, '.git', 'config'), '--get', 'user.name']), 'agent-companion memory-vault');
     const ok = runScript(SCRIPT, ['status', '--json'], { cwd: fx.dir, env });
     assert.equal(ok.status, 0, ok.stderr);
     assert.equal(ok.json?.refused, undefined);
