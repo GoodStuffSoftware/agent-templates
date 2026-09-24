@@ -30,8 +30,25 @@ function writeOverride(stateDir, minClaudeCodeVersion) {
   }));
 }
 
-test('installed Claude Code below the alias-resolution floor: signal fires, names the floor and the running version', () => {
-  const [maj, min, pat] = runningVersion();
+// Computed once, up front, at module load — never inside the test body — so
+// the skip decision is made the same way `{ skip }` is documented to work:
+// a CI runner with no `claude` CLI on PATH (exit 127) must SKIP this test
+// with a clear reason, never silently pass it (a skip and a pass read very
+// differently in a report). Only this first test depends on the real
+// installed version; the other two in this file don't call runningVersion()
+// and stay fully active either way.
+let cachedRunningVersion;
+let runningVersionError;
+try {
+  cachedRunningVersion = runningVersion();
+} catch (err) {
+  runningVersionError = err;
+}
+
+test('installed Claude Code below the alias-resolution floor: signal fires, names the floor and the running version', {
+  skip: runningVersionError ? `claude CLI not available to derive a real running version: ${runningVersionError.message}` : false,
+}, () => {
+  const [maj, min, pat] = cachedRunningVersion;
   const floorAbove = `${maj}.${min}.${pat + 1}`; // guaranteed strictly above the running version
   const { dir, stateDir, cleanup } = makeFixture();
   try {
