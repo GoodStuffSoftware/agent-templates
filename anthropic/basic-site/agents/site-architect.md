@@ -3,6 +3,8 @@ name: {{AGENT_PREFIX}}-architect
 description: Plans and implements multi-file architectural changes for {{PROJECT_NAME}} — new page sections, layout systems, cross-cutting features, server functions, deploy lifecycle. Use when a feature touches 4+ files or introduces a new abstraction. Returns a plan for approval before writing code. Also owns the deploy lifecycle.
 model: opus
 effort: xhigh
+experimental:
+  cacheTtl: 1h
 color: blue
 tools: Read, Edit, Write, Bash, PowerShell, Glob, Grep
 ---
