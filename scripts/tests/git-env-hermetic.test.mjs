@@ -23,8 +23,13 @@ const REPO_ROOT = resolve(HERE, "..", "..");
 const temps = [];
 after(() => { for (const d of temps) rmSync(d, { recursive: true, force: true }); });
 
+// No auto-maintenance/gc: a recent git detaches `maintenance run --auto`
+// after a commit, and its transient objects/maintenance.lock (or a repack)
+// races hashTree() below. Seen on the Linux CI runner.
+const NO_AUTO_MAINT = ["-c", "maintenance.auto=false", "-c", "gc.auto=0"];
+
 function git(args, cwd) {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true, env: cleanGitEnv() });
+  const r = spawnSync("git", [...NO_AUTO_MAINT, ...args], { cwd, encoding: "utf8", windowsHide: true, env: cleanGitEnv() });
   if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
   return r.stdout.trim();
 }

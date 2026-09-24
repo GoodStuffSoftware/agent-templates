@@ -21,8 +21,13 @@ import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
 const COMMON = join(dirname(fileURLToPath(import.meta.url)), '..', 'bench', 'tasks', 'common.mjs');
 
+// No auto-maintenance/gc: a recent git detaches `maintenance run --auto`
+// after a commit, and its transient objects/maintenance.lock (or a repack)
+// races hashTree() below. Seen on the Linux CI runner.
+const NO_AUTO_MAINT = ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0'];
+
 function git(args, cwd) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, env: cleanGitEnv() });
+  const r = spawnSync('git', [...NO_AUTO_MAINT, ...args], { cwd, encoding: 'utf8', windowsHide: true, env: cleanGitEnv() });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
   return r.stdout.trim();
 }
