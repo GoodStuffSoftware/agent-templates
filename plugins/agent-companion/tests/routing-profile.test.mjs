@@ -288,6 +288,46 @@ test('a code-review row sets a minimum effort over writer parity, never the mode
   assert.match(hk.skipped.find((x) => x.layer === 'profile').reason, /^F4: minimum effort 'xhigh' unsupported by the writer's model haiku/);
 });
 
+// A code-review row combined with a fable writer: F2 caps fable to opus in
+// parityFloors() before the row is ever consulted, so the row's minimum
+// effort can only RAISE what F2 already produced, never below it and never
+// onto a different model (a row can never name one for a parity type; see F3
+// in profileRowRefusal).
+test('a code-review row raises on top of F2 for a fable writer, never below it and never off-model', () => {
+  // Below the F2-capped effort: the floor wins outright ("already met").
+  writeProfile(profile({ 'code-review': row(null, 'low') }));
+  const met = ctx.resolveRoute({ type: 'code-review', writer: { model: 'fable', effort: 'low' }, now: BEFORE });
+  assert.deepEqual([label(met), met.layer], ['opus/low', 'profile']);
+  assert.match(met.rationale, /already met/);
+  assert.ok(met.floorsApplied.some((f) => f.floor === 'F2' && /fable -> opus/.test(f.capped)));
+
+  // Above it: the row raises further, still on the F2-capped model (opus).
+  writeProfile(profile({ 'code-review': row(null, 'xhigh') }));
+  const raised = ctx.resolveRoute({ type: 'code-review', writer: { model: 'fable', effort: 'low' }, now: BEFORE });
+  assert.deepEqual([label(raised), raised.layer], ['opus/xhigh', 'profile']);
+  assert.match(raised.rationale, /sets a minimum effort xhigh -> opus\/xhigh/);
+  assert.equal(raised.model, 'opus', 'the profile row never moves the model off the F2-capped opus');
+});
+
+// An EXPLICIT critical consequence departs from code-review's own preset
+// (weight "parity", consequence "inherit"; ADR 0003 §1's departure rule), so
+// it skips the profile layer entirely — a code-review row can never soften a
+// critical, fable-capped review by sitting underneath it: the shipped F1/F2
+// floors alone govern, whatever the row asks for.
+test('an explicit critical consequence bypasses the code-review row entirely: F1/F2 alone floor a fable writer', () => {
+  for (const minEffort of ['low', 'max']) {
+    writeProfile(profile({ 'code-review': row(null, minEffort) }));
+    const r = ctx.resolveRoute({
+      type: 'code-review', writer: { model: 'fable', effort: 'low' }, consequence: 'critical', consequenceExplicit: true, now: BEFORE,
+    });
+    assert.deepEqual([label(r), r.layer], ['opus/xhigh', 'grid'], `row minEffort ${minEffort} must not change the floored answer`);
+    assert.equal(r.source, 'reviewer-parity');
+    assert.ok(r.floorsApplied.some((f) => f.floor === 'F2' && /fable -> opus/.test(f.capped)));
+    assert.ok(r.floorsApplied.some((f) => f.floor === 'F1' && /effort low -> xhigh/.test(f.raised)));
+    assert.match(r.skipped.find((x) => x.layer === 'profile').reason, /explicit consequence departs from the code-review preset/);
+  }
+});
+
 // --- User-local types --------------------------------------------------------
 
 test('local types: TYPE resolves shipped first, then local; a local type never carries a trial', () => {
