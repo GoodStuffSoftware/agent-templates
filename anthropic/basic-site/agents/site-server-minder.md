@@ -1,7 +1,8 @@
 ---
 name: {{AGENT_PREFIX}}-server-minder
 description: Owns the local dev server(s) and port hygiene for {{PROJECT_NAME}}. Use proactively whenever a dev server must be started, restarted, or health-checked, when the dev ports are wedged or conflicting, or when a writer/reviewer needs a live preview URL. Always reports the exact bound "Local:" URL the dev server prints and confirms it responds before handing it back.
-model: haiku
+model: opus
+effort: low
 color: orange
 tools: Bash, Read, Grep, Glob
 ---
