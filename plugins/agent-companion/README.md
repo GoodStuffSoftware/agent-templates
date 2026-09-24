@@ -28,7 +28,7 @@ It was built after two observed failures:
 | Toggle | Does | Blocks? |
 |---|---|---|
 | `delegation_guard` | Fires when the **main thread** runs `delegation_threshold` execution-class tools in a row. Inert inside every subagent. | nudge, with cooldown |
-| `premium_cap` | Caps concurrent premium-tier subagents at `premium_max_concurrent`, counted by tier: a spawn whose route names opus needs no warrant but still counts. Only spawns that start count for the full 10-minute window; one that never starts (the harness rejected it) stops counting after 3 minutes. | yes, at the cap |
+| `premium_cap` | Caps concurrent premium-tier subagents at `premium_max_concurrent`. Counted: fable, and any premium tier the spawn's own route does not name; a spawn whose route names its model (e.g. a trial routing to opus) needs no warrant and is not counted. Only spawns that start count for the full 10-minute window; one that never starts (the harness rejected it) stops counting after 3 minutes. | yes, at the cap |
 | `warrant_required` | Premium spawns must carry a `WARRANT:` line stating task weight and why a cheaper tier will not do. | yes |
 | `memory_budget` | Warns when always-loaded instruction files exceed `memory_budget_tokens`, and writes a ready-to-run refactor prompt. | no |
 | `memory_doctor` | Detects memory files on disk that the index does not link — **unreachable rules** — plus broken index links. Repairs non-destructively. | no |

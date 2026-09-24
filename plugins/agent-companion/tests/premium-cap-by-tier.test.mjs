@@ -12,6 +12,16 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 
+// HELD DECISION — ADR 0003 open question 8 (counting route-exempt premium
+// spawns toward premium_cap). Implemented on feat/ac-routing-profile-s1b,
+// held from release 2026-09-24: under trial v2 most task types route to opus
+// and the cap is machine-wide (2 per rolling 10 min), so counting routed opus
+// would throttle nearly every spawn, and that needs the operator's explicit
+// call. The two cases that assert the held behaviour are marked todo (they
+// still run and report, but do not gate) until the operator decides; the
+// other three hold under both versions and stay live.
+const HELD_OQ8 = 'HELD: ADR 0003 OQ8 — routed/autofilled opus counting toward premium_cap awaits an explicit operator decision';
+
 function harness(extraEnv = {}) {
   const fx = makeFixture();
   const env = { CLAUDE_PLUGIN_DATA: join(fx.dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PREMIUM_MAX_CONCURRENT: '2', ...extraEnv };
@@ -30,7 +40,7 @@ function harness(extraEnv = {}) {
   return { ...fx, spawn, window, denials };
 }
 
-test('routed opus spawns (no warrant needed) now count toward the cap, and the third is denied', () => {
+test('routed opus spawns (no warrant needed) now count toward the cap, and the third is denied', { todo: HELD_OQ8 }, () => {
   const h = harness();
   try {
     assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'allow');
@@ -45,7 +55,7 @@ test('routed opus spawns (no warrant needed) now count toward the cap, and the t
   } finally { h.cleanup(); }
 });
 
-test('an autofilled opus (no model named, TYPE routes to opus) counts too', () => {
+test('an autofilled opus (no model named, TYPE routes to opus) counts too', { todo: HELD_OQ8 }, () => {
   const h = harness();
   try {
     assert.equal(h.spawn('TYPE: debug-root-cause\ngo', null).decision, 'allow');
@@ -75,5 +85,17 @@ test('premium_cap off: routed opus spawns are neither counted nor capped', () =>
   try {
     for (let i = 0; i < 3; i += 1) assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'allow');
     assert.equal(h.window(), 0);
+  } finally { h.cleanup(); }
+});
+
+// What ships while OQ8 is held: a spawn whose route names its model is not
+// counted (as before slice 1b), so routed opus is never capped.
+test('SHIPPED while OQ8 is held: routed and autofilled opus spawns are not counted toward the cap', () => {
+  const h = harness();
+  try {
+    for (let i = 0; i < 3; i += 1) assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'allow');
+    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', null).decision, 'allow');
+    assert.equal(h.window(), 0);
+    assert.deepEqual(h.denials(), []);
   } finally { h.cleanup(); }
 });

@@ -703,9 +703,14 @@ try {
   let warrantSoftNote = null;
 
   if (!isPremiumForSpawn) {
-    // Route-exempt from the warrant, but a premium TIER still counts toward
-    // the fan-out cap (see enforcePremiumCap below).
-    if (isPremium(model)) enforcePremiumCap(true);
+    // HELD DECISION (ADR 0003 open question 8, 2026-09-24): counting a
+    // route-exempt premium spawn toward the cap is implemented on
+    // feat/ac-routing-profile-s1b (`if (isPremium(model))
+    // enforcePremiumCap(true);` here) but held from release. Under trial v2
+    // most task types route to opus and the cap is machine-wide (2 per
+    // rolling 10 min), so it would throttle nearly every spawn; that effect
+    // needs the operator's explicit call. Until then a spawn whose route
+    // names its model skips the cap, as before slice 1b.
     allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
   }
 
@@ -767,14 +772,10 @@ try {
   }
 
   // --- Concurrency cap ---------------------------------------------------
-  // Counted by the RESOLVED TIER (classifyModel's premium flag, after
-  // autofill), regardless of route (ADR 0003 open question 8, decided
-  // 2026-09-24). A route that names opus exempts the spawn from the WARRANT —
-  // the table prescribed it — but not from the fan-out bound: before this, a
-  // routed opus spawn returned early above and skipped the cap entirely, so
-  // trial v2 (and any future profile row naming opus) removed the only limit
-  // on concurrent premium agents for most task types. Declared as a function
-  // (hoisted within this block) so the route-exempt path above can call it.
+  // Reached only by a spawn that is premium FOR THIS SPAWN (fable, or a
+  // premium tier its route does not name). Counting route-exempt premium
+  // spawns too (open question 8) is a HELD decision — see the early allow
+  // above. `routeExempt` stays so that version is a one-line change.
   enforcePremiumCap(false);
   function enforcePremiumCap(routeExempt) {
     if (!opt('premium_cap', true)) return;
