@@ -415,7 +415,7 @@ export function routingProfileInvalidMarkerPath() {
 // present exactly while the last read of the profile failed. It names the
 // failure class and the fields at fault, never a value from the file. Written
 // once per distinct (reason, mtime, size), removed when the file is valid or
-// gone; memoised per process so a caller resolving many types pays it once.
+// gone or the routing_profile switch is off; memoised per process so a caller resolving many types pays it once.
 let _markerSynced = '';
 function syncInvalidMarker(res) {
   const key = `${res.status}|${res.reason || ''}|${res.mtimeMs ?? ''}|${res.size ?? ''}`;
@@ -453,7 +453,12 @@ export function routingProfileState({ use = true } = {}) {
   if (!use) return { status: 'unused', profile: null, revision: null };
   let on = true;
   try { on = opt('routing_profile', true); } catch { on = true; }
-  if (!on) return { status: 'off', profile: null, revision: null };
+  if (!on) {
+    // Off: nothing in the file can matter, so a marker left by an earlier
+    // failed read would be a stale signal to the scout (S2 review P6).
+    syncInvalidMarker({ status: 'off' });
+    return { status: 'off', profile: null, revision: null };
+  }
   try {
     const res = readProfile(routingProfilePath());
     syncInvalidMarker(res);

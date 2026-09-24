@@ -405,6 +405,20 @@ test('local types: TYPE resolves shipped first, then local; a local type never c
 
 // --- Kill switch ---------------------------------------------------------------
 
+// S2 review P6: a marker left by an earlier failed read went stale while the
+// switch was off (the file is not read, so nothing ever cleared it).
+test('kill switch: turning routing_profile off clears a marker left by an earlier failed read', () => {
+  writeProfile('not json');
+  ctx.resolveRoute({ type: 'bounded-feature', now: BEFORE });
+  assert.equal(existsSync(MARKER), true, 'an invalid read leaves the marker');
+  process.env.CLAUDE_PLUGIN_OPTION_ROUTING_PROFILE = 'false';
+  try {
+    assert.equal(ctx.resolveRoute({ type: 'bounded-feature', now: BEFORE }).profileStatus, 'off');
+    assert.equal(existsSync(MARKER), false, 'the stale marker must be cleared while the switch is off');
+  } finally { delete process.env.CLAUDE_PLUGIN_OPTION_ROUTING_PROFILE; }
+  clearProfile();
+});
+
 test('kill switch: routing_profile off means the shipped table only, and the file is not touched', () => {
   writeProfile(profile({ 'bounded-feature': row('sonnet', 'medium') }));
   const before = statSync(PROFILE);
