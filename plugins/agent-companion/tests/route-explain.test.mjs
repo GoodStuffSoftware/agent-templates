@@ -65,3 +65,49 @@ test('recommend --explain prints the grid floors the reviewer found missing', ()
   const j = runScript('scripts/recommend.mjs', ['--type', 'explore', '--consequence', 'critical', '--explain', '--json']).json;
   assert.deepEqual(j.route.floorsApplied.map((f) => [f.floor, f.within]), [['F1', 'grid'], ['F1', 'grid']]);
 });
+
+// --- No route: layer null, and explain says so --------------------------------
+
+test('a fractional weight resolves to no route: layer null, not a grid winner with an empty model', () => {
+  const r = ctx.resolveRoute({ weight: 2.5, weightExplicit: true, now: NOW });
+  assert.equal(r.model, '');
+  assert.equal(r.effort, '');
+  assert.equal(r.layer, null);
+  assert.equal(r.source, null);
+  assert.deepEqual(r.floorsApplied, []);
+  assert.equal(r.rationale, 'no routing row for weight 2.5');
+  const grid = r.stack.find((s) => s.layer === 'grid');
+  assert.deepEqual([grid.status, grid.candidate], ['unresolved', null]);
+  // The compatibility shape is what resolveExpected() always returned here.
+  assert.deepEqual(JSON.parse(JSON.stringify(ctx.resolveExpected({ weight: 2.5, weightExplicit: true, now: NOW }))),
+    { model: '', effort: '', rationale: 'no routing row for weight 2.5', weight: 2.5, kind: 'bounded', consequence: 'routine', trial: null });
+  const lines = ctx.explainRoute(r);
+  assert.equal(lines.find((l) => l.startsWith('winner:')), 'winner:   none — no route (no routing row for weight 2.5)');
+  assert.equal(lines.find((l) => l.startsWith('provenance:')), 'provenance: no route resolved');
+});
+
+test('a fractional weight on a trial type departs from the preset, skips the trial, and still has no route', () => {
+  const r = ctx.resolveRoute({ type: 'debug-root-cause', weight: 2.5, weightExplicit: true, now: NOW });
+  assert.equal(r.layer, null);
+  assert.equal(r.model, '');
+  assert.match(r.skipped[0].reason, /explicit weight departs/);
+});
+
+test('every other invalid weight is no route too (layer null)', () => {
+  for (const [weight, why] of [[0, 'no routing row for weight 0'], [6, 'no routing row for weight 6'], [-1, 'no routing row for weight -1'],
+    [Number.NaN, 'no routing row for weight null'], ['3', 'no routing row for weight "3"'], [undefined, 'no routing row for weight null']]) {
+    const r = ctx.resolveRoute({ weight, weightExplicit: true, now: NOW });
+    assert.deepEqual([r.layer, r.model, r.rationale], [null, '', why], String(weight));
+    assert.match(ctx.explainRoute(r).find((l) => l.startsWith('winner:')), /^winner:\s+none — no route/);
+  }
+  // A parity type with no writer: no route, as it always was.
+  assert.equal(ctx.resolveRoute({ type: 'code-review', now: NOW }).layer, null);
+});
+
+test('recommend --weight 2.5 --explain says "no route"', () => {
+  const res = runScript('scripts/recommend.mjs', ['--weight', '2.5', '--explain']);
+  assert.match(res.stdout, /winner:\s+none — no route \(no routing row for weight 2\.5\)/);
+  const j = runScript('scripts/recommend.mjs', ['--weight', '2.5', '--explain', '--json']).json;
+  assert.equal(j.route.layer, null);
+  assert.equal(j.model, '');
+});

@@ -365,7 +365,8 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 //     type, typeKnown, weight, kind, consequence, departures, matchesPreset,
 //     stack, trial }
 // `model` is '' (and layer null) when no route could be resolved: weight
-// missing, non-numeric or outside 1-5, or a parity type with no writer.
+// missing, non-numeric, outside 1-5 or naming no routing row (2.5), or a
+// parity type with no writer.
 // `trial` is the old resolveExpected() trial metadata — non-null exactly when
 // the trial layer won.
 
@@ -640,6 +641,19 @@ export function resolveRoute({
       }
     }
   }
+  if (!won && !grid.model) {
+    // A weight inside 1-5 that names no routing row (a fractional weight, or
+    // a row missing from an edited table): the grid has no answer, so there
+    // is no route — layer null, never a grid "winner" with an empty model.
+    gridEntry.status = 'unresolved';
+    gridEntry.candidate = null;
+    return {
+      ...base, model: '', effort: '', layer: null, source: null, state: null, provenance: null,
+      floorsApplied: [], skipped,
+      rationale: grid.rationale,
+      trial: null,
+    };
+  }
   if (!won) {
     gridEntry.status = 'won';
     won = {
@@ -743,7 +757,7 @@ export function explainRoute(r) {
           : (r.skipped || []).length ? 'every higher layer was skipped' : 'no higher layer has an entry for this task');
     L.push(`winner:   ${r.layer} -> ${routeLabelOf(r.model, r.effort)} (${why})`);
   } else {
-    L.push('winner:   none (no route resolved)');
+    L.push(`winner:   none — no route (${r.rationale})`);
   }
   L.push(`floors:   ${(r.floorsApplied || []).length ? r.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}${f.within ? ` (within the ${f.within})` : ''}`).join('; ') : 'none fired'}`);
   L.push(`profile:  revision ${r.profileRevision ?? 'none'}`);

@@ -52,10 +52,13 @@ async function stage(contextSource, configText) {
   staged.push(s);
   return s.mod;
 }
-const casesFor = (cfg) => buildCases({
+// The live matrix adds a fractional weight (2.5: inside 1-5, no routing row);
+// the frozen record's matrix is the one it was generated with.
+const casesFor = (cfg, { frozen = false } = {}) => buildCases({
   typeNames: Object.keys(cfg.taskTypes || {}),
   kinds: Object.keys(cfg.taskKinds || {}),
   consequences: Object.keys(cfg.consequence || {}),
+  extraWeights: frozen ? [] : [2.5],
 });
 
 test('the vendored reference is the pinned baseline resolver, byte for byte', () => {
@@ -69,7 +72,7 @@ test('the vendored reference is the pinned baseline resolver, byte for byte', ()
 
 test('the vendored reference still reproduces the frozen record on the baseline config', async () => {
   const ref = await stage(REF_CONTEXT, REF_CONFIG);
-  const cases = casesFor(ref.modelTiers());
+  const cases = casesFor(ref.modelTiers(), { frozen: true });
   assert.deepEqual(golden.clocks, CLOCKS);
   assert.equal(golden.caseCount, cases.length * CLOCKS.length);
   const bad = [];
@@ -136,7 +139,8 @@ const REGRESSIONS = {
   "the grid ignores the kind's effort delta": ['const delta = (cfg.taskKinds || {})[kind]?.effortDelta ?? 0;', 'const delta = 0;'],
   'a preset-equal weight counts as a departure again': ["note('weight', weightExplicit, typeKnown && weight === t.weight);", "note('weight', weightExplicit, false);"],
   'the retirement date ignores the pinned clock': ['const n = clockDate(now);', 'const n = new Date(Date.parse(\'2026-09-24T12:00:00Z\'));'],
-  'the trial answers with the grid model': ['          model: ov.model,\n', '          model: grid.model,\n'],
+  'a weight with no routing row is a grid "winner" again': ['  if (!won && !grid.model) {', '  if (false) {'],
+  'the trial answers with the grid model':['          model: ov.model,\n', '          model: grid.model,\n'],
 };
 for (const [name, [anchor, repl]] of Object.entries(REGRESSIONS)) {
   test(`gate goes red on a seeded resolver regression: ${name}`, async () => {

@@ -177,10 +177,10 @@ export function compareLive({ cur, ref, cfg, cases, clocks }) {
       if (route.model !== want.model || route.effort !== want.effort) {
         problems.push(`resolveRoute ${route.model}/${route.effort} (layer ${route.layer}) vs reference ${want.model}/${want.effort}`);
       }
-      if (want.model) {
-        const layer = want.trial ? 'trial' : 'grid';
-        if (route.layer !== layer) problems.push(`layer ${route.layer}, want ${layer}`);
-      }
+      // No model means no route: layer null, never a grid "winner" with an
+      // empty model.
+      const layer = want.model ? (want.trial ? 'trial' : 'grid') : null;
+      if (route.layer !== layer) problems.push(`layer ${route.layer}, want ${layer}`);
       if (lifts.length) problems.push(`a floor lifted a layer outside the floor-after-trial class: ${JSON.stringify(lifts)}`);
       try { assertSame(wrapped, want); } catch {
         problems.push(`resolveExpected differs\n    got  ${JSON.stringify(wrapped)}\n    want ${JSON.stringify(want)}`);

@@ -24,12 +24,15 @@ export const CLOCKS = ['2026-09-24T12:00:00.000Z', '2026-10-20T12:00:00.000Z'];
 
 const NONE = '-';
 
-export function buildCases({ typeNames, kinds, consequences }) {
+// `extraWeights` adds explicit weights to the cross (the live gate adds a
+// fractional one); the frozen record in expected.json was built without it.
+export function buildCases({ typeNames, kinds, consequences, extraWeights = [] }) {
   const types = [null, ...typeNames, 'no-such-type'];
   const weightOpts = [
     { id: NONE },
     ...[1, 2, 3, 4, 5].map((n) => ({ id: `E${n}`, weight: n, weightExplicit: true })),
     { id: 'E0', weight: 0, weightExplicit: true },
+    ...extraWeights.map((n) => ({ id: `E${n}`, weight: n, weightExplicit: true })),
   ];
   const kindOpts = [
     { id: NONE },
