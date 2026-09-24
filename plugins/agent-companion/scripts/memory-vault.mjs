@@ -34,7 +34,7 @@
 
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync,
-  realpathSync, statSync,
+  realpathSync, statSync, lstatSync,
 } from 'node:fs';
 import { join, dirname, relative, sep } from 'node:path';
 import { gitClean, enclosingGitRepo, samePath } from './lib/git-env.mjs';
@@ -205,6 +205,13 @@ function realOrResolved(p) {
 // a clean env, agrees. Anything else — .git missing, a gitfile pointing
 // elsewhere, discovery landing in an enclosing repository — throws before
 // any write.
+//
+// "Agrees" is not enough on its own. Both sides of that comparison are
+// realpath'd, so a <dir>/.git that is a symlink or a Windows junction to
+// ANOTHER repository's .git resolves identically on both sides and passes —
+// and every later add/commit lands in that repository. So <dir>/.git must
+// also be a real directory (lstat: not a link, not a junction, not a
+// gitfile), sitting exactly at <realpath(dir)>/.git once links are resolved.
 function assertVaultGitDir(dir) {
   const expected = vaultGitDir(dir);
   let actual = '';
@@ -219,6 +226,21 @@ function assertVaultGitDir(dir) {
       + `${expected}. Nothing was changed.`,
     );
   }
+  if (!isRealDir(expected) || !samePath(realOrResolved(expected), join(realOrResolved(dir), '.git'))) {
+    throw new Error(
+      `refusing to write — ${expected} is not a real directory of the vault's own (it is a symlink or `
+      + `junction, resolving to ${realOrResolved(expected)}). Nothing was changed.`,
+    );
+  }
+}
+
+// A directory entry that is itself a directory — not a symlink or junction to
+// one. Node's lstat reports a Windows junction as a symbolic link.
+function isRealDir(p) {
+  try {
+    const st = lstatSync(p);
+    return st.isDirectory() && !st.isSymbolicLink();
+  } catch { return false; }
 }
 
 function isDirPath(p) {

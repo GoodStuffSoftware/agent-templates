@@ -16,10 +16,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync,
+  mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, lstatSync, symlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { makeFixture, runScript, assertNotRealHome } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
@@ -215,6 +216,57 @@ test('a marker-bearing vault whose .git is gone is refused, not written through 
     fx.cleanup();
   }
 });
+
+// Every file under `dir`, path -> sha256, links recorded as links (never
+// followed). "Byte-identical" for a whole .git, objects included.
+function hashTree(dir, out = {}, base = dir) {
+  if (!existsSync(dir)) return out;
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    const st = lstatSync(p);
+    if (st.isSymbolicLink()) { out[p.slice(base.length)] = 'LINK'; continue; }
+    if (st.isDirectory()) { hashTree(p, out, base); continue; }
+    out[p.slice(base.length)] = createHash('sha256').update(readFileSync(p)).digest('hex');
+  }
+  return out;
+}
+
+const MARKER = JSON.stringify({ kind: 'agent-companion-memory-vault', schema: 1, createdAt: 'x' });
+
+// V1. assertVaultGitDir used to realpath BOTH sides of its comparison, so a
+// vault/.git that is a junction (or symlink) to a project's .git resolved to
+// the same place on both sides and passed — and sync committed the corpus
+// into the project. Junctions need no privilege on Windows; elsewhere the
+// same shape is a directory symlink.
+for (const cmd of ['init', 'sync']) {
+  test(`${cmd} refuses a marker vault whose .git is a junction/symlink to a project's .git`, () => {
+    const fx = makeFixture();
+    try {
+      const { repo, wt } = makeProject(fx.dir);
+      const corpus = makeCorpus(fx.dir);
+      const vault = join(fx.stateDir, 'memory-vault');
+      mkdirSync(vault, { recursive: true });
+      writeFileSync(join(vault, '.memory-vault.json'), MARKER);
+      symlinkSync(join(repo, '.git'), join(vault, '.git'), 'junction');
+      const before = snapshot(repo);
+      const treeBefore = hashTree(join(repo, '.git'));
+
+      const res = runScript(SCRIPT, [cmd, '--json'], {
+        cwd: fx.dir,
+        env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
+        timeout: 60000,
+      });
+
+      assert.deepEqual(hashTree(join(repo, '.git')), treeBefore, 'project .git must be byte-identical');
+      assertProjectUntouched(repo, wt, before, `${cmd} via .git junction`);
+      assert.notEqual(res.status, 0, `${cmd} must refuse: ${res.stdout}`);
+      assert.match(res.stderr, /is not a real directory of the vault's own/);
+      assert.ok(!existsSync(join(vault, '.gitattributes')), 'no backfill may be written');
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
 
 test('an existing vault keeps working when its path is inside a repository (it created itself)', () => {
   const fx = makeFixture();
