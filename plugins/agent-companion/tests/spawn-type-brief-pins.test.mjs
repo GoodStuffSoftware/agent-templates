@@ -110,8 +110,28 @@ test('5. an earlier stray "type: x" mid-sentence is ignored; the TYPE: line wins
   assert.equal(r.row.declared_type, 'integration');
 });
 
-test('5b. an earlier line-start "type: object" (a YAML snippet) loses to a later TYPE line naming a known task type', () => {
+// 5b FLIPPED in the 0.29.0 RC review (R1, lead decision): the FIRST
+// line-anchored TYPE wins whether or not it names a known type, so a body
+// line can never replace a header. An unfenced, shallow-indented YAML
+// "type: object" ahead of the TYPE line is now that first TYPE: unknown, no
+// type route, the warrant's weight 4 goes to the grid (sonnet/high) -> DENIED.
+// Fence the snippet (5d) or indent it as code (5e) and the TYPE line wins.
+test('5b. an earlier line-start "type: object" (a YAML snippet) is the first TYPE and stays unknown -> grid -> DENIED', () => {
   const r = spawnOpus('schema:\n  type: object\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5b');
+  assert.equal(r.decision, 'deny');
+  assert.equal(r.row.declared_type, 'object');
+  assert.equal(r.row.route_layer, 'grid');
+});
+
+test('5d. the same YAML inside a fenced code block is not a declaration; the TYPE line wins -> ALLOWED', () => {
+  const r = spawnOpus('```yaml\nschema:\n  type: object\n```\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5d');
+  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.row.declared_type, 'integration');
+  assert.equal(r.row.route_layer, 'trial');
+});
+
+test('5e. the same YAML as indented code (4 spaces) is not a declaration; the TYPE line wins -> ALLOWED', () => {
+  const r = spawnOpus('schema:\n\n    type: object\n\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5e');
   assert.equal(r.decision, 'allow', r.reason);
   assert.equal(r.row.declared_type, 'integration');
 });

@@ -30,9 +30,10 @@ import {
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
-  taskTypeNames, taskTypeDef,
+  taskTypeDef,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
+import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract } from './lib/brevity.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
@@ -62,23 +63,6 @@ function allowWith(systemMessage, updatedInput) {
 function combineNotes(...parts) {
   const joined = parts.filter(Boolean).join('\n\n');
   return joined || null;
-}
-
-// A brief declaration ("LABEL: value") on a line of its own: optional
-// leading whitespace, an optional list marker (-, *, >), and an optional
-// markdown-bold label and/or value ("**TYPE:** x", "**TYPE**: x",
-// "__KIND:__ x"). Case-insensitive, as before. `value` is a regex source
-// whose first group is the declared value. declLines() returns every match
-// in order; declLine() the first, or null.
-function declPattern(label, value) {
-  const bold = '(?:\\*\\*|__)?';
-  return new RegExp(`^[ \\t]*(?:[-*>][ \\t]+)?${bold}${label}${bold}[ \\t]*:[ \\t]*${bold}[ \\t]*${value}`, 'gim');
-}
-function declLines(text, label, value) {
-  return [...String(text || '').matchAll(declPattern(label, value))];
-}
-function declLine(text, label, value) {
-  return declLines(text, label, value)[0] || null;
 }
 
 try {
@@ -133,22 +117,28 @@ try {
   // documents declared_weight coming from either), but never as the
   // EXPLICIT deviation that discards a named TYPE's own preset.
   //
-  // Every declaration is read from a LINE OF ITS OWN (declLine() below), not
-  // from anywhere in the text: an unanchored match used to pick up prose
-  // ("the kind: mechanical parts", "weight: 4 files", "a brief for type: x")
-  // as an explicit declaration, which discarded the named TYPE's preset and
-  // denied the spawn its trial prescribes. A line may be list-marked
-  // (-, *, >) and the label or value markdown-bold ("**TYPE:** integration").
-  const weightLineMatch = declLine(brief, 'WEIGHT', '(?:weight[ \\t]*)?([1-5])\\b');
-  const warrantWeightMatch = declLine(brief, 'WARRANT', '(?:weight[ \\t]*)?([1-5])\\b');
+  // Every declaration is read from a LINE OF ITS OWN, not from anywhere in
+  // the text: an unanchored match used to pick up prose ("the kind:
+  // mechanical parts", "weight: 4 files", "a brief for type: x") as an
+  // explicit declaration, which discarded the named TYPE's preset and denied
+  // the spawn its trial prescribes. A line may be list-marked (-, *) and the
+  // label or value markdown-bold ("**TYPE:** integration"). Lines inside
+  // fenced code, indented code and > blockquotes are never declarations, and
+  // the FIRST declaration of each label wins whether or not its value is
+  // valid (lib/brief-directives.mjs, RC review R1): a pasted "type: explore"
+  // or "WEIGHT: 1" in the body can no longer replace or outrank the header.
+  const decls = briefDeclarations(brief);
+  const weightLineMatch = declarationValue(decls, 'WEIGHT', /(?:weight[ \t]*)?([1-5])\b/.source);
+  const warrantWeightMatch = declarationValue(decls, 'WARRANT', /(?:weight[ \t]*)?([1-5])\b/.source);
+  const warrantDeclared = !!decls.WARRANT;
   const weightLineExplicit = !!weightLineMatch;
   let declaredWeight = weightLineMatch ? Number(weightLineMatch[1])
     : (warrantWeightMatch ? Number(warrantWeightMatch[1]) : null);
   const weightWasDeclared = declaredWeight !== null;
-  const km = declLine(brief, 'KIND', '(mechanical|bounded|diagnostic|novel-design)\\b');
+  const km = declarationValue(decls, 'KIND', /(mechanical|bounded|diagnostic|novel-design)\b/.source);
   let declaredKind = km ? km[1].toLowerCase() : null;
   const kindWasDeclared = declaredKind !== null;
-  const cm = declLine(brief, 'CONSEQUENCE', '(routine|elevated|critical)\\b');
+  const cm = declarationValue(decls, 'CONSEQUENCE', /(routine|elevated|critical)\b/.source);
   let declaredConsequence = cm ? cm[1].toLowerCase() : null;
   const consequenceWasDeclared = declaredConsequence !== null;
   // TYPE: names a config/model-tiers.json taskTypes preset (taskTypesNote) —
@@ -158,16 +148,10 @@ try {
   // `recommend.mjs --type`; declaring WEIGHT/KIND/CONSEQUENCE alongside it is
   // a deliberate deviation and bypasses the override when its value DEPARTS
   // from the preset (one equal to the preset restates the type), same rule
-  // as there.
-  // Several TYPE: lines (a quoted snippet, a YAML "type: object" line): the
-  // first that names a KNOWN task type wins over any earlier stray one, so
-  // a real TYPE line is never shadowed by an incidental token.
-  // Known = shipped types first, then the routing profile's user-local types
-  // (ADR 0003 §5), both through the resolver's own lookup.
-  const typeLines = declLines(brief, 'TYPE', '([a-z][a-z0-9-]*)\\b').map((m) => m[1].toLowerCase());
-  let knownTypes = new Set();
-  try { knownTypes = new Set(taskTypeNames()); } catch { /* table unreadable: first line wins */ }
-  const declaredType = typeLines.find((n) => knownTypes.has(n)) ?? typeLines[0] ?? null;
+  // as there. Only the first TYPE line counts: an unknown one stays unknown
+  // (no route from it), and declared_type records exactly that header value.
+  const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
+  const declaredType = tm ? tm[1].toLowerCase() : null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
@@ -750,7 +734,7 @@ try {
   // case the fix's own instruction calls out: warn, don't block, since
   // nothing here can confirm the premium tier either way.
   if (opt('warrant_required', true)) {
-    if (!/WARRANT\s*:/i.test(brief)) {
+    if (!warrantDeclared) {
       if (spawnAlias === 'fable' || routingKnown) {
         recordDenial('warrant', p, `premium tier ${model} requested with no warrant`);
         deny(
