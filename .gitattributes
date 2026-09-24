@@ -15,3 +15,10 @@
 *.json  text eol=lf
 *.mjs   text eol=lf
 *.js    text eol=lf
+
+# The pre-push hook is a POSIX sh script with no file extension. A
+# Windows checkout with core.autocrlf=true would rewrite its LFs to CRLF,
+# which Git Bash's `sh` may misparse (a CRLF shebang line can fail to
+# resolve the interpreter). Force LF so the committed script always runs
+# the same way in Git Bash on Windows and in a real shell on Linux/macOS.
+.githooks/* text eol=lf

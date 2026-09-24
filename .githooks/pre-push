@@ -1,0 +1,21 @@
+#!/bin/sh
+# Pre-push gate. ALL logic (which refs to skip, which suites to run, when to
+# use --ci-parity) lives in scripts/ci-local.mjs, so the hook and CI can never
+# drift apart — this file only finds node and execs it, passing the pushed
+# refs through on stdin exactly as git gave them to us.
+#
+# Must work as a plain POSIX sh script in Git Bash on Windows and in a real
+# shell on Linux/macOS — no bashisms, no non-POSIX utilities.
+#
+# Enable with: node scripts/setup-hooks.mjs  (see CONTRIBUTING.md)
+
+hook_dir=$(cd "$(dirname "$0")" && pwd)
+repo_root=$(cd "$hook_dir/.." && pwd)
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "pre-push: node not found on PATH — cannot run the CI-local gate." >&2
+  echo "Install Node, or push with --no-verify only if you accept the risk (never on a real branch)." >&2
+  exit 1
+fi
+
+exec node "$repo_root/scripts/ci-local.mjs" --pre-push-hook
