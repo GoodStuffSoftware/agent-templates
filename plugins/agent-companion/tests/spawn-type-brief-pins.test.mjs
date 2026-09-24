@@ -5,18 +5,19 @@
 // weight). On the current code the recommender's own template shape is
 // allowed; that is case 1.
 //
-// Cases 2-5 are latent hazards in the CURRENT parser, pinned as-is because
-// slice 1 changes no behaviour. Each one makes the guard fall to the grid and
+// Cases 2-5 were latent hazards in the slice-1 parser, pinned as-is there
+// because slice 1 changed no behaviour; slice 1b fixed them. Each one makes the guard fall to the grid and
 // deny an opus spawn that the type's trial prescribes:
 //   2. an explicit WEIGHT: line EQUAL to the preset still counted as a
 //      departure (ADR §1 says only a value that DEPARTS should skip layers
 //      1-2) — FIXED in slice 1b (a);
 //   3. a prose "kind: <x>" anywhere in the body is parsed as an explicit
 //      KIND (the regexes are unanchored and case-insensitive) — since 1b (a)
-//      only a departing value (3b) still denies;
-//   4. a markdown-bold "**TYPE:** integration" is not parsed, so the type is
-//      lost and the warrant's weight is used;
-//   5. an earlier stray "type: x" token wins over the real TYPE: line.
+//      only a departing value (3b) still denied — FIXED in slice 1b (b);
+//   4. a markdown-bold "**TYPE:** integration" was not parsed, so the type
+//      was lost and the warrant's weight used — FIXED in slice 1b (b);
+//   5. an earlier stray "type: x" token won over the real TYPE: line —
+//      FIXED in slice 1b (b).
 // A later slice that fixes these must flip the matching assertions here
 // deliberately — that edit IS the behaviour change, and says so.
 import test from 'node:test';
@@ -68,23 +69,54 @@ test('3a. a prose "kind: bounded" line equal to the preset no longer departs -> 
   assert.equal(r.row.route_layer, 'trial');
 });
 
-test('3b. TODAY: a prose "kind: mechanical" in the body is parsed as an explicit KIND that departs -> grid -> DENIED', () => {
+// 3b, 4 and 5 FLIPPED in slice 1b fix (b): declarations are read only from
+// a line of their own (optionally list-marked and/or markdown-bold), and the
+// first TYPE line naming a known task type wins.
+test('3b. a prose "kind: mechanical" mid-sentence is no longer a KIND declaration -> trial -> ALLOWED', () => {
   const r = spawnOpus('TYPE: integration\nWARRANT: weight 4 — x\nThe kind: mechanical parts are renames', 'sess-pin-3b');
-  assert.equal(r.decision, 'deny');
+  assert.equal(r.decision, 'allow', r.reason);
   assert.equal(r.row.declared_type, 'integration');
+  assert.equal(r.row.declared_kind, 'bounded'); // filled from the preset, not the prose
+  assert.equal(r.row.route_layer, 'trial');
+});
+
+test('3c. a prose "weight: 4 files" mid-sentence is no longer a WEIGHT declaration', () => {
+  const r = spawnOpus('TYPE: integration\nWARRANT: weight 4 — x\nTouches weight: 2 files only', 'sess-pin-3c');
+  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.row.declared_weight, 4);
+  assert.equal(r.row.route_layer, 'trial');
+});
+
+test('3d. a KIND: line of its own that departs still departs -> grid -> DENIED', () => {
+  const r = spawnOpus('TYPE: integration\nKIND: mechanical\nWARRANT: weight 4 — x\ndo it', 'sess-pin-3d');
+  assert.equal(r.decision, 'deny');
   assert.equal(r.row.declared_kind, 'mechanical');
   assert.equal(r.row.route_layer, 'grid');
 });
 
-test('4. TODAY: "**TYPE:** integration" (markdown bold) is not parsed -> the warrant weight is used -> DENIED', () => {
-  const r = spawnOpus('**TYPE:** integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-4');
-  assert.equal(r.decision, 'deny');
-  assert.match(r.reason, /declares weight 4 \(bounded\), routine consequence, which the routing table sends to sonnet\/high/);
-  assert.equal(r.row.declared_type, null);
+for (const [n, line] of [['4', '**TYPE:** integration'], ['4b', '**TYPE**: integration'], ['4c', '**TYPE: integration**'], ['4d', '- TYPE: integration'], ['4e', '  Type: integration']]) {
+  test(`${n}. "${line}" is parsed as TYPE -> trial opus/high -> ALLOWED`, () => {
+    const r = spawnOpus(`${line}\nWARRANT: weight 4 — x\ndo it`, `sess-pin-${n}`);
+    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.row.declared_type, 'integration');
+    assert.equal(r.row.fit_expected, 'opus/high');
+    assert.equal(r.row.route_layer, 'trial');
+  });
+}
+
+test('5. an earlier stray "type: x" mid-sentence is ignored; the TYPE: line wins -> ALLOWED', () => {
+  const r = spawnOpus('Brief for type: cleanup\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5');
+  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.row.declared_type, 'integration');
 });
 
-test('5. TODAY: an earlier stray "type: x" token wins over the real TYPE: line -> DENIED', () => {
-  const r = spawnOpus('Brief for type: cleanup\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5');
-  assert.equal(r.decision, 'deny');
+test('5b. an earlier line-start "type: object" (a YAML snippet) loses to a later TYPE line naming a known task type', () => {
+  const r = spawnOpus('schema:\n  type: object\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5b');
+  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.row.declared_type, 'integration');
+});
+
+test('5c. with no known type anywhere, the first TYPE line is still recorded as declared', () => {
+  const r = spawnOpus('TYPE: cleanup\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5c');
   assert.equal(r.row.declared_type, 'cleanup');
 });

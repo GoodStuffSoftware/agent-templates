@@ -62,6 +62,23 @@ function combineNotes(...parts) {
   return joined || null;
 }
 
+// A brief declaration ("LABEL: value") on a line of its own: optional
+// leading whitespace, an optional list marker (-, *, >), and an optional
+// markdown-bold label and/or value ("**TYPE:** x", "**TYPE**: x",
+// "__KIND:__ x"). Case-insensitive, as before. `value` is a regex source
+// whose first group is the declared value. declLines() returns every match
+// in order; declLine() the first, or null.
+function declPattern(label, value) {
+  const bold = '(?:\\*\\*|__)?';
+  return new RegExp(`^[ \\t]*(?:[-*>][ \\t]+)?${bold}${label}${bold}[ \\t]*:[ \\t]*${bold}[ \\t]*${value}`, 'gim');
+}
+function declLines(text, label, value) {
+  return [...String(text || '').matchAll(declPattern(label, value))];
+}
+function declLine(text, label, value) {
+  return declLines(text, label, value)[0] || null;
+}
+
 try {
   const p = readStdin();
   noteAgentType(p);
@@ -113,16 +130,23 @@ try {
   // declared weight for declaredWeight/telemetry/fitOn (TELEMETRY.md
   // documents declared_weight coming from either), but never as the
   // EXPLICIT deviation that discards a named TYPE's own preset.
-  const weightLineMatch = brief.match(/\bWEIGHT\s*:\s*(?:weight\s*)?([1-5])\b/i);
-  const warrantWeightMatch = brief.match(/\bWARRANT\s*:\s*(?:weight\s*)?([1-5])\b/i);
+  //
+  // Every declaration is read from a LINE OF ITS OWN (declLine() below), not
+  // from anywhere in the text: an unanchored match used to pick up prose
+  // ("the kind: mechanical parts", "weight: 4 files", "a brief for type: x")
+  // as an explicit declaration, which discarded the named TYPE's preset and
+  // denied the spawn its trial prescribes. A line may be list-marked
+  // (-, *, >) and the label or value markdown-bold ("**TYPE:** integration").
+  const weightLineMatch = declLine(brief, 'WEIGHT', '(?:weight[ \\t]*)?([1-5])\\b');
+  const warrantWeightMatch = declLine(brief, 'WARRANT', '(?:weight[ \\t]*)?([1-5])\\b');
   const weightLineExplicit = !!weightLineMatch;
   let declaredWeight = weightLineMatch ? Number(weightLineMatch[1])
     : (warrantWeightMatch ? Number(warrantWeightMatch[1]) : null);
   const weightWasDeclared = declaredWeight !== null;
-  const km = brief.match(/\bKIND\s*:\s*(mechanical|bounded|diagnostic|novel-design)\b/i);
+  const km = declLine(brief, 'KIND', '(mechanical|bounded|diagnostic|novel-design)\\b');
   let declaredKind = km ? km[1].toLowerCase() : null;
   const kindWasDeclared = declaredKind !== null;
-  const cm = brief.match(/\bCONSEQUENCE\s*:\s*(routine|elevated|critical)\b/i);
+  const cm = declLine(brief, 'CONSEQUENCE', '(routine|elevated|critical)\\b');
   let declaredConsequence = cm ? cm[1].toLowerCase() : null;
   const consequenceWasDeclared = declaredConsequence !== null;
   // TYPE: names a config/model-tiers.json taskTypes preset (taskTypesNote) —
@@ -133,8 +157,13 @@ try {
   // a deliberate deviation and bypasses the override when its value DEPARTS
   // from the preset (one equal to the preset restates the type), same rule
   // as there.
-  const tm = brief.match(/\bTYPE\s*:\s*([a-z][a-z0-9-]*)\b/i);
-  const declaredType = tm ? tm[1].toLowerCase() : null;
+  // Several TYPE: lines (a quoted snippet, a YAML "type: object" line): the
+  // first that names a KNOWN task type wins over any earlier stray one, so
+  // a real TYPE line is never shadowed by an incidental token.
+  const typeLines = declLines(brief, 'TYPE', '([a-z][a-z0-9-]*)\\b').map((m) => m[1].toLowerCase());
+  let knownTypes = {};
+  try { knownTypes = modelTiers().taskTypes || {}; } catch { /* table unreadable: first line wins */ }
+  const declaredType = typeLines.find((n) => Object.prototype.hasOwnProperty.call(knownTypes, n)) ?? typeLines[0] ?? null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
