@@ -42,15 +42,17 @@ import {
   CELLS, TASKS, TASK_FAMILIES, resolveList, runOne, rescoreOne, rebuildSummary, defaultResultsRoot,
   checkIsolateHomePreflight, formatRunLine, authErrorAbortMessage, scaledMaxBudgetUsd,
   harnessErrorRow, cliJudgeCaller, taskFamilyOf,
+  checkEvidenceFamilyOverridePreflight, withEvidenceFamilyOverride, loadLocalEvidenceFamilyMapping,
 } from '../bench/runner.mjs';
 import { loadPack, buildTaskFromPack } from '../bench/task-packs/lib.mjs';
 import {
-  validateJudgeConfig, checkJudgeEligibility, taskJudgeKey, findTrustedCalibration, calibrateJudge,
+  validateJudgeConfig, checkJudgeEligibility, taskJudgeKey, findTrustedCalibration, calibrateJudge, JUDGE_VOTES,
 } from '../bench/judge.mjs';
 import { scheduleRuns, makeCapacityGate } from '../bench/scheduler.mjs';
 import {
-  loadSeed, loadLocalHistory, estimateRun, formatEstimate, shouldConfirm,
+  loadSeed, loadLocalHistory, estimateRun, formatEstimate, shouldConfirm, loadLocalJudgeVoteHistory,
 } from '../bench/estimate.mjs';
+import { evidenceFamilyOf } from '../bench/evidence-family.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -121,6 +123,12 @@ function printHelp() {
   --isolate-home                 Redirect HOME/USERPROFILE to a throwaway dir per run (opt-in;
                                  default is your normal OAuth session, unredirected). Requires
                                  ANTHROPIC_API_KEY -- refused otherwise. See docs/BENCHMARK.md.
+  --evidence-family <fine label>  Whole-run evidence-family default (bench/evidence-family.mjs's
+                                 fine labels only), applied to any task that declares no
+                                 evidenceFamily of its own -- for an external harness whose tasks
+                                 set no family at all. Falls back to
+                                 AGENT_COMPANION_BENCH_EVIDENCE_FAMILY when omitted. See
+                                 docs/BENCHMARK.md "Evidence families".
   --judge-model <full id>        OPTIONAL rubric judge (bench/judge.mjs): grade each run's change
                                  against the task's rubric, as a SEPARATE score (never merged into
                                  pass/fail). Must differ from, and be at least as strong as, every
@@ -147,6 +155,15 @@ function parseArgs(argv) {
     judgeModel: null, judgeEffort: null, judgeBudgetUsd: null, judgeCalibrations: null, calibrateJudge: false,
     concurrency: 1, perAgentMB: null,
     weeklyUsagePct: null, weeklyCeilingPct: null, confirmAbovePoints: 2, confirm: false,
+    // FS9 fix (2026-09-24 round-2 family-split review, HIGH): this gated
+    // entry point had no --evidence-family flag at all -- bench/runner.mjs's
+    // OWN direct CLI has had one since FS2, but scripts/benchmark.mjs (the
+    // one operators actually run) could not set a whole-run default for an
+    // external harness's tasks. null until parsed below (CLI) or read from
+    // the env (see the fallback after the loop) -- reuses runner.mjs's own
+    // AGENT_COMPANION_BENCH_EVIDENCE_FAMILY var name so one env var covers
+    // either entry point.
+    evidenceFamily: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -175,8 +192,14 @@ function parseArgs(argv) {
     else if (a === '--judge-budget-usd') out.judgeBudgetUsd = Number(argv[++i]);
     else if (a === '--judge-calibrations') out.judgeCalibrations = argv[++i];
     else if (a === '--calibrate-judge') out.calibrateJudge = true;
+    else if (a === '--evidence-family') out.evidenceFamily = argv[++i];
     else if (a === '--help' || a === '-h') out.help = true;
     else usageError(`unknown arg: ${a}`);
+  }
+  // Env fallback: only when --evidence-family was not given explicitly --
+  // same behavior as bench/runner.mjs's own parseArgs().
+  if (out.evidenceFamily == null && process.env.AGENT_COMPANION_BENCH_EVIDENCE_FAMILY) {
+    out.evidenceFamily = process.env.AGENT_COMPANION_BENCH_EVIDENCE_FAMILY;
   }
   return out;
 }
@@ -220,36 +243,70 @@ function expandTasks(spec, tasksMap) {
 
 // bench/runner.mjs's taskFamilyOf() returns the bare family names this
 // benchmark's OWN grid uses ("easy" | "hard" | "real" | "pack" | "other").
-// bench/estimate.mjs's seed/history are keyed by the GENERIC labels the
-// public seed ships (bench/config/estimate-seed.json: "easy-synthetic" |
-// "hard-synthetic" | "real-bugfix" | "architecture") -- this maps one to the
-// other. A task pack ("pack") is bug-fix sized by convention (FORMAT.md), so
-// it maps to "real-bugfix"; "architecture" has no built-in task family at
-// all today (it is ADR 0003 slice 6 mining's own family, supplied directly
-// by that caller, never derived from a built-in task id).
-const FAMILY_TO_SEED_FAMILY = {
-  easy: 'easy-synthetic', hard: 'hard-synthetic', real: 'real-bugfix', pack: 'real-bugfix',
-};
-
-// Flattens a cell x task x rep grid into bench/estimate.mjs's plan shape
-// ({ cellId, model, effort, family, n }), one row per (cell, task) with
-// n = reps -- estimateRun() treats n identical rows as equivalent to n
-// separate ones, so this is exact, not an approximation.
-export function buildEstimatePlan({ cellIds, taskIds, tasksMap, reps }) {
+// bench/estimate.mjs's seed/history are keyed by the finer evidence-family
+// labels the public seed ships (bench/config/estimate-seed.json:
+// "easy-synthetic" | "hard-synthetic" | "real-bugfix" | "architecture") --
+// bench/evidence-family.mjs's evidenceFamilyOf() maps one to the other (a
+// task pack defaults to "real-bugfix" per FORMAT.md unless its own manifest
+// declares `evidenceFamily`; "architecture" has no built-in task family at
+// all today -- it is ADR 0003 slice 6 mining's own family, supplied directly
+// by that caller, never derived from a built-in task id). This is the SAME
+// registry bench/runner.mjs uses to stamp every results.jsonl row, so a plan
+// built here and a row logged there always agree on a task's evidence
+// family.
+// FS9 fix (2026-09-24 round-2 family-split review, HIGH): `evidenceFamilyOverride`
+// (--evidence-family/AGENT_COMPANION_BENCH_EVIDENCE_FAMILY, applied only to a
+// task with no evidenceFamily of its own -- see withEvidenceFamilyOverride())
+// and `localMapping` (the operator's local evidence-families.json, loaded
+// once in main()) are now threaded through to evidenceFamilyOf() here too --
+// previously this plan builder consulted neither, so a --dry-run/live
+// estimate for an external harness's tasks (no declared evidenceFamily) could
+// never agree with what rebuildSummary() would eventually classify those same
+// rows as. Both default to null/none so an existing caller that omits them
+// behaves exactly as before.
+export function buildEstimatePlan({
+  cellIds, taskIds, tasksMap, reps, evidenceFamilyOverride = null, localMapping = null,
+}) {
   const plan = [];
   for (const cellId of cellIds) {
     const cell = CELLS[cellId];
     if (!cell) continue;
     for (const taskId of taskIds) {
       const task = tasksMap[taskId];
-      const rawFamily = taskFamilyOf(taskId, { task });
+      const { fine } = evidenceFamilyOf({
+        taskId, task: withEvidenceFamilyOverride(task, evidenceFamilyOverride), taskFamilyOf, localMapping,
+      });
       plan.push({
         cellId, model: cell.model, effort: cell.effort,
-        family: FAMILY_TO_SEED_FAMILY[rawFamily] || rawFamily, n: reps, taskId,
+        family: fine, n: reps, taskId,
       });
     }
   }
   return plan;
+}
+
+// Operator direction (2026-09-24): the pre-run estimate previously counted
+// ZERO judge-vote cost, even though a rubric judge casts real, separately-
+// billed votes (bench/judge.mjs's JUDGE_VOTES per judged answer). Builds the
+// `judgeVotePlan` bench/estimate.mjs's estimateRun() takes: the judge's own
+// model/effort (never a writer cell's), and the TOTAL vote count across this
+// plan -- only cells actually ELIGIBLE for this judge (checkJudgeEligibility())
+// ever get judged, so an ineligible cell contributes zero judged answers here,
+// matching what a live run would actually do. Returns null when no judge is
+// configured, or its own config failed to validate -- estimateRun() treats
+// that exactly like "no judge cost", unchanged from before this existed.
+export function buildJudgeVotePlan({ judge, cellIds, reps }) {
+  if (!judge || !judge.config) return null;
+  let eligibleCells = 0;
+  for (const id of cellIds) {
+    const cell = CELLS[id];
+    if (cell && checkJudgeEligibility(judge.config.model, cell.model).ok) eligibleCells += 1;
+  }
+  const judgedAnswers = eligibleCells * (judge.judgedTasks || []).length * reps;
+  return {
+    model: judge.config.model, effort: judge.config.effort, votes: judgedAnswers * JUDGE_VOTES,
+    history: loadLocalJudgeVoteHistory(),
+  };
 }
 
 export function defaultCalibrationStore() {
@@ -352,7 +409,9 @@ export async function runGlobalPool({
         return row;
       } catch (e) {
         process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
-        const errRow = harnessErrorRow({ cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e });
+        const errRow = harnessErrorRow({
+          cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e, evidenceFamilyOverride: args.evidenceFamily,
+        });
         fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(errRow) + '\n');
         return errRow;
       }
@@ -366,6 +425,11 @@ export async function runGlobalPool({
         judge: judgeOpt,
         runId: run.id, slot: ctx.slot, concurrency: ctx.concurrency, coScheduledRunIds: ctx.coScheduledRunIds,
         isCollisionRetry: !!run.isRetry,
+        // FS9 fix: threads --evidence-family/the env override into the
+        // ACTUAL row-stamping call too, not only the pre-run estimate --
+        // already preflight-validated in main() before runGlobalPool() is
+        // ever reached.
+        evidenceFamilyOverride: args.evidenceFamily,
       });
       process.stdout.write(formatRunLine(row, Date.now() - t0) + '\n');
       if (row.auth_error && !stopReason) stopReason = { type: 'auth_error', row };
@@ -379,7 +443,9 @@ export async function runGlobalPool({
         };
       }
       process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
-      const errRow = harnessErrorRow({ cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e });
+      const errRow = harnessErrorRow({
+        cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e, evidenceFamilyOverride: args.evidenceFamily,
+      });
       fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(errRow) + '\n');
       return errRow;
     }
@@ -430,6 +496,21 @@ async function main() {
   } catch (e) {
     usageError(e.message);
   }
+  // FS9 fix: validated up front, same as bench/runner.mjs's own main() --
+  // a typo here would otherwise misclassify every row in the batch (or, once
+  // it reaches a task, abort mid-batch -- see evidence-family.mjs's FS3
+  // note).
+  let evidenceFamilyOverride;
+  try {
+    evidenceFamilyOverride = checkEvidenceFamilyOverridePreflight(args.evidenceFamily);
+  } catch (e) {
+    usageError(e.message);
+  }
+  // FS9 fix: loaded ONCE for the whole run, reused by every buildEstimatePlan()
+  // call and threaded into every live runOneImpl() call below -- the SAME
+  // local mapping file bench/runner.mjs's rebuildSummary() reads at summary
+  // time (see loadLocalEvidenceFamilyMapping()'s own note).
+  const localMapping = loadLocalEvidenceFamilyMapping();
   if (!Number.isInteger(args.concurrency) || args.concurrency < 1) {
     usageError(`--concurrency must be a positive integer, got "${args.concurrency}"`);
   }
@@ -538,10 +619,13 @@ async function main() {
     }
     console.log('');
     const dryRunEstimate = estimateRun({
-      plan: buildEstimatePlan({ cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps }),
+      plan: buildEstimatePlan({
+        cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps, evidenceFamilyOverride, localMapping,
+      }),
       concurrency: args.concurrency,
       seed: loadSeed(),
-      history: loadLocalHistory(),
+      history: loadLocalHistory({ taskFamilyOf, localMapping }),
+      judgeVotePlan: buildJudgeVotePlan({ judge, cellIds: cellsToRun, reps: args.reps }),
     });
     console.log(formatEstimate(dryRunEstimate, {
       currentWeeklyPct: args.weeklyUsagePct, weeklyCeilingPct: args.weeklyCeilingPct, confirmAbovePoints: args.confirmAbovePoints,
@@ -563,10 +647,13 @@ async function main() {
   // --weekly-usage-pct's help text); the orchestrating skill reads it via
   // get_usage and passes it in.
   const liveEstimate = estimateRun({
-    plan: buildEstimatePlan({ cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps }),
+    plan: buildEstimatePlan({
+      cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps, evidenceFamilyOverride, localMapping,
+    }),
     concurrency: args.concurrency,
     seed: loadSeed(),
-    history: loadLocalHistory(),
+    history: loadLocalHistory({ taskFamilyOf, localMapping }),
+    judgeVotePlan: buildJudgeVotePlan({ judge, cellIds: cellsToRun, reps: args.reps }),
   });
   console.log(formatEstimate(liveEstimate, {
     currentWeeklyPct: args.weeklyUsagePct, weeklyCeilingPct: args.weeklyCeilingPct, confirmAbovePoints: args.confirmAbovePoints,

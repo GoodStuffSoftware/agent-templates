@@ -29,7 +29,53 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyModel, dataDir } from "../hooks/lib/context.mjs";
+import {
+  classifyModel, classifyReferenceModel, dataDir, modelTiers,
+} from "../hooks/lib/context.mjs";
+import {
+  coarseOf as evidenceCoarseOf, BUILTIN_FAMILY_TO_FINE, evidenceFamilyOf,
+} from "./evidence-family.mjs";
+
+// FS5 fix (2026-09-24 family-split review, MED, pre-existing): a HISTORICAL
+// row's fine evidence-family key, for loadLocalHistory() below. Deliberately
+// does NOT import bench/runner.mjs directly (this module stays import-light
+// -- see the banner above); `taskFamilyOf` and `localMapping` are INJECTED
+// by the caller instead (scripts/benchmark.mjs, which already imports both
+// bench/runner.mjs and this module) -- the same dependency-injection style
+// bench/evidence-family.mjs's own evidenceFamilyOf() already uses for
+// `taskFamilyOf`.
+//
+// FS8 fix (2026-09-24 round-2 family-split review, CRITICAL): when
+// `taskFamilyOf` IS injected, this delegates to evidenceFamilyOf() with the
+// EXACT SAME precedence bench/runner.mjs's rebuildSummary() uses for every
+// other classification call in this plugin -- row field > task.evidenceFamily
+// (already baked into the row by the time it is on disk, by
+// runOne()/harnessErrorRow()'s own stamping) > the local mapping file >
+// the built-in taskFamilyOf(taskId) > unknown. Before this fix, a legacy row
+// with no `evidence_family_fine` fell back to ONLY its own coarse
+// `task_family` (skipping the local mapping and the built-in registry
+// entirely) -- so a real architecture/mined row with `task_family: "other"`
+// (an external harness that sets no family at all -- see FS2) was
+// misclassified "unknown" even when a local mapping file existed that would
+// have classified it correctly. See docs/BENCHMARK.md "Evidence families".
+//
+// When `taskFamilyOf` is NOT injected (a bare caller with no runner.mjs
+// access at all -- e.g. a unit test fixture), this keeps the PRE-FS8
+// fallback unchanged: row field, else the row's own already-recorded
+// COARSE `task_family` mapped through the same registry. It never consults
+// `localMapping` on this path -- matching a taskId against it needs a real
+// taskId a caller with no taskFamilyOf has no other use for anyway.
+export function fineFamilyOfHistoryRow(row, { taskFamilyOf = null, localMapping = null } = {}) {
+  if (taskFamilyOf) {
+    const { fine } = evidenceFamilyOf({
+      taskId: row.task, row, taskFamilyOf, localMapping,
+    });
+    return fine;
+  }
+  if (typeof row.evidence_family_fine === "string" && row.evidence_family_fine) return row.evidence_family_fine;
+  const coarse = row.task_family || "other";
+  return BUILTIN_FAMILY_TO_FINE[coarse] || "unknown";
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -75,7 +121,7 @@ function median(nums) {
 // history at all
 // yields `{ families: {} }`, not an error -- this is expected on a fresh
 // install.
-export function loadLocalHistory({ resultsRoot } = {}) {
+export function loadLocalHistory({ resultsRoot, taskFamilyOf = null, localMapping = null } = {}) {
   const root = resultsRoot || path.join(dataDir(), "benchmarks");
   const families = {};
   let dirs = [];
@@ -101,7 +147,32 @@ export function loadLocalHistory({ resultsRoot } = {}) {
         continue;
       }
       if (row.terminal_reason === "budget_exhausted" || row.auth_error || row.collision || row.is_rescore_retry) continue;
-      const family = row.task_family || "other";
+      // FS5 fix: this used to be `row.task_family || "other"` -- the COARSE
+      // built-in family ("easy" | "hard" | "real" | "pack" | "other") --
+      // while mediansFor()/estimateRun() below key every lookup by the FINE
+      // evidence-family label ("real-bugfix", "architecture", ...). A coarse
+      // key here NEVER matched a fine lookup key, so local REAL-WORLD
+      // history was silently ignored in favor of the seed/rough-guess
+      // fallback no matter how much of it existed on this machine. See
+      // fineFamilyOfHistoryRow() above and docs/BENCHMARK.md "Evidence
+      // families".
+      const family = fineFamilyOfHistoryRow(row, { taskFamilyOf, localMapping });
+      // FS8 fix (2026-09-24 round-2 family-split review, CRITICAL): "unknown"
+      // is EXCLUDED from local history entirely -- never given its own
+      // famKey, never contributing a median to any estimate, regardless of
+      // which path above produced it. Before this fix, a legacy row this
+      // classifier could not place (most often a real architecture/mined row
+      // with no evidence_family_fine and no matching local mapping) fell
+      // into "unknown" and had its real dollars/tokens POOLED there with
+      // anything else that landed in the same misc bucket (a genuinely
+      // unclassifiable synthetic id, for instance) -- see
+      // docs/BENCHMARK.md "Evidence families". No caller of mediansFor()/
+      // estimateRun() ever deliberately asks for family "unknown" data (an
+      // "unknown"-family plan row always falls through to
+      // roughGuessFallbackFor() instead -- see that function's own note), so
+      // this exclusion changes nothing for a well-labelled row and closes
+      // the pooling hole for a badly-labelled one.
+      if (family === "unknown") continue;
       const model = row.requested_model || "unknown";
       const effort = row.requested_effort || "none";
       const famKey = family;
@@ -149,20 +220,188 @@ export function mediansFor({ family, model, effort, seed = loadSeed(), history =
   if (seedCell && seedCell.n > 0) {
     return { medians: seedCell, source: "seed", n: seedCell.n, label: `shipped seed, n=${seedCell.n}` };
   }
-  return { medians: null, source: "none", n: 0, label: "no local history, rough guess" };
+  // Labelled by evidence-family KIND (bench/evidence-family.mjs), never a
+  // generic "no local history" -- operator direction 2026-09-24: real-world
+  // and synthetic evidence are never pooled, including at the fallback
+  // label. A REAL family with zero data must say so explicitly (never
+  // implying its guess came from, or was validated against, synthetic
+  // numbers) and vice versa. See ROUGH_GUESS_FALLBACKS below for the actual
+  // numbers used alongside this label.
+  const kind = evidenceCoarseOf(family);
+  const label = kind === "real" ? "no local real-world history, rough guess"
+    : kind === "synthetic" ? "no local synthetic history, rough guess"
+    : "no local history, rough guess (evidence family unknown)";
+  return { medians: null, source: "none", n: 0, label };
 }
 
-// A conservative rough-guess fallback used ONLY when neither local history
+// Conservative rough-guess fallbacks used ONLY when neither local history
 // nor the seed has ANY cell for the requested family at all (a brand new
 // task family with zero data anywhere) -- clearly labelled, never silently
-// treated as measured. Sized at the seed's own real-bugfix median (the
-// middle of the family range this benchmark has actually measured) rather
-// than an arbitrary round number.
-const ROUGH_GUESS_FALLBACK = {
-  medianDurationMs: 45000, medianCostUsd: 0.15,
-  medianInputTokens: 10, medianCacheReadTokens: 150000, medianCacheCreationTokens: 12000,
-  medianOutputTokens: 2500, medianNumTurns: 5,
+// treated as measured. ONE fallback per evidence-family KIND
+// (bench/evidence-family.mjs), never a single shared number: a real-world
+// family's guess must never be derived from synthetic numbers, and a
+// synthetic family's guess must never borrow from real-world numbers --
+// operator direction 2026-09-24, see docs/BENCHMARK.md "Evidence families".
+//
+// REAL is sized at the seed's own real-bugfix median (the middle of the
+// real-world range this benchmark has actually measured). SYNTHETIC is
+// sized at the seed's own hard-synthetic median (the middle of the
+// synthetic range measured). UNKNOWN (a family this benchmark cannot
+// classify as either -- see evidenceFamilyOf()) uses the same conservative
+// numbers REAL does only because a wholly unclassified family is, in
+// practice, more likely to be a new real-world source (a mined pack, a new
+// architecture family) than a new synthetic one; it is never returned for a
+// family evidenceCoarseOf() already knows is "synthetic".
+const ROUGH_GUESS_FALLBACKS = {
+  real: {
+    medianDurationMs: 45000, medianCostUsd: 0.15,
+    medianInputTokens: 10, medianCacheReadTokens: 150000, medianCacheCreationTokens: 12000,
+    medianOutputTokens: 2500, medianNumTurns: 5,
+  },
+  synthetic: {
+    medianDurationMs: 15000, medianCostUsd: 0.08,
+    medianInputTokens: 7, medianCacheReadTokens: 110000, medianCacheCreationTokens: 9500,
+    medianOutputTokens: 1200, medianNumTurns: 5,
+  },
 };
+ROUGH_GUESS_FALLBACKS.unknown = ROUGH_GUESS_FALLBACKS.real;
+
+// Exported for tests. Picks the right rough-guess fallback for a family by
+// its evidence-family KIND, never by name -- so a future fine label (a new
+// real pack kind, a new synthetic difficulty tier) is covered automatically
+// as soon as it is registered in bench/evidence-family.mjs.
+export function roughGuessFallbackFor(family) {
+  const kind = evidenceCoarseOf(family);
+  return ROUGH_GUESS_FALLBACKS[kind] || ROUGH_GUESS_FALLBACKS.unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Judge-vote cost (operator direction, 2026-09-24): the pre-run estimate
+// previously accounted for ZERO judge cost at all -- a rubric judge casts
+// bench/judge.mjs's JUDGE_VOTES (3) votes per judged answer, each a real
+// model call with its own $ cost (bench/runner.mjs's runOne() stamps the
+// TOTAL as `judge_cost_usd` alongside `judge_votes` on the judged row), and
+// none of that ever showed up in formatEstimate()'s numbers. Measured on
+// real architecture-pack judging: ~21 judged answers (63 votes) cost about
+// $54 total, i.e. about $0.81/vote at fable/high -- roughly 3x what a
+// synthetic-task guess would have suggested. See bench/config/estimate-seed.json's
+// own `judgeVoteAnchor.note`.
+// ---------------------------------------------------------------------------
+
+// Scans the SAME local results.jsonl history loadLocalHistory() reads, for
+// rows a rubric judge actually voted on -- `judge_cost_usd` and `judge_votes`
+// are stamped together or not at all (bench/runner.mjs's runOne()), so
+// either both are present and usable or neither is. `judge_cost_usd` is the
+// TOTAL for that judged answer's `judge_votes` votes, so the per-VOTE cost is
+// `judge_cost_usd / judge_votes`, medianed per (judge_model, judge_effort) --
+// the same "median across rows, keyed by model|effort" shape loadLocalHistory()
+// uses, just without the evidence-family dimension (judge cost is driven by
+// the judge's own model/effort, not by which family the JUDGED task belongs
+// to). Never throws: no local judge-vote history anywhere yields `{}`.
+export function loadLocalJudgeVoteHistory({ resultsRoot } = {}) {
+  const root = resultsRoot || path.join(dataDir(), "benchmarks");
+  let dirs = [];
+  try {
+    dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => path.join(root, d.name));
+  } catch {
+    return {};
+  }
+  const byCell = new Map();
+  for (const dir of dirs) {
+    const jsonlPath = path.join(dir, "results.jsonl");
+    let lines;
+    try {
+      lines = fs.readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean);
+    } catch {
+      continue;
+    }
+    for (const line of lines) {
+      let row;
+      try {
+        row = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof row.judge_cost_usd !== "number" || typeof row.judge_votes !== "number" || row.judge_votes <= 0) continue;
+      const model = row.judge_model || "unknown";
+      const effort = row.judge_effort || "none";
+      const key = model + "|" + effort;
+      if (!byCell.has(key)) byCell.set(key, []);
+      byCell.get(key).push(row.judge_cost_usd / row.judge_votes);
+    }
+  }
+  const out = {};
+  for (const [key, perVoteCosts] of byCell) {
+    out[key] = { medianCostUsdPerVote: median(perVoteCosts), n: perVoteCosts.length };
+  }
+  return out;
+}
+
+// Tier pricing relative to FABLE, the model bench/config/estimate-seed.json's
+// `judgeVoteAnchor` was measured on -- a DIFFERENT anchor from
+// bench/runner.mjs's own modelPriceRatioToSonnet() (that one scales a per-task
+// BUDGET CAP relative to Sonnet; this one scales a judge-vote COST relative to
+// Fable). Deliberately duplicated here rather than importing
+// modelPriceRatioToSonnet() from bench/runner.mjs -- this module stays
+// import-light (see the file banner above); the two ratios also anchor on
+// different reference tiers, so a shared helper would need a parameter this
+// file has no other use for. A dated id (`claude-fable-5-1`, `claude-opus-5-5`,
+// ...) is checked against classifyReferenceModel() FIRST for its own exact
+// historical pricing; an id with no reference entry falls back to its current
+// alias tier. Returns 1 (no scaling) whenever either model's pricing is
+// unreadable -- fail toward the seed's own already-measured number rather
+// than guessing a ratio.
+function fablePricing() {
+  return modelTiers().tiers?.fable?.resolvesTo?.pricing || null;
+}
+
+function judgeModelPricing(fullModelId) {
+  const ref = classifyReferenceModel(fullModelId);
+  if (ref?.pricing) return ref.pricing;
+  const alias = classifyModel(fullModelId).alias;
+  return (modelTiers().tiers || {})[alias]?.resolvesTo?.pricing || null;
+}
+
+// Exported for tests.
+export function judgePriceRatioToFable(fullModelId) {
+  const fable = fablePricing();
+  const model = judgeModelPricing(fullModelId);
+  if (!fable || !model) return 1;
+  if (typeof model.inputPerMTok !== "number" || typeof model.outputPerMTok !== "number"
+    || typeof fable.inputPerMTok !== "number" || typeof fable.outputPerMTok !== "number"
+    || fable.inputPerMTok <= 0 || fable.outputPerMTok <= 0) return 1;
+  const inRatio = model.inputPerMTok / fable.inputPerMTok;
+  const outRatio = model.outputPerMTok / fable.outputPerMTok;
+  return (inRatio + outRatio) / 2;
+}
+
+// Resolves the $/vote for one (judge model, judge effort), preferring LOCAL
+// history over the seed anchor -- same precedence mediansFor() gives writer
+// cells. `history` is loadLocalJudgeVoteHistory()'s own flat `{ "<model>|<effort>":
+// { medianCostUsdPerVote, n } }` shape (never the family-keyed shape
+// loadLocalHistory() returns -- judge cost has no family dimension).
+export function judgeVoteCostFor({ model, effort, seed = loadSeed(), history = null }) {
+  const key = model + "|" + (effort || "none");
+  const hist = history && history[key];
+  if (hist && hist.n > 0) {
+    return {
+      costUsdPerVote: hist.medianCostUsdPerVote, source: "local-history", n: hist.n,
+      label: `local history, n=${hist.n} votes`,
+    };
+  }
+  const anchor = seed.judgeVoteAnchor;
+  if (!anchor || typeof anchor.costUsdPerVote !== "number") {
+    return { costUsdPerVote: null, source: "none", n: 0, label: "no judge-vote data anywhere -- judge cost omitted" };
+  }
+  const ratio = judgePriceRatioToFable(model);
+  const costUsdPerVote = anchor.costUsdPerVote * ratio;
+  const label = Math.abs(ratio - 1) < 1e-9
+    ? anchor.note
+    : `${anchor.note}, scaled ${ratio.toFixed(2)}x for this tier`;
+  return {
+    costUsdPerVote, source: "seed", n: anchor.n ?? null, label,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Weekly-point anchors -> points per run
@@ -238,7 +477,19 @@ const DEFAULT_CONCURRENCY_OVERHEAD = 1.15;
 // plan: array of { cellId, model, effort, family, n? }. `n` (default 1) lets
 // a caller collapse identical rows (e.g. "12 reps of this cell x task") into
 // one plan entry instead of 12 separate ones -- both are equivalent.
-export function estimateRun({ plan, concurrency = 1, seed = loadSeed(), history = null, overheadFactor = DEFAULT_CONCURRENCY_OVERHEAD }) {
+//
+// judgeVotePlan (optional): { model, effort, votes, history? } -- the rubric
+// judge's OWN model/effort (never a writer cell's) and the total number of
+// VOTES it will cast across this whole plan (judged-answer count x
+// bench/judge.mjs's JUDGE_VOTES; the caller computes this, since only it
+// knows which cells are judge-eligible -- see scripts/benchmark.mjs). `null`
+// (the default) omits judge cost entirely, unchanged from before this
+// existed -- every existing caller with no judge configured is unaffected.
+// `history` here is loadLocalJudgeVoteHistory()'s own flat shape, NOT the
+// family-keyed `history` this function's other params already use.
+export function estimateRun({
+  plan, concurrency = 1, seed = loadSeed(), history = null, overheadFactor = DEFAULT_CONCURRENCY_OVERHEAD, judgeVotePlan = null,
+}) {
   let totalRuns = 0;
   let sequentialWallMs = 0;
   const tokensByClass = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
@@ -260,7 +511,7 @@ export function estimateRun({ plan, concurrency = 1, seed = loadSeed(), history 
   for (const row of plan) {
     const n = row.n || 1;
     const { medians, source, label } = mediansFor({ family: row.family, model: row.model, effort: row.effort, seed, history });
-    const m = medians || ROUGH_GUESS_FALLBACK;
+    const m = medians || roughGuessFallbackFor(row.family);
     if (!medians) anyRoughGuess = true;
     const pts = pointsPerRun({ family: row.family, model: row.model, effort: row.effort, seed, history });
     if (pts.low == null) familiesWithNoAnchor.add(row.family);
@@ -304,6 +555,22 @@ export function estimateRun({ plan, concurrency = 1, seed = loadSeed(), history 
     ? Math.ceil((sequentialWallMs / Math.max(1, concurrency)) * overheadFactor)
     : sequentialWallMs;
 
+  // Judge-vote cost: folded into apiCostUsd (it is a real $ cost of the run,
+  // same as any writer cell's) AND reported separately (judgeVote below) so
+  // a reader can see where it came from and how much of the total it is --
+  // never silently invisible inside one lump sum.
+  let judgeVote = null;
+  if (judgeVotePlan && judgeVotePlan.votes > 0) {
+    const jv = judgeVoteCostFor({
+      model: judgeVotePlan.model, effort: judgeVotePlan.effort, seed, history: judgeVotePlan.history,
+    });
+    const totalCostUsd = (jv.costUsdPerVote || 0) * judgeVotePlan.votes;
+    apiCostUsd += totalCostUsd;
+    judgeVote = {
+      votes: judgeVotePlan.votes, costUsdPerVote: jv.costUsdPerVote, totalCostUsd, source: jv.source, label: jv.label,
+    };
+  }
+
   return {
     totalRuns,
     concurrency: Math.max(1, concurrency),
@@ -311,6 +578,7 @@ export function estimateRun({ plan, concurrency = 1, seed = loadSeed(), history 
     wallTimeMsSequential: sequentialWallMs,
     tokensByClass,
     apiCostUsd,
+    judgeVote,
     weeklyPoints: { low: round3(pointsLow), high: round3(pointsHigh) },
     // "unknown" (null bounds) unless bench/config/estimate-seed.json ships a
     // REAL, independently-measured fiveHourPointAnchors entry for at least
@@ -418,7 +686,12 @@ export function formatEstimate(estimate, { currentWeeklyPct = null, weeklyCeilin
   lines.push(`  wall time:    ~${fmtMs(estimate.wallTimeMs)}` + (estimate.concurrency > 1 ? ` (sequential would be ~${fmtMs(estimate.wallTimeMsSequential)}; parallel runs slow each other down)` : ""));
   lines.push(`  tokens:       input ${Math.round(estimate.tokensByClass.input)}, cache-read ${Math.round(estimate.tokensByClass.cacheRead)}, `
     + `cache-write ${Math.round(estimate.tokensByClass.cacheWrite)}, output ${Math.round(estimate.tokensByClass.output)}`);
-  lines.push(`  API-equivalent $: ~$${estimate.apiCostUsd.toFixed(2)}`);
+  lines.push(`  API-equivalent $: ~$${estimate.apiCostUsd.toFixed(2)}` + (estimate.judgeVote ? " (includes judge-vote cost below)" : ""));
+  if (estimate.judgeVote) {
+    const jv = estimate.judgeVote;
+    const perVoteText = jv.costUsdPerVote == null ? "unknown" : `$${jv.costUsdPerVote.toFixed(3)}/vote`;
+    lines.push(`  judge votes:  ${jv.votes} vote(s) x ${perVoteText} = ~$${jv.totalCostUsd.toFixed(2)}  [${jv.label}]`);
+  }
   const fiveHourText = estimate.fiveHourPoints.low == null
     ? "unknown (no measured 5-hour anchor configured)"
     : `${fmtRange(estimate.fiveHourPoints, " pts")} (measured 5-hour anchor)`;

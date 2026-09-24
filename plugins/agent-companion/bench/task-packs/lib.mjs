@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import crypto from 'node:crypto';
 import { assertNoLeakedFixLanguage, addGuardFile, finalizeScore, rmrf, snapshotTree, GUARD_REL_PATH } from '../tasks/common.mjs';
+import { FINE_FAMILIES, coarseOf } from '../evidence-family.mjs';
 
 // parentRef/fixRef are stored BASE64-ENCODED in manifest.json
 // (parentRefB64/fixRefB64), never as plain hex. A raw git SHA is exactly the
@@ -120,6 +121,30 @@ async function runHiddenTest(hiddenTestPath, sandboxDir) {
 // await on a synchronous built-in task's return value is a harmless no-op).
 export function buildTaskFromPack(pack, { repoPath }) {
   if (!repoPath) throw new Error(`task pack "${pack.id}" needs --pack-repo <path> at run time`);
+  // FS3 fix (2026-09-24 family-split review, HIGH): validated at PACK-LOAD
+  // time -- before any sandbox is created or model spawned -- rather than
+  // discovered only when a row is later stamped (bench/evidence-family.mjs's
+  // evidenceFamilyOf() throws too, but that runs after a model call has
+  // already spent real money; see bench/runner.mjs's runOne()). Every task
+  // pack is sourced from a real fix commit (manifest.parentRefB64/
+  // fixRefB64), so a pack may declare an evidenceFamily only from the KNOWN
+  // registry (bench/evidence-family.mjs's FINE_FAMILIES), and never a
+  // SYNTHETIC one -- a real pack can never honestly call itself synthetic.
+  if (pack.evidenceFamily !== undefined) {
+    if (!(pack.evidenceFamily in FINE_FAMILIES)) {
+      throw new Error(
+        `task pack "${pack.id}": manifest.evidenceFamily "${pack.evidenceFamily}" is not a recognized fine `
+        + `label -- known labels: ${Object.keys(FINE_FAMILIES).join(', ')} (bench/evidence-family.mjs).`,
+      );
+    }
+    if (coarseOf(pack.evidenceFamily) === 'synthetic') {
+      throw new Error(
+        `task pack "${pack.id}": manifest.evidenceFamily "${pack.evidenceFamily}" is a SYNTHETIC label, but `
+        + 'every task pack is sourced from a real fix commit (manifest.parentRefB64/fixRefB64) -- a real '
+        + 'pack may never declare itself synthetic (see docs/BENCHMARK.md "Evidence families").',
+      );
+    }
+  }
   const expectedFiles = pack.expectedFiles || pack.files;
 
   const promptFor = (reportText) => `${reportText.trim()}\n\n` +
@@ -147,6 +172,16 @@ export function buildTaskFromPack(pack, { repoPath }) {
     maxBudgetUsd: pack.maxBudgetUsd,
     __isPackTask: true,
     family: 'pack',
+    // OPTIONAL manifest field, evidence-family.mjs's fine-label vocabulary
+    // ("real-bugfix" | "architecture" | "mined"). Absent manifest field ->
+    // undefined here -> bench/evidence-family.mjs's evidenceFamilyOf()
+    // falls through to its own default for "pack" tasks (real-bugfix, per
+    // FORMAT.md's "a task pack is bug-fix shaped by convention"). Every
+    // task-pack task is still coarse evidence family "real" either way --
+    // this only refines WHICH real fine label a pack reports under (e.g. an
+    // architecture/task-card pack, once one exists, would declare
+    // "evidenceFamily": "architecture" in its manifest).
+    evidenceFamily: pack.evidenceFamily,
     rubric: pack.rubricText || null,
     // Optional manifest.resources -- see FORMAT.md "Resource declarations".
     // Undefined (not present at all) when the manifest omits it, which is

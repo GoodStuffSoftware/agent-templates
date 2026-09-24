@@ -128,6 +128,31 @@ test('buildTaskFromPack() throws a clear error with no --pack-repo', () => {
   assert.throws(() => buildTaskFromPack(pack, {}), /needs --pack-repo/);
 });
 
+// --- FS3 (2026-09-24 family-split review, HIGH): evidenceFamily is --------
+// --- validated at PACK-LOAD time, before any sandbox/model spend ----------
+
+test('FS3: buildTaskFromPack() rejects a manifest.evidenceFamily that is not a known fine label', () => {
+  const pack = { ...loadPack(EXAMPLE_PACK_DIR), evidenceFamily: 'not-a-real-label' };
+  assert.throws(
+    () => buildTaskFromPack(pack, { repoPath: REPO_ROOT }),
+    /not a recognized fine label/,
+  );
+});
+
+test('FS3: buildTaskFromPack() rejects a SYNTHETIC evidenceFamily -- a real pack can never call itself synthetic', () => {
+  const pack = { ...loadPack(EXAMPLE_PACK_DIR), evidenceFamily: 'easy-synthetic' };
+  assert.throws(
+    () => buildTaskFromPack(pack, { repoPath: REPO_ROOT }),
+    /may never declare itself synthetic/,
+  );
+});
+
+test('FS3: buildTaskFromPack() accepts a real fine label ("architecture") on a pack', () => {
+  const pack = { ...loadPack(EXAMPLE_PACK_DIR), evidenceFamily: 'architecture' };
+  const task = buildTaskFromPack(pack, { repoPath: REPO_ROOT });
+  assert.equal(task.evidenceFamily, 'architecture');
+});
+
 test('scripts/benchmark.mjs: --task-pack requires --pack-repo', () => {
   const res = runScript('scripts/benchmark.mjs', ['--dry-run', '--cells', 'haiku', '--tasks', 'leak-check-gitignore-fix', '--task-pack', EXAMPLE_PACK_DIR]);
   assert.equal(res.status, 2);
