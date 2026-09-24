@@ -29,13 +29,36 @@
 //
 // Exit code: 0 if every suite that ran passed; 1 otherwise; 2 on a bad
 // invocation (unknown flag/suite).
+//
+// Test-suite outcomes (the two node --test suites). Every count is node's
+// own: pass / fail / todo / skipped. A `todo` test is held work — it never
+// counts as, or is printed as, a failure (scripts/ci-reporters/human.mjs).
+//   PASS    every test file passed.
+//   FAIL    a test file failed, and failed again when re-run on its own.
+//   FLAKY   a test file failed in the full run and PASSED when re-run once on
+//           its own ("flaky on isolated re-run"). Printed loudly with the
+//           file's name. Does NOT block a plain run or the pre-push gate for
+//           an ordinary branch; under --ci-parity (and so for pushes to main
+//           and release/**) it counts as a failure.
+//
+// Concurrency: node --test runs at most N test files at once, N =
+// $CI_LOCAL_TEST_CONCURRENCY when it is a positive integer, otherwise half
+// the machine's available parallelism, clamped to 1..8. node's own default
+// (every core but one) oversubscribes a many-core machine enough to make
+// timing-sensitive tests fail under load.
+//
+// Pre-push only: before any suite, every commit being pushed — on EVERY ref,
+// wip/** and backup/** included — is scanned by scripts/push-scan.mjs
+// (leak-check's classes plus the local private-names denylist, over each
+// commit's added lines, message and touched paths). A hit blocks the push
+// and never prints the matched text.
 
 import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statSync,
 } from 'node:fs';
-import { join, dirname, resolve, delimiter } from 'node:path';
-import { tmpdir } from 'node:os';
+import { join, dirname, resolve, relative, delimiter } from 'node:path';
+import { tmpdir, availableParallelism } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -53,11 +76,14 @@ function testFiles(cwd, relDir) {
     .map((f) => join(relDir, f));
 }
 
+// A suite with `testDir` is a node --test suite: ci-local runs it through
+// runTestSuite() (reporters, concurrency cap, isolated re-run of failed
+// files). One with `command` is run as a plain node script.
 export const SUITES = {
   'scripts-tests': {
     // Runs from leak-check.yml's first step.
     workflowFile: '.github/workflows/leak-check.yml',
-    command: (cwd) => ['--test', ...testFiles(cwd, 'scripts/tests')],
+    testDir: 'scripts/tests',
   },
   'leak-check': {
     // Runs from leak-check.yml's second step.
@@ -70,7 +96,7 @@ export const SUITES = {
     // bench task-pack fixture pins a historical commit and reads it with
     // `git show <sha>:<path>`, which a depth-1 clone can't resolve.
     workflowFile: '.github/workflows/agent-companion-tests.yml',
-    command: (cwd) => ['--test', ...testFiles(cwd, 'plugins/agent-companion/tests')],
+    testDir: 'plugins/agent-companion/tests',
   },
 };
 
@@ -113,6 +139,33 @@ export function parseArgs(argv) {
   return opts;
 }
 
+// ---------------------------------------------------------------------------
+// Test concurrency (exported and unit-tested)
+// ---------------------------------------------------------------------------
+
+export const CONCURRENCY_ENV = 'CI_LOCAL_TEST_CONCURRENCY';
+export const MAX_DEFAULT_CONCURRENCY = 8;
+
+export function defaultTestConcurrency(cpuCount) {
+  const n = Math.floor(Number(cpuCount) / 2);
+  return Math.min(MAX_DEFAULT_CONCURRENCY, Math.max(1, Number.isFinite(n) ? n : 1));
+}
+
+// { value, source: 'env' | 'default', warning? }. An env value that is not a
+// positive integer is ignored with a warning, never half-applied.
+export function resolveTestConcurrency(env = process.env, cpuCount = availableParallelism()) {
+  const fallback = defaultTestConcurrency(cpuCount);
+  const raw = env[CONCURRENCY_ENV];
+  if (raw === undefined || String(raw).trim() === '') return { value: fallback, source: 'default' };
+  const n = Number(String(raw).trim());
+  if (Number.isInteger(n) && n >= 1) return { value: n, source: 'env' };
+  return {
+    value: fallback,
+    source: 'default',
+    warning: `ci-local: ignoring ${CONCURRENCY_ENV}=${JSON.stringify(String(raw))} (not a positive integer); using ${fallback}.`,
+  };
+}
+
 function printHelp() {
   console.log(`ci-local.mjs — shared entry point for this repo's CI suites
 
@@ -122,8 +175,18 @@ function printHelp() {
                         Actions: claude hidden from PATH, checkout depth read
                         from the relevant workflow file, LF line endings.
   --ref <ref>           with --ci-parity, the ref/sha to test (default: HEAD).
-  --pre-push-hook       read pushed refs from stdin (git pre-push protocol)
-                        and run whatever they require. Used by .githooks/pre-push.
+  --pre-push-hook       read pushed refs from stdin (git pre-push protocol),
+                        scan every pushed commit on every ref for leaks and
+                        private names, then run whatever suites the refs
+                        require. Used by .githooks/pre-push.
+
+  env ${CONCURRENCY_ENV}=<n>
+                        run at most n test files at once (default: half the
+                        available CPUs, clamped to 1..${MAX_DEFAULT_CONCURRENCY}).
+
+  A test file that fails is re-run once on its own. If it then passes it is
+  reported as FLAKY ("flaky on isolated re-run"): not blocking by default,
+  a failure under --ci-parity. todo tests are never counted as failures.
 `);
 }
 
@@ -131,9 +194,10 @@ function printHelp() {
 // Ref classification for the pre-push hook (exported and unit-tested)
 // ---------------------------------------------------------------------------
 
-// wip/** and backup/** are never gated on push (see CONTRIBUTING.md); main
+// wip/** and backup/** skip the SUITES on push (see CONTRIBUTING.md); main
 // and release/** get the full --ci-parity treatment; everything else gets
-// the normal (in-place) suite.
+// the normal (in-place) suite. Every ref, skipped or not, still gets the
+// pushed-commit leak scan (see runPrePushHook).
 export function classifyRef(refName) {
   const branch = String(refName || '').replace(/^refs\/heads\//, '');
   if (branch.startsWith('wip/') || branch.startsWith('backup/')) return 'skip';
@@ -404,7 +468,7 @@ export function registerSignalHandlers() {
   }
 }
 
-const STALE_TEMP_DIR_RE = /^ci-local-(?:peek|parity)-(\d+)-/;
+const STALE_TEMP_DIR_RE = /^ci-local-(?:peek|parity|results)-(\d+)-/;
 const DEFAULT_STALE_SWEEP_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour, per spec.
 
 function staleSweepMaxAgeMs() {
@@ -490,9 +554,94 @@ export function sweepStaleTempDirs(root = tmpdir(), overrides = {}) {
 // Suite execution
 // ---------------------------------------------------------------------------
 
-function runSuiteLocal(name) {
+const HUMAN_REPORTER = pathToFileURL(join(__dirname, 'ci-reporters', 'human.mjs')).href;
+const RESULTS_REPORTER = pathToFileURL(join(__dirname, 'ci-reporters', 'results.mjs')).href;
+
+// Read the results reporter's JSON lines: node's run-wide counts (the
+// summary with no file) and the absolute paths of the files that had a real
+// (non-todo) failure.
+export function readResults(text) {
+  let counts = null;
+  const failedFiles = new Set();
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.type === 'summary' && !ev.file && ev.counts) counts = ev.counts;
+    else if (ev.type === 'fail' && ev.file) failedFiles.add(ev.file);
+  }
+  return { counts, failedFiles: [...failedFiles] };
+}
+
+// One `node --test` run over `files` (paths relative to cwd, or absolute),
+// with both ci-local reporters and the concurrency cap. Returns
+// { status, counts, failedFiles }.
+function nodeTestOnce(files, cwd, env, concurrency, spawnNode) {
+  const dir = trackTempDir(mkdtempSync(join(tmpdir(), `ci-local-results-${process.pid}-`)));
+  try {
+    const resultsFile = join(dir, 'results.jsonl');
+    const args = [
+      '--test',
+      `--test-concurrency=${concurrency}`,
+      `--test-reporter=${HUMAN_REPORTER}`, '--test-reporter-destination=stdout',
+      `--test-reporter=${RESULTS_REPORTER}`, `--test-reporter-destination=${resultsFile}`,
+      ...files,
+    ];
+    const { status } = spawnNode(args, cwd, env);
+    let text = '';
+    try { text = readFileSync(resultsFile, 'utf8'); } catch { /* reporter never ran: no results */ }
+    const { counts, failedFiles } = readResults(text);
+    return { status, counts, failedFiles: failedFiles.map((f) => resolve(cwd, f)) };
+  } finally {
+    untrackTempDir(dir);
+  }
+}
+
+// Run a node --test suite. A file that fails is re-run ONCE on its own; if
+// every such file then passes, the outcome is 'flaky' ("flaky on isolated
+// re-run"), which blocks only when `ciParity` is set. Returns
+// { status, outcome: 'pass'|'fail'|'flaky', counts, flakyFiles, failedFiles }.
+// `log`/`spawnNode` are seams for tests; the defaults print to the console
+// and spawn the real node with inherited stdio.
+export function runTestSuite({
+  files, cwd, env = baseChildEnv(), ciParity = false,
+  concurrency = resolveTestConcurrency().value,
+  log = (m) => console.log(m), spawnNode = runNode,
+}) {
+  const first = nodeTestOnce(files, cwd, env, concurrency, spawnNode);
+  const base = { counts: first.counts, flakyFiles: [], failedFiles: [] };
+  if (first.status === 0) return { ...base, status: 0, outcome: 'pass' };
+  if (first.failedFiles.length === 0) {
+    // Non-zero exit with no attributable file (a crash before any test ran,
+    // a reporter failure): nothing to re-run, so it is a plain failure.
+    return { ...base, status: 1, outcome: 'fail' };
+  }
+  const flakyFiles = [];
+  const failedFiles = [];
+  for (const file of first.failedFiles) {
+    const rel = relative(cwd, file) || file;
+    log(`\nci-local: ${rel} failed in the full run — re-running it ONCE on its own.`);
+    const again = nodeTestOnce([file], cwd, env, 1, spawnNode);
+    if (again.status === 0) flakyFiles.push(rel);
+    else failedFiles.push(rel);
+  }
+  if (failedFiles.length) return { ...base, status: 1, outcome: 'fail', flakyFiles, failedFiles };
+  return { ...base, status: ciParity ? 1 : 0, outcome: 'flaky', flakyFiles, failedFiles };
+}
+
+function runSuiteIn(name, cwd, env, ciParity) {
   const suite = SUITES[name];
-  return runNode(suite.command(REPO_ROOT), REPO_ROOT, baseChildEnv());
+  if (suite.testDir) {
+    return runTestSuite({
+      files: testFiles(cwd, suite.testDir), cwd, env, ciParity,
+    });
+  }
+  const res = runNode(suite.command(cwd), cwd, env);
+  return { ...res, outcome: res.status === 0 ? 'pass' : 'fail' };
+}
+
+function runSuiteLocal(name) {
+  return runSuiteIn(name, REPO_ROOT, baseChildEnv(), false);
 }
 
 function runSuiteParity(name, ref) {
@@ -516,7 +665,7 @@ function runSuiteParity(name, ref) {
     }
 
     const env = hideFromPath(baseChildEnv(), CLAUDE_BIN_NAMES);
-    return runNode(suite.command(workDir), workDir, env);
+    return runSuiteIn(name, workDir, env, true);
   } finally {
     for (const d of dirsToClean) untrackTempDir(d);
   }
@@ -526,18 +675,136 @@ function runSuite(name, ciParity, ref) {
   return ciParity ? runSuiteParity(name, ref) : runSuiteLocal(name);
 }
 
-function printSummary(results) {
-  console.log('\nci-local summary:');
-  for (const r of results) {
-    console.log(`  ${r.status === 0 ? 'PASS' : 'FAIL'}  ${r.name}`);
+// "pass N · fail N · todo N · skipped N" (+ "cancelled N" when non-zero),
+// straight from node's own counts. A todo is its own word, never a failure.
+export function formatCounts(counts) {
+  if (!counts) return '';
+  const parts = [
+    `pass ${counts.passed ?? 0}`,
+    `fail ${counts.failed ?? 0}`,
+    `todo ${counts.todo ?? 0}`,
+    `skipped ${counts.skipped ?? 0}`,
+  ];
+  if (counts.cancelled) parts.push(`cancelled ${counts.cancelled}`);
+  return parts.join(' · ');
+}
+
+// One summary line per suite. Exported so the exact wording is tested.
+export function formatSummaryLine(r, ciParity = false) {
+  const tag = { pass: 'PASS', fail: 'FAIL', flaky: 'FLAKY' }[r.outcome] || (r.status === 0 ? 'PASS' : 'FAIL');
+  let line = `  ${tag.padEnd(5)}  ${r.name}`;
+  const counts = formatCounts(r.counts);
+  if (counts) line += `  (${counts})`;
+  if (r.failedFiles?.length) line += ` — failed again on isolated re-run: ${r.failedFiles.join(', ')}`;
+  if (r.flakyFiles?.length) {
+    line += ` — flaky on isolated re-run: ${r.flakyFiles.join(', ')}`;
+    if (r.outcome === 'flaky') line += ciParity ? ' (--ci-parity: counts as a failure)' : ' (not blocking; --ci-parity would block)';
   }
+  return line;
+}
+
+// The loud notice for a flaky outcome, or null.
+export function flakyBanner(results, ciParity = false) {
+  const flaky = results.flatMap((r) => r.flakyFiles || []);
+  if (flaky.length === 0) return null;
+  return [
+    '',
+    '!!! ci-local: FLAKY — failed in the full run, passed when re-run on its own:',
+    ...flaky.map((f) => `!!!   ${f}`),
+    ciParity
+      ? '!!! --ci-parity treats this as a failure.'
+      : '!!! Not blocking this run; --ci-parity (and a push to main or release/**) blocks on it. Fix or report the flake.',
+  ].join('\n');
+}
+
+function printSummary(results, ciParity = false) {
+  console.log('\nci-local summary:');
+  for (const r of results) console.log(formatSummaryLine(r, ciParity));
+  const banner = flakyBanner(results, ciParity);
+  if (banner) console.log(banner);
 }
 
 // ---------------------------------------------------------------------------
 // pre-push hook mode
 // ---------------------------------------------------------------------------
 
-function runPrePushHook() {
+// The default pushed-commit scan: scripts/push-scan.mjs over every pushed
+// ref, against this repository. Imported lazily so a plain suite run (and a
+// copy of this file on its own, as ci-local-parity.test.mjs builds) never
+// loads it.
+async function defaultPushScan(refs) {
+  const { runPushScan } = await import(pathToFileURL(join(__dirname, 'push-scan.mjs')).href);
+  return runPushScan({ repo: REPO_ROOT, pushes: refs, env: process.env });
+}
+
+function defaultRunSuites(cls, localSha) {
+  const ciParity = cls === 'parity';
+  const results = DEFAULT_ORDER.map((name) => ({ name, ...runSuite(name, ciParity, localSha) }));
+  printSummary(results, ciParity);
+  return results;
+}
+
+// The pre-push gate, with its two effects injectable for tests:
+//   1. `scan(refs)` — the pushed-commit leak scan, over EVERY ref (wip/**
+//      and backup/** included). A non-zero status blocks the push; the
+//      suites are not run.
+//   2. `runSuites(cls, localSha)` — the suites each non-skipped ref needs,
+//      once per (class, sha).
+// Returns the hook's exit status.
+export async function prePushGate(refs, {
+  scan = defaultPushScan, runSuites = defaultRunSuites,
+  log = (m) => console.log(m), err = (m) => console.error(m),
+} = {}) {
+  const live = refs.filter((r) => !isDeletedRef(r.localSha));
+  if (live.length === 0) {
+    log('ci-local pre-push: no refs to check.');
+    return 0;
+  }
+
+  log(`ci-local pre-push: scanning the commits on ${live.length} pushed ref(s) (every ref, wip/** and backup/** included) for leaks and private names.`);
+  let scanRes;
+  try {
+    scanRes = await scan(live);
+  } catch (e) {
+    err(`ci-local pre-push: BLOCKED — the pushed-commit scan could not run: ${e.message}`);
+    return 1;
+  }
+  if (!scanRes || scanRes.status !== 0) {
+    err('\nci-local pre-push: BLOCKED — the pushed-commit scan found something (above). Nothing was pushed.');
+    err('Never use --no-verify to get past it; see CONTRIBUTING.md.');
+    return 1;
+  }
+
+  let overallStatus = 0;
+  let flaky = false;
+  const ran = new Set();
+  for (const { remoteRef, localSha } of live) {
+    const cls = classifyRef(remoteRef);
+    if (cls === 'skip') {
+      log(`ci-local pre-push: suites skipped for ${remoteRef} (wip/** or backup/**, per CONTRIBUTING.md); its commits were scanned above.`);
+      continue;
+    }
+    const key = `${cls}:${localSha}`;
+    if (ran.has(key)) continue;
+    ran.add(key);
+    log(`\nci-local pre-push: ${remoteRef} -> ${cls === 'parity' ? 'full suite, --ci-parity' : 'full suite'} against ${localSha}.`);
+    const results = await runSuites(cls, localSha);
+    if (results.some((r) => r.status !== 0)) overallStatus = 1;
+    if (results.some((r) => r.outcome === 'flaky')) flaky = true;
+  }
+
+  if (overallStatus !== 0) {
+    err('\nci-local pre-push: BLOCKED — fix the failing suite(s) above before pushing.');
+    err('Never use --no-verify; see CONTRIBUTING.md.');
+  } else if (flaky) {
+    log('\nci-local pre-push: required checks passed, WITH A FLAKY TEST FILE (see the !!! notice above). Pushing; fix or report the flake.');
+  } else {
+    log('\nci-local pre-push: all required checks passed.');
+  }
+  return overallStatus;
+}
+
+async function runPrePushHook() {
   let stdinText = '';
   try {
     stdinText = readFileSync(0, 'utf8');
@@ -545,46 +812,14 @@ function runPrePushHook() {
     console.error(`ci-local pre-push: could not read stdin: ${err.message}`);
     return 1;
   }
-  const refs = parsePrePushStdin(stdinText).filter((r) => !isDeletedRef(r.localSha));
-  if (refs.length === 0) {
-    console.log('ci-local pre-push: no refs to check.');
-    return 0;
-  }
-
-  let overallStatus = 0;
-  const ran = new Set();
-  for (const { remoteRef, localSha } of refs) {
-    const cls = classifyRef(remoteRef);
-    if (cls === 'skip') {
-      console.log(`ci-local pre-push: skipping ${remoteRef} (wip/** or backup/**, per CONTRIBUTING.md).`);
-      continue;
-    }
-    const key = `${cls}:${localSha}`;
-    if (ran.has(key)) continue;
-    ran.add(key);
-    console.log(`\nci-local pre-push: ${remoteRef} -> ${cls === 'parity' ? 'full suite, --ci-parity' : 'full suite'} against ${localSha}.`);
-    const results = DEFAULT_ORDER.map((name) => ({
-      name,
-      ...runSuite(name, cls === 'parity', localSha),
-    }));
-    printSummary(results);
-    if (results.some((r) => r.status !== 0)) overallStatus = 1;
-  }
-
-  if (overallStatus !== 0) {
-    console.error('\nci-local pre-push: BLOCKED — fix the failing suite(s) above before pushing.');
-    console.error('Never use --no-verify on a real branch; see CONTRIBUTING.md.');
-  } else {
-    console.log('\nci-local pre-push: all required checks passed.');
-  }
-  return overallStatus;
+  return prePushGate(parsePrePushStdin(stdinText));
 }
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-function main() {
+async function main() {
   let opts;
   try {
     opts = parseArgs(process.argv.slice(2));
@@ -601,8 +836,10 @@ function main() {
   registerSignalHandlers();
   sweepStaleTempDirs();
   cleanupLegacyParityTags(REPO_ROOT);
+  const conc = resolveTestConcurrency();
+  if (conc.warning) console.error(conc.warning);
   if (opts.prePushHook) {
-    process.exitCode = runPrePushHook();
+    process.exitCode = await runPrePushHook();
     return;
   }
   const results = opts.suites.map((name) => ({
@@ -612,7 +849,7 @@ function main() {
       return runSuite(name, opts.ciParity, opts.ref);
     })(),
   }));
-  printSummary(results);
+  printSummary(results, opts.ciParity);
   process.exitCode = results.some((r) => r.status !== 0) ? 1 : 0;
 }
 
@@ -623,4 +860,4 @@ const isMain = (() => {
     return false;
   }
 })();
-if (isMain) main();
+if (isMain) await main();
