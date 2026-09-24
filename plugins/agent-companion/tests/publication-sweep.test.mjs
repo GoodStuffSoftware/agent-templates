@@ -20,7 +20,7 @@ import { pathToFileURL } from 'node:url';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
   sweepRepo, sweepRepoInPlace, sweepAllCloud, isSessionCheckout, normalizeGitUrl,
-  filterNew, fingerprintHit, STRICT_MARKER_FILE,
+  filterNew, fingerprintHit, STRICT_MARKER_FILE, redactRepoIdentifiers,
 } from '../scripts/lib/publication-sweep.mjs';
 
 const REAL_LEAK_CHECK = join(PLUGIN_ROOT, '..', '..', 'scripts', 'leak-check.mjs');
@@ -482,6 +482,63 @@ test('normalizeGitUrl: ssh, https and scp-style forms of the same repo compare e
   assert.equal(a, c);
   assert.equal(a, d);
   assert.notEqual(a, normalizeGitUrl('git@github.com:someone-else/other-repo.git'));
+});
+
+// --- privacy fix: sweepRepo()/sweepRepoInPlace() must never return a raw
+// repo identity inside their `error` text (CI diagnosis 3: a failed
+// `git clone`/`git fetch`'s own stderr embeds the source path/URL). This is
+// deliberately exercised with SYNTHETIC stderr, not a real failing clone —
+// git's exact wording is platform-dependent, so a real-clone assertion would
+// be flaky; feeding the text directly makes the redaction itself
+// deterministic everywhere.
+
+test('redactRepoIdentifiers: strips a path-shaped repo entry embedded in synthetic stderr', () => {
+  const entry = '/srv/checkouts/zbprivrepo';
+  const stderr = `fatal: repository '${entry}' does not exist`;
+  const out = redactRepoIdentifiers(stderr, entry);
+  assert.doesNotMatch(out, /zbprivrepo/i);
+  assert.match(out, /<repo-url>/);
+});
+
+test('redactRepoIdentifiers: strips a URL-shaped repo entry embedded in synthetic stderr', () => {
+  const entry = 'https://github.com/myorg/zbprivrepo.git';
+  const stderr = `Cloning into 'zbprivrepo'...\nfatal: could not read Username for '${entry}': terminal prompts disabled`;
+  const out = redactRepoIdentifiers(stderr, entry);
+  assert.doesNotMatch(out, /zbprivrepo/i);
+  assert.match(out, /<repo-url>/);
+});
+
+test('redactRepoIdentifiers: strips a bare-name repo entry embedded in synthetic stderr', () => {
+  const entry = 'zbprivrepo';
+  const stderr = `fatal: '${entry}' does not appear to be a git repository`;
+  const out = redactRepoIdentifiers(stderr, entry);
+  assert.doesNotMatch(out, /zbprivrepo/i);
+  assert.match(out, /<repo-url>/);
+});
+
+test('redactRepoIdentifiers: also strips the resolved clone SOURCE (extra) when it differs from a local-path entry', () => {
+  const entry = '/srv/checkouts/zbprivrepo';
+  const source = 'git@github.com:myorg/zbprivrepo.git';
+  const stderr = `fatal: unable to access '${source}/': Could not resolve host: github.com`;
+  const out = redactRepoIdentifiers(stderr, entry, [source]);
+  assert.doesNotMatch(out, /zbprivrepo/i);
+  assert.match(out, /<repo-url>/);
+});
+
+test('redactRepoIdentifiers: leaves unrelated text untouched and tolerates empty input', () => {
+  assert.equal(redactRepoIdentifiers('', 'zbprivrepo'), '');
+  assert.equal(redactRepoIdentifiers('network timeout', 'zbprivrepo'), 'network timeout');
+});
+
+test('sweepRepo: a real clone failure never leaks the repo entry in .error', async () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'ac-pubsweep-missing-'));
+  const missing = join(tmpRoot, 'zbprivrepo');
+  try {
+    const r = await sweepRepo(missing, { timeout: 15000 });
+    assert.ok(r.error, 'a missing source must surface as an error');
+    assert.doesNotMatch(r.error, /zbprivrepo/i, r.error);
+    assert.match(r.error, /<repo-url>/, r.error);
+  } finally { rmSync(tmpRoot, { recursive: true, force: true }); }
 });
 
 test('isSessionCheckout: matches a repo entry equal to the checkout\'s own origin, not an unrelated one', () => {

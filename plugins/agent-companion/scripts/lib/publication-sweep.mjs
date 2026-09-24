@@ -414,7 +414,8 @@ export async function sweepRepo(repoEntry, {
     // as a git flag (e.g. an entry starting with "--upload-pack=...").
     const clone = run('git', ['clone', '--quiet', '--depth', '1', '--', source, cloneDir], { timeout });
     if (clone.status !== 0) {
-      return { repo: repoEntry, hits: [], error: `clone failed: ${(clone.stderr || clone.error?.message || 'unknown error').split('\n')[0]}` };
+      const raw = (clone.stderr || clone.error?.message || 'unknown error').split('\n')[0];
+      return { repo: repoEntry, hits: [], error: `clone failed: ${redactRepoIdentifiers(raw, repoEntry, [source])}` };
     }
     const strict = isStrictRepo(cloneDir, repoEntry, strictRepoUrls);
     const mayExecute = mayExecuteTargetScript(repoEntry, { strictRepoUrls, allowedOwners, resolvedSource: source });
@@ -509,6 +510,55 @@ export function normalizeGitUrl(url) {
   return u.toLowerCase();
 }
 
+// Every substring that could reveal a swept repo's own identity inside
+// incidental text — the raw configured entry, its normalized host/owner/repo
+// form, the bare owner/repo and repo-name slugs, and (for a path-shaped
+// entry) its basename. Longest first, so a full path/URL is replaced before
+// a shorter substring of it (e.g. the bare repo name) fragments the match.
+//
+// Deliberately SEPARATE from scrub.mjs: scrub() redacts the OPERATOR's own
+// machine/handle tokens and has documented gaps for long bare paths (it has
+// no reason to know a configured repo's own name) — this redacts the repo's
+// OWN name/slug/path, which is exactly what a failing `git clone`/`git
+// fetch`'s raw stderr embeds (CI diagnosis: publication-sweep.test.mjs note
+// (b), review finding on sweepRepo()/sweepRepoInPlace()).
+function repoIdentifierCandidates(identifiers) {
+  const out = new Set();
+  const add = (s) => {
+    const t = String(s || '').trim();
+    if (t.length >= 3) out.add(t);
+  };
+  for (const raw of identifiers) {
+    if (!raw) continue;
+    add(raw);
+    const norm = normalizeGitUrl(raw);
+    if (norm) {
+      add(norm);
+      const parts = norm.split('/').filter(Boolean);
+      if (parts.length >= 2) add(parts.slice(-2).join('/')); // owner/repo
+      if (parts.length >= 1) add(parts[parts.length - 1]); // bare repo name
+    }
+    const posix = String(raw).replace(/\\/g, '/').replace(/\/+$/, '');
+    add(basename(posix).replace(/\.git$/i, ''));
+  }
+  return [...out].sort((a, b) => b.length - a.length);
+}
+
+// Redact every identifying trace of `repoEntry` (plus any `extra` strings —
+// e.g. the resolved clone source, which can differ from a local-path entry)
+// out of `text` before it is ever returned or printed. Pure and
+// deterministic — plain strings in, no I/O — so it is exercised directly
+// with synthetic stderr in tests rather than a real failing clone.
+export function redactRepoIdentifiers(text, repoEntry, extra = []) {
+  let out = String(text || '');
+  if (!out) return out;
+  for (const cand of repoIdentifierCandidates([repoEntry, ...extra])) {
+    const escaped = cand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(escaped, 'gi'), '<repo-url>');
+  }
+  return out;
+}
+
 function originUrlOf(dir) {
   const r = run('git', ['-C', dir, 'remote', 'get-url', 'origin']);
   return r.status === 0 ? r.stdout.trim() : null;
@@ -537,7 +587,8 @@ export async function sweepRepoInPlace(repoEntry, cwd, { timeout = 60000, tokenF
   try {
     const fetch = run('git', ['-C', cwd, 'fetch', '--quiet', 'origin'], { timeout });
     if (fetch.status !== 0) {
-      return { repo: repoEntry, hits: [], error: `git fetch origin failed: ${(fetch.stderr || fetch.error?.message || 'unknown error').split('\n')[0]}` };
+      const raw = (fetch.stderr || fetch.error?.message || 'unknown error').split('\n')[0];
+      return { repo: repoEntry, hits: [], error: `git fetch origin failed: ${redactRepoIdentifiers(raw, repoEntry)}` };
     }
     let defaultBranch = null;
     const symref = run('git', ['-C', cwd, 'symbolic-ref', 'refs/remotes/origin/HEAD']);

@@ -213,10 +213,16 @@ elif [ -n "$PUBLICATION_LEAK_REPOS_FALLBACK" ]; then
       // (process.cwd()) only, never a clone of anything.
       // LOCAL: sweepAll() — clones each configured repo's origin, as usual.
       const { results } = cloud ? await m.sweepAllCloud(repos, { cwd: process.cwd() }) : await m.sweepAll(repos, {});
+      // The repo identifier itself is never printed raw here — this fallback
+      // has no access to the discovery-time public/private classification,
+      // so treat every configured entry as potentially private and always
+      // use a placeholder (a repo name, a path or a git error message must
+      // never reach the run output raw).
+      const repoLabel = '<repo-url>';
       for (const r of results) {
-        if (r.skipped) { say('publication-leak: not swept —', r.repo, '(' + r.note + ')'); continue; }
-        if (r.error) { say('publication-leak sweep error:', r.repo, '—', r.error); continue; }
-        if (r.hits.length) say('publication-leak hit(s):', r.repo, '—', r.hits.map(h => h.rel + ':' + h.line + ' [' + h.label + ']').join('; '));
+        if (r.skipped) { say('publication-leak: not swept —', repoLabel, '(' + r.note + ')'); continue; }
+        if (r.error) { say('publication-leak sweep error:', repoLabel, '—', r.error); continue; }
+        if (r.hits.length) say('publication-leak hit(s):', repoLabel, '—', r.hits.map(h => h.rel + ':' + h.line + ' [' + h.label + ']').join('; '));
       }
     });
   "
