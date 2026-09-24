@@ -1,6 +1,7 @@
 // resolveExpected() keeps its pre-ADR-0003 shape EXACTLY: the same seven
-// keys on every answer (S2 review P11). A harness diff between d7188f1 and
-// slice 2 showed `"weight": null` appearing; it is not a new key. d7188f1
+// keys on every answer (S2 review P11). A harness diff between the
+// pre-slice-2 baseline and slice 2 showed `"weight": null` appearing; it is
+// not a new key. The pre-slice-2 baseline
 // looked a type up with a plain property read, so a name inherited from
 // Object.prototype ("constructor", "__proto__", "toString", ...) counted as
 // a known type with no preset: its weight came back undefined (dropped by

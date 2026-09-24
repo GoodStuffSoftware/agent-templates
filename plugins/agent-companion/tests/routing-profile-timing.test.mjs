@@ -84,8 +84,9 @@ const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[Math.
 // lower quartile of interleaved runs still reflects the code.
 const lowQ = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 4)]; };
 
-// The baseline is the resolver as it stood before routing profiles (slice 2):
-// d7188f1's hooks/lib/context.mjs, vendored byte for byte and pinned here.
+// The baseline is the resolver as it stood before routing profiles:
+// hooks/lib/context.mjs at the last commit before slice 2, vendored byte for
+// byte and pinned here.
 const BASELINE = join(TESTS_DIR, 'fixtures', 'routing-profile', 'baseline', 'context.mjs');
 const BASELINE_SHA256 = '4f1c9c26288ac76248d4b6b062589f2f78886142c9574f7b91b2ab107b512de3';
 
