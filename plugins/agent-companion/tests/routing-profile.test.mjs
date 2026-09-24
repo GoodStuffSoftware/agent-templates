@@ -268,6 +268,22 @@ test('without a waiver, F5 raises a hand-edited elevated row below high (floors 
   assert.equal(r.waiver, null);
 });
 
+// S2 review P5 (lead decision): a code-review row's minimum effort can only
+// RAISE effort, so it applies even when the consequence departs; a critical
+// review never gets less effort than a routine one.
+test('a code-review minimum effort still applies when the consequence departs (critical)', () => {
+  writeProfile(profile({ 'code-review': row(null, 'max') }));
+  const writer = { model: 'sonnet', effort: 'high' };
+  const routine = ctx.resolveRoute({ type: 'code-review', writer, now: BEFORE });
+  const critical = ctx.resolveRoute({ type: 'code-review', writer, consequence: 'critical', consequenceExplicit: true, now: BEFORE });
+  assert.deepEqual([routine.layer, label(routine)], ['profile', 'sonnet/max']);
+  assert.deepEqual([critical.layer, label(critical)], ['profile', 'opus/max']);
+  // Any other departure still skips the row.
+  const kind = ctx.resolveRoute({ type: 'code-review', writer, kind: 'mechanical', kindExplicit: true, now: BEFORE });
+  assert.equal(kind.layer, 'grid');
+  assert.match(kind.skipped.find((x) => x.layer === 'profile').reason, /explicit kind departs from the code-review preset/);
+});
+
 // S2 review P4: a hand-edited effort matched case-insensitively but was
 // used verbatim ("HIGH"); it is lower-cased at read time.
 test('a hand-edited upper-case effort is used lower-cased', () => {
@@ -344,22 +360,24 @@ test('a code-review row raises on top of F2 for a fable writer, never below it a
   assert.equal(raised.model, 'opus', 'the profile row never moves the model off the F2-capped opus');
 });
 
-// An EXPLICIT critical consequence departs from code-review's own preset
-// (weight "parity", consequence "inherit"; ADR 0003 §1's departure rule), so
-// it skips the profile layer entirely — a code-review row can never soften a
-// critical, fable-capped review by sitting underneath it: the shipped F1/F2
-// floors alone govern, whatever the row asks for.
-test('an explicit critical consequence bypasses the code-review row entirely: F1/F2 alone floor a fable writer', () => {
-  for (const minEffort of ['low', 'max']) {
+// FLIPPED by S2 review P5 (lead decision). An EXPLICIT critical consequence
+// departs from code-review's own preset (weight "parity", consequence
+// "inherit"), and it used to skip the profile layer entirely. A code-review
+// row only sets a MINIMUM effort, applied after F3/F4/F2/F1 have floored
+// the answer, so it can never soften a critical, fable-capped review; it can
+// only raise it. It therefore still applies: a minimum below the floor is
+// "already met", one above it raises the effort. F1/F2 still govern the model.
+test('an explicit critical consequence keeps the code-review row: F1/F2 floor a fable writer, the row can only raise', () => {
+  for (const [minEffort, want] of [['low', 'opus/xhigh'], ['max', 'opus/max']]) {
     writeProfile(profile({ 'code-review': row(null, minEffort) }));
     const r = ctx.resolveRoute({
       type: 'code-review', writer: { model: 'fable', effort: 'low' }, consequence: 'critical', consequenceExplicit: true, now: BEFORE,
     });
-    assert.deepEqual([label(r), r.layer], ['opus/xhigh', 'grid'], `row minEffort ${minEffort} must not change the floored answer`);
-    assert.equal(r.source, 'reviewer-parity');
+    assert.deepEqual([label(r), r.layer], [want, 'profile'], `row minEffort ${minEffort}`);
+    assert.equal(r.model, 'opus', 'the row never moves the model off the F2-capped opus');
     assert.ok(r.floorsApplied.some((f) => f.floor === 'F2' && /fable -> opus/.test(f.capped)));
     assert.ok(r.floorsApplied.some((f) => f.floor === 'F1' && /effort low -> xhigh/.test(f.raised)));
-    assert.match(r.skipped.find((x) => x.layer === 'profile').reason, /explicit consequence departs from the code-review preset/);
+    assert.equal(r.skipped.find((x) => x.layer === 'profile'), undefined);
   }
 });
 

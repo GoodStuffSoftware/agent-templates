@@ -933,7 +933,9 @@ export function resolveRoute({
 
   // Layer 1's verdict for this task, shared by the parity and grid paths:
   // true when the row may apply; otherwise the reason is in `skipped`.
-  const profileMayWin = () => {
+  // `tolerated`: departures that do not skip layer 1 for this caller (the
+  // parity path tolerates a consequence departure, see there).
+  const profileMayWin = (tolerated = []) => {
     if (!profContends) return false;
     // A row that cannot run as written is reported as such first — that is
     // the finding the operator must act on, departure or not.
@@ -942,9 +944,10 @@ export function resolveRoute({
       skipped.push({ layer: 'profile', reason: prof.refusal });
       return false;
     }
-    if (!asIs) {
+    const dep = departures.filter((d) => !tolerated.includes(d));
+    if (dep.length) {
       profEntry.status = 'skipped';
-      skipped.push({ layer: 'profile', reason: departNote });
+      skipped.push({ layer: 'profile', reason: `explicit ${dep.join('/')} departs from the ${type} preset` });
       return false;
     }
     return true;
@@ -975,7 +978,11 @@ export function resolveRoute({
     // AFTER F3/F4/F2/F1 have already floored it (parityFloors()) — it can
     // only raise that floored effort further, never lower it or move it off
     // the floored model.
-    let profWins = profileMayWin();
+    // A parity row's minimum effort can only RAISE the reviewer's effort, so
+    // it still applies when the consequence departs from the preset: a
+    // critical review never gets less effort than a routine one (S2 review
+    // P5, lead decision). Any other departure still skips it.
+    let profWins = profileMayWin(['consequence']);
     if (ov && !asIs) {
       trialEntry.status = 'skipped';
       skipped.push({ layer: 'trial', reason: departNote });
