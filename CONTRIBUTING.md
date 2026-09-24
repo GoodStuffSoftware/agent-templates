@@ -46,6 +46,8 @@ Before opening a contribution, scrub it:
 - [ ] **Re-read the diff as a stranger.** Would someone with no knowledge of your project understand and use this? If it only makes sense with your project's context, it's not generic yet.
 - [ ] **Know the guard's boundary.** Leak-check scans committable *file contents* only — commit messages and branch names are not scanned. Whether source-project names may appear in commit metadata is maintainer discretion; the no-specifics guarantee and its CI enforcement cover files. And the guard matches known tokens, not meaning: proprietary material (real code, config, product logic) stays out of files entirely — reconstruct generic examples rather than pasting-and-renaming.
 
+**WIP pushes:** a branch named `wip/**` is excluded from the push trigger on both CI workflows (still fully covered via `pull_request`, and every other branch — including `main` — still runs on every push). Push in-progress work there to avoid emailing the operator on every commit.
+
 ---
 
 ## Where it goes
