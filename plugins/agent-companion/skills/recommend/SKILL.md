@@ -86,6 +86,13 @@ node "$AC/scripts/recommend.mjs" --type code-review --writer opus/xhigh
 Explicit flags override a task type's preset, so `--type` plus one flag is the
 common case.
 
+Add `--explain` to see HOW it was resolved: what each layer of the stack
+(routing profile > shipped routing trial > grid) would give, which layer won
+and why, which consequence floors fired, and the winner's provenance in one
+line. An explicit weight, kind or consequence skips the profile and trial
+layers and answers from the grid. Use it when the answer surprises you or
+someone asks why.
+
 ## Step 3 — act on the result, honestly
 
 State the recommendation and the rationale it printed. Then:

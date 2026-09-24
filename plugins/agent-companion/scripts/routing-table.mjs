@@ -14,7 +14,7 @@
 //   node routing-table.mjs --sync-skill FILE          # rewrite that block in FILE, between its markers
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { modelTiers, effortFor, routeForWeight } from '../hooks/lib/context.mjs';
+import { modelTiers, effortFor, routeForWeight, resolveRoute } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -25,6 +25,18 @@ const tiers = Object.entries(cfg.tiers || {}).sort((a, b) => (a[1].rank ?? 0) - 
 const efforts = Object.entries(cfg.efforts || {}).sort((a, b) => (a[1].rank ?? 0) - (b[1].rank ?? 0));
 const kinds = Object.keys(cfg.taskKinds || {});
 const weights = Object.keys(cfg.routing || {}).sort();
+
+// A named type's route and its shipped-trial entry, both from resolveRoute()
+// — the only reader of taskTypes.<type>.override (tests/route-readers.test.mjs).
+// `won` is true only when the trial actually won (resolved as-is and passed
+// F2/F4); a trial that was skipped renders as the grid answer instead.
+// `label` is the winning (model, effort) after floors.
+function typeRoute(name) {
+  const r = resolveRoute({ type: name });
+  const entry = r.stack.find((s) => s.layer === 'trial');
+  const trial = entry && entry.present ? { ...entry.candidate, ...entry.meta } : null;
+  return { won: r.layer === 'trial', model: r.model, label: `${r.model}${r.effort ? '/' + r.effort : ''}`, trial };
+}
 
 const cell = (w, k) => {
   const r = effortFor(Number(w), k);
@@ -54,9 +66,10 @@ function taskTypeBlock() {
     let route = '—';
     let premium = '—';
     if (typeof t.weight === 'number') {
-      if (t.override) {
-        route = `\`${t.override.model}${t.override.effort ? '/' + t.override.effort : ''}\` (routing trial${t.override.reviewBy ? ', review by ' + t.override.reviewBy : ''})`;
-        premium = premiumOf(t.override.model) ? 'yes' : 'no';
+      const tr = typeRoute(name);
+      if (tr.won) {
+        route = `\`${tr.label}\` (routing trial${tr.trial.reviewBy ? ', review by ' + tr.trial.reviewBy : ''})`;
+        premium = premiumOf(tr.model) ? 'yes' : 'no';
       } else {
         const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
         route = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
@@ -216,8 +229,9 @@ if (cfg.taskTypes) {
   for (const [name, t] of Object.entries(cfg.taskTypes)) {
     let resolved = '—';
     if (typeof t.weight === 'number') {
-      if (t.override) {
-        resolved = `\`${t.override.model}${t.override.effort ? '/' + t.override.effort : ''}\` _(trial override)_`;
+      const tr = typeRoute(name);
+      if (tr.won) {
+        resolved = `\`${tr.label}\` _(trial override)_`;
       } else {
         const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
         resolved = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
@@ -235,7 +249,9 @@ if (cfg.taskTypes) {
   L.push(`</details>`);
   L.push(``);
 
-  const overridden = Object.entries(cfg.taskTypes).filter(([, t]) => t.override);
+  const overridden = Object.entries(cfg.taskTypes)
+    .map(([name, t]) => [name, t, typeRoute(name).trial])
+    .filter(([, , ov]) => ov);
   if (overridden.length) {
     L.push(`### Routing trial (benchmark overrides, not the plain grid)`);
     L.push(``);
@@ -243,8 +259,7 @@ if (cfg.taskTypes) {
     L.push(``);
     L.push(`| Task type | Trial | Grid would say | Since | Review by | Evidence |`);
     L.push(`|---|---|---|---|---|---|`);
-    for (const [name, t] of overridden) {
-      const ov = t.override;
+    for (const [name, t, ov] of overridden) {
       const grid = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
       const gridLabel = `${grid.model}${grid.effort ? '/' + grid.effort : ''}`;
       const trialLabel = `${ov.model}${ov.effort ? '/' + ov.effort : ''}` + (ov.overridesKindDelta ? ' _(overrides kind delta)_' : '');
@@ -252,7 +267,7 @@ if (cfg.taskTypes) {
       L.push(`| \`${name}\` | \`${trialLabel}\` | \`${gridLabel}\` | ${ov.trialSince || '—'} | ${ov.reviewBy || '—'} | ${evid} |`);
     }
     L.push(``);
-    for (const [name, t] of overridden) L.push(`- **\`${name}\`** — ${t.override.reason}`);
+    for (const [name, , ov] of overridden) L.push(`- **\`${name}\`** — ${ov.reason}`);
     L.push(``);
   }
 }

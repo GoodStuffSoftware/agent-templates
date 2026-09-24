@@ -26,7 +26,7 @@
 import { createHash } from 'node:crypto';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveExpected,
+  appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
 } from './lib/context.mjs';
@@ -106,7 +106,7 @@ try {
   // and then denied the exact opus spawn the trial prescribes for a
   // manufactured "over-provisioned" mismatch. A WARRANT justifies a tier;
   // it does not redeclare the task's weight, and must never outrank a
-  // declared TYPE. Precedence (see the resolveExpected() call below):
+  // declared TYPE. Precedence (see the resolveRoute() call below):
   // explicit TYPE (with its trial override) > a real WEIGHT: line >
   // a WARRANT's own stated weight. weightLineExplicit therefore reflects
   // ONLY a genuine WEIGHT: line; a WARRANT-only weight still counts as A
@@ -148,12 +148,13 @@ try {
   // The table's answer for the declared weight (or named type), used two
   // ways: filled in where the spawn left the model blank (the inheritance
   // hazard, closed at its source), and as the yardstick for a model the
-  // spawn did name. resolveExpected() is the SHARED resolver
+  // spawn did name. resolveRoute() is the SHARED resolver
   // (hooks/lib/context.mjs) — scripts/recommend.mjs and scripts/evaluate.mjs
-  // go through the identical function, so a taskTypes.<type>.override
-  // ROUTING TRIAL is applied here too: a spawn that correctly follows a
-  // trial (e.g. TYPE: debug-root-cause on opus/low) is judged against the
-  // trial's own (model, effort), not the plain grid's.
+  // go through the identical function, so its layer stack (profile > shipped
+  // ROUTING TRIAL > grid, floors after the winner) is applied here too: a
+  // spawn that correctly follows a trial (e.g. TYPE: debug-root-cause on
+  // opus/low) is judged against the trial's own (model, effort), not the
+  // plain grid's.
   let typeWeight = null;
   if (declaredType) {
     try { typeWeight = modelTiers().taskTypes?.[declaredType]?.weight ?? null; } catch { /* table unreadable */ }
@@ -162,7 +163,7 @@ try {
   let route = null;
   if (fitOn) {
     try {
-      const resolved = resolveExpected({
+      const resolved = resolveRoute({
         type: declaredType,
         weight: declaredWeight, kind: declaredKind, consequence: declaredConsequence,
         // weightExplicit is weightLineExplicit, NOT weightWasDeclared: only a
@@ -187,6 +188,9 @@ try {
     } catch { /* table unreadable */ }
   }
   const routeLabel = route?.model ? `${route.model}${route.effort ? '/' + route.effort : ''}` : '';
+  // Which layer answered — named in every fit note below, so a spawner can
+  // tell a shipped trial's answer from the plain grid's without --explain.
+  const routeLayerNote = route?.layer ? ` [route layer: ${route.layer === 'trial' ? 'shipped trial' : route.layer}]` : '';
 
   // --- Premium-tier determination, ROUTING-AWARE (bugfix 2026-09-23) -----
   // The premium set used to be hard-coded to isPremium()'s tier-table
@@ -200,7 +204,7 @@ try {
   // names it — that is not a spawner reaching for the expensive tier, it is
   // the table's own prescribed answer. A route exists whenever fitOn is
   // true (a TYPE, or an explicit/warrant weight, was declared) and
-  // resolveExpected() found a row. Fable is excluded from this exception on
+  // resolveRoute() found a row. Fable is excluded from this exception on
   // purpose: routingNote is explicit that "nothing routes to fable — it is
   // an exception, not a row", so no route can ever justify it, and it stays
   // a warranted exception on every spawn regardless of TYPE/WEIGHT.
@@ -503,7 +507,7 @@ try {
       fit = evaluateFit({
         model, effort: def?.effort || '', weight: declaredWeight,
         kind: declaredKind || 'bounded', consequence: declaredConsequence || 'routine',
-        // `route` was already resolved via resolveExpected() above (override
+        // `route` was already resolved via resolveRoute() above (layer stack
         // included) — pass it through as `expected` so evaluateFit() judges
         // against it directly instead of recomputing an override-blind
         // default from the plain grid.
@@ -597,6 +601,8 @@ try {
       declared_consequence: declaredConsequence,
       declared_type: declaredType,       // null when the brief named no TYPE: preset
       fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid
+      route_layer: route?.layer || null,  // profile | trial | grid: which resolveRoute() layer answered; null when no route
+      route_profile_rev: route ? (route.profileRevision ?? null) : null, // routing-profile revision behind a profile answer; null until profiles ship
       fit: autofilled ? 'fit' : fit ? fit.verdict : null, // over | under | fit | unknown, when a weight was declared
       fit_expected: routeLabel || null,
       // --- Memory nudge/brief observability -------------------------------
@@ -649,13 +655,13 @@ try {
   const who = input.subagent_type || 'an agent';
   let note = null;
   if (autofilled) {
-    note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel}).`;
+    note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel})${routeLayerNote}.`;
   } else if (fit?.verdict === 'under') {
     // The cheap direction is never blocked, but a weight-4 task on haiku is
     // the failure that ships wrong code, so it is said out loud.
-    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}. ${fit.action}.`;
+    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}${routeLayerNote}. ${fit.action}.`;
   } else if (fit?.verdict === 'over' && !isPremiumForSpawn) {
-    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
+    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}${routeLayerNote}. Re-spawn there unless the weight is understated.`;
   }
   // Set only in the warrant section below (routing-can't-be-inferred case);
   // declared here so it is defined for the early-exit combineNotes() call
@@ -676,7 +682,7 @@ try {
       `Best fit: this spawn requests "${model}" but declares weight ${declaredWeight}` +
       (declaredKind ? ` (${declaredKind})` : '') +
       (declaredConsequence ? `, ${declaredConsequence} consequence` : '') +
-      `, which the routing table sends to ${routeLabel}. ${fit.reason}.\n\n` +
+      `, which the routing table sends to ${routeLabel}${routeLayerNote}. ${fit.reason}.\n\n` +
       `Either re-spawn at ${routeLabel}, or restate the brief honestly: a higher WEIGHT if the task ` +
       `is heavier than declared, or CONSEQUENCE: critical if a mistake would be expensive or ` +
       `irreversible (that raises the model floor). A warrant that contradicts its own weight is ` +

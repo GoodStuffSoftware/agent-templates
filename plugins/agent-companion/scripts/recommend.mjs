@@ -13,9 +13,15 @@
 //   node recommend.mjs --type bounded-feature --consequence critical
 //   node recommend.mjs --weight 4 --kind diagnostic
 //   node recommend.mjs --type code-review --writer opus/xhigh
+//   node recommend.mjs --type debug-root-cause --explain
 //   add --json for machine-readable output
+//
+// --explain prints the full resolution stack from resolveRoute(): what each
+// layer (profile > shipped trial > shipped grid) would give, which layer won
+// and why, which floors fired, and the winner's provenance in one line. With
+// --json it adds a `route` block carrying the same facts.
 
-import { modelTiers, resolveExpected, classifyModel, classifyEffort, rungFor } from '../hooks/lib/context.mjs';
+import { modelTiers, resolveRoute, classifyModel, classifyEffort, rungFor, explainRoute } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -54,6 +60,7 @@ let consequence = consequenceExplicit ? explicitConsequence : (t?.consequence ||
 if (consequence === 'inherit') consequence = 'routine';
 
 const out = { taskType: typeName || null, weight, kind, consequence };
+let route = null;
 
 // Reviewer parity: a review is sized to the writer it gates.
 if (weight === 'parity') {
@@ -64,31 +71,34 @@ if (weight === 'parity') {
   }
   const [wm, we] = String(w).split('/');
   const p = cfg.reviewerParity || {};
-  out.model = wm;
-  out.effort = we || '';
+  // Same resolver as every other route: reviewer parity is its F3 floor.
+  route = resolveRoute({
+    type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
+    weightExplicit, kindExplicit, consequenceExplicit, writer: { model: wm, effort: we || '' },
+  });
+  out.model = route.model;
+  out.effort = route.effort;
   out.rationale = `reviewer parity: model matches the writer (${wm})` + (we ? `; effort at least ${we}` : '') + (p.effortMayExceed ? ', may exceed' : '');
 } else {
   if (typeof weight !== 'number' || !(weight >= 1 && weight <= 5)) {
     console.error('need --type <task-type> or --weight 1-5 (see --list)');
     process.exit(2);
   }
-  // A ROUTING TRIAL override on the named type: a benchmark-backed (model,
-  // effort) pair that supersedes this type's own weight/kind/consequence grid
-  // resolution — see taskTypesNote in config/model-tiers.json. It applies only
-  // when the type is resolved as-is; an explicit --weight/--kind/--consequence
-  // is a deliberate deviation from the preset and falls back to the plain
-  // grid. resolveExpected() is the SHARED resolver (hooks/lib/context.mjs) —
-  // scripts/evaluate.mjs and hooks/spawn-guard.mjs's fit check go through the
-  // identical function, so a trial-conforming spawn is judged consistently
-  // wherever the table is consulted, not just here.
-  const resolved = resolveExpected({
+  // resolveRoute() is the SHARED resolver (hooks/lib/context.mjs): the layer
+  // stack profile > shipped ROUTING TRIAL (taskTypesNote) > grid, with the
+  // floors applied after whichever layer won. scripts/evaluate.mjs and
+  // hooks/spawn-guard.mjs's fit check go through the identical function, so
+  // a trial-conforming spawn is judged consistently wherever the table is
+  // consulted. An explicit --weight/--kind/--consequence is a deliberate
+  // deviation from the preset and skips straight to the grid.
+  route = resolveRoute({
     type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
     weightExplicit, kindExplicit, consequenceExplicit,
   });
-  out.model = resolved.model;
-  out.effort = resolved.effort;
-  out.rationale = resolved.rationale;
-  if (resolved.trial) out.trial = resolved.trial;
+  out.model = route.model;
+  out.effort = route.effort;
+  out.rationale = route.rationale;
+  if (route.trial) out.trial = route.trial;
 }
 
 // Ladder rung: the ordered cheapest-to-dearest view of the same (model,
@@ -122,6 +132,12 @@ if (cls.premium) {
   out.warrantTemplate = `WARRANT: weight ${typeof weight === 'number' ? weight : '<1-5>'} — <why a cheaper tier cannot do this>`;
 }
 
+const explain = has('--explain');
+if (explain && route) {
+  const { layer, profileRevision, source, state, provenance, floorsApplied, skipped, stale, departures, stack } = route;
+  out.route = { layer, profileRevision, source, state, provenance, floorsApplied, skipped, stale, departures, stack };
+}
+
 if (has('--json')) {
   console.log(JSON.stringify(out, null, 2));
   process.exit(0);
@@ -150,3 +166,7 @@ if (out.warrantRequired) {
   console.log(`  ${out.warrantTemplate}`);
 }
 if (out.tryFirst) console.log(`\ntry first:      ${out.tryFirst}`);
+if (explain && route) {
+  console.log('\nEXPLAIN — how this was resolved:');
+  for (const line of explainRoute(route)) console.log(`  ${line}`);
+}

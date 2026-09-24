@@ -15,7 +15,7 @@
 //   add --json for machine-readable output
 // Exit code: 0 fit, 1 over-provisioned, 2 under-provisioned, 3 usage error
 
-import { modelTiers, evaluateFit, resolveExpected } from '../hooks/lib/context.mjs';
+import { modelTiers, evaluateFit, resolveRoute, expectedFromRoute } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -57,9 +57,14 @@ if (weight === 'parity') {
     process.exit(3);
   }
   const [wm, we] = String(w).split('/');
+  // Same resolver as every other route: reviewer parity is its F3 floor.
+  const route = resolveRoute({
+    type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
+    weightExplicit, kindExplicit, consequenceExplicit, writer: { model: wm, effort: we || '' },
+  });
   const expected = {
-    model: wm,
-    effort: we || '',
+    model: route.model,
+    effort: route.effort,
     rationale: `reviewer parity: match the writer (${wm}${we ? '/' + we : ''}); effort may exceed, must not drop`,
   };
   fit = evaluateFit({ model, effort, weight, kind, consequence, expected, parity: true });
@@ -68,17 +73,18 @@ if (weight === 'parity') {
     console.error('need --type <task-type> or --weight 1-5 (see recommend.mjs --list)');
     process.exit(3);
   }
-  // resolveExpected() is the SHARED resolver (hooks/lib/context.mjs) — the
+  // resolveRoute() is the SHARED resolver (hooks/lib/context.mjs) — the
   // SAME function scripts/recommend.mjs and hooks/spawn-guard.mjs's fit
-  // check go through, so a taskTypes.<type>.override ROUTING TRIAL (see
-  // taskTypesNote in config/model-tiers.json) is applied here too instead of
-  // silently falling back to the plain grid the way a direct effortFor()
-  // call would. Passed as `expected` so evaluateFit() uses it as-is rather
-  // than recomputing its own (override-blind) default internally.
-  const expected = resolveExpected({
+  // check go through, so the layer stack (profile > shipped ROUTING TRIAL >
+  // grid, floors after the winner) is applied here too instead of silently
+  // falling back to the plain grid the way a direct effortFor() call would.
+  // Passed as `expected` (in its compatibility shape, so --json output is
+  // unchanged) so evaluateFit() uses it as-is rather than recomputing its own
+  // default internally.
+  const expected = expectedFromRoute(resolveRoute({
     type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
     weightExplicit, kindExplicit, consequenceExplicit,
-  });
+  }));
   fit = evaluateFit({ model, effort, weight, kind, consequence, expected });
 }
 

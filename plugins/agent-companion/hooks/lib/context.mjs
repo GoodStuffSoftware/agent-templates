@@ -555,7 +555,7 @@ export function resolveRoute({
       trialEntry.status = 'skipped';
       skipped.push({ layer: 'trial', reason: 'F3: a parity-sized type is sized to its writer; a trial cannot name its model' });
     }
-    if (!writer || !writer.model) {
+    if (!writer) {
       gridEntry.status = 'unresolved';
       return {
         ...base, model: '', effort: '', layer: null, source: null, state: null, provenance: null,
