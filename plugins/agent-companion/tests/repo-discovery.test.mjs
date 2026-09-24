@@ -15,9 +15,12 @@ import {
   readClaudeJsonProjectPaths, parseExtraSpec, defaultDevRoots,
 } from '../scripts/lib/repo-discovery.mjs';
 import { normalizeGitUrl } from '../scripts/lib/publication-sweep.mjs';
+import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
 function git(args, cwd, env) {
-  const res = spawnSync('git', args, { windowsHide: true, cwd, encoding: 'utf8', env: env || process.env, timeout: 30000 });
+  const res = spawnSync('git', args, {
+    cwd, encoding: 'utf8', env: cleanGitEnv(env || process.env), timeout: 30000, windowsHide: true,
+  });
   if (res.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
   return res;
 }

@@ -1245,6 +1245,16 @@ const memoryVaultDrift = {
         data: s,
       };
     }
+    // A vault that fails the read-only guards (its .git is a link to another
+    // repository, or its marker sits in a repository the plugin did not
+    // create) is not backing anything up, and sync refuses it every time.
+    if (s.refused) {
+      return {
+        status: 'fail',
+        findings: [`vault at ${s.dir} is refused by the memory-vault guards: ${s.refused}`, attempt],
+        data: s,
+      };
+    }
     const findings = [`${s.fileCount} file(s) tracked across ${s.projectCount} project(s) at ${s.dir}`];
     if (s.dirty) {
       findings.push('vault working tree has uncommitted changes — a previous sync may have been '

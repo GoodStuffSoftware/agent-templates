@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
+import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 import {
   sweepRepo, sweepRepoInPlace, sweepAllCloud, isSessionCheckout, normalizeGitUrl,
   filterNew, fingerprintHit, STRICT_MARKER_FILE, redactRepoIdentifiers,
@@ -32,7 +33,9 @@ const REAL_LEAK_CHECK = join(PLUGIN_ROOT, '..', '..', 'scripts', 'leak-check.mjs
 const SYNTHETIC_LEAK_LINE = ['private path: C:', '\\Users\\', 'zzz', 'testuser', '\\dev\\thing'].join('');
 
 function git(args, cwd, env) {
-  const res = spawnSync('git', args, { windowsHide: true, cwd, encoding: 'utf8', env: env || process.env, timeout: 30000 });
+  const res = spawnSync('git', args, {
+    cwd, encoding: 'utf8', env: cleanGitEnv(env || process.env), timeout: 30000, windowsHide: true,
+  });
   if (res.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
   return res;
 }
