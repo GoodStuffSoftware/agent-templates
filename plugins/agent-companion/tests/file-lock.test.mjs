@@ -172,10 +172,16 @@ test('F5: the next acquire sweeps old crash debris beside the lock, and only tha
     const { utimesSync } = await import('node:fs');
     const guarded = join(s.dir, 'state.json');
     const old = new Date(Date.now() - DEBRIS_MAX_AGE_MS - 60_000);
-    const debris = ['x.lock.4242.0a1b2c3d.new', 'x.lock.4242.0a1b2c3d.stale', 'x.lock.0123456789abcdef.1.break', 'state.json.4242.9f8e7d6c.tmp'];
-    const keep = ['x.lock.notes', 'other.json.4242.9f8e7d6c.tmp', 'state.json', 'state.json.4242.9f8e7d6c.tmp.bak'];
+    const dead = deadPid();
+    const live = process.pid;
+    const debris = [`x.lock.${dead}.0a1b2c3d.new`, `x.lock.${dead}.0a1b2c3d.stale`, 'x.lock.0123456789abcdef.1.break', `state.json.${dead}.9f8e7d6c.tmp`];
+    // A file whose maker is still running is never crash debris, however
+    // old: it is passed over without even a stat (a stat of every waiter's
+    // in-flight temp file, under the lock, starved waiters on Windows).
+    const keep = ['x.lock.notes', `other.json.${dead}.9f8e7d6c.tmp`, 'state.json', `state.json.${dead}.9f8e7d6c.tmp.bak`,
+      `x.lock.${live}.0a1b2c3f.new`, `x.lock.${live}.0a1b2c3f.stale`, `state.json.${live}.9f8e7d6e.tmp`];
     for (const n of [...debris, ...keep]) { writeFileSync(join(s.dir, n), 'x'); utimesSync(join(s.dir, n), old, old); }
-    const fresh = ['x.lock.4243.0a1b2c3e.new', 'state.json.4243.9f8e7d6d.tmp'];
+    const fresh = [`x.lock.${dead}.0a1b2c3e.new`, `state.json.${dead}.9f8e7d6d.tmp`];
     for (const n of fresh) writeFileSync(join(s.dir, n), 'x');
     const h = acquireLock(s.lock, { waitMs: 200, debris: [guarded] });
     assert.ok(h);

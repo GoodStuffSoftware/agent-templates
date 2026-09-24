@@ -187,7 +187,9 @@ function breakStale(lockPath, seen, staleMs) {
 }
 
 // Crash debris beside the lock, removed by the next process to take it once
-// older than DEBRIS_MAX_AGE_MS (0.29.0 final review F5): this helper's own
+// older than DEBRIS_MAX_AGE_MS and, where the name carries the pid of the
+// process that made it, once that process is gone (0.29.0 final review
+// F5): this helper's own
 // temp files (<lock>.<pid>.<hex>.new), moved stale locks (.stale) and claims
 // (<lock>.<id>.<k>.break), and the `.tmp` files of the files the lock guards
 // (<file>.<pid>.<hex>.tmp, the atomic-write temp names), passed as `debris`.
@@ -201,15 +203,25 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function sweepDebris(lockPath, debris) {
   const dir = dirname(lockPath);
   const own = escapeRe(basename(lockPath));
-  const res = [new RegExp(`^${own}\\.\\d+\\.[0-9a-f]+\\.(?:new|stale)$`), new RegExp(`^${own}\\.[0-9a-f]{16}\\.\\d+\\.break$`)];
+  // Group 1, where a name has one, is the pid of the process that made it.
+  const res = [new RegExp(`^${own}\\.(\\d+)\\.[0-9a-f]+\\.(?:new|stale)$`), new RegExp(`^${own}\\.[0-9a-f]{16}\\.\\d+\\.break$`)];
   for (const f of debris) {
-    if (dirname(f) === dir) res.push(new RegExp(`^${escapeRe(basename(f))}\\.\\d+\\.[0-9a-f]+\\.tmp$`));
+    if (dirname(f) === dir) res.push(new RegExp(`^${escapeRe(basename(f))}\\.(\\d+)\\.[0-9a-f]+\\.tmp$`));
   }
   let names;
   try { names = readdirSync(dir); } catch { return; }
   const now = Date.now();
   for (const n of names) {
-    if (!res.some((re) => re.test(n))) continue;
+    let m = null;
+    for (const re of res) { m = re.exec(n); if (m) break; }
+    if (!m) continue;
+    // A file whose maker is still running is not crash debris, and is
+    // passed over WITHOUT a stat: on Windows a stat of a file another
+    // process is writing or deleting can stall, and this runs under the
+    // lock. Statting every waiter's in-flight temp file on every acquire
+    // cost 30-200 ms of hold time per acquire under contention (measured,
+    // 16 processes), which starved waiters into timeouts.
+    if (m[1] !== undefined && pidAlive(Number(m[1]))) continue;
     const p = join(dir, n);
     try {
       const st = statSync(p);
