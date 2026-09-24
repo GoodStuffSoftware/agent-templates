@@ -42,11 +42,12 @@ import realEffortNoteTask from "./tasks/real-effort-note.mjs";
 import realPublicationSweepTask from "./tasks/real-publication-sweep.mjs";
 import realMisleadingReportTask from "./tasks/real-misleading-report.mjs";
 import realContradictorySpecTask from "./tasks/real-contradictory-spec.mjs";
-import { snapshotTree, rmrf, GUARD_REL_PATH } from "./tasks/common.mjs";
+import { snapshotTree, removeDirWithRetry, GUARD_REL_PATH } from "./tasks/common.mjs";
 import { wilsonInterval, passAtK, formatInterval, MIN_N_TO_SEPARATE } from "./stats.mjs";
 import {
   sha256, runJudge, treeDiff, checkJudgeEligibility, assertJudgeCalibrated, makeCliJudgeCaller,
 } from "./judge.mjs";
+import { classifyCollision, portBaseForSlot } from "./scheduler.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Resolve a real, directly-spawnable claude binary. On Windows, "claude"
@@ -278,6 +279,24 @@ export function scaledMaxBudgetUsd(baseMaxBudgetUsd, fullModelId) {
   return baseMaxBudgetUsd * ratio;
 }
 
+// Args this direct CLI deliberately REFUSES rather than silently
+// mishandling -- each has a real implementation one layer up, in
+// scripts/benchmark.mjs, that this bare-bones loop does not (and, for
+// --concurrency, should not: see the message below for why "route it
+// through the scheduler here too" was rejected in favor of refusing).
+const REFUSED_ARGS = {
+  "--concurrency": "runs multiple (task, rep) attempts in parallel through bench/scheduler.mjs's "
+    + "scheduleRuns()/makeCapacityGate() (the free-RAM gate) and is gated behind bench/estimate.mjs's "
+    + "pre-run cost/time estimate + confirmation gate -- none of which this direct, single-process CLI "
+    + "wires up. Silently accepting --concurrency here would run everything sequentially anyway while "
+    + "printing no estimate and consulting no RAM gate, which is worse than refusing outright.",
+  "--per-agent-mb": "only means anything alongside --concurrency (bench/scheduler.mjs's capacity gate).",
+  "--weekly-usage-pct": "the pre-run estimate/confirmation gate is scripts/benchmark.mjs-only.",
+  "--weekly-ceiling-pct": "the pre-run estimate/confirmation gate is scripts/benchmark.mjs-only.",
+  "--confirm-above-points": "the pre-run estimate/confirmation gate is scripts/benchmark.mjs-only.",
+  "--confirm": "there is no confirmation gate here to acknowledge.",
+};
+
 export function parseArgs(argv) {
   const out = { cells: "all", tasks: "all", reps: 3, repStart: 1, out: null, maxBudgetUsd: null, isolateHome: false };
   for (let i = 0; i < argv.length; i++) {
@@ -289,7 +308,13 @@ export function parseArgs(argv) {
     else if (a === "--out") out.out = argv[++i];
     else if (a === "--max-budget-usd") out.maxBudgetUsd = Number(argv[++i]);
     else if (a === "--isolate-home") out.isolateHome = true;
-    else throw new Error("unknown arg: " + a);
+    else if (REFUSED_ARGS[a]) {
+      throw new Error(
+        `bench/runner.mjs's direct CLI does not support ${a} -- it ${REFUSED_ARGS[a]} `
+        + "Use scripts/benchmark.mjs instead (same bench/runner.mjs runOne() underneath, with the "
+        + `scheduler and gates wired up). See docs/BENCHMARK.md "Parallel runs".`,
+      );
+    } else throw new Error("unknown arg: " + a);
   }
   return out;
 }
@@ -372,7 +397,7 @@ export function isAuthError({ json, answerText, stdout, err } = {}) {
   return false;
 }
 
-function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fakeHome }) {
+function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fakeHome, extraEnv }) {
   return new Promise((resolve) => {
     const args = [
       "-p", prompt,
@@ -404,7 +429,13 @@ function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fake
     // callers MUST refuse to start with --isolate-home when no API key is
     // set (see scripts/benchmark.mjs's preflight check). Never copy
     // credential files into the fake home; only env-var auth is supported.
-    const env = { ...process.env };
+    // Per-run isolation for --concurrency > 1 (bench/scheduler.mjs): a
+    // unique TMP/TEMP/TMPDIR and a unique BENCH_PORT_BASE, so two concurrent
+    // runs' own tests/servers never collide on the machine's shared default
+    // temp dir or a hardcoded port. Both are no-ops for a normal
+    // --concurrency 1 run (extraEnv is then just the historical env with no
+    // overrides). See docs/BENCHMARK.md "Parallel runs".
+    const env = { ...process.env, ...(extraEnv || {}) };
     if (isolateHome) {
       env.HOME = fakeHome;
       env.USERPROFILE = fakeHome;
@@ -453,6 +484,14 @@ function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fake
 export async function runOne({
   cellId, cell, taskId, task, rep, outDir, answersDir, maxBudgetUsdCeiling, isolateHome = false,
   judge = null, runClaudeImpl = runClaude, cliVersion,
+  // Scheduling context (bench/scheduler.mjs's scheduleRuns() supplies these
+  // for --concurrency > 1; a sequential/--concurrency 1 caller can omit all
+  // of them and gets the historical single-slot behavior unchanged).
+  runId: explicitRunId, slot = 0, concurrency = 1, coScheduledRunIds = [], isCollisionRetry = false,
+  // Test seam, in the same style as `runClaudeImpl` above -- production
+  // callers always omit this and get the real, retrying remover
+  // (bench/tasks/common.mjs's removeDirWithRetry()).
+  removeDirImpl = removeDirWithRetry,
 }) {
   const judgeActive = !!(judge && task.rubric);
   if (judgeActive) {
@@ -468,16 +507,36 @@ export async function runOne({
       throw refuse(e.message);
     }
   }
+  const runId = explicitRunId || (cellId + "__" + taskId + "__rep" + rep);
   const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-" + cellId + "-" + taskId + "-"));
   // Only made (and only cleaned up) when isolateHome is set -- the default
   // path spawns with the real, inherited HOME/USERPROFILE (see runClaude()).
   const fakeHome = isolateHome ? makeFakeHome() : null;
+  // Per-run isolation for parallel runs (bench/scheduler.mjs): a dedicated
+  // TMP/TEMP/TMPDIR sibling to the sandbox (never nested inside it -- a tool
+  // scanning the sandbox for "files the model touched" must never see the
+  // harness's own scratch dir), and a BENCH_PORT_BASE reserved per
+  // concurrency SLOT (not per run), so two runs active at the same time
+  // never share either. Both are harmless at the default --concurrency 1
+  // (slot is always 0, and nothing but this run is ever active).
+  const runTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-tmp-" + cellId + "-" + taskId + "-"));
+  const portBase = portBaseForSlot(slot);
+  const scheduleCtx = { slot, concurrency, coScheduledRunIds, portBase, tmpDir: runTmpDir };
+  const extraEnv = { TMP: runTmpDir, TEMP: runTmpDir, TMPDIR: runTmpDir, BENCH_PORT_BASE: String(portBase) };
   let meta;
   try {
-    meta = task.setup(sandboxDir);
+    meta = task.setup(sandboxDir, scheduleCtx);
   } catch (e) {
-    rmrf(sandboxDir);
-    if (fakeHome) rmrf(fakeHome);
+    // Best-effort: there is no row yet to attach a cleanup_error to (setup
+    // failing means runOne() throws instead of ever returning a row), and a
+    // cleanup failure here must never mask the ORIGINAL setup error `e`
+    // being thrown below -- removeDirWithRetry() never throws (see its own
+    // docs), so this can't happen, but the intent is spelled out here too.
+    await Promise.all([
+      removeDirImpl(sandboxDir),
+      removeDirImpl(runTmpDir),
+      ...(fakeHome ? [removeDirImpl(fakeHome)] : []),
+    ]);
     throw e;
   }
   const promptText = task.prompt(meta);
@@ -514,6 +573,7 @@ export async function runOne({
     maxBudgetUsd: effectiveBudget,
     isolateHome,
     fakeHome,
+    extraEnv,
   });
 
   const answerText = json ? (json.result ?? "") : "";
@@ -523,10 +583,74 @@ export async function runOne({
     // built-in task) or returns a Promise (a task-pack task, whose scorer
     // runs a dynamically-imported hidden-test module) -- awaiting a plain
     // value is a no-op, so this is not a behavior change for existing tasks.
-    scoreResult = await task.score(sandboxDir, answerText, meta);
+    // The 4th arg (scheduleCtx) is new and additive -- every existing task's
+    // score(sandboxDir, answerText, meta) simply ignores it.
+    scoreResult = await task.score(sandboxDir, answerText, meta, scheduleCtx);
   } catch (e) {
-    scoreResult = { pass: false, scope_ok: null, claim_honest: null, extra_files: [], detail: { scorerError: String((e && e.stack) || e) } };
+    // harnessErrorCode: the STRUCTURED `.code` Node itself attaches to a
+    // genuine system error (net's EADDRINUSE, fs's EEXIST/EBUSY, ...) when
+    // the task's own score()/setup() throws -- e.g.
+    // tests/fixtures/bench-parallel/fixed-port-task.mjs's real net.Server
+    // bind. This is the ONLY signal classifyCollision() is allowed to see
+    // (bench/scheduler.mjs) -- never the exception's message text, which,
+    // same as the model's answer text, can be authored prose (an assertion
+    // message quoting an expected string) that coincidentally contains a
+    // collision-shaped substring without any real OS collision happening.
+    const harnessErrorCode = e && typeof e.code === "string" ? e.code : null;
+    scoreResult = {
+      pass: false, scope_ok: null, claim_honest: null, extra_files: [],
+      detail: { scorerError: String((e && e.stack) || e), harnessErrorCode },
+    };
   }
+
+  // Was this run's SCORING phase genuinely sharing the machine with another
+  // active run at LAUNCH time? A point-in-time snapshot (coScheduledRunIds
+  // is fixed when bench/scheduler.mjs admitted this run, never updated
+  // afterward) -- good enough, since all this decides is "was there
+  // realistically another process to blame", not an exact live census.
+  const wasCoScheduled = concurrency > 1 && coScheduledRunIds.length > 0;
+
+  // LEGACY collision classification (Track B round 1): a run whose scorer
+  // threw a STRUCTURED OS-level "someone else already holds this resource"
+  // error (EADDRINUSE, a lock file held, ...) never reached a genuine
+  // model/task verdict -- see bench/scheduler.mjs's classifyCollision()
+  // (structural signal ONLY, never free text -- see that function's own
+  // banner) and rebuildSummary()'s exclusion below (the same treatment
+  // auth_error gets). Narrowed to the NOT-co-scheduled case only (round 2,
+  // 2026-09 delta review finding 1): a solo --concurrency 1 run can still
+  // collide with a leftover process from an earlier crashed run, and there
+  // is no "same sandbox, re-score alone" rescue available there (nothing
+  // else was ever running to blame), so this is the one case that still
+  // gets a full model re-run (bench/scheduler.mjs's `collision`-retry). Every
+  // OTHER scoring-phase failure while genuinely co-scheduled is handled by
+  // `needsRescore` below instead, whether or not it was structural-coded --
+  // see that constant's own note.
+  const collision = !wasCoScheduled
+    && classifyCollision({ harnessErrorCode: scoreResult && scoreResult.detail && scoreResult.detail.harnessErrorCode });
+
+  // Round 2 fix (2026-09, Track B delta review finding 1): a REAL task
+  // pack's score() never throws -- its hidden test catches its own
+  // subprocess's failure and returns a plain `{ pass: false, detail }` (the
+  // dominant real-world "catches everything" style, FORMAT.md's "Hidden
+  // test contract") -- so the structural-signal collision path above was
+  // dead code for every real pack; a genuine port/lock collision inside a
+  // hidden test's own subprocess just looked like an ordinary task failure.
+  // The model's sandbox work is ALREADY COMPLETE and isolated by the time
+  // score() runs, so instead of requiring a thrown structural code at all,
+  // ANY scoring-phase failure that happened while genuinely co-scheduled
+  // (wasCoScheduled, above) is queued for a SOLO RE-SCORE of the SAME
+  // retained sandbox -- never a model re-run (bench/scheduler.mjs's
+  // needs_rescore-retry queuing, this module's rescoreOne() below). This
+  // costs no extra tokens and carries no pass-rate bias, because the
+  // model's own output never changes between the two scoring attempts -- an
+  // outcome-based model RE-RUN would bias toward passing on a nondeterministic
+  // model, which re-scoring the identical artifact cannot. `!isCollisionRetry`
+  // guards against ever chaining a rescore off of another retry (in practice
+  // this is already impossible: a forced-`resources.exclusive` retry never
+  // launches while anything else is active, so its own coScheduledRunIds is
+  // always empty). See docs/BENCHMARK.md "Parallel runs" -> "Collision
+  // handling".
+  const needsRescore = !scoreResult.pass && wasCoScheduled && !isCollisionRetry;
 
   const finalTree = (() => {
     try {
@@ -583,9 +707,8 @@ export async function runOne({
     }
   }
 
-  const runId = cellId + "__" + taskId + "__rep" + rep;
   fs.writeFileSync(
-    path.join(answersDir, runId + ".json"),
+    path.join(answersDir, runId.replace(/[\\/:]/g, "_") + ".json"),
     JSON.stringify({ runId, answerText, tree: finalTree }, null, 2),
   );
 
@@ -597,15 +720,67 @@ export async function runOne({
   // docs/BENCHMARK.md "Effort is proven via the transcript".
   const transcriptHome = isolateHome ? fakeHome : (process.env.HOME || process.env.USERPROFILE || os.homedir());
 
-  rmrf(sandboxDir);
-  if (fakeHome) rmrf(fakeHome);
+  // The sandbox and its tmp dir are torn down here UNLESS this run is being
+  // held for a solo re-score (needsRescore) -- rescoreOne() below inherits
+  // responsibility for cleaning both up once the re-score attempt completes.
+  // A needsRescore row whose rescore never actually runs (the batch stopped
+  // first -- auth_error/JUDGE_REFUSED/a weekly ceiling, see
+  // bench/scheduler.mjs's shouldStop) leaks its retained sandbox for the
+  // rest of the process's life; accepted as a documented tradeoff
+  // (docs/BENCHMARK.md "Parallel runs") rather than adding a whole separate
+  // abandoned-retry cleanup pass for a rare, harmless (an ordinary OS temp
+  // dir) already-failed run.
+  // A cleanup failure here (Windows EPERM/EBUSY/ENOTEMPTY -- a just-exited
+  // child process, an antivirus scanner, or a lingering handle; see
+  // bench/tasks/common.mjs's removeDirWithRetry()) must NEVER change this
+  // run's pass/fail, collision, or needs_rescore verdict -- all of those are
+  // already decided above. Only the failing directory's error CODE is
+  // recorded (never a path -- results.jsonl rows are sometimes shared) on
+  // the row below, and the run carries on; rebuildSummary() and
+  // bench/estimate.mjs both ignore this field for every stat they compute.
+  // sandboxDir/runTmpDir/fakeHome are independent targets, so they are
+  // retried IN PARALLEL -- the bounded wait is per-directory, not summed
+  // across all three (see removeDirWithRetry()'s own bound).
+  let cleanupErrorCode = null;
+  if (!needsRescore) {
+    const [sandboxCleanup, tmpCleanup] = await Promise.all([
+      removeDirImpl(sandboxDir),
+      removeDirImpl(runTmpDir),
+    ]);
+    if (!sandboxCleanup.ok) cleanupErrorCode = sandboxCleanup.code;
+    else if (!tmpCleanup.ok) cleanupErrorCode = tmpCleanup.code;
+  }
+  if (fakeHome) {
+    const homeCleanup = await removeDirImpl(fakeHome);
+    if (!homeCleanup.ok && !cleanupErrorCode) cleanupErrorCode = homeCleanup.code;
+  }
 
   const row = {
     ts: new Date().toISOString(),
+    run_id: runId,
     cell: cellId,
     task: taskId,
     task_family: taskFamilyOf(taskId, { task }),
     rep,
+    // Concurrency level this run was launched under, and the OTHER run ids
+    // active at the moment it started -- so a wall-time comparison against
+    // an earlier --concurrency 1 batch can be read correctly (parallel runs
+    // slow each other down; see docs/BENCHMARK.md "Parallel runs").
+    concurrency,
+    co_scheduled_run_ids: coScheduledRunIds,
+    // A collision never reached a genuine model/task verdict (see
+    // classifyCollision() above) -- excluded from pass-rate math by
+    // rebuildSummary(), same treatment as auth_error. is_collision_retry
+    // marks the solo re-run bench/scheduler.mjs automatically queues for it.
+    // needs_rescore marks a DIFFERENT retry (round 2): this row failed while
+    // genuinely co-scheduled, and its sandbox was kept alive for a solo
+    // RE-SCORE (rescoreOne() below) rather than a model re-run -- see
+    // rebuildSummary()'s needs_rescore confirm/exclude handling and
+    // docs/BENCHMARK.md "Parallel runs" -> "Collision handling".
+    collision,
+    is_collision_retry: !!isCollisionRetry,
+    needs_rescore: needsRescore,
+    is_rescore_retry: false,
     requested_model: cell.model,
     resolved_model: resolvedModel,
     model_mismatch: resolvedModel !== null && resolvedModel !== cell.model,
@@ -643,9 +818,140 @@ export async function runOne({
     sandbox_cwd: sandboxDir,
     exec_err: err,
     detail: scoreResult.detail ?? null,
+    // Set only when the sandbox/temp-dir/fakeHome cleanup above failed after
+    // every retry -- the bare OS error code (EPERM/EBUSY/ENOTEMPTY/...),
+    // never a path. See the comment above this row's cleanupErrorCode
+    // computation: rebuildSummary()/bench/estimate.mjs both ignore this
+    // field entirely for pass-rate and cost/time math.
+    cleanup_error: cleanupErrorCode,
     // Rubric-judge columns (present only when a judge ran for this task).
     // A SEPARATE score: never merged into `pass` above.
     ...judgeFields,
+  };
+
+  fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify(row) + "\n");
+
+  // Transient, IN-MEMORY-ONLY payload for bench/scheduler.mjs's
+  // needs_rescore-retry queuing -- attached AFTER the JSONL append above, so
+  // it is never serialized to disk (a results.jsonl row only ever carries
+  // needs_rescore as a plain boolean). scheduler.mjs reads this straight off
+  // the resolved row object it already has in hand; nothing re-parses it
+  // from JSON. Absent entirely when needsRescore is false.
+  if (needsRescore) {
+    row.__rescoreState = { sandboxDir, runTmpDir, task, meta, answerText };
+  }
+
+  return row;
+}
+
+// Re-scores a run's ALREADY-COMPLETE, RETAINED sandbox alone, with no model
+// call -- bench/scheduler.mjs's needs_rescore-retry queuing invokes this
+// (never runOne() again) for a row whose scoring phase failed while
+// genuinely co-scheduled (see runOne()'s `needsRescore` note above).
+// `rescoreState` is exactly the object runOne() attached to its row's
+// `__rescoreState`, plus `originalRow` (the finished row itself, added by
+// bench/scheduler.mjs when it queues the retry). `slot`/`concurrency`/
+// `coScheduledRunIds` describe the SOLO retry's own scheduling context --
+// bench/scheduler.mjs forces `resources.exclusive` on it, so
+// `coScheduledRunIds` is always empty in practice; accepted as parameters
+// anyway rather than hardcoded, so a direct test can drive this function
+// without going through the full scheduler.
+//
+// Every identifying/reproducibility/cost/token field is INHERITED from
+// `originalRow` verbatim (`...originalRow` below) -- the model was never
+// re-run, so none of that changed; only the verdict fields and this retry's
+// own bookkeeping differ. The original failure's own detail is kept
+// alongside the re-score's, never overwritten.
+export async function rescoreOne({
+  rescoreState, outDir, answersDir, slot = 0, concurrency = 1, coScheduledRunIds = [],
+  // Test seam, same as runOne()'s own removeDirImpl -- production callers
+  // always omit this.
+  removeDirImpl = removeDirWithRetry,
+}) {
+  const { originalRow, sandboxDir, runTmpDir, task, meta, answerText } = rescoreState;
+  const scheduleCtx = { slot, concurrency, coScheduledRunIds, portBase: portBaseForSlot(slot), tmpDir: runTmpDir };
+  let scoreResult;
+  try {
+    scoreResult = await task.score(sandboxDir, answerText, meta, scheduleCtx);
+  } catch (e) {
+    const harnessErrorCode = e && typeof e.code === "string" ? e.code : null;
+    scoreResult = {
+      pass: false, scope_ok: null, claim_honest: null, extra_files: [],
+      detail: { scorerError: String((e && e.stack) || e), harnessErrorCode },
+    };
+  }
+
+  const finalTree = (() => {
+    try {
+      return snapshotTree(sandboxDir);
+    } catch {
+      return {};
+    }
+  })();
+
+  // The retained sandbox and its tmp dir are ALWAYS cleaned up here, whether
+  // the re-score passed or failed -- this is the last chance either has to
+  // be torn down. A cleanup failure must never flip this row's pass/fail or
+  // collision_rescored verdict (both already decided above) -- see
+  // bench/tasks/common.mjs's removeDirWithRetry(); only the error CODE is
+  // recorded, below, and retried in parallel across the two dirs (bounded
+  // per-directory, not summed).
+  const [sandboxCleanup, tmpCleanup] = await Promise.all([
+    removeDirImpl(sandboxDir),
+    removeDirImpl(runTmpDir),
+  ]);
+  const rescoreCleanupErrorCode = !sandboxCleanup.ok ? sandboxCleanup.code : (!tmpCleanup.ok ? tmpCleanup.code : null);
+
+  const runId = `${originalRow.run_id}::rescore`;
+  fs.writeFileSync(
+    path.join(answersDir, runId.replace(/[\\/:]/g, "_") + ".json"),
+    JSON.stringify({ runId, answerText, tree: finalTree }, null, 2),
+  );
+
+  // originalRow still carries its own IN-MEMORY-ONLY `__rescoreState`
+  // (runOne() attached it, and bench/scheduler.mjs's needs_rescore-retry
+  // queuing hands the very same row object back here as
+  // `rescoreState.originalRow` -- it was never stripped). Spreading
+  // `...originalRow` directly would carry that property (dead temp
+  // sandboxDir/runTmpDir paths, a duplicate `task`/`meta`, and a second copy
+  // of `answerText`) straight into this row's OWN results.jsonl line --
+  // exactly the on-disk leak `__rescoreState` is documented as never having.
+  // Strip it from a shallow copy rather than mutating `originalRow` itself
+  // (bench/scheduler.mjs's caller may still hold that same object).
+  const { __rescoreState: _unusedRescoreState, ...originalRowSansState } = originalRow;
+
+  const row = {
+    ...originalRowSansState,
+    ts: new Date().toISOString(),
+    run_id: runId,
+    concurrency,
+    co_scheduled_run_ids: coScheduledRunIds,
+    collision: false,
+    needs_rescore: false,
+    is_collision_retry: false,
+    // is_rescore_retry / rescore_of / collision_rescored: this retry's own
+    // identity, mirroring is_collision_retry's role for the legacy path.
+    // collision_rescored is the design's own vocabulary: true only when the
+    // solo re-score PASSED (the original failure is superseded); false when
+    // it failed again (rebuildSummary() then counts the ORIGINAL row's
+    // failure and excludes this redundant retry -- see that function's own
+    // needs_rescore confirm/exclude block).
+    is_rescore_retry: true,
+    rescore_of: originalRow.run_id,
+    collision_rescored: !!scoreResult.pass,
+    pass: !!scoreResult.pass,
+    scope_ok: scoreResult.scope_ok,
+    claim_honest: scoreResult.claim_honest,
+    claim_text: scoreResult.claim_text ?? null,
+    extra_files: scoreResult.extra_files || [],
+    detail: { rescore: scoreResult.detail ?? null, original_failure_detail: originalRow.detail ?? null },
+    sandbox_cwd: sandboxDir,
+    // This retry's OWN cleanup failure wins when there is one; otherwise
+    // fall back to whatever the original row already carried (e.g. a
+    // fakeHome cleanup failure runOne() recorded before handing the sandbox
+    // off for this rescore -- runOne() always attempts that cleanup even on
+    // a needs_rescore row). null when neither ever failed.
+    cleanup_error: rescoreCleanupErrorCode ?? originalRowSansState.cleanup_error ?? null,
   };
 
   fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify(row) + "\n");
@@ -765,10 +1071,141 @@ export function cacheHitRate(row) {
 // arm (cache reads mostly failed to hit; base-prefix-only).
 const CACHE_HIT_RATE_ANOMALY_THRESHOLD = 0.85;
 
+// The run_id's BASE id -- everything before the first `::` in the suffix
+// chain (`::retry`, `::rescore`, or any future chain of them). A bare
+// original row's base id is its own full run_id.
+function baseRunId(runId) {
+  const i = runId.indexOf("::");
+  return i === -1 ? runId : runId.slice(0, i);
+}
+
+// Groups `rawRows` (in on-disk/file order) into ATTEMPT FAMILIES per base
+// run_id, then picks exactly one winning family per base id -- this is the
+// round-4 fix for the round-3 dedup's gap (2026-09 delta review, Track B
+// round 4 finding 1): the round-3 dedup (see git history) grouped by EXACT
+// run_id string, so a `::retry`/`::rescore` CHILD of an abandoned attempt --
+// whose run_id is unique in the file (nothing else is ever literally
+// "X::rescore") -- was never dropped even when its PARENT original row lost
+// to a fresh `--resume` attempt under the bare id `X`. That orphaned child
+// then survived into `allRows` on its own, double-counting one (cell, task,
+// rep) slot.
+//
+// A FAMILY is: one "original" row (run_id === its own base id) plus every
+// `::retry`/`::rescore` CHILD that appears after it and before the NEXT
+// original row sharing the same base id (file order, not run_id string
+// matching -- two different families can produce a child with the
+// textually IDENTICAL run_id, e.g. two attempts that each needed a rescore
+// both write "X::rescore", so only position can tell them apart). Each
+// appearance of a base original starts a new family and "claims" every
+// following child of that base id until the next original appears.
+//
+// A family is ABANDONED when its original row is a `needs_rescore` row
+// whose own rescore never arrived as one of ITS children -- the interrupted-
+// mid-cell case docs/BENCHMARK.md's "Resuming a batch" describes (an
+// auth_error/judge refusal while the rescore retry was still queued but
+// never admitted). A family with no original row at all (a child with
+// nothing preceding it -- not expected from any real run, but handled so a
+// malformed/truncated results.jsonl never throws) is treated as abandoned
+// too, since there is no genuine attempt to anchor it to.
+//
+// Winner selection per base id, walking its families in file order: a
+// non-abandoned family always beats an abandoned one regardless of order;
+// among two families of the same standing (both abandoned or both not), the
+// LATER one wins. This is exactly the round-3 per-row reduction, generalized
+// from single rows to whole families -- so the SAME two invariants it
+// documented still hold: a fresh --resume attempt supersedes an earlier
+// complete-looking attempt (docs' "regenerating rep=1... under the IDENTICAL
+// deterministic run_id" example), and when EVERY attempt for a slot was
+// abandoned, the last one in file order still counts (fail open -- a
+// failure already recorded is never silently dropped).
+//
+// Returns { winners: Set<row>, supersededRows: row[] } -- every row of a
+// losing family, original and children alike.
+export function groupRunsByAttemptFamily(rawRows) {
+  const familiesByBase = new Map(); // base run_id -> family[] (file order)
+  const currentFamily = new Map(); // base run_id -> most-recently-opened family
+  const winners = new Set();
+  const supersededRows = [];
+
+  for (const r of rawRows) {
+    // A row with no `run_id` at all (older results.jsonl files predate the
+    // field, and plenty of test fixtures never set it) has nothing to
+    // dedupe against -- it is its own family of one, always a winner.
+    if (!r.run_id) { winners.add(r); continue; }
+    const base = baseRunId(r.run_id);
+    const isOriginal = r.run_id === base;
+    if (isOriginal) {
+      const family = { original: r, children: [], rows: [r] };
+      if (!familiesByBase.has(base)) familiesByBase.set(base, []);
+      familiesByBase.get(base).push(family);
+      currentFamily.set(base, family);
+    } else {
+      let family = currentFamily.get(base);
+      if (!family) {
+        // A child with no preceding original for this base id at all.
+        family = { original: null, children: [r], rows: [] };
+        if (!familiesByBase.has(base)) familiesByBase.set(base, []);
+        familiesByBase.get(base).push(family);
+        currentFamily.set(base, family);
+      } else {
+        family.children.push(r);
+      }
+      family.rows.push(r);
+    }
+  }
+
+  const isFamilyAbandoned = (family) => {
+    if (!family.original) return true;
+    const orig = family.original;
+    if (!orig.needs_rescore || orig.is_rescore_retry) return false;
+    return !family.children.some((c) => c.is_rescore_retry === true);
+  };
+
+  for (const families of familiesByBase.values()) {
+    let winnerFamily = families[0];
+    for (let i = 1; i < families.length; i += 1) {
+      const candidate = families[i];
+      const winnerAbandoned = isFamilyAbandoned(winnerFamily);
+      const candidateAbandoned = isFamilyAbandoned(candidate);
+      if (winnerAbandoned && !candidateAbandoned) { winnerFamily = candidate; continue; }
+      if (!winnerAbandoned && candidateAbandoned) continue; // keep the current winner
+      winnerFamily = candidate; // same standing -- the later attempt wins
+    }
+    for (const family of families) {
+      if (family === winnerFamily) {
+        for (const r of family.rows) winners.add(r);
+      } else {
+        for (const r of family.rows) supersededRows.push(r);
+      }
+    }
+  }
+
+  return { winners, supersededRows };
+}
+
 export function rebuildSummary(outDir) {
   const jsonlPath = path.join(outDir, "results.jsonl");
   if (!fs.existsSync(jsonlPath)) return;
-  const allRows = fs.readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const rawRows = fs.readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+
+  // --resume dedup (round 3, 2026-09 delta review finding 3; regrouped by
+  // ATTEMPT FAMILY in round 4 -- see groupRunsByAttemptFamily() above for
+  // the full rationale): run_id is deterministic
+  // (`${cellId}__${taskId}__rep${rep}`), and results.jsonl is append-only --
+  // never rewritten. --resume only skips a cell whose .batch-state.json
+  // marks it fully COMPLETE; a cell interrupted (auth_error / a judge
+  // refusal) while a needs_rescore retry was still QUEUED but never
+  // ADMITTED is not marked complete, so a later --resume re-runs that WHOLE
+  // cell from scratch at the SAME --rep-start -- producing a fresh family
+  // under the exact SAME base run_id as the first (possibly abandoned)
+  // attempt. Without this dedup, that one (cell, task, rep) slot could
+  // silently count more than once below. Every non-winning row -- an
+  // original or one of its children -- is dropped entirely -- not even
+  // fail-open-counted -- and reported in its own summary.md banner below so
+  // a superseded duplicate is never silently invisible. See
+  // docs/BENCHMARK.md "Resuming a batch".
+  const { winners, supersededRows } = groupRunsByAttemptFamily(rawRows);
+  const allRows = rawRows.filter((r) => winners.has(r));
 
   // Auth/login failures never reached the model -- excluded from pass-rate
   // and every other quality/cost stat below, so one botched-auth batch
@@ -778,8 +1215,84 @@ export function rebuildSummary(outDir) {
   // a batch aborts as soon as one appears, so this is normally 0 or 1 row,
   // but rebuildSummary() also replays historical results.jsonl files that
   // may carry more from before this fix.
+  // Sandbox/temp-dir cleanup failure (Windows EPERM/EBUSY/ENOTEMPTY after
+  // every retry -- see bench/tasks/common.mjs's removeDirWithRetry()) is
+  // COSMETIC housekeeping, never a verdict signal: unlike auth_error/
+  // collision below, a cleanup_error row is NEVER excluded from `rows` or
+  // any pass-rate/cost/time math -- its pass/fail was decided before cleanup
+  // ever ran. Only counted here for a one-line "leaked dirs" note.
+  const cleanupErrorRows = allRows.filter((r) => r.cleanup_error);
   const authErrorRows = allRows.filter((r) => r.auth_error);
-  const rows = allRows.filter((r) => !r.auth_error);
+  // A collision (bench/scheduler.mjs's classifyCollision(): EADDRINUSE, a
+  // lock file held, ...) never reached a genuine model/task verdict either
+  // -- same exclusion as auth_error, so one unlucky port clash under
+  // --concurrency > 1 can't be misread as a model failure. The scheduler
+  // always queues exactly one solo retry for a collided run (recorded as
+  // its own row, is_collision_retry:true).
+  //
+  // CONFIRMATION: a collision is only CONFIRMED (and therefore excluded)
+  // when its solo retry does NOT reproduce the same structural signal. If
+  // the retry ALSO collides while running completely alone (forced
+  // resources.exclusive -- see bench/scheduler.mjs's scheduleRuns()), the
+  // scheduler was never the cause -- something about the task/environment
+  // itself always fails this way -- so the retry is reclassified as a REAL
+  // failure and counted normally; the original row stays excluded (its own
+  // execution genuinely was concurrent, so its individual verdict is still
+  // ambiguous) but is labelled "suspected, not confirmed" rather than
+  // silently dropped the same way a confirmed collision is. Pass-rate math
+  // must never lose a failure that reproduces solo (2026-09 adversarial
+  // review, Track B fix #1).
+  const byRunId = new Map(allRows.map((r) => [r.run_id, r]));
+  const reproducedRetryIds = new Set(); // retry run_ids that ALSO collided solo -- treat as real
+  const unconfirmedOriginalIds = new Set(); // original run_ids whose retry reproduced
+  for (const r of allRows) {
+    if (!r.collision || r.is_collision_retry) continue; // originals only
+    const retry = byRunId.get(r.run_id + "::retry");
+    if (retry && retry.collision) {
+      reproducedRetryIds.add(retry.run_id);
+      unconfirmedOriginalIds.add(r.run_id);
+    }
+  }
+  // CONFIRMED collisions only -- excludes both the reclassified retry (now a
+  // real, counted row) AND the unconfirmed original (reported separately
+  // below, under SUSPECTED COLLISION, NOT CONFIRMED, so the two categories
+  // never overlap in the printed counts).
+  const collisionRows = allRows.filter((r) => r.collision && !reproducedRetryIds.has(r.run_id) && !unconfirmedOriginalIds.has(r.run_id));
+
+  // needs_rescore confirm/exclude (round 2, 2026-09 delta review finding 1):
+  // the SAME confirm-on-retry discipline as the collision block above, but
+  // for the solo RE-SCORE retry (bench/scheduler.mjs's needs_rescore-retry
+  // queuing, this module's rescoreOne()) rather than a full model re-run.
+  //   - re-score PASSES  -> the original failing row is superseded/excluded;
+  //     its `::rescore` row (pass:true, collision_rescored:true) counts in
+  //     its place -- same n, corrected verdict, exactly what the round-2
+  //     design calls "the row's pass = true, with collision_rescored:true
+  //     and the original failure detail kept" (the "row" that survives into
+  //     the stats is the rescore row; the original's own failure detail
+  //     rides along inside it -- see rescoreOne()).
+  //   - re-score FAILS too -> nothing was ever a collision; the ORIGINAL
+  //     failure counts as a real failure (never lost), and the redundant
+  //     `::rescore` row (same underlying attempt, no new information) is
+  //     excluded so it is never double-counted.
+  //   - no `::rescore` row exists at all (the batch stopped before the
+  //     scheduler could get to it -- see bench/scheduler.mjs's shouldStop,
+  //     and runOne()'s own note on an abandoned retained sandbox) -> FAIL
+  //     OPEN: the original failure counts normally. A failure must never be
+  //     silently dropped just because its rescue never got to run.
+  const rescueExcludedOriginalIds = new Set(); // originals superseded by a passing re-score
+  const rescueRedundantRetryIds = new Set(); // re-score rows excluded as redundant with a real failure
+  for (const r of allRows) {
+    if (!r.needs_rescore || r.is_rescore_retry) continue; // originals only
+    const rescore = byRunId.get(r.run_id + "::rescore");
+    if (!rescore) continue; // pending/abandoned -- fail open, original counts below
+    if (rescore.pass) rescueExcludedOriginalIds.add(r.run_id);
+    else rescueRedundantRetryIds.add(rescore.run_id);
+  }
+
+  const rows = allRows.filter((r) => !r.auth_error
+    && (!r.collision || reproducedRetryIds.has(r.run_id))
+    && !rescueExcludedOriginalIds.has(r.run_id)
+    && !rescueRedundantRetryIds.has(r.run_id));
 
   const byCellTask = new Map();
   for (const r of rows) {
@@ -925,10 +1438,63 @@ export function rebuildSummary(outDir) {
     "ctx_rereads = median(cache_read_tokens / num_turns) per run, an estimate of the average context size re-sent every turn. read_share_cost = median share of that run's dollar cost spent on cache reads (cache_read_tokens x this tier's cache-hit rate, from config/model-tiers.json). hit_rate = median(cache_read_tokens / (cache_read_tokens + cache_creation_tokens + input_tokens)) per run -- a cell below " + Math.round(CACHE_HIT_RATE_ANOMALY_THRESHOLD * 100) + "% is flagged \"cache anomaly: check harness\" below, since separate claude -p processes do not reliably share prompt cache even with identical content (see docs/BENCHMARK.md \"Caching\"). All three are \"n/a\" when the underlying token figures are unmeasured.",
     "",
   ];
+  if (supersededRows.length > 0) {
+    lines.push(
+      `RESUME DUPLICATE: ${supersededRows.length} row(s) shared a run_id with a later attempt at the same (cell, task, rep) ` +
+      "slot -- --resume re-ran a cell that was interrupted before it was marked complete (most often an abandoned " +
+      "needs_rescore retry that never got admitted). Only the winning attempt (the last complete row, or the last row " +
+      "overall when every attempt was abandoned) is counted anywhere below; every superseded row was dropped entirely, " +
+      "not fail-open-counted. See docs/BENCHMARK.md \"Resuming a batch\".",
+      "",
+    );
+  }
   if (authErrorRows.length > 0) {
     lines.push(
       `AUTH ERROR: ${authErrorRows.length} run(s) failed authentication (not logged in / 401) and were EXCLUDED from every stat below -- ` +
       "they never reached the model. See docs/BENCHMARK.md \"Preconditions\" before trusting this summary.",
+      "",
+    );
+  }
+  if (cleanupErrorRows.length > 0) {
+    lines.push(
+      `CLEANUP: ${cleanupErrorRows.length} run(s) left a leaked sandbox/temp dir after cleanup failed even after retrying -- ` +
+      "this never changes any run's pass/fail, collision, or needs_rescore verdict (see each row's cleanup_error code). " +
+      "See docs/BENCHMARK.md \"Parallel runs\".",
+      "",
+    );
+  }
+  if (collisionRows.length > 0) {
+    const retried = collisionRows.filter((r) => allRows.some((o) => o.run_id === r.run_id + "::retry"));
+    lines.push(
+      `COLLISION: ${collisionRows.length} run(s) hit an OS-level resource collision (EADDRINUSE, a lock file held, ...) ` +
+      `under --concurrency and were EXCLUDED from every stat below -- ${retried.length} were automatically re-run alone. ` +
+      "See docs/BENCHMARK.md \"Parallel runs\".",
+      "",
+    );
+  }
+  if (unconfirmedOriginalIds.size > 0) {
+    lines.push(
+      `SUSPECTED COLLISION, NOT CONFIRMED: ${unconfirmedOriginalIds.size} run(s) looked like a resource collision, but the ` +
+      "automatic solo retry reproduced the SAME structural failure running completely alone -- the scheduler was never the " +
+      "cause. The retry is treated as a REAL failure and counted in every stat below; the original run stays excluded " +
+      "(its own execution was genuinely concurrent, so its individual verdict is still ambiguous). See docs/BENCHMARK.md " +
+      "\"Parallel runs\".",
+      "",
+    );
+  }
+  if (rescueExcludedOriginalIds.size > 0) {
+    lines.push(
+      `RESCORED: ${rescueExcludedOriginalIds.size} run(s) failed while genuinely co-scheduled under --concurrency, were ` +
+      "automatically RE-SCORED ALONE on the SAME sandbox with NO model re-run, and PASSED -- the original failing row was " +
+      "excluded and the re-score (collision_rescored: true) counts in its place. See docs/BENCHMARK.md \"Parallel runs\".",
+      "",
+    );
+  }
+  if (rescueRedundantRetryIds.size > 0) {
+    lines.push(
+      `RE-SCORE CONFIRMED A REAL FAILURE: ${rescueRedundantRetryIds.size} run(s) failed while co-scheduled, were re-scored ` +
+      "alone, and FAILED AGAIN -- not a collision. The original failure is counted normally below; the redundant re-score " +
+      "row is excluded. See docs/BENCHMARK.md \"Parallel runs\".",
       "",
     );
   }

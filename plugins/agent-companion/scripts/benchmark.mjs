@@ -7,9 +7,16 @@
 // This script is the CLI layer on top: task-family expansion, a global
 // runaway-budget ceiling, --dry-run (plan only, zero model calls), and
 // --batch-by/--resume so a driving agent can check plan usage between
-// batches instead of one process running the whole grid unattended. See
-// docs/BENCHMARK.md before a real run and skills/model-benchmark/SKILL.md
-// for the operating procedure.
+// batches instead of one process running the whole grid unattended.
+// --concurrency > 1 runs a SINGLE bench/scheduler.mjs pool across EVERY
+// requested cell (buildGlobalRunPlan()/runGlobalPool() below) -- two
+// different cells' runs can be active at once, bounded by --concurrency and
+// the RAM gate, with resource conflicts (FORMAT.md) respected across cells
+// exactly as within one. --batch-by cell opts OUT of that cross-cell pool
+// (cells run one after another, --concurrency applies within each) in
+// exchange for a real cell boundary to checkpoint plan usage at. See
+// docs/BENCHMARK.md "Parallel runs" before a real run and
+// skills/model-benchmark/SKILL.md for the operating procedure.
 //
 // HOME/USERPROFILE: by DEFAULT this does NOT redirect them -- a live run
 // uses your normal, already-authenticated OAuth session (`claude /login`),
@@ -32,14 +39,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CELLS, TASKS, TASK_FAMILIES, resolveList, runOne, rebuildSummary, defaultResultsRoot,
+  CELLS, TASKS, TASK_FAMILIES, resolveList, runOne, rescoreOne, rebuildSummary, defaultResultsRoot,
   checkIsolateHomePreflight, formatRunLine, authErrorAbortMessage, scaledMaxBudgetUsd,
-  harnessErrorRow, cliJudgeCaller,
+  harnessErrorRow, cliJudgeCaller, taskFamilyOf,
 } from '../bench/runner.mjs';
 import { loadPack, buildTaskFromPack } from '../bench/task-packs/lib.mjs';
 import {
   validateJudgeConfig, checkJudgeEligibility, taskJudgeKey, findTrustedCalibration, calibrateJudge,
 } from '../bench/judge.mjs';
+import { scheduleRuns, makeCapacityGate } from '../bench/scheduler.mjs';
+import {
+  loadSeed, loadLocalHistory, estimateRun, formatEstimate, shouldConfirm,
+} from '../bench/estimate.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -61,6 +72,31 @@ function printHelp() {
                                  families and ids may be mixed. Default: all.
   --reps <N>                    Repetitions per (cell, task). Default: 1.
   --rep-start <N>                First rep number (for resuming a specific rep range). Default: 1.
+  --concurrency <N>              Run up to N (task, rep) runs in parallel (default 1, fully sequential --
+                                 identical behavior to before this flag existed). WITHOUT --batch-by cell,
+                                 this bounds the WHOLE grid in one global pool -- every requested cell
+                                 shares it, so two different cells' runs can be active at once. WITH
+                                 --batch-by cell, it bounds each cell separately (cells still run one
+                                 after another) -- see --batch-by below for why. Runs whose declared
+                                 resources conflict (bench/task-packs/FORMAT.md "Resource declarations")
+                                 are never co-scheduled, whichever cell they belong to; a free-RAM check
+                                 (bench/scheduler.mjs's makeCapacityGate(), --per-agent-mb below) gates
+                                 every launch. See docs/BENCHMARK.md "Parallel runs".
+  --per-agent-mb <MB>             Per-run memory estimate for the --concurrency capacity gate.
+                                 Default: 350 (scripts/capacity.mjs's own default). Ignored at
+                                 --concurrency 1 (no gate is applied).
+  --weekly-usage-pct <N>          Current weekly plan-usage %, as read by the orchestrating skill via
+                                 get_usage (this script cannot read it itself). Shown in the pre-run
+                                 estimate's "current -> projected" line; omit to show "unknown".
+  --weekly-ceiling-pct <N>        A configured weekly-usage ceiling. Crossing it (current + estimated)
+                                 requires --confirm to start, and --batch-by cell stops at the next
+                                 cell boundary (prints a partial-results summary) once
+                                 --weekly-usage-pct reaches it.
+  --confirm-above-points <N>      Weekly-point threshold above which a live run requires --confirm.
+                                 Default: 2.
+  --confirm                      Acknowledges the pre-run estimate's confirmation gate (see
+                                 "Confirmation gate" in docs/BENCHMARK.md) and lets a gated live run
+                                 start. Has no effect on --dry-run, which never needs it.
   --out-dir <dir>                Results directory. Default: the plugin data dir's
                                  benchmarks/<phase>-<date>/ (see bench/runner.mjs's defaultResultsRoot()).
   --phase <name>                 Phase label used only when --out-dir is omitted (default "pilot"),
@@ -72,7 +108,9 @@ function printHelp() {
   --batch-by cell                Run ONE cell to completion (every task x every rep for it), write
                                  a batch-complete marker under --out-dir, then exit — so the driving
                                  agent can check plan usage before the next cell. Re-invoke with
-                                 --resume to continue.
+                                 --resume to continue. Trades away cross-cell --concurrency overlap
+                                 for this checkpoint: cells still run one after another (concurrency
+                                 applies only within each cell) — see docs/BENCHMARK.md "Parallel runs".
   --resume                       Skip cells already marked complete under --out-dir (requires
                                   --out-dir to point at a previous invocation's directory, or
                                   --batch-by cell + the same --cells/--tasks/--reps to recompute it).
@@ -107,6 +145,8 @@ function parseArgs(argv) {
     maxBudgetUsd: null, dryRun: false, batchByCell: false, resume: false, list: false, help: false,
     taskPacks: [], packRepo: null, isolateHome: false,
     judgeModel: null, judgeEffort: null, judgeBudgetUsd: null, judgeCalibrations: null, calibrateJudge: false,
+    concurrency: 1, perAgentMB: null,
+    weeklyUsagePct: null, weeklyCeilingPct: null, confirmAbovePoints: 2, confirm: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -114,6 +154,12 @@ function parseArgs(argv) {
     else if (a === '--tasks') out.tasks = argv[++i];
     else if (a === '--reps') out.reps = Number(argv[++i]);
     else if (a === '--rep-start') out.repStart = Number(argv[++i]);
+    else if (a === '--concurrency') out.concurrency = Number(argv[++i]);
+    else if (a === '--per-agent-mb') out.perAgentMB = Number(argv[++i]);
+    else if (a === '--weekly-usage-pct') out.weeklyUsagePct = Number(argv[++i]);
+    else if (a === '--weekly-ceiling-pct') out.weeklyCeilingPct = Number(argv[++i]);
+    else if (a === '--confirm-above-points') out.confirmAbovePoints = Number(argv[++i]);
+    else if (a === '--confirm') out.confirm = true;
     else if (a === '--out-dir') out.outDir = argv[++i];
     else if (a === '--phase') out.phase = argv[++i];
     else if (a === '--max-budget-usd') out.maxBudgetUsd = Number(argv[++i]);
@@ -172,6 +218,40 @@ function expandTasks(spec, tasksMap) {
   return ids;
 }
 
+// bench/runner.mjs's taskFamilyOf() returns the bare family names this
+// benchmark's OWN grid uses ("easy" | "hard" | "real" | "pack" | "other").
+// bench/estimate.mjs's seed/history are keyed by the GENERIC labels the
+// public seed ships (bench/config/estimate-seed.json: "easy-synthetic" |
+// "hard-synthetic" | "real-bugfix" | "architecture") -- this maps one to the
+// other. A task pack ("pack") is bug-fix sized by convention (FORMAT.md), so
+// it maps to "real-bugfix"; "architecture" has no built-in task family at
+// all today (it is ADR 0003 slice 6 mining's own family, supplied directly
+// by that caller, never derived from a built-in task id).
+const FAMILY_TO_SEED_FAMILY = {
+  easy: 'easy-synthetic', hard: 'hard-synthetic', real: 'real-bugfix', pack: 'real-bugfix',
+};
+
+// Flattens a cell x task x rep grid into bench/estimate.mjs's plan shape
+// ({ cellId, model, effort, family, n }), one row per (cell, task) with
+// n = reps -- estimateRun() treats n identical rows as equivalent to n
+// separate ones, so this is exact, not an approximation.
+export function buildEstimatePlan({ cellIds, taskIds, tasksMap, reps }) {
+  const plan = [];
+  for (const cellId of cellIds) {
+    const cell = CELLS[cellId];
+    if (!cell) continue;
+    for (const taskId of taskIds) {
+      const task = tasksMap[taskId];
+      const rawFamily = taskFamilyOf(taskId, { task });
+      plan.push({
+        cellId, model: cell.model, effort: cell.effort,
+        family: FAMILY_TO_SEED_FAMILY[rawFamily] || rawFamily, n: reps, taskId,
+      });
+    }
+  }
+  return plan;
+}
+
 export function defaultCalibrationStore() {
   return path.join(defaultResultsRoot(), 'judge-calibrations.json');
 }
@@ -216,6 +296,106 @@ export function judgePreflight({ args, cellIds, taskIds, tasksMap, calibrating =
   return { config, storeFile, judgedTasks, problems };
 }
 
+// Flattens EVERY requested cell x task x rep into ONE plan array -- the
+// global pool's input. Exported for tests (proving cross-cell overlap
+// without a real claude spawn -- see tests/bench-cross-cell.test.mjs) and
+// for main()'s own non---batch-by-cell path below.
+export function buildGlobalRunPlan({ cellIds, taskIds, tasksMap, reps, repStart = 1 }) {
+  const plan = [];
+  for (const cellId of cellIds) {
+    for (const taskId of taskIds) {
+      for (let rep = repStart; rep < repStart + reps; rep += 1) {
+        plan.push({ id: `${cellId}__${taskId}__rep${rep}`, cellId, taskId, rep, resources: tasksMap[taskId].resources });
+      }
+    }
+  }
+  return plan;
+}
+
+// Runs ONE bench/scheduler.mjs pool across `plan`, whatever cell each run
+// belongs to -- the "grid-wide concurrency" fix (Track B adversarial review,
+// fix #2): --concurrency bounds the WHOLE grid, not each cell separately, so
+// two different cells' runs can be active at the same time (their resource
+// declarations, if any, are still respected exactly the same way across
+// cells as within one -- resourcesConflict() has never known what a "cell"
+// is). `runOneImpl` defaults to the real runOne() (bench/runner.mjs) but a
+// test can substitute a stub, exactly the way runOne()'s own `runClaudeImpl`
+// parameter lets tests/bench-scheduler.test.mjs prove scheduling behavior
+// with zero real child processes -- see that file's banner. Returns
+// `{ stopReason }`; `stopReason` is set once by an auth_error or
+// JUDGE_REFUSED and never cleared -- once set, no NEW run is admitted, but
+// every already-active run is still awaited to completion (scheduleRuns()'s
+// own `shouldStop` contract), and the caller writes the partial summary
+// exactly as it always has for a per-cell stop.
+export async function runGlobalPool({
+  plan, concurrency, canAfford, outDir, answersDir, tasksMap, args, judgeOpt, runOneImpl = runOne, rescoreOneImpl = rescoreOne,
+}) {
+  let stopReason = null;
+  const launch = async (run, ctx) => {
+    const cellId = run.cellId;
+    const cell = CELLS[cellId];
+    const task = tasksMap[run.taskId];
+    const t0 = Date.now();
+    const tag = ctx.concurrency > 1 ? ` [slot ${ctx.slot}/${ctx.concurrency}]` : '';
+    // Round 2 fix: a needs_rescore retry (bench/scheduler.mjs) re-scores its
+    // retained sandbox alone -- NO model call, never runOneImpl. Dispatched
+    // BEFORE the normal path below, on the `isRescoreRetry` flag
+    // bench/scheduler.mjs stamped onto the retry run it queued.
+    if (run.isRescoreRetry) {
+      process.stdout.write(`[${new Date().toISOString()}] RE-SCORE (solo) ${run.retryOf}${tag} ... `);
+      try {
+        const row = await rescoreOneImpl({
+          rescoreState: run.rescoreState, outDir, answersDir,
+          slot: ctx.slot, concurrency: ctx.concurrency, coScheduledRunIds: ctx.coScheduledRunIds,
+        });
+        process.stdout.write(`pass=${row.pass} collision_rescored=${!!row.collision_rescored} (${Date.now() - t0}ms)\n`);
+        return row;
+      } catch (e) {
+        process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
+        const errRow = harnessErrorRow({ cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e });
+        fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(errRow) + '\n');
+        return errRow;
+      }
+    }
+    process.stdout.write(`[${new Date().toISOString()}] START ${cellId} / ${run.taskId} / rep${run.rep}${tag} ... `);
+    try {
+      const row = await runOneImpl({
+        cellId, cell, taskId: run.taskId, task, rep: run.rep, outDir, answersDir,
+        maxBudgetUsdCeiling: args.maxBudgetUsd,
+        isolateHome: args.isolateHome,
+        judge: judgeOpt,
+        runId: run.id, slot: ctx.slot, concurrency: ctx.concurrency, coScheduledRunIds: ctx.coScheduledRunIds,
+        isCollisionRetry: !!run.isRetry,
+      });
+      process.stdout.write(formatRunLine(row, Date.now() - t0) + '\n');
+      if (row.auth_error && !stopReason) stopReason = { type: 'auth_error', row };
+      return row;
+    } catch (e) {
+      if (e && e.code === 'JUDGE_REFUSED') {
+        if (!stopReason) stopReason = { type: 'judge_refused', message: e.message };
+        return {
+          run_id: run.id, cell: cellId, task: run.taskId, rep: run.rep,
+          pass: false, is_error: true, judge_refused: true, exec_err: e.message,
+        };
+      }
+      process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
+      const errRow = harnessErrorRow({ cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e });
+      fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(errRow) + '\n');
+      return errRow;
+    }
+  };
+
+  const rows = await scheduleRuns({
+    runs: plan,
+    concurrency,
+    canAfford: canAfford || (() => true),
+    launch,
+    shouldStop: () => !!stopReason,
+  });
+
+  return { rows, stopReason };
+}
+
 function batchStatePath(outDir) {
   return path.join(outDir, '.batch-state.json');
 }
@@ -249,6 +429,9 @@ async function main() {
     checkIsolateHomePreflight(args.isolateHome);
   } catch (e) {
     usageError(e.message);
+  }
+  if (!Number.isInteger(args.concurrency) || args.concurrency < 1) {
+    usageError(`--concurrency must be a positive integer, got "${args.concurrency}"`);
   }
 
   const cellIds = resolveList(args.cells, CELLS);
@@ -313,7 +496,12 @@ async function main() {
     console.log(`reps:     ${args.reps} (starting at ${args.repStart})`);
     console.log(`total runs: ${totalRuns}`);
     if (args.maxBudgetUsd != null) console.log(`global --max-budget-usd ceiling: $${args.maxBudgetUsd}`);
-    if (args.batchByCell) console.log('batching: one cell per invocation (--batch-by cell)');
+    if (args.batchByCell) console.log('batching: one cell per invocation (--batch-by cell) -- cells run one after another, --concurrency applies within each cell only');
+    if (args.concurrency > 1) {
+      console.log(args.batchByCell
+        ? `concurrency: ${args.concurrency} parallel (task, rep) runs per cell (see docs/BENCHMARK.md "Parallel runs")`
+        : `concurrency: ${args.concurrency} parallel runs across the WHOLE grid -- every requested cell shares one pool (see docs/BENCHMARK.md "Parallel runs")`);
+    }
     if (args.isolateHome) console.log('--isolate-home: HOME/USERPROFILE will be redirected per run (requires ANTHROPIC_API_KEY)');
     if (judge) {
       console.log(`rubric judge: ${judge.config ? `${judge.config.model}/${judge.config.effort ?? 'none'}` : '(invalid)'}; judged tasks: ${(judge.judgedTasks || []).join(', ') || 'none'}`);
@@ -348,6 +536,16 @@ async function main() {
         }
       }
     }
+    console.log('');
+    const dryRunEstimate = estimateRun({
+      plan: buildEstimatePlan({ cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps }),
+      concurrency: args.concurrency,
+      seed: loadSeed(),
+      history: loadLocalHistory(),
+    });
+    console.log(formatEstimate(dryRunEstimate, {
+      currentWeeklyPct: args.weeklyUsagePct, weeklyCeilingPct: args.weeklyCeilingPct, confirmAbovePoints: args.confirmAbovePoints,
+    }));
     process.exit(0);
   }
 
@@ -358,6 +556,30 @@ async function main() {
     config: judge.config, storeFile: judge.storeFile, callJudge: cliJudgeCaller,
     scaledJudgeBudget: scaledMaxBudgetUsd(judge.config.maxBudgetUsd, judge.config.model),
   } : null;
+
+  // Pre-run estimate + confirmation gate (ADR 0003 sec 3 "Cost controls
+  // before any run") -- ALWAYS shown before a live run starts, not only on
+  // --dry-run. This script cannot read plan usage itself (see
+  // --weekly-usage-pct's help text); the orchestrating skill reads it via
+  // get_usage and passes it in.
+  const liveEstimate = estimateRun({
+    plan: buildEstimatePlan({ cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps }),
+    concurrency: args.concurrency,
+    seed: loadSeed(),
+    history: loadLocalHistory(),
+  });
+  console.log(formatEstimate(liveEstimate, {
+    currentWeeklyPct: args.weeklyUsagePct, weeklyCeilingPct: args.weeklyCeilingPct, confirmAbovePoints: args.confirmAbovePoints,
+  }));
+  const gate = shouldConfirm(liveEstimate, {
+    confirmAbovePoints: args.confirmAbovePoints, weeklyCeilingPct: args.weeklyCeilingPct, currentWeeklyPct: args.weeklyUsagePct,
+  });
+  if (gate.required && !args.confirm) {
+    usageError(
+      '\nRefusing to start without confirmation (see the estimate above):\n  - ' + gate.reasons.join('\n  - ')
+      + '\n\nReview the estimate, then re-invoke with --confirm to proceed (or narrow --cells/--tasks/--reps to bring it under the threshold).',
+    );
+  }
 
   fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(answersDir, { recursive: true });
@@ -370,42 +592,68 @@ async function main() {
     }
   }
 
-  for (const cellId of cellsToRun) {
-    const cell = CELLS[cellId];
-    for (const taskId of taskIds) {
-      const task = tasksMap[taskId];
-      for (let rep = args.repStart; rep < args.repStart + args.reps; rep += 1) {
-        const t0 = Date.now();
-        process.stdout.write(`[${new Date().toISOString()}] START ${cellId} / ${taskId} / rep${rep} ... `);
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          const row = await runOne({
-            cellId, cell, taskId, task, rep, outDir, answersDir,
-            maxBudgetUsdCeiling: args.maxBudgetUsd,
-            isolateHome: args.isolateHome,
-            judge: judgeOpt,
-          });
-          process.stdout.write(formatRunLine(row, Date.now() - t0) + '\n');
-          if (row.auth_error) {
-            console.error(authErrorAbortMessage(row));
-            rebuildSummary(outDir);
-            process.exit(1);
-          }
-        } catch (e) {
-          if (e && e.code === 'JUDGE_REFUSED') {
-            console.error(`\nJUDGE REFUSED: ${e.message}\nAborting the batch (no row written).`);
-            rebuildSummary(outDir);
-            process.exit(1);
-          }
-          process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
-          fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(harnessErrorRow({
-            cellId, cell, taskId, task, rep, error: e,
-          })) + '\n');
-        }
-      }
-    }
+  // Free-RAM capacity gate for --concurrency > 1 (bench/scheduler.mjs). At
+  // the default --concurrency 1 the gate is never consulted at all -- this
+  // keeps the historical fully-sequential path's behavior byte-for-byte
+  // unchanged, rather than relying on the gate itself always saying yes.
+  const capacityGate = args.concurrency > 1
+    ? makeCapacityGate({ perAgentMB: args.perAgentMB ?? undefined })
+    : null;
 
-    if (args.batchByCell) {
+  // --batch-by cell keeps its historical MEANING (Track B adversarial
+  // review, fix #2's "keep --batch-by cell meaningful" requirement): it
+  // runs ONE cell to completion, writes a checkpoint, and exits, so a
+  // driving agent can check plan usage between cells. That checkpoint
+  // NEEDS a real cell boundary to stop at, which a single global pool
+  // spanning every cell does not have -- so --batch-by cell deliberately
+  // forfeits cross-cell parallelism (--concurrency still applies WITHIN
+  // each cell, exactly as before) in exchange for it. Without --batch-by,
+  // every requested cell's runs share ONE global scheduler pool below --
+  // --concurrency bounds the WHOLE grid, and two different cells' runs can
+  // be active at the same time (their resources are still respected exactly
+  // the same way across cells as within one). See docs/BENCHMARK.md
+  // "Parallel runs".
+  if (args.batchByCell) {
+    for (const cellId of cellsToRun) {
+      // Live stop: check the weekly ceiling BETWEEN batches (a "batch" here
+      // is one cell). --weekly-usage-pct is whatever the orchestrating skill
+      // last read via get_usage; this script cannot read it itself.
+      // Stopping BEFORE starting the next cell (rather than mid-cell) means
+      // every already-written row stays a clean, complete batch.
+      if (args.weeklyCeilingPct != null && args.weeklyUsagePct != null && args.weeklyUsagePct >= args.weeklyCeilingPct) {
+        rebuildSummary(outDir);
+        console.log(`\nCEILING REACHED: weekly usage ${args.weeklyUsagePct}% >= configured ceiling ${args.weeklyCeilingPct}% -- `
+          + `stopping before starting cell "${cellId}".`);
+        console.log(`Partial results: ${path.join(outDir, 'summary.md')}`);
+        process.exit(0);
+      }
+
+      // Every (task, rep) for THIS cell only, flattened into one schedulable
+      // plan -- --concurrency N runs up to N of these at once, subject to
+      // resource conflicts (FORMAT.md) and the capacity gate above;
+      // --concurrency 1 (default) runs them one at a time, in the same
+      // order as before.
+      const plan = buildGlobalRunPlan({
+        cellIds: [cellId], taskIds, tasksMap, reps: args.reps, repStart: args.repStart,
+      });
+
+      // eslint-disable-next-line no-await-in-loop
+      const { stopReason } = await runGlobalPool({
+        plan, concurrency: args.concurrency, canAfford: capacityGate || (() => true),
+        outDir, answersDir, tasksMap, args, judgeOpt,
+      });
+
+      if (stopReason && stopReason.type === 'auth_error') {
+        console.error(authErrorAbortMessage(stopReason.row));
+        rebuildSummary(outDir);
+        process.exit(1);
+      }
+      if (stopReason && stopReason.type === 'judge_refused') {
+        console.error(`\nJUDGE REFUSED: ${stopReason.message}\nAborting the batch.`);
+        rebuildSummary(outDir);
+        process.exit(1);
+      }
+
       const state = readBatchState(outDir);
       const completed = new Set(state.completedCells || []);
       completed.add(cellId);
@@ -415,6 +663,38 @@ async function main() {
       console.log(`Check plan usage now (mcp__ccd_session_mgmt__get_usage), then re-invoke with --resume to continue, or stop here.`);
       console.log(`Marker: ${batchStatePath(outDir)}`);
       process.exit(0); // one cell per invocation, by design — see the module banner
+    }
+  } else {
+    // GLOBAL POOL across every requested cell. The weekly-ceiling check has
+    // no "between cells" boundary to fire at here (a single invocation's
+    // --weekly-usage-pct is a static reading -- see its own help text --
+    // so re-checking it mid-grid would always agree with this one check
+    // anyway); check it once, up front, before building the plan.
+    if (args.weeklyCeilingPct != null && args.weeklyUsagePct != null && args.weeklyUsagePct >= args.weeklyCeilingPct) {
+      rebuildSummary(outDir);
+      console.log(`\nCEILING REACHED: weekly usage ${args.weeklyUsagePct}% >= configured ceiling ${args.weeklyCeilingPct}% -- `
+        + 'stopping before starting any cell.');
+      console.log(`Partial results: ${path.join(outDir, 'summary.md')}`);
+      process.exit(0);
+    }
+
+    const plan = buildGlobalRunPlan({
+      cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps, repStart: args.repStart,
+    });
+    const { stopReason } = await runGlobalPool({
+      plan, concurrency: args.concurrency, canAfford: capacityGate || (() => true),
+      outDir, answersDir, tasksMap, args, judgeOpt,
+    });
+
+    if (stopReason && stopReason.type === 'auth_error') {
+      console.error(authErrorAbortMessage(stopReason.row));
+      rebuildSummary(outDir);
+      process.exit(1);
+    }
+    if (stopReason && stopReason.type === 'judge_refused') {
+      console.error(`\nJUDGE REFUSED: ${stopReason.message}\nAborting the batch.`);
+      rebuildSummary(outDir);
+      process.exit(1);
     }
   }
 

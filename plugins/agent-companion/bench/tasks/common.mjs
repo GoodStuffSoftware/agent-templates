@@ -152,8 +152,75 @@ export function snapshotFiles(sandboxDir, relPaths) {
   return snap;
 }
 
+// Windows-safe sandbox/temp-dir cleanup (2026-09-24, live-benchmark-round
+// EPERM finding): a just-exited `claude` child process, an antivirus
+// scanner, or Windows' own delayed directory-entry accounting can all hold a
+// removal target busy for a few hundred ms after the process that used it
+// has already resolved -- surfacing as EPERM or EBUSY on the directory
+// itself, or ENOTEMPTY when a child entry hasn't finished disappearing yet.
+// Found the hard way running 3 concurrent reps of the same pack on Windows.
+// This is the ONE place that policy (which codes are worth retrying, and for
+// how long) is decided -- every removal of a sandbox or per-run temp dir
+// anywhere in this bench harness goes through either this constant/helper
+// pair directly (removeDirWithRetry(), for a caller that must never throw)
+// or rmrf() below (for a caller that still wants the historical
+// throw-on-failure contract).
+export const CLEANUP_RETRYABLE_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY']);
+const CLEANUP_MAX_RETRIES = 4;
+const CLEANUP_RETRY_DELAY_MS = 200; // linear backoff: 200,400,600,800ms -> 2s worst case per dir
+
+function defaultDelay(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+// ASYNC removal with bounded retry-with-backoff on CLEANUP_RETRYABLE_CODES,
+// used by bench/runner.mjs's runOne()/rescoreOne(). Deliberately ASYNC (never
+// a synchronous busy-wait): a blocking retry would stall the whole process's
+// event loop, freezing every OTHER concurrently scheduled run's I/O for the
+// same few seconds -- exactly the scenario that surfaced this bug in the
+// first place (3 concurrent runs racing on Windows). NEVER throws -- the
+// caller reads `.ok`/`.code` and decides what to do (bench/runner.mjs stamps
+// a non-ok result onto the row's `cleanup_error` field rather than letting a
+// cleanup failure change the run's own pass/fail, collision, or
+// needs_rescore verdict). A non-retryable error code fails fast (no delay,
+// no extra attempts). `removeImpl`/`delayImpl` are test seams, in the same
+// style as bench/runner.mjs's `runClaudeImpl` -- production code never
+// overrides either.
+export async function removeDirWithRetry(p, {
+  maxRetries = CLEANUP_MAX_RETRIES,
+  retryDelayMs = CLEANUP_RETRY_DELAY_MS,
+  removeImpl = (dir) => fs.rmSync(dir, { recursive: true, force: true }),
+  delayImpl = defaultDelay,
+} = {}) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      removeImpl(p);
+      return { ok: true, code: null, attempts: attempt };
+    } catch (e) {
+      const code = e && typeof e.code === 'string' ? e.code : null;
+      if (code && CLEANUP_RETRYABLE_CODES.has(code) && attempt <= maxRetries) {
+        // eslint-disable-next-line no-await-in-loop
+        await delayImpl(retryDelayMs * attempt);
+        continue;
+      }
+      return { ok: false, code: code || 'UNKNOWN', attempts: attempt };
+    }
+  }
+}
+
+// Synchronous, throwing convenience wrapper -- the historical `rmrf`
+// contract every non-benchmark-row caller here already relies on (this
+// module's own callers in bench/rescore.mjs and bench/task-packs/lib.mjs: a
+// `finally` block that isn't itself async, or simply doesn't need the
+// never-throw contract). Delegates the SAME retryable-code policy to
+// fs.rmSync's own maxRetries/retryDelay, which the Node.js docs confirm
+// retries exactly EBUSY, EMFILE, ENFILE, ENOTEMPTY and EPERM (a superset of
+// CLEANUP_RETRYABLE_CODES above) with a linear backoff -- not reimplemented
+// here as a second retry loop, since fs.rmSync's own C-level retry cannot be
+// driven through removeDirWithRetry()'s injectable `removeImpl` anyway. Still
+// throws on final failure, exactly as before this fix.
 export function rmrf(p) {
-  fs.rmSync(p, { recursive: true, force: true });
+  fs.rmSync(p, { recursive: true, force: true, maxRetries: CLEANUP_MAX_RETRIES, retryDelay: CLEANUP_RETRY_DELAY_MS });
 }
 
 // --- uniform "do not touch" guard + full-tree scoring helpers ---

@@ -1,0 +1,548 @@
+{
+  "version": 1,
+  "note": "Seed medians for bench/estimate.mjs. NUMBERS and generic family labels only (easy-synthetic, hard-synthetic, real-bugfix, architecture) -- no paths, pack, repo or project names. Computed 2026-09-24 from this operators own local benchmark history (results.jsonl files kept outside this repo, see docs/BENCHMARK.md \"Where results live\"). A machine with its OWN local results.jsonl history overrides these per-family/cell medians -- see loadHistoricalMedians() in bench/estimate.mjs.",
+  "families": {
+    "easy-synthetic": {
+      "totalRows": 52,
+      "keptRows": 52,
+      "budgetExhaustedExcluded": 0,
+      "cells": {
+        "claude-haiku-4-5|none": {
+          "model": "claude-haiku-4-5",
+          "effort": "none",
+          "n": 4,
+          "medianDurationMs": 28900,
+          "medianCostUsd": 0.052,
+          "medianInputTokens": 38,
+          "medianCacheReadTokens": 150277.5,
+          "medianCacheCreationTokens": 10746,
+          "medianOutputTokens": 2736,
+          "medianNumTurns": 7
+        },
+        "claude-sonnet-5|low": {
+          "model": "claude-sonnet-5",
+          "effort": "low",
+          "n": 4,
+          "medianDurationMs": 7044,
+          "medianCostUsd": 0.056,
+          "medianInputTokens": 6,
+          "medianCacheReadTokens": 94268,
+          "medianCacheCreationTokens": 8380.5,
+          "medianOutputTokens": 573,
+          "medianNumTurns": 4
+        },
+        "claude-sonnet-5|medium": {
+          "model": "claude-sonnet-5",
+          "effort": "medium",
+          "n": 4,
+          "medianDurationMs": 7126.5,
+          "medianCostUsd": 0.057,
+          "medianInputTokens": 6,
+          "medianCacheReadTokens": 94283.5,
+          "medianCacheCreationTokens": 8381,
+          "medianOutputTokens": 571,
+          "medianNumTurns": 4
+        },
+        "claude-sonnet-5|high": {
+          "model": "claude-sonnet-5",
+          "effort": "high",
+          "n": 4,
+          "medianDurationMs": 7265.5,
+          "medianCostUsd": 0.059,
+          "medianInputTokens": 6,
+          "medianCacheReadTokens": 94511.5,
+          "medianCacheCreationTokens": 8535.5,
+          "medianOutputTokens": 589,
+          "medianNumTurns": 3.5
+        },
+        "claude-sonnet-5|xhigh": {
+          "model": "claude-sonnet-5",
+          "effort": "xhigh",
+          "n": 4,
+          "medianDurationMs": 11053.5,
+          "medianCostUsd": 0.064,
+          "medianInputTokens": 6,
+          "medianCacheReadTokens": 94501,
+          "medianCacheCreationTokens": 8757.5,
+          "medianOutputTokens": 1035.5,
+          "medianNumTurns": 5
+        },
+        "claude-opus-5|low": {
+          "model": "claude-opus-5",
+          "effort": "low",
+          "n": 4,
+          "medianDurationMs": 12220,
+          "medianCostUsd": 0.142,
+          "medianInputTokens": 5,
+          "medianCacheReadTokens": 78664,
+          "medianCacheCreationTokens": 8979.5,
+          "medianOutputTokens": 513.5,
+          "medianNumTurns": 2.5
+        },
+        "claude-opus-5|medium": {
+          "model": "claude-opus-5",
+          "effort": "medium",
+          "n": 4,
+          "medianDurationMs": 14459,
+          "medianCostUsd": 0.248,
+          "medianInputTokens": 6,
+          "medianCacheReadTokens": 97437,
+          "medianCacheCreationTokens": 10866,
+          "medianOutputTokens": 804,
+          "medianNumTurns": 3
+        },
+        "claude-opus-5|high": {
+          "model": "claude-opus-5",
+          "effort": "high",
+          "n": 4,
+          "medianDurationMs": 17550.5,
+          "medianCostUsd": 0.326,
+          "medianInputTokens": 8,
+          "medianCacheReadTokens": 122277.5,
+          "medianCacheCreationTokens": 12756,
+          "medianOutputTokens": 1164,
+          "medianNumTurns": 4.5
+        },
+        "claude-opus-5|xhigh": {
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "n": 4,
+          "medianDurationMs": 23314.5,
+          "medianCostUsd": 0.25,
+          "medianInputTokens": 8,
+          "medianCacheReadTokens": 136218,
+          "medianCacheCreationTokens": 11885,
+          "medianOutputTokens": 1564.5,
+          "medianNumTurns": 4.5
+        },
+        "claude-opus-5-5|low": {
+          "model": "claude-opus-5-5",
+          "effort": "low",
+          "n": 4,
+          "medianDurationMs": 9483,
+          "medianCostUsd": 0.088,
+          "medianInputTokens": 4,
+          "medianCacheReadTokens": 60370.5,
+          "medianCacheCreationTokens": 7774,
+          "medianOutputTokens": 569,
+          "medianNumTurns": 2
+        },
+        "claude-opus-5-5|medium": {
+          "model": "claude-opus-5-5",
+          "effort": "medium",
+          "n": 4,
+          "medianDurationMs": 9368,
+          "medianCostUsd": 0.09,
+          "medianInputTokens": 5,
+          "medianCacheReadTokens": 77293,
+          "medianCacheCreationTokens": 7994.5,
+          "medianOutputTokens": 507.5,
+          "medianNumTurns": 2.5
+        },
+        "claude-opus-5-5|high": {
+          "model": "claude-opus-5-5",
+          "effort": "high",
+          "n": 4,
+          "medianDurationMs": 9621.5,
+          "medianCostUsd": 0.096,
+          "medianInputTokens": 5,
+          "medianCacheReadTokens": 77449.5,
+          "medianCacheCreationTokens": 8163,
+          "medianOutputTokens": 701.5,
+          "medianNumTurns": 2.5
+        },
+        "claude-opus-5-5|xhigh": {
+          "model": "claude-opus-5-5",
+          "effort": "xhigh",
+          "n": 4,
+          "medianDurationMs": 12062.5,
+          "medianCostUsd": 0.106,
+          "medianInputTokens": 6,
+          "medianCacheReadTokens": 94123.5,
+          "medianCacheCreationTokens": 8597.5,
+          "medianOutputTokens": 933.5,
+          "medianNumTurns": 4
+        }
+      }
+    },
+    "hard-synthetic": {
+      "totalRows": 116,
+      "keptRows": 116,
+      "budgetExhaustedExcluded": 0,
+      "cells": {
+        "claude-haiku-4-5|none": {
+          "model": "claude-haiku-4-5",
+          "effort": "none",
+          "n": 4,
+          "medianDurationMs": 44039,
+          "medianCostUsd": 0.065,
+          "medianInputTokens": 50,
+          "medianCacheReadTokens": 210201.5,
+          "medianCacheCreationTokens": 12870,
+          "medianOutputTokens": 4935.5,
+          "medianNumTurns": 11.5
+        },
+        "claude-sonnet-5|low": {
+          "model": "claude-sonnet-5",
+          "effort": "low",
+          "n": 4,
+          "medianDurationMs": 12128,
+          "medianCostUsd": 0.07,
+          "medianInputTokens": 6,
+          "medianCacheReadTokens": 96259.5,
+          "medianCacheCreationTokens": 9179.5,
+          "medianOutputTokens": 1060.5,
+          "medianNumTurns": 3
+        },
+        "claude-sonnet-5|medium": {
+          "model": "claude-sonnet-5",
+          "effort": "medium",
+          "n": 4,
+          "medianDurationMs": 12742,
+          "medianCostUsd": 0.076,
+          "medianInputTokens": 8,
+          "medianCacheReadTokens": 130748,
+          "medianCacheCreationTokens": 9673,
+          "medianOutputTokens": 1041.5,
+          "medianNumTurns": 5.5
+        },
+        "claude-sonnet-5|high": {
+          "model": "claude-sonnet-5",
+          "effort": "high",
+          "n": 4,
+          "medianDurationMs": 12641.5,
+          "medianCostUsd": 0.072,
+          "medianInputTokens": 7,
+          "medianCacheReadTokens": 112879.5,
+          "medianCacheCreationTokens": 9494.5,
+          "medianOutputTokens": 1166,
+          "medianNumTurns": 4
+        },
+        "claude-sonnet-5|xhigh": {
+          "model": "claude-sonnet-5",
+          "effort": "xhigh",
+          "n": 4,
+          "medianDurationMs": 18043,
+          "medianCostUsd": 0.088,
+          "medianInputTokens": 8,
+          "medianCacheReadTokens": 132393.5,
+          "medianCacheCreationTokens": 11007,
+          "medianOutputTokens": 2017.5,
+          "medianNumTurns": 8.5
+        },
+        "claude-opus-5|low": {
+          "model": "claude-opus-5",
+          "effort": "low",
+          "n": 12,
+          "medianDurationMs": 16667.5,
+          "medianCostUsd": 0.181,
+          "medianInputTokens": 6,
+          "medianCacheReadTokens": 97587,
+          "medianCacheCreationTokens": 10185.5,
+          "medianOutputTokens": 1159,
+          "medianNumTurns": 3
+        },
+        "claude-opus-5|medium": {
+          "model": "claude-opus-5",
+          "effort": "medium",
+          "n": 12,
+          "medianDurationMs": 22357.5,
+          "medianCostUsd": 0.192,
+          "medianInputTokens": 6,
+          "medianCacheReadTokens": 97637.5,
+          "medianCacheCreationTokens": 10907.5,
+          "medianOutputTokens": 1346.5,
+          "medianNumTurns": 3
+        },
+        "claude-opus-5|high": {
+          "model": "claude-opus-5",
+          "effort": "high",
+          "n": 12,
+          "medianDurationMs": 30154.5,
+          "medianCostUsd": 0.26,
+          "medianInputTokens": 8,
+          "medianCacheReadTokens": 136882,
+          "medianCacheCreationTokens": 12659.5,
+          "medianOutputTokens": 2321.5,
+          "medianNumTurns": 4.5
+        },
+        "claude-opus-5|xhigh": {
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "n": 12,
+          "medianDurationMs": 38724,
+          "medianCostUsd": 0.289,
+          "medianInputTokens": 8,
+          "medianCacheReadTokens": 137500,
+          "medianCacheCreationTokens": 13671.5,
+          "medianOutputTokens": 3098.5,
+          "medianNumTurns": 5
+        },
+        "claude-opus-5-5|low": {
+          "model": "claude-opus-5-5",
+          "effort": "low",
+          "n": 12,
+          "medianDurationMs": 11392.5,
+          "medianCostUsd": 0.107,
+          "medianInputTokens": 5,
+          "medianCacheReadTokens": 78081.5,
+          "medianCacheCreationTokens": 8866,
+          "medianOutputTokens": 840,
+          "medianNumTurns": 2.5
+        },
+        "claude-opus-5-5|medium": {
+          "model": "claude-opus-5-5",
+          "effort": "medium",
+          "n": 12,
+          "medianDurationMs": 13445,
+          "medianCostUsd": 0.118,
+          "medianInputTokens": 5,
+          "medianCacheReadTokens": 78055.5,
+          "medianCacheCreationTokens": 9277,
+          "medianOutputTokens": 1101,
+          "medianNumTurns": 2.5
+        },
+        "claude-opus-5-5|high": {
+          "model": "claude-opus-5-5",
+          "effort": "high",
+          "n": 12,
+          "medianDurationMs": 15426,
+          "medianCostUsd": 0.123,
+          "medianInputTokens": 5,
+          "medianCacheReadTokens": 78092,
+          "medianCacheCreationTokens": 9465,
+          "medianOutputTokens": 1357,
+          "medianNumTurns": 2.5
+        },
+        "claude-opus-5-5|xhigh": {
+          "model": "claude-opus-5-5",
+          "effort": "xhigh",
+          "n": 12,
+          "medianDurationMs": 16238,
+          "medianCostUsd": 0.147,
+          "medianInputTokens": 7,
+          "medianCacheReadTokens": 114556.5,
+          "medianCacheCreationTokens": 10656.5,
+          "medianOutputTokens": 1620.5,
+          "medianNumTurns": 4
+        }
+      }
+    },
+    "real-bugfix": {
+      "totalRows": 63,
+      "keptRows": 54,
+      "budgetExhaustedExcluded": 9,
+      "cells": {
+        "claude-haiku-4-5|none": {
+          "model": "claude-haiku-4-5",
+          "effort": "none",
+          "n": 7,
+          "medianDurationMs": 70798,
+          "medianCostUsd": 0.083,
+          "medianInputTokens": 42,
+          "medianCacheReadTokens": 174586,
+          "medianCacheCreationTokens": 16736,
+          "medianOutputTokens": 7992,
+          "medianNumTurns": 7
+        },
+        "claude-opus-5-5|low": {
+          "model": "claude-opus-5-5",
+          "effort": "low",
+          "n": 7,
+          "medianDurationMs": 26352,
+          "medianCostUsd": 0.148,
+          "medianInputTokens": 8,
+          "medianCacheReadTokens": 128499,
+          "medianCacheCreationTokens": 10890,
+          "medianOutputTokens": 2471,
+          "medianNumTurns": 4
+        },
+        "claude-opus-5-5|medium": {
+          "model": "claude-opus-5-5",
+          "effort": "medium",
+          "n": 7,
+          "medianDurationMs": 72489,
+          "medianCostUsd": 0.193,
+          "medianInputTokens": 8,
+          "medianCacheReadTokens": 131204,
+          "medianCacheCreationTokens": 12833,
+          "medianOutputTokens": 3528,
+          "medianNumTurns": 4
+        },
+        "claude-opus-5-5|xhigh": {
+          "model": "claude-opus-5-5",
+          "effort": "xhigh",
+          "n": 7,
+          "medianDurationMs": 87857,
+          "medianCostUsd": 0.384,
+          "medianInputTokens": 14,
+          "medianCacheReadTokens": 258608,
+          "medianCacheCreationTokens": 17755,
+          "medianOutputTokens": 9940,
+          "medianNumTurns": 8
+        },
+        "claude-sonnet-5|medium": {
+          "model": "claude-sonnet-5",
+          "effort": "medium",
+          "n": 7,
+          "medianDurationMs": 46443,
+          "medianCostUsd": 0.12,
+          "medianInputTokens": 12,
+          "medianCacheReadTokens": 205345,
+          "medianCacheCreationTokens": 11670,
+          "medianOutputTokens": 3183,
+          "medianNumTurns": 8
+        },
+        "claude-opus-5-5|high": {
+          "model": "claude-opus-5-5",
+          "effort": "high",
+          "n": 7,
+          "medianDurationMs": 40291,
+          "medianCostUsd": 0.222,
+          "medianInputTokens": 10,
+          "medianCacheReadTokens": 174864,
+          "medianCacheCreationTokens": 14269,
+          "medianOutputTokens": 4441,
+          "medianNumTurns": 6
+        },
+        "claude-fable-5-1|high": {
+          "model": "claude-fable-5-1",
+          "effort": "high",
+          "n": 5,
+          "medianDurationMs": 88129,
+          "medianCostUsd": 0.858,
+          "medianInputTokens": 194,
+          "medianCacheReadTokens": 253394,
+          "medianCacheCreationTokens": 21815,
+          "medianOutputTokens": 3985,
+          "medianNumTurns": 7
+        },
+        "claude-fable-5-1|xhigh": {
+          "model": "claude-fable-5-1",
+          "effort": "xhigh",
+          "n": 1,
+          "medianDurationMs": 57508,
+          "medianCostUsd": 0.492,
+          "medianInputTokens": 98,
+          "medianCacheReadTokens": 134890,
+          "medianCacheCreationTokens": 12646,
+          "medianOutputTokens": 4094,
+          "medianNumTurns": 4
+        },
+        "claude-fable-5|high": {
+          "model": "claude-fable-5",
+          "effort": "high",
+          "n": 6,
+          "medianDurationMs": 75314,
+          "medianCostUsd": 0.796,
+          "medianInputTokens": 11,
+          "medianCacheReadTokens": 198007.5,
+          "medianCacheCreationTokens": 15509.5,
+          "medianOutputTokens": 5756,
+          "medianNumTurns": 6
+        }
+      }
+    },
+    "architecture": {
+      "totalRows": 11,
+      "keptRows": 11,
+      "budgetExhaustedExcluded": 0,
+      "cells": {
+        "claude-sonnet-5|medium": {
+          "model": "claude-sonnet-5",
+          "effort": "medium",
+          "n": 5,
+          "medianDurationMs": 511628,
+          "medianCostUsd": 1.838,
+          "medianInputTokens": 84,
+          "medianCacheReadTokens": 4441201,
+          "medianCacheCreationTokens": 127196,
+          "medianOutputTokens": 44060,
+          "medianNumTurns": 49
+        },
+        "claude-fable-5-1|high": {
+          "model": "claude-fable-5-1",
+          "effort": "high",
+          "n": 1,
+          "medianDurationMs": 1206215,
+          "medianCostUsd": 9.64,
+          "medianInputTokens": 1478,
+          "medianCacheReadTokens": 6736286,
+          "medianCacheCreationTokens": 211247,
+          "medianOutputTokens": 74329,
+          "medianNumTurns": 49
+        },
+        "claude-opus-5-5|xhigh": {
+          "model": "claude-opus-5-5",
+          "effort": "xhigh",
+          "n": 2,
+          "medianDurationMs": 1467535,
+          "medianCostUsd": 8.197,
+          "medianInputTokens": 123,
+          "medianCacheReadTokens": 14332934,
+          "medianCacheCreationTokens": 312141.5,
+          "medianOutputTokens": 141664,
+          "medianNumTurns": 88
+        },
+        "claude-opus-5-5|low": {
+          "model": "claude-opus-5-5",
+          "effort": "low",
+          "n": 2,
+          "medianDurationMs": 571221,
+          "medianCostUsd": 1.224,
+          "medianInputTokens": 42,
+          "medianCacheReadTokens": 1407005,
+          "medianCacheCreationTokens": 61586,
+          "medianOutputTokens": 22502,
+          "medianNumTurns": 23.5
+        },
+        "claude-opus-5-5|high": {
+          "model": "claude-opus-5-5",
+          "effort": "high",
+          "n": 1,
+          "medianDurationMs": 1103137,
+          "medianCostUsd": 3.991,
+          "medianInputTokens": 90,
+          "medianCacheReadTokens": 6568519,
+          "medianCacheCreationTokens": 174364,
+          "medianOutputTokens": 64087,
+          "medianNumTurns": 62
+        }
+      }
+    }
+  },
+  "weeklyPointAnchors": {
+    "easy-synthetic": {
+      "runs": 52,
+      "points": 1,
+      "note": "upper bound -- other sessions were running concurrently"
+    },
+    "hard-synthetic": {
+      "runs": 52,
+      "points": 2,
+      "note": "upper bound -- other sessions were running concurrently"
+    },
+    "hard-synthetic-opus": {
+      "runs": 64,
+      "points": 3,
+      "note": "opus cells specifically within hard-synthetic; upper bound"
+    },
+    "real-bugfix": {
+      "runs": 35,
+      "points": 4,
+      "note": "upper bound -- other sessions were running concurrently"
+    },
+    "architecture": {
+      "runs": 10,
+      "points": 3,
+      "note": "calibration plus a head-to-head; upper bound"
+    }
+  },
+  "planWeightMultipliers": {
+    "opus": {
+      "value": 1.5,
+      "confirmed": false,
+      "source": "unconfirmed in-app tooltip, 2026-09-23 (ADR 0003 sec Evidence gathered)"
+    }
+  }
+}

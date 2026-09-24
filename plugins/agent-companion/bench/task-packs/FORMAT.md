@@ -85,6 +85,11 @@ Two consequences:
                                           // extra sandbox-relative paths the model is allowed to
                                           // touch/create beyond files[] itself and the guard file
                                           // (finalizeScore's scope check flags anything else)
+  "resources": {                           // OPTIONAL -- see "Resource declarations" below.
+    "fixedPorts": [8080],                  // ports this pack's own work binds to a HARDCODED number
+    "lockFiles": ["/tmp/some.lock"],       // absolute/relative paths a run holds a lock on
+    "exclusive": false                     // true = never co-schedule with ANY other run, whatever it declares
+  },
   "judgeCalibration": {                   // OPTIONAL, only meaningful with rubric.md
     "plantedBad": [                       // known-bad variants of the FIX: each is one
       { "note": "tracked files only",     // find/replace applied to the fix-ref content.
@@ -104,6 +109,112 @@ fault, or language lifted from the fix commit's own message. This is the
 same discipline `bench/PROCESS-NOTES.md`'s real-history ADR documents for
 the pre-baked `real-*` tasks; `leakPhrases` is the automated tripwire on
 top of writing it carefully.
+
+## Resource declarations
+
+`manifest.resources` (optional) tells `bench/scheduler.mjs` what this pack's
+own work (the model's run, or its held-out test) touches at the OS level, so
+`scripts/benchmark.mjs --concurrency N` never co-schedules two runs that
+would collide — see `docs/BENCHMARK.md` "Parallel runs".
+
+```jsonc
+"resources": {
+  "fixedPorts": [8080],           // ports bound to a HARDCODED number (not derived from
+                                   // BENCH_PORT_BASE, see below) -- any two runs (same pack
+                                   // or different) declaring an overlapping port never
+                                   // run at the same time.
+  "lockFiles": ["/tmp/some.lock"], // paths (normalized case/slash-insensitively) a run holds
+                                   // a lock on -- same exclusion rule as fixedPorts.
+  "exclusive": true                // this run is NEVER co-scheduled with anything else,
+                                   // regardless of what the other run declares. Reach for
+                                   // this only when the pack's work is not expressible as
+                                   // ports/lock files (e.g. it assumes it is the only thing
+                                   // touching a shared external resource).
+}
+```
+
+**No declaration at all** (the `resources` key absent from the manifest,
+not merely empty) is the conservative default: the scheduler treats it as
+**exclusive with other runs of the SAME pack id**, so two reps of an
+unreviewed pack are never accidentally run in parallel, but it never blocks
+a DIFFERENT pack from running alongside it. A pack that has been reviewed
+and is genuinely safe to run concurrently with itself opts out by declaring
+`"resources": {}` explicitly (even empty) — see the fixture packs below.
+
+**`BENCH_PORT_BASE`**: every run gets one exported to its environment (and,
+for a built-in task or a pack's own scorer, passed as the 4th argument to
+`setup()`/`score()`) — a base port number reserved for that run's
+concurrency SLOT, never shared with another run active at the same time. A
+pack whose work needs a port but does not care WHICH one should bind
+somewhere in `[BENCH_PORT_BASE, BENCH_PORT_BASE + 200)` rather than a
+hardcoded number — that is what makes it safe to run alongside another copy
+of itself, and it needs no `resources.fixedPorts` declaration at all (declare
+`"resources": {}` to opt out of the same-pack default above). Two worked
+examples, used by `tests/bench-scheduler.test.mjs` to prove the scheduler's
+behavior against real (not mocked) port binds:
+`tests/fixtures/bench-parallel/fixed-port-task.mjs` (hardcoded port,
+`resources.fixedPorts`, always serialized with itself) and
+`tests/fixtures/bench-parallel/port-base-task.mjs` (binds
+`BENCH_PORT_BASE`, `resources: {}`, runs concurrently with itself).
+
+**Collision, despite a correct declaration.** Two mechanisms, chosen by WHEN
+the collision happened -- full detail and worked examples in
+`docs/BENCHMARK.md` "Parallel runs" -> "Collision handling"; summary here:
+
+- **Before the model's work completed** (`setup()` threw, or `score()` threw
+  while NOT genuinely co-scheduled): `bench/runner.mjs` extracts the
+  STRUCTURAL error `.code` Node itself attached to the exception
+  (`EADDRINUSE`, a lock file's `EEXIST`/`EBUSY`, ...) and hands ONLY that
+  code to `bench/scheduler.mjs`'s `classifyCollision()` -- never the model's
+  answer text or the exception's message string, both of which are authored
+  prose that can coincidentally contain a collision-shaped substring without
+  any real collision happening. A `collision: true` row is excluded from
+  `pass_rate`/every other stat in `summary.md` (same treatment `auth_error`
+  gets) and automatically re-run exactly once, ALONE, with a FRESH sandbox
+  and model call (`resources.exclusive` forced `true`). `is_collision_retry`
+  marks the retry.
+- **After the model's work completed** (a REAL pack's `score()` normally,
+  since its hidden test's own "catch everything" style never throws at all
+  -- see "Hidden test contract" below): a run that FAILS while genuinely
+  co-scheduled is marked `needs_rescore: true`, its sandbox is deliberately
+  KEPT, and the scheduler queues a solo retry that re-runs ONLY `score()`
+  against that SAME sandbox -- never the model. `collision_rescored: true`
+  on the `<run_id>::rescore` row means the re-score passed (the original is
+  superseded); `false` means it failed too (the original failure counts, the
+  retry is excluded as redundant). This is the round-2 fix for the finding
+  that the pre-model path above was dead code for every real pack.
+
+**Confirmation.** Either mechanism's exclusion only applies once CONFIRMED,
+but the two mechanisms pair their original/retry rows OPPOSITELY, because a
+full re-run gets a fresh answer while a re-score reuses the same one:
+
+- **Collision (full re-run).** The solo retry must NOT reproduce the same
+  failure to confirm a collision. If it reproduces -- the task fails this
+  way even running completely alone -- the retry is reclassified as a REAL
+  failure and counted normally; the ORIGINAL row stays excluded (its own
+  execution was genuinely concurrent, so its individual verdict is still
+  ambiguous) but `summary.md` labels it `SUSPECTED COLLISION, NOT CONFIRMED`
+  rather than folding it into the confirmed-collision count.
+- **Rescore (solo re-score, same sandbox/answer).** The solo re-score must
+  PASS to confirm the original failure was a collision. If it fails too --
+  the same answer, scored alone, still fails -- nothing was ever a
+  collision: the ORIGINAL failing row counts normally (a real failure is
+  never lost), and the `<run_id>::rescore` row is excluded as redundant
+  (the same underlying attempt, no new information). `summary.md` labels
+  this `RE-SCORE CONFIRMED A REAL FAILURE`. Only when the re-score PASSES is
+  the original excluded (superseded) and the `::rescore` row counts in its
+  place, labelled `RESCORED`.
+
+A failure that reproduces solo -- under either mechanism -- is never lost
+from pass-rate math. See `docs/BENCHMARK.md` "Collision handling" for the
+full worked-through version of both tables.
+
+**Coverage gap.** Neither mechanism sees a collision the MODEL's own
+in-session commands hit while doing its own work (e.g. its own test run,
+before the harness ever reaches `score()`) -- that is invisible to both, and
+shows up only in the model's own transcript/answer. Bind inside
+`[BENCH_PORT_BASE, BENCH_PORT_BASE + 200)` (below) rather than a hardcoded
+port to avoid it in the first place.
 
 ## Hidden test contract
 
