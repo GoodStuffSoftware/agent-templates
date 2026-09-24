@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { cleanGitEnv } from '../../scripts/lib/git-env.mjs';
 
 export function copyDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
@@ -48,8 +49,16 @@ export function readFileSafe(p) {
 // set, so this was invisible until something tried to test the scorers
 // directly -- which is exactly why it is worth guarding against here
 // rather than only in the test suite.
+//
+// It also strips the repo-LOCATING GIT_* variables (GIT_DIR, GIT_WORK_TREE,
+// GIT_INDEX_FILE, ... — see scripts/lib/git-env.mjs). The hidden tests this
+// runs create throwaway repositories with `git init` / `commit` and pass
+// their own env through; under a git hook (which exports GIT_DIR) those
+// commands would act on the caller's repository instead. The fixtures are
+// frozen (their hashes are pinned), so the guard lives here, where it covers
+// every hidden test at once.
 function cleanTestEnv() {
-  const env = { ...process.env };
+  const env = cleanGitEnv(process.env);
   for (const key of Object.keys(env)) {
     if (key.startsWith('NODE_TEST_')) delete env[key];
   }
