@@ -388,11 +388,11 @@ export function parseVerdict(text) {
 // "(only works with --print)" and names no separate stdin flag, which
 // suggests reading stdin as the prompt is the default text-input behaviour
 // in print mode with no positional prompt; the piping itself is verified
-// with a stub CLI in tests/bench-judge.test.mjs. This mirrors bench/runner.mjs's own
-// `runClaude()`, which still passes its (much shorter, task-sized) prompt
-// as an argument -- runner.mjs is owned by another worker in this pass, so
-// its own ENAMETOOLONG exposure on a future oversized task prompt is
-// reported, not fixed, here.
+// with a stub CLI in tests/bench-judge.test.mjs. bench/runner.mjs's
+// `runClaude()` differs: it still passes its prompt as a `-p <arg>`
+// command-line argument. Task prompts are much shorter than a judge prompt,
+// but a task prompt large enough to pass the Windows limit would fail the
+// same way there, with ENAMETOOLONG.
 // `execFileImpl` is a test seam (same style as `removeDirImpl`): production
 // always gets the real node:child_process `execFile`. A test can inject a
 // fake with the same `(bin, args, options, callback) => child` signature to
