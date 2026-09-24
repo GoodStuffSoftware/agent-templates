@@ -343,6 +343,18 @@ test('a killed writer\'s lock (dead pid) is broken within a second, not after 30
   assert.deepEqual(readdirSync(files().dir).sort(), ['routing-profile.journal.jsonl', 'routing-profile.json']);
 });
 
+// 0.29.0 final review F3: a directory at the lock path used to be waited on
+// for the whole 15 s and then refused as "locked by another writer".
+test('a directory at the lock path is refused at once as invalid-file, not after 15 s as locked', () => {
+  freshRoot('lockdir');
+  mkdirSync(files().lock, { recursive: true });
+  const t0 = Date.now();
+  expectCode(() => store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW }), 'invalid-file');
+  assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
+  assert.throws(() => store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW }), /routing-profile lock at .* cannot be used \(something other than a lock file stands at the lock path \(a directory\)\)/);
+  assert.equal(existsSync(files().profile), false, 'nothing was written');
+});
+
 test('unset retires the row (kept, journalled); rollback --row restores it; unknown rows are not-found', () => {
   freshRoot('unset');
   store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW });

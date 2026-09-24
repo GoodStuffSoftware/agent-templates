@@ -44,7 +44,7 @@ import {
   parseProfileText, parseJournal, rebuildAt, journalMaxRevision, emptyProfile, profileContent, canonical, applyEntry,
   typeShapeErrors, rowShapeErrors, ACTIVE_STATES, JOURNAL_FILE, LOCK_FILE,
 } from '../../hooks/lib/routing-profile.mjs';
-import { withFileLock, LockTimeoutError } from '../../hooks/lib/file-lock.mjs';
+import { withFileLock, LockTimeoutError, LockUnusableError } from '../../hooks/lib/file-lock.mjs';
 
 // A dead owner's lock this old is broken. A live owner's never is, whatever
 // its age, so this only has to exceed the instant between creating a lock
@@ -78,6 +78,9 @@ function withLock(lockPath, fn) {
   } catch (e) {
     if (e instanceof LockTimeoutError) {
       throw new ProfileWriteError('locked', `routing profile is locked by another writer (${lockPath}); retry, or remove the lock if no writer is running`);
+    }
+    if (e instanceof LockUnusableError) {
+      throw new ProfileWriteError('invalid-file', `the routing-profile lock at ${lockPath} cannot be used (${e.reason}); fix or remove it before writing`);
     }
     throw e;
   }

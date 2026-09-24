@@ -49,6 +49,11 @@ import { randomBytes, createHash } from 'node:crypto';
 // claims on one stale lock: each one needs a process that died mid-break.
 const MAX_CLAIM_SLOTS = 32;
 
+// A lock dated further in the future than this was written before the
+// clock stepped back: its age cannot be known, so once its owner is dead it
+// counts as stale at once (0.29.0 final review F3; it used to never age).
+export const CLOCK_SKEW_MS = 5_000;
+
 function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* retry at once */ }
 }
@@ -61,8 +66,11 @@ function lockContent(token) {
   return JSON.stringify({ pid: process.pid, token, at: Date.now() });
 }
 
-// null when the lock is absent, else { raw, owner, st, id }:
-//   raw   - the content, or null when it cannot be read
+// null when the lock is absent, { notFile: true, st } when something other
+// than a regular file stands at the name (a directory, say: no lock can ever
+// be created there, and it must never be "broken"), else { raw, owner, st, id }:
+//   raw   - the content, or null when it cannot be read (an unreadable lock
+//           has no readable owner: it counts as dead once old enough)
 //   owner - { pid, token, at }, or null (no readable owner)
 //   st    - the stat taken before the read
 //   id    - a digest of the content AND the file's identity (inode, size,
@@ -70,6 +78,7 @@ function lockContent(token) {
 function readLock(lockPath) {
   let st;
   try { st = statSync(lockPath); } catch { return null; }
+  if (!st.isFile()) return { notFile: true, st };
   let raw = null;
   try { raw = readFileSync(lockPath, 'utf8'); } catch (e) {
     if (e?.code === 'ENOENT') return null;
@@ -114,13 +123,20 @@ function tryCreate(lockPath, content) {
   }
 }
 
+// Age from the owner's `at`, else the file's mtime. A time further ahead
+// than CLOCK_SKEW_MS is from before a clock step back: Infinity.
 function lockAge(seen) {
-  if (seen.owner && Number.isFinite(seen.owner.at)) return Date.now() - seen.owner.at;
-  return Number.isFinite(seen.st?.mtimeMs) ? Date.now() - seen.st.mtimeMs : 0;
+  const now = Date.now();
+  let t = null;
+  if (seen.owner && Number.isFinite(seen.owner.at)) t = seen.owner.at;
+  else if (Number.isFinite(seen.st?.mtimeMs)) t = seen.st.mtimeMs;
+  if (t === null) return 0;
+  return t - now > CLOCK_SKEW_MS ? Infinity : now - t;
 }
 
 // Stale: older than staleMs, and its owner is not a live process.
 function isStale(seen, staleMs) {
+  if (seen.notFile) return false;
   return lockAge(seen) > staleMs && !(seen.owner && pidAlive(seen.owner.pid));
 }
 
@@ -170,24 +186,32 @@ function breakStale(lockPath, seen, staleMs) {
   }
 }
 
-// Acquire: a handle { lockPath, token } or null when not acquired within
-// waitMs (or the lock cannot be created here at all).
-export function acquireLock(lockPath, { waitMs = 2000, staleMs = 5000 } = {}) {
+// { handle } when acquired; { unusable: reason } when no lock can be created
+// at this path at all (answered at once: waiting cannot help); {} when
+// another holder kept it past waitMs.
+function acquire(lockPath, { waitMs, staleMs }) {
   try { mkdirSync(dirname(lockPath), { recursive: true }); } catch { /* create reports it */ }
   const token = newToken();
   const deadline = Date.now() + waitMs;
   for (;;) {
     const got = tryCreate(lockPath, lockContent(token));
-    if (got === true) return { lockPath, token };
-    if (got === null) return null;
+    if (got === true) return { handle: { lockPath, token } };
+    if (got === null) return { unusable: 'the lock file cannot be created there' };
     const seen = readLock(lockPath);
+    if (seen?.notFile) return { unusable: `something other than a lock file stands at the lock path (${seen.st.isDirectory() ? 'a directory' : 'not a regular file'})` };
     if (seen && isStale(seen, staleMs)) {
       breakStale(lockPath, seen, staleMs);
       if (Date.now() < deadline) continue;
     }
-    if (Date.now() >= deadline) return null;
+    if (Date.now() >= deadline) return {};
     sleepSync(5 + Math.floor(Math.random() * 20));
   }
+}
+
+// Acquire: a handle { lockPath, token } or null when not acquired within
+// waitMs (or the lock cannot be created here at all).
+export function acquireLock(lockPath, { waitMs = 2000, staleMs = 5000 } = {}) {
+  return acquire(lockPath, { waitMs, staleMs }).handle || null;
 }
 
 // Release: unlink only while the lock still holds this handle's token. On
@@ -218,12 +242,23 @@ export class LockTimeoutError extends Error {
   }
 }
 
-// Run fn under the lock. failOpen (hooks): on a timeout fn still runs,
-// unlocked. Otherwise a timeout throws LockTimeoutError. fn must not exit
+// No lock can ever be taken at this path (a directory stands there, say).
+export class LockUnusableError extends Error {
+  constructor(lockPath, reason) {
+    super(`cannot lock ${lockPath}: ${reason}`);
+    this.code = 'ELOCKUNUSABLE';
+    this.lockPath = lockPath;
+    this.reason = reason;
+  }
+}
+
+// Run fn under the lock. failOpen (hooks): on a timeout, or when no lock can
+// be taken at this path, fn still runs, unlocked. Otherwise a timeout throws
+// LockTimeoutError and an unusable path LockUnusableError. fn must not exit
 // the process while holding the lock.
 export function withFileLock(lockPath, fn, { waitMs = 2000, staleMs = 5000, failOpen = true } = {}) {
-  const handle = acquireLock(lockPath, { waitMs, staleMs });
-  if (!handle && !failOpen) throw new LockTimeoutError(lockPath);
+  const { handle = null, unusable } = acquire(lockPath, { waitMs, staleMs });
+  if (!handle && !failOpen) throw unusable ? new LockUnusableError(lockPath, unusable) : new LockTimeoutError(lockPath);
   try {
     return fn({ locked: !!handle });
   } finally {

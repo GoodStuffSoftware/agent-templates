@@ -118,6 +118,48 @@ test('concurrent writers with every lock judged old never lose an update (owner 
   } finally { s.cleanup(); }
 });
 
+// 0.29.0 final review F3: a lock dated in the future (written before the
+// clock stepped back) never aged, so a crashed holder's lock blocked every
+// waiter until the clock caught up. Past a small skew allowance its age is
+// unknowable: stale at once when its owner is dead, never when alive.
+test('F3: a future-dated lock of a dead owner is broken; a live owner\'s is not', () => {
+  const s = scratch();
+  try {
+    writeFileSync(s.lock, JSON.stringify({ pid: deadPid(), token: 'future-dead', at: Date.now() + 3_600_000 }));
+    const h = acquireLock(s.lock, { waitMs: 500, staleMs: 1000 });
+    assert.ok(h, 'a dead owner\'s future-dated lock is broken');
+    releaseLock(h);
+    writeFileSync(s.lock, JSON.stringify({ pid: process.pid, token: 'future-live', at: Date.now() + 3_600_000 }));
+    assert.equal(acquireLock(s.lock, { waitMs: 150, staleMs: 1000 }), null);
+    assert.equal(JSON.parse(readFileSync(s.lock, 'utf8')).token, 'future-live');
+    // Within the skew allowance a dead owner's lock still waits out staleMs.
+    writeFileSync(s.lock, JSON.stringify({ pid: deadPid(), token: 'skew', at: Date.now() + 1000 }));
+    assert.equal(acquireLock(s.lock, { waitMs: 150, staleMs: 60_000 }), null);
+  } finally { s.cleanup(); }
+});
+
+// F3: a directory at the lock path. It used to be waited on for the whole
+// waitMs and then reported as "held by another writer"; and a waiter must
+// never move it aside as a stale lock. Now: answered at once, untouched.
+test('F3: a directory at the lock path is reported at once as unusable, never waited on or moved', async () => {
+  const s = scratch();
+  try {
+    const { LockUnusableError } = await import(HELPER);
+    mkdirSync(s.lock);
+    const old = new Date(Date.now() - 3_600_000);
+    (await import('node:fs')).utimesSync(s.lock, old, old);
+    let t0 = Date.now();
+    assert.equal(acquireLock(s.lock, { waitMs: 3000, staleMs: 10 }), null);
+    assert.ok(Date.now() - t0 < 1500, `waited ${Date.now() - t0} ms on a directory`);
+    t0 = Date.now();
+    assert.equal(typeof LockUnusableError, 'function', 'LockUnusableError is exported');
+    assert.throws(() => withFileLock(s.lock, () => 1, { waitMs: 3000, failOpen: false }), (e) => e instanceof LockUnusableError && /a directory/.test(e.message));
+    assert.deepEqual(withFileLock(s.lock, (st) => st, { waitMs: 3000, failOpen: true }), { locked: false });
+    assert.ok(Date.now() - t0 < 1500, `waited ${Date.now() - t0} ms on a directory`);
+    assert.deepEqual(readdirSync(s.dir), ['x.lock'], 'the directory was left where it stands');
+  } finally { s.cleanup(); }
+});
+
 // 0.29.0 final review F1: the put-back race. With 3 or more waiters racing a
 // crashed holder's lock, waiter C judged the dead lock stale; before C's
 // rename, another waiter B broke it and A created a live lock; C's rename
