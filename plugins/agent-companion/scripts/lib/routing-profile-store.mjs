@@ -8,12 +8,12 @@
 //      helper (hooks/lib/file-lock.mjs), so two writers serialise instead of
 //      losing an update. The lock names its owner (pid + token); it is
 //      released only by that owner, and broken only when the owner's process
-//      is gone AND it is older than STALE_LOCK_MS, by a re-verified rename.
-//      A live pid's lock is never judged stale (S2 review P1: stat-then-unlink
-//      broke live locks, duplicating revisions and corrupting the journal),
-//      and a killed writer's lock no longer blocks for 30 s (P8). Residual:
-//      with 3 or more contenders racing a crashed holder, a rare put-back
-//      race can still let two holders coexist; tracked for 0.29.1.
+//      is gone AND it is older than STALE_LOCK_MS, and then by one waiter at
+//      a time (a claim on that exact stale lock). A live pid's lock is never
+//      judged stale (S2 review P1: stat-then-unlink broke live locks,
+//      duplicating revisions and corrupting the journal), writers racing a
+//      crashed holder's lock cannot leave two holders (0.29.0 final review
+//      F1), and a killed writer's lock no longer blocks for 30 s (P8).
 //   2. read the file and the journal FRESH (never the resolver's cache);
 //      refuse to write over a file that is invalid or from a newer major
 //      version — the operator fixes or removes it, the writer never guesses
@@ -44,7 +44,7 @@ import {
   parseProfileText, parseJournal, rebuildAt, journalMaxRevision, emptyProfile, profileContent, canonical, applyEntry,
   typeShapeErrors, rowShapeErrors, ACTIVE_STATES, JOURNAL_FILE, LOCK_FILE,
 } from '../../hooks/lib/routing-profile.mjs';
-import { withFileLock, LockTimeoutError } from '../../hooks/lib/file-lock.mjs';
+import { withFileLock, LockTimeoutError, LockUnusableError } from '../../hooks/lib/file-lock.mjs';
 
 // A dead owner's lock this old is broken. A live owner's never is, whatever
 // its age, so this only has to exceed the instant between creating a lock
@@ -71,13 +71,16 @@ function sleepMs(ms) {
 }
 
 // The writer never runs unlocked: a timeout is a 'locked' refusal.
-function withLock(lockPath, fn) {
+function withLock(lockPath, fn, debris = []) {
   mkdirSync(dirname(lockPath), { recursive: true });
   try {
-    return withFileLock(lockPath, () => fn(), { waitMs: LOCK_TIMEOUT_MS, staleMs: STALE_LOCK_MS, failOpen: false });
+    return withFileLock(lockPath, () => fn(), { waitMs: LOCK_TIMEOUT_MS, staleMs: STALE_LOCK_MS, failOpen: false, debris });
   } catch (e) {
     if (e instanceof LockTimeoutError) {
       throw new ProfileWriteError('locked', `routing profile is locked by another writer (${lockPath}); retry, or remove the lock if no writer is running`);
+    }
+    if (e instanceof LockUnusableError) {
+      throw new ProfileWriteError('invalid-file', `the routing-profile lock at ${lockPath} cannot be used (${e.reason}); fix or remove it before writing`);
     }
     throw e;
   }
@@ -149,30 +152,55 @@ function basedOnNow() {
   return { tableVersion: cfg.version ?? null, tableUpdated: cfg.updated ?? null };
 }
 
+// The refusal of each listed row of `profile` ([{ type, reason }], empty =
+// all fine): an active row through profileRowRefusal() in `mode`, a retired
+// row (never resolved) for its shape only.
+export function rowRefusals(profile, types, { now, mode = 'write' } = {}) {
+  const out = [];
+  const state = { status: 'ok', profile, revision: profile.revision };
+  for (const type of types) {
+    const row = (profile.rows || {})[type];
+    if (row === undefined) continue; // removed
+    if (row && ACTIVE_STATES.has(row.state)) {
+      const td = taskTypeDef(type, { state });
+      const reason = profileRowRefusal(type, row, { typeDef: td ? td.def : null, now, mode });
+      if (reason) out.push({ type, reason });
+    } else {
+      for (const e of rowShapeErrors(row)) out.push({ type, reason: `invalid row: ${e}` });
+    }
+  }
+  return out;
+}
+
 // Validate the rows a change touches (write mode) plus the profile's shape.
 // Returns the list of refusals (empty = OK). Local types are validated for
 // shape so a written profile never carries a type the reader would drop.
-export function validateForWrite(next, touched, { now, mode = 'write' } = {}) {
+// `allowed(type, row)`: a row refusal to let through (see commitLocked).
+export function validateForWrite(next, touched, { now, mode = 'write', allowed = () => false } = {}) {
   const errs = [];
   const res = parseProfileText(JSON.stringify(next));
   if (res.status !== 'ok') return res.errors;
   for (const [n, def] of Object.entries(next.types || {})) {
     for (const e of typeShapeErrors(def)) errs.push(`type ${n}: ${e}`);
   }
-  const state = { status: 'ok', profile: next, revision: next.revision };
-  for (const type of touched) {
-    const row = next.rows[type];
-    if (row === undefined) continue; // removed
-    if (row && ACTIVE_STATES.has(row.state)) {
-      const td = taskTypeDef(type, { state });
-      const reason = profileRowRefusal(type, row, { typeDef: td ? td.def : null, now, mode });
-      if (reason) errs.push(`${type}: ${reason}`);
-    } else {
-      // A retired row never resolves, so only its shape is checked.
-      for (const e of rowShapeErrors(row)) errs.push(`${type}: invalid row: ${e}`);
-    }
+  for (const { type, reason } of rowRefusals(next, touched, { now, mode })) {
+    if (!allowed(type, next.rows[type])) errs.push(`${type}: ${reason}`);
   }
   return errs;
+}
+
+// The rows an adoption recorded as skipped (the resolver refuses them in
+// read mode), as "type\0canonical row" keys.
+function adoptedSkippedRows(entries) {
+  const keys = new Set();
+  for (const e of entries) {
+    if (e.action !== 'adopt-external-edit' || !Array.isArray(e.skipped)) continue;
+    for (const s of e.skipped) {
+      const row = e.after?.rows?.[s?.type];
+      if (row !== undefined) keys.add(`${s.type}\0${canonical(row)}`);
+    }
+  }
+  return keys;
 }
 
 // THE writer. `change(current, { entries })` receives the current profile (a
@@ -193,7 +221,7 @@ export function commitChange(change, { by = 'operator', expectRevision, now, at 
       if (e instanceof ProfileWriteError) throw e;
       throw new ProfileWriteError('io', `the routing profile was not written: ${e.code || e.name}: ${String(e.message || '').slice(0, 160)}`);
     }
-  });
+  }, [files.profile]);
 }
 
 function commitLocked(files, change, { by, expectRevision, now, at }) {
@@ -218,9 +246,15 @@ function commitLocked(files, change, { by, expectRevision, now, at }) {
     const adoptRev = jmax < onDisk.revision ? onDisk.revision : jmax + 1;
     const prior = jmax >= 0 ? rebuildAt(entries, jmax) : null;
     cur = { ...JSON.parse(JSON.stringify(onDisk)), revision: adoptRev };
+    // The hand edit is journalled exactly as it stands, whatever it holds;
+    // the rows the resolver refuses (read mode, F1-F4: it skips them) are
+    // recorded with the reason, so show/why can say so and a rollback to a
+    // revision carrying them is not refused for them (0.29.0 final review F5).
+    const skipped = rowRefusals(cur, Object.keys(cur.rows || {}), { now, mode: 'read' });
     pending.push({
       revision: adoptRev, at: stamp, action: 'adopt-external-edit', type: null,
       before: prior ? profileContent(prior) : null, after: profileContent(cur), by,
+      ...(skipped.length ? { skipped } : {}),
     });
   } else {
     cur = JSON.parse(JSON.stringify(onDisk));
@@ -232,9 +266,13 @@ function commitLocked(files, change, { by, expectRevision, now, at }) {
   let next;
   let entry;
   let touched;
+  const readMode = c.validate === 'read';
   if (c.type === null) {
     next = { ...JSON.parse(JSON.stringify(c.content)), revision };
     touched = Object.keys(next.rows || {});
+    // A rollback judges only the rows it changes: a row carried over as it
+    // stands is already what the resolver reads.
+    if (readMode) touched = touched.filter((t) => canonical(next.rows[t]) !== canonical((cur.rows || {})[t] ?? null));
     entry = { revision, at: stamp, action: c.action, type: null, before: profileContent(cur), after: profileContent(next), by };
   } else {
     if (typeof c.type !== 'string' || !c.type) throw new ProfileWriteError('usage', 'a row change must name its type');
@@ -250,8 +288,13 @@ function commitLocked(files, change, { by, expectRevision, now, at }) {
   // (F1-F4, what the resolver itself refuses), not write mode, so a revision
   // the writer would now refuse on F5 (an adopted hand edit, say) is still
   // restorable exactly; F5 then raises it at resolve time as usual (S2
-  // review P3, lead decision).
-  const errs = validateForWrite(next, touched, { now, mode: c.validate === 'read' ? 'read' : 'write' });
+  // review P3, lead decision). A row an adoption recorded as skipped is
+  // restorable too, exactly as journalled: the resolver skips it again, as
+  // it did then (0.29.0 final review F5).
+  const skippedKeys = readMode ? adoptedSkippedRows([...entries, ...pending]) : new Set();
+  const errs = validateForWrite(next, touched, {
+    now, mode: readMode ? 'read' : 'write', allowed: (t, row) => skippedKeys.has(`${t}\0${canonical(row)}`),
+  });
   if (errs.length) throw new ProfileWriteError('refused', `refused: ${errs[0]}`, errs);
 
   writeAtomic(files.profile, JSON.stringify(next, null, 2) + '\n');

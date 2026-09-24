@@ -12,12 +12,9 @@ import { stateFile, readJson, writeJsonAtomic } from './context.mjs';
 // on PreToolUse and spawn-log on SubagentStart). The lock is `<file>.lock`,
 // managed by the shared helper (lib/file-lock.mjs): a unique owner token,
 // broken only when its owner's pid is dead AND it is older than
-// STATE_LOCK_STALE_MS, by an atomic rename that is re-verified. True
-// guarantee: a live pid's lock is never judged stale — not that a live
-// writer's lock can never be removed. With 3 or more contenders racing a
-// crashed holder's stale lock, a rare put-back race can still let two
-// holders coexist; tracked for 0.29.1. A waiter polls for at most
-// STATE_LOCK_WAIT_MS; on timeout, or
+// STATE_LOCK_STALE_MS, and then by one waiter at a time (a claim on that
+// exact stale lock), so waiters racing a crashed holder's lock cannot leave
+// two holders. A waiter polls for at most STATE_LOCK_WAIT_MS; on timeout, or
 // when the lock cannot be created at all, fn still runs, unlocked: a hook
 // fails open and never throws for a lock. fn must not exit the process
 // (deny() does): return a verdict and act on it after the lock is released.
@@ -25,7 +22,7 @@ export const STATE_LOCK_WAIT_MS = 2000;
 export const STATE_LOCK_STALE_MS = 1000;
 export function withStateLock(file, fn) {
   return withFileLock(`${file}.lock`, () => fn(), {
-    waitMs: STATE_LOCK_WAIT_MS, staleMs: STATE_LOCK_STALE_MS, failOpen: true,
+    waitMs: STATE_LOCK_WAIT_MS, staleMs: STATE_LOCK_STALE_MS, failOpen: true, debris: [file],
   });
 }
 

@@ -7,13 +7,18 @@
 // parallel test run's load decides it. No model is called.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, readFileSync, copyFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { makeFixture, TESTS_DIR, PLUGIN_ROOT, runHook } from './helpers.mjs';
 import { sha256Text } from './fixtures/route-golden/live-gate.mjs';
 
 const BUDGET_MS = 5;
+// The guard's brief parser, premium window and lock helper (0.29.0), measured
+// separately from the routing-profile cost above (0.29.0 final review F5):
+// ~2.7 ms on the reference machine (2026-09-24, ~0.8 ms per module file),
+// budgeted with headroom so growth shows.
+const GUARD_BUDGET_MS = 4;
 // The baseline path's cost on a quiet machine (lower quartile, 2026-09-24).
 const REFERENCE_BASELINE_MS = 10.7;
 const RUNS = 15;
@@ -55,16 +60,26 @@ function realisticProfile(minRows = 0) {
 // A plugin tree staged in a temp dir: `contextSource` as hooks/lib/context.mjs
 // plus every sibling module it imports from the real hooks/lib, the CURRENT
 // config and plugin manifest. Both sides of the comparison are staged the
-// same way, so neither gets a path or cache advantage.
-function stageTree(tag, contextSource) {
+// same way, so neither gets a path or cache advantage. `extra`: more
+// hooks/lib entry modules to stage with their own sibling imports (the
+// current tree's other guard routing-path modules, which the baseline lacks).
+function stageTree(tag, contextSource, extra = []) {
   const dir = join(fx.dir, `stage-${tag}`);
   mkdirSync(join(dir, 'hooks', 'lib'), { recursive: true });
   mkdirSync(join(dir, 'config'), { recursive: true });
   mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
   writeFileSync(join(dir, 'hooks', 'lib', 'context.mjs'), contextSource);
-  for (const [, rel] of contextSource.matchAll(/from\s+['"]\.\/([\w.-]+\.mjs)['"]/g)) {
-    copyFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', rel), join(dir, 'hooks', 'lib', rel));
-  }
+  const staged = new Set(['context.mjs']);
+  const stage = (source) => {
+    for (const [, rel] of source.matchAll(/from\s+['"]\.\/([\w.-]+\.mjs)['"]/g)) {
+      if (staged.has(rel)) continue;
+      staged.add(rel);
+      copyFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', rel), join(dir, 'hooks', 'lib', rel));
+      stage(readFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', rel), 'utf8'));
+    }
+  };
+  stage(contextSource);
+  for (const m of extra) stage(`from './${m}'`);
   copyFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), join(dir, 'config', 'model-tiers.json'));
   copyFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), join(dir, '.claude-plugin', 'plugin.json'));
   return dir;
@@ -96,7 +111,11 @@ test('the timing baseline is the pre-slice-2 resolver, byte for byte', () => {
 
 test(`routing profiles add under ${BUDGET_MS} ms to the spawn guard's routing path, measured against the pre-profile baseline (module loading included, 50-row profile, cold, fresh process)`, (t) => {
   const baseRoot = stageTree('baseline', readFileSync(BASELINE, 'utf8'));
-  const curRoot = stageTree('current', readFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', 'context.mjs'), 'utf8'));
+  // The current side also loads the guard's other routing-path modules
+  // (0.29.0 final review F5): the brief parser and the premium window, which
+  // loads the lock helper.
+  const curRoot = stageTree('current', readFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', 'context.mjs'), 'utf8'), ['brief-directives.mjs', 'premium-window.mjs']);
+  assert.ok(existsSync(join(curRoot, 'hooks', 'lib', 'file-lock.mjs')), 'the lock helper is staged with the premium window');
   const withDir = join(fx.dir, 'with');
   const withoutDir = join(fx.dir, 'without');
   mkdirSync(join(withDir, 'config'), { recursive: true });
@@ -110,6 +129,7 @@ test(`routing profiles add under ${BUDGET_MS} ms to the spawn guard's routing pa
     withP.push(measure(curRoot, withDir, 'bounded-feature'));
   }
   assert.ok(withP.every((r) => r.layer === 'profile'), 'the profile row actually won');
+  assert.ok([...none, ...withP].every((r) => r.guardModules) && base.every((r) => !r.guardModules), 'the guard modules load on the current side only');
   assert.ok(none.every((r) => r.layer === 'trial') && base.every((r) => r.layer === 'trial'));
   const b = lowQ(base.map((r) => r.totalMs));
   const n = lowQ(none.map((r) => r.totalMs));
@@ -125,6 +145,13 @@ test(`routing profiles add under ${BUDGET_MS} ms to the spawn guard's routing pa
     assert.ok(added / b < share, `routing profiles add ${added.toFixed(2)} ms ${label}: ${(100 * added / b).toFixed(0)}% of the ${b.toFixed(2)} ms baseline path (budget ${(100 * share).toFixed(0)}%, i.e. ${BUDGET_MS} ms of ${REFERENCE_BASELINE_MS} ms)`);
     if (b <= REFERENCE_BASELINE_MS * 1.15) assert.ok(added < BUDGET_MS, `routing profiles add ${added.toFixed(2)} ms ${label} on a quiet run (budget ${BUDGET_MS} ms)`);
   }
+  // The guard's other routing-path modules (brief parser, premium window,
+  // lock helper; 0.29.0 final review F5), timed on their own in the same
+  // fresh processes and held to their own budget, the same way.
+  const g = lowQ([...none, ...withP].map((r) => r.guardMs));
+  t.diagnostic(`guard modules (brief-directives, premium-window, file-lock): ${g.toFixed(2)} ms, lower quartile; budget ${GUARD_BUDGET_MS} ms`);
+  assert.ok(g / b < GUARD_BUDGET_MS / REFERENCE_BASELINE_MS, `the guard modules add ${g.toFixed(2)} ms: ${(100 * g / b).toFixed(0)}% of the ${b.toFixed(2)} ms baseline path (budget ${(100 * GUARD_BUDGET_MS / REFERENCE_BASELINE_MS).toFixed(0)}%, i.e. ${GUARD_BUDGET_MS} ms of ${REFERENCE_BASELINE_MS} ms)`);
+  if (b <= REFERENCE_BASELINE_MS * 1.15) assert.ok(g < GUARD_BUDGET_MS, `the guard modules add ${g.toFixed(2)} ms on a quiet run (budget ${GUARD_BUDGET_MS} ms)`);
 });
 
 test('in-process: a warm (mtime-cached) resolve with a realistic profile stays well under the budget', () => {
