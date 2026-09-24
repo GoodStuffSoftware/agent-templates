@@ -29,7 +29,7 @@ function sha256(buf) {
 }
 
 function git(dir, args, opts = {}) {
-  return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', ...opts });
+  return execFileSync('git', ['-C', dir, ...args], { windowsHide: true, encoding: 'utf8', ...opts });
 }
 
 function makeCorpus(dir, layout) {
@@ -194,7 +194,7 @@ test('CONTROL: without .gitattributes, autocrlf=true breaks the LF round trip', 
     git(repo, ['commit', '-q', '-m', 'add']);
 
     // A fresh checkout is what a restore actually is.
-    execFileSync('git', ['--work-tree', out, '-C', repo, 'checkout-index', '-a', '-f'], { encoding: 'utf8' });
+    execFileSync('git', ['--work-tree', out, '-C', repo, 'checkout-index', '-a', '-f'], { windowsHide: true, encoding: 'utf8' });
     const restored = readFileSync(join(out, 'MEMORY.md'));
     assert.notEqual(sha256(restored), sha256(original),
       'if this passes, autocrlf was not actually active and the round-trip test below proves nothing');
@@ -226,10 +226,10 @@ test('an LF file round-trips byte-identically through commit and checkout with `
     git(repo, ['add', '-A']);
     git(repo, ['commit', '-q', '-m', 'add']);
 
-    execFileSync('git', ['--work-tree', out, '-C', repo, 'checkout-index', '-a', '-f'], { encoding: 'utf8' });
+    execFileSync('git', ['--work-tree', out, '-C', repo, 'checkout-index', '-a', '-f'], { windowsHide: true, encoding: 'utf8' });
 
     for (const [name, original] of Object.entries(cases)) {
-      const blob = execFileSync('git', ['-C', repo, 'show', `HEAD:${name}`], { encoding: 'buffer' });
+      const blob = execFileSync('git', ['-C', repo, 'show', `HEAD:${name}`], { windowsHide: true, encoding: 'buffer' });
       const restored = readFileSync(join(out, name));
       const working = readFileSync(join(repo, name));
       assert.equal(sha256(blob), sha256(original), `${name}: committed blob differs from the original bytes`);
@@ -259,8 +259,8 @@ test('an LF memory file round-trips byte-identically through a real vault sync u
     assert.equal(r.json?.committed, true, `sync should commit: ${r.stderr}`);
 
     const rel = 'projects/proj-a/memory/MEMORY.md';
-    const blob = execFileSync('git', ['-C', vault, 'show', `HEAD:${rel}`], { encoding: 'buffer' });
-    execFileSync('git', ['--work-tree', out, '-C', vault, 'checkout-index', '-a', '-f'], { encoding: 'utf8' });
+    const blob = execFileSync('git', ['-C', vault, 'show', `HEAD:${rel}`], { windowsHide: true, encoding: 'buffer' });
+    execFileSync('git', ['--work-tree', out, '-C', vault, 'checkout-index', '-a', '-f'], { windowsHide: true, encoding: 'utf8' });
     const restored = readFileSync(join(out, ...rel.split('/')));
     const working = readFileSync(join(vault, ...rel.split('/')));
 

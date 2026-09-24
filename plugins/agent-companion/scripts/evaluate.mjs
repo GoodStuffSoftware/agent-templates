@@ -15,14 +15,11 @@
 //   add --json for machine-readable output
 // Exit code: 0 fit, 1 over-provisioned, 2 under-provisioned, 3 usage error
 
-import { modelTiers, evaluateFit, resolveExpected } from '../hooks/lib/context.mjs';
+import { evaluateFit, resolveRoute, expectedFromRoute, taskTypeDef } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
 const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
-
-const cfg = modelTiers();
-const types = cfg.taskTypes || {};
 
 const model = val('--model');
 if (!model) {
@@ -32,7 +29,8 @@ if (!model) {
 const effort = (val('--effort') || '').toLowerCase();
 
 const typeName = val('--type');
-const t = typeName ? types[typeName] : null;
+// Shipped types first, then the routing profile's user-local types.
+const t = typeName ? (taskTypeDef(typeName)?.def || null) : null;
 if (typeName && !t) {
   console.error(`unknown task type "${typeName}" — see recommend.mjs --list`);
   process.exit(3);
@@ -57,10 +55,23 @@ if (weight === 'parity') {
     process.exit(3);
   }
   const [wm, we] = String(w).split('/');
+  // Same resolver as every other route: reviewer parity is F3, raised to F1
+  // on a critical change and capped by F2 (see resolveRoute()).
+  const route = resolveRoute({
+    type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
+    weightExplicit, kindExplicit, consequenceExplicit, writer: { model: wm, effort: we || '' },
+  });
+  if (!route.model) {
+    // F4: an unknown (or unavailable, unreplaced) writer model is never
+    // passed straight through as the reviewer's.
+    console.error(`cannot size a reviewer for writer "${w}": ${route.rationale}`);
+    process.exit(3);
+  }
+  // The resolver's own rationale: the writer, then every floor that moved it.
   const expected = {
-    model: wm,
-    effort: we || '',
-    rationale: `reviewer parity: match the writer (${wm}${we ? '/' + we : ''}); effort may exceed, must not drop`,
+    model: route.model,
+    effort: route.effort,
+    rationale: route.rationale,
   };
   fit = evaluateFit({ model, effort, weight, kind, consequence, expected, parity: true });
 } else {
@@ -68,17 +79,18 @@ if (weight === 'parity') {
     console.error('need --type <task-type> or --weight 1-5 (see recommend.mjs --list)');
     process.exit(3);
   }
-  // resolveExpected() is the SHARED resolver (hooks/lib/context.mjs) — the
+  // resolveRoute() is the SHARED resolver (hooks/lib/context.mjs) — the
   // SAME function scripts/recommend.mjs and hooks/spawn-guard.mjs's fit
-  // check go through, so a taskTypes.<type>.override ROUTING TRIAL (see
-  // taskTypesNote in config/model-tiers.json) is applied here too instead of
-  // silently falling back to the plain grid the way a direct effortFor()
-  // call would. Passed as `expected` so evaluateFit() uses it as-is rather
-  // than recomputing its own (override-blind) default internally.
-  const expected = resolveExpected({
+  // check go through, so the layer stack (profile > shipped ROUTING TRIAL >
+  // grid, floors after the winner) is applied here too instead of silently
+  // falling back to the plain grid the way a direct effortFor() call would.
+  // Passed as `expected` (in its compatibility shape, so --json output is
+  // unchanged) so evaluateFit() uses it as-is rather than recomputing its own
+  // default internally.
+  const expected = expectedFromRoute(resolveRoute({
     type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
     weightExplicit, kindExplicit, consequenceExplicit,
-  });
+  }));
   fit = evaluateFit({ model, effort, weight, kind, consequence, expected });
 }
 

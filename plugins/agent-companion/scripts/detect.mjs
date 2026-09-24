@@ -16,7 +16,7 @@ import { join, basename } from 'node:path';
 import { userInfo, homedir } from 'node:os';
 import {
   modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
-  homeRoot, stateRoot,
+  homeRoot, stateRoot, resolveRoute,
 } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
@@ -306,13 +306,17 @@ try {
 // nothing expires it automatically, unlike a tier's retiresAfter — so this is
 // the one signal standing between "trial" and "silently permanent." Uses
 // nowDate() (fake-clock injectable) rather than the real calendar so a test
-// can assert the finding fires without waiting on 2026-09-30.
+// can assert the finding fires without waiting on 2026-09-30. The trial is
+// read through resolveRoute()'s layer stack — the only reader of
+// taskTypes.<type>.override — so a trial that stops winning (skipped by a
+// floor) is still reviewed while it is in the table.
 try {
   const cfg = modelTiers();
   const n = nowDate();
   const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
-  for (const [name, t] of Object.entries(cfg.taskTypes || {})) {
-    const ov = t.override;
+  for (const name of Object.keys(cfg.taskTypes || {})) {
+    const entry = resolveRoute({ type: name, now: n }).stack.find((st) => st.layer === 'trial');
+    const ov = entry && entry.present ? entry.meta : null;
     if (!ov || !ov.reviewBy) continue;
     const reviewUtc = Date.parse(ov.reviewBy);
     if (Number.isNaN(reviewUtc)) continue;

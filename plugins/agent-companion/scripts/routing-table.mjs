@@ -14,7 +14,7 @@
 //   node routing-table.mjs --sync-skill FILE          # rewrite that block in FILE, between its markers
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { modelTiers, effortFor, routeForWeight } from '../hooks/lib/context.mjs';
+import { modelTiers, effortFor, routeForWeight, resolveRoute } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -25,6 +25,47 @@ const tiers = Object.entries(cfg.tiers || {}).sort((a, b) => (a[1].rank ?? 0) - 
 const efforts = Object.entries(cfg.efforts || {}).sort((a, b) => (a[1].rank ?? 0) - (b[1].rank ?? 0));
 const kinds = Object.keys(cfg.taskKinds || {});
 const weights = Object.keys(cfg.routing || {}).sort();
+
+// Which layers the table renders. The DEFAULT is the shipped table only —
+// profile:false — because this output is committed (docs/ROUTING.md, the
+// recommend skill's block) and checked by the routing-doc audit check; one
+// machine's routing profile must never leak into it. `--profile` renders the
+// table as THIS machine resolves it, with any winning routing-profile row
+// marked (the /ac routing display).
+// Combined with an output that is committed or machine-read (--out,
+// --json, --task-type-block, --sync-skill) it is refused, never silently
+// ignored (S2 review P10): those always render the shipped table.
+const withProfile = has('--profile');
+if (withProfile) {
+  const clash = ['--out', '--json', '--task-type-block', '--sync-skill'].filter(has);
+  if (clash.length) {
+    console.error(`--profile renders this machine's view for reading only; it cannot be combined with ${clash.join(', ')}, which always render the shipped table. Drop --profile, or drop ${clash.join(', ')}.`);
+    process.exit(2);
+  }
+}
+
+// A named type's route and its shipped-trial entry, both from resolveRoute()
+// — the only reader of taskTypes.<type>.override (tests/route-readers.test.mjs).
+// Every row renders the resolver's WINNING answer (after floors), whichever
+// layer produced it; `layer` says which. `won` is true only when the trial
+// actually won; `trial` is the trial entry whether or not it won.
+function typeRoute(name) {
+  const r = resolveRoute({ type: name, profile: withProfile });
+  const entry = r.stack.find((s) => s.layer === 'trial');
+  const trial = entry && entry.present ? { ...entry.candidate, ...entry.meta } : null;
+  const gridEntry = r.stack.find((s) => s.layer === 'grid');
+  const grid = gridEntry && gridEntry.candidate ? `${gridEntry.candidate.model}${gridEntry.candidate.effort ? '/' + gridEntry.candidate.effort : ''}` : '';
+  return {
+    won: r.layer === 'trial',
+    layer: r.layer,
+    profileRevision: r.profileRevision,
+    model: r.model,
+    label: `${r.model}${r.effort ? '/' + r.effort : ''}`,
+    trial,
+    grid,
+  };
+}
+const profileMark = (tr) => (tr.layer === 'profile' ? ` _(your routing profile, rev ${tr.profileRevision})_` : '');
 
 const cell = (w, k) => {
   const r = effortFor(Number(w), k);
@@ -54,17 +95,14 @@ function taskTypeBlock() {
     let route = '—';
     let premium = '—';
     if (typeof t.weight === 'number') {
-      if (t.override) {
-        route = `\`${t.override.model}${t.override.effort ? '/' + t.override.effort : ''}\` (routing trial${t.override.reviewBy ? ', review by ' + t.override.reviewBy : ''})`;
-        premium = premiumOf(t.override.model) ? 'yes' : 'no';
-      } else {
-        const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
-        route = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
-        premium = premiumOf(r.model) ? 'yes' : 'no';
-      }
+      const tr = typeRoute(name);
+      route = tr.won
+        ? `\`${tr.label}\` (routing trial${tr.trial.reviewBy ? ', review by ' + tr.trial.reviewBy : ''})`
+        : `\`${tr.label}\`${profileMark(tr)}`;
+      premium = premiumOf(tr.model) ? 'yes' : 'no';
     } else if (t.weight === 'parity') {
-      route = "writer's model; effort ≥ writer's";
-      premium = 'as writer';
+      route = "writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's";
+      premium = 'as writer (opus if critical or fable)';
     }
     B.push(`| \`${name}\` | ${route} | ${premium} | ${t.summary || ''} |`);
   }
@@ -200,30 +238,33 @@ if (cfg.reviewerParity) {
   const p = cfg.reviewerParity;
   L.push(`## Reviewer parity`);
   L.push(``);
-  L.push(`- Model must match the writer it gates: **${p.modelMustMatch ? 'yes' : 'no'}**`);
+  L.push(`- Reviewer starts at the model of the writer it gates (then the floors below apply): **${p.modelMustMatch ? 'yes' : 'no'}**`);
   L.push(`- Effort may exceed the writer's: **${p.effortMayExceed ? 'yes' : 'no'}**`);
   L.push(`- Effort may fall below the writer's: **${p.effortMayNotDrop ? 'no' : 'yes'}**`);
+  L.push(``);
+  const critFloor = cfg.consequence?.critical || {};
+  L.push(`That parity match is then floored, same as any other route (operator-decided 2026-09-24, see resolveRoute() in hooks/lib/context.mjs): a **critical** review is never sized below \`${critFloor.modelFloor}\`/\`${critFloor.effortFloor}\` (F1), never routed to fable — capped to the best available tier that is not one, which still demands its own WARRANT (F2) — and refused outright for a writer model outside the tier table, or unavailable with no staged replacement (F4). A per-user routing profile row for a parity type may only raise the resulting minimum effort further; it can never name a model.`);
   L.push(``);
 }
 
 if (cfg.taskTypes) {
   L.push(`## Task types → routing (the task model list)`);
   L.push(``);
-  L.push(`Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. \`parity\` weight = match the writer being reviewed; \`inherit\` consequence = take the change's consequence. **\`--type\` is the preferred input over raw \`--weight\`/\`--kind\`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.`);
+  L.push(`Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. \`parity\` weight = sized to the writer being reviewed (see Reviewer parity); \`inherit\` consequence = take the change's consequence. **\`--type\` is the preferred input over raw \`--weight\`/\`--kind\`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.`);
   L.push(``);
   L.push(`| Task type | Weight | Kind | Consequence | Resolves to | What it is |`);
   L.push(`|---|---|---|---|---|---|`);
   for (const [name, t] of Object.entries(cfg.taskTypes)) {
     let resolved = '—';
     if (typeof t.weight === 'number') {
-      if (t.override) {
-        resolved = `\`${t.override.model}${t.override.effort ? '/' + t.override.effort : ''}\` _(trial override)_`;
+      const tr = typeRoute(name);
+      if (tr.won) {
+        resolved = `\`${tr.label}\` _(trial override)_`;
       } else {
-        const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
-        resolved = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
+        resolved = `\`${tr.label}\`${profileMark(tr)}`;
       }
     } else if (t.weight === 'parity') {
-      resolved = '_writer\'s model; effort ≥ writer_';
+      resolved = '_writer\'s model, floored to opus/xhigh if critical and never fable; effort ≥ writer_';
     }
     L.push(`| \`${name}\` | ${t.weight} | \`${t.kind}\` | \`${t.consequence}\` | ${resolved} | ${t.summary || ''} |`);
   }
@@ -235,24 +276,24 @@ if (cfg.taskTypes) {
   L.push(`</details>`);
   L.push(``);
 
-  const overridden = Object.entries(cfg.taskTypes).filter(([, t]) => t.override);
+  const overridden = Object.entries(cfg.taskTypes)
+    .map(([name, t]) => [name, t, typeRoute(name).trial])
+    .filter(([, , ov]) => ov);
   if (overridden.length) {
     L.push(`### Routing trial (benchmark overrides, not the plain grid)`);
     L.push(``);
-    L.push(`These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit \`--weight\`/\`--kind\`/\`--consequence\` falls back to the plain grid. Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.`);
+    L.push(`These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit \`--weight\`/\`--kind\`/\`--consequence\` that departs from the type's preset falls back to the plain grid (one equal to the preset restates the type and keeps the trial). Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.`);
     L.push(``);
     L.push(`| Task type | Trial | Grid would say | Since | Review by | Evidence |`);
     L.push(`|---|---|---|---|---|---|`);
-    for (const [name, t] of overridden) {
-      const ov = t.override;
-      const grid = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
-      const gridLabel = `${grid.model}${grid.effort ? '/' + grid.effort : ''}`;
+    for (const [name, , ov] of overridden) {
+      const gridLabel = typeRoute(name).grid;
       const trialLabel = `${ov.model}${ov.effort ? '/' + ov.effort : ''}` + (ov.overridesKindDelta ? ' _(overrides kind delta)_' : '');
       const evid = ov.evidence ? `${ov.evidence.source || ''}${ov.evidence.date ? ' (' + ov.evidence.date + ')' : ''}` : '—';
       L.push(`| \`${name}\` | \`${trialLabel}\` | \`${gridLabel}\` | ${ov.trialSince || '—'} | ${ov.reviewBy || '—'} | ${evid} |`);
     }
     L.push(``);
-    for (const [name, t] of overridden) L.push(`- **\`${name}\`** — ${t.override.reason}`);
+    for (const [name, , ov] of overridden) L.push(`- **\`${name}\`** — ${ov.reason}`);
     L.push(``);
   }
 }

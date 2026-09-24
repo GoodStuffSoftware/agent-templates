@@ -44,11 +44,22 @@ test('recommend --type operate routes to opus/low under the routing trial (weigh
   assert.equal(res.json.trial.gridResolution, 'sonnet/medium', 'the plain grid must still resolve operate to sonnet/medium');
 });
 
-test('an explicit --weight bypasses the operate/verify trial override and falls back to the plain grid', () => {
-  const res = runScript('scripts/recommend.mjs', ['--type', 'verify', '--weight', '1', '--json']);
+// CHANGED in slice 1b (ADR 0003 §1, operator-approved 2026-09-24): this used
+// `--type verify --weight 1`, which EQUALS verify's preset weight. An explicit
+// value equal to the preset now restates the type and keeps its trial, so the
+// departure case uses weight 2 (still haiku on the plain grid).
+test('an explicit --weight that departs from the preset bypasses the operate/verify trial override and falls back to the plain grid', () => {
+  const res = runScript('scripts/recommend.mjs', ['--type', 'verify', '--weight', '2', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.model, 'haiku', 'an explicit --weight is a deliberate deviation from the preset, not the trial');
   assert.equal(res.json.trial, undefined);
+});
+
+test('an explicit --weight EQUAL to the preset keeps the verify trial (slice 1b)', () => {
+  const res = runScript('scripts/recommend.mjs', ['--type', 'verify', '--weight', '1', '--json']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(`${res.json.model}/${res.json.effort}`, 'opus/low');
+  assert.ok(res.json.trial);
 });
 
 test('a trivial-looking multi-step procedure against a live system must not resolve to weight 1/haiku', () => {

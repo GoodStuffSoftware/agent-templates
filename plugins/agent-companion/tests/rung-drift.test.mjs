@@ -23,6 +23,7 @@ test('a sonnet/medium spawn declaring weight 4 (table says sonnet/high) is flagg
 
     const auditScript = join(PLUGIN_ROOT, 'scripts', 'audit.mjs');
     const out = execFileSync(process.execPath, [auditScript, '--only', 'spawn-audit', '--json'], {
+      windowsHide: true,
       encoding: 'utf8', cwd: PLUGIN_ROOT, env: { ...process.env, CLAUDE_PLUGIN_DATA: pluginData }, timeout: 30000,
     });
     const spawnAudit = JSON.parse(out).results.find((r) => r.id === 'spawn-audit');

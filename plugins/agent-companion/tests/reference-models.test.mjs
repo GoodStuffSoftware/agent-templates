@@ -12,6 +12,7 @@ import { makeFixture, PLUGIN_ROOT } from './helpers.mjs';
 function runAgentDefsAudit(dir, env) {
   const auditScript = join(PLUGIN_ROOT, 'scripts', 'audit.mjs');
   const out = execFileSync(process.execPath, [auditScript, '--dir', dir, '--only', 'agent-defs', '--json'], {
+    windowsHide: true,
     encoding: 'utf8', cwd: PLUGIN_ROOT, env: { ...process.env, ...env }, timeout: 30000,
   });
   return JSON.parse(out).results.find((r) => r.id === 'agent-defs');

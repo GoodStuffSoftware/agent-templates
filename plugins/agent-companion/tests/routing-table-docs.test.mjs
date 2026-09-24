@@ -10,6 +10,7 @@ import { PLUGIN_ROOT } from './helpers.mjs';
 
 test('docs/ROUTING.md matches a fresh run of scripts/routing-table.mjs', () => {
   const fresh = execFileSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'routing-table.mjs')], {
+    windowsHide: true,
     encoding: 'utf8', cwd: PLUGIN_ROOT, timeout: 15000,
   });
   const committed = readFileSync(join(PLUGIN_ROOT, 'docs', 'ROUTING.md'), 'utf8');
@@ -18,6 +19,7 @@ test('docs/ROUTING.md matches a fresh run of scripts/routing-table.mjs', () => {
 
 test('the generated table includes the effort ladder and reference-model sections', () => {
   const out = execFileSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'routing-table.mjs')], {
+    windowsHide: true,
     encoding: 'utf8', cwd: PLUGIN_ROOT, timeout: 15000,
   });
   assert.match(out, /## Effort ladder \(cheapest to dearest\)/);
@@ -28,6 +30,7 @@ test('the generated table includes the effort ladder and reference-model section
 
 test('skills/recommend/SKILL.md carries a fresh generated task-type block (works with no shell)', () => {
   const block = execFileSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'routing-table.mjs'), '--task-type-block'], {
+    windowsHide: true,
     encoding: 'utf8', cwd: PLUGIN_ROOT, timeout: 15000,
   }).replace(/\r\n/g, '\n').trimEnd();
   const skill = readFileSync(join(PLUGIN_ROOT, 'skills', 'recommend', 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');

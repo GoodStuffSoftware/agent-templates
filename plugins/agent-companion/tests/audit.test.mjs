@@ -20,6 +20,7 @@ test('audit.mjs --only spawn-audit reads telemetry from the durable state root',
 
     const auditScript = join(PLUGIN_ROOT, 'scripts', 'audit.mjs');
     const out = execFileSync(process.execPath, [auditScript, '--only', 'spawn-audit', '--json'], {
+      windowsHide: true,
       encoding: 'utf8',
       cwd: PLUGIN_ROOT,
       env: { ...process.env, CLAUDE_PLUGIN_DATA: pluginData },

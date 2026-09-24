@@ -43,7 +43,7 @@ Config v7 (updated 2026-09-23). **Premium** = the spawn brief needs a `WARRANT:`
 | `large-refactor` | `opus/high` (routing trial, review by 2026-09-30) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
 | `novel-design` | `opus/high` (routing trial, review by 2026-09-30) | yes | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
 | `critical-change` | `opus/xhigh` | yes | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
-| `code-review` | writer's model; effort ≥ writer's | as writer | adversarial review of a diff; sized to the writer it gates |
+| `code-review` | writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's | as writer (opus if critical or fable) | adversarial review of a diff; sized to the writer it gates |
 | `long-autonomous-run` | `opus/xhigh` | yes | an agent session expected to run for hours with minimal supervision |
 | `subagent-worker` | `opus/low` (routing trial, review by 2026-09-30) | yes | a delegated worker doing a bounded, well-specified piece of a larger task |
 | `verify` | `opus/low` (routing trial, review by 2026-09-30) | yes | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
@@ -86,6 +86,14 @@ node "$AC/scripts/recommend.mjs" --type code-review --writer opus/xhigh
 Explicit flags override a task type's preset, so `--type` plus one flag is the
 common case.
 
+Add `--explain` to see HOW it was resolved: what each layer of the stack
+(routing profile > shipped routing trial > grid) would give, which layer won
+and why, which consequence floors fired, and the winner's provenance in one
+line. An explicit weight, kind or consequence that departs from the type's
+preset skips the profile and trial layers and answers from the grid; one
+equal to the preset just restates the type. Use it when the answer surprises you or
+someone asks why.
+
 ## Step 3 — act on the result, honestly
 
 State the recommendation and the rationale it printed. Then:
@@ -99,10 +107,12 @@ State the recommendation and the rationale it printed. Then:
   VERIFIED / REASONED / ASSUMED. A brief that carries that checklist on `opus`
   closes most of the gap. Fable also prefers whole-file rewrites and over-infers
   beyond explicit limits — a poor fit for scoped work even when warranted.
-- **Pair the reviewer it printed.** Same model as the writer; effort may
-  exceed, must not drop. A reviewer sized below the writer catches the errors
-  it would itself have avoided and waves through the ones it would itself have
-  made.
+- **Pair the reviewer it printed.** At least the writer's model and effort
+  (effort may exceed, must not drop); a critical change raises it to
+  opus/xhigh whatever the writer (F1), and a fable writer's reviewer is capped
+  to opus, which still needs a WARRANT (F2). A reviewer sized below the writer
+  catches the errors it would itself have avoided and waves through the ones
+  it would itself have made.
 - **Do not route on "this model sticks to instructions better."** That claim is
   not in Anthropic's docs and first-hand reports contradict it. Route on
   capability needed, search benefit, and consequence.
