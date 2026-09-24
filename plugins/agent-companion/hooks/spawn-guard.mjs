@@ -124,7 +124,8 @@ try {
   // explicit declaration, which discarded the named TYPE's preset and denied
   // the spawn its trial prescribes. A line may be list-marked (-, *) and the
   // label or value markdown-bold ("**TYPE:** integration"). Lines inside
-  // fenced code, indented code and > blockquotes are never declarations, and
+  // fenced code, indented code, > blockquotes and HTML comments are never
+  // declarations (a nested list item is not indented code), and
   // the FIRST declaration of each label wins whether or not its value is
   // valid (lib/brief-directives.mjs, RC review R1): a pasted "type: explore"
   // or "WEIGHT: 1" in the body can no longer replace or outrank the header.
