@@ -18,3 +18,7 @@ Thumbs.db
 # the maintainer ONLY; the library records anonymized ids (contrib-1, …). See
 # ARCHITECTURE.md and CONTRIBUTING.md.
 PROVENANCE.local.md
+
+# claude plugin eval output (agent-companion routing canaries). Run results are
+# local, carry per-run cost figures, and never belong in version control.
+plugins/agent-companion/evals/results/

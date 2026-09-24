@@ -10,8 +10,10 @@
 //   node routing-table.mjs               # markdown to stdout
 //   node routing-table.mjs --json        # machine-readable
 //   node routing-table.mjs --out FILE    # write markdown to FILE (e.g. docs/ROUTING.md)
+//   node routing-table.mjs --task-type-block          # the compact block skills/recommend/SKILL.md carries
+//   node routing-table.mjs --sync-skill FILE          # rewrite that block in FILE, between its markers
 
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { modelTiers, effortFor, routeForWeight } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
@@ -28,6 +30,73 @@ const cell = (w, k) => {
   const r = effortFor(Number(w), k);
   return r.model + (r.effort ? `/${r.effort}` : '');
 };
+
+// A compact task-type -> route block, spliced into skills/recommend/SKILL.md
+// between the markers below. Why the skill carries a copy at all: a session
+// with no shell and no read access outside its working directory (an eval
+// sandbox, a read-only session) cannot run recommend.mjs or open
+// docs/ROUTING.md, so without this block the skill has no routing data and
+// the model falls back to its own taste -- found by the routing eval suite
+// (evals/), where the architecture canary answered opus/xhigh instead of the
+// trial's opus/high. GENERATED like docs/ROUTING.md, and checked by the same
+// routing-doc audit check, so it cannot drift from the config.
+const SKILL_BLOCK_BEGIN = '<!-- routing-table:task-types BEGIN (generated from config/model-tiers.json by scripts/routing-table.mjs --sync-skill; do not edit by hand) -->';
+const SKILL_BLOCK_END = '<!-- routing-table:task-types END -->';
+
+function taskTypeBlock() {
+  const B = [SKILL_BLOCK_BEGIN];
+  B.push(`Config v${cfg.version} (updated ${cfg.updated}). **Premium** = the spawn brief needs a \`WARRANT:\` line. Fable never appears here: it is a warranted exception, not a route.`);
+  B.push('');
+  B.push('| Task type | Route | Premium | What it is |');
+  B.push('|---|---|---|---|');
+  const premiumOf = (alias) => !!(cfg.tiers?.[alias]?.premium);
+  for (const [name, t] of Object.entries(cfg.taskTypes || {})) {
+    let route = '—';
+    let premium = '—';
+    if (typeof t.weight === 'number') {
+      if (t.override) {
+        route = `\`${t.override.model}${t.override.effort ? '/' + t.override.effort : ''}\` (routing trial${t.override.reviewBy ? ', review by ' + t.override.reviewBy : ''})`;
+        premium = premiumOf(t.override.model) ? 'yes' : 'no';
+      } else {
+        const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
+        route = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
+        premium = premiumOf(r.model) ? 'yes' : 'no';
+      }
+    } else if (t.weight === 'parity') {
+      route = "writer's model; effort ≥ writer's";
+      premium = 'as writer';
+    }
+    B.push(`| \`${name}\` | ${route} | ${premium} | ${t.summary || ''} |`);
+  }
+  B.push(SKILL_BLOCK_END);
+  return B.join('\n');
+}
+
+// Replaces the marked block in `text` with a fresh one. Returns null when the
+// markers are missing (the caller reports it rather than guessing a spot).
+function spliceSkillBlock(text, block = taskTypeBlock()) {
+  const s = text.indexOf(SKILL_BLOCK_BEGIN);
+  const e = text.indexOf(SKILL_BLOCK_END);
+  if (s < 0 || e < 0 || e < s) return null;
+  return text.slice(0, s) + block + text.slice(e + SKILL_BLOCK_END.length);
+}
+
+// CLI only (this file renders at top level and is never imported): the
+// routing-doc audit check and the tests exec it with these flags.
+if (has('--task-type-block')) {
+  process.stdout.write(taskTypeBlock() + '\n');
+  process.exit(0);
+}
+
+if (has('--sync-skill')) {
+  const file = val('--sync-skill');
+  const before = readFileSync(file, 'utf8');
+  const after = spliceSkillBlock(before.replace(/\r\n/g, '\n'));
+  if (after == null) { console.error(`${file}: routing-table markers not found`); process.exit(1); }
+  writeFileSync(file, after);
+  console.log(`synced task-type block in ${file}`);
+  process.exit(0);
+}
 
 if (has('--json')) {
   const grid = {};
