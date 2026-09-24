@@ -51,8 +51,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { classifyModel, classifyReferenceModel, isModelAvailable, effortSupported } from '../hooks/lib/context.mjs';
+import { execFile, execFileSync } from 'node:child_process';
+import {
+  classifyModel, classifyReferenceModel, isModelAvailable, effortSupported, classifyEffort,
+} from '../hooks/lib/context.mjs';
 import { removeDirWithRetry } from './tasks/common.mjs';
 
 // Bump whenever buildJudgePrompt()'s wording changes: every calibration
@@ -61,7 +63,15 @@ import { removeDirWithRetry } from './tasks/common.mjs';
 export const JUDGE_TEMPLATE_VERSION = 1;
 export const JUDGE_VOTES = 3;
 export const JUDGE_PASS_VOTES = 2;
-export const JUDGE_EFFORTS = ['low', 'medium', 'high'];
+// 'xhigh' is allowed (not 'max' -- that stays out of reach: the runner's own
+// reviewer-parity rule says a judge must be AT LEAST as strong an effort as
+// the author it is grading, never that it must match every effort the
+// author could reach). Without xhigh here, a fable/xhigh or opus/xhigh
+// author could never get a judge whose effort was at least its own -- the
+// judge would always be reviewing upward, the opposite of the method's own
+// rule (see checkJudgeEligibility's "at least as strong" MODEL rule above;
+// this is the same rule applied to the effort axis).
+export const JUDGE_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 export const JUDGE_DEFAULT_EFFORT = 'medium';
 // Per-call budget, in SONNET dollars (scaled by the judge's price before use,
 // same as every task budget -- see bench/runner.mjs scaledMaxBudgetUsd()).
@@ -87,6 +97,20 @@ export function validateJudgeConfig(cfg = {}) {
   if (model && !/^claude-/.test(model)) problems.push(`judge model "${model}" must be a full model id (claude-...), not an alias -- aliases float across versions`);
   let effort = cfg.effort == null ? JUDGE_DEFAULT_EFFORT : String(cfg.effort).toLowerCase();
   if (!JUDGE_EFFORTS.includes(effort)) problems.push(`judge effort "${effort}" is not allowed (allowed: ${JUDGE_EFFORTS.join(', ')}) -- capped so a judge cannot cost more than the run it grades`);
+  // Reviewer-parity floor on the EFFORT axis: a judge grading a stronger
+  // author-effort answer must be bumped up to at least that effort, the same
+  // rule checkJudgeEligibility() already enforces for the MODEL axis. Only
+  // raises -- never lowers -- the configured effort, and never past the
+  // highest allowed value above (xhigh): an author run at 'max' still gets
+  // the strongest judge effort available rather than being refused outright.
+  if (cfg.authorEffort != null && JUDGE_EFFORTS.includes(effort)) {
+    const authorRank = classifyEffort(cfg.authorEffort).rank;
+    const judgeRank = classifyEffort(effort).rank;
+    if (authorRank > judgeRank) {
+      const bumped = JUDGE_EFFORTS.find((e) => classifyEffort(e).rank >= authorRank);
+      effort = bumped || JUDGE_EFFORTS[JUDGE_EFFORTS.length - 1];
+    }
+  }
   // A tier that takes no effort parameter at all (haiku) gets none sent.
   if (model) {
     const sup = effortSupported(model, effort);
@@ -149,96 +173,145 @@ export function scrubIdentity(text, { codeSafe = false } = {}) {
 
 // ------------------------------------------------------------------ diff --
 
-// Line diff via LCS, rendered as unified hunks with 3 lines of context. Zero
-// dependencies on purpose (the sandbox trees are small text fixtures). Files
-// past MAX_LCS_LINES fall back to "whole file replaced" rather than an
-// O(n*m) table that could stall a batch.
-const MAX_LCS_LINES = 3000;
-
-function lineDiff(a, b) {
-  const n = a.length;
-  const m = b.length;
-  if (n > MAX_LCS_LINES || m > MAX_LCS_LINES) {
-    return [...a.map((l) => ['-', l]), ...b.map((l) => ['+', l])];
-  }
-  const w = m + 1;
-  const dp = new Uint32Array((n + 1) * w);
-  for (let i = n - 1; i >= 0; i -= 1) {
-    for (let j = m - 1; j >= 0; j -= 1) {
-      dp[i * w + j] = a[i] === b[j] ? dp[(i + 1) * w + j + 1] + 1 : Math.max(dp[(i + 1) * w + j], dp[i * w + j + 1]);
-    }
-  }
-  const ops = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) { ops.push([' ', a[i]]); i += 1; j += 1; }
-    else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) { ops.push(['-', a[i]]); i += 1; }
-    else { ops.push(['+', b[j]]); j += 1; }
-  }
-  while (i < n) { ops.push(['-', a[i]]); i += 1; }
-  while (j < m) { ops.push(['+', b[j]]); j += 1; }
-  return ops;
-}
-
-function hunks(ops, context = 3) {
-  const changed = ops.map((o) => o[0] !== ' ');
-  const out = [];
-  let k = 0;
-  while (k < ops.length) {
-    if (!changed[k]) { k += 1; continue; }
-    const start = Math.max(0, k - context);
-    let end = k;
-    while (end < ops.length) {
-      if (changed[end]) { end += 1; continue; }
-      let run = end;
-      while (run < ops.length && !changed[run]) run += 1;
-      if (run - end > context * 2 || run === ops.length) { end = Math.min(ops.length, end + context); break; }
-      end = run;
-    }
-    out.push(ops.slice(start, end));
-    k = end;
-  }
-  return out;
-}
-
-function splitLines(text) {
-  if (text == null) return [];
-  const s = String(text).replace(/\r\n/g, '\n');
-  const lines = s.split('\n');
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  return lines;
-}
-
-// Unified-style diff between two sandbox trees ({ relPath: content }).
-// `exclude` paths (e.g. the guard sentinel file) are never shown.
-export function treeDiff(oldTree = {}, newTree = {}, { exclude = [] } = {}) {
-  const skip = new Set(exclude);
-  const paths = [...new Set([...Object.keys(oldTree), ...Object.keys(newTree)])].filter((p) => !skip.has(p)).sort();
-  const parts = [];
-  for (const p of paths) {
-    const a = oldTree[p];
-    const b = newTree[p];
-    if (a === b) continue;
-    parts.push(`--- ${a == null ? '/dev/null' : 'a/' + p}`);
-    parts.push(`+++ ${b == null ? '/dev/null' : 'b/' + p}`);
-    for (const h of hunks(lineDiff(splitLines(a), splitLines(b)))) {
-      parts.push('@@');
-      for (const [op, line] of h) parts.push(op + line);
-    }
-  }
-  return parts.join('\n');
-}
-
-// ---------------------------------------------------------------- prompt --
-
-const JUDGE_SYSTEM = 'You are a careful, skeptical software reviewer acting as a grader. You grade one candidate change against a rubric. You have no tools; everything you need is in the message.';
-
 function clip(text, max) {
   const s = String(text ?? '');
   if (s.length <= max) return { text: s, truncated: false };
   return { text: s.slice(0, max) + `\n[... truncated: ${s.length - max} more characters not shown ...]`, truncated: true };
 }
+
+// GIT_* stripped before every `git diff --no-index` shell-out. This module
+// runs inside a benchmark harness that is itself usually invoked from
+// within a git worktree (see this repo's own CI), so an ambient GIT_DIR,
+// GIT_WORK_TREE, GIT_INDEX_FILE, etc. inherited from the calling process
+// could point the diff at the wrong repository state instead of the two
+// plain temp files it is actually given. No shared git-env helper exists
+// yet anywhere in this plugin (checked hooks/lib and scripts/lib) so this
+// strips locally rather than reaching for one that isn't there.
+function gitCleanEnv() {
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/.test(k)));
+}
+
+// Round 2026-09 fix: a file over MAX_LCS_LINES (the old hand-rolled LCS
+// differ's fallback threshold) used to be treated as "whole file replaced"
+// -- every old line as a deletion, every new line as an insertion -- rather
+// than run an O(n*m) table that could stall a batch. On a repo with large
+// central files that turned a one-line change into a 440-780K character
+// diff of pure noise, and the first real architecture-pack judge pass
+// scored 0/21 because of it. `git diff --no-index` computes a real,
+// minimal diff regardless of file size, so the LCS engine (and its
+// whole-file fallback) is gone entirely -- not tuned, removed.
+//
+// Ordered source-first, then tests, then docs (`diffBucket()` below): the
+// judge's context budget is capped (JUDGE_MAX_DIFF_CHARS), so if anything
+// gets truncated it should be the docs, not the fix itself.
+function diffBucket(relPath) {
+  const base = relPath.split('/').pop() || '';
+  if (/(^|\/)(tests?|__tests__|spec)(\/|$)/i.test(relPath) || /\.(test|spec)\.[^./]+$/i.test(base)) return 1;
+  if (/\.mdx?$/i.test(base) || /(^|\/)(docs?|documentation)(\/|$)/i.test(relPath) || /^readme(\.|$)/i.test(base)) return 2;
+  return 0;
+}
+
+// Same CRLF normalisation the old differ's splitLines() applied: a file
+// that is byte-identical content but checked out with different line
+// endings (routine on Windows) must not read as a full-file replacement.
+// A file that genuinely differs ONLY by EOL style still shows as a real
+// (if small) change -- this normalises both sides the same way, it does
+// not hide a real difference.
+function normalizeEol(s) {
+  return s == null ? null : String(s).replace(/\r\n/g, '\n');
+}
+
+// Diffs one path via a real `git diff --no-index`. `git` cannot take a
+// literal "/dev/null" path on Windows (there is no such device -- confirmed
+// empirically: git errors "Could not access" rather than treating it as an
+// empty file the way it does on POSIX), so an absent side is always a real,
+// empty temp file underneath; the /dev/null label in the header below is
+// purely cosmetic and rebuilt by hand so the presentation is the same on
+// every platform regardless of what git itself would have printed.
+function diffOnePath(baseDir, relPath, oldContent, newContent) {
+  const segments = relPath.split('/');
+  const aPath = path.join(baseDir, 'a', ...segments);
+  const bPath = path.join(baseDir, 'b', ...segments);
+  fs.mkdirSync(path.dirname(aPath), { recursive: true });
+  fs.mkdirSync(path.dirname(bPath), { recursive: true });
+  fs.writeFileSync(aPath, oldContent == null ? '' : normalizeEol(oldContent));
+  fs.writeFileSync(bPath, newContent == null ? '' : normalizeEol(newContent));
+  let out = '';
+  try {
+    // -c core.autocrlf=false / core.safecrlf=false: this call's own -- not
+    // the operator's global -- config, scoped to this one invocation only
+    // (never `git config`, per house rule). Content is already normalised
+    // to LF above; without this, a machine with autocrlf=true prints a
+    // "LF will be replaced by CRLF" warning to stderr for every temp file
+    // written here, which is harmless but pure noise in test/CI output.
+    out = execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', 'diff', '--no-index', '--no-color', '-U3', '--', aPath, bPath], {
+      encoding: 'utf8', windowsHide: true, env: gitCleanEnv(), maxBuffer: 1024 * 1024 * 64,
+    });
+  } catch (e) {
+    // git diff --no-index exits 1 when the two files differ -- the normal,
+    // expected case, not a failure -- and execFileSync throws on any
+    // non-zero exit. The real diff text is still on e.stdout.
+    out = (e && typeof e.stdout === 'string') ? e.stdout : '';
+  }
+  if (!out.trim()) return '';
+  // Drop git's own "diff --git", "index ...", "---", "+++" lines (which
+  // carry this call's real, non-deterministic temp-file paths) and rebuild
+  // the header with the stable a/<relPath> b/<relPath> (or /dev/null) form
+  // every caller of treeDiff() already expects.
+  const forwardRel = segments.join('/');
+  const aLabel = oldContent == null ? '/dev/null' : `a/${forwardRel}`;
+  const bLabel = newContent == null ? '/dev/null' : `b/${forwardRel}`;
+  const lines = out.split('\n');
+  const body = [];
+  let pastHeader = false;
+  for (const line of lines) {
+    if (!pastHeader) {
+      if (line.startsWith('+++ ')) pastHeader = true;
+      continue;
+    }
+    body.push(line);
+  }
+  while (body.length && body[body.length - 1] === '') body.pop();
+  return [`--- ${aLabel}`, `+++ ${bLabel}`, ...body].join('\n');
+}
+
+// Diff between two sandbox trees ({ relPath: content }), via real
+// `git diff --no-index` per changed path (bench/judge.mjs.test.mjs: "the
+// sandbox trees are small text fixtures", so one process per changed path
+// is cheap). `exclude` paths (e.g. the guard sentinel file) are never
+// shown. Ordered source-first/tests/docs and capped at JUDGE_MAX_DIFF_CHARS
+// with an explicit truncation marker, same shape callers already rely on
+// from buildJudgePrompt()'s own clip() below.
+export function treeDiff(oldTree = {}, newTree = {}, { exclude = [] } = {}) {
+  const skip = new Set(exclude);
+  const paths = [...new Set([...Object.keys(oldTree), ...Object.keys(newTree)])].filter((p) => !skip.has(p));
+  const changed = paths.filter((p) => oldTree[p] !== newTree[p]);
+  if (!changed.length) return '';
+  changed.sort((x, y) => {
+    const bx = diffBucket(x);
+    const by = diffBucket(y);
+    if (bx !== by) return bx - by;
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ac-judge-treediff-'));
+  try {
+    const parts = [];
+    for (const p of changed) {
+      const d = diffOnePath(baseDir, p, oldTree[p] ?? null, newTree[p] ?? null);
+      if (d) parts.push(d);
+    }
+    return clip(parts.join('\n'), JUDGE_MAX_DIFF_CHARS).text;
+  } finally {
+    // Best-effort cleanup: a leaked temp dir here is harmless, same
+    // acceptance as the judge vote's own tmp cwd in makeCliJudgeCaller()
+    // below -- never worth risking a synchronous retry stall over.
+    try { fs.rmSync(baseDir, { recursive: true, force: true }); } catch { /* leaked temp dir: harmless */ }
+  }
+}
+
+// ---------------------------------------------------------------- prompt --
+
+const JUDGE_SYSTEM = 'You are a careful, skeptical software reviewer acting as a grader. You grade one candidate change against a rubric. You have no tools; everything you need is in the message.';
 
 // Deterministic, and BLIND by construction: its only inputs are the task
 // brief, the rubric, the change, and the candidate's scrubbed final message.
@@ -303,12 +376,38 @@ export function parseVerdict(text) {
 // this async path; this was the one remaining synchronous cleanup call in
 // the concurrent run path (docs/BENCHMARK.md "Sandbox cleanup retry
 // (Windows)").
-export function makeCliJudgeCaller(getBin, { removeDirImpl = removeDirWithRetry } = {}) {
+// Round 2026-09 fix 2: `user` (the full judge prompt, including the
+// candidate's diff -- see JUDGE_MAX_DIFF_CHARS/JUDGE_MAX_MESSAGE_CHARS
+// above, tens of thousands of characters) used to be passed as a `-p <arg>`
+// COMMAND-LINE argument. Windows has a hard per-process command-line length
+// limit (~32K chars total, well under one large prompt on its own once the
+// executable path and other flags are added), so a large vote failed with
+// ENAMETOOLONG before the process even started. The prompt is now piped
+// through the child's stdin instead: `-p` with no positional prompt
+// argument reads the prompt from stdin (confirmed against `claude --help`:
+// `--input-format text` -- the default -- is documented only as "(only
+// works with --print)" with no separate stdin flag, because reading stdin
+// as the prompt IS the default text-input behaviour when print mode is
+// asked for no positional prompt). This mirrors bench/runner.mjs's own
+// `runClaude()`, which still passes its (much shorter, task-sized) prompt
+// as an argument -- runner.mjs is owned by another worker in this pass, so
+// its own ENAMETOOLONG exposure on a future oversized task prompt is
+// reported, not fixed, here.
+// `execFileImpl` is a test seam (same style as `removeDirImpl`): production
+// always gets the real node:child_process `execFile`. A test can inject a
+// fake with the same `(bin, args, options, callback) => child` signature to
+// prove the prompt reaches stdin, and never argv, without spawning a real
+// OS process or depending on how this machine's `claude` binary happens to
+// be packaged (an npm-installed `.cmd` shim on Windows cannot even be
+// launched via a shell-less execFile on current Node -- confirmed while
+// building this fix -- so a real end-to-end spawn test would be testing
+// Node/npm packaging, not this code).
+export function makeCliJudgeCaller(getBin, { removeDirImpl = removeDirWithRetry, execFileImpl = execFile } = {}) {
   return function callJudgeViaCli({ system, user, model, effort, maxBudgetUsd }) {
     return new Promise((resolve) => {
       const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-judge-'));
       const args = [
-        '-p', user,
+        '-p',
         '--model', model,
         '--output-format', 'json',
         '--system-prompt', system,
@@ -319,7 +418,7 @@ export function makeCliJudgeCaller(getBin, { removeDirImpl = removeDirWithRetry 
         '--max-budget-usd', String(maxBudgetUsd),
       ];
       if (effort) args.push('--effort', effort);
-      execFile(getBin(), args, {
+      const child = execFileImpl(getBin(), args, {
         cwd, env: { ...process.env }, encoding: 'utf8', maxBuffer: 1024 * 1024 * 16, timeout: 10 * 60 * 1000,
         windowsHide: true,
       }, (err, stdout) => {
@@ -338,6 +437,16 @@ export function makeCliJudgeCaller(getBin, { removeDirImpl = removeDirWithRetry 
           });
         });
       });
+      // The prompt goes on stdin, not argv (see the fix note above). Written
+      // AFTER execFile() so `child.stdin` already exists; guarded because a
+      // getBin() that resolves to a nonexistent binary (the test suite's
+      // NO_CLAUDE / CLAUDE_BIN-not-found seam) can fail synchronously before
+      // stdin is ever attached, and a write to a dead pipe would otherwise
+      // throw EPIPE past this function's own error handling.
+      try {
+        child.stdin.write(user, 'utf8');
+        child.stdin.end();
+      } catch { /* process already gone (e.g. ENOENT on getBin()): the exit handler above still fires */ }
     });
   };
 }

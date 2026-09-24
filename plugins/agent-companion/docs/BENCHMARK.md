@@ -274,14 +274,24 @@ word "fail"; "false-positive" matching bare "false"; methodology text like
 
 ## Rubric judge (optional, a separate score)
 
+**This is a design-quality signal ONLY, never a correctness check.**
+Correctness comes from the hidden tests alone. Found running the judge
+against real (non-fixture) architecture-pack work, 2026-09: the judge does
+**not** track the hidden tests on real tasks -- it passed changes that the
+hidden tests then failed. Treat `judge_pass` as "does this look like a sound
+design", never as a proxy for "does it work", and never gate a merge or a
+pass/fail decision on it alone.
+
 A hidden test answers "does it work". It cannot say whether the change fixed
 the real cause or special-cased the test, stayed in scope, or added needless
 complexity. Once every cell passes (the default outcome, see "Ceiling
 effects"), those are the only quality differences left.
 `bench/judge.mjs` grades a run's **change** (a unified diff of the sandbox,
-before -> after) against a **rubric that lives in the task definition**: a
-task pack's `rubric.md`, or a built-in task's `rubric` string. It is off
-unless you pass `--judge-model`, and it only runs on tasks that have a rubric.
+before -> after, built with `git diff --no-index` per changed file, ordered
+source-then-tests-then-docs and capped/truncated -- see `treeDiff()`)
+against a **rubric that lives in the task definition**: a task pack's
+`rubric.md`, or a built-in task's `rubric` string. It is off unless you pass
+`--judge-model`, and it only runs on tasks that have a rubric.
 
 The rules, each enforced in code and covered by `tests/bench-judge.test.mjs`
 (every test stubs the judge; nothing there calls a model):
@@ -296,9 +306,13 @@ The rules, each enforced in code and covered by `tests/bench-judge.test.mjs`
 2. **Three independent calls; pass on 2 of 3.** Each vote is a fresh
    `claude -p` with no tools (`--tools ""`), no settings, no MCP, no session
    persistence, and an empty working directory. This mirrors
-   `claude plugin eval`'s `llm` grader. A vote with no parseable verdict is
-   recorded as `null`, never guessed. With fewer than 2 readable votes the
-   run's `judge_pass` is `null`, and it is excluded from the judge rate.
+   `claude plugin eval`'s `llm` grader. The prompt (which can run tens of
+   thousands of characters once the diff and rubric are in it) is piped
+   through the child's stdin, not passed as a `-p <arg>` command-line
+   argument -- a large prompt on argv hits Windows's ENAMETOOLONG before the
+   process even starts. A vote with no parseable verdict is recorded as
+   `null`, never guessed. With fewer than 2 readable votes the run's
+   `judge_pass` is `null`, and it is excluded from the judge rate.
 3. **Reason before the verdict.** The prompt asks for `REASONING:` first and a
    single `VERDICT: PASS|FAIL` line last. Only the last verdict line counts.
 4. **Blind.** The prompt builder takes only the task brief, the rubric, the
@@ -308,13 +322,21 @@ The rules, each enforced in code and covered by `tests/bench-judge.test.mjs`
    message. In the diff only attribution lines are scrubbed, because code
    may legitimately name models. Two cells that make the same change produce
    byte-identical judge input.
-5. **Capped.** Effort is limited to `low|medium|high` (default `medium`). The
-   per-vote budget defaults to $0.30 with a hard cap of $1.00, both in Sonnet
-   dollars and scaled by the judge's price like every task budget.
-   **Temperature is never sent.** Current judge-eligible models (Sonnet 5,
-   Opus 5/5.5, Fable 5/5.1) reject sampling parameters with an HTTP 400, and
-   `claude -p` exposes none. Setting one is refused rather than silently
-   ignored. Variance is controlled by fixed effort and the 3-vote majority.
+5. **Capped, but never below the author's effort.** Effort is limited to
+   `low|medium|high|xhigh` (default `medium`; `max` stays out of reach). The
+   configured effort is bumped up to at least the effort the answer under
+   grading was produced at (`validateJudgeConfig`'s `authorEffort`) -- the
+   same reviewer-parity rule `checkJudgeEligibility` already applies to the
+   MODEL axis, applied here to the EFFORT axis, so a fable/xhigh or
+   opus/xhigh answer can never end up with a judge reviewing at a lower
+   effort than the one it is judging. It is never lowered below its own
+   configured value. The per-vote budget defaults to $0.30 with a hard cap of
+   $1.00, both in Sonnet dollars and scaled by the judge's price like every
+   task budget. **Temperature is never sent.** Current judge-eligible models
+   (Sonnet 5, Opus 5/5.5, Fable 5/5.1) reject sampling parameters with an
+   HTTP 400, and `claude -p` exposes none. Setting one is refused rather than
+   silently ignored. Variance is controlled by fixed effort and the 3-vote
+   majority.
 6. **Logged separately.** The judge fills its own columns: `judge_pass`,
    `judge_votes`, `judge_invalid_votes`, `judge_cost_usd`, `judge_model`,
    `judge_effort`, `judge_rubric_sha256`, `judge_prompt_sha256` and
@@ -342,6 +364,14 @@ The trust record lives in `<data dir>/benchmarks/judge-calibrations.json`
 template version. Change any of them and the judge must be re-calibrated. A
 judge that passes everything, or fails everything, is written down as
 **untrusted** and is never honoured.
+
+**Cost (measured, 2026-09-24).** A judge vote at fable/high cost roughly
+**$0.81** -- about 3x the rough pre-measurement estimate -- and a 21-answer
+architecture-pack judge pass came to about **$54** total. Budget from this
+measured figure, not a hand-waved one; a `--judge-model`/`--judge-effort`
+combination the plan hasn't priced yet can still run well over the $1.00
+per-vote cap's Sonnet-dollar-scaled equivalent for a large prompt, so check
+`judge_cost_usd` on a small run before committing to a full grid.
 
 ```bash
 # 1. calibrate (real judge calls: 3 votes x (1 good + N bad) per rubric task)
