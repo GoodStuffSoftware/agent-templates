@@ -19,7 +19,8 @@ through unchanged.
 |---|---|---|
 | `recommend <args>` | `agent-companion:recommend` | `node "$AC/scripts/recommend.mjs" <args>` |
 | `evaluate <args>` | `agent-companion:evaluate` | `node "$AC/scripts/evaluate.mjs" <args>` |
-| `routing` or `table` | `agent-companion:routing-table` | `node "$AC/scripts/routing-table.mjs"` |
+| `routing` or `table` | `agent-companion:routing-table` | `node "$AC/scripts/routing-table.mjs" --profile` |
+| `routing set …`, `routing unset …`, `routing show`, `routing why …`, `routing rollback …` | `agent-companion:routing-table` (its "Your routing profile" section) | `node "$AC/scripts/routing-profile.mjs" <set\|unset\|show\|why\|rollback> <args>` |
 | `audit <args>` | `agent-companion:audit` | `node "$AC/scripts/audit.mjs" <args>` |
 | `brevity <args>` or `quiet <args>` | `agent-companion:brevity` | `node "$AC/scripts/brevity.mjs" <args>` |
 | `rules <args>` | `agent-companion:standing-rules` | `node "$AC/scripts/rules.mjs" <args>` |
