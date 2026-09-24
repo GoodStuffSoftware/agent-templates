@@ -12,6 +12,15 @@
 // line READS a task type's trial, it does not belong here: go through
 // resolveRoute() (its stack carries the trial entry and metadata).
 export const ALLOWED = {
+  "bench/estimate.mjs": [
+    "// on this machine. Override via estimateRun()'s `overheadFactor`.",
+  ],
+  "bench/runner.mjs": [
+    "// overrides). See docs/BENCHMARK.md \"Parallel runs\".",
+  ],
+  "bench/tasks/common.mjs": [
+    "// overrides either.",
+  ],
   "bench/tasks/hard-instruction-logic.mjs": [
     "lines.push(\"11. Precedence: for records with CATEGORY = test AND owner exactly unassigned, do NOT add \" + bq(\"needs-owner\") + \" (this overrides rule 8) -- except see rule 12.\");",
     "lines.push(\"12. Precedence: rule 11's exemption is itself cancelled when the record is ACTIVE (as defined in rule 4). That is: a record with CATEGORY = test, owner exactly unassigned, AND ACTIVE = true DOES get the \" + bq(\"needs-owner\") + \" flag after all (this overrides rule 11, which overrides rule 8).\");",
