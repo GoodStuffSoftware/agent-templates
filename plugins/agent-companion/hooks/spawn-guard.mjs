@@ -26,19 +26,20 @@
 import { createHash } from 'node:crypto';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  premiumWindowLive, PREMIUM_WINDOW_MS, withStateLock, writeJsonAtomic, premiumAgentType,
+  writeJsonAtomic,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef,
 } from './lib/context.mjs';
+import { premiumWindowLive, PREMIUM_WINDOW_MS, withStateLock, premiumAgentType } from './lib/premium-window.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract } from './lib/brevity.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
 
-const WINDOW_MS = PREMIUM_WINDOW_MS; // rolling window used to approximate concurrency (see context.mjs)
+const WINDOW_MS = PREMIUM_WINDOW_MS; // rolling window used to approximate concurrency (see lib/premium-window.mjs)
 
 // Allow — optionally saying something to the user, and/or rewriting the tool
 // input (`updatedInput` is how a PreToolUse hook fills in a model the spawn
@@ -810,13 +811,13 @@ try {
     const f = stateFile('premium-window.json');
     const now = Date.now();
     // The whole read-count-write runs under the window lock, shared with
-    // SubagentStart's confirmPremiumStart (context.mjs withStateLock): without
+    // SubagentStart's confirmPremiumStart (lib/premium-window.mjs withStateLock): without
     // it a parallel burst of premium spawns each read the same count and all
     // passed the cap, and a guard and a start interleaving lost an entry.
     // deny() exits the process, so the verdict is acted on after the lock.
     const counted = withStateLock(f, () => {
       // Started spawns count for the window; a spawn not yet confirmed started
-      // counts only while young (premiumWindowLive, context.mjs), so one the
+      // counts only while young (premiumWindowLive, lib/premium-window.mjs), so one the
       // harness rejects stops holding a slot instead of extending the block.
       const recent = premiumWindowLive(readJson(f, []), now);
       if (recent.length >= cap) {
@@ -827,7 +828,7 @@ try {
       // started at once: there is no evidence SubagentStart fires for one, and
       // under-counting it would reopen the fan-out this cap exists to bound.
       // `atype` lets SubagentStart confirm this entry only on a start of the
-      // same agent type (confirmPremiumStart, context.mjs).
+      // same agent type (confirmPremiumStart, lib/premium-window.mjs).
       if (!isCanary) writeJsonAtomic(f, [...recent, { t: now, sid, confirmed: !!input.team_name, atype: premiumAgentType(input.subagent_type) }]);
       return null;
     });

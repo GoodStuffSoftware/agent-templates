@@ -8,16 +8,12 @@
 
 import {
   readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync,
-  openSync, fstatSync, readSync, closeSync, unlinkSync, renameSync,
+  openSync, fstatSync, readSync, closeSync,
 } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
-import {
-  readProfile, rowShapeErrors, typeShapeErrors, ACTIVE_STATES,
-  PROFILE_FILE, INVALID_MARKER_FILE,
-} from './routing-profile.mjs';
 
 // Agent types observed in the shipped binary (2.1.220). The binary tests the
 // main thread with `agentType === "main"`, but mainThreadAgentType is settable
@@ -320,15 +316,10 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 // honoured, floored and explained identically wherever the table is consulted.
 //
 // Layer stack, highest first, for a TYPE resolved as-is:
-//   1. profile — a per-user routing-profile row (<stateRoot>/config/
-//      routing-profile.json; format in hooks/lib/routing-profile.mjs). It
-//      applies when its state is trial or adopted, it is not hard-stale, it
-//      breaks none of F1-F4, and the routing_profile option is on (the kill
-//      switch: off means the file is not even read). A file that fails to
-//      parse or validate, or carries a higher major schemaVersion, is
-//      ignored AS A WHOLE and the shipped table answers (fail open); the
-//      failure is returned as profileStatus/profileError and recorded in
-//      state/routing-profile-invalid.json for the scout.
+//   1. profile — a per-user routing-profile row. A SEAM ONLY in this release:
+//      profileLayer() yields nothing and profileRevision is always null. The
+//      profile file, its validation and the routing_profile kill switch
+//      arrive in a later slice without any caller changing.
 //   2. trial   — the shipped ROUTING TRIAL (`taskTypes.<type>.override`).
 //   3. grid    — effortFor(weight, kind, consequence), or reviewer parity for
 //      a parity-sized type when a writer is supplied.
@@ -345,21 +336,16 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 //       effort >= its effortFloor (xhigh). Inviolable.
 //   F2  fable — and any premium tier ranked at or above fable — is never a
 //       destination: a layer-1/2 candidate naming one is skipped. Inviolable.
-//   F3  reviewer parity: the reviewer starts at the writer's model and
-//       effort; effort may exceed the writer's but not drop below it. F1
-//       then raises and F2 caps it (see "Reviewer parity" below). Inviolable.
+//   F3  reviewer parity: the model matches the writer; effort may exceed the
+//       writer's but not drop below it. Inviolable.
 //   F4  availability: a layer-1/2 candidate's alias must be available (not
 //       retired) and must accept the named effort, or it is skipped. The
 //       build half of F4 (aliasResolution.minClaudeCodeVersion) needs the
 //       CALLING session's build, which only the spawn guard can read, so it
 //       stays there (SPAWNING RULE 2).
-//   F5  elevated consequence effort floor (high). Soft: a profile row may
-//       waive it with waivesFloor: "elevated", honoured ONLY when the row's
-//       source is operator-observed (result.waiver; explain always prints
-//       it). The waiver never touches F1.
-// A profile row that breaks F1-F4 is refused by the writer
-// (scripts/lib/routing-profile-store.mjs) and ignored here, for a file
-// edited by hand; both go through profileRowRefusal().
+//   F5  elevated consequence effort floor (high). Soft in the ADR: only a
+//       future operator-observed profile row may waive it, so there is no
+//       waiver path here yet.
 // Every raise is recorded in floorsApplied — including the ones effortFor()
 // makes inside the grid when the grid wins (marked `within: 'grid'`); every
 // candidate that could not run as written is recorded in skipped.
@@ -377,253 +363,26 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 // the rule names F1 only.
 //
 // `now` pins the calendar (Date, ISO string or epoch ms) for the tier
-// retirement date; omitted, it is the real clock. `profile: false` skips
-// layer 1 outright — for renderers of the SHIPPED table (routing-table.mjs,
-// whose output is committed as docs/ROUTING.md and must not pick up one
-// machine's profile).
+// retirement date; omitted, it is the real clock.
 //
 // Returns (ADR §2 shape, plus what the callers need):
-//   { model, effort, cacheTtl, layer, profileRevision, profileStatus,
-//     profileError, source, state, provenance, floorsApplied, skipped, stale,
-//     waiver, rationale, type, typeKnown, typeOrigin, weight, kind,
-//     consequence, departures, matchesPreset, stack, trial }
-// profileStatus: absent | ok | invalid | off | unused. profileRevision is the
-// loaded profile's revision when it is ok, else null.
+//   { model, effort, cacheTtl, layer, profileRevision, source, state,
+//     provenance, floorsApplied, skipped, stale, rationale,
+//     type, typeKnown, weight, kind, consequence, departures, matchesPreset,
+//     stack, trial }
 // `model` is '' (and layer null) when no route could be resolved: weight
 // missing, non-numeric, outside 1-5 or naming no routing row (2.5), or a
 // parity type with no writer.
 // `trial` is the old resolveExpected() trial metadata — non-null exactly when
 // the trial layer won.
 
-// --- Layer 1: the per-user routing profile --------------------------------
-// Paths computed WITHOUT creating directories: this runs on every Agent
-// spawn, and with no profile present the whole cost must stay one stat().
-const hasOwn = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
-const isPlainObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-function stateRootPath() {
-  return process.env.AGENT_COMPANION_STATE_DIR || join(claudeDir(), 'agent-companion');
-}
-export function routingProfilePath() {
-  return join(stateRootPath(), 'config', PROFILE_FILE);
-}
-export function routingProfileInvalidMarkerPath() {
-  return join(stateRootPath(), 'state', INVALID_MARKER_FILE);
-}
-
-// The marker the scout's routing_profile_invalid signal (slice 4) reads:
-// present exactly while the last read of the profile failed. It names the
-// failure class and the fields at fault, never a value from the file. Written
-// once per distinct (reason, mtime, size), removed when the file is valid or
-// gone or the routing_profile switch is off; memoised per process so a caller resolving many types pays it once.
-let _markerSynced = '';
-function syncInvalidMarker(res) {
-  const key = `${res.status}|${res.reason || ''}|${res.mtimeMs ?? ''}|${res.size ?? ''}`;
-  if (key === _markerSynced) return;
-  _markerSynced = key;
-  const marker = routingProfileInvalidMarkerPath();
-  try {
-    if (res.status === 'invalid') {
-      let cur = null;
-      try { cur = JSON.parse(readFileSync(marker, 'utf8')); } catch { /* absent */ }
-      if (cur && cur.reason === res.reason && cur.mtimeMs === (res.mtimeMs ?? null) && cur.size === (res.size ?? null)) return;
-      mkdirSync(dirname(marker), { recursive: true });
-      writeFileSync(marker, JSON.stringify({
-        signal: 'routing_profile_invalid',
-        at: new Date().toISOString(),
-        reason: res.reason,
-        errors: (res.errors || []).slice(0, 5),
-        mtimeMs: res.mtimeMs ?? null,
-        size: res.size ?? null,
-      }) + '\n');
-    } else if (existsSync(marker)) {
-      unlinkSync(marker);
-    }
-  } catch { /* fail open: the marker is a signal, never a precondition */ }
-}
-
-// The profile as the resolver sees it. NEVER throws. status:
-//   unused  — the caller asked for the shipped table only (profile: false)
-//   off     — the routing_profile option (kill switch) is off; the file is
-//             not read, so nothing in it can matter
-//   absent  — no file
-//   invalid — unparseable, fails the schema, or a higher major schemaVersion
-//   ok      — { profile, revision }
-export function routingProfileState({ use = true } = {}) {
-  if (!use) return { status: 'unused', profile: null, revision: null };
-  let on = true;
-  try { on = opt('routing_profile', true); } catch { on = true; }
-  if (!on) {
-    // Off: nothing in the file can matter, so a marker left by an earlier
-    // failed read would be a stale signal to the scout (S2 review P6).
-    syncInvalidMarker({ status: 'off' });
-    return { status: 'off', profile: null, revision: null };
-  }
-  try {
-    const res = readProfile(routingProfilePath());
-    syncInvalidMarker(res);
-    if (res.status === 'ok') return { status: 'ok', profile: res.profile, revision: res.profile.revision };
-    if (res.status === 'invalid') {
-      return { status: 'invalid', profile: null, revision: null, reason: res.reason, errors: res.errors || [] };
-    }
-    return { status: 'absent', profile: null, revision: null };
-  } catch {
-    return { status: 'invalid', profile: null, revision: null, reason: 'error', errors: ['the profile reader failed'] };
-  }
-}
-
-// A user-local task type (ADR §5): the shipped preset shape, checked against
-// the table's own kinds and consequences. A parity-sized local type is not
-// supported in this slice.
-function localTypeErrors(def, cfg) {
-  const e = typeShapeErrors(def);
-  if (!e.length) {
-    if (!hasOwn(cfg.taskKinds, def.kind)) e.push(`kind '${def.kind}' is not a task kind in the routing table`);
-    if (!hasOwn(cfg.consequence, def.consequence)) e.push(`consequence '${def.consequence}' is not a consequence level in the routing table`);
-  }
-  return e;
-}
-
-// `TYPE: <name>` resolution: SHIPPED types first, then the profile's local
-// `types` (only while the profile is on and valid). Returns
-// { def, origin: 'shipped' | 'local' } or null. A local definition is
-// returned as its preset fields only — a local type can never carry a
-// shipped trial.
-export function taskTypeDef(name, { profile = true, state } = {}) {
-  if (!name) return null;
-  const cfg = modelTiers();
-  if (hasOwn(cfg.taskTypes, name) && isPlainObj(cfg.taskTypes[name])) return { def: cfg.taskTypes[name], origin: 'shipped' };
-  const st = state || routingProfileState({ use: profile });
-  const local = st.profile && hasOwn(st.profile.types, name) ? st.profile.types[name] : null;
-  if (local && !localTypeErrors(local, cfg).length) {
-    return {
-      def: { weight: local.weight, kind: local.kind, consequence: local.consequence, summary: typeof local.summary === 'string' ? local.summary : '' },
-      origin: 'local',
-    };
-  }
-  return null;
-}
-
-// Every resolvable type name: shipped, then valid local ones not shadowed by
-// a shipped type of the same name.
-export function taskTypeNames({ profile = true, state } = {}) {
-  const cfg = modelTiers();
-  const names = Object.keys(cfg.taskTypes || {});
-  const st = state || routingProfileState({ use: profile });
-  for (const [n, def] of Object.entries((st.profile && st.profile.types) || {})) {
-    if (!hasOwn(cfg.taskTypes, n) && !localTypeErrors(def, cfg).length) names.push(n);
-  }
-  return names;
-}
-
-// THE row check, shared by the writer (mode 'write': refuse) and the
-// resolver (mode 'read': ignore). Returns '' when the row can run as
-// written, else the reason. `typeDef` is the resolved preset (shipped or
-// local) or null; `consequence` the resolved consequence (defaults to the
-// preset's). Order: shape, type existence, F3 (parity rows), alias, F2, F4
-// (availability, effort), F1, then — write only — F5 and waiver rules.
-export function profileRowRefusal(type, row, { typeDef = null, consequence, now, mode = 'read' } = {}) {
-  const cfg = modelTiers();
-  const shape = rowShapeErrors(row);
-  if (shape.length) return `invalid row: ${shape.join('; ')}`;
-  if (!typeDef) return `hard-stale: task type '${type}' exists in neither the shipped table nor the profile's types`;
-  const model = row.model ?? null;
-  const effort = row.effort ?? '';
-  if (typeDef.weight === 'parity') {
-    if (model) return `F3: a ${type} row may set only a minimum effort, never a model (reviewer parity: the model is sized to the writer)`;
-    if (!effort || !classifyEffort(effort).known) return `F3: a ${type} row must name a known minimum effort`;
-    if (row.waivesFloor) return `F5: waivesFloor does not apply to a parity-sized type`;
-    return '';
-  }
-  if (!model) return `invalid row: a ${type} row must name a model`;
-  // F2 and F4, the same checks the trial layer gets; an F4 failure means the
-  // row cannot run as written, i.e. it is hard-stale (ADR §2).
-  const cand = candidateRefusal(model, effort, now);
-  if (cand) return cand.startsWith('F4:') ? `hard-stale (F4):${cand.slice(3)}` : cand;
-  let c = consequence ?? typeDef.consequence ?? 'routine';
-  if (c === 'inherit') c = 'routine';
-  if (c === 'critical') {
-    const cons = (cfg.consequence || {}).critical || {};
-    if (cons.modelFloor && tierRank(cons.modelFloor) > tierRank(model)) {
-      return `F1: critical consequence needs at least ${cons.modelFloor}; the row names ${model}`;
-    }
-    if (cons.effortFloor && raiseEffort(model, effort, cons.effortFloor) !== effort) {
-      return `F1: critical consequence needs effort at least ${cons.effortFloor}; the row names ${effort || '(none)'}`;
-    }
-  }
-  // F5 on a model that takes no effort parameter (haiku): no effort can be
-  // raised to the elevated floor, so the row counts as BELOW it (S2 review
-  // P2), not as meeting it. The writer requires the waiver; the reader skips
-  // the row unless it carries an honoured one (operator-observed).
-  const elevatedFloor = ((cfg.consequence || {}).elevated || {}).effortFloor;
-  const noEffortBelowFloor = c === 'elevated' && !!elevatedFloor && !rankedEffortsFor(model).length;
-  const waiverHonoured = row.waivesFloor === 'elevated' && row.source === 'operator-observed';
-  if (mode === 'write') {
-    if (row.waivesFloor === 'elevated' && row.source !== 'operator-observed') {
-      return `F5: waivesFloor "elevated" is honoured only on an operator-observed row (this row's source is ${row.source})`;
-    }
-    if (row.waivesFloor === 'elevated' && c !== 'elevated') return `F5: nothing to waive — ${type} is not elevated consequence`;
-    const waiveHint = row.source === 'operator-observed' ? 'pass --waive-floor elevated to waive it on this row' : 'only an operator-observed row may waive it';
-    if (noEffortBelowFloor && !row.waivesFloor) {
-      return `F5: ${model} takes no effort parameter, so it cannot meet the elevated floor (${elevatedFloor}); ${waiveHint}`;
-    }
-    if (c === 'elevated' && !row.waivesFloor && elevatedFloor && raiseEffort(model, effort, elevatedFloor) !== effort) {
-      return `F5: effort '${effort || '(none)'}' is below the elevated floor (${elevatedFloor}); ${waiveHint}`;
-    }
-  } else if (noEffortBelowFloor && !waiverHonoured) {
-    return `F5: ${model} takes no effort parameter, so it cannot meet the elevated floor (${elevatedFloor}); ` +
-      'the row applies only with an honoured waiver (waivesFloor "elevated" on an operator-observed row)';
-  }
-  return '';
-}
-
-// F5 waiver status for a winning row: null when the row requests none.
-function waiverFor(row, consequence) {
-  if (!row || row.waivesFloor !== 'elevated') return null;
-  const honored = row.source === 'operator-observed';
-  return {
-    floor: 'elevated',
-    honored,
-    applies: consequence === 'elevated',
-    reason: honored
-      ? 'operator-observed row waives the elevated effort floor (F5)'
-      : `waiver ignored: source ${row.source} is not operator-observed, so F5 applies`,
-  };
-}
-
-// Soft-stale reasons (ADR §2) — a SEAM for slice 4 (maxAgeDays, reviewBy
-// passed, alias generation change, aliasFloor, typeDefSha, basedOn). A
-// soft-stale row still applies; this only flags it.
-function profileRowStale(/* row, { typeDef, profile, now } */) {
-  return [];
-}
-
-function profileLayer({ type, state, typeDef, consequence, now }) {
-  const base = { row: null, revision: state.status === 'ok' ? state.revision : null, refusal: '' };
-  if (state.status === 'unused') return { ...base, status: 'unused', note: 'not consulted (shipped table requested)' };
-  if (state.status === 'off') return { ...base, status: 'off', note: 'routing_profile is off: shipped table only' };
-  if (state.status === 'invalid') {
-    return { ...base, status: 'invalid', note: `profile ignored as a whole (${state.reason}: ${(state.errors || [])[0] || 'invalid'}); shipped table used` };
-  }
-  if (state.status !== 'ok') return { ...base, status: 'absent', note: 'no routing profile' };
-  const rows = state.profile.rows || {};
-  if (!type || !hasOwn(rows, type)) return { ...base, status: 'absent', note: `profile rev ${state.revision} has no row for ${type || 'this task'}` };
-  // A hand-edited effort is matched case-insensitively everywhere, so it is
-  // also USED lower-cased ("HIGH" runs as high), never verbatim (S2 review P4).
-  const raw = rows[type];
-  const row = isPlainObj(raw) && typeof raw.effort === 'string' && raw.effort !== raw.effort.toLowerCase()
-    ? { ...raw, effort: raw.effort.toLowerCase() }
-    : raw;
-  if (isPlainObj(row) && row.state === 'retired') return { ...base, row, status: 'retired', note: `row retired (profile rev ${state.revision})` };
-  const refusal = profileRowRefusal(type, row, { typeDef, consequence, now, mode: 'read' });
-  return { ...base, row, status: refusal ? 'refused' : 'eligible', refusal, note: '' };
+// Layer 1: the per-user routing profile. Seam only — see the banner above.
+function profileLayer(/* { type, now } */) {
+  return { row: null, revision: null, note: 'no routing profile in this release' };
 }
 
 function routeLabelOf(model, effort) {
   return `${model}${effort ? '/' + effort : ''}`;
-}
-
-function floorText(f) {
-  return `${f.floor} ${f.raised || f.capped || `waived: ${f.waived}`}`;
 }
 
 // F2's set: fable, plus any premium tier ranked at or above it.
@@ -638,20 +397,10 @@ function neverDestination(model) {
 
 // F2 + F4 for a layer-1/2 candidate: the reason it cannot run as written,
 // or '' when it can.
-// Shared by the trial layer and profile rows (profileRowRefusal). A layer-1/2
-// candidate must name a tier ALIAS the table knows: isModelAvailable() and
-// effortSupported() both answer "fine" for a model they cannot classify
-// (they flag unknowns elsewhere rather than block), so without this check a
-// row naming "gpt-x/high" would win. A model that takes an effort must be
-// given one — an empty effort would run at whatever the session has.
 function candidateRefusal(model, effort, now) {
-  const cfg = modelTiers();
   if (!model) return 'names no model';
-  if (!hasOwn(cfg.tiers, model)) return `F4: '${model}' is not a tier alias in the routing table (name the alias, never a dated model id)`;
   if (neverDestination(model)) return `F2: ${model} is never a routing destination (it needs a warrant)`;
   if (!isModelAvailable(model, now)) return `F4: ${model} is unavailable or retired`;
-  const list = Array.isArray(cfg.tiers[model].efforts) ? cfg.tiers[model].efforts : null;
-  if (list && list.length && !effort) return `F4: ${model} takes an effort parameter; none is named`;
   const sup = effortSupported(model, effort);
   if (!sup.ok) return `F4: effort '${effort}' unsupported by ${model} (${sup.reason})`;
   return '';
@@ -709,7 +458,7 @@ function parityFloors(r, { consequence, writer, now }) {
   // F3: the candidate is the writer; effort may exceed it, never drop.
   let { model, effort } = r;
   if (model !== wm) {
-    floorsApplied.push({ floor: 'F3', raised: `model ${model} -> ${wm} (starts at the writer)` });
+    floorsApplied.push({ floor: 'F3', raised: `model ${model} -> ${wm} (must match the writer)` });
     model = wm;
   }
   if (we && classifyEffort(we).known) {
@@ -734,29 +483,6 @@ function parityFloors(r, { consequence, writer, now }) {
     floorsApplied.push({ floor: 'F4', raised: `model ${model} -> ${to} (${cls.alias} retired after ${ret.retiresAfter}; its staged replacement stands in)` });
     model = to;
     effort = effortOn(model, effort || ret.replacement.effort || '');
-  }
-
-  // F4 (effort): the reviewer's effort must be one its model accepts. An
-  // effort that is no effort level at all is refused, never passed through;
-  // on a model that takes no effort parameter (haiku) it is dropped; one the
-  // model does not accept is raised to the next level it does (a reviewer
-  // may exceed, never drop).
-  if (effort) {
-    const ce = classifyEffort(effort);
-    if (!ce.known) {
-      return { refusal: `F4: writer effort "${effort}" is not an effort level (${Object.keys(cfg.efforts || {}).join(', ')}), so a reviewer cannot be sized to it` };
-    }
-    effort = ce.level; // "HIGH" is high
-    const ranked = rankedEffortsFor(model);
-    if (!ranked.length) {
-      floorsApplied.push({ floor: 'F4', capped: `effort ${effort} -> (none) (${classifyModel(model).alias || model} takes no effort parameter)` });
-      effort = '';
-    } else if (!ranked.includes(effort)) {
-      const up = ranked.find((e) => classifyEffort(e).rank >= ce.rank);
-      if (!up) return { refusal: `F4: ${model} accepts no effort at or above the writer's ${effort}` };
-      floorsApplied.push({ floor: 'F4', raised: `effort ${effort} -> ${up} (${model} does not accept ${effort})` });
-      effort = up;
-    }
   }
 
   // F2: never a destination. Cap to the best tier that is one; the answer is
@@ -793,7 +519,7 @@ function parityFloors(r, { consequence, writer, now }) {
   return { model, effort, floorsApplied };
 }
 
-function applyFloors(r, { consequence, parity, writer, waive = null, now }) {
+function applyFloors(r, { consequence, parity, writer, now }) {
   const cfg = modelTiers();
   const floorsApplied = [];
   let { model, effort } = r;
@@ -830,17 +556,8 @@ function applyFloors(r, { consequence, parity, writer, waive = null, now }) {
   if (cons.effortFloor) {
     const raised = raiseEffort(model, effort, cons.effortFloor);
     if (raised !== effort) {
-      // F5 only — a waiver can never reach F1 (critical is not waivable).
-      if (waive === 'elevated' && consequence === 'elevated') {
-        floorsApplied.push({ floor: label, waived: `effort ${effort || '(none)'} kept below ${cons.effortFloor} (operator-observed profile row waives F5)` });
-      } else {
-        floorsApplied.push({ floor: label, raised: `effort ${effort || '(none)'} -> ${raised}` });
-        effort = raised;
-      }
-    } else if (waive === 'elevated' && consequence === 'elevated' && !rankedEffortsFor(model).length) {
-      // A no-effort model is below the floor (P2); an honoured waiver is
-      // what lets it run, so it is recorded like any other waived floor.
-      floorsApplied.push({ floor: label, waived: `${classifyModel(model).alias || model} takes no effort, kept below ${cons.effortFloor} (operator-observed profile row waives F5)` });
+      floorsApplied.push({ floor: label, raised: `effort ${effort || '(none)'} -> ${raised}` });
+      effort = raised;
     }
   }
   return { model, effort, floorsApplied };
@@ -849,16 +566,11 @@ function applyFloors(r, { consequence, parity, writer, waive = null, now }) {
 export function resolveRoute({
   type = null, weight, kind, consequence,
   weightExplicit = false, kindExplicit = false, consequenceExplicit = false,
-  writer = null, now, profile = true,
+  writer = null, now,
 } = {}) {
   const cfg = modelTiers();
-  // Read once per resolution; taskTypeDef() and the profile layer share it.
-  const profState = routingProfileState({ use: profile });
-  // Shipped types first, then the profile's local `types` (ADR §5).
-  const td = type ? taskTypeDef(type, { state: profState }) : null;
-  const t = td ? td.def : null;
-  const shippedT = td && td.origin === 'shipped' ? td.def : null;
-  const typeKnown = !!t;
+  const t = type ? (cfg.taskTypes || {})[type] : null;
+  const typeKnown = !!(t && typeof t === 'object');
   const w = weightExplicit ? weight : (t ? t.weight : weight);
   const k = kindExplicit ? (kind || 'bounded') : (kind || t?.kind || 'bounded');
   let c = consequenceExplicit ? (consequence || 'routine') : (consequence || t?.consequence || 'routine');
@@ -879,12 +591,9 @@ export function resolveRoute({
   const asIs = departures.length === 0;
   const departNote = `explicit ${departures.join('/')} departs from the ${type} preset`;
 
-  const prof = profileLayer({ type, state: profState, typeDef: t, consequence: c, now });
-  const ov = shippedT?.override || null; // a local type never carries a shipped trial
+  const prof = profileLayer({ type, now });
+  const ov = t?.override || null;
   const parity = w === 'parity';
-  const profRow = isPlainObj(prof.row) ? prof.row : null;
-  // A row that exists and is not retired — eligible, or refused by a floor.
-  const profContends = prof.status === 'eligible' || prof.status === 'refused';
 
   // The grid's own answer — computed whenever there is a numeric weight, so
   // explain can show what the grid would have said even when a higher layer
@@ -896,21 +605,7 @@ export function resolveRoute({
 
   const skipped = [];
   const stack = [
-    {
-      layer: 'profile',
-      present: !!prof.row,
-      candidate: profRow ? { model: profRow.model ?? null, effort: profRow.effort || '' } : null,
-      meta: profRow ? {
-        revision: prof.revision,
-        state: profRow.state ?? null,
-        source: profRow.source ?? null,
-        since: profRow.since ?? null,
-        reviewBy: profRow.reviewBy ?? null,
-        waivesFloor: profRow.waivesFloor ?? null,
-      } : null,
-      status: profContends ? 'not-reached' : prof.status,
-      note: prof.note,
-    },
+    { layer: 'profile', present: !!prof.row, candidate: null, status: 'absent', note: prof.note },
     {
       layer: 'trial',
       present: !!ov,
@@ -932,41 +627,14 @@ export function resolveRoute({
       status: 'not-reached',
     },
   ];
-  const [profEntry, trialEntry, gridEntry] = stack;
-  if (prof.status === 'invalid') skipped.push({ layer: 'profile', reason: prof.note });
-
-  // Layer 1's verdict for this task, shared by the parity and grid paths:
-  // true when the row may apply; otherwise the reason is in `skipped`.
-  // `tolerated`: departures that do not skip layer 1 for this caller (the
-  // parity path tolerates a consequence departure, see there).
-  const profileMayWin = (tolerated = []) => {
-    if (!profContends) return false;
-    // A row that cannot run as written is reported as such first — that is
-    // the finding the operator must act on, departure or not.
-    if (prof.refusal) {
-      profEntry.status = 'skipped';
-      skipped.push({ layer: 'profile', reason: prof.refusal });
-      return false;
-    }
-    const dep = departures.filter((d) => !tolerated.includes(d));
-    if (dep.length) {
-      profEntry.status = 'skipped';
-      skipped.push({ layer: 'profile', reason: `explicit ${dep.join('/')} departs from the ${type} preset` });
-      return false;
-    }
-    return true;
-  };
+  const [, trialEntry, gridEntry] = stack;
 
   const base = {
     cacheTtl: null,
     profileRevision: prof.revision,
-    profileStatus: profState.status,
-    profileError: profState.status === 'invalid' ? (profState.reason || 'invalid') : null,
     stale: [],
-    waiver: null,
     type: type || null,
     typeKnown,
-    typeOrigin: td ? td.origin : null,
     weight: w,
     kind: k,
     consequence: c,
@@ -977,16 +645,6 @@ export function resolveRoute({
 
   // --- Parity-sized types (code-review): sized to the writer ---------------
   if (parity) {
-    // A parity type's profile row carries a MINIMUM effort only (F3; the
-    // writer checked it names no model), applied on top of writer parity
-    // AFTER F3/F4/F2/F1 have already floored it (parityFloors()) — it can
-    // only raise that floored effort further, never lower it or move it off
-    // the floored model.
-    // A parity row's minimum effort can only RAISE the reviewer's effort, so
-    // it still applies when the consequence departs from the preset: a
-    // critical review never gets less effort than a routine one (S2 review
-    // P5, lead decision). Any other departure still skips it.
-    let profWins = profileMayWin(['consequence']);
     if (ov && !asIs) {
       trialEntry.status = 'skipped';
       skipped.push({ layer: 'trial', reason: departNote });
@@ -998,7 +656,6 @@ export function resolveRoute({
     }
     if (!writer) {
       gridEntry.status = 'unresolved';
-      if (profWins) profEntry.status = 'unresolved';
       return {
         ...base, model: '', effort: '', layer: null, source: null, state: null, provenance: null,
         floorsApplied: [], skipped,
@@ -1008,12 +665,7 @@ export function resolveRoute({
     }
     const floored = applyFloors({ model: writer.model, effort: writer.effort || '' }, { consequence: c, parity: true, writer, now });
     if (floored.refusal) {
-      // F4: no reviewer can be sized to this writer at all — a profile row's
-      // minimum effort has nothing to raise, so the profile layer never gets
-      // a say (ADR §1: floors are applied after whichever layer wins, and
-      // here no layer can win).
       gridEntry.status = 'unresolved';
-      if (profWins) profEntry.status = 'unresolved';
       skipped.push({ layer: 'grid', reason: floored.refusal });
       return {
         ...base, model: '', effort: '', layer: null, source: null, state: null, provenance: null,
@@ -1022,55 +674,22 @@ export function resolveRoute({
         trial: null,
       };
     }
-    // The writer's model and effort, then the floors: the answer may differ
-    // from the writer (F1 raises, F2 caps, F4 fits the effort), so the
-    // rationale never claims the model simply matches it.
-    const parityOpening = `reviewer parity: sized to the writer (${routeLabelOf(writer.model, writer.effort || '')})` +
-      (writer.effort ? ', effort may exceed it' : '');
+    gridEntry.status = 'won';
     const parityFloorNote = floored.floorsApplied.length
       ? `; floors: ${floored.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join(', ')} -> ${routeLabelOf(floored.model, floored.effort)}`
       : '';
-    if (profWins) {
-      // A parity type's profile row carries a MINIMUM effort only (F3/F4/F2/F1
-      // already resolved `floored` above); it can only RAISE that floor, and
-      // it can never name a model, so `floored.model` never changes here.
-      const minEffort = profRow.effort;
-      if (!rankedEffortsFor(floored.model).includes(minEffort)) {
-        profEntry.status = 'skipped';
-        skipped.push({ layer: 'profile', reason: `F4: minimum effort '${minEffort}' unsupported by the writer's model ${floored.model}` });
-        profWins = false;
-      } else {
-        const raised = raiseEffort(floored.model, floored.effort, minEffort);
-        profEntry.status = 'won';
-        gridEntry.status = 'shadowed';
-        return {
-          ...base,
-          stale: profileRowStale(profRow, { typeDef: t, now }),
-          model: floored.model, effort: raised,
-          layer: 'profile', source: profRow.source, state: profRow.state,
-          provenance: profRow.provenance ?? null,
-          floorsApplied: floored.floorsApplied, skipped,
-          rationale: parityOpening + parityFloorNote +
-            `; ROUTING PROFILE (rev ${prof.revision}, ${profRow.source}, ${profRow.state}) sets a minimum effort ${minEffort}` +
-            (raised !== floored.effort ? ` -> ${routeLabelOf(floored.model, raised)}` : ' (already met)'),
-          trial: null,
-        };
-      }
-    }
-    gridEntry.status = 'won';
     return {
       ...base,
       model: floored.model, effort: floored.effort,
       layer: 'grid', source: 'reviewer-parity', state: null,
       provenance: { rule: 'reviewerParity', writer: routeLabelOf(writer.model, writer.effort || '') },
       floorsApplied: floored.floorsApplied, skipped,
-      rationale: parityOpening + parityFloorNote,
+      rationale: `reviewer parity: model matches the writer (${writer.model})` + (writer.effort ? `; effort at least ${writer.effort}` : '') + parityFloorNote,
       trial: null,
     };
   }
 
   if (!validWeight) {
-    if (profileMayWin()) { profEntry.status = 'unresolved'; }
     if (ov) { trialEntry.status = 'unresolved'; }
     gridEntry.status = 'unresolved';
     return {
@@ -1083,33 +702,6 @@ export function resolveRoute({
 
   // --- Pick the winning layer ---------------------------------------------
   let won = null;
-  // Layer 1 is decided first (so its skip reasons lead), but applied after
-  // the trial block below, which keeps that block exactly as slice 1 wrote
-  // it: the trial is still evaluated and explained, and is shadowed when a
-  // profile row wins.
-  let profWon = null;
-  if (profileMayWin()) {
-    profEntry.status = 'won';
-    const e = profRow.effort || '';
-    profWon = {
-      layer: 'profile',
-      model: profRow.model,
-      effort: e,
-      cacheTtl: profRow.cacheTtl ?? null,
-      source: profRow.source,
-      state: profRow.state,
-      provenance: profRow.provenance ?? null,
-      waiver: waiverFor(profRow, c),
-      stale: profileRowStale(profRow, { typeDef: t, now }),
-      // The row's note is local free text: it never enters the rationale,
-      // which callers may surface in hook messages.
-      rationale: `ROUTING PROFILE (rev ${prof.revision}, ${profRow.source}, ${profRow.state}` +
-        `${profRow.reviewBy ? `, review by ${profRow.reviewBy}` : ''}): ${routeLabelOf(profRow.model, e)}.` +
-        (ov ? ` Shipped trial would give ${routeLabelOf(ov.model, ov.effort || '')}.` : '') +
-        ` Grid would otherwise resolve to ${gridLabel}.`,
-      trial: null,
-    };
-  }
   if (ov) {
     if (!asIs) {
       trialEntry.status = 'skipped';
@@ -1139,10 +731,6 @@ export function resolveRoute({
         };
       }
     }
-  }
-  if (profWon) {
-    if (won) trialEntry.status = 'shadowed';
-    won = profWon;
   }
   if (!won && !grid.model) {
     // A weight inside 1-5 that names no routing row (a fractional weight, or
@@ -1174,19 +762,15 @@ export function resolveRoute({
   }
 
   // --- Floors, after whichever layer won -----------------------------------
-  const waive = won.waiver && won.waiver.honored && won.waiver.applies ? 'elevated' : null;
   const floored = won.model
-    ? applyFloors({ model: won.model, effort: won.effort }, { consequence: c, parity: false, waive })
+    ? applyFloors({ model: won.model, effort: won.effort }, { consequence: c, parity: false })
     : { model: won.model, effort: won.effort, floorsApplied: [] };
   const floorNote = floored.floorsApplied.length
-    ? `; floors: ${floored.floorsApplied.map(floorText).join(', ')} -> ${routeLabelOf(floored.model, floored.effort)}`
+    ? `; floors: ${floored.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join(', ')} -> ${routeLabelOf(floored.model, floored.effort)}`
     : '';
 
   return {
     ...base,
-    cacheTtl: won.cacheTtl ?? null,
-    waiver: won.waiver ?? null,
-    stale: won.stale || [],
     model: floored.model,
     effort: floored.effort,
     layer: won.layer,
@@ -1239,25 +823,6 @@ export function routeProvenanceLine(r) {
     return `shipped trial${p.trialVersion ? ' v' + p.trialVersion : ''}, since ${p.trialSince || '?'}, review by ${p.reviewBy || '?'}` +
       `${p.overridesKindDelta ? ', overrides the kind delta' : ''}${ev}`;
   }
-  if (r.layer === 'profile') {
-    // One line, numbers only when the row carries them (an operator-observed
-    // row has no n or CI, and this says so rather than inventing any).
-    const m = (r.stack || []).find((s) => s.layer === 'profile')?.meta || {};
-    const parts = [`profile rev ${r.profileRevision ?? '?'}`, r.source || 'unknown source'];
-    const pass = p.pass;
-    if (pass && Number.isFinite(pass.n) && pass.n > 0) {
-      const ci = Array.isArray(pass.ci95) && pass.ci95.length === 2
-        ? `, CI ${Math.round(pass.ci95[0] * 100)}-${Math.round(pass.ci95[1] * 100)}%` : '';
-      parts.push(`${pass.k}/${pass.n} pass${ci}`);
-    } else {
-      parts.push('no n or CI recorded');
-    }
-    if (Number.isFinite(p.packs)) parts.push(`${p.packs} packs`);
-    if (typeof p.costIndex === 'number') parts.push(`cost ${p.costIndex.toFixed(2)}x`);
-    if (p.measuredAt) parts.push(`measured ${p.measuredAt}`);
-    parts.push(`${r.state || '?'}${m.since ? ' since ' + m.since : ''}${m.reviewBy ? ', review by ' + m.reviewBy : ''}`);
-    return parts.join(', ');
-  }
   if (r.source === 'reviewer-parity') return `reviewer parity with writer ${p.writer}`;
   return `shipped grid: weight ${p.weight} x ${p.kind} x ${p.consequence} (config v${p.tableVersion ?? '?'}, updated ${p.tableUpdated ?? '?'})`;
 }
@@ -1267,20 +832,15 @@ export function explainRoute(r) {
   const L = [];
   L.push('layer stack (highest first):');
   for (const s of r.stack || []) {
-    const cand = !s.candidate ? '-'
-      : (s.candidate.model ? routeLabelOf(s.candidate.model, s.candidate.effort) : `min effort ${s.candidate.effort || '?'}`);
-    const reasons = (r.skipped || []).filter((x) => x.layer === s.layer).map((x) => x.reason);
+    const cand = s.candidate ? routeLabelOf(s.candidate.model, s.candidate.effort) : '-';
     const why = s.layer === 'profile'
-      ? [s.note, ...reasons.filter((x) => x !== s.note)].filter(Boolean).join('; ')
-      : reasons.join('; ');
+      ? s.note
+      : (r.skipped || []).filter((x) => x.layer === s.layer).map((x) => x.reason).join('; ');
     L.push(`  ${s.layer.padEnd(8)} ${s.status.padEnd(12)} ${cand}${why ? '  (' + why + ')' : ''}`);
   }
-  const asIsNote = (r.matchesPreset || []).length ? ` (explicit ${r.matchesPreset.join('/')} equals the preset)` : '';
   if (r.layer) {
-    const why = r.layer === 'profile'
-      ? `the type was resolved as-is${asIsNote} and its routing-profile row (${r.state}, ${r.source}) passed F1-F4`
-      : r.layer === 'trial'
-      ? `the type was resolved as-is${asIsNote} and its shipped trial passed F2/F4`
+    const why = r.layer === 'trial'
+      ? `the type was resolved as-is${(r.matchesPreset || []).length ? ` (explicit ${r.matchesPreset.join('/')} equals the preset)` : ''} and its shipped trial passed F2/F4`
       : r.source === 'reviewer-parity'
         ? 'a parity-sized type is sized to its writer'
         : ((r.departures || []).length
@@ -1290,14 +850,8 @@ export function explainRoute(r) {
   } else {
     L.push(`winner:   none — no route (${r.rationale})`);
   }
-  L.push(`floors:   ${(r.floorsApplied || []).length ? r.floorsApplied.map((f) => `${floorText(f)}${f.within ? ` (within the ${f.within})` : ''}`).join('; ') : 'none fired'}`);
-  // A waiver is ALWAYS printed (ADR §1, F5), honoured or not, needed or not.
-  if (r.waiver) {
-    const state = !r.waiver.honored ? 'IGNORED' : (r.waiver.applies ? 'HONOURED' : 'honoured, but this task is not elevated consequence');
-    L.push(`waiver:   F5 ${r.waiver.floor} effort floor — ${state}: ${r.waiver.reason}`);
-  }
-  L.push(`profile:  revision ${r.profileRevision ?? 'none'} (${r.profileStatus || 'absent'}${r.profileError ? ': ' + r.profileError : ''})`);
-  if ((r.stale || []).length) L.push(`stale:    ${r.stale.map((x) => x.reason || x).join('; ')}`);
+  L.push(`floors:   ${(r.floorsApplied || []).length ? r.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}${f.within ? ` (within the ${f.within})` : ''}`).join('; ') : 'none fired'}`);
+  L.push(`profile:  revision ${r.profileRevision ?? 'none'}`);
   L.push(`provenance: ${routeProvenanceLine(r)}`);
   return L;
 }
@@ -1745,28 +1299,43 @@ export function writeJson(file, value) {
   try { writeFileSync(file, JSON.stringify(value)); } catch { /* fail open */ }
 }
 
-function sleepSync(ms) {
-  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no wait: retry at once */ }
+// --- Premium fan-out window (state/premium-window.json) ---------------------
+// The cap counts premium spawns that actually STARTED, not every spawn the
+// guard allowed. An allowed spawn the harness then rejects (an unknown
+// subagent_type, say) used to hold a slot for the whole window, so each
+// failed retry extended the block. Now the guard records a PENDING entry
+// {t, sid, confirmed:false}; the SubagentStart hook (spawn-log.mjs) confirms
+// the oldest pending entry for its session; an entry never confirmed stops
+// counting after PREMIUM_PENDING_MS. Pending entries DO count while young,
+// so a parallel burst (several spawns before any has started — the
+// four-Fable shape) is still capped. PREMIUM_PENDING_MS is set from measured
+// spawn-to-start lag (p50 ~0.1 s, p99 ~52 s, max ~101 s over 394 pairs,
+// 2026-09-24) with headroom. A bare number is a pre-1b entry: confirmed.
+export const PREMIUM_WINDOW_MS = 10 * 60 * 1000;
+export const PREMIUM_PENDING_MS = 3 * 60 * 1000;
+
+function windowEntryLive(e, now) {
+  if (typeof e === 'number') return now - e < PREMIUM_WINDOW_MS;
+  if (!e || typeof e.t !== 'number') return false;
+  return now - e.t < (e.confirmed ? PREMIUM_WINDOW_MS : PREMIUM_PENDING_MS);
 }
 
-// writeJson through a temp file renamed over the target, so a reader never
-// sees a half-written file. On Windows a reader holding the target open for
-// the instant of its read makes the replace fail with EPERM/EBUSY, so the
-// rename is retried briefly, then falls back to a direct write. Never throws.
-export function writeJsonAtomic(file, value) {
-  const text = JSON.stringify(value);
-  const tmp = `${file}.${process.pid}.${Math.random().toString(16).slice(2, 10)}.tmp`;
-  try {
-    writeFileSync(tmp, text);
-    for (let i = 0; ; i += 1) {
-      try { renameSync(tmp, file); return; } catch (e) {
-        if (i >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes(e?.code)) break;
-        sleepSync(10);
-      }
-    }
-  } catch { /* temp write failed: fall through to the direct write */ }
-  try { unlinkSync(tmp); } catch { /* already renamed or never written */ }
-  writeJson(file, value);
+export function premiumWindowLive(entries, now = Date.now()) {
+  return (Array.isArray(entries) ? entries : []).filter((e) => windowEntryLive(e, now));
+}
+
+// SubagentStart: confirm the oldest live pending entry for this session.
+// Matched by session only — the start's agent_type does not always equal the
+// spawn's subagent_type (namespacing). Returns true when one was confirmed.
+export function confirmPremiumStart(sessionId, now = Date.now()) {
+  if (!sessionId) return false;
+  const f = stateFile('premium-window.json');
+  const live = premiumWindowLive(readJson(f, []), now);
+  const idx = live.findIndex((e) => e && typeof e === 'object' && !e.confirmed && e.sid === sessionId);
+  if (idx < 0) return false;
+  live[idx] = { ...live[idx], confirmed: true, startedAt: now };
+  writeJson(f, live);
+  return true;
 }
 
 // Emitted telemetry is a PUBLIC CONTRACT, not an internal detail — other tools

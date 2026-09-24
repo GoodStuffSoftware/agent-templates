@@ -125,6 +125,7 @@ export function rowShapeErrors(row) {
   if (!(row.waivesFloor === null || row.waivesFloor === undefined || WAIVABLE_FLOORS.includes(row.waivesFloor))) e.push('waivesFloor may only be null or "elevated"');
   if (!isStrOrNull(row.note)) e.push('note must be a string or null');
   if (!(row.provenance === null || row.provenance === undefined || isObj(row.provenance))) e.push('provenance must be an object or null');
+  if (valueDepthExceeds(row, MAX_PROFILE_DEPTH - 3)) e.push(`row nests deeper than ${MAX_PROFILE_DEPTH - 3} levels`);
   return e;
 }
 
@@ -140,20 +141,35 @@ export function typeShapeErrors(def) {
   return e;
 }
 
-// Nesting depth, measured without recursion (a deeply nested value must not
-// blow the stack here, the thing the check exists to prevent). S2 review P7:
-// a hand-edited profile nesting 20000 levels made the writer throw an
-// uncaught RangeError in JSON.stringify.
+// Nesting depth of JSON TEXT, measured without recursion (a deeply nested
+// value must not blow the stack here, the thing the check exists to
+// prevent). S2 review P7: a hand-edited profile nesting 20000 levels made
+// the writer throw an uncaught RangeError in JSON.stringify. Strings are
+// stripped by a native regex first, so the scan is over structure only: this
+// runs on the hook path, and an object walk cost ~0.9 ms cold (P9).
 export const MAX_PROFILE_DEPTH = 64;
-export function nestingDepth(v) {
-  let max = 0;
+
+// The same limit on one parsed value (a row), walked without recursion.
+export function valueDepthExceeds(v, limit) {
   const stack = [[v, 1]];
   while (stack.length) {
     const [x, d] = stack.pop();
     if (!x || typeof x !== 'object') continue;
-    if (d > max) max = d;
-    if (max > MAX_PROFILE_DEPTH) return max;
+    if (d > limit) return true;
     for (const k of Object.keys(x)) stack.push([x[k], d + 1]);
+  }
+  return false;
+}
+export function textNestingDepth(text, limit = MAX_PROFILE_DEPTH) {
+  const t = String(text).replace(/"(?:[^"\\]|\\.)*"/g, '').replace(/[^[\]{}]/g, '');
+  let d = 0;
+  let max = 0;
+  for (let i = 0; i < t.length; i += 1) {
+    const c = t.charCodeAt(i);
+    if (c === 123 || c === 91) {
+      d += 1;
+      if (d > max) { max = d; if (max > limit) return max; }
+    } else d -= 1;
   }
   return max;
 }
@@ -161,7 +177,11 @@ export function nestingDepth(v) {
 // Parse + validate raw text. Never throws. Returns one of
 //   { status: 'ok', profile }
 //   { status: 'invalid', reason: 'parse' | 'schema' | 'version', errors: [...] }
-export function parseProfileText(text) {
+// `depthCheck: false` is for the hook-path reader only (readProfile): it never
+// stringifies a whole profile, and the one row it uses is depth-checked by
+// rowShapeErrors(), so the whole-text scan stays off the hot path (P9). The
+// writer and `show`, which do stringify it, keep the check.
+export function parseProfileText(text, { depthCheck = true } = {}) {
   let raw = String(text ?? '');
   if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
   let p;
@@ -176,7 +196,7 @@ export function parseProfileText(text) {
       schemaVersion: p.schemaVersion,
     };
   }
-  if (nestingDepth(p) > MAX_PROFILE_DEPTH) {
+  if (depthCheck && textNestingDepth(raw) > MAX_PROFILE_DEPTH) {
     return { status: 'invalid', reason: 'schema', errors: [`the profile nests deeper than ${MAX_PROFILE_DEPTH} levels`] };
   }
   const errors = profileErrors(p);
@@ -197,7 +217,7 @@ export function readProfile(file) {
   if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.result;
   let result;
   try {
-    result = parseProfileText(readFileSync(file, 'utf8'));
+    result = parseProfileText(readFileSync(file, 'utf8'), { depthCheck: false });
   } catch {
     result = { status: 'invalid', reason: 'parse', errors: ['the file could not be read'] };
   }
@@ -236,7 +256,7 @@ export function parseJournal(text) {
     try {
       const e = JSON.parse(line);
       if (!isObj(e) || !Number.isInteger(e.revision) || e.revision < 0) throw new Error('shape');
-      if (nestingDepth(e) > MAX_PROFILE_DEPTH + 2) throw new Error('depth');
+      if (textNestingDepth(line, MAX_PROFILE_DEPTH + 2) > MAX_PROFILE_DEPTH + 2) throw new Error('depth');
       if (!(e.type === null || typeof e.type === 'string')) throw new Error('shape');
       entries.push(e);
     } catch {

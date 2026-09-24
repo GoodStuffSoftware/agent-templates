@@ -248,9 +248,25 @@ test('a deeply nested profile, or a directory at the profile path, is refused cl
   expectCode(() => store.setRow('explore', { model: 'sonnet', effort: 'low', now: NOW }), 'invalid-file');
   assert.equal(readFileSync(files().profile, 'utf8'), deep, 'the file is untouched');
   assert.deepEqual(readdirSync(files().dir), ['routing-profile.json'], 'no journal, lock or temp file');
-  // The reader ignores it as a whole instead of throwing.
+  // The hook-path reader never stringifies the whole profile, so a deep
+  // UNKNOWN key cannot hurt it and is tolerated like any unknown key (P9
+  // keeps the whole-text scan off the hot path); it never throws. A deep ROW
+  // is refused on its own (rowShapeErrors), since callers do stringify rows.
   rp._resetProfileCache();
-  assert.equal(ctx.resolveRoute({ type: 'explore', now: NOW }).profileStatus, 'invalid');
+  assert.equal(ctx.resolveRoute({ type: 'explore', now: NOW }).profileStatus, 'ok');
+  const deepRow = { schema: 'agent-companion/routing-profile', schemaVersion: 1, revision: 1, rows: { explore: {
+    state: 'trial', model: 'sonnet', effort: 'low', source: 'benchmark', since: '2026-09-01', provenance: {},
+  } } };
+  let node = deepRow.rows.explore.provenance;
+  for (let i = 0; i < 100; i += 1) { node.x = {}; node = node.x; }
+  writeFileSync(files().profile, JSON.stringify(deepRow));
+  rp._resetProfileCache();
+  const r = ctx.resolveRoute({ type: 'explore', now: NOW });
+  assert.notEqual(r.layer, 'profile');
+  assert.match(r.skipped.find((x) => x.layer === 'profile').reason, /row nests deeper than 61 levels/);
+  const rec = runScript('scripts/recommend.mjs', ['--type', 'explore', '--explain', '--json'], { env: { AGENT_COMPANION_STATE_DIR: root } });
+  assert.equal(rec.status, 0, rec.stderr);
+  writeFileSync(files().profile, deep);
 
   rmSync(files().profile);
   mkdirSync(files().profile);
