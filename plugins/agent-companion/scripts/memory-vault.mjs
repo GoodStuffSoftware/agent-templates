@@ -34,12 +34,13 @@
 
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync,
+  realpathSync, statSync,
 } from 'node:fs';
 import { join, dirname, relative, sep } from 'node:path';
-import { execFileSyncHidden } from './lib/proc.mjs';
+import { gitClean, enclosingGitRepo, samePath } from './lib/git-env.mjs';
 import { fileURLToPath } from 'node:url';
 import {
-  opt, stateRoot, stateDir,
+  opt, stateRootPath, stateDir,
 } from '../hooks/lib/context.mjs';
 import { memoryRoot, discoverFiles } from '../hooks/lib/memory-index.mjs';
 
@@ -149,8 +150,10 @@ export function scanForSecrets(text) {
 
 // --- Paths ---------------------------------------------------------------
 
+// Path only — resolving it creates nothing, so ensureInit() can refuse a bad
+// location before a single byte is written anywhere.
 export function vaultDir() {
-  return join(stateRoot(), 'memory-vault');
+  return join(stateRootPath(), 'memory-vault');
 }
 
 function lockFile() {
@@ -161,12 +164,65 @@ function statusCacheFile() {
   return join(stateDir(), 'memory-vault-status.json');
 }
 
+// --- git, pinned to the vault ---------------------------------------------
+// EVERY git call in this file goes through one of these two. Neither ever
+// lets git discover a repository from the environment or the cwd:
+//
+//   - gitClean() strips GIT_DIR and the other repo-locating variables (see
+//     lib/git-env.mjs for the incident this prevents). An inherited absolute
+//     GIT_DIR made `git init <vault>` re-initialise the CALLER's repository
+//     as bare and `git -C <vault> config user.*` write the vault identity
+//     into that repository's shared .git/config.
+//   - vaultGit() additionally names the vault's git dir and work tree
+//     explicitly, so even a variable the strip list misses, or a vault whose
+//     .git has gone missing (which would otherwise make git walk UP into
+//     whatever repository encloses it), cannot redirect a write.
 function git(args, opts = {}) {
-  return execFileSyncHidden('git', args, { encoding: 'utf8', ...opts });
+  return gitClean(args, opts);
+}
+
+function vaultGitDir(dir) {
+  return join(dir, '.git');
+}
+
+// RELATIVE --git-dir/--work-tree, resolved after `-C dir`: Git for Windows
+// rejects an explicit git dir of PATH_MAX (260) chars or more with
+// "'$GIT_DIR' too big", which an absolute path under a deep state root can
+// reach. Relative to the vault they are always short, and still explicit.
+function vaultGit(dir, args, opts = {}) {
+  return gitClean(['-C', dir, '--git-dir=.git', '--work-tree=.', ...args], opts);
 }
 
 function isOurVault(dir) {
   return existsSync(join(dir, MARKER_NAME));
+}
+
+function realOrResolved(p) {
+  try { return realpathSync.native(p); } catch { return p; }
+}
+
+// The vault's OWN git dir is <dir>/.git and git, discovering from <dir> with
+// a clean env, agrees. Anything else — .git missing, a gitfile pointing
+// elsewhere, discovery landing in an enclosing repository — throws before
+// any write.
+function assertVaultGitDir(dir) {
+  const expected = vaultGitDir(dir);
+  let actual = '';
+  try {
+    actual = git(['-C', dir, 'rev-parse', '--absolute-git-dir'], { stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch (e) {
+    throw new Error(`refusing to write — ${dir} has no git repository of its own (${String(e?.message || e).split('\n')[0]})`);
+  }
+  if (!isDirPath(expected) || !samePath(realOrResolved(actual), realOrResolved(expected))) {
+    throw new Error(
+      `refusing to write — git resolves ${dir} to the repository at ${actual}, not to the vault's own `
+      + `${expected}. Nothing was changed.`,
+    );
+  }
+}
+
+function isDirPath(p) {
+  try { return statSync(p).isDirectory(); } catch { return false; }
 }
 
 const VAULT_README = [
@@ -273,7 +329,7 @@ export function vaultIsByteExact(dir) {
 // `hash-object --no-filters` is the one path that applies no conversion at all.
 function divergentFromIndex(dir) {
   const byPath = new Map();
-  for (const e of git(['-C', dir, 'ls-files', '-s', '-z']).split('\0')) {
+  for (const e of vaultGit(dir, ['ls-files', '-s', '-z']).split('\0')) {
     const tab = e.indexOf('\t'); // "<mode> <sha> <stage>\t<path>"
     if (tab < 0) continue;
     const meta = e.slice(0, tab).trim().split(/\s+/);
@@ -284,7 +340,7 @@ function divergentFromIndex(dir) {
   // --stdin-paths is newline-delimited, so a path containing one cannot be
   // checked. Unverifiable counts as divergent: this gate fails closed.
   if (paths.some((p) => p.includes('\n'))) return ['<unverifiable path>'];
-  const hashes = git(['-C', dir, 'hash-object', '--no-filters', '--stdin-paths'],
+  const hashes = vaultGit(dir, ['hash-object', '--no-filters', '--stdin-paths'],
     { input: `${paths.join('\n')}\n` })
     .split('\n').map((l) => l.trim()).filter(Boolean);
   if (hashes.length !== paths.length) return ['<unverifiable tree>'];
@@ -313,13 +369,13 @@ function backfillGitattributes(dir) {
     // safely is never even momentarily changed.
     if (divergentFromIndex(dir).length) return 'blocked';
     writeFileSync(file, GITATTRIBUTES);
-    git(['-C', dir, 'add', '--', GITATTRIBUTES_NAME]);
-    git(['-C', dir, 'commit', '-q', '-F', '-'], { input: GITATTRIBUTES_COMMIT_MSG });
+    vaultGit(dir, ['add', '--', GITATTRIBUTES_NAME]);
+    vaultGit(dir, ['commit', '-q', '-F', '-'], { input: GITATTRIBUTES_COMMIT_MSG });
     return 'backfilled';
   } catch {
     // Only remove what we wrote, and only if it never got committed.
     try {
-      const tracked = git(['-C', dir, 'ls-files', '--', GITATTRIBUTES_NAME]).trim();
+      const tracked = vaultGit(dir, ['ls-files', '--', GITATTRIBUTES_NAME]).trim();
       if (!tracked && existsSync(file)) unlinkSync(file);
     } catch { /* best effort */ }
     return 'error';
@@ -331,12 +387,32 @@ function backfillGitattributes(dir) {
 // that can be done without rewriting anything (see backfillGitattributes).
 // A NON-EMPTY dir with no marker is refused outright — this is the "refuses
 // to clobber an existing repo" guarantee.
+//
+// A NEW vault is also refused, with nothing written at all (not even the
+// vault directory), when its location is, or is inside, any existing git
+// repository — its work tree or its git dir. A vault this file created
+// itself (marker present AND git resolves the dir to its own .git) is exempt,
+// so a vault that already works keeps working. Every refusal happens before
+// the first mkdir.
 export function ensureInit() {
   const dir = vaultDir();
-  mkdirSync(dir, { recursive: true });
-  if (isOurVault(dir)) return { created: false, dir, gitattributes: backfillGitattributes(dir) };
+  if (isOurVault(dir)) {
+    assertVaultGitDir(dir);
+    return { created: false, dir, gitattributes: backfillGitattributes(dir) };
+  }
 
-  const entries = readdirSync(dir);
+  const enclosing = enclosingGitRepo(dir);
+  if (enclosing) {
+    throw new Error(
+      `refusing to initialize — ${dir} is inside an existing git repository `
+      + `(${enclosing.kind === 'git-dir' ? 'its git dir' : 'its work tree'} at ${enclosing.root}). `
+      + 'The memory vault must be a repository of its own, never nested in another. Nothing was '
+      + 'written. Relocate the vault by setting AGENT_COMPANION_STATE_DIR to a directory outside '
+      + 'any repository, then retry.',
+    );
+  }
+
+  const entries = existsSync(dir) ? readdirSync(dir) : [];
   if (entries.length > 0) {
     const sample = entries.slice(0, 5).join(', ') + (entries.length > 5 ? ', ...' : '');
     throw new Error(
@@ -346,9 +422,17 @@ export function ensureInit() {
     );
   }
 
+  mkdirSync(dir, { recursive: true });
   git(['init', '-q', '-b', 'main', dir]);
-  git(['-C', dir, 'config', 'user.name', 'agent-companion memory-vault']);
-  git(['-C', dir, 'config', 'user.email', 'memory-vault@agent-companion.local']);
+  // Proven BEFORE the first config write: the repository git just made is
+  // this directory's own. If it is not, stop here with only an empty repo
+  // created inside the vault dir, never a write anywhere else.
+  assertVaultGitDir(dir);
+  // --file, not an ambient lookup: the identity can only ever land in the
+  // vault's own config file.
+  const vaultConfig = join(vaultGitDir(dir), 'config');
+  git(['config', '--file', vaultConfig, 'user.name', 'agent-companion memory-vault']);
+  git(['config', '--file', vaultConfig, 'user.email', 'memory-vault@agent-companion.local']);
   mkdirSync(join(dir, 'projects'), { recursive: true });
   writeFileSync(join(dir, 'README.md'), VAULT_README);
   // Written BEFORE the first commit, so a new vault has never once stored a
@@ -358,8 +442,8 @@ export function ensureInit() {
     join(dir, MARKER_NAME),
     JSON.stringify({ kind: 'agent-companion-memory-vault', schema: SCHEMA, createdAt: new Date().toISOString() }, null, 2) + '\n',
   );
-  git(['-C', dir, 'add', '-A']);
-  git(['-C', dir, 'commit', '-q', '-m', 'memory-vault: initialize\n\nLocal git history for the Claude Code memory corpus. See README.md.']);
+  vaultGit(dir, ['add', '-A']);
+  vaultGit(dir, ['commit', '-q', '-m', 'memory-vault: initialize\n\nLocal git history for the Claude Code memory corpus. See README.md.']);
   return { created: true, dir, gitattributes: 'created' };
 }
 
@@ -549,8 +633,8 @@ export function sync() {
       }
     }
 
-    git(['-C', dir, 'add', '-A', '--', 'projects']);
-    const staged = git(['-C', dir, 'diff', '--cached', '--name-status']).trim();
+    vaultGit(dir, ['add', '-A', '--', 'projects']);
+    const staged = vaultGit(dir, ['diff', '--cached', '--name-status']).trim();
 
     const now = new Date().toISOString();
     if (!staged) {
@@ -575,8 +659,8 @@ export function sync() {
     const msg = buildCommitMessage({
       added, modified, removed, projectsTouched, flagged, readErrors,
     });
-    git(['-C', dir, 'commit', '-q', '-F', '-'], { input: msg });
-    const sha = git(['-C', dir, 'rev-parse', 'HEAD']).trim();
+    vaultGit(dir, ['commit', '-q', '-F', '-'], { input: msg });
+    const sha = vaultGit(dir, ['rev-parse', 'HEAD']).trim();
 
     writeStatusCache({
       outcome: 'ran',
@@ -693,9 +777,9 @@ export function status() {
   }
   let dirty = false;
   let lastCommit = null;
-  try { dirty = git(['-C', dir, 'status', '--porcelain']).trim().length > 0; } catch { /* unknown */ }
+  try { dirty = vaultGit(dir, ['status', '--porcelain']).trim().length > 0; } catch { /* unknown */ }
   try {
-    const raw = git(['-C', dir, 'log', '-1', '--format=%H%x1f%cI%x1f%s']).trim();
+    const raw = vaultGit(dir, ['log', '-1', '--format=%H%x1f%cI%x1f%s']).trim();
     if (raw) {
       const [sha, date, subject] = raw.split('\x1f');
       lastCommit = { sha, date, subject };

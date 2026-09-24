@@ -427,8 +427,16 @@ const STATE_ROOT_README = [
   'reverts them to defaults.',
 ].join('\n') + '\n';
 
+// The state root's PATH, with no side effect. stateRoot() below creates the
+// directory (and its README) on every call; a caller that must be able to
+// refuse BEFORE writing anything (memory-vault.mjs's ensureInit) resolves the
+// path through here instead.
+export function stateRootPath() {
+  return process.env.AGENT_COMPANION_STATE_DIR || join(claudeDir(), 'agent-companion');
+}
+
 export function stateRoot() {
-  const d = process.env.AGENT_COMPANION_STATE_DIR || join(claudeDir(), 'agent-companion');
+  const d = stateRootPath();
   try {
     mkdirSync(d, { recursive: true });
     const readme = join(d, 'README.txt');
