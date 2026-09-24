@@ -11,6 +11,7 @@ import {
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { makeFixture, runScript } from './helpers.mjs';
+import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 import { scanForSecrets } from '../scripts/memory-vault.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
@@ -49,7 +50,7 @@ function baseEnv(fx, corpusRoot, { vaultOn = true } = {}) {
 }
 
 function git(vault, args) {
-  return execFileSync('git', ['-C', vault, ...args], { encoding: 'utf8' });
+  return execFileSync('git', ['-C', vault, ...args], { encoding: 'utf8', windowsHide: true, env: cleanGitEnv() });
 }
 
 function walkFiles(dir, out = [], base = dir) {

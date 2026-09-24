@@ -18,9 +18,10 @@ import {
 } from './helpers.mjs';
 import { encodeProjectDir, resolveMemoryScopeDir } from '../hooks/lib/memory-index.mjs';
 import { buildMemoryNudge } from '../hooks/lib/memory-brief.mjs';
+import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
 function git(args, cwd) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, env: cleanGitEnv() });
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} in ${cwd} failed: ${r.stderr}`);
   }

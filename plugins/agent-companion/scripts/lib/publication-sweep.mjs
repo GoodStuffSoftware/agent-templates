@@ -36,6 +36,7 @@ import {
 } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { tmpdir, homedir, userInfo } from 'node:os';
+import { cleanGitEnv } from './git-env.mjs';
 import { createHmac, randomBytes } from 'node:crypto';
 import {
   scanRepo as coreScanRepo, ownRepoNames as coreOwnRepoNames, mainCheckoutDir as coreMainCheckoutDir,
@@ -173,6 +174,12 @@ export function interpretTargetScan(scan) {
   return { hits, error: null };
 }
 
+// Every child gets the repo-locating GIT_* variables stripped (see
+// git-env.mjs): git clone / git fetch here, and the leak-check children's
+// own git ls-files, must act on the directory they are pointed at, never on
+// a repository named by an inherited GIT_DIR. An explicit opts.env (the
+// scrubbed leak-check env) is cleaned the same way; that only ever removes
+// keys, so the allow-list scrub stays intact.
 function run(cmd, args, opts = {}) {
   return spawnSync(cmd, args, {
     encoding: 'utf8',
@@ -180,6 +187,7 @@ function run(cmd, args, opts = {}) {
     timeout: opts.timeout ?? 60000,
     windowsHide: true,
     ...opts,
+    env: cleanGitEnv(opts.env || process.env),
   });
 }
 

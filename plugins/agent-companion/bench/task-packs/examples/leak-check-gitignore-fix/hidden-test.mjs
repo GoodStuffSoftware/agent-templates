@@ -18,6 +18,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// A task pack is self-contained (FORMAT.md), so this does not import the
+// plugin's scripts/lib/git-env.mjs. Same rule, simpler form: no inherited
+// GIT_* variable reaches these git calls. An inherited GIT_DIR (this check
+// run under a git hook) would otherwise send git init / git config /
+// git commit into the caller's repository instead of repoDir.
+const GIT_ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+
 export default async function check(sandboxDir) {
   const target = join(sandboxDir, 'scripts', 'leak-check.mjs');
   if (!existsSync(target)) {
@@ -26,9 +33,9 @@ export default async function check(sandboxDir) {
 
   const repoDir = mkdtempSync(join(tmpdir(), 'leak-check-pack-verify-'));
   try {
-    execFileSync('git', ['init', '-q'], { cwd: repoDir, windowsHide: true });
-    execFileSync('git', ['config', 'user.email', 'bench@example.invalid'], { cwd: repoDir, windowsHide: true });
-    execFileSync('git', ['config', 'user.name', 'bench'], { cwd: repoDir, windowsHide: true });
+    execFileSync('git', ['init', '-q'], { cwd: repoDir, env: GIT_ENV, windowsHide: true });
+    execFileSync('git', ['config', 'user.email', 'bench@example.invalid'], { cwd: repoDir, env: GIT_ENV, windowsHide: true });
+    execFileSync('git', ['config', 'user.name', 'bench'], { cwd: repoDir, env: GIT_ENV, windowsHide: true });
 
     mkdirSync(join(repoDir, 'scripts'), { recursive: true });
     copyFileSync(target, join(repoDir, 'scripts', 'leak-check.mjs'));
@@ -50,13 +57,13 @@ export default async function check(sandboxDir) {
     // is about. A commit is not strictly required for `--others
     // --exclude-standard` to work, but it matches the real repo's shape (a
     // tracked script) rather than leaving everything untracked.
-    execFileSync('git', ['add', 'scripts/leak-check.mjs'], { cwd: repoDir, windowsHide: true });
-    execFileSync('git', ['commit', '-q', '-m', 'seed'], { cwd: repoDir, windowsHide: true });
+    execFileSync('git', ['add', 'scripts/leak-check.mjs'], { cwd: repoDir, env: GIT_ENV, windowsHide: true });
+    execFileSync('git', ['commit', '-q', '-m', 'seed'], { cwd: repoDir, env: GIT_ENV, windowsHide: true });
 
     let output = '';
     let status = 0;
     try {
-      output = execFileSync(process.execPath, ['scripts/leak-check.mjs'], { cwd: repoDir, encoding: 'utf8', windowsHide: true });
+      output = execFileSync(process.execPath, ['scripts/leak-check.mjs'], { cwd: repoDir, env: GIT_ENV, encoding: 'utf8', windowsHide: true });
     } catch (e) {
       status = typeof e.status === 'number' ? e.status : 1;
       output = (e.stdout || '') + (e.stderr || '');

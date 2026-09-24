@@ -49,12 +49,19 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { sweepRepo, sweepRepoInPlace, filterNew, ownerOf } from './lib/publication-sweep.mjs';
+import { cleanGitEnv } from './lib/git-env.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const reduced = process.argv.includes('--reduced');
 
+// Every child here gets an env with the repo-locating GIT_* variables removed
+// (lib/git-env.mjs). This canary runs git init / remote add / commit / push;
+// under an inherited GIT_DIR those would land in the CALLER's repository, not
+// in the throwaway ones built below.
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30000, windowsHide: true, ...opts });
+  const res = spawnSync(cmd, args, {
+    encoding: 'utf8', timeout: 30000, windowsHide: true, ...opts, env: cleanGitEnv(opts.env || process.env),
+  });
   if (res.status !== 0) {
     throw new Error(`${cmd} ${args.join(' ')} failed: ${(res.stderr || res.error?.message || '').split('\n')[0]}`);
   }
