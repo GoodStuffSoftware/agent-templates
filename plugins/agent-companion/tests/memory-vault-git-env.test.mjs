@@ -130,8 +130,15 @@ for (const [label, leak] of LEAKED_ENVS) {
 
 // --- ensureInit refuses a location inside another repository --------------
 
+// Both entry points. sync used to write its lock, the state root's README
+// and state/memory-vault-status.json BEFORE ensureInit() refused (V7), so its
+// "Nothing was written" was untrue — inside the project's work tree.
 function refusalCase(label, stateDirFor, kindRe) {
-  test(`init refuses, writing nothing, when the vault would sit ${label}`, () => {
+  for (const cmd of ['init', 'sync']) refusalCaseFor(cmd, label, stateDirFor, kindRe);
+}
+
+function refusalCaseFor(cmd, label, stateDirFor, kindRe) {
+  test(`${cmd} refuses, writing nothing, when the vault would sit ${label}`, () => {
     const fx = makeFixture();
     try {
       const { repo, wt } = makeProject(fx.dir);
@@ -139,8 +146,9 @@ function refusalCase(label, stateDirFor, kindRe) {
       const stateDir = stateDirFor(repo, fx.dir);
       const before = snapshot(repo);
       const gitDirListing = readdirSync(join(repo, '.git')).sort();
+      const treeBefore = hashTree(join(repo, '.git'));
 
-      const res = runScript(SCRIPT, ['init', '--json'], {
+      const res = runScript(SCRIPT, [cmd, '--json'], {
         cwd: fx.dir,
         env: {
           AGENT_COMPANION_STATE_DIR: stateDir,
@@ -149,11 +157,12 @@ function refusalCase(label, stateDirFor, kindRe) {
         },
       });
 
-      assert.notEqual(res.status, 0, 'init must refuse');
+      assert.notEqual(res.status, 0, `${cmd} must refuse`);
       assert.match(res.stderr, /refusing to initialize — .* is inside an existing git repository/);
       assert.match(res.stderr, kindRe);
       assert.ok(!existsSync(stateDir), `nothing may be created at ${stateDir}`);
       assert.deepEqual(readdirSync(join(repo, '.git')).sort(), gitDirListing, '.git gained or lost entries');
+      assert.deepEqual(hashTree(join(repo, '.git')), treeBefore, 'project .git must be byte-identical');
       assertProjectUntouched(repo, wt, before, label);
     } finally {
       fx.cleanup();
@@ -165,25 +174,27 @@ refusalCase('inside a project work tree', (repo) => join(repo, 'nested', 'state'
 refusalCase('inside a project .git dir', (repo) => join(repo, '.git', 'agent-companion'), /its git dir at /);
 refusalCase('inside a linked worktree', (repo, root) => join(root, 'project-wt', 'state'), /its work tree at /);
 
-test('init refuses a location inside a bare repository', () => {
-  const fx = makeFixture();
-  try {
-    const bare = join(fx.dir, 'origin.git');
-    git(['init', '-q', '--bare', bare]);
-    const configBefore = readFileSync(join(bare, 'config'));
-    const stateDir = join(bare, 'state');
-    const res = runScript(SCRIPT, ['init', '--json'], {
-      cwd: fx.dir,
-      env: { AGENT_COMPANION_STATE_DIR: stateDir, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
-    });
-    assert.notEqual(res.status, 0);
-    assert.match(res.stderr, /inside an existing git repository \(its git dir at /);
-    assert.ok(!existsSync(stateDir));
-    assert.ok(readFileSync(join(bare, 'config')).equals(configBefore));
-  } finally {
-    fx.cleanup();
-  }
-});
+for (const cmd of ['init', 'sync']) {
+  test(`${cmd} refuses a location inside a bare repository`, () => {
+    const fx = makeFixture();
+    try {
+      const bare = join(fx.dir, 'origin.git');
+      git(['init', '-q', '--bare', bare]);
+      const treeBefore = hashTree(bare);
+      const stateDir = join(bare, 'state');
+      const res = runScript(SCRIPT, [cmd, '--json'], {
+        cwd: fx.dir,
+        env: { AGENT_COMPANION_STATE_DIR: stateDir, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
+      });
+      assert.notEqual(res.status, 0);
+      assert.match(res.stderr, /inside an existing git repository \(its git dir at /);
+      assert.ok(!existsSync(stateDir));
+      assert.deepEqual(hashTree(bare), treeBefore, 'the bare repository must be byte-identical');
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
 
 test('a marker-bearing vault whose .git is gone is refused, not written through to the enclosing repo', () => {
   const fx = makeFixture();
@@ -262,6 +273,7 @@ for (const cmd of ['init', 'sync']) {
       assert.notEqual(res.status, 0, `${cmd} must refuse: ${res.stdout}`);
       assert.match(res.stderr, /is not a real directory of the vault's own/);
       assert.ok(!existsSync(join(vault, '.gitattributes')), 'no backfill may be written');
+      assert.deepEqual(readdirSync(fx.stateDir), ['memory-vault'], 'no lock, status file or README may be written');
     } finally {
       fx.cleanup();
     }
@@ -307,6 +319,7 @@ for (const [label, setup] of [
       assert.deepEqual(hashTree(join(vault, '.git')), treeBefore, "the repository's .git must be byte-identical");
       assert.ok(!existsSync(join(vault, '.gitattributes')), 'no backfill may be written');
       assert.ok(!existsSync(join(vault, 'projects')), 'no corpus may be copied in');
+      assert.deepEqual(readdirSync(fx.stateDir), ['memory-vault'], 'no lock, status file or README may be written');
     } finally {
       fx.cleanup();
     }

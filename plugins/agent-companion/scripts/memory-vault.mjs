@@ -480,13 +480,27 @@ function backfillGitattributes(dir) {
 // itself (marker present AND git resolves the dir to its own .git) is exempt,
 // so a vault that already works keeps working. Every refusal happens before
 // the first mkdir.
+//
+// The checks live in checkVaultLocation(), which is READ-ONLY, so sync() can
+// run the same checks before it writes its lock or status file: a refusal
+// that says "Nothing was written" has to be true on every entry point.
 export function ensureInit() {
   const dir = vaultDir();
+  if (checkVaultLocation(dir) === 'existing') {
+    return { created: false, dir, gitattributes: backfillGitattributes(dir) };
+  }
+  return createVault(dir);
+}
+
+// 'existing' — a vault this file created, safe to write.
+// 'new'      — nothing there (or an empty dir) outside any repository.
+// Anything else throws, having written nothing anywhere.
+export function checkVaultLocation(dir = vaultDir()) {
   if (vaultPathTooLong(dir)) throw new Error(tooLongMessage(dir));
   if (isOurVault(dir)) {
     assertVaultGitDir(dir);
     assertVaultIdentity(dir);
-    return { created: false, dir, gitattributes: backfillGitattributes(dir) };
+    return 'existing';
   }
 
   // A repository of its own but no marker: an initialization that stopped
@@ -523,7 +537,10 @@ export function ensureInit() {
       + 'setting AGENT_COMPANION_STATE_DIR, then retry.',
     );
   }
+  return 'new';
+}
 
+function createVault(dir) {
   mkdirSync(dir, { recursive: true });
   // --template= (empty): no template directory at all, so neither an
   // operator's init.templateDir nor git's sample hooks seed the vault's .git.
@@ -649,6 +666,11 @@ export function sync() {
       message: 'memory-vault: disabled (memory_vault option is off) — no-op',
     };
   }
+
+  // Before the lock and the status file — both are writes, under the state
+  // root. A location the vault must never use is refused with nothing
+  // written; ensureInit() below repeats the check under the lock.
+  checkVaultLocation();
 
   if (!acquireLock()) {
     const rec = writeStatusCache({ outcome: 'skipped', reason: 'locked' });

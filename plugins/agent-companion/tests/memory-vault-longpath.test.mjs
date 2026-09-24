@@ -77,6 +77,7 @@ for (let len = 243; len <= 250; len += 1) {
         assert.notEqual(sync.status, 0, 'sync must refuse');
         assert.match(sync.stderr, /Git for Windows cannot find a repository whose path is longer than 246/);
         assert.ok(!existsSync(vault), 'no partial vault may be left behind');
+        assert.ok(!existsSync(state), 'sync may not write its lock or status file before refusing');
         return;
       }
       assert.equal(init.status, 0, `init failed: ${init.stderr}`);
