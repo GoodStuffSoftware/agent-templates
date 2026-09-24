@@ -141,6 +141,64 @@ function looksLikeRealCall(argsText) {
   return inner.trim() === '' || /['"`,]/.test(inner);
 }
 
+// The test harness spawns hooks and scripts hundreds of times per run
+// (tests/helpers.mjs runHook/runScript, and direct spawns in test files and
+// fixture harnesses), so the same flag is required there too (S2 review P12:
+// runHook had none). Only the vendored golden reference is skipped: it is
+// frozen byte for byte and never spawns.
+function walkTestMjs(dir, out = []) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === 'reference') continue;
+      walkTestMjs(join(dir, entry.name), out);
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith('.mjs')) out.push(join(dir, entry.name));
+  }
+  return out;
+}
+
+// Test files often name a local helper `spawn` (a spawn-guard call through
+// runHook), so in tests/ only the names a file actually imports from
+// node:child_process are checked (aliases included).
+function childProcessCallRe(src) {
+  const names = new Set();
+  for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"](?:node:)?child_process['"]/g)) {
+    for (const part of m[1].split(',')) {
+      const p = /^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/.exec(part);
+      if (p) names.add(p[2] || p[1]);
+    }
+  }
+  if (!names.size) return null;
+  return new RegExp(`(?<![\\w$.])(${[...names].join('|')})\\(`, 'g');
+}
+
+function violationsIn(files) {
+  const violations = [];
+  for (const file of files) {
+    const src = stripComments(readFileSync(file, 'utf8'));
+    const re = childProcessCallRe(src);
+    if (!re) continue;
+    let m;
+    while ((m = re.exec(src))) {
+      const argsText = extractCallArgs(src, m.index + m[0].length - 1);
+      if (!looksLikeRealCall(argsText)) continue;
+      if (!argsText.includes('windowsHide')) {
+        const line = src.slice(0, m.index).split('\n').length;
+        violations.push(`${file.replace(pluginRoot, '.')}:${line}: \`${m[1]}(\` has no windowsHide in its arguments`);
+      }
+    }
+  }
+  return violations;
+}
+
+test('every child_process call in tests/ (helpers, test files, fixture harnesses) carries windowsHide', () => {
+  const violations = violationsIn(walkTestMjs(join(pluginRoot, 'tests')));
+  assert.deepEqual(violations, [], `test-harness child_process call(s) missing windowsHide:\n${violations.join('\n')}`);
+});
+
 test('every child_process call in hooks/, scripts/, and bench/ carries windowsHide', () => {
   const violations = [];
 

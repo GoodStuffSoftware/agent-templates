@@ -86,6 +86,7 @@ export function makeFixture() {
 export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, args = [] } = {}) {
   const script = join(PLUGIN_ROOT, hookRelPath);
   const res = spawnSync(process.execPath, [script, ...args], {
+    windowsHide: true,
     input: payload === undefined ? '' : JSON.stringify(payload),
     encoding: 'utf8',
     cwd: cwd || PLUGIN_ROOT,
