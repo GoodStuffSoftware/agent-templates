@@ -36,7 +36,7 @@ import {
   readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync,
   realpathSync, statSync, lstatSync,
 } from 'node:fs';
-import { join, dirname, relative, sep } from 'node:path';
+import { join, dirname, relative, sep, resolve } from 'node:path';
 import { gitClean, enclosingGitRepo, samePath } from './lib/git-env.mjs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -48,6 +48,8 @@ const MARKER_NAME = '.memory-vault.json';
 const LOCK_STALE_MS = 120000;
 const SCHEMA = 1;          // .memory-vault.json marker — do NOT bump with the status cache
 const STATUS_SCHEMA = 2;   // memory-vault-status.json — see writeStatusCache()
+const VAULT_USER_NAME = 'agent-companion memory-vault';
+const VAULT_USER_EMAIL = 'memory-vault@agent-companion.local';
 
 // --- Secrets gate ------------------------------------------------------
 // Standing gate, run on every sync, not a one-off. A match excludes that ONE
@@ -186,11 +188,31 @@ function vaultGitDir(dir) {
 }
 
 // RELATIVE --git-dir/--work-tree, resolved after `-C dir`: Git for Windows
-// rejects an explicit git dir of PATH_MAX (260) chars or more with
+// rejects an explicit absolute git dir far short of PATH_MAX with
 // "'$GIT_DIR' too big", which an absolute path under a deep state root can
 // reach. Relative to the vault they are always short, and still explicit.
+// core.longpaths lets Git for Windows reach work-tree files
+// (projects/<project>/memory/...) past 260 characters once the repository is
+// found; it is ignored everywhere else.
 function vaultGit(dir, args, opts = {}) {
-  return gitClean(['-C', dir, '--git-dir=.git', '--work-tree=.', ...args], opts);
+  return gitClean(['-c', 'core.longpaths=true', '-C', dir, '--git-dir=.git', '--work-tree=.', ...args], opts);
+}
+
+// Git for Windows finds a repository by checking <dir>\.git\objects against
+// MAX_PATH (260, so 259 usable characters) BEFORE it reads any config, so
+// core.longpaths cannot lift it: at a vault path longer than this, git sees
+// no repository in the vault at all. Refused up front, before anything is
+// written, rather than leaving a half-made vault that no later run can use.
+const WIN_MAX_VAULT_PATH = 259 - '\\.git\\objects'.length; // 246
+
+function vaultPathTooLong(dir) {
+  return process.platform === 'win32' && resolve(dir).length > WIN_MAX_VAULT_PATH;
+}
+
+function tooLongMessage(dir) {
+  return `refusing to initialize — the vault path is ${resolve(dir).length} characters (${dir}). `
+    + `Git for Windows cannot find a repository whose path is longer than ${WIN_MAX_VAULT_PATH} characters, `
+    + 'whatever core.longpaths says. Nothing was written. Choose a shorter vault location, then retry.';
 }
 
 function isOurVault(dir) {
@@ -418,9 +440,24 @@ function backfillGitattributes(dir) {
 // the first mkdir.
 export function ensureInit() {
   const dir = vaultDir();
+  if (vaultPathTooLong(dir)) throw new Error(tooLongMessage(dir));
   if (isOurVault(dir)) {
     assertVaultGitDir(dir);
     return { created: false, dir, gitattributes: backfillGitattributes(dir) };
+  }
+
+  // A repository of its own but no marker: an initialization that stopped
+  // part-way, or a repository that was never a vault. Said as exactly that —
+  // the enclosing-repository check below would otherwise report the vault
+  // directory as "inside an existing git repository", which sends the
+  // operator looking for a repository that is not there.
+  if (existsSync(vaultGitDir(dir))) {
+    throw new Error(
+      `refusing to initialize — ${dir} already holds a git repository but no memory-vault marker `
+      + `(${MARKER_NAME}). Either an earlier initialization stopped part-way or this repository is not a `
+      + 'memory vault. Nothing was written. If it is a half-made vault, delete that directory and retry; '
+      + 'otherwise choose another vault location.',
+    );
   }
 
   const enclosing = enclosingGitRepo(dir);
@@ -445,16 +482,18 @@ export function ensureInit() {
   }
 
   mkdirSync(dir, { recursive: true });
-  git(['init', '-q', '-b', 'main', dir]);
+  git(['-c', 'core.longpaths=true', 'init', '-q', '-b', 'main', dir]);
   // Proven BEFORE the first config write: the repository git just made is
   // this directory's own. If it is not, stop here with only an empty repo
   // created inside the vault dir, never a write anywhere else.
   assertVaultGitDir(dir);
   // --file, not an ambient lookup: the identity can only ever land in the
-  // vault's own config file.
-  const vaultConfig = join(vaultGitDir(dir), 'config');
-  git(['config', '--file', vaultConfig, 'user.name', 'agent-companion memory-vault']);
-  git(['config', '--file', vaultConfig, 'user.email', 'memory-vault@agent-companion.local']);
+  // vault's own config file. RELATIVE to the vault (after -C): an absolute
+  // --file makes Git for Windows build <vault>\.git\config.lock as a full
+  // path, which passes 260 characters for vaults of 243 characters and up
+  // and fails, leaving a vault with a repository and no marker.
+  vaultGit(dir, ['config', '--file', '.git/config', 'user.name', VAULT_USER_NAME]);
+  vaultGit(dir, ['config', '--file', '.git/config', 'user.email', VAULT_USER_EMAIL]);
   mkdirSync(join(dir, 'projects'), { recursive: true });
   writeFileSync(join(dir, 'README.md'), VAULT_README);
   // Written BEFORE the first commit, so a new vault has never once stored a
