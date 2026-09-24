@@ -29,6 +29,7 @@ import {
 } from './lib/repo-discovery.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
+import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/ci-status.mjs';
 
 // The operator's raw OS handle(s), for scrubbing signal text.
 function rawOsHandles() {
@@ -702,6 +703,90 @@ if (publicationRepos.length) {
   } catch (err) {
     sig('publication_leak_sweep_error', `sweep crashed: ${err.message || err}`, 'manual-check');
   }
+}
+
+// --- 9. Main branch CI red ----------------------------------------------
+// Suggestion-only: never re-runs, cancels, or fixes anything — it only reads
+// gh's own view of the default branch's latest completed runs. Fails open
+// (silent) whenever gh is missing, unauthenticated, or the API call errors
+// (offline included) — see ci-status.mjs's checkRepoCiStatus().
+//
+// SCOPE DECISION (required to pick the safer of "public repos only" or "the
+// current project only"): this checks the CURRENT PROJECT's own origin (cwd's
+// git toplevel — whatever its visibility), PLUS any repo already confirmed
+// PUBLIC by the publication-leak sweep above (`baseline.publicationKnownPublicRepos`,
+// populated only when the opt-in `publication_leak_sweep` has actually run).
+// No new repo-listing/discovery gh calls are made just for this feature, and
+// no repo of UNKNOWN or private visibility is ever added beyond the current
+// project itself. This is the current-project-only option, with free reuse of
+// an already-vetted public list when that unrelated feature happens to be on.
+const ciStatusOn = opt('ci_status_signal', true);
+if (ciStatusOn) {
+  try {
+    const CI_STATUS_CACHE_MS = 10 * 60 * 1000;
+    const CI_STATUS_MAX_REPOS = 5; // bound gh calls per run regardless of list size
+    const ciCache = { ...(baseline.ciStatusCache || {}) };
+
+    const currentProjectUrls = [];
+    try {
+      const originUrl = execSyncHidden('git remote get-url origin', { cwd: process.cwd(), encoding: 'utf8', timeout: 15000 }).trim();
+      if (originUrl) currentProjectUrls.push(originUrl);
+    } catch { /* not a repo / no origin here: nothing to add */ }
+    const knownPublicUrls = baseline.publicationKnownPublicRepos || [];
+
+    const seenKeys = new Set();
+    const targets = [];
+    for (const u of currentProjectUrls) {
+      const gh = githubOwnerRepoFromUrl(u, normalizeGitUrl);
+      if (!gh || seenKeys.has(repoCacheKey(gh.owner, gh.repo))) continue;
+      seenKeys.add(repoCacheKey(gh.owner, gh.repo));
+      targets.push(gh);
+    }
+    for (const u of knownPublicUrls) {
+      const gh = githubOwnerRepoFromUrl(u, normalizeGitUrl);
+      if (!gh) continue;
+      // Known public: safe to name in full in the signal text (scrub() below
+      // keeps only repo references that normalize to something in this set).
+      // Recorded unconditionally — even when this repo is ALSO the current
+      // project (already a target from the loop above) or past the repo cap
+      // below, its name must still be treated as public, not silently
+      // skipped by the dedupe/cap that only governs which repos get gh calls.
+      knownPublicForScrub.push(u, `${gh.owner}/${gh.repo}`);
+      const key = repoCacheKey(gh.owner, gh.repo);
+      if (seenKeys.has(key) || targets.length >= CI_STATUS_MAX_REPOS) continue;
+      seenKeys.add(key);
+      targets.push(gh);
+    }
+
+    for (const t of targets) {
+      const key = repoCacheKey(t.owner, t.repo);
+      const cached = ciCache[key];
+      const fresh = cached && (Date.now() - Date.parse(cached.checkedAt || 0)) < CI_STATUS_CACHE_MS;
+      let result = fresh ? cached : null;
+      if (!result) {
+        // AGENT_COMPANION_CI_STATUS_NO_GH: test/offline escape hatch, same
+        // convention as AGENT_COMPANION_DISCOVERY_NO_GH above — take the "gh
+        // unavailable" degrade path deterministically, with no real `gh`
+        // call and no dependence on whether this machine has gh installed.
+        const noGh = process.env.AGENT_COMPANION_CI_STATUS_NO_GH;
+        const res = noGh
+          ? { ok: false, reason: noGh === '1' ? 'gh is not installed' : String(noGh) }
+          // eslint-disable-next-line no-await-in-loop
+          : await checkRepoCiStatus({ owner: t.owner, repo: t.repo });
+        result = res.ok
+          ? { checkedAt: now, ok: true, red: res.red, workflows: res.workflows }
+          : { checkedAt: now, ok: false, reason: res.reason };
+        ciCache[key] = result;
+      }
+      if (result.ok && result.red) {
+        const wfList = result.workflows
+          .map((w) => `${w.name} red since ${w.redSince} (${w.latestUrl})`)
+          .join('; ');
+        sig('main_ci_red', `${t.owner}/${t.repo}: ${wfList}`, 'manual-check');
+      }
+    }
+    next.ciStatusCache = ciCache;
+  } catch { /* fail open: gh/network trouble here is never a reason to block the scout */ }
 }
 
 // Scrub every signal's text now that the known-public set is final.

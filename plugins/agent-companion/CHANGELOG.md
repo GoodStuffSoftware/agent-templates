@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## Unreleased
+
+- New `main_ci_red` scout signal (`ci_status_signal`, default on): detects a repo's default branch sitting on a red (failure/cancelled/timed_out) latest completed workflow run via `gh`, suggestion-only. Surfaced in the daily scout and as a cheap, cache-only SessionStart note. Scope is the current project plus repos already confirmed public by `publication_leak_sweep`; a private repo's name is scrubbed like any other signal detail. Silent when `gh` is missing, unauthenticated, or offline.
+
 ## 0.29.0 — 2026-09-24
 
 Ships the routing resolver layer stack and per-user routing profiles

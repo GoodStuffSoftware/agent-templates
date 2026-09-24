@@ -56,6 +56,7 @@ Only for signals that fired:
 | `inherited_model_spawns` | routing review |
 | `spawn_activity` with `spend-deep-dive` | spend attribution |
 | `harness_version_unreadable` | report to the operator; do not guess |
+| `main_ci_red` | report to the operator (repo, workflow, red-since, run URL) — suggestion only, never re-run or fix the workflow yourself |
 | `harness_version_changed`, `lineup_drift`, `model_retirement_approaching`, or any change to `config/model-tiers.json` | **suggest** the routing eval suite (below) in the report; never run it yourself |
 
 ### routing eval suite — suggest only, never auto-run
