@@ -32,14 +32,11 @@ import {
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef,
 } from './lib/context.mjs';
-import { premiumWindowLive, PREMIUM_WINDOW_MS, withStateLock, premiumAgentType } from './lib/premium-window.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract } from './lib/brevity.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
-
-const WINDOW_MS = PREMIUM_WINDOW_MS; // rolling window used to approximate concurrency (see lib/premium-window.mjs)
 
 // Allow — optionally saying something to the user, and/or rewriting the tool
 // input (`updatedInput` is how a PreToolUse hook fills in a model the spawn
@@ -735,7 +732,7 @@ try {
     // HELD DECISION (ADR 0003 open question 8, 2026-09-24): counting a
     // route-exempt premium spawn toward the cap is implemented on
     // feat/ac-routing-profile-s1b (`if (isPremium(model))
-    // enforcePremiumCap(true);` here) but held from release. Under trial v2
+    // await enforcePremiumCap(true);` here) but held from release. Under trial v2
     // most task types route to opus and the cap is machine-wide (2 per
     // rolling 10 min), so it would throttle nearly every spawn; that effect
     // needs the operator's explicit call. Until then a spawn whose route
@@ -805,9 +802,15 @@ try {
   // premium tier its route does not name). Counting route-exempt premium
   // spawns too (open question 8) is a HELD decision — see the early allow
   // above. `routeExempt` stays so that version is a one-line change.
-  enforcePremiumCap(false);
-  function enforcePremiumCap(routeExempt) {
+  await enforcePremiumCap(false);
+  async function enforcePremiumCap(routeExempt) {
     if (!opt('premium_cap', true)) return;
+    // Loaded here, not at the top: only a premium spawn reaches the cap, and
+    // the window module with the lock helper it loads cost ~1.6 ms cold on
+    // every other spawn (0.29.0 final review F5).
+    const {
+      premiumWindowLive, PREMIUM_WINDOW_MS, withStateLock, premiumAgentType,
+    } = await import('./lib/premium-window.mjs');
     const cap = Math.max(1, opt('premium_max_concurrent', 2));
     const f = stateFile('premium-window.json');
     const now = Date.now();
@@ -838,7 +841,7 @@ try {
       recordDenial('premium-cap', p, `${counted} premium agents in window, cap ${cap}`);
       deny(
         `Premium fan-out cap: ${counted} premium-tier agents already started in the last ` +
-        `${WINDOW_MS / 60000} minutes and the cap is ${cap}.\n\n` +
+        `${PREMIUM_WINDOW_MS / 60000} minutes and the cap is ${cap}.\n\n` +
         `This is the exact shape of the four-Fable incident: each spawn looked reasonable ` +
         `alone, and nothing was counting them together. Run this one at sonnet, or wait for ` +
         `the in-flight premium agents to finish.\n\n` +
