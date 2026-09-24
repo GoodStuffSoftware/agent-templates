@@ -46,7 +46,41 @@ Before opening a contribution, scrub it:
 - [ ] **Re-read the diff as a stranger.** Would someone with no knowledge of your project understand and use this? If it only makes sense with your project's context, it's not generic yet.
 - [ ] **Know the guard's boundary.** Leak-check scans committable *file contents* only — commit messages and branch names are not scanned. Whether source-project names may appear in commit metadata is maintainer discretion; the no-specifics guarantee and its CI enforcement cover files. And the guard matches known tokens, not meaning: proprietary material (real code, config, product logic) stays out of files entirely — reconstruct generic examples rather than pasting-and-renaming.
 
-**WIP pushes:** a branch named `wip/**` is excluded from the push trigger on both CI workflows (still fully covered via `pull_request`, and every other branch — including `main` — still runs on every push). Push in-progress work there to avoid emailing the operator on every commit.
+**WIP pushes:** a branch named `wip/**` or `backup/**` is excluded from the push trigger on both CI workflows (still fully covered via `pull_request`, and every other branch — including `main` — still runs on every push). Push in-progress or backup work there to avoid emailing the operator on every commit.
+
+---
+
+## Local CI gate (pre-push)
+
+Overnight, more than 60 red CI runs once emailed the operator for causes that were each invisible locally until CI ran: a shallow-clone checkout that couldn't see a commit a task-pack fixture pins, a runner with no `claude` CLI, and a sha-like token in a test comment. `scripts/ci-local.mjs` and a repo-tracked pre-push hook exist so those show up **before** a push, not in a failure email after.
+
+**One-line setup**, once per checkout:
+
+```
+node scripts/setup-hooks.mjs
+```
+
+This points git at the repo-tracked `.githooks/` directory (`core.hooksPath`) instead of the untracked, per-clone `.git/hooks/`. In a **worktree** checkout, that setting lives in the config every worktree of the repo shares — running the plain command above turns the hook on everywhere, which is usually what you want for your own clone, but is *not* what you want if you're one of several worktrees on a shared machine and only want the hook active in one of them. For that, pass `--worktree` (`node scripts/setup-hooks.mjs --worktree`), which scopes it to the current worktree only via `git config --worktree` — but only once `git config extensions.worktreeConfig true` has already been set (itself a shared-config change, so the script asks you to opt into that explicitly rather than doing it for you).
+
+**What the hook runs:** `.githooks/pre-push` reads the refs you're pushing and forwards them to `node scripts/ci-local.mjs --pre-push-hook`, which:
+- **skips** `wip/**` and `backup/**` branches entirely (same exclusion as the CI workflows above);
+- runs the full local suite (`scripts-tests`, `leak-check`, `agent-companion-tests`) for any other branch;
+- runs it in **`--ci-parity`** mode — a fresh shallow clone of the commit you're pushing, in a temp dir outside the repo, with `claude` hidden from `PATH` and the checkout depth read from the actual workflow file — when the destination is `main` or `release/**`, since those are the branches a red run is most expensive on;
+- **blocks the push** on any failure, printing which suite(s) failed.
+
+Run the same checks by hand at any time with `node scripts/ci-local.mjs` (fast, in place) or `node scripts/ci-local.mjs --ci-parity` (slower, exact CI reproduction) — this is also what CI itself calls, so there is only one implementation of "the suite" to keep green, not two that can drift apart.
+
+**Never use `--no-verify` on a real branch.** It skips the hook entirely, which is fine for a `wip/**`/`backup/**` push (the hook would have skipped it anyway) and not fine for anything else — it's the exact gap this hook exists to close.
+
+**Post-push:** after any push to a CI-visible branch (i.e. not `wip/**`/`backup/**`), watch the run rather than walking away from it:
+
+```
+gh run watch <run-id> --exit-status
+```
+
+Treat red as a failed step, not noise — read the log, fix it, and push a fix commit. Never push again to a branch CI is currently red on without first fixing what made it red. If CI is red and you didn't expect that, check **main's own latest run first** — if main is already red, fix the baseline before spending time blaming your diff for it.
+
+See **[Release gate](#release-gate)** below: cutting a versioned release is gated on CI the same way, cross-referenced here rather than restated.
 
 ---
 
@@ -99,7 +133,7 @@ Either way: the change isn't "done" until it's scrubbed (leak-check green, local
 
 ## Release gate
 
-The same principle governs cutting a versioned release (e.g. the `agent-companion` plugin): landing is gated on CI, not on local runs alone. GitHub CI must be green on the release branch before landing, and on main after the push; watch with `gh run watch <id> --exit-status`. Red CI is a failed release step.
+The same principle governs cutting a versioned release (e.g. the `agent-companion` plugin): landing is gated on CI, not on local runs alone or the [pre-push gate](#local-ci-gate-pre-push) alone. GitHub CI must be green on the release branch before landing, and on main after the push; watch with `gh run watch <id> --exit-status`. Red CI is a failed release step.
 
 ---
 
