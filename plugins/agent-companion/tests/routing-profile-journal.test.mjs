@@ -219,6 +219,38 @@ test('a stale lock left by a crashed writer is broken; no lock or temp file surv
   assert.deepEqual(readdirSync(files().dir).sort(), ['routing-profile.journal.jsonl', 'routing-profile.json']);
 });
 
+// S2 review P1/P8: the writer's lock is the shared helper (lib/file-lock.mjs).
+// Stat-then-unlink broke a LIVE writer's lock (duplicate revisions, a lost
+// set, a corrupt journal), and a killed writer's lock blocked for 30 s.
+test('a LIVE writer\'s lock is never broken, however old: the next writer waits for its release', async () => {
+  const root = freshRoot('livelock');
+  mkdirSync(files().dir, { recursive: true });
+  // This test process is the live owner; its lock is an hour old.
+  writeFileSync(files().lock, JSON.stringify({ pid: process.pid, token: 'live-holder', at: Date.now() - 3_600_000 }));
+  const old = new Date(Date.now() - 3_600_000);
+  utimesSync(files().lock, old, old);
+  const child = runChild({ AGENT_COMPANION_STATE_DIR: root }, ['1', 'operate:sonnet']);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(JSON.parse(readFileSync(files().lock, 'utf8')).token, 'live-holder', 'the waiting writer broke a live lock');
+  assert.equal(existsSync(files().profile), false, 'the waiting writer wrote while the lock was held');
+  rmSync(files().lock);
+  const r = await child;
+  assert.equal(r.code, 0, r.err);
+  assert.equal(readFile().revision, 1);
+});
+
+test('a killed writer\'s lock (dead pid) is broken within a second, not after 30 s', () => {
+  freshRoot('deadlock');
+  mkdirSync(files().dir, { recursive: true });
+  const { spawnSync } = process.getBuiltinModule('node:child_process');
+  const dead = spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid;
+  writeFileSync(files().lock, JSON.stringify({ pid: dead, token: 'killed', at: Date.now() - 2000 }));
+  const t0 = Date.now();
+  assert.equal(store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW }).revision, 1);
+  assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
+  assert.deepEqual(readdirSync(files().dir).sort(), ['routing-profile.journal.jsonl', 'routing-profile.json']);
+});
+
 test('unset retires the row (kept, journalled); rollback --row restores it; unknown rows are not-found', () => {
   freshRoot('unset');
   store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW });

@@ -4,9 +4,14 @@
 // Nothing else writes the file.
 //
 // One write, in order:
-//   1. take the lock (config/routing-profile.lock, exclusive create), so two
-//      writers serialise instead of losing an update; a lock older than
-//      STALE_LOCK_MS is a crashed writer's and is broken
+//   1. take the lock (config/routing-profile.lock) through the shared
+//      helper (hooks/lib/file-lock.mjs), so two writers serialise instead of
+//      losing an update. The lock names its owner (pid + token); it is
+//      released only by that owner, and broken only when the owner's process
+//      is gone AND it is older than STALE_LOCK_MS, by a re-verified rename.
+//      A live writer's lock is never broken (S2 review P1: stat-then-unlink
+//      broke live locks, duplicating revisions and corrupting the journal),
+//      and a killed writer's lock no longer blocks for 30 s (P8).
 //   2. read the file and the journal FRESH (never the resolver's cache);
 //      refuse to write over a file that is invalid or from a newer major
 //      version — the operator fixes or removes it, the writer never guesses
@@ -24,8 +29,7 @@
 // Every path it touches is under the state root (routingProfilePath()).
 
 import {
-  openSync, closeSync, writeSync, writeFileSync, readFileSync, renameSync, unlinkSync, statSync,
-  appendFileSync, mkdirSync, existsSync,
+  writeFileSync, readFileSync, renameSync, unlinkSync, appendFileSync, mkdirSync, existsSync,
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -36,8 +40,12 @@ import {
   parseProfileText, parseJournal, rebuildAt, journalMaxRevision, emptyProfile, profileContent, canonical, applyEntry,
   typeShapeErrors, rowShapeErrors, ACTIVE_STATES, JOURNAL_FILE, LOCK_FILE,
 } from '../../hooks/lib/routing-profile.mjs';
+import { withFileLock, LockTimeoutError } from '../../hooks/lib/file-lock.mjs';
 
-export const STALE_LOCK_MS = 30_000;
+// A dead owner's lock this old is broken. A live owner's never is, whatever
+// its age, so this only has to exceed the instant between creating a lock
+// and its owner being checkable.
+export const STALE_LOCK_MS = 1_000;
 const LOCK_TIMEOUT_MS = 15_000;
 
 export class ProfileWriteError extends Error {
@@ -58,29 +66,16 @@ function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+// The writer never runs unlocked: a timeout is a 'locked' refusal.
 function withLock(lockPath, fn) {
   mkdirSync(dirname(lockPath), { recursive: true });
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  let fd = null;
-  for (;;) {
-    try {
-      fd = openSync(lockPath, 'wx');
-      writeSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
-      break;
-    } catch (e) {
-      if (e.code !== 'EEXIST' && e.code !== 'EPERM' && e.code !== 'EACCES') throw e;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS) { unlinkSync(lockPath); continue; }
-      } catch { /* vanished between open and stat: retry */ }
-      if (Date.now() > deadline) throw new ProfileWriteError('locked', `routing profile is locked by another writer (${lockPath}); retry, or remove the lock if no writer is running`);
-      sleepMs(10 + Math.floor(Math.random() * 30));
-    }
-  }
   try {
-    return fn();
-  } finally {
-    try { closeSync(fd); } catch { /* already closed */ }
-    try { unlinkSync(lockPath); } catch { /* best effort */ }
+    return withFileLock(lockPath, () => fn(), { waitMs: LOCK_TIMEOUT_MS, staleMs: STALE_LOCK_MS, failOpen: false });
+  } catch (e) {
+    if (e instanceof LockTimeoutError) {
+      throw new ProfileWriteError('locked', `routing profile is locked by another writer (${lockPath}); retry, or remove the lock if no writer is running`);
+    }
+    throw e;
   }
 }
 
