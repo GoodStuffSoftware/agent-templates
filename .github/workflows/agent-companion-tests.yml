@@ -7,6 +7,8 @@ name: agent-companion-tests
 
 on:
   push:
+    branches-ignore:
+      - 'wip/**'
   pull_request:
 
 jobs:
@@ -15,6 +17,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # A task-pack fixture (bench/task-packs/examples/leak-check-gitignore-fix)
+          # pins a historical commit by SHA and reads it with `git show`. A
+          # shallow (depth-1) clone doesn't have that object, so
+          # `git show <ref>:<path>` fails with "invalid object name". Full
+          # history avoids that without pinning to a specific depth.
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
