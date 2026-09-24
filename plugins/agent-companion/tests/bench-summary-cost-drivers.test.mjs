@@ -45,7 +45,7 @@ test('rebuildSummary computes median_context_rereads and read_share_of_cost for 
     const headerLine = md.split('\n').find((l) => l.startsWith('cell | task'));
     assert.ok(headerLine, 'expected a markdown header row starting with "cell | task"');
     const cols = headerLine.split(' | ').map((s) => s.trim());
-    const idxPassRate = cols.indexOf('pass_rate');
+    const idxPassRate = cols.indexOf('pass@1');
     const idxCacheRead = cols.indexOf('med_cache_read_tok');
     const idxHitRate = cols.indexOf('hit_rate');
     const idxTurns = cols.indexOf('med_turns');
@@ -53,7 +53,7 @@ test('rebuildSummary computes median_context_rereads and read_share_of_cost for 
     const idxReadShare = cols.indexOf('read_share_cost');
     const idxCostPerCorrect = cols.indexOf('cost_per_correct');
     for (const i of [idxCacheRead, idxHitRate, idxTurns, idxRereads, idxReadShare]) {
-      assert.ok(i > idxPassRate, 'headline cost-driver column must come after pass_rate');
+      assert.ok(i > idxPassRate, 'headline cost-driver column must come after pass@1');
       assert.ok(i < idxCostPerCorrect, 'headline cost-driver column must come before cost_per_correct');
     }
     assert.ok(idxHitRate > idxCacheRead, 'hit_rate sits next to cache reads, per the brief');

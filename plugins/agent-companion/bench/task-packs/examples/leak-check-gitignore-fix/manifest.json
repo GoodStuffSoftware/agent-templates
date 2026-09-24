@@ -9,5 +9,21 @@
     "PROVENANCE.local.md",
     "even though CI was green"
   ],
-  "maxBudgetUsd": 0.6
+  "maxBudgetUsd": 0.6,
+  "judgeCalibration": {
+    "plantedBad": [
+      {
+        "note": "tracked files only (untracked, non-ignored files slip through)",
+        "file": "scripts/leak-check.mjs",
+        "find": "[\"ls-files\", \"--cached\", \"--others\", \"--exclude-standard\"]",
+        "replace": "[\"ls-files\", \"--cached\"]"
+      },
+      {
+        "note": "special-cases one file suffix instead of honouring .gitignore",
+        "file": "scripts/leak-check.mjs",
+        "find": "for (const file of listCommittableFiles()) {",
+        "replace": "for (const file of walk(ROOT).filter((f) => !f.endsWith(\".local.md\"))) {"
+      }
+    ]
+  }
 }

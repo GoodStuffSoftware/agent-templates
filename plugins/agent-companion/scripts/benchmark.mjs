@@ -32,25 +32,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CELLS, TASKS, resolveList, runOne, rebuildSummary, defaultResultsRoot,
+  CELLS, TASKS, TASK_FAMILIES, resolveList, runOne, rebuildSummary, defaultResultsRoot,
   checkIsolateHomePreflight, formatRunLine, authErrorAbortMessage, scaledMaxBudgetUsd,
+  harnessErrorRow, cliJudgeCaller,
 } from '../bench/runner.mjs';
 import { loadPack, buildTaskFromPack } from '../bench/task-packs/lib.mjs';
+import {
+  validateJudgeConfig, checkJudgeEligibility, taskJudgeKey, findTrustedCalibration, calibrateJudge,
+} from '../bench/judge.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Task families: a coarser unit than a single task id, matching the "easy /
-// hard / real" tiers docs/BENCHMARK.md and PROCESS-NOTES.md describe. Kept
-// here (not in runner.mjs) because it is a CLI convenience, not a mechanic —
-// runner.mjs's own --tasks stays a plain id list or "all".
-const TASK_FAMILIES = {
-  easy: ['lookup', 'verify', 'procedure', 'bounded-edit', 'diagnosis', 'instruction-logic'],
-  hard: ['hard-verify', 'hard-procedure', 'hard-diagnosis', 'hard-instruction-logic'],
-  real: [
-    'real-capacity', 'real-secret-scan', 'real-opt-fallback', 'real-effort-note',
-    'real-publication-sweep', 'real-misleading-report', 'real-contradictory-spec',
-  ],
-};
+// Task families (easy / hard / real) live in bench/runner.mjs now -- the
+// summary's confidence intervals are reported per cell x family, so the
+// mechanics need them too. Imported above and re-exported below unchanged.
 
 function usageError(msg) {
   console.error(msg);
@@ -88,6 +83,19 @@ function printHelp() {
   --isolate-home                 Redirect HOME/USERPROFILE to a throwaway dir per run (opt-in;
                                  default is your normal OAuth session, unredirected). Requires
                                  ANTHROPIC_API_KEY -- refused otherwise. See docs/BENCHMARK.md.
+  --judge-model <full id>        OPTIONAL rubric judge (bench/judge.mjs): grade each run's change
+                                 against the task's rubric, as a SEPARATE score (never merged into
+                                 pass/fail). Must differ from, and be at least as strong as, every
+                                 selected cell's model. Only tasks with a rubric are judged.
+  --judge-effort <low|medium|high>  Judge effort. Default: medium.
+  --judge-budget-usd <amount>    Per-vote budget cap in Sonnet dollars (scaled by the judge's price).
+                                 Default 0.3, hard cap 1.0.
+  --judge-calibrations <file>    Calibration store. Default: <data dir>/benchmarks/judge-calibrations.json.
+  --calibrate-judge              Calibrate the judge on every selected task that has a rubric (known-good
+                                 must PASS, every known-bad must FAIL), write the store, and exit
+                                 (0 = all trusted, 1 = any untrusted). Makes real judge calls
+                                 (3 votes x (1 + known-bad count) per task). A live run refuses to
+                                 start with an uncalibrated judge.
   --list                         Print available cells, task ids, and task families, then exit.
   --help                         Print this text and exit.
 `);
@@ -98,6 +106,7 @@ function parseArgs(argv) {
     cells: 'all', tasks: 'all', reps: 1, repStart: 1, outDir: null, phase: 'pilot',
     maxBudgetUsd: null, dryRun: false, batchByCell: false, resume: false, list: false, help: false,
     taskPacks: [], packRepo: null, isolateHome: false,
+    judgeModel: null, judgeEffort: null, judgeBudgetUsd: null, judgeCalibrations: null, calibrateJudge: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -115,6 +124,11 @@ function parseArgs(argv) {
     else if (a === '--task-pack') out.taskPacks.push(...argv[++i].split(',').map((s) => s.trim()).filter(Boolean));
     else if (a === '--pack-repo') out.packRepo = argv[++i];
     else if (a === '--isolate-home') out.isolateHome = true;
+    else if (a === '--judge-model') out.judgeModel = argv[++i];
+    else if (a === '--judge-effort') out.judgeEffort = argv[++i];
+    else if (a === '--judge-budget-usd') out.judgeBudgetUsd = Number(argv[++i]);
+    else if (a === '--judge-calibrations') out.judgeCalibrations = argv[++i];
+    else if (a === '--calibrate-judge') out.calibrateJudge = true;
     else if (a === '--help' || a === '-h') out.help = true;
     else usageError(`unknown arg: ${a}`);
   }
@@ -158,6 +172,50 @@ function expandTasks(spec, tasksMap) {
   return ids;
 }
 
+export function defaultCalibrationStore() {
+  return path.join(defaultResultsRoot(), 'judge-calibrations.json');
+}
+
+// Judge preflight, run before ANY model call (live, --dry-run, and
+// --calibrate-judge alike). Returns null when no judge was asked for, else
+// { config, storeFile, judgedTasks, problems[] }: config validation,
+// judge-vs-cell eligibility for every selected cell, and (unless
+// calibrating) a TRUSTED calibration record for every selected task that has
+// a rubric. A live run refuses to start while problems[] is non-empty -- the
+// runner never uses an uncalibrated judge.
+export function judgePreflight({ args, cellIds, taskIds, tasksMap, calibrating = false }) {
+  if (!args.judgeModel) {
+    if (calibrating) return { config: null, judgedTasks: [], problems: ['--calibrate-judge requires --judge-model'] };
+    return null;
+  }
+  const problems = [];
+  let config = null;
+  try {
+    config = validateJudgeConfig({ model: args.judgeModel, effort: args.judgeEffort, maxBudgetUsd: args.judgeBudgetUsd });
+  } catch (e) {
+    return { config: null, judgedTasks: [], problems: [e.message] };
+  }
+  const storeFile = args.judgeCalibrations
+    ? (path.isAbsolute(args.judgeCalibrations) ? args.judgeCalibrations : path.resolve(process.cwd(), args.judgeCalibrations))
+    : defaultCalibrationStore();
+  if (!calibrating) {
+    for (const id of cellIds) {
+      const elig = checkJudgeEligibility(config.model, CELLS[id].model);
+      if (!elig.ok) problems.push(`cell ${id}: ${elig.reason}`);
+    }
+  }
+  const judgedTasks = taskIds.filter((t) => tasksMap[t] && tasksMap[t].rubric);
+  if (judgedTasks.length === 0) problems.push('none of the selected tasks has a rubric -- the judge would never run (add rubric.md to a task pack)');
+  if (!calibrating) {
+    for (const t of judgedTasks) {
+      if (!findTrustedCalibration(storeFile, taskJudgeKey(t, tasksMap[t], config))) {
+        problems.push(`task ${t}: judge ${config.model}/${config.effort ?? 'none'} is not calibrated (run --calibrate-judge first)`);
+      }
+    }
+  }
+  return { config, storeFile, judgedTasks, problems };
+}
+
 function batchStatePath(outDir) {
   return path.join(outDir, '.batch-state.json');
 }
@@ -198,6 +256,31 @@ async function main() {
   const tasksMap = loadTaskMap(args);
   const taskIds = expandTasks(args.tasks, tasksMap);
 
+  const judge = judgePreflight({ args, cellIds, taskIds, tasksMap, calibrating: args.calibrateJudge });
+
+  if (args.calibrateJudge) {
+    if (judge.problems.length) usageError('Cannot calibrate the judge:\n  - ' + judge.problems.join('\n  - '));
+    if (args.dryRun) {
+      console.log(`DRY RUN -- would calibrate judge ${judge.config.model}/${judge.config.effort ?? 'none'} on: ${judge.judgedTasks.join(', ')}`);
+      console.log(`store: ${judge.storeFile}`);
+      process.exit(0);
+    }
+    let allTrusted = true;
+    for (const t of judge.judgedTasks) {
+      // eslint-disable-next-line no-await-in-loop
+      const rec = await calibrateJudge({
+        taskId: t, task: tasksMap[t], config: judge.config,
+        budgetUsd: scaledMaxBudgetUsd(judge.config.maxBudgetUsd, judge.config.model),
+        callJudge: cliJudgeCaller, storeFile: judge.storeFile,
+      });
+      allTrusted = allTrusted && rec.trusted;
+      console.log(`${t}: ${rec.trusted ? 'TRUSTED' : 'NOT TRUSTED'} -- known-good ${rec.knownGood.pass === true ? 'PASS' : 'did not pass'} (${rec.knownGood.votes.join('/')}); `
+        + rec.knownBad.map((b) => `${b.label} ${b.pass === false ? 'FAIL' : 'did not fail'} (${b.votes.join('/')})`).join('; '));
+    }
+    console.log(`Calibration store: ${judge.storeFile}`);
+    process.exit(allTrusted ? 0 : 1);
+  }
+
   const outDir = args.outDir
     ? (path.isAbsolute(args.outDir) ? args.outDir : path.resolve(process.cwd(), args.outDir))
     : path.join(defaultResultsRoot(), `${args.phase}-${new Date().toISOString().slice(0, 10)}`);
@@ -232,6 +315,10 @@ async function main() {
     if (args.maxBudgetUsd != null) console.log(`global --max-budget-usd ceiling: $${args.maxBudgetUsd}`);
     if (args.batchByCell) console.log('batching: one cell per invocation (--batch-by cell)');
     if (args.isolateHome) console.log('--isolate-home: HOME/USERPROFILE will be redirected per run (requires ANTHROPIC_API_KEY)');
+    if (judge) {
+      console.log(`rubric judge: ${judge.config ? `${judge.config.model}/${judge.config.effort ?? 'none'}` : '(invalid)'}; judged tasks: ${(judge.judgedTasks || []).join(', ') || 'none'}`);
+      if (judge.problems.length) console.log('JUDGE WOULD BE REFUSED -- a live run will not start:\n  - ' + judge.problems.join('\n  - '));
+    }
     if (resumeNote) console.log(resumeNote);
     if (args.resume && cellsToRun.length === 0) process.exit(0);
     console.log('\nPlanned runs (cell / task / rep -> claude args)' + (args.resume ? ', remaining cells only' : '') + ':');
@@ -264,6 +351,14 @@ async function main() {
     process.exit(0);
   }
 
+  if (judge && judge.problems.length) {
+    usageError('Refusing to start: the rubric judge is not usable for this plan.\n  - ' + judge.problems.join('\n  - '));
+  }
+  const judgeOpt = judge ? {
+    config: judge.config, storeFile: judge.storeFile, callJudge: cliJudgeCaller,
+    scaledJudgeBudget: scaledMaxBudgetUsd(judge.config.maxBudgetUsd, judge.config.model),
+  } : null;
+
   fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(answersDir, { recursive: true });
 
@@ -288,6 +383,7 @@ async function main() {
             cellId, cell, taskId, task, rep, outDir, answersDir,
             maxBudgetUsdCeiling: args.maxBudgetUsd,
             isolateHome: args.isolateHome,
+            judge: judgeOpt,
           });
           process.stdout.write(formatRunLine(row, Date.now() - t0) + '\n');
           if (row.auth_error) {
@@ -296,11 +392,15 @@ async function main() {
             process.exit(1);
           }
         } catch (e) {
+          if (e && e.code === 'JUDGE_REFUSED') {
+            console.error(`\nJUDGE REFUSED: ${e.message}\nAborting the batch (no row written).`);
+            rebuildSummary(outDir);
+            process.exit(1);
+          }
           process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
-          fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify({
-            ts: new Date().toISOString(), cell: cellId, task: taskId, rep, pass: false, is_error: true,
-            exec_err: String((e && e.message) || e),
-          }) + '\n');
+          fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(harnessErrorRow({
+            cellId, cell, taskId, task, rep, error: e,
+          })) + '\n');
         }
       }
     }
