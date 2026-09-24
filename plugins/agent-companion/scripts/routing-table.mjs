@@ -148,6 +148,8 @@ L.push(`# Model routing table`);
 L.push(``);
 L.push(`_Generated from \`config/model-tiers.json\` v${cfg.version} (updated ${cfg.updated}) by \`scripts/routing-table.mjs\`. Do not edit by hand — change the config and regenerate._`);
 L.push(``);
+L.push(`For WHY the table is shaped this way — lowest-sufficient tier, effort as a separate lever, reviewer parity, the consequence floors, trials and per-user profiles, cost basis, and haiku-as-validator — see [\`docs/ROUTING-RATIONALE.md\`](./ROUTING-RATIONALE.md), a hand-written companion doc (this file is generated and cannot carry hand-written prose).`);
+L.push(``);
 
 L.push(`## Tiers`);
 L.push(``);

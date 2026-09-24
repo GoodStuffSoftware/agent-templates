@@ -20,7 +20,7 @@ import { execSyncHidden, execFileSyncHidden } from './lib/proc.mjs';
 
 import {
   classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir, opt, claudeDir,
-  referenceEffortSupported,
+  referenceEffortSupported, retirement,
 } from '../hooks/lib/context.mjs';
 import {
   memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
@@ -466,7 +466,13 @@ const spawnAudit = {
       findings.push('fit where weight was declared: over=' + n('over') + ' under=' + n('under') + ' fit=' + n('fit') + ' of ' + declared.length +
         (n('under') ? ' - under-provisioned spawns ship wrong code; see the evaluate skill' : ''));
     }
-    if (!rows.some((r) => /haiku/i.test(r.model || ''))) {
+    // Once haiku is past its staged retirement (config/model-tiers.json
+    // tiers.haiku.retiresAfter), the routing table stops sending anything
+    // there on its own — an empty haiku bucket is then the CORRECT outcome,
+    // not a finding. Skip the nag rather than nagging for a tier that is
+    // supposed to sit idle.
+    const haikuRetired = !!retirement('haiku')?.retired;
+    if (!haikuRetired && !rows.some((r) => /haiku/i.test(r.model || ''))) {
       findings.push('no haiku spawns recorded - the cheapest tier is going unused');
     }
     // Rung-level effort drift: right MODEL tier, but effort below the ladder
