@@ -32,7 +32,7 @@ const REAL_LEAK_CHECK = join(PLUGIN_ROOT, '..', '..', 'scripts', 'leak-check.mjs
 const SYNTHETIC_LEAK_LINE = ['private path: C:', '\\Users\\', 'zzz', 'testuser', '\\dev\\thing'].join('');
 
 function git(args, cwd, env) {
-  const res = spawnSync('git', args, { cwd, encoding: 'utf8', env: env || process.env, timeout: 30000 });
+  const res = spawnSync('git', args, { windowsHide: true, cwd, encoding: 'utf8', env: env || process.env, timeout: 30000 });
   if (res.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
   return res;
 }
@@ -917,6 +917,7 @@ test('leak-scan-core scanRepo: the vendor skip is SHA-ONLY and narrow — build/
 
 test('leak-sweep-canary.mjs: full mode passes', () => {
   const res = spawnSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'leak-sweep-canary.mjs')], {
+    windowsHide: true,
     encoding: 'utf8', timeout: 60000,
   });
   assert.equal(res.status, 0, res.stderr);
@@ -925,6 +926,7 @@ test('leak-sweep-canary.mjs: full mode passes', () => {
 
 test('leak-sweep-canary.mjs: reduced mode passes', () => {
   const res = spawnSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'leak-sweep-canary.mjs'), '--reduced'], {
+    windowsHide: true,
     encoding: 'utf8', timeout: 60000,
   });
   assert.equal(res.status, 0, res.stderr);
@@ -1136,6 +1138,7 @@ test('note (b): the routine fallback, run for real, never prints a private repo 
   const home = mkdtempSync(join(tmpdir(), 'ac-fallback-home-'));
   try {
     const res = spawnSync(process.execPath, ['-e', js], {
+      windowsHide: true,
       cwd: home,
       encoding: 'utf8',
       timeout: 60000,

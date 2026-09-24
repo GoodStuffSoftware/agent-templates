@@ -16,7 +16,7 @@ import { makeFixture, runScript } from './helpers.mjs';
 // machine, rather than hardcoding a version, so the test is correct whether
 // this machine is ahead of or behind any particular Claude Code release.
 function runningVersion() {
-  const out = execSync('claude --version', { encoding: 'utf8', timeout: 20000 }).trim();
+  const out = execSync('claude --version', { windowsHide: true, encoding: 'utf8', timeout: 20000 }).trim();
   const m = out.match(/(\d+)\.(\d+)\.(\d+)/);
   if (!m) throw new Error(`could not parse \`claude --version\` output: ${out}`);
   return [Number(m[1]), Number(m[2]), Number(m[3])];

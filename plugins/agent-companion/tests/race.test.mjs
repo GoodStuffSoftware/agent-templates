@@ -19,7 +19,7 @@ test('noteAgentType: 8 concurrent processes, same new type -> exactly 1 row and 
     const agentType = 'race-probe-agent-type';
 
     const runs = Array.from({ length: N }, (_, i) => new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [script], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn(process.execPath, [script], { windowsHide: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
       let stderr = '';
       child.stderr.on('data', (d) => { stderr += d; });
       child.on('error', reject);

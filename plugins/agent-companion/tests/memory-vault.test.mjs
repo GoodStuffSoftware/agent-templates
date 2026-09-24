@@ -49,7 +49,7 @@ function baseEnv(fx, corpusRoot, { vaultOn = true } = {}) {
 }
 
 function git(vault, args) {
-  return execFileSync('git', ['-C', vault, ...args], { encoding: 'utf8' });
+  return execFileSync('git', ['-C', vault, ...args], { windowsHide: true, encoding: 'utf8' });
 }
 
 function walkFiles(dir, out = [], base = dir) {

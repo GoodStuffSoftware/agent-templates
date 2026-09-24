@@ -95,13 +95,15 @@ Example: a one-line production migration is `mechanical` by kind (effort down) b
 
 ## Reviewer parity
 
-- Model must match the writer it gates: **yes**
+- Reviewer starts at the model of the writer it gates (then the floors below apply): **yes**
 - Effort may exceed the writer's: **yes**
 - Effort may fall below the writer's: **no**
 
+That parity match is then floored, same as any other route (operator-decided 2026-09-24, see resolveRoute() in hooks/lib/context.mjs): a **critical** review is never sized below `opus`/`xhigh` (F1), never routed to fable — capped to the best available tier that is not one, which still demands its own WARRANT (F2) — and refused outright for a writer model outside the tier table, or unavailable with no staged replacement (F4). A per-user routing profile row for a parity type may only raise the resulting minimum effort further; it can never name a model.
+
 ## Task types → routing (the task model list)
 
-Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. `parity` weight = match the writer being reviewed; `inherit` consequence = take the change's consequence. **`--type` is the preferred input over raw `--weight`/`--kind`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.
+Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. `parity` weight = sized to the writer being reviewed (see Reviewer parity); `inherit` consequence = take the change's consequence. **`--type` is the preferred input over raw `--weight`/`--kind`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.
 
 | Task type | Weight | Kind | Consequence | Resolves to | What it is |
 |---|---|---|---|---|---|
@@ -113,7 +115,7 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 | `large-refactor` | 5 | `bounded` | `elevated` | `opus/high` _(trial override)_ | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
 | `novel-design` | 5 | `novel-design` | `elevated` | `opus/high` _(trial override)_ | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
 | `critical-change` | 4 | `bounded` | `critical` | `opus/xhigh` | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
-| `code-review` | parity | `diagnostic` | `inherit` | _writer's model; effort ≥ writer_ | adversarial review of a diff; sized to the writer it gates |
+| `code-review` | parity | `diagnostic` | `inherit` | _writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer_ | adversarial review of a diff; sized to the writer it gates |
 | `long-autonomous-run` | 5 | `bounded` | `elevated` | `opus/xhigh` | an agent session expected to run for hours with minimal supervision |
 | `subagent-worker` | 2 | `mechanical` | `routine` | `opus/low` _(trial override)_ | a delegated worker doing a bounded, well-specified piece of a larger task |
 | `verify` | 1 | `mechanical` | `routine` | `opus/low` _(trial override)_ | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
@@ -139,7 +141,7 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 
 ### Routing trial (benchmark overrides, not the plain grid)
 
-These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit `--weight`/`--kind`/`--consequence` falls back to the plain grid. Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.
+These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit `--weight`/`--kind`/`--consequence` that departs from the type's preset falls back to the plain grid (one equal to the preset restates the type and keeps the trial). Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.
 
 | Task type | Trial | Grid would say | Since | Review by | Evidence |
 |---|---|---|---|---|---|

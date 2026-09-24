@@ -2,6 +2,7 @@
 // Feeds the calibration routine: which agent types and models actually ran.
 
 import { readStdin, noteAgentType, opt, appendLog, passthrough } from './lib/context.mjs';
+import { confirmPremiumStart } from './lib/premium-window.mjs';
 
 try {
   const p = readStdin();
@@ -17,5 +18,9 @@ try {
       agent_transcript_path: p.agent_transcript_path || null,
     });
   }
+  // The premium fan-out cap counts spawns that actually STARTED: confirm the
+  // spawn guard's pending entry for this session and agent type
+  // (confirmPremiumStart in lib/premium-window.mjs). Independent of spawn_telemetry — this is cap state.
+  try { confirmPremiumStart(p.session_id, Date.now(), p.agent_type || null); } catch { /* fail open */ }
 } catch { /* fail open */ }
 passthrough();

@@ -28,7 +28,7 @@ It was built after two observed failures:
 | Toggle | Does | Blocks? |
 |---|---|---|
 | `delegation_guard` | Fires when the **main thread** runs `delegation_threshold` execution-class tools in a row. Inert inside every subagent. | nudge, with cooldown |
-| `premium_cap` | Caps concurrent premium-tier subagents at `premium_max_concurrent`. | yes, at the cap |
+| `premium_cap` | Caps concurrent premium-tier subagents at `premium_max_concurrent`. Counted: fable, and any premium tier the spawn's own route does not name; a spawn whose route names its model (e.g. a trial routing to opus) needs no warrant and is not counted. Only spawns that start count for the full 10-minute window; one that never starts (the harness rejected it) stops counting after 3 minutes. | yes, at the cap |
 | `warrant_required` | Premium spawns must carry a `WARRANT:` line stating task weight and why a cheaper tier will not do. | yes |
 | `memory_budget` | Warns when always-loaded instruction files exceed `memory_budget_tokens`, and writes a ready-to-run refactor prompt. | no |
 | `memory_doctor` | Detects memory files on disk that the index does not link — **unreachable rules** — plus broken index links. Repairs non-destructively. | no |
@@ -37,6 +37,7 @@ It was built after two observed failures:
 | `version_notice` | At session start and on the next prompt, says once per (plugin, lastUpdated) pair when ANY installed plugin — not just this one — was updated after this session last loaded its plugins (session start, or the last `/reload-plugins`), catching a stale parent (and everything it spawns) mid-session, not just at startup. Also keeps this plugin's own running-vs-installed self-check, merged into the same notice when both fire, for the one case timestamps alone miss: a desktop session that loaded a stale app-extracted bundle at startup. Updating itself is the harness's job: the native autoupdater in terminal sessions, the built-in `plugin update` commands run by the daily local scout in desktop sessions. Install the global hook (see below) to run this checker itself from a fixed path that is never stale. | no |
 | `fit_guard` | Best fit at the spawn, both directions. A brief that declares `WEIGHT:` gets its model graded against the routing table: under- and cheap-over-provisioned spawns are announced; a premium model over-provisioned for its own declared weight is denied with the correction. | premium-over only |
 | `fit_autofill` | A spawn that declares `WEIGHT:` but names no model gets the table's model filled in, instead of inheriting the lead's tier by accident. | no |
+| `routing_profile` | Routes a declared `TYPE:` through **your** routing profile ahead of the shipped table (see [Routing profile](#routing-profile)). The kill switch: off means only the shipped table routes, from the next hook invocation, and the file is left untouched. On by default because the file exists only once you write a row. | no |
 | *(spawning rule)* | Three operator-approved checks, always on (not a togglable option, same as the no-effort-stated warning below): a spawn naming no model anywhere is flagged even with no `WEIGHT:` declared; an opus/fable spawn from a session on a Claude Code build below the alias-resolution floor is flagged; the audit separately verifies the RESOLVED model against what ran. See [Spawning rule](#spawning-rule-operator-approved-2026-09-23). | no |
 | `brevity` | Appends a short reporting contract to every spawned agent's brief — status line, blockers in full, outcome as facts, no narration — plus a peer-brevity clause on inter-agent messages. | no (an opt-in sub-toggle can block once per agent) |
 | `standing_rules` | Injects operator-authored "always do X if Y" rules at session start, on matching prompts, and into matching spawn briefs. | no |
@@ -368,6 +369,48 @@ and the fan-out cap during exactly the window in which nobody has updated the
 table yet. So it fails toward the expensive assumption, and the audit tells you
 the table needs an entry rather than quietly applying the strict path.
 
+## Routing profile
+
+Your own routing rows, kept apart from the shipped table
+(docs/adr/0003-per-user-routing-profiles.md). A row is keyed by task type and
+wins over the shipped trial and the grid when a brief declares that `TYPE:`
+as-is. The floors still apply after it: critical work stays on opus at xhigh
+or above (F1), nothing routes to fable (F2), a reviewer matches its writer
+(F3), and a row must name an available tier alias with an effort it takes
+(F4). A row that breaks any of these is refused when written and ignored if
+the file is edited by hand. The elevated effort floor (F5, high) can be waived
+on one row with `--waive-floor elevated`, and only on a row you set yourself;
+`why` always prints the waiver.
+
+```bash
+node "$AC/scripts/routing-profile.mjs" set integration --model sonnet --effort high --because "sonnet handles my integration work"
+node "$AC/scripts/routing-profile.mjs" set code-review --effort xhigh   # a review row sets a minimum effort only
+node "$AC/scripts/routing-profile.mjs" why integration                 # the full explain stack (= recommend --explain)
+node "$AC/scripts/routing-profile.mjs" show
+node "$AC/scripts/routing-profile.mjs" unset integration               # the row is retired, kept in the journal
+node "$AC/scripts/routing-profile.mjs" rollback --row integration      # the row's previous value
+node "$AC/scripts/routing-profile.mjs" rollback --to 3                 # the whole profile as it stood at revision 3
+```
+
+`/ac routing set|unset|show|why|rollback …` is the short form. A `set` row is
+`operator-observed`, starts as a `trial`, and gets a review date 90 days out;
+nothing expires it.
+
+**Where it lives.** `~/.claude/agent-companion/config/routing-profile.json`,
+next to an append-only journal (`routing-profile.journal.jsonl`, one line per
+change) from which any revision can be rebuilt. Never in a repository and
+never in the plugin directory, so an uninstall keeps it. Every write goes
+through one validated writer: locked, written to a temp file and renamed, and
+journalled. A profile that fails to parse, fails the schema, or comes from a
+newer major format is ignored as a whole; the shipped table routes, and
+`state/routing-profile-invalid.json` records the failure for the scout.
+
+The profile can also define **local task types** (`types`, the same preset
+shape as the shipped ones). `TYPE:` resolves shipped types first, then local
+ones. `routing-table.mjs --profile` shows the table as this machine resolves
+it; the default output stays the shipped table, because it is committed as
+`docs/ROUTING.md`.
+
 ## Model benchmark
 
 The routing table's `taskTypes.*.override` entries (routing trials) are
@@ -531,7 +574,7 @@ the legacy-data import, and the schema.
 | `telemetry/fixtures.jsonl` | state root | rows from `verify-`/`test-`/`fixture-` sessions, routed here instead of a production stream |
 | `telemetry/brevity.jsonl` | state root | one row per `SubagentStart` self-heal and per `SubagentStop`: agent type, report length, whether the contract was on, whether it was gated |
 | `state/delegation-streak.json` | state root | per-session main-thread streak counter |
-| `state/premium-window.json` | state root | rolling window used to approximate premium concurrency |
+| `state/premium-window.json` | state root | rolling window used to approximate premium concurrency; read-modify-written only under `premium-window.json.lock` (a transient lock both hooks share, via hooks/lib/file-lock.mjs: it names its owner, and is broken only when that process is gone and the lock is over 5 s old) |
 | `state/baseline.json` | state root | previous harness version + counters, for daily drift detection; also the publication-leak sweep's per-repo hit fingerprints (keyed HMACs, not guessable hashes), so an accepted finding doesn't re-fire daily, and its repo-visibility cache (only public answers kept, for 24h; not-public and unknown ones are rechecked every run, so a repo made public is swept on the next run) |
 | `leak-fingerprint.key` | state root | per-machine random key for those hit fingerprints, created on the first sweep (owner-only permissions) |
 | `state/scout-latest.json` | state root | most recent calibration-scout result (overwritten each run) |
@@ -699,7 +742,7 @@ node "$AC/scripts/audit.mjs" --only guard-canary
 |---|---|---|
 | `recommend` | `/ac recommend --type <task-type>` | what should this task run on: model, effort, warrant, reviewer |
 | `evaluate` | `/ac evaluate --model <alias> --type <task-type>` | is what is running (or being spawned) right for it: over, under, or fit |
-| `routing-table` | `/ac routing` | the current table, rendered from config |
+| `routing-table` | `/ac routing` | the current table, rendered from config; `/ac routing set`, `unset`, `show`, `why` and `rollback` manage your routing profile |
 | `audit` | `/ac audit --dir <project>` | the composable hygiene audit; `--fix` for the fixable checks |
 | `brevity` | `/ac brevity` | is the reporting contract on, for whom, and which layer is winning |
 | `standing-rules` | `/ac rules` | which "always do X if Y" rules exist, and whether one would fire on given text |

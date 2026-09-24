@@ -154,7 +154,7 @@ function withPath(env, value) {
 function resolveInChild(env) {
   const code = `import {homeRoot,claudeDir} from ${JSON.stringify(CONTEXT_URL)};`
     + 'process.stdout.write(JSON.stringify([homeRoot(),claudeDir()]));';
-  const out = execFileSync(process.execPath, ['--input-type=module', '-e', code], { env, encoding: 'utf8' });
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', code], { windowsHide: true, env, encoding: 'utf8' });
   const [home, claude] = JSON.parse(out);
   return { home, claude };
 }
@@ -177,6 +177,7 @@ function runAuditTraced(baseEnv, watchRoots) {
     let out;
     try {
       out = execFileSync(process.execPath, [AUDIT, '--dir', PLUGIN_ROOT, '--json'], {
+        windowsHide: true,
         encoding: 'utf8',
         cwd: PLUGIN_ROOT,
         env,

@@ -26,16 +26,20 @@
 import { createHash } from 'node:crypto';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveExpected,
+  writeJsonAtomic,
+  appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
+  taskTypeDef,
 } from './lib/context.mjs';
+import { premiumWindowLive, PREMIUM_WINDOW_MS, withStateLock, premiumAgentType } from './lib/premium-window.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
+import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract } from './lib/brevity.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
 
-const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
+const WINDOW_MS = PREMIUM_WINDOW_MS; // rolling window used to approximate concurrency (see lib/premium-window.mjs)
 
 // Allow — optionally saying something to the user, and/or rewriting the tool
 // input (`updatedInput` is how a PreToolUse hook fills in a model the spawn
@@ -106,23 +110,36 @@ try {
   // and then denied the exact opus spawn the trial prescribes for a
   // manufactured "over-provisioned" mismatch. A WARRANT justifies a tier;
   // it does not redeclare the task's weight, and must never outrank a
-  // declared TYPE. Precedence (see the resolveExpected() call below):
+  // declared TYPE. Precedence (see the resolveRoute() call below):
   // explicit TYPE (with its trial override) > a real WEIGHT: line >
   // a WARRANT's own stated weight. weightLineExplicit therefore reflects
   // ONLY a genuine WEIGHT: line; a WARRANT-only weight still counts as A
   // declared weight for declaredWeight/telemetry/fitOn (TELEMETRY.md
   // documents declared_weight coming from either), but never as the
   // EXPLICIT deviation that discards a named TYPE's own preset.
-  const weightLineMatch = brief.match(/\bWEIGHT\s*:\s*(?:weight\s*)?([1-5])\b/i);
-  const warrantWeightMatch = brief.match(/\bWARRANT\s*:\s*(?:weight\s*)?([1-5])\b/i);
+  //
+  // Every declaration is read from a LINE OF ITS OWN, not from anywhere in
+  // the text: an unanchored match used to pick up prose ("the kind:
+  // mechanical parts", "weight: 4 files", "a brief for type: x") as an
+  // explicit declaration, which discarded the named TYPE's preset and denied
+  // the spawn its trial prescribes. A line may be list-marked (-, *) and the
+  // label or value markdown-bold ("**TYPE:** integration"). Lines inside
+  // fenced code, indented code and > blockquotes are never declarations, and
+  // the FIRST declaration of each label wins whether or not its value is
+  // valid (lib/brief-directives.mjs, RC review R1): a pasted "type: explore"
+  // or "WEIGHT: 1" in the body can no longer replace or outrank the header.
+  const decls = briefDeclarations(brief);
+  const weightLineMatch = declarationValue(decls, 'WEIGHT', /(?:weight[ \t]*)?([1-5])\b/.source);
+  const warrantWeightMatch = declarationValue(decls, 'WARRANT', /(?:weight[ \t]*)?([1-5])\b/.source);
+  const warrantDeclared = !!decls.WARRANT;
   const weightLineExplicit = !!weightLineMatch;
   let declaredWeight = weightLineMatch ? Number(weightLineMatch[1])
     : (warrantWeightMatch ? Number(warrantWeightMatch[1]) : null);
   const weightWasDeclared = declaredWeight !== null;
-  const km = brief.match(/\bKIND\s*:\s*(mechanical|bounded|diagnostic|novel-design)\b/i);
+  const km = declarationValue(decls, 'KIND', /(mechanical|bounded|diagnostic|novel-design)\b/.source);
   let declaredKind = km ? km[1].toLowerCase() : null;
   const kindWasDeclared = declaredKind !== null;
-  const cm = brief.match(/\bCONSEQUENCE\s*:\s*(routine|elevated|critical)\b/i);
+  const cm = declarationValue(decls, 'CONSEQUENCE', /(routine|elevated|critical)\b/.source);
   let declaredConsequence = cm ? cm[1].toLowerCase() : null;
   const consequenceWasDeclared = declaredConsequence !== null;
   // TYPE: names a config/model-tiers.json taskTypes preset (taskTypesNote) —
@@ -130,8 +147,11 @@ try {
   // Declaring it alone (no WEIGHT/KIND/CONSEQUENCE) lets a brief pick up the
   // type's own weight/kind/consequence preset AND its override, same as
   // `recommend.mjs --type`; declaring WEIGHT/KIND/CONSEQUENCE alongside it is
-  // a deliberate deviation and bypasses the override, same rule as there.
-  const tm = brief.match(/\bTYPE\s*:\s*([a-z][a-z0-9-]*)\b/i);
+  // a deliberate deviation and bypasses the override when its value DEPARTS
+  // from the preset (one equal to the preset restates the type), same rule
+  // as there. Only the first TYPE line counts: an unknown one stays unknown
+  // (no route from it), and declared_type records exactly that header value.
+  const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
   const declaredType = tm ? tm[1].toLowerCase() : null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
@@ -148,21 +168,22 @@ try {
   // The table's answer for the declared weight (or named type), used two
   // ways: filled in where the spawn left the model blank (the inheritance
   // hazard, closed at its source), and as the yardstick for a model the
-  // spawn did name. resolveExpected() is the SHARED resolver
+  // spawn did name. resolveRoute() is the SHARED resolver
   // (hooks/lib/context.mjs) — scripts/recommend.mjs and scripts/evaluate.mjs
-  // go through the identical function, so a taskTypes.<type>.override
-  // ROUTING TRIAL is applied here too: a spawn that correctly follows a
-  // trial (e.g. TYPE: debug-root-cause on opus/low) is judged against the
-  // trial's own (model, effort), not the plain grid's.
+  // go through the identical function, so its layer stack (profile > shipped
+  // ROUTING TRIAL > grid, floors after the winner) is applied here too: a
+  // spawn that correctly follows a trial (e.g. TYPE: debug-root-cause on
+  // opus/low) is judged against the trial's own (model, effort), not the
+  // plain grid's.
   let typeWeight = null;
   if (declaredType) {
-    try { typeWeight = modelTiers().taskTypes?.[declaredType]?.weight ?? null; } catch { /* table unreadable */ }
+    try { typeWeight = taskTypeDef(declaredType)?.def?.weight ?? null; } catch { /* table unreadable */ }
   }
   const fitOn = opt('fit_guard', true) && (weightWasDeclared || typeof typeWeight === 'number');
   let route = null;
   if (fitOn) {
     try {
-      const resolved = resolveExpected({
+      const resolved = resolveRoute({
         type: declaredType,
         weight: declaredWeight, kind: declaredKind, consequence: declaredConsequence,
         // weightExplicit is weightLineExplicit, NOT weightWasDeclared: only a
@@ -186,7 +207,37 @@ try {
       // route null, same as the old "no weight declared" no-op path.
     } catch { /* table unreadable */ }
   }
+  // --- F1 on a critical parity-sized spawn (RC review R6) -----------------
+  // A parity-sized type (code-review) has no route without a writer, so the
+  // fit check above never ran for it, and "TYPE: code-review" +
+  // "CONSEQUENCE: critical" on sonnet or haiku passed in silence. The brief
+  // names no writer, so parity itself (F3) cannot be checked here, but F1
+  // holds whatever the writer was: a critical review is at least the
+  // critical consequence's model and effort floor (opus/xhigh). Below that
+  // is "under", said out loud like any other under-provisioned fit. Only
+  // the under direction is judged: with no writer, a tier above the floor
+  // (a fable writer's reviewer) cannot be called over-provisioned.
+  let parityFloor = null;
+  if (opt('fit_guard', true) && typeWeight === 'parity') {
+    try {
+      const pr = resolveRoute({
+        type: declaredType,
+        weight: declaredWeight, kind: declaredKind, consequence: declaredConsequence,
+        weightExplicit: weightLineExplicit, kindExplicit: kindWasDeclared, consequenceExplicit: consequenceWasDeclared,
+      });
+      if (!pr.model && pr.weight === 'parity' && pr.consequence === 'critical') {
+        const crit = modelTiers().consequence?.critical || {};
+        if (crit.modelFloor) parityFloor = { model: crit.modelFloor, effort: crit.effortFloor || '' };
+      }
+    } catch { /* table unreadable */ }
+  }
+  const parityFloorLabel = parityFloor ? `${parityFloor.model}${parityFloor.effort ? '/' + parityFloor.effort : ''}` : '';
   const routeLabel = route?.model ? `${route.model}${route.effort ? '/' + route.effort : ''}` : '';
+  // Which layer answered — named in every fit note below, so a spawner can
+  // tell a shipped trial's answer from the plain grid's without --explain.
+  const routeLayerNote = route?.layer
+    ? ` [route layer: ${route.layer === 'trial' ? 'shipped trial' : route.layer === 'profile' ? `routing profile rev ${route.profileRevision}` : route.layer}]`
+    : '';
 
   // --- Premium-tier determination, ROUTING-AWARE (bugfix 2026-09-23) -----
   // The premium set used to be hard-coded to isPremium()'s tier-table
@@ -200,7 +251,7 @@ try {
   // names it — that is not a spawner reaching for the expensive tier, it is
   // the table's own prescribed answer. A route exists whenever fitOn is
   // true (a TYPE, or an explicit/warrant weight, was declared) and
-  // resolveExpected() found a row. Fable is excluded from this exception on
+  // resolveRoute() found a row. Fable is excluded from this exception on
   // purpose: routingNote is explicit that "nothing routes to fable — it is
   // an exception, not a row", so no route can ever justify it, and it stays
   // a warranted exception on every spawn regardless of TYPE/WEIGHT.
@@ -503,13 +554,23 @@ try {
       fit = evaluateFit({
         model, effort: def?.effort || '', weight: declaredWeight,
         kind: declaredKind || 'bounded', consequence: declaredConsequence || 'routine',
-        // `route` was already resolved via resolveExpected() above (override
+        // `route` was already resolved via resolveRoute() above (layer stack
         // included) — pass it through as `expected` so evaluateFit() judges
         // against it directly instead of recomputing an override-blind
         // default from the plain grid.
         expected: route,
       });
     } catch { /* table unreadable: the audit reports that separately */ }
+  }
+  // F1 on a critical parity-sized spawn (see parityFloor above): under only.
+  if (!fit && parityFloor && model && !autofilled) {
+    try {
+      const f = evaluateFit({
+        model, effort: def?.effort || '', weight: null,
+        kind: declaredKind || 'bounded', consequence: 'critical', expected: parityFloor,
+      });
+      if (f.verdict === 'under') fit = { ...f, parityFloor: true };
+    } catch { /* table unreadable */ }
   }
 
   if (opt('spawn_telemetry', true) && !isCanary) {
@@ -597,8 +658,10 @@ try {
       declared_consequence: declaredConsequence,
       declared_type: declaredType,       // null when the brief named no TYPE: preset
       fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid
+      route_layer: route?.layer || null,  // profile | trial | grid: which resolveRoute() layer answered; null when no route
+      route_profile_rev: route?.layer === 'profile' ? (route.profileRevision ?? null) : null, // routing-profile revision behind a profile answer; null for every other layer. The row's content is never logged.
       fit: autofilled ? 'fit' : fit ? fit.verdict : null, // over | under | fit | unknown, when a weight was declared
-      fit_expected: routeLabel || null,
+      fit_expected: routeLabel || (fit?.parityFloor ? parityFloorLabel : null),
       // --- Memory nudge/brief observability -------------------------------
       // null across the board when the feature never ran for this spawn
       // (memory_search/memory_brief off, or mode "off") — distinct from
@@ -649,13 +712,16 @@ try {
   const who = input.subagent_type || 'an agent';
   let note = null;
   if (autofilled) {
-    note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel}).`;
+    note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel})${routeLayerNote}.`;
+  } else if (fit?.parityFloor) {
+    note = `agent-companion: spawning ${who} at ${model}${def?.effort ? '/' + def.effort : ''} for a critical ${declaredType} is under-provisioned — ${fit.reason}. ` +
+      `F1: a critical review is never sized below ${parityFloorLabel}, whatever its writer (no writer is declared, so parity with it is not checked here). ${fit.action}.`;
   } else if (fit?.verdict === 'under') {
     // The cheap direction is never blocked, but a weight-4 task on haiku is
     // the failure that ships wrong code, so it is said out loud.
-    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}. ${fit.action}.`;
+    note =`agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}${routeLayerNote}. ${fit.action}.`;
   } else if (fit?.verdict === 'over' && !isPremiumForSpawn) {
-    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
+    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}${routeLayerNote}. Re-spawn there unless the weight is understated.`;
   }
   // Set only in the warrant section below (routing-can't-be-inferred case);
   // declared here so it is defined for the early-exit combineNotes() call
@@ -664,7 +730,17 @@ try {
   // known true — see the warrant section).
   let warrantSoftNote = null;
 
-  if (!isPremiumForSpawn) allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
+  if (!isPremiumForSpawn) {
+    // HELD DECISION (ADR 0003 open question 8, 2026-09-24): counting a
+    // route-exempt premium spawn toward the cap is implemented on
+    // feat/ac-routing-profile-s1b (`if (isPremium(model))
+    // enforcePremiumCap(true);` here) but held from release. Under trial v2
+    // most task types route to opus and the cap is machine-wide (2 per
+    // rolling 10 min), so it would throttle nearly every spawn; that effect
+    // needs the operator's explicit call. Until then a spawn whose route
+    // names its model skips the cap, as before slice 1b.
+    allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
+  }
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -676,7 +752,7 @@ try {
       `Best fit: this spawn requests "${model}" but declares weight ${declaredWeight}` +
       (declaredKind ? ` (${declaredKind})` : '') +
       (declaredConsequence ? `, ${declaredConsequence} consequence` : '') +
-      `, which the routing table sends to ${routeLabel}. ${fit.reason}.\n\n` +
+      `, which the routing table sends to ${routeLabel}${routeLayerNote}. ${fit.reason}.\n\n` +
       `Either re-spawn at ${routeLabel}, or restate the brief honestly: a higher WEIGHT if the task ` +
       `is heavier than declared, or CONSEQUENCE: critical if a mistake would be expensive or ` +
       `irreversible (that raises the model floor). A warrant that contradicts its own weight is ` +
@@ -697,7 +773,7 @@ try {
   // case the fix's own instruction calls out: warn, don't block, since
   // nothing here can confirm the premium tier either way.
   if (opt('warrant_required', true)) {
-    if (!/WARRANT\s*:/i.test(brief)) {
+    if (!warrantDeclared) {
       if (spawnAlias === 'fable' || routingKnown) {
         recordDenial('warrant', p, `premium tier ${model} requested with no warrant`);
         deny(
@@ -724,27 +800,55 @@ try {
   }
 
   // --- Concurrency cap ---------------------------------------------------
-  if (opt('premium_cap', true)) {
+  // Reached only by a spawn that is premium FOR THIS SPAWN (fable, or a
+  // premium tier its route does not name). Counting route-exempt premium
+  // spawns too (open question 8) is a HELD decision — see the early allow
+  // above. `routeExempt` stays so that version is a one-line change.
+  enforcePremiumCap(false);
+  function enforcePremiumCap(routeExempt) {
+    if (!opt('premium_cap', true)) return;
     const cap = Math.max(1, opt('premium_max_concurrent', 2));
     const f = stateFile('premium-window.json');
     const now = Date.now();
-    const all = readJson(f, []);
-    const recent = all.filter((t) => now - t < WINDOW_MS);
+    // The whole read-count-write runs under the window lock, shared with
+    // SubagentStart's confirmPremiumStart (lib/premium-window.mjs withStateLock): without
+    // it a parallel burst of premium spawns each read the same count and all
+    // passed the cap, and a guard and a start interleaving lost an entry.
+    // deny() exits the process, so the verdict is acted on after the lock.
+    const counted = withStateLock(f, () => {
+      // Started spawns count for the window; a spawn not yet confirmed started
+      // counts only while young (premiumWindowLive, lib/premium-window.mjs), so one the
+      // harness rejects stops holding a slot instead of extending the block.
+      const recent = premiumWindowLive(readJson(f, []), now);
+      if (recent.length >= cap) {
+        writeJsonAtomic(f, recent);
+        return recent.length;
+      }
+      // A probe must not consume the cap. A teammate (team_name) is recorded as
+      // started at once: there is no evidence SubagentStart fires for one, and
+      // under-counting it would reopen the fan-out this cap exists to bound.
+      // `atype` lets SubagentStart confirm this entry only on a start of the
+      // same agent type (confirmPremiumStart, lib/premium-window.mjs).
+      if (!isCanary) writeJsonAtomic(f, [...recent, { t: now, sid, confirmed: !!input.team_name, atype: premiumAgentType(input.subagent_type) }]);
+      return null;
+    });
 
-    if (recent.length >= cap) {
-      writeJson(f, recent);
-      recordDenial('premium-cap', p, `${recent.length} premium agents in window, cap ${cap}`);
+    if (counted !== null) {
+      recordDenial('premium-cap', p, `${counted} premium agents in window, cap ${cap}`);
       deny(
-        `Premium fan-out cap: ${recent.length} premium-tier agents already started in the last ` +
+        `Premium fan-out cap: ${counted} premium-tier agents already started in the last ` +
         `${WINDOW_MS / 60000} minutes and the cap is ${cap}.\n\n` +
         `This is the exact shape of the four-Fable incident: each spawn looked reasonable ` +
         `alone, and nothing was counting them together. Run this one at sonnet, or wait for ` +
         `the in-flight premium agents to finish.\n\n` +
+        (routeExempt
+          ? `(This spawn's own route names ${spawnAlias || model}, which exempts it from the WARRANT but not ` +
+            `from this cap: the cap counts every premium-tier spawn by its tier, regardless of route.)\n\n`
+          : '') +
         `(Concurrency is approximated by a rolling window, so a batch of genuinely-warranted ` +
         `premium work may need the cap raised in settings rather than worked around.)`
       );
     }
-    if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
   allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));

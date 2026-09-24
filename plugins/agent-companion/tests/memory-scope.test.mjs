@@ -20,7 +20,7 @@ import { encodeProjectDir, resolveMemoryScopeDir } from '../hooks/lib/memory-ind
 import { buildMemoryNudge } from '../hooks/lib/memory-brief.mjs';
 
 function git(args, cwd) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, { windowsHide: true, cwd, encoding: 'utf8' });
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} in ${cwd} failed: ${r.stderr}`);
   }
