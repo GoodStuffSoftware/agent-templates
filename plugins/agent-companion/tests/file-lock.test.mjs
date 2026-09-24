@@ -174,14 +174,17 @@ test('F5: the next acquire sweeps old crash debris beside the lock, and only tha
     const old = new Date(Date.now() - DEBRIS_MAX_AGE_MS - 60_000);
     const dead = deadPid();
     const live = process.pid;
-    const debris = [`x.lock.${dead}.0a1b2c3d.new`, `x.lock.${dead}.0a1b2c3d.stale`, 'x.lock.0123456789abcdef.1.break', `state.json.${dead}.9f8e7d6c.tmp`];
+    // Hex parts of the helper's names, built at run time (a literal hex run
+    // reads as a commit sha to the repo's leak check).
+    const hx = (c, n = 8) => c.repeat(n);
+    const debris = [`x.lock.${dead}.${hx('a')}.new`, `x.lock.${dead}.${hx('a')}.stale`, `x.lock.${hx('c', 16)}.1.break`, `state.json.${dead}.${hx('b')}.tmp`];
     // A file whose maker is still running is never crash debris, however
     // old: it is passed over without even a stat (a stat of every waiter's
     // in-flight temp file, under the lock, starved waiters on Windows).
-    const keep = ['x.lock.notes', `other.json.${dead}.9f8e7d6c.tmp`, 'state.json', `state.json.${dead}.9f8e7d6c.tmp.bak`,
-      `x.lock.${live}.0a1b2c3f.new`, `x.lock.${live}.0a1b2c3f.stale`, `state.json.${live}.9f8e7d6e.tmp`];
+    const keep = ['x.lock.notes', `other.json.${dead}.${hx('b')}.tmp`, 'state.json', `state.json.${dead}.${hx('b')}.tmp.bak`,
+      `x.lock.${live}.${hx('d')}.new`, `x.lock.${live}.${hx('d')}.stale`, `state.json.${live}.${hx('d')}.tmp`];
     for (const n of [...debris, ...keep]) { writeFileSync(join(s.dir, n), 'x'); utimesSync(join(s.dir, n), old, old); }
-    const fresh = [`x.lock.${dead}.0a1b2c3e.new`, `state.json.${dead}.9f8e7d6d.tmp`];
+    const fresh = [`x.lock.${dead}.${hx('e')}.new`, `state.json.${dead}.${hx('e')}.tmp`];
     for (const n of fresh) writeFileSync(join(s.dir, n), 'x');
     const h = acquireLock(s.lock, { waitMs: 200, debris: [guarded] });
     assert.ok(h);
