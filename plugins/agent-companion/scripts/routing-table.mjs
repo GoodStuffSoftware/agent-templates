@@ -26,17 +26,37 @@ const efforts = Object.entries(cfg.efforts || {}).sort((a, b) => (a[1].rank ?? 0
 const kinds = Object.keys(cfg.taskKinds || {});
 const weights = Object.keys(cfg.routing || {}).sort();
 
+// Which layers the table renders. The DEFAULT is the shipped table only —
+// profile:false — because this output is committed (docs/ROUTING.md, the
+// recommend skill's block) and checked by the routing-doc audit check; one
+// machine's routing profile must never leak into it. `--profile` renders the
+// table as THIS machine resolves it, with any winning routing-profile row
+// marked (the /ac routing display).
+const withProfile = has('--profile')
+  && !has('--out') && !has('--json') && !has('--task-type-block') && !has('--sync-skill');
+
 // A named type's route and its shipped-trial entry, both from resolveRoute()
 // — the only reader of taskTypes.<type>.override (tests/route-readers.test.mjs).
-// `won` is true only when the trial actually won (resolved as-is and passed
-// F2/F4); a trial that was skipped renders as the grid answer instead.
-// `label` is the winning (model, effort) after floors.
+// Every row renders the resolver's WINNING answer (after floors), whichever
+// layer produced it; `layer` says which. `won` is true only when the trial
+// actually won; `trial` is the trial entry whether or not it won.
 function typeRoute(name) {
-  const r = resolveRoute({ type: name });
+  const r = resolveRoute({ type: name, profile: withProfile });
   const entry = r.stack.find((s) => s.layer === 'trial');
   const trial = entry && entry.present ? { ...entry.candidate, ...entry.meta } : null;
-  return { won: r.layer === 'trial', model: r.model, label: `${r.model}${r.effort ? '/' + r.effort : ''}`, trial };
+  const gridEntry = r.stack.find((s) => s.layer === 'grid');
+  const grid = gridEntry && gridEntry.candidate ? `${gridEntry.candidate.model}${gridEntry.candidate.effort ? '/' + gridEntry.candidate.effort : ''}` : '';
+  return {
+    won: r.layer === 'trial',
+    layer: r.layer,
+    profileRevision: r.profileRevision,
+    model: r.model,
+    label: `${r.model}${r.effort ? '/' + r.effort : ''}`,
+    trial,
+    grid,
+  };
 }
+const profileMark = (tr) => (tr.layer === 'profile' ? ` _(your routing profile, rev ${tr.profileRevision})_` : '');
 
 const cell = (w, k) => {
   const r = effortFor(Number(w), k);
@@ -67,14 +87,10 @@ function taskTypeBlock() {
     let premium = '—';
     if (typeof t.weight === 'number') {
       const tr = typeRoute(name);
-      if (tr.won) {
-        route = `\`${tr.label}\` (routing trial${tr.trial.reviewBy ? ', review by ' + tr.trial.reviewBy : ''})`;
-        premium = premiumOf(tr.model) ? 'yes' : 'no';
-      } else {
-        const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
-        route = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
-        premium = premiumOf(r.model) ? 'yes' : 'no';
-      }
+      route = tr.won
+        ? `\`${tr.label}\` (routing trial${tr.trial.reviewBy ? ', review by ' + tr.trial.reviewBy : ''})`
+        : `\`${tr.label}\`${profileMark(tr)}`;
+      premium = premiumOf(tr.model) ? 'yes' : 'no';
     } else if (t.weight === 'parity') {
       route = "writer's model; effort ≥ writer's";
       premium = 'as writer';
@@ -230,12 +246,7 @@ if (cfg.taskTypes) {
     let resolved = '—';
     if (typeof t.weight === 'number') {
       const tr = typeRoute(name);
-      if (tr.won) {
-        resolved = `\`${tr.label}\` _(trial override)_`;
-      } else {
-        const r = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
-        resolved = `\`${r.model}${r.effort ? '/' + r.effort : ''}\``;
-      }
+      resolved = tr.won ? `\`${tr.label}\` _(trial override)_` : `\`${tr.label}\`${profileMark(tr)}`;
     } else if (t.weight === 'parity') {
       resolved = '_writer\'s model; effort ≥ writer_';
     }
@@ -259,9 +270,8 @@ if (cfg.taskTypes) {
     L.push(``);
     L.push(`| Task type | Trial | Grid would say | Since | Review by | Evidence |`);
     L.push(`|---|---|---|---|---|---|`);
-    for (const [name, t, ov] of overridden) {
-      const grid = effortFor(t.weight, t.kind, t.consequence === 'inherit' ? 'routine' : t.consequence);
-      const gridLabel = `${grid.model}${grid.effort ? '/' + grid.effort : ''}`;
+    for (const [name, , ov] of overridden) {
+      const gridLabel = typeRoute(name).grid;
       const trialLabel = `${ov.model}${ov.effort ? '/' + ov.effort : ''}` + (ov.overridesKindDelta ? ' _(overrides kind delta)_' : '');
       const evid = ov.evidence ? `${ov.evidence.source || ''}${ov.evidence.date ? ' (' + ov.evidence.date + ')' : ''}` : '—';
       L.push(`| \`${name}\` | \`${trialLabel}\` | \`${gridLabel}\` | ${ov.trialSince || '—'} | ${ov.reviewBy || '—'} | ${evid} |`);
