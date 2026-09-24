@@ -36,6 +36,9 @@
 // Windows env names are case-insensitive, so matching is too: a `Git_Dir`
 // left behind would still be honoured by git.exe.
 //
+// isolatedGitEnv() / gitIsolated() below go one step further and also drop
+// that inherited config injection, for callers that never inject any.
+//
 // This module never spawns anything itself except the read-only
 // `rev-parse` in enclosingGitRepo(), which runs with the cleaned env.
 
@@ -94,6 +97,37 @@ export function gitClean(args, opts = {}) {
     encoding: 'utf8',
     ...opts,
     env: cleanGitEnv(opts.env || process.env),
+  });
+}
+
+// --- stricter: no inherited config injection either ------------------------
+// gitClean() keeps per-process config injection on purpose (the leak-sweep
+// canary clones through url.<base>.insteadOf set that way). A caller that
+// never injects config itself — memory-vault.mjs — has no use for an
+// INHERITED injection, and one is harmful there: a parent's
+// `core.hooksPath` runs the parent's hooks on every vault commit, an
+// `include.path` can rewrite the vault's author, `init.templateDir` /
+// GIT_TEMPLATE_DIR seed the vault's .git from another repository's.
+// isolatedGitEnv() is cleanGitEnv() minus those too.
+const CONFIG_INJECTION = new Set(['GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_TEMPLATE_DIR']);
+
+export function isConfigInjectionGitVar(name) {
+  const up = String(name).toUpperCase();
+  return CONFIG_INJECTION.has(up) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(up);
+}
+
+export function isolatedGitEnv(env = process.env, overrides = {}) {
+  const out = cleanGitEnv(env, overrides);
+  for (const k of Object.keys(out)) if (isConfigInjectionGitVar(k)) delete out[k];
+  return out;
+}
+
+// `git <args>` with isolatedGitEnv() and the window hidden.
+export function gitIsolated(args, opts = {}) {
+  return execFileSyncHidden('git', args, {
+    encoding: 'utf8',
+    ...opts,
+    env: isolatedGitEnv(opts.env || process.env),
   });
 }
 

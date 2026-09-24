@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, lstatSync, symlinkSync,
+  mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, lstatSync, symlinkSync, chmodSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -262,6 +262,56 @@ for (const cmd of ['init', 'sync']) {
       assert.notEqual(res.status, 0, `${cmd} must refuse: ${res.stdout}`);
       assert.match(res.stderr, /is not a real directory of the vault's own/);
       assert.ok(!existsSync(join(vault, '.gitattributes')), 'no backfill may be written');
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
+
+// V5. gitClean() keeps per-process config injection (the leak-sweep canary
+// needs it), so an inherited GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT reached
+// vault commits: a parent's core.hooksPath ran the parent's hooks inside the
+// vault and an include.path rewrote the vault's author. A hooksPath from the
+// operator's global config ran them too.
+function makeHooks(root) {
+  const hooks = join(root, 'parent-hooks');
+  mkdirSync(hooks, { recursive: true });
+  const flag = join(root, 'HOOK_RAN');
+  for (const h of ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit']) {
+    writeFileSync(join(hooks, h), `#!/bin/sh\necho ${h} >> "${flag.replace(/\\/g, '/')}"\nexit 0\n`);
+    chmodSync(join(hooks, h), 0o755);
+  }
+  const include = join(root, 'include.cfg');
+  writeFileSync(include, '[user]\n\tname = INCLUDED-IDENT\n\temail = included@example.invalid\n');
+  const globalCfg = join(root, 'global.gitconfig');
+  writeFileSync(globalCfg, `[core]\n\thooksPath = ${hooks.replace(/\\/g, '/')}\n`);
+  return { hooks: hooks.replace(/\\/g, '/'), flag, include: include.replace(/\\/g, '/'), globalCfg };
+}
+
+const INJECTED_ENVS = [
+  ['GIT_CONFIG_PARAMETERS core.hooksPath', (h) => ({ GIT_CONFIG_PARAMETERS: `'core.hooksPath'='${h.hooks}'` })],
+  ['GIT_CONFIG_PARAMETERS include.path', (h) => ({ GIT_CONFIG_PARAMETERS: `'include.path'='${h.include}'` })],
+  ['GIT_CONFIG_COUNT core.hooksPath', (h) => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: h.hooks })],
+  ['a global config with core.hooksPath', (h) => ({ GIT_CONFIG_GLOBAL: h.globalCfg })],
+];
+
+for (const [label, inject] of INJECTED_ENVS) {
+  test(`vault commits ignore an inherited ${label}: no hook runs, the author is the vault's`, () => {
+    const fx = makeFixture();
+    try {
+      const corpus = makeCorpus(fx.dir);
+      const h = makeHooks(fx.dir);
+      const res = runScript(SCRIPT, ['sync', '--json'], {
+        cwd: fx.dir,
+        env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', ...inject(h) },
+        timeout: 60000,
+      });
+      assert.equal(res.status, 0, res.stderr);
+      assert.equal(res.json?.committed, true, res.stdout);
+      assert.ok(!existsSync(h.flag), `a hook ran on a vault commit: ${existsSync(h.flag) ? readFileSync(h.flag, 'utf8') : ''}`);
+      const authors = git(['-C', join(fx.stateDir, 'memory-vault'), 'log', '--format=%an <%ae>']).split('\n');
+      assert.equal(authors.length, 2, 'init + sync commits');
+      for (const a of authors) assert.equal(a, `${VAULT_NAME} <memory-vault@agent-companion.local>`);
     } finally {
       fx.cleanup();
     }

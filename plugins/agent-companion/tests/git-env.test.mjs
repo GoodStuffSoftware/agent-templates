@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { makeFixture } from './helpers.mjs';
 import {
   REPO_LOCATING_GIT_VARS, isRepoLocatingGitVar, cleanGitEnv, gitClean, enclosingGitRepo, samePath,
+  isolatedGitEnv, isConfigInjectionGitVar,
 } from '../scripts/lib/git-env.mjs';
 
 function git(args, cwd) {
@@ -77,6 +78,30 @@ test('cleanGitEnv applies overrides but never lets one reintroduce a repo-locati
     EXTRA: 'e', DROP: undefined, GIT_DIR: '/smuggled/.git', git_work_tree: '/smuggled',
   });
   assert.deepEqual(out, { PATH: '/bin', KEEP: '1', EXTRA: 'e' });
+});
+
+test('isolatedGitEnv also drops inherited config injection, in any case, and keeps the rest', () => {
+  const out = isolatedGitEnv({
+    PATH: '/bin',
+    GIT_DIR: '/elsewhere/.git',
+    GIT_CONFIG_PARAMETERS: "'core.hooksPath'='/elsewhere/hooks'",
+    Git_Config_Count: '2',
+    GIT_CONFIG_KEY_0: 'core.hooksPath',
+    git_config_value_0: '/elsewhere/hooks',
+    GIT_CONFIG_KEY_1: 'include.path',
+    GIT_CONFIG_VALUE_1: '/elsewhere/inc',
+    GIT_TEMPLATE_DIR: '/elsewhere/.git',
+    GIT_AUTHOR_NAME: 'a',
+    GIT_CONFIG_GLOBAL: '/tmp/gc',
+    GIT_CONFIG_NOSYSTEM: '1',
+  });
+  assert.deepEqual(Object.keys(out).sort(), ['GIT_AUTHOR_NAME', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'PATH']);
+  for (const k of ['GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_7', 'GIT_CONFIG_VALUE_12', 'GIT_TEMPLATE_DIR']) {
+    assert.equal(isConfigInjectionGitVar(k), true, k);
+  }
+  assert.equal(isConfigInjectionGitVar('GIT_CONFIG_GLOBAL'), false);
+  // gitClean() is unchanged: the canary still gets its injected config.
+  assert.equal(cleanGitEnv({ GIT_CONFIG_COUNT: '1' }).GIT_CONFIG_COUNT, '1');
 });
 
 test('cleanGitEnv defaults to process.env and returns a copy', () => {

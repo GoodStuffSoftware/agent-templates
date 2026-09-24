@@ -37,7 +37,7 @@ import {
   realpathSync, statSync, lstatSync,
 } from 'node:fs';
 import { join, dirname, relative, sep, resolve } from 'node:path';
-import { gitClean, enclosingGitRepo, samePath } from './lib/git-env.mjs';
+import { gitIsolated, enclosingGitRepo, samePath } from './lib/git-env.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   opt, stateRootPath, stateDir,
@@ -170,18 +170,31 @@ function statusCacheFile() {
 // EVERY git call in this file goes through one of these two. Neither ever
 // lets git discover a repository from the environment or the cwd:
 //
-//   - gitClean() strips GIT_DIR and the other repo-locating variables (see
-//     lib/git-env.mjs for the incident this prevents). An inherited absolute
-//     GIT_DIR made `git init <vault>` re-initialise the CALLER's repository
-//     as bare and `git -C <vault> config user.*` write the vault identity
-//     into that repository's shared .git/config.
+//   - gitIsolated() strips GIT_DIR and the other repo-locating variables
+//     (see lib/git-env.mjs for the incident this prevents). An inherited
+//     absolute GIT_DIR made `git init <vault>` re-initialise the CALLER's
+//     repository as bare and `git -C <vault> config user.*` write the vault
+//     identity into that repository's shared .git/config. It also strips
+//     inherited config injection (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/
+//     KEY_n/VALUE_n, GIT_TEMPLATE_DIR): a parent's core.hooksPath ran the
+//     parent's hooks inside the vault, and an include.path rewrote the vault
+//     commits' author. This file never injects config that way itself, so
+//     nothing it needs is lost (the leak-sweep canary, which does, keeps
+//     using gitClean()).
 //   - vaultGit() additionally names the vault's git dir and work tree
 //     explicitly, so even a variable the strip list misses, or a vault whose
 //     .git has gone missing (which would otherwise make git walk UP into
-//     whatever repository encloses it), cannot redirect a write.
+//     whatever repository encloses it), cannot redirect a write. And it
+//     points core.hooksPath at a directory that does not exist, so no hook —
+//     from global or system config, or from the vault's own .git/hooks — runs
+//     on a vault commit.
 function git(args, opts = {}) {
-  return gitClean(args, opts);
+  return gitIsolated(args, opts);
 }
+
+// Relative hooksPath resolves against the vault's work tree. Never created:
+// an absent hooks directory is an empty one.
+const NO_HOOKS = '.git/agent-companion-no-hooks';
 
 function vaultGitDir(dir) {
   return join(dir, '.git');
@@ -195,7 +208,10 @@ function vaultGitDir(dir) {
 // (projects/<project>/memory/...) past 260 characters once the repository is
 // found; it is ignored everywhere else.
 function vaultGit(dir, args, opts = {}) {
-  return gitClean(['-c', 'core.longpaths=true', '-C', dir, '--git-dir=.git', '--work-tree=.', ...args], opts);
+  return gitIsolated([
+    '-c', 'core.longpaths=true', '-c', `core.hooksPath=${NO_HOOKS}`,
+    '-C', dir, '--git-dir=.git', '--work-tree=.', ...args,
+  ], opts);
 }
 
 // Git for Windows finds a repository by checking <dir>\.git\objects against
@@ -482,7 +498,9 @@ export function ensureInit() {
   }
 
   mkdirSync(dir, { recursive: true });
-  git(['-c', 'core.longpaths=true', 'init', '-q', '-b', 'main', dir]);
+  // --template= (empty): no template directory at all, so neither an
+  // operator's init.templateDir nor git's sample hooks seed the vault's .git.
+  git(['-c', 'core.longpaths=true', 'init', '-q', '--template=', '-b', 'main', dir]);
   // Proven BEFORE the first config write: the repository git just made is
   // this directory's own. If it is not, stop here with only an empty repo
   // created inside the vault dir, never a write anywhere else.
