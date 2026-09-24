@@ -30,6 +30,7 @@ import {
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
+  taskTypeNames, taskTypeDef,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
@@ -161,10 +162,12 @@ try {
   // Several TYPE: lines (a quoted snippet, a YAML "type: object" line): the
   // first that names a KNOWN task type wins over any earlier stray one, so
   // a real TYPE line is never shadowed by an incidental token.
+  // Known = shipped types first, then the routing profile's user-local types
+  // (ADR 0003 §5), both through the resolver's own lookup.
   const typeLines = declLines(brief, 'TYPE', '([a-z][a-z0-9-]*)\\b').map((m) => m[1].toLowerCase());
-  let knownTypes = {};
-  try { knownTypes = modelTiers().taskTypes || {}; } catch { /* table unreadable: first line wins */ }
-  const declaredType = typeLines.find((n) => Object.prototype.hasOwnProperty.call(knownTypes, n)) ?? typeLines[0] ?? null;
+  let knownTypes = new Set();
+  try { knownTypes = new Set(taskTypeNames()); } catch { /* table unreadable: first line wins */ }
+  const declaredType = typeLines.find((n) => knownTypes.has(n)) ?? typeLines[0] ?? null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
@@ -189,7 +192,7 @@ try {
   // plain grid's.
   let typeWeight = null;
   if (declaredType) {
-    try { typeWeight = modelTiers().taskTypes?.[declaredType]?.weight ?? null; } catch { /* table unreadable */ }
+    try { typeWeight = taskTypeDef(declaredType)?.def?.weight ?? null; } catch { /* table unreadable */ }
   }
   const fitOn = opt('fit_guard', true) && (weightWasDeclared || typeof typeWeight === 'number');
   let route = null;
@@ -222,7 +225,9 @@ try {
   const routeLabel = route?.model ? `${route.model}${route.effort ? '/' + route.effort : ''}` : '';
   // Which layer answered — named in every fit note below, so a spawner can
   // tell a shipped trial's answer from the plain grid's without --explain.
-  const routeLayerNote = route?.layer ? ` [route layer: ${route.layer === 'trial' ? 'shipped trial' : route.layer}]` : '';
+  const routeLayerNote = route?.layer
+    ? ` [route layer: ${route.layer === 'trial' ? 'shipped trial' : route.layer === 'profile' ? `routing profile rev ${route.profileRevision}` : route.layer}]`
+    : '';
 
   // --- Premium-tier determination, ROUTING-AWARE (bugfix 2026-09-23) -----
   // The premium set used to be hard-coded to isPremium()'s tier-table
@@ -634,7 +639,7 @@ try {
       declared_type: declaredType,       // null when the brief named no TYPE: preset
       fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid
       route_layer: route?.layer || null,  // profile | trial | grid: which resolveRoute() layer answered; null when no route
-      route_profile_rev: route ? (route.profileRevision ?? null) : null, // routing-profile revision behind a profile answer; null until profiles ship
+      route_profile_rev: route?.layer === 'profile' ? (route.profileRevision ?? null) : null, // routing-profile revision behind a profile answer; null for every other layer. The row's content is never logged.
       fit: autofilled ? 'fit' : fit ? fit.verdict : null, // over | under | fit | unknown, when a weight was declared
       fit_expected: routeLabel || null,
       // --- Memory nudge/brief observability -------------------------------

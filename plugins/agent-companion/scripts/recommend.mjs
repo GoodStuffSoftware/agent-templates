@@ -21,27 +21,30 @@
 // and why, which floors fired, and the winner's provenance in one line. With
 // --json it adds a `route` block carrying the same facts.
 
-import { modelTiers, resolveRoute, classifyModel, classifyEffort, rungFor, explainRoute } from '../hooks/lib/context.mjs';
+import {
+  modelTiers, resolveRoute, classifyModel, classifyEffort, rungFor, explainRoute, taskTypeDef, taskTypeNames,
+} from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
 const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 
 const cfg = modelTiers();
-const types = cfg.taskTypes || {};
 
 if (has('--list')) {
-  console.log('Task types (from config/model-tiers.json):\n');
-  for (const [name, t] of Object.entries(types)) {
-    console.log(`  ${name.padEnd(22)} w=${String(t.weight).padEnd(7)} ${t.kind.padEnd(13)} ${t.consequence.padEnd(9)} ${t.summary || ''}`);
+  console.log('Task types (from config/model-tiers.json, then your routing profile\'s local types):\n');
+  for (const name of taskTypeNames()) {
+    const { def: t, origin } = taskTypeDef(name);
+    console.log(`  ${name.padEnd(22)} w=${String(t.weight).padEnd(7)} ${t.kind.padEnd(13)} ${t.consequence.padEnd(9)} ${origin === 'local' ? '(local) ' : ''}${t.summary || ''}`);
   }
   console.log('\nKinds: ' + Object.keys(cfg.taskKinds || {}).join(', '));
   console.log('Consequence: ' + Object.keys(cfg.consequence || {}).join(', '));
   process.exit(0);
 }
 
+// Shipped types first, then the routing profile's user-local types.
 const typeName = val('--type');
-const t = typeName ? types[typeName] : null;
+const t = typeName ? (taskTypeDef(typeName)?.def || null) : null;
 if (typeName && !t) {
   console.error(`unknown task type "${typeName}" — see --list`);
   process.exit(2);
@@ -132,6 +135,9 @@ if (cls.premium) {
   out.warrantTemplate = `WARRANT: weight ${typeof weight === 'number' ? weight : '<1-5>'} — <why a cheaper tier cannot do this>`;
 }
 
+if (route?.cacheTtl) out.cacheTtl = route.cacheTtl; // advisory hint; only a profile row carries one
+if (route?.layer === 'profile') out.routeLayer = 'profile';
+
 const explain = has('--explain');
 if (explain && route) {
   const { layer, profileRevision, source, state, provenance, floorsApplied, skipped, stale, departures, stack } = route;
@@ -154,6 +160,8 @@ if (out.spawnAgentNamespaced) {
   console.log(`spawn as:       no ladder rung mapped for ${out.model}${out.effort ? '/' + out.effort : ''} — spawn with model="${out.model}"${out.effort ? ` and an agent definition carrying effort: ${out.effort}` : ''}`);
 }
 console.log(`reviewer:       ${out.reviewer.model} at effort ${out.reviewer.effort}`);
+if (route?.layer === 'profile') console.log(`route layer:    your routing profile (rev ${route.profileRevision}) — /ac routing why ${out.taskType} explains it`);
+if (route?.cacheTtl) console.log(`cache TTL hint: ${route.cacheTtl} (advisory, from your routing profile; no guard enforces it)`);
 if (out.trial) {
   console.log(`\nROUTING TRIAL — this type's output is a benchmark override, not the plain grid:`);
   console.log(`  trial window:  ${out.trial.trialSince} -> review by ${out.trial.reviewBy}`);

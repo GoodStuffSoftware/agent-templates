@@ -114,6 +114,12 @@
       "description": "When a spawn declares WEIGHT but names no model, set the model from the routing table instead of letting it inherit the lead’s tier. Premium results still require a WARRANT line.",
       "default": true
     },
+    "routing_profile": {
+      "type": "boolean",
+      "title": "Routing profile",
+      "description": "Route through YOUR routing profile (~/.claude/agent-companion/config/routing-profile.json, written by /ac routing set) ahead of the shipped table. The kill switch: off means only the shipped table routes, from the next hook invocation, and the file is left untouched. On by default because the file exists only if you wrote it. Floors F1-F4 always apply.",
+      "default": true
+    },
     "foreground_guard": {
       "type": "string",
       "title": "Foreground-spawn guard",

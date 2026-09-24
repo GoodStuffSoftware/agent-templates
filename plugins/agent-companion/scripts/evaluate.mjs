@@ -15,14 +15,11 @@
 //   add --json for machine-readable output
 // Exit code: 0 fit, 1 over-provisioned, 2 under-provisioned, 3 usage error
 
-import { modelTiers, evaluateFit, resolveRoute, expectedFromRoute } from '../hooks/lib/context.mjs';
+import { evaluateFit, resolveRoute, expectedFromRoute, taskTypeDef } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
 const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
-
-const cfg = modelTiers();
-const types = cfg.taskTypes || {};
 
 const model = val('--model');
 if (!model) {
@@ -32,7 +29,8 @@ if (!model) {
 const effort = (val('--effort') || '').toLowerCase();
 
 const typeName = val('--type');
-const t = typeName ? types[typeName] : null;
+// Shipped types first, then the routing profile's user-local types.
+const t = typeName ? (taskTypeDef(typeName)?.def || null) : null;
 if (typeName && !t) {
   console.error(`unknown task type "${typeName}" — see recommend.mjs --list`);
   process.exit(3);
