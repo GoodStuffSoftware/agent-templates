@@ -13,9 +13,15 @@
 //     0); EPERM counts as alive) AND it is older than staleMs, and it is
 //     broken by an atomic rename to a unique name followed by re-reading the
 //     renamed file: if that is not the lock judged stale (it was replaced in
-//     between), it is put back (link, which never clobbers) and nothing is
-//     broken. A lock with no readable owner (a crash between creating the
-//     fallback-path file and writing it) counts as dead once old enough.
+//     between), it is put back (link, which never clobbers). A lock with no
+//     readable owner (a crash between creating the fallback-path file and
+//     writing it) counts as dead once old enough.
+// True guarantee: a live pid's lock is never judged stale. It is NOT that a
+// live writer's lock can never be removed: with 3 or more contenders racing
+// a crashed holder's stale lock, the rename-then-put-back is not atomic as a
+// pair, and a rare interleaving can put a newly-created live lock back after
+// a step that already let a second racer through, leaving two holders at
+// once. Tracked for 0.29.1.
 // Residual, accepted: a dead owner's pid reused by an unrelated live process
 // keeps its lock alive; waiters then time out (fail open for hooks), never
 // corrupt anything.

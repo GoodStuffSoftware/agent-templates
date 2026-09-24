@@ -9,9 +9,11 @@
 //      losing an update. The lock names its owner (pid + token); it is
 //      released only by that owner, and broken only when the owner's process
 //      is gone AND it is older than STALE_LOCK_MS, by a re-verified rename.
-//      A live writer's lock is never broken (S2 review P1: stat-then-unlink
+//      A live pid's lock is never judged stale (S2 review P1: stat-then-unlink
 //      broke live locks, duplicating revisions and corrupting the journal),
-//      and a killed writer's lock no longer blocks for 30 s (P8).
+//      and a killed writer's lock no longer blocks for 30 s (P8). Residual:
+//      with 3 or more contenders racing a crashed holder, a rare put-back
+//      race can still let two holders coexist; tracked for 0.29.1.
 //   2. read the file and the journal FRESH (never the resolver's cache);
 //      refuse to write over a file that is invalid or from a newer major
 //      version — the operator fixes or removes it, the writer never guesses
