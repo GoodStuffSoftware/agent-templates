@@ -23,9 +23,16 @@
 //                                             to run instead.
 
 import { spawnSync } from 'node:child_process';
+import { cleanGitEnv } from '../plugins/agent-companion/scripts/lib/git-env.mjs';
 
+// cleanGitEnv() strips the repo-LOCATING variables (GIT_DIR, GIT_WORK_TREE,
+// GIT_COMMON_DIR, GIT_CONFIG, ...). Run from inside a git hook, a rebase
+// --exec or any other git-spawned process, those point git at whatever
+// repository started that process, so an unstripped `git config
+// core.hooksPath` would write into THAT repository's config instead of the
+// one this script was run in (the incident git-env.mjs documents).
 function git(args) {
-  return spawnSync('git', args, { encoding: 'utf8', windowsHide: true });
+  return spawnSync('git', args, { encoding: 'utf8', windowsHide: true, env: cleanGitEnv(process.env) });
 }
 
 function main() {
