@@ -4,7 +4,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
 import {
-  SCOPES, defaultRules, readRules, matchRules, renderRules, rulesPath,
+  SCOPES, defaultRules, readRules, matchRules, renderRules, rulesPath, userOwnText, COPYABLE_PROMPT_WHEN,
 } from '../hooks/lib/rules.mjs';
 import { stateFile, writeJson } from '../hooks/lib/context.mjs';
 
@@ -327,6 +327,105 @@ test('fails open when the state dir path is unwritable (a file, not a dir)', () 
       { session_id: 'sess-failopen-2', prompt: 'write me a prompt', cwd: dir },
       { args: ['--event', 'user-prompt'] });
     assert.equal(prompt.status, 0, `must exit 0 even when its state dir is unwritable: stderr=${prompt.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// 0.29.2: copyable-prompt's `when` was \bprompts?\b, so ANY mention of a
+// prompt fired it ("the prompt field is empty", "why do prompts time out?").
+// It now fires on a request for a prompt only. Both directions, as a table.
+const PROMPT_REQUESTS = [
+  'write me a prompt for a reviewer',
+  'Please write me a prompt for onboarding a new hire.',
+  'give me a prompt that summarises the logs',
+  'draft a prompt for the builder',
+  'can you create a prompt to review this PR?',
+  'I need a prompt for an agent that triages bugs',
+  'a prompt that checks the handoff file, please',
+  'write a short copyable prompt for the release agent',
+  'draft a new system prompt for the support bot',
+  'give me prompts for three reviewers',
+  'write me a brief for the builder',
+  'compose two prompts for the eval',
+  'Prompt for the reviewer, please.',
+  'write the prompt for the next worker',
+  'generate a short prompt that tests the parser',
+  'WRITE ME A PROMPT',
+];
+const PROMPT_MENTIONS = [
+  'the prompt field is empty',
+  'why do prompts time out?',
+  'the prompt was too long, trim it',
+  'I pasted the prompt above',
+  'prompt caching makes this cheaper',
+  'the system prompt says to be brief',
+  'git will prompt for credentials on push',
+  'fix the login bug',
+  'please respond promptly',
+  'does the prompt injection guard still work?',
+  'the UserPromptSubmit hook fired twice',
+  'give me a brief summary of the diff',
+  'the brief for the builder was too long',
+  'create a prompt field in the settings form',
+  'write the prompt caching docs',
+  'write a test for prompts',
+  'the reviewer prompted me for a password',
+  'update the prompt hook to skip wrappers',
+];
+
+test('copyable-prompt fires on a request for a prompt, and not on a mere mention of one', () => {
+  assert.ok(PROMPT_REQUESTS.length >= 10 && PROMPT_MENTIONS.length >= 10);
+  const { cleanup } = makeFixture();
+  try {
+    const ids = (text) => matchRules({ scope: 'user-prompt', text }).map((r) => r.id);
+    for (const text of PROMPT_REQUESTS) assert.deepEqual(ids(text), ['copyable-prompt'], `should fire: ${text}`);
+    for (const text of PROMPT_MENTIONS) assert.deepEqual(ids(text), [], `should stay silent: ${text}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('the shipped copyable-prompt `when` fits the source-length cap, so it never goes inert', () => {
+  const { cleanup } = makeFixture();
+  try {
+    assert.ok(COPYABLE_PROMPT_WHEN.length <= 400, `when is ${COPYABLE_PROMPT_WHEN.length} chars`);
+    const r = readRules().rules.find((x) => x.id === 'copyable-prompt');
+    assert.equal(r.when, COPYABLE_PROMPT_WHEN);
+    assert.equal(r.enabled, true);
+  } finally {
+    cleanup();
+  }
+});
+
+// 0.29.2: slash-command and teammate wrappers are harness text too.
+const COMMAND_WRAPPED_ONLY = [
+  '<teammate-message teammate_id="w1">write me a prompt for the reviewer</teammate-message>',
+  '<command-message>prompt-writer is running</command-message>\n<command-name>/prompt-writer</command-name>\n<command-args>write me a prompt for a reviewer</command-args>',
+  '<local-command-stdout>draft a prompt for the builder</local-command-stdout>',
+  '<local-command-caveat>Caveat: generated while running local commands. Give me a prompt for them.</local-command-caveat>',
+  '<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>\n<local-command-stdout>a prompt that was cleared</local-command-stdout>',
+];
+
+test('userOwnText strips teammate and slash-command wrappers', () => {
+  for (const text of COMMAND_WRAPPED_ONLY) assert.equal(userOwnText(text).trim(), '', text);
+  assert.match(userOwnText(`${COMMAND_WRAPPED_ONLY[0]}\nfix the bug`), /fix the bug/);
+});
+
+test('a turn made only of teammate/slash-command wrappers stays silent, in matchRules and in the hook', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    for (const [i, text] of COMMAND_WRAPPED_ONLY.entries()) {
+      assert.deepEqual(matchRules({ scope: 'user-prompt', text }).map((r) => r.id), [], text);
+      const res = runHook('hooks/standing-rules.mjs',
+        { session_id: `sess-cmd-wrap-${i}`, prompt: text, cwd: dir },
+        { args: ['--event', 'user-prompt'] });
+      assert.equal(res.status, 0);
+      assert.equal(res.stdout.trim(), '', `wrapper-only turn must be silent: ${text}`);
+    }
+    assert.deepEqual(
+      matchRules({ scope: 'user-prompt', text: `${COMMAND_WRAPPED_ONLY[1]}\nwrite me a prompt for a reviewer` }).map((r) => r.id),
+      ['copyable-prompt'], 'the user\'s own text beside the wrappers still counts');
   } finally {
     cleanup();
   }

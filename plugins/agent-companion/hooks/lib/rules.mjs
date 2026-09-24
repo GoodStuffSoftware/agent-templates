@@ -67,6 +67,32 @@ export function rulesPath() {
   return join(configDir(), 'standing-rules.json');
 }
 
+// copyable-prompt's `when`: a REQUEST for a prompt, not any mention of one.
+// A bare \bprompts?\b fired on "the prompt field is empty" and "why do
+// prompts time out?". Three shapes count:
+//   - a making verb aimed at a prompt: "write me a prompt", "draft a new
+//     system prompt", "give me prompts for three reviewers", "write the
+//     prompt for the next worker" (or a brief: "write me a brief for X").
+//     UI and plumbing nouns after "prompt" (field, box, hook, caching,
+//     injection, ...) do not count: "create a prompt field" is a form change;
+//   - an indefinite prompt with a purpose: "I need a prompt for X",
+//     "a prompt that checks Y";
+//   - a turn that opens with "prompt for ...".
+// Up to two filler words may sit between the article and "prompt" ("a short
+// copyable prompt"), but not a preposition, so "write a test for prompts"
+// stays silent. Bounded repetition only; kept under WHEN_MAX_CHARS (a test
+// pins the length).
+const PROMPT_VERB = '(?:write|give|draft|create|compose|generate|craft|prepare)';
+const PROMPT_DET = '(?:an?|another|the)';
+const PROMPT_FILLER = '(?:(?!(?:for|to|of|about|on|in|with)\\b)[\\w-]+\\s+){0,2}?';
+const PROMPT_NOT_PLUMBING = '(?!\\s+(?:field|box|input|bar|hook|cach|inject|text))';
+export const COPYABLE_PROMPT_WHEN = [
+  `\\b${PROMPT_VERB}(?:\\s+(?:me|us))?\\s+(?:${PROMPT_DET}\\s+)?${PROMPT_FILLER}`
+    + `(?:prompts?\\b${PROMPT_NOT_PLUMBING}|brief\\s+(?:for|to|that)\\b)`,
+  `\\b(?:an?|another)\\s+${PROMPT_FILLER}prompts?\\s+(?:for|that)\\b`,
+  '^\\s*prompts?\\s+for\\b',
+].join('|');
+
 function builtinRules() {
   return [
     {
@@ -74,7 +100,7 @@ function builtinRules() {
       enabled: true,
       builtin: true,
       scope: 'user-prompt',
-      when: '\\bprompts?\\b|\\bwrite (?:me )?a prompt\\b|\\bbrief for\\b',
+      when: COPYABLE_PROMPT_WHEN,
       then: 'The user is asking for a prompt. Put the complete prompt in ONE fenced code block with nothing else inside the fence — no commentary, no ellipses, no placeholder text unless the user asked for placeholders. Anything you want to say about the prompt goes outside the fence.',
       gate: null,
       note: null,
@@ -314,7 +340,17 @@ function gateSatisfied(gate, sessionId) {
 // blocks are removed. Innermost blocks go first (repeated until stable), an
 // unterminated opening tag swallows the rest of the text, and a stray closing
 // tag is dropped.
-const WRAPPER_TAGS = 'cross-session-message|task-notification|agent-message|system-reminder';
+//
+// Slash-command and teammate turns arrive the same way: <teammate-message>
+// carries another agent's text, and <command-message>, <command-name>,
+// <command-args>, <local-command-stdout> and <local-command-caveat> are the
+// harness's record of a slash command and its output. None of them is the
+// user asking for something in their own words.
+const WRAPPER_TAGS = [
+  'cross-session-message', 'task-notification', 'agent-message', 'system-reminder',
+  'teammate-message', 'command-message', 'command-name', 'command-args',
+  'local-command-stdout', 'local-command-caveat',
+].join('|');
 const WRAPPER_BLOCK_RE = new RegExp(
   `<(${WRAPPER_TAGS})(?:\\s[^>]*)?>(?:(?!<(?:${WRAPPER_TAGS})(?:\\s|>))[\\s\\S])*?</\\1\\s*>`, 'gi',
 );
