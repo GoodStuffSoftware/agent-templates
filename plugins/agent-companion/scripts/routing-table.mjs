@@ -255,7 +255,7 @@ if (cfg.taskTypes) {
   if (overridden.length) {
     L.push(`### Routing trial (benchmark overrides, not the plain grid)`);
     L.push(``);
-    L.push(`These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit \`--weight\`/\`--kind\`/\`--consequence\` falls back to the plain grid. Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.`);
+    L.push(`These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit \`--weight\`/\`--kind\`/\`--consequence\` that departs from the type's preset falls back to the plain grid (one equal to the preset restates the type and keeps the trial). Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.`);
     L.push(``);
     L.push(`| Task type | Trial | Grid would say | Since | Review by | Evidence |`);
     L.push(`|---|---|---|---|---|---|`);

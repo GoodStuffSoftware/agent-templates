@@ -317,9 +317,11 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 //   2. trial   — the shipped ROUTING TRIAL (`taskTypes.<type>.override`).
 //   3. grid    — effortFor(weight, kind, consequence), or reviewer parity for
 //      a parity-sized type when a writer is supplied.
-// An explicit weight/kind/consequence (the matching *Explicit flag) answers a
-// different question than the named type, so it skips layers 1-2 and goes
-// straight to the grid — the taskTypesNote rule, unchanged.
+// An explicit weight/kind/consequence that DEPARTS from the named type's
+// preset answers a different question, so it skips layers 1-2 and goes
+// straight to the grid (taskTypesNote). One that EQUALS the preset is not a
+// departure: it restates the type and keeps layers 1-2 (listed in
+// matchesPreset).
 //
 // Floors, applied AFTER whichever layer won (ADR §1 table). Before this, a
 // trial override returned before effortFor() ran, so no consequence floor
@@ -353,7 +355,8 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 // Returns (ADR §2 shape, plus what the callers need):
 //   { model, effort, cacheTtl, layer, profileRevision, source, state,
 //     provenance, floorsApplied, skipped, stale, rationale,
-//     type, typeKnown, weight, kind, consequence, departures, stack, trial }
+//     type, typeKnown, weight, kind, consequence, departures, matchesPreset,
+//     stack, trial }
 // `model` is '' (and layer null) when no route could be resolved: weight
 // missing, non-numeric or outside 1-5, or a parity type with no writer.
 // `trial` is the old resolveExpected() trial metadata — non-null exactly when
@@ -487,10 +490,18 @@ export function resolveRoute({
   let c = consequenceExplicit ? (consequence || 'routine') : (consequence || t?.consequence || 'routine');
   if (c === 'inherit') c = 'routine';
 
+  // A DEPARTURE is an explicit value that differs from the named type's own
+  // preset (ADR 0003 §1). An explicit value EQUAL to the preset restates the
+  // type rather than asking a different question, so it keeps layers 1-2 —
+  // "TYPE: integration" + "WEIGHT: 4" is still the integration type. With no
+  // known type there is no preset to depart from and no layer 1-2 to keep.
+  const normCons = (v) => (v === 'inherit' ? 'routine' : v);
   const departures = [];
-  if (weightExplicit) departures.push('weight');
-  if (kindExplicit) departures.push('kind');
-  if (consequenceExplicit) departures.push('consequence');
+  const matchesPreset = [];
+  const note = (field, explicit, equal) => { if (explicit) (equal ? matchesPreset : departures).push(field); };
+  note('weight', weightExplicit, typeKnown && weight === t.weight);
+  note('kind', kindExplicit, typeKnown && (kind || 'bounded') === (t.kind || 'bounded'));
+  note('consequence', consequenceExplicit, typeKnown && normCons(consequence || 'routine') === normCons(t.consequence || 'routine'));
   const asIs = departures.length === 0;
   const departNote = `explicit ${departures.join('/')} departs from the ${type} preset`;
 
@@ -541,6 +552,7 @@ export function resolveRoute({
     kind: k,
     consequence: c,
     departures,
+    matchesPreset,
     stack,
   };
 
@@ -713,7 +725,7 @@ export function explainRoute(r) {
   }
   if (r.layer) {
     const why = r.layer === 'trial'
-      ? 'the type was resolved as-is and its shipped trial passed F2/F4'
+      ? `the type was resolved as-is${(r.matchesPreset || []).length ? ` (explicit ${r.matchesPreset.join('/')} equals the preset)` : ''} and its shipped trial passed F2/F4`
       : r.source === 'reviewer-parity'
         ? 'a parity-sized type is sized to its writer'
         : ((r.departures || []).length

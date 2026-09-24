@@ -139,7 +139,7 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 
 ### Routing trial (benchmark overrides, not the plain grid)
 
-These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit `--weight`/`--kind`/`--consequence` falls back to the plain grid. Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.
+These task types resolve to a benchmark-backed (model, effort) pair that supersedes their own weight/kind/consequence grid resolution for the trial window below. The override applies only when the type is used as-is — passing an explicit `--weight`/`--kind`/`--consequence` that departs from the type's preset falls back to the plain grid (one equal to the preset restates the type and keeps the trial). Every OTHER task type in the list above is **UNBENCHMARKED** by this trial and keeps its grid-resolved routing unchanged.
 
 | Task type | Trial | Grid would say | Since | Review by | Evidence |
 |---|---|---|---|---|---|

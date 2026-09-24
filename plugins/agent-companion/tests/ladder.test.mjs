@@ -56,11 +56,24 @@ test('recommend.mjs prints the namespaced spawnable agent name for a routed task
   assert.equal(res.json.rung, 6);
 });
 
-test('an explicit --kind bypasses the bounded-feature trial override and falls back to the plain grid', () => {
-  const res = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--kind', 'bounded', '--json']);
+// CHANGED in slice 1b (ADR 0003 §1, operator-approved 2026-09-24): this used
+// `--type bounded-feature --kind bounded`, whose kind EQUALS the preset. An
+// explicit value equal to the preset now restates the type and keeps its
+// trial, so a departure must actually depart: explore's preset is
+// 1/mechanical, so --weight 3 --kind bounded is the plain grid's sonnet/medium.
+test('an explicit --weight/--kind that departs from the preset bypasses the trial override and falls back to the plain grid', () => {
+  const res = runScript('scripts/recommend.mjs', ['--type', 'explore', '--weight', '3', '--kind', 'bounded', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-sonnet-medium');
   assert.equal(res.json.rung, 3);
+  assert.equal(res.json.trial, undefined);
+});
+
+test('an explicit --kind EQUAL to the preset keeps the bounded-feature trial (slice 1b)', () => {
+  const res = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--kind', 'bounded', '--json']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-opus-low');
+  assert.ok(res.json.trial);
 });
 
 test('recommend.mjs maps a fable-warranted result to no rung (outside the ladder)', () => {

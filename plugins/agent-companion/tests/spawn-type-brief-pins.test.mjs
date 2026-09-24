@@ -8,10 +8,12 @@
 // Cases 2-5 are latent hazards in the CURRENT parser, pinned as-is because
 // slice 1 changes no behaviour. Each one makes the guard fall to the grid and
 // deny an opus spawn that the type's trial prescribes:
-//   2. an explicit WEIGHT: line EQUAL to the preset still counts as a
-//      departure (ADR §1 says only a value that DEPARTS should skip layers 1-2);
-//   3. a prose "kind: bounded" anywhere in the body is parsed as an explicit
-//      KIND (the regexes are unanchored and case-insensitive);
+//   2. an explicit WEIGHT: line EQUAL to the preset still counted as a
+//      departure (ADR §1 says only a value that DEPARTS should skip layers
+//      1-2) — FIXED in slice 1b (a);
+//   3. a prose "kind: <x>" anywhere in the body is parsed as an explicit
+//      KIND (the regexes are unanchored and case-insensitive) — since 1b (a)
+//      only a departing value (3b) still denies;
 //   4. a markdown-bold "**TYPE:** integration" is not parsed, so the type is
 //      lost and the warrant's weight is used;
 //   5. an earlier stray "type: x" token wins over the real TYPE: line.
@@ -49,18 +51,28 @@ test('1. "TYPE: integration / EFFORT: high / WARRANT: weight 4 — ..." on opus 
   assert.equal(r.row.route_layer, 'trial');
 });
 
-test('2. TODAY: TYPE: integration + "WEIGHT: 4" (equal to the preset) is treated as a departure -> grid sonnet/high -> DENIED', () => {
+// FLIPPED in slice 1b fix (a): a WEIGHT: line equal to the preset restates
+// the type, so the trial applies (ADR §1).
+test('2. TYPE: integration + "WEIGHT: 4" (equal to the preset) restates the type -> shipped trial opus/high -> ALLOWED', () => {
   const r = spawnOpus('TYPE: integration\nWEIGHT: 4\nWARRANT: weight 4 — x\ndo it', 'sess-pin-2');
-  assert.equal(r.decision, 'deny');
-  assert.match(r.reason, /routing table sends to sonnet\/high \[route layer: grid\]/);
-  assert.equal(r.row.route_layer, 'grid');
+  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.row.fit_expected, 'opus/high');
+  assert.equal(r.row.route_layer, 'trial');
 });
 
-test('3. TODAY: a prose "kind: bounded" line in the body is parsed as an explicit KIND -> grid -> DENIED', () => {
-  const r = spawnOpus('TYPE: integration\nWARRANT: weight 4 — x\nThe kind: bounded work is in three files', 'sess-pin-3');
+// 3a FLIPPED in slice 1b fix (a): the stray prose "kind: bounded" is still
+// parsed as a KIND line, but it equals the preset, so it no longer departs.
+test('3a. a prose "kind: bounded" line equal to the preset no longer departs -> trial -> ALLOWED', () => {
+  const r = spawnOpus('TYPE: integration\nWARRANT: weight 4 — x\nThe kind: bounded work is in three files', 'sess-pin-3a');
+  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.row.route_layer, 'trial');
+});
+
+test('3b. TODAY: a prose "kind: mechanical" in the body is parsed as an explicit KIND that departs -> grid -> DENIED', () => {
+  const r = spawnOpus('TYPE: integration\nWARRANT: weight 4 — x\nThe kind: mechanical parts are renames', 'sess-pin-3b');
   assert.equal(r.decision, 'deny');
-  assert.match(r.reason, /sonnet\/high/);
   assert.equal(r.row.declared_type, 'integration');
+  assert.equal(r.row.declared_kind, 'mechanical');
   assert.equal(r.row.route_layer, 'grid');
 });
 

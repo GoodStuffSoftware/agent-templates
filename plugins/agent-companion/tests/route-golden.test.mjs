@@ -23,8 +23,19 @@
 // large-refactor and novel-design x elevated, whose trials already sit at
 // the high floor. Operator-decided 2026-09-24: keep floors-after-trial.
 // No shipped caller reaches this shape; tests/route-reachability.test.mjs
-// pins that. Any OTHER difference, or a different count, fails here — a
-// data finding to report, not a fixture to regenerate.
+// pins that.
+//
+// THE RESTATED-PRESET CHANGE (slice 1b, operator-approved 2026-09-24; ADR
+// §1: only a value that DEPARTS from the preset skips layers 1-2). An
+// explicit weight/kind/consequence EQUAL to the type's preset used to count
+// as a departure and fall to the grid ("TYPE: integration" + "WEIGHT: 4" ->
+// sonnet/high). It now restates the type. So each case is compared with the
+// baseline of the same case with its preset-equal explicit fields dropped —
+// which is the old answer whenever nothing was dropped. The number of cases
+// whose answer this changes is pinned below.
+//
+// Any OTHER difference, or a different count, fails here — a data finding to
+// report, not a fixture to regenerate.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -93,13 +104,34 @@ function assertCarveOut(c, want, route, wrapped) {
   assert.ok(wrapped.rationale.startsWith(want.rationale) && /floors: F[15] /.test(wrapped.rationale), `${c.key}: ${wrapped.rationale}`);
 }
 
+// 98 = the 10 trial types x every combination of preset-equal explicit
+// fields (weight, kind, consequence; "inherit" also equals a routine preset),
+// excluding "none explicit": 7 routine-preset types x 11 + 3 elevated x 7.
+const RESTATED_PER_CLOCK = 98;
+const normCons = (v) => (v === 'inherit' ? 'routine' : v);
+// The key of the same case with every explicit field that EQUALS the type's
+// preset dropped (to "not given").
+function restatedKey(c) {
+  const t = c.args.type ? cfg.taskTypes?.[c.args.type] : null;
+  if (!t) return c.key;
+  const [type, w, k, co] = c.key.split('|');
+  const a = c.args;
+  const w2 = a.weightExplicit && a.weight === t.weight ? 'w=-' : w;
+  const k2 = a.kindExplicit && a.kind === (t.kind || 'bounded') ? 'k=-' : k;
+  const c2 = a.consequenceExplicit && normCons(a.consequence) === normCons(t.consequence || 'routine') ? 'c=-' : co;
+  return [type, w2, k2, c2].join('|');
+}
+
 CLOCKS.forEach((clock, ci) => {
-  test(`resolveRoute matches the pre-ADR-0003 resolver on all ${cases.length} cases at ${clock} (floor carve-out: exactly ${CARVE_OUT_PER_CLOCK})`, () => {
+  test(`resolveRoute matches the pre-ADR-0003 resolver on all ${cases.length} cases at ${clock} (floor carve-out: exactly ${CARVE_OUT_PER_CLOCK}; restated preset: exactly ${RESTATED_PER_CLOCK})`, () => {
     const mismatches = [];
     const floorHits = [];
     let carved = 0;
+    let restated = 0;
     for (const c of cases) {
-      const want = expectedFor(c.key, ci);
+      const rk = restatedKey(c);
+      const want = expectedFor(rk, ci);
+      if (rk !== c.key && JSON.stringify(want) !== JSON.stringify(expectedFor(c.key, ci))) restated += 1;
       const route = ctx.resolveRoute({ ...c.args, now: clock });
       if (isCarveOutShape(c) && route.floorsApplied.length) {
         assertCarveOut(c, want, route, plain(ctx.resolveExpected({ ...c.args, now: clock })));
@@ -118,6 +150,7 @@ CLOCKS.forEach((clock, ci) => {
     assert.deepEqual(floorHits, [], 'a floor fired outside the carve-out: a shipped layer breaks a floor — report it, do not regenerate');
     assert.deepEqual(mismatches.slice(0, 20), [], `${mismatches.length} mismatches`);
     assert.equal(carved, CARVE_OUT_PER_CLOCK, 'the floor carve-out changed size — report it, do not adjust the count');
+    assert.equal(restated, RESTATED_PER_CLOCK, 'the restated-preset change reaches a different number of cases — report it, do not adjust the count');
   });
 });
 

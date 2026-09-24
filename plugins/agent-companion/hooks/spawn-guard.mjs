@@ -130,7 +130,9 @@ try {
   // Declaring it alone (no WEIGHT/KIND/CONSEQUENCE) lets a brief pick up the
   // type's own weight/kind/consequence preset AND its override, same as
   // `recommend.mjs --type`; declaring WEIGHT/KIND/CONSEQUENCE alongside it is
-  // a deliberate deviation and bypasses the override, same rule as there.
+  // a deliberate deviation and bypasses the override when its value DEPARTS
+  // from the preset (one equal to the preset restates the type), same rule
+  // as there.
   const tm = brief.match(/\bTYPE\s*:\s*([a-z][a-z0-9-]*)\b/i);
   const declaredType = tm ? tm[1].toLowerCase() : null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
