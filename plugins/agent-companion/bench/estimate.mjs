@@ -173,8 +173,13 @@ function sonnetBaselineCost(familyMedians) {
 // true attributable cost is lower, and 60% is a round, clearly-labelled
 // guess, not a second measurement) -- see DECISIONS below for how to revise
 // it. Returns null bounds when this family has no anchor at all.
-export function pointsPerRun({ family, model, effort, seed = loadSeed(), history = null }) {
-  const anchors = seed.weeklyPointAnchors || {};
+// `anchorsKey` selects which anchor table in the seed to read -- the default
+// "weeklyPointAnchors" (weekly usage window) or "fiveHourPointAnchors" (a
+// SEPARATE, independently-measured 5-hour-window anchor -- see
+// estimateRun()'s fiveHourPoints field below for why this is not merely the
+// weekly figure re-labelled).
+export function pointsPerRun({ family, model, effort, seed = loadSeed(), history = null, anchorsKey = "weeklyPointAnchors" }) {
+  const anchors = seed[anchorsKey] || {};
   const alias = classifyModel(model).alias;
   let anchorKey = family;
   if (family === "hard-synthetic" && alias === "opus" && anchors["hard-synthetic-opus"]) anchorKey = "hard-synthetic-opus";
@@ -226,6 +231,14 @@ export function estimateRun({ plan, concurrency = 1, seed = loadSeed(), history 
   let apiCostUsd = 0;
   let pointsLow = 0;
   let pointsHigh = 0;
+  // Separate accumulator for the 5-hour window -- see the fiveHourPoints
+  // field below. anyFiveHourAnchor stays false (and the field reports
+  // "unknown") unless bench/config/estimate-seed.json ships a REAL, measured
+  // fiveHourPointAnchors entry for at least one planned row; it is never
+  // synthesized from the weekly figure.
+  let fiveHourPointsLow = 0;
+  let fiveHourPointsHigh = 0;
+  let anyFiveHourAnchor = false;
   const perCell = [];
   const familiesWithNoAnchor = new Set();
   let anyRoughGuess = false;
@@ -237,6 +250,14 @@ export function estimateRun({ plan, concurrency = 1, seed = loadSeed(), history 
     if (!medians) anyRoughGuess = true;
     const pts = pointsPerRun({ family: row.family, model: row.model, effort: row.effort, seed, history });
     if (pts.low == null) familiesWithNoAnchor.add(row.family);
+    const fiveHourPts = pointsPerRun({
+      family: row.family, model: row.model, effort: row.effort, seed, history, anchorsKey: "fiveHourPointAnchors",
+    });
+    if (fiveHourPts.low != null) {
+      fiveHourPointsLow += fiveHourPts.low * n;
+      fiveHourPointsHigh += fiveHourPts.high * n;
+      anyFiveHourAnchor = true;
+    }
 
     totalRuns += n;
     sequentialWallMs += (m.medianDurationMs || 0) * n;
@@ -277,12 +298,23 @@ export function estimateRun({ plan, concurrency = 1, seed = loadSeed(), history 
     tokensByClass,
     apiCostUsd,
     weeklyPoints: { low: round3(pointsLow), high: round3(pointsHigh) },
-    // See the file banner: no separate 5-hour-window calibration exists yet,
-    // so the 5-hour figure is the SAME points, not a second measurement --
-    // both windows meter the same underlying usage, just over different
-    // reset periods. Flagged explicitly so a caller never mistakes this for
-    // an independent number.
-    fiveHourPoints: { low: round3(pointsLow), high: round3(pointsHigh), derivedFrom: "weekly (same usage meter, unconfirmed independently for the 5-hour window)" },
+    // "unknown" (null bounds) unless bench/config/estimate-seed.json ships a
+    // REAL, independently-measured fiveHourPointAnchors entry for at least
+    // one planned row. An earlier version of this field copied the WEEKLY
+    // points here unconditionally -- presented as a real number while
+    // actually being an unmeasured guess dressed up as one (2026-09
+    // adversarial review finding, Track B fix #4). No such anchor is shipped
+    // today, so this is "unknown" for every plan until one is measured and
+    // added to the seed.
+    fiveHourPoints: anyFiveHourAnchor
+      ? {
+        low: round3(fiveHourPointsLow), high: round3(fiveHourPointsHigh),
+        derivedFrom: "measured 5-hour anchor (bench/config/estimate-seed.json fiveHourPointAnchors)",
+      }
+      : {
+        low: null, high: null,
+        derivedFrom: "unknown -- no measured 5-hour anchor configured (see bench/config/estimate-seed.json)",
+      },
     perCell,
     hasFableCell: perCell.some((c) => c.isFable),
     anyRoughGuess,
@@ -373,7 +405,10 @@ export function formatEstimate(estimate, { currentWeeklyPct = null, weeklyCeilin
   lines.push(`  tokens:       input ${Math.round(estimate.tokensByClass.input)}, cache-read ${Math.round(estimate.tokensByClass.cacheRead)}, `
     + `cache-write ${Math.round(estimate.tokensByClass.cacheWrite)}, output ${Math.round(estimate.tokensByClass.output)}`);
   lines.push(`  API-equivalent $: ~$${estimate.apiCostUsd.toFixed(2)}`);
-  lines.push(`  weekly-window points: ${fmtRange(estimate.weeklyPoints, " pts")}  |  5-hour-window points: ${fmtRange(estimate.fiveHourPoints, " pts")} (derived from weekly, unconfirmed independently)`);
+  const fiveHourText = estimate.fiveHourPoints.low == null
+    ? "unknown (no measured 5-hour anchor configured)"
+    : `${fmtRange(estimate.fiveHourPoints, " pts")} (measured 5-hour anchor)`;
+  lines.push(`  weekly-window points: ${fmtRange(estimate.weeklyPoints, " pts")}  |  5-hour-window points: ${fiveHourText}`);
   const cur = currentWeeklyPct == null ? "unknown" : `${currentWeeklyPct}%`;
   const projected = (currentWeeklyPct == null || estimate.weeklyPoints.high == null)
     ? "unknown"

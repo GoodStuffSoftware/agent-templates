@@ -87,13 +87,16 @@ real batch, and re-run it after changing `--cells`/`--tasks`/`--reps`.
 
 **`--dry-run` also prints the pre-run estimate** (`bench/estimate.mjs`):
 wall time at the chosen `--concurrency`, tokens by class (input, cache-read,
-cache-write, output), an API-equivalent $ figure, and a weekly/5-hour
-usage-window points range — from this machine's own local `results.jsonl`
-history when it has any for that cell, else the shipped seed
-(`bench/config/estimate-seed.json`, labelled "shipped seed"), else a rough
-guess (labelled "no local history, rough guess"). A LIVE run (not
-`--dry-run`) prints the exact same estimate before doing anything else, and
-is gated behind it — see (3) below.
+cache-write, output), an API-equivalent $ figure, and a weekly usage-window
+points range — from this machine's own local `results.jsonl` history when it
+has any for that cell, else the shipped seed (`bench/config/estimate-seed.json`,
+labelled "shipped seed"), else a rough guess (labelled "no local history,
+rough guess"). The estimate's **5-hour-window points reads `unknown`** unless
+a real, separately-measured `fiveHourPointAnchors` entry has been added to
+the seed (none ships today — see docs/BENCHMARK.md "Pre-run estimate and
+confirmation gate") — it is never the weekly figure copied over. A LIVE run
+(not `--dry-run`) prints the exact same estimate before doing anything else,
+and is gated behind it — see (3) below.
 
 ## (3) Budget
 

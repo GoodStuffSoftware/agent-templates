@@ -501,6 +501,20 @@ unconfirmed "Opus 5.5 = 1.5x Sonnet" in-app-tooltip figure, which is named
 (and marked unconfirmed) in the per-cell breakdown whenever an Opus cell's
 estimate is shown, but never used to compute it.
 
+**The 5-hour-window figure is `unknown` unless separately measured.** No
+`bench/config/estimate-seed.json` ships a `fiveHourPointAnchors` table today
+— only `weeklyPointAnchors`. An earlier version of `estimateRun()` printed
+the WEEKLY points figure again as the "5-hour-window" number, presented as a
+real measurement while actually being an unconfirmed guess dressed up as one
+(2026-09 adversarial review finding, Track B fix #4): the weekly and 5-hour
+windows meter usage over different reset periods, and nothing established
+they move at the same rate. `formatEstimate()` now prints
+`5-hour-window points: unknown (no measured 5-hour anchor configured)` until
+a real 5-hour anchor is measured and added to the seed under
+`fiveHourPointAnchors`, in the same `{ runs, points, note }` shape as
+`weeklyPointAnchors` — at which point `pointsPerRun({ ..., anchorsKey:
+"fiveHourPointAnchors" })` picks it up automatically.
+
 **The confirmation gate** (`shouldConfirm()`) always requires `--confirm`
 before a live run starts when: the estimate is above
 `--confirm-above-points` (default 2), any Fable cell is selected, or the

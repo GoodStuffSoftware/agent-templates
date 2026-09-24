@@ -139,6 +139,30 @@ test('suggestCheaperCellSet: drops fable cells first and lists what remains', ()
   assert.deepEqual(cells.sort(), ['opus55-high', 'sonnet-medium']);
 });
 
+test('estimateRun: fiveHourPoints is unknown (null bounds) when the seed ships no fiveHourPointAnchors -- never copied from weekly', () => {
+  const seed = loadSeed();
+  assert.equal(seed.fiveHourPointAnchors, undefined, 'the shipped seed has no measured 5-hour anchor yet');
+  const plan = [{ cellId: 'sonnet-medium', model: 'claude-sonnet-5', effort: 'medium', family: 'real-bugfix', n: 3 }];
+  const est = estimateRun({ plan, concurrency: 1, seed });
+  assert.ok(est.weeklyPoints.high > 0, 'weekly points ARE measured for this cell (sanity check)');
+  assert.equal(est.fiveHourPoints.low, null, 'fiveHourPoints must be unknown, not silently equal to the weekly figure');
+  assert.equal(est.fiveHourPoints.high, null);
+  assert.match(est.fiveHourPoints.derivedFrom, /unknown/);
+  const text = formatEstimate(est);
+  assert.match(text, /5-hour-window points: unknown/);
+});
+
+test('estimateRun: fiveHourPoints IS populated (and distinct math from weekly) once a fiveHourPointAnchors entry is configured', () => {
+  const seed = { ...loadSeed(), fiveHourPointAnchors: { 'real-bugfix': { runs: 10, points: 1, note: 'test-only measured anchor' } } };
+  const plan = [{ cellId: 'sonnet-medium', model: 'claude-sonnet-5', effort: 'medium', family: 'real-bugfix', n: 3 }];
+  const est = estimateRun({ plan, concurrency: 1, seed });
+  assert.notEqual(est.fiveHourPoints.low, null, 'a configured 5-hour anchor must populate real numbers');
+  assert.notEqual(est.fiveHourPoints.high, null);
+  assert.match(est.fiveHourPoints.derivedFrom, /measured 5-hour anchor/);
+  const text = formatEstimate(est);
+  assert.match(text, /5-hour-window points: [\d.]/);
+});
+
 test('formatEstimate: shows "unknown" for weekly % when currentWeeklyPct is not supplied', () => {
   const seed = loadSeed();
   const plan = [{ cellId: 'sonnet-medium', model: 'claude-sonnet-5', effort: 'medium', family: 'real-bugfix', n: 1 }];
