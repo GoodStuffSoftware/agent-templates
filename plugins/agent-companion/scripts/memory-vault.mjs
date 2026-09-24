@@ -37,7 +37,9 @@ import {
   realpathSync, statSync, lstatSync,
 } from 'node:fs';
 import { join, dirname, relative, sep, resolve, isAbsolute } from 'node:path';
-import { gitIsolated, enclosingGitRepo, samePath } from './lib/git-env.mjs';
+import {
+  gitIsolated, enclosingGitRepo, samePath, isIdentityGitVar,
+} from './lib/git-env.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   opt, stateRootPath, stateDir,
@@ -206,8 +208,17 @@ function statusCacheFile({ create = true } = {}) {
 //     points core.hooksPath at a directory that does not exist, so no hook —
 //     from global or system config, or from the vault's own .git/hooks — runs
 //     on a vault commit.
+//   - Both also drop inherited GIT_AUTHOR_*/GIT_COMMITTER_* names, emails and
+//     dates (vaultEnv()), which would otherwise override the vault's own
+//     identity and the real commit time.
+function vaultEnv(env = process.env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env || {})) if (!isIdentityGitVar(k)) out[k] = v;
+  return out;
+}
+
 function git(args, opts = {}) {
-  return gitIsolated(args, opts);
+  return gitIsolated(args, { ...opts, env: vaultEnv(opts.env || process.env) });
 }
 
 // Relative hooksPath resolves against the vault's work tree. Never created:
@@ -238,7 +249,7 @@ function vaultGit(dir, args, opts = {}) {
     '-c', 'core.longpaths=true', '-c', `core.hooksPath=${NO_HOOKS}`, '-c', 'core.fsmonitor=false',
     '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
     '-C', dir, '--git-dir=.git', '--work-tree=.', ...args,
-  ], opts);
+  ], { ...opts, env: vaultEnv(opts.env || process.env) });
 }
 
 // Git for Windows finds a repository by checking <dir>\.git\objects against

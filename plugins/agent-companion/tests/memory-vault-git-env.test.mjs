@@ -509,6 +509,46 @@ for (const cmd of ['init', 'sync']) {
   });
 }
 
+// G4. isolatedGitEnv() passes GIT_AUTHOR_* / GIT_COMMITTER_* through (other
+// callers set them on purpose), so an inherited name, email or date overrode
+// the vault's identity and the real commit time. Windows env names are
+// case-insensitive, so a lower-case spelling is covered too.
+for (const [label, identityEnv] of [
+  ['upper-case', {
+    GIT_AUTHOR_NAME: 'Inherited Author', GIT_AUTHOR_EMAIL: 'author@example.invalid', GIT_AUTHOR_DATE: '2001-02-03T04:05:06Z',
+    GIT_COMMITTER_NAME: 'Inherited Committer', GIT_COMMITTER_EMAIL: 'committer@example.invalid', GIT_COMMITTER_DATE: '2001-02-03T04:05:06Z',
+  }],
+  ...(process.platform === 'win32' ? [['lower-case (Windows)', {
+    git_author_name: 'Inherited Author', git_author_date: '2001-02-03T04:05:06Z', git_committer_email: 'committer@example.invalid',
+  }]] : []),
+]) {
+  test(`G4: vault commits ignore inherited ${label} GIT_AUTHOR_*/GIT_COMMITTER_* identity and dates`, () => {
+    const fx = makeFixture();
+    try {
+      const corpus = makeCorpus(fx.dir);
+      const res = runScript(SCRIPT, ['sync', '--json'], {
+        cwd: fx.dir,
+        env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', ...identityEnv },
+        timeout: 60000,
+      });
+      assert.equal(res.status, 0, res.stderr);
+      assert.equal(res.json?.committed, true, res.stdout);
+      const lines = git(['-C', join(fx.stateDir, 'memory-vault'), 'log', '--format=%an <%ae>|%cn <%ce>|%aI|%cI']).split('\n');
+      assert.equal(lines.length, 2, 'init + sync commits');
+      const year = String(new Date().getUTCFullYear());
+      for (const l of lines) {
+        const [author, committer, ad, cd] = l.split('|');
+        assert.equal(author, `${VAULT_NAME} <memory-vault@agent-companion.local>`, l);
+        assert.equal(committer, `${VAULT_NAME} <memory-vault@agent-companion.local>`, l);
+        assert.ok(!ad.startsWith('2001') && !cd.startsWith('2001'), `an inherited date leaked: ${l}`);
+        assert.ok(Math.abs(Date.parse(cd) - Date.now()) < 3600000 || cd.startsWith(year), `commit date is not now: ${l}`);
+      }
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
+
 test('an existing vault keeps working when its path is inside a repository (it created itself)', () => {
   const fx = makeFixture();
   try {

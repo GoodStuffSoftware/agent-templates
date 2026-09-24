@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { makeFixture } from './helpers.mjs';
 import {
   REPO_LOCATING_GIT_VARS, isRepoLocatingGitVar, cleanGitEnv, gitClean, enclosingGitRepo, samePath,
-  isolatedGitEnv, isConfigInjectionGitVar,
+  isolatedGitEnv, isConfigInjectionGitVar, isIdentityGitVar,
 } from '../scripts/lib/git-env.mjs';
 
 function git(args, cwd) {
@@ -102,6 +102,18 @@ test('isolatedGitEnv also drops inherited config injection, in any case, and kee
   assert.equal(isConfigInjectionGitVar('GIT_CONFIG_GLOBAL'), false);
   // gitClean() is unchanged: the canary still gets its injected config.
   assert.equal(cleanGitEnv({ GIT_CONFIG_COUNT: '1' }).GIT_CONFIG_COUNT, '1');
+});
+
+test('isIdentityGitVar names exactly the author/committer name, email and date vars, in any case', () => {
+  for (const k of ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE', 'GIT_COMMITTER_NAME',
+    'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE', 'git_author_date', 'Git_Committer_Email']) {
+    assert.equal(isIdentityGitVar(k), true, k);
+  }
+  for (const k of ['GIT_AUTHOR', 'GIT_AUTHOR_NAMEX', 'GIT_DIR', 'GIT_CONFIG_GLOBAL', 'EMAIL', 'GIT_SSH_COMMAND']) {
+    assert.equal(isIdentityGitVar(k), false, k);
+  }
+  // The shared helpers still pass identity through; only the vault strips it.
+  assert.equal(isolatedGitEnv({ GIT_AUTHOR_DATE: 'x' }).GIT_AUTHOR_DATE, 'x');
 });
 
 test('cleanGitEnv defaults to process.env and returns a copy', () => {

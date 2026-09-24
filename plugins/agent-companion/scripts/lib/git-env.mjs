@@ -24,6 +24,7 @@
 // tree, index or object store git operates on. Everything else passes through
 // on purpose:
 //   - GIT_AUTHOR_* / GIT_COMMITTER_* — callers set these deliberately.
+//     (memory-vault.mjs strips them for its own calls; see isIdentityGitVar.)
 //   - GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n /
 //     GIT_CONFIG_PARAMETERS — per-process config injection. The leak-sweep
 //     canary relies on it (url.<base>.insteadOf) to clone without network.
@@ -120,6 +121,17 @@ export function isolatedGitEnv(env = process.env, overrides = {}) {
   const out = cleanGitEnv(env, overrides);
   for (const k of Object.keys(out)) if (isConfigInjectionGitVar(k)) delete out[k];
   return out;
+}
+
+// --- identity and dates -----------------------------------------------------
+// GIT_AUTHOR_{NAME,EMAIL,DATE} / GIT_COMMITTER_{NAME,EMAIL,DATE} override the
+// repository's own user.* config and the clock on every commit. They pass
+// through cleanGitEnv() and isolatedGitEnv() because callers elsewhere set them
+// deliberately. memory-vault.mjs strips them for its own calls: an inherited
+// value (a rebase --exec, a scripted commit with pinned dates) otherwise stamps
+// someone else's name and a false date onto the backup's history.
+export function isIdentityGitVar(name) {
+  return /^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)$/i.test(String(name));
 }
 
 // `git <args>` with isolatedGitEnv() and the window hidden.
