@@ -335,7 +335,8 @@
       "note": "Reversible, contained, cheap to redo."
     },
     "elevated": {
-      "effortFloor": "high",
+      "effortFloor": "medium",
+      "effortFloorNote": "Lowered from high to medium 2026-09-24 (0.29.2 architecture-effort operator decision, DECISIONS.md, review 2026-09-30) specifically so integration's routing trial could actually resolve to opus/medium -- with the floor still at high, F5 raised any elevated-consequence trial straight back up, which is why v2's integration override changed only the MODEL and left the effort alone. large-refactor and novel-design stay at opus/high (already at or above medium, so the lower floor changes nothing for them); critical-change is unaffected (its floor is F1/xhigh, not F5). See F6 for the separate, non-waivable rule that no architecture-class type may ever reach opus/low regardless of this floor's value.",
       "modelFloor": null,
       "triggers": [
         "shared config",
@@ -361,6 +362,7 @@
     }
   },
   "consequenceNote": "Consequence is a FLOOR, not a delta, and it is applied AFTER the kind adjustment so it cannot be undercut. This matters because difficulty and consequence are close to orthogonal: a one-line production migration is mechanical by KIND, which would otherwise push its effort DOWN on precisely the change most likely to hurt. The floor is the answer to \"how bad is it if this is wrong\", which is a different question from \"how hard is this to get right\".",
+  "architectureClassNote": "`architectureClass: true` on a task type (integration, large-refactor, novel-design, critical-change ship with it; a local profile type may carry it too) marks it as never allowed to resolve to opus/low, at ANY layer, whatever its consequence happens to be (F6 in hooks/lib/context.mjs's resolveRoute()). Added 2026-09-24 alongside the elevated-consequence floor moving from high to medium, specifically so lowering that floor for integration's benefit could not accidentally let a future architecture-class type slip to opus/low through a consequence with a model floor but no matching effort floor. Unlike F5, F6 is never waivable: a routing-profile row naming opus/low for an architecture-class type is refused at validation, in both read and write mode, not silently raised.",
   "taskTypes": {
     "explore": {
       "weight": 1,
@@ -413,16 +415,17 @@
       "weight": 4,
       "kind": "bounded",
       "consequence": "elevated",
+      "architectureClass": true,
       "summary": "multi-file, cross-referencing, touches shared config or things other agents depend on",
-      "provenance": "Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself, but see operatorNote and the ROUTING TRIAL v2 override below.",
+      "provenance": "Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself, but see operatorNote and the ROUTING TRIAL v3 override below.",
       "operatorNote": "Architecture and deep technical work stay on Opus; Sonnet gets confused on some of the operator's technical/architecture work (operator-observed 2026-09-23). Do not route architecture off Opus on benchmark evidence alone.",
       "override": {
         "model": "opus",
-        "effort": "high",
-        "trialVersion": 2,
-        "reason": "ROUTING TRIAL v2 (operator-endorsed): unmeasured by benchmark, but operator first-hand evidence says Sonnet struggles on some of the operator's technical, multi-file work (operator-observed 2026-09-23) -- do not route this off Opus on benchmark evidence alone. opus/high matches the existing weight-4 elevated consequence floor (effortFloor: high), so this changes the MODEL (sonnet -> opus), not the effort.",
-        "evidence": { "source": "operator first-hand observation on integration/multi-file technical work (kept outside this repo)", "date": "2026-09-23" },
-        "trialSince": "2026-09-23",
+        "effort": "medium",
+        "trialVersion": 3,
+        "reason": "ROUTING TRIAL v3 (architecture-effort operator decision, DECISIONS.md; supersedes v2's opus/high): still unmeasured by benchmark, but the operator judged v2's opus/high heavier than integration work needs day to day, and moved it down one rung to opus/medium. Model stays opus: operator first-hand evidence says Sonnet struggles on some of the operator's technical, multi-file work (operator-observed 2026-09-23) -- do not route this off Opus on benchmark evidence alone. Landing on medium (not v2's high) required lowering the elevated-consequence effort floor from high to medium (config/model-tiers.json consequence.elevated.effortFloor) -- at the old high floor, F5 would have raised any elevated-consequence trial straight back to high regardless of what this override named, which is exactly why v2 could only change the model, not the effort. large-refactor and novel-design deliberately stay at opus/high (unaffected by the lower floor, since high already sits above medium); critical-change is unaffected (F1/xhigh, not F5). A separate, non-waivable rule (F6) still refuses opus/low for any architecture-class type -- this trial does not touch that floor.",
+        "evidence": { "source": "operator architecture-effort decision, DECISIONS.md (kept outside this repo)", "date": "2026-09-24" },
+        "trialSince": "2026-09-24",
         "reviewBy": "2026-09-30"
       }
     },
@@ -446,6 +449,7 @@
       "weight": 5,
       "kind": "bounded",
       "consequence": "elevated",
+      "architectureClass": true,
       "summary": "large-scale refactor across a module or subsystem; the target shape is known, the surface is wide",
       "provenance": "OFFICIAL choosing-a-model: Opus for large-scale refactoring and complex systems engineering. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself, but see operatorNote and the ROUTING TRIAL v2 override below.",
       "operatorNote": "Architecture and deep technical work stay on Opus; Sonnet gets confused on some of the operator's technical/architecture work (operator-observed 2026-09-23). Do not route architecture off Opus on benchmark evidence alone.",
@@ -463,6 +467,7 @@
       "weight": 5,
       "kind": "novel-design",
       "consequence": "elevated",
+      "architectureClass": true,
       "summary": "a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape",
       "provenance": "Our kind axis. OFFICIAL: Opus for complex systems engineering. Fable only with a warrant - and per the procedural-discipline finding, first try a brief that carries the verification checklist on Opus. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself, but see operatorNote and the ROUTING TRIAL v2 override below.",
       "operatorNote": "Architecture and deep technical work stay on Opus; Sonnet gets confused on some of the operator's technical/architecture work (operator-observed 2026-09-23). Do not route architecture off Opus on benchmark evidence alone.",
@@ -481,6 +486,7 @@
       "weight": 4,
       "kind": "bounded",
       "consequence": "critical",
+      "architectureClass": true,
       "summary": "production data, migrations, destructive ops, auth, billing, secrets - regardless of size",
       "provenance": "Consequence axis (arXiv 2606.04402: consequence is orthogonal to difficulty). The floor raises even a one-line change to opus/xhigh. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; the critical floor (opus/xhigh) stays regardless."
     },

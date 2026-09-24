@@ -353,11 +353,28 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 //       build half of F4 (aliasResolution.minClaudeCodeVersion) needs the
 //       CALLING session's build, which only the spawn guard can read, so it
 //       stays there (SPAWNING RULE 2).
-//   F5  elevated consequence effort floor (high). Soft: a profile row may
-//       waive it with waivesFloor: "elevated", honoured ONLY when the row's
-//       source is operator-observed (result.waiver; explain always prints
-//       it). The waiver never touches F1.
-// A profile row that breaks F1-F4 is refused by the writer
+//   F5  elevated consequence effort floor (config-driven; see
+//       config/model-tiers.json's consequence.elevated.effortFloor — medium
+//       as of the 0.29.2 "effort" architecture decision, reviewed 2026-09-30).
+//       Soft: a profile row may waive it with waivesFloor: "elevated",
+//       honoured ONLY when the row's source is operator-observed
+//       (result.waiver; explain always prints it). The waiver never touches
+//       F1.
+//   F6  architecture-class effort floor: a task type flagged
+//       `architectureClass: true` (integration, large-refactor, novel-design,
+//       critical-change, or any local type carrying the flag) never resolves
+//       to opus/low, regardless of layer. Inviolable and NOT waivable by F5's
+//       waivesFloor — architecture work needs sustained reasoning even when
+//       an elevated-consequence waiver is in play. Currently unreachable via
+//       the shipped trial/grid (F1/F5 already keep every shipped
+//       architecture-class type at or above medium), so it fires today only
+//       as a backstop against a future config mistake (e.g. a new consequence
+//       with a model floor but no matching effort floor) — see
+//       tests/architecture-floor.test.mjs. A profile row is refused outright
+//       at profileRowRefusal() rather than silently floored (operator
+//       decision 2026-09-24: refuse at validation, not waive-and-raise), so
+//       this floor's raise path only ever fires for the trial/grid layers.
+// A profile row that breaks F1-F4 or F6 is refused by the writer
 // (scripts/lib/routing-profile-store.mjs) and ignored here, for a file
 // edited by hand; both go through profileRowRefusal().
 // Every raise is recorded in floorsApplied — including the ones effortFor()
@@ -549,6 +566,15 @@ export function profileRowRefusal(type, row, { typeDef = null, consequence, now,
       return `F1: critical consequence needs effort at least ${cons.effortFloor}; the row names ${effort || '(none)'}`;
     }
   }
+  // F6: architecture-class task types (integration, large-refactor,
+  // novel-design, critical-change, or any local type carrying
+  // `architectureClass: true`) never route to opus/low, in EITHER mode —
+  // unlike F5 this is refused outright, never waivable, so a profile row
+  // cannot use waivesFloor to reach opus/low on architecture work (operator
+  // decision 2026-09-24: refuse at profile validation, don't silently raise).
+  if (isArchitectureClass(typeDef) && classifyModel(model).alias === 'opus' && classifyEffort(effort).level === 'low') {
+    return `F6: architecture-class task type '${type}' may never route to opus/low; name at least opus/medium (or leave the row unset to use the shipped trial/grid)`;
+  }
   // F5 on a model that takes no effort parameter (haiku): no effort can be
   // raised to the elevated floor, so the row counts as BELOW it (S2 review
   // P2), not as meeting it. The writer requires the waiver; the reader skips
@@ -623,6 +649,15 @@ function routeLabelOf(model, effort) {
 
 function floorText(f) {
   return `${f.floor} ${f.raised || f.capped || `waived: ${f.waived}`}`;
+}
+
+// F6's trigger: a type definition (shipped or local) flagged
+// `architectureClass: true` — integration, large-refactor, novel-design and
+// critical-change ship with it; a local profile type may carry it too, which
+// is how "any other type the plugin classes as architecture" is expressed as
+// data rather than a hardcoded name list.
+function isArchitectureClass(typeDef) {
+  return !!(typeDef && typeDef.architectureClass);
 }
 
 // F2's set: fable, plus any premium tier ranked at or above it.
@@ -792,7 +827,7 @@ function parityFloors(r, { consequence, writer, now }) {
   return { model, effort, floorsApplied };
 }
 
-function applyFloors(r, { consequence, parity, writer, waive = null, now }) {
+function applyFloors(r, { consequence, parity, writer, waive = null, now, architectureClass = false }) {
   const cfg = modelTiers();
   const floorsApplied = [];
   let { model, effort } = r;
@@ -840,6 +875,22 @@ function applyFloors(r, { consequence, parity, writer, waive = null, now }) {
       // A no-effort model is below the floor (P2); an honoured waiver is
       // what lets it run, so it is recorded like any other waived floor.
       floorsApplied.push({ floor: label, waived: `${classifyModel(model).alias || model} takes no effort, kept below ${cons.effortFloor} (operator-observed profile row waives F5)` });
+    }
+  }
+
+  // F6: architecture-class task types never resolve to opus/low, whatever
+  // consequence produced the answer — inviolable, never waivable (unlike
+  // F5). Unreachable via the shipped trial/grid today (F1/F5 already keep
+  // every shipped architecture-class type at or above medium); this is a
+  // backstop against a future config mistake, e.g. a new consequence naming
+  // a model floor with no matching effort floor. A profile row this low is
+  // refused outright at profileRowRefusal() before it can ever win, so it
+  // never reaches here with model/effort still at opus/low.
+  if (architectureClass && classifyModel(model).alias === 'opus' && classifyEffort(effort).level === 'low') {
+    const raised = raiseEffort(model, effort, 'medium');
+    if (raised !== effort) {
+      floorsApplied.push({ floor: 'F6', raised: `effort ${effort} -> ${raised} (architecture-class task type never routes to opus/low)` });
+      effort = raised;
     }
   }
   return { model, effort, floorsApplied };
@@ -1175,7 +1226,7 @@ export function resolveRoute({
   // --- Floors, after whichever layer won -----------------------------------
   const waive = won.waiver && won.waiver.honored && won.waiver.applies ? 'elevated' : null;
   const floored = won.model
-    ? applyFloors({ model: won.model, effort: won.effort }, { consequence: c, parity: false, waive })
+    ? applyFloors({ model: won.model, effort: won.effort }, { consequence: c, parity: false, waive, architectureClass: typeKnown && isArchitectureClass(t) })
     : { model: won.model, effort: won.effort, floorsApplied: [] };
   const floorNote = floored.floorsApplied.length
     ? `; floors: ${floored.floorsApplied.map(floorText).join(', ')} -> ${routeLabelOf(floored.model, floored.effort)}`
