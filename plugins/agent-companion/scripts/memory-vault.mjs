@@ -171,8 +171,15 @@ export function vaultDir() {
   return process.env[VAULT_DIR_ENV] || join(stateRootPath(), 'memory-vault');
 }
 
+// "Persistently" matters: the scheduled scout's sync and the audit's drift
+// check read the variable from their own environment, so a one-off inline
+// setting fixes only the run it prefixes.
+const PERSIST_ADVICE = 'Set it persistently (the "env" block of Claude Code\'s settings.json, or a user '
+  + 'environment variable) so the scheduled scout and the audit use it too.';
+
 const RELOCATE_ADVICE = `Relocate the vault alone by setting ${VAULT_DIR_ENV} to an absolute path outside `
-  + 'any git repository, then retry. (AGENT_COMPANION_STATE_DIR would move the vault too, but it moves ALL '
+  + `any git repository, then retry. ${PERSIST_ADVICE} `
+  + '(AGENT_COMPANION_STATE_DIR would move the vault too, but it moves ALL '
   + 'agent-companion state with it — config, brevity toggles, standing rules, telemetry.)';
 
 // sync writes its lock and status file under the state root (state/), and
@@ -222,7 +229,7 @@ function assertVaultOutsideStateRoot() {
     `refusing to initialize — ${VAULT_DIR_ENV} is ${envDir}, which is ${relation} (${root}). sync keeps its `
     + 'lock and status file under the state root, so a vault there would be written to before it was '
     + `checked. Nothing was written. Set ${VAULT_DIR_ENV} to an absolute path outside the state root and `
-    + `outside any git repository, or unset it to use the default location, ${defaultVault}.`,
+    + `outside any git repository, or unset it to use the default location, ${defaultVault}. ${PERSIST_ADVICE}`,
   );
 }
 
@@ -318,7 +325,7 @@ function tooLongMessage(dir) {
   return `refusing to initialize — the vault path is ${resolve(dir).length} characters (${dir}). `
     + `Git for Windows cannot find a repository whose path is longer than ${WIN_MAX_VAULT_PATH} characters, `
     + `whatever core.longpaths says. Nothing was written. Set ${VAULT_DIR_ENV} to a shorter absolute path `
-    + 'outside any git repository, then retry.';
+    + `outside any git repository, then retry. ${PERSIST_ADVICE}`;
 }
 
 function isOurVault(dir) {
@@ -651,7 +658,7 @@ export function checkVaultLocation(dir = vaultDir()) {
     throw new Error(
       `refusing to initialize — ${VAULT_DIR_ENV} is "${process.env[VAULT_DIR_ENV]}", a relative path, which `
       + 'would resolve against whatever directory the sync happens to run from. Nothing was written. Set it '
-      + 'to an absolute path outside any git repository, then retry.',
+      + `to an absolute path outside any git repository, then retry. ${PERSIST_ADVICE}`,
     );
   }
   assertVaultOutsideStateRoot();

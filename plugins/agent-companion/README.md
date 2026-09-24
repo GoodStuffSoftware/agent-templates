@@ -253,6 +253,37 @@ for example because `~/.claude` is itself a git repository:
 AGENT_COMPANION_VAULT_DIR=/path/outside/any/repo/memory-vault node scripts/memory-vault.mjs sync
 ```
 
+**Set it persistently.** The inline form above moves the vault for that one
+command. Two other things read the variable from their own environment: the
+scheduled calibration scout, which runs `sync` every day (see
+[`routines/calibration-scout-daily.md`](routines/calibration-scout-daily.md)),
+and the audit's `memory-vault-drift` check. If the variable is not set where
+they run, they use the default location. The scout then starts a second vault
+there or is refused, and the audit reports on the wrong vault. Set it in one
+of these places:
+
+- **Claude Code's `settings.json`** (`~/.claude/settings.json`), in its `env`
+  block. This is recommended: every Claude Code session gets it, including
+  the scheduled scout's and every command it runs.
+
+  ```json
+  {
+    "env": {
+      "AGENT_COMPANION_VAULT_DIR": "/absolute/path/outside/any/repo/memory-vault"
+    }
+  }
+  ```
+
+- **A user environment variable**, for runs outside Claude Code. On Windows,
+  use `setx AGENT_COMPANION_VAULT_DIR "D:\backups\memory-vault"`. It applies
+  only to processes started afterwards, so restart Claude Code. On macOS or
+  Linux, use an `export` line in your shell profile, which reaches only
+  processes started from that shell. A scheduler that starts no login shell
+  will not see it, which is why `settings.json` is the recommended place.
+
+To confirm, run `node scripts/memory-vault.mjs status` from the same kind of
+session the scout uses. Its first line shows the vault directory it resolved.
+
 The path must also be outside the agent-companion state root. It cannot be
 the state root, a directory inside it, or a directory that contains it,
 because `sync` keeps its lock and status file there. The one exception is the

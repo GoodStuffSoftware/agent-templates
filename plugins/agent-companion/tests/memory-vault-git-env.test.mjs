@@ -22,7 +22,9 @@ import {
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { makeFixture, runScript, assertNotRealHome } from './helpers.mjs';
+import {
+  makeFixture, runScript, assertNotRealHome, PLUGIN_ROOT,
+} from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
@@ -699,6 +701,44 @@ test('G6: AGENT_COMPANION_VAULT_DIR set to the default location inside the state
   } finally {
     fx.cleanup();
   }
+});
+
+// G7. A one-off inline AGENT_COMPANION_VAULT_DIR moves only that run. The
+// scheduled scout's sync and the audit read the variable from their own
+// environment, so every refusal that says to set it also says to set it
+// persistently, and the README says how.
+test('G7: every refusal that recommends AGENT_COMPANION_VAULT_DIR says to set it persistently', () => {
+  const fx = makeFixture();
+  try {
+    const { repo } = makeProject(fx.dir);
+    const corpus = makeCorpus(fx.dir);
+    const base = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
+    const cases = [
+      ['inside a repository', { AGENT_COMPANION_STATE_DIR: join(repo, 'nested', 'state') }],
+      ['relative', { AGENT_COMPANION_VAULT_DIR: join('relative', 'vault') }],
+      ['overlapping the state root', { AGENT_COMPANION_VAULT_DIR: join(fx.stateDir, 'state') }],
+    ];
+    for (const [label, env] of cases) {
+      const res = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env: { ...base, ...env } });
+      assert.notEqual(res.status, 0, label);
+      assert.match(res.stderr, /AGENT_COMPANION_VAULT_DIR/, label);
+      assert.match(res.stderr,
+        /Set it persistently \(the "env" block of Claude Code's settings\.json, or a user environment variable\) so the scheduled scout and the audit use it too/,
+        `${label}: ${res.stderr}`);
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('G7: the README documents setting AGENT_COMPANION_VAULT_DIR persistently for the scheduled scout and the audit', () => {
+  const readme = readFileSync(join(PLUGIN_ROOT, 'README.md'), 'utf8');
+  const section = readme.slice(readme.indexOf('**Moving the vault.**'), readme.indexOf('**Never a session transcript.**'));
+  assert.match(section, /\*\*Set it persistently\.\*\*/);
+  assert.match(section, /"env": \{\s*"AGENT_COMPANION_VAULT_DIR": /);
+  assert.match(section, /scheduled calibration scout/);
+  assert.match(section, /memory-vault-drift/);
+  assert.match(section, /setx AGENT_COMPANION_VAULT_DIR/);
 });
 
 test('an existing vault keeps working when its path is inside a repository (it created itself)', () => {

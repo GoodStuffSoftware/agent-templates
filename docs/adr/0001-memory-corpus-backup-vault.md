@@ -210,6 +210,9 @@ an ordinary git command, not just a bug in this feature's own code.
   `git show`, forever — nothing in it depends on the plugin being installed.
   `AGENT_COMPANION_VAULT_DIR` (an absolute path) moves the vault alone, for
   when the default location sits inside a git repository and is refused.
+  It has to be set persistently (the `env` block of Claude Code's
+  `settings.json`, or a user environment variable), or the scheduled scout's
+  sync and the audit's drift check keep using the default location.
   `AGENT_COMPANION_STATE_DIR` would move it too, but it moves all of the
   plugin's state with it, including user-authored `config/`.
 - **Transcripts (requirement 3):** proven, not just designed-around.
