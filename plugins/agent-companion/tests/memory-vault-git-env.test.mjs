@@ -26,6 +26,7 @@ import {
   makeFixture, runScript, assertNotRealHome, PLUGIN_ROOT,
 } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
+import { vaultGitWrites, vaultGitEnv } from '../scripts/memory-vault.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
 const VAULT_NAME = 'agent-companion memory-vault';
@@ -802,4 +803,162 @@ test('an existing vault keeps working when its path is inside a repository (it c
   } finally {
     fx.cleanup();
   }
+});
+
+// --- 0.29.2 S1: housekeeping runs in the foreground, inside the sync lock --
+// A vault commit can start `git maintenance run --auto` / `git gc --auto`,
+// which by default detach and keep working on the vault's .git after the
+// commit returns, overlapping the next sync. Every vault invocation now says
+// maintenance.autoDetach=false and gc.autoDetach=false, and never zeroes
+// gc.auto. git's own trace2 event stream records each process's full argv,
+// -c options included, so this reads what git actually received.
+function traceStarts(file) {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, 'utf8').split('\n').filter(Boolean)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((e) => e && e.event === 'start' && Array.isArray(e.argv));
+}
+
+function hasConfigPair(argv, kv) {
+  return argv.some((a, i) => a === '-c' && argv[i + 1] === kv);
+}
+
+test('S1: every vault commit (and every vault git call) runs housekeeping undetached; gc.auto is left alone', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const trace = join(fx.dir, 'trace2.jsonl');
+    const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', GIT_TRACE2_EVENT: trace };
+    const first = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(first.status, 0, first.stderr);
+    writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
+    const second = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(second.json?.committed, true, second.stdout);
+
+    // Top-level processes only (a child git spawns has a nested sid), and
+    // only the vault's own: vaultGit() names --git-dir=.git; createVault()'s
+    // init is the one call made before there is a work tree.
+    const ours = traceStarts(trace).filter((e) => !String(e.sid || '').includes('/')
+      && (e.argv.includes('--git-dir=.git') || e.argv.includes('init')));
+    const commits = ours.filter((e) => e.argv.includes('commit'));
+    assert.ok(commits.length >= 2, `expected the init and sync commits in the trace, saw ${commits.length}`);
+    assert.ok(ours.some((e) => e.argv.includes('init')), 'the init call is traced');
+    for (const e of ours) {
+      const shown = e.argv.join(' ');
+      assert.ok(hasConfigPair(e.argv, 'maintenance.autoDetach=false'), `missing maintenance.autoDetach=false: ${shown}`);
+      assert.ok(hasConfigPair(e.argv, 'gc.autoDetach=false'), `missing gc.autoDetach=false: ${shown}`);
+      assert.ok(!e.argv.some((a) => /^gc\.auto=/i.test(a)), `gc.auto must not be overridden: ${shown}`);
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// --- 0.29.2 S2: config files named by env are ignored on vault WRITES -----
+// isolatedGitEnv() kept GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM, so an
+// inherited one could inject any setting into a vault write. The -c
+// overrides already neutralise hooksPath and signing, and the vault's own
+// config wins for its identity, so this fixture also sets a
+// core.excludesFile: without the strip it silently drops a memory file from
+// the backup.
+function makeHostileGlobal(root) {
+  const hooks = join(root, 'hostile-hooks');
+  mkdirSync(hooks, { recursive: true });
+  const flag = join(root, 'HOSTILE_HOOK_RAN');
+  for (const h of ['pre-commit', 'commit-msg', 'post-commit', 'reference-transaction']) {
+    writeFileSync(join(hooks, h), `#!/bin/sh\necho ${h} >> "${flag.replace(/\\/g, '/')}"\ncat >/dev/null\nexit 0\n`);
+    chmodSync(join(hooks, h), 0o755);
+  }
+  const excludes = join(root, 'hostile-excludes');
+  writeFileSync(excludes, 'hostile-excluded.md\n');
+  const cfg = join(root, 'hostile.gitconfig');
+  writeFileSync(cfg, [
+    '[core]',
+    `\thooksPath = ${hooks.replace(/\\/g, '/')}`,
+    `\texcludesFile = ${excludes.replace(/\\/g, '/')}`,
+    '[user]',
+    '\tname = HOSTILE-GLOBAL-IDENT',
+    '\temail = hostile@example.invalid',
+    '',
+  ].join('\n'));
+  return { cfg, flag };
+}
+
+for (const [label, envFor] of [
+  ['GIT_CONFIG_GLOBAL', (cfg) => ({ GIT_CONFIG_GLOBAL: cfg })],
+  ['GIT_CONFIG_SYSTEM', (cfg) => ({ GIT_CONFIG_SYSTEM: cfg })],
+  ...(process.platform === 'win32' ? [['lower-case git_config_global (Windows)', (cfg) => ({ git_config_global: cfg })]] : []),
+]) {
+  test(`S2: a hostile ${label} (hooksPath, user.name, excludesFile) cannot reach a vault write`, () => {
+    const fx = makeFixture();
+    try {
+      const corpus = makeCorpus(fx.dir);
+      writeFileSync(join(corpus, 'proj-a', 'memory', 'hostile-excluded.md'), 'must be backed up\n');
+      const { cfg, flag } = makeHostileGlobal(fx.dir);
+      const res = runScript(SCRIPT, ['sync', '--json'], {
+        cwd: fx.dir,
+        env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', ...envFor(cfg) },
+        timeout: 60000,
+      });
+      assert.equal(res.status, 0, res.stderr);
+      assert.equal(res.json?.committed, true, res.stdout);
+      const vault = join(fx.stateDir, 'memory-vault');
+      assert.ok(!existsSync(flag), `a hostile hook ran: ${existsSync(flag) ? readFileSync(flag, 'utf8') : ''}`);
+      assert.equal(git(['-C', vault, 'show', 'HEAD:projects/proj-a/memory/hostile-excluded.md']), 'must be backed up',
+        'an env-named config file excluded a memory file from the backup');
+      for (const a of git(['-C', vault, 'log', '--format=%an <%ae>|%cn <%ce>']).split('\n')) {
+        assert.equal(a, `${VAULT_NAME} <memory-vault@agent-companion.local>|${VAULT_NAME} <memory-vault@agent-companion.local>`);
+      }
+      const cfgText = readFileSync(join(vault, '.git', 'config'), 'utf8');
+      assert.doesNotMatch(cfgText, /HOSTILE|hostile/, 'nothing from the hostile file was written into the vault config');
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
+
+test('S2: vaultGitWrites classifies every vault call shape; unknown subcommands count as writes', () => {
+  const V = ['-c', 'core.longpaths=true', '-C', '/v', '--git-dir=.git', '--work-tree=.'];
+  const writes = [
+    ['-c', 'core.hooksPath=/x', 'init', '-q', '--template=', '-b', 'main', '/v'],
+    [...V, 'add', '-A'],
+    [...V, 'add', '-A', '--', 'projects'],
+    [...V, 'commit', '-q', '-F', '-'],
+    [...V, 'config', '--file', '.git/config', 'user.name', 'n'],
+    [...V, 'hash-object', '-w', '--stdin-paths'],
+    [...V, 'status', '--porcelain'],
+    [...V, 'gc'],
+    [...V, 'some-future-subcommand'],
+    [],
+  ];
+  const reads = [
+    ['-C', '/v', 'rev-parse', '--absolute-git-dir'],
+    [...V, 'rev-parse', 'HEAD'],
+    [...V, 'config', '--file', '.git/config', '--get', 'user.email'],
+    [...V, 'log', '--max-parents=0', '--format=%s', 'HEAD'],
+    [...V, 'rev-list', '--all', '--reflog', '--count'],
+    [...V, 'ls-files', '-s', '-z'],
+    [...V, 'hash-object', '--no-filters', '--stdin-paths'],
+    [...V, 'diff', '--cached', '--name-status'],
+    [...V, '--no-optional-locks', 'status', '--porcelain'],
+    [...V, '--no-optional-locks', 'log', '-1'],
+  ];
+  for (const a of writes) assert.equal(vaultGitWrites(a), true, a.join(' '));
+  for (const a of reads) assert.equal(vaultGitWrites(a), false, a.join(' '));
+});
+
+test('S2: vaultGitEnv drops GIT_CONFIG_GLOBAL/SYSTEM for writes only, and identity for both', () => {
+  const env = {
+    PATH: '/bin', GIT_CONFIG_GLOBAL: '/g', GIT_CONFIG_SYSTEM: '/s', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'x',
+  };
+  const w = vaultGitEnv(['-C', '/v', 'commit', '-q'], env);
+  assert.equal(w.GIT_CONFIG_GLOBAL, undefined);
+  assert.equal(w.GIT_CONFIG_SYSTEM, undefined);
+  assert.equal(w.GIT_CONFIG_NOSYSTEM, '1');
+  assert.equal(w.GIT_AUTHOR_NAME, undefined);
+  const r = vaultGitEnv(['-C', '/v', 'rev-parse', 'HEAD'], env);
+  assert.equal(r.GIT_CONFIG_GLOBAL, '/g');
+  assert.equal(r.GIT_CONFIG_SYSTEM, '/s');
+  assert.equal(r.GIT_AUTHOR_NAME, undefined);
 });

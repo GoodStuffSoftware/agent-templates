@@ -30,7 +30,8 @@
 //     canary relies on it (url.<base>.insteadOf) to clone without network.
 //   - GIT_SSH_COMMAND, GIT_ASKPASS, GIT_TERMINAL_PROMPT — clone/fetch auth.
 //   - GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG_NOSYSTEM — hermetic
-//     test setups point these at throwaway files.
+//     test setups point these at throwaway files. (isolatedWriteGitEnv()
+//     below drops GLOBAL and SYSTEM for the memory vault's writes.)
 // GIT_CONFIG (the legacy "`git config` reads and writes THIS file" variable)
 // IS stripped: it redirects config writes, which is exactly the failure class.
 //
@@ -120,6 +121,28 @@ export function isConfigInjectionGitVar(name) {
 export function isolatedGitEnv(env = process.env, overrides = {}) {
   const out = cleanGitEnv(env, overrides);
   for (const k of Object.keys(out)) if (isConfigInjectionGitVar(k)) delete out[k];
+  return out;
+}
+
+// --- config FILES named by env ----------------------------------------------
+// GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM replace the files git reads as its
+// global and system config. isolatedGitEnv() keeps them (hermetic test
+// setups and read-only callers rely on them), which let an inherited
+// GIT_CONFIG_GLOBAL inject any setting at all into a vault WRITE: a
+// core.excludesFile that drops memory files from the backup, an identity, a
+// hooksPath. isolatedWriteGitEnv() is isolatedGitEnv() minus those two, so a
+// write reads only the default global and system files, as a plain `git`
+// run by the operator would. GIT_CONFIG_NOSYSTEM stays: it only removes a
+// config source, never adds one.
+const CONFIG_FILE_REDIRECT = new Set(['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']);
+
+export function isConfigFileRedirectGitVar(name) {
+  return CONFIG_FILE_REDIRECT.has(String(name).toUpperCase());
+}
+
+export function isolatedWriteGitEnv(env = process.env, overrides = {}) {
+  const out = isolatedGitEnv(env, overrides);
+  for (const k of Object.keys(out)) if (isConfigFileRedirectGitVar(k)) delete out[k];
   return out;
 }
 
