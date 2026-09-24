@@ -625,6 +625,82 @@ test('G5: status still reports an ordinary vault, and a vault whose initialize c
   }
 });
 
+// G6. sync writes its lock and status file under the state root BEFORE the
+// vault is created. An AGENT_COMPANION_VAULT_DIR that was the state root,
+// was inside it, or contained it therefore got written to first. The refusal
+// that followed ("already exists and is not a memory vault") claimed that
+// nothing was written, which was false.
+const OVERLAPS = [
+  ['the state root itself', (fx) => fx.stateDir, /which is the state root itself/],
+  ['the state/ dir that holds the lock', (fx) => join(fx.stateDir, 'state'), /which is inside the state root/],
+  ['a directory inside state/', (fx) => join(fx.stateDir, 'state', 'vault'), /which is inside the state root/],
+  ['another directory inside the state root', (fx) => join(fx.stateDir, 'other-vault'), /which is inside the state root/],
+  ['a directory that contains the state root', (fx) => join(fx.dir, '.claude'), /which is a directory that contains the state root/],
+];
+
+for (const [label, vaultFor, re] of OVERLAPS) {
+  for (const cmd of ['init', 'sync']) {
+    test(`G6: ${cmd} refuses, writing nothing, an AGENT_COMPANION_VAULT_DIR that is ${label}`, () => {
+      const fx = makeFixture();
+      try {
+        const corpus = makeCorpus(fx.dir);
+        const vault = vaultFor(fx);
+        const res = runScript(SCRIPT, [cmd, '--json'], {
+          cwd: fx.dir,
+          env: { AGENT_COMPANION_VAULT_DIR: vault, AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
+        });
+        assert.notEqual(res.status, 0, `${cmd} must refuse: ${res.stdout}`);
+        assert.match(res.stderr, /refusing to initialize — AGENT_COMPANION_VAULT_DIR is /);
+        assert.match(res.stderr, re);
+        assert.match(res.stderr, /Nothing was written/);
+        assert.ok(!existsSync(fx.stateDir), `the state root must not be created: ${existsSync(fx.stateDir) ? readdirSync(fx.stateDir) : ''}`);
+        assert.ok(!existsSync(vault), 'the vault directory must not be created');
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
+}
+
+test('G6: an AGENT_COMPANION_VAULT_DIR that reaches the state root through a junction/symlink is refused', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    mkdirSync(fx.stateDir, { recursive: true });
+    const alias = join(fx.dir, 'alias');
+    symlinkSync(fx.stateDir, alias, 'junction');
+    const res = runScript(SCRIPT, ['sync', '--json'], {
+      cwd: fx.dir,
+      env: { AGENT_COMPANION_VAULT_DIR: join(alias, 'state'), AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
+    });
+    assert.notEqual(res.status, 0, res.stdout);
+    assert.match(res.stderr, /which is inside the state root/);
+    assert.deepEqual(readdirSync(fx.stateDir), [], 'nothing may be written under the state root');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('G6: AGENT_COMPANION_VAULT_DIR set to the default location inside the state root is accepted', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const res = runScript(SCRIPT, ['sync', '--json'], {
+      cwd: fx.dir,
+      env: {
+        AGENT_COMPANION_VAULT_DIR: join(fx.stateDir, 'memory-vault'),
+        AGENT_COMPANION_MEMORY_ROOT: corpus,
+        CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true',
+      },
+      timeout: 60000,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.json?.committed, true, res.stdout);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test('an existing vault keeps working when its path is inside a repository (it created itself)', () => {
   const fx = makeFixture();
   try {

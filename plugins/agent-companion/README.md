@@ -253,6 +253,11 @@ for example because `~/.claude` is itself a git repository:
 AGENT_COMPANION_VAULT_DIR=/path/outside/any/repo/memory-vault node scripts/memory-vault.mjs sync
 ```
 
+The path must also be outside the agent-companion state root. It cannot be
+the state root, a directory inside it, or a directory that contains it,
+because `sync` keeps its lock and status file there. The one exception is the
+default location, `<state root>/memory-vault`.
+
 `AGENT_COMPANION_STATE_DIR` also moves the vault, but it moves **all**
 agent-companion state with it: `config/` (brevity toggles, standing rules),
 telemetry, and dedup state. Use it only if that is what you want.

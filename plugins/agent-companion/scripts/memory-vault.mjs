@@ -175,6 +175,57 @@ const RELOCATE_ADVICE = `Relocate the vault alone by setting ${VAULT_DIR_ENV} to
   + 'any git repository, then retry. (AGENT_COMPANION_STATE_DIR would move the vault too, but it moves ALL '
   + 'agent-companion state with it — config, brevity toggles, standing rules, telemetry.)';
 
+// sync writes its lock and status file under the state root (state/), and
+// stateDir() adds README.txt at the root. A vault directory that is the state
+// root, sits inside it, or contains it shares those paths. The first sync then
+// writes into the vault location before the vault is checked, which breaks the
+// "nothing was written" guarantee of every refusal, and later syncs mix state
+// files into the vault's work tree. So an AGENT_COMPANION_VAULT_DIR that
+// overlaps the state root in any direction is refused. The default location,
+// <state root>/memory-vault, is the one exception: this file creates it there
+// itself, and nothing else writes into it.
+function canonicalPath(p) {
+  const abs = resolve(String(p));
+  const rest = [];
+  for (let a = abs; ; a = dirname(a)) {
+    if (existsSync(a)) return join(realOrResolved(a), ...rest.reverse());
+    const up = dirname(a);
+    if (up === a) return abs;
+    rest.push(a.slice(up.length).replace(/^[\\/]+/, ''));
+  }
+}
+
+function isWithin(child, parent) {
+  const norm = (p) => {
+    const s = resolve(p).replace(/\\/g, '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? s.toLowerCase() : s;
+  };
+  const c = norm(child); const pa = norm(parent);
+  return c === pa || c.startsWith(`${pa}/`);
+}
+
+function assertVaultOutsideStateRoot() {
+  const envDir = process.env[VAULT_DIR_ENV];
+  if (!envDir) return;
+  const root = stateRootPath();
+  const defaultVault = join(root, 'memory-vault');
+  if (samePath(envDir, defaultVault) || samePath(canonicalPath(envDir), canonicalPath(defaultVault))) return;
+  const pairs = [[resolve(envDir), resolve(root)], [canonicalPath(envDir), canonicalPath(root)]];
+  let relation = '';
+  for (const [v, r] of pairs) {
+    if (samePath(v, r)) { relation = 'the state root itself'; break; }
+    if (isWithin(v, r)) { relation = 'inside the state root'; break; }
+    if (isWithin(r, v)) { relation = 'a directory that contains the state root'; break; }
+  }
+  if (!relation) return;
+  throw new Error(
+    `refusing to initialize — ${VAULT_DIR_ENV} is ${envDir}, which is ${relation} (${root}). sync keeps its `
+    + 'lock and status file under the state root, so a vault there would be written to before it was '
+    + `checked. Nothing was written. Set ${VAULT_DIR_ENV} to an absolute path outside the state root and `
+    + `outside any git repository, or unset it to use the default location, ${defaultVault}.`,
+  );
+}
+
 function lockFile() {
   return join(stateDir(), 'memory-vault-sync.lock');
 }
@@ -603,6 +654,7 @@ export function checkVaultLocation(dir = vaultDir()) {
       + 'to an absolute path outside any git repository, then retry.',
     );
   }
+  assertVaultOutsideStateRoot();
   if (vaultPathTooLong(dir)) throw new Error(tooLongMessage(dir));
   if (isOurVault(dir)) {
     assertVaultGitDir(dir);
