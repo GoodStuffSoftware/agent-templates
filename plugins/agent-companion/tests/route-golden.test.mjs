@@ -29,7 +29,7 @@ import { join } from 'node:path';
 import { PLUGIN_ROOT, makeFixture } from './helpers.mjs';
 import { buildCases, CLOCKS } from './fixtures/route-golden/cases.mjs';
 import {
-  REFERENCE_DIR, REFERENCE_FILES, sha256Text, stageResolver, atClock, compareLive,
+  REFERENCE_DIR, REFERENCE_FILES, sha256Text, stageResolver, atClock, compareLive, floorsFor,
 } from './fixtures/route-golden/live-gate.mjs';
 
 // Hermetic BEFORE the first modelTiers() call: no per-machine override file.
@@ -92,16 +92,39 @@ test('the vendored reference still reproduces the frozen record on the baseline 
 const cfg = ctx.modelTiers();
 const cases = casesFor(cfg);
 
+// What the config itself makes reachable, so the gate's own sanity checks
+// follow the table instead of assuming today's trials (RC review R4: ending
+// every trial used to fail the gate, and ending the explore trial threw).
+//   restated        needs a trial: an explicit preset-equal field keeps it
+//                   here, where the reference fell to the grid;
+//   floorAfterTrial needs a trial below some consequence's floor (the
+//                   matrix passes every consequence without departing).
+const trialTypes = (c) => Object.entries(c.taskTypes || {})
+  .filter(([, t]) => t && t.override && typeof t.weight === 'number').map(([n]) => n);
+function reachableClasses(c) {
+  const trials = trialTypes(c);
+  const floorAfterTrial = trials.some((n) => {
+    const ov = c.taskTypes[n].override;
+    return Object.keys(c.consequence || {}).some((k) => {
+      const f = floorsFor(c, k, ov.model, ov.effort || '');
+      return f.model !== ov.model || f.effort !== (ov.effort || '');
+    });
+  });
+  return { restated: trials.length > 0, floorAfterTrial };
+}
+
 test(`LIVE: resolveRoute matches the frozen reference on the current config, all ${cases.length} cases x ${CLOCKS.length} clocks, differing only by the permitted classes`, async (t) => {
   const ref = await stage(REF_CONTEXT, CUR_CONFIG);
   const { mismatches, counts } = compareLive({ cur: ctx, ref, cfg, cases, clocks: CLOCKS });
   t.diagnostic(`classes: ${JSON.stringify(counts)}`);
   assert.deepEqual(mismatches.slice(0, 20), [], `${mismatches.length} mismatches — a resolver regression, or a shipped trial a floor refuses; report it`);
   assert.equal(counts.cases, cases.length * CLOCKS.length);
-  // Both classes are reachable on the shipped table (it carries trials at
-  // opus/low and elevated-preset types); an empty class would mean the gate
-  // stopped exercising it, not that the difference went away.
-  assert.ok(counts.restated > 0 && counts.floorAfterTrial > 0, JSON.stringify(counts));
+  // Every class the table makes reachable must be exercised; an empty one
+  // would mean the gate stopped reaching it, not that the difference went
+  // away. A table with no trials (every trial ended) has neither class.
+  const reach = reachableClasses(cfg);
+  if (reach.restated) assert.ok(counts.restated > 0, JSON.stringify(counts));
+  if (reach.floorAfterTrial) assert.ok(counts.floorAfterTrial > 0, JSON.stringify(counts));
 });
 
 // --- The gate is not vacuous -------------------------------------------------
@@ -114,14 +137,40 @@ async function gateOn(contextSource, configText) {
   const [cur, ref] = [await stage(contextSource, configText), await stage(REF_CONTEXT, configText)];
   return compareLive({ cur, ref, cfg: cur.modelTiers(), cases: casesFor(cfgV), clocks: CLOCKS });
 }
-const edit = (fn) => { const c = JSON.parse(CUR_CONFIG); fn(c); return JSON.stringify(c, null, 2); };
+// The self-tests below need trials to edit and to regress. When the shipped
+// table has none (every trial ended), synthetic ones are added to a copy for
+// the self-tests only — one below the elevated floor, one routine — so the
+// seeded regressions stay detectable whatever the table carries.
+function withTrials(text) {
+  const c = JSON.parse(text);
+  if (trialTypes(c).length >= 2) return text;
+  const numeric = Object.entries(c.taskTypes || {}).filter(([, t]) => typeof t.weight === 'number' && !t.override);
+  const pick = (want) => numeric.find(([, t]) => (t.consequence || 'routine') === want)?.[0];
+  const names = [...new Set([pick('elevated'), pick('routine'), ...numeric.map(([n]) => n)].filter(Boolean))].slice(0, 2 - trialTypes(c).length);
+  for (const n of names) {
+    c.taskTypes[n].override = {
+      model: 'opus', effort: 'low', reason: 'synthetic trial for the gate self-tests',
+      evidence: { source: 'synthetic', date: '2026-01-01' }, trialSince: '2026-01-01', reviewBy: '2099-12-31',
+    };
+  }
+  return JSON.stringify(c, null, 2);
+}
+const BASE_CONFIG = withTrials(CUR_CONFIG);
+const edit = (fn) => { const c = JSON.parse(BASE_CONFIG); fn(c); return JSON.stringify(c, null, 2); };
+// Targets come from the table, never hard-coded type names.
+const [TRIAL_A, TRIAL_B] = (() => { const t = trialTypes(JSON.parse(BASE_CONFIG)); return [t[0], t[1] ?? t[0]]; })();
+const GRID_ROW = Object.keys(JSON.parse(BASE_CONFIG).routing || {})[0];
+function otherEffort(c, model, current) {
+  const list = c.tiers?.[model]?.efforts || [];
+  return list.find((e) => e !== current) ?? current;
+}
 const TRIAL_EDITS = {
-  "extend a trial's reviewBy": (c) => { c.taskTypes.explore.override.reviewBy = '2026-10-14'; },
-  'end a trial (delete its override)': (c) => { delete c.taskTypes.verify.override; },
+  "extend a trial's reviewBy": (c) => { c.taskTypes[TRIAL_A].override.reviewBy = '2099-12-31'; },
+  'end a trial (delete its override)': (c) => { delete c.taskTypes[TRIAL_B].override; },
   'end every trial': (c) => { for (const t of Object.values(c.taskTypes)) delete t.override; },
-  'retune a trial': (c) => { c.taskTypes['debug-root-cause'].override.effort = 'medium'; },
+  'retune a trial': (c) => { const ov = c.taskTypes[TRIAL_A].override; ov.effort = otherEffort(c, ov.model, ov.effort); },
   'bump the table version': (c) => { c.version = (c.version || 0) + 1; },
-  'move a grid row': (c) => { c.routing['3'] = { ...c.routing['3'], effort: 'high' }; },
+  'move a grid row': (c) => { const r = c.routing[GRID_ROW]; c.routing[GRID_ROW] = { ...r, effort: otherEffort(c, r.model, r.effort) }; },
 };
 for (const [name, fn] of Object.entries(TRIAL_EDITS)) {
   test(`gate stays green on a routine table edit: ${name}`, async () => {
@@ -145,7 +194,7 @@ const REGRESSIONS = {
 for (const [name, [anchor, repl]] of Object.entries(REGRESSIONS)) {
   test(`gate goes red on a seeded resolver regression: ${name}`, async () => {
     assert.equal(CUR_CONTEXT.split(anchor).length, 2, `anchor for "${name}" must occur exactly once in context.mjs`);
-    const { mismatches } = await gateOn(CUR_CONTEXT.replace(anchor, repl), CUR_CONFIG);
+    const { mismatches } = await gateOn(CUR_CONTEXT.replace(anchor, repl), BASE_CONFIG);
     assert.ok(mismatches.length > 0, 'the seeded regression passed the gate');
   });
 }
@@ -158,7 +207,8 @@ test('the golden matrix exercises every layer outcome it should', () => {
     seen.add(r.layer);
     if (r.skipped.some((s) => s.layer === 'trial')) seen.add('trial-skipped');
   }
-  for (const want of ['trial', 'grid', null, 'trial-skipped']) assert.ok(seen.has(want), `no case reached ${want}`);
+  const outcomes = trialTypes(cfg).length ? ['trial', 'grid', null, 'trial-skipped'] : ['grid', null];
+  for (const want of outcomes) assert.ok(seen.has(want), `no case reached ${want}`);
   // And the retirement clock really changes something (weight 1-2 grid rows).
   const a = ctx.resolveRoute({ weight: 1, weightExplicit: true, now: CLOCKS[0] });
   const b = ctx.resolveRoute({ weight: 1, weightExplicit: true, now: CLOCKS[1] });
