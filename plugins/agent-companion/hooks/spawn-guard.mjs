@@ -701,7 +701,12 @@ try {
   // known true — see the warrant section).
   let warrantSoftNote = null;
 
-  if (!isPremiumForSpawn) allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
+  if (!isPremiumForSpawn) {
+    // Route-exempt from the warrant, but a premium TIER still counts toward
+    // the fan-out cap (see enforcePremiumCap below).
+    if (isPremium(model)) enforcePremiumCap(true);
+    allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
+  }
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -761,7 +766,17 @@ try {
   }
 
   // --- Concurrency cap ---------------------------------------------------
-  if (opt('premium_cap', true)) {
+  // Counted by the RESOLVED TIER (classifyModel's premium flag, after
+  // autofill), regardless of route (ADR 0003 open question 8, decided
+  // 2026-09-24). A route that names opus exempts the spawn from the WARRANT —
+  // the table prescribed it — but not from the fan-out bound: before this, a
+  // routed opus spawn returned early above and skipped the cap entirely, so
+  // trial v2 (and any future profile row naming opus) removed the only limit
+  // on concurrent premium agents for most task types. Declared as a function
+  // (hoisted within this block) so the route-exempt path above can call it.
+  enforcePremiumCap(false);
+  function enforcePremiumCap(routeExempt) {
+    if (!opt('premium_cap', true)) return;
     const cap = Math.max(1, opt('premium_max_concurrent', 2));
     const f = stateFile('premium-window.json');
     const now = Date.now();
@@ -777,6 +792,10 @@ try {
         `This is the exact shape of the four-Fable incident: each spawn looked reasonable ` +
         `alone, and nothing was counting them together. Run this one at sonnet, or wait for ` +
         `the in-flight premium agents to finish.\n\n` +
+        (routeExempt
+          ? `(This spawn's own route names ${spawnAlias || model}, which exempts it from the WARRANT but not ` +
+            `from this cap: the cap counts every premium-tier spawn by its tier, regardless of route.)\n\n`
+          : '') +
         `(Concurrency is approximated by a rolling window, so a batch of genuinely-warranted ` +
         `premium work may need the cap raised in settings rather than worked around.)`
       );
