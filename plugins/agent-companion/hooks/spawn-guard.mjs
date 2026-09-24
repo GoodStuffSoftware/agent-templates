@@ -206,6 +206,31 @@ try {
       // route null, same as the old "no weight declared" no-op path.
     } catch { /* table unreadable */ }
   }
+  // --- F1 on a critical parity-sized spawn (RC review R6) -----------------
+  // A parity-sized type (code-review) has no route without a writer, so the
+  // fit check above never ran for it, and "TYPE: code-review" +
+  // "CONSEQUENCE: critical" on sonnet or haiku passed in silence. The brief
+  // names no writer, so parity itself (F3) cannot be checked here, but F1
+  // holds whatever the writer was: a critical review is at least the
+  // critical consequence's model and effort floor (opus/xhigh). Below that
+  // is "under", said out loud like any other under-provisioned fit. Only
+  // the under direction is judged: with no writer, a tier above the floor
+  // (a fable writer's reviewer) cannot be called over-provisioned.
+  let parityFloor = null;
+  if (opt('fit_guard', true) && typeWeight === 'parity') {
+    try {
+      const pr = resolveRoute({
+        type: declaredType,
+        weight: declaredWeight, kind: declaredKind, consequence: declaredConsequence,
+        weightExplicit: weightLineExplicit, kindExplicit: kindWasDeclared, consequenceExplicit: consequenceWasDeclared,
+      });
+      if (!pr.model && pr.weight === 'parity' && pr.consequence === 'critical') {
+        const crit = modelTiers().consequence?.critical || {};
+        if (crit.modelFloor) parityFloor = { model: crit.modelFloor, effort: crit.effortFloor || '' };
+      }
+    } catch { /* table unreadable */ }
+  }
+  const parityFloorLabel = parityFloor ? `${parityFloor.model}${parityFloor.effort ? '/' + parityFloor.effort : ''}` : '';
   const routeLabel = route?.model ? `${route.model}${route.effort ? '/' + route.effort : ''}` : '';
   // Which layer answered — named in every fit note below, so a spawner can
   // tell a shipped trial's answer from the plain grid's without --explain.
@@ -536,6 +561,16 @@ try {
       });
     } catch { /* table unreadable: the audit reports that separately */ }
   }
+  // F1 on a critical parity-sized spawn (see parityFloor above): under only.
+  if (!fit && parityFloor && model && !autofilled) {
+    try {
+      const f = evaluateFit({
+        model, effort: def?.effort || '', weight: null,
+        kind: declaredKind || 'bounded', consequence: 'critical', expected: parityFloor,
+      });
+      if (f.verdict === 'under') fit = { ...f, parityFloor: true };
+    } catch { /* table unreadable */ }
+  }
 
   if (opt('spawn_telemetry', true) && !isCanary) {
     // --- Schema v2 additions: who is spawning, and at what effort ----------
@@ -625,7 +660,7 @@ try {
       route_layer: route?.layer || null,  // profile | trial | grid: which resolveRoute() layer answered; null when no route
       route_profile_rev: route?.layer === 'profile' ? (route.profileRevision ?? null) : null, // routing-profile revision behind a profile answer; null for every other layer. The row's content is never logged.
       fit: autofilled ? 'fit' : fit ? fit.verdict : null, // over | under | fit | unknown, when a weight was declared
-      fit_expected: routeLabel || null,
+      fit_expected: routeLabel || (fit?.parityFloor ? parityFloorLabel : null),
       // --- Memory nudge/brief observability -------------------------------
       // null across the board when the feature never ran for this spawn
       // (memory_search/memory_brief off, or mode "off") — distinct from
@@ -677,10 +712,13 @@ try {
   let note = null;
   if (autofilled) {
     note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel})${routeLayerNote}.`;
+  } else if (fit?.parityFloor) {
+    note = `agent-companion: spawning ${who} at ${model}${def?.effort ? '/' + def.effort : ''} for a critical ${declaredType} is under-provisioned — ${fit.reason}. ` +
+      `F1: a critical review is never sized below ${parityFloorLabel}, whatever its writer (no writer is declared, so parity with it is not checked here). ${fit.action}.`;
   } else if (fit?.verdict === 'under') {
     // The cheap direction is never blocked, but a weight-4 task on haiku is
     // the failure that ships wrong code, so it is said out loud.
-    note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}${routeLayerNote}. ${fit.action}.`;
+    note =`agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}${routeLayerNote}. ${fit.action}.`;
   } else if (fit?.verdict === 'over' && !isPremiumForSpawn) {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}${routeLayerNote}. Re-spawn there unless the weight is understated.`;
   }
