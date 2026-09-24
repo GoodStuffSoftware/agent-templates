@@ -268,6 +268,51 @@ for (const cmd of ['init', 'sync']) {
   });
 }
 
+// V6. A marker dropped into a real repository used to be honoured: sync
+// backfilled .gitattributes and committed the corpus into it. The marker is
+// honoured only when the vault's own config carries the vault identity AND
+// its history is rooted in the initialize commit.
+for (const [label, setup] of [
+  ['a real repository with its own identity and history', (v) => {
+    git(['-C', v, 'config', 'user.name', 'owner']);
+    git(['-C', v, 'config', 'user.email', 'owner@example.invalid']);
+  }],
+  ['a real repository that copied the vault identity but not its history', (v) => {
+    git(['-C', v, 'config', 'user.name', VAULT_NAME]);
+    git(['-C', v, 'config', 'user.email', 'memory-vault@agent-companion.local']);
+  }],
+]) {
+  test(`sync refuses a planted marker in ${label}`, () => {
+    const fx = makeFixture();
+    try {
+      const corpus = makeCorpus(fx.dir);
+      const vault = join(fx.stateDir, 'memory-vault');
+      mkdirSync(vault, { recursive: true });
+      git(['init', '-q', '-b', 'main', vault]);
+      setup(vault);
+      writeFileSync(join(vault, 'code.txt'), 'owner work\n');
+      writeFileSync(join(vault, '.memory-vault.json'), MARKER);
+      git(['-C', vault, 'add', 'code.txt']);
+      git(['-C', vault, 'commit', '-q', '-m', 'owner work']);
+      const treeBefore = hashTree(join(vault, '.git'));
+
+      const res = runScript(SCRIPT, ['sync', '--json'], {
+        cwd: fx.dir,
+        env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
+        timeout: 60000,
+      });
+
+      assert.notEqual(res.status, 0, `sync must refuse: ${res.stdout}`);
+      assert.match(res.stderr, /carries a memory-vault marker but is not a vault this plugin created/);
+      assert.deepEqual(hashTree(join(vault, '.git')), treeBefore, "the repository's .git must be byte-identical");
+      assert.ok(!existsSync(join(vault, '.gitattributes')), 'no backfill may be written');
+      assert.ok(!existsSync(join(vault, 'projects')), 'no corpus may be copied in');
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
+
 // V5. gitClean() keeps per-process config injection (the leak-sweep canary
 // needs it), so an inherited GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT reached
 // vault commits: a parent's core.hooksPath ran the parent's hooks inside the

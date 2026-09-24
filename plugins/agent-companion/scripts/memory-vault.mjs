@@ -50,6 +50,7 @@ const SCHEMA = 1;          // .memory-vault.json marker — do NOT bump with the
 const STATUS_SCHEMA = 2;   // memory-vault-status.json — see writeStatusCache()
 const VAULT_USER_NAME = 'agent-companion memory-vault';
 const VAULT_USER_EMAIL = 'memory-vault@agent-companion.local';
+const INIT_SUBJECT = 'memory-vault: initialize';
 
 // --- Secrets gate ------------------------------------------------------
 // Standing gate, run on every sync, not a one-off. A match excludes that ONE
@@ -272,6 +273,31 @@ function assertVaultGitDir(dir) {
   }
 }
 
+// A marker file is only a claim — one dropped into any repository (or copied
+// along with a directory) would otherwise hand that repository to sync. The
+// vault this file creates carries two things a planted marker does not: the
+// vault identity in its OWN config file, and a history rooted in the
+// initialize commit. Both are checked, read-only, before anything is written.
+function assertVaultIdentity(dir) {
+  const quiet = { stdio: ['ignore', 'pipe', 'ignore'] };
+  let email = '';
+  let roots = [];
+  try { email = vaultGit(dir, ['config', '--file', '.git/config', '--get', 'user.email'], quiet).trim(); } catch { /* unset */ }
+  try {
+    roots = vaultGit(dir, ['log', '--max-parents=0', '--format=%s', 'HEAD'], quiet)
+      .split('\n').map((l) => l.trim()).filter(Boolean);
+  } catch { /* no commits */ }
+  const rootsOk = roots.length > 0 && roots.every((s) => s === INIT_SUBJECT);
+  if (email !== VAULT_USER_EMAIL || !rootsOk) {
+    throw new Error(
+      `refusing to write — ${dir} carries a memory-vault marker but is not a vault this plugin created `
+      + `(its own config ${email === VAULT_USER_EMAIL ? 'has' : 'lacks'} the vault identity; its history `
+      + `${rootsOk ? 'is' : 'is not'} rooted in "${INIT_SUBJECT}"). Nothing was changed. If this is `
+      + 'your repository, remove the stray marker file; otherwise choose another vault location.',
+    );
+  }
+}
+
 // A directory entry that is itself a directory — not a symlink or junction to
 // one. Node's lstat reports a Windows junction as a symbolic link.
 function isRealDir(p) {
@@ -459,6 +485,7 @@ export function ensureInit() {
   if (vaultPathTooLong(dir)) throw new Error(tooLongMessage(dir));
   if (isOurVault(dir)) {
     assertVaultGitDir(dir);
+    assertVaultIdentity(dir);
     return { created: false, dir, gitattributes: backfillGitattributes(dir) };
   }
 
@@ -522,7 +549,7 @@ export function ensureInit() {
     JSON.stringify({ kind: 'agent-companion-memory-vault', schema: SCHEMA, createdAt: new Date().toISOString() }, null, 2) + '\n',
   );
   vaultGit(dir, ['add', '-A']);
-  vaultGit(dir, ['commit', '-q', '-m', 'memory-vault: initialize\n\nLocal git history for the Claude Code memory corpus. See README.md.']);
+  vaultGit(dir, ['commit', '-q', '-m', `${INIT_SUBJECT}\n\nLocal git history for the Claude Code memory corpus. See README.md.`]);
   return { created: true, dir, gitattributes: 'created' };
 }
 
