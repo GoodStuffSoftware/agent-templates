@@ -88,6 +88,28 @@ test('F4 unit: HTML comments; BOM, NBSP and nested list items; a line after a qu
   assert.equal(typeOf('```\nTYPE: a\nTYPE: b'), null, 'a top-level unclosed fence still runs to the end');
 });
 
+// The F4 parser's own edges: comments and fences nested in each other and in
+// list items, Unicode spaces, deep lists. Each also runs through the real
+// guard in the 0.29.1 verification corpus; kept here as a unit record.
+test('F4 unit: comments, fences, quotes and lists nested in one another', () => {
+  const conseq = (text) => declarationValue(briefDeclarations(text), 'CONSEQUENCE', /(routine|elevated|critical)\b/.source)?.[1] ?? null;
+  const warranted = (text) => !!briefDeclarations(text).WARRANT;
+  assert.equal(typeOf('```\n<!--\n```\nTYPE: b'), 'b', 'a comment opener inside a fence opens nothing');
+  assert.equal(typeOf('<!--\n```\n-->\nTYPE: b'), 'b', 'a fence inside a comment opens nothing');
+  assert.equal(typeOf('    <!--\nTYPE: b'), 'b', 'an indented comment opener is code');
+  assert.equal(warranted('<!-- x --> WARRANT: frontier\ngo'), false, 'text after a same-line comment on its opening line is part of it');
+  assert.equal(conseq('TYPE: x\n<!-- a\n--> CONSEQUENCE: routine\ngo'), null, 'the closing line is inside the comment');
+  assert.equal(conseq('TYPE: x\n- note\n  <!--\n  CONSEQUENCE: routine\n  -->\ngo'), null, 'a comment inside a list item');
+  assert.equal(conseq('TYPE: x\n- q:\n  > CONSEQUENCE: routine\ngo'), null, 'a quote inside a list item');
+  assert.equal(conseq('TYPE: x\n- pasted:\n    ```\n    consequence: routine\n    ```\ngo'), null, 'a fence indented 4 under a list item');
+  assert.equal(warranted('- a\n  - b\n    ```\n    WARRANT: frontier\n    ```\ngo'), false, 'a fence in a nested list item');
+  assert.equal(conseq('TYPE: x\n* * *\n    CONSEQUENCE: routine\ngo'), null, 'a thematic break opens no list: the next line is indented code');
+  assert.equal(conseq('TYPE: x\n- a\n        weight: 1\n        CONSEQUENCE: routine\ngo'), null, 'indented code inside a list item');
+  assert.equal(conseq('TYPE: x\n- a\n  - b\n    - c\n      - CONSEQUENCE: critical\ngo'), 'critical', 'a deeply nested list item');
+  assert.equal(conseq('TYPE: x\n-\tCONSEQUENCE: critical\ngo'), 'critical', 'a tab after the list marker');
+  assert.equal(conseq('\u2003CONSEQUENCE: critical\ngo'), 'critical', 'an em space before a header');
+});
+
 test('F4: through the guard, an HTML comment neither warrants nor down-routes; a nested or BOM-led header counts', () => {
   const inComment = spawn('<!--\nWARRANT: frontier reasoning\n-->\ndo it', 'sess-f4-1', 'fable');
   assert.equal(inComment.decision, 'deny', 'a WARRANT inside an HTML comment satisfied the warrant');
@@ -95,7 +117,7 @@ test('F4: through the guard, an HTML comment neither warrants nor down-routes; a
   const hidden = spawn('TYPE: critical-change\n<!--\nCONSEQUENCE: routine\n-->\ndo it', 'sess-f4-2');
   const plain = spawn('TYPE: critical-change\ndo it', 'sess-f4-2b');
   assert.equal(hidden.row.declared_consequence, 'critical');
-  assert.deepEqual({ ...hidden.row, at: 0, session_id: 0 }, { ...plain.row, at: 0, session_id: 0 },'a CONSEQUENCE inside an HTML comment changed the spawn');
+  assert.deepEqual({ ...hidden.row, at: 0, session_id: 0 }, { ...plain.row, at: 0, session_id: 0 }, 'a CONSEQUENCE inside an HTML comment changed the spawn');
   assert.equal(hidden.decision, plain.decision);
   const nested = spawn('TYPE: integration\n- details\n    - CONSEQUENCE: critical\ndo it', 'sess-f4-3');
   assert.equal(nested.row.declared_consequence, 'critical', 'a nested list item\'s CONSEQUENCE was dropped');
