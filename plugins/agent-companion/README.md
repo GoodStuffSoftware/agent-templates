@@ -34,6 +34,7 @@ It was built after two observed failures:
 | `memory_doctor` | Detects memory files on disk that the index does not link — **unreachable rules** — plus broken index links. Repairs non-destructively. | no |
 | `spawn_telemetry` | Records every spawn (model, agent type, effort) for the calibration routine. | no |
 | `scout_surface` | At session start, surfaces unresolved signals from the last locally scheduled scout run. Silent on a quiet day. | no |
+| `ci_status_signal` | Detects a repo's default branch sitting on a red (failure/cancelled/timed_out) latest completed workflow run, via `gh`. Suggestion-only — never re-runs, cancels, or fixes anything. Surfaced two ways: a `main_ci_red` signal in the daily scout (repo, workflow name(s), "red since" timestamp, failing run URL(s)), and a one-line SessionStart note ("main CI red since ...") read from a 10-minute cache only — the SessionStart path never calls `gh` or the network itself. Silent when `gh` is missing, unauthenticated, or offline. Scope: the current project's own repo, plus any repo already confirmed public by `publication_leak_sweep` — see [Main-branch CI status](#main-branch-ci-status) for why. | no |
 | `version_notice` | At session start and on the next prompt, says once per (plugin, lastUpdated) pair when ANY installed plugin — not just this one — was updated after this session last loaded its plugins (session start, or the last `/reload-plugins`), catching a stale parent (and everything it spawns) mid-session, not just at startup. Also keeps this plugin's own running-vs-installed self-check, merged into the same notice when both fire, for the one case timestamps alone miss: a desktop session that loaded a stale app-extracted bundle at startup. Updating itself is the harness's job: the native autoupdater in terminal sessions, the built-in `plugin update` commands run by the daily local scout in desktop sessions. Install the global hook (see below) to run this checker itself from a fixed path that is never stale. | no |
 | `fit_guard` | Best fit at the spawn, both directions. A brief that declares `WEIGHT:` gets its model graded against the routing table: under- and cheap-over-provisioned spawns are announced; a premium model over-provisioned for its own declared weight is denied with the correction. | premium-over only |
 | `fit_autofill` | A spawn that declares `WEIGHT:` but names no model gets the table's model filled in, instead of inheriting the lead's tier by accident. | no |
@@ -152,6 +153,54 @@ judgement, and doing it wrong loses knowledge permanently.
 
 Note the tradeoff: re-linking unreachable rules makes the index *larger*.
 Reachability and size are separate problems, and this tool only fixes the first.
+
+## Main-branch CI status
+
+`ci_status_signal` (on by default) closes a specific gap: a repo's main
+branch can sit red for hours before anyone notices, because the only signal
+is a pile of GitHub Actions failure emails nobody reads until there are 60 of
+them. This checks `gh`'s own view of each covered repo's default branch and
+surfaces a red streak two ways — the daily scout, and a cheap SessionStart
+note — never re-running, cancelling, or fixing anything.
+
+**How a repo counts as red:** its default branch's *latest completed* run of
+an *active* workflow concluded `failure`, `cancelled`, or `timed_out`. Green,
+in progress, or no completed runs at all are all silent. The reported
+"red since" timestamp is the oldest run in the current unbroken red streak,
+within the last 30 completed runs fetched (a longer streak reports that
+oldest-fetched run as a lower bound rather than paginating further — this is
+a daily suggestion, not an incident timeline).
+
+**Scope (a deliberate choice between two safer options):** the brief asked
+for either "public repos only" or "the current project only" — whichever is
+safer — rather than the broader auto-discovery `publication_leak_sweep` does.
+This checks the **current project's own repo** (whatever its visibility),
+**plus** any repo already confirmed public by `publication_leak_sweep`
+(`state/baseline.json`'s `publicationKnownPublicRepos`, populated only when
+that separate, off-by-default feature has actually run). No new repo-listing
+or discovery `gh` calls are made just for this feature, and no repo of
+unknown or private visibility is ever added beyond the current project
+itself. A private current-project repo's name is scrubbed out of the signal
+text exactly like any other private detail (see `scripts/lib/scrub.mjs`); an
+already-known-public repo's name and run URL stay readable.
+
+**Fails silent, on purpose:** `gh` missing, unauthenticated, or erroring
+(offline included) — the signal simply does not fire that run. It is never
+itself reported as a finding; a human already gets told when `gh` is broken
+through other means.
+
+**Rate limiting:** results are cached per repo in `state/baseline.json`'s
+`ciStatusCache` for about 10 minutes, so a SessionStart hook firing on every
+new session never triggers its own `gh` call — it reads that cache only. The
+daily scout (`scripts/detect.mjs`) is what actually refreshes the cache.
+
+**SessionStart note:** `hooks/scout-surface.mjs` reads `ciStatusCache` for
+whatever repo the CURRENT session's cwd resolves to (a local, no-network
+`git remote get-url origin`) and, when that entry is red, adds one line:
+`main CI red since <timestamp>, <workflow> — <url>`. This never blocks on
+the network — a cache miss or a repo the cache doesn't cover is silent. It is
+independent of `scout_surface`: turning the generic scout-signal listing off
+does not suppress this note, and vice versa.
 
 ## Memory vault
 
