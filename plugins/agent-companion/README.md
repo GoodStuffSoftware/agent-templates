@@ -531,7 +531,10 @@ The profile can also define **local task types** (`types`, the same preset
 shape as the shipped ones). `TYPE:` resolves shipped types first, then local
 ones. `routing-table.mjs --profile` shows the table as this machine resolves
 it; the default output stays the shipped table, because it is committed as
-`docs/ROUTING.md`.
+`docs/ROUTING.md`. For the reasoning behind the table's shape — lowest
+sufficient tier, effort as a separate lever, reviewer parity, the consequence
+floors, trials vs. profiles, cost basis, and haiku-as-validator — see
+[`docs/ROUTING-RATIONALE.md`](docs/ROUTING-RATIONALE.md).
 
 ## Model benchmark
 

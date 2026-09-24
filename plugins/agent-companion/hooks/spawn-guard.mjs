@@ -781,7 +781,7 @@ try {
           `Add a line to the agent's brief in the form:\n` +
           `  WARRANT: weight <1-5> — <why a cheaper tier cannot do this>\n\n` +
           `If you cannot write that line honestly, the task does not warrant the tier — ` +
-          `re-spawn at sonnet (or haiku for reads and searches). These warrants are logged ` +
+          `re-spawn at a cheaper tier (see \`node scripts/recommend.mjs\`). These warrants are logged ` +
           `and audited, so a weak one is worse than a downgrade.`
         );
       } else {
