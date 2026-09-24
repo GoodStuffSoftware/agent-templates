@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, unlinkSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { PLUGIN_ROOT, makeFixture } from './helpers.mjs';
 
 const WARRANTED = 'WARRANT: frontier reasoning\ndo the work';
@@ -67,6 +68,42 @@ const holdLock = (fx, { pid = process.pid, ageMs = 0, token = 'test-holder' } = 
   utimesSync(fx.lock, then, then);
 };
 const deadPid = () => spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid;
+
+// 0.29.0 final review F5: the window module (and the lock helper it loads)
+// cost ~1.6 ms cold on EVERY spawn while only a premium spawn reaches the
+// cap. The guard now imports it there. Proven by logging every module the
+// guard process loads (a module.registerHooks preload).
+test('only a premium spawn loads the premium window and the lock helper', () => {
+  const fx = fixture();
+  try {
+    const preload = join(fx.dir, 'load-log.mjs');
+    writeFileSync(preload, `
+      import { registerHooks } from 'node:module';
+      import { appendFileSync } from 'node:fs';
+      registerHooks({ load(url, ctx, next) { if (url.startsWith('file:')) appendFileSync(process.env.AC_LOAD_LOG, url + '\\n'); return next(url, ctx); } });
+    `);
+    const loaded = (tag, model, prompt) => {
+      const log = join(fx.dir, `${tag}.log`);
+      writeFileSync(log, '');
+      const payload = { ...guardPayload(fx.dir, `S-${tag}`), tool_input: { ...guardPayload(fx.dir).tool_input, model, prompt } };
+      const r = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, join(PLUGIN_ROOT, 'hooks', 'spawn-guard.mjs')], {
+        input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, ...fx.env, AC_LOAD_LOG: log }, windowsHide: true, timeout: 20000,
+      });
+      assert.equal(r.status, 0, r.stderr);
+      const names = readFileSync(log, 'utf8').split('\n').filter(Boolean).map((u) => u.split('/').pop());
+      return { names, decision: JSON.parse(r.stdout).hookSpecificOutput?.permissionDecision };
+    };
+    const plain = loaded('sonnet', 'sonnet', 'TYPE: bounded-feature\ngo');
+    assert.ok(plain.names.includes('spawn-guard.mjs') && plain.names.includes('context.mjs'), plain.names.join(' '));
+    assert.equal(plain.decision, 'allow');
+    assert.equal(plain.names.includes('premium-window.mjs'), false, 'a non-premium spawn loaded the premium window');
+    assert.equal(plain.names.includes('file-lock.mjs'), false, 'a non-premium spawn loaded the lock helper');
+    const premium = loaded('fable', 'fable', WARRANTED);
+    assert.equal(premium.decision, 'allow');
+    assert.ok(premium.names.includes('premium-window.mjs') && premium.names.includes('file-lock.mjs'), premium.names.join(' '));
+    assert.equal(readWindow(fx.file).length, 1, 'the premium spawn was counted');
+  } finally { fx.cleanup(); }
+});
 
 test('the spawn guard waits for a held window lock and counts what the holder wrote', async () => {
   const fx = fixture();

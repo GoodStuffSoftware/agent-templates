@@ -236,6 +236,63 @@ test('rollback restores a journalled revision exactly even when write-mode F5 wo
     row: { ...readFile().rows.integration, model: 'fable' } })), 'refused');
 });
 
+// 0.29.0 final review F5: an adopted hand edit was journalled without its
+// rows being judged, so a row the resolver refuses (and skips) rode along in
+// every later revision, and rollback --to refused every one of them for that
+// row. The adoption now records the rows the resolver skips, and a rollback
+// judges only the rows it changes, letting a recorded skipped row back in
+// exactly as journalled.
+test('F5: an adopted hand edit records the rows the resolver skips; rollback --to is not refused for them', () => {
+  freshRoot('adopt-skip');
+  store.setRow('explore', { model: 'sonnet', effort: 'low', now: NOW }); // rev 1
+  const p = readFile();
+  const bad = {
+    state: 'trial', model: 'fable', effort: 'high', cacheTtl: null, source: 'operator-observed',
+    since: '2026-09-01', reviewBy: null, waivesFloor: null, note: null, provenance: null,
+  };
+  p.rows.integration = bad;
+  writeFileSync(files().profile, JSON.stringify(p, null, 2));
+  rp._resetProfileCache();
+  const afterAdopt = store.setRow('verify', { model: 'sonnet', effort: 'low', now: NOW }); // adopt (2) + set (3)
+  const adopt = readEntries().entries.find((e) => e.action === 'adopt-external-edit');
+  assert.ok(Array.isArray(adopt.skipped) && adopt.skipped.length === 1, JSON.stringify(adopt.skipped));
+  assert.equal(adopt.skipped[0].type, 'integration');
+  assert.equal(typeof adopt.skipped[0].reason, 'string');
+  store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW }); // rev 4
+
+  // Back to rev 3: the skipped row is carried unchanged; nothing else is refused.
+  const r = store.rollbackTo(afterAdopt.revision, { now: NOW });
+  const { entries } = readEntries();
+  assert.equal(JSON.stringify(rp.profileContent(readFile())), JSON.stringify(rp.profileContent(rp.rebuildAt(entries, afterAdopt.revision))));
+  // Fix the row, then roll back to a revision holding the recorded skipped row: restored exactly.
+  store.setRow('integration', { model: 'opus', effort: 'high', now: NOW });
+  store.rollbackTo(r.revision, { now: NOW });
+  assert.deepEqual(readFile().rows.integration, bad);
+  // A refused row the journal never recorded as skipped is still refused.
+  expectCode(() => store.commitChange(() => ({ action: 'rollback-row', type: 'integration', validate: 'read',
+    row: { ...bad, effort: 'low' } })), 'refused');
+  // A clean adoption records nothing extra: its entry is byte-for-byte what it was.
+  freshRoot('adopt-clean');
+  store.setRow('explore', { model: 'sonnet', effort: 'low', now: NOW });
+  const q = readFile();
+  q.rows.operate = { ...bad, model: 'sonnet', effort: 'low' };
+  writeFileSync(files().profile, JSON.stringify(q, null, 2));
+  rp._resetProfileCache();
+  store.setRow('verify', { model: 'sonnet', effort: 'low', now: NOW });
+  assert.equal('skipped' in readEntries().entries.find((e) => e.action === 'adopt-external-edit'), false);
+});
+
+// F5: the depth check stripped strings with a regex that overflowed on a
+// string value of a few MB (a RangeError out of the writer and `show`).
+test('F5: the nesting-depth scan handles a 20 MB string value without throwing', () => {
+  const big = 'x'.repeat(20_000_000);
+  assert.equal(rp.textNestingDepth(`{"a":"${big}","b":[[{"c":"\\"[{"}]]}`), 4);
+  assert.equal(rp.textNestingDepth('{"a":"\\\\"}'), 1, 'an escaped backslash ends before the closing quote');
+  assert.equal(rp.textNestingDepth('[[[[', 2), 3, 'stops once past the limit');
+  const res = rp.parseProfileText(JSON.stringify({ schema: 'agent-companion/routing-profile', schemaVersion: 1, revision: 1, note: big }));
+  assert.ok(['ok', 'invalid'].includes(res.status));
+});
+
 // S2 review P7: the writer threw an uncaught RangeError on a deeply nested
 // profile and a raw EISDIR when the profile path is a directory. Both are
 // now clean refusals: a message, a non-zero exit, nothing written, no lock.
@@ -341,6 +398,18 @@ test('a killed writer\'s lock (dead pid) is broken within a second, not after 30
   assert.equal(store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW }).revision, 1);
   assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
   assert.deepEqual(readdirSync(files().dir).sort(), ['routing-profile.journal.jsonl', 'routing-profile.json']);
+});
+
+// 0.29.0 final review F3: a directory at the lock path used to be waited on
+// for the whole 15 s and then refused as "locked by another writer".
+test('a directory at the lock path is refused at once as invalid-file, not after 15 s as locked', () => {
+  freshRoot('lockdir');
+  mkdirSync(files().lock, { recursive: true });
+  const t0 = Date.now();
+  expectCode(() => store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW }), 'invalid-file');
+  assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
+  assert.throws(() => store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW }), /routing-profile lock at .* cannot be used \(something other than a lock file stands at the lock path \(a directory\)\)/);
+  assert.equal(existsSync(files().profile), false, 'nothing was written');
 });
 
 test('unset retires the row (kept, journalled); rollback --row restores it; unknown rows are not-found', () => {

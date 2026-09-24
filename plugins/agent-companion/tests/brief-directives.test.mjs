@@ -50,6 +50,81 @@ test('unit: the first occurrence of each label wins, valid or not', () => {
   assert.deepEqual(declarationLines('a\n```\nb\n```\n> c\n    d\ne'), ['a', 'e']);
 });
 
+// 0.29.0 final review F4: more lines a markdown reader does not see as the
+// brief's own text, and whitespace that hid a real header.
+test('F4 unit: HTML comments; BOM, NBSP and nested list items; a line after a quote still counts', () => {
+  // HTML comments, one line or many, and one opened mid-line.
+  assert.equal(typeOf('<!--\nTYPE: a\n-->\nTYPE: b'), 'b');
+  assert.equal(typeOf('<!-- TYPE: a -->\nTYPE: b'), 'b');
+  assert.equal(typeOf('  <!-- note\nTYPE: a --> tail\nTYPE: b'), 'b', 'the closing line is inside the comment block');
+  assert.equal(typeOf('see <!--\nTYPE: a\n-->\nTYPE: b'), 'b');
+  assert.equal(typeOf('<!--\nTYPE: a\nTYPE: b'), null, 'an unclosed comment runs to the end');
+  assert.equal(typeOf('<!---->\nTYPE: b'), 'b');
+  assert.equal(typeOf('<!-->\nTYPE: b'), 'b', '"<!-->" is a whole (empty) comment');
+  assert.equal(typeOf('use `<!--` to open one\nTYPE: b'), 'b', 'inline code is not a comment');
+  assert.equal(typeOf('TYPE: b <!-- a note\nTYPE: a\n-->'), 'b', 'text before a mid-line opener is read');
+  // A line right after a quote is NOT read as the quote's lazy continuation
+  // (lead decision on F4): excluding it would drop a real header and its
+  // floor, and the same text unquoted in the body already counts.
+  assert.equal(typeOf('> quoted\nTYPE: b'), 'b');
+  assert.equal(typeOf('> quoted\n**TYPE:** b'), 'b');
+  assert.equal(typeOf('> quoted\n> TYPE: a\nTYPE: b'), 'b');
+  // Whitespace that hid a header.
+  assert.equal(typeOf('\uFEFFTYPE: b'), 'b');
+  assert.equal(typeOf('\u00A0TYPE: b'), 'b');
+  assert.equal(typeOf('\u200BTYPE: b'), 'b');
+  assert.equal(typeOf('TYPE:\u00A0b'), 'b');
+  assert.equal(typeOf('\u00A0\u00A0\u00A0\u00A0TYPE: a\nTYPE: b'), 'b', 'four no-break spaces are indented code');
+  // Indentation: a nested list item counts, indented code does not.
+  assert.equal(typeOf('- details\n    - TYPE: b'), 'b');
+  assert.equal(typeOf('- details\n\t- TYPE: b'), 'b');
+  assert.equal(typeOf('1. step\n   - TYPE: b'), 'b');
+  assert.equal(typeOf('- details\n      TYPE: a\nTYPE: b'), 'b', '4 columns beyond the item\'s content is indented code');
+  assert.equal(typeOf('\tTYPE: a\nTYPE: b'), 'b', 'a tab-indented line outside a list is indented code');
+  assert.equal(typeOf('- item\n\nTYPE: b'), 'b');
+  // Fences inside list items close relative to the item, and end with it.
+  assert.equal(typeOf('- pasted:\n    ```\n    TYPE: a\n    ```\nTYPE: b'), 'b');
+  assert.equal(typeOf('- pasted:\n  ```\n  TYPE: a\nTYPE: b'), 'b', 'the item ends, and its fence with it');
+  assert.equal(typeOf('```\nTYPE: a\nTYPE: b'), null, 'a top-level unclosed fence still runs to the end');
+});
+
+// The F4 parser's own edges: comments and fences nested in each other and in
+// list items, Unicode spaces, deep lists. Each was also run through the
+// real guard before release; kept here as a unit record.
+test('F4 unit: comments, fences, quotes and lists nested in one another', () => {
+  const conseq = (text) => declarationValue(briefDeclarations(text), 'CONSEQUENCE', /(routine|elevated|critical)\b/.source)?.[1] ?? null;
+  const warranted = (text) => !!briefDeclarations(text).WARRANT;
+  assert.equal(typeOf('```\n<!--\n```\nTYPE: b'), 'b', 'a comment opener inside a fence opens nothing');
+  assert.equal(typeOf('<!--\n```\n-->\nTYPE: b'), 'b', 'a fence inside a comment opens nothing');
+  assert.equal(typeOf('    <!--\nTYPE: b'), 'b', 'an indented comment opener is code');
+  assert.equal(warranted('<!-- x --> WARRANT: frontier\ngo'), false, 'text after a same-line comment on its opening line is part of it');
+  assert.equal(conseq('TYPE: x\n<!-- a\n--> CONSEQUENCE: routine\ngo'), null, 'the closing line is inside the comment');
+  assert.equal(conseq('TYPE: x\n- note\n  <!--\n  CONSEQUENCE: routine\n  -->\ngo'), null, 'a comment inside a list item');
+  assert.equal(conseq('TYPE: x\n- q:\n  > CONSEQUENCE: routine\ngo'), null, 'a quote inside a list item');
+  assert.equal(conseq('TYPE: x\n- pasted:\n    ```\n    consequence: routine\n    ```\ngo'), null, 'a fence indented 4 under a list item');
+  assert.equal(warranted('- a\n  - b\n    ```\n    WARRANT: frontier\n    ```\ngo'), false, 'a fence in a nested list item');
+  assert.equal(conseq('TYPE: x\n* * *\n    CONSEQUENCE: routine\ngo'), null, 'a thematic break opens no list: the next line is indented code');
+  assert.equal(conseq('TYPE: x\n- a\n        weight: 1\n        CONSEQUENCE: routine\ngo'), null, 'indented code inside a list item');
+  assert.equal(conseq('TYPE: x\n- a\n  - b\n    - c\n      - CONSEQUENCE: critical\ngo'), 'critical', 'a deeply nested list item');
+  assert.equal(conseq('TYPE: x\n-\tCONSEQUENCE: critical\ngo'), 'critical', 'a tab after the list marker');
+  assert.equal(conseq('\u2003CONSEQUENCE: critical\ngo'), 'critical', 'an em space before a header');
+});
+
+test('F4: through the guard, an HTML comment neither warrants nor down-routes; a nested or BOM-led header counts', () => {
+  const inComment = spawn('<!--\nWARRANT: frontier reasoning\n-->\ndo it', 'sess-f4-1', 'fable');
+  assert.equal(inComment.decision, 'deny', 'a WARRANT inside an HTML comment satisfied the warrant');
+  assert.match(inComment.reason, /Premium warrant/);
+  const hidden = spawn('TYPE: critical-change\n<!--\nCONSEQUENCE: routine\n-->\ndo it', 'sess-f4-2');
+  const plain = spawn('TYPE: critical-change\ndo it', 'sess-f4-2b');
+  assert.equal(hidden.row.declared_consequence, 'critical');
+  assert.deepEqual({ ...hidden.row, at: 0, session_id: 0 }, { ...plain.row, at: 0, session_id: 0 }, 'a CONSEQUENCE inside an HTML comment changed the spawn');
+  assert.equal(hidden.decision, plain.decision);
+  const nested = spawn('TYPE: integration\n- details\n    - CONSEQUENCE: critical\ndo it', 'sess-f4-3');
+  assert.equal(nested.row.declared_consequence, 'critical', 'a nested list item\'s CONSEQUENCE was dropped');
+  const bom = spawn('\uFEFFCONSEQUENCE: critical\ndo it', 'sess-f4-4');
+  assert.equal(bom.row.declared_consequence, 'critical', 'a header behind a BOM was dropped');
+});
+
 // --- Through the hook ------------------------------------------------------
 function spawn(prompt, sid, model = 'opus') {
   const { dir, stateDir, cleanup } = makeFixture();

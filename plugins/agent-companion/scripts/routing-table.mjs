@@ -39,7 +39,7 @@ const withProfile = has('--profile');
 if (withProfile) {
   const clash = ['--out', '--json', '--task-type-block', '--sync-skill'].filter(has);
   if (clash.length) {
-    console.error(`--profile renders this machine's view for reading only; it cannot be combined with ${clash.join(', ')}, which always render the shipped table. Drop --profile, or drop ${clash.join(', ')}.`);
+    console.error(`--profile renders this machine's view for reading only; it cannot be combined with ${clash.join(', ')}, which always ${clash.length === 1 ? 'renders' : 'render'} the shipped table. Drop --profile, or drop ${clash.join(', ')}.`);
     process.exit(2);
   }
 }

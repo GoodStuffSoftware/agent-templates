@@ -528,8 +528,12 @@ test('routing-table --profile with --json/--out/--task-type-block/--sync-skill i
     const r = runScript('scripts/routing-table.mjs', ['--profile', ...extra]);
     assert.equal(r.status, 2, extra[0]);
     assert.match(r.stderr, /--profile renders this machine's view for reading only; it cannot be combined with/);
+    // 0.29.0 final review F5: the verb agrees with the number of flags.
+    assert.match(r.stderr, new RegExp(`combined with ${extra[0]}, which always renders the shipped table`));
     assert.equal(r.stdout, '');
   }
+  const two = runScript('scripts/routing-table.mjs', ['--profile', '--json', '--task-type-block']);
+  assert.match(two.stderr, /combined with --json, --task-type-block, which always render the shipped table/);
   assert.equal(existsSync(join(fx.dir, 'x.md')), false);
 });
 
