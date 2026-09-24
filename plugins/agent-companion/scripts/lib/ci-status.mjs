@@ -43,7 +43,12 @@ function fetchDefaultBranch(owner, repo, exec, timeout) {
   try {
     const out = exec('gh', ['api', `repos/${owner}/${repo}`, '--jq', '.default_branch'], { timeout, windowsHide: true });
     const branch = String(out || '').trim();
-    return branch ? { ok: true, branch } : { ok: false, reason: 'gh api returned no default_branch' };
+    // `--jq .default_branch` prints the literal text "null" when the field is
+    // missing (and nothing at all for an empty body) — neither is a branch,
+    // and querying runs on a branch named "null" would read as a quiet repo.
+    return branch && branch !== 'null'
+      ? { ok: true, branch }
+      : { ok: false, reason: 'gh api returned no default_branch' };
   } catch (err) {
     return ghDegrade(err);
   }

@@ -56,6 +56,7 @@ import {
   classifyModel, classifyReferenceModel, isModelAvailable, effortSupported, classifyEffort,
 } from '../hooks/lib/context.mjs';
 import { removeDirWithRetry } from './tasks/common.mjs';
+import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
 // Bump whenever buildJudgePrompt()'s wording changes: every calibration
 // record is keyed on it, so a prompt change forces re-calibration rather than
@@ -179,17 +180,15 @@ function clip(text, max) {
   return { text: s.slice(0, max) + `\n[... truncated: ${s.length - max} more characters not shown ...]`, truncated: true };
 }
 
-// GIT_* stripped before every `git diff --no-index` shell-out. This module
-// runs inside a benchmark harness that is itself usually invoked from
-// within a git worktree (see this repo's own CI), so an ambient GIT_DIR,
-// GIT_WORK_TREE, GIT_INDEX_FILE, etc. inherited from the calling process
-// could point the diff at the wrong repository state instead of the two
-// plain temp files it is actually given. No shared git-env helper exists
-// yet anywhere in this plugin (checked hooks/lib and scripts/lib) so this
-// strips locally rather than reaching for one that isn't there.
-function gitCleanEnv() {
-  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/.test(k)));
-}
+// Repo-locating GIT_* variables are stripped before every
+// `git diff --no-index` shell-out, via the shared scripts/lib/git-env.mjs
+// cleanGitEnv() (matched case-insensitively -- on Windows a `Git_Dir` is the
+// same variable as GIT_DIR to git). This module runs inside a benchmark
+// harness that is itself usually invoked from within a git worktree, so an
+// inherited GIT_DIR would make git read THAT repository's attributes and
+// config (e.g. a `* binary` attribute turns the diff into "Binary files
+// differ"). An inherited GIT_EXTERNAL_DIFF, which the old local
+// strip-every-GIT_* helper also dropped, is neutralised by --no-ext-diff.
 
 // Round 2026-09 fix: a file over MAX_LCS_LINES (the old hand-rolled LCS
 // differ's fallback threshold) used to be treated as "whole file replaced"
@@ -244,8 +243,8 @@ function diffOnePath(baseDir, relPath, oldContent, newContent) {
     // to LF above; without this, a machine with autocrlf=true prints a
     // "LF will be replaced by CRLF" warning to stderr for every temp file
     // written here, which is harmless but pure noise in test/CI output.
-    out = execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', 'diff', '--no-index', '--no-color', '-U3', '--', aPath, bPath], {
-      encoding: 'utf8', windowsHide: true, env: gitCleanEnv(), maxBuffer: 1024 * 1024 * 64,
+    out = execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', 'diff', '--no-index', '--no-color', '--no-ext-diff', '-U3', '--', aPath, bPath], {
+      encoding: 'utf8', windowsHide: true, env: cleanGitEnv(), maxBuffer: 1024 * 1024 * 64,
     });
   } catch (e) {
     // git diff --no-index exits 1 when the two files differ -- the normal,
@@ -384,11 +383,12 @@ export function parseVerdict(text) {
 // executable path and other flags are added), so a large vote failed with
 // ENAMETOOLONG before the process even started. The prompt is now piped
 // through the child's stdin instead: `-p` with no positional prompt
-// argument reads the prompt from stdin (confirmed against `claude --help`:
-// `--input-format text` -- the default -- is documented only as "(only
-// works with --print)" with no separate stdin flag, because reading stdin
-// as the prompt IS the default text-input behaviour when print mode is
-// asked for no positional prompt). This mirrors bench/runner.mjs's own
+// argument reads the prompt from stdin. That is INFERRED, not documented:
+// `claude --help` describes `--input-format text` (the default) only as
+// "(only works with --print)" and names no separate stdin flag, which
+// suggests reading stdin as the prompt is the default text-input behaviour
+// in print mode with no positional prompt; the piping itself is verified
+// with a stub CLI in tests/bench-judge.test.mjs. This mirrors bench/runner.mjs's own
 // `runClaude()`, which still passes its (much shorter, task-sized) prompt
 // as an argument -- runner.mjs is owned by another worker in this pass, so
 // its own ENAMETOOLONG exposure on a future oversized task prompt is

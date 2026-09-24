@@ -843,6 +843,26 @@ test('FS11: rebuildSummary surfaces an unrecognized legacy evidence_family_fine 
   }
 });
 
+// 0.29.1 fix e: rebuildSummary() runs after every completed run of a batch;
+// the stderr warning is emitted once per process per label, while the
+// summary.md banner and per-row field keep naming the label every time.
+test('FS11: five rebuildSummary calls over the same legacy label warn on stderr exactly once', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'ac-bench-fs11-dedupe-'));
+  try {
+    writeRows(outDir, [
+      row('sonnet-medium', 'legacy-task-z', 0, true, { run_id: 'd1', evidence_family_fine: 'fs11-dedupe-retired-label' }),
+    ]);
+    let stderrOutput = '';
+    for (let i = 0; i < 5; i += 1) stderrOutput += captureStderr(() => rebuildSummary(outDir));
+    const warningLines = stderrOutput.split('\n').filter((l) => l.includes('WARNING:') && l.includes('fs11-dedupe-retired-label'));
+    assert.equal(warningLines.length, 1, stderrOutput);
+    const md = readFileSync(join(outDir, 'summary.md'), 'utf8');
+    assert.match(md, /LEGACY EVIDENCE FAMILY: 1 distinct .*fs11-dedupe-retired-label/, 'the banner is not deduped');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('FS11: no unrecognized legacy fine anywhere -> no warning, no banner, every row\'s field is null', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'ac-bench-fs11-clean-'));
   try {

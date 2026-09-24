@@ -305,8 +305,34 @@ function gateSatisfied(gate, sessionId) {
 // file order). `when` is ignored for 'always' and 'session-start' per the
 // scope semantics documented in the spec; for 'user-prompt' and 'spawn' a
 // missing/invalid `when` simply never matches rather than throwing.
+// A UserPromptSubmit "prompt" is not always the user's own words: the
+// harness delivers cross-session messages, background-task notifications,
+// agent messages and system reminders as tagged wrapper blocks in the same
+// field. Their text (another agent's brief, a task summary) routinely says
+// "prompt", which fired copyable-prompt on turns where the user asked for
+// nothing. A user-prompt rule therefore matches only what is left once those
+// blocks are removed. Innermost blocks go first (repeated until stable), an
+// unterminated opening tag swallows the rest of the text, and a stray closing
+// tag is dropped.
+const WRAPPER_TAGS = 'cross-session-message|task-notification|agent-message|system-reminder';
+const WRAPPER_BLOCK_RE = new RegExp(
+  `<(${WRAPPER_TAGS})(?:\\s[^>]*)?>(?:(?!<(?:${WRAPPER_TAGS})(?:\\s|>))[\\s\\S])*?</\\1\\s*>`, 'gi',
+);
+const WRAPPER_OPEN_RE = new RegExp(`<(?:${WRAPPER_TAGS})(?:\\s[^>]*)?>[\\s\\S]*$`, 'i');
+const WRAPPER_CLOSE_RE = new RegExp(`</(?:${WRAPPER_TAGS})\\s*>`, 'gi');
+
+export function userOwnText(text) {
+  let s = String(text ?? '');
+  for (let prev = null; prev !== s;) {
+    prev = s;
+    s = s.replace(WRAPPER_BLOCK_RE, ' ');
+  }
+  return s.replace(WRAPPER_OPEN_RE, ' ').replace(WRAPPER_CLOSE_RE, ' ');
+}
+
 export function matchRules({ scope, text, sessionId } = {}) {
   const { rules } = readRules();
+  const subject = scope === 'user-prompt' ? userOwnText(text) : String(text ?? '');
   return rules.filter((r) => {
     if (!r.enabled) return false;
     if (r.scope !== scope) return false;
@@ -315,7 +341,7 @@ export function matchRules({ scope, text, sessionId } = {}) {
     if (typeof r.when !== 'string' || !r.when) return false;
     let re;
     try { re = new RegExp(r.when, 'i'); } catch { return false; }
-    return re.test(String(text ?? ''));
+    return re.test(subject);
   });
 }
 

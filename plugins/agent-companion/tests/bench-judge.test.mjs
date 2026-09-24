@@ -25,6 +25,8 @@ import {
   makeCliJudgeCaller, JUDGE_MAX_BUDGET_USD, JUDGE_DEFAULT_EFFORT, JUDGE_MAX_DIFF_CHARS,
 } from '../bench/judge.mjs';
 import { runOne, rebuildSummary, CELLS } from '../bench/runner.mjs';
+import { judgePreflight, buildJudgeVotePlan } from '../scripts/benchmark.mjs';
+import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 import { loadPack, buildTaskFromPack, applyPlantedBad } from '../bench/task-packs/lib.mjs';
 
 const REPO_ROOT = resolve(PLUGIN_ROOT, '..', '..');
@@ -187,6 +189,34 @@ test('treeDiff: caps total size at JUDGE_MAX_DIFF_CHARS with an explicit truncat
   assert.match(d, /truncated/, 'a clear truncation marker, not a silent cut');
 });
 
+// 0.29.1 fix b: the judge's diff uses the shared, case-insensitive
+// cleanGitEnv(). An inherited GIT_DIR pointing at a repository whose
+// attributes say `* binary` turns the diff into "Binary files differ"; the
+// old local helper stripped only an exact-case /^GIT_/, so on Windows a
+// `Git_Dir` (the same variable to git there) slipped through.
+test('treeDiff ignores an inherited GIT_DIR in any case (Git_Dir, GIT_DIR)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ac-judge-gitdir-'));
+  const saved = Object.fromEntries(Object.keys(process.env).filter((k) => /^git_dir$/i.test(k)).map((k) => [k, process.env[k]]));
+  try {
+    const victim = join(root, 'victim');
+    mkdirSync(victim);
+    execFileSync('git', ['init', '-q', victim], { windowsHide: true, env: cleanGitEnv() });
+    writeFileSync(join(victim, '.git', 'info', 'attributes'), '* binary\n');
+    for (const name of ['Git_Dir', 'GIT_DIR']) {
+      for (const k of Object.keys(process.env)) if (/^git_dir$/i.test(k)) delete process.env[k];
+      process.env[name] = join(victim, '.git');
+      const d = treeDiff({ 'src/a.js': 'x\n' }, { 'src/a.js': 'y\n' });
+      assert.doesNotMatch(d, /Binary files/, `${name} leaked into the judge's git diff`);
+      assert.match(d, /^-x$/m, name);
+      assert.match(d, /^\+y$/m, name);
+    }
+  } finally {
+    for (const k of Object.keys(process.env)) if (/^git_dir$/i.test(k)) delete process.env[k];
+    Object.assign(process.env, saved);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('makeCliJudgeCaller pipes the prompt through stdin, not argv (fails on the old code, which hit ENAMETOOLONG on Windows for large prompts)', async () => {
   const captured = {};
   const execFileImpl = (bin, args, options, callback) => {
@@ -291,7 +321,7 @@ function packTask() {
 // A stub "model" that writes the REAL fix into the sandbox, so the hidden
 // test genuinely passes and the judge sees the real change.
 function fixingClaude(pack) {
-  const fixed = execFileSync('git', ['-C', REPO_ROOT, 'show', `${pack.fixRef}:scripts/leak-check.mjs`], { encoding: 'utf8', windowsHide: true });
+  const fixed = execFileSync('git', ['-C', REPO_ROOT, 'show', `${pack.fixRef}:scripts/leak-check.mjs`], { encoding: 'utf8', windowsHide: true, env: cleanGitEnv() });
   const calls = [];
   const impl = async ({ cwd, model }) => {
     calls.push(model);
@@ -348,6 +378,64 @@ test('runOne refuses a judge that is not stronger than the cell (same model)', a
   }
 });
 
+// 0.29.1 fix a: runOne() re-validates the judge config with
+// authorEffort: cell.effort, so the effort floor actually applies per cell --
+// to the calibration gate, to the votes, and to the judge_effort column.
+test('runOne floors the judge effort at the cell\'s author effort (calibration gate, votes and column)', async () => {
+  const { outDir, answersDir } = tmpOut();
+  try {
+    const { pack, task } = packTask();
+    const storeFile = join(outDir, 'cal.json');
+    // Calibrated at the CONFIGURED effort (low) only.
+    assert.equal((await calibrateJudge({ taskId: pack.id, task, config: JUDGE(), callJudge: readingJudge().fn, storeFile })).trusted, true);
+    const first = fixingClaude(pack);
+    await assert.rejects(
+      runOne({
+        cellId: 'opus55-high', cell: CELLS['opus55-high'], taskId: pack.id, task, rep: 1, outDir, answersDir,
+        runClaudeImpl: first.impl, cliVersion: 'x', judge: { config: JUDGE(), storeFile, callJudge: constantJudge('PASS') },
+      }),
+      (e) => e.code === 'JUDGE_REFUSED' && /claude-fable-5-1\/high is not calibrated/.test(e.message),
+      'a high-effort author needs a judge calibrated at high, not the configured low',
+    );
+    assert.equal(first.calls.length, 0, 'refused before any model call');
+
+    const hi = validateJudgeConfig({ model: 'claude-fable-5-1', effort: 'high' });
+    assert.equal((await calibrateJudge({ taskId: pack.id, task, config: hi, callJudge: readingJudge().fn, storeFile })).trusted, true);
+    const judged = readingJudge();
+    const row = await runOne({
+      cellId: 'opus55-high', cell: CELLS['opus55-high'], taskId: pack.id, task, rep: 1, outDir, answersDir,
+      runClaudeImpl: fixingClaude(pack).impl, cliVersion: 'x',
+      judge: { config: JUDGE(), storeFile, callJudge: judged.fn, scaledJudgeBudget: 0.9 },
+    });
+    assert.equal(row.judge_effort, 'high');
+    assert.equal(judged.prompts.length, 3);
+    assert.ok(judged.prompts.every((p) => p.effort === 'high'), 'every vote runs at the floored effort');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('judgePreflight and buildJudgeVotePlan apply the same per-cell effort floor', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ac-bench-judge-pf-'));
+  try {
+    const { pack, task } = packTask();
+    const storeFile = join(dir, 'cal.json');
+    await calibrateJudge({ taskId: pack.id, task, config: JUDGE(), callJudge: readingJudge().fn, storeFile });
+    const args = { judgeModel: 'claude-fable-5-1', judgeEffort: 'low', judgeCalibrations: storeFile };
+    const tasksMap = { [pack.id]: task };
+    const ok = judgePreflight({ args, cellIds: ['sonnet-low'], taskIds: [pack.id], tasksMap });
+    assert.deepEqual(ok.problems, [], 'a low-effort cell is served by the low calibration');
+    const bumped = judgePreflight({ args, cellIds: ['sonnet-low', 'sonnet-high'], taskIds: [pack.id], tasksMap });
+    assert.equal(bumped.problems.length, 1, bumped.problems.join('\n'));
+    assert.match(bumped.problems[0], /claude-fable-5-1\/high is not calibrated \(raised from low to match the author effort of sonnet-high; calibrate with --judge-effort high\)/);
+    const plan = buildJudgeVotePlan({ judge: bumped, cellIds: ['sonnet-low', 'sonnet-high'], reps: 1 });
+    assert.equal(plan.effort, 'high', 'the estimate prices the highest effective judge effort');
+    assert.equal(buildJudgeVotePlan({ judge: ok, cellIds: ['sonnet-low'], reps: 1 }).effort, 'low');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('calibrated judge: separate judge_* columns, blind across cells, pass/fail untouched', async () => {
   const { outDir, answersDir } = tmpOut();
   try {
@@ -355,6 +443,13 @@ test('calibrated judge: separate judge_* columns, blind across cells, pass/fail 
     const storeFile = join(outDir, 'cal.json');
     const cal = await calibrateJudge({ taskId: pack.id, task, config: JUDGE(), callJudge: readingJudge().fn, storeFile });
     assert.equal(cal.trusted, true);
+    // The sonnet-medium cell is judged at fable/MEDIUM (the judge's effort is
+    // floored at the author's -- 0.29.1 fix a), so that config needs its own
+    // trusted record too.
+    const calMedium = await calibrateJudge({
+      taskId: pack.id, task, config: validateJudgeConfig({ model: 'claude-fable-5-1', effort: 'medium' }), callJudge: readingJudge().fn, storeFile,
+    });
+    assert.equal(calMedium.trusted, true);
 
     const seen = [];
     const judgeFn = async (args) => { seen.push(args.user); return { text: 'REASONING: r\nVERDICT: FAIL', cost_usd: 0.003, is_error: false }; };
@@ -375,6 +470,7 @@ test('calibrated judge: separate judge_* columns, blind across cells, pass/fail 
       assert.ok(Math.abs(r.judge_cost_usd - 0.009) < 1e-9);
       assert.match(r.judge_rubric_sha256, /^[0-9a-f]{64}$/);
     }
+    assert.deepEqual(rows.map((r) => r.judge_effort), ['medium', 'low'], 'judge effort floored at each cell\'s author effort');
     assert.equal(seen.length, 6);
     assert.ok(seen.every((u) => u === seen[0]), 'identical judge input whichever cell produced the change: blind');
     assert.doesNotMatch(seen[0], /claude-opus|claude-sonnet|opus55|sonnet-medium|Opus 5\.5/i);

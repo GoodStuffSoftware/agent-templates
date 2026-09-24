@@ -186,8 +186,22 @@ export const ALLOWED = {
   "scripts/lib/publication-sweep.mjs": [
     "// listed so a caller can see them here, but sweepRepo() overrides both with",
   ],
+  // 0.29.1 integration: the vault-guard track (branched before this scan
+  // existed) added the shared git-env helper, whose `overrides` argument is
+  // caller-supplied env vars, and vault comments about env overriding config.
+  "scripts/lib/git-env.mjs": [
+    "// case), then `overrides` laid on top. Overrides are the caller's explicit",
+    "// merged `{ ...process.env, X }` passed as `overrides` must not smuggle the",
+    "export function cleanGitEnv(env = process.env, overrides = {}) {",
+    "for (const [k, v] of Object.entries(overrides || {})) {",
+    "export function isolatedGitEnv(env = process.env, overrides = {}) {",
+    "const out = cleanGitEnv(env, overrides);",
+    "// GIT_AUTHOR_{NAME,EMAIL,DATE} / GIT_COMMITTER_{NAME,EMAIL,DATE} override the",
+  ],
   "scripts/memory-vault.mjs": [
     "// env var remains a per-invocation override.",
+    "// dates (vaultEnv()), which would otherwise override the vault's own",
+    "// override as every other vault call. It is absolute here because init runs",
   ],
   "scripts/recommend.mjs": [
     "// Explicit flags override the preset; the preset fills what is not given.",

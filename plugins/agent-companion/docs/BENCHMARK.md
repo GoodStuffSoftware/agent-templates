@@ -293,6 +293,11 @@ against a **rubric that lives in the task definition**: a task pack's
 `rubric.md`, or a built-in task's `rubric` string. It is off unless you pass
 `--judge-model`, and it only runs on tasks that have a rubric.
 
+Building the diff is not free: `treeDiff()` spawns one `git diff --no-index`
+per changed file, at about **93 ms per changed file**. A
+change touching 50 files adds roughly 5 s per judged answer (once per answer,
+not per vote); negligible next to a vote, but visible in a large calibration.
+
 The rules, each enforced in code and covered by `tests/bench-judge.test.mjs`
 (every test stubs the judge; nothing there calls a model):
 
@@ -330,7 +335,10 @@ The rules, each enforced in code and covered by `tests/bench-judge.test.mjs`
    MODEL axis, applied here to the EFFORT axis, so a fable/xhigh or
    opus/xhigh answer can never end up with a judge reviewing at a lower
    effort than the one it is judging. It is never lowered below its own
-   configured value. The per-vote budget defaults to $0.30 with a hard cap of
+   configured value. The runner applies this per cell (`runOne()` passes
+   `authorEffort: cell.effort`), and calibration is keyed on the effective
+   effort, so a grid with a high-effort cell needs a trusted calibration at
+   that effort too; the preflight names the effort to calibrate at. The per-vote budget defaults to $0.30 with a hard cap of
    $1.00, both in Sonnet dollars and scaled by the judge's price like every
    task budget. **Temperature is never sent.** Current judge-eligible models
    (Sonnet 5, Opus 5/5.5, Fable 5/5.1) reject sampling parameters with an
@@ -909,6 +917,23 @@ live run starts.
    cell yet (a fresh install).
 3. **A rough guess**, clearly labelled `"no local history, rough guess"`,
    when neither has anything for that family at all.
+
+**Judge-vote pricing.** With `--judge-model`, the estimate also counts the
+rubric judge's votes (`JUDGE_VOTES` per judged answer, eligible cells only;
+`judgeVoteCostFor()`), priced in the same order:
+
+1. **Local history first**: the median `judge_cost_usd / judge_votes` over
+   this machine's judged rows for the same (judge model, judge effort).
+2. **Otherwise the seed**: `judgeVoteAnchor` in
+   `bench/config/estimate-seed.json`, **$0.81 per vote measured at
+   fable/high** (2026-09-24, n≈21), scaled by the judge tier's price ratio to
+   Fable (`judgePriceRatioToFable()`). The seed is not rescaled for effort.
+3. **Neither**: judge cost is omitted and the estimate says so.
+
+Each cell is judged at an effort floored at that cell's own effort (see
+"Rubric judge" rule 5), so the estimate prices votes at the HIGHEST
+effective judge effort across the selected cells: one figure, never an
+underestimate.
 
 **Weekly-point anchors** (`bench/config/estimate-seed.json`'s
 `weeklyPointAnchors`) calibrate points-per-run for each family: 52 easy

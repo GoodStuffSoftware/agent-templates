@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import {
   fetchShaIntoTempRepo, setGitSpawnerForTests, selectStaleTempDirs,
 } from '../ci-local.mjs';
+import { cleanGitEnv } from '../../plugins/agent-companion/scripts/lib/git-env.mjs';
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'ci-local.mjs');
 
@@ -47,10 +48,11 @@ function git(cwd, args) {
     cwd,
     encoding: 'utf8',
     windowsHide: true,
-    env: {
-      ...process.env,
+    // Repo-locating GIT_* stripped (shared helper): run directly from a git
+    // hook, an inherited GIT_DIR would point init/commit at the real repo.
+    env: cleanGitEnv(process.env, {
       GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid',
-    },
+    }),
   });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
   return r.stdout;
