@@ -468,6 +468,47 @@ for (const [label, inject] of INJECTED_ENVS) {
   });
 }
 
+// G3. `git init` ran without the no-hooks override, so a reference-transaction
+// hook from the operator's global core.hooksPath ran while the vault was being
+// created. A global core.fsmonitor program ran on every vault call too.
+function makeGlobalHookConfig(root) {
+  const hooks = join(root, 'global-hooks');
+  mkdirSync(hooks, { recursive: true });
+  const flag = join(root, 'GLOBAL_HOOK_RAN');
+  const f = flag.replace(/\\/g, '/');
+  for (const h of ['reference-transaction', 'post-checkout', 'post-index-change']) {
+    writeFileSync(join(hooks, h), `#!/bin/sh\necho ${h} >> "${f}"\ncat >/dev/null\nexit 0\n`);
+    chmodSync(join(hooks, h), 0o755);
+  }
+  const fsmon = join(root, 'fsmonitor-program');
+  writeFileSync(fsmon, `#!/bin/sh\necho fsmonitor >> "${f}"\nexit 1\n`);
+  chmodSync(fsmon, 0o755);
+  const globalCfg = join(root, 'hooks-global.gitconfig');
+  writeFileSync(globalCfg,
+    `[core]\n\thooksPath = ${hooks.replace(/\\/g, '/')}\n\tfsmonitor = ${fsmon.replace(/\\/g, '/')}\n`);
+  return { flag, globalCfg };
+}
+
+for (const cmd of ['init', 'sync']) {
+  test(`G3: ${cmd} of a new vault runs no hook or fsmonitor program from the operator's global config`, () => {
+    const fx = makeFixture();
+    try {
+      const corpus = makeCorpus(fx.dir);
+      const { flag, globalCfg } = makeGlobalHookConfig(fx.dir);
+      const res = runScript(SCRIPT, [cmd, '--json'], {
+        cwd: fx.dir,
+        env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', GIT_CONFIG_GLOBAL: globalCfg },
+        timeout: 60000,
+      });
+      assert.equal(res.status, 0, res.stderr);
+      assert.ok(!existsSync(flag), `a global hook ran during vault ${cmd}: ${existsSync(flag) ? readFileSync(flag, 'utf8') : ''}`);
+      assert.equal(git(['-C', join(fx.stateDir, 'memory-vault'), 'log', '--max-parents=0', '--format=%s']), 'memory-vault: initialize');
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
+
 test('an existing vault keeps working when its path is inside a repository (it created itself)', () => {
   const fx = makeFixture();
   try {

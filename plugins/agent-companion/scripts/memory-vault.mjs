@@ -230,9 +230,12 @@ function vaultGitDir(dir) {
 // operator's global signing setting has no business on a local backup, and a
 // signer that is missing or locked made the initialize commit fail, leaving a
 // vault that no later run could use (see finishInit()).
+//
+// core.fsmonitor=false: a global fsmonitor setting names a program (or starts
+// a daemon) that git would run against the vault. The vault needs none.
 function vaultGit(dir, args, opts = {}) {
   return gitIsolated([
-    '-c', 'core.longpaths=true', '-c', `core.hooksPath=${NO_HOOKS}`,
+    '-c', 'core.longpaths=true', '-c', `core.hooksPath=${NO_HOOKS}`, '-c', 'core.fsmonitor=false',
     '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
     '-C', dir, '--git-dir=.git', '--work-tree=.', ...args,
   ], opts);
@@ -637,7 +640,14 @@ function createVault(dir) {
   mkdirSync(dir, { recursive: true });
   // --template= (empty): no template directory at all, so neither an
   // operator's init.templateDir nor git's sample hooks seed the vault's .git.
-  git(['-c', 'core.longpaths=true', 'init', '-q', '--template=', '-b', 'main', dir]);
+  // `git init` runs hooks too: creating HEAD fires reference-transaction, from
+  // the operator's global core.hooksPath. So init gets the same no-hooks
+  // override as every other vault call. It is absolute here because init runs
+  // before there is a vault work tree to resolve a relative path against.
+  git([
+    '-c', 'core.longpaths=true', '-c', `core.hooksPath=${join(dir, NO_HOOKS)}`, '-c', 'core.fsmonitor=false',
+    'init', '-q', '--template=', '-b', 'main', dir,
+  ]);
   // Proven BEFORE the first config write: the repository git just made is
   // this directory's own. If it is not, stop here with only an empty repo
   // created inside the vault dir, never a write anywhere else.
