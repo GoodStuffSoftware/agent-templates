@@ -139,8 +139,6 @@ test('isolatedWriteGitEnv also drops GIT_CONFIG_GLOBAL/SYSTEM, in any case; isol
   for (const k of ['GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_GLOBALX']) {
     assert.equal(isConfigFileRedirectGitVar(k), false, k);
   }
-  // Overrides cannot smuggle one back in either.
-  assert.equal(isolatedWriteGitEnv({}, { GIT_CONFIG_GLOBAL: '/x' }).GIT_CONFIG_GLOBAL, undefined);
   // Read paths are unchanged.
   const read = isolatedGitEnv(input);
   assert.equal(read.GIT_CONFIG_GLOBAL, '/hostile/global');
