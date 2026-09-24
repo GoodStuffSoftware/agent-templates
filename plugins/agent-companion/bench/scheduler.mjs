@@ -89,22 +89,35 @@ export function makeCapacityGate({ perAgentMB = 350, headroomGB = null } = {}) {
 // (a port still bound, a lock file still held). Same "carve this failure
 // class out of pass-rate math" treatment bench/runner.mjs already gives
 // auth_error; see rebuildSummary()'s COLLISION handling.
+//
+// STRUCTURAL SIGNAL ONLY -- never free text. An earlier version of this
+// function regexed the model's own answer text (bench/runner.mjs used to
+// feed it `stdout`, the raw `claude -p --output-format json` response) plus
+// the scorer's error MESSAGE string. Both are attacker- and author-
+// controlled prose: a model explaining a bug it just fixed ("I found the
+// EADDRINUSE bug and added server.close()...") or a hidden test's own
+// assertion-failure message ("expected 'x' to match /EADDRINUSE/") can
+// contain the exact substrings the regex looked for without ANY real OS
+// collision occurring -- a genuine task FAILURE then silently vanished from
+// pass-rate math (2026-09 adversarial review finding, Track B fix #1). The
+// only trustworthy signal is the structured `.code` Node itself attaches to
+// a genuine system error (net.Server.listen()'s EADDRINUSE, an `fs` lock's
+// EEXIST/EBUSY, ...) when the TASK'S OWN score()/setup() throws -- never
+// something an LLM or a human wrote. bench/runner.mjs's runOne() extracts
+// that code (harnessErrorCode) from the caught exception and passes ONLY
+// that here; it never passes stdout/stderr/the model's answer text at all.
 // ---------------------------------------------------------------------------
 
-const COLLISION_RE = /EADDRINUSE|address already in use|EEXIST.*lock|lock\s*(file)?\s*(is\s+)?held|resource temporarily unavailable.*lock|ELOCKED/i;
+export const COLLISION_ERROR_CODES = new Set([
+  'EADDRINUSE', // a port is already bound (net.Server.listen())
+  'EADDRNOTAVAIL',
+  'EEXIST', // a lock file already exists (fs.writeFileSync(..., { flag: 'wx' }) or similar)
+  'EBUSY',
+  'ELOCKED',
+]);
 
-export function classifyCollision({ err, stdout, stderr, detail } = {}) {
-  const detailText = typeof detail === 'string' ? detail : (detail ? safeStringify(detail) : '');
-  const haystack = [err, stdout, stderr, detailText].filter(Boolean).join('\n');
-  return COLLISION_RE.test(haystack);
-}
-
-function safeStringify(v) {
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
+export function classifyCollision({ harnessErrorCode } = {}) {
+  return typeof harnessErrorCode === 'string' && COLLISION_ERROR_CODES.has(harnessErrorCode);
 }
 
 // ---------------------------------------------------------------------------

@@ -419,16 +419,28 @@ Three safeguards make this safe rather than merely fast:
    exclusive with OTHER RUNS OF THE SAME PACK (conservative default) — a
    pack that has been reviewed and is genuinely safe to run alongside itself
    opts out with an explicit `"resources": {}`.
-3. **Collision detection and one automatic solo retry.** A run whose
-   spawn/exec error or scorer detail matches an OS-level "this resource is
-   already held" shape (`EADDRINUSE`, a lock file held, ...) is classified
-   `collision: true` (`bench/scheduler.mjs`'s `classifyCollision()`) rather
-   than a model/task failure. It is excluded from `pass_rate` and every
-   other stat in `summary.md`/`summary.json` — the same treatment
-   `auth_error` gets — and the scheduler automatically re-runs it exactly
-   once, ALONE (the retry is queued with `resources.exclusive` forced
-   `true`, so the scheduler itself guarantees isolation). Both rows are kept
-   in `results.jsonl`; the retry carries `is_collision_retry: true`.
+3. **Collision detection and one automatic solo retry.** When a task's
+   `score()`/`setup()` throws a genuine OS-level error (`EADDRINUSE`, a lock
+   file's `EEXIST`/`EBUSY`, ...), `bench/runner.mjs` reads the STRUCTURAL
+   `.code` Node itself attaches to that exception and hands only that to
+   `bench/scheduler.mjs`'s `classifyCollision()` — **never** the model's
+   answer text or the exception's message string. An earlier version of this
+   function regexed both, and a model merely *describing* an EADDRINUSE bug
+   it had fixed (or a hidden test's own assertion message quoting an
+   expected error string) could flip a genuine task FAILURE into an excluded
+   `collision: true` row (2026-09 adversarial review finding). A
+   `collision: true` row is excluded from `pass_rate` and every other stat
+   in `summary.md`/`summary.json` — the same treatment `auth_error` gets —
+   ONLY once CONFIRMED: the scheduler automatically re-runs it exactly once,
+   ALONE (the retry is queued with `resources.exclusive` forced `true`), and
+   the exclusion holds only if that retry does NOT reproduce the same
+   structural error code. If the retry ALSO fails that way running
+   completely alone, the scheduler was never the cause — the retry is
+   reclassified as a REAL failure and counted normally, while the original
+   row stays excluded but labelled "suspected, not confirmed" in
+   `summary.md` rather than folded into the confirmed-collision count. Both
+   rows are always kept in `results.jsonl`; the retry carries
+   `is_collision_retry: true`.
 
 **Every results.jsonl row records `concurrency` and `co_scheduled_run_ids`.**
 Read these before comparing wall time across batches: a run's `duration_ms`

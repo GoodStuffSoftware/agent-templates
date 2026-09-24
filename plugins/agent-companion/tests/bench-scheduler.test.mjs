@@ -85,12 +85,20 @@ test('resourcesConflict: lockFiles overlap conflicts (path-normalized)', () => {
 
 // --- classifyCollision(): pure logic ---------------------------------------
 
-test('classifyCollision recognizes EADDRINUSE and lock-held shapes, not an ordinary failure', () => {
-  assert.equal(classifyCollision({ err: 'Error: listen EADDRINUSE: address already in use :::58231' }), true);
-  assert.equal(classifyCollision({ detail: { scorerError: 'Error [ERR]: EADDRINUSE' } }), true);
-  assert.equal(classifyCollision({ stderr: 'lock file is held by another process' }), true);
-  assert.equal(classifyCollision({ err: 'assertion failed: expected 2 got 3' }), false);
+test('classifyCollision recognizes a STRUCTURAL harnessErrorCode, never free text', () => {
+  assert.equal(classifyCollision({ harnessErrorCode: 'EADDRINUSE' }), true);
+  assert.equal(classifyCollision({ harnessErrorCode: 'EEXIST' }), true);
+  assert.equal(classifyCollision({ harnessErrorCode: 'EBUSY' }), true);
+  assert.equal(classifyCollision({ harnessErrorCode: 'ERR_ASSERTION' }), false, 'an ordinary assertion error code is not a collision');
+  assert.equal(classifyCollision({ harnessErrorCode: null }), false);
   assert.equal(classifyCollision({}), false);
+  // No text-matching parameter exists any more -- passing free text (even
+  // text that CONTAINS "EADDRINUSE") must never flip the result. See
+  // tests/bench-collision-classification.test.mjs for the full adversarial
+  // false-positive suite (2026-09 review, Track B fix #1).
+  assert.equal(classifyCollision({ err: 'Error: listen EADDRINUSE: address already in use :::58231' }), false);
+  assert.equal(classifyCollision({ stdout: JSON.stringify({ result: 'I fixed the EADDRINUSE bug' }) }), false);
+  assert.equal(classifyCollision({ detail: { scorerError: "expected 'x' to match /EADDRINUSE/" } }), false);
 });
 
 test('portBaseForSlot gives each slot a distinct, non-overlapping range', () => {

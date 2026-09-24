@@ -552,19 +552,33 @@ export async function runOne({
     // score(sandboxDir, answerText, meta) simply ignores it.
     scoreResult = await task.score(sandboxDir, answerText, meta, scheduleCtx);
   } catch (e) {
-    scoreResult = { pass: false, scope_ok: null, claim_honest: null, extra_files: [], detail: { scorerError: String((e && e.stack) || e) } };
+    // harnessErrorCode: the STRUCTURED `.code` Node itself attaches to a
+    // genuine system error (net's EADDRINUSE, fs's EEXIST/EBUSY, ...) when
+    // the task's own score()/setup() throws -- e.g.
+    // tests/fixtures/bench-parallel/fixed-port-task.mjs's real net.Server
+    // bind. This is the ONLY signal classifyCollision() is allowed to see
+    // (bench/scheduler.mjs) -- never the exception's message text, which,
+    // same as the model's answer text, can be authored prose (an assertion
+    // message quoting an expected string) that coincidentally contains a
+    // collision-shaped substring without any real OS collision happening.
+    const harnessErrorCode = e && typeof e.code === "string" ? e.code : null;
+    scoreResult = {
+      pass: false, scope_ok: null, claim_honest: null, extra_files: [],
+      detail: { scorerError: String((e && e.stack) || e), harnessErrorCode },
+    };
   }
 
-  // Collision classification: a run whose spawn/exec error or scorer detail
-  // matches an OS-level "someone else already holds this resource" shape
-  // (EADDRINUSE, a lock file held, ...) never reached a genuine model/task
-  // verdict -- see bench/scheduler.mjs's classifyCollision() and
-  // rebuildSummary()'s exclusion below (the same treatment auth_error gets).
-  // Only meaningful for a run that declared shared resources in the first
-  // place (--concurrency 1's single active run can still "collide" with a
+  // Collision classification: a run whose scorer/setup threw a STRUCTURED
+  // OS-level "someone else already holds this resource" error (EADDRINUSE,
+  // a lock file held, ...) never reached a genuine model/task verdict -- see
+  // bench/scheduler.mjs's classifyCollision() (structural signal ONLY, never
+  // free text -- see that function's own banner) and rebuildSummary()'s
+  // exclusion below (the same treatment auth_error gets). Only meaningful
+  // for a run that declared shared resources in the first place
+  // (--concurrency 1's single active run can still "collide" with a
   // leftover process from a previous crashed run, so this is not gated on
   // concurrency > 1).
-  const collision = classifyCollision({ err, stdout, stderr, detail: scoreResult && scoreResult.detail });
+  const collision = classifyCollision({ harnessErrorCode: scoreResult && scoreResult.detail && scoreResult.detail.harnessErrorCode });
 
   const finalTree = (() => {
     try {
@@ -835,9 +849,37 @@ export function rebuildSummary(outDir) {
   // -- same exclusion as auth_error, so one unlucky port clash under
   // --concurrency > 1 can't be misread as a model failure. The scheduler
   // always queues exactly one solo retry for a collided run (recorded as
-  // its own row, is_collision_retry:true); THAT row is judged normally.
-  const collisionRows = allRows.filter((r) => r.collision);
-  const rows = allRows.filter((r) => !r.auth_error && !r.collision);
+  // its own row, is_collision_retry:true).
+  //
+  // CONFIRMATION: a collision is only CONFIRMED (and therefore excluded)
+  // when its solo retry does NOT reproduce the same structural signal. If
+  // the retry ALSO collides while running completely alone (forced
+  // resources.exclusive -- see bench/scheduler.mjs's scheduleRuns()), the
+  // scheduler was never the cause -- something about the task/environment
+  // itself always fails this way -- so the retry is reclassified as a REAL
+  // failure and counted normally; the original row stays excluded (its own
+  // execution genuinely was concurrent, so its individual verdict is still
+  // ambiguous) but is labelled "suspected, not confirmed" rather than
+  // silently dropped the same way a confirmed collision is. Pass-rate math
+  // must never lose a failure that reproduces solo (2026-09 adversarial
+  // review, Track B fix #1).
+  const byRunId = new Map(allRows.map((r) => [r.run_id, r]));
+  const reproducedRetryIds = new Set(); // retry run_ids that ALSO collided solo -- treat as real
+  const unconfirmedOriginalIds = new Set(); // original run_ids whose retry reproduced
+  for (const r of allRows) {
+    if (!r.collision || r.is_collision_retry) continue; // originals only
+    const retry = byRunId.get(r.run_id + "::retry");
+    if (retry && retry.collision) {
+      reproducedRetryIds.add(retry.run_id);
+      unconfirmedOriginalIds.add(r.run_id);
+    }
+  }
+  // CONFIRMED collisions only -- excludes both the reclassified retry (now a
+  // real, counted row) AND the unconfirmed original (reported separately
+  // below, under SUSPECTED COLLISION, NOT CONFIRMED, so the two categories
+  // never overlap in the printed counts).
+  const collisionRows = allRows.filter((r) => r.collision && !reproducedRetryIds.has(r.run_id) && !unconfirmedOriginalIds.has(r.run_id));
+  const rows = allRows.filter((r) => !r.auth_error && (!r.collision || reproducedRetryIds.has(r.run_id)));
 
   const byCellTask = new Map();
   for (const r of rows) {
@@ -996,6 +1038,16 @@ export function rebuildSummary(outDir) {
       `COLLISION: ${collisionRows.length} run(s) hit an OS-level resource collision (EADDRINUSE, a lock file held, ...) ` +
       `under --concurrency and were EXCLUDED from every stat below -- ${retried.length} were automatically re-run alone. ` +
       "See docs/BENCHMARK.md \"Parallel runs\".",
+      "",
+    );
+  }
+  if (unconfirmedOriginalIds.size > 0) {
+    lines.push(
+      `SUSPECTED COLLISION, NOT CONFIRMED: ${unconfirmedOriginalIds.size} run(s) looked like a resource collision, but the ` +
+      "automatic solo retry reproduced the SAME structural failure running completely alone -- the scheduler was never the " +
+      "cause. The retry is treated as a REAL failure and counted in every stat below; the original run stays excluded " +
+      "(its own execution was genuinely concurrent, so its individual verdict is still ambiguous). See docs/BENCHMARK.md " +
+      "\"Parallel runs\".",
       "",
     );
   }

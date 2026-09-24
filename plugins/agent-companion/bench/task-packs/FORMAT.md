@@ -157,14 +157,30 @@ behavior against real (not mocked) port binds:
 `tests/fixtures/bench-parallel/port-base-task.mjs` (binds
 `BENCH_PORT_BASE`, `resources: {}`, runs concurrently with itself).
 
-**Collision, despite a correct declaration.** A run whose spawn/exec error or
-scorer detail matches an OS-level "this resource is already held" shape
-(`EADDRINUSE`, a lock file held, ...) is classified `collision: true`
-(`bench/scheduler.mjs`'s `classifyCollision()`) rather than a model/task
-failure, excluded from `pass_rate`/every other stat in `summary.md`
-(same treatment `auth_error` gets), and automatically re-run exactly once,
-ALONE (the retry is queued with `resources.exclusive` forced `true`). Both
-rows are kept in `results.jsonl` (`is_collision_retry` marks the retry).
+**Collision, despite a correct declaration.** When a pack's own `score()` (or
+`setup()`) throws a genuine OS-level "this resource is already held" error
+(`EADDRINUSE`, a lock file's `EEXIST`/`EBUSY`, ...), `bench/runner.mjs`
+extracts the STRUCTURAL error `.code` Node itself attached to that exception
+and hands ONLY that code to `bench/scheduler.mjs`'s `classifyCollision()` --
+never the model's answer text or the exception's message string, both of
+which are authored prose that can coincidentally contain a collision-shaped
+substring without any real collision happening (a model describing a bug it
+fixed, or a hidden-test assertion quoting an expected error string). A
+`collision: true` row is excluded from `pass_rate`/every other stat in
+`summary.md` (same treatment `auth_error` gets) and automatically re-run
+exactly once, ALONE (the retry is queued with `resources.exclusive` forced
+`true`). Both rows are kept in `results.jsonl` (`is_collision_retry` marks
+the retry).
+
+**Confirmation.** The exclusion above only applies once the collision is
+CONFIRMED: the solo retry must NOT reproduce the same structural error code.
+If it does -- the task fails this way even running completely alone -- the
+scheduler was never the cause, so the retry is reclassified as a REAL
+failure and counted normally; the original row stays excluded (its own
+execution was genuinely concurrent, so its individual verdict is still
+ambiguous) but `summary.md` labels it "suspected, not confirmed" rather than
+folding it into the confirmed-collision count. A failure that reproduces
+solo is never lost from pass-rate math.
 
 ## Hidden test contract
 
