@@ -8,6 +8,7 @@ on:
   push:
     branches-ignore:
       - 'wip/**'
+      - 'backup/**'
   pull_request:
 
 jobs:

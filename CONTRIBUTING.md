@@ -97,6 +97,12 @@ Either way: the change isn't "done" until it's scrubbed (leak-check green, local
 
 ---
 
+## Release gate
+
+The same principle governs cutting a versioned release (e.g. the `agent-companion` plugin): landing is gated on CI, not on local runs alone. GitHub CI must be green on the release branch before landing, and on main after the push; watch with `gh run watch <id> --exit-status`. Red CI is a failed release step.
+
+---
+
 ## Provenance anonymization
 
 Lessons carry a `provenance: [contrib-1, contrib-2, …]` field — **anonymized contributor ids only**. The library must **never** record who a contributor really is.

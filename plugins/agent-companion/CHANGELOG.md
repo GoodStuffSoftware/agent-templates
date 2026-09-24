@@ -2,6 +2,53 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.0 — 2026-09-24
+
+Ships the routing resolver layer stack and per-user routing profiles
+(ADR-0003 slices 1, 1b and 2), a parallel-safe benchmark runner with a
+pre-run cost gate, and a hardened premium-window lock.
+
+### Routing: layer stack and per-user routing profiles (ADR-0003, slices 1, 1b and 2)
+- New `resolveRoute()` resolves every route through one layer stack: per-user profile row, then shipped trial, then shipped grid. Floors F1–F5 now apply AFTER whichever layer wins, so shipped trials are floored too. `resolveExpected()` keeps its shape.
+- `recommend --explain` and `/ac routing why <type>` print the full stack: what each layer would give, the winner, the floors that fired (including those raised inside the grid), and the winning row's provenance.
+- New per-user routing profile at `<stateRoot>/config/routing-profile.json`:
+  - Schema v1, with an append-only journal (`routing-profile.journal.jsonl`).
+  - `/ac routing set | unset | show | why | rollback --row | rollback --to`.
+  - Kill switch: the `routing_profile` option (default on; with no file, nothing changes).
+  - Rows that break F1–F4 are refused at write time and ignored at read time. The elevated floor (F5) can be waived only by an operator-observed row with `--waive-floor elevated`. A model that takes no effort (haiku) counts as below F5 on elevated types.
+  - Rollback restores any journalled revision the resolver accepts.
+  - An invalid file fails open to the shipped table and leaves a marker.
+  - Writes are atomic and locked.
+- `spawns.jsonl` gains `route_layer` and `route_profile_rev`; row content is never logged.
+- Reviewer parity (code-review): the reviewer is max(writer, the F1 critical floor), capped by F2 (fable is never a destination; a fable writer gets an opus reviewer and still needs a warrant). An unknown writer, or an effort that isn't a level, is refused (recommend exits 2, evaluate exits 3). An effort a haiku writer states is dropped. Effort case is normalised.
+- An explicit weight, kind or consequence that EQUALS the type's preset no longer bypasses the trial.
+- A task type named after an Object.prototype member (`constructor`, `toString`, and so on) now resolves as unknown.
+
+### Spawn guard
+- Brief directives (TYPE, WEIGHT, KIND, CONSEQUENCE, WARRANT, EFFORT) are read only from their own lines, and never from fenced code, indented code or `>` blockquotes. The first declaration of each label wins, even if its value is invalid, so pasted logs can't override the header. Markdown-bold `**TYPE:**` is accepted. A warrant needs a declaration line.
+- A `TYPE: code-review` spawn that declares `CONSEQUENCE: critical` below opus/xhigh is reported as under-provisioned (F1).
+- The premium_cap window is locked and written atomically, so the cap is exact under concurrent spawns. It counts a spawn only once SubagentStart confirms it has started, matched by agent type. An allowed spawn the harness then rejects stops counting after 3 minutes. (Counting routed opus by tier, ADR-0003 OQ8, is HELD pending an operator decision.)
+- The premium-window lock's stale time is lowered from 5000ms to 1000ms, at or below its 2000ms wait. The comments describing the lock's guarantee are corrected: a live pid's lock is never judged stale — not that a live writer's lock can never be removed. A rare put-back race can still let two holders coexist after a crashed holder's lock is broken, when 3 or more contenders are racing it; that race is tracked for 0.29.1.
+- Transitional: an older plugin version running concurrently in another session rewrites the premium window without the new fields.
+
+### Benchmark harness
+- Parallel-safe runner, `scripts/benchmark.mjs --concurrency N`:
+  - One global pool across cells, gated on free RAM.
+  - Each run gets its own TMP and `BENCH_PORT_BASE`.
+  - Pack `resources: {fixedPorts, lockFiles, exclusive}` declarations are respected across cells.
+  - When a run that ran alongside others fails, the SAME sandbox is re-scored solo, without re-running the model, which keeps pass rates unbiased.
+  - `--resume` dedupes by attempt family.
+  - Windows-safe sandbox cleanup with retries (`cleanup_error` never changes a result).
+- Pre-run cost and time estimate:
+  - Covers wall time, tokens by class, API $, and weekly plan points as a low–high range. 5-hour points show as "unknown" unless you have a measured anchor.
+  - It is built from local history, with a labelled fallback.
+  - Confirmation gate above N weekly points (default 2), for any fable cell, or when a run would cross the weekly ceiling. `--dry-run` makes no model calls.
+  - The ceiling stop is checked between batches.
+
+### Fixes
+- The publication-leak sweep never prints a repo's raw identity in clone or fetch errors.
+- CI: full-depth checkout; the alias-floor test skips when no `claude` CLI is present; push runs skip `wip/**` and `backup/**`.
+
 ## 0.28.0 — 2026-09-24
 
 Folds proven evaluation practice into the model x effort benchmark. It
