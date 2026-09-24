@@ -445,28 +445,99 @@ Three safeguards make this safe rather than merely fast:
    exclusive with OTHER RUNS OF THE SAME PACK (conservative default) — a
    pack that has been reviewed and is genuinely safe to run alongside itself
    opts out with an explicit `"resources": {}`.
-3. **Collision detection and one automatic solo retry.** When a task's
-   `score()`/`setup()` throws a genuine OS-level error (`EADDRINUSE`, a lock
-   file's `EEXIST`/`EBUSY`, ...), `bench/runner.mjs` reads the STRUCTURAL
-   `.code` Node itself attaches to that exception and hands only that to
-   `bench/scheduler.mjs`'s `classifyCollision()` — **never** the model's
-   answer text or the exception's message string. An earlier version of this
-   function regexed both, and a model merely *describing* an EADDRINUSE bug
-   it had fixed (or a hidden test's own assertion message quoting an
-   expected error string) could flip a genuine task FAILURE into an excluded
-   `collision: true` row (2026-09 adversarial review finding). A
-   `collision: true` row is excluded from `pass_rate` and every other stat
-   in `summary.md`/`summary.json` — the same treatment `auth_error` gets —
-   ONLY once CONFIRMED: the scheduler automatically re-runs it exactly once,
-   ALONE (the retry is queued with `resources.exclusive` forced `true`), and
-   the exclusion holds only if that retry does NOT reproduce the same
-   structural error code. If the retry ALSO fails that way running
-   completely alone, the scheduler was never the cause — the retry is
-   reclassified as a REAL failure and counted normally, while the original
-   row stays excluded but labelled "suspected, not confirmed" in
-   `summary.md` rather than folded into the confirmed-collision count. Both
-   rows are always kept in `results.jsonl`; the retry carries
-   `is_collision_retry: true`.
+3. **Collision handling** — a run that fails for a reason that has nothing to
+   do with the model, because it happened to be sharing the machine. See its
+   own subsection right below; two DIFFERENT mechanisms exist, chosen by
+   WHEN in the run the collision happened.
+
+### Collision handling
+
+A collision never reached a genuine model/task verdict — it failed because
+of the machine it happened to share, not because of anything the model did.
+Both mechanisms below exclude a CONFIRMED collision from `pass_rate` and
+every other stat in `summary.md`/`summary.json` (the same treatment
+`auth_error` gets), and both keep every row involved in `results.jsonl` —
+nothing is ever silently dropped. (This is a different thing from
+`bench/rescore.mjs`'s manual re-score for a wording bug in the test itself —
+see "The fairness rule: re-score vs re-run" above. That is an operator
+choice, made after auditing a suspected scorer bug; everything below is
+fully automatic, made by the scheduler for every run, whether or not
+anything is actually wrong with the scorer.)
+
+**Which mechanism applies depends on WHEN the collision happened**, because
+that determines whether the model's work is even salvageable:
+
+- **Before the model's work completed** (`setup()` threw) — there is no
+  valid sandbox or answer to reuse, so the only option is a **full re-run,
+  alone**: `bench/runner.mjs` reads the STRUCTURAL `.code` Node itself
+  attaches to the exception (`EADDRINUSE`, a lock file's `EEXIST`/`EBUSY`,
+  ...) and hands only that to `bench/scheduler.mjs`'s `classifyCollision()`
+  — **never** the model's answer text or the exception's message string (an
+  earlier version of this function regexed both, and a model merely
+  *describing* an EADDRINUSE bug it had fixed, or a hidden test's own
+  assertion message quoting an expected error string, could flip a genuine
+  task FAILURE into an excluded `collision: true` row — 2026-09 adversarial
+  review finding). The scheduler automatically re-runs it exactly once,
+  ALONE (`resources.exclusive` forced `true`), with a FRESH sandbox and a
+  FRESH model call. This is also the fallback for a scoring-phase collision
+  that happened at `--concurrency 1` with nothing else genuinely active —
+  see below.
+- **After the model's work completed** (the run reached `score()`) — the
+  model's sandbox is already finished and isolated, so re-running the model
+  again would be wasteful AND biased (an outcome-based re-run skews toward
+  passing on a nondeterministic model, which re-scoring the identical
+  artifact cannot). Round 2 finding (2026-09 delta review): a REAL task
+  pack's `score()` never actually THROWS even on a genuine collision — its
+  hidden test catches its own subprocess's failure and returns a plain
+  `{ pass: false, detail }` (the dominant real-world "catch everything"
+  style; see the committed example pack's own `hidden-test.mjs`) — so the
+  structural-`.code` path above was dead code for every real pack; a genuine
+  port/lock collision inside a hidden test's own subprocess just looked like
+  an ordinary task failure. Instead: ANY run that FAILS while genuinely
+  co-scheduled (`--concurrency > 1` AND something else was actually active
+  when this run was admitted — `co_scheduled_run_ids` non-empty) gets its
+  row marked `needs_rescore: true`, its sandbox is deliberately NOT torn
+  down, and `bench/scheduler.mjs` automatically queues a solo retry
+  (`resources.exclusive` forced `true`, same as above) that calls
+  `bench/runner.mjs`'s `rescoreOne()` — which re-runs ONLY `task.score()`
+  against that SAME retained sandbox, with the SAME saved answer text, and
+  **never calls the model**. Both the original row and the `<run_id>::rescore`
+  row are kept in `results.jsonl`:
+    - **Re-score PASSES** → the original row is excluded (superseded); the
+      `::rescore` row (`pass: true`, `collision_rescored: true`, and the
+      ORIGINAL failure's own detail carried along under
+      `detail.original_failure_detail`) counts in its place. Same `n`,
+      corrected verdict, no extra tokens spent.
+    - **Re-score FAILS too** → nothing was actually a collision. The
+      ORIGINAL failing row counts normally (a real failure is never lost),
+      and the redundant `::rescore` row is excluded so the same underlying
+      attempt is never double-counted.
+    - **No `::rescore` row exists at all** (the batch stopped before the
+      scheduler got to it — an `auth_error`/judge refusal/a weekly ceiling)
+      → fails OPEN: the original failure counts normally, and its retained
+      sandbox is simply abandoned under the OS temp dir (harmless, if
+      untidy — accepted rather than building a whole separate
+      abandoned-retry cleanup pass for a rare case).
+
+  `summary.md` reports each outcome by name: `COLLISION` / `SUSPECTED
+  COLLISION, NOT CONFIRMED` for the legacy (pre-model) path, `RESCORED` /
+  `RE-SCORE CONFIRMED A REAL FAILURE` for this one.
+
+**Coverage gap, by design: the model's OWN in-session commands.** Everything
+above is about the HARNESS's re-score/re-run machinery around `setup()`/
+`score()` — it says nothing about a port collision the MODEL itself hits
+while doing its own work inside the sandbox (e.g. running its own test suite
+as part of solving the task, before ever reaching the harness's scoring
+step). That kind of collision is invisible to `classifyCollision()`/
+`needs_rescore` entirely — it just shows up as whatever the model's own
+transcript/answer says happened, same as any other in-session hiccup. The
+only mitigation is UPSTREAM of collision detection: a pack whose own
+commands need a port should bind inside `[BENCH_PORT_BASE, BENCH_PORT_BASE +
+200)` (its concurrency SLOT's reserved range — see "Per-run isolation"
+above) rather than a hardcoded number, and/or declare `manifest.resources`
+accurately, so the SCHEDULER simply never puts two runs in a position to
+collide over the same port in the first place. There is no after-the-fact
+detection for a collision inside the model's own session.
 
 **Only `scripts/benchmark.mjs` supports `--concurrency`.** `bench/runner.mjs`'s
 own direct CLI (`node bench/runner.mjs ...`) is a bare-bones, fully-sequential

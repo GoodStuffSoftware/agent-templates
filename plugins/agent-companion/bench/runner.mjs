@@ -592,17 +592,54 @@ export async function runOne({
     };
   }
 
-  // Collision classification: a run whose scorer/setup threw a STRUCTURED
-  // OS-level "someone else already holds this resource" error (EADDRINUSE,
-  // a lock file held, ...) never reached a genuine model/task verdict -- see
-  // bench/scheduler.mjs's classifyCollision() (structural signal ONLY, never
-  // free text -- see that function's own banner) and rebuildSummary()'s
-  // exclusion below (the same treatment auth_error gets). Only meaningful
-  // for a run that declared shared resources in the first place
-  // (--concurrency 1's single active run can still "collide" with a
-  // leftover process from a previous crashed run, so this is not gated on
-  // concurrency > 1).
-  const collision = classifyCollision({ harnessErrorCode: scoreResult && scoreResult.detail && scoreResult.detail.harnessErrorCode });
+  // Was this run's SCORING phase genuinely sharing the machine with another
+  // active run at LAUNCH time? A point-in-time snapshot (coScheduledRunIds
+  // is fixed when bench/scheduler.mjs admitted this run, never updated
+  // afterward) -- good enough, since all this decides is "was there
+  // realistically another process to blame", not an exact live census.
+  const wasCoScheduled = concurrency > 1 && coScheduledRunIds.length > 0;
+
+  // LEGACY collision classification (Track B round 1): a run whose scorer
+  // threw a STRUCTURED OS-level "someone else already holds this resource"
+  // error (EADDRINUSE, a lock file held, ...) never reached a genuine
+  // model/task verdict -- see bench/scheduler.mjs's classifyCollision()
+  // (structural signal ONLY, never free text -- see that function's own
+  // banner) and rebuildSummary()'s exclusion below (the same treatment
+  // auth_error gets). Narrowed to the NOT-co-scheduled case only (round 2,
+  // 2026-09 delta review finding 1): a solo --concurrency 1 run can still
+  // collide with a leftover process from an earlier crashed run, and there
+  // is no "same sandbox, re-score alone" rescue available there (nothing
+  // else was ever running to blame), so this is the one case that still
+  // gets a full model re-run (bench/scheduler.mjs's `collision`-retry). Every
+  // OTHER scoring-phase failure while genuinely co-scheduled is handled by
+  // `needsRescore` below instead, whether or not it was structural-coded --
+  // see that constant's own note.
+  const collision = !wasCoScheduled
+    && classifyCollision({ harnessErrorCode: scoreResult && scoreResult.detail && scoreResult.detail.harnessErrorCode });
+
+  // Round 2 fix (2026-09, Track B delta review finding 1): a REAL task
+  // pack's score() never throws -- its hidden test catches its own
+  // subprocess's failure and returns a plain `{ pass: false, detail }` (the
+  // dominant real-world "catches everything" style, FORMAT.md's "Hidden
+  // test contract") -- so the structural-signal collision path above was
+  // dead code for every real pack; a genuine port/lock collision inside a
+  // hidden test's own subprocess just looked like an ordinary task failure.
+  // The model's sandbox work is ALREADY COMPLETE and isolated by the time
+  // score() runs, so instead of requiring a thrown structural code at all,
+  // ANY scoring-phase failure that happened while genuinely co-scheduled
+  // (wasCoScheduled, above) is queued for a SOLO RE-SCORE of the SAME
+  // retained sandbox -- never a model re-run (bench/scheduler.mjs's
+  // needs_rescore-retry queuing, this module's rescoreOne() below). This
+  // costs no extra tokens and carries no pass-rate bias, because the
+  // model's own output never changes between the two scoring attempts -- an
+  // outcome-based model RE-RUN would bias toward passing on a nondeterministic
+  // model, which re-scoring the identical artifact cannot. `!isCollisionRetry`
+  // guards against ever chaining a rescore off of another retry (in practice
+  // this is already impossible: a forced-`resources.exclusive` retry never
+  // launches while anything else is active, so its own coScheduledRunIds is
+  // always empty). See docs/BENCHMARK.md "Parallel runs" -> "Collision
+  // handling".
+  const needsRescore = !scoreResult.pass && wasCoScheduled && !isCollisionRetry;
 
   const finalTree = (() => {
     try {
@@ -672,8 +709,20 @@ export async function runOne({
   // docs/BENCHMARK.md "Effort is proven via the transcript".
   const transcriptHome = isolateHome ? fakeHome : (process.env.HOME || process.env.USERPROFILE || os.homedir());
 
-  rmrf(sandboxDir);
-  rmrf(runTmpDir);
+  // The sandbox and its tmp dir are torn down here UNLESS this run is being
+  // held for a solo re-score (needsRescore) -- rescoreOne() below inherits
+  // responsibility for cleaning both up once the re-score attempt completes.
+  // A needsRescore row whose rescore never actually runs (the batch stopped
+  // first -- auth_error/JUDGE_REFUSED/a weekly ceiling, see
+  // bench/scheduler.mjs's shouldStop) leaks its retained sandbox for the
+  // rest of the process's life; accepted as a documented tradeoff
+  // (docs/BENCHMARK.md "Parallel runs") rather than adding a whole separate
+  // abandoned-retry cleanup pass for a rare, harmless (an ordinary OS temp
+  // dir) already-failed run.
+  if (!needsRescore) {
+    rmrf(sandboxDir);
+    rmrf(runTmpDir);
+  }
   if (fakeHome) rmrf(fakeHome);
 
   const row = {
@@ -693,8 +742,15 @@ export async function runOne({
     // classifyCollision() above) -- excluded from pass-rate math by
     // rebuildSummary(), same treatment as auth_error. is_collision_retry
     // marks the solo re-run bench/scheduler.mjs automatically queues for it.
+    // needs_rescore marks a DIFFERENT retry (round 2): this row failed while
+    // genuinely co-scheduled, and its sandbox was kept alive for a solo
+    // RE-SCORE (rescoreOne() below) rather than a model re-run -- see
+    // rebuildSummary()'s needs_rescore confirm/exclude handling and
+    // docs/BENCHMARK.md "Parallel runs" -> "Collision handling".
     collision,
     is_collision_retry: !!isCollisionRetry,
+    needs_rescore: needsRescore,
+    is_rescore_retry: false,
     requested_model: cell.model,
     resolved_model: resolvedModel,
     model_mismatch: resolvedModel !== null && resolvedModel !== cell.model,
@@ -735,6 +791,101 @@ export async function runOne({
     // Rubric-judge columns (present only when a judge ran for this task).
     // A SEPARATE score: never merged into `pass` above.
     ...judgeFields,
+  };
+
+  fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify(row) + "\n");
+
+  // Transient, IN-MEMORY-ONLY payload for bench/scheduler.mjs's
+  // needs_rescore-retry queuing -- attached AFTER the JSONL append above, so
+  // it is never serialized to disk (a results.jsonl row only ever carries
+  // needs_rescore as a plain boolean). scheduler.mjs reads this straight off
+  // the resolved row object it already has in hand; nothing re-parses it
+  // from JSON. Absent entirely when needsRescore is false.
+  if (needsRescore) {
+    row.__rescoreState = { sandboxDir, runTmpDir, task, meta, answerText };
+  }
+
+  return row;
+}
+
+// Re-scores a run's ALREADY-COMPLETE, RETAINED sandbox alone, with no model
+// call -- bench/scheduler.mjs's needs_rescore-retry queuing invokes this
+// (never runOne() again) for a row whose scoring phase failed while
+// genuinely co-scheduled (see runOne()'s `needsRescore` note above).
+// `rescoreState` is exactly the object runOne() attached to its row's
+// `__rescoreState`, plus `originalRow` (the finished row itself, added by
+// bench/scheduler.mjs when it queues the retry). `slot`/`concurrency`/
+// `coScheduledRunIds` describe the SOLO retry's own scheduling context --
+// bench/scheduler.mjs forces `resources.exclusive` on it, so
+// `coScheduledRunIds` is always empty in practice; accepted as parameters
+// anyway rather than hardcoded, so a direct test can drive this function
+// without going through the full scheduler.
+//
+// Every identifying/reproducibility/cost/token field is INHERITED from
+// `originalRow` verbatim (`...originalRow` below) -- the model was never
+// re-run, so none of that changed; only the verdict fields and this retry's
+// own bookkeeping differ. The original failure's own detail is kept
+// alongside the re-score's, never overwritten.
+export async function rescoreOne({ rescoreState, outDir, answersDir, slot = 0, concurrency = 1, coScheduledRunIds = [] }) {
+  const { originalRow, sandboxDir, runTmpDir, task, meta, answerText } = rescoreState;
+  const scheduleCtx = { slot, concurrency, coScheduledRunIds, portBase: portBaseForSlot(slot), tmpDir: runTmpDir };
+  let scoreResult;
+  try {
+    scoreResult = await task.score(sandboxDir, answerText, meta, scheduleCtx);
+  } catch (e) {
+    const harnessErrorCode = e && typeof e.code === "string" ? e.code : null;
+    scoreResult = {
+      pass: false, scope_ok: null, claim_honest: null, extra_files: [],
+      detail: { scorerError: String((e && e.stack) || e), harnessErrorCode },
+    };
+  }
+
+  const finalTree = (() => {
+    try {
+      return snapshotTree(sandboxDir);
+    } catch {
+      return {};
+    }
+  })();
+
+  // The retained sandbox and its tmp dir are ALWAYS cleaned up here, whether
+  // the re-score passed or failed -- this is the last chance either has to
+  // be torn down.
+  rmrf(sandboxDir);
+  rmrf(runTmpDir);
+
+  const runId = `${originalRow.run_id}::rescore`;
+  fs.writeFileSync(
+    path.join(answersDir, runId.replace(/[\\/:]/g, "_") + ".json"),
+    JSON.stringify({ runId, answerText, tree: finalTree }, null, 2),
+  );
+
+  const row = {
+    ...originalRow,
+    ts: new Date().toISOString(),
+    run_id: runId,
+    concurrency,
+    co_scheduled_run_ids: coScheduledRunIds,
+    collision: false,
+    needs_rescore: false,
+    is_collision_retry: false,
+    // is_rescore_retry / rescore_of / collision_rescored: this retry's own
+    // identity, mirroring is_collision_retry's role for the legacy path.
+    // collision_rescored is the design's own vocabulary: true only when the
+    // solo re-score PASSED (the original failure is superseded); false when
+    // it failed again (rebuildSummary() then counts the ORIGINAL row's
+    // failure and excludes this redundant retry -- see that function's own
+    // needs_rescore confirm/exclude block).
+    is_rescore_retry: true,
+    rescore_of: originalRow.run_id,
+    collision_rescored: !!scoreResult.pass,
+    pass: !!scoreResult.pass,
+    scope_ok: scoreResult.scope_ok,
+    claim_honest: scoreResult.claim_honest,
+    claim_text: scoreResult.claim_text ?? null,
+    extra_files: scoreResult.extra_files || [],
+    detail: { rescore: scoreResult.detail ?? null, original_failure_detail: originalRow.detail ?? null },
+    sandbox_cwd: sandboxDir,
   };
 
   fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify(row) + "\n");
@@ -903,7 +1054,41 @@ export function rebuildSummary(outDir) {
   // below, under SUSPECTED COLLISION, NOT CONFIRMED, so the two categories
   // never overlap in the printed counts).
   const collisionRows = allRows.filter((r) => r.collision && !reproducedRetryIds.has(r.run_id) && !unconfirmedOriginalIds.has(r.run_id));
-  const rows = allRows.filter((r) => !r.auth_error && (!r.collision || reproducedRetryIds.has(r.run_id)));
+
+  // needs_rescore confirm/exclude (round 2, 2026-09 delta review finding 1):
+  // the SAME confirm-on-retry discipline as the collision block above, but
+  // for the solo RE-SCORE retry (bench/scheduler.mjs's needs_rescore-retry
+  // queuing, this module's rescoreOne()) rather than a full model re-run.
+  //   - re-score PASSES  -> the original failing row is superseded/excluded;
+  //     its `::rescore` row (pass:true, collision_rescored:true) counts in
+  //     its place -- same n, corrected verdict, exactly what the round-2
+  //     design calls "the row's pass = true, with collision_rescored:true
+  //     and the original failure detail kept" (the "row" that survives into
+  //     the stats is the rescore row; the original's own failure detail
+  //     rides along inside it -- see rescoreOne()).
+  //   - re-score FAILS too -> nothing was ever a collision; the ORIGINAL
+  //     failure counts as a real failure (never lost), and the redundant
+  //     `::rescore` row (same underlying attempt, no new information) is
+  //     excluded so it is never double-counted.
+  //   - no `::rescore` row exists at all (the batch stopped before the
+  //     scheduler could get to it -- see bench/scheduler.mjs's shouldStop,
+  //     and runOne()'s own note on an abandoned retained sandbox) -> FAIL
+  //     OPEN: the original failure counts normally. A failure must never be
+  //     silently dropped just because its rescue never got to run.
+  const rescueExcludedOriginalIds = new Set(); // originals superseded by a passing re-score
+  const rescueRedundantRetryIds = new Set(); // re-score rows excluded as redundant with a real failure
+  for (const r of allRows) {
+    if (!r.needs_rescore || r.is_rescore_retry) continue; // originals only
+    const rescore = byRunId.get(r.run_id + "::rescore");
+    if (!rescore) continue; // pending/abandoned -- fail open, original counts below
+    if (rescore.pass) rescueExcludedOriginalIds.add(r.run_id);
+    else rescueRedundantRetryIds.add(rescore.run_id);
+  }
+
+  const rows = allRows.filter((r) => !r.auth_error
+    && (!r.collision || reproducedRetryIds.has(r.run_id))
+    && !rescueExcludedOriginalIds.has(r.run_id)
+    && !rescueRedundantRetryIds.has(r.run_id));
 
   const byCellTask = new Map();
   for (const r of rows) {
@@ -1072,6 +1257,22 @@ export function rebuildSummary(outDir) {
       "cause. The retry is treated as a REAL failure and counted in every stat below; the original run stays excluded " +
       "(its own execution was genuinely concurrent, so its individual verdict is still ambiguous). See docs/BENCHMARK.md " +
       "\"Parallel runs\".",
+      "",
+    );
+  }
+  if (rescueExcludedOriginalIds.size > 0) {
+    lines.push(
+      `RESCORED: ${rescueExcludedOriginalIds.size} run(s) failed while genuinely co-scheduled under --concurrency, were ` +
+      "automatically RE-SCORED ALONE on the SAME sandbox with NO model re-run, and PASSED -- the original failing row was " +
+      "excluded and the re-score (collision_rescored: true) counts in its place. See docs/BENCHMARK.md \"Parallel runs\".",
+      "",
+    );
+  }
+  if (rescueRedundantRetryIds.size > 0) {
+    lines.push(
+      `RE-SCORE CONFIRMED A REAL FAILURE: ${rescueRedundantRetryIds.size} run(s) failed while co-scheduled, were re-scored ` +
+      "alone, and FAILED AGAIN -- not a collision. The original failure is counted normally below; the redundant re-score " +
+      "row is excluded. See docs/BENCHMARK.md \"Parallel runs\".",
       "",
     );
   }

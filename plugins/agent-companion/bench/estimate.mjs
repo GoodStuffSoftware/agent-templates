@@ -59,8 +59,16 @@ function median(nums) {
 // the shipped seed's `families` -- so mediansFor() below can treat "local
 // history" and "seed" identically. budget_exhausted, auth_error and
 // collision rows are excluded (they never reflect a genuine completed run's
-// time/cost). Never throws: a machine with no history at all yields
-// `{ families: {} }`, not an error -- this is expected on a fresh install.
+// time/cost). is_rescore_retry rows are excluded too (round 2, 2026-09 delta
+// review): bench/runner.mjs's rescoreOne() INHERITS its cost/token/duration
+// fields verbatim from the original row it re-scores (no model call was
+// made, so nothing about spend actually changed) -- counting both would
+// double-count that one real run's cost/time. The ORIGINAL row (whether it
+// needed a re-score or not) is never excluded here; its cost/tokens are
+// genuine regardless of which way its pass/fail verdict ultimately landed
+// in rebuildSummary(). Never throws: a machine with no history at all
+// yields `{ families: {} }`, not an error -- this is expected on a fresh
+// install.
 export function loadLocalHistory({ resultsRoot } = {}) {
   const root = resultsRoot || path.join(dataDir(), "benchmarks");
   const families = {};
@@ -86,7 +94,7 @@ export function loadLocalHistory({ resultsRoot } = {}) {
       } catch {
         continue;
       }
-      if (row.terminal_reason === "budget_exhausted" || row.auth_error || row.collision) continue;
+      if (row.terminal_reason === "budget_exhausted" || row.auth_error || row.collision || row.is_rescore_retry) continue;
       const family = row.task_family || "other";
       const model = row.requested_model || "unknown";
       const effort = row.requested_effort || "none";

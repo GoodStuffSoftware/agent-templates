@@ -39,7 +39,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CELLS, TASKS, TASK_FAMILIES, resolveList, runOne, rebuildSummary, defaultResultsRoot,
+  CELLS, TASKS, TASK_FAMILIES, resolveList, runOne, rescoreOne, rebuildSummary, defaultResultsRoot,
   checkIsolateHomePreflight, formatRunLine, authErrorAbortMessage, scaledMaxBudgetUsd,
   harnessErrorRow, cliJudgeCaller, taskFamilyOf,
 } from '../bench/runner.mjs';
@@ -328,7 +328,7 @@ export function buildGlobalRunPlan({ cellIds, taskIds, tasksMap, reps, repStart 
 // own `shouldStop` contract), and the caller writes the partial summary
 // exactly as it always has for a per-cell stop.
 export async function runGlobalPool({
-  plan, concurrency, canAfford, outDir, answersDir, tasksMap, args, judgeOpt, runOneImpl = runOne,
+  plan, concurrency, canAfford, outDir, answersDir, tasksMap, args, judgeOpt, runOneImpl = runOne, rescoreOneImpl = rescoreOne,
 }) {
   let stopReason = null;
   const launch = async (run, ctx) => {
@@ -337,6 +337,26 @@ export async function runGlobalPool({
     const task = tasksMap[run.taskId];
     const t0 = Date.now();
     const tag = ctx.concurrency > 1 ? ` [slot ${ctx.slot}/${ctx.concurrency}]` : '';
+    // Round 2 fix: a needs_rescore retry (bench/scheduler.mjs) re-scores its
+    // retained sandbox alone -- NO model call, never runOneImpl. Dispatched
+    // BEFORE the normal path below, on the `isRescoreRetry` flag
+    // bench/scheduler.mjs stamped onto the retry run it queued.
+    if (run.isRescoreRetry) {
+      process.stdout.write(`[${new Date().toISOString()}] RE-SCORE (solo) ${run.retryOf}${tag} ... `);
+      try {
+        const row = await rescoreOneImpl({
+          rescoreState: run.rescoreState, outDir, answersDir,
+          slot: ctx.slot, concurrency: ctx.concurrency, coScheduledRunIds: ctx.coScheduledRunIds,
+        });
+        process.stdout.write(`pass=${row.pass} collision_rescored=${!!row.collision_rescored} (${Date.now() - t0}ms)\n`);
+        return row;
+      } catch (e) {
+        process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
+        const errRow = harnessErrorRow({ cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e });
+        fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(errRow) + '\n');
+        return errRow;
+      }
+    }
     process.stdout.write(`[${new Date().toISOString()}] START ${cellId} / ${run.taskId} / rep${run.rep}${tag} ... `);
     try {
       const row = await runOneImpl({

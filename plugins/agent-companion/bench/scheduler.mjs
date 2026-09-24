@@ -16,9 +16,14 @@
 //      before every launch (RAM changes as runs start/stop).
 //   3. scheduleRuns()       -- the actual async admission-control loop: pulls
 //      runnable, non-conflicting, affordable runs off the queue up to
-//      `concurrency`, and on a `collision` result auto-queues ONE solo retry
-//      (forced `resources.exclusive`, so the scheduler itself guarantees it
-//      runs alone -- no separate "retry" code path needed).
+//      `concurrency`, and auto-queues ONE solo retry (forced
+//      `resources.exclusive`, so the scheduler itself guarantees it runs
+//      alone -- no separate "retry" code path needed) whenever a finished run
+//      needs one: a `collision` result gets a full re-run (a fresh sandbox,
+//      a fresh model call -- only reachable pre-model / not-co-scheduled,
+//      see classifyCollision()'s round-2 banner below), and a `needs_rescore`
+//      result gets a solo RE-SCORE of its SAME retained sandbox instead (no
+//      model call at all -- bench/runner.mjs's rescoreOne()).
 //
 // See bench/task-packs/FORMAT.md ("Resource declarations") for the
 // manifest.resources schema packs use to declare this, and
@@ -106,6 +111,24 @@ export function makeCapacityGate({ perAgentMB = 350, headroomGB = null } = {}) {
 // something an LLM or a human wrote. bench/runner.mjs's runOne() extracts
 // that code (harnessErrorCode) from the caught exception and passes ONLY
 // that here; it never passes stdout/stderr/the model's answer text at all.
+//
+// ROUND 2 NARROWING (2026-09, Track B delta review finding 1): a REAL task
+// pack's score() never throws at all -- its hidden test catches its own
+// subprocess's failure and returns a plain `{ pass: false, detail }` (the
+// dominant real-world "catches everything" style, FORMAT.md's "Hidden test
+// contract") -- so this structural-`.code` signal is dead code for that
+// shape no matter how it's read. classifyCollision()/this thrown-`.code`
+// path is therefore now used ONLY for the case where the run was NOT
+// genuinely co-scheduled (bench/runner.mjs's `wasCoScheduled`) -- a solo
+// `--concurrency 1` run can still collide with a leftover process from an
+// earlier crashed run, and there is no "same sandbox, re-score alone" rescue
+// available there (nothing else was ever running to blame), so a full model
+// re-run is still the right response. Every OTHER scoring-phase failure that
+// happened while genuinely co-scheduled -- structural-coded or an ordinary
+// returned `pass: false`, it makes no difference now -- is instead queued
+// for a SOLO RE-SCORE of the SAME retained sandbox (`needs_rescore` below),
+// never a model re-run. See bench/runner.mjs's `rescoreOne()` and
+// docs/BENCHMARK.md "Parallel runs" -> "Collision handling".
 // ---------------------------------------------------------------------------
 
 export const COLLISION_ERROR_CODES = new Set([
@@ -246,6 +269,10 @@ export async function scheduleRuns({
     onEvent({ type: 'finish', runId: settled.id, row });
 
     if (row.collision && !finishedEntry.run.isRetry) {
+      // Legacy full re-run retry -- ONLY reachable now for the pre-model /
+      // not-co-scheduled case (see classifyCollision()'s round-2 banner
+      // above). Requeues the ORIGINAL run (a fresh sandbox, a fresh model
+      // call), forced exclusive.
       const retryRun = {
         ...finishedEntry.run,
         id: `${finishedEntry.run.id}::retry`,
@@ -258,6 +285,31 @@ export async function scheduleRuns({
       };
       queue.push(retryRun);
       onEvent({ type: 'collision-retry-queued', runId: settled.id, retryId: retryRun.id });
+    } else if (row.needs_rescore && !finishedEntry.run.isRetry) {
+      // Round 2 fix: a scoring-phase failure that happened while genuinely
+      // co-scheduled. The model's sandbox work is already complete and
+      // isolated (bench/runner.mjs's runOne() deliberately did NOT tear down
+      // its sandbox for this row -- see that function's own note), so the
+      // retry re-scores that SAME sandbox alone -- never a new sandbox, never
+      // a new model call. `rescoreState` is the payload runOne() attached to
+      // `row.__rescoreState`; `originalRow` (the row itself) rides along so
+      // bench/runner.mjs's rescoreOne() can inherit every identifying/
+      // reproducibility/cost field from it (the model was never re-run, so
+      // none of that changed) and keep the original failure's detail on
+      // record. Forced exclusive for the same reason as the legacy retry
+      // above -- the whole point is to prove the failure was really about
+      // sharing the machine, by removing the sharing.
+      const retryRun = {
+        ...finishedEntry.run,
+        id: `${finishedEntry.run.id}::rescore`,
+        isRetry: true,
+        isRescoreRetry: true,
+        retryOf: finishedEntry.run.id,
+        rescoreState: { ...(row.__rescoreState || {}), originalRow: row },
+        resources: { ...(finishedEntry.run.resources || {}), exclusive: true },
+      };
+      queue.push(retryRun);
+      onEvent({ type: 'rescore-retry-queued', runId: settled.id, retryId: retryRun.id });
     }
   }
 

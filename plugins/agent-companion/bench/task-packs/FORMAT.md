@@ -157,30 +157,48 @@ behavior against real (not mocked) port binds:
 `tests/fixtures/bench-parallel/port-base-task.mjs` (binds
 `BENCH_PORT_BASE`, `resources: {}`, runs concurrently with itself).
 
-**Collision, despite a correct declaration.** When a pack's own `score()` (or
-`setup()`) throws a genuine OS-level "this resource is already held" error
-(`EADDRINUSE`, a lock file's `EEXIST`/`EBUSY`, ...), `bench/runner.mjs`
-extracts the STRUCTURAL error `.code` Node itself attached to that exception
-and hands ONLY that code to `bench/scheduler.mjs`'s `classifyCollision()` --
-never the model's answer text or the exception's message string, both of
-which are authored prose that can coincidentally contain a collision-shaped
-substring without any real collision happening (a model describing a bug it
-fixed, or a hidden-test assertion quoting an expected error string). A
-`collision: true` row is excluded from `pass_rate`/every other stat in
-`summary.md` (same treatment `auth_error` gets) and automatically re-run
-exactly once, ALONE (the retry is queued with `resources.exclusive` forced
-`true`). Both rows are kept in `results.jsonl` (`is_collision_retry` marks
-the retry).
+**Collision, despite a correct declaration.** Two mechanisms, chosen by WHEN
+the collision happened -- full detail and worked examples in
+`docs/BENCHMARK.md` "Parallel runs" -> "Collision handling"; summary here:
 
-**Confirmation.** The exclusion above only applies once the collision is
-CONFIRMED: the solo retry must NOT reproduce the same structural error code.
-If it does -- the task fails this way even running completely alone -- the
-scheduler was never the cause, so the retry is reclassified as a REAL
-failure and counted normally; the original row stays excluded (its own
-execution was genuinely concurrent, so its individual verdict is still
-ambiguous) but `summary.md` labels it "suspected, not confirmed" rather than
-folding it into the confirmed-collision count. A failure that reproduces
-solo is never lost from pass-rate math.
+- **Before the model's work completed** (`setup()` threw, or `score()` threw
+  while NOT genuinely co-scheduled): `bench/runner.mjs` extracts the
+  STRUCTURAL error `.code` Node itself attached to the exception
+  (`EADDRINUSE`, a lock file's `EEXIST`/`EBUSY`, ...) and hands ONLY that
+  code to `bench/scheduler.mjs`'s `classifyCollision()` -- never the model's
+  answer text or the exception's message string, both of which are authored
+  prose that can coincidentally contain a collision-shaped substring without
+  any real collision happening. A `collision: true` row is excluded from
+  `pass_rate`/every other stat in `summary.md` (same treatment `auth_error`
+  gets) and automatically re-run exactly once, ALONE, with a FRESH sandbox
+  and model call (`resources.exclusive` forced `true`). `is_collision_retry`
+  marks the retry.
+- **After the model's work completed** (a REAL pack's `score()` normally,
+  since its hidden test's own "catch everything" style never throws at all
+  -- see "Hidden test contract" below): a run that FAILS while genuinely
+  co-scheduled is marked `needs_rescore: true`, its sandbox is deliberately
+  KEPT, and the scheduler queues a solo retry that re-runs ONLY `score()`
+  against that SAME sandbox -- never the model. `collision_rescored: true`
+  on the `<run_id>::rescore` row means the re-score passed (the original is
+  superseded); `false` means it failed too (the original failure counts, the
+  retry is excluded as redundant). This is the round-2 fix for the finding
+  that the pre-model path above was dead code for every real pack.
+
+**Confirmation.** Either mechanism's exclusion only applies once CONFIRMED:
+the solo retry must NOT reproduce the same failure. If it does -- the task
+fails this way even running completely alone -- the retry is reclassified as
+a REAL failure and counted normally; the original row stays excluded (its
+own execution was genuinely concurrent, so its individual verdict is still
+ambiguous) but `summary.md` labels it accordingly rather than folding it
+into the confirmed-collision/rescore count. A failure that reproduces solo
+is never lost from pass-rate math.
+
+**Coverage gap.** Neither mechanism sees a collision the MODEL's own
+in-session commands hit while doing its own work (e.g. its own test run,
+before the harness ever reaches `score()`) -- that is invisible to both, and
+shows up only in the model's own transcript/answer. Bind inside
+`[BENCH_PORT_BASE, BENCH_PORT_BASE + 200)` (below) rather than a hardcoded
+port to avoid it in the first place.
 
 ## Hidden test contract
 
