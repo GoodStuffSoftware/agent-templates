@@ -219,6 +219,14 @@ test('a stale lock left by a crashed writer is broken; no lock or temp file surv
   assert.deepEqual(readdirSync(files().dir).sort(), ['routing-profile.journal.jsonl', 'routing-profile.json']);
 });
 
+test('F5 at write: a haiku row on an elevated type needs --waive-floor elevated (P2)', () => {
+  freshRoot('haiku-f5');
+  expectCode(() => store.setRow('large-refactor', { model: 'haiku', now: NOW }), 'refused');
+  assert.throws(() => store.setRow('large-refactor', { model: 'haiku', now: NOW }), /F5: haiku takes no effort parameter, so it cannot meet the elevated floor \(high\); pass --waive-floor elevated/);
+  assert.equal(store.setRow('large-refactor', { model: 'haiku', waiveFloor: 'elevated', now: NOW }).revision, 1);
+  assert.equal(store.setRow('verify', { model: 'haiku', now: NOW }).revision, 2, 'a routine type needs no waiver');
+});
+
 // S2 review P1/P8: the writer's lock is the shared helper (lib/file-lock.mjs).
 // Stat-then-unlink broke a LIVE writer's lock (duplicate revisions, a lost
 // set, a corrupt journal), and a killed writer's lock blocked for 30 s.

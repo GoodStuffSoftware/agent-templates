@@ -268,6 +268,30 @@ test('without a waiver, F5 raises a hand-edited elevated row below high (floors 
   assert.equal(r.waiver, null);
 });
 
+// S2 review P2: raiseEffort() cannot raise a model that takes no effort, so
+// a haiku row on an elevated type used to skip F5 entirely. Such a model
+// counts as BELOW the floor: the row is skipped unless it carries an honoured
+// waiver, and when it does, the waived floor is recorded.
+test('F5: a haiku row on an elevated type is skipped without an honoured waiver', () => {
+  for (const extra of [{}, { waivesFloor: 'elevated', source: 'benchmark' }]) {
+    writeProfile(profile({ 'large-refactor': row('haiku', null, extra) }));
+    const r = ctx.resolveRoute({ type: 'large-refactor', now: BEFORE });
+    assert.notEqual(r.layer, 'profile', JSON.stringify(extra));
+    assert.match(r.skipped.find((x) => x.layer === 'profile').reason, /^F5: haiku takes no effort parameter, so it cannot meet the elevated floor \(high\)/);
+  }
+});
+
+test('F5: a haiku row on an elevated type with an honoured waiver applies, and the waived floor is recorded', () => {
+  writeProfile(profile({ 'large-refactor': row('haiku', null, { waivesFloor: 'elevated' }) }));
+  const r = ctx.resolveRoute({ type: 'large-refactor', now: BEFORE });
+  assert.equal(r.layer, 'profile');
+  assert.equal(label(r), 'haiku');
+  assert.deepEqual(r.floorsApplied.map((f) => [f.floor, !!f.waived]), [['F5', true]]);
+  // A routine type is unaffected: haiku there needs no waiver.
+  writeProfile(profile({ verify: row('haiku', null) }));
+  assert.equal(ctx.resolveRoute({ type: 'verify', now: BEFORE }).layer, 'profile');
+});
+
 test('a waiver never reaches F1: a critical declaration still floors a waiving row (or ignores it)', () => {
   writeProfile(profile({ integration: row('sonnet', 'medium', { waivesFloor: 'elevated' }) }));
   const r = ctx.resolveRoute({ type: 'integration', consequence: 'critical', now: BEFORE });

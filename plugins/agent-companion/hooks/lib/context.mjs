@@ -546,16 +546,28 @@ export function profileRowRefusal(type, row, { typeDef = null, consequence, now,
       return `F1: critical consequence needs effort at least ${cons.effortFloor}; the row names ${effort || '(none)'}`;
     }
   }
+  // F5 on a model that takes no effort parameter (haiku): no effort can be
+  // raised to the elevated floor, so the row counts as BELOW it (S2 review
+  // P2), not as meeting it. The writer requires the waiver; the reader skips
+  // the row unless it carries an honoured one (operator-observed).
+  const elevatedFloor = ((cfg.consequence || {}).elevated || {}).effortFloor;
+  const noEffortBelowFloor = c === 'elevated' && !!elevatedFloor && !rankedEffortsFor(model).length;
+  const waiverHonoured = row.waivesFloor === 'elevated' && row.source === 'operator-observed';
   if (mode === 'write') {
     if (row.waivesFloor === 'elevated' && row.source !== 'operator-observed') {
       return `F5: waivesFloor "elevated" is honoured only on an operator-observed row (this row's source is ${row.source})`;
     }
     if (row.waivesFloor === 'elevated' && c !== 'elevated') return `F5: nothing to waive — ${type} is not elevated consequence`;
-    const floor = ((cfg.consequence || {}).elevated || {}).effortFloor;
-    if (c === 'elevated' && !row.waivesFloor && floor && raiseEffort(model, effort, floor) !== effort) {
-      return `F5: effort '${effort || '(none)'}' is below the elevated floor (${floor}); ` +
-        (row.source === 'operator-observed' ? 'pass --waive-floor elevated to waive it on this row' : 'only an operator-observed row may waive it');
+    const waiveHint = row.source === 'operator-observed' ? 'pass --waive-floor elevated to waive it on this row' : 'only an operator-observed row may waive it';
+    if (noEffortBelowFloor && !row.waivesFloor) {
+      return `F5: ${model} takes no effort parameter, so it cannot meet the elevated floor (${elevatedFloor}); ${waiveHint}`;
     }
+    if (c === 'elevated' && !row.waivesFloor && elevatedFloor && raiseEffort(model, effort, elevatedFloor) !== effort) {
+      return `F5: effort '${effort || '(none)'}' is below the elevated floor (${elevatedFloor}); ${waiveHint}`;
+    }
+  } else if (noEffortBelowFloor && !waiverHonoured) {
+    return `F5: ${model} takes no effort parameter, so it cannot meet the elevated floor (${elevatedFloor}); ` +
+      'the row applies only with an honoured waiver (waivesFloor "elevated" on an operator-observed row)';
   }
   return '';
 }
@@ -816,6 +828,10 @@ function applyFloors(r, { consequence, parity, writer, waive = null, now }) {
         floorsApplied.push({ floor: label, raised: `effort ${effort || '(none)'} -> ${raised}` });
         effort = raised;
       }
+    } else if (waive === 'elevated' && consequence === 'elevated' && !rankedEffortsFor(model).length) {
+      // A no-effort model is below the floor (P2); an honoured waiver is
+      // what lets it run, so it is recorded like any other waived floor.
+      floorsApplied.push({ floor: label, waived: `${classifyModel(model).alias || model} takes no effort, kept below ${cons.effortFloor} (operator-observed profile row waives F5)` });
     }
   }
   return { model, effort, floorsApplied };
