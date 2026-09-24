@@ -184,14 +184,30 @@ the collision happened -- full detail and worked examples in
   retry is excluded as redundant). This is the round-2 fix for the finding
   that the pre-model path above was dead code for every real pack.
 
-**Confirmation.** Either mechanism's exclusion only applies once CONFIRMED:
-the solo retry must NOT reproduce the same failure. If it does -- the task
-fails this way even running completely alone -- the retry is reclassified as
-a REAL failure and counted normally; the original row stays excluded (its
-own execution was genuinely concurrent, so its individual verdict is still
-ambiguous) but `summary.md` labels it accordingly rather than folding it
-into the confirmed-collision/rescore count. A failure that reproduces solo
-is never lost from pass-rate math.
+**Confirmation.** Either mechanism's exclusion only applies once CONFIRMED,
+but the two mechanisms pair their original/retry rows OPPOSITELY, because a
+full re-run gets a fresh answer while a re-score reuses the same one:
+
+- **Collision (full re-run).** The solo retry must NOT reproduce the same
+  failure to confirm a collision. If it reproduces -- the task fails this
+  way even running completely alone -- the retry is reclassified as a REAL
+  failure and counted normally; the ORIGINAL row stays excluded (its own
+  execution was genuinely concurrent, so its individual verdict is still
+  ambiguous) but `summary.md` labels it `SUSPECTED COLLISION, NOT CONFIRMED`
+  rather than folding it into the confirmed-collision count.
+- **Rescore (solo re-score, same sandbox/answer).** The solo re-score must
+  PASS to confirm the original failure was a collision. If it fails too --
+  the same answer, scored alone, still fails -- nothing was ever a
+  collision: the ORIGINAL failing row counts normally (a real failure is
+  never lost), and the `<run_id>::rescore` row is excluded as redundant
+  (the same underlying attempt, no new information). `summary.md` labels
+  this `RE-SCORE CONFIRMED A REAL FAILURE`. Only when the re-score PASSES is
+  the original excluded (superseded) and the `::rescore` row counts in its
+  place, labelled `RESCORED`.
+
+A failure that reproduces solo -- under either mechanism -- is never lost
+from pass-rate math. See `docs/BENCHMARK.md` "Collision handling" for the
+full worked-through version of both tables.
 
 **Coverage gap.** Neither mechanism sees a collision the MODEL's own
 in-session commands hit while doing its own work (e.g. its own test run,

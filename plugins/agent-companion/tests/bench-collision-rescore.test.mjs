@@ -39,6 +39,7 @@ import { tmpdir } from 'node:os';
 import { scheduleRuns } from '../bench/scheduler.mjs';
 import { runOne, rescoreOne, rebuildSummary } from '../bench/runner.mjs';
 import subprocessTask, { SUBPROCESS_FIXED_PORT } from './fixtures/bench-parallel/subprocess-collision-catching-task.mjs';
+import { PLUGIN_ROOT } from './helpers.mjs';
 
 const CELL = { model: 'claude-sonnet-5', effort: null };
 const SUB_TASK_ID = 'subprocess-collision';
@@ -270,6 +271,35 @@ test('neither the original needs_rescore row nor its ::rescore row ever carries 
     await closeHolder(holder).catch(() => {});
     rmSync(outDir, { recursive: true, force: true });
   }
+});
+
+// --- Round 3 finding 2: FORMAT.md's "Confirmation" section had the ----------
+// rescore exclude/count pairing BACKWARDS relative to docs/BENCHMARK.md and
+// the actual rebuildSummary() behavior above (Scenario A/B): for the
+// collision (full re-run) mechanism, a reproducing retry is counted and the
+// ORIGINAL is excluded -- but for the rescore mechanism it's the opposite:
+// a failing re-score means the ORIGINAL counts and the `::rescore` row is
+// excluded as redundant. FORMAT.md described both mechanisms with the
+// collision pairing, which is wrong for rescore.
+test('FORMAT.md "Confirmation" section states the rescore exclude/count pairing correctly (original counts on a failed re-score, not the retry)', () => {
+  const format = readFileSync(join(PLUGIN_ROOT, 'bench', 'task-packs', 'FORMAT.md'), 'utf8');
+  const section = format.slice(format.indexOf('**Confirmation.**'), format.indexOf('**Coverage gap.**'));
+  assert.ok(section.length > 0, 'the Confirmation section exists between its own heading and Coverage gap');
+  assert.match(
+    section,
+    /it fails too.*ORIGINAL failing row counts normally/is,
+    'a failed re-score must document that the ORIGINAL row counts',
+  );
+  assert.match(
+    section,
+    /rescore.*row is excluded as redundant/is,
+    'a failed re-score must document that the ::rescore row is excluded as redundant',
+  );
+  assert.doesNotMatch(
+    section,
+    /Either mechanism's exclusion only applies once CONFIRMED:\nthe solo retry must NOT reproduce/,
+    'the old text applied the collision-only pairing to both mechanisms uniformly -- must be gone',
+  );
 });
 
 console.log('bench-collision-rescore.test.mjs: round 2 solo re-score regression tests defined');
