@@ -85,6 +85,11 @@ Two consequences:
                                           // extra sandbox-relative paths the model is allowed to
                                           // touch/create beyond files[] itself and the guard file
                                           // (finalizeScore's scope check flags anything else)
+  "resources": {                           // OPTIONAL -- see "Resource declarations" below.
+    "fixedPorts": [8080],                  // ports this pack's own work binds to a HARDCODED number
+    "lockFiles": ["/tmp/some.lock"],       // absolute/relative paths a run holds a lock on
+    "exclusive": false                     // true = never co-schedule with ANY other run, whatever it declares
+  },
   "judgeCalibration": {                   // OPTIONAL, only meaningful with rubric.md
     "plantedBad": [                       // known-bad variants of the FIX: each is one
       { "note": "tracked files only",     // find/replace applied to the fix-ref content.
@@ -104,6 +109,62 @@ fault, or language lifted from the fix commit's own message. This is the
 same discipline `bench/PROCESS-NOTES.md`'s real-history ADR documents for
 the pre-baked `real-*` tasks; `leakPhrases` is the automated tripwire on
 top of writing it carefully.
+
+## Resource declarations
+
+`manifest.resources` (optional) tells `bench/scheduler.mjs` what this pack's
+own work (the model's run, or its held-out test) touches at the OS level, so
+`scripts/benchmark.mjs --concurrency N` never co-schedules two runs that
+would collide — see `docs/BENCHMARK.md` "Parallel runs".
+
+```jsonc
+"resources": {
+  "fixedPorts": [8080],           // ports bound to a HARDCODED number (not derived from
+                                   // BENCH_PORT_BASE, see below) -- any two runs (same pack
+                                   // or different) declaring an overlapping port never
+                                   // run at the same time.
+  "lockFiles": ["/tmp/some.lock"], // paths (normalized case/slash-insensitively) a run holds
+                                   // a lock on -- same exclusion rule as fixedPorts.
+  "exclusive": true                // this run is NEVER co-scheduled with anything else,
+                                   // regardless of what the other run declares. Reach for
+                                   // this only when the pack's work is not expressible as
+                                   // ports/lock files (e.g. it assumes it is the only thing
+                                   // touching a shared external resource).
+}
+```
+
+**No declaration at all** (the `resources` key absent from the manifest,
+not merely empty) is the conservative default: the scheduler treats it as
+**exclusive with other runs of the SAME pack id**, so two reps of an
+unreviewed pack are never accidentally run in parallel, but it never blocks
+a DIFFERENT pack from running alongside it. A pack that has been reviewed
+and is genuinely safe to run concurrently with itself opts out by declaring
+`"resources": {}` explicitly (even empty) — see the fixture packs below.
+
+**`BENCH_PORT_BASE`**: every run gets one exported to its environment (and,
+for a built-in task or a pack's own scorer, passed as the 4th argument to
+`setup()`/`score()`) — a base port number reserved for that run's
+concurrency SLOT, never shared with another run active at the same time. A
+pack whose work needs a port but does not care WHICH one should bind
+somewhere in `[BENCH_PORT_BASE, BENCH_PORT_BASE + 200)` rather than a
+hardcoded number — that is what makes it safe to run alongside another copy
+of itself, and it needs no `resources.fixedPorts` declaration at all (declare
+`"resources": {}` to opt out of the same-pack default above). Two worked
+examples, used by `tests/bench-scheduler.test.mjs` to prove the scheduler's
+behavior against real (not mocked) port binds:
+`tests/fixtures/bench-parallel/fixed-port-task.mjs` (hardcoded port,
+`resources.fixedPorts`, always serialized with itself) and
+`tests/fixtures/bench-parallel/port-base-task.mjs` (binds
+`BENCH_PORT_BASE`, `resources: {}`, runs concurrently with itself).
+
+**Collision, despite a correct declaration.** A run whose spawn/exec error or
+scorer detail matches an OS-level "this resource is already held" shape
+(`EADDRINUSE`, a lock file held, ...) is classified `collision: true`
+(`bench/scheduler.mjs`'s `classifyCollision()`) rather than a model/task
+failure, excluded from `pass_rate`/every other stat in `summary.md`
+(same treatment `auth_error` gets), and automatically re-run exactly once,
+ALONE (the retry is queued with `resources.exclusive` forced `true`). Both
+rows are kept in `results.jsonl` (`is_collision_retry` marks the retry).
 
 ## Hidden test contract
 

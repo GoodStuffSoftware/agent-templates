@@ -40,6 +40,7 @@ import { loadPack, buildTaskFromPack } from '../bench/task-packs/lib.mjs';
 import {
   validateJudgeConfig, checkJudgeEligibility, taskJudgeKey, findTrustedCalibration, calibrateJudge,
 } from '../bench/judge.mjs';
+import { scheduleRuns, makeCapacityGate } from '../bench/scheduler.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -61,6 +62,15 @@ function printHelp() {
                                  families and ids may be mixed. Default: all.
   --reps <N>                    Repetitions per (cell, task). Default: 1.
   --rep-start <N>                First rep number (for resuming a specific rep range). Default: 1.
+  --concurrency <N>              Run up to N (task, rep) runs of the SAME cell in parallel (default 1,
+                                 fully sequential -- identical behavior to before this flag existed).
+                                 Runs whose declared resources conflict (bench/task-packs/FORMAT.md
+                                 "Resource declarations") are never co-scheduled; a free-RAM check
+                                 (bench/scheduler.mjs's makeCapacityGate(), --per-agent-mb below) gates
+                                 every launch. See docs/BENCHMARK.md "Parallel runs".
+  --per-agent-mb <MB>             Per-run memory estimate for the --concurrency capacity gate.
+                                 Default: 350 (scripts/capacity.mjs's own default). Ignored at
+                                 --concurrency 1 (no gate is applied).
   --out-dir <dir>                Results directory. Default: the plugin data dir's
                                  benchmarks/<phase>-<date>/ (see bench/runner.mjs's defaultResultsRoot()).
   --phase <name>                 Phase label used only when --out-dir is omitted (default "pilot"),
@@ -107,6 +117,7 @@ function parseArgs(argv) {
     maxBudgetUsd: null, dryRun: false, batchByCell: false, resume: false, list: false, help: false,
     taskPacks: [], packRepo: null, isolateHome: false,
     judgeModel: null, judgeEffort: null, judgeBudgetUsd: null, judgeCalibrations: null, calibrateJudge: false,
+    concurrency: 1, perAgentMB: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -114,6 +125,8 @@ function parseArgs(argv) {
     else if (a === '--tasks') out.tasks = argv[++i];
     else if (a === '--reps') out.reps = Number(argv[++i]);
     else if (a === '--rep-start') out.repStart = Number(argv[++i]);
+    else if (a === '--concurrency') out.concurrency = Number(argv[++i]);
+    else if (a === '--per-agent-mb') out.perAgentMB = Number(argv[++i]);
     else if (a === '--out-dir') out.outDir = argv[++i];
     else if (a === '--phase') out.phase = argv[++i];
     else if (a === '--max-budget-usd') out.maxBudgetUsd = Number(argv[++i]);
@@ -250,6 +263,9 @@ async function main() {
   } catch (e) {
     usageError(e.message);
   }
+  if (!Number.isInteger(args.concurrency) || args.concurrency < 1) {
+    usageError(`--concurrency must be a positive integer, got "${args.concurrency}"`);
+  }
 
   const cellIds = resolveList(args.cells, CELLS);
   for (const id of cellIds) if (!CELLS[id]) usageError(`unknown cell: "${id}" (--list to see valid cells)`);
@@ -314,6 +330,7 @@ async function main() {
     console.log(`total runs: ${totalRuns}`);
     if (args.maxBudgetUsd != null) console.log(`global --max-budget-usd ceiling: $${args.maxBudgetUsd}`);
     if (args.batchByCell) console.log('batching: one cell per invocation (--batch-by cell)');
+    if (args.concurrency > 1) console.log(`concurrency: ${args.concurrency} parallel (task, rep) runs per cell (see docs/BENCHMARK.md "Parallel runs")`);
     if (args.isolateHome) console.log('--isolate-home: HOME/USERPROFILE will be redirected per run (requires ANTHROPIC_API_KEY)');
     if (judge) {
       console.log(`rubric judge: ${judge.config ? `${judge.config.model}/${judge.config.effort ?? 'none'}` : '(invalid)'}; judged tasks: ${(judge.judgedTasks || []).join(', ') || 'none'}`);
@@ -370,39 +387,78 @@ async function main() {
     }
   }
 
+  // Free-RAM capacity gate for --concurrency > 1 (bench/scheduler.mjs). At
+  // the default --concurrency 1 the gate is never consulted at all -- this
+  // keeps the historical fully-sequential path's behavior byte-for-byte
+  // unchanged, rather than relying on the gate itself always saying yes.
+  const capacityGate = args.concurrency > 1
+    ? makeCapacityGate({ perAgentMB: args.perAgentMB ?? undefined })
+    : null;
+
   for (const cellId of cellsToRun) {
     const cell = CELLS[cellId];
+    // Every (task, rep) for this cell, flattened into one schedulable plan.
+    // --concurrency N runs up to N of these at once, subject to resource
+    // conflicts (FORMAT.md) and the capacity gate above; --concurrency 1
+    // (default) runs them one at a time, in the same order as before.
+    const plan = [];
     for (const taskId of taskIds) {
-      const task = tasksMap[taskId];
       for (let rep = args.repStart; rep < args.repStart + args.reps; rep += 1) {
-        const t0 = Date.now();
-        process.stdout.write(`[${new Date().toISOString()}] START ${cellId} / ${taskId} / rep${rep} ... `);
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          const row = await runOne({
-            cellId, cell, taskId, task, rep, outDir, answersDir,
-            maxBudgetUsdCeiling: args.maxBudgetUsd,
-            isolateHome: args.isolateHome,
-            judge: judgeOpt,
-          });
-          process.stdout.write(formatRunLine(row, Date.now() - t0) + '\n');
-          if (row.auth_error) {
-            console.error(authErrorAbortMessage(row));
-            rebuildSummary(outDir);
-            process.exit(1);
-          }
-        } catch (e) {
-          if (e && e.code === 'JUDGE_REFUSED') {
-            console.error(`\nJUDGE REFUSED: ${e.message}\nAborting the batch (no row written).`);
-            rebuildSummary(outDir);
-            process.exit(1);
-          }
-          process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
-          fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(harnessErrorRow({
-            cellId, cell, taskId, task, rep, error: e,
-          })) + '\n');
-        }
+        plan.push({ id: `${cellId}__${taskId}__rep${rep}`, taskId, rep, resources: tasksMap[taskId].resources });
       }
+    }
+
+    let stopReason = null; // set by launch() on an auth_error or JUDGE_REFUSED -- stops admitting NEW runs
+    const launch = async (run, ctx) => {
+      const task = tasksMap[run.taskId];
+      const t0 = Date.now();
+      const tag = ctx.concurrency > 1 ? ` [slot ${ctx.slot}/${ctx.concurrency}]` : '';
+      process.stdout.write(`[${new Date().toISOString()}] START ${cellId} / ${run.taskId} / rep${run.rep}${tag} ... `);
+      try {
+        const row = await runOne({
+          cellId, cell, taskId: run.taskId, task, rep: run.rep, outDir, answersDir,
+          maxBudgetUsdCeiling: args.maxBudgetUsd,
+          isolateHome: args.isolateHome,
+          judge: judgeOpt,
+          runId: run.id, slot: ctx.slot, concurrency: ctx.concurrency, coScheduledRunIds: ctx.coScheduledRunIds,
+          isCollisionRetry: !!run.isRetry,
+        });
+        process.stdout.write(formatRunLine(row, Date.now() - t0) + '\n');
+        if (row.auth_error && !stopReason) stopReason = { type: 'auth_error', row };
+        return row;
+      } catch (e) {
+        if (e && e.code === 'JUDGE_REFUSED') {
+          if (!stopReason) stopReason = { type: 'judge_refused', message: e.message };
+          return {
+            run_id: run.id, cell: cellId, task: run.taskId, rep: run.rep,
+            pass: false, is_error: true, judge_refused: true, exec_err: e.message,
+          };
+        }
+        process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
+        const errRow = harnessErrorRow({ cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e });
+        fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(errRow) + '\n');
+        return errRow;
+      }
+    };
+
+    // eslint-disable-next-line no-await-in-loop
+    await scheduleRuns({
+      runs: plan,
+      concurrency: args.concurrency,
+      canAfford: capacityGate || (() => true),
+      launch,
+      shouldStop: () => !!stopReason,
+    });
+
+    if (stopReason && stopReason.type === 'auth_error') {
+      console.error(authErrorAbortMessage(stopReason.row));
+      rebuildSummary(outDir);
+      process.exit(1);
+    }
+    if (stopReason && stopReason.type === 'judge_refused') {
+      console.error(`\nJUDGE REFUSED: ${stopReason.message}\nAborting the batch.`);
+      rebuildSummary(outDir);
+      process.exit(1);
     }
 
     if (args.batchByCell) {

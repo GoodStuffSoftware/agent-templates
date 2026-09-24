@@ -50,6 +50,19 @@ either.
   which is an expensive turn, and it says only that something finished, not
   that the output is sane. `--batch-by cell` already hands control back after
   each cell.
+- **Parallel runs within a cell are fine — `--concurrency N`.** This replaces
+  any earlier "one at a time" assumption for THIS benchmark; the FOREGROUND
+  rule above is unchanged (concurrency means several `claude` child
+  processes inside one foreground invocation, never a background job). The
+  scheduler (`bench/scheduler.mjs`) never co-schedules runs whose declared
+  `resources` conflict, gives every run its own `TMP`/`BENCH_PORT_BASE`, and
+  auto-retries a genuine collision (EADDRINUSE, a lock held) alone once,
+  excluded from pass-rate. See docs/BENCHMARK.md "Parallel runs" for the full
+  picture. **Wall-time comparisons must note the concurrency level** (a
+  `duration_ms` under `--concurrency 4` is not comparable to one under
+  `--concurrency 1`) — cite `cost_usd`/`relative_cost_index` as the primary
+  cost signal, since per-cell usage deltas do not isolate cleanly under
+  concurrency.
 - **Never `git stash`.** The stash stack is shared by every worktree and every
   concurrent session. Use a WIP commit, or leave uncommitted work untouched.
 - **Budget caps scale with model price.** Task budgets and `--max-budget-usd`

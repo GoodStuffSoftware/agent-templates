@@ -47,6 +47,7 @@ import { wilsonInterval, passAtK, formatInterval, MIN_N_TO_SEPARATE } from "./st
 import {
   sha256, runJudge, treeDiff, checkJudgeEligibility, assertJudgeCalibrated, makeCliJudgeCaller,
 } from "./judge.mjs";
+import { classifyCollision, portBaseForSlot } from "./scheduler.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Resolve a real, directly-spawnable claude binary. On Windows, "claude"
@@ -372,7 +373,7 @@ export function isAuthError({ json, answerText, stdout, err } = {}) {
   return false;
 }
 
-function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fakeHome }) {
+function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fakeHome, extraEnv }) {
   return new Promise((resolve) => {
     const args = [
       "-p", prompt,
@@ -404,7 +405,13 @@ function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fake
     // callers MUST refuse to start with --isolate-home when no API key is
     // set (see scripts/benchmark.mjs's preflight check). Never copy
     // credential files into the fake home; only env-var auth is supported.
-    const env = { ...process.env };
+    // Per-run isolation for --concurrency > 1 (bench/scheduler.mjs): a
+    // unique TMP/TEMP/TMPDIR and a unique BENCH_PORT_BASE, so two concurrent
+    // runs' own tests/servers never collide on the machine's shared default
+    // temp dir or a hardcoded port. Both are no-ops for a normal
+    // --concurrency 1 run (extraEnv is then just the historical env with no
+    // overrides). See docs/BENCHMARK.md "Parallel runs".
+    const env = { ...process.env, ...(extraEnv || {}) };
     if (isolateHome) {
       env.HOME = fakeHome;
       env.USERPROFILE = fakeHome;
@@ -453,6 +460,10 @@ function runClaude({ cwd, prompt, model, effort, maxBudgetUsd, isolateHome, fake
 export async function runOne({
   cellId, cell, taskId, task, rep, outDir, answersDir, maxBudgetUsdCeiling, isolateHome = false,
   judge = null, runClaudeImpl = runClaude, cliVersion,
+  // Scheduling context (bench/scheduler.mjs's scheduleRuns() supplies these
+  // for --concurrency > 1; a sequential/--concurrency 1 caller can omit all
+  // of them and gets the historical single-slot behavior unchanged).
+  runId: explicitRunId, slot = 0, concurrency = 1, coScheduledRunIds = [], isCollisionRetry = false,
 }) {
   const judgeActive = !!(judge && task.rubric);
   if (judgeActive) {
@@ -468,15 +479,28 @@ export async function runOne({
       throw refuse(e.message);
     }
   }
+  const runId = explicitRunId || (cellId + "__" + taskId + "__rep" + rep);
   const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-" + cellId + "-" + taskId + "-"));
   // Only made (and only cleaned up) when isolateHome is set -- the default
   // path spawns with the real, inherited HOME/USERPROFILE (see runClaude()).
   const fakeHome = isolateHome ? makeFakeHome() : null;
+  // Per-run isolation for parallel runs (bench/scheduler.mjs): a dedicated
+  // TMP/TEMP/TMPDIR sibling to the sandbox (never nested inside it -- a tool
+  // scanning the sandbox for "files the model touched" must never see the
+  // harness's own scratch dir), and a BENCH_PORT_BASE reserved per
+  // concurrency SLOT (not per run), so two runs active at the same time
+  // never share either. Both are harmless at the default --concurrency 1
+  // (slot is always 0, and nothing but this run is ever active).
+  const runTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-tmp-" + cellId + "-" + taskId + "-"));
+  const portBase = portBaseForSlot(slot);
+  const scheduleCtx = { slot, concurrency, coScheduledRunIds, portBase, tmpDir: runTmpDir };
+  const extraEnv = { TMP: runTmpDir, TEMP: runTmpDir, TMPDIR: runTmpDir, BENCH_PORT_BASE: String(portBase) };
   let meta;
   try {
-    meta = task.setup(sandboxDir);
+    meta = task.setup(sandboxDir, scheduleCtx);
   } catch (e) {
     rmrf(sandboxDir);
+    rmrf(runTmpDir);
     if (fakeHome) rmrf(fakeHome);
     throw e;
   }
@@ -514,6 +538,7 @@ export async function runOne({
     maxBudgetUsd: effectiveBudget,
     isolateHome,
     fakeHome,
+    extraEnv,
   });
 
   const answerText = json ? (json.result ?? "") : "";
@@ -523,10 +548,23 @@ export async function runOne({
     // built-in task) or returns a Promise (a task-pack task, whose scorer
     // runs a dynamically-imported hidden-test module) -- awaiting a plain
     // value is a no-op, so this is not a behavior change for existing tasks.
-    scoreResult = await task.score(sandboxDir, answerText, meta);
+    // The 4th arg (scheduleCtx) is new and additive -- every existing task's
+    // score(sandboxDir, answerText, meta) simply ignores it.
+    scoreResult = await task.score(sandboxDir, answerText, meta, scheduleCtx);
   } catch (e) {
     scoreResult = { pass: false, scope_ok: null, claim_honest: null, extra_files: [], detail: { scorerError: String((e && e.stack) || e) } };
   }
+
+  // Collision classification: a run whose spawn/exec error or scorer detail
+  // matches an OS-level "someone else already holds this resource" shape
+  // (EADDRINUSE, a lock file held, ...) never reached a genuine model/task
+  // verdict -- see bench/scheduler.mjs's classifyCollision() and
+  // rebuildSummary()'s exclusion below (the same treatment auth_error gets).
+  // Only meaningful for a run that declared shared resources in the first
+  // place (--concurrency 1's single active run can still "collide" with a
+  // leftover process from a previous crashed run, so this is not gated on
+  // concurrency > 1).
+  const collision = classifyCollision({ err, stdout, stderr, detail: scoreResult && scoreResult.detail });
 
   const finalTree = (() => {
     try {
@@ -583,9 +621,8 @@ export async function runOne({
     }
   }
 
-  const runId = cellId + "__" + taskId + "__rep" + rep;
   fs.writeFileSync(
-    path.join(answersDir, runId + ".json"),
+    path.join(answersDir, runId.replace(/[\\/:]/g, "_") + ".json"),
     JSON.stringify({ runId, answerText, tree: finalTree }, null, 2),
   );
 
@@ -598,14 +635,28 @@ export async function runOne({
   const transcriptHome = isolateHome ? fakeHome : (process.env.HOME || process.env.USERPROFILE || os.homedir());
 
   rmrf(sandboxDir);
+  rmrf(runTmpDir);
   if (fakeHome) rmrf(fakeHome);
 
   const row = {
     ts: new Date().toISOString(),
+    run_id: runId,
     cell: cellId,
     task: taskId,
     task_family: taskFamilyOf(taskId, { task }),
     rep,
+    // Concurrency level this run was launched under, and the OTHER run ids
+    // active at the moment it started -- so a wall-time comparison against
+    // an earlier --concurrency 1 batch can be read correctly (parallel runs
+    // slow each other down; see docs/BENCHMARK.md "Parallel runs").
+    concurrency,
+    co_scheduled_run_ids: coScheduledRunIds,
+    // A collision never reached a genuine model/task verdict (see
+    // classifyCollision() above) -- excluded from pass-rate math by
+    // rebuildSummary(), same treatment as auth_error. is_collision_retry
+    // marks the solo re-run bench/scheduler.mjs automatically queues for it.
+    collision,
+    is_collision_retry: !!isCollisionRetry,
     requested_model: cell.model,
     resolved_model: resolvedModel,
     model_mismatch: resolvedModel !== null && resolvedModel !== cell.model,
@@ -779,7 +830,14 @@ export function rebuildSummary(outDir) {
   // but rebuildSummary() also replays historical results.jsonl files that
   // may carry more from before this fix.
   const authErrorRows = allRows.filter((r) => r.auth_error);
-  const rows = allRows.filter((r) => !r.auth_error);
+  // A collision (bench/scheduler.mjs's classifyCollision(): EADDRINUSE, a
+  // lock file held, ...) never reached a genuine model/task verdict either
+  // -- same exclusion as auth_error, so one unlucky port clash under
+  // --concurrency > 1 can't be misread as a model failure. The scheduler
+  // always queues exactly one solo retry for a collided run (recorded as
+  // its own row, is_collision_retry:true); THAT row is judged normally.
+  const collisionRows = allRows.filter((r) => r.collision);
+  const rows = allRows.filter((r) => !r.auth_error && !r.collision);
 
   const byCellTask = new Map();
   for (const r of rows) {
@@ -929,6 +987,15 @@ export function rebuildSummary(outDir) {
     lines.push(
       `AUTH ERROR: ${authErrorRows.length} run(s) failed authentication (not logged in / 401) and were EXCLUDED from every stat below -- ` +
       "they never reached the model. See docs/BENCHMARK.md \"Preconditions\" before trusting this summary.",
+      "",
+    );
+  }
+  if (collisionRows.length > 0) {
+    const retried = collisionRows.filter((r) => allRows.some((o) => o.run_id === r.run_id + "::retry"));
+    lines.push(
+      `COLLISION: ${collisionRows.length} run(s) hit an OS-level resource collision (EADDRINUSE, a lock file held, ...) ` +
+      `under --concurrency and were EXCLUDED from every stat below -- ${retried.length} were automatically re-run alone. ` +
+      "See docs/BENCHMARK.md \"Parallel runs\".",
       "",
     );
   }

@@ -388,6 +388,66 @@ ones) and that a task-pack extraction never produces a `.git` directory.
 abort, and `--isolate-home`-without-a-key refusal from "Preconditions"
 above.
 
+## Parallel runs
+
+**Parallel runs are fine now.** `scripts/benchmark.mjs --concurrency N` (default
+1, fully sequential — the historical, unchanged behavior) runs up to N
+(task, rep) runs of the SAME cell at once, through `bench/scheduler.mjs`'s
+admission-control scheduler. This replaces any earlier "run one at a time"
+guidance for this benchmark specifically; the general FOREGROUND/no-monitors
+rule under "Operating rules" above still applies unchanged — parallelism
+here means concurrent `claude` child processes inside ONE foreground
+`scripts/benchmark.mjs` invocation, never a background job.
+
+Three safeguards make this safe rather than merely fast:
+
+1. **Per-run isolation.** Every run already gets its own throwaway sandbox
+   (unconditional, see "Sandbox isolation" below). `--concurrency > 1` adds a
+   per-run `TMP`/`TEMP`/`TMPDIR` (a sibling of the sandbox, never nested
+   inside it) and a `BENCH_PORT_BASE` reserved per concurrency SLOT (not per
+   run — a slot is only ever held by one active run), exported to the
+   spawned `claude` process's environment and passed as the 4th argument to
+   a task's/pack's `setup()`/`score()`. A pack that needs a port but does not
+   care which one should bind inside `[BENCH_PORT_BASE, BENCH_PORT_BASE +
+   200)` rather than a hardcoded number — see `bench/task-packs/FORMAT.md`
+   "Resource declarations" and its two worked fixture packs.
+2. **Resource declarations + the scheduler.** `manifest.resources` (or a
+   built-in task's own `resources` field) declares `fixedPorts`, `lockFiles`
+   and/or `exclusive`. The scheduler (`bench/scheduler.mjs`'s
+   `resourcesConflict()`) never co-schedules two runs whose declared
+   resources overlap. A pack that declares nothing at all is treated as
+   exclusive with OTHER RUNS OF THE SAME PACK (conservative default) — a
+   pack that has been reviewed and is genuinely safe to run alongside itself
+   opts out with an explicit `"resources": {}`.
+3. **Collision detection and one automatic solo retry.** A run whose
+   spawn/exec error or scorer detail matches an OS-level "this resource is
+   already held" shape (`EADDRINUSE`, a lock file held, ...) is classified
+   `collision: true` (`bench/scheduler.mjs`'s `classifyCollision()`) rather
+   than a model/task failure. It is excluded from `pass_rate` and every
+   other stat in `summary.md`/`summary.json` — the same treatment
+   `auth_error` gets — and the scheduler automatically re-runs it exactly
+   once, ALONE (the retry is queued with `resources.exclusive` forced
+   `true`, so the scheduler itself guarantees isolation). Both rows are kept
+   in `results.jsonl`; the retry carries `is_collision_retry: true`.
+
+**Every results.jsonl row records `concurrency` and `co_scheduled_run_ids`.**
+Read these before comparing wall time across batches: a run's `duration_ms`
+under `--concurrency 4` is not comparable to the same task's `duration_ms`
+under `--concurrency 1` — parallel runs slow each other down (shared CPU,
+memory, and often shared rate limits). **Token-derived cost (`cost_usd`,
+`relative_cost_index`, `plan_usage_index`) stays the primary cost signal**
+under concurrency for exactly this reason: per-cell USAGE deltas (see
+"Caching" below) do not isolate cleanly when several runs share the machine
+at once, but each run's own token counts are unaffected by how many other
+runs happened to be active alongside it.
+
+A free-RAM capacity gate (`bench/scheduler.mjs`'s `makeCapacityGate()`,
+wrapping `scripts/capacity.mjs`'s existing per-agent-MB budget) is checked
+before every launch at `--concurrency > 1` — `--per-agent-mb` overrides the
+350MB default. The gate is not consulted at all at the default
+`--concurrency 1`, so the historical fully-sequential path's behavior is
+unchanged byte-for-byte.
+
 ## No visible windows
 
 Every spawn passes `windowsHide: true` (`bench/runner.mjs`'s `runClaude()`)
