@@ -38,7 +38,7 @@ Config v7 (updated 2026-09-23). **Premium** = the spawn brief needs a `WARRANT:`
 | `explore` | `opus/low` (routing trial, review by 2026-09-30) | yes | read-only search: where is X, what touches Y, does Z exist |
 | `mechanical-edit` | `opus/low` (routing trial, review by 2026-09-30) | yes | rename, config edit, reformat, apply a known migration recipe |
 | `bounded-feature` | `opus/low` (routing trial, review by 2026-09-30) | yes | a feature against a clear spec, 1-3 files, known shape |
-| `integration` | `opus/high` (routing trial, review by 2026-09-30) | yes | multi-file, cross-referencing, touches shared config or things other agents depend on |
+| `integration` | `opus/medium` (routing trial, review by 2026-09-30) | yes | multi-file, cross-referencing, touches shared config or things other agents depend on |
 | `debug-root-cause` | `opus/low` (routing trial, review by 2026-09-30) | yes | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
 | `large-refactor` | `opus/high` (routing trial, review by 2026-09-30) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
 | `novel-design` | `opus/high` (routing trial, review by 2026-09-30) | yes | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
