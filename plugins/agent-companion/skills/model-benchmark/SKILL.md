@@ -85,6 +85,16 @@ Zero model calls. Confirms the cell x task x rep count and the exact args
 each run would use before anything spends a token. Always run this before a
 real batch, and re-run it after changing `--cells`/`--tasks`/`--reps`.
 
+**`--dry-run` also prints the pre-run estimate** (`bench/estimate.mjs`):
+wall time at the chosen `--concurrency`, tokens by class (input, cache-read,
+cache-write, output), an API-equivalent $ figure, and a weekly/5-hour
+usage-window points range — from this machine's own local `results.jsonl`
+history when it has any for that cell, else the shipped seed
+(`bench/config/estimate-seed.json`, labelled "shipped seed"), else a rough
+guess (labelled "no local history, rough guess"). A LIVE run (not
+`--dry-run`) prints the exact same estimate before doing anything else, and
+is gated behind it — see (3) below.
+
 ## (3) Budget
 
 The plan's **weekly all-models usage window** is the currency being
@@ -95,7 +105,26 @@ gives a different number.
 - Read `mcp__ccd_session_mgmt__get_usage` (`session_id: "self"`) **before
   and after every batch** — this cannot run inside `scripts/benchmark.mjs`
   itself (it's an MCP tool available to the orchestrating agent, not to a
-  plain Node script).
+  plain Node script). Pass the reading straight through as
+  `--weekly-usage-pct <N>` on every invocation (including `--dry-run`) so
+  the estimate's "current -> projected" line is real instead of "unknown",
+  and as `--weekly-ceiling-pct <N>` alongside a chosen ceiling so the script
+  itself can gate and stop — it never reads usage on its own.
+- **Confirmation gate.** A live run (not `--dry-run`) refuses to start (exit
+  2) when the estimate is above `--confirm-above-points` (default 2), any
+  Fable cell is selected, or the projected weekly % would reach/cross
+  `--weekly-ceiling-pct` — printing the reason(s) and, when dropping the
+  most expensive cells would still leave something to run, a ready-to-paste
+  cheaper `--cells` list. Read the printed estimate, then re-invoke with
+  `--confirm` to proceed (or narrow `--cells`/`--tasks`/`--reps` instead).
+  Never pass `--confirm` without having actually read the estimate that
+  invocation just printed.
+- **Live stop between batches.** With `--batch-by cell` and both
+  `--weekly-usage-pct`/`--weekly-ceiling-pct` set, the script stops at the
+  NEXT cell boundary once the ceiling is reached (prints `CEILING REACHED`
+  and a partial-results summary path, exits 0) instead of starting another
+  cell — check `get_usage` before every `--resume` and pass the fresh
+  reading back in.
 - Use `--batch-by cell`: it runs ONE cell to completion, writes a
   `.batch-state.json` marker under `--out-dir`, and **exits**. Check
   `get_usage` and the just-written `summary.md`, then `--resume` to
@@ -105,7 +134,14 @@ gives a different number.
 - Readings are integer-rounded and the account may be shared with
   concurrent sessions — treat plan-usage as a coarse "are we near the
   ceiling" check, and the token-derived `cost_usd`/`plan_usage_index` in
-  `summary.md` as the primary signal for relative comparisons.
+  `summary.md` as the primary signal for relative comparisons. The
+  weekly-point anchors behind the estimator's numbers are themselves upper
+  bounds (measured while other sessions ran concurrently) — see
+  `bench/estimate.mjs`'s own comments before treating them as exact.
+- **The "Opus 5.5 = 1.5x Sonnet" plan-weight figure is unconfirmed** (an
+  in-app tooltip) and is deliberately not used by the points estimator,
+  which scales by each cell's own measured $ cost ratio instead — the
+  estimate's per-cell breakdown says so on any Opus row.
 
 ## (4) Order
 

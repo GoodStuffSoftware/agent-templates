@@ -448,6 +448,68 @@ before every launch at `--concurrency > 1` — `--per-agent-mb` overrides the
 `--concurrency 1`, so the historical fully-sequential path's behavior is
 unchanged byte-for-byte.
 
+## Pre-run estimate and confirmation gate
+
+`bench/estimate.mjs` is a SHARED module (ADR 0003 slice 6's own git
+fix-commit-mining dry run reuses it) that turns a planned cell x task x rep
+grid into: wall time at the chosen `--concurrency`, tokens by class (input,
+cache-read, cache-write, output), an API-equivalent $ figure, and a
+weekly/5-hour usage-window points range (low-high). `scripts/benchmark.mjs`
+prints it both on `--dry-run` (plan only, zero model calls) and before ANY
+live run starts.
+
+**Where the numbers come from**, in priority order:
+
+1. **This machine's own local history** — `loadLocalHistory()` scans every
+   `results.jsonl` this machine already has under the plugin data dir
+   (`dataDir()/benchmarks/*/`, the same root `defaultResultsRoot()` writes
+   to), medianed per (task family, model, effort), excluding
+   `budget_exhausted`/`auth_error`/`collision` rows.
+2. **The shipped seed** (`bench/config/estimate-seed.json`) — medians
+   computed once from this operator's own 2026-09-23 pilot/hard/real/
+   architecture runs, committed as **numbers and the four generic family
+   labels only** (`easy-synthetic`, `hard-synthetic`, `real-bugfix`,
+   `architecture`) — no paths, pack, repo or project names, because this
+   repo is public. Used only when local history has nothing for that exact
+   cell yet (a fresh install).
+3. **A rough guess**, clearly labelled `"no local history, rough guess"`,
+   when neither has anything for that family at all.
+
+**Weekly-point anchors** (`bench/config/estimate-seed.json`'s
+`weeklyPointAnchors`) calibrate points-per-run for each family: 52 easy
+runs ≈ 1 point, 52 hard runs ≈ 2 points (64 opus-tier hard runs ≈ 3 points,
+used specifically for an Opus cell within `hard-synthetic`), 35 real
+bug-fix runs ≈ 4 points, and architecture calibration plus a head-to-head
+≈ 3 points. **These are upper bounds** — measured while other sessions were
+running concurrently — so `bench/estimate.mjs`'s `low` end is 60% of the
+anchor-derived `high` end, a documented round assumption, not a second
+measurement. Each cell's own rate is then scaled by its MEASURED `$` cost
+ratio to that family's sonnet/medium baseline — deliberately NOT the
+unconfirmed "Opus 5.5 = 1.5x Sonnet" in-app-tooltip figure, which is named
+(and marked unconfirmed) in the per-cell breakdown whenever an Opus cell's
+estimate is shown, but never used to compute it.
+
+**The confirmation gate** (`shouldConfirm()`) always requires `--confirm`
+before a live run starts when: the estimate is above
+`--confirm-above-points` (default 2), any Fable cell is selected, or the
+projected weekly usage (`--weekly-usage-pct` + the estimate's high end)
+would reach/cross `--weekly-ceiling-pct`. The printed estimate includes a
+ready-to-paste cheaper `--cells` list (`suggestCheaperCellSet()`, Fable
+dropped first) when narrowing would help. `--dry-run` shows the identical
+estimate and gate state but never needs `--confirm` — it runs nothing
+regardless.
+
+**Live stop between batches**: with `--batch-by cell` and both
+`--weekly-usage-pct`/`--weekly-ceiling-pct` given, the ceiling is checked at
+every cell boundary; once reached, the script stops before starting the
+next cell, prints `CEILING REACHED` plus the partial `summary.md` path, and
+exits 0 (a clean stop, not an error).
+
+**This script cannot read plan usage itself.** `--weekly-usage-pct` is
+always supplied by the orchestrating skill/agent, which reads
+`mcp__ccd_session_mgmt__get_usage` and passes the reading through. Omit it
+and the estimate prints `unknown` for current/projected %, never a guess.
+
 ## No visible windows
 
 Every spawn passes `windowsHide: true` (`bench/runner.mjs`'s `runClaude()`)

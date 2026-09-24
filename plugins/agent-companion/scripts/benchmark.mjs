@@ -34,13 +34,16 @@ import { fileURLToPath } from 'node:url';
 import {
   CELLS, TASKS, TASK_FAMILIES, resolveList, runOne, rebuildSummary, defaultResultsRoot,
   checkIsolateHomePreflight, formatRunLine, authErrorAbortMessage, scaledMaxBudgetUsd,
-  harnessErrorRow, cliJudgeCaller,
+  harnessErrorRow, cliJudgeCaller, taskFamilyOf,
 } from '../bench/runner.mjs';
 import { loadPack, buildTaskFromPack } from '../bench/task-packs/lib.mjs';
 import {
   validateJudgeConfig, checkJudgeEligibility, taskJudgeKey, findTrustedCalibration, calibrateJudge,
 } from '../bench/judge.mjs';
 import { scheduleRuns, makeCapacityGate } from '../bench/scheduler.mjs';
+import {
+  loadSeed, loadLocalHistory, estimateRun, formatEstimate, shouldConfirm,
+} from '../bench/estimate.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -71,6 +74,18 @@ function printHelp() {
   --per-agent-mb <MB>             Per-run memory estimate for the --concurrency capacity gate.
                                  Default: 350 (scripts/capacity.mjs's own default). Ignored at
                                  --concurrency 1 (no gate is applied).
+  --weekly-usage-pct <N>          Current weekly plan-usage %, as read by the orchestrating skill via
+                                 get_usage (this script cannot read it itself). Shown in the pre-run
+                                 estimate's "current -> projected" line; omit to show "unknown".
+  --weekly-ceiling-pct <N>        A configured weekly-usage ceiling. Crossing it (current + estimated)
+                                 requires --confirm to start, and --batch-by cell stops at the next
+                                 cell boundary (prints a partial-results summary) once
+                                 --weekly-usage-pct reaches it.
+  --confirm-above-points <N>      Weekly-point threshold above which a live run requires --confirm.
+                                 Default: 2.
+  --confirm                      Acknowledges the pre-run estimate's confirmation gate (see
+                                 "Confirmation gate" in docs/BENCHMARK.md) and lets a gated live run
+                                 start. Has no effect on --dry-run, which never needs it.
   --out-dir <dir>                Results directory. Default: the plugin data dir's
                                  benchmarks/<phase>-<date>/ (see bench/runner.mjs's defaultResultsRoot()).
   --phase <name>                 Phase label used only when --out-dir is omitted (default "pilot"),
@@ -118,6 +133,7 @@ function parseArgs(argv) {
     taskPacks: [], packRepo: null, isolateHome: false,
     judgeModel: null, judgeEffort: null, judgeBudgetUsd: null, judgeCalibrations: null, calibrateJudge: false,
     concurrency: 1, perAgentMB: null,
+    weeklyUsagePct: null, weeklyCeilingPct: null, confirmAbovePoints: 2, confirm: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -127,6 +143,10 @@ function parseArgs(argv) {
     else if (a === '--rep-start') out.repStart = Number(argv[++i]);
     else if (a === '--concurrency') out.concurrency = Number(argv[++i]);
     else if (a === '--per-agent-mb') out.perAgentMB = Number(argv[++i]);
+    else if (a === '--weekly-usage-pct') out.weeklyUsagePct = Number(argv[++i]);
+    else if (a === '--weekly-ceiling-pct') out.weeklyCeilingPct = Number(argv[++i]);
+    else if (a === '--confirm-above-points') out.confirmAbovePoints = Number(argv[++i]);
+    else if (a === '--confirm') out.confirm = true;
     else if (a === '--out-dir') out.outDir = argv[++i];
     else if (a === '--phase') out.phase = argv[++i];
     else if (a === '--max-budget-usd') out.maxBudgetUsd = Number(argv[++i]);
@@ -183,6 +203,40 @@ function expandTasks(spec, tasksMap) {
     }
   }
   return ids;
+}
+
+// bench/runner.mjs's taskFamilyOf() returns the bare family names this
+// benchmark's OWN grid uses ("easy" | "hard" | "real" | "pack" | "other").
+// bench/estimate.mjs's seed/history are keyed by the GENERIC labels the
+// public seed ships (bench/config/estimate-seed.json: "easy-synthetic" |
+// "hard-synthetic" | "real-bugfix" | "architecture") -- this maps one to the
+// other. A task pack ("pack") is bug-fix sized by convention (FORMAT.md), so
+// it maps to "real-bugfix"; "architecture" has no built-in task family at
+// all today (it is ADR 0003 slice 6 mining's own family, supplied directly
+// by that caller, never derived from a built-in task id).
+const FAMILY_TO_SEED_FAMILY = {
+  easy: 'easy-synthetic', hard: 'hard-synthetic', real: 'real-bugfix', pack: 'real-bugfix',
+};
+
+// Flattens a cell x task x rep grid into bench/estimate.mjs's plan shape
+// ({ cellId, model, effort, family, n }), one row per (cell, task) with
+// n = reps -- estimateRun() treats n identical rows as equivalent to n
+// separate ones, so this is exact, not an approximation.
+export function buildEstimatePlan({ cellIds, taskIds, tasksMap, reps }) {
+  const plan = [];
+  for (const cellId of cellIds) {
+    const cell = CELLS[cellId];
+    if (!cell) continue;
+    for (const taskId of taskIds) {
+      const task = tasksMap[taskId];
+      const rawFamily = taskFamilyOf(taskId, { task });
+      plan.push({
+        cellId, model: cell.model, effort: cell.effort,
+        family: FAMILY_TO_SEED_FAMILY[rawFamily] || rawFamily, n: reps, taskId,
+      });
+    }
+  }
+  return plan;
 }
 
 export function defaultCalibrationStore() {
@@ -365,6 +419,16 @@ async function main() {
         }
       }
     }
+    console.log('');
+    const dryRunEstimate = estimateRun({
+      plan: buildEstimatePlan({ cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps }),
+      concurrency: args.concurrency,
+      seed: loadSeed(),
+      history: loadLocalHistory(),
+    });
+    console.log(formatEstimate(dryRunEstimate, {
+      currentWeeklyPct: args.weeklyUsagePct, weeklyCeilingPct: args.weeklyCeilingPct, confirmAbovePoints: args.confirmAbovePoints,
+    }));
     process.exit(0);
   }
 
@@ -375,6 +439,30 @@ async function main() {
     config: judge.config, storeFile: judge.storeFile, callJudge: cliJudgeCaller,
     scaledJudgeBudget: scaledMaxBudgetUsd(judge.config.maxBudgetUsd, judge.config.model),
   } : null;
+
+  // Pre-run estimate + confirmation gate (ADR 0003 sec 3 "Cost controls
+  // before any run") -- ALWAYS shown before a live run starts, not only on
+  // --dry-run. This script cannot read plan usage itself (see
+  // --weekly-usage-pct's help text); the orchestrating skill reads it via
+  // get_usage and passes it in.
+  const liveEstimate = estimateRun({
+    plan: buildEstimatePlan({ cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps }),
+    concurrency: args.concurrency,
+    seed: loadSeed(),
+    history: loadLocalHistory(),
+  });
+  console.log(formatEstimate(liveEstimate, {
+    currentWeeklyPct: args.weeklyUsagePct, weeklyCeilingPct: args.weeklyCeilingPct, confirmAbovePoints: args.confirmAbovePoints,
+  }));
+  const gate = shouldConfirm(liveEstimate, {
+    confirmAbovePoints: args.confirmAbovePoints, weeklyCeilingPct: args.weeklyCeilingPct, currentWeeklyPct: args.weeklyUsagePct,
+  });
+  if (gate.required && !args.confirm) {
+    usageError(
+      '\nRefusing to start without confirmation (see the estimate above):\n  - ' + gate.reasons.join('\n  - ')
+      + '\n\nReview the estimate, then re-invoke with --confirm to proceed (or narrow --cells/--tasks/--reps to bring it under the threshold).',
+    );
+  }
 
   fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(answersDir, { recursive: true });
@@ -396,6 +484,20 @@ async function main() {
     : null;
 
   for (const cellId of cellsToRun) {
+    // Live stop: check the weekly ceiling BETWEEN batches (a "batch" here is
+    // one cell, --batch-by cell's existing unit). --weekly-usage-pct is
+    // whatever the orchestrating skill last read via get_usage; this script
+    // cannot read it itself. Stopping BEFORE starting the next cell (rather
+    // than mid-cell) means every already-written row stays a clean,
+    // complete batch.
+    if (args.weeklyCeilingPct != null && args.weeklyUsagePct != null && args.weeklyUsagePct >= args.weeklyCeilingPct) {
+      rebuildSummary(outDir);
+      console.log(`\nCEILING REACHED: weekly usage ${args.weeklyUsagePct}% >= configured ceiling ${args.weeklyCeilingPct}% -- `
+        + `stopping before starting cell "${cellId}".`);
+      console.log(`Partial results: ${path.join(outDir, 'summary.md')}`);
+      process.exit(0);
+    }
+
     const cell = CELLS[cellId];
     // Every (task, rep) for this cell, flattened into one schedulable plan.
     // --concurrency N runs up to N of these at once, subject to resource
