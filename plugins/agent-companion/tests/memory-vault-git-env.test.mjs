@@ -17,6 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, lstatSync, symlinkSync, chmodSync,
+  renameSync, utimesSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -548,6 +549,81 @@ for (const [label, identityEnv] of [
     }
   });
 }
+
+// G5. status() ran `git status` with no guards and without
+// --no-optional-locks. `git status` refreshes the index and writes it back,
+// so with a vault .git that was a junction to a project's .git, status
+// rewrote the PROJECT's index.
+test('G5: status on a vault whose .git is a junction to a project refuses and leaves the project .git byte-identical', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
+    const first = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(first.status, 0, first.stderr);
+    const vault = join(fx.stateDir, 'memory-vault');
+    const { repo, wt } = makeProject(fx.dir);
+    // The project tracks a file byte-identical to one in the vault's work
+    // tree, so an index refresh through the junction has a stat change it
+    // would write back.
+    writeFileSync(join(repo, 'README.md'), readFileSync(join(vault, 'README.md')));
+    git(['-C', repo, 'add', '-A']);
+    git(['-C', repo, 'commit', '-q', '-m', 'readme']);
+    renameSync(join(vault, '.git'), join(vault, '.git-orig'));
+    symlinkSync(join(repo, '.git'), join(vault, '.git'), 'junction');
+    const before = snapshot(repo);
+    // An index older than its entries makes every entry racily clean, so
+    // any `git status` that reaches this index re-checks and rewrites it. That
+    // makes the unguarded write deterministic instead of timing-dependent.
+    const past = new Date('2001-01-01T00:00:00Z');
+    utimesSync(join(repo, '.git', 'index'), past, past);
+    const treeBefore = hashTree(join(repo, '.git'));
+
+    for (const args of [['status', '--json'], ['status']]) {
+      const res = runScript(SCRIPT, args, { cwd: fx.dir, env, timeout: 60000 });
+      assert.deepEqual(hashTree(join(repo, '.git')), treeBefore, `project .git changed under \`${args.join(' ')}\``);
+      assert.notEqual(res.status, 0, `status must refuse: ${res.stdout}`);
+      assert.match(res.stderr, /status refused — refusing to write — .* is not a real directory of the vault's own/);
+      if (args.includes('--json')) {
+        assert.equal(res.json?.initialized, true);
+        assert.match(res.json?.refused || '', /not a real directory of the vault's own/);
+        assert.equal(res.json?.dirty, undefined, 'no work-tree git call may run on a refused vault');
+      } else {
+        assert.match(res.stdout, /REFUSED {8}: /);
+      }
+    }
+    assertProjectUntouched(repo, wt, before, 'status via .git junction');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('G5: status still reports an ordinary vault, and a vault whose initialize commit never landed, without refusing', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
+    const vault = join(fx.stateDir, 'memory-vault');
+    mkdirSync(vault, { recursive: true });
+    git(['init', '-q', '-b', 'main', vault]);
+    git(['-C', vault, 'config', '--file', join(vault, '.git', 'config'), 'user.email', 'memory-vault@agent-companion.local']);
+    writeFileSync(join(vault, '.memory-vault.json'), MARKER);
+    const half = runScript(SCRIPT, ['status', '--json'], { cwd: fx.dir, env });
+    assert.equal(half.status, 0, half.stderr);
+    assert.equal(half.json?.refused, undefined, half.stdout);
+    assert.equal(half.json?.lastCommit, null);
+
+    const sync = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(sync.status, 0, sync.stderr);
+    const ok = runScript(SCRIPT, ['status', '--json'], { cwd: fx.dir, env });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(ok.json?.refused, undefined);
+    assert.equal(ok.json?.dirty, false);
+    assert.equal(ok.json?.lastCommit?.subject.startsWith('memory-vault sync'), true, ok.stdout);
+  } finally {
+    fx.cleanup();
+  }
+});
 
 test('an existing vault keeps working when its path is inside a repository (it created itself)', () => {
   const fx = makeFixture();

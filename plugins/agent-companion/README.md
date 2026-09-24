@@ -240,7 +240,10 @@ in it. It suggests deleting only a directory with an empty `.git` and nothing
 else. Sometimes an initialization stops before its first commit, which leaves
 the marker and the vault identity but no commits. The next `init` or `sync`
 finishes that initialization instead of refusing it. Vault commits are never
-signed, whatever your global `commit.gpgsign` says.
+signed, whatever your global `commit.gpgsign` says. `status` runs the same
+guards as `sync` before it touches the vault's work tree, so it never writes
+an index. If a guard fails, it reports the vault as refused and exits 1, and
+the audit's `memory-vault-drift` check fails with the same reason.
 
 **Moving the vault.** Set `AGENT_COMPANION_VAULT_DIR` to an absolute path to
 move the vault alone. This is the fix when the default location is refused,

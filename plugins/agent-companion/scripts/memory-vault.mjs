@@ -337,7 +337,7 @@ function rootSubjects(dir) {
   } catch { return []; } // no commits
 }
 
-function assertVaultIdentity(dir) {
+function assertVaultIdentity(dir, { note = true } = {}) {
   const email = vaultEmail(dir);
   const roots = rootSubjects(dir);
   const rootsOk = roots.length > 0 && roots.every((s) => s === INIT_SUBJECT);
@@ -348,7 +348,7 @@ function assertVaultIdentity(dir) {
       + `Nothing was changed. ${keepOrClearAdvice(dir, { marker: true })}`,
     );
   }
-  if (email !== VAULT_USER_EMAIL && !identityNoted.has(resolve(dir))) {
+  if (note && email !== VAULT_USER_EMAIL && !identityNoted.has(resolve(dir))) {
     identityNoted.add(resolve(dir));
     process.stderr.write(
       `memory-vault: note — ${dir} is a vault this plugin created, but its local user.email is `
@@ -1046,11 +1046,24 @@ export function status() {
   if (!isOurVault(dir)) {
     return { enabled, initialized: false, dir, ...attempt };
   }
+  // The same read-only guards sync runs, BEFORE any git call on the work tree.
+  // `git status` is not read-only: it refreshes the index and writes it back
+  // when it can take the lock. With a vault whose .git was a junction to a
+  // project's .git, that rewrote the PROJECT's index. A vault that fails a
+  // guard is reported as refused, and nothing else is run against it.
+  // --no-optional-locks on the calls below keeps them from writing even for
+  // a vault that passes.
+  try {
+    assertVaultGitDir(dir);
+    if (!isUnfinishedVault(dir)) assertVaultIdentity(dir, { note: false });
+  } catch (e) {
+    return { enabled, initialized: true, refused: String(e?.message || e), dir, ...attempt };
+  }
   let dirty = false;
   let lastCommit = null;
-  try { dirty = vaultGit(dir, ['status', '--porcelain']).trim().length > 0; } catch { /* unknown */ }
+  try { dirty = vaultGit(dir, ['--no-optional-locks', 'status', '--porcelain']).trim().length > 0; } catch { /* unknown */ }
   try {
-    const raw = vaultGit(dir, ['log', '-1', '--format=%H%x1f%cI%x1f%s']).trim();
+    const raw = vaultGit(dir, ['--no-optional-locks', 'log', '-1', '--format=%H%x1f%cI%x1f%s']).trim();
     if (raw) {
       const [sha, date, subject] = raw.split('\x1f');
       lastCommit = { sha, date, subject };
@@ -1122,6 +1135,11 @@ function printStatus(r) {
   console.log(`  option enabled : ${r.enabled}`);
   console.log(`  initialized    : ${r.initialized}`);
   if (!r.initialized) { printAttempt(r); return; }
+  if (r.refused) {
+    console.log(`  REFUSED        : ${r.refused}`);
+    printAttempt(r);
+    return;
+  }
   printAttempt(r);
   console.log(`  tracked files  : ${r.fileCount} across ${r.projectCount} project(s)`);
   console.log(`  working tree   : ${r.dirty ? 'DIRTY (uncommitted changes present)' : 'clean'}`);
@@ -1161,7 +1179,8 @@ function main() {
       const r = status();
       if (json) console.log(JSON.stringify(r));
       else printStatus(r);
-      process.exit(0);
+      if (r.refused) console.error(`memory-vault: status refused — ${r.refused}`);
+      process.exit(r.refused ? 1 : 0);
     }
     console.error('usage: node memory-vault.mjs <init|sync|status> [--json]');
     process.exit(2);
