@@ -60,19 +60,68 @@ either.
   after another (that flag trades cross-cell overlap for a real checkpoint
   between cells) and `--concurrency` bounds each cell separately. The
   scheduler (`bench/scheduler.mjs`) never co-schedules runs whose declared
-  `resources` conflict — whichever cell they belong to — gives every run its
-  own `TMP`/`BENCH_PORT_BASE`, and auto-retries a genuine collision
-  (EADDRINUSE, a lock held) alone once; the exclusion from pass-rate only
-  holds once that retry CONFIRMS the collision (does not reproduce it solo)
-  — a failure that reproduces even running alone is counted as real. See
-  docs/BENCHMARK.md "Parallel runs" for the full picture. **Wall-time
-  comparisons must note the concurrency level** (a `duration_ms` under
-  `--concurrency 4` is not comparable to one under `--concurrency 1`) — cite
-  `cost_usd`/`relative_cost_index` as the primary cost signal, since per-cell
-  usage deltas do not isolate cleanly under concurrency.
+  `resources` conflict — whichever cell they belong to — and gives every run
+  its own `TMP`/`BENCH_PORT_BASE`. **Wall-time comparisons must note the
+  concurrency level** (a `duration_ms` under `--concurrency 4` is not
+  comparable to one under `--concurrency 1`) — cite `cost_usd`/
+  `relative_cost_index` as the primary cost signal, since per-cell usage
+  deltas do not isolate cleanly under concurrency.
+- **Collision handling has TWO mechanisms — which one applies depends on
+  WHEN the collision happened.** Full rule and worked examples in
+  docs/BENCHMARK.md "Collision handling". Both exclude a CONFIRMED collision
+  from `pass_rate`/every other stat, and both keep every row in
+  `results.jsonl` — nothing is ever silently dropped.
+  - **Legacy path — before the model's work completed** (`setup()` threw a
+    structural `.code`, e.g. `EADDRINUSE`, a lock held): the scheduler
+    auto-retries alone once, with a fresh sandbox and a fresh model call. The
+    exclusion from pass-rate only holds once that retry CONFIRMS the
+    collision (does not reproduce it solo) — a failure that reproduces even
+    running alone is counted as real. `summary.md`: `COLLISION` /
+    `SUSPECTED COLLISION, NOT CONFIRMED`.
+  - **Re-score path — after the model's work completed** (a real task
+    pack's `score()` never throws; it just looks like an ordinary failure):
+    ANY run that fails while genuinely co-scheduled gets `needs_rescore:
+    true`, its sandbox is kept alive, and the scheduler queues a solo
+    `<run_id>::rescore` retry that re-runs ONLY `task.score()` against the
+    SAME retained sandbox — never the model again. Re-score passes → the
+    original is superseded and excluded, the `::rescore` row counts in its
+    place. Re-score fails too → the original failure counts normally (never
+    lost) and the redundant `::rescore` row is excluded. No `::rescore` row
+    at all (the batch stopped first, e.g. an `auth_error`/judge refusal
+    while it was still queued but never admitted) → fails OPEN: the original
+    failure counts normally, its retained sandbox is abandoned (harmless).
+    `summary.md`: `RESCORED` / `RE-SCORE CONFIRMED A REAL FAILURE`.
 - **`bench/runner.mjs`'s own direct CLI has no `--concurrency`.** It refuses
   the flag with a message pointing at `scripts/benchmark.mjs` — always drive
   a parallel run through `scripts/benchmark.mjs`, never the bare runner.
+- **`--resume` reruns a whole cell that was interrupted before it was marked
+  complete** (an `auth_error`/judge refusal while a `needs_rescore` retry
+  was queued but never admitted), regenerating a fresh row under the exact
+  SAME deterministic `run_id` as the earlier, abandoned attempt.
+  `rebuildSummary()` dedupes by ATTEMPT FAMILY before computing anything: a
+  base original row and every `::retry`/`::rescore` child that follows it
+  (in file order, not by run_id string — two attempts can each produce a
+  literally identical child id) travel together. The latest family wins
+  unless it's abandoned (a `needs_rescore` original with no rescore ever
+  admitted), in which case it loses to any later family; when every family
+  for a slot was abandoned, the last one still counts (fail open — a
+  recorded failure is never silently dropped). `summary.md` prints a
+  `RESUME DUPLICATE: N row(s)` banner naming every superseded row. See
+  docs/BENCHMARK.md "Resuming a batch".
+- **A leaked sandbox/temp dir is cosmetic, never a verdict signal.**
+  Windows can throw `EPERM`/`EBUSY`/`ENOTEMPTY` when removing a just-
+  finished run's sandbox or temp dir (a lingering child-process handle, an
+  antivirus scanner, or delayed directory-entry accounting) — every removal
+  in the concurrent run path (`runOne()`/`rescoreOne()`, and
+  `bench/judge.mjs`'s per-vote temp cwd) retries through the same async,
+  non-blocking `removeDirWithRetry()` (`bench/tasks/common.mjs`) so a
+  backoff wait never stalls a sibling run. A failure that survives every
+  retry NEVER changes the run's own `pass`/`collision`/`needs_rescore`
+  verdict — only the bare OS error code lands on the row's `cleanup_error`
+  field (never a path), and `rebuildSummary()`/`bench/estimate.mjs` both
+  ignore it for every stat. `summary.md` prints a `CLEANUP: N run(s)` line
+  when at least one row carries it. See docs/BENCHMARK.md "Sandbox cleanup
+  retry (Windows)".
 - **Never `git stash`.** The stash stack is shared by every worktree and every
   concurrent session. Use a WIP commit, or leave uncommitted work untouched.
 - **Budget caps scale with model price.** Task budgets and `--max-budget-usd`
