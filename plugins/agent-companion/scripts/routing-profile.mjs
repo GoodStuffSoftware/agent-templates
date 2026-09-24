@@ -80,7 +80,11 @@ function fail(e) {
     }
     process.exit(e.code === 'usage' ? 2 : 1);
   }
-  throw e;
+  // Never a raw stack trace (S2 review P7): say what failed, exit non-zero.
+  const msg = `routing profile: ${e?.code || e?.name || 'error'}: ${String(e?.message || e).slice(0, 200)}`;
+  if (has('--json')) console.log(JSON.stringify({ ok: false, code: 'error', error: msg }, null, 2));
+  else console.error(msg);
+  process.exit(1);
 }
 
 const label = (row) => (row.model ? `${row.model}${row.effort ? '/' + row.effort : ''}` : `min effort ${row.effort || '?'}`);

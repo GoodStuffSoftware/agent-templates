@@ -140,6 +140,24 @@ export function typeShapeErrors(def) {
   return e;
 }
 
+// Nesting depth, measured without recursion (a deeply nested value must not
+// blow the stack here, the thing the check exists to prevent). S2 review P7:
+// a hand-edited profile nesting 20000 levels made the writer throw an
+// uncaught RangeError in JSON.stringify.
+export const MAX_PROFILE_DEPTH = 64;
+export function nestingDepth(v) {
+  let max = 0;
+  const stack = [[v, 1]];
+  while (stack.length) {
+    const [x, d] = stack.pop();
+    if (!x || typeof x !== 'object') continue;
+    if (d > max) max = d;
+    if (max > MAX_PROFILE_DEPTH) return max;
+    for (const k of Object.keys(x)) stack.push([x[k], d + 1]);
+  }
+  return max;
+}
+
 // Parse + validate raw text. Never throws. Returns one of
 //   { status: 'ok', profile }
 //   { status: 'invalid', reason: 'parse' | 'schema' | 'version', errors: [...] }
@@ -157,6 +175,9 @@ export function parseProfileText(text) {
       errors: [`schemaVersion ${p.schemaVersion} is newer than this reader (${PROFILE_SCHEMA_VERSION}); the whole profile is ignored`],
       schemaVersion: p.schemaVersion,
     };
+  }
+  if (nestingDepth(p) > MAX_PROFILE_DEPTH) {
+    return { status: 'invalid', reason: 'schema', errors: [`the profile nests deeper than ${MAX_PROFILE_DEPTH} levels`] };
   }
   const errors = profileErrors(p);
   if (errors.length) return { status: 'invalid', reason: 'schema', errors };
@@ -215,6 +236,7 @@ export function parseJournal(text) {
     try {
       const e = JSON.parse(line);
       if (!isObj(e) || !Number.isInteger(e.revision) || e.revision < 0) throw new Error('shape');
+      if (nestingDepth(e) > MAX_PROFILE_DEPTH + 2) throw new Error('depth');
       if (!(e.type === null || typeof e.type === 'string')) throw new Error('shape');
       entries.push(e);
     } catch {

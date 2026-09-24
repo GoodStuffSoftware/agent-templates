@@ -236,6 +236,37 @@ test('rollback restores a journalled revision exactly even when write-mode F5 wo
     row: { ...readFile().rows.integration, model: 'fable' } })), 'refused');
 });
 
+// S2 review P7: the writer threw an uncaught RangeError on a deeply nested
+// profile and a raw EISDIR when the profile path is a directory. Both are
+// now clean refusals: a message, a non-zero exit, nothing written, no lock.
+test('a deeply nested profile, or a directory at the profile path, is refused cleanly: nothing written, lock released', () => {
+  const root = freshRoot('p7');
+  mkdirSync(files().dir, { recursive: true });
+  const n = 20000;
+  const deep = `{"schema":"agent-companion/routing-profile","schemaVersion":1,"revision":1,"rows":{},"x":${'['.repeat(n)}${']'.repeat(n)}}`;
+  writeFileSync(files().profile, deep);
+  expectCode(() => store.setRow('explore', { model: 'sonnet', effort: 'low', now: NOW }), 'invalid-file');
+  assert.equal(readFileSync(files().profile, 'utf8'), deep, 'the file is untouched');
+  assert.deepEqual(readdirSync(files().dir), ['routing-profile.json'], 'no journal, lock or temp file');
+  // The reader ignores it as a whole instead of throwing.
+  rp._resetProfileCache();
+  assert.equal(ctx.resolveRoute({ type: 'explore', now: NOW }).profileStatus, 'invalid');
+
+  rmSync(files().profile);
+  mkdirSync(files().profile);
+  expectCode(() => store.setRow('explore', { model: 'sonnet', effort: 'low', now: NOW }), 'invalid-file');
+  assert.deepEqual(readdirSync(files().dir), ['routing-profile.json'], 'no journal, lock or temp file');
+  const env = { AGENT_COMPANION_STATE_DIR: root };
+  const set = runScript('scripts/routing-profile.mjs', ['set', 'explore', '--model', 'sonnet', '--effort', 'low'], { env });
+  assert.equal(set.status, 1);
+  assert.match(set.stderr, /cannot be read \(EISDIR\)/);
+  assert.doesNotMatch(set.stderr, /\n\s+at /, 'no stack trace');
+  const show = runScript('scripts/routing-profile.mjs', ['show'], { env });
+  assert.equal(show.status, 0, show.stderr);
+  assert.match(show.stdout, /INVALID \(unreadable\)/);
+  rmSync(files().profile, { recursive: true });
+});
+
 test('compare-revision: a stale expectRevision is a conflict, not a lost update', () => {
   freshRoot('cas');
   store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW });

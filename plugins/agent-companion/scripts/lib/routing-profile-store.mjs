@@ -104,10 +104,18 @@ function writeAtomic(file, text) {
 
 // Current file + journal, read fresh. Throws ProfileWriteError on a file or
 // journal the writer must not build on.
+// A path that exists but cannot be read as a file (a directory, say) is a
+// clean refusal, never a raw fs error (S2 review P7).
+function readTextOrRefuse(path, what) {
+  try { return readFileSync(path, 'utf8'); } catch (e) {
+    throw new ProfileWriteError('invalid-file', `the routing-profile ${what} at ${path} cannot be read (${e.code || e.name}); fix or remove it before writing`);
+  }
+}
+
 export function readForWrite(files = profileFiles()) {
   let profile = null;
   if (existsSync(files.profile)) {
-    const res = parseProfileText(readFileSync(files.profile, 'utf8'));
+    const res = parseProfileText(readTextOrRefuse(files.profile, 'file'));
     if (res.status !== 'ok') {
       throw new ProfileWriteError('invalid-file',
         `the routing profile at ${files.profile} is invalid (${res.reason}); fix or remove it before writing — the resolver is ignoring it`,
@@ -117,7 +125,7 @@ export function readForWrite(files = profileFiles()) {
   }
   let entries = [];
   if (existsSync(files.journal)) {
-    const j = parseJournal(readFileSync(files.journal, 'utf8'));
+    const j = parseJournal(readTextOrRefuse(files.journal, 'journal'));
     if (j.errors.length) {
       throw new ProfileWriteError('corrupt-journal', `the routing-profile journal at ${files.journal} cannot be folded; repair it before writing`, j.errors);
     }
@@ -174,68 +182,80 @@ export function validateForWrite(next, touched, { now, mode = 'write' } = {}) {
 export function commitChange(change, { by = 'operator', expectRevision, now, at } = {}) {
   const files = profileFiles();
   return withLock(files.lock, () => {
-    const { profile: onDisk, entries } = readForWrite(files);
-    if (expectRevision !== undefined && expectRevision !== null) {
-      const have = onDisk ? onDisk.revision : 0;
-      if (have !== expectRevision) {
-        throw new ProfileWriteError('conflict', `routing profile is at revision ${have}, not ${expectRevision}: someone else changed it; re-read and retry`);
-      }
+    try {
+      return commitLocked(files, change, { by, expectRevision, now, at });
+    } catch (e) {
+      // Anything unexpected (an fs error, a RangeError) is a clean refusal:
+      // it is thrown before the rename, so nothing was written, and the lock
+      // is released by withLock on the way out (S2 review P7).
+      if (e instanceof ProfileWriteError) throw e;
+      throw new ProfileWriteError('io', `the routing profile was not written: ${e.code || e.name}: ${String(e.message || '').slice(0, 160)}`);
     }
-    const stamp = at || new Date().toISOString();
-    const pending = [];
-    let cur;
-    const jmax = journalMaxRevision(entries);
-    if (!onDisk) {
-      // A new file (or one deleted by hand): journal its creation, keeping
-      // revisions monotonic across a reset.
-      const initRev = jmax + 1;
-      cur = { ...emptyProfile(basedOnNow()), revision: initRev };
-      pending.push({ revision: initRev, at: stamp, action: 'init', type: null, before: null, after: profileContent(cur), by });
-    } else if (!journalMatchesFile(onDisk, entries)) {
-      const adoptRev = jmax < onDisk.revision ? onDisk.revision : jmax + 1;
-      const prior = jmax >= 0 ? rebuildAt(entries, jmax) : null;
-      cur = { ...JSON.parse(JSON.stringify(onDisk)), revision: adoptRev };
-      pending.push({
-        revision: adoptRev, at: stamp, action: 'adopt-external-edit', type: null,
-        before: prior ? profileContent(prior) : null, after: profileContent(cur), by,
-      });
-    } else {
-      cur = JSON.parse(JSON.stringify(onDisk));
-    }
-
-    const c = change(JSON.parse(JSON.stringify(cur)), { entries: [...entries, ...pending] });
-    if (!c || typeof c !== 'object') throw new ProfileWriteError('usage', 'change() returned nothing');
-    const revision = cur.revision + 1;
-    let next;
-    let entry;
-    let touched;
-    if (c.type === null) {
-      next = { ...JSON.parse(JSON.stringify(c.content)), revision };
-      touched = Object.keys(next.rows || {});
-      entry = { revision, at: stamp, action: c.action, type: null, before: profileContent(cur), after: profileContent(next), by };
-    } else {
-      if (typeof c.type !== 'string' || !c.type) throw new ProfileWriteError('usage', 'a row change must name its type');
-      const before = Object.prototype.hasOwnProperty.call(cur.rows, c.type) ? cur.rows[c.type] : null;
-      const rows = { ...cur.rows };
-      if (c.row === null || c.row === undefined) delete rows[c.type];
-      else rows[c.type] = JSON.parse(JSON.stringify(c.row));
-      next = { ...cur, rows, revision };
-      touched = [c.type];
-      entry = { revision, at: stamp, action: c.action, type: c.type, before, after: c.row ?? null, by };
-    }
-    // A rollback restores a journalled state: it is checked in READ mode
-    // (F1-F4, what the resolver itself refuses), not write mode, so a revision
-    // the writer would now refuse on F5 (an adopted hand edit, say) is still
-    // restorable exactly; F5 then raises it at resolve time as usual (S2
-    // review P3, lead decision).
-    const errs = validateForWrite(next, touched, { now, mode: c.validate === 'read' ? 'read' : 'write' });
-    if (errs.length) throw new ProfileWriteError('refused', `refused: ${errs[0]}`, errs);
-
-    writeAtomic(files.profile, JSON.stringify(next, null, 2) + '\n');
-    pending.push(entry);
-    appendFileSync(files.journal, pending.map((e) => JSON.stringify(e)).join('\n') + '\n');
-    return { revision, profile: next, entries: pending };
   });
+}
+
+function commitLocked(files, change, { by, expectRevision, now, at }) {
+  const { profile: onDisk, entries } = readForWrite(files);
+  if (expectRevision !== undefined && expectRevision !== null) {
+    const have = onDisk ? onDisk.revision : 0;
+    if (have !== expectRevision) {
+      throw new ProfileWriteError('conflict', `routing profile is at revision ${have}, not ${expectRevision}: someone else changed it; re-read and retry`);
+    }
+  }
+  const stamp = at || new Date().toISOString();
+  const pending = [];
+  let cur;
+  const jmax = journalMaxRevision(entries);
+  if (!onDisk) {
+    // A new file (or one deleted by hand): journal its creation, keeping
+    // revisions monotonic across a reset.
+    const initRev = jmax + 1;
+    cur = { ...emptyProfile(basedOnNow()), revision: initRev };
+    pending.push({ revision: initRev, at: stamp, action: 'init', type: null, before: null, after: profileContent(cur), by });
+  } else if (!journalMatchesFile(onDisk, entries)) {
+    const adoptRev = jmax < onDisk.revision ? onDisk.revision : jmax + 1;
+    const prior = jmax >= 0 ? rebuildAt(entries, jmax) : null;
+    cur = { ...JSON.parse(JSON.stringify(onDisk)), revision: adoptRev };
+    pending.push({
+      revision: adoptRev, at: stamp, action: 'adopt-external-edit', type: null,
+      before: prior ? profileContent(prior) : null, after: profileContent(cur), by,
+    });
+  } else {
+    cur = JSON.parse(JSON.stringify(onDisk));
+  }
+
+  const c = change(JSON.parse(JSON.stringify(cur)), { entries: [...entries, ...pending] });
+  if (!c || typeof c !== 'object') throw new ProfileWriteError('usage', 'change() returned nothing');
+  const revision = cur.revision + 1;
+  let next;
+  let entry;
+  let touched;
+  if (c.type === null) {
+    next = { ...JSON.parse(JSON.stringify(c.content)), revision };
+    touched = Object.keys(next.rows || {});
+    entry = { revision, at: stamp, action: c.action, type: null, before: profileContent(cur), after: profileContent(next), by };
+  } else {
+    if (typeof c.type !== 'string' || !c.type) throw new ProfileWriteError('usage', 'a row change must name its type');
+    const before = Object.prototype.hasOwnProperty.call(cur.rows, c.type) ? cur.rows[c.type] : null;
+    const rows = { ...cur.rows };
+    if (c.row === null || c.row === undefined) delete rows[c.type];
+    else rows[c.type] = JSON.parse(JSON.stringify(c.row));
+    next = { ...cur, rows, revision };
+    touched = [c.type];
+    entry = { revision, at: stamp, action: c.action, type: c.type, before, after: c.row ?? null, by };
+  }
+  // A rollback restores a journalled state: it is checked in READ mode
+  // (F1-F4, what the resolver itself refuses), not write mode, so a revision
+  // the writer would now refuse on F5 (an adopted hand edit, say) is still
+  // restorable exactly; F5 then raises it at resolve time as usual (S2
+  // review P3, lead decision).
+  const errs = validateForWrite(next, touched, { now, mode: c.validate === 'read' ? 'read' : 'write' });
+  if (errs.length) throw new ProfileWriteError('refused', `refused: ${errs[0]}`, errs);
+
+  writeAtomic(files.profile, JSON.stringify(next, null, 2) + '\n');
+  pending.push(entry);
+  appendFileSync(files.journal, pending.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  return { revision, profile: next, entries: pending };
 }
 
 // Read-only view for show/why and the tests: file + journal, plus whether
@@ -244,14 +264,21 @@ export function inspect() {
   const files = profileFiles();
   const out = { files, profile: null, status: 'absent', errors: [], entries: [], journalErrors: [] };
   if (existsSync(files.profile)) {
-    const res = parseProfileText(readFileSync(files.profile, 'utf8'));
+    let text = null;
+    try { text = readFileSync(files.profile, 'utf8'); } catch (e) {
+      out.status = 'invalid'; out.reason = 'unreadable'; out.errors = [`the file cannot be read (${e.code || e.name})`];
+    }
+    const res = text === null ? { status: 'invalid', reason: 'unreadable', errors: out.errors } : parseProfileText(text);
     out.status = res.status;
     if (res.status === 'ok') out.profile = res.profile;
     else { out.reason = res.reason; out.errors = res.errors || []; }
   }
   if (existsSync(files.journal)) {
-    const j = parseJournal(readFileSync(files.journal, 'utf8'));
+    let jt = '';
+    try { jt = readFileSync(files.journal, 'utf8'); } catch (e) { out.journalErrors = [`the journal cannot be read (${e.code || e.name})`]; }
+    const j = parseJournal(jt);
     out.entries = j.entries;
+    if (out.journalErrors.length) j.errors.unshift(...out.journalErrors);
     out.journalErrors = j.errors;
   }
   out.journalMatches = out.profile ? journalMatchesFile(out.profile, out.entries) : null;
