@@ -728,6 +728,8 @@ const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|woff2?|ttf|eot|zip|gz|mp4|mov)
 // scans these files fully — including build/, dist/, vendor/ and
 // sourcemaps, a classic absolute-path leak vector that must never be
 // skipped wholesale.
+// This file's own path inside a checkout of this repo (see scanOptionsForRel).
+const SELF_REL = "scripts/leak-check.mjs";
 const SHA_SKIP_PATH_RE = /(^|\/)node_modules\//i;
 const SHA_SKIP_FILE_RE = /\.min\.(js|css)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Cargo\.lock|Gemfile\.lock|poetry\.lock)$/i;
 
@@ -849,16 +851,19 @@ function parseArgs(argv) {
 
 const splitList = (v) => (v ? String(v).split(/[,;]/).map((s) => s.trim()).filter(Boolean) : []);
 
-export function main(argv = process.argv.slice(2), env = process.env) {
-  let opts;
-  try {
-    opts = parseArgs(argv);
-  } catch (err) {
-    console.error(`leak-check: ${err.message}`);
-    return 2;
-  }
+// Everything a scan needs besides the text itself: the scan root, the
+// compiled derived-name matchers and the operator's real OS handle(s). Split
+// out of main() so another tool (scripts/push-scan.mjs, which scans the
+// commits a push would publish rather than the working tree) applies exactly
+// the same classes with exactly the same derivation. `opts` takes the same
+// keys parseArgs() produces. Returns { root, derived, realUsers } or, on a
+// bad option, { error } — never throws for a derivation problem.
+// opts.quiet suppresses the derivation notes it would otherwise print.
+export function buildScanContext(opts = {}, env = process.env) {
   const root = resolve(opts.root || env.LEAK_CHECK_ROOT || REPO_ROOT);
   const noDerived = opts.noDerived || env.LEAK_CHECK_NO_DERIVED === "1";
+  // opts.quiet silences the notes (a caller with its own output contract).
+  const note = opts.quiet ? () => {} : (msg) => console.error(msg);
 
   let derived = [];
   // The operator's RAW OS handle(s), before any generic-word filtering —
@@ -874,7 +879,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   }
   let realUsersList = users.map((u) => u.trim().toLowerCase()).filter((u) => /^[a-z0-9._$-]+$/.test(u));
   if (noDerived) {
-    console.error("leak-check: note — derived-name checks disabled (--no-derived).");
+    note("leak-check: note — derived-name checks disabled (--no-derived).");
   } else {
     let devRoots = splitList(opts.devRoot || env.LEAK_CHECK_DEV_ROOT).map((p) => resolve(p));
     if (devRoots.length === 0) {
@@ -893,16 +898,15 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     try {
       tokens = deriveTokens({ devRoots, claudeProjectsDir, tokenFile, users, ownNames, publicNames, scanRoot: root });
     } catch (err) {
-      console.error(`leak-check: ${err.message}`);
-      return 2;
+      return { error: err.message };
     }
-    for (const n of tokens.notes) console.error(`leak-check: note — ${n}.`);
+    for (const n of tokens.notes) note(`leak-check: note — ${n}.`);
     const total = tokens.names.length + tokens.prefixes.length + tokens.users.length;
     if (total === 0) {
-      console.error("leak-check: note — no derived names on this machine; derived-name checks found nothing to match (static checks still run).");
+      note("leak-check: note — no derived names on this machine; derived-name checks found nothing to match (static checks still run).");
     }
     if (opts.showDerived) {
-      console.error(
+      note(
         `leak-check: derived ${tokens.names.length} name(s), ${tokens.prefixes.length} prefix(es), ` +
           `${tokens.users.length} user handle(s), ${tokens.joined.length} joined form(s) — sources: ${JSON.stringify(tokens.counts)}`,
       );
@@ -911,7 +915,34 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     realUsersList = [...new Set([...realUsersList, ...tokens.realUsers, ...tokens.users])];
   }
 
-  const realUsers = new Set(realUsersList);
+  return { root, derived, realUsers: new Set(realUsersList) };
+}
+
+// A committed file's scan options, by its repo-relative path (forward
+// slashes): this file itself is exempt from the SHA class only, and so are
+// lockfiles, minified bundles and node_modules/.
+export function scanOptionsForRel(rel) {
+  return {
+    rel,
+    isSelf: rel === SELF_REL,
+    noSha: SHA_SKIP_PATH_RE.test(rel) || SHA_SKIP_FILE_RE.test(rel),
+  };
+}
+
+export function main(argv = process.argv.slice(2), env = process.env) {
+  let opts;
+  try {
+    opts = parseArgs(argv);
+  } catch (err) {
+    console.error(`leak-check: ${err.message}`);
+    return 2;
+  }
+  const ctx = buildScanContext(opts, env);
+  if (ctx.error) {
+    console.error(`leak-check: ${ctx.error}`);
+    return 2;
+  }
+  const { root, derived, realUsers } = ctx;
   const selfAbs = resolve(fileURLToPath(import.meta.url));
   const hits = [];
   const warnings = [];
