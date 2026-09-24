@@ -237,7 +237,10 @@ it somewhere. The vault stays in use, and `sync` prints a one-line note. A
 refusal never tells you to delete a directory that holds commits or files. It
 tells you to move the directory aside by renaming it, which keeps everything
 in it. It suggests deleting only a directory with an empty `.git` and nothing
-else.
+else. Sometimes an initialization stops before its first commit, which leaves
+the marker and the vault identity but no commits. The next `init` or `sync`
+finishes that initialization instead of refusing it. Vault commits are never
+signed, whatever your global `commit.gpgsign` says.
 
 **Moving the vault.** Set `AGENT_COMPANION_VAULT_DIR` to an absolute path to
 move the vault alone. This is the fix when the default location is refused,

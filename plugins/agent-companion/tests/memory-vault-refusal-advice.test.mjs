@@ -220,3 +220,83 @@ for (const change of [
     }
   });
 }
+
+// --- G2: a half-made vault is finished, never refused forever --------------
+// createVault() writes the marker before the initialize commit. When that
+// commit failed, for example because a global commit.gpgsign had no working
+// signer, the result was a marker, the vault identity and zero commits. Every
+// later run refused it as "not rooted in memory-vault: initialize".
+
+function signingGlobalConfig(fx) {
+  const cfg = join(fx.dir, 'signing.gitconfig');
+  const noGpg = join(fx.dir, 'no-such-gpg-program').replace(/\\/g, '/');
+  writeFileSync(cfg, `[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n[gpg]\n\tprogram = ${noGpg}\n`);
+  return cfg;
+}
+
+test('G2: a global commit.gpgsign with no working signer does not break init; vault commits are unsigned', () => {
+  const fx = fixture();
+  try {
+    const env = { GIT_CONFIG_GLOBAL: signingGlobalConfig(fx) };
+    const init = runVault(fx, 'init', env);
+    assert.equal(init.status, 0, `init must not depend on the operator's signer:\n${init.stderr}`);
+    const sync = runVault(fx, 'sync', env);
+    assert.equal(sync.status, 0, sync.stderr);
+    assert.equal(sync.json?.committed, true, sync.stdout);
+    assert.equal(git(['-C', fx.vault, 'log', '--format=%s', '--max-parents=0']), 'memory-vault: initialize');
+    assert.equal(commitCount(fx.vault), 2);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('G2: a vault whose initialize commit never landed is finished on the next run', () => {
+  const fx = fixture();
+  try {
+    // The exact leftovers of a failed initialize commit: our own .git with
+    // the vault identity, the init files written and staged, no commit.
+    mkdirSync(join(fx.vault, 'projects'), { recursive: true });
+    git(['init', '-q', '-b', 'main', fx.vault]);
+    git(['-C', fx.vault, 'config', '--file', join(fx.vault, '.git', 'config'), 'user.name', 'agent-companion memory-vault']);
+    git(['-C', fx.vault, 'config', '--file', join(fx.vault, '.git', 'config'), 'user.email', VAULT_EMAIL]);
+    writeFileSync(join(fx.vault, 'README.md'), '# agent-companion memory vault\n');
+    writeFileSync(join(fx.vault, '.gitattributes'), '* -text\n');
+    writeFileSync(join(fx.vault, '.memory-vault.json'), MARKER);
+    git(['-C', fx.vault, 'add', '-A']);
+    assert.equal(commitCount(fx.vault), 0);
+
+    const res = runVault(fx, 'sync');
+    assert.equal(res.status, 0, `a half-made vault must be finished, not refused:\n${res.stderr}`);
+    assert.equal(res.json?.committed, true, res.stdout);
+    assert.deepEqual(
+      git(['-C', fx.vault, 'log', '--reverse', '--format=%s']).split('\n').map((s) => s.split(':')[0]),
+      ['memory-vault', 'memory-vault sync'],
+    );
+    assert.equal(git(['-C', fx.vault, 'log', '--max-parents=0', '--format=%s']), 'memory-vault: initialize');
+    assert.equal(git(['-C', fx.vault, 'show', 'HEAD:projects/proj-a/memory/MEMORY.md']), '# index');
+    // The next run treats it as an ordinary vault.
+    writeFileSync(join(fx.corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
+    const again = runVault(fx, 'sync');
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(again.json?.committed, true);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('G2: a zero-commit repository with a marker but not the vault identity is still refused', () => {
+  const fx = fixture();
+  try {
+    mkdirSync(fx.vault, { recursive: true });
+    git(['init', '-q', '-b', 'main', fx.vault]);
+    git(['-C', fx.vault, 'config', '--file', join(fx.vault, '.git', 'config'), 'user.email', 'owner@example.invalid']);
+    writeFileSync(join(fx.vault, '.memory-vault.json'), MARKER);
+    const res = runVault(fx, 'sync');
+    assert.notEqual(res.status, 0, res.stdout);
+    assert.match(res.stderr, /is not a vault this plugin created/);
+    assert.equal(commitCount(fx.vault), 0);
+    assert.deepEqual(readdirSync(fx.vault).sort(), ['.git', '.memory-vault.json']);
+  } finally {
+    fx.cleanup();
+  }
+});

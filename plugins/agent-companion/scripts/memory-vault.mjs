@@ -225,9 +225,15 @@ function vaultGitDir(dir) {
 // core.longpaths lets Git for Windows reach work-tree files
 // (projects/<project>/memory/...) past 260 characters once the repository is
 // found; it is ignored everywhere else.
+//
+// commit.gpgsign / tag.gpgsign are off for the same reason the hooks are: an
+// operator's global signing setting has no business on a local backup, and a
+// signer that is missing or locked made the initialize commit fail, leaving a
+// vault that no later run could use (see finishInit()).
 function vaultGit(dir, args, opts = {}) {
   return gitIsolated([
     '-c', 'core.longpaths=true', '-c', `core.hooksPath=${NO_HOOKS}`,
+    '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
     '-C', dir, '--git-dir=.git', '--work-tree=.', ...args,
   ], opts);
 }
@@ -561,13 +567,18 @@ function backfillGitattributes(dir) {
 // that says "Nothing was written" has to be true on every entry point.
 export function ensureInit() {
   const dir = vaultDir();
-  if (checkVaultLocation(dir) === 'existing') {
+  const state = checkVaultLocation(dir);
+  if (state === 'existing') {
     return { created: false, dir, gitattributes: backfillGitattributes(dir) };
   }
+  if (state === 'resume') return finishInit(dir);
   return createVault(dir);
 }
 
 // 'existing' — a vault this file created, safe to write.
+// 'resume'   — a vault this file started but whose initialize commit never
+//              landed (marker + vault identity, zero commits). finishInit()
+//              completes it.
 // 'new'      — nothing there (or an empty dir) outside any repository.
 // Anything else throws, having written nothing anywhere.
 export function checkVaultLocation(dir = vaultDir()) {
@@ -581,6 +592,7 @@ export function checkVaultLocation(dir = vaultDir()) {
   if (vaultPathTooLong(dir)) throw new Error(tooLongMessage(dir));
   if (isOurVault(dir)) {
     assertVaultGitDir(dir);
+    if (isUnfinishedVault(dir)) return 'resume';
     assertVaultIdentity(dir);
     return 'existing';
   }
@@ -647,8 +659,37 @@ function createVault(dir) {
     JSON.stringify({ kind: 'agent-companion-memory-vault', schema: SCHEMA, createdAt: new Date().toISOString() }, null, 2) + '\n',
   );
   vaultGit(dir, ['add', '-A']);
-  vaultGit(dir, ['commit', '-q', '-m', `${INIT_SUBJECT}\n\nLocal git history for the Claude Code memory corpus. See README.md.`]);
+  vaultGit(dir, ['commit', '-q', '-m', INIT_MESSAGE]);
   return { created: true, dir, gitattributes: 'created' };
+}
+
+const INIT_MESSAGE = `${INIT_SUBJECT}\n\nLocal git history for the Claude Code memory corpus. See README.md.`;
+
+// createVault() writes the marker BEFORE the initialize commit, so a commit
+// that fails (a global commit.gpgsign with no working signer was the case
+// found) leaves the marker, the vault identity and zero commits. That vault
+// used to be refused on every later run, because it has no initialize root
+// commit. It is ours: the marker and the vault identity in its own config
+// say so, and with no commits there is no history anyone else could own. So
+// the initialization is finished instead.
+function isUnfinishedVault(dir) {
+  return vaultEmail(dir) === VAULT_USER_EMAIL && reachableCommits(dir) === 0;
+}
+
+const INIT_FILES = ['README.md', GITATTRIBUTES_NAME, MARKER_NAME];
+
+function finishInit(dir) {
+  mkdirSync(join(dir, 'projects'), { recursive: true });
+  if (!existsSync(join(dir, 'README.md'))) writeFileSync(join(dir, 'README.md'), VAULT_README);
+  const gaExisted = existsSync(join(dir, GITATTRIBUTES_NAME));
+  if (!gaExisted) writeFileSync(join(dir, GITATTRIBUTES_NAME), GITATTRIBUTES);
+  vaultGit(dir, ['add', '--', ...INIT_FILES]);
+  // Only the initialize files, whatever else is staged: `commit -- <paths>`.
+  vaultGit(dir, ['commit', '-q', '-m', INIT_MESSAGE, '--', ...INIT_FILES]);
+  return {
+    created: true, resumed: true, dir,
+    gitattributes: !gaExisted || vaultIsByteExact(dir) ? 'created' : 'differs',
+  };
 }
 
 // --- Locking (protects against two of OUR OWN sync runs racing on the vault's
@@ -1083,7 +1124,8 @@ function main() {
       const r = ensureInit();
       if (json) console.log(JSON.stringify(r));
       else {
-        console.log(r.created ? `memory-vault: initialized at ${r.dir}` : `memory-vault: already initialized at ${r.dir}`);
+        console.log(r.resumed ? `memory-vault: finished an interrupted initialization at ${r.dir}`
+          : r.created ? `memory-vault: initialized at ${r.dir}` : `memory-vault: already initialized at ${r.dir}`);
         printGitattributes(r.gitattributes);
       }
       process.exit(0);
