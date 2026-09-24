@@ -526,6 +526,47 @@ that determines whether the model's work is even salvageable:
   COLLISION, NOT CONFIRMED` for the legacy (pre-model) path, `RESCORED` /
   `RE-SCORE CONFIRMED A REAL FAILURE` for this one.
 
+### Sandbox cleanup retry (Windows)
+
+A DIFFERENT kind of machine-sharing problem from collision handling above:
+not two runs fighting over the same port/lock, but a single run's OWN
+sandbox or per-run temp dir refusing to be *deleted* once the run is
+finished. Found live (2026-09-24): 3 reps of the same pack running
+concurrently on Windows, and removing a finished run's sandbox directory
+threw `EPERM` — a just-exited `claude` child process, an antivirus scanner,
+or Windows' own delayed directory-entry accounting can all hold a handle
+into (or a stale listing of) a directory for a few hundred milliseconds
+after the process that used it has already resolved.
+
+Every removal of a sandbox or per-run temp dir in this bench harness goes
+through ONE helper, `bench/tasks/common.mjs`'s `removeDirWithRetry()`:
+bounded retry-with-backoff (linear, a few seconds at most, ASYNC so a
+backoff wait never blocks the event loop and stalls every OTHER
+concurrently scheduled run) on exactly three transient codes —
+`EPERM`, `EBUSY`, `ENOTEMPTY` — and a fail-fast (no retry at all) for
+anything else. `bench/runner.mjs`'s `runOne()`/`rescoreOne()` call it
+through a `removeDirImpl` test seam (same style as `runOne()`'s own
+`runClaudeImpl`); every other removal in `bench/` (`bench/rescore.mjs`,
+`bench/task-packs/lib.mjs`, `bench/judge.mjs`'s per-vote temp cwd) goes
+through this module's synchronous `rmrf()`, which delegates the SAME
+retryable-code policy to `fs.rmSync`'s own `maxRetries`/`retryDelay`
+(confirmed by the Node.js docs to cover `EBUSY`/`EMFILE`/`ENFILE`/
+`ENOTEMPTY`/`EPERM` with a linear backoff) rather than reimplementing a
+second retry loop.
+
+**A cleanup failure that survives every retry NEVER changes the run's own
+verdict.** `pass`/`collision`/`needs_rescore` are all decided BEFORE cleanup
+ever runs — a leaked directory afterward is pure housekeeping, not a signal
+about the model or the task. Only the failing directory's bare OS error CODE
+(never a path — `results.jsonl` rows are sometimes shared) is recorded on
+the row as `cleanup_error`, and the run carries on normally. `rebuildSummary()`
+and `bench/estimate.mjs` both ignore this field for every stat they compute —
+a `cleanup_error` row counts toward `pass_rate`/medians/local-history exactly
+like any other row. When at least one row in a batch carries `cleanup_error`,
+`summary.md` prints a single `CLEANUP: N run(s) left a leaked sandbox/temp
+dir after cleanup failed even after retrying` line so it is visible without
+digging through `results.jsonl`, distinct from `COLLISION`/`RESCORED` above.
+
 **Coverage gap, by design: the model's OWN in-session commands.** Everything
 above is about the HARNESS's re-score/re-run machinery around `setup()`/
 `score()` — it says nothing about a port collision the MODEL itself hits

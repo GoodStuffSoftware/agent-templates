@@ -53,6 +53,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { classifyModel, classifyReferenceModel, isModelAvailable, effortSupported } from '../hooks/lib/context.mjs';
+import { rmrf } from './tasks/common.mjs';
 
 // Bump whenever buildJudgePrompt()'s wording changes: every calibration
 // record is keyed on it, so a prompt change forces re-calibration rather than
@@ -306,7 +307,11 @@ export function makeCliJudgeCaller(getBin) {
         cwd, env: { ...process.env }, encoding: 'utf8', maxBuffer: 1024 * 1024 * 16, timeout: 10 * 60 * 1000,
         windowsHide: true,
       }, (err, stdout) => {
-        try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
+        // rmrf() (bench/tasks/common.mjs) retries EPERM/EBUSY/ENOTEMPTY with
+        // bounded backoff before giving up -- still best-effort here (a
+        // judge vote's temp cwd leaking on a rare Windows failure is
+        // harmless), so any final failure is still swallowed.
+        try { rmrf(cwd); } catch { /* best effort */ }
         let json = null;
         try { json = JSON.parse(stdout); } catch { json = null; }
         resolve({

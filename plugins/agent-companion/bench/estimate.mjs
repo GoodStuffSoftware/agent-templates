@@ -66,7 +66,13 @@ function median(nums) {
 // double-count that one real run's cost/time. The ORIGINAL row (whether it
 // needed a re-score or not) is never excluded here; its cost/tokens are
 // genuine regardless of which way its pass/fail verdict ultimately landed
-// in rebuildSummary(). Never throws: a machine with no history at all
+// in rebuildSummary(). A row's `cleanup_error` (bench/tasks/common.mjs's
+// removeDirWithRetry() -- a sandbox/temp-dir removal that failed even after
+// retrying) is likewise NEVER a reason to exclude a row here: the run's own
+// cost/duration are unaffected by whether its leftover directory was
+// cleaned up afterward, so this function reads only the named fields above
+// and never checks for that key at all. Never throws: a machine with no
+// history at all
 // yields `{ families: {} }`, not an error -- this is expected on a fresh
 // install.
 export function loadLocalHistory({ resultsRoot } = {}) {

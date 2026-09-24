@@ -42,7 +42,7 @@ import realEffortNoteTask from "./tasks/real-effort-note.mjs";
 import realPublicationSweepTask from "./tasks/real-publication-sweep.mjs";
 import realMisleadingReportTask from "./tasks/real-misleading-report.mjs";
 import realContradictorySpecTask from "./tasks/real-contradictory-spec.mjs";
-import { snapshotTree, rmrf, GUARD_REL_PATH } from "./tasks/common.mjs";
+import { snapshotTree, removeDirWithRetry, GUARD_REL_PATH } from "./tasks/common.mjs";
 import { wilsonInterval, passAtK, formatInterval, MIN_N_TO_SEPARATE } from "./stats.mjs";
 import {
   sha256, runJudge, treeDiff, checkJudgeEligibility, assertJudgeCalibrated, makeCliJudgeCaller,
@@ -488,6 +488,10 @@ export async function runOne({
   // for --concurrency > 1; a sequential/--concurrency 1 caller can omit all
   // of them and gets the historical single-slot behavior unchanged).
   runId: explicitRunId, slot = 0, concurrency = 1, coScheduledRunIds = [], isCollisionRetry = false,
+  // Test seam, in the same style as `runClaudeImpl` above -- production
+  // callers always omit this and get the real, retrying remover
+  // (bench/tasks/common.mjs's removeDirWithRetry()).
+  removeDirImpl = removeDirWithRetry,
 }) {
   const judgeActive = !!(judge && task.rubric);
   if (judgeActive) {
@@ -523,9 +527,16 @@ export async function runOne({
   try {
     meta = task.setup(sandboxDir, scheduleCtx);
   } catch (e) {
-    rmrf(sandboxDir);
-    rmrf(runTmpDir);
-    if (fakeHome) rmrf(fakeHome);
+    // Best-effort: there is no row yet to attach a cleanup_error to (setup
+    // failing means runOne() throws instead of ever returning a row), and a
+    // cleanup failure here must never mask the ORIGINAL setup error `e`
+    // being thrown below -- removeDirWithRetry() never throws (see its own
+    // docs), so this can't happen, but the intent is spelled out here too.
+    await Promise.all([
+      removeDirImpl(sandboxDir),
+      removeDirImpl(runTmpDir),
+      ...(fakeHome ? [removeDirImpl(fakeHome)] : []),
+    ]);
     throw e;
   }
   const promptText = task.prompt(meta);
@@ -719,11 +730,30 @@ export async function runOne({
   // (docs/BENCHMARK.md "Parallel runs") rather than adding a whole separate
   // abandoned-retry cleanup pass for a rare, harmless (an ordinary OS temp
   // dir) already-failed run.
+  // A cleanup failure here (Windows EPERM/EBUSY/ENOTEMPTY -- a just-exited
+  // child process, an antivirus scanner, or a lingering handle; see
+  // bench/tasks/common.mjs's removeDirWithRetry()) must NEVER change this
+  // run's pass/fail, collision, or needs_rescore verdict -- all of those are
+  // already decided above. Only the failing directory's error CODE is
+  // recorded (never a path -- results.jsonl rows are sometimes shared) on
+  // the row below, and the run carries on; rebuildSummary() and
+  // bench/estimate.mjs both ignore this field for every stat they compute.
+  // sandboxDir/runTmpDir/fakeHome are independent targets, so they are
+  // retried IN PARALLEL -- the bounded wait is per-directory, not summed
+  // across all three (see removeDirWithRetry()'s own bound).
+  let cleanupErrorCode = null;
   if (!needsRescore) {
-    rmrf(sandboxDir);
-    rmrf(runTmpDir);
+    const [sandboxCleanup, tmpCleanup] = await Promise.all([
+      removeDirImpl(sandboxDir),
+      removeDirImpl(runTmpDir),
+    ]);
+    if (!sandboxCleanup.ok) cleanupErrorCode = sandboxCleanup.code;
+    else if (!tmpCleanup.ok) cleanupErrorCode = tmpCleanup.code;
   }
-  if (fakeHome) rmrf(fakeHome);
+  if (fakeHome) {
+    const homeCleanup = await removeDirImpl(fakeHome);
+    if (!homeCleanup.ok && !cleanupErrorCode) cleanupErrorCode = homeCleanup.code;
+  }
 
   const row = {
     ts: new Date().toISOString(),
@@ -788,6 +818,12 @@ export async function runOne({
     sandbox_cwd: sandboxDir,
     exec_err: err,
     detail: scoreResult.detail ?? null,
+    // Set only when the sandbox/temp-dir/fakeHome cleanup above failed after
+    // every retry -- the bare OS error code (EPERM/EBUSY/ENOTEMPTY/...),
+    // never a path. See the comment above this row's cleanupErrorCode
+    // computation: rebuildSummary()/bench/estimate.mjs both ignore this
+    // field entirely for pass-rate and cost/time math.
+    cleanup_error: cleanupErrorCode,
     // Rubric-judge columns (present only when a judge ran for this task).
     // A SEPARATE score: never merged into `pass` above.
     ...judgeFields,
@@ -826,7 +862,12 @@ export async function runOne({
 // re-run, so none of that changed; only the verdict fields and this retry's
 // own bookkeeping differ. The original failure's own detail is kept
 // alongside the re-score's, never overwritten.
-export async function rescoreOne({ rescoreState, outDir, answersDir, slot = 0, concurrency = 1, coScheduledRunIds = [] }) {
+export async function rescoreOne({
+  rescoreState, outDir, answersDir, slot = 0, concurrency = 1, coScheduledRunIds = [],
+  // Test seam, same as runOne()'s own removeDirImpl -- production callers
+  // always omit this.
+  removeDirImpl = removeDirWithRetry,
+}) {
   const { originalRow, sandboxDir, runTmpDir, task, meta, answerText } = rescoreState;
   const scheduleCtx = { slot, concurrency, coScheduledRunIds, portBase: portBaseForSlot(slot), tmpDir: runTmpDir };
   let scoreResult;
@@ -850,9 +891,16 @@ export async function rescoreOne({ rescoreState, outDir, answersDir, slot = 0, c
 
   // The retained sandbox and its tmp dir are ALWAYS cleaned up here, whether
   // the re-score passed or failed -- this is the last chance either has to
-  // be torn down.
-  rmrf(sandboxDir);
-  rmrf(runTmpDir);
+  // be torn down. A cleanup failure must never flip this row's pass/fail or
+  // collision_rescored verdict (both already decided above) -- see
+  // bench/tasks/common.mjs's removeDirWithRetry(); only the error CODE is
+  // recorded, below, and retried in parallel across the two dirs (bounded
+  // per-directory, not summed).
+  const [sandboxCleanup, tmpCleanup] = await Promise.all([
+    removeDirImpl(sandboxDir),
+    removeDirImpl(runTmpDir),
+  ]);
+  const rescoreCleanupErrorCode = !sandboxCleanup.ok ? sandboxCleanup.code : (!tmpCleanup.ok ? tmpCleanup.code : null);
 
   const runId = `${originalRow.run_id}::rescore`;
   fs.writeFileSync(
@@ -898,6 +946,12 @@ export async function rescoreOne({ rescoreState, outDir, answersDir, slot = 0, c
     extra_files: scoreResult.extra_files || [],
     detail: { rescore: scoreResult.detail ?? null, original_failure_detail: originalRow.detail ?? null },
     sandbox_cwd: sandboxDir,
+    // This retry's OWN cleanup failure wins when there is one; otherwise
+    // fall back to whatever the original row already carried (e.g. a
+    // fakeHome cleanup failure runOne() recorded before handing the sandbox
+    // off for this rescore -- runOne() always attempts that cleanup even on
+    // a needs_rescore row). null when neither ever failed.
+    cleanup_error: rescoreCleanupErrorCode ?? originalRowSansState.cleanup_error ?? null,
   };
 
   fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify(row) + "\n");
@@ -1081,6 +1135,13 @@ export function rebuildSummary(outDir) {
   // a batch aborts as soon as one appears, so this is normally 0 or 1 row,
   // but rebuildSummary() also replays historical results.jsonl files that
   // may carry more from before this fix.
+  // Sandbox/temp-dir cleanup failure (Windows EPERM/EBUSY/ENOTEMPTY after
+  // every retry -- see bench/tasks/common.mjs's removeDirWithRetry()) is
+  // COSMETIC housekeeping, never a verdict signal: unlike auth_error/
+  // collision below, a cleanup_error row is NEVER excluded from `rows` or
+  // any pass-rate/cost/time math -- its pass/fail was decided before cleanup
+  // ever ran. Only counted here for a one-line "leaked dirs" note.
+  const cleanupErrorRows = allRows.filter((r) => r.cleanup_error);
   const authErrorRows = allRows.filter((r) => r.auth_error);
   // A collision (bench/scheduler.mjs's classifyCollision(): EADDRINUSE, a
   // lock file held, ...) never reached a genuine model/task verdict either
@@ -1311,6 +1372,14 @@ export function rebuildSummary(outDir) {
     lines.push(
       `AUTH ERROR: ${authErrorRows.length} run(s) failed authentication (not logged in / 401) and were EXCLUDED from every stat below -- ` +
       "they never reached the model. See docs/BENCHMARK.md \"Preconditions\" before trusting this summary.",
+      "",
+    );
+  }
+  if (cleanupErrorRows.length > 0) {
+    lines.push(
+      `CLEANUP: ${cleanupErrorRows.length} run(s) left a leaked sandbox/temp dir after cleanup failed even after retrying -- ` +
+      "this never changes any run's pass/fail, collision, or needs_rescore verdict (see each row's cleanup_error code). " +
+      "See docs/BENCHMARK.md \"Parallel runs\".",
       "",
     );
   }
