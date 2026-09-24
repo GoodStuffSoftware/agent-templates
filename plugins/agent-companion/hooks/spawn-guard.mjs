@@ -26,7 +26,7 @@
 import { createHash } from 'node:crypto';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  premiumWindowLive, PREMIUM_WINDOW_MS, withStateLock, writeJsonAtomic,
+  premiumWindowLive, PREMIUM_WINDOW_MS, withStateLock, writeJsonAtomic, premiumAgentType,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
@@ -826,7 +826,9 @@ try {
       // A probe must not consume the cap. A teammate (team_name) is recorded as
       // started at once: there is no evidence SubagentStart fires for one, and
       // under-counting it would reopen the fan-out this cap exists to bound.
-      if (!isCanary) writeJsonAtomic(f, [...recent, { t: now, sid, confirmed: !!input.team_name }]);
+      // `atype` lets SubagentStart confirm this entry only on a start of the
+      // same agent type (confirmPremiumStart, context.mjs).
+      if (!isCanary) writeJsonAtomic(f, [...recent, { t: now, sid, confirmed: !!input.team_name, atype: premiumAgentType(input.subagent_type) }]);
       return null;
     });
 

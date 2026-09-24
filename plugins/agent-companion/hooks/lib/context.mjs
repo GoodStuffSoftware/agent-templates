@@ -1780,17 +1780,32 @@ export function premiumWindowLive(entries, now = Date.now()) {
   return (Array.isArray(entries) ? entries : []).filter((e) => windowEntryLive(e, now));
 }
 
-// SubagentStart: confirm the oldest live pending entry for this session.
-// Matched by session only — the start's agent_type does not always equal the
-// spawn's subagent_type (namespacing). Returns true when one was confirmed.
-export function confirmPremiumStart(sessionId, now = Date.now()) {
+// The agent type as both hooks see it, for matching a start to its spawn:
+// the part after any plugin namespace ("agent-companion:ac-opus" and
+// "ac-opus" are one type), lower-cased; a spawn naming none runs as
+// general-purpose, which is what SubagentStart then reports.
+export function premiumAgentType(t) {
+  return String(t || 'general-purpose').split(':').pop().trim().toLowerCase() || 'general-purpose';
+}
+
+// SubagentStart: confirm the oldest live pending entry for this session
+// whose agent type matches the start's (RC review R7). SubagentStart
+// carries agent_type (not the model), and the spawn guard records the
+// spawn's type on its entry (`atype`), so a NON-premium start in the same
+// session no longer confirms a premium spawn's entry. Matched by session
+// only when either side lacks a type (an entry from an older guard, or a
+// payload with no agent_type): that over-counts, the safe direction.
+// Returns true when one was confirmed.
+export function confirmPremiumStart(sessionId, now = Date.now(), agentType = null) {
   if (!sessionId) return false;
+  const want = agentType ? premiumAgentType(agentType) : null;
   const f = stateFile('premium-window.json');
   // Under the window lock (withStateLock): the spawn guard read-modify-writes
   // the same file, and an unlocked interleaving lost one side's update.
   return withStateLock(f, () => {
     const live = premiumWindowLive(readJson(f, []), now);
-    const idx = live.findIndex((e) => e && typeof e === 'object' && !e.confirmed && e.sid === sessionId);
+    const idx = live.findIndex((e) => e && typeof e === 'object' && !e.confirmed && e.sid === sessionId
+      && (!want || typeof e.atype !== 'string' || e.atype === want));
     if (idx < 0) return false;
     live[idx] = { ...live[idx], confirmed: true, startedAt: now };
     writeJsonAtomic(f, live);

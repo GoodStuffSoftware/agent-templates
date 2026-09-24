@@ -18,8 +18,8 @@ try {
     });
   }
   // The premium fan-out cap counts spawns that actually STARTED: confirm the
-  // spawn guard's pending entry for this session (context.mjs,
+  // spawn guard's pending entry for this session and agent type (context.mjs,
   // confirmPremiumStart). Independent of spawn_telemetry — this is cap state.
-  try { confirmPremiumStart(p.session_id); } catch { /* fail open */ }
+  try { confirmPremiumStart(p.session_id, Date.now(), p.agent_type || null); } catch { /* fail open */ }
 } catch { /* fail open */ }
 passthrough();
