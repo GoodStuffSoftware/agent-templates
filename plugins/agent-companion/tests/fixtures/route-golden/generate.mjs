@@ -1,25 +1,31 @@
 #!/usr/bin/env node
 // Regenerate tests/fixtures/route-golden/expected.json from a PINNED git ref.
 //
-// The golden table is the acceptance gate for ADR 0003 slice 1: resolveRoute()
-// must give the same answer as the resolver that shipped BEFORE it. So the
-// expected values are never computed by the code under test and never typed
-// by hand. This script extracts hooks/lib/context.mjs and
-// config/model-tiers.json at <ref> with `git show` into a temp directory
-// OUTSIDE the repository, evaluates cases.mjs against that copy's
-// resolveExpected() in a hermetic child process (empty state root, so no
-// per-machine model-tiers.json override leaks in), and writes the results.
+// expected.json is the FROZEN record of what the pre-ADR-0003 resolver
+// returned on its own config. It is not the acceptance gate any more: the
+// gate (live-gate.mjs, run by tests/route-golden.test.mjs) runs the vendored
+// copy of that resolver under reference/ against the CURRENT config, so a
+// routine table edit never calls for regenerating anything. This record only
+// proves the vendored reference is faithful: the test checks reference/'s
+// sha256 against the `source` block below and that it reproduces every row.
+// There is no reason to regenerate it; if you must, pass the SAME baseline
+// ref, never a ref carrying resolveRoute() (that would vet the reference
+// against the code under test).
+//
+// This script extracts hooks/lib/context.mjs and config/model-tiers.json at
+// <ref> with `git show` into a temp directory OUTSIDE the repository,
+// evaluates cases.mjs against that copy's resolveExpected() in a hermetic
+// child process (empty state root, so no per-machine model-tiers.json
+// override leaks in), and writes the results.
 //
 // The old resolver has no clock parameter, so the child pins the calendar by
 // replacing the global Date for each clock in CLOCKS.
 //
 // Usage (from anywhere inside the repo):
-//   node plugins/agent-companion/tests/fixtures/route-golden/generate.mjs [--ref <git-ref>]
-// Default ref: origin/main. The committed fixture was generated from the
-// origin/main commit "docs(adr-0003): accept per-user routing profiles,
-// decide open questions" (see its `source` block), before resolveRoute().
-// Only regenerate from a ref whose resolver you trust as the baseline —
-// regenerating from the code under test turns the gate into a tautology.
+//   node plugins/agent-companion/tests/fixtures/route-golden/generate.mjs --ref <git-ref>
+// The committed fixture was generated from the commit "docs(adr-0003): accept
+// per-user routing profiles, decide open questions" (see its `source`
+// block), before resolveRoute().
 
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
@@ -35,7 +41,11 @@ const FILES = ['hooks/lib/context.mjs', 'config/model-tiers.json'];
 
 const argv = process.argv.slice(2);
 const refIdx = argv.indexOf('--ref');
-const ref = refIdx >= 0 ? argv[refIdx + 1] : 'origin/main';
+const ref = refIdx >= 0 ? argv[refIdx + 1] : '';
+if (!ref) {
+  console.error('usage: generate.mjs --ref <the pinned baseline ref> (there is no default: the record is frozen)');
+  process.exit(2);
+}
 
 function git(args) {
   const r = spawnSync('git', args, { cwd: HERE, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
