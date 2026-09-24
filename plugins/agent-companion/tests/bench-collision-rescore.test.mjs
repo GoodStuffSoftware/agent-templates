@@ -18,12 +18,12 @@
 // the fixture: a hidden test that shells out (execFileSync) to a real child
 // process (subprocess-bind-child.mjs) that binds a fixed port, in the exact
 // "catch everything, never throw" style FORMAT.md documents. This whole
-// suite fails against bfd7173 (the round 2 base commit: score() never
-// throws, so classifyCollision() -> `collision` never fires for this shape,
-// and there was no other rescue mechanism at all -- a genuine collision
-// counted as an ordinary task failure, uncorrected) and passes once
-// bench/runner.mjs's `needsRescore`/`rescoreOne()` and bench/scheduler.mjs's
-// needs_rescore-retry queuing exist.
+// suite fails against the round 2 base commit (score() never throws, so
+// classifyCollision() -> `collision` never fires for this shape, and there
+// was no other rescue mechanism at all -- a genuine collision counted as an
+// ordinary task failure, uncorrected) and passes once bench/runner.mjs's
+// `needsRescore`/`rescoreOne()` and bench/scheduler.mjs's needs_rescore-retry
+// queuing exist.
 //
 // NO MODEL IS EVER CALLED. Every runOne() call below is driven through its
 // runClaudeImpl test seam (a stub that never spawns `claude`); rescoreOne()
