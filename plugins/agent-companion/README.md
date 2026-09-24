@@ -220,6 +220,28 @@ embedded connection-string credentials, generic `secret:`/`token:`/
 reported by file path and pattern label only, never the matched text — and
 leaves whatever the vault already had for it untouched.
 
+**Never inside another repository.** The vault must be a git repository of
+its own. `init` and `sync` refuse, writing nothing at all (no vault
+directory, lock or status file), when the vault location is inside an
+existing repository's work tree or `.git`, when its `.git` is a symlink or
+junction, when a marker file sits in a repository the plugin did not create,
+or when a vault path is longer than 246 characters on Windows. Git for
+Windows cannot find a repository past that length, whatever `core.longpaths`
+says. Every git call the vault makes also ignores the caller's
+repo-locating `GIT_*` variables, inherited `-c` config, and hooks.
+
+**Moving the vault.** Set `AGENT_COMPANION_VAULT_DIR` to an absolute path to
+move the vault alone. This is the fix when the default location is refused,
+for example because `~/.claude` is itself a git repository:
+
+```bash
+AGENT_COMPANION_VAULT_DIR=/path/outside/any/repo/memory-vault node scripts/memory-vault.mjs sync
+```
+
+`AGENT_COMPANION_STATE_DIR` also moves the vault, but it moves **all**
+agent-companion state with it: `config/` (brevity toggles, standing rules),
+telemetry, and dedup state. Use it only if that is what you want.
+
 **Never a session transcript.** Transcripts live at
 `~/.claude/projects/<project>/*.jsonl`, a *sibling* of that project's
 `memory/` directory, never inside it — structurally outside every path this
@@ -542,7 +564,7 @@ the legacy-data import, and the schema.
 | `state/migrated.json` | state root | written once, after the first legacy-data import |
 | `state/model-tiers.json` | state root | operator override of `config/model-tiers.json` (optional); a legacy copy under the plugin data dir is still honoured as a fallback |
 | `state/agent-types/*.seen` | state root | one marker file per seen unknown agent type (race-free dedup) |
-| `memory-vault/` | state root | the vault repo itself — a separate git repository, see [Memory vault](#memory-vault) |
+| `memory-vault/` | state root, or `AGENT_COMPANION_VAULT_DIR` when set | the vault repo itself — a separate git repository, see [Memory vault](#memory-vault) |
 | `state/memory-vault-sync.lock` | state root | held for the duration of one `memory-vault.mjs sync`; stale after 120s and taken over |
 | `state/memory-vault-status.json` | state root | fast-read cache of the vault's last sync outcome, plus a record of every sync ATTEMPT — including the ones turned away before doing any work, which is how a sync that silently stopped running becomes reportable (git history is the source of truth for content, not this file) |
 | `migration/backup-<stamp>/...` | state root | verbatim backup of each legacy dir's durable files, taken before the first import |

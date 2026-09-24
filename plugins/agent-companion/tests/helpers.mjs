@@ -44,7 +44,7 @@ export const REAL_CLAUDE_DIRS = Object.freeze([...new Set([
     : []),
 ].filter(Boolean))]);
 
-const ENV_KEYS = ['AGENT_COMPANION_HOME_OVERRIDE', 'AGENT_COMPANION_STATE_DIR', 'CLAUDE_PLUGIN_DATA', 'CLAUDE_CONFIG_DIR'];
+const ENV_KEYS = ['AGENT_COMPANION_HOME_OVERRIDE', 'AGENT_COMPANION_STATE_DIR', 'AGENT_COMPANION_VAULT_DIR', 'CLAUDE_PLUGIN_DATA', 'CLAUDE_CONFIG_DIR'];
 
 // Fresh temp dir + the standard env overrides. Returns { dir, stateDir,
 // cleanup() }. Call cleanup() in a `finally` (or node:test's `after`) —
@@ -59,6 +59,8 @@ export function makeFixture() {
   process.env.AGENT_COMPANION_STATE_DIR = stateDir;
   delete process.env.CLAUDE_PLUGIN_DATA;
   delete process.env.CLAUDE_CONFIG_DIR;
+  // An operator's own vault override must never steer a test's vault.
+  delete process.env.AGENT_COMPANION_VAULT_DIR;
 
   assertNotRealHome(dir, 'AGENT_COMPANION_HOME_OVERRIDE');
   assertNotRealHome(stateDir, 'AGENT_COMPANION_STATE_DIR');

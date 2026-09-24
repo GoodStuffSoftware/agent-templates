@@ -326,6 +326,79 @@ for (const [label, setup] of [
   });
 }
 
+// V8. The refusal used to recommend AGENT_COMPANION_STATE_DIR, which moves
+// ALL agent-companion state (config, toggles, standing rules), not just the
+// vault. AGENT_COMPANION_VAULT_DIR moves the vault alone.
+test('the inside-a-repository refusal recommends AGENT_COMPANION_VAULT_DIR and warns what STATE_DIR moves', () => {
+  const fx = makeFixture();
+  try {
+    const { repo } = makeProject(fx.dir);
+    const res = runScript(SCRIPT, ['init', '--json'], {
+      cwd: fx.dir,
+      env: { AGENT_COMPANION_STATE_DIR: join(repo, 'nested', 'state'), CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
+    });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /Relocate the vault alone by setting AGENT_COMPANION_VAULT_DIR to an absolute path/);
+    assert.match(res.stderr, /AGENT_COMPANION_STATE_DIR would move the vault too, but it moves ALL agent-companion state/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('AGENT_COMPANION_VAULT_DIR moves the vault alone: a state root inside a repository no longer blocks it', () => {
+  const fx = makeFixture();
+  try {
+    const { repo, wt } = makeProject(fx.dir);
+    const corpus = makeCorpus(fx.dir);
+    const stateDir = join(repo, 'nested', 'state');
+    const vault = join(fx.dir, 'elsewhere', 'my-vault');
+    const before = snapshot(repo);
+    const treeBefore = hashTree(join(repo, '.git'));
+
+    const res = runScript(SCRIPT, ['sync', '--json'], {
+      cwd: fx.dir,
+      env: {
+        AGENT_COMPANION_STATE_DIR: stateDir,
+        AGENT_COMPANION_VAULT_DIR: vault,
+        AGENT_COMPANION_MEMORY_ROOT: corpus,
+        CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true',
+      },
+      timeout: 60000,
+    });
+
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.json?.committed, true, res.stdout);
+    assert.equal(git(['-C', vault, 'show', 'HEAD:projects/proj-a/memory/MEMORY.md']), '# index');
+    assert.ok(!existsSync(join(stateDir, 'memory-vault')), 'the vault must not be created under the state root');
+    assert.deepEqual(hashTree(join(repo, '.git')), treeBefore, 'project .git must be byte-identical');
+    assert.equal(git(['-C', repo, 'rev-parse', 'HEAD']), before.head);
+    git(['-C', wt, 'status', '--porcelain']);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('a relative AGENT_COMPANION_VAULT_DIR is refused with nothing written', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const res = runScript(SCRIPT, ['sync', '--json'], {
+      cwd: fx.dir,
+      env: {
+        AGENT_COMPANION_VAULT_DIR: join('relative', 'vault'),
+        AGENT_COMPANION_MEMORY_ROOT: corpus,
+        CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true',
+      },
+    });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /AGENT_COMPANION_VAULT_DIR is ".*", a relative path/);
+    assert.ok(!existsSync(join(fx.dir, 'relative')), 'no vault may be created relative to the cwd');
+    assert.ok(!existsSync(fx.stateDir), 'no lock or status file may be written');
+  } finally {
+    fx.cleanup();
+  }
+});
+
 // V5. gitClean() keeps per-process config injection (the leak-sweep canary
 // needs it), so an inherited GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT reached
 // vault commits: a parent's core.hooksPath ran the parent's hooks inside the

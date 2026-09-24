@@ -36,7 +36,7 @@ import {
   readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync,
   realpathSync, statSync, lstatSync,
 } from 'node:fs';
-import { join, dirname, relative, sep, resolve } from 'node:path';
+import { join, dirname, relative, sep, resolve, isAbsolute } from 'node:path';
 import { gitIsolated, enclosingGitRepo, samePath } from './lib/git-env.mjs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -155,9 +155,23 @@ export function scanForSecrets(text) {
 
 // Path only — resolving it creates nothing, so ensureInit() can refuse a bad
 // location before a single byte is written anywhere.
+//
+// AGENT_COMPANION_VAULT_DIR moves the vault ALONE: it names the vault
+// directory itself (absolute; checkVaultLocation() refuses a relative one,
+// which would resolve against whatever cwd a scheduled run happens to have).
+// AGENT_COMPANION_STATE_DIR also moves the vault, but it moves every piece of
+// agent-companion state with it — config (brevity toggles, standing rules),
+// telemetry, dedup state — so it is the wrong knob for "the vault landed
+// inside a repository".
+export const VAULT_DIR_ENV = 'AGENT_COMPANION_VAULT_DIR';
+
 export function vaultDir() {
-  return join(stateRootPath(), 'memory-vault');
+  return process.env[VAULT_DIR_ENV] || join(stateRootPath(), 'memory-vault');
 }
+
+const RELOCATE_ADVICE = `Relocate the vault alone by setting ${VAULT_DIR_ENV} to an absolute path outside `
+  + 'any git repository, then retry. (AGENT_COMPANION_STATE_DIR would move the vault too, but it moves ALL '
+  + 'agent-companion state with it — config, brevity toggles, standing rules, telemetry.)';
 
 function lockFile() {
   return join(stateDir(), 'memory-vault-sync.lock');
@@ -229,7 +243,8 @@ function vaultPathTooLong(dir) {
 function tooLongMessage(dir) {
   return `refusing to initialize — the vault path is ${resolve(dir).length} characters (${dir}). `
     + `Git for Windows cannot find a repository whose path is longer than ${WIN_MAX_VAULT_PATH} characters, `
-    + 'whatever core.longpaths says. Nothing was written. Choose a shorter vault location, then retry.';
+    + `whatever core.longpaths says. Nothing was written. Set ${VAULT_DIR_ENV} to a shorter absolute path `
+    + 'outside any git repository, then retry.';
 }
 
 function isOurVault(dir) {
@@ -293,7 +308,7 @@ function assertVaultIdentity(dir) {
       `refusing to write — ${dir} carries a memory-vault marker but is not a vault this plugin created `
       + `(its own config ${email === VAULT_USER_EMAIL ? 'has' : 'lacks'} the vault identity; its history `
       + `${rootsOk ? 'is' : 'is not'} rooted in "${INIT_SUBJECT}"). Nothing was changed. If this is `
-      + 'your repository, remove the stray marker file; otherwise choose another vault location.',
+      + `your repository, remove the stray marker file. ${RELOCATE_ADVICE}`,
     );
   }
 }
@@ -496,6 +511,13 @@ export function ensureInit() {
 // 'new'      — nothing there (or an empty dir) outside any repository.
 // Anything else throws, having written nothing anywhere.
 export function checkVaultLocation(dir = vaultDir()) {
+  if (process.env[VAULT_DIR_ENV] && !isAbsolute(process.env[VAULT_DIR_ENV])) {
+    throw new Error(
+      `refusing to initialize — ${VAULT_DIR_ENV} is "${process.env[VAULT_DIR_ENV]}", a relative path, which `
+      + 'would resolve against whatever directory the sync happens to run from. Nothing was written. Set it '
+      + 'to an absolute path outside any git repository, then retry.',
+    );
+  }
   if (vaultPathTooLong(dir)) throw new Error(tooLongMessage(dir));
   if (isOurVault(dir)) {
     assertVaultGitDir(dir);
@@ -512,8 +534,8 @@ export function checkVaultLocation(dir = vaultDir()) {
     throw new Error(
       `refusing to initialize — ${dir} already holds a git repository but no memory-vault marker `
       + `(${MARKER_NAME}). Either an earlier initialization stopped part-way or this repository is not a `
-      + 'memory vault. Nothing was written. If it is a half-made vault, delete that directory and retry; '
-      + 'otherwise choose another vault location.',
+      + 'memory vault. Nothing was written. If it is a half-made vault, delete that directory and retry. '
+      + RELOCATE_ADVICE,
     );
   }
 
@@ -523,8 +545,7 @@ export function checkVaultLocation(dir = vaultDir()) {
       `refusing to initialize — ${dir} is inside an existing git repository `
       + `(${enclosing.kind === 'git-dir' ? 'its git dir' : 'its work tree'} at ${enclosing.root}). `
       + 'The memory vault must be a repository of its own, never nested in another. Nothing was '
-      + 'written. Relocate the vault by setting AGENT_COMPANION_STATE_DIR to a directory outside '
-      + 'any repository, then retry.',
+      + `written. ${RELOCATE_ADVICE}`,
     );
   }
 
@@ -533,8 +554,8 @@ export function checkVaultLocation(dir = vaultDir()) {
     const sample = entries.slice(0, 5).join(', ') + (entries.length > 5 ? ', ...' : '');
     throw new Error(
       `refusing to initialize — ${dir} already exists and is not an agent-companion `
-      + `memory vault (found: ${sample}). Move or remove it, or relocate the vault by `
-      + 'setting AGENT_COMPANION_STATE_DIR, then retry.',
+      + `memory vault (found: ${sample}). Nothing was written. Move or remove it, or `
+      + `${RELOCATE_ADVICE.charAt(0).toLowerCase()}${RELOCATE_ADVICE.slice(1)}`,
     );
   }
   return 'new';
