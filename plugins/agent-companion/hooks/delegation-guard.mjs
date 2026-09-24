@@ -41,10 +41,11 @@ try {
       `Delegation guard: that is ${streak} execution-class tool calls in a row on the MAIN thread ` +
       `(${p.tool_name}). This is the pattern the orchestrator rules exist to prevent — the main ` +
       `session holds decisions, workers hold token volume.\n\n` +
-      `Spawn a subagent for this instead, sized to the task (weight 1-2 -> haiku, 3 -> sonnet, ` +
-      `4-5 -> sonnet/opus). If this genuinely belongs on the main thread — a one-off read you ` +
-      `need in order to decide what to delegate — simply repeat the call and it will pass; ` +
-      `the counter has been reset.`
+      `Spawn a subagent for this instead, sized to the task — run \`node scripts/recommend.mjs ` +
+      `--type <task-type>\` (or --weight 1-5) rather than assuming a tier by hand, since the ` +
+      `routing table (and any staged tier retirement) can change which model that resolves to. ` +
+      `If this genuinely belongs on the main thread — a one-off read you need in order to decide ` +
+      `what to delegate — simply repeat the call and it will pass; the counter has been reset.`
     );
   }
 
