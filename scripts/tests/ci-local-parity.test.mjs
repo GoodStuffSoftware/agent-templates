@@ -224,6 +224,13 @@ function buildThrowawayRepo() {
     '',
   ].join('\n'));
   writeFileSync(join(repo, 'scripts', 'ci-local.mjs'), readFileText(SCRIPT));
+  // ci-local runs node --test suites through its own reporters, resolved
+  // next to itself; without them the suite would fail at once and the kill
+  // below would land on an already-finished run.
+  mkdirSync(join(repo, 'scripts', 'ci-reporters'), { recursive: true });
+  for (const f of ['human.mjs', 'results.mjs']) {
+    writeFileSync(join(repo, 'scripts', 'ci-reporters', f), readFileText(join(dirname(SCRIPT), 'ci-reporters', f)));
+  }
 
   git(repo, ['init', '-q']);
   git(repo, ['add', '-A']);
