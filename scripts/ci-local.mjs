@@ -168,9 +168,33 @@ export function isDeletedRef(localSha) {
 // Process helpers
 // ---------------------------------------------------------------------------
 
+// Running as a git hook (pre-push, etc.) means git already set GIT_DIR,
+// GIT_WORK_TREE, GIT_CONFIG_PARAMETERS and friends in OUR process env, so
+// that every plain `git` command the hook itself runs targets the repo the
+// push came from — correct for git's own purposes, but fatal for us: every
+// child process we spawn (a suite's own `git` calls, a suite's own clones,
+// our own clone-and-tag machinery) inherits that same env, so a `git`
+// command run with a DIFFERENT cwd (a fresh temp clone) still gets pointed
+// at the ORIGINAL repo's gitdir regardless of cwd or `-C`, producing
+// "fatal: this operation must be run in a work tree" and cross-repo
+// remote/tag collisions inside what should be an independent checkout.
+// Strip every GIT_*-prefixed var before spawning anything, so cwd-based git
+// discovery works the way a suite run directly (not from a hook) expects.
+export function stripGitEnv(env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env || {})) {
+    if (!/^GIT_/i.test(k)) out[k] = v;
+  }
+  return out;
+}
+
+function baseChildEnv() {
+  return stripGitEnv(process.env);
+}
+
 function runNode(args, cwd, env) {
   const res = spawnSync(process.execPath, args, {
-    cwd, env, stdio: 'inherit', windowsHide: true,
+    cwd, env: env || baseChildEnv(), stdio: 'inherit', windowsHide: true,
   });
   if (res.error) {
     console.error(`ci-local: failed to run node ${args.join(' ')}: ${res.error.message}`);
@@ -181,7 +205,7 @@ function runNode(args, cwd, env) {
 
 function git(cwd, args) {
   const res = spawnSync('git', args, {
-    cwd, encoding: 'utf8', windowsHide: true,
+    cwd, env: baseChildEnv(), encoding: 'utf8', windowsHide: true,
   });
   if (res.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${(res.stderr || res.error?.message || '').trim()}`);
@@ -267,7 +291,7 @@ function shallowCloneRef(dest, repoRoot, tagName, depth) {
   const args = ['clone', '--no-local', '-c', 'core.autocrlf=input', '--branch', tagName, '--single-branch'];
   if (depth > 0) args.push('--depth', String(depth));
   args.push(repoRoot, dest);
-  const res = spawnSync('git', args, { encoding: 'utf8', windowsHide: true });
+  const res = spawnSync('git', args, { env: baseChildEnv(), encoding: 'utf8', windowsHide: true });
   if (res.status !== 0) {
     throw new Error(`git clone (parity, depth=${depth}) failed: ${(res.stderr || '').trim()}`);
   }
@@ -295,7 +319,7 @@ function shallowCloneRef(dest, repoRoot, tagName, depth) {
 
 function runSuiteLocal(name) {
   const suite = SUITES[name];
-  return runNode(suite.command(REPO_ROOT), REPO_ROOT, process.env);
+  return runNode(suite.command(REPO_ROOT), REPO_ROOT, baseChildEnv());
 }
 
 function runSuiteParity(name, ref) {
@@ -318,7 +342,7 @@ function runSuiteParity(name, ref) {
       shallowCloneRef(workDir, REPO_ROOT, tagName, depth);
     }
 
-    const env = hideFromPath({ ...process.env }, CLAUDE_BIN_NAMES);
+    const env = hideFromPath(baseChildEnv(), CLAUDE_BIN_NAMES);
     return runNode(suite.command(workDir), workDir, env);
   } finally {
     deleteTempTag(REPO_ROOT, tagName);

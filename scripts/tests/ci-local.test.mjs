@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   parseArgs, classifyRef, parsePrePushStdin, isDeletedRef, readCheckoutDepth,
-  SUITE_NAMES, DEFAULT_ORDER,
+  stripGitEnv, SUITE_NAMES, DEFAULT_ORDER,
 } from '../ci-local.mjs';
 
 // --- parseArgs ---------------------------------------------------------
@@ -171,4 +171,35 @@ test('readCheckoutDepth: no fetch-depth line means the actions/checkout default 
 
 test('readCheckoutDepth: a missing file means the default of 1', () => {
   assert.equal(readCheckoutDepth(join(tmpdir(), 'does-not-exist-ci-local.yml')), 1);
+});
+
+// --- stripGitEnv -----------------------------------------------------------
+// Running as a git hook (e.g. pre-push), git sets GIT_DIR/GIT_WORK_TREE/
+// GIT_CONFIG_PARAMETERS etc. in the hook's own process env so that ITS git
+// commands target the right repo -- but every git command WE spawn for a
+// different cwd (a fresh temp clone) inherits that same env and gets
+// force-pointed at the ORIGINAL repo regardless of cwd, breaking clone/tag
+// operations against the temp clone. Reproduced live: a real
+// `git -c core.hooksPath=... push --dry-run` run failed several suites with
+// "fatal: this operation must be run in a work tree" until this stripping
+// was added.
+test('stripGitEnv: removes every GIT_*-prefixed key, case-insensitively', () => {
+  const cleaned = stripGitEnv({
+    GIT_DIR: '/somewhere/.git',
+    GIT_WORK_TREE: '/somewhere',
+    git_prefix: '',
+    PATH: '/usr/bin',
+    HOME: '/home/x',
+  });
+  assert.deepEqual(cleaned, { PATH: '/usr/bin', HOME: '/home/x' });
+});
+
+test('stripGitEnv: leaves a env with no GIT_* keys untouched', () => {
+  const env = { PATH: '/usr/bin', NODE_ENV: 'test' };
+  assert.deepEqual(stripGitEnv(env), env);
+});
+
+test('stripGitEnv: handles undefined/empty input', () => {
+  assert.deepEqual(stripGitEnv(undefined), {});
+  assert.deepEqual(stripGitEnv({}), {});
 });
