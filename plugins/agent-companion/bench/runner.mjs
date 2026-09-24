@@ -1071,60 +1071,140 @@ export function cacheHitRate(row) {
 // arm (cache reads mostly failed to hit; base-prefix-only).
 const CACHE_HIT_RATE_ANOMALY_THRESHOLD = 0.85;
 
+// The run_id's BASE id -- everything before the first `::` in the suffix
+// chain (`::retry`, `::rescore`, or any future chain of them). A bare
+// original row's base id is its own full run_id.
+function baseRunId(runId) {
+  const i = runId.indexOf("::");
+  return i === -1 ? runId : runId.slice(0, i);
+}
+
+// Groups `rawRows` (in on-disk/file order) into ATTEMPT FAMILIES per base
+// run_id, then picks exactly one winning family per base id -- this is the
+// round-4 fix for the round-3 dedup's gap (2026-09 delta review, Track B
+// round 4 finding 1): the round-3 dedup (see git history) grouped by EXACT
+// run_id string, so a `::retry`/`::rescore` CHILD of an abandoned attempt --
+// whose run_id is unique in the file (nothing else is ever literally
+// "X::rescore") -- was never dropped even when its PARENT original row lost
+// to a fresh `--resume` attempt under the bare id `X`. That orphaned child
+// then survived into `allRows` on its own, double-counting one (cell, task,
+// rep) slot.
+//
+// A FAMILY is: one "original" row (run_id === its own base id) plus every
+// `::retry`/`::rescore` CHILD that appears after it and before the NEXT
+// original row sharing the same base id (file order, not run_id string
+// matching -- two different families can produce a child with the
+// textually IDENTICAL run_id, e.g. two attempts that each needed a rescore
+// both write "X::rescore", so only position can tell them apart). Each
+// appearance of a base original starts a new family and "claims" every
+// following child of that base id until the next original appears.
+//
+// A family is ABANDONED when its original row is a `needs_rescore` row
+// whose own rescore never arrived as one of ITS children -- the interrupted-
+// mid-cell case docs/BENCHMARK.md's "Resuming a batch" describes (an
+// auth_error/judge refusal while the rescore retry was still queued but
+// never admitted). A family with no original row at all (a child with
+// nothing preceding it -- not expected from any real run, but handled so a
+// malformed/truncated results.jsonl never throws) is treated as abandoned
+// too, since there is no genuine attempt to anchor it to.
+//
+// Winner selection per base id, walking its families in file order: a
+// non-abandoned family always beats an abandoned one regardless of order;
+// among two families of the same standing (both abandoned or both not), the
+// LATER one wins. This is exactly the round-3 per-row reduction, generalized
+// from single rows to whole families -- so the SAME two invariants it
+// documented still hold: a fresh --resume attempt supersedes an earlier
+// complete-looking attempt (docs' "regenerating rep=1... under the IDENTICAL
+// deterministic run_id" example), and when EVERY attempt for a slot was
+// abandoned, the last one in file order still counts (fail open -- a
+// failure already recorded is never silently dropped).
+//
+// Returns { winners: Set<row>, supersededRows: row[] } -- every row of a
+// losing family, original and children alike.
+export function groupRunsByAttemptFamily(rawRows) {
+  const familiesByBase = new Map(); // base run_id -> family[] (file order)
+  const currentFamily = new Map(); // base run_id -> most-recently-opened family
+  const winners = new Set();
+  const supersededRows = [];
+
+  for (const r of rawRows) {
+    // A row with no `run_id` at all (older results.jsonl files predate the
+    // field, and plenty of test fixtures never set it) has nothing to
+    // dedupe against -- it is its own family of one, always a winner.
+    if (!r.run_id) { winners.add(r); continue; }
+    const base = baseRunId(r.run_id);
+    const isOriginal = r.run_id === base;
+    if (isOriginal) {
+      const family = { original: r, children: [], rows: [r] };
+      if (!familiesByBase.has(base)) familiesByBase.set(base, []);
+      familiesByBase.get(base).push(family);
+      currentFamily.set(base, family);
+    } else {
+      let family = currentFamily.get(base);
+      if (!family) {
+        // A child with no preceding original for this base id at all.
+        family = { original: null, children: [r], rows: [] };
+        if (!familiesByBase.has(base)) familiesByBase.set(base, []);
+        familiesByBase.get(base).push(family);
+        currentFamily.set(base, family);
+      } else {
+        family.children.push(r);
+      }
+      family.rows.push(r);
+    }
+  }
+
+  const isFamilyAbandoned = (family) => {
+    if (!family.original) return true;
+    const orig = family.original;
+    if (!orig.needs_rescore || orig.is_rescore_retry) return false;
+    return !family.children.some((c) => c.is_rescore_retry === true);
+  };
+
+  for (const families of familiesByBase.values()) {
+    let winnerFamily = families[0];
+    for (let i = 1; i < families.length; i += 1) {
+      const candidate = families[i];
+      const winnerAbandoned = isFamilyAbandoned(winnerFamily);
+      const candidateAbandoned = isFamilyAbandoned(candidate);
+      if (winnerAbandoned && !candidateAbandoned) { winnerFamily = candidate; continue; }
+      if (!winnerAbandoned && candidateAbandoned) continue; // keep the current winner
+      winnerFamily = candidate; // same standing -- the later attempt wins
+    }
+    for (const family of families) {
+      if (family === winnerFamily) {
+        for (const r of family.rows) winners.add(r);
+      } else {
+        for (const r of family.rows) supersededRows.push(r);
+      }
+    }
+  }
+
+  return { winners, supersededRows };
+}
+
 export function rebuildSummary(outDir) {
   const jsonlPath = path.join(outDir, "results.jsonl");
   if (!fs.existsSync(jsonlPath)) return;
   const rawRows = fs.readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 
-  // --resume dedup (round 3, 2026-09 delta review finding 3): run_id is
-  // deterministic (`${cellId}__${taskId}__rep${rep}`), and results.jsonl is
-  // append-only -- never rewritten. --resume only skips a cell whose
-  // .batch-state.json marks it fully COMPLETE; a cell interrupted
-  // (auth_error / a judge refusal / a weekly ceiling) while a needs_rescore
-  // retry was still QUEUED but never ADMITTED is not marked complete, so a
-  // later --resume re-runs that WHOLE cell from scratch at the SAME
-  // --rep-start -- producing a SECOND row under the exact SAME run_id as the
-  // first (abandoned) attempt. Without this dedup, that one (cell, task,
-  // rep) slot silently counts TWICE below (n off by one, a row that never
-  // actually finished averaged in with the real one). Any run_id with more
-  // than one row on disk is deduped here, before anything else in this
-  // function reads `allRows`: a "complete" row (its own rescue, if any,
-  // either wasn't needed or actually ran to a `::rescore` verdict) beats an
-  // ABANDONED needs_rescore row (queued for a solo re-score that never got
-  // admitted); among rows of the same standing, the LAST one in file order
-  // (the most recent attempt) wins. Every non-winning row is dropped
-  // entirely -- not even fail-open-counted -- and reported in its own
-  // summary.md banner below so a superseded duplicate is never silently
-  // invisible. See docs/BENCHMARK.md "Resuming a batch".
-  const runIdSet = new Set(rawRows.map((r) => r.run_id).filter(Boolean));
-  const isAbandonedNeedsRescore = (r) => r.needs_rescore && !r.is_rescore_retry && !runIdSet.has(r.run_id + "::rescore");
-  // A row with no `run_id` at all (older results.jsonl files predate the
-  // field, and plenty of test fixtures never set it) has nothing to dedupe
-  // against -- group ONLY rows that share a truthy run_id; every run_id-less
-  // row is its own singleton group so it is never merged with anything.
-  const groupsByRunId = new Map();
-  for (const r of rawRows) {
-    if (!r.run_id) { groupsByRunId.set(r, [r]); continue; }
-    if (!groupsByRunId.has(r.run_id)) groupsByRunId.set(r.run_id, []);
-    groupsByRunId.get(r.run_id).push(r);
-  }
-  const supersededRows = [];
-  const winners = new Set();
-  for (const group of groupsByRunId.values()) {
-    let winner = group[0];
-    for (let i = 1; i < group.length; i += 1) {
-      const candidate = group[i];
-      const winnerAbandoned = isAbandonedNeedsRescore(winner);
-      const candidateAbandoned = isAbandonedNeedsRescore(candidate);
-      if (winnerAbandoned && !candidateAbandoned) { winner = candidate; continue; }
-      if (!winnerAbandoned && candidateAbandoned) continue; // keep the current winner
-      winner = candidate; // same standing -- the later attempt wins
-    }
-    winners.add(winner);
-    if (group.length > 1) {
-      for (const r of group) if (r !== winner) supersededRows.push(r);
-    }
-  }
+  // --resume dedup (round 3, 2026-09 delta review finding 3; regrouped by
+  // ATTEMPT FAMILY in round 4 -- see groupRunsByAttemptFamily() above for
+  // the full rationale): run_id is deterministic
+  // (`${cellId}__${taskId}__rep${rep}`), and results.jsonl is append-only --
+  // never rewritten. --resume only skips a cell whose .batch-state.json
+  // marks it fully COMPLETE; a cell interrupted (auth_error / a judge
+  // refusal) while a needs_rescore retry was still QUEUED but never
+  // ADMITTED is not marked complete, so a later --resume re-runs that WHOLE
+  // cell from scratch at the SAME --rep-start -- producing a fresh family
+  // under the exact SAME base run_id as the first (possibly abandoned)
+  // attempt. Without this dedup, that one (cell, task, rep) slot could
+  // silently count more than once below. Every non-winning row -- an
+  // original or one of its children -- is dropped entirely -- not even
+  // fail-open-counted -- and reported in its own summary.md banner below so
+  // a superseded duplicate is never silently invisible. See
+  // docs/BENCHMARK.md "Resuming a batch".
+  const { winners, supersededRows } = groupRunsByAttemptFamily(rawRows);
   const allRows = rawRows.filter((r) => winners.has(r));
 
   // Auth/login failures never reached the model -- excluded from pass-rate
