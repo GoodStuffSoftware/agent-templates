@@ -55,7 +55,10 @@ function expectedFor(key, ci) {
 }
 
 test('the fixture was generated from a pinned commit and covers exactly the current case matrix', () => {
-  assert.match(golden.source?.commit || '', /^[0-9a-f]{40}$/);
+  assert.ok(golden.source?.commitSubject && golden.source?.commitDate, 'fixture must name the baseline commit');
+  for (const rel of ['hooks/lib/context.mjs', 'config/model-tiers.json']) {
+    assert.match(golden.source?.sha256?.[rel] || '', /^[0-9a-f]{64}$/, `baseline sha256 for ${rel}`);
+  }
   assert.deepEqual(golden.clocks, CLOCKS);
   assert.equal(golden.caseCount, cases.length * CLOCKS.length,
     'the case matrix changed (a task type, kind or consequence was added or removed) — regenerate from a trusted baseline ref');
