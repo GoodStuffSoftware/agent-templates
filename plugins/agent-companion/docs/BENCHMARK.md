@@ -642,6 +642,217 @@ never silently invisible in the stats. This dedup runs on every
 `rebuildSummary()` call, whether or not `--resume` was ever used — a
 duplicate `run_id` from any other source is caught the same way.
 
+## Evidence families: real-world vs synthetic — never pooled
+
+Operator direction (2026-09-24): keep REAL-WORLD results strictly separate
+from SYNTHETIC results in every summary, estimate, and profile input this
+benchmark produces. **Real** means a real bug-fix pack, a real
+architecture/task-card pack, or mined user work. **Synthetic** means the
+hand-built easy/hard tasks this benchmark ships. Why this matters in
+practice, not just in principle: synthetic tasks both **saturate** (every
+Sonnet and Opus cell passes nearly every hand-built task — see "Ceiling
+effects" above) **and understate usage** — real bug-fix and architecture
+runs measured markedly more tokens and turns than synthetic rounds of the
+same cells (`bench/config/estimate-seed.json`'s own `real-bugfix` and
+`architecture` medians run 3-40x the tokens/turns of `easy-synthetic`/
+`hard-synthetic` at the same cell). A pooled number is therefore neither an
+honest capability read (synthetic saturation drowns out a real difference)
+nor an honest cost projection (synthetic's low token counts would
+under-project real work, and vice versa).
+
+**Where the classification lives** (`bench/evidence-family.mjs`):
+
+- Every `results.jsonl` row carries `evidence_family` (`"real"` |
+  `"synthetic"` | `"unknown"`) and `evidence_family_fine` (a finer label:
+  `easy-synthetic`, `hard-synthetic`, `real-bugfix`, `architecture`, `mined`,
+  or `unknown`), stamped once at write time by `bench/runner.mjs`'s
+  `runOne()`/`harnessErrorRow()`.
+- Classification priority (`evidenceFamilyOf()`): (1) a row's own
+  already-stamped field always wins, so re-classifying this module's
+  registry later never silently changes an old row's label; (2) a task's
+  own declared `evidenceFamily` (a task pack's `manifest.json` may set one
+  — see `task-packs/FORMAT.md` — or a `--evidence-family`/env override, see
+  below); (3) the LOCAL mapping file (see below); (4) the built-in task
+  family (`taskFamilyOf()`) mapped through `BUILTIN_FAMILY_TO_FINE`;
+  (5) `"unknown"` when none of the above resolves anything. A **legacy
+  row** written before this field existed is classified the same way at
+  summary-build time (steps 3-4, by its task id) — never left unclassified
+  merely because it predates the field. A row that genuinely cannot be
+  classified (an unrecognized task id with no pack metadata and no local
+  mapping match) is `"unknown"` and is **never pooled with either "real" or
+  "synthetic"** — it gets its own section, reported on its own.
+- A label is **validated**, never silently accepted (FS3, 2026-09-24 family-
+  split review, HIGH): a task/pack that declares an unrecognized
+  `evidenceFamily` throws at LOAD time — `task-packs/lib.mjs`'s
+  `buildTaskFromPack()` checks a pack's own manifest field before any
+  sandbox/model spend, and `bench/runner.mjs`'s `runOne()` resolves
+  `evidenceFamilyOf()` eagerly for the same reason — never discovered only
+  after a run already spent money. A task pack may additionally **never**
+  declare a SYNTHETIC label: every pack is sourced from a real fix commit
+  (`manifest.parentRefB64`/`fixRefB64`), so it can never honestly call
+  itself synthetic. A **legacy row already on disk** with an unrecognized
+  `evidence_family_fine`, by contrast, is never thrown for — it cannot be
+  reclassified retroactively — and is instead classified `"unknown"`.
+
+**External harnesses that build their own tasks** (FS2, 2026-09-24
+family-split review, CRITICAL): the real architecture-pack harness lives
+OUTSIDE this repo, in the operator's local benchmark data dir, and its own
+task builder sets no family at all — every row it produced landed as
+`"unknown"`. Three ways for such a harness to get a real fine label, from
+most to least specific:
+
+1. **Per-task**: set `evidenceFamily` directly on the task object it hands
+   to `bench/runner.mjs`'s `runOne()` (same field a task pack's manifest
+   uses — see `evidenceFamilyOf()`'s priority above).
+2. **Per-run**: pass `--evidence-family <fine>` to `bench/runner.mjs`'s
+   direct CLI, OR to `scripts/benchmark.mjs` (the gated entry point
+   operators actually run — added FS9, 2026-09-24 round-2 family-split
+   review, HIGH; the direct CLI has had this since FS2), or set the
+   `AGENT_COMPANION_BENCH_EVIDENCE_FAMILY` env var either one reads (the CLI
+   flag wins if both are set) — validated against the known-label registry
+   up front, and applied only to a task that declares no `evidenceFamily` of
+   its own.
+3. **Per-machine, retroactively (including legacy rows)**: a LOCAL,
+   user-authored mapping file at `<stateRoot>/config/evidence-families.json`
+   (`configDir()`, honouring `AGENT_COMPANION_STATE_DIR`) —
+
+   ```json
+   {
+     "rules": [
+       { "taskIdPattern": "arch-*", "family": "architecture" },
+       { "taskIdPattern": "/^task-[0-9]+-/i", "family": "mined" }
+     ]
+   }
+   ```
+
+   `taskIdPattern` is either a glob (`*` = any run of characters, `?` = any
+   one character, anchored start-to-end) or a `/regex/flags` literal;
+   `family` must be one of `bench/evidence-family.mjs`'s known fine labels.
+   Rules are tried in order, first match wins. Applied at SUMMARY time
+   (`rebuildSummary()`/`buildFamilySummary()`), so it also classifies
+   LEGACY rows no builder ever labelled — this is the mechanism for making
+   sense of results already on disk, not only new runs. **Never shipped
+   with this repo, and never containing real private task ids or pack
+   names** — an operator's own working copy uses its real ids; a committed
+   example (as above) uses placeholder patterns only.
+
+**In `summary.json`/`summary-by-family.json`**: unchanged bare arrays (every
+existing consumer keeps working), with `evidence_family`/
+`evidence_family_fine` added to every row/family-rollup entry. **Both
+grouping keys include the fine evidence-family label itself** — `cell ::
+task :: evidence_family_fine` for `summary.json`, `cell :: built-in family
+:: evidence_family_fine` for `summary-by-family.json` — never just `(cell,
+task)` or `(cell, family)` alone. An earlier version of this file claimed
+"every task belongs to exactly one evidence family, so no row here has ever
+mixed the two" — that was **false**: `results.jsonl` is append-only, and the
+same task id can carry two different fine labels across separate rows (a
+`manifest.evidenceFamily` correction made between two runs, or a pack id
+later reused for a different pack). Without the fine label in the grouping
+key, those rows silently pooled into one row/rollup (2026-09-24
+family-split review, FS1, CRITICAL). With it, two such rows always produce
+two separate rows/rollups instead.
+
+**In `summary.md`**: the per-(cell, task) table and the "By task family"
+rollup are each split into up to three clearly-headed sections —
+`## REAL-WORLD RESULTS`, `## SYNTHETIC RESULTS`, and (only if any row is
+unclassifiable) `## UNCLASSIFIED RESULTS` — instead of one flat table mixing
+rows from both kinds of evidence. A family with zero rows in a given run
+prints no section for it at all.
+
+**In `bench/estimate.mjs`** (the pre-run cost/time estimator): real-world
+estimates seed ONLY from real-world history or the shipped seed's real
+families (`real-bugfix`, `architecture`) — never scaled up or down from
+synthetic history, and vice versa. `mediansFor()` already keyed its
+local-history/seed lookups strictly by family string, so there was never a
+cross-family read in the cost-ratio math (a real family's cost ratio never
+read a synthetic cell's number, or vice versa); the ROUGH-GUESS fallback
+used when a family has neither local history nor a seed entry —
+`roughGuessFallbackFor()` picks a fallback (and a label: `"no local
+real-world history, rough guess"` or `"no local synthetic history, rough
+guess"`) by the family's evidence-family KIND, never a single shared guess
+sized from one side and silently applied to both.
+
+**`loadLocalHistory()`'s own key was wrong, independent of the above** (FS5,
+2026-09-24 family-split review, MED, pre-existing): it grouped a scanned
+row by its COARSE `task_family` (`"easy"` | `"hard"` | `"real"` | `"pack"` |
+`"other"`), while every lookup above reads the FINE label (`"real-bugfix"`,
+`"architecture"`, ...). A coarse key never matches a fine lookup key, so
+this machine's own local real-world history was silently ignored in favor
+of the seed/rough-guess, no matter how much of it existed. Fixed by keying
+on `fineFamilyOfHistoryRow(row)` (prefers an already-stamped
+`evidence_family_fine`, else maps the coarse `task_family` through
+`BUILTIN_FAMILY_TO_FINE`) instead.
+
+**`loadLocalHistory()` still ignored the local mapping/built-in registry**
+(FS8, 2026-09-24 round-2 family-split review, CRITICAL): FS5's fix only
+covered a row's own coarse `task_family` — a legacy row an external
+harness wrote with no fine label AND a `task_family` the built-in registry
+cannot place (`"other"`) still classified `"unknown"`, even when a local
+mapping file existed that would have placed it correctly. `fineFamilyOfHistoryRow()`
+now takes injected `taskFamilyOf`/`localMapping` (the exact same
+dependency-injection style `evidenceFamilyOf()` already uses) and, when
+`taskFamilyOf` is given, delegates to `evidenceFamilyOf()` with the SAME
+precedence `rebuildSummary()` uses. Every production caller
+(`bench/runner.mjs`'s `runOne()`/`harnessErrorRow()`, `scripts/benchmark.mjs`'s
+`buildEstimatePlan()`/both `loadLocalHistory()` call sites) now injects both,
+so the bare, coarse-only fallback is reachable only from a bare unit test —
+pinned by a static scan in `tests/bench-evidence-family.test.mjs`. `"unknown"`
+is additionally EXCLUDED from `loadLocalHistory()`'s output entirely, on
+every path — never given its own bucket, never available to `mediansFor()`,
+regardless of which classifier resolved it.
+
+**Cost/plan-usage indices compare only the SAME fine family, not just the
+same coarse kind** (FS10, 2026-09-24 round-2 family-split review, HIGH):
+`assertComparableEvidence()` only ever refused a cross-COARSE comparison
+(real vs synthetic) — two fine labels sharing a coarse kind (`architecture`
+and `real-bugfix`, both `"real"`) passed it, so `relativeCostIndexOrNull()`
+could ratio one against the other's baseline as if they were the same
+evidence. It now additionally refuses whenever the baseline's own fine label
+does not exactly match the group's. `rebuildSummary()`'s baseline map is
+also now keyed by `task + "::" + fine` (previously task alone, which meant
+two fine families sharing a task id under the baseline cell would
+NONDETERMINISTICALLY overwrite each other's entry) — every fine family the
+baseline cell has data for gets its own deterministic entry.
+
+**A legacy row's unrecognized `evidence_family_fine` is now surfaced, not
+just silently classified** (FS11, 2026-09-24 round-2 family-split review,
+MED): a retired/renamed fine label already on disk (FS3 classifies it
+`"unknown"` rather than throwing) is named in three places — a
+`summary.md` `LEGACY EVIDENCE FAMILY:` banner line, each affected row's own
+`unrecognized_legacy_fines` array field in `summary.json`/
+`summary-by-family.json` (`null` otherwise — the array stays a bare array,
+no top-level shape change), and one `stderr` warning per `rebuildSummary()`
+call.
+
+**Cost basis (FS6, 2026-09-24, operator correction).** The estimator's `$`
+and weekly-plan-points figures come from `cost_usd` medians — the dollar
+amount Claude Code itself reports per run — wherever a row carries one.
+Price-weighted token indices (`priceWeightedTokens()`, used only for
+`relative_cost_index`/`plan_usage_index` in `summary.json`, never for a
+dollar figure) understated Opus relative to its real spend; `cost_usd` is
+the cost basis for every `$`/points number this file produces. A price ×
+tokens computation is never used as a `$` figure anywhere in
+`bench/estimate.mjs` — the shipped seed's own numbers, and every local
+history entry, are `cost_usd` medians end to end.
+
+**Pinned in code for the future proposal engine.** ADR 0003's "Decision
+rules" R3 states: evidence from `synthetic-*` tiers may support an upgrade
+but can never justify a downgrade, because synthetic tasks saturate. That
+proposal engine (ADR 0003 slice 5) does not exist yet, so there is no
+decision-rule code to change today — instead, `bench/evidence-family.mjs`
+exports `assertComparableEvidence(familyA, familyB, { forDowngrade })`, a
+hard guard (throws, does not just return a boolean) that any future
+comparison — a routing decision, slice 5's own rules, or a hand-run
+analysis — should call before treating two cells' intervals as comparable.
+A matching comment sits at `bench/runner.mjs`'s `rebuildSummary()`, right at
+the `summary.json` export boundary, stating the same rule for slice 5 to
+honour. Note this module's fine-label vocabulary
+(`real-bugfix`/`architecture`/`mined`/`easy-synthetic`/`hard-synthetic`) is
+independent of ADR 0003 §1's own `benchmarkTier` field
+(`user-mined`/`shipped-real`/`synthetic-hard`/`synthetic-easy`) — both encode
+the same real/synthetic split for different subsystems; slice 5 should map
+between them explicitly rather than assume they're interchangeable.
+
 ## Pre-run estimate and confirmation gate
 
 `bench/estimate.mjs` is a SHARED module (ADR 0003 slice 6's own git

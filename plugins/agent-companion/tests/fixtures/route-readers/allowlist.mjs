@@ -15,8 +15,33 @@ export const ALLOWED = {
   "bench/estimate.mjs": [
     "// on this machine. Override via estimateRun()'s `overheadFactor`.",
   ],
+  "bench/evidence-family.mjs": [
+    "// family` override applied to any task with no declaration of its own",
+    "// (bench/runner.mjs's `withEvidenceFamilyOverride()` -- an external",
+  ],
   "bench/runner.mjs": [
     "// overrides). See docs/BENCHMARK.md \"Parallel runs\".",
+    "// (see the fallback after the loop) -- see withEvidenceFamilyOverride().",
+    "// override against the known-label registry BEFORE any cell/task loop runs",
+    "export function checkEvidenceFamilyOverridePreflight(fine) {",
+    "// FS2 fix: applies the run-wide evidence-family override to a task that",
+    "export function withEvidenceFamilyOverride(task, override) {",
+    "if (!override) return task;",
+    "return { ...task, evidenceFamily: override };",
+    "evidenceFamilyOverride = null,",
+    // FS8 fix (2026-09-24 round-2 family-split review): runOne()/harnessErrorRow()
+    // now also load and pass the local evidence-family mapping into this same
+    // call -- the two lines below replace the pre-FS8 text (without
+    // `, localMapping,`), one for each call site.
+    "// declared evidenceFamily and no CLI/env override still gets the",
+    "// brand-new row; task.evidenceFamily/override > local mapping > built-in",
+    "taskId, task: withEvidenceFamilyOverride(task, evidenceFamilyOverride), taskFamilyOf, localMapping,",
+    "taskId, task: withEvidenceFamilyOverride(task, evidenceFamilyOverride), taskFamilyOf, localMapping,",
+    "cellId, cell, taskId, task, rep, error, cliVersion, evidenceFamilyOverride = null,",
+    "// override would otherwise misclassify (pre-FS3) or abort mid-batch",
+    "const evidenceFamilyOverride = checkEvidenceFamilyOverridePreflight(args.evidenceFamily);",
+    "cellId, cell, taskId, task, rep, outDir, answersDir, isolateHome: args.isolateHome, evidenceFamilyOverride,",
+    "JSON.stringify(harnessErrorRow({ cellId, cell, taskId, task, rep, error: e, evidenceFamilyOverride })) + \"\\n\",",
   ],
   "bench/tasks/common.mjs": [
     "// overrides either.",
@@ -78,6 +103,27 @@ export const ALLOWED = {
     "// were wanted. Global switch, per-agent override in either direction,",
     "// against it directly instead of recomputing an override-blind",
     "fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid",
+  ],
+  // FS9 fix (2026-09-24 round-2 family-split review, HIGH): scripts/benchmark.mjs
+  // (the gated entry point) gained its own --evidence-family flag/env
+  // override, threaded through buildEstimatePlan()/runGlobalPool() the same
+  // way bench/runner.mjs's own direct CLI already does -- none of this reads
+  // taskTypes.<type>.override; it is bench/evidence-family.mjs's own,
+  // unrelated real/synthetic classification override.
+  "scripts/benchmark.mjs": [
+    "checkEvidenceFamilyOverridePreflight, withEvidenceFamilyOverride, loadLocalEvidenceFamilyMapping,",
+    "// FS9 fix (2026-09-24 round-2 family-split review, HIGH): `evidenceFamilyOverride`",
+    "// task with no evidenceFamily of its own -- see withEvidenceFamilyOverride())",
+    "cellIds, taskIds, tasksMap, reps, evidenceFamilyOverride = null, localMapping = null,",
+    "taskId, task: withEvidenceFamilyOverride(task, evidenceFamilyOverride), taskFamilyOf, localMapping,",
+    "cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e, evidenceFamilyOverride: args.evidenceFamily,",
+    "// FS9 fix: threads --evidence-family/the env override into the",
+    "evidenceFamilyOverride: args.evidenceFamily,",
+    "cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e, evidenceFamilyOverride: args.evidenceFamily,",
+    "let evidenceFamilyOverride;",
+    "evidenceFamilyOverride = checkEvidenceFamilyOverridePreflight(args.evidenceFamily);",
+    "cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps, evidenceFamilyOverride, localMapping,",
+    "cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps, evidenceFamilyOverride, localMapping,",
   ],
   "scripts/brevity.mjs": [
     "// decided (per-agent beats the runtime global override, which beats the",

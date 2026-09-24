@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import {
   loadSeed, loadLocalHistory, mediansFor, pointsPerRun, estimateRun,
   shouldConfirm, suggestCheaperCellSet, formatEstimate,
+  loadLocalJudgeVoteHistory, judgeVoteCostFor, judgePriceRatioToFable,
 } from '../bench/estimate.mjs';
 
 test('loadSeed: shipped seed has the four generic family labels and only numbers/model-ids inside', () => {
@@ -54,11 +55,21 @@ test('mediansFor: falls back to the seed when local history has nothing for that
   assert.ok(r.n > 0);
 });
 
-test('mediansFor: no data anywhere -> source "none", labelled "no local history, rough guess"', () => {
+test('mediansFor: no data anywhere for a REAL family -> source "none", labelled "no local real-world history"', () => {
   const seed = loadSeed();
   const r = mediansFor({ family: 'real-bugfix', model: 'claude-made-up-9000', effort: 'medium', seed, history: { families: {} } });
   assert.equal(r.source, 'none');
-  assert.match(r.label, /no local history, rough guess/);
+  // Real and synthetic evidence are never pooled, including at the
+  // rough-guess label -- see bench/evidence-family.mjs.
+  assert.match(r.label, /no local real-world history, rough guess/);
+});
+
+test('mediansFor: no data anywhere for a SYNTHETIC family -> labelled "no local synthetic history", never "real-world"', () => {
+  const seed = loadSeed();
+  const r = mediansFor({ family: 'easy-synthetic', model: 'claude-made-up-9000', effort: 'medium', seed, history: { families: {} } });
+  assert.equal(r.source, 'none');
+  assert.match(r.label, /no local synthetic history, rough guess/);
+  assert.doesNotMatch(r.label, /real-world/);
 });
 
 test('pointsPerRun: real-bugfix sonnet/medium cell is close to the 4pts/35runs anchor (cost ratio ~1x, it IS the baseline)', () => {
@@ -193,11 +204,16 @@ function writeResultsFixture(dir, rows) {
 test('loadLocalHistory excludes budget_exhausted, auth_error and collision rows from the medians', () => {
   const root = mkdtempSync(join(tmpdir(), 'ac-bench-est-hist-'));
   try {
+    // FS5 fix (2026-09-24 family-split review): loadLocalHistory() now keys
+    // its `families` map by the FINE evidence-family label (see
+    // fineFamilyOfHistoryRow() in bench/estimate.mjs), not the coarse
+    // built-in task_family -- a real row always carries BOTH fields (see
+    // bench/runner.mjs's runOne()), so the fixture below does too.
     writeResultsFixture(join(root, 'pilot-2020-01-01'), [
-      { task_family: 'easy-synthetic', requested_model: 'claude-sonnet-5', requested_effort: 'medium', duration_ms: 1000, cost_usd: 0.01, input_tokens: 1, cache_read_tokens: 1, cache_creation_tokens: 1, output_tokens: 1, terminal_reason: 'completed' },
-      { task_family: 'easy-synthetic', requested_model: 'claude-sonnet-5', requested_effort: 'medium', duration_ms: 999999, cost_usd: 99, terminal_reason: 'budget_exhausted' },
-      { task_family: 'easy-synthetic', requested_model: 'claude-sonnet-5', requested_effort: 'medium', duration_ms: 1, cost_usd: 0, auth_error: true },
-      { task_family: 'easy-synthetic', requested_model: 'claude-sonnet-5', requested_effort: 'medium', duration_ms: 1, cost_usd: 0, collision: true },
+      { task_family: 'easy', evidence_family_fine: 'easy-synthetic', requested_model: 'claude-sonnet-5', requested_effort: 'medium', duration_ms: 1000, cost_usd: 0.01, input_tokens: 1, cache_read_tokens: 1, cache_creation_tokens: 1, output_tokens: 1, terminal_reason: 'completed' },
+      { task_family: 'easy', evidence_family_fine: 'easy-synthetic', requested_model: 'claude-sonnet-5', requested_effort: 'medium', duration_ms: 999999, cost_usd: 99, terminal_reason: 'budget_exhausted' },
+      { task_family: 'easy', evidence_family_fine: 'easy-synthetic', requested_model: 'claude-sonnet-5', requested_effort: 'medium', duration_ms: 1, cost_usd: 0, auth_error: true },
+      { task_family: 'easy', evidence_family_fine: 'easy-synthetic', requested_model: 'claude-sonnet-5', requested_effort: 'medium', duration_ms: 1, cost_usd: 0, collision: true },
     ]);
     const hist = loadLocalHistory({ resultsRoot: root });
     const cell = hist.families['easy-synthetic'].cells['claude-sonnet-5|medium'];
@@ -211,4 +227,162 @@ test('loadLocalHistory excludes budget_exhausted, auth_error and collision rows 
 test('loadLocalHistory on a nonexistent root returns empty families, never throws', () => {
   const hist = loadLocalHistory({ resultsRoot: join(tmpdir(), 'ac-bench-est-does-not-exist-' + Date.now()) });
   assert.deepEqual(hist.families, {});
+});
+
+// --- FS6 (2026-09-24 family-split review): the estimator's $ and weekly ---
+// --- points come from cost_usd (Claude Code-reported), never price x -----
+// --- tokens. REQUIRED PROOF: the estimator's $ comes from cost_usd. ------
+//
+// Already true of the current code (loadLocalHistory()'s medianCostUsd is
+// `median(rows.map((r) => r.cost_usd))`, and estimateRun()'s apiCostUsd sums
+// medianCostUsd directly) -- this test LOCKS that invariant so a future
+// change cannot silently reintroduce a price x tokens dollar figure without
+// a red test here. A row's OUTPUT_TOKENS is set deliberately huge relative
+// to its cost_usd; if the $ figure were ever derived from tokens x price
+// instead, it would come out far larger than the tiny cost_usd below.
+test('FS6: the estimator\'s $ comes from cost_usd, never price x tokens', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ac-bench-est-fs6-'));
+  try {
+    writeResultsFixture(join(root, 'pilot-2020-01-01'), [
+      {
+        task_family: 'real', evidence_family_fine: 'real-bugfix', requested_model: 'claude-opus-5-5', requested_effort: 'high',
+        duration_ms: 5000, cost_usd: 0.42, input_tokens: 10, cache_read_tokens: 500000, cache_creation_tokens: 50000, output_tokens: 90000,
+      },
+    ]);
+    const history = loadLocalHistory({ resultsRoot: root });
+    const cell = history.families['real-bugfix'].cells['claude-opus-5-5|high'];
+    assert.equal(cell.medianCostUsd, 0.42, 'medianCostUsd must equal the row\'s reported cost_usd exactly');
+
+    const est = estimateRun({
+      plan: [{ cellId: 'opus55-high', model: 'claude-opus-5-5', effort: 'high', family: 'real-bugfix', n: 1 }],
+      concurrency: 1, seed: { families: {}, weeklyPointAnchors: {} }, history,
+    });
+    assert.equal(est.apiCostUsd, 0.42, 'estimateRun()\'s apiCostUsd must equal cost_usd, not a price x tokens figure');
+    assert.equal(est.perCell[0].costUsd, 0.42);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// --- Judge-vote cost (operator direction, 2026-09-24): the pre-run ---------
+// --- estimate previously counted ZERO judge cost at all -- a rubric judge --
+// --- casts real, separately-billed votes, measured on real architecture ---
+// --- packs at ~$0.81/vote at fable/high (n~=21 judged answers, ~$54 total) -
+
+test('judgePriceRatioToFable: 1x for a fable model, and a cheaper tier scales down proportionally', () => {
+  assert.equal(judgePriceRatioToFable('claude-fable-5-1'), 1);
+  const sonnetRatio = judgePriceRatioToFable('claude-sonnet-5');
+  assert.ok(sonnetRatio > 0 && sonnetRatio < 1, `sonnet must be cheaper than fable, got ${sonnetRatio}`);
+  const opusRatio = judgePriceRatioToFable('claude-opus-5-5');
+  assert.ok(opusRatio > sonnetRatio && opusRatio < 1, 'opus sits between sonnet and fable in price');
+  // An unreadable/unknown model never throws and never scales -- fails open
+  // to 1x (the seed's own already-measured number, unscaled).
+  assert.equal(judgePriceRatioToFable('not-a-real-model-id'), 1);
+});
+
+test('loadLocalJudgeVoteHistory: keys by (judge_model, judge_effort), medians the PER-VOTE cost, and ignores rows with no judge data', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ac-bench-est-judgevote-'));
+  try {
+    writeResultsFixture(join(root, 'pilot-2020-01-01'), [
+      // judge_cost_usd is the TOTAL for judge_votes votes -- 3 votes at
+      // $0.90 total = $0.30/vote.
+      { judge_model: 'claude-fable-5-1', judge_effort: 'high', judge_cost_usd: 0.90, judge_votes: 3 },
+      { judge_model: 'claude-fable-5-1', judge_effort: 'high', judge_cost_usd: 1.20, judge_votes: 3 },
+      // A different judge tier gets its own bucket.
+      { judge_model: 'claude-sonnet-5', judge_effort: 'medium', judge_cost_usd: 0.30, judge_votes: 3 },
+      // No judge fields at all -- an ordinary writer row, never counted.
+      { requested_model: 'claude-sonnet-5', requested_effort: 'medium', cost_usd: 0.05 },
+      // judge_votes present but zero -- never divides by zero, never counted.
+      { judge_model: 'claude-fable-5-1', judge_effort: 'high', judge_cost_usd: 0.5, judge_votes: 0 },
+    ]);
+    const hist = loadLocalJudgeVoteHistory({ resultsRoot: root });
+    assert.ok(hist['claude-fable-5-1|high'], 'must have a bucket for the judge model/effort actually seen');
+    assert.equal(hist['claude-fable-5-1|high'].n, 2);
+    // median(0.90/3, 1.20/3) = median(0.30, 0.40) = 0.35.
+    assert.equal(hist['claude-fable-5-1|high'].medianCostUsdPerVote, 0.35);
+    assert.equal(hist['claude-sonnet-5|medium'].n, 1);
+    assert.ok(
+      Math.abs(hist['claude-sonnet-5|medium'].medianCostUsdPerVote - 0.10) < 1e-9,
+      `expected ~0.10, got ${hist['claude-sonnet-5|medium'].medianCostUsdPerVote}`,
+    );
+    assert.equal(Object.keys(hist).length, 2, 'no bucket for rows with no usable judge data');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('loadLocalJudgeVoteHistory on a nonexistent root returns {}, never throws', () => {
+  const hist = loadLocalJudgeVoteHistory({ resultsRoot: join(tmpdir(), 'ac-bench-est-judgevote-missing-' + Date.now()) });
+  assert.deepEqual(hist, {});
+});
+
+test('judgeVoteCostFor: prefers LOCAL HISTORY over the seed anchor when this machine has judge-vote data', () => {
+  const history = { 'claude-fable-5-1|high': { medianCostUsdPerVote: 1.23, n: 6 } };
+  const r = judgeVoteCostFor({ model: 'claude-fable-5-1', effort: 'high', history });
+  assert.equal(r.source, 'local-history');
+  assert.equal(r.costUsdPerVote, 1.23);
+  assert.equal(r.n, 6);
+});
+
+test('judgeVoteCostFor: falls back to the seed anchor (measured 2026-09-24, ~$0.81/vote at fable/high), labelled as such', () => {
+  const r = judgeVoteCostFor({ model: 'claude-fable-5-1', effort: 'high', history: {} });
+  assert.equal(r.source, 'seed');
+  assert.equal(r.costUsdPerVote, 0.81);
+  assert.match(r.label, /measured 2026-09-24/);
+  assert.match(r.label, /21 votes/);
+});
+
+test('judgeVoteCostFor: scales the seed anchor by relative model price for a DIFFERENT judge tier, and says so', () => {
+  const r = judgeVoteCostFor({ model: 'claude-sonnet-5', effort: 'medium', history: {} });
+  assert.equal(r.source, 'seed');
+  assert.ok(r.costUsdPerVote > 0 && r.costUsdPerVote < 0.81, `sonnet must scale below the fable anchor, got ${r.costUsdPerVote}`);
+  assert.match(r.label, /scaled .*x for this tier/);
+});
+
+test('judgeVoteCostFor: no local history and a seed with no judgeVoteAnchor -> "none", never a guessed number', () => {
+  const r = judgeVoteCostFor({ model: 'claude-fable-5-1', effort: 'high', seed: { families: {} }, history: {} });
+  assert.equal(r.source, 'none');
+  assert.equal(r.costUsdPerVote, null);
+});
+
+test('estimateRun(): with a judgeVotePlan, judge cost is added to apiCostUsd AND reported separately; without one, judgeVote is null (unchanged)', () => {
+  const plan = [{ cellId: 'sonnet-medium', model: 'claude-sonnet-5', effort: 'medium', family: 'easy-synthetic', n: 1 }];
+  const noJudge = estimateRun({ plan, concurrency: 1, seed: loadSeed(), history: { families: {} } });
+  assert.equal(noJudge.judgeVote, null);
+
+  const withJudge = estimateRun({
+    plan, concurrency: 1, seed: loadSeed(), history: { families: {} },
+    judgeVotePlan: { model: 'claude-fable-5-1', effort: 'high', votes: 9, history: {} },
+  });
+  assert.ok(withJudge.judgeVote, 'judgeVote must be reported when a judgeVotePlan is given');
+  assert.equal(withJudge.judgeVote.votes, 9);
+  assert.equal(withJudge.judgeVote.costUsdPerVote, 0.81);
+  assert.equal(withJudge.judgeVote.totalCostUsd, 0.81 * 9);
+  assert.equal(
+    withJudge.apiCostUsd, noJudge.apiCostUsd + 0.81 * 9,
+    'judge-vote cost must be added on top of the writer cells\' own apiCostUsd, not replace it',
+  );
+});
+
+test('estimateRun(): a judgeVotePlan with zero votes contributes no judge cost (an unjudged/ineligible plan)', () => {
+  const plan = [{ cellId: 'sonnet-medium', model: 'claude-sonnet-5', effort: 'medium', family: 'easy-synthetic', n: 1 }];
+  const est = estimateRun({
+    plan, concurrency: 1, seed: loadSeed(), history: { families: {} },
+    judgeVotePlan: { model: 'claude-fable-5-1', effort: 'high', votes: 0, history: {} },
+  });
+  assert.equal(est.judgeVote, null);
+});
+
+test('formatEstimate(): prints a judge-votes line only when judgeVote is present', () => {
+  const plan = [{ cellId: 'sonnet-medium', model: 'claude-sonnet-5', effort: 'medium', family: 'easy-synthetic', n: 1 }];
+  const noJudge = estimateRun({ plan, concurrency: 1, seed: loadSeed(), history: { families: {} } });
+  assert.doesNotMatch(formatEstimate(noJudge), /judge votes:/);
+
+  const withJudge = estimateRun({
+    plan, concurrency: 1, seed: loadSeed(), history: { families: {} },
+    judgeVotePlan: { model: 'claude-fable-5-1', effort: 'high', votes: 9, history: {} },
+  });
+  const text = formatEstimate(withJudge);
+  assert.match(text, /judge votes:\s+9 vote\(s\) x \$0\.810\/vote = ~\$7\.29/);
+  assert.match(text, /measured 2026-09-24/);
 });

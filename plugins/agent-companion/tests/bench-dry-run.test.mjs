@@ -98,6 +98,45 @@ test('an unknown cell is a usage error (exit 2)', () => {
   assert.match(res.stderr, /unknown cell/);
 });
 
+// --- FS9 (2026-09-24 round-2 family-split review, HIGH): scripts/benchmark.mjs --
+// --- (the gated entry point) had no --evidence-family flag at all -----------------
+
+test('FS9: --evidence-family overrides a task with no declared evidenceFamily, reflected in the pre-run estimate', () => {
+  // "lookup" is a built-in easy task -- no evidenceFamily of its own, so it
+  // normally estimates as family "easy-synthetic".
+  const baseline = dryRun(['--cells', 'sonnet-medium', '--tasks', 'lookup', '--reps', '1']);
+  assert.equal(baseline.status, 0, baseline.stderr);
+  assert.match(baseline.stdout, /family=easy-synthetic\b/);
+
+  const overridden = dryRun(['--cells', 'sonnet-medium', '--tasks', 'lookup', '--reps', '1', '--evidence-family', 'architecture']);
+  assert.equal(overridden.status, 0, overridden.stderr);
+  assert.match(overridden.stdout, /family=architecture\b/);
+  assert.doesNotMatch(overridden.stdout, /family=easy-synthetic\b/);
+});
+
+test('FS9: an unrecognized --evidence-family value is a usage error (exit 2), refused before any plan is printed', () => {
+  const res = dryRun(['--cells', 'sonnet-medium', '--tasks', 'lookup', '--reps', '1', '--evidence-family', 'not-a-real-label']);
+  assert.equal(res.status, 2);
+  assert.match(res.stderr, /not a recognized fine label/);
+  assert.doesNotMatch(res.stdout, /DRY RUN/);
+});
+
+test('FS9: AGENT_COMPANION_BENCH_EVIDENCE_FAMILY env var is used when --evidence-family is omitted, and an explicit flag wins over it', () => {
+  const viaEnv = dryRun(
+    ['--cells', 'sonnet-medium', '--tasks', 'lookup', '--reps', '1'],
+    { AGENT_COMPANION_BENCH_EVIDENCE_FAMILY: 'mined' },
+  );
+  assert.equal(viaEnv.status, 0, viaEnv.stderr);
+  assert.match(viaEnv.stdout, /family=mined\b/);
+
+  const flagWins = dryRun(
+    ['--cells', 'sonnet-medium', '--tasks', 'lookup', '--reps', '1', '--evidence-family', 'architecture'],
+    { AGENT_COMPANION_BENCH_EVIDENCE_FAMILY: 'mined' },
+  );
+  assert.equal(flagWins.status, 0, flagWins.stderr);
+  assert.match(flagWins.stdout, /family=architecture\b/);
+});
+
 test('--list prints cells, families, and every task id, and makes no model call', () => {
   const res = runScript('scripts/benchmark.mjs', ['--list']);
   assert.equal(res.status, 0, res.stderr);

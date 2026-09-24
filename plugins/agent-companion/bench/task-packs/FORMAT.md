@@ -81,6 +81,16 @@ Two consequences:
                                           // at build time (a future edit to files[] could
                                           // reintroduce one)
   "maxBudgetUsd": 0.6,                    // per-run --max-budget-usd ceiling for this task
+  "evidenceFamily": "real-bugfix",        // OPTIONAL -- one of bench/evidence-family.mjs's fine
+                                          // labels ("real-bugfix" | "architecture" | "mined").
+                                          // Every task pack is coarse evidence family "real"
+                                          // regardless (a pack is bug-fix shaped by convention,
+                                          // per this file's own opening paragraph) -- this only
+                                          // picks which REAL fine label the pack reports under in
+                                          // results.jsonl and bench/estimate.mjs's seed/history
+                                          // lookups. Defaults to "real-bugfix" when absent. NEVER
+                                          // a synthetic-* label -- a task pack sourced from a real
+                                          // fix commit cannot be synthetic evidence.
   "expectedFiles": ["scripts/leak-check.mjs"],
                                           // extra sandbox-relative paths the model is allowed to
                                           // touch/create beyond files[] itself and the guard file

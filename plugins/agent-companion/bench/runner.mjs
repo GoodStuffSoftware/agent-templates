@@ -23,7 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile, execFileSync } from "node:child_process";
-import { dataDir, classifyModel, classifyReferenceModel, modelTiers } from "../hooks/lib/context.mjs";
+import { dataDir, classifyModel, classifyReferenceModel, modelTiers, configDir } from "../hooks/lib/context.mjs";
 
 import lookupTask from "./tasks/lookup.mjs";
 import verifyTask from "./tasks/verify.mjs";
@@ -48,6 +48,7 @@ import {
   sha256, runJudge, treeDiff, checkJudgeEligibility, assertJudgeCalibrated, makeCliJudgeCaller,
 } from "./judge.mjs";
 import { classifyCollision, portBaseForSlot } from "./scheduler.mjs";
+import { evidenceFamilyOf, assertComparableEvidence, FINE_FAMILIES } from "./evidence-family.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Resolve a real, directly-spawnable claude binary. On Windows, "claude"
@@ -217,6 +218,30 @@ export function defaultResultsRoot() {
   return path.join(dataDir(), "benchmarks");
 }
 
+// FS2 fix (2026-09-24 family-split review, CRITICAL): the LOCAL,
+// user-authored evidence-family mapping file -- `<stateRoot>/config/
+// evidence-families.json` (configDir() = stateRoot()/config, honouring
+// AGENT_COMPANION_STATE_DIR the same way every other local-state read in
+// this plugin does). Classifies rows at SUMMARY time (rebuildSummary()/
+// buildFamilySummary() below), including LEGACY rows no task/pack builder
+// ever labelled. NEVER shipped with this repo, and NEVER containing real
+// private task ids or pack names -- see docs/BENCHMARK.md "Evidence
+// families" for the file's shape and an operator's own worked example (with
+// placeholder patterns only). Missing/malformed file -> no mapping at all
+// (fail open, same as every other optional local config this plugin reads)
+// -- never thrown, since a summary rebuild must never abort over a file the
+// operator has not created yet.
+export function loadLocalEvidenceFamilyMapping() {
+  try {
+    const raw = fs.readFileSync(path.join(configDir(), "evidence-families.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.rules)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 // Every per-task maxBudgetUsd below (and the --max-budget-usd CLI ceiling)
 // was calibrated against SONNET 5's price. --max-budget-usd is the only
 // working per-run runaway guard this CLI honours (see the turn-limit note
@@ -298,7 +323,16 @@ const REFUSED_ARGS = {
 };
 
 export function parseArgs(argv) {
-  const out = { cells: "all", tasks: "all", reps: 3, repStart: 1, out: null, maxBudgetUsd: null, isolateHome: false };
+  const out = {
+    cells: "all", tasks: "all", reps: 3, repStart: 1, out: null, maxBudgetUsd: null, isolateHome: false,
+    // FS2 fix (2026-09-24 family-split review, CRITICAL): a whole-run
+    // evidence-family default, for an external harness (e.g. the operator's
+    // local architecture-pack harness, which builds its own task objects
+    // and sets no family at all) that cannot label every task it builds
+    // individually. null until parsed below (CLI) or read from the env
+    // (see the fallback after the loop) -- see withEvidenceFamilyOverride().
+    evidenceFamily: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--cells") out.cells = argv[++i];
@@ -308,6 +342,7 @@ export function parseArgs(argv) {
     else if (a === "--out") out.out = argv[++i];
     else if (a === "--max-budget-usd") out.maxBudgetUsd = Number(argv[++i]);
     else if (a === "--isolate-home") out.isolateHome = true;
+    else if (a === "--evidence-family") out.evidenceFamily = argv[++i];
     else if (REFUSED_ARGS[a]) {
       throw new Error(
         `bench/runner.mjs's direct CLI does not support ${a} -- it ${REFUSED_ARGS[a]} `
@@ -316,7 +351,41 @@ export function parseArgs(argv) {
       );
     } else throw new Error("unknown arg: " + a);
   }
+  // Env fallback: only when --evidence-family was not given explicitly --
+  // lets an external harness set one env var once instead of threading a
+  // CLI flag through every invocation.
+  if (out.evidenceFamily == null && process.env.AGENT_COMPANION_BENCH_EVIDENCE_FAMILY) {
+    out.evidenceFamily = process.env.AGENT_COMPANION_BENCH_EVIDENCE_FAMILY;
+  }
   return out;
+}
+
+// Validates a run-wide `--evidence-family`/`AGENT_COMPANION_BENCH_EVIDENCE_FAMILY`
+// override against the known-label registry BEFORE any cell/task loop runs
+// -- a typo here would otherwise misclassify (or, post-FS3, throw partway
+// through) every single row in the batch. Returns the value unchanged (or
+// null) for convenience at the call site.
+export function checkEvidenceFamilyOverridePreflight(fine) {
+  if (fine == null) return null;
+  if (!(fine in FINE_FAMILIES)) {
+    throw new Error(
+      `--evidence-family "${fine}" is not a recognized fine label -- known labels: `
+      + `${Object.keys(FINE_FAMILIES).join(', ')} (bench/evidence-family.mjs).`,
+    );
+  }
+  return fine;
+}
+
+// FS2 fix: applies the run-wide evidence-family override to a task that
+// does not already declare its own -- an explicit task.evidenceFamily
+// always wins (same precedence evidenceFamilyOf() gives a task's own
+// declaration over anything coarser). Used ONLY to resolve evidenceFamilyOf()
+// for row-stamping; never mutates the real task object passed to
+// task.setup()/prompt()/score().
+export function withEvidenceFamilyOverride(task, override) {
+  if (!override) return task;
+  if (task && typeof task.evidenceFamily === "string" && task.evidenceFamily) return task;
+  return { ...task, evidenceFamily: override };
 }
 
 // --isolate-home only works with env-var auth (ANTHROPIC_API_KEY), which
@@ -492,6 +561,9 @@ export async function runOne({
   // callers always omit this and get the real, retrying remover
   // (bench/tasks/common.mjs's removeDirWithRetry()).
   removeDirImpl = removeDirWithRetry,
+  // FS2 fix: a whole-run `--evidence-family`/env default (see parseArgs()),
+  // applied only to a task that declares no evidenceFamily of its own.
+  evidenceFamilyOverride = null,
 }) {
   const judgeActive = !!(judge && task.rubric);
   if (judgeActive) {
@@ -507,6 +579,25 @@ export async function runOne({
       throw refuse(e.message);
     }
   }
+  // FS3 fix (2026-09-24 family-split review, HIGH): resolved EAGERLY, before
+  // any sandbox is created or model spawned -- an unknown evidenceFamily
+  // declared on a task/pack (evidenceFamilyOf() throws for that; see
+  // bench/evidence-family.mjs) is a configuration error that must fail
+  // BEFORE this run spends any money, not after the model already ran (the
+  // row-stamping site below used to be the first place this was ever
+  // checked). Reused at the row-stamping site further down instead of
+  // re-resolving.
+  // FS8 fix (2026-09-24 round-2 family-split review): the local mapping file
+  // is now consulted here too, not only at summary time -- a task with no
+  // declared evidenceFamily and no CLI/env override still gets the
+  // operator's own local classification at the moment the row is written,
+  // the same precedence rebuildSummary() uses (row field is moot for a
+  // brand-new row; task.evidenceFamily/override > local mapping > built-in
+  // registry > unknown).
+  const localMapping = loadLocalEvidenceFamilyMapping();
+  const evidenceFamily = evidenceFamilyOf({
+    taskId, task: withEvidenceFamilyOverride(task, evidenceFamilyOverride), taskFamilyOf, localMapping,
+  });
   const runId = explicitRunId || (cellId + "__" + taskId + "__rep" + rep);
   const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-" + cellId + "-" + taskId + "-"));
   // Only made (and only cleaned up) when isolateHome is set -- the default
@@ -755,12 +846,21 @@ export async function runOne({
     if (!homeCleanup.ok && !cleanupErrorCode) cleanupErrorCode = homeCleanup.code;
   }
 
+  // Evidence family (real-world vs synthetic; see bench/evidence-family.mjs
+  // and docs/BENCHMARK.md "Evidence families") -- `evidenceFamily` was
+  // already resolved EAGERLY, above (FS3 fix), before the model was ever
+  // spawned, so it is stamped here unchanged rather than re-resolved.
+  // `unknown` is never merged into either "real" or "synthetic" by anything
+  // downstream.
+
   const row = {
     ts: new Date().toISOString(),
     run_id: runId,
     cell: cellId,
     task: taskId,
     task_family: taskFamilyOf(taskId, { task }),
+    evidence_family: evidenceFamily.coarse,
+    evidence_family_fine: evidenceFamily.fine,
     rep,
     // Concurrency level this run was launched under, and the OTHER run ids
     // active at the moment it started -- so a wall-time comparison against
@@ -962,13 +1062,37 @@ export async function rescoreOne({
 // judge, ...). Carries the same identifying/reproducibility fields a normal
 // row does where they are knowable without a run -- every results.jsonl row
 // names its harness, requested model and effort.
-export function harnessErrorRow({ cellId, cell, taskId, task, rep, error, cliVersion }) {
+export function harnessErrorRow({
+  cellId, cell, taskId, task, rep, error, cliVersion, evidenceFamilyOverride = null,
+}) {
   let version = cliVersion;
   if (version === undefined) {
     try { version = getClaudeCliVersion(); } catch { version = null; }
   }
+  // FS3 note: evidenceFamilyOf() throws for an unrecognized task.evidenceFamily
+  // (a configuration error, caught EAGERLY by runOne() before any model
+  // spend -- see that function's own note). This row is written from
+  // main()'s catch block for WHATEVER error runOne() threw, which may be
+  // that exact one -- never let resolving IT here throw a SECOND,
+  // unhandled exception that replaces the original error with a harder
+  // crash; the original error text already reached stdout/this row's
+  // exec_err field either way.
+  let evidenceFamily;
+  try {
+    // FS8 fix: same local-mapping consultation as runOne()'s own resolution
+    // above -- an error row for a task with no declared evidenceFamily still
+    // gets the operator's local classification instead of skipping straight
+    // to the built-in registry/unknown.
+    const localMapping = loadLocalEvidenceFamilyMapping();
+    evidenceFamily = evidenceFamilyOf({
+      taskId, task: withEvidenceFamilyOverride(task, evidenceFamilyOverride), taskFamilyOf, localMapping,
+    });
+  } catch {
+    evidenceFamily = { fine: 'unknown', coarse: 'unknown' };
+  }
   return {
     ts: new Date().toISOString(), cell: cellId, task: taskId, task_family: taskFamilyOf(taskId, { task }), rep,
+    evidence_family: evidenceFamily.coarse, evidence_family_fine: evidenceFamily.fine,
     requested_model: cell ? cell.model : null, resolved_model: null, requested_effort: cell ? cell.effort : null,
     claude_cli_version: version ?? null,
     task_pack_sha256: task && task.packSha256 ? task.packSha256 : null,
@@ -992,6 +1116,44 @@ function priceWeightedTokens(row) {
   const cacheWrite = row.cache_creation_tokens || 0;
   const out = row.output_tokens || 0;
   return inp * 1 + cacheRead * 0.1 + cacheWrite * 1.25 + out * 5;
+}
+
+// FS4 fix (2026-09-24 family-split review, HIGH): the one place two
+// different CELLS' evidence is compared today -- a group's price-weighted
+// tokens against the sonnet-medium BASELINE for the same task, to produce
+// relative_cost_index/plan_usage_index (see rebuildSummary(), below).
+// Exported so it is directly unit-testable without going through a full
+// rebuildSummary() run. `baselineEntry` is `{ fine, cost }` (or undefined
+// when this task has no sonnet-medium row at all); `fine` is the CURRENT
+// group's own evidence family. Refuses (returns null, never throws -- a
+// summary rebuild must never abort over this) whenever the two don't
+// match, via bench/evidence-family.mjs's assertComparableEvidence() --
+// the guard that module shipped but nothing ever called.
+export function relativeCostIndexOrNull(pwt, baselineEntry, fine) {
+  if (!baselineEntry || !baselineEntry.cost) return null;
+  try {
+    assertComparableEvidence(baselineEntry.fine, fine);
+  } catch {
+    return null;
+  }
+  // FS10 fix (2026-09-24 round-2 family-split review, HIGH): assertComparableEvidence()
+  // only refuses a CROSS-COARSE comparison (real vs synthetic) -- two FINE
+  // labels that share a coarse kind (e.g. "architecture" and "real-bugfix",
+  // both coarse "real") passed it, so this used to ratio an architecture
+  // cell's cost against a real-bugfix baseline as if the two were the same
+  // evidence (round-2 review finding: a real, materially wrong multiplier
+  // computed exactly this way). A relative/plan-usage index is only ever
+  // meaningful against the SAME FINE family's own baseline -- two different
+  // real-world task shapes cost differently for reasons that have nothing to
+  // do with model/effort, so ratioing one against the other's baseline is
+  // not "refusing to pool real and synthetic", it is a DIFFERENT kind of
+  // false precision. The caller (rebuildSummary()) now also keys its own
+  // baseline map by task + fine label (see the "FS10 fix" note there), so in
+  // practice `baselineEntry` never carries a mismatched fine label reaching
+  // here at all -- this check stays as the direct, unit-testable guarantee.
+  // See docs/BENCHMARK.md "Evidence families".
+  if (baselineEntry.fine !== fine) return null;
+  return pwt / baselineEntry.cost;
 }
 
 // bench/config/model-tiers.json's planUsageMultipliers table, resolved by
@@ -1187,6 +1349,9 @@ export function rebuildSummary(outDir) {
   const jsonlPath = path.join(outDir, "results.jsonl");
   if (!fs.existsSync(jsonlPath)) return;
   const rawRows = fs.readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  // FS2 fix: loaded ONCE per rebuild, not per row -- see
+  // loadLocalEvidenceFamilyMapping()'s own note.
+  const localMapping = loadLocalEvidenceFamilyMapping();
 
   // --resume dedup (round 3, 2026-09 delta review finding 3; regrouped by
   // ATTEMPT FAMILY in round 4 -- see groupRunsByAttemptFamily() above for
@@ -1294,28 +1459,75 @@ export function rebuildSummary(outDir) {
     && !rescueExcludedOriginalIds.has(r.run_id)
     && !rescueRedundantRetryIds.has(r.run_id));
 
+  // FS1 fix (2026-09-24 family-split review, CRITICAL): this grouping key
+  // used to be `cell::task` alone. The evidence family (fine label) is NOT
+  // implied by (cell, task) -- the SAME task id can carry two different
+  // fine labels across separate rows in the same append-only results.jsonl
+  // (a manifest.evidenceFamily correction made between two benchmark runs,
+  // or a pack id later reused for a different pack), so a `cell::task`
+  // group could silently POOL a real-world row with a synthetic one into
+  // one summary.json entry -- exactly the "no row here has ever mixed the
+  // two" claim docs/BENCHMARK.md used to make, which was false. The fine
+  // label is now part of the key itself, so two rows with the same
+  // (cell, task) but different evidence_family_fine always land in
+  // SEPARATE groups/rows. See tests/bench-evidence-family.test.mjs's mixed
+  // (cell, task) case.
+  // FS11 fix (2026-09-24 round-2 family-split review, MED): evidenceFamilyOf()
+  // has flagged an unrecognized legacy evidence_family_fine (FS3) since the
+  // round-1 fix, but nothing here ever read the flag it returns --
+  // `unrecognizedLegacyFine` was computed and immediately discarded. Tracked
+  // run-wide (every unique label, whichever group it ends up in -- all such
+  // rows classify "unknown" and share the SAME `::unknown` key, but their
+  // ORIGINAL retired labels can differ) so it can be surfaced below: once as
+  // a summary.md banner line, once as a per-row `unrecognized_legacy_fines`
+  // field (summary.json stays a bare array -- see the "SUMMARY-EXPORT
+  // BOUNDARY" note below), and once as a single stderr warning for this run.
+  const unrecognizedLegacyFines = new Set();
   const byCellTask = new Map();
   for (const r of rows) {
-    const key = r.cell + "::" + r.task;
-    if (!byCellTask.has(key)) byCellTask.set(key, []);
-    byCellTask.get(key).push(r);
+    const evidenceFamily = evidenceFamilyOf({ taskId: r.task, row: r, taskFamilyOf, localMapping });
+    if (evidenceFamily.unrecognizedLegacyFine) unrecognizedLegacyFines.add(evidenceFamily.unrecognizedLegacyFine);
+    const key = r.cell + "::" + r.task + "::" + evidenceFamily.fine;
+    if (!byCellTask.has(key)) byCellTask.set(key, { cell: r.cell, task: r.task, evidenceFamily, rows: [], legacyFines: new Set() });
+    const group = byCellTask.get(key);
+    if (evidenceFamily.unrecognizedLegacyFine) group.legacyFines.add(evidenceFamily.unrecognizedLegacyFine);
+    group.rows.push(r);
+  }
+  if (unrecognizedLegacyFines.size > 0) {
+    process.stderr.write(
+      `WARNING: ${unrecognizedLegacyFines.size} unrecognized legacy evidence_family_fine value(s) in ${outDir}: `
+      + `${[...unrecognizedLegacyFines].sort().join(", ")} -- classified "unknown" and excluded from every `
+      + "real/synthetic median (bench/evidence-family.mjs's registry). See docs/BENCHMARK.md \"Evidence families\".\n",
+    );
   }
 
+  // Baseline (sonnet-medium's own price-weighted tokens for this task).
+  //
+  // FS10 fix (2026-09-24 round-2 family-split review, HIGH): this used to be
+  // keyed by TASK ONLY. When sonnet-medium had TWO groups for the same task
+  // id under different fine labels (byCellTask's own key includes the fine
+  // label, so this happens whenever a task's evidenceFamily was corrected, or
+  // an external harness's task shares an id with a built-in one), whichever
+  // group this loop visited LAST silently overwrote the other's baseline
+  // entry -- Map iteration order here is byCellTask's insertion order, not
+  // anything a caller controls, so which fine label "won" was NONDETERMINISTIC.
+  // Keyed by task + fine label instead: every fine label sonnet-medium has
+  // data for gets its OWN deterministic baseline entry, so sonnet-medium's
+  // own real-bugfix group compares against sonnet-medium's own real-bugfix
+  // baseline (never architecture's), and vice versa -- see the lookup site
+  // below and relativeCostIndexOrNull()'s own note.
   const baseline = new Map();
-  for (const [key, group] of byCellTask) {
-    const parts = key.split("::");
-    const cell = parts[0];
-    const task = parts[1];
+  for (const { cell, task, evidenceFamily, rows: group } of byCellTask.values()) {
     if (cell === "sonnet-medium") {
-      baseline.set(task, median(group.map(priceWeightedTokens)));
+      const baselineKey = task + "::" + evidenceFamily.fine;
+      baseline.set(baselineKey, { fine: evidenceFamily.fine, cost: median(group.map(priceWeightedTokens)) });
     }
   }
 
   const summaryRows = [];
-  for (const [key, group] of byCellTask) {
-    const parts = key.split("::");
-    const cell = parts[0];
-    const task = parts[1];
+  for (const {
+    cell, task, evidenceFamily, rows: group, legacyFines,
+  } of byCellTask.values()) {
     const passRate = group.filter((r) => r.pass).length / group.length;
     const nPass = group.filter((r) => r.pass).length;
     // pass@1 = the mean single-trial pass rate across reps (the same number
@@ -1339,8 +1551,15 @@ export function rebuildSummary(outDir) {
     const medTurns = median(group.map((r) => r.num_turns));
     const medDuration = median(group.map((r) => r.duration_ms));
     const pwt = median(group.map(priceWeightedTokens));
-    const base = baseline.get(task);
-    const relIndex = base ? pwt / base : null;
+    // FS4 fix (2026-09-24 family-split review, HIGH): bench/evidence-family.mjs
+    // shipped assertComparableEvidence() as a guard for "two cells' evidence
+    // being compared", but nothing ever called it -- this IS that comparison
+    // (this cell's price-weighted tokens against the sonnet-medium baseline
+    // for the SAME task, to produce relative_cost_index/plan_usage_index).
+    // relativeCostIndexOrNull() refuses (returns null) rather than dividing
+    // whenever the baseline it found belongs to a DIFFERENT evidence family
+    // than this group's own -- see that function's own note, below.
+    const relIndex = relativeCostIndexOrNull(pwt, baseline.get(task + "::" + evidenceFamily.fine), evidenceFamily.fine);
     const nCorrect = group.filter((r) => r.pass).length;
     const costPerCorrect = nCorrect > 0 ? (group.reduce((s, r) => s + (r.cost_usd || 0), 0) / nCorrect) : null;
     // Plan-usage index: the token-cost ratio to the sonnet-medium baseline,
@@ -1366,9 +1585,18 @@ export function rebuildSummary(outDir) {
     // cost numbers -- see cacheHitRate() above and docs/BENCHMARK.md.
     const medCacheHitRate = median(group.map(cacheHitRate).filter((v) => v != null));
     const cacheAnomaly = medCacheHitRate != null && medCacheHitRate < CACHE_HIT_RATE_ANOMALY_THRESHOLD;
+    // Evidence family (real-world vs synthetic): `evidenceFamily` was
+    // already resolved once, above, as PART OF the grouping key itself
+    // (FS1 fix) -- every row in this group shares the exact same fine
+    // label by construction now, not merely "by convention" the way the
+    // old, false comment here used to claim. NEVER averaged or pooled
+    // across the two below -- see rebuildSummary()'s markdown sectioning
+    // and docs/BENCHMARK.md "Evidence families".
 
     summaryRows.push({
-      cell, task, task_family: taskFamilyOf(task, { row: group[0] }), n: group.length,
+      cell, task, task_family: taskFamilyOf(task, { row: group[0] }),
+      evidence_family: evidenceFamily.coarse, evidence_family_fine: evidenceFamily.fine,
+      n: group.length,
       pass_rate: passRate,
       pass_at_1: passRate,
       pass_ci95_low: passCi ? passCi.low : null,
@@ -1400,13 +1628,35 @@ export function rebuildSummary(outDir) {
       cost_per_correct_usd: costPerCorrect,
       relative_cost_index: relIndex,
       plan_usage_index: planUsageIndex,
+      // FS11 fix (2026-09-24 round-2 family-split review, MED): non-empty
+      // ONLY for an "unknown"-family group that contains at least one row
+      // whose OWN evidence_family_fine was set but not recognized by the
+      // current registry (bench/evidence-family.mjs) -- a retired/renamed
+      // fine label on a row already on disk. null for every ordinary row,
+      // keeping this array's per-row shape unchanged everywhere else.
+      unrecognized_legacy_fines: legacyFines.size ? [...legacyFines].sort() : null,
     });
   }
 
-  summaryRows.sort((a, b) => (a.task + a.cell).localeCompare(b.task + b.cell));
+  // Sort key includes evidence_family_fine (FS1): two rows can now share a
+  // (task, cell) pair while differing only in evidence family, and must
+  // sort deterministically rather than in Map-iteration (insertion) order.
+  summaryRows.sort((a, b) => (a.task + a.evidence_family_fine + a.cell).localeCompare(b.task + b.evidence_family_fine + b.cell));
   // A bare array, same shape as before -- each row already self-documents
   // via claim_honest_experimental:true rather than requiring a reader to
   // also fetch a separate top-level note.
+  //
+  // SUMMARY-EXPORT BOUNDARY -- the rule any future consumer must honour:
+  // every row here carries its own evidence_family ("real" | "synthetic" |
+  // "unknown", bench/evidence-family.mjs) and must never be pooled, averaged,
+  // or compared across that boundary to justify a decision. In particular,
+  // for ADR 0003 slice 5 (the proposal engine, not built yet): synthetic
+  // evidence may support an upgrade but can NEVER justify a downgrade
+  // (ADR 0003 "Decision rules" R3 -- synthetic tasks saturate), and a
+  // synthetic row never feeds a real-world usage/cost projection or vice
+  // versa. See bench/evidence-family.mjs's assertComparableEvidence() for
+  // the same rule pinned as a callable guard, and docs/BENCHMARK.md
+  // "Evidence families".
   fs.writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summaryRows, null, 2));
 
   // Cell x task-family rollup: the level at which confidence intervals are
@@ -1416,7 +1666,7 @@ export function rebuildSummary(outDir) {
   // pass@k uses k = the smallest rep count among the family's tasks, averaged
   // over tasks. Written to its own file so summary.json stays the bare array
   // it has always been.
-  const familyRows = buildFamilySummary(rows);
+  const familyRows = buildFamilySummary(rows, { localMapping });
   fs.writeFileSync(path.join(outDir, "summary-by-family.json"), JSON.stringify(familyRows, null, 2));
 
   // Cache-read tokens, turns, context re-reads, and read-share-of-cost are
@@ -1508,47 +1758,98 @@ export function rebuildSummary(outDir) {
       "",
     );
   }
-  lines.push(
-    header.join(" | "),
-    header.map(() => "---").join(" | "),
-  );
-  for (const r of summaryRows) {
-    lines.push([
-      r.cell, r.task, r.n,
-      (r.pass_rate * 100).toFixed(0) + "%",
-      formatInterval(r.pass_ci95_low != null ? { low: r.pass_ci95_low, high: r.pass_ci95_high } : null),
-      r.pass_at_k != null ? (r.pass_at_k * 100).toFixed(0) + "% (k=" + r.k + ")" : "n/a",
-      r.median_cache_read_tokens ?? "n/a",
-      r.cache_hit_rate != null ? (r.cache_hit_rate * 100).toFixed(0) + "%" + (r.cache_anomaly ? " ⚠" : "") : "n/a",
-      r.median_num_turns ?? "n/a",
-      r.median_context_rereads != null ? Math.round(r.median_context_rereads) : "n/a",
-      r.read_share_of_cost != null ? (r.read_share_of_cost * 100).toFixed(0) + "%" : "n/a",
-      r.cost_per_correct_usd != null ? "$" + r.cost_per_correct_usd.toFixed(3) : "n/a",
-      r.claim_honest_rate != null ? (r.claim_honest_rate * 100).toFixed(0) + "%" : "n/a",
-      r.scope_ok_rate != null ? (r.scope_ok_rate * 100).toFixed(0) + "%" : "n/a",
-      r.median_output_tokens ?? "n/a",
-      r.median_cost_usd != null ? "$" + r.median_cost_usd.toFixed(3) : "n/a",
-      r.relative_cost_index != null ? r.relative_cost_index.toFixed(2) + "x" : "n/a",
-      r.plan_usage_index != null ? r.plan_usage_index.toFixed(2) + "x" : "n/a (unmeasured tier)",
-    ].join(" | "));
+  // FS11 fix (2026-09-24 round-2 family-split review, MED): unrecognizedLegacyFine
+  // was computed since round 1 (FS3) but never surfaced anywhere a reader
+  // could see it -- this banner, each affected row's own
+  // unrecognized_legacy_fines field (above), and a stderr warning (above,
+  // once per rebuildSummary() call) are the three places round 2 requires it.
+  if (unrecognizedLegacyFines.size > 0) {
+    lines.push(
+      `LEGACY EVIDENCE FAMILY: ${unrecognizedLegacyFines.size} distinct evidence_family_fine value(s) already on ` +
+      `disk are not in the current bench/evidence-family.mjs registry: ${[...unrecognizedLegacyFines].sort().join(", ")} -- ` +
+      "classified \"unknown\" below, never real or synthetic (see each affected row's own unrecognized_legacy_fines " +
+      "field in summary.json).",
+      "",
+    );
+  }
+  // Evidence-family sectioning (real-world vs synthetic; see
+  // bench/evidence-family.mjs and docs/BENCHMARK.md "Evidence families"):
+  // the main per-(cell, task) table is printed as up to three SEPARATE,
+  // clearly-headed sections -- never one flat table mixing rows from both
+  // kinds of evidence. Pass rates, CIs, tokens, turns and costs are already
+  // computed per (cell, task) above (never pooled across tasks of different
+  // families), so this is presentation-only: which rows land under which
+  // heading. A family with zero rows in this run prints no section at all.
+  const EVIDENCE_SECTION_TITLES = {
+    real: "REAL-WORLD RESULTS",
+    synthetic: "SYNTHETIC RESULTS",
+    unknown: "UNCLASSIFIED RESULTS (evidence family unknown -- never pooled with real or synthetic)",
+  };
+  const summaryRowsByEvidence = { real: [], synthetic: [], unknown: [] };
+  for (const r of summaryRows) summaryRowsByEvidence[r.evidence_family].push(r);
+  for (const key of ["real", "synthetic", "unknown"]) {
+    const rowsForFamily = summaryRowsByEvidence[key];
+    if (rowsForFamily.length === 0) continue;
+    lines.push(
+      `## ${EVIDENCE_SECTION_TITLES[key]}`,
+      "",
+      header.join(" | "),
+      header.map(() => "---").join(" | "),
+    );
+    for (const r of rowsForFamily) {
+      lines.push([
+        r.cell, r.task, r.n,
+        (r.pass_rate * 100).toFixed(0) + "%",
+        formatInterval(r.pass_ci95_low != null ? { low: r.pass_ci95_low, high: r.pass_ci95_high } : null),
+        r.pass_at_k != null ? (r.pass_at_k * 100).toFixed(0) + "% (k=" + r.k + ")" : "n/a",
+        r.median_cache_read_tokens ?? "n/a",
+        r.cache_hit_rate != null ? (r.cache_hit_rate * 100).toFixed(0) + "%" + (r.cache_anomaly ? " ⚠" : "") : "n/a",
+        r.median_num_turns ?? "n/a",
+        r.median_context_rereads != null ? Math.round(r.median_context_rereads) : "n/a",
+        r.read_share_of_cost != null ? (r.read_share_of_cost * 100).toFixed(0) + "%" : "n/a",
+        r.cost_per_correct_usd != null ? "$" + r.cost_per_correct_usd.toFixed(3) : "n/a",
+        r.claim_honest_rate != null ? (r.claim_honest_rate * 100).toFixed(0) + "%" : "n/a",
+        r.scope_ok_rate != null ? (r.scope_ok_rate * 100).toFixed(0) + "%" : "n/a",
+        r.median_output_tokens ?? "n/a",
+        r.median_cost_usd != null ? "$" + r.median_cost_usd.toFixed(3) : "n/a",
+        r.relative_cost_index != null ? r.relative_cost_index.toFixed(2) + "x" : "n/a",
+        r.plan_usage_index != null ? r.plan_usage_index.toFixed(2) + "x" : "n/a (unmeasured tier)",
+      ].join(" | "));
+    }
+    lines.push("");
   }
 
   if (familyRows.length > 0) {
-    lines.push(
-      "",
-      "## By task family (cell x family)",
-      "",
-      "family | cell | tasks | runs | passes | pass@1 | 95% CI | pass@k | note",
-      "--- | --- | --- | --- | --- | --- | --- | --- | ---",
-    );
-    for (const f of familyRows) {
-      lines.push([
-        f.family, f.cell, f.tasks, f.runs, f.passes,
-        (f.pass_at_1 * 100).toFixed(0) + "%",
-        formatInterval(f.pass_ci95_low != null ? { low: f.pass_ci95_low, high: f.pass_ci95_high } : null),
-        f.pass_at_k != null ? (f.pass_at_k * 100).toFixed(0) + "% (k=" + f.k + ")" : "n/a",
-        f.n_too_small ? "n too small to separate" : "",
-      ].join(" | "));
+    lines.push("", "## By task family (cell x family)", "");
+    // Same evidence-family separation as the main table above, one level
+    // down: a sub-section per coarse evidence kind, never one flat rollup
+    // mixing a real-world family's CI against a synthetic one's.
+    const FAMILY_SECTION_TITLES = {
+      real: "Real-world",
+      synthetic: "Synthetic",
+      unknown: "Unclassified (evidence family unknown -- never pooled)",
+    };
+    const familyRowsByEvidence = { real: [], synthetic: [], unknown: [] };
+    for (const f of familyRows) familyRowsByEvidence[f.evidence_family].push(f);
+    for (const key of ["real", "synthetic", "unknown"]) {
+      const rowsForFamily = familyRowsByEvidence[key];
+      if (rowsForFamily.length === 0) continue;
+      lines.push(
+        `### ${FAMILY_SECTION_TITLES[key]}`,
+        "",
+        "family | cell | tasks | runs | passes | pass@1 | 95% CI | pass@k | note",
+        "--- | --- | --- | --- | --- | --- | --- | --- | ---",
+      );
+      for (const f of rowsForFamily) {
+        lines.push([
+          f.family, f.cell, f.tasks, f.runs, f.passes,
+          (f.pass_at_1 * 100).toFixed(0) + "%",
+          formatInterval(f.pass_ci95_low != null ? { low: f.pass_ci95_low, high: f.pass_ci95_high } : null),
+          f.pass_at_k != null ? (f.pass_at_k * 100).toFixed(0) + "% (k=" + f.k + ")" : "n/a",
+          f.n_too_small ? "n too small to separate" : "",
+        ].join(" | "));
+      }
+      lines.push("");
     }
   }
 
@@ -1575,15 +1876,35 @@ export function rebuildSummary(outDir) {
   fs.writeFileSync(path.join(outDir, "summary.md"), lines.join("\n") + "\n");
 }
 
-// Exported for tests. Groups non-auth-error rows by (cell, family) -- see the
-// rollup note in rebuildSummary().
-export function buildFamilySummary(rows) {
+// Exported for tests. Groups non-auth-error rows by (cell, built-in family,
+// evidence-family fine label) -- see the rollup note in rebuildSummary().
+//
+// FS1 fix (2026-09-24 family-split review, CRITICAL): the grouping key used
+// to be `cell::family` alone (the built-in coarse family, e.g. "pack"),
+// with the group's evidence family SAMPLED off group[0] and a comment
+// falsely claiming "every row in this group shares one built-in task
+// family... so its evidence-family kind is uniform". It never was: two
+// DIFFERENT task-pack tasks can share the built-in family "pack" while one
+// is a real bug-fix pack and the other declares itself synthetic (or a
+// legacy id with no pack metadata) -- exactly the reviewer's Case B repro.
+// The fine label is now part of the key, so each (cell, family) rollup
+// splits into one row per evidence family actually present, and every row
+// pushed below already shares the SAME fine label by construction --
+// nothing is sampled off "the first" row anymore.
+export function buildFamilySummary(rows, { localMapping = null } = {}) {
   const byCellFamily = new Map();
   for (const r of rows) {
     const fam = taskFamilyOf(r.task, { row: r });
-    const key = r.cell + "::" + fam;
-    if (!byCellFamily.has(key)) byCellFamily.set(key, { cell: r.cell, family: fam, byTask: new Map() });
+    const evidenceFamily = evidenceFamilyOf({
+      taskId: r.task, row: r, taskFamilyOf, localMapping,
+    });
+    const key = r.cell + "::" + fam + "::" + evidenceFamily.fine;
+    if (!byCellFamily.has(key)) byCellFamily.set(key, { cell: r.cell, family: fam, evidenceFamily, byTask: new Map(), legacyFines: new Set() });
     const g = byCellFamily.get(key);
+    // FS11 fix (2026-09-24 round-2 family-split review, MED): same
+    // per-group tracking rebuildSummary()'s own byCellTask loop does --
+    // see this module's SUMMARY-EXPORT BOUNDARY note.
+    if (evidenceFamily.unrecognizedLegacyFine) g.legacyFines.add(evidenceFamily.unrecognizedLegacyFine);
     if (!g.byTask.has(r.task)) g.byTask.set(r.task, []);
     g.byTask.get(r.task).push(r);
   }
@@ -1597,22 +1918,29 @@ export function buildFamilySummary(rows) {
     const passAt1 = perTask.reduce((s, t) => s + t.c / t.n, 0) / perTask.length;
     const pk = perTask.map((t) => passAtK(t.n, t.c, k));
     out.push({
-      cell: g.cell, family: g.family, tasks: perTask.length, runs, passes,
+      cell: g.cell, family: g.family,
+      evidence_family: g.evidenceFamily.coarse, evidence_family_fine: g.evidenceFamily.fine,
+      tasks: perTask.length, runs, passes,
       pass_at_1: passAt1,
       pass_ci95_low: ci ? ci.low : null,
       pass_ci95_high: ci ? ci.high : null,
       pass_at_k: pk.every((v) => v != null) ? pk.reduce((s, v) => s + v, 0) / pk.length : null,
       k,
       n_too_small: runs < MIN_N_TO_SEPARATE,
+      unrecognized_legacy_fines: g.legacyFines.size ? [...g.legacyFines].sort() : null,
     });
   }
-  out.sort((a, b) => (a.family + a.cell).localeCompare(b.family + b.cell));
+  out.sort((a, b) => (a.family + a.evidence_family_fine + a.cell).localeCompare(b.family + b.evidence_family_fine + b.cell));
   return out;
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   checkIsolateHomePreflight(args.isolateHome);
+  // FS2 fix: validated up front -- a typo in --evidence-family/the env
+  // override would otherwise misclassify (pre-FS3) or abort mid-batch
+  // (post-FS3) every row in the run.
+  const evidenceFamilyOverride = checkEvidenceFamilyOverridePreflight(args.evidenceFamily);
   const cellIds = resolveList(args.cells, CELLS);
   const taskIds = resolveList(args.tasks, TASKS);
   // RESULTS NEVER GO IN THE REPO. --out, when given, may be relative (to
@@ -1641,7 +1969,9 @@ async function main() {
         const t0 = Date.now();
         process.stdout.write("[" + new Date().toISOString() + "] START " + cellId + " / " + taskId + " / rep" + rep + " ... ");
         try {
-          const row = await runOne({ cellId, cell, taskId, task, rep, outDir, answersDir, isolateHome: args.isolateHome });
+          const row = await runOne({
+            cellId, cell, taskId, task, rep, outDir, answersDir, isolateHome: args.isolateHome, evidenceFamilyOverride,
+          });
           process.stdout.write(formatRunLine(row, Date.now() - t0) + "\n");
           if (row.auth_error) {
             console.error(authErrorAbortMessage(row));
@@ -1655,7 +1985,10 @@ async function main() {
             process.exit(1);
           }
           process.stdout.write("ERROR: " + ((e && e.stack) || e) + "\n");
-          fs.appendFileSync(path.join(outDir, "results.jsonl"), JSON.stringify(harnessErrorRow({ cellId, cell, taskId, task, rep, error: e })) + "\n");
+          fs.appendFileSync(
+            path.join(outDir, "results.jsonl"),
+            JSON.stringify(harnessErrorRow({ cellId, cell, taskId, task, rep, error: e, evidenceFamilyOverride })) + "\n",
+          );
         }
       }
     }

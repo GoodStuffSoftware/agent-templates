@@ -244,6 +244,19 @@ yourself if in doubt.
 
 ## (6) Reporting
 
+**Real-world and synthetic evidence are never pooled** (docs/BENCHMARK.md
+"Evidence families"). Every row and every summary entry carries an
+`evidence_family` (`real` | `synthetic` | `unknown`) and a finer
+`evidence_family_fine` (`real-bugfix` | `architecture` | `mined` |
+`easy-synthetic` | `hard-synthetic`); `summary.md` prints separate
+`## REAL-WORLD RESULTS` / `## SYNTHETIC RESULTS` sections rather than one
+mixed table. When you hand-write a report from these results, keep that
+same separation — never a combined pass rate, cost, or token figure across
+the two, and never cite a synthetic-only result as evidence for a real-world
+capability or cost claim (or the reverse). An `unknown`-family row belongs
+in neither section; call it out on its own rather than folding it into
+whichever section is more convenient.
+
 Order: **quality first**, then cost per CORRECT result, a **cost index
 relative to sonnet/medium** on the same task set, and a **plan-usage index**
 (`config/model-tiers.json`'s `planUsageMultipliers`, cited by source and
