@@ -123,9 +123,10 @@ export function floorsFor(cfg, consequence, model, effort) {
   return { model: m, effort: e };
 }
 
-// A floor entry that LIFTED the winning layer's candidate. (Later commits
-// may add entries describing the grid's own internal raises; those are part
-// of the grid's answer, which the reference already produced.)
+// A floor entry that LIFTED the winning layer's candidate. Entries marked
+// `within: 'grid'` report the raises effortFor() made inside the grid: they
+// are part of the grid's answer, which the reference produced too, and the
+// exact-answer comparison already covers them.
 export const liftsOf = (route) => (route.floorsApplied || []).filter((f) => f.within !== 'grid');
 
 // Run the gate. `cur` is the resolver under test, `ref` the staged reference,

@@ -125,7 +125,13 @@ test('an explicit departure skips the trial even when the trial would break a fl
   assert.deepEqual(r.departures, ['weight']);
   assert.match(r.skipped[0].reason, /explicit weight departs from the x-critical-low preset/);
   assert.equal(label(r), 'opus/xhigh'); // the grid applies the critical floor itself
-  assert.deepEqual(r.floorsApplied, []);
+  // ...and says so: the grid's own raises are reported, marked within the
+  // grid, while nothing lifted the winning layer's candidate after the fact.
+  assert.deepEqual(r.floorsApplied, [
+    { floor: 'F1', raised: 'model sonnet -> opus', within: 'grid' },
+    { floor: 'F1', raised: 'effort low -> xhigh', within: 'grid' },
+  ]);
+  assert.doesNotMatch(r.rationale, /; floors: /);
 });
 
 test('explainRoute names every layer, the winner, the floors and a provenance line', () => {

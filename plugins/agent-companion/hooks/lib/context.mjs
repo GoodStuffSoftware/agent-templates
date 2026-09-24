@@ -229,13 +229,16 @@ export function effortSupported(model, effort) {
 //
 // Returns { model, effort, rationale } and clamps to what the model accepts,
 // so a haiku route comes back with no effort at all rather than a parameter
-// that model does not take.
+// that model does not take. Pass `floors: []` to have each consequence floor
+// that raised the answer pushed onto it ({ floor, raised, within: 'grid' }) —
+// resolveRoute() reports them, so explain never says "none fired" about an
+// answer a floor lifted inside the grid.
 function tierRank(alias) {
   const cfg = modelTiers();
   return (cfg.tiers || {})[alias]?.rank ?? 0;
 }
 
-export function effortFor(weight, kind = 'bounded', consequence = 'routine', { now } = {}) {
+export function effortFor(weight, kind = 'bounded', consequence = 'routine', { now, floors = null } = {}) {
   const cfg = modelTiers();
   // routeForWeight, not the raw row: it applies a staged retirement replacement
   // by date, so a weight that routes to a retired alias resolves to its
@@ -252,6 +255,8 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
   const modelFloored = !!(cons.modelFloor && tierRank(cons.modelFloor) > tierRank(route.model));
   const model = modelFloored ? cons.modelFloor : route.model;
   const lifted = modelFloored ? `; ${consequence} consequence raises the model to ${model}` : '';
+  const floorLabel = FLOOR_FOR_CONSEQUENCE[consequence] || `consequence:${consequence}`;
+  if (modelFloored && floors) floors.push({ floor: floorLabel, raised: `model ${route.model} -> ${model}`, within: 'grid' });
   const routeLabel = `${route.model}${route.effort ? '/' + route.effort : ''}` +
     (route.retiredFrom ? ` (standing in for retired ${route.retiredFrom})` : '');
 
@@ -288,6 +293,7 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
     if (floorIdx > finalIdx) finalIdx = floorIdx;
   }
   const effortFinal = ranked[finalIdx];
+  if (finalIdx > idx && floors) floors.push({ floor: floorLabel, raised: `effort ${ranked[idx]} -> ${effortFinal}`, within: 'grid' });
 
   const moved = idx - baseIdx;
   const why = moved === 0
@@ -340,8 +346,9 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 //   F5  elevated consequence effort floor (high). Soft in the ADR: only a
 //       future operator-observed profile row may waive it, so there is no
 //       waiver path here yet.
-// Every raise is recorded in floorsApplied; every candidate that could not
-// run as written is recorded in skipped.
+// Every raise is recorded in floorsApplied — including the ones effortFor()
+// makes inside the grid when the grid wins (marked `within: 'grid'`); every
+// candidate that could not run as written is recorded in skipped.
 //
 // KNOWN GAP, deliberately preserved (slice 1 changes no behaviour): the
 // parity path (code-review with a writer) applies F3 only. It never applied
@@ -513,7 +520,8 @@ export function resolveRoute({
   // explain can show what the grid would have said even when a higher layer
   // won.
   const validWeight = typeof w === 'number' && w >= 1 && w <= 5;
-  const grid = validWeight ? effortFor(w, k, c, { now }) : null;
+  const gridFloors = [];
+  const grid = validWeight ? effortFor(w, k, c, { now, floors: gridFloors }) : null;
   const gridLabel = grid ? routeLabelOf(grid.model, grid.effort) : '';
 
   const skipped = [];
@@ -664,7 +672,9 @@ export function resolveRoute({
     source: won.source,
     state: won.state,
     provenance: won.provenance,
-    floorsApplied: floored.floorsApplied,
+    // The grid's own raises come first: they are part of the grid's answer
+    // (and already in its rationale), then any lift of the winning layer.
+    floorsApplied: [...(won.layer === 'grid' ? gridFloors : []), ...floored.floorsApplied],
     skipped,
     rationale: won.rationale + floorNote,
     trial: won.trial,
@@ -735,7 +745,7 @@ export function explainRoute(r) {
   } else {
     L.push('winner:   none (no route resolved)');
   }
-  L.push(`floors:   ${(r.floorsApplied || []).length ? r.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join('; ') : 'none fired'}`);
+  L.push(`floors:   ${(r.floorsApplied || []).length ? r.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}${f.within ? ` (within the ${f.within})` : ''}`).join('; ') : 'none fired'}`);
   L.push(`profile:  revision ${r.profileRevision ?? 'none'}`);
   L.push(`provenance: ${routeProvenanceLine(r)}`);
   return L;
