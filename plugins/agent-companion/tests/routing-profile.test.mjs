@@ -239,32 +239,35 @@ test('the trial layer gets the same alias checks (review finding A): unknown ali
 // --- F5: waivable only by an operator-observed row, always explained --------
 
 test('F5 waiver on an operator-observed row: the effort stays below the elevated floor, and explain says so', () => {
-  writeProfile(profile({ integration: row('sonnet', 'medium', { waivesFloor: 'elevated' }) }));
+  // integration's own consequence is elevated, whose floor is medium (since
+  // the 0.29.2 "effort" decision lowered it from high) -- use low so F5
+  // still has something to waive.
+  writeProfile(profile({ integration: row('sonnet', 'low', { waivesFloor: 'elevated' }) }));
   const r = ctx.resolveRoute({ type: 'integration', now: BEFORE });
   assert.equal(r.layer, 'profile');
-  assert.equal(label(r), 'sonnet/medium');
+  assert.equal(label(r), 'sonnet/low');
   assert.deepEqual(r.floorsApplied.map((f) => [f.floor, !!f.waived]), [['F5', true]]);
   assert.deepEqual([r.waiver.honored, r.waiver.applies], [true, true]);
   const lines = ctx.explainRoute(r).join('\n');
-  assert.match(lines, /floors:\s+F5 waived: effort medium kept below high/);
+  assert.match(lines, /floors:\s+F5 waived: effort low kept below medium/);
   assert.match(lines, /waiver:\s+F5 elevated effort floor — HONOURED/);
 });
 
 test('F5 waiver on a non-operator row is ignored: F5 raises the effort, and explain prints the ignored waiver', () => {
-  writeProfile(profile({ integration: row('sonnet', 'medium', { waivesFloor: 'elevated', source: 'benchmark' }) }));
+  writeProfile(profile({ integration: row('sonnet', 'low', { waivesFloor: 'elevated', source: 'benchmark' }) }));
   const r = ctx.resolveRoute({ type: 'integration', now: BEFORE });
   assert.equal(r.layer, 'profile');
-  assert.equal(label(r), 'sonnet/high');
-  assert.deepEqual(r.floorsApplied.map((f) => [f.floor, f.raised]), [['F5', 'effort medium -> high']]);
+  assert.equal(label(r), 'sonnet/medium');
+  assert.deepEqual(r.floorsApplied.map((f) => [f.floor, f.raised]), [['F5', 'effort low -> medium']]);
   assert.equal(r.waiver.honored, false);
   assert.match(ctx.explainRoute(r).join('\n'), /waiver:\s+F5 elevated effort floor — IGNORED: waiver ignored: source benchmark is not operator-observed/);
 });
 
-test('without a waiver, F5 raises a hand-edited elevated row below high (floors after the winning layer)', () => {
+test('without a waiver, F5 raises a hand-edited elevated row below medium (floors after the winning layer)', () => {
   writeProfile(profile({ integration: row('sonnet', 'low') }));
   const r = ctx.resolveRoute({ type: 'integration', now: BEFORE });
   assert.equal(r.layer, 'profile');
-  assert.equal(label(r), 'sonnet/high');
+  assert.equal(label(r), 'sonnet/medium');
   assert.equal(r.waiver, null);
 });
 
@@ -304,7 +307,7 @@ test('F5: a haiku row on an elevated type is skipped without an honoured waiver'
     writeProfile(profile({ 'large-refactor': row('haiku', null, extra) }));
     const r = ctx.resolveRoute({ type: 'large-refactor', now: BEFORE });
     assert.notEqual(r.layer, 'profile', JSON.stringify(extra));
-    assert.match(r.skipped.find((x) => x.layer === 'profile').reason, /^F5: haiku takes no effort parameter, so it cannot meet the elevated floor \(high\)/);
+    assert.match(r.skipped.find((x) => x.layer === 'profile').reason, /^F5: haiku takes no effort parameter, so it cannot meet the elevated floor \(medium\)/);
   }
 });
 
@@ -541,6 +544,6 @@ test('routing-profile show says what a floor-raised row runs as', () => {
   writeProfile(profile({ integration: row('sonnet', 'low'), 'bounded-feature': row('sonnet', 'medium') }));
   const r = runScript('scripts/routing-profile.mjs', ['show']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /integration[\s\S]*?-> applies \(raised by F5 to sonnet\/high\)/);
+  assert.match(r.stdout, /integration[\s\S]*?-> applies \(raised by F5 to sonnet\/medium\)/);
   assert.match(r.stdout, /bounded-feature[\s\S]*?-> applies(?! \()/);
 });

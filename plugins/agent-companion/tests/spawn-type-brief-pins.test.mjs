@@ -38,7 +38,7 @@ function spawnOpus(prompt, sid) {
   } finally { cleanup(); }
 }
 
-test('1. "TYPE: integration / EFFORT: high / WARRANT: weight 4 — ..." on opus is ALLOWED through the shipped trial (opus/high)', () => {
+test('1. "TYPE: integration / EFFORT: high / WARRANT: weight 4 — ..." on opus is ALLOWED through the shipped trial (opus/medium)', () => {
   const r = spawnOpus('TYPE: integration\nEFFORT: high\nWARRANT: weight 4 — shared surfaces other agents depend on\ndo the multi-file change', 'sess-pin-1');
   assert.equal(r.decision, 'allow', r.reason);
   assert.doesNotMatch(r.msg, /Best fit|Premium warrant|over-provisioned/);
@@ -47,17 +47,17 @@ test('1. "TYPE: integration / EFFORT: high / WARRANT: weight 4 — ..." on opus 
   assert.equal(r.row.declared_kind, 'bounded');
   assert.equal(r.row.declared_consequence, 'elevated');
   assert.equal(r.row.fit, 'fit');
-  assert.equal(r.row.fit_expected, 'opus/high');
+  assert.equal(r.row.fit_expected, 'opus/medium');
   assert.equal(r.row.fit_trial, true);
   assert.equal(r.row.route_layer, 'trial');
 });
 
 // FLIPPED in slice 1b fix (a): a WEIGHT: line equal to the preset restates
 // the type, so the trial applies (ADR §1).
-test('2. TYPE: integration + "WEIGHT: 4" (equal to the preset) restates the type -> shipped trial opus/high -> ALLOWED', () => {
+test('2. TYPE: integration + "WEIGHT: 4" (equal to the preset) restates the type -> shipped trial opus/medium -> ALLOWED', () => {
   const r = spawnOpus('TYPE: integration\nWEIGHT: 4\nWARRANT: weight 4 — x\ndo it', 'sess-pin-2');
   assert.equal(r.decision, 'allow', r.reason);
-  assert.equal(r.row.fit_expected, 'opus/high');
+  assert.equal(r.row.fit_expected, 'opus/medium');
   assert.equal(r.row.route_layer, 'trial');
 });
 
@@ -95,11 +95,11 @@ test('3d. a KIND: line of its own that departs still departs -> grid -> DENIED',
 });
 
 for (const [n, line] of [['4', '**TYPE:** integration'], ['4b', '**TYPE**: integration'], ['4c', '**TYPE: integration**'], ['4d', '- TYPE: integration'], ['4e', '  Type: integration']]) {
-  test(`${n}. "${line}" is parsed as TYPE -> trial opus/high -> ALLOWED`, () => {
+  test(`${n}. "${line}" is parsed as TYPE -> trial opus/medium -> ALLOWED`, () => {
     const r = spawnOpus(`${line}\nWARRANT: weight 4 — x\ndo it`, `sess-pin-${n}`);
     assert.equal(r.decision, 'allow', r.reason);
     assert.equal(r.row.declared_type, 'integration');
-    assert.equal(r.row.fit_expected, 'opus/high');
+    assert.equal(r.row.fit_expected, 'opus/medium');
     assert.equal(r.row.route_layer, 'trial');
   });
 }

@@ -29,9 +29,13 @@ test('a grid answer raised by F1 inside effortFor() reports both raises, marked 
 });
 
 test('a grid answer raised by F5 inside effortFor() reports the effort raise', () => {
-  const r = ctx.resolveRoute({ weight: 3, weightExplicit: true, consequence: 'elevated', consequenceExplicit: true, now: NOW });
-  assert.equal(label(r), 'sonnet/high');
-  assert.deepEqual(r.floorsApplied, [{ floor: 'F5', raised: 'effort medium -> high', within: 'grid' }]);
+  // weight 3's own base is sonnet/medium, which already meets the elevated
+  // floor since the 0.29.2 "effort" decision lowered it from high to medium
+  // -- so pair it with the mechanical kind's -1 delta (sonnet/medium ->
+  // sonnet/low) to give F5 something to raise back up to the floor.
+  const r = ctx.resolveRoute({ weight: 3, weightExplicit: true, kind: 'mechanical', kindExplicit: true, consequence: 'elevated', consequenceExplicit: true, now: NOW });
+  assert.equal(label(r), 'sonnet/medium');
+  assert.deepEqual(r.floorsApplied, [{ floor: 'F5', raised: 'effort low -> medium', within: 'grid' }]);
 });
 
 test('a grid answer no floor touched still says "none fired"', () => {
@@ -41,8 +45,8 @@ test('a grid answer no floor touched still says "none fired"', () => {
 });
 
 test('the grid floors are not reported when a higher layer won (the grid was only shadowed)', () => {
-  // integration: elevated preset; its trial (opus/high) wins, and the grid's
-  // own F5 raise belongs to the shadowed grid candidate, not the answer.
+  // integration: elevated preset; its trial (opus/medium) wins, and the
+  // grid's own F5 raise belongs to the shadowed grid candidate, not the answer.
   const r = ctx.resolveRoute({ type: 'integration', now: NOW });
   assert.equal(r.layer, 'trial');
   assert.deepEqual(r.floorsApplied, []);

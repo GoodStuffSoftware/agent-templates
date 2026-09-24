@@ -14,7 +14,7 @@
 // this plan has no separate Opus weekly window -- so explore,
 // mechanical-edit, subagent-worker, verify, and operate move from v1's
 // sonnet/low to opus/low. integration, large-refactor, and novel-design pick
-// up their own v2 overrides too: integration (unmeasured by benchmark) moves
+// up their own v2 overrides too: integration (unmeasured by benchmark) moved
 // model-only to opus/high on operator first-hand evidence that Sonnet
 // struggles on some of the operator's multi-file technical work;
 // large-refactor and novel-design (both already opus-routed) move from their
@@ -23,6 +23,18 @@
 // architecture work itself is unmeasured. critical-change (consequence floor)
 // and long-autonomous-run (already grid-resolves to opus/xhigh) are
 // deliberately left alone.
+//
+// v3 (2026-09-24, 0.29.2 "effort" architecture decision, DECISIONS.md,
+// review 2026-09-30): integration moves again, opus/high -> opus/medium —
+// the operator judged v2's opus/high heavier than integration work needs.
+// Landing on medium required lowering the elevated-consequence effort floor
+// (F5) from high to medium (config/model-tiers.json), since the floor would
+// otherwise have raised any elevated-consequence trial straight back to
+// high. large-refactor and novel-design deliberately stay at opus/high
+// (already above the lower floor); critical-change is unaffected (F1/xhigh).
+// A separate, non-waivable floor (F6) still refuses opus/low for any
+// architecture-class type (integration, large-refactor, novel-design,
+// critical-change) at every layer — see tests/architecture-floor.test.mjs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -39,7 +51,6 @@ const CHANGED = [
   ['operate', 'opus', 'low'],
   ['bounded-feature', 'opus', 'low'],
   ['debug-root-cause', 'opus', 'low'],
-  ['integration', 'opus', 'high'],
   ['large-refactor', 'opus', 'high'],
   ['novel-design', 'opus', 'high'],
 ];
@@ -55,6 +66,20 @@ for (const [type, model, effort] of CHANGED) {
     assert.equal(res.json.trial.reviewBy, '2026-09-30');
   });
 }
+
+// integration is checked separately (not in CHANGED above): its trial moved
+// AGAIN on 2026-09-24 (0.29.2 "effort" architecture decision, opus/high ->
+// opus/medium), so its trialSince differs from the rest of the 2026-09-23
+// window while reviewBy stays the same.
+test('recommend --type integration routes to opus/medium under the routing trial (v3, since 2026-09-24)', () => {
+  const res = runScript('scripts/recommend.mjs', ['--type', 'integration', '--json']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.json.model, 'opus');
+  assert.equal(res.json.effort, 'medium');
+  assert.ok(res.json.trial, 'integration must report trial metadata');
+  assert.equal(res.json.trial.trialSince, '2026-09-24');
+  assert.equal(res.json.trial.reviewBy, '2026-09-30');
+});
 
 test('novel-design explicitly overrides the novel-design kind\'s +2 effort delta, not a silent kind change', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'novel-design', '--json']);
@@ -76,11 +101,11 @@ test('large-refactor overrides the plain weight-5 xhigh resolution down to high 
   assert.equal(res.json.trial.gridResolution, 'opus/xhigh');
 });
 
-test('integration overrides only the MODEL, not the effort — it already floors at high via the elevated consequence', () => {
+test('integration (v3): the 0.29.2 "effort" decision moved it to opus/medium, which required lowering the elevated-consequence floor from high to medium', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'integration', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.model, 'opus');
-  assert.equal(res.json.effort, 'high');
+  assert.equal(res.json.effort, 'medium');
   assert.equal(res.json.trial.gridResolution, 'sonnet/high');
 });
 
@@ -130,13 +155,17 @@ test('code-review (parity-sized) is unaffected by the trial — no override, wei
 });
 
 test('every override in config/model-tiers.json carries evidence, trialSince and reviewBy', () => {
+  // integration's trial moved again on 2026-09-24 (0.29.2 "effort" decision),
+  // so it carries a later trialSince than the rest of the 2026-09-23 window;
+  // every override still shares the same reviewBy.
+  const trialSinceByType = { integration: '2026-09-24' };
   for (const [name, t] of Object.entries(cfg.taskTypes)) {
     if (!t.override) continue;
     const ov = t.override;
     assert.ok(ov.model, `${name}.override.model`);
     assert.ok(ov.reason, `${name}.override.reason`);
     assert.ok(ov.evidence?.source, `${name}.override.evidence.source`);
-    assert.equal(ov.trialSince, '2026-09-23', `${name}.override.trialSince`);
+    assert.equal(ov.trialSince, trialSinceByType[name] || '2026-09-23', `${name}.override.trialSince`);
     assert.equal(ov.reviewBy, '2026-09-30', `${name}.override.reviewBy`);
   }
 });

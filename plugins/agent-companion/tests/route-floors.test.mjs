@@ -91,10 +91,10 @@ test('F1: a critical trial on haiku gets BOTH the model floor and the effort flo
   assert.match(r.floorsApplied[0].raised, /^model haiku -> opus/);
 });
 
-test('F5: an elevated trial at opus/low is lifted to the high effort floor (no waiver path yet)', () => {
+test('F5: an elevated trial at opus/low is lifted to the elevated effort floor (medium as of the 0.29.2 "effort" decision; no waiver path yet)', () => {
   const r = ctx.resolveRoute({ type: 'x-elevated-low', now: BEFORE });
-  assert.equal(label(r), 'opus/high');
-  assert.deepEqual(r.floorsApplied, [{ floor: 'F5', raised: 'effort low -> high' }]);
+  assert.equal(label(r), 'opus/medium');
+  assert.deepEqual(r.floorsApplied, [{ floor: 'F5', raised: 'effort low -> medium' }]);
 });
 
 test('F5 cannot be expressed on a model that takes no effort (haiku stays effortless, as the grid does)', () => {

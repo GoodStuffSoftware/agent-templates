@@ -75,7 +75,7 @@ test('(a) opus + TYPE: integration with NO warrant is ALLOWED — the trial rout
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.declared_type, 'integration');
     assert.equal(row.fit_trial, true);
-    assert.equal(row.fit_expected, 'opus/high');
+    assert.equal(row.fit_expected, 'opus/medium');
   } finally {
     cleanup();
   }
@@ -230,7 +230,7 @@ test('a REAL "WEIGHT:" line (not a warrant) still explicitly overrides a declare
         model: 'opus',
         run_in_background: true,
         name: 'weight-override-worker',
-        // TYPE: integration would normally route to opus/high (trial). An
+        // TYPE: integration would normally route to opus/medium (trial). An
         // explicit WEIGHT: 2 deliberately deviates from the type's own
         // preset (per taskTypesNote) and falls back to the plain grid,
         // where weight 2 is haiku-tier — opus is now genuinely
