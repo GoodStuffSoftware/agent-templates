@@ -2,9 +2,55 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## Unreleased
+## 0.29.1 — 2026-09-24
 
-- New `main_ci_red` scout signal (`ci_status_signal`, default on): detects a repo's default branch sitting on a red (failure/cancelled/timed_out) latest completed workflow run via `gh`, suggestion-only. Surfaced in the daily scout and as a cheap, cache-only SessionStart note. Scope is the current project plus repos already confirmed public by `publication_leak_sweep`; a private repo's name is scrubbed like any other signal detail. Silent when `gh` is missing, unauthenticated, or offline.
+An incident fix for the memory vault, hardening for the spawn guard's locks
+and brief parsing, a new `main_ci_red` scout signal, and benchmark evidence
+families that never pool real and synthetic results.
+
+### Memory vault (incident fix, 2026-09-24)
+- Every vault git call strips the repo-locating GIT_* variables (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY and the others), matched case-insensitively. The bug: an inherited GIT_DIR made `git init` re-initialise the project's own .git with `core.bare=true` and a vault identity, which broke every worktree.
+- `ensureInit` refuses any target inside an existing repo, work tree, .git or bare repo, and writes nothing. The location is checked before any write, on sync, init and status.
+- A vault's .git must be a real directory, not a junction or symlink, and must not contain `commondir`.
+- A marker is honoured only if the vault's history is rooted in "memory-vault: initialize". A changed or unset user.email is still accepted, with a note.
+- A refusal never advises deleting a directory that holds commits or files; it says to move it aside instead.
+- A half-made vault (marker present, no commits) is finished rather than refused.
+- Vault commits are never signed and never run hooks: hooksPath is overridden, `--template=` is set, fsmonitor is off, and inherited GIT_CONFIG_* and author/committer env are ignored.
+- New `AGENT_COMPANION_VAULT_DIR` moves the vault only. It must be an absolute path and must not overlap the state root. Set it persistently, so the scout and the drift check see it too.
+- On Windows, vault paths over 246 characters are refused up front (Git for Windows' MAX_PATH limit).
+- `status` is read-only: its guards run first, it uses `--no-optional-locks`, and a refused vault makes `status` exit 1 and the drift check fail.
+- Test and gate git spawns strip the repo-locating GIT_* variables too: leak-check parity, bench hidden tests, the canary and the publication sweep.
+
+### Spawn guard and locks
+- Stale-lock breaking is serialised, so racing waiters never both hold the lock.
+- A future-dated lock, or one that isn't a regular file, no longer blocks until timeout.
+- Crash debris is swept only when its owner process is dead.
+- Transitional: while upgrading, a 0.29.0 helper racing a 0.29.1 helper can still overlap once.
+- Brief declarations ignore HTML comments and read nested list items. A BOM, NBSP or zero-width character before a header is normalised. A declaration-shaped line right after a quote still counts.
+- The guard loads the premium window only for premium spawns, which makes every other spawn faster.
+- Routing profile store: the depth scan is iterative, so huge strings no longer cause a RangeError; adopted external edits are validated. A grammar error in the routing table is fixed.
+- Haiku retirement (2026-10-15): `ac-haiku` is marked RETIRING, with sonnet/low as the fallback. After that date, advice and audit text no longer name haiku.
+
+### Scout
+- New `main_ci_red` signal, controlled by `ci_status_signal` (default on). Using `gh`, it flags a default branch whose latest completed CI run is red. Suggestion-only.
+- Scope is the current project plus known-public repos. It shows as a cache-only SessionStart note and stays silent without `gh`. A `default_branch` lookup that answers "null" or nothing counts as no answer.
+
+### Benchmark
+- Evidence families: every row and summary carries `evidence_family` (real, synthetic or unknown) plus a finer label.
+- Summaries, estimates and cost comparisons never pool families. Cost indices compare only within the same fine family, and unknown rows never feed estimates.
+- External harnesses can label their tasks via `task.evidenceFamily`, `--evidence-family` (on `scripts/benchmark.mjs` and on the runner), or `AGENT_COMPANION_BENCH_EVIDENCE_FAMILY`.
+- Historical rows can be labelled through a local mapping file at `<stateRoot>/config/evidence-families.json`.
+- An unknown label is rejected before any spend, and a real pack can't claim a synthetic label. The unrecognized-legacy-label warning prints once per label per process, not once per rebuilt summary.
+- Estimates use `cost_usd`, because price-weighted token indices understated Opus. They draw on local history keyed by fine family.
+- Judge-vote cost comes from local history; otherwise a measured $0.81 per vote at fable/high, scaled by tier.
+- Judge diffs are git-based: a small change to a large file stays small, and output is ordered source, then tests, then docs, and capped.
+- The judge prompt goes via stdin, which fixes ENAMETOOLONG on Windows.
+- The judge allows xhigh, and its effort is at least the author's, applied per cell: calibration, votes and the `judge_effort` column all use the raised effort.
+- Docs: the judge is a design-quality signal only, never a correctness check.
+- New `docs/ROUTING-RATIONALE.md` explains why the routing table is shaped the way it is.
+
+### Fixes
+- Standing rules: a `user-prompt` rule matches only the user's own text. Cross-session-message, task-notification, agent-message and system-reminder blocks are stripped first, so a turn carrying only those no longer fires "The user is asking for a prompt".
 
 ## 0.29.0 — 2026-09-24
 
