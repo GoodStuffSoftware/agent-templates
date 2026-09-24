@@ -4,15 +4,17 @@
 // the same count and more than the cap were allowed (a burst of 6 fable
 // spawns under a cap of 2 allowed more than 2 in 20 of 40 runs), and a guard
 // and a start interleaving lost one side's entry (0.29.0 RC review R2).
-// Both now hold an O_EXCL lock file for the whole read-count-write
-// (context.mjs withStateLock) and write through a temp file and a rename.
-// On a lock timeout the hook fails open: it still answers, it never throws.
+// Both now hold a lock file for the whole read-count-write (context.mjs
+// withStateLock, on the shared helper lib/file-lock.mjs: an owner token,
+// broken only when the owner's pid is dead AND the lock is old) and write
+// through a temp file and a rename. On a lock timeout the hook fails open:
+// it still answers, it never throws.
 //
 // The held-lock cases are deterministic: the test itself holds the lock,
 // changes the window while the hook must be waiting, then releases it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, unlinkSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { PLUGIN_ROOT, makeFixture } from './helpers.mjs';
@@ -57,10 +59,19 @@ const guardPayload = (dir, sid = 'S1') => ({
 const startPayload = (sid = 'S1') => ({ session_id: sid, agent_id: 'a1', agent_type: 'general-purpose', hook_event_name: 'SubagentStart' });
 const readWindow = (f) => (existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : []);
 
+// A lock as the helper writes it (lib/file-lock.mjs): owner pid, token, age
+// (in the content, and as the file's mtime).
+const holdLock = (fx, { pid = process.pid, ageMs = 0, token = 'test-holder' } = {}) => {
+  writeFileSync(fx.lock, JSON.stringify({ pid, token, at: Date.now() - ageMs }), { flag: 'wx' });
+  const then = new Date(Date.now() - ageMs);
+  utimesSync(fx.lock, then, then);
+};
+const deadPid = () => spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid;
+
 test('the spawn guard waits for a held window lock and counts what the holder wrote', async () => {
   const fx = fixture();
   try {
-    writeFileSync(fx.lock, '', { flag: 'wx' });
+    holdLock(fx);
     const run = runAsync('spawn-guard.mjs', guardPayload(fx.dir), fx.env);
     await sleep(600);
     // The holder's update lands while the guard must still be waiting.
@@ -78,7 +89,7 @@ test('the spawn guard waits for a held window lock and counts what the holder wr
 test('SubagentStart waits for a held window lock before confirming', async () => {
   const fx = fixture();
   try {
-    writeFileSync(fx.lock, '', { flag: 'wx' });
+    holdLock(fx);
     const run = runAsync('spawn-log.mjs', startPayload(), fx.env);
     await sleep(600);
     writeFileSync(fx.file, JSON.stringify([{ t: Date.now(), sid: 'S1', confirmed: false }]));
@@ -91,12 +102,10 @@ test('SubagentStart waits for a held window lock before confirming', async () =>
   } finally { fx.cleanup(); }
 });
 
-test('a stale lock (a crashed holder) is broken, and the guard proceeds', async () => {
+test('an old lock of a dead owner (a crashed holder) is broken, and the guard proceeds', async () => {
   const fx = fixture();
   try {
-    writeFileSync(fx.lock, '', { flag: 'wx' });
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(fx.lock, old, old);
+    holdLock(fx, { pid: deadPid(), ageMs: 60_000 });
     const r = await runAsync('spawn-guard.mjs', guardPayload(fx.dir), fx.env);
     assert.equal(r.code, 0, r.err);
     assert.equal(r.decision, 'allow');
@@ -105,16 +114,27 @@ test('a stale lock (a crashed holder) is broken, and the guard proceeds', async 
   } finally { fx.cleanup(); }
 });
 
+test('an old lock whose owner is ALIVE is never broken: the guard waits, then fails open', async () => {
+  const fx = fixture();
+  try {
+    holdLock(fx, { ageMs: 60_000 });
+    const r = await runAsync('spawn-guard.mjs', guardPayload(fx.dir), fx.env);
+    assert.equal(r.code, 0, r.err);
+    assert.equal(r.decision, 'allow');
+    assert.equal(JSON.parse(readFileSync(fx.lock, 'utf8')).token, 'test-holder', 'a live owner\'s lock was broken');
+  } finally { fx.cleanup(); }
+});
+
 test('a lock held past the wait fails open: the guard still answers within the hook timeout', async () => {
   const fx = fixture();
   try {
-    writeFileSync(fx.lock, '', { flag: 'wx' });
+    holdLock(fx);
     const r = await runAsync('spawn-guard.mjs', guardPayload(fx.dir), fx.env);
     assert.equal(r.code, 0, r.err);
     assert.equal(r.decision, 'allow');
     assert.ok(r.ms < 8000, `took ${r.ms} ms`);
     assert.equal(readWindow(fx.file).length, 1, 'fail-open still records the spawn');
-    assert.equal(existsSync(fx.lock), true, 'a lock the guard never took is not its to remove');
+    assert.equal(JSON.parse(readFileSync(fx.lock, 'utf8')).token, 'test-holder', 'a lock the guard never took is not its to remove');
   } finally { fx.cleanup(); }
 });
 

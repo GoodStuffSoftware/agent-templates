@@ -18,6 +18,7 @@ import {
   readProfile, rowShapeErrors, typeShapeErrors, ACTIVE_STATES,
   PROFILE_FILE, INVALID_MARKER_FILE,
 } from './routing-profile.mjs';
+import { withFileLock } from './file-lock.mjs';
 
 // Agent types observed in the shipped binary (2.1.220). The binary tests the
 // main thread with `agentType === "main"`, but mainThreadAgentType is settable
@@ -1733,41 +1734,19 @@ export function writeJsonAtomic(file, value) {
 // An exclusive lock for a read-modify-write of one small state file, shared
 // by every hook process that writes it (the premium window: the spawn guard
 // on PreToolUse and spawn-log on SubagentStart). The lock is `<file>.lock`,
-// created O_EXCL ('wx'). A waiter polls for at most STATE_LOCK_WAIT_MS; a
-// lock older than STATE_LOCK_STALE_MS is a crashed holder's and is broken
-// (the critical section is one small read and one write, milliseconds, so
-// that age is far past any live holder). On timeout, or when the lock cannot
-// be created at all, fn still runs, unlocked: a hook fails open and never
-// throws for a lock. Residual race, accepted: two waiters that both judge
-// the same lock stale can both break it, one removing the other's fresh
-// lock; that needs a crashed holder first and costs at most one lost update.
-// fn must not exit the process (deny() does): return a verdict and act on
-// it after the lock is released.
+// managed by the shared helper (lib/file-lock.mjs): a unique owner token,
+// released only by its owner, and broken only when its owner's pid is dead
+// AND it is older than STATE_LOCK_STALE_MS, by an atomic rename that is
+// re-verified. A waiter polls for at most STATE_LOCK_WAIT_MS; on timeout, or
+// when the lock cannot be created at all, fn still runs, unlocked: a hook
+// fails open and never throws for a lock. fn must not exit the process
+// (deny() does): return a verdict and act on it after the lock is released.
 export const STATE_LOCK_WAIT_MS = 2000;
 export const STATE_LOCK_STALE_MS = 5000;
 export function withStateLock(file, fn) {
-  const lock = `${file}.lock`;
-  let fd = null;
-  try { mkdirSync(dirname(file), { recursive: true }); } catch { /* fail open */ }
-  const deadline = Date.now() + STATE_LOCK_WAIT_MS;
-  for (;;) {
-    try { fd = openSync(lock, 'wx'); break; } catch (e) {
-      if (!['EEXIST', 'EPERM', 'EACCES', 'EBUSY'].includes(e?.code)) break; // cannot lock here: run unlocked
-    }
-    let stale = false;
-    try { stale = Date.now() - statSync(lock).mtimeMs > STATE_LOCK_STALE_MS; } catch { /* vanished: retry */ }
-    if (Date.now() >= deadline) break; // fail open: run unlocked
-    if (stale) { try { unlinkSync(lock); } catch { /* another waiter broke it */ } continue; }
-    sleepSync(5 + Math.floor(Math.random() * 20));
-  }
-  try {
-    return fn();
-  } finally {
-    if (fd !== null) {
-      try { closeSync(fd); } catch { /* already closed */ }
-      try { unlinkSync(lock); } catch { /* best effort */ }
-    }
-  }
+  return withFileLock(`${file}.lock`, () => fn(), {
+    waitMs: STATE_LOCK_WAIT_MS, staleMs: STATE_LOCK_STALE_MS, failOpen: true,
+  });
 }
 
 // --- Premium fan-out window (state/premium-window.json) ---------------------
