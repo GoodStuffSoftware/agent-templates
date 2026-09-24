@@ -141,24 +141,36 @@ export function classifyEffort(effort) {
 // advance: `replacement: { model, effort }` on the tier, applied BY DATE, so
 // the switch happens on the day without anyone having to remember it.
 // Returns null for tiers with no retirement date.
-export function retirement(alias) {
+//
+// `now` (optional) pins the calendar for a caller that needs a deterministic
+// answer — resolveRoute()'s golden test in particular, which must not change
+// verdict the day a tier retires. Omitted, it is the real clock, as before.
+export function retirement(alias, now) {
   const spec = (modelTiers().tiers || {})[alias];
   if (!spec || !spec.retiresAfter) return null;
   const at = Date.parse(spec.retiresAfter);
   if (Number.isNaN(at)) return null;
   // Calendar days: retired from the day AFTER the date, whatever the hour.
-  const n = new Date();
+  const n = clockDate(now);
   const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
   const daysLeft = Math.round((at - todayUtc) / 86400000);
   const replacement = spec.replacement && spec.replacement.model ? spec.replacement : null;
   return { alias, retiresAfter: spec.retiresAfter, daysLeft, retired: daysLeft < 0, replacement };
 }
 
-export function routeForWeight(weight) {
+// A Date for `now` (Date, ISO string or epoch ms); the real clock when absent
+// or unparseable, so a bad value degrades to today's behaviour, never a throw.
+function clockDate(now) {
+  if (now === undefined || now === null) return new Date();
+  const d = now instanceof Date ? now : new Date(now);
+  return Number.isNaN(d.getTime()) ? new Date() : d;
+}
+
+export function routeForWeight(weight, now) {
   const cfg = modelTiers();
   const route = (cfg.routing || {})[String(weight)] || null;
   if (!route) return null;
-  const r = retirement(route.model);
+  const r = retirement(route.model, now);
   if (r && r.retired && r.replacement) {
     // The row still names the retired alias; resolve it to the staged
     // replacement and say so, so a rationale never claims a model that is gone.
@@ -171,13 +183,13 @@ export function routeForWeight(weight) {
 // An entry may be classified but not reachable on this account — flagged
 // `available: false`, or past its retirement date. Pinning an agent to one
 // fails at spawn time with nothing having warned beforehand.
-export function isModelAvailable(model) {
+export function isModelAvailable(model, now) {
   const cfg = modelTiers();
   const m = String(model || '');
   for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
     if (m && new RegExp(spec.match || alias, 'i').test(m)) {
       if (spec.available === false) return false;
-      const r = retirement(alias);
+      const r = retirement(alias, now);
       return !(r && r.retired);
     }
   }
@@ -223,12 +235,12 @@ function tierRank(alias) {
   return (cfg.tiers || {})[alias]?.rank ?? 0;
 }
 
-export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
+export function effortFor(weight, kind = 'bounded', consequence = 'routine', { now } = {}) {
   const cfg = modelTiers();
   // routeForWeight, not the raw row: it applies a staged retirement replacement
   // by date, so a weight that routes to a retired alias resolves to its
   // successor here without anyone editing the routing rows on the day.
-  const route = routeForWeight(weight);
+  const route = routeForWeight(weight, now);
   if (!route) return { model: '', effort: '', rationale: `no routing row for weight ${weight}` };
 
   // Resolve the consequence MODEL floor before anything else. It used to be
@@ -288,77 +300,433 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine') {
     rationale: `weight ${weight} routes to ${routeLabel}${lifted}; ${why}${floored} -> ${model}/${effortFinal}`,
   };
 }
-// Resolve a task's expected (model, effort) — the ONE place every reader of
-// the routing table computes "what does this task currently route to", so a
-// benchmark-backed ROUTING TRIAL override (taskTypes.<type>.override — see
-// config/model-tiers.json's taskTypesNote) is honoured identically wherever
-// the table is consulted. Before this existed, only scripts/recommend.mjs
-// applied the override inline; scripts/evaluate.mjs and
-// hooks/spawn-guard.mjs's fit check both called effortFor() directly against
-// the plain grid, so a spawn that correctly FOLLOWED a trial (e.g.
-// debug-root-cause on opus/low) was judged under-provisioned against the
-// grid's opus/medium instead of being recognised as fit.
+// ---------------------------------------------------------------------------
+// resolveRoute() — THE routing resolver (docs/adr/0003-per-user-routing-
+// profiles.md §1-§2). Every reader of "what does this task route to" goes
+// through it: scripts/recommend.mjs, scripts/evaluate.mjs,
+// hooks/spawn-guard.mjs, scripts/routing-table.mjs and scripts/detect.mjs.
+// NOTHING ELSE reads `taskTypes.<type>.override` (tests/route-readers.test.mjs
+// greps the plugin source and fails on any other reader), so a trial is
+// honoured, floored and explained identically wherever the table is consulted.
 //
-// `type` names a config/model-tiers.json taskTypes entry (null/unknown skips
-// straight to the plain grid via weight/kind/consequence alone).
-// weight/kind/consequence are the type's own preset UNLESS the matching
-// *Explicit flag is set, in which case the explicit value is used AND the
-// override is bypassed — an explicit weight/kind/consequence is a
-// deliberate deviation from the named preset and answers a different
-// question than the type as declared (taskTypesNote), exactly the same rule
-// recommend.mjs already applied inline.
+// Layer stack, highest first, for a TYPE resolved as-is:
+//   1. profile — a per-user routing-profile row. A SEAM ONLY in this release:
+//      profileLayer() yields nothing and profileRevision is always null. The
+//      profile file, its validation and the routing_profile kill switch
+//      arrive in a later slice without any caller changing.
+//   2. trial   — the shipped ROUTING TRIAL (`taskTypes.<type>.override`).
+//   3. grid    — effortFor(weight, kind, consequence), or reviewer parity for
+//      a parity-sized type when a writer is supplied.
+// An explicit weight/kind/consequence (the matching *Explicit flag) answers a
+// different question than the named type, so it skips layers 1-2 and goes
+// straight to the grid — the taskTypesNote rule, unchanged.
 //
-// Returns the same shape effortFor() does — { model, effort, rationale } —
-// plus the weight/kind/consequence actually resolved and `trial` (the
-// override's metadata, or null when none applied / none exists for this
-// type). `model` is '' when no routing row could be resolved (e.g. weight
-// missing, non-numeric, or out of 1-5 range) — callers treat that as "no
-// route", same as effortFor()'s own failure shape.
+// Floors, applied AFTER whichever layer won (ADR §1 table). Before this, a
+// trial override returned before effortFor() ran, so no consequence floor
+// ever applied to it:
+//   F1  critical consequence: model >= the consequence's modelFloor (opus),
+//       effort >= its effortFloor (xhigh). Inviolable.
+//   F2  fable — and any premium tier ranked at or above fable — is never a
+//       destination: a layer-1/2 candidate naming one is skipped. Inviolable.
+//   F3  reviewer parity: the model matches the writer; effort may exceed the
+//       writer's but not drop below it. Inviolable.
+//   F4  availability: a layer-1/2 candidate's alias must be available (not
+//       retired) and must accept the named effort, or it is skipped. The
+//       build half of F4 (aliasResolution.minClaudeCodeVersion) needs the
+//       CALLING session's build, which only the spawn guard can read, so it
+//       stays there (SPAWNING RULE 2).
+//   F5  elevated consequence effort floor (high). Soft in the ADR: only a
+//       future operator-observed profile row may waive it, so there is no
+//       waiver path here yet.
+// Every raise is recorded in floorsApplied; every candidate that could not
+// run as written is recorded in skipped.
 //
-// Does NOT handle weight:"parity" (reviewer sizing) — that needs a --writer
-// no caller here can supply generically; callers check for it themselves
-// (see recommend.mjs and evaluate.mjs) before ever calling this.
-export function resolveExpected({
+// KNOWN GAP, deliberately preserved (slice 1 changes no behaviour): the
+// parity path (code-review with a writer) applies F3 only. It never applied
+// the consequence floors — a critical code-review has always been sized to
+// its writer — and applying F1 there would change routing. Flagged for a
+// later slice rather than changed silently.
+//
+// `now` pins the calendar (Date, ISO string or epoch ms) for the tier
+// retirement date; omitted, it is the real clock.
+//
+// Returns (ADR §2 shape, plus what the callers need):
+//   { model, effort, cacheTtl, layer, profileRevision, source, state,
+//     provenance, floorsApplied, skipped, stale, rationale,
+//     type, typeKnown, weight, kind, consequence, departures, stack, trial }
+// `model` is '' (and layer null) when no route could be resolved: weight
+// missing, non-numeric or outside 1-5, or a parity type with no writer.
+// `trial` is the old resolveExpected() trial metadata — non-null exactly when
+// the trial layer won.
+
+// Layer 1: the per-user routing profile. Seam only — see the banner above.
+function profileLayer(/* { type, now } */) {
+  return { row: null, revision: null, note: 'no routing profile in this release' };
+}
+
+function routeLabelOf(model, effort) {
+  return `${model}${effort ? '/' + effort : ''}`;
+}
+
+// F2's set: fable, plus any premium tier ranked at or above it.
+function neverDestination(model) {
+  const cfg = modelTiers();
+  const c = classifyModel(model);
+  if (!c.known) return false;
+  if (c.alias === 'fable') return true;
+  const fableRank = (cfg.tiers || {}).fable?.rank;
+  return typeof fableRank === 'number' && c.premium && c.rank >= fableRank;
+}
+
+// F2 + F4 for a layer-1/2 candidate: the reason it cannot run as written,
+// or '' when it can.
+function candidateRefusal(model, effort, now) {
+  if (!model) return 'names no model';
+  if (neverDestination(model)) return `F2: ${model} is never a routing destination (it needs a warrant)`;
+  if (!isModelAvailable(model, now)) return `F4: ${model} is unavailable or retired`;
+  const sup = effortSupported(model, effort);
+  if (!sup.ok) return `F4: effort '${effort}' unsupported by ${model} (${sup.reason})`;
+  return '';
+}
+
+function rankedEffortsFor(model) {
+  const cfg = modelTiers();
+  const alias = classifyModel(model).alias || model;
+  const supported = Array.isArray((cfg.tiers || {})[alias]?.efforts) ? cfg.tiers[alias].efforts : [];
+  return Object.entries(cfg.efforts || {})
+    .sort((a, b) => (a[1].rank ?? 0) - (b[1].rank ?? 0))
+    .map(([name]) => name)
+    .filter((name) => supported.includes(name));
+}
+
+// Raise `effort` to at least `floor`, within what `model` accepts. A model
+// that takes no effort parameter (haiku) is left at '' — asking it for more
+// thinking sets a parameter it does not take (the same clamp effortFor()
+// applies), so no floor can be expressed there.
+function raiseEffort(model, effort, floor) {
+  const ranked = rankedEffortsFor(model);
+  if (!ranked.length || !floor) return effort;
+  const floorIdx = ranked.indexOf(floor);
+  if (floorIdx < 0) return effort;
+  const cur = effort ? ranked.indexOf(effort) : -1;
+  return cur >= floorIdx ? effort : ranked[floorIdx];
+}
+
+const FLOOR_FOR_CONSEQUENCE = { critical: 'F1', elevated: 'F5' };
+
+function applyFloors(r, { consequence, parity, writer }) {
+  const cfg = modelTiers();
+  const floorsApplied = [];
+  let { model, effort } = r;
+
+  if (parity) {
+    // F3 only (see KNOWN GAP in the banner).
+    const wm = writer.model;
+    const we = writer.effort || '';
+    if (model !== wm) {
+      floorsApplied.push({ floor: 'F3', raised: `model ${model} -> ${wm} (must match the writer)` });
+      model = wm;
+    }
+    if (we && classifyEffort(we).known) {
+      const cur = classifyEffort(effort);
+      if (!effort || (cur.known && cur.rank < classifyEffort(we).rank)) {
+        floorsApplied.push({ floor: 'F3', raised: `effort ${effort || '(none)'} -> ${we} (may not drop below the writer)` });
+        effort = we;
+      }
+    }
+    return { model, effort, floorsApplied };
+  }
+
+  // F2 on the final answer. Layers 1-2 were already filtered; this only fires
+  // if a grid row itself named a never-destination tier, which the shipped
+  // table never does ("nothing routes to fable"). Cap to the highest-ranked
+  // available tier that is not one.
+  if (neverDestination(model)) {
+    const best = Object.entries(cfg.tiers || {})
+      .filter(([alias, spec]) => spec.available !== false && !neverDestination(alias))
+      .sort((a, b) => (b[1].rank ?? 0) - (a[1].rank ?? 0))[0];
+    if (best) {
+      floorsApplied.push({ floor: 'F2', capped: `model ${model} -> ${best[0]} (never a routing destination)` });
+      model = best[0];
+      const ranked = rankedEffortsFor(model);
+      if (!ranked.length) effort = '';
+      else if (!ranked.includes(effort)) effort = ranked[0];
+    }
+  }
+
+  // F1 / F5: the resolved consequence's model and effort floors.
+  const cons = (cfg.consequence || {})[consequence] || {};
+  const label = FLOOR_FOR_CONSEQUENCE[consequence] || `consequence:${consequence}`;
+  if (cons.modelFloor && tierRank(cons.modelFloor) > tierRank(classifyModel(model).alias || model)) {
+    floorsApplied.push({ floor: label, raised: `model ${model} -> ${cons.modelFloor}` });
+    model = cons.modelFloor;
+    const ranked = rankedEffortsFor(model);
+    if (!ranked.length) effort = '';
+    else if (!ranked.includes(effort)) effort = ranked[0];
+  }
+  if (cons.effortFloor) {
+    const raised = raiseEffort(model, effort, cons.effortFloor);
+    if (raised !== effort) {
+      floorsApplied.push({ floor: label, raised: `effort ${effort || '(none)'} -> ${raised}` });
+      effort = raised;
+    }
+  }
+  return { model, effort, floorsApplied };
+}
+
+export function resolveRoute({
   type = null, weight, kind, consequence,
   weightExplicit = false, kindExplicit = false, consequenceExplicit = false,
+  writer = null, now,
 } = {}) {
   const cfg = modelTiers();
   const t = type ? (cfg.taskTypes || {})[type] : null;
+  const typeKnown = !!(t && typeof t === 'object');
   const w = weightExplicit ? weight : (t ? t.weight : weight);
   const k = kindExplicit ? (kind || 'bounded') : (kind || t?.kind || 'bounded');
   let c = consequenceExplicit ? (consequence || 'routine') : (consequence || t?.consequence || 'routine');
   if (c === 'inherit') c = 'routine';
 
-  if (typeof w !== 'number' || !(w >= 1 && w <= 5)) {
-    return { model: '', effort: '', rationale: `no routing row for weight ${JSON.stringify(w ?? null)}`, weight: w, kind: k, consequence: c, trial: null };
-  }
+  const departures = [];
+  if (weightExplicit) departures.push('weight');
+  if (kindExplicit) departures.push('kind');
+  if (consequenceExplicit) departures.push('consequence');
+  const asIs = departures.length === 0;
+  const departNote = `explicit ${departures.join('/')} departs from the ${type} preset`;
 
-  // asIs: none of weight/kind/consequence was an explicit deviation from the
-  // named type's own preset — the only shape in which its override applies.
-  const asIs = !weightExplicit && !kindExplicit && !consequenceExplicit;
-  const ov = t?.override;
-  if (ov && asIs) {
-    const natural = effortFor(w, k, c);
-    const naturalLabel = `${natural.model}${natural.effort ? '/' + natural.effort : ''}`;
-    return {
-      model: ov.model,
-      effort: ov.effort || '',
-      rationale: `ROUTING TRIAL (since ${ov.trialSince}, review by ${ov.reviewBy}): ${ov.reason} Grid would otherwise resolve to ${naturalLabel}.`,
-      weight: w,
-      kind: k,
-      consequence: c,
-      trial: {
-        trialSince: ov.trialSince,
-        reviewBy: ov.reviewBy,
-        evidence: ov.evidence || null,
+  const prof = profileLayer({ type, now });
+  const ov = t?.override || null;
+  const parity = w === 'parity';
+
+  // The grid's own answer — computed whenever there is a numeric weight, so
+  // explain can show what the grid would have said even when a higher layer
+  // won.
+  const validWeight = typeof w === 'number' && w >= 1 && w <= 5;
+  const grid = validWeight ? effortFor(w, k, c, { now }) : null;
+  const gridLabel = grid ? routeLabelOf(grid.model, grid.effort) : '';
+
+  const skipped = [];
+  const stack = [
+    { layer: 'profile', present: !!prof.row, candidate: null, status: 'absent', note: prof.note },
+    {
+      layer: 'trial',
+      present: !!ov,
+      candidate: ov ? { model: ov.model, effort: ov.effort || '' } : null,
+      meta: ov ? {
+        trialSince: ov.trialSince ?? null,
+        reviewBy: ov.reviewBy ?? null,
+        trialVersion: ov.trialVersion ?? null,
         overridesKindDelta: !!ov.overridesKindDelta,
-        gridResolution: naturalLabel,
-      },
+        evidence: ov.evidence || null,
+        reason: ov.reason || '',
+      } : null,
+      status: ov ? 'not-reached' : 'absent',
+    },
+    {
+      layer: 'grid',
+      present: !!grid || (parity && !!writer),
+      candidate: grid ? { model: grid.model, effort: grid.effort } : (parity && writer ? { model: writer.model, effort: writer.effort || '' } : null),
+      status: 'not-reached',
+    },
+  ];
+  const [, trialEntry, gridEntry] = stack;
+
+  const base = {
+    cacheTtl: null,
+    profileRevision: prof.revision,
+    stale: [],
+    type: type || null,
+    typeKnown,
+    weight: w,
+    kind: k,
+    consequence: c,
+    departures,
+    stack,
+  };
+
+  // --- Parity-sized types (code-review): sized to the writer ---------------
+  if (parity) {
+    if (ov && !asIs) {
+      trialEntry.status = 'skipped';
+      skipped.push({ layer: 'trial', reason: departNote });
+    } else if (ov) {
+      // A parity type's layer-1/2 row may only set a minimum effort (F3); no
+      // shipped trial does. Kept visible rather than silently ignored.
+      trialEntry.status = 'skipped';
+      skipped.push({ layer: 'trial', reason: 'F3: a parity-sized type is sized to its writer; a trial cannot name its model' });
+    }
+    if (!writer || !writer.model) {
+      gridEntry.status = 'unresolved';
+      return {
+        ...base, model: '', effort: '', layer: null, source: null, state: null, provenance: null,
+        floorsApplied: [], skipped,
+        rationale: `no routing row for weight ${JSON.stringify(w)}`,
+        trial: null,
+      };
+    }
+    const floored = applyFloors({ model: writer.model, effort: writer.effort || '' }, { consequence: c, parity: true, writer });
+    gridEntry.status = 'won';
+    return {
+      ...base,
+      model: floored.model, effort: floored.effort,
+      layer: 'grid', source: 'reviewer-parity', state: null,
+      provenance: { rule: 'reviewerParity', writer: routeLabelOf(writer.model, writer.effort || '') },
+      floorsApplied: floored.floorsApplied, skipped,
+      rationale: `reviewer parity: model matches the writer (${writer.model})` + (writer.effort ? `; effort at least ${writer.effort}` : ''),
+      trial: null,
     };
   }
 
-  const r = effortFor(w, k, c);
-  return { ...r, weight: w, kind: k, consequence: c, trial: null };
+  if (!validWeight) {
+    if (ov) { trialEntry.status = 'unresolved'; }
+    gridEntry.status = 'unresolved';
+    return {
+      ...base, model: '', effort: '', layer: null, source: null, state: null, provenance: null,
+      floorsApplied: [], skipped,
+      rationale: `no routing row for weight ${JSON.stringify(w ?? null)}`,
+      trial: null,
+    };
+  }
+
+  // --- Pick the winning layer ---------------------------------------------
+  let won = null;
+  if (ov) {
+    if (!asIs) {
+      trialEntry.status = 'skipped';
+      skipped.push({ layer: 'trial', reason: departNote });
+    } else {
+      const refusal = candidateRefusal(ov.model, ov.effort || '', now);
+      if (refusal) {
+        trialEntry.status = 'skipped';
+        skipped.push({ layer: 'trial', reason: refusal });
+      } else {
+        trialEntry.status = 'won';
+        won = {
+          layer: 'trial',
+          model: ov.model,
+          effort: ov.effort || '',
+          source: 'shipped-trial',
+          state: 'trial',
+          provenance: trialEntry.meta,
+          rationale: `ROUTING TRIAL (since ${ov.trialSince}, review by ${ov.reviewBy}): ${ov.reason} Grid would otherwise resolve to ${gridLabel}.`,
+          trial: {
+            trialSince: ov.trialSince,
+            reviewBy: ov.reviewBy,
+            evidence: ov.evidence || null,
+            overridesKindDelta: !!ov.overridesKindDelta,
+            gridResolution: gridLabel,
+          },
+        };
+      }
+    }
+  }
+  if (!won) {
+    gridEntry.status = 'won';
+    won = {
+      layer: 'grid',
+      model: grid.model,
+      effort: grid.effort,
+      source: 'shipped-grid',
+      state: null,
+      provenance: { rule: 'effortFor', weight: w, kind: k, consequence: c, tableVersion: cfg.version ?? null, tableUpdated: cfg.updated ?? null },
+      rationale: grid.rationale,
+      trial: null,
+    };
+  } else {
+    gridEntry.status = 'shadowed';
+  }
+
+  // --- Floors, after whichever layer won -----------------------------------
+  const floored = won.model
+    ? applyFloors({ model: won.model, effort: won.effort }, { consequence: c, parity: false })
+    : { model: won.model, effort: won.effort, floorsApplied: [] };
+  const floorNote = floored.floorsApplied.length
+    ? `; floors: ${floored.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join(', ')} -> ${routeLabelOf(floored.model, floored.effort)}`
+    : '';
+
+  return {
+    ...base,
+    model: floored.model,
+    effort: floored.effort,
+    layer: won.layer,
+    source: won.source,
+    state: won.state,
+    provenance: won.provenance,
+    floorsApplied: floored.floorsApplied,
+    skipped,
+    rationale: won.rationale + floorNote,
+    trial: won.trial,
+  };
+}
+
+// The pre-ADR-0003 shape, kept EXACTLY — { model, effort, rationale, weight,
+// kind, consequence, trial } — for any caller (or external script) still on
+// resolveExpected(). A thin wrapper: all resolution happens in resolveRoute().
+export function expectedFromRoute(r) {
+  return {
+    model: r.model,
+    effort: r.effort,
+    rationale: r.rationale,
+    weight: r.weight,
+    kind: r.kind,
+    consequence: r.consequence,
+    trial: r.trial,
+  };
+}
+
+// Resolve a task's expected (model, effort). Kept for compatibility; see
+// resolveRoute() for the rules. Does NOT handle weight:"parity" (reviewer
+// sizing) — pass a writer to resolveRoute() for that.
+export function resolveExpected({
+  type = null, weight, kind, consequence,
+  weightExplicit = false, kindExplicit = false, consequenceExplicit = false,
+  now,
+} = {}) {
+  return expectedFromRoute(resolveRoute({
+    type, weight, kind, consequence, weightExplicit, kindExplicit, consequenceExplicit, now,
+  }));
+}
+
+// One line naming where the winning answer came from, for explain output.
+export function routeProvenanceLine(r) {
+  if (!r || !r.layer) return 'no route resolved';
+  const p = r.provenance || {};
+  if (r.layer === 'trial') {
+    const ev = p.evidence ? `; evidence: ${p.evidence.source || 'unstated'}${p.evidence.date ? ' (' + p.evidence.date + ')' : ''}` : '';
+    return `shipped trial${p.trialVersion ? ' v' + p.trialVersion : ''}, since ${p.trialSince || '?'}, review by ${p.reviewBy || '?'}` +
+      `${p.overridesKindDelta ? ', overrides the kind delta' : ''}${ev}`;
+  }
+  if (r.source === 'reviewer-parity') return `reviewer parity with writer ${p.writer}`;
+  return `shipped grid: weight ${p.weight} x ${p.kind} x ${p.consequence} (config v${p.tableVersion ?? '?'}, updated ${p.tableUpdated ?? '?'})`;
+}
+
+// The full layer stack as printable lines (recommend --explain).
+export function explainRoute(r) {
+  const L = [];
+  L.push('layer stack (highest first):');
+  for (const s of r.stack || []) {
+    const cand = s.candidate ? routeLabelOf(s.candidate.model, s.candidate.effort) : '-';
+    const why = s.layer === 'profile'
+      ? s.note
+      : (r.skipped || []).filter((x) => x.layer === s.layer).map((x) => x.reason).join('; ');
+    L.push(`  ${s.layer.padEnd(8)} ${s.status.padEnd(12)} ${cand}${why ? '  (' + why + ')' : ''}`);
+  }
+  if (r.layer) {
+    const why = r.layer === 'trial'
+      ? 'the type was resolved as-is and its shipped trial passed F2/F4'
+      : r.source === 'reviewer-parity'
+        ? 'a parity-sized type is sized to its writer'
+        : ((r.departures || []).length
+          ? `explicit ${r.departures.join('/')} skips layers 1-2`
+          : (r.skipped || []).length ? 'every higher layer was skipped' : 'no higher layer has an entry for this task');
+    L.push(`winner:   ${r.layer} -> ${routeLabelOf(r.model, r.effort)} (${why})`);
+  } else {
+    L.push('winner:   none (no route resolved)');
+  }
+  L.push(`floors:   ${(r.floorsApplied || []).length ? r.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join('; ') : 'none fired'}`);
+  L.push(`profile:  revision ${r.profileRevision ?? 'none'}`);
+  L.push(`provenance: ${routeProvenanceLine(r)}`);
+  return L;
 }
 
 // Find the ladder rung matching a resolved (model, effort) pair — the
