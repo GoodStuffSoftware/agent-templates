@@ -519,3 +519,24 @@ test('recommend --list and --type see local types; routing-table stays shipped u
   const mine = runScript('scripts/routing-table.mjs', ['--profile']);
   assert.match(mine.stdout, /`bounded-feature` \| 3 .*`sonnet\/medium` _\(your routing profile, rev 7\)_/);
 });
+
+// S2 review P10: --profile with an output that always renders the shipped
+// table was silently ignored; it is now refused. And `show` said "applies"
+// for a row a floor then raises.
+test('routing-table --profile with --json/--out/--task-type-block/--sync-skill is refused, not ignored', () => {
+  for (const extra of [['--json'], ['--out', join(fx.dir, 'x.md')], ['--task-type-block'], ['--sync-skill', join(fx.dir, 'y.md')]]) {
+    const r = runScript('scripts/routing-table.mjs', ['--profile', ...extra]);
+    assert.equal(r.status, 2, extra[0]);
+    assert.match(r.stderr, /--profile renders this machine's view for reading only; it cannot be combined with/);
+    assert.equal(r.stdout, '');
+  }
+  assert.equal(existsSync(join(fx.dir, 'x.md')), false);
+});
+
+test('routing-profile show says what a floor-raised row runs as', () => {
+  writeProfile(profile({ integration: row('sonnet', 'low'), 'bounded-feature': row('sonnet', 'medium') }));
+  const r = runScript('scripts/routing-profile.mjs', ['show']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /integration[\s\S]*?-> applies \(raised by F5 to sonnet\/high\)/);
+  assert.match(r.stdout, /bounded-feature[\s\S]*?-> applies(?! \()/);
+});

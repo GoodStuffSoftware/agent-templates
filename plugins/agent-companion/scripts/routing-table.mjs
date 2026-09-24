@@ -32,8 +32,17 @@ const weights = Object.keys(cfg.routing || {}).sort();
 // machine's routing profile must never leak into it. `--profile` renders the
 // table as THIS machine resolves it, with any winning routing-profile row
 // marked (the /ac routing display).
-const withProfile = has('--profile')
-  && !has('--out') && !has('--json') && !has('--task-type-block') && !has('--sync-skill');
+// Combined with an output that is committed or machine-read (--out,
+// --json, --task-type-block, --sync-skill) it is refused, never silently
+// ignored (S2 review P10): those always render the shipped table.
+const withProfile = has('--profile');
+if (withProfile) {
+  const clash = ['--out', '--json', '--task-type-block', '--sync-skill'].filter(has);
+  if (clash.length) {
+    console.error(`--profile renders this machine's view for reading only; it cannot be combined with ${clash.join(', ')}, which always render the shipped table. Drop --profile, or drop ${clash.join(', ')}.`);
+    process.exit(2);
+  }
+}
 
 // A named type's route and its shipped-trial entry, both from resolveRoute()
 // — the only reader of taskTypes.<type>.override (tests/route-readers.test.mjs).

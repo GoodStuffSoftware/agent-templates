@@ -23,7 +23,8 @@ $AC = (Get-ChildItem "$env:USERPROFILE/.claude/plugins/marketplaces/*/plugins/ag
 node "$AC/scripts/routing-table.mjs" --profile
 ```
 
-Add `--json` for machine-readable output. The committed copy is
+For machine-readable output of the shipped table, run it with `--json` in place of
+`--profile` (the two cannot be combined: it exits 2). The committed copy is
 `docs/ROUTING.md`; the `routing-doc` audit check fails if it drifts from the
 config, and `--fix` regenerates it. That default output is the SHIPPED table
 only. Add `--profile` to render it as this machine resolves it, with any row

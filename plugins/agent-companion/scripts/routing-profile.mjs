@@ -20,7 +20,7 @@
 
 import { join } from 'node:path';
 import {
-  opt, routingProfileState, taskTypeDef, profileRowRefusal, routingProfileInvalidMarkerPath,
+  opt, routingProfileState, taskTypeDef, profileRowRefusal, routingProfileInvalidMarkerPath, resolveRoute,
 } from '../hooks/lib/context.mjs';
 import { typeShapeErrors } from '../hooks/lib/routing-profile.mjs';
 import {
@@ -89,6 +89,20 @@ function fail(e) {
 
 const label = (row) => (row.model ? `${row.model}${row.effort ? '/' + row.effort : ''}` : `min effort ${row.effort || '?'}`);
 
+// "applies" alone misread a row the floors then raise (S2 review P10): say
+// what it runs as when a floor lifts it. Parity rows need a writer to
+// resolve and only ever set a minimum, so they are left as "applies".
+function raisedNote(type, td) {
+  if (!td || td.def.weight === 'parity') return '';
+  try {
+    const r = resolveRoute({ type });
+    if (r.layer !== 'profile') return '';
+    const lifts = r.floorsApplied.filter((f) => f.raised && f.within !== 'grid');
+    if (!lifts.length) return '';
+    return ` (raised by ${[...new Set(lifts.map((f) => f.floor))].join('+')} to ${r.model}${r.effort ? '/' + r.effort : ''})`;
+  } catch { return ''; }
+}
+
 function show() {
   const v = inspect();
   const on = opt('routing_profile', true);
@@ -100,7 +114,7 @@ function show() {
     if (row && row.state === 'retired') status = 'retired';
     else {
       const reason = profileRowRefusal(type, row, { typeDef: td ? td.def : null, mode: 'read' });
-      status = reason ? `ignored: ${reason}` : (on ? 'applies' : 'would apply (routing_profile is off)');
+      status = reason ? `ignored: ${reason}` : (on ? `applies${raisedNote(type, td)}` : 'would apply (routing_profile is off)');
     }
     rows.push({ type, row, status, origin: td ? td.origin : null });
   }
