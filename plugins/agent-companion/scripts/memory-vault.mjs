@@ -773,6 +773,15 @@ function finishInit(dir) {
   if (!existsSync(join(dir, 'README.md'))) writeFileSync(join(dir, 'README.md'), VAULT_README);
   const gaExisted = existsSync(join(dir, GITATTRIBUTES_NAME));
   if (!gaExisted) writeFileSync(join(dir, GITATTRIBUTES_NAME), GITATTRIBUTES);
+  // The commit needs a name as well as the email isUnfinishedVault() keyed
+  // on. Inherited author env is ignored (vaultEnv()), and git's own fallback
+  // is the OS account's full name, which is empty on many Linux hosts (CI
+  // runners included), where the commit then fails with "empty ident name"
+  // on every run. So an unset name is filled in, in the vault's own config
+  // only; a name the operator set is left alone.
+  let name = '';
+  try { name = vaultGit(dir, ['config', '--file', '.git/config', '--get', 'user.name'], QUIET).trim(); } catch { /* unset */ }
+  if (!name) vaultGit(dir, ['config', '--file', '.git/config', 'user.name', VAULT_USER_NAME]);
   vaultGit(dir, ['add', '--', ...INIT_FILES]);
   // Only the initialize files, whatever else is staged: `commit -- <paths>`.
   vaultGit(dir, ['commit', '-q', '-m', INIT_MESSAGE, '--', ...INIT_FILES]);
