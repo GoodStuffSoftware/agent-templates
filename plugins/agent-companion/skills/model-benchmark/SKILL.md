@@ -50,19 +50,29 @@ either.
   which is an expensive turn, and it says only that something finished, not
   that the output is sane. `--batch-by cell` already hands control back after
   each cell.
-- **Parallel runs within a cell are fine — `--concurrency N`.** This replaces
-  any earlier "one at a time" assumption for THIS benchmark; the FOREGROUND
-  rule above is unchanged (concurrency means several `claude` child
-  processes inside one foreground invocation, never a background job). The
+- **Parallel runs across the WHOLE grid are fine — `--concurrency N`.** This
+  replaces any earlier "one at a time" (or "one cell at a time") assumption
+  for THIS benchmark; the FOREGROUND rule above is unchanged (concurrency
+  means several `claude` child processes inside one foreground invocation,
+  never a background job). WITHOUT `--batch-by cell`, `--concurrency` bounds
+  ONE scheduler pool spanning every requested cell — two different cells'
+  runs can be active at once. WITH `--batch-by cell`, cells still run one
+  after another (that flag trades cross-cell overlap for a real checkpoint
+  between cells) and `--concurrency` bounds each cell separately. The
   scheduler (`bench/scheduler.mjs`) never co-schedules runs whose declared
-  `resources` conflict, gives every run its own `TMP`/`BENCH_PORT_BASE`, and
-  auto-retries a genuine collision (EADDRINUSE, a lock held) alone once,
-  excluded from pass-rate. See docs/BENCHMARK.md "Parallel runs" for the full
-  picture. **Wall-time comparisons must note the concurrency level** (a
-  `duration_ms` under `--concurrency 4` is not comparable to one under
-  `--concurrency 1`) — cite `cost_usd`/`relative_cost_index` as the primary
-  cost signal, since per-cell usage deltas do not isolate cleanly under
-  concurrency.
+  `resources` conflict — whichever cell they belong to — gives every run its
+  own `TMP`/`BENCH_PORT_BASE`, and auto-retries a genuine collision
+  (EADDRINUSE, a lock held) alone once; the exclusion from pass-rate only
+  holds once that retry CONFIRMS the collision (does not reproduce it solo)
+  — a failure that reproduces even running alone is counted as real. See
+  docs/BENCHMARK.md "Parallel runs" for the full picture. **Wall-time
+  comparisons must note the concurrency level** (a `duration_ms` under
+  `--concurrency 4` is not comparable to one under `--concurrency 1`) — cite
+  `cost_usd`/`relative_cost_index` as the primary cost signal, since per-cell
+  usage deltas do not isolate cleanly under concurrency.
+- **`bench/runner.mjs`'s own direct CLI has no `--concurrency`.** It refuses
+  the flag with a message pointing at `scripts/benchmark.mjs` — always drive
+  a parallel run through `scripts/benchmark.mjs`, never the bare runner.
 - **Never `git stash`.** The stash stack is shared by every worktree and every
   concurrent session. Use a WIP commit, or leave uncommitted work untouched.
 - **Budget caps scale with model price.** Task budgets and `--max-budget-usd`
@@ -127,7 +137,11 @@ gives a different number.
   NEXT cell boundary once the ceiling is reached (prints `CEILING REACHED`
   and a partial-results summary path, exits 0) instead of starting another
   cell — check `get_usage` before every `--resume` and pass the fresh
-  reading back in.
+  reading back in. WITHOUT `--batch-by cell` (the grid-wide pool), there is
+  no mid-run cell boundary to stop at — the same check runs ONCE up front,
+  before anything is scheduled, and a ceiling reached mid-run instead means
+  an `auth_error`/judge refusal: no NEW run is launched, every already
+  ACTIVE run finishes, and the partial summary is written from those.
 - Use `--batch-by cell`: it runs ONE cell to completion, writes a
   `.batch-state.json` marker under `--out-dir`, and **exits**. Check
   `get_usage` and the just-written `summary.md`, then `--resume` to

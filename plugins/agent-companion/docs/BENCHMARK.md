@@ -390,14 +390,40 @@ above.
 
 ## Parallel runs
 
-**Parallel runs are fine now.** `scripts/benchmark.mjs --concurrency N` (default
-1, fully sequential — the historical, unchanged behavior) runs up to N
-(task, rep) runs of the SAME cell at once, through `bench/scheduler.mjs`'s
-admission-control scheduler. This replaces any earlier "run one at a time"
-guidance for this benchmark specifically; the general FOREGROUND/no-monitors
-rule under "Operating rules" above still applies unchanged — parallelism
-here means concurrent `claude` child processes inside ONE foreground
-`scripts/benchmark.mjs` invocation, never a background job.
+**Parallel runs are fine now, ACROSS THE WHOLE GRID.** `scripts/benchmark.mjs
+--concurrency N` (default 1, fully sequential — the historical, unchanged
+behavior) runs up to N (cell, task, rep) runs at once through ONE
+`bench/scheduler.mjs` admission-control pool (`buildGlobalRunPlan()` +
+`runGlobalPool()`) that spans EVERY requested cell — not one pool per cell.
+An earlier version of this script ran one scheduler pool per cell (cells
+strictly one after another, however high `--concurrency` was set), which
+under-used a multi-pack, multi-cell round; two DIFFERENT cells' runs can now
+be active at the same time, bounded by `--concurrency` and the RAM gate,
+with resource conflicts (`bench/task-packs/FORMAT.md` "Resource
+declarations") respected across cells exactly the same way they always were
+within one (`resourcesConflict()` has never known what a "cell" is). This
+replaces any earlier "run one at a time" guidance for this benchmark
+specifically; the general FOREGROUND/no-monitors rule under "Operating
+rules" above still applies unchanged — parallelism here means concurrent
+`claude` child processes inside ONE foreground `scripts/benchmark.mjs`
+invocation, never a background job.
+
+**`--batch-by cell` opts OUT of the cross-cell pool, on purpose.** It exists
+to hand control back to the driving agent BETWEEN cells (a plan-usage
+checkpoint), which needs a real cell boundary to stop at — a single global
+pool spanning every cell has no such boundary mid-run. So with `--batch-by
+cell`, cells still run strictly one after another exactly as before, and
+`--concurrency` bounds each cell SEPARATELY, not the whole grid. Drop
+`--batch-by cell` (an unattended single invocation covering the whole
+`--cells` list) to get the cross-cell pool described above. Once a
+`--weekly-ceiling-pct` is reached: WITHOUT `--batch-by cell`, the check runs
+once up front (a single invocation's `--weekly-usage-pct` is a static
+reading — see its own help text — so there is no later point in one process
+where re-checking it could disagree); WITH it, the check still runs at every
+cell boundary as before. Either way: once the ceiling is reached (or an
+`auth_error`/judge refusal fires), no NEW run is launched, every already
+ACTIVE run is still awaited to completion, and the partial `summary.md` is
+written from whatever finished.
 
 Three safeguards make this safe rather than merely fast:
 

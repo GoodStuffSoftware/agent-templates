@@ -7,9 +7,16 @@
 // This script is the CLI layer on top: task-family expansion, a global
 // runaway-budget ceiling, --dry-run (plan only, zero model calls), and
 // --batch-by/--resume so a driving agent can check plan usage between
-// batches instead of one process running the whole grid unattended. See
-// docs/BENCHMARK.md before a real run and skills/model-benchmark/SKILL.md
-// for the operating procedure.
+// batches instead of one process running the whole grid unattended.
+// --concurrency > 1 runs a SINGLE bench/scheduler.mjs pool across EVERY
+// requested cell (buildGlobalRunPlan()/runGlobalPool() below) -- two
+// different cells' runs can be active at once, bounded by --concurrency and
+// the RAM gate, with resource conflicts (FORMAT.md) respected across cells
+// exactly as within one. --batch-by cell opts OUT of that cross-cell pool
+// (cells run one after another, --concurrency applies within each) in
+// exchange for a real cell boundary to checkpoint plan usage at. See
+// docs/BENCHMARK.md "Parallel runs" before a real run and
+// skills/model-benchmark/SKILL.md for the operating procedure.
 //
 // HOME/USERPROFILE: by DEFAULT this does NOT redirect them -- a live run
 // uses your normal, already-authenticated OAuth session (`claude /login`),
@@ -65,10 +72,14 @@ function printHelp() {
                                  families and ids may be mixed. Default: all.
   --reps <N>                    Repetitions per (cell, task). Default: 1.
   --rep-start <N>                First rep number (for resuming a specific rep range). Default: 1.
-  --concurrency <N>              Run up to N (task, rep) runs of the SAME cell in parallel (default 1,
-                                 fully sequential -- identical behavior to before this flag existed).
-                                 Runs whose declared resources conflict (bench/task-packs/FORMAT.md
-                                 "Resource declarations") are never co-scheduled; a free-RAM check
+  --concurrency <N>              Run up to N (task, rep) runs in parallel (default 1, fully sequential --
+                                 identical behavior to before this flag existed). WITHOUT --batch-by cell,
+                                 this bounds the WHOLE grid in one global pool -- every requested cell
+                                 shares it, so two different cells' runs can be active at once. WITH
+                                 --batch-by cell, it bounds each cell separately (cells still run one
+                                 after another) -- see --batch-by below for why. Runs whose declared
+                                 resources conflict (bench/task-packs/FORMAT.md "Resource declarations")
+                                 are never co-scheduled, whichever cell they belong to; a free-RAM check
                                  (bench/scheduler.mjs's makeCapacityGate(), --per-agent-mb below) gates
                                  every launch. See docs/BENCHMARK.md "Parallel runs".
   --per-agent-mb <MB>             Per-run memory estimate for the --concurrency capacity gate.
@@ -97,7 +108,9 @@ function printHelp() {
   --batch-by cell                Run ONE cell to completion (every task x every rep for it), write
                                  a batch-complete marker under --out-dir, then exit — so the driving
                                  agent can check plan usage before the next cell. Re-invoke with
-                                 --resume to continue.
+                                 --resume to continue. Trades away cross-cell --concurrency overlap
+                                 for this checkpoint: cells still run one after another (concurrency
+                                 applies only within each cell) — see docs/BENCHMARK.md "Parallel runs".
   --resume                       Skip cells already marked complete under --out-dir (requires
                                   --out-dir to point at a previous invocation's directory, or
                                   --batch-by cell + the same --cells/--tasks/--reps to recompute it).
@@ -283,6 +296,86 @@ export function judgePreflight({ args, cellIds, taskIds, tasksMap, calibrating =
   return { config, storeFile, judgedTasks, problems };
 }
 
+// Flattens EVERY requested cell x task x rep into ONE plan array -- the
+// global pool's input. Exported for tests (proving cross-cell overlap
+// without a real claude spawn -- see tests/bench-cross-cell.test.mjs) and
+// for main()'s own non---batch-by-cell path below.
+export function buildGlobalRunPlan({ cellIds, taskIds, tasksMap, reps, repStart = 1 }) {
+  const plan = [];
+  for (const cellId of cellIds) {
+    for (const taskId of taskIds) {
+      for (let rep = repStart; rep < repStart + reps; rep += 1) {
+        plan.push({ id: `${cellId}__${taskId}__rep${rep}`, cellId, taskId, rep, resources: tasksMap[taskId].resources });
+      }
+    }
+  }
+  return plan;
+}
+
+// Runs ONE bench/scheduler.mjs pool across `plan`, whatever cell each run
+// belongs to -- the "grid-wide concurrency" fix (Track B adversarial review,
+// fix #2): --concurrency bounds the WHOLE grid, not each cell separately, so
+// two different cells' runs can be active at the same time (their resource
+// declarations, if any, are still respected exactly the same way across
+// cells as within one -- resourcesConflict() has never known what a "cell"
+// is). `runOneImpl` defaults to the real runOne() (bench/runner.mjs) but a
+// test can substitute a stub, exactly the way runOne()'s own `runClaudeImpl`
+// parameter lets tests/bench-scheduler.test.mjs prove scheduling behavior
+// with zero real child processes -- see that file's banner. Returns
+// `{ stopReason }`; `stopReason` is set once by an auth_error or
+// JUDGE_REFUSED and never cleared -- once set, no NEW run is admitted, but
+// every already-active run is still awaited to completion (scheduleRuns()'s
+// own `shouldStop` contract), and the caller writes the partial summary
+// exactly as it always has for a per-cell stop.
+export async function runGlobalPool({
+  plan, concurrency, canAfford, outDir, answersDir, tasksMap, args, judgeOpt, runOneImpl = runOne,
+}) {
+  let stopReason = null;
+  const launch = async (run, ctx) => {
+    const cellId = run.cellId;
+    const cell = CELLS[cellId];
+    const task = tasksMap[run.taskId];
+    const t0 = Date.now();
+    const tag = ctx.concurrency > 1 ? ` [slot ${ctx.slot}/${ctx.concurrency}]` : '';
+    process.stdout.write(`[${new Date().toISOString()}] START ${cellId} / ${run.taskId} / rep${run.rep}${tag} ... `);
+    try {
+      const row = await runOneImpl({
+        cellId, cell, taskId: run.taskId, task, rep: run.rep, outDir, answersDir,
+        maxBudgetUsdCeiling: args.maxBudgetUsd,
+        isolateHome: args.isolateHome,
+        judge: judgeOpt,
+        runId: run.id, slot: ctx.slot, concurrency: ctx.concurrency, coScheduledRunIds: ctx.coScheduledRunIds,
+        isCollisionRetry: !!run.isRetry,
+      });
+      process.stdout.write(formatRunLine(row, Date.now() - t0) + '\n');
+      if (row.auth_error && !stopReason) stopReason = { type: 'auth_error', row };
+      return row;
+    } catch (e) {
+      if (e && e.code === 'JUDGE_REFUSED') {
+        if (!stopReason) stopReason = { type: 'judge_refused', message: e.message };
+        return {
+          run_id: run.id, cell: cellId, task: run.taskId, rep: run.rep,
+          pass: false, is_error: true, judge_refused: true, exec_err: e.message,
+        };
+      }
+      process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
+      const errRow = harnessErrorRow({ cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e });
+      fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(errRow) + '\n');
+      return errRow;
+    }
+  };
+
+  const rows = await scheduleRuns({
+    runs: plan,
+    concurrency,
+    canAfford: canAfford || (() => true),
+    launch,
+    shouldStop: () => !!stopReason,
+  });
+
+  return { rows, stopReason };
+}
+
 function batchStatePath(outDir) {
   return path.join(outDir, '.batch-state.json');
 }
@@ -383,8 +476,12 @@ async function main() {
     console.log(`reps:     ${args.reps} (starting at ${args.repStart})`);
     console.log(`total runs: ${totalRuns}`);
     if (args.maxBudgetUsd != null) console.log(`global --max-budget-usd ceiling: $${args.maxBudgetUsd}`);
-    if (args.batchByCell) console.log('batching: one cell per invocation (--batch-by cell)');
-    if (args.concurrency > 1) console.log(`concurrency: ${args.concurrency} parallel (task, rep) runs per cell (see docs/BENCHMARK.md "Parallel runs")`);
+    if (args.batchByCell) console.log('batching: one cell per invocation (--batch-by cell) -- cells run one after another, --concurrency applies within each cell only');
+    if (args.concurrency > 1) {
+      console.log(args.batchByCell
+        ? `concurrency: ${args.concurrency} parallel (task, rep) runs per cell (see docs/BENCHMARK.md "Parallel runs")`
+        : `concurrency: ${args.concurrency} parallel runs across the WHOLE grid -- every requested cell shares one pool (see docs/BENCHMARK.md "Parallel runs")`);
+    }
     if (args.isolateHome) console.log('--isolate-home: HOME/USERPROFILE will be redirected per run (requires ANTHROPIC_API_KEY)');
     if (judge) {
       console.log(`rubric judge: ${judge.config ? `${judge.config.model}/${judge.config.effort ?? 'none'}` : '(invalid)'}; judged tasks: ${(judge.judgedTasks || []).join(', ') || 'none'}`);
@@ -483,73 +580,90 @@ async function main() {
     ? makeCapacityGate({ perAgentMB: args.perAgentMB ?? undefined })
     : null;
 
-  for (const cellId of cellsToRun) {
-    // Live stop: check the weekly ceiling BETWEEN batches (a "batch" here is
-    // one cell, --batch-by cell's existing unit). --weekly-usage-pct is
-    // whatever the orchestrating skill last read via get_usage; this script
-    // cannot read it itself. Stopping BEFORE starting the next cell (rather
-    // than mid-cell) means every already-written row stays a clean,
-    // complete batch.
+  // --batch-by cell keeps its historical MEANING (Track B adversarial
+  // review, fix #2's "keep --batch-by cell meaningful" requirement): it
+  // runs ONE cell to completion, writes a checkpoint, and exits, so a
+  // driving agent can check plan usage between cells. That checkpoint
+  // NEEDS a real cell boundary to stop at, which a single global pool
+  // spanning every cell does not have -- so --batch-by cell deliberately
+  // forfeits cross-cell parallelism (--concurrency still applies WITHIN
+  // each cell, exactly as before) in exchange for it. Without --batch-by,
+  // every requested cell's runs share ONE global scheduler pool below --
+  // --concurrency bounds the WHOLE grid, and two different cells' runs can
+  // be active at the same time (their resources are still respected exactly
+  // the same way across cells as within one). See docs/BENCHMARK.md
+  // "Parallel runs".
+  if (args.batchByCell) {
+    for (const cellId of cellsToRun) {
+      // Live stop: check the weekly ceiling BETWEEN batches (a "batch" here
+      // is one cell). --weekly-usage-pct is whatever the orchestrating skill
+      // last read via get_usage; this script cannot read it itself.
+      // Stopping BEFORE starting the next cell (rather than mid-cell) means
+      // every already-written row stays a clean, complete batch.
+      if (args.weeklyCeilingPct != null && args.weeklyUsagePct != null && args.weeklyUsagePct >= args.weeklyCeilingPct) {
+        rebuildSummary(outDir);
+        console.log(`\nCEILING REACHED: weekly usage ${args.weeklyUsagePct}% >= configured ceiling ${args.weeklyCeilingPct}% -- `
+          + `stopping before starting cell "${cellId}".`);
+        console.log(`Partial results: ${path.join(outDir, 'summary.md')}`);
+        process.exit(0);
+      }
+
+      // Every (task, rep) for THIS cell only, flattened into one schedulable
+      // plan -- --concurrency N runs up to N of these at once, subject to
+      // resource conflicts (FORMAT.md) and the capacity gate above;
+      // --concurrency 1 (default) runs them one at a time, in the same
+      // order as before.
+      const plan = buildGlobalRunPlan({
+        cellIds: [cellId], taskIds, tasksMap, reps: args.reps, repStart: args.repStart,
+      });
+
+      // eslint-disable-next-line no-await-in-loop
+      const { stopReason } = await runGlobalPool({
+        plan, concurrency: args.concurrency, canAfford: capacityGate || (() => true),
+        outDir, answersDir, tasksMap, args, judgeOpt,
+      });
+
+      if (stopReason && stopReason.type === 'auth_error') {
+        console.error(authErrorAbortMessage(stopReason.row));
+        rebuildSummary(outDir);
+        process.exit(1);
+      }
+      if (stopReason && stopReason.type === 'judge_refused') {
+        console.error(`\nJUDGE REFUSED: ${stopReason.message}\nAborting the batch.`);
+        rebuildSummary(outDir);
+        process.exit(1);
+      }
+
+      const state = readBatchState(outDir);
+      const completed = new Set(state.completedCells || []);
+      completed.add(cellId);
+      writeBatchState(outDir, { completedCells: [...completed], lastCellAt: new Date().toISOString() });
+      rebuildSummary(outDir);
+      console.log(`\nBATCH COMPLETE: ${cellId}. ${completed.size}/${cellIds.length} of the requested cells done.`);
+      console.log(`Check plan usage now (mcp__ccd_session_mgmt__get_usage), then re-invoke with --resume to continue, or stop here.`);
+      console.log(`Marker: ${batchStatePath(outDir)}`);
+      process.exit(0); // one cell per invocation, by design — see the module banner
+    }
+  } else {
+    // GLOBAL POOL across every requested cell. The weekly-ceiling check has
+    // no "between cells" boundary to fire at here (a single invocation's
+    // --weekly-usage-pct is a static reading -- see its own help text --
+    // so re-checking it mid-grid would always agree with this one check
+    // anyway); check it once, up front, before building the plan.
     if (args.weeklyCeilingPct != null && args.weeklyUsagePct != null && args.weeklyUsagePct >= args.weeklyCeilingPct) {
       rebuildSummary(outDir);
       console.log(`\nCEILING REACHED: weekly usage ${args.weeklyUsagePct}% >= configured ceiling ${args.weeklyCeilingPct}% -- `
-        + `stopping before starting cell "${cellId}".`);
+        + 'stopping before starting any cell.');
       console.log(`Partial results: ${path.join(outDir, 'summary.md')}`);
       process.exit(0);
     }
 
-    const cell = CELLS[cellId];
-    // Every (task, rep) for this cell, flattened into one schedulable plan.
-    // --concurrency N runs up to N of these at once, subject to resource
-    // conflicts (FORMAT.md) and the capacity gate above; --concurrency 1
-    // (default) runs them one at a time, in the same order as before.
-    const plan = [];
-    for (const taskId of taskIds) {
-      for (let rep = args.repStart; rep < args.repStart + args.reps; rep += 1) {
-        plan.push({ id: `${cellId}__${taskId}__rep${rep}`, taskId, rep, resources: tasksMap[taskId].resources });
-      }
-    }
-
-    let stopReason = null; // set by launch() on an auth_error or JUDGE_REFUSED -- stops admitting NEW runs
-    const launch = async (run, ctx) => {
-      const task = tasksMap[run.taskId];
-      const t0 = Date.now();
-      const tag = ctx.concurrency > 1 ? ` [slot ${ctx.slot}/${ctx.concurrency}]` : '';
-      process.stdout.write(`[${new Date().toISOString()}] START ${cellId} / ${run.taskId} / rep${run.rep}${tag} ... `);
-      try {
-        const row = await runOne({
-          cellId, cell, taskId: run.taskId, task, rep: run.rep, outDir, answersDir,
-          maxBudgetUsdCeiling: args.maxBudgetUsd,
-          isolateHome: args.isolateHome,
-          judge: judgeOpt,
-          runId: run.id, slot: ctx.slot, concurrency: ctx.concurrency, coScheduledRunIds: ctx.coScheduledRunIds,
-          isCollisionRetry: !!run.isRetry,
-        });
-        process.stdout.write(formatRunLine(row, Date.now() - t0) + '\n');
-        if (row.auth_error && !stopReason) stopReason = { type: 'auth_error', row };
-        return row;
-      } catch (e) {
-        if (e && e.code === 'JUDGE_REFUSED') {
-          if (!stopReason) stopReason = { type: 'judge_refused', message: e.message };
-          return {
-            run_id: run.id, cell: cellId, task: run.taskId, rep: run.rep,
-            pass: false, is_error: true, judge_refused: true, exec_err: e.message,
-          };
-        }
-        process.stdout.write(`ERROR: ${(e && e.stack) || e}\n`);
-        const errRow = harnessErrorRow({ cellId, cell, taskId: run.taskId, task, rep: run.rep, error: e });
-        fs.appendFileSync(path.join(outDir, 'results.jsonl'), JSON.stringify(errRow) + '\n');
-        return errRow;
-      }
-    };
-
-    // eslint-disable-next-line no-await-in-loop
-    await scheduleRuns({
-      runs: plan,
-      concurrency: args.concurrency,
-      canAfford: capacityGate || (() => true),
-      launch,
-      shouldStop: () => !!stopReason,
+    const plan = buildGlobalRunPlan({
+      cellIds: cellsToRun, taskIds, tasksMap, reps: args.reps, repStart: args.repStart,
+    });
+    const { stopReason } = await runGlobalPool({
+      plan, concurrency: args.concurrency, canAfford: capacityGate || (() => true),
+      outDir, answersDir, tasksMap, args, judgeOpt,
     });
 
     if (stopReason && stopReason.type === 'auth_error') {
@@ -561,18 +675,6 @@ async function main() {
       console.error(`\nJUDGE REFUSED: ${stopReason.message}\nAborting the batch.`);
       rebuildSummary(outDir);
       process.exit(1);
-    }
-
-    if (args.batchByCell) {
-      const state = readBatchState(outDir);
-      const completed = new Set(state.completedCells || []);
-      completed.add(cellId);
-      writeBatchState(outDir, { completedCells: [...completed], lastCellAt: new Date().toISOString() });
-      rebuildSummary(outDir);
-      console.log(`\nBATCH COMPLETE: ${cellId}. ${completed.size}/${cellIds.length} of the requested cells done.`);
-      console.log(`Check plan usage now (mcp__ccd_session_mgmt__get_usage), then re-invoke with --resume to continue, or stop here.`);
-      console.log(`Marker: ${batchStatePath(outDir)}`);
-      process.exit(0); // one cell per invocation, by design — see the module banner
     }
   }
 
