@@ -279,6 +279,24 @@ export function scaledMaxBudgetUsd(baseMaxBudgetUsd, fullModelId) {
   return baseMaxBudgetUsd * ratio;
 }
 
+// Args this direct CLI deliberately REFUSES rather than silently
+// mishandling -- each has a real implementation one layer up, in
+// scripts/benchmark.mjs, that this bare-bones loop does not (and, for
+// --concurrency, should not: see the message below for why "route it
+// through the scheduler here too" was rejected in favor of refusing).
+const REFUSED_ARGS = {
+  "--concurrency": "runs multiple (task, rep) attempts in parallel through bench/scheduler.mjs's "
+    + "scheduleRuns()/makeCapacityGate() (the free-RAM gate) and is gated behind bench/estimate.mjs's "
+    + "pre-run cost/time estimate + confirmation gate -- none of which this direct, single-process CLI "
+    + "wires up. Silently accepting --concurrency here would run everything sequentially anyway while "
+    + "printing no estimate and consulting no RAM gate, which is worse than refusing outright.",
+  "--per-agent-mb": "only means anything alongside --concurrency (bench/scheduler.mjs's capacity gate).",
+  "--weekly-usage-pct": "the pre-run estimate/confirmation gate is scripts/benchmark.mjs-only.",
+  "--weekly-ceiling-pct": "the pre-run estimate/confirmation gate is scripts/benchmark.mjs-only.",
+  "--confirm-above-points": "the pre-run estimate/confirmation gate is scripts/benchmark.mjs-only.",
+  "--confirm": "there is no confirmation gate here to acknowledge.",
+};
+
 export function parseArgs(argv) {
   const out = { cells: "all", tasks: "all", reps: 3, repStart: 1, out: null, maxBudgetUsd: null, isolateHome: false };
   for (let i = 0; i < argv.length; i++) {
@@ -290,7 +308,13 @@ export function parseArgs(argv) {
     else if (a === "--out") out.out = argv[++i];
     else if (a === "--max-budget-usd") out.maxBudgetUsd = Number(argv[++i]);
     else if (a === "--isolate-home") out.isolateHome = true;
-    else throw new Error("unknown arg: " + a);
+    else if (REFUSED_ARGS[a]) {
+      throw new Error(
+        `bench/runner.mjs's direct CLI does not support ${a} -- it ${REFUSED_ARGS[a]} `
+        + "Use scripts/benchmark.mjs instead (same bench/runner.mjs runOne() underneath, with the "
+        + `scheduler and gates wired up). See docs/BENCHMARK.md "Parallel runs".`,
+      );
+    } else throw new Error("unknown arg: " + a);
   }
   return out;
 }

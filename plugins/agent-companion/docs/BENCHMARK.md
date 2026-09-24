@@ -442,6 +442,19 @@ Three safeguards make this safe rather than merely fast:
    rows are always kept in `results.jsonl`; the retry carries
    `is_collision_retry: true`.
 
+**Only `scripts/benchmark.mjs` supports `--concurrency`.** `bench/runner.mjs`'s
+own direct CLI (`node bench/runner.mjs ...`) is a bare-bones, fully-sequential
+single-process loop with no scheduler, no RAM gate, and no pre-run cost
+estimate wired up — routing `--concurrency` through it too would mean either
+duplicating all three, or silently running everything sequentially anyway
+while claiming to respect a concurrency flag it never actually gates. Track B
+adversarial review, fix #3: it REFUSES `--concurrency` (and `--per-agent-mb`/
+`--weekly-usage-pct`/`--weekly-ceiling-pct`/`--confirm-above-points`/
+`--confirm`, which only mean something alongside it) with a message pointing
+at `scripts/benchmark.mjs` — the same `bench/runner.mjs` `runOne()` mechanics
+underneath, but with the scheduler and both gates already wired up. Always
+use `scripts/benchmark.mjs` for anything beyond a single sequential cell.
+
 **Every results.jsonl row records `concurrency` and `co_scheduled_run_ids`.**
 Read these before comparing wall time across batches: a run's `duration_ms`
 under `--concurrency 4` is not comparable to the same task's `duration_ms`
