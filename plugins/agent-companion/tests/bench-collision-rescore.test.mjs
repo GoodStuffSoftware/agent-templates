@@ -226,4 +226,50 @@ test('a subprocess failure that reproduces on its solo re-score is counted as a 
   }
 });
 
+// --- Round 3 finding 1: __rescoreState must never reach results.jsonl -----
+//
+// runOne() attaches `__rescoreState` (sandboxDir, runTmpDir, task, meta,
+// answerText) to a needs_rescore row's IN-MEMORY object only, documented as
+// "never serialized to disk". bench/scheduler.mjs hands that SAME row object
+// back to rescoreOne() as `rescoreState.originalRow`. rescoreOne() used to
+// build its own new row with `{ ...originalRow, ... }`, which spreads
+// `__rescoreState` straight through -- a dead temp-path/task/meta/duplicate-
+// answerText leak into the ::rescore row's OWN on-disk line. This fails
+// against the round 3 base commit and passes once rescoreOne() strips
+// `__rescoreState` from the row it builds.
+test('neither the original needs_rescore row nor its ::rescore row ever carries __rescoreState on disk', async () => {
+  const { outDir, answersDir } = tmpOut();
+  const tasksMap = { [OTHER_TASK_ID]: otherTask, [SUB_TASK_ID]: subprocessTask };
+  const holder = await bindHolder(SUBPROCESS_FIXED_PORT);
+  let released = false;
+  try {
+    const launch = makeLaunch({ tasksMap, outDir, answersDir, runClaudeImpl: stubClaude });
+    await scheduleRuns({
+      runs: buildRuns(),
+      concurrency: 2,
+      launch,
+      onEvent: async (e) => {
+        if (e.type === 'finish' && e.row && e.row.needs_rescore && !released) {
+          released = true;
+          await closeHolder(holder);
+        }
+      },
+    });
+
+    const lines = readFileSync(join(outDir, 'results.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(lines.length >= 2, 'at least the original and the ::rescore row were written');
+    for (const line of lines) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(line, '__rescoreState'),
+        false,
+        `results.jsonl row ${line.run_id} must never carry __rescoreState on disk`,
+      );
+    }
+  } finally {
+    await closeHolder(holder).catch(() => {});
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 console.log('bench-collision-rescore.test.mjs: round 2 solo re-score regression tests defined');

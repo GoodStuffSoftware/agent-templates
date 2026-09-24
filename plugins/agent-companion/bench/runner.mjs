@@ -860,8 +860,20 @@ export async function rescoreOne({ rescoreState, outDir, answersDir, slot = 0, c
     JSON.stringify({ runId, answerText, tree: finalTree }, null, 2),
   );
 
+  // originalRow still carries its own IN-MEMORY-ONLY `__rescoreState`
+  // (runOne() attached it, and bench/scheduler.mjs's needs_rescore-retry
+  // queuing hands the very same row object back here as
+  // `rescoreState.originalRow` -- it was never stripped). Spreading
+  // `...originalRow` directly would carry that property (dead temp
+  // sandboxDir/runTmpDir paths, a duplicate `task`/`meta`, and a second copy
+  // of `answerText`) straight into this row's OWN results.jsonl line --
+  // exactly the on-disk leak `__rescoreState` is documented as never having.
+  // Strip it from a shallow copy rather than mutating `originalRow` itself
+  // (bench/scheduler.mjs's caller may still hold that same object).
+  const { __rescoreState: _unusedRescoreState, ...originalRowSansState } = originalRow;
+
   const row = {
-    ...originalRow,
+    ...originalRowSansState,
     ts: new Date().toISOString(),
     run_id: runId,
     concurrency,
