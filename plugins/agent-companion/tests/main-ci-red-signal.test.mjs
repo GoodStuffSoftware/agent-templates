@@ -17,9 +17,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeFixture, runScript } from './helpers.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
+import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
 function git(args, cwd) {
-  const res = spawnSync('git', args, { windowsHide: true, cwd, encoding: 'utf8', timeout: 15000 });
+  const res = spawnSync('git', args, { windowsHide: true, cwd, encoding: 'utf8', timeout: 15000, env: cleanGitEnv() });
   if (res.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
   return res;
 }

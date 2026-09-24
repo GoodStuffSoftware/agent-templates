@@ -45,7 +45,7 @@ import realContradictorySpecTask from "./tasks/real-contradictory-spec.mjs";
 import { snapshotTree, removeDirWithRetry, GUARD_REL_PATH } from "./tasks/common.mjs";
 import { wilsonInterval, passAtK, formatInterval, MIN_N_TO_SEPARATE } from "./stats.mjs";
 import {
-  sha256, runJudge, treeDiff, checkJudgeEligibility, assertJudgeCalibrated, makeCliJudgeCaller,
+  sha256, runJudge, treeDiff, checkJudgeEligibility, assertJudgeCalibrated, makeCliJudgeCaller, validateJudgeConfig,
 } from "./judge.mjs";
 import { classifyCollision, portBaseForSlot } from "./scheduler.mjs";
 import { evidenceFamilyOf, assertComparableEvidence, FINE_FAMILIES } from "./evidence-family.mjs";
@@ -566,15 +566,26 @@ export async function runOne({
   evidenceFamilyOverride = null,
 }) {
   const judgeActive = !!(judge && task.rubric);
+  // The judge config EFFECTIVE for this cell: validateJudgeConfig()'s
+  // reviewer-parity floor raises the judge's effort to at least the effort
+  // this cell's answer was produced at (never lowers it, never past xhigh).
+  // Everything below -- calibration gate, the votes, the judge_effort
+  // column -- uses this, never the run-wide judge.config.
+  let judgeConfig = null;
   if (judgeActive) {
     // A refusal is a CONFIGURATION error, not a run failure: it carries
     // code JUDGE_REFUSED so both main loops abort the batch instead of
     // logging a pass:false row that would drag the cell's pass rate down.
     const refuse = (msg) => Object.assign(new Error(msg), { code: "JUDGE_REFUSED" });
-    const elig = checkJudgeEligibility(judge.config.model, cell.model);
+    try {
+      judgeConfig = validateJudgeConfig({ ...judge.config, authorEffort: cell.effort });
+    } catch (e) {
+      throw refuse(e.message);
+    }
+    const elig = checkJudgeEligibility(judgeConfig.model, cell.model);
     if (!elig.ok) throw refuse(`judge refused for cell ${cellId}: ${elig.reason}`);
     try {
-      assertJudgeCalibrated({ taskId, task, config: judge.config, storeFile: judge.storeFile });
+      assertJudgeCalibrated({ taskId, task, config: judgeConfig, storeFile: judge.storeFile });
     } catch (e) {
       throw refuse(e.message);
     }
@@ -765,10 +776,10 @@ export async function runOne({
   let judgeFields = {};
   if (judgeActive) {
     const authFailed = isAuthError({ json, answerText, stdout, err });
-    const eligResolved = resolvedModel ? checkJudgeEligibility(judge.config.model, resolvedModel) : { ok: true };
+    const eligResolved = resolvedModel ? checkJudgeEligibility(judgeConfig.model, resolvedModel) : { ok: true };
     const base = {
-      judge_model: judge.config.model,
-      judge_effort: judge.config.effort,
+      judge_model: judgeConfig.model,
+      judge_effort: judgeConfig.effort,
       judge_rubric_sha256: sha256(task.rubric),
     };
     if (authFailed) {
@@ -778,8 +789,8 @@ export async function runOne({
     } else {
       const { scaledJudgeBudget } = judge;
       const verdict = await runJudge({
-        config: judge.config,
-        budgetUsd: typeof scaledJudgeBudget === "number" ? scaledJudgeBudget : scaledMaxBudgetUsd(judge.config.maxBudgetUsd, judge.config.model),
+        config: judgeConfig,
+        budgetUsd: typeof scaledJudgeBudget === "number" ? scaledJudgeBudget : scaledMaxBudgetUsd(judgeConfig.maxBudgetUsd, judgeConfig.model),
         taskPrompt: promptText,
         rubric: task.rubric,
         diff: treeDiff(initialTree, finalTree, { exclude: [GUARD_REL_PATH] }),
@@ -1345,6 +1356,11 @@ export function groupRunsByAttemptFamily(rawRows) {
   return { winners, supersededRows };
 }
 
+// Unrecognized legacy evidence_family_fine labels already warned about on
+// stderr in this process (FS11): rebuildSummary() runs once per completed
+// run, so without this a batch repeated the same warning after every run.
+const WARNED_LEGACY_FINES = new Set();
+
 export function rebuildSummary(outDir) {
   const jsonlPath = path.join(outDir, "results.jsonl");
   if (!fs.existsSync(jsonlPath)) return;
@@ -1493,10 +1509,16 @@ export function rebuildSummary(outDir) {
     if (evidenceFamily.unrecognizedLegacyFine) group.legacyFines.add(evidenceFamily.unrecognizedLegacyFine);
     group.rows.push(r);
   }
-  if (unrecognizedLegacyFines.size > 0) {
+  // rebuildSummary() runs after every completed run of a batch, so the
+  // stderr warning is deduped per PROCESS (WARNED_LEGACY_FINES): each label
+  // is warned about once, however many rebuilds see it. The summary.md
+  // banner and per-row field below still carry every label, every time.
+  const newLegacyFines = [...unrecognizedLegacyFines].filter((l) => !WARNED_LEGACY_FINES.has(l)).sort();
+  if (newLegacyFines.length > 0) {
+    for (const l of newLegacyFines) WARNED_LEGACY_FINES.add(l);
     process.stderr.write(
-      `WARNING: ${unrecognizedLegacyFines.size} unrecognized legacy evidence_family_fine value(s) in ${outDir}: `
-      + `${[...unrecognizedLegacyFines].sort().join(", ")} -- classified "unknown" and excluded from every `
+      `WARNING: ${newLegacyFines.length} unrecognized legacy evidence_family_fine value(s) in ${outDir}: `
+      + `${newLegacyFines.join(", ")} -- classified "unknown" and excluded from every `
       + "real/synthetic median (bench/evidence-family.mjs's registry). See docs/BENCHMARK.md \"Evidence families\".\n",
     );
   }

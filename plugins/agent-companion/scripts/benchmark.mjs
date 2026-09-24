@@ -53,6 +53,7 @@ import {
   loadSeed, loadLocalHistory, estimateRun, formatEstimate, shouldConfirm, loadLocalJudgeVoteHistory,
 } from '../bench/estimate.mjs';
 import { evidenceFamilyOf } from '../bench/evidence-family.mjs';
+import { classifyEffort } from '../hooks/lib/context.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -298,13 +299,20 @@ export function buildEstimatePlan({
 export function buildJudgeVotePlan({ judge, cellIds, reps }) {
   if (!judge || !judge.config) return null;
   let eligibleCells = 0;
+  // Priced at the HIGHEST effective judge effort across the eligible cells
+  // (each cell's judge effort is floored at its author's -- see
+  // judgeConfigForCell()): one number, and never an underestimate.
+  let effort = judge.config.effort;
   for (const id of cellIds) {
     const cell = CELLS[id];
-    if (cell && checkJudgeEligibility(judge.config.model, cell.model).ok) eligibleCells += 1;
+    if (!cell || !checkJudgeEligibility(judge.config.model, cell.model).ok) continue;
+    eligibleCells += 1;
+    const eff = judgeConfigForCell(judge.config, cell).effort;
+    if (eff != null && (effort == null || classifyEffort(eff).rank > classifyEffort(effort).rank)) effort = eff;
   }
   const judgedAnswers = eligibleCells * (judge.judgedTasks || []).length * reps;
   return {
-    model: judge.config.model, effort: judge.config.effort, votes: judgedAnswers * JUDGE_VOTES,
+    model: judge.config.model, effort, votes: judgedAnswers * JUDGE_VOTES,
     history: loadLocalJudgeVoteHistory(),
   };
 }
@@ -344,13 +352,38 @@ export function judgePreflight({ args, cellIds, taskIds, tasksMap, calibrating =
   const judgedTasks = taskIds.filter((t) => tasksMap[t] && tasksMap[t].rubric);
   if (judgedTasks.length === 0) problems.push('none of the selected tasks has a rubric -- the judge would never run (add rubric.md to a task pack)');
   if (!calibrating) {
+    // Each cell is judged at its EFFECTIVE effort (the runner re-validates
+    // with authorEffort: cell.effort -- the reviewer-parity floor), so the
+    // calibration a live run needs is per distinct effective config, not
+    // just the configured one. Checked here so a missing record refuses the
+    // run before any spend rather than mid-batch.
+    const byEffort = new Map();
+    const add = (eff, id) => {
+      const k = eff.effort ?? 'none';
+      if (!byEffort.has(k)) byEffort.set(k, { config: eff, cells: [] });
+      if (id) byEffort.get(k).cells.push(id);
+    };
+    for (const id of cellIds) if (CELLS[id]) add(judgeConfigForCell(config, CELLS[id]), id);
+    if (byEffort.size === 0) add(config, null);
     for (const t of judgedTasks) {
-      if (!findTrustedCalibration(storeFile, taskJudgeKey(t, tasksMap[t], config))) {
-        problems.push(`task ${t}: judge ${config.model}/${config.effort ?? 'none'} is not calibrated (run --calibrate-judge first)`);
+      for (const { config: eff, cells } of byEffort.values()) {
+        if (!findTrustedCalibration(storeFile, taskJudgeKey(t, tasksMap[t], eff))) {
+          const bumped = eff.effort !== config.effort ? ` (raised from ${config.effort ?? 'none'} to match the author effort of ${cells.join(', ')}; calibrate with --judge-effort ${eff.effort ?? 'none'})` : '';
+          problems.push(`task ${t}: judge ${eff.model}/${eff.effort ?? 'none'} is not calibrated${bumped} (run --calibrate-judge first)`);
+        }
       }
     }
   }
   return { config, storeFile, judgedTasks, problems };
+}
+
+// The judge config a given cell is actually graded with: the run-wide config
+// re-validated with that cell's effort as authorEffort, so the judge's effort
+// is raised to at least the author's (bench/judge.mjs validateJudgeConfig()).
+// bench/runner.mjs runOne() applies the same call; this is the preflight's
+// and the estimate's view of it.
+export function judgeConfigForCell(config, cell) {
+  return validateJudgeConfig({ ...config, authorEffort: cell ? cell.effort : null });
 }
 
 // Flattens EVERY requested cell x task x rep into ONE plan array -- the

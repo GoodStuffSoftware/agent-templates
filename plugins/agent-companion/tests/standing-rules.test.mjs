@@ -231,6 +231,52 @@ test('hook --event user-prompt: matching prompt injects the directive, non-match
   }
 });
 
+// 0.29.1 fix g: copyable-prompt fired on turns carrying only harness wrapper
+// blocks (another agent's message or a task summary that says "prompt").
+// A user-prompt rule matches only the user's own text, wrappers stripped.
+const WRAPPED_ONLY = [
+  '<cross-session-message from="peer">Here is the prompt for the reviewer: write a prompt</cross-session-message>',
+  '<task-notification>\n<summary>Agent "prompt writer" completed</summary>\n</task-notification>',
+  '<agent-message from="w">brief for the next worker; prompts attached</agent-message>',
+  '<system-reminder>The user may ask for a prompt later.</system-reminder>',
+  '<system-reminder>outer <task-notification>a prompt</task-notification> still outer prompt</system-reminder>',
+  '<cross-session-message from="x">unterminated message that says prompt',
+];
+
+test('matchRules(user-prompt) ignores wrapper-only turns and still fires on the user\'s own ask', () => {
+  const { cleanup } = makeFixture();
+  try {
+    for (const text of WRAPPED_ONLY) {
+      assert.deepEqual(matchRules({ scope: 'user-prompt', text }).map((r) => r.id), [], text);
+    }
+    const ids = (text) => matchRules({ scope: 'user-prompt', text }).map((r) => r.id);
+    assert.deepEqual(ids('write me a prompt for a reviewer'), ['copyable-prompt']);
+    assert.deepEqual(ids(`${WRAPPED_ONLY[3]}\nwrite me a prompt for a reviewer`), ['copyable-prompt'], 'user text beside a wrapper still counts');
+    assert.deepEqual(ids(`${WRAPPED_ONLY[0]}\nfix the login bug`), [], 'wrapper text never counts as the user\'s');
+  } finally {
+    cleanup();
+  }
+});
+
+test('hook --event user-prompt: a wrapper-only turn is silent; a real "write me a prompt" still fires', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    for (const [i, prompt] of WRAPPED_ONLY.entries()) {
+      const res = runHook('hooks/standing-rules.mjs',
+        { session_id: `sess-wrap-${i}`, prompt, cwd: dir },
+        { args: ['--event', 'user-prompt'] });
+      assert.equal(res.status, 0);
+      assert.equal(res.stdout.trim(), '', `wrapper-only turn must be silent: ${prompt}`);
+    }
+    const hit = runHook('hooks/standing-rules.mjs',
+      { session_id: 'sess-wrap-real', prompt: 'write me a prompt for a reviewer', cwd: dir },
+      { args: ['--event', 'user-prompt'] });
+    assert.ok(hit.json?.hookSpecificOutput?.additionalContext.includes('fenced code block'), hit.stdout);
+  } finally {
+    cleanup();
+  }
+});
+
 test('hook --event session-start: emits the lead-brevity directive by default', () => {
   const { dir, cleanup } = makeFixture();
   try {

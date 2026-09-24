@@ -99,6 +99,24 @@ test('checkRepoCiStatus: no active workflows -> ok:true, red:false (nothing to c
   assert.deepEqual(res.workflows, []);
 });
 
+// 0.29.1 fix f: `--jq .default_branch` prints "null" for a missing field;
+// that (or an empty answer) is no branch, never a branch named "null".
+test('checkRepoCiStatus: a default_branch lookup of "null" or empty degrades to ok:false', async () => {
+  for (const answer of ['null', 'null\n', '', '  \n']) {
+    const asked = [];
+    const inner = scriptedExec({
+      branch: answer,
+      workflows: [{ id: 1, name: 'CI' }],
+      runsByWorkflow: { 1: [{ conclusion: 'failure', created_at: '2026-09-24T00:00:00Z', html_url: 'u' }] },
+    });
+    const exec = (cmd, args, opts) => { asked.push(args.join(' ')); return inner(cmd, args, opts); };
+    const res = await checkRepoCiStatus({ owner: 'me', repo: 'proj', exec });
+    assert.equal(res.ok, false, `answer ${JSON.stringify(answer)}`);
+    assert.match(res.reason, /no default_branch/);
+    assert.equal(asked.length, 1, 'no workflow or run query against a branch named "null"');
+  }
+});
+
 test('checkRepoCiStatus: gh missing (ENOENT) -> ok:false, reason names it, never throws', async () => {
   const exec = () => { const e = new Error('spawn gh ENOENT'); e.code = 'ENOENT'; throw e; };
   const res = await checkRepoCiStatus({ owner: 'me', repo: 'proj', exec });
