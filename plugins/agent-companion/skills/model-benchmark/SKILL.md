@@ -45,6 +45,16 @@ either.
   must use a single persistent process (`--input-format stream-json
   --output-format stream-json --verbose`, one turn fed at a time), not one
   `claude -p` call per turn. See docs/BENCHMARK.md "Caching".
+- **Run each cell in the FOREGROUND.** No background jobs, no monitors or
+  watchers that notify on completion. Every notification wakes the lead,
+  which is an expensive turn, and it says only that something finished, not
+  that the output is sane. `--batch-by cell` already hands control back after
+  each cell.
+- **Never `git stash`.** The stash stack is shared by every worktree and every
+  concurrent session. Use a WIP commit, or leave uncommitted work untouched.
+- **Budget caps scale with model price.** Task budgets and `--max-budget-usd`
+  are in Sonnet dollars, and the runner scales them per cell. Do not hand-
+  shrink a cap for a pricier model.
 - **Check the cache hit rate before trusting a batch's cost numbers.**
   `summary.md`/`summary.json`'s `cache_hit_rate` (and the `CACHE ANOMALY:
   check harness` block, when triggered) flags any cell under 0.85 — that
@@ -96,6 +106,10 @@ gives a different number.
    from actual bug-fix commits — see `bench/task-packs/FORMAT.md` to add
    more without committing extracted source).
 4. **Reps 2-3 only for cells that already showed a difference** at rep 1.
+   A single run cannot separate close settings: Opus 5.5 high 5/7 vs low 7/7
+   on the real tasks was variance. Use **at least 3 reps before comparing
+   adjacent efforts**, and check that the 95% intervals in `summary.md` do
+   not overlap before calling one better.
 5. **Fable only if Opus at xhigh fails something** — it's an exception tier
    requiring a warrant, not a grid row (`config/model-tiers.json`'s `fable`
    entry).
@@ -121,9 +135,25 @@ relative to sonnet/medium** on the same task set, and a **plan-usage index**
 date — `scripts/benchmark.mjs`'s generated `summary.md`/`summary.json` do
 this already; don't strip the citation when hand-editing).
 
+Quality is reported as **pass@1** (mean single-trial pass rate across reps)
+with a **95% Wilson interval** and **pass@k** (k = reps). Read the "By task
+family" table: a family group under 5 runs says "n too small to separate",
+and so should your report. Cite `claude_cli_version` and
+`task_content_sha256` from the rows when comparing against an earlier batch.
+If either differs, the harness or the task changed, not only the model.
+See docs/BENCHMARK.md "Statistics" and "Reproducibility metadata".
+
 `claim_honest` is EXPERIMENTAL — a word-bag heuristic, unreliable on long,
 hedged answers (29-57% on real-history tasks even when fully correct). Read
 the actual claim text before treating a low rate as a quality problem.
+
+**Optional rubric judge** (docs/BENCHMARK.md "Rubric judge"): for design
+quality the hidden test cannot see. Calibrate first
+(`--calibrate-judge --judge-model <id>`, real judge calls), then pass the
+same `--judge-model` to the run. The judge must differ from, and be at least
+as strong as, every cell's model, and an uncalibrated judge is refused before
+any model call. Report `judge_pass_rate` as its own column. Never fold it
+into pass@1.
 
 ## (7) Outputs
 
