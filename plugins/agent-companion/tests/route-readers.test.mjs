@@ -15,6 +15,14 @@
 //
 // A config-validation TEST reading the raw data is not routing and is out of
 // scope (tests/ is not scanned).
+//
+// KNOWN LIMIT (0.29.0 RC review F9, accepted, not fixed): a reader that never
+// spells the token and reads outside the runtime trap evades both detectors,
+// e.g. importing config/model-tiers.json as a JSON module (not through
+// modelTiers()), or eval / new Function with a computed key ("over" + "ride")
+// on a path the shipped entry points do not run. This gate catches the
+// shapes in mutants.mjs; code review remains the backstop for deliberate
+// evasion.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
