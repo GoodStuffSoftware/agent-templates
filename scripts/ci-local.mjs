@@ -32,7 +32,7 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  mkdtempSync, rmSync, readFileSync, readdirSync, existsSync,
+  mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statSync,
 } from 'node:fs';
 import { join, dirname, resolve, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -203,8 +203,24 @@ function runNode(args, cwd, env) {
   return { status: res.status === null ? 1 : res.status };
 }
 
+function realSpawnGit(args, opts) {
+  return spawnSync('git', args, opts);
+}
+
+// Test-only seam: every git invocation this module makes goes through
+// spawnGitImpl, so scripts/tests/*.test.mjs can record/observe them (e.g. to
+// prove parity mode never runs `git tag` or `git update-ref` against the
+// source repo) without monkeypatching node:child_process itself — its
+// exports are non-configurable, so mock.method() on spawnSync fails outright
+// (`TypeError: Cannot redefine property: spawnSync`); confirmed empirically.
+let spawnGitImpl = realSpawnGit;
+
+export function setGitSpawnerForTests(fn) {
+  spawnGitImpl = fn || realSpawnGit;
+}
+
 function git(cwd, args) {
-  const res = spawnSync('git', args, {
+  const res = spawnGitImpl(args, {
     cwd, env: baseChildEnv(), encoding: 'utf8', windowsHide: true,
   });
   if (res.status !== 0) {
@@ -258,59 +274,216 @@ export function readCheckoutDepth(workflowPath) {
   return m ? Number(m[1]) : 1;
 }
 
-function createTempTag(repoRoot, ref) {
-  const sha = git(repoRoot, ['rev-parse', ref]).trim();
-  const tagName = `ci-local-parity-${process.pid}-${Date.now()}`;
-  git(repoRoot, ['tag', tagName, sha]);
-  return { sha, tagName };
-}
-
-function deleteTempTag(repoRoot, tagName) {
-  try {
-    git(repoRoot, ['tag', '-d', tagName]);
-  } catch (err) {
-    console.error(`ci-local: warning — could not remove temp tag ${tagName}: ${err.message}`);
-  }
-}
-
-// Clones REPO_ROOT (never the real origin — this all runs offline against
-// the local object store) at the given tag, at the given depth. --no-local
-// forces the smart-transport negotiation path instead of the hardlink
-// fast-path a same-disk clone would otherwise take, so --depth is actually
-// honored the way it would be against a real remote. -c core.autocrlf=input
-// keeps LF bytes as LF on checkout, matching a Linux CI runner regardless of
-// this machine's global git config.
+// --ci-parity used to mark the commit under test with a temporary tag
+// (`ci-local-parity-<pid>-<ts>`) in REPO_ROOT so a same-disk `git clone
+// --branch <tag>` could reach it, then deleted the tag in a `finally`. A
+// kill (Ctrl-C, taskkill) never reaches `finally`, so the tag was left
+// behind — a ref written into the REAL repo's shared refs, which every
+// worktree and session here shares. This repo is public and multi-worktree;
+// parity mode must never write a ref into REPO_ROOT, killed or not.
 //
-// depth === 0 means "no --depth flag", i.e. full history for that one
-// branch/tag — this mirrors what fetch-depth: 0 is actually FOR here (an
+// Fetching the exact commit by SHA with `uploadpack.allowAnySHA1InWant`
+// reaches the same object without a ref existing for it at all — no tag,
+// no branch, nothing to leak if the process dies mid-fetch. See
+// fetchShaIntoTempRepo() below.
+
+// Fetches exactly `sha` out of `repoRoot`'s local object store into a fresh
+// repo at `dest` (created by the caller, e.g. via mkdtempSync), at the given
+// depth — without creating or touching any ref in `repoRoot`.
+//
+// `git init` + `git fetch <path> <sha>` (rather than `git clone --branch`)
+// is what makes this ref-free: a bare SHA is not something a normal fetch
+// will serve unless the server side allows it, so
+// `--upload-pack "git -c uploadpack.allowAnySHA1InWant=true upload-pack"`
+// spawns upload-pack against REPO_ROOT with that one option turned on for
+// this fetch only — REPO_ROOT's own on-disk config is never written to.
+// Verified on both Git for Windows and Git Bash: fetching a SHA that is
+// several commits behind every existing ref's tip succeeds, and
+// `for-each-ref` on the source repo is unchanged afterward.
+//
+// -c core.autocrlf=input on the fresh repo keeps LF bytes as LF on checkout,
+// matching a Linux CI runner regardless of this machine's global git
+// config — same reason the old `clone` used `-c core.autocrlf=input`.
+//
+// depth === 0 means "no --depth flag", i.e. full history reachable from
+// that one SHA — this mirrors what fetch-depth: 0 is actually FOR here (an
 // object being reachable via `git show <sha>:<path>`), not a literal
 // all-branches-and-tags mirror of actions/checkout's fetch-depth: 0, which
 // would be far slower against a 90-branch local repo for no benefit to the
 // thing being tested. Documented limitation, not an oversight.
-function shallowCloneRef(dest, repoRoot, tagName, depth) {
-  const args = ['clone', '--no-local', '-c', 'core.autocrlf=input', '--branch', tagName, '--single-branch'];
-  if (depth > 0) args.push('--depth', String(depth));
-  args.push(repoRoot, dest);
-  const res = spawnSync('git', args, { env: baseChildEnv(), encoding: 'utf8', windowsHide: true });
-  if (res.status !== 0) {
-    throw new Error(`git clone (parity, depth=${depth}) failed: ${(res.stderr || '').trim()}`);
-  }
-  // We just cloned from REPO_ROOT's local path, so `origin` in the clone
-  // points at that local path, not the real GitHub remote — unlike a real
-  // CI checkout, which clones from the actual repo URL. leak-check.mjs's
-  // own-repo-name exemption (ownRepoNames()) reads `git remote get-url
-  // origin` to recognize this repo's own public owner/repo name (e.g. in
-  // README.md's install instructions) as NOT a leak; left pointing at a
-  // local path, that exemption can't parse an owner/repo out of it and
-  // leak-check falsely flags the repo's own name. Point the clone's origin
-  // at REPO_ROOT's real origin (if it has one) so this suite sees exactly
-  // what CI sees.
+export function fetchShaIntoTempRepo(dest, repoRoot, sha, depth) {
+  // cwd is irrelevant to `git init <path>` (it takes the target as an
+  // explicit argument) — repoRoot is passed only because git() requires a
+  // cwd; nothing here is read from or written to it.
+  git(repoRoot, ['init', '-q', dest]);
+  git(dest, ['config', 'core.autocrlf', 'input']);
+
+  const fetchArgs = ['fetch', '-q'];
+  if (depth > 0) fetchArgs.push('--depth', String(depth));
+  fetchArgs.push('--upload-pack', 'git -c uploadpack.allowAnySHA1InWant=true upload-pack', repoRoot, sha);
+  git(dest, fetchArgs);
+  git(dest, ['checkout', '-q', 'FETCH_HEAD']);
+
+  // A plain `git fetch <path> <sha>` (no named remote) leaves `dest` with no
+  // `origin` at all, unlike the old `clone`, which always created one.
+  // leak-check.mjs's own-repo-name exemption (ownRepoNames()) reads `git
+  // remote get-url origin` to recognize this repo's own public owner/repo
+  // name (e.g. in README.md's install instructions) as NOT a leak; add an
+  // `origin` pointing at REPO_ROOT's real origin (if it has one) so this
+  // suite sees exactly what CI sees.
   try {
     const realOrigin = git(repoRoot, ['remote', 'get-url', 'origin']).trim();
-    if (realOrigin) git(dest, ['remote', 'set-url', 'origin', realOrigin]);
+    if (realOrigin) git(dest, ['remote', 'add', 'origin', realOrigin]);
   } catch {
     // REPO_ROOT has no `origin` remote configured — nothing to propagate.
   }
+}
+
+// One-time, local-only cleanup of tags a PRE-FIX version of this script left
+// behind in REPO_ROOT (see the note above fetchShaIntoTempRepo). Runs on
+// every invocation — cheap and a no-op once the leftovers are gone — and
+// never touches the remote: `git tag -d` only ever removes a local ref.
+export function cleanupLegacyParityTags(repoRoot) {
+  let output;
+  try {
+    output = git(repoRoot, ['for-each-ref', '--format=%(refname)', 'refs/tags/ci-local-parity-*']);
+  } catch (err) {
+    console.error(`ci-local: warning — could not check for legacy parity tags: ${err.message}`);
+    return;
+  }
+  const refs = output.split('\n').map((l) => l.trim()).filter(Boolean);
+  for (const ref of refs) {
+    const tagName = ref.replace(/^refs\/tags\//, '');
+    try {
+      git(repoRoot, ['tag', '-d', tagName]);
+      console.log(`ci-local: removed leftover legacy parity tag ${tagName} (local only, never touched the remote).`);
+    } catch (err) {
+      console.error(`ci-local: warning — could not remove legacy parity tag ${tagName}: ${err.message}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Interrupt handling and stale temp-dir cleanup
+// ---------------------------------------------------------------------------
+
+// Temp dirs currently "live" (created, not yet cleaned up) across every
+// parity run this process has started. A signal handler can only clean up
+// what it knows about, so every mkdtempSync'd dir used for parity is added
+// here on creation and removed once rmDirWithRetries has run on it.
+const activeTempDirs = new Set();
+
+function trackTempDir(dir) {
+  activeTempDirs.add(dir);
+  return dir;
+}
+
+function untrackTempDir(dir) {
+  rmDirWithRetries(dir);
+  activeTempDirs.delete(dir);
+}
+
+let signalHandlersRegistered = false;
+
+// Best-effort: on POSIX (and an interactive Ctrl-C on Windows) this runs
+// before exit and removes whatever temp dirs this process created. A
+// programmatic hard kill (taskkill /F, or Windows' unconditional
+// termination of a signalled child process) bypasses any JS handler
+// entirely — that gap is exactly why sweepStaleTempDirs() below exists as a
+// second, independent line of defense that does not depend on this handler
+// having run.
+export function registerSignalHandlers() {
+  if (signalHandlersRegistered) return;
+  signalHandlersRegistered = true;
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(signal, () => {
+      console.error(`\nci-local: caught ${signal} — removing ${activeTempDirs.size} temp dir(s) before exit.`);
+      for (const dir of [...activeTempDirs]) untrackTempDir(dir);
+      process.exit(1);
+    });
+  }
+}
+
+const STALE_TEMP_DIR_RE = /^ci-local-(?:peek|parity)-(\d+)-/;
+const DEFAULT_STALE_SWEEP_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour, per spec.
+
+function staleSweepMaxAgeMs() {
+  // Testability knob only: an integration test needs to prove a leftover
+  // dir gets swept without actually waiting an hour. Not documented in
+  // --help; normal use always gets the 1-hour default.
+  const override = Number(process.env.CI_LOCAL_STALE_SWEEP_MAX_AGE_MS);
+  return Number.isFinite(override) && override >= 0 ? override : DEFAULT_STALE_SWEEP_MAX_AGE_MS;
+}
+
+// Pure selection logic: given the basenames found under a temp root, decide
+// which look like OUR leftover dirs (name matches the ci-local-<kind>-<pid>-
+// pattern), are older than maxAgeMs, and whose owning pid is no longer
+// alive. Every input is injected (no fs/process access in here) so this is
+// unit-testable without touching a real filesystem or spawning anything.
+export function selectStaleTempDirs(names, {
+  now, maxAgeMs, getMtimeMs, isPidAlive,
+}) {
+  const stale = [];
+  for (const name of names) {
+    const m = STALE_TEMP_DIR_RE.exec(name);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    const mtimeMs = getMtimeMs(name);
+    if (mtimeMs == null) continue;
+    if (now - mtimeMs < maxAgeMs) continue;
+    if (isPidAlive(pid)) continue;
+    stale.push(name);
+  }
+  return stale;
+}
+
+function isPidAliveReal(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    // Signal 0 sends nothing; it only checks whether the pid could be
+    // signalled, i.e. whether it currently exists.
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means it exists but we can't signal it — still alive. ESRCH (or
+    // anything else) means it's gone.
+    return err.code === 'EPERM';
+  }
+}
+
+// Startup sweep: removes our own leftover temp dirs from a PRIOR run that
+// never reached its `finally` (killed mid-run) or its signal handler
+// (hard-killed). Runs on every invocation; a clean prior run leaves nothing
+// to find, so this is a no-op in the common case.
+export function sweepStaleTempDirs(root = tmpdir(), overrides = {}) {
+  const {
+    maxAgeMs = staleSweepMaxAgeMs(), now = Date.now(), isPidAlive = isPidAliveReal,
+  } = overrides;
+  let names;
+  try {
+    names = readdirSync(root);
+  } catch (err) {
+    console.error(`ci-local: warning — could not read ${root} for the stale temp-dir sweep: ${err.message}`);
+    return [];
+  }
+  const stale = selectStaleTempDirs(names, {
+    now,
+    maxAgeMs,
+    getMtimeMs: (name) => {
+      try {
+        return statSync(join(root, name)).mtimeMs;
+      } catch {
+        return null;
+      }
+    },
+    isPidAlive,
+  });
+  for (const name of stale) {
+    const full = join(root, name);
+    rmDirWithRetries(full);
+    console.log(`ci-local: startup sweep removed stale temp dir ${full} (owning process no longer running).`);
+  }
+  return stale;
 }
 
 // ---------------------------------------------------------------------------
@@ -325,28 +498,27 @@ function runSuiteLocal(name) {
 function runSuiteParity(name, ref) {
   const suite = SUITES[name];
   const dirsToClean = [];
-  const { tagName } = createTempTag(REPO_ROOT, ref);
+  const sha = git(REPO_ROOT, ['rev-parse', ref]).trim();
   try {
     // Step 1: a depth-1 peek clone, purely to read the workflow file AS IT
     // EXISTED AT THIS COMMIT. That is what tells parity mode the real
     // checkout depth to use, instead of guessing or hardcoding one.
-    const peekDir = mkdtempSync(join(tmpdir(), 'ci-local-peek-'));
+    const peekDir = trackTempDir(mkdtempSync(join(tmpdir(), `ci-local-peek-${process.pid}-`)));
     dirsToClean.push(peekDir);
-    shallowCloneRef(peekDir, REPO_ROOT, tagName, 1);
+    fetchShaIntoTempRepo(peekDir, REPO_ROOT, sha, 1);
     const depth = readCheckoutDepth(join(peekDir, suite.workflowFile));
 
     let workDir = peekDir;
     if (depth !== 1) {
-      workDir = mkdtempSync(join(tmpdir(), 'ci-local-parity-'));
+      workDir = trackTempDir(mkdtempSync(join(tmpdir(), `ci-local-parity-${process.pid}-`)));
       dirsToClean.push(workDir);
-      shallowCloneRef(workDir, REPO_ROOT, tagName, depth);
+      fetchShaIntoTempRepo(workDir, REPO_ROOT, sha, depth);
     }
 
     const env = hideFromPath(baseChildEnv(), CLAUDE_BIN_NAMES);
     return runNode(suite.command(workDir), workDir, env);
   } finally {
-    deleteTempTag(REPO_ROOT, tagName);
-    for (const d of dirsToClean) rmDirWithRetries(d);
+    for (const d of dirsToClean) untrackTempDir(d);
   }
 }
 
@@ -426,6 +598,9 @@ function main() {
     process.exitCode = 0;
     return;
   }
+  registerSignalHandlers();
+  sweepStaleTempDirs();
+  cleanupLegacyParityTags(REPO_ROOT);
   if (opts.prePushHook) {
     process.exitCode = runPrePushHook();
     return;
