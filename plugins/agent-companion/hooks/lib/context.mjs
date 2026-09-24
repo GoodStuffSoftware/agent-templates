@@ -713,6 +713,29 @@ function parityFloors(r, { consequence, writer, now }) {
     effort = effortOn(model, effort || ret.replacement.effort || '');
   }
 
+  // F4 (effort): the reviewer's effort must be one its model accepts. An
+  // effort that is no effort level at all is refused, never passed through;
+  // on a model that takes no effort parameter (haiku) it is dropped; one the
+  // model does not accept is raised to the next level it does (a reviewer
+  // may exceed, never drop).
+  if (effort) {
+    const ce = classifyEffort(effort);
+    if (!ce.known) {
+      return { refusal: `F4: writer effort "${effort}" is not an effort level (${Object.keys(cfg.efforts || {}).join(', ')}), so a reviewer cannot be sized to it` };
+    }
+    effort = ce.level; // "HIGH" is high
+    const ranked = rankedEffortsFor(model);
+    if (!ranked.length) {
+      floorsApplied.push({ floor: 'F4', capped: `effort ${effort} -> (none) (${classifyModel(model).alias || model} takes no effort parameter)` });
+      effort = '';
+    } else if (!ranked.includes(effort)) {
+      const up = ranked.find((e) => classifyEffort(e).rank >= ce.rank);
+      if (!up) return { refusal: `F4: ${model} accepts no effort at or above the writer's ${effort}` };
+      floorsApplied.push({ floor: 'F4', raised: `effort ${effort} -> ${up} (${model} does not accept ${effort})` });
+      effort = up;
+    }
+  }
+
   // F2: never a destination. Cap to the best tier that is one; the answer is
   // still a premium tier, so a warrant is still demanded.
   if (neverDestination(model)) {

@@ -157,3 +157,42 @@ test('evaluate: a reviewer sized to a sonnet writer is under-provisioned on a cr
   assert.equal(over.json.verdict, 'over');
   assert.match(over.json.action, /WARRANT/);
 });
+
+// --- F4 on the writer's effort (0.29.0 RC review R5) -------------------------
+// Parity passed an unusable effort straight through: haiku/low -> haiku/low
+// (haiku takes no effort parameter) and opus/bogus -> opus/bogus. The effort
+// is now normalised for the reviewer's model, and one that is no effort level
+// at all is refused like an unknown writer model.
+
+test('F4 effort: a writer effort on a model that takes none is dropped, and recorded', () => {
+  const r = review('haiku/low', null);
+  assert.equal(label(r), 'haiku');
+  assert.deepEqual(r.floorsApplied, [{ floor: 'F4', capped: 'effort low -> (none) (haiku takes no effort parameter)' }]);
+  assert.equal(label(review('haiku/low', 'critical')), 'opus/xhigh');
+  assert.equal(label(review('haiku/low', null, AFTER)), 'sonnet/low', 'a retired haiku writer is reviewed on its replacement at the writer effort');
+});
+
+test('F4 effort: a writer effort that is no effort level is refused, never echoed back', () => {
+  for (const w of ['opus/bogus', 'sonnet/minimal', 'haiku/turbo']) {
+    const r = review(w, null);
+    assert.equal(r.model, '', w);
+    assert.equal(r.layer, null, w);
+    assert.match(r.rationale, /^F4: writer effort "[^"]+" is not an effort level/, w);
+  }
+  assert.equal(review('gpt-x/bogus', null).rationale.startsWith('F4: writer model "gpt-x"'), true, 'an unknown model is still reported first');
+});
+
+test('F4 effort: an effort level is matched case-insensitively', () => {
+  assert.equal(label(review('opus/HIGH', null)), 'opus/high');
+});
+
+test('recommend and evaluate: haiku/low reviews on haiku with no effort; opus/bogus is refused', () => {
+  const j = runScript('scripts/recommend.mjs', ['--type', 'code-review', '--writer', 'haiku/low', '--json']).json;
+  assert.equal(j.model, 'haiku');
+  assert.equal(j.effort, '');
+  const r = runScript('scripts/recommend.mjs', ['--type', 'code-review', '--writer', 'opus/bogus']);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /cannot size a reviewer for writer "opus\/bogus": F4: writer effort "bogus" is not an effort level/);
+  const e = runScript('scripts/evaluate.mjs', ['--model', 'opus', '--effort', 'high', '--type', 'code-review', '--writer', 'opus/bogus']);
+  assert.equal(e.status, 3);
+});
