@@ -350,11 +350,17 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 // makes inside the grid when the grid wins (marked `within: 'grid'`); every
 // candidate that could not run as written is recorded in skipped.
 //
-// KNOWN GAP, deliberately preserved (slice 1 changes no behaviour): the
-// parity path (code-review with a writer) applies F3 only. It never applied
-// the consequence floors — a critical code-review has always been sized to
-// its writer — and applying F1 there would change routing. Flagged for a
-// later slice rather than changed silently.
+// Reviewer parity (code-review with a writer; operator-decided 2026-09-24,
+// replacing slice 1's F3-only path): the reviewer's model is the writer's
+// model raised to F1's model floor when the consequence is critical, and its
+// effort the writer's raised to F1's effort floor — so a critical review is
+// never sized below opus/xhigh because its writer was. F2 then caps the
+// result: fable is never a destination, so a fable writer's reviewer is the
+// highest tier that is one (opus), which still demands a WARRANT. F4: a
+// writer model that is not in the tier table gets no route (never a silent
+// pass-through), a retired one its staged replacement, and an unavailable
+// one with no replacement no route. F5 (elevated) is not applied to parity:
+// the rule names F1 only.
 //
 // `now` pins the calendar (Date, ISO string or epoch ms) for the tier
 // retirement date; omitted, it is the real clock.
@@ -425,28 +431,100 @@ function raiseEffort(model, effort, floor) {
 
 const FLOOR_FOR_CONSEQUENCE = { critical: 'F1', elevated: 'F5' };
 
-function applyFloors(r, { consequence, parity, writer }) {
+// The highest-ranked available tier that is not an F2 never-destination.
+function bestDestination() {
+  const cfg = modelTiers();
+  return Object.entries(cfg.tiers || {})
+    .filter(([alias, spec]) => spec.available !== false && !neverDestination(alias))
+    .sort((a, b) => (b[1].rank ?? 0) - (a[1].rank ?? 0))[0]?.[0] || null;
+}
+
+// Move to `model`, keeping the effort if the new model takes it, else its
+// lowest (or none, for a model that takes no effort parameter).
+function effortOn(model, effort) {
+  const ranked = rankedEffortsFor(model);
+  if (!ranked.length) return '';
+  return ranked.includes(effort) ? effort : ranked[0];
+}
+
+// Reviewer parity (see the banner): F3, then F4, F2 and F1, in that order.
+// Returns { model, effort, floorsApplied } or { refusal } when no reviewer
+// can be sized.
+function parityFloors(r, { consequence, writer, now }) {
+  const cfg = modelTiers();
+  const floorsApplied = [];
+  const wm = String(writer.model || '');
+  const we = writer.effort || '';
+  // F3: the candidate is the writer; effort may exceed it, never drop.
+  let { model, effort } = r;
+  if (model !== wm) {
+    floorsApplied.push({ floor: 'F3', raised: `model ${model} -> ${wm} (must match the writer)` });
+    model = wm;
+  }
+  if (we && classifyEffort(we).known) {
+    const cur = classifyEffort(effort);
+    if (!effort || (cur.known && cur.rank < classifyEffort(we).rank)) {
+      floorsApplied.push({ floor: 'F3', raised: `effort ${effort || '(none)'} -> ${we} (may not drop below the writer)` });
+      effort = we;
+    }
+  }
+
+  // F4: the writer's model must be a known tier the reviewer can run on.
+  const cls = classifyModel(wm);
+  if (!wm || !cls.known) {
+    return { refusal: `F4: writer model "${wm}" is not in the tier table, so a reviewer cannot be sized to it — pass the writer as a known model (see recommend.mjs --list)` };
+  }
+  if (!isModelAvailable(wm, now)) {
+    const ret = retirement(cls.alias, now);
+    if (!(ret && ret.retired && ret.replacement)) {
+      return { refusal: `F4: writer model ${wm} is unavailable and has no staged replacement to review on` };
+    }
+    const to = ret.replacement.model;
+    floorsApplied.push({ floor: 'F4', raised: `model ${model} -> ${to} (${cls.alias} retired after ${ret.retiresAfter}; its staged replacement stands in)` });
+    model = to;
+    effort = effortOn(model, effort || ret.replacement.effort || '');
+  }
+
+  // F2: never a destination. Cap to the best tier that is one; the answer is
+  // still a premium tier, so a warrant is still demanded.
+  if (neverDestination(model)) {
+    const best = bestDestination();
+    if (best) {
+      floorsApplied.push({ floor: 'F2', capped: `model ${model} -> ${best} (${classifyModel(model).alias || model} is never a routing destination; reviewing on it needs its own WARRANT)` });
+      model = best;
+      effort = effort ? effortOn(model, effort) : '';
+    }
+  }
+
+  // F1: a critical review is at least the critical floor, whatever the writer.
+  if (consequence === 'critical') {
+    const cons = (cfg.consequence || {}).critical || {};
+    if (cons.modelFloor && tierRank(cons.modelFloor) > tierRank(classifyModel(model).alias || model)) {
+      floorsApplied.push({ floor: 'F1', raised: `model ${model} -> ${cons.modelFloor}` });
+      model = cons.modelFloor;
+      const before = effort;
+      effort = effortOn(model, effort);
+      if (!before) effort = '';
+    }
+    if (cons.effortFloor) {
+      const ranked = rankedEffortsFor(model);
+      const fi = ranked.indexOf(cons.effortFloor);
+      const ci = effort ? ranked.indexOf(effort) : -1;
+      if (fi >= 0 && ci < fi) {
+        floorsApplied.push({ floor: 'F1', raised: `effort ${effort || '(none)'} -> ${cons.effortFloor}` });
+        effort = cons.effortFloor;
+      }
+    }
+  }
+  return { model, effort, floorsApplied };
+}
+
+function applyFloors(r, { consequence, parity, writer, now }) {
   const cfg = modelTiers();
   const floorsApplied = [];
   let { model, effort } = r;
 
-  if (parity) {
-    // F3 only (see KNOWN GAP in the banner).
-    const wm = writer.model;
-    const we = writer.effort || '';
-    if (model !== wm) {
-      floorsApplied.push({ floor: 'F3', raised: `model ${model} -> ${wm} (must match the writer)` });
-      model = wm;
-    }
-    if (we && classifyEffort(we).known) {
-      const cur = classifyEffort(effort);
-      if (!effort || (cur.known && cur.rank < classifyEffort(we).rank)) {
-        floorsApplied.push({ floor: 'F3', raised: `effort ${effort || '(none)'} -> ${we} (may not drop below the writer)` });
-        effort = we;
-      }
-    }
-    return { model, effort, floorsApplied };
-  }
+  if (parity) return parityFloors(r, { consequence, writer, now });
 
   // F2 on the final answer. Layers 1-2 were already filtered; this only fires
   // if a grid row itself named a never-destination tier, which the shipped
@@ -585,15 +663,28 @@ export function resolveRoute({
         trial: null,
       };
     }
-    const floored = applyFloors({ model: writer.model, effort: writer.effort || '' }, { consequence: c, parity: true, writer });
+    const floored = applyFloors({ model: writer.model, effort: writer.effort || '' }, { consequence: c, parity: true, writer, now });
+    if (floored.refusal) {
+      gridEntry.status = 'unresolved';
+      skipped.push({ layer: 'grid', reason: floored.refusal });
+      return {
+        ...base, model: '', effort: '', layer: null, source: null, state: null, provenance: null,
+        floorsApplied: [], skipped,
+        rationale: floored.refusal,
+        trial: null,
+      };
+    }
     gridEntry.status = 'won';
+    const parityFloorNote = floored.floorsApplied.length
+      ? `; floors: ${floored.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join(', ')} -> ${routeLabelOf(floored.model, floored.effort)}`
+      : '';
     return {
       ...base,
       model: floored.model, effort: floored.effort,
       layer: 'grid', source: 'reviewer-parity', state: null,
       provenance: { rule: 'reviewerParity', writer: routeLabelOf(writer.model, writer.effort || '') },
       floorsApplied: floored.floorsApplied, skipped,
-      rationale: `reviewer parity: model matches the writer (${writer.model})` + (writer.effort ? `; effort at least ${writer.effort}` : ''),
+      rationale: `reviewer parity: model matches the writer (${writer.model})` + (writer.effort ? `; effort at least ${writer.effort}` : '') + parityFloorNote,
       trial: null,
     };
   }

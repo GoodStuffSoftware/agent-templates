@@ -57,15 +57,25 @@ if (weight === 'parity') {
     process.exit(3);
   }
   const [wm, we] = String(w).split('/');
-  // Same resolver as every other route: reviewer parity is its F3 floor.
+  // Same resolver as every other route: reviewer parity is F3, raised to F1
+  // on a critical change and capped by F2 (see resolveRoute()).
   const route = resolveRoute({
     type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
     weightExplicit, kindExplicit, consequenceExplicit, writer: { model: wm, effort: we || '' },
   });
+  if (!route.model) {
+    // F4: an unknown (or unavailable, unreplaced) writer model is never
+    // passed straight through as the reviewer's.
+    console.error(`cannot size a reviewer for writer "${w}": ${route.rationale}`);
+    process.exit(3);
+  }
+  const floorNote = route.floorsApplied.length
+    ? `; floors: ${route.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join(', ')} -> ${route.model}${route.effort ? '/' + route.effort : ''}`
+    : '';
   const expected = {
     model: route.model,
     effort: route.effort,
-    rationale: `reviewer parity: match the writer (${wm}${we ? '/' + we : ''}); effort may exceed, must not drop`,
+    rationale: `reviewer parity: match the writer (${wm}${we ? '/' + we : ''}); effort may exceed, must not drop${floorNote}`,
   };
   fit = evaluateFit({ model, effort, weight, kind, consequence, expected, parity: true });
 } else {

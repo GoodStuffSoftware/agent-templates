@@ -71,14 +71,24 @@ if (weight === 'parity') {
   }
   const [wm, we] = String(w).split('/');
   const p = cfg.reviewerParity || {};
-  // Same resolver as every other route: reviewer parity is its F3 floor.
+  // Same resolver as every other route: reviewer parity is F3, raised to F1
+  // on a critical change and capped by F2 (see resolveRoute()).
   route = resolveRoute({
     type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
     weightExplicit, kindExplicit, consequenceExplicit, writer: { model: wm, effort: we || '' },
   });
+  if (!route.model) {
+    // F4: an unknown (or unavailable, unreplaced) writer model is never
+    // passed straight through as the reviewer's.
+    console.error(`cannot size a reviewer for writer "${w}": ${route.rationale}`);
+    process.exit(2);
+  }
   out.model = route.model;
   out.effort = route.effort;
-  out.rationale = `reviewer parity: model matches the writer (${wm})` + (we ? `; effort at least ${we}` : '') + (p.effortMayExceed ? ', may exceed' : '');
+  const floorNote = route.floorsApplied.length
+    ? `; floors: ${route.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join(', ')} -> ${out.model}${out.effort ? '/' + out.effort : ''}`
+    : '';
+  out.rationale = `reviewer parity: model matches the writer (${wm})` + (we ? `; effort at least ${we}` : '') + (p.effortMayExceed ? ', may exceed' : '') + floorNote;
 } else {
   if (typeof weight !== 'number' || !(weight >= 1 && weight <= 5)) {
     console.error('need --type <task-type> or --weight 1-5 (see --list)');
