@@ -319,7 +319,7 @@ const agentDefs = {
         if (tierOf(r.model) > 0 && tierOf(topWriter.model) > tierOf(r.model)) {
           findings.push(
             `${r.name}: reviewer on "${r.model}" gates ${topWriter.name} on `
-            + `"${topWriter.model}" — a reviewer must match the tier it reviews`,
+            + `"${topWriter.model}" — a reviewer must be at least the tier it reviews`,
           );
         }
         // Effort may exceed the writer's; it must not fall below it. Refutation
@@ -336,7 +336,7 @@ const agentDefs = {
       }
     }
 
-    const bad = findings.some((x) => /NO model|FABLE|must match the tier/.test(x));
+    const bad = findings.some((x) => /NO model|FABLE|at least the tier it reviews/.test(x));
     return {
       status: bad ? 'fail' : (findings.length ? 'warn' : 'ok'),
       findings,

@@ -346,8 +346,9 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 //       effort >= its effortFloor (xhigh). Inviolable.
 //   F2  fable — and any premium tier ranked at or above fable — is never a
 //       destination: a layer-1/2 candidate naming one is skipped. Inviolable.
-//   F3  reviewer parity: the model matches the writer; effort may exceed the
-//       writer's but not drop below it. Inviolable.
+//   F3  reviewer parity: the reviewer starts at the writer's model and
+//       effort; effort may exceed the writer's but not drop below it. F1
+//       then raises and F2 caps it (see "Reviewer parity" below). Inviolable.
 //   F4  availability: a layer-1/2 candidate's alias must be available (not
 //       retired) and must accept the named effort, or it is skipped. The
 //       build half of F4 (aliasResolution.minClaudeCodeVersion) needs the
@@ -524,7 +525,7 @@ export function profileRowRefusal(type, row, { typeDef = null, consequence, now,
   const model = row.model ?? null;
   const effort = row.effort ?? '';
   if (typeDef.weight === 'parity') {
-    if (model) return `F3: a ${type} row may set only a minimum effort, never a model (reviewer parity: the model matches the writer)`;
+    if (model) return `F3: a ${type} row may set only a minimum effort, never a model (reviewer parity: the model is sized to the writer)`;
     if (!effort || !classifyEffort(effort).known) return `F3: a ${type} row must name a known minimum effort`;
     if (row.waivesFloor) return `F5: waivesFloor does not apply to a parity-sized type`;
     return '';
@@ -687,7 +688,7 @@ function parityFloors(r, { consequence, writer, now }) {
   // F3: the candidate is the writer; effort may exceed it, never drop.
   let { model, effort } = r;
   if (model !== wm) {
-    floorsApplied.push({ floor: 'F3', raised: `model ${model} -> ${wm} (must match the writer)` });
+    floorsApplied.push({ floor: 'F3', raised: `model ${model} -> ${wm} (starts at the writer)` });
     model = wm;
   }
   if (we && classifyEffort(we).known) {
@@ -989,6 +990,11 @@ export function resolveRoute({
         trial: null,
       };
     }
+    // The writer's model and effort, then the floors: the answer may differ
+    // from the writer (F1 raises, F2 caps, F4 fits the effort), so the
+    // rationale never claims the model simply matches it.
+    const parityOpening = `reviewer parity: sized to the writer (${routeLabelOf(writer.model, writer.effort || '')})` +
+      (writer.effort ? ', effort may exceed it' : '');
     const parityFloorNote = floored.floorsApplied.length
       ? `; floors: ${floored.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join(', ')} -> ${routeLabelOf(floored.model, floored.effort)}`
       : '';
@@ -1012,7 +1018,7 @@ export function resolveRoute({
           layer: 'profile', source: profRow.source, state: profRow.state,
           provenance: profRow.provenance ?? null,
           floorsApplied: floored.floorsApplied, skipped,
-          rationale: `reviewer parity: model matches the writer (${writer.model})` + (writer.effort ? `; effort at least ${writer.effort}` : '') + parityFloorNote +
+          rationale: parityOpening + parityFloorNote +
             `; ROUTING PROFILE (rev ${prof.revision}, ${profRow.source}, ${profRow.state}) sets a minimum effort ${minEffort}` +
             (raised !== floored.effort ? ` -> ${routeLabelOf(floored.model, raised)}` : ' (already met)'),
           trial: null,
@@ -1026,7 +1032,7 @@ export function resolveRoute({
       layer: 'grid', source: 'reviewer-parity', state: null,
       provenance: { rule: 'reviewerParity', writer: routeLabelOf(writer.model, writer.effort || '') },
       floorsApplied: floored.floorsApplied, skipped,
-      rationale: `reviewer parity: model matches the writer (${writer.model})` + (writer.effort ? `; effort at least ${writer.effort}` : '') + parityFloorNote,
+      rationale: parityOpening + parityFloorNote,
       trial: null,
     };
   }

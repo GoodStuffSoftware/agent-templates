@@ -107,10 +107,12 @@ State the recommendation and the rationale it printed. Then:
   VERIFIED / REASONED / ASSUMED. A brief that carries that checklist on `opus`
   closes most of the gap. Fable also prefers whole-file rewrites and over-infers
   beyond explicit limits — a poor fit for scoped work even when warranted.
-- **Pair the reviewer it printed.** Same model as the writer; effort may
-  exceed, must not drop. A reviewer sized below the writer catches the errors
-  it would itself have avoided and waves through the ones it would itself have
-  made.
+- **Pair the reviewer it printed.** At least the writer's model and effort
+  (effort may exceed, must not drop); a critical change raises it to
+  opus/xhigh whatever the writer (F1), and a fable writer's reviewer is capped
+  to opus, which still needs a WARRANT (F2). A reviewer sized below the writer
+  catches the errors it would itself have avoided and waves through the ones
+  it would itself have made.
 - **Do not route on "this model sticks to instructions better."** That claim is
   not in Anthropic's docs and first-hand reports contradict it. Route on
   capability needed, search benefit, and consequence.

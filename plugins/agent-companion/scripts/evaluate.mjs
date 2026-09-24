@@ -67,13 +67,11 @@ if (weight === 'parity') {
     console.error(`cannot size a reviewer for writer "${w}": ${route.rationale}`);
     process.exit(3);
   }
-  const floorNote = route.floorsApplied.length
-    ? `; floors: ${route.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join(', ')} -> ${route.model}${route.effort ? '/' + route.effort : ''}`
-    : '';
+  // The resolver's own rationale: the writer, then every floor that moved it.
   const expected = {
     model: route.model,
     effort: route.effort,
-    rationale: `reviewer parity: match the writer (${wm}${we ? '/' + we : ''}); effort may exceed, must not drop${floorNote}`,
+    rationale: route.rationale,
   };
   fit = evaluateFit({ model, effort, weight, kind, consequence, expected, parity: true });
 } else {

@@ -73,7 +73,6 @@ if (weight === 'parity') {
     process.exit(2);
   }
   const [wm, we] = String(w).split('/');
-  const p = cfg.reviewerParity || {};
   // Same resolver as every other route: reviewer parity is F3, raised to F1
   // on a critical change and capped by F2 (see resolveRoute()).
   route = resolveRoute({
@@ -88,10 +87,8 @@ if (weight === 'parity') {
   }
   out.model = route.model;
   out.effort = route.effort;
-  const floorNote = route.floorsApplied.length
-    ? `; floors: ${route.floorsApplied.map((f) => `${f.floor} ${f.raised || f.capped}`).join(', ')} -> ${out.model}${out.effort ? '/' + out.effort : ''}`
-    : '';
-  out.rationale = `reviewer parity: model matches the writer (${wm})` + (we ? `; effort at least ${we}` : '') + (p.effortMayExceed ? ', may exceed' : '') + floorNote;
+  // The resolver's own rationale: the writer, then every floor that moved it.
+  out.rationale = route.rationale;
 } else {
   if (typeof weight !== 'number' || !(weight >= 1 && weight <= 5)) {
     console.error('need --type <task-type> or --weight 1-5 (see --list)');
@@ -132,7 +129,7 @@ out.warrantRequired = cls.premium;
 out.reviewer = {
   model: out.model,
   effort: out.effort ? `>= ${out.effort}` : '(none)',
-  note: 'reviewer parity: same model as the writer; effort may exceed, must not drop',
+  note: 'reviewer parity: at least the writer\'s model and effort (effort may exceed, must not drop), raised to F1 on a critical change and capped by F2 (never fable)',
 };
 
 // The single most useful nudge on a premium result: per the procedural-

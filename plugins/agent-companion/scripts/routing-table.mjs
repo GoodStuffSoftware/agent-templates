@@ -229,7 +229,7 @@ if (cfg.reviewerParity) {
   const p = cfg.reviewerParity;
   L.push(`## Reviewer parity`);
   L.push(``);
-  L.push(`- Model must match the writer it gates: **${p.modelMustMatch ? 'yes' : 'no'}**`);
+  L.push(`- Reviewer starts at the model of the writer it gates (then the floors below apply): **${p.modelMustMatch ? 'yes' : 'no'}**`);
   L.push(`- Effort may exceed the writer's: **${p.effortMayExceed ? 'yes' : 'no'}**`);
   L.push(`- Effort may fall below the writer's: **${p.effortMayNotDrop ? 'no' : 'yes'}**`);
   L.push(``);
@@ -241,7 +241,7 @@ if (cfg.reviewerParity) {
 if (cfg.taskTypes) {
   L.push(`## Task types → routing (the task model list)`);
   L.push(``);
-  L.push(`Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. \`parity\` weight = match the writer being reviewed; \`inherit\` consequence = take the change's consequence. **\`--type\` is the preferred input over raw \`--weight\`/\`--kind\`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.`);
+  L.push(`Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. \`parity\` weight = sized to the writer being reviewed (see Reviewer parity); \`inherit\` consequence = take the change's consequence. **\`--type\` is the preferred input over raw \`--weight\`/\`--kind\`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.`);
   L.push(``);
   L.push(`| Task type | Weight | Kind | Consequence | Resolves to | What it is |`);
   L.push(`|---|---|---|---|---|---|`);

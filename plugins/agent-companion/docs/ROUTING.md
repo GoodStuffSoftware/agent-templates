@@ -95,7 +95,7 @@ Example: a one-line production migration is `mechanical` by kind (effort down) b
 
 ## Reviewer parity
 
-- Model must match the writer it gates: **yes**
+- Reviewer starts at the model of the writer it gates (then the floors below apply): **yes**
 - Effort may exceed the writer's: **yes**
 - Effort may fall below the writer's: **no**
 
@@ -103,7 +103,7 @@ That parity match is then floored, same as any other route (operator-decided 202
 
 ## Task types → routing (the task model list)
 
-Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. `parity` weight = match the writer being reviewed; `inherit` consequence = take the change's consequence. **`--type` is the preferred input over raw `--weight`/`--kind`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.
+Each named task type is a preset over (weight, kind, consequence) and resolves through the same grid. `parity` weight = sized to the writer being reviewed (see Reviewer parity); `inherit` consequence = take the change's consequence. **`--type` is the preferred input over raw `--weight`/`--kind`** — a named type is the only place a measured routing-trial override (below) attaches; resolving by weight/kind alone always uses the plain grid.
 
 | Task type | Weight | Kind | Consequence | Resolves to | What it is |
 |---|---|---|---|---|---|

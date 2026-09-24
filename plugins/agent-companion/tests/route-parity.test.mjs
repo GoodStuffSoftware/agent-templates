@@ -64,7 +64,7 @@ test('F1 raises on a critical review are recorded, and the rationale says so', (
     { floor: 'F1', raised: 'model sonnet -> opus' },
     { floor: 'F1', raised: 'effort low -> xhigh' },
   ]);
-  assert.equal(r.rationale, 'reviewer parity: model matches the writer (sonnet); effort at least low; floors: F1 model sonnet -> opus, F1 effort low -> xhigh -> opus/xhigh');
+  assert.equal(r.rationale, 'reviewer parity: sized to the writer (sonnet/low), effort may exceed it; floors: F1 model sonnet -> opus, F1 effort low -> xhigh -> opus/xhigh');
   const h = review('haiku', 'critical');
   assert.deepEqual(h.floorsApplied.map((f) => f.raised), ['model haiku -> opus', 'effort (none) -> xhigh']);
   const lines = ctx.explainRoute(r).join('\n');
@@ -75,7 +75,7 @@ test('F1 raises on a critical review are recorded, and the rationale says so', (
 test('F3 alone fires no floor: an unchanged review records nothing', () => {
   const r = review('opus/xhigh', null);
   assert.deepEqual(r.floorsApplied, []);
-  assert.equal(r.rationale, 'reviewer parity: model matches the writer (opus); effort at least xhigh');
+  assert.equal(r.rationale, 'reviewer parity: sized to the writer (opus/xhigh), effort may exceed it');
 });
 
 test('F2: a fable writer is capped to opus, recorded as a cap that needs its own warrant', () => {
@@ -122,7 +122,7 @@ test('recommend: a critical review is opus/xhigh, with the floors in the rationa
   // Unchanged when no floor fires.
   const u = runScript('scripts/recommend.mjs', ['--type', 'code-review', '--writer', 'sonnet/low', '--json']).json;
   assert.equal(`${u.model}/${u.effort}`, 'sonnet/low');
-  assert.equal(u.rationale, 'reviewer parity: model matches the writer (sonnet); effort at least low, may exceed');
+  assert.equal(u.rationale, 'reviewer parity: sized to the writer (sonnet/low), effort may exceed it');
 });
 
 test('recommend: a fable writer gets opus with a warrant demanded, not a fable route', () => {
@@ -195,4 +195,33 @@ test('recommend and evaluate: haiku/low reviews on haiku with no effort; opus/bo
   assert.match(r.stderr, /cannot size a reviewer for writer "opus\/bogus": F4: writer effort "bogus" is not an effort level/);
   const e = runScript('scripts/evaluate.mjs', ['--model', 'opus', '--effort', 'high', '--type', 'code-review', '--writer', 'opus/bogus']);
   assert.equal(e.status, 3);
+});
+
+// --- Parity wording (0.29.0 RC review R3) ------------------------------------
+// The rule is max(writer, F1), capped by F2, fitted by F4 — not "the model
+// must match the writer". The recommend rationale used to open "model matches
+// the writer (sonnet)" and then answer opus/xhigh; the config note said the
+// MODEL must match. Neither may claim a match the answer contradicts.
+
+test('no parity rationale claims the reviewer model matches the writer', () => {
+  for (const [w, c] of [['sonnet/low', 'critical'], ['fable/high', null], ['haiku/low', null], ['opus/xhigh', null]]) {
+    const r = review(w, c);
+    assert.doesNotMatch(r.rationale, /matches the writer|must match/, w);
+    assert.match(r.rationale, new RegExp(`^reviewer parity: sized to the writer \\(${w.replace('/', '\\/')}\\)`), w);
+  }
+  for (const script of ['scripts/recommend.mjs', 'scripts/evaluate.mjs']) {
+    const args = script.endsWith('evaluate.mjs') ? ['--model', 'opus', '--effort', 'xhigh'] : [];
+    const j = runScript(script, [...args, '--type', 'code-review', '--writer', 'sonnet/low', '--consequence', 'critical', '--json']).json;
+    const rationale = j.rationale ?? j.expected.rationale;
+    assert.equal(rationale, 'reviewer parity: sized to the writer (sonnet/low), effort may exceed it; floors: F1 model sonnet -> opus, F1 effort low -> xhigh -> opus/xhigh', script);
+  }
+  const rec = runScript('scripts/recommend.mjs', ['--type', 'code-review', '--writer', 'sonnet/low', '--json']).json;
+  assert.doesNotMatch(rec.reviewer.note, /same model as the writer/);
+  assert.match(rec.reviewer.note, /F1/);
+});
+
+test('config reviewerParity.note states the floored rule, not "the MODEL must match"', () => {
+  const note = ctx.modelTiers().reviewerParity.note;
+  assert.doesNotMatch(note, /MODEL must match/);
+  for (const want of [/at least the writer's/, /F1/, /F2/, /F4/]) assert.match(note, want);
 });
