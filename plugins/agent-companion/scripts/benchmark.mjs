@@ -33,7 +33,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CELLS, TASKS, resolveList, runOne, rebuildSummary, defaultResultsRoot,
-  checkIsolateHomePreflight, formatRunLine, authErrorAbortMessage,
+  checkIsolateHomePreflight, formatRunLine, authErrorAbortMessage, scaledMaxBudgetUsd,
 } from '../bench/runner.mjs';
 import { loadPack, buildTaskFromPack } from '../bench/task-packs/lib.mjs';
 
@@ -239,7 +239,13 @@ async function main() {
       const cell = CELLS[cellId];
       for (const taskId of taskIds) {
         const task = tasksMap[taskId];
-        const budget = args.maxBudgetUsd != null ? Math.min(task.maxBudgetUsd, args.maxBudgetUsd) : task.maxBudgetUsd;
+        // Mirrors runOne()'s own scaling (bench/runner.mjs, scaledMaxBudgetUsd)
+        // so the dry-run preview shows the cap that will ACTUALLY run, not
+        // the unscaled Sonnet-calibrated default for a pricier cell.
+        const scaledTaskBudget = scaledMaxBudgetUsd(task.maxBudgetUsd, cell.model);
+        const budget = args.maxBudgetUsd != null
+          ? Math.min(scaledTaskBudget, scaledMaxBudgetUsd(args.maxBudgetUsd, cell.model))
+          : scaledTaskBudget;
         for (let rep = args.repStart; rep < args.repStart + args.reps; rep += 1) {
           const claudeArgs = [
             '-p', '<task prompt>',

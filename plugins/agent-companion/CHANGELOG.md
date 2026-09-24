@@ -2,6 +2,88 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.27.2 — 2026-09-23
+
+Fixes a live spawn-guard bug surfaced by routing trial v2 (0.27.1): most task
+types now route to opus, and the premium-warrant machinery had not caught up.
+
+### Fixed
+
+- **`hooks/spawn-guard.mjs`: the premium-tier set is now derived from the
+  spawn's OWN resolved routing, not hard-coded to the tier table's
+  classification alone.** Under routing trial v2 (`config/model-tiers.json`
+  v7), a spawn declaring `TYPE: integration` (or any other type the trial
+  routes to opus) still demanded a `WARRANT: weight N — ...` line and was
+  BLOCKED without one — even though the routing table itself prescribed
+  opus for that exact spawn. Fix: a model is premium FOR THIS SPAWN unless
+  the same resolved routing that answers "what should this run on" (a
+  declared `TYPE` with its trial override, or the plain grid for an
+  explicit `WEIGHT`) also names it. Fable is excluded from this exception on
+  purpose — nothing routes to fable, so no route can ever justify it; it
+  stays a warranted exception on every spawn regardless of `TYPE`/`WEIGHT`.
+- **A `WARRANT:` line's own stated weight no longer overrides a declared
+  `TYPE`'s preset or its routing-trial override.** `WARRANT: weight 4 —
+  <reason>` and `WEIGHT: 4` were parsed by the same regex, so a warrant
+  justifying an opus spawn under `TYPE: novel-design` (type weight 5, trial
+  override `opus/high`) had its own "4" silently treated as an EXPLICIT
+  weight declaration — bypassing the type's own preset and override,
+  falling back to the plain grid's weight-4 answer, and denying the exact
+  spawn the trial prescribes for a manufactured "over-provisioned"
+  mismatch. Fix: only a genuine `WEIGHT:` line counts as an explicit
+  deviation from a named `TYPE`'s preset now; a warrant's own weight is
+  still captured for `declaredWeight`/telemetry (unchanged, per
+  `docs/TELEMETRY.md`), but never bypasses a declared `TYPE`. Precedence:
+  explicit `TYPE` (with its trial override) > a real `WEIGHT:` line > a
+  warrant's own stated weight.
+- **A premium spawn with neither `TYPE` nor `WEIGHT` declared now WARNS
+  instead of BLOCKING when its `WARRANT:` line is missing.** The guard has
+  no routing information to confirm the tier either way in that shape, so a
+  missing warrant is now a `systemMessage`, not a denial — the base
+  tier-table classification (the same default the guard already used for
+  every undeclared spawn) still applies, but a false block here would stop
+  legitimate work the guard cannot actually judge. Fable, and any spawn
+  where routing IS known and disagrees, still block on a missing warrant
+  exactly as before.
+- New `tests/premium-warrant-routing.test.mjs` (6 tests) reproduces both
+  bugs directly against a live routing-trial config: an opus + `TYPE:
+  integration` spawn with no warrant is now allowed; an opus + `TYPE:
+  novel-design` spawn with a weight-bearing warrant is now allowed and
+  judged `fit` against the type's own override, not the plain grid; a
+  fable spawn (with or without a `TYPE`) with no warrant is still blocked;
+  an opus spawn with neither `TYPE` nor `WEIGHT` and no warrant is now
+  warned rather than blocked; and a genuine `WEIGHT:` line still explicitly
+  overrides a declared `TYPE` (proving the fix changed only `WARRANT`
+  parsing, not `WEIGHT` precedence). Full suite: 523/523 (was 517/0
+  baseline + 6 new).
+
+### Added
+
+- **`bench/runner.mjs`: `CELLS` gains `fable51-{low,medium,high,xhigh}`**
+  (`claude-fable-5-1`, the current Fable tier) **and `fable5-high`**
+  (`claude-fable-5`, the superseded dated id, for a direct 5-vs-5.1
+  comparison at the same effort).
+- **Per-run budget caps now scale with the cell's model price relative to
+  Sonnet 5.** `--max-budget-usd` (both each task's own calibrated default
+  and `scripts/benchmark.mjs`'s global ceiling) is the only working per-run
+  runaway guard this CLI honours, and it kills a run once its ACTUAL API
+  dollar cost crosses the cap — not once a token count does. Every cap was
+  calibrated in Sonnet dollars, so a pricier model doing the identical
+  amount of real work hit the SAME dollar cap sooner: Fable failed 7
+  real-task runs purely this way (2026-09-23), cut off while still working
+  because its cap was sized for a model at a fifth of its price. Fix: new
+  `bench/runner.mjs` exports `modelPriceRatioToSonnet()` (reads
+  `config/model-tiers.json`'s own `tiers.*.resolvesTo.pricing`, checking
+  `classifyReferenceModel()` first so a dated id like `claude-opus-5` uses
+  its own historical price rather than the current alias tier's) and
+  `scaledMaxBudgetUsd()` (scales a base cap by that ratio, floored at 1x so
+  a cheaper model's cap is never tightened). `runOne()` applies it to both
+  the task default and the global ceiling before taking the tighter of the
+  two, logs the actual scaled cap used as `max_budget_usd` on every results
+  row, and `scripts/benchmark.mjs --dry-run`'s preview shows the same
+  scaled number. Documented in `docs/BENCHMARK.md`. New
+  `tests/bench-budget-scaling.test.mjs` (13 tests) plus two new
+  `tests/bench-dry-run.test.mjs` cases.
+
 ## 0.27.1 — 2026-09-23
 
 Folds in the `cache-read-weight-2026-09-23` experiment's findings and an

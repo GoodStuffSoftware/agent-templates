@@ -59,6 +59,20 @@ test('--dry-run applies the global --max-budget-usd ceiling to the shown args (t
   assert.match(res.stdout, /--max-budget-usd 0\.01\b/);
 });
 
+test('--dry-run scales the shown --max-budget-usd by the cell\'s model price relative to Sonnet 5 (fable51-high: lookup\'s 0.6 * 5x = 3)', () => {
+  const res = dryRun(['--cells', 'fable51-high', '--tasks', 'lookup', '--reps', '1']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /--model claude-fable-5-1\b/);
+  assert.match(res.stdout, /--max-budget-usd 3\b/);
+});
+
+test('--dry-run scales the global --max-budget-usd ceiling too, before taking the tighter of the two (fable51-high, ceiling 1 -> scaled to 5, still looser than the task\'s scaled 3)', () => {
+  const res = dryRun(['--cells', 'fable51-high', '--tasks', 'lookup', '--reps', '1', '--max-budget-usd', '1']);
+  assert.equal(res.status, 0, res.stderr);
+  // task default (0.6) scaled 5x = 3, ceiling (1) scaled 5x = 5 -- tighter is 3.
+  assert.match(res.stdout, /--max-budget-usd 3\b/);
+});
+
 test('--tasks family expansion: easy/hard/real are disjoint and union to "all"', () => {
   const easy = dryRun(['--cells', 'haiku', '--tasks', 'easy', '--reps', '1']);
   const hard = dryRun(['--cells', 'haiku', '--tasks', 'hard', '--reps', '1']);

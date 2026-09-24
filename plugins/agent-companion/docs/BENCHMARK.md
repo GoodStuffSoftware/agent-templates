@@ -134,6 +134,27 @@ flag.
   `scripts/benchmark.mjs --max-budget-usd` applies an additional global
   ceiling on top (the tighter of the two always wins — see
   `bench/runner.mjs`'s `runOne()`).
+- **Both of those caps are calibrated in SONNET dollars, and are scaled by
+  the cell's model price before use (`bench/runner.mjs`'s
+  `scaledMaxBudgetUsd()`/`modelPriceRatioToSonnet()`, fixed 2026-09-23).**
+  `--max-budget-usd` kills the run once the ACTUAL API dollar cost crosses
+  the cap, not once a token count does — a pricier model doing the exact
+  same amount of real work costs proportionally more real dollars for an
+  identical token count, so a Sonnet-sized cap cut a pricier model off
+  before the task was actually done. Concretely, this failed Fable on 7
+  real-task runs (2026-09-23, `budget-cap-fable-cutoff` finding): the model
+  was still working when the CLI killed it for "exceeding" a cap sized for
+  a model at a fifth of Fable's price. The fix scales every cap — the
+  task's own `maxBudgetUsd` AND `--max-budget-usd`'s global ceiling — by
+  the ratio of the cell's model price to Sonnet 5's
+  (`config/model-tiers.json`'s own `tiers.*.resolvesTo.pricing`, with a
+  dated id like `claude-opus-5` checked against `referenceModels` first for
+  its own historical price rather than the current alias tier's), floored
+  at 1x so a cheaper model's cap is never tightened. `bench/runner.mjs`'s
+  results rows log the ACTUAL scaled cap used as `max_budget_usd`, and
+  `scripts/benchmark.mjs --dry-run`'s preview shows the scaled number, not
+  the raw per-task default — both mirror the same scaling so what you see
+  before a run matches what the run actually used.
 - **`bench/rescore.mjs` cannot re-score a task-pack run.** Task-pack tasks
   (`bench/task-packs/`) are merged into the runnable set only at
   `scripts/benchmark.mjs`'s CLI layer (they need a `--pack-repo` path

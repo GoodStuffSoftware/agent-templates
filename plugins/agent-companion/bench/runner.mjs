@@ -23,7 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile, execFileSync } from "node:child_process";
-import { dataDir, classifyModel, modelTiers } from "../hooks/lib/context.mjs";
+import { dataDir, classifyModel, classifyReferenceModel, modelTiers } from "../hooks/lib/context.mjs";
 
 import lookupTask from "./tasks/lookup.mjs";
 import verifyTask from "./tasks/verify.mjs";
@@ -117,6 +117,20 @@ export const CELLS = {
   "opus55-medium": { model: "claude-opus-5-5", effort: "medium" },
   "opus55-high": { model: "claude-opus-5-5", effort: "high" },
   "opus55-xhigh": { model: "claude-opus-5-5", effort: "xhigh" },
+  // Fable 5.1 (claude-fable-5-1) -- the current Fable tier (config's
+  // tiers.fable). Fable takes no "medium"/"none" no-op the way haiku does;
+  // it always thinks (thinking: "adaptive, always on, cannot disable"), so
+  // every effort level here is a genuine distinct setting.
+  "fable51-low": { model: "claude-fable-5-1", effort: "low" },
+  "fable51-medium": { model: "claude-fable-5-1", effort: "medium" },
+  "fable51-high": { model: "claude-fable-5-1", effort: "high" },
+  "fable51-xhigh": { model: "claude-fable-5-1", effort: "xhigh" },
+  // Fable 5 (claude-fable-5, referenceModels["fable-5"]) -- superseded by
+  // 5.1 but still a live, dated id some definitions may pin. high only:
+  // this cell exists for a direct 5-vs-5.1 comparison at the same effort,
+  // not a full grid -- add the other effort levels if that comparison needs
+  // widening.
+  "fable5-high": { model: "claude-fable-5", effort: "high" },
 };
 
 // Default output root: the plugin's own data dir, NEVER the repo -- a
@@ -128,6 +142,68 @@ export const CELLS = {
 // and state/ rather than inventing its own location.
 export function defaultResultsRoot() {
   return path.join(dataDir(), "benchmarks");
+}
+
+// Every per-task maxBudgetUsd below (and the --max-budget-usd CLI ceiling)
+// was calibrated against SONNET 5's price. --max-budget-usd is the only
+// working per-run runaway guard this CLI honours (see the turn-limit note
+// at the top of this file) -- it kills the run once the ACTUAL API dollar
+// cost crosses the cap, not once a token count does. A pricier model doing
+// the exact same amount of real work therefore costs proportionally more
+// real dollars for an identical token count, so a Sonnet-sized cap cuts it
+// off before the task is actually done -- not a genuine budget overrun, a
+// units mismatch between the cap (calibrated in Sonnet dollars) and the
+// model actually spending them. Fable failed 7 real-task runs exactly this
+// way (2026-09-23, budget-cap-fable-cutoff finding) -- the model was still
+// working when the CLI killed it for "exceeding" a cap sized for a model at
+// a fifth of its price.
+//
+// Fix: scale every cap by the cell's model price relative to Sonnet 5,
+// read from config/model-tiers.json's own pricing table (never
+// hard-coded -- see the "table as DATA, not code" note at that config's
+// own top) so a future price change needs no code edit here. A dated id
+// (e.g. claude-opus-5, claude-fable-5) is checked against
+// classifyReferenceModel() FIRST for its own exact historical pricing
+// (tiers.opus's current pricing would otherwise silently apply Opus 5.5's
+// price to a claude-opus-5 cell); an id with no reference entry falls back
+// to its current alias tier. Scaling only ever goes UP (floor of 1x): a
+// cheaper model (haiku) is already comfortably inside a Sonnet-sized cap
+// for the same token count, so there is no cutoff failure to compensate
+// for on that side, and tightening it would risk a NEW one for no benefit.
+function sonnetPricing() {
+  return modelTiers().tiers?.sonnet?.resolvesTo?.pricing || null;
+}
+
+function modelPricing(fullModelId) {
+  const ref = classifyReferenceModel(fullModelId);
+  if (ref?.pricing) return ref.pricing;
+  const alias = classifyModel(fullModelId).alias;
+  return (modelTiers().tiers || {})[alias]?.resolvesTo?.pricing || null;
+}
+
+// Exported for tests. Returns 1 (no scaling) whenever either model's
+// pricing is unreadable -- fail toward the EXISTING, already-shipped
+// per-task defaults rather than guessing a ratio, same fail-open posture
+// every other guard/table lookup in this plugin takes.
+export function modelPriceRatioToSonnet(fullModelId) {
+  const sonnet = sonnetPricing();
+  const model = modelPricing(fullModelId);
+  if (!sonnet || !model) return 1;
+  if (typeof model.inputPerMTok !== "number" || typeof model.outputPerMTok !== "number"
+    || typeof sonnet.inputPerMTok !== "number" || typeof sonnet.outputPerMTok !== "number"
+    || sonnet.inputPerMTok <= 0 || sonnet.outputPerMTok <= 0) return 1;
+  const inRatio = model.inputPerMTok / sonnet.inputPerMTok;
+  const outRatio = model.outputPerMTok / sonnet.outputPerMTok;
+  return (inRatio + outRatio) / 2;
+}
+
+// The scaled cap actually used for a run: the task's own calibrated
+// maxBudgetUsd (or, for the global --max-budget-usd ceiling, that value),
+// scaled by this cell's price relative to Sonnet 5, floored at 1x so a
+// cheaper model's cap is never tightened.
+export function scaledMaxBudgetUsd(baseMaxBudgetUsd, fullModelId) {
+  const ratio = Math.max(1, modelPriceRatioToSonnet(fullModelId));
+  return baseMaxBudgetUsd * ratio;
 }
 
 export function parseArgs(argv) {
@@ -313,9 +389,13 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
   // The per-run runaway guard is the TIGHTER of the task's own calibrated
   // budget and an optional global ceiling (scripts/benchmark.mjs's
   // --max-budget-usd) -- never looser than what the task itself declared.
+  // Both are calibrated in SONNET dollars, so both are scaled by this
+  // cell's price relative to Sonnet 5 before comparing them -- see
+  // scaledMaxBudgetUsd()'s own note, above.
+  const scaledTaskBudget = scaledMaxBudgetUsd(task.maxBudgetUsd, cell.model);
   const effectiveBudget = typeof maxBudgetUsdCeiling === "number"
-    ? Math.min(task.maxBudgetUsd, maxBudgetUsdCeiling)
-    : task.maxBudgetUsd;
+    ? Math.min(scaledTaskBudget, scaledMaxBudgetUsd(maxBudgetUsdCeiling, cell.model))
+    : scaledTaskBudget;
 
   const { json, stdout, stderr, err, wallMs } = await runClaude({
     cwd: sandboxDir,
@@ -396,6 +476,12 @@ export async function runOne({ cellId, cell, taskId, task, rep, outDir, answersD
     is_error: json ? !!json.is_error : true,
     subtype: (json && json.subtype) || null,
     terminal_reason: (json && json.terminal_reason) || null,
+    // The ACTUAL cap passed to --max-budget-usd for this run, after
+    // scaling task.maxBudgetUsd (and any --max-budget-usd ceiling) by this
+    // cell's price relative to Sonnet 5 -- see scaledMaxBudgetUsd(). Logged
+    // so a run cut off for exceeding budget is auditable against the cap
+    // it actually ran under, not the unscaled task default.
+    max_budget_usd: effectiveBudget,
     session_id: (json && json.session_id) || null,
     // Distinct from a genuine task/model failure -- see isAuthError() above
     // and scripts/benchmark.mjs's abort-on-first-auth_error handling.

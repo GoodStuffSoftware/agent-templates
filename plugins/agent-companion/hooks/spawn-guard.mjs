@@ -98,8 +98,26 @@ try {
   // chose the tier left no trace and could never be compared against what the
   // task turned out to need. Capture it whenever it IS stated.
   const brief = String(input.prompt || '');
-  const wm = brief.match(/\b(?:WARRANT|WEIGHT)\s*:\s*(?:weight\s*)?([1-5])\b/i);
-  let declaredWeight = wm ? Number(wm[1]) : null;
+  // WEIGHT: line vs a WARRANT's OWN weight are two different things, and
+  // conflating them was a live bug (2026-09-23): "TYPE: novel-design" +
+  // "WARRANT: weight 4 - <reason>" got the WARRANT's "4" parsed as an
+  // EXPLICIT weight declaration, which bypassed the type's own preset (5)
+  // and its routing-trial override entirely, fell back to the plain grid,
+  // and then denied the exact opus spawn the trial prescribes for a
+  // manufactured "over-provisioned" mismatch. A WARRANT justifies a tier;
+  // it does not redeclare the task's weight, and must never outrank a
+  // declared TYPE. Precedence (see the resolveExpected() call below):
+  // explicit TYPE (with its trial override) > a real WEIGHT: line >
+  // a WARRANT's own stated weight. weightLineExplicit therefore reflects
+  // ONLY a genuine WEIGHT: line; a WARRANT-only weight still counts as A
+  // declared weight for declaredWeight/telemetry/fitOn (TELEMETRY.md
+  // documents declared_weight coming from either), but never as the
+  // EXPLICIT deviation that discards a named TYPE's own preset.
+  const weightLineMatch = brief.match(/\bWEIGHT\s*:\s*(?:weight\s*)?([1-5])\b/i);
+  const warrantWeightMatch = brief.match(/\bWARRANT\s*:\s*(?:weight\s*)?([1-5])\b/i);
+  const weightLineExplicit = !!weightLineMatch;
+  let declaredWeight = weightLineMatch ? Number(weightLineMatch[1])
+    : (warrantWeightMatch ? Number(warrantWeightMatch[1]) : null);
   const weightWasDeclared = declaredWeight !== null;
   const km = brief.match(/\bKIND\s*:\s*(mechanical|bounded|diagnostic|novel-design)\b/i);
   let declaredKind = km ? km[1].toLowerCase() : null;
@@ -147,7 +165,10 @@ try {
       const resolved = resolveExpected({
         type: declaredType,
         weight: declaredWeight, kind: declaredKind, consequence: declaredConsequence,
-        weightExplicit: weightWasDeclared, kindExplicit: kindWasDeclared, consequenceExplicit: consequenceWasDeclared,
+        // weightExplicit is weightLineExplicit, NOT weightWasDeclared: only a
+        // real WEIGHT: line is a deliberate deviation from a named TYPE's own
+        // preset; a WARRANT's incidental weight must not silently discard it.
+        weightExplicit: weightLineExplicit, kindExplicit: kindWasDeclared, consequenceExplicit: consequenceWasDeclared,
       });
       if (resolved.model) {
         route = resolved;
@@ -166,6 +187,27 @@ try {
     } catch { /* table unreadable */ }
   }
   const routeLabel = route?.model ? `${route.model}${route.effort ? '/' + route.effort : ''}` : '';
+
+  // --- Premium-tier determination, ROUTING-AWARE (bugfix 2026-09-23) -----
+  // The premium set used to be hard-coded to isPremium()'s tier-table
+  // classification alone, so under routing trial v2 (most task types now
+  // resolve to opus/low or opus/high) EVERY spawn requesting opus demanded
+  // a warrant, even one that named exactly the TYPE the trial itself routes
+  // there — the routing table telling a spawner "use opus" and then this
+  // guard telling it "justify using opus" is not the over-provisioning this
+  // guard exists to stop. The fix: a model is premium FOR THIS SPAWN unless
+  // the SAME resolved routing that answers "what should this run on" also
+  // names it — that is not a spawner reaching for the expensive tier, it is
+  // the table's own prescribed answer. A route exists whenever fitOn is
+  // true (a TYPE, or an explicit/warrant weight, was declared) and
+  // resolveExpected() found a row. Fable is excluded from this exception on
+  // purpose: routingNote is explicit that "nothing routes to fable — it is
+  // an exception, not a row", so no route can ever justify it, and it stays
+  // a warranted exception on every spawn regardless of TYPE/WEIGHT.
+  const spawnAlias = model ? classifyModel(model).alias : '';
+  const routingKnown = fitOn && !!route?.model;
+  const routeMatchesModel = routingKnown && !!spawnAlias && classifyModel(route.model).alias === spawnAlias;
+  const isPremiumForSpawn = spawnAlias === 'fable' ? true : (routeMatchesModel ? false : isPremium(model));
 
   let autofilled = false;
   let updatedInput = null;
@@ -586,10 +628,10 @@ try {
   }
 
   // --- Gate 1, block mode --------------------------------------------------
-  // Checked before the isPremium() early-return just below: spawn SHAPE is
-  // orthogonal to model TIER, so this must apply the same way to a premium
-  // spawn and a cheap one, not only to whichever one isPremium() lets fall
-  // through to the fit/warrant/cap checks.
+  // Checked before the isPremiumForSpawn early-return just below: spawn SHAPE
+  // is orthogonal to model TIER, so this must apply the same way to a
+  // premium spawn and a cheap one, not only to whichever one
+  // isPremiumForSpawn lets fall through to the fit/warrant/cap checks.
   if (gate1Action === 'block') {
     recordDenial('foreground', p, `main-session foreground spawn (${input.subagent_type || 'an agent'}), no FOREGROUND justification`);
     deny(
@@ -612,11 +654,17 @@ try {
     // The cheap direction is never blocked, but a weight-4 task on haiku is
     // the failure that ships wrong code, so it is said out loud.
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}. ${fit.action}.`;
-  } else if (fit?.verdict === 'over' && !isPremium(model)) {
+  } else if (fit?.verdict === 'over' && !isPremiumForSpawn) {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}. Re-spawn there unless the weight is understated.`;
   }
+  // Set only in the warrant section below (routing-can't-be-inferred case);
+  // declared here so it is defined for the early-exit combineNotes() call
+  // too, even though that branch can never actually populate it (it only
+  // runs once we are already past the point where isPremiumForSpawn is
+  // known true — see the warrant section).
+  let warrantSoftNote = null;
 
-  if (!isPremium(model)) allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote), withAdditions(updatedInput));
+  if (!isPremiumForSpawn) allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
@@ -637,19 +685,41 @@ try {
   }
 
   // --- Warrant -----------------------------------------------------------
+  // Reaching this point means isPremiumForSpawn was true, which (fable
+  // aside) only happens two ways: routing is KNOWN (a TYPE or WEIGHT
+  // resolved a route) and DISAGREES with the requested model — but that
+  // shape was already denied above by the best-fit check, EXCEPT when the
+  // model is unrecognised by the tier table (fit verdict "unknown", not
+  // "over" — the fit check only denies on "over") — or routing is UNKNOWN
+  // entirely (no TYPE, no WEIGHT declared anywhere). Fable and a
+  // known-but-disagreeing route are cases this guard CAN verify, so a
+  // missing warrant still blocks. An unknown/unrecognised route is the
+  // case the fix's own instruction calls out: warn, don't block, since
+  // nothing here can confirm the premium tier either way.
   if (opt('warrant_required', true)) {
     if (!/WARRANT\s*:/i.test(brief)) {
-      recordDenial('warrant', p, `premium tier ${model} requested with no warrant`);
-      deny(
-        (autofilled
-          ? `Premium warrant: the routing table sends declared weight ${declaredWeight} to "${model}", a premium tier, and the brief states no justification.\n\n`
-          : `Premium warrant: this spawn requests "${model}", a premium tier, with no stated justification.\n\n`) +
-        `Add a line to the agent's brief in the form:\n` +
-        `  WARRANT: weight <1-5> — <why a cheaper tier cannot do this>\n\n` +
-        `If you cannot write that line honestly, the task does not warrant the tier — ` +
-        `re-spawn at sonnet (or haiku for reads and searches). These warrants are logged ` +
-        `and audited, so a weak one is worse than a downgrade.`
-      );
+      if (spawnAlias === 'fable' || routingKnown) {
+        recordDenial('warrant', p, `premium tier ${model} requested with no warrant`);
+        deny(
+          (autofilled
+            ? `Premium warrant: the routing table sends declared weight ${declaredWeight} to "${model}", a premium tier, and the brief states no justification.\n\n`
+            : `Premium warrant: this spawn requests "${model}", a premium tier, with no stated justification.\n\n`) +
+          `Add a line to the agent's brief in the form:\n` +
+          `  WARRANT: weight <1-5> — <why a cheaper tier cannot do this>\n\n` +
+          `If you cannot write that line honestly, the task does not warrant the tier — ` +
+          `re-spawn at sonnet (or haiku for reads and searches). These warrants are logged ` +
+          `and audited, so a weak one is worse than a downgrade.`
+        );
+      } else {
+        // Routing can't be inferred at all (no TYPE, no WEIGHT anywhere) —
+        // warn rather than block: a false block here stops legitimate work
+        // the guard has no basis to judge either direction.
+        warrantSoftNote = `agent-companion: this spawn resolves to ${model}, a premium tier, with no WARRANT line — ` +
+          'and no TYPE or WEIGHT is declared either, so the routing table has nothing to check it against. Not ' +
+          'blocking: this guard cannot confirm the tier is unwarranted, only that it cannot confirm it IS ' +
+          'warranted. Add a TYPE (or WEIGHT) line so the guard can judge fit, or add ' +
+          '"WARRANT: weight <1-5> — <why a cheaper tier cannot do this>" to state it explicitly.';
+      }
     }
   }
 
@@ -677,7 +747,7 @@ try {
     if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
   }
 
-  allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote), withAdditions(updatedInput));
+  allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
 } catch {
   passthrough(); // never break a session
 }
