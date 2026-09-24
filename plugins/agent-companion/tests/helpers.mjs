@@ -108,6 +108,7 @@ export function runScript(scriptRelPath, args = [], { env = {}, cwd, timeout = 1
     cwd: cwd || PLUGIN_ROOT,
     env: { ...process.env, ...env },
     timeout,
+    windowsHide: true,
   });
   const out = (res.stdout || '').trim();
   let json = null;
