@@ -603,7 +603,12 @@ function profileLayer({ type, state, typeDef, consequence, now }) {
   if (state.status !== 'ok') return { ...base, status: 'absent', note: 'no routing profile' };
   const rows = state.profile.rows || {};
   if (!type || !hasOwn(rows, type)) return { ...base, status: 'absent', note: `profile rev ${state.revision} has no row for ${type || 'this task'}` };
-  const row = rows[type];
+  // A hand-edited effort is matched case-insensitively everywhere, so it is
+  // also USED lower-cased ("HIGH" runs as high), never verbatim (S2 review P4).
+  const raw = rows[type];
+  const row = isPlainObj(raw) && typeof raw.effort === 'string' && raw.effort !== raw.effort.toLowerCase()
+    ? { ...raw, effort: raw.effort.toLowerCase() }
+    : raw;
   if (isPlainObj(row) && row.state === 'retired') return { ...base, row, status: 'retired', note: `row retired (profile rev ${state.revision})` };
   const refusal = profileRowRefusal(type, row, { typeDef, consequence, now, mode: 'read' });
   return { ...base, row, status: refusal ? 'refused' : 'eligible', refusal, note: '' };

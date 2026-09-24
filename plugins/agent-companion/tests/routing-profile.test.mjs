@@ -268,6 +268,17 @@ test('without a waiver, F5 raises a hand-edited elevated row below high (floors 
   assert.equal(r.waiver, null);
 });
 
+// S2 review P4: a hand-edited effort matched case-insensitively but was
+// used verbatim ("HIGH"); it is lower-cased at read time.
+test('a hand-edited upper-case effort is used lower-cased', () => {
+  writeProfile(profile({ 'bounded-feature': row('sonnet', 'HIGH') }));
+  const r = ctx.resolveRoute({ type: 'bounded-feature', now: BEFORE });
+  assert.deepEqual([r.layer, label(r)], ['profile', 'sonnet/high']);
+  writeProfile(profile({ 'code-review': row(null, 'XHigh') }));
+  const cr = ctx.resolveRoute({ type: 'code-review', writer: { model: 'sonnet', effort: 'high' }, now: BEFORE });
+  assert.deepEqual([cr.layer, label(cr)], ['profile', 'sonnet/xhigh']);
+});
+
 // S2 review P2: raiseEffort() cannot raise a model that takes no effort, so
 // a haiku row on an elevated type used to skip F5 entirely. Such a model
 // counts as BELOW the floor: the row is skipped unless it carries an honoured
