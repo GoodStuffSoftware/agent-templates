@@ -1,6 +1,6 @@
 # ADR 0003: per-user routing profiles, derived from benchmarking the user's own work
 
-**Status:** Proposed (design only; awaiting operator approval)
+**Status:** Accepted (2026-09-23)
 **Date:** 2026-09-23
 **Owner:** agent-companion plugin (`plugins/agent-companion/`)
 
@@ -605,41 +605,58 @@ optional.
 1. **Where the profile lives.** The brief said the plugin data directory,
    but that directory is deleted on uninstall. *Recommendation:*
    `<stateRoot>/config/`, as decided above.
+   **Decided:** config dir, not plugin data — as recommended.
 2. **The elevated effort floor (F5).** Should it be soft, waivable only by an
    operator-observed row, or inviolable? *Recommendation:* soft as designed.
    The operator already routes integration to opus/high, which is at the
    floor, so nothing today depends on waiving it, but a user with cheap
    git-plumbing may want to.
+   **Decided:** soft, waivable only by an operator-observed row — as
+   recommended.
 3. **A model generation changes under a row.** Keep applying the row and flag
    it (as designed), or fall through to shipped defaults?
    *Recommendation:* keep and flag. A mass fall-through on release day is an
    unreviewed routing change.
+   **Decided:** keep the row and flag it — as recommended.
 4. **Decision thresholds.** The design uses a 15% cost delta, n ≥ 5, at
    least 2 packs, and a Wilson lower bound ≥ 0.6 for a downgrade.
    *Recommendation:* accept these for v1, keep them in a config block rather
    than in code, and revisit after the first mined run.
+   **Decided:** 15% cost / n≥5 / 2 packs / lower-CI ≥ 0.6 for v1, kept in
+   config — as recommended.
 5. **Integration's public default.** Should it go back to the grid
    (sonnet/high) for public users? *Recommendation:* yes. Your
    "Sonnet struggles here" evidence moves into your profile, where it keeps
    applying to you.
+   **Decided:** public default goes back to sonnet/high; the operator's
+   observation moves to their profile — as recommended.
 6. **The default objective.** `api-cost` or `plan-usage`?
    *Recommendation:* `api-cost`, with the plan-usage index shown alongside,
    until a user has measured their own multipliers. The 1.5x tooltip is
    still unconfirmed.
+   **Decided:** `api-cost` by default, with plan usage shown — as
+   recommended.
 7. **Team profiles.** Import as a proposal only (as designed), or a real
    team layer between the user and the shipped trial? *Recommendation:*
    proposal-only for v1, and add a layer only if a team actually asks.
+   **Decided:** team profiles import as a proposal only — as recommended.
 8. **`premium_cap` and routed opus.** Rows that name opus already let those
    spawns skip the concurrency cap as well as the warrant.
    *Recommendation:* separate the two. Keep the warrant exemption tied to
    the route, but count the cap by the resolved tier's rank regardless of
    route, so a profile cannot remove the fan-out bound. This would be a
    small separate change, and could land alongside slice 1.
+   **Decided:** `premium_cap` is counted by the resolved tier's rank
+   regardless of route — as recommended.
 9. **Admitting mined packs.** Should a human review every S1 (git) pack's
    symptom report, or only S2 (card) packs? *Recommendation:* only S2
    packs. S1 packs have automated gates (the blind drafter, leak phrases,
    and `verifyPack`), and their reports are shown in the proposal for
    spot checks.
+   **Decided:** human review only for task-card (S2) packs — as
+   recommended.
 10. **Should trial rows expire automatically** at `reviewBy`?
     *Recommendation:* no. That matches shipped trials today, and the scout
     signal forces the review instead.
+    **Decided:** trial rows don't auto-expire; the scout forces a review —
+    as recommended.
