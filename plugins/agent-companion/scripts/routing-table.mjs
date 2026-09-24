@@ -246,7 +246,11 @@ if (cfg.taskTypes) {
     let resolved = '—';
     if (typeof t.weight === 'number') {
       const tr = typeRoute(name);
-      resolved = tr.won ? `\`${tr.label}\` _(trial override)_` : `\`${tr.label}\`${profileMark(tr)}`;
+      if (tr.won) {
+        resolved = `\`${tr.label}\` _(trial override)_`;
+      } else {
+        resolved = `\`${tr.label}\`${profileMark(tr)}`;
+      }
     } else if (t.weight === 'parity') {
       resolved = '_writer\'s model; effort ≥ writer_';
     }
