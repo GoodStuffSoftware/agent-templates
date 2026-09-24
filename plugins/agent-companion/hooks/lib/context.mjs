@@ -8,7 +8,7 @@
 
 import {
   readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync,
-  openSync, fstatSync, readSync, closeSync, unlinkSync,
+  openSync, fstatSync, readSync, closeSync, unlinkSync, renameSync,
 } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1683,6 +1683,70 @@ export function writeJson(file, value) {
   try { writeFileSync(file, JSON.stringify(value)); } catch { /* fail open */ }
 }
 
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no wait: retry at once */ }
+}
+
+// writeJson through a temp file renamed over the target, so a reader never
+// sees a half-written file. On Windows a reader holding the target open for
+// the instant of its read makes the replace fail with EPERM/EBUSY, so the
+// rename is retried briefly, then falls back to a direct write. Never throws.
+export function writeJsonAtomic(file, value) {
+  const text = JSON.stringify(value);
+  const tmp = `${file}.${process.pid}.${Math.random().toString(16).slice(2, 10)}.tmp`;
+  try {
+    writeFileSync(tmp, text);
+    for (let i = 0; ; i += 1) {
+      try { renameSync(tmp, file); return; } catch (e) {
+        if (i >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes(e?.code)) break;
+        sleepSync(10);
+      }
+    }
+  } catch { /* temp write failed: fall through to the direct write */ }
+  try { unlinkSync(tmp); } catch { /* already renamed or never written */ }
+  writeJson(file, value);
+}
+
+// An exclusive lock for a read-modify-write of one small state file, shared
+// by every hook process that writes it (the premium window: the spawn guard
+// on PreToolUse and spawn-log on SubagentStart). The lock is `<file>.lock`,
+// created O_EXCL ('wx'). A waiter polls for at most STATE_LOCK_WAIT_MS; a
+// lock older than STATE_LOCK_STALE_MS is a crashed holder's and is broken
+// (the critical section is one small read and one write, milliseconds, so
+// that age is far past any live holder). On timeout, or when the lock cannot
+// be created at all, fn still runs, unlocked: a hook fails open and never
+// throws for a lock. Residual race, accepted: two waiters that both judge
+// the same lock stale can both break it, one removing the other's fresh
+// lock; that needs a crashed holder first and costs at most one lost update.
+// fn must not exit the process (deny() does): return a verdict and act on
+// it after the lock is released.
+export const STATE_LOCK_WAIT_MS = 2000;
+export const STATE_LOCK_STALE_MS = 5000;
+export function withStateLock(file, fn) {
+  const lock = `${file}.lock`;
+  let fd = null;
+  try { mkdirSync(dirname(file), { recursive: true }); } catch { /* fail open */ }
+  const deadline = Date.now() + STATE_LOCK_WAIT_MS;
+  for (;;) {
+    try { fd = openSync(lock, 'wx'); break; } catch (e) {
+      if (!['EEXIST', 'EPERM', 'EACCES', 'EBUSY'].includes(e?.code)) break; // cannot lock here: run unlocked
+    }
+    let stale = false;
+    try { stale = Date.now() - statSync(lock).mtimeMs > STATE_LOCK_STALE_MS; } catch { /* vanished: retry */ }
+    if (Date.now() >= deadline) break; // fail open: run unlocked
+    if (stale) { try { unlinkSync(lock); } catch { /* another waiter broke it */ } continue; }
+    sleepSync(5 + Math.floor(Math.random() * 20));
+  }
+  try {
+    return fn();
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* already closed */ }
+      try { unlinkSync(lock); } catch { /* best effort */ }
+    }
+  }
+}
+
 // --- Premium fan-out window (state/premium-window.json) ---------------------
 // The cap counts premium spawns that actually STARTED, not every spawn the
 // guard allowed. An allowed spawn the harness then rejects (an unknown
@@ -1714,12 +1778,16 @@ export function premiumWindowLive(entries, now = Date.now()) {
 export function confirmPremiumStart(sessionId, now = Date.now()) {
   if (!sessionId) return false;
   const f = stateFile('premium-window.json');
-  const live = premiumWindowLive(readJson(f, []), now);
-  const idx = live.findIndex((e) => e && typeof e === 'object' && !e.confirmed && e.sid === sessionId);
-  if (idx < 0) return false;
-  live[idx] = { ...live[idx], confirmed: true, startedAt: now };
-  writeJson(f, live);
-  return true;
+  // Under the window lock (withStateLock): the spawn guard read-modify-writes
+  // the same file, and an unlocked interleaving lost one side's update.
+  return withStateLock(f, () => {
+    const live = premiumWindowLive(readJson(f, []), now);
+    const idx = live.findIndex((e) => e && typeof e === 'object' && !e.confirmed && e.sid === sessionId);
+    if (idx < 0) return false;
+    live[idx] = { ...live[idx], confirmed: true, startedAt: now };
+    writeJsonAtomic(f, live);
+    return true;
+  });
 }
 
 // Emitted telemetry is a PUBLIC CONTRACT, not an internal detail — other tools

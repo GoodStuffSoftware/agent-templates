@@ -26,7 +26,7 @@
 import { createHash } from 'node:crypto';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
-  premiumWindowLive, PREMIUM_WINDOW_MS,
+  premiumWindowLive, PREMIUM_WINDOW_MS, withStateLock, writeJsonAtomic,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
@@ -771,17 +771,31 @@ try {
     const cap = Math.max(1, opt('premium_max_concurrent', 2));
     const f = stateFile('premium-window.json');
     const now = Date.now();
-    const all = readJson(f, []);
-    // Started spawns count for the window; a spawn not yet confirmed started
-    // counts only while young (premiumWindowLive, context.mjs), so one the
-    // harness rejects stops holding a slot instead of extending the block.
-    const recent = premiumWindowLive(all, now);
+    // The whole read-count-write runs under the window lock, shared with
+    // SubagentStart's confirmPremiumStart (context.mjs withStateLock): without
+    // it a parallel burst of premium spawns each read the same count and all
+    // passed the cap, and a guard and a start interleaving lost an entry.
+    // deny() exits the process, so the verdict is acted on after the lock.
+    const counted = withStateLock(f, () => {
+      // Started spawns count for the window; a spawn not yet confirmed started
+      // counts only while young (premiumWindowLive, context.mjs), so one the
+      // harness rejects stops holding a slot instead of extending the block.
+      const recent = premiumWindowLive(readJson(f, []), now);
+      if (recent.length >= cap) {
+        writeJsonAtomic(f, recent);
+        return recent.length;
+      }
+      // A probe must not consume the cap. A teammate (team_name) is recorded as
+      // started at once: there is no evidence SubagentStart fires for one, and
+      // under-counting it would reopen the fan-out this cap exists to bound.
+      if (!isCanary) writeJsonAtomic(f, [...recent, { t: now, sid, confirmed: !!input.team_name }]);
+      return null;
+    });
 
-    if (recent.length >= cap) {
-      writeJson(f, recent);
-      recordDenial('premium-cap', p, `${recent.length} premium agents in window, cap ${cap}`);
+    if (counted !== null) {
+      recordDenial('premium-cap', p, `${counted} premium agents in window, cap ${cap}`);
       deny(
-        `Premium fan-out cap: ${recent.length} premium-tier agents already started in the last ` +
+        `Premium fan-out cap: ${counted} premium-tier agents already started in the last ` +
         `${WINDOW_MS / 60000} minutes and the cap is ${cap}.\n\n` +
         `This is the exact shape of the four-Fable incident: each spawn looked reasonable ` +
         `alone, and nothing was counting them together. Run this one at sonnet, or wait for ` +
@@ -794,10 +808,6 @@ try {
         `premium work may need the cap raised in settings rather than worked around.)`
       );
     }
-    // A probe must not consume the cap. A teammate (team_name) is recorded as
-    // started at once: there is no evidence SubagentStart fires for one, and
-    // under-counting it would reopen the fan-out this cap exists to bound.
-    if (!isCanary) writeJson(f, [...recent, { t: now, sid, confirmed: !!input.team_name }]);
   }
 
   allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
