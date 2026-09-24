@@ -275,13 +275,20 @@ See docs/BENCHMARK.md "Statistics" and "Reproducibility metadata".
 hedged answers (29-57% on real-history tasks even when fully correct). Read
 the actual claim text before treating a low rate as a quality problem.
 
-**Optional rubric judge** (docs/BENCHMARK.md "Rubric judge"): for design
-quality the hidden test cannot see. Calibrate first
+**Optional rubric judge** (docs/BENCHMARK.md "Rubric judge"): a DESIGN-QUALITY
+SIGNAL ONLY, never a correctness check — on real (non-fixture) work the judge
+does NOT track the hidden tests, it has passed changes the hidden tests then
+failed. Correctness comes from the hidden tests alone; never gate pass/fail
+or a merge decision on `judge_pass`. Calibrate first
 (`--calibrate-judge --judge-model <id>`, real judge calls), then pass the
 same `--judge-model` to the run. The judge must differ from, and be at least
-as strong as, every cell's model, and an uncalibrated judge is refused before
-any model call. Report `judge_pass_rate` as its own column. Never fold it
-into pass@1.
+as strong as, every cell's model AND effort (a fable/xhigh or opus/xhigh
+answer is bumped up to a judge effort of at least its own, capped at xhigh),
+and an uncalibrated judge is refused before any model call. Report
+`judge_pass_rate` as its own column. Never fold it into pass@1. Cost is real:
+measured at roughly $0.81/vote at fable/high (2026-09-24), about 3x a rough
+earlier estimate — check `judge_cost_usd` on a small run before committing
+to a full grid.
 
 ## (7) Outputs
 

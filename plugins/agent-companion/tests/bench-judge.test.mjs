@@ -22,7 +22,7 @@ import { PLUGIN_ROOT, runScript } from './helpers.mjs';
 import {
   validateJudgeConfig, checkJudgeEligibility, scrubIdentity, buildJudgePrompt, parseVerdict, runJudge,
   treeDiff, calibrateJudge, assertJudgeCalibrated, loadCalibrationStore, taskJudgeKey,
-  JUDGE_MAX_BUDGET_USD, JUDGE_DEFAULT_EFFORT,
+  makeCliJudgeCaller, JUDGE_MAX_BUDGET_USD, JUDGE_DEFAULT_EFFORT, JUDGE_MAX_DIFF_CHARS,
 } from '../bench/judge.mjs';
 import { runOne, rebuildSummary, CELLS } from '../bench/runner.mjs';
 import { loadPack, buildTaskFromPack, applyPlantedBad } from '../bench/task-packs/lib.mjs';
@@ -66,10 +66,23 @@ test('validateJudgeConfig: defaults, and caps on effort, budget and temperature'
   assert.equal(c.temperature, null);
   assert.ok(c.maxBudgetUsd > 0 && c.maxBudgetUsd <= JUDGE_MAX_BUDGET_USD);
   assert.throws(() => validateJudgeConfig({ model: 'opus' }), /full model id/);
-  assert.throws(() => validateJudgeConfig({ model: 'claude-opus-5-5', effort: 'xhigh' }), /not allowed/);
+  // xhigh is allowed (fixed 2026-09: a fable/xhigh or opus/xhigh author could
+  // never get a judge whose effort was at least its own while the cap
+  // stopped at 'high') -- 'max' stays out of reach, that cap is intentional.
+  assert.equal(validateJudgeConfig({ model: 'claude-opus-5-5', effort: 'xhigh' }).effort, 'xhigh');
+  assert.throws(() => validateJudgeConfig({ model: 'claude-opus-5-5', effort: 'max' }), /not allowed/);
   assert.throws(() => validateJudgeConfig({ model: 'claude-opus-5-5', maxBudgetUsd: 5 }), /exceeds the cap/);
   assert.throws(() => validateJudgeConfig({ model: 'claude-opus-5-5', temperature: 0.2 }), /temperature must be left unset/);
   assert.throws(() => validateJudgeConfig({}), /judge model is required/);
+});
+
+test('validateJudgeConfig: judge effort is bumped to at least the author\'s effort, never lowered, capped at xhigh', () => {
+  assert.equal(validateJudgeConfig({ model: 'claude-opus-5-5', effort: 'low', authorEffort: 'xhigh' }).effort, 'xhigh');
+  assert.equal(validateJudgeConfig({ model: 'claude-opus-5-5', effort: 'high', authorEffort: 'low' }).effort, 'high', 'never lowered below its own configured effort');
+  assert.equal(validateJudgeConfig({ model: 'claude-opus-5-5', effort: 'medium', authorEffort: 'medium' }).effort, 'medium');
+  // An author run at 'max' (not a judge-eligible effort) still gets the
+  // strongest judge effort actually available, rather than being refused.
+  assert.equal(validateJudgeConfig({ model: 'claude-opus-5-5', effort: 'high', authorEffort: 'max' }).effort, 'xhigh');
 });
 
 test('checkJudgeEligibility: different from, and at least as strong as, the model under test', () => {
@@ -133,12 +146,72 @@ test('runJudge: three independent calls, pass on 2 of 3, unparseable votes never
   assert.equal(err.cost_usd, null, 'unknown cost stays null');
 });
 
-test('treeDiff: unified hunks, guard file excluded, no-change -> empty', () => {
+test('treeDiff: real unified diff (git diff --no-index), guard file excluded, no-change -> empty', () => {
   const d = treeDiff({ 'a.js': 'x\ny\nz\n', 'DO_NOT_TOUCH.txt': 'g' }, { 'a.js': 'x\nY\nz\n', 'b.js': 'new\n', 'DO_NOT_TOUCH.txt': 'changed' }, { exclude: ['DO_NOT_TOUCH.txt'] });
-  assert.match(d, /--- a\/a\.js\n\+\+\+ b\/a\.js\n@@\n x\n-y\n\+Y\n z/);
-  assert.match(d, /--- \/dev\/null\n\+\+\+ b\/b\.js/);
-  assert.doesNotMatch(d, /DO_NOT_TOUCH/);
-  assert.equal(treeDiff({ a: '1' }, { a: '1' }), '');
+  assert.match(d, /--- a\/a\.js\n\+\+\+ b\/a\.js\n@@[^\n]*@@[^\n]*\n x\n-y\n\+Y\n z/);
+  assert.match(d, /--- \/dev\/null\n\+\+\+ b\/b\.js/, 'a new file diffs against /dev/null');
+  assert.doesNotMatch(d, /DO_NOT_TOUCH/, 'excluded path never appears');
+  assert.equal(treeDiff({ a: '1' }, { a: '1' }), '', 'identical trees -> empty diff');
+});
+
+test('treeDiff: a file over 3000 lines with a small change gives a SMALL diff (fails on the old LCS-fallback code, which replaced the whole file)', () => {
+  const lines = [];
+  for (let i = 0; i < 3500; i += 1) lines.push(`line${i}`);
+  const oldContent = `${lines.join('\n')}\n`;
+  const changed = lines.slice();
+  changed[1000] = 'CHANGED';
+  const newContent = `${changed.join('\n')}\n`;
+  const d = treeDiff({ 'src/big.js': oldContent }, { 'src/big.js': newContent });
+  assert.ok(d.length < 1000, `expected a small hunk-only diff, got ${d.length} chars (old code produced 440-780K on real files this shape)`);
+  assert.match(d, /-line1000/);
+  assert.match(d, /\+CHANGED/);
+  assert.doesNotMatch(d, /line0\b/, 'unrelated lines 3000+ apart are not dumped as whole-file replacement');
+});
+
+test('treeDiff: ordered source files first, then tests, then docs', () => {
+  const oldTree = { 'docs/guide.md': 'old doc', 'src/index.js': 'old src', 'tests/index.test.js': 'old test' };
+  const newTree = { 'docs/guide.md': 'new doc', 'src/index.js': 'new src', 'tests/index.test.js': 'new test' };
+  const d = treeDiff(oldTree, newTree);
+  const iSrc = d.indexOf('src/index.js');
+  const iTest = d.indexOf('tests/index.test.js');
+  const iDoc = d.indexOf('docs/guide.md');
+  assert.ok(iSrc >= 0 && iTest >= 0 && iDoc >= 0, 'all three files are present in the diff');
+  assert.ok(iSrc < iTest, 'source comes before tests');
+  assert.ok(iTest < iDoc, 'tests come before docs');
+});
+
+test('treeDiff: caps total size at JUDGE_MAX_DIFF_CHARS with an explicit truncation marker', () => {
+  const big = 'x\n'.repeat(JUDGE_MAX_DIFF_CHARS);
+  const d = treeDiff({ 'f.txt': '' }, { 'f.txt': big });
+  assert.ok(d.length <= JUDGE_MAX_DIFF_CHARS + 200, 'capped near the limit, not left to grow unbounded');
+  assert.match(d, /truncated/, 'a clear truncation marker, not a silent cut');
+});
+
+test('makeCliJudgeCaller pipes the prompt through stdin, not argv (fails on the old code, which hit ENAMETOOLONG on Windows for large prompts)', async () => {
+  const captured = {};
+  const execFileImpl = (bin, args, options, callback) => {
+    captured.bin = bin;
+    captured.args = args;
+    const chunks = [];
+    return {
+      stdin: {
+        write(chunk) { chunks.push(chunk); return true; },
+        end() {
+          captured.stdin = chunks.join('');
+          const json = JSON.stringify({ result: `REASONING: got ${captured.stdin.length} chars\nVERDICT: PASS`, total_cost_usd: 0.002, is_error: false });
+          callback(null, json, '');
+        },
+      },
+    };
+  };
+  const caller = makeCliJudgeCaller(() => 'fake-claude-bin', { execFileImpl });
+  const bigUser = `PROMPT_START${'y'.repeat(45000)}PROMPT_END`; // over the ~32K Windows argv limit
+  const result = await caller({ system: 'sys prompt', user: bigUser, model: 'claude-fable-5-1', effort: 'xhigh', maxBudgetUsd: 0.3 });
+  assert.ok(!captured.args.some((a) => a.includes('PROMPT_START')), 'the prompt is never one of the spawned argv entries');
+  assert.equal(captured.stdin, bigUser, 'the exact prompt text arrives intact via stdin');
+  assert.match(result.text, /VERDICT: PASS/);
+  assert.equal(captured.args[0], '-p', '-p is passed bare (no positional prompt argument) so the CLI reads stdin');
+  assert.ok(captured.args.includes('xhigh'), 'effort still passed as a normal argument');
 });
 
 // ---------------------------------------------------------- calibration --
