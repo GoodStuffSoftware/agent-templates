@@ -199,6 +199,43 @@ test('the writer refuses to build on an invalid file or an unfoldable journal, a
   assert.equal(existsSync(files().profile), false);
 });
 
+// S2 review P3 (lead decision): rollback validates in READ mode (F1-F4), so a
+// journalled revision the writer would now refuse on F5 — here an adopted
+// hand edit — is restored exactly; F5 then raises it at resolve time.
+test('rollback restores a journalled revision exactly even when write-mode F5 would refuse it', () => {
+  freshRoot('rb-read');
+  store.setRow('explore', { model: 'sonnet', effort: 'low', now: NOW });
+  // Hand edit: an elevated row below the F5 floor, no waiver.
+  const p = readFile();
+  p.rows.integration = {
+    state: 'trial', model: 'sonnet', effort: 'low', cacheTtl: null, source: 'operator-observed',
+    since: '2026-09-01', reviewBy: null, waivesFloor: null, note: null, provenance: null,
+  };
+  writeFileSync(files().profile, JSON.stringify(p, null, 2));
+  rp._resetProfileCache();
+  const adopted = store.setRow('verify', { model: 'sonnet', effort: 'low', now: NOW }); // journals the adopt first
+  const adoptRev = readEntries().entries.find((e) => e.action === 'adopt-external-edit').revision;
+  const target = adopted.revision; // the state holding the hand-edited row (+ verify)
+  store.setRow('integration', { model: 'sonnet', effort: 'high', now: NOW });
+
+  const r = store.rollbackTo(target, { now: NOW });
+  const { entries } = readEntries();
+  assert.equal(JSON.stringify(rp.profileContent(readFile())), JSON.stringify(rp.profileContent(rp.rebuildAt(entries, target))), 'restored byte for byte');
+  assert.deepEqual([readFile().rows.integration.effort, r.revision], ['low', target + 2]);
+  // Resolve time: F5 raises the restored row as usual.
+  rp._resetProfileCache();
+  assert.equal(ctx.resolveRoute({ type: 'integration', now: NOW }).effort, 'high');
+
+  // rollback --row does the same for one row.
+  store.setRow('integration', { model: 'sonnet', effort: 'xhigh', now: NOW });
+  store.rollbackRow('integration', { now: NOW });
+  assert.equal(readFile().rows.integration.effort, 'low');
+  assert.ok(adoptRev < target);
+  // Read mode still refuses what the resolver refuses (F1-F4).
+  expectCode(() => store.commitChange(() => ({ action: 'rollback-row', type: 'integration', validate: 'read',
+    row: { ...readFile().rows.integration, model: 'fable' } })), 'refused');
+});
+
 test('compare-revision: a stale expectRevision is a conflict, not a lost update', () => {
   freshRoot('cas');
   store.setRow('operate', { model: 'sonnet', effort: 'low', now: NOW });

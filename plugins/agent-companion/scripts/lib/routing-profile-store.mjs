@@ -22,7 +22,9 @@
 //      stays a complete history
 //   5. apply the change and VALIDATE: schema, and every row the change
 //      touches through context.mjs's profileRowRefusal() in write mode
-//      (F1-F4 refused; F5 only with an operator-observed waiver)
+//      (F1-F4 refused; F5 only with an operator-observed waiver). A
+//      rollback is checked in read mode instead (F1-F4 only), so any
+//      journalled revision the resolver would accept is restorable exactly
 //   6. write a temp file beside the profile and rename it over (atomic on
 //      the same volume), then append the journal line(s)
 //   7. release the lock
@@ -140,7 +142,7 @@ function basedOnNow() {
 // Validate the rows a change touches (write mode) plus the profile's shape.
 // Returns the list of refusals (empty = OK). Local types are validated for
 // shape so a written profile never carries a type the reader would drop.
-export function validateForWrite(next, touched, { now } = {}) {
+export function validateForWrite(next, touched, { now, mode = 'write' } = {}) {
   const errs = [];
   const res = parseProfileText(JSON.stringify(next));
   if (res.status !== 'ok') return res.errors;
@@ -153,7 +155,7 @@ export function validateForWrite(next, touched, { now } = {}) {
     if (row === undefined) continue; // removed
     if (row && ACTIVE_STATES.has(row.state)) {
       const td = taskTypeDef(type, { state });
-      const reason = profileRowRefusal(type, row, { typeDef: td ? td.def : null, now, mode: 'write' });
+      const reason = profileRowRefusal(type, row, { typeDef: td ? td.def : null, now, mode });
       if (reason) errs.push(`${type}: ${reason}`);
     } else {
       // A retired row never resolves, so only its shape is checked.
@@ -221,7 +223,12 @@ export function commitChange(change, { by = 'operator', expectRevision, now, at 
       touched = [c.type];
       entry = { revision, at: stamp, action: c.action, type: c.type, before, after: c.row ?? null, by };
     }
-    const errs = validateForWrite(next, touched, { now });
+    // A rollback restores a journalled state: it is checked in READ mode
+    // (F1-F4, what the resolver itself refuses), not write mode, so a revision
+    // the writer would now refuse on F5 (an adopted hand edit, say) is still
+    // restorable exactly; F5 then raises it at resolve time as usual (S2
+    // review P3, lead decision).
+    const errs = validateForWrite(next, touched, { now, mode: c.validate === 'read' ? 'read' : 'write' });
     if (errs.length) throw new ProfileWriteError('refused', `refused: ${errs[0]}`, errs);
 
     writeAtomic(files.profile, JSON.stringify(next, null, 2) + '\n');
@@ -318,7 +325,7 @@ export function rollbackRow(type, { by = 'operator', now } = {}) {
     let i = hist.length - 1;
     while (i >= 0 && canonical(hist[i].value) === current) i -= 1;
     if (i < 0) throw new ProfileWriteError('not-found', `the journal holds no earlier version of the ${type} row`);
-    return { action: 'rollback-row', type, row: hist[i].value };
+    return { action: 'rollback-row', type, row: hist[i].value, validate: 'read' };
   }, { by, now });
 }
 
@@ -334,6 +341,6 @@ export function rollbackTo(target, { by = 'operator', now } = {}) {
     if (canonical(content) === canonical(profileContent(cur))) {
       throw new ProfileWriteError('usage', `the profile already matches revision ${n}; nothing to roll back`);
     }
-    return { action: 'rollback-to', type: null, content };
+    return { action: 'rollback-to', type: null, content, validate: 'read' };
   }, { by, now });
 }
