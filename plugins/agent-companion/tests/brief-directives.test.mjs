@@ -89,8 +89,8 @@ test('F4 unit: HTML comments; BOM, NBSP and nested list items; a line after a qu
 });
 
 // The F4 parser's own edges: comments and fences nested in each other and in
-// list items, Unicode spaces, deep lists. Each also runs through the real
-// guard in the 0.29.1 verification corpus; kept here as a unit record.
+// list items, Unicode spaces, deep lists. Each was also run through the
+// real guard before release; kept here as a unit record.
 test('F4 unit: comments, fences, quotes and lists nested in one another', () => {
   const conseq = (text) => declarationValue(briefDeclarations(text), 'CONSEQUENCE', /(routine|elevated|critical)\b/.source)?.[1] ?? null;
   const warranted = (text) => !!briefDeclarations(text).WARRANT;
