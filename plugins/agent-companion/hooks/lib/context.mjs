@@ -1184,6 +1184,45 @@ export function writeJson(file, value) {
   try { writeFileSync(file, JSON.stringify(value)); } catch { /* fail open */ }
 }
 
+// --- Premium fan-out window (state/premium-window.json) ---------------------
+// The cap counts premium spawns that actually STARTED, not every spawn the
+// guard allowed. An allowed spawn the harness then rejects (an unknown
+// subagent_type, say) used to hold a slot for the whole window, so each
+// failed retry extended the block. Now the guard records a PENDING entry
+// {t, sid, confirmed:false}; the SubagentStart hook (spawn-log.mjs) confirms
+// the oldest pending entry for its session; an entry never confirmed stops
+// counting after PREMIUM_PENDING_MS. Pending entries DO count while young,
+// so a parallel burst (several spawns before any has started — the
+// four-Fable shape) is still capped. PREMIUM_PENDING_MS is set from measured
+// spawn-to-start lag (p50 ~0.1 s, p99 ~52 s, max ~101 s over 394 pairs,
+// 2026-09-24) with headroom. A bare number is a pre-1b entry: confirmed.
+export const PREMIUM_WINDOW_MS = 10 * 60 * 1000;
+export const PREMIUM_PENDING_MS = 3 * 60 * 1000;
+
+function windowEntryLive(e, now) {
+  if (typeof e === 'number') return now - e < PREMIUM_WINDOW_MS;
+  if (!e || typeof e.t !== 'number') return false;
+  return now - e.t < (e.confirmed ? PREMIUM_WINDOW_MS : PREMIUM_PENDING_MS);
+}
+
+export function premiumWindowLive(entries, now = Date.now()) {
+  return (Array.isArray(entries) ? entries : []).filter((e) => windowEntryLive(e, now));
+}
+
+// SubagentStart: confirm the oldest live pending entry for this session.
+// Matched by session only — the start's agent_type does not always equal the
+// spawn's subagent_type (namespacing). Returns true when one was confirmed.
+export function confirmPremiumStart(sessionId, now = Date.now()) {
+  if (!sessionId) return false;
+  const f = stateFile('premium-window.json');
+  const live = premiumWindowLive(readJson(f, []), now);
+  const idx = live.findIndex((e) => e && typeof e === 'object' && !e.confirmed && e.sid === sessionId);
+  if (idx < 0) return false;
+  live[idx] = { ...live[idx], confirmed: true, startedAt: now };
+  writeJson(f, live);
+  return true;
+}
+
 // Emitted telemetry is a PUBLIC CONTRACT, not an internal detail — other tools
 // read these files. Every record carries the schema version that produced it, so
 // a consumer can skip records from a major version it does not understand

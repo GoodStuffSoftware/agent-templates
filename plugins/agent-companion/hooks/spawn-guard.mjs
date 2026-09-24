@@ -26,6 +26,7 @@
 import { createHash } from 'node:crypto';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
+  premiumWindowLive, PREMIUM_WINDOW_MS,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
@@ -35,7 +36,7 @@ import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract } from './lib/brevity.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
 
-const WINDOW_MS = 10 * 60 * 1000; // rolling window used to approximate concurrency
+const WINDOW_MS = PREMIUM_WINDOW_MS; // rolling window used to approximate concurrency (see context.mjs)
 
 // Allow — optionally saying something to the user, and/or rewriting the tool
 // input (`updatedInput` is how a PreToolUse hook fills in a model the spawn
@@ -781,7 +782,10 @@ try {
     const f = stateFile('premium-window.json');
     const now = Date.now();
     const all = readJson(f, []);
-    const recent = all.filter((t) => now - t < WINDOW_MS);
+    // Started spawns count for the window; a spawn not yet confirmed started
+    // counts only while young (premiumWindowLive, context.mjs), so one the
+    // harness rejects stops holding a slot instead of extending the block.
+    const recent = premiumWindowLive(all, now);
 
     if (recent.length >= cap) {
       writeJson(f, recent);
@@ -800,7 +804,10 @@ try {
         `premium work may need the cap raised in settings rather than worked around.)`
       );
     }
-    if (!isCanary) writeJson(f, [...recent, now]); // a probe must not consume the cap
+    // A probe must not consume the cap. A teammate (team_name) is recorded as
+    // started at once: there is no evidence SubagentStart fires for one, and
+    // under-counting it would reopen the fan-out this cap exists to bound.
+    if (!isCanary) writeJson(f, [...recent, { t: now, sid, confirmed: !!input.team_name }]);
   }
 
   allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
