@@ -140,8 +140,8 @@ export function isConfigFileRedirectGitVar(name) {
   return CONFIG_FILE_REDIRECT.has(String(name).toUpperCase());
 }
 
-export function isolatedWriteGitEnv(env = process.env, overrides = {}) {
-  const out = isolatedGitEnv(env, overrides);
+export function isolatedWriteGitEnv(env = process.env) {
+  const out = isolatedGitEnv(env);
   for (const k of Object.keys(out)) if (isConfigFileRedirectGitVar(k)) delete out[k];
   return out;
 }
