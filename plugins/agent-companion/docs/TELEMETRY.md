@@ -150,6 +150,10 @@ whose.
 | `v` | number | schema version |
 | `at` | ISO 8601 string | when the spawn was requested |
 | `session_id` | string | the session that requested it |
+| `guard_version` | string \| null | the plugin version of the spawn-guard copy that wrote this row (its own `plugin.json`). Rows written before this field existed have no key at all |
+| `guard_source` | `cache` \| `checkout` \| null | where that copy runs from: `cache` is an installed copy under the plugin cache (current or orphaned), `checkout` a `--plugin-dir` load or source tree |
+| `guard_scope` | string \| null | the install scope that applies to the spawn's cwd in `installed_plugins.json`: `user`, or `project:<hash>` / `local:<hash>` (first 12 hex of sha256 of the normalised project path, never the path); null when nothing is installed. The daily scout compares `guard_version` against the version installed for this scope (`stale_guard_running`) |
+| `subagent_type_rewritten_to` | string \| null | the ladder rung best-fit autofill rewrote a general-purpose (or unnamed) spawn to, so its effort is pinned too (`fit_autofill_ladder`); null when not rewritten. `subagent_type` keeps the type as the caller wrote it |
 | `spawned_by_agent_type` | string | what requested it — `main`, `subagent`, `teammate`, … |
 | `model` | string | the requested model, or the literal `(inherited)` |
 | `model_declared` | string or null | the model named at the spawn site, if any |

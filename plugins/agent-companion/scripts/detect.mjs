@@ -16,8 +16,11 @@ import { join, basename } from 'node:path';
 import { userInfo, homedir } from 'node:os';
 import {
   modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
-  homeRoot, stateRoot, resolveRoute,
+  homeRoot, stateRoot, resolveRoute, isLadderAgentName,
 } from '../hooks/lib/context.mjs';
+import {
+  readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
+} from '../hooks/lib/plugin-installs.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
 import {
@@ -208,7 +211,11 @@ try {
 
 // --- 2. Unknown agent types -------------------------------------------
 // Enforcement fails open on these by design; detection must not.
-const unknownRecords = readJsonl('unknown-agent-types.jsonl');
+// The ladder's own rungs (config/model-tiers.json `ladder[].agent`, bare or
+// agent-companion:-namespaced) are this plugin's own types, never drift —
+// filtered here too, so rows recorded before the guard learned that stop
+// raising the signal.
+const unknownRecords = readJsonl('unknown-agent-types.jsonl').filter((r) => !isLadderAgentName(r.agent_type));
 if (unknownRecords.length) {
   const types = [...new Set(unknownRecords.map((r) => r.agent_type).filter(Boolean))];
   const seen = new Set(baseline.knownUnknowns || []);
@@ -335,32 +342,141 @@ try {
 // the marketplace clone can be ahead of the installed cache; in the cloud, the
 // claude.ai plugin directory snapshots a marketplace when it is added and
 // serves that version until someone presses Sync. Either way the guards that
-// run are older than the guards that shipped, and nothing errors. Compare this
-// script's own manifest (the current copy) with what the harness has installed.
+// run are older than the guards that shipped, and nothing errors.
+//
+// "Latest" is the latest AVAILABLE version, never whichever checkout happens
+// to be running this script: locally that is the marketplace clone's own
+// plugin.json (what `claude plugin update` would install); in the cloud the
+// routine runs from a checkout of the marketplace repo itself, so that
+// checkout IS the latest available there. The comparison is directional:
+// only an install BELOW latest fires. An older checkout running the scout
+// (installed 0.29.1, checkout 0.29.0) stays silent, and so does an
+// unreleased dev checkout that is ahead of every release.
+const OWN_MANIFEST = (() => {
+  try { return JSON.parse(readFileSync(join(import.meta.dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8')); } catch { return null; }
+})();
+const PLUGIN_NAME = (OWN_MANIFEST && OWN_MANIFEST.name) || 'agent-companion';
+
+function readJsonFile(file) {
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
+}
+// The version a marketplace's local clone would install for `name`, or null.
+function marketplaceVersion(marketplace, name) {
+  if (!marketplace) return null;
+  const known = readJsonFile(join(claudeDir(), 'plugins', 'known_marketplaces.json')) || {};
+  const loc = (known[marketplace] && typeof known[marketplace].installLocation === 'string' && known[marketplace].installLocation)
+    || join(claudeDir(), 'plugins', 'marketplaces', marketplace);
+  let pluginDir = join(loc, 'plugins', name);
+  let listed = null;
+  const mj = readJsonFile(join(loc, '.claude-plugin', 'marketplace.json'));
+  const ent = Array.isArray(mj?.plugins) ? mj.plugins.find((x) => x && x.name === name) : null;
+  if (ent) {
+    if (typeof ent.source === 'string' && ent.source.startsWith('./')) pluginDir = join(loc, ent.source);
+    if (typeof ent.version === 'string') listed = ent.version;
+  }
+  const pj = readJsonFile(join(pluginDir, '.claude-plugin', 'plugin.json'));
+  return (pj && typeof pj.version === 'string' && pj.version) || listed;
+}
+
 try {
-  const own = JSON.parse(readFileSync(join(import.meta.dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8'));
-  // Was process.env.USERPROFILE || process.env.HOME directly — bypassed
-  // AGENT_COMPANION_HOME_OVERRIDE entirely, so a test (or this script's own
-  // manual verification) read the REAL ~/.claude/plugins/installed_plugins.json
-  // even with the override set. claudeDir() honours the override like every
-  // other path in this plugin.
-  const inst = JSON.parse(readFileSync(join(claudeDir(), 'plugins', 'installed_plugins.json'), 'utf8'));
-  const entries = Object.entries(inst.plugins || inst).filter(([k]) => k.startsWith(`${own.name}@`));
+  // claudeDir() honours the test home redirect like every other path in this
+  // plugin, so a test never reads the real installed_plugins.json.
+  const entries = pluginEntries(readInstalledPlugins(claudeDir()), PLUGIN_NAME);
   const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
-  for (const [key, val] of entries) {
-    for (const e of Array.isArray(val) ? val : [val]) {
-      if (e?.version && own.version && e.version !== own.version) {
-        sig('plugin_version_behind',
-          `${key} (${e.scope || 'user'} scope) is installed at ${e.version}; the current copy is ${own.version}` +
-          (cloud
-            ? ' — in the cloud this means the claude.ai plugin directory has not been synced since the marketplace was added (Sync button on the marketplace page)'
-            : ' — run claude plugin marketplace update, then claude plugin update, then restart'),
-          'plugin-update');
+  for (const e of entries) {
+    const latest = cloud ? (OWN_MANIFEST && OWN_MANIFEST.version) : marketplaceVersion(e.key.split('@')[1], PLUGIN_NAME);
+    if (!latest || !versionBelow(e.version, latest)) continue;
+    sig('plugin_version_behind',
+      `${e.key} (${e.scope || 'user'} scope) is installed at ${e.version}; the latest available is ${latest}` +
+      (cloud
+        ? ' — in the cloud this means the claude.ai plugin directory has not been synced since the marketplace was added (Sync button on the marketplace page)'
+        : ' (the marketplace clone) — run claude plugin update, then restart'),
+      'plugin-update');
+  }
+  if (OWN_MANIFEST && OWN_MANIFEST.version) next.pluginVersion = OWN_MANIFEST.version;
+} catch { /* no install record here (a bare checkout): not a signal */ }
+
+// --- 6b. Stale guard still running ---------------------------------------
+// The cross-session half of the version check. spawn-guard.mjs stamps its
+// own version, copy source (cache/checkout) and install scope key into every
+// spawns.jsonl row. A spawn in the last 24h that was guarded by a version
+// BELOW the version installed for that same scope means a stale copy of the
+// plugin is still loaded somewhere — the 2026-09-24 incident, where a
+// session loaded only an old 0.22.0 copy and nothing inside that session
+// could say so. Rules, all chosen so a normal update never fires:
+//   - directional and per scope: guard below installed for ITS scope only;
+//     a checkout guard (the operator's own tree) is never judged;
+//   - only rows written AFTER that scope's install entry's lastUpdated, and
+//     only from sessions whose first spawn is also after it — a session
+//     that was already open across an update runs its old hooks until it
+//     reloads, which is expected, not a stale install;
+//   - a row with no stamp at all is judged only when it also lacks
+//     route_layer (every guard since 0.29.0 writes that key), i.e. it came
+//     from a pre-0.29.0 guard, and only when every install is >= 0.29.0 —
+//     its scope is unknown, so it must be behind every install to count.
+const STALE_GUARD_REMEDY = 'remove the stale agent-companion entry in the desktop plugin manager, then /reload-plugins, ' +
+  'then verify with a trivial ladder spawn; fresh session if that still fails';
+const ROUTE_LAYER_SINCE = '0.29.0';
+try {
+  const entries = pluginEntries(readInstalledPlugins(claudeDir()), PLUGIN_NAME);
+  if (entries.length && recent.length) {
+    // One entry per scope key; if two marketplaces share a scope, the newer counts.
+    const byScope = new Map();
+    for (const e of entries) {
+      const k = scopeKey(e);
+      const cur = byScope.get(k);
+      if (!cur || compareVersions(e.version, cur.version) === 1) byScope.set(k, e);
+    }
+    const newestUpdate = entries.reduce((best, e) => {
+      const t = Date.parse(e.lastUpdated || '');
+      return Number.isFinite(t) && (!best || t > Date.parse(best.lastUpdated)) ? e : best;
+    }, null);
+    const everyInstallHasRouteLayer = entries.every((e) => !versionBelow(e.version, ROUTE_LAYER_SINCE));
+    const firstSeen = new Map();
+    for (const s of spawns) {
+      const t = Date.parse(s.at);
+      if (!Number.isFinite(t) || !s.session_id) continue;
+      if (!firstSeen.has(s.session_id) || t < firstSeen.get(s.session_id)) firstSeen.set(s.session_id, t);
+    }
+    const bySession = new Map();
+    for (const s of recent) {
+      if (s.guard_source === 'checkout') continue;
+      let guard;
+      let entry;
+      if (typeof s.guard_version === 'string' && s.guard_version) {
+        entry = byScope.get(s.guard_scope);
+        if (!entry || !versionBelow(s.guard_version, entry.version)) continue;
+        guard = s.guard_version;
+      } else if (!('guard_version' in s) && !('route_layer' in s) && everyInstallHasRouteLayer && newestUpdate) {
+        entry = newestUpdate;
+        guard = `a pre-${ROUTE_LAYER_SINCE} version`;
+      } else {
+        continue;
       }
+      const updated = Date.parse(entry.lastUpdated || '');
+      const at = Date.parse(s.at);
+      if (!Number.isFinite(updated) || !(at > updated)) continue;
+      if (!((firstSeen.get(s.session_id) ?? at) > updated)) continue;
+      const sidKey = String(s.session_id || 'unknown');
+      const cur = bySession.get(sidKey) || { count: 0, guard, installed: entry.version, scope: entry.scope || 'user' };
+      cur.count += 1;
+      bySession.set(sidKey, cur);
+    }
+    if (bySession.size) {
+      const total = [...bySession.values()].reduce((n, v) => n + v.count, 0);
+      const list = [...bySession.entries()].slice(0, 5)
+        .map(([sidKey, v]) => `session ${sidKey.slice(0, 8)}: guard ${v.guard} < installed ${v.installed} (${v.scope} scope)`);
+      const more = bySession.size > 5 ? `, +${bySession.size - 5} more` : '';
+      const installs = [...new Set(entries.map((e) => `${e.scope || 'user'}@${e.version}`))];
+      sig('stale_guard_running',
+        `${total} spawn(s) in 24h from ${bySession.size} session(s) were guarded by an older agent-companion than the one ` +
+        `installed for their scope — a stale copy is still loaded: ${list.join('; ')}${more}.` +
+        (installs.length > 1 ? ` Installs visible: ${installs.join(', ')}.` : '') +
+        ` Remedy: ${STALE_GUARD_REMEDY}.`,
+        'plugin-update');
     }
   }
-  next.pluginVersion = own.version;
-} catch { /* no install record here (a bare checkout): not a signal */ }
+} catch { /* telemetry or install record unreadable: not a signal */ }
 
 // --- 7. Enforcement silent (telemetry coverage vs. transcripts) --------
 // spawns.jsonl going quiet looks identical whether nothing was spawned or the

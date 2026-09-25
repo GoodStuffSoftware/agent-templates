@@ -92,8 +92,14 @@ Use the Claude Code `schedule` skill, which calls `RemoteTrigger`:
 - `name`: `agent-companion-scout`
 - `cron_expression`: **UTC**, e.g. `0 11 * * *` (7am America/New_York)
 - `job_config.ccr.environment_id`: the account's default cloud environment
-- `session_context.model`: `claude-sonnet-5` — the scout interprets
-  deterministic signals; it does not need a premium tier
+- `session_context.model`: take it from the route, not from this page. The
+  scout runs deterministic scripts and reads their output, which is an
+  `operate` task, so run `node "$AC/scripts/recommend.mjs" --type operate`:
+  it prints a (model, effort) pair, and the model's full id is that tier's
+  `resolvesTo.modelId` in `config/model-tiers.json`. Name BOTH halves to the
+  user. If the routine API has no effort field, the routine runs at the
+  model's own default effort (the same tier's `resolvesTo.defaultEffort`),
+  so tell the user that effort, not the route's
 - `session_context.sources`: the marketplace repo (the plugin lives in it)
 - `session_context.allowed_tools`: `Bash, Read, Glob, Grep, WebFetch, WebSearch`
 - `events[0].data.message.content`: the same hydrated prompt as step 2
@@ -137,13 +143,23 @@ re-implements one. Re-run the copy after a plugin update that changes it.
 
 Observed (2026-09-24): `agent-companion:ac-opus-low` (or the bare `ac-opus-low`)
 can fail with "Agent type not found" even right after a `/reload-plugins` that
-itself reported success — a stale plugin-cache entry left loaded alongside the
-new one can keep serving the OLD agent roster. `hooks/ladder-check.mjs`
-(SessionStart) detects two symptoms of this from disk (a broken/missing
-`agents/ac-*.md` file, and spawn-guard.mjs's self-reported running version
-trailing what `installed_plugins.json` says is installed) and names the
-recovery: remove the stale agent-companion entry in the desktop plugin
-manager, `/reload-plugins`, verify with a trivial ladder spawn.
+itself reported success. In the observed case the session had loaded ONLY a
+stale 0.22.0 copy (no `agents/` folder), not the installed one, so nothing
+inside that session could say so. Two checks cover it:
+
+- **Across sessions (daily scout):** the spawn guard stamps its own version and
+  install scope into every `spawns.jsonl` row, and the scout's
+  `stale_guard_running` signal fires when spawns in the last 24h were guarded
+  by a version older than the one installed for that scope. It names both
+  versions and the sessions.
+- **In session (`hooks/ladder-check.mjs`, SessionStart):** a missing or broken
+  `agents/ac-*.md` file, and an orphaned plugin-cache copy older than the
+  install for this session's scope (fresh processes only; a newer copy or a
+  source checkout is never called stale).
+
+Recovery for a stale copy: remove the stale agent-companion entry in the
+desktop plugin manager, `/reload-plugins`, verify with a trivial ladder spawn,
+and start a fresh session if that still fails.
 
 If that still does not register the ladder, `scripts/install-ladder-agents.mjs`
 is the fallback: it copies the ladder's `agents/ac-*.md` files to **user-level**
@@ -179,10 +195,13 @@ What it guarantees, enforced by the script itself, not just documented here:
 **UNVERIFIED, recorded here rather than assumed:** whether a user-level agent
 definition actually registers **mid-session** (without starting a fresh one)
 is not confirmed by this track — the script only makes the files exist in the
-right place. Test that separately: after `--yes`, try a trivial spawn of
-`agent-companion:ac-opus-low` (or the bare `ac-opus-low`) in the SAME session
-first; if it still fails, start a fresh session before concluding the fallback
-did not work.
+right place. Test that separately: after `--yes`, try a trivial spawn of the
+BARE `ac-opus-low` in the SAME session first (a user-level copy registers
+under its bare name; `agent-companion:ac-opus-low` exercises the plugin copy,
+not this fallback); if it still fails, start a fresh session before
+concluding the fallback did not work. The script refuses any manifest entry
+that is not a plain `ac-*.md` name inside the agents folder, and rejects
+unknown or value-less arguments (`--agents-dir` must be followed by a path).
 
 ## Staying current
 
