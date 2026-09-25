@@ -260,14 +260,15 @@ test('decodeDenylist: UTF-8 (with or without a BOM) decodes; UTF-16 (either BOM,
   assert.equal(decodeDenylist(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(`${name}\n`)])).text, `${name}\n`);
   const utf16le = Buffer.from(`${name}\r\n`, 'utf16le');
   const utf16be = Buffer.from(utf16le).swap16();
-  for (const [what, buf] of [
-    ['UTF-16LE with a BOM', Buffer.concat([Buffer.from([0xff, 0xfe]), utf16le])],
-    ['UTF-16BE with a BOM', Buffer.concat([Buffer.from([0xfe, 0xff]), utf16be])],
-    ['UTF-16LE without a BOM', utf16le],
-    ['invalid UTF-8', Buffer.concat([Buffer.from(`${name}\n`), Buffer.from([0xc3, 0x28, 0x0a])])],
+  for (const [what, buf, why] of [
+    ['UTF-16LE with a BOM', Buffer.concat([Buffer.from([0xff, 0xfe]), utf16le]), /is UTF-16 encoded/],
+    ['UTF-16BE with a BOM', Buffer.concat([Buffer.from([0xfe, 0xff]), utf16be]), /is UTF-16 encoded/],
+    ['UTF-16LE without a BOM', utf16le, /contains NUL bytes/],
+    ['invalid UTF-8', Buffer.concat([Buffer.from(`${name}\n`), Buffer.from([0xc3, 0x28, 0x0a])]), /is not valid UTF-8/],
   ]) {
     const d = decodeDenylist(buf);
     assert.ok(d.error, `${what} must be an error`);
+    assert.match(d.error, why, what);
     assertNoName(d.error, [name], `${what} error`);
   }
 });
