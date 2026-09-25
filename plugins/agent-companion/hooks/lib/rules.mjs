@@ -69,33 +69,40 @@ export function rulesPath() {
 
 // copyable-prompt's `when`: a REQUEST for a prompt, not any mention of one.
 // A bare \bprompts?\b fired on "the prompt field is empty" and "why do
-// prompts time out?". Four shapes count:
+// prompts time out?". Three shapes count:
 //   - a verb that asks for one, then up to three words that are not a
 //     preposition, then "prompt(s)": "write me a prompt", "draft a new system
-//     prompt", "make me a prompt", "write up a prompt", "rewrite this prompt",
-//     "put together a prompt", "I need a prompt", "can I get a prompt",
-//     "turn this into a prompt" (or a brief: "write me a brief for X").
+//     prompt", "craft a prompt", "prepare a prompt", "make me a prompt",
+//     "send me a prompt", "write up a prompt", "rewrite this prompt", "put
+//     together a prompt", "I need a prompt", "I'd like a prompt", "I would
+//     like a prompt", "can I get a prompt", "could I get a prompt", "turn
+//     this into a prompt" (or a brief: "write me a brief for X").
+//     A bare "get" does not count: "I get a UAC prompt every time" and "why
+//     do I get a prompt for my passphrase?" are about a program's prompt.
+//     A verb may end a longer word ("rewrite", "regenerate", "redraft"), so
+//     the pattern does not start with \b; every verb must still be followed
+//     by whitespace.
 //     A plumbing noun after "prompt" does not count ("create a prompt field",
 //     "generate the prompt cache key", "a prompts table", "the prompt template
 //     loader"), and neither does "prompt(s) to a/the ..." ("write the prompts
 //     to a log file"): that names a destination, not a purpose;
-//   - a turn that opens with "a prompt for" / "a prompt that", unless "that"
-//     is followed by I/you/we/they ("a prompt that I sent timed out");
-//   - a turn that opens with "prompt for a/the ..." ("Prompt for the
-//     reviewer"), but not "Prompt for confirmation before ...";
-//   - "... prompt ... write it out/up" within one short stretch.
+//   - a turn that opens with "a prompt for" / "another prompt for" / "a
+//     prompt that", unless "that" is followed by I/you/we/they ("a prompt that
+//     I sent timed out"), or opens with "prompt for a/the ..." ("Prompt for
+//     the reviewer"), but not "Prompt for confirmation before ...";
+//   - "... prompt ... write it" within one short stretch ("what should the
+//     prompt say? write it out").
 // Seen elsewhere in a sentence, "a prompt for/that" is usually something a
 // program shows ("the CLI shows a prompt for the password"), so it does not
 // count on its own. Bounded repetition only; kept under WHEN_MAX_CHARS (a
 // test pins the length).
-const PROMPT_VERB = '(?:(?:re)?write|give|draft|create|compose|generate|make|put together|need|want|get|into)';
-const PROMPT_FILLER = "(?:(?!(?:for|to|of|in|on)\\b)[\\w'-]+\\s+){0,3}?";
-const PROMPT_NOT_PLUMBING = '(?!\\s+(?:field|box|input|bar|hook|cach|inject|text|table|templat|to (?:an?|the)\\b))';
+const PROMPT_VERB = "(?:write|give|[cd]raft|create|compose|generate|make|together|need|want|into|prepare|send me|c(?:an|ould) i get|(?:'d|ould) like)";
+const PROMPT_FILLER = '(?:(?!(?:for|to|of|[io]n)\\b)\\S+\\s+){0,3}';
+const PROMPT_NOT_PLUMBING = '(?!\\s(?:field|box|input|bar|hook|cach|inject|text|table|templat|to (?:an?|the)\\b))';
 export const COPYABLE_PROMPT_WHEN = [
-  `\\b${PROMPT_VERB}\\s+${PROMPT_FILLER}(?:prompts?\\b${PROMPT_NOT_PLUMBING}|brief\\s+(?:for|to|that)\\b)`,
-  '^\\s*an?(?:other)?\\s+prompts?\\s(?:for|that\\s(?!(?:i|you|we|they)\\b))',
-  '^\\s*prompts?\\sfor\\s(?:an?|the)\\b',
-  'prompt.{0,60}write it (?:out|up)',
+  `${PROMPT_VERB}\\s+${PROMPT_FILLER}(?:prompts?\\b${PROMPT_NOT_PLUMBING}|brief\\sfor\\b)`,
+  '^\\s*(?:an?\\S*\\sprompts?\\s(?:for|that\\s(?!(?:i|you|we|they)\\b))|prompts?\\sfor\\s(?:an?|the)\\b)',
+  'prompt.{0,60}write it\\b',
 ].join('|');
 
 function builtinRules() {
@@ -356,10 +363,21 @@ const WRAPPER_TAGS = [
   'local-command-stdout', 'local-command-caveat',
 ].join('|');
 // A candidate tag: "<name" or "</name" followed by whitespace or ">". An
-// opening tag runs to the next ">" (attributes may hold anything else); a
-// closing tag allows only whitespace before its ">".
+// opening tag runs to the next ">", unless another candidate starts before
+// that ">": then it is not a tag but the user's own text, typed about one
+// ("the <command-args flag is ignored"), and the ">" belongs to the real tag
+// that follows (a harness <system-reminder>, say). A closing tag allows only
+// whitespace before its ">".
 const WRAPPER_TAG_RE = new RegExp(`<(/?)(${WRAPPER_TAGS})(?=[\\s>])`, 'gi');
 const SPACES_RE = /\s*/y;
+
+// An odd number of '"' in s[from, to). Only ever called on a stretch the scan
+// then moves past, so it keeps userOwnText linear.
+function oddQuotes(s, from, to) {
+  let odd = false;
+  for (let i = from; i < to; i++) if (s.charCodeAt(i) === 34) odd = !odd;
+  return odd;
+}
 
 // One left-to-right pass with a stack of open wrappers, so the cost is
 // linear in the length of the text whatever the nesting. (It used to repeat
@@ -375,8 +393,11 @@ const SPACES_RE = /\s*/y;
 // The output matches the old replace-until-stable on every input where each
 // opening tag's ">" comes before the next "<". On malformed input it does
 // not: the old passes replaced a removed block with a space, which could
-// turn a preceding "<system-reminder" (no ">") into an opening tag, or find
-// a tag inside another tag's attributes. Here a tag is only what the text
+// turn a preceding "<system-reminder" (no ">") into an opening tag. Given
+// `<system-reminder<command-args>x</command-args>>write me a prompt</system-reminder>`,
+// the old code removed the inner block, found a whole <system-reminder>
+// block where the text had none, and was silent; this code removes only the
+// <command-args> block, and the ask counts. Here a tag is only what the text
 // itself spells.
 export function userOwnText(text) {
   const s = String(text ?? '');
@@ -386,32 +407,49 @@ export function userOwnText(text) {
   let blockStart = 0; // where the outermost open wrapper began
   let gt = -2; // cached s.indexOf('>', ...): the scan only moves forward
   WRAPPER_TAG_RE.lastIndex = 0;
-  for (let m = WRAPPER_TAG_RE.exec(s); m; m = WRAPPER_TAG_RE.exec(s)) {
+  let m = WRAPPER_TAG_RE.exec(s);
+  while (m) {
     const nameEnd = m.index + m[0].length;
     const name = m[2].toLowerCase();
     if (m[1]) {
       SPACES_RE.lastIndex = nameEnd;
       SPACES_RE.exec(s);
-      if (s[SPACES_RE.lastIndex] !== '>') { WRAPPER_TAG_RE.lastIndex = nameEnd; continue; }
-      const end = SPACES_RE.lastIndex + 1;
-      WRAPPER_TAG_RE.lastIndex = end;
-      if (stack.length === 0) {
-        out += `${s.slice(copied, m.index)} `;
-        copied = end;
-      } else if (stack[stack.length - 1] === name) {
-        stack.pop();
+      if (s[SPACES_RE.lastIndex] === '>') {
+        const end = SPACES_RE.lastIndex + 1;
         if (stack.length === 0) {
-          out += `${s.slice(copied, blockStart)} `;
+          out += `${s.slice(copied, m.index)} `;
           copied = end;
+        } else if (stack[stack.length - 1] === name) {
+          stack.pop();
+          if (stack.length === 0) {
+            out += `${s.slice(copied, blockStart)} `;
+            copied = end;
+          }
         }
+        WRAPPER_TAG_RE.lastIndex = end;
+      } else {
+        WRAPPER_TAG_RE.lastIndex = nameEnd;
       }
+      m = WRAPPER_TAG_RE.exec(s);
       continue;
     }
     if (gt !== -1 && gt < nameEnd) gt = s.indexOf('>', nameEnd);
     if (gt === -1) break; // no ">" left: nothing after this can be a tag
-    WRAPPER_TAG_RE.lastIndex = gt + 1;
+    // The next candidate, found once and then processed in turn, so the scan
+    // still only moves forward. If it starts before this tag's ">", this is
+    // not a tag, unless the candidate sits inside a quoted attribute value
+    // (an odd number of '"' since the tag name): a teammate's
+    // summary="fixed the <system-reminder> parsing" is part of its tag.
+    WRAPPER_TAG_RE.lastIndex = nameEnd;
+    let next = WRAPPER_TAG_RE.exec(s);
+    if (next && next.index < gt) {
+      if (!oddQuotes(s, nameEnd, next.index)) { m = next; continue; }
+      WRAPPER_TAG_RE.lastIndex = gt + 1;
+      next = WRAPPER_TAG_RE.exec(s);
+    }
     if (stack.length === 0) blockStart = m.index;
     stack.push(name);
+    m = next;
   }
   if (stack.length > 0) return `${out}${s.slice(copied, blockStart)} `;
   return out + s.slice(copied);
