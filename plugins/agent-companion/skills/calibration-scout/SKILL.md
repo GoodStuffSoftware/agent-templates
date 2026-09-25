@@ -62,9 +62,10 @@ Only for signals that fired:
 ### routing eval suite — suggest only, never auto-run
 
 The canaries in `evals/` (`claude plugin eval`) check that a live session
-consults the routing guidance and lands on the trial routing: debug to
-opus/low, architecture to opus/high, never fable for a trivial read, and a
-warrant for any fable request. Each run is a real model call, so the scout
+consults the routing guidance and lands on whatever `config/model-tiers.json`
+currently routes (the expected answers live in `evals/`, not here; check one
+with `node "$AC/scripts/recommend.mjs" --type <type>`), never fable for a
+trivial read, and a warrant for any fable request. Each run is a real model call, so the scout
 **only suggests** it, in one report line, with the command:
 
 ```bash

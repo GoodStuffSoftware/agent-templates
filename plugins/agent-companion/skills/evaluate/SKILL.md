@@ -29,9 +29,13 @@ $AC = (Get-ChildItem "$env:USERPROFILE/.claude/plugins/marketplaces/*/plugins/ag
 ## Step 1 — state what is actually running
 
 - **model** — from your own system prompt ("You are powered by the model
-  named …"). Give the alias: `fable`, `opus`, `sonnet`, `haiku`.
-- **effort** — only if you know it (a brief or agent definition said so).
-  Otherwise omit it; model dominates the verdict.
+  named …"). Give the alias: `fable`, `opus`, `sonnet` (`haiku` retires
+  2026-10-15).
+- **effort** — always pass it. The verdict compares actual (model, effort)
+  against the routed (model, effort) for the task type, and a right model at
+  the wrong effort is still OVER or UNDER. A spawn with no effort set runs at
+  the lead's effort (a ladder agent `ac-<model>-<effort>` fixes it); without
+  `--effort` the script can only check the model and says `no effort given`.
 - **the task as it turned out**, not as it was briefed — a task type from
   `recommend.mjs --list`, or weight / kind / consequence. That gap is the
   whole point of asking.
@@ -49,12 +53,15 @@ Exit code 0 is fit, 1 over-provisioned, 2 under-provisioned.
 ## Step 3 — act on the verdict, honestly
 
 - **OVER** is a cost problem, not a correctness problem. Finish the current
-  step, then hand the remainder down to the model it printed (the `ho`
-  skill exists for this). Premium only: if a cheaper tier genuinely cannot do
+  step, then hand the remainder down to the (model, effort) it printed as
+  `expected:`, spawned as the matching ladder agent
+  (`agent-companion:ac-<model>-<effort>`, e.g. `ac-opus-low`) so the effort
+  is pinned rather than inherited (the `ho` skill exists for this). Premium only: if a cheaper tier genuinely cannot do
   the rest, say so with a `WARRANT:` line — and if you cannot write that line
   honestly, hand off. "It's already running, may as well" is the reasoning
   the premium cap exists to interrupt.
-- **UNDER** is a correctness problem. Escalate to the model it printed (with
+- **UNDER** is a correctness problem. Escalate to the (model, effort) it
+  printed, as its ladder agent `ac-<model>-<effort>` (with
   a `WARRANT:` line if premium). Treat what you have already produced as
   suspect wherever it needed the missing capability, and say so in the
   handoff rather than letting it pass as reviewed.
@@ -68,7 +75,9 @@ The spawn guard applies the same table to every brief that declares `WEIGHT:`
 (or `WARRANT: weight N`), reading `KIND:` and `CONSEQUENCE:` too:
 
 - **No model named** → the guard **fills in** the table's model for that
-  weight (`fit_autofill`). The spawn no longer inherits the lead's tier by
+  weight (`fit_autofill`). It fills the model only, not the effort: the spawn
+  still runs at the lead's effort unless it targets the ladder agent for the
+  route. The spawn no longer inherits the lead's tier by
   accident; the inheritance hazard is closed at its source. A weight the table
   routes to a premium tier still needs a `WARRANT:` line.
 - **Named model, under-provisioned** → allowed, said out loud.
