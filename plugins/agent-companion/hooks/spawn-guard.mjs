@@ -24,13 +24,16 @@
 // legitimate work; these are detection, not enforcement.
 
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join, dirname } from 'node:path';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
   writeJsonAtomic,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
-  taskTypeDef,
+  taskTypeDef, isLadderAgentName,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
@@ -63,7 +66,32 @@ function combineNotes(...parts) {
   return joined || null;
 }
 
+// Self-report — cheap (one plugin.json read + one small state write), and
+// deliberately NOT the same mechanism self-update.mjs's runningPlugin() uses
+// for ITSELF: that reads self-update.mjs's own import.meta.url, which tells
+// you what self-update.mjs resolved to, not what THIS file (spawn-guard.mjs)
+// did. The bug this exists to catch is exactly a divergence between the two —
+// self-update.mjs (and /reload-plugins) reporting a fresh load while
+// spawn-guard.mjs, loaded earlier in the same process tree or from a stale
+// cache path, keeps running old code. Recording spawn-guard.mjs's OWN
+// resolved version on every invocation gives hooks/ladder-check.mjs
+// (SessionStart) a fact to compare against installed_plugins.json instead of
+// trusting the reload's own self-report. Fails open on any error — this must
+// never be the reason a spawn is blocked.
+function reportOwnVersion() {
+  try {
+    const here = fileURLToPath(import.meta.url); // .../hooks/spawn-guard.mjs
+    const root = join(dirname(here), '..');
+    const pj = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8'));
+    if (!pj || !pj.version || !pj.name) return;
+    writeJsonAtomic(stateFile('spawn-guard-running.json'), {
+      name: pj.name, version: pj.version, file: here, at: new Date().toISOString(),
+    });
+  } catch { /* fail open: no self-report this invocation, ladder-check stays silent on it */ }
+}
+
 try {
+  reportOwnVersion();
   const p = readStdin();
   noteAgentType(p);
 
@@ -287,14 +315,43 @@ try {
   // nothing to inherit.
   const modelTakesEffort = !!model && effortSupported(model, 'high').ok;
   const effortStatedSomewhere = !!def?.effort;
+
+  // The CALLER's own transcript, read once here so both the non-ladder
+  // advisory just below and the spawn-telemetry row further down (which used
+  // to compute this independently) share one answer. `p.effort?.level` wins
+  // when the harness supplies it directly; the transcript tail-read is the
+  // fallback for payload shapes that don't.
+  const callerTranscript = callerTranscriptPath(p);
+  const callerMeta = callerTranscript ? lastAssistantMeta(callerTranscript) : null;
+  const callerModel = (callerMeta && callerMeta.model) || null;
+  const callerEffort = p.effort?.level || (callerMeta && callerMeta.effort) || null;
+
+  // Non-ladder + explicit differing model: the shape a ladder-registration
+  // failure pushes a caller into (spawn a built-in type like general-purpose
+  // with model: opus named explicitly, because agent-companion:ac-opus-low
+  // itself would not spawn) — and the one shape where that workaround quietly
+  // loses the effort half of the pair, since a built-in type has no `effort`
+  // frontmatter to set it. Narrower than the generic rule-1 note below (which
+  // fires for ANY effort-taking model with no stated effort, ladder or not):
+  // this one names the actual hazard — a DIFFERENT model than the lead is
+  // running was chosen on purpose, and effort came along for free, uninvited.
+  const isNonLadderExplicitEscalation = !isLadderAgentName(input.subagent_type)
+    && !!declared && !!callerModel
+    && classifyModel(declared).alias !== classifyModel(callerModel).alias;
   const noEffortStatedNote = (modelTakesEffort && !effortStatedSomewhere)
-    ? `agent-companion (SPAWNING RULE 1): this spawn resolves to ${classifyModel(model).alias || model} with no ` +
-      'effort stated in its agent definition — it will INHERIT the orchestrating session\'s current effort ' +
-      'rather than any model default, which couples this subagent\'s depth of thinking to whatever the caller ' +
-      'happens to be running at. That counts as a rule-1 violation: every spawn must name a definition that ' +
-      'states BOTH model and effort. State it explicitly by setting `effort:` in the agent definition ' +
-      'frontmatter — a brief-level "EFFORT:" line does NOT set it; effort is locked to the definition, not the ' +
-      'spawn call.'
+    ? (isNonLadderExplicitEscalation
+      ? `agent-companion: effort not set — "${input.subagent_type || 'this worker'}" is not a ladder agent ` +
+        `(agent-companion:ac-*) and names "${declared}" explicitly, which differs from the lead's own model ` +
+        `(${callerModel}); with no \`effort:\` in a definition, this worker inherits the session's effort ` +
+        `(${callerEffort || "unknown — the lead's own effort could not be read from its transcript either"}). ` +
+        'Spawn the matching ladder agent instead (see `node scripts/recommend.mjs`) to pin model and effort together.'
+      : `agent-companion (SPAWNING RULE 1): this spawn resolves to ${classifyModel(model).alias || model} with no ` +
+        'effort stated in its agent definition — it will INHERIT the orchestrating session\'s current effort ' +
+        'rather than any model default, which couples this subagent\'s depth of thinking to whatever the caller ' +
+        'happens to be running at. That counts as a rule-1 violation: every spawn must name a definition that ' +
+        'states BOTH model and effort. State it explicitly by setting `effort:` in the agent definition ' +
+        'frontmatter — a brief-level "EFFORT:" line does NOT set it; effort is locked to the definition, not the ' +
+        'spawn call.')
     : null;
 
   // --- Missing model (SPAWNING RULE 1, other half) ------------------------
@@ -573,14 +630,11 @@ try {
 
   if (opt('spawn_telemetry', true) && !isCanary) {
     // --- Schema v2 additions: who is spawning, and at what effort ----------
-    // The caller's OWN transcript (not the new subagent's — it does not exist
-    // yet at PreToolUse time), read via a bounded tail so this never risks the
-    // hook's timeout on a large session.
-    const callerTranscript = callerTranscriptPath(p);
-    const callerMeta = callerTranscript ? lastAssistantMeta(callerTranscript) : null;
-    const callerModel = (callerMeta && callerMeta.model) || null;
-    const callerEffort = p.effort?.level || (callerMeta && callerMeta.effort) || null;
-
+    // callerTranscript/callerMeta/callerModel/callerEffort are computed once,
+    // above (shared with the non-ladder-escalation advisory), from the
+    // CALLER's OWN transcript (not the new subagent's — it does not exist yet
+    // at PreToolUse time), via a bounded tail so this never risks the hook's
+    // timeout on a large session.
     const description = typeof input.description === 'string' ? input.description : null;
     const descSha = description ? createHash('sha256').update(description).digest('hex').slice(0, 16) : null;
     const descLen = description ? description.length : null;

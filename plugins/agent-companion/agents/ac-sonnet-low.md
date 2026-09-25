@@ -1,6 +1,6 @@
 ---
 name: ac-sonnet-low
-description: Rung 2/10: high-volume/latency-sensitive bounded work that does not need much reasoning depth.
+description: "Rung 2/10: high-volume/latency-sensitive bounded work that does not need much reasoning depth. Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
 model: sonnet
 effort: low
 ---
