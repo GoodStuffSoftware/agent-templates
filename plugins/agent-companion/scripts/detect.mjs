@@ -17,10 +17,8 @@ import { userInfo, homedir } from 'node:os';
 import {
   modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
   homeRoot, stateRoot, resolveRoute, isLadderAgentName,
-} from '../hooks/lib/context.mjs';
-import {
   readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
-} from '../hooks/lib/plugin-installs.mjs';
+} from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
 import {

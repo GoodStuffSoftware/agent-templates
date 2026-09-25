@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
-import { scopeKey } from '../hooks/lib/plugin-installs.mjs';
+import { scopeKey } from '../hooks/lib/context.mjs';
 
 const PJ = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
 
