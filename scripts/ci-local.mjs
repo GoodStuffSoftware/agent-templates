@@ -58,7 +58,7 @@ import {
   mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statSync,
 } from 'node:fs';
 import { join, dirname, resolve, relative, delimiter } from 'node:path';
-import { tmpdir, availableParallelism } from 'node:os';
+import { tmpdir, availableParallelism, homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -728,6 +728,22 @@ function printSummary(results, ciParity = false) {
 // pre-push hook mode
 // ---------------------------------------------------------------------------
 
+// `s` with this machine's home directory (native, forward-slash and MSYS
+// /c/... spellings) shown as "~" — never print an expanded home path. The
+// same function as push-scan.mjs's scrubHome(), kept here because this file
+// must load on its own (push-scan is imported lazily, and only here).
+export function scrubHomeDir(s, home = homedir()) {
+  let out = String(s);
+  if (!home) return out;
+  const variants = new Set([home, home.replace(/\\/g, '/'), home.replace(/\//g, '\\')]);
+  const drive = /^([A-Za-z]):[\\/](.*)$/.exec(home);
+  if (drive) variants.add(`/${drive[1]}/${drive[2].replace(/\\/g, '/')}`);
+  for (const v of [...variants].sort((a, b) => b.length - a.length)) {
+    out = out.replace(new RegExp(v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '~');
+  }
+  return out;
+}
+
 // The default pushed-commit scan: scripts/push-scan.mjs over every pushed
 // ref, against this repository. Imported lazily so a plain suite run (and a
 // copy of this file on its own, as ci-local-parity.test.mjs builds) never
@@ -766,7 +782,9 @@ export async function prePushGate(refs, {
   try {
     scanRes = await scan(live);
   } catch (e) {
-    err(`ci-local pre-push: BLOCKED — the pushed-commit scan could not run: ${e.message}`);
+    // push-scan redacts its own errors; a failure to even load it (a module
+    // error names a file path) gets the home directory shown as "~" here.
+    err(`ci-local pre-push: BLOCKED — the pushed-commit scan could not run: ${scrubHomeDir(e && e.message ? e.message : String(e))}`);
     return 1;
   }
   if (!scanRes || scanRes.status !== 0) {
