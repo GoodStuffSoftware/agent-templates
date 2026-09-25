@@ -92,12 +92,27 @@ test('makeCliJudgeCaller only resolves AFTER removeDirImpl settles', async () =>
   assert.equal(cleanupSettled, true, 'callJudgeViaCli must not resolve before its cleanup promise has settled');
 });
 
+// A shared temp dir, not a race: os.tmpdir() is machine-wide, and this
+// suite's own naming convention ("bench-judge-<random>") is shared with
+// every OTHER concurrent bench-judge run on the same box -- including a
+// second Claude Code session running this very file at the same time (a
+// routine occurrence on a shared operator machine). A before/after SNAPSHOT
+// DIFF of the whole tmpdir listing, filtered only by prefix, can pick up
+// ANOTHER process's still-live "bench-judge-*" directory that merely happens
+// to exist at the moment of the `after` read, and fail this assertion for a
+// leak that was never this call's own. The fix asserts on the EXACT
+// directory THIS call created instead of a namespace-wide diff: a thin
+// recording wrapper still delegates to the real removeDirWithRetry() (so the
+// "no injected stub" cleanup path this test exists to cover is unchanged),
+// it just also remembers which path was removed.
 test('makeCliJudgeCaller default (real removeDirWithRetry) actually removes the per-vote temp dir from disk, with no injected stub', async () => {
-  const before = new Set(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('bench-judge-')));
-  const caller = makeCliJudgeCaller(getFakeClaudeBin); // no options -- exercises the real default
+  let seenDir = null;
+  const recordingRemoveDirImpl = (dir) => { seenDir = dir; return removeDirWithRetry(dir); };
+  const caller = makeCliJudgeCaller(getFakeClaudeBin, { removeDirImpl: recordingRemoveDirImpl });
   await caller({ system: 's', user: INVALID_JS_PROMPT, model: 'claude-sonnet-5', effort: null, maxBudgetUsd: 0.01 });
-  const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('bench-judge-') && !before.has(n));
-  assert.deepEqual(after, [], 'the real removeDirWithRetry() must have removed the temp cwd it created -- no leaked dir');
+  assert.ok(seenDir, 'the real removeDirWithRetry() path was exercised at all');
+  assert.match(path.basename(seenDir), /^bench-judge-/, 'the temp cwd is this call\'s own per-vote judge dir');
+  assert.equal(fs.existsSync(seenDir), false, 'the real removeDirWithRetry() must have removed the temp cwd it created -- no leaked dir');
 });
 
 test('removeDirWithRetry itself resolves the fake dir path with ok:true for a directory that genuinely exists', async () => {

@@ -302,10 +302,24 @@ function vaultGitDir(dir) {
 //
 // core.fsmonitor=false: a global fsmonitor setting names a program (or starts
 // a daemon) that git would run against the vault. The vault needs none.
+//
+// maintenance.autoDetach=false / gc.autoDetach=false: without these, a commit
+// that crosses git's auto-gc threshold forks a detached `git gc`/maintenance
+// child and returns immediately — an UNAWAITED CHILD outliving this process.
+// It holds the vault's .git open and burns CPU/disk-I/O out of band, so the
+// very next sync (this hook runs on a schedule, and under concurrent load
+// several syncs can be close together) can race it: two git processes touch
+// the same .git at once, and the second one's own git calls slow down or
+// contend for the same lock files, which is exactly the load-sensitivity
+// this plugin's test suite has observed (see PLAN.md's flaky-set notes).
+// autoDetach=false keeps the maintenance run (never disabled outright — see
+// the CHANGELOG note NOT to set gc.auto=0) INSIDE this process, serialized
+// under the sync lock like everything else a commit does here.
 function vaultGit(dir, args, opts = {}) {
   return gitIsolated([
     '-c', 'core.longpaths=true', '-c', `core.hooksPath=${NO_HOOKS}`, '-c', 'core.fsmonitor=false',
     '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
+    '-c', 'maintenance.autoDetach=false', '-c', 'gc.autoDetach=false',
     '-C', dir, '--git-dir=.git', '--work-tree=.', ...args,
   ], { ...opts, env: vaultEnv(opts.env || process.env) });
 }
