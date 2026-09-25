@@ -22,11 +22,15 @@
 //     straight from the blobs (`git cat-file`), never from a rendered diff,
 //     so .gitattributes `binary` / `-diff`, textconv and NUL bytes cannot hide
 //     content. Each line is checked as UTF-8; the denylist also checks it as
-//     latin1 when it is not valid UTF-8 and as UTF-16LE when the file has
-//     NUL bytes. A file over the size cap (16 MiB, or
-//     PUSH_SCAN_MAX_FILE_BYTES) is NOT scanned: a warning names it and the
-//     push goes on;
-//   - the commit message (%B — the body and its trailers);
+//     latin1 when it is not valid UTF-8 and as UTF-16LE (both alignments)
+//     when the file has NUL bytes. A file over the size cap (16 MiB, or
+//     PUSH_SCAN_MAX_FILE_BYTES) is NOT scanned: a warning names it ("not
+//     scanned (size)") and the push goes on — the cap bounds the scan's
+//     memory and time, and a file that large is a build artefact or data
+//     dump that is looked at by hand, not a place a name slips in by
+//     accident. Its path is still checked;
+//   - the commit message (%B — the body and its trailers), as UTF-8 and, for
+//     the denylist, as latin1 when it is not valid UTF-8;
 //   - every path the commit introduces (a name no parent has).
 // Paths come from `git diff-tree -z`, NUL-separated and never C-quoted.
 // Author and committer identity (name, email, dates) are NOT scanned: they
@@ -350,11 +354,13 @@ export function makeRedactor({ entries = [], leakCtx = null, home = homedir() } 
   const displayPath = (p) => {
     const text = typeof p === 'string' ? p : p.text;
     const latin1 = typeof p === 'string' ? null : p.latin1;
-    let r = redact(text);
-    r = escapeControls(r);
-    r = redact(r);
-    // Anything still matching (in any view: NFKC, format characters
-    // removed) could not be cut out cleanly: withhold the whole path.
+    const cut = redact(text);
+    // Anything still matching after the cut — in any view (NFKC, format
+    // characters removed), or once control characters are dropped (a name
+    // split by one would read through its escape) — could not be cut out
+    // cleanly: withhold the whole path.
+    if (anyHit(cut) || anyHit(cut.replace(CONTROL_RE, ''))) return REDACTED_PATH;
+    const r = escapeControls(cut);
     if (anyHit(r)) return REDACTED_PATH;
     // A path that is not valid UTF-8 is printed in its UTF-8 reading, from
     // which a hit in its latin1 reading cannot be cut: withhold it.
@@ -416,18 +422,24 @@ export function listPushedCommits(git, { localSha, remoteSha }) {
   return gitOk(git, args).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 }
 
-// Whether `bytes` is not valid UTF-8, i.e. its UTF-8 reading `text` loses bytes.
-function lossyUtf8(bytes, text) {
-  return !Buffer.from(text, 'utf8').equals(bytes);
+// The latin1 reading of `bytes` when they are not valid UTF-8, else null.
+// Content lines, messages and paths are matched in their UTF-8 reading AND,
+// when that reading loses bytes (invalid UTF-8 turns into U+FFFD), in their
+// latin1 reading, which loses none. Valid UTF-8 is NOT also read as latin1:
+// that reading is mojibake that invents word boundaries (French "annee" with
+// an accented e, read as latin1, is "ann" + capital A-tilde + ..., which
+// would make "ann" hit).
+function latin1View(bytes) {
+  const s = bytes.toString('latin1');
+  if (!/[\x80-\xff]/.test(s)) return null;
+  return Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes) ? null : s;
 }
 
 // A path as git stored it (raw bytes): `text` is its UTF-8 reading, `key` a
-// lossless latin1 key, and `latin1` its latin1 reading when the bytes are
-// not valid UTF-8 (so `text` does not show them all).
+// lossless latin1 key, and `latin1` its latin1 reading when the bytes are not
+// valid UTF-8 (so `text` does not show them all).
 function pathObj(bytes) {
-  const key = bytes.toString('latin1');
-  const text = bytes.toString('utf8');
-  return { text, key, latin1: /[\x80-\xff]/.test(key) && lossyUtf8(bytes, text) ? key : null };
+  return { text: bytes.toString('utf8'), key: bytes.toString('latin1'), latin1: latin1View(bytes) };
 }
 
 // Parse `git diff-tree -r -z --raw` output: NUL-separated, so a path is
@@ -530,16 +542,18 @@ function batchContents(git, oids, info) {
 const GITLINK = '160000';
 
 // Everything scanned in one commit:
-//   { sha, parents, message,
+//   { sha, parents, message, messageLatin1 (null unless not valid UTF-8),
 //     files: [{ path, nameIsNew, binary, lines: [{ line, buf, key }], unscanned: null | { size } }] }
 // `files` holds each path whose version differs from EVERY parent's (a root
 // commit: from the empty tree), with only the lines new relative to all of
 // them. nameIsNew: no parent has that path (it is added, or renamed to).
 export function readCommit(git, sha, { maxFileBytes = DEFAULT_MAX_FILE_BYTES } = {}) {
-  const head = gitOk(git, ['show', '-s', '--format=%P%x00%B', sha]);
-  const nul = head.indexOf('\0');
-  const parents = head.slice(0, nul).trim().split(/\s+/).filter(Boolean);
-  const message = head.slice(nul + 1);
+  const head = gitOkBuf(git, ['show', '-s', '--format=%P%x00%B', sha]);
+  const nul = head.indexOf(0);
+  if (nul === -1) throw new Error('unexpected git show output');
+  const parents = head.subarray(0, nul).toString('latin1').trim().split(/\s+/).filter(Boolean);
+  const message = head.subarray(nul + 1).toString('utf8');
+  const messageLatin1 = latin1View(head.subarray(nul + 1));
   const bases = parents.length ? parents : [null];
   const maps = bases.map((p) => {
     const raw = gitOkBuf(git, ['diff-tree', '-r', '-z', '--raw', '-M', '--no-commit-id', ...(p ? [p, sha] : ['--root', sha])]);
@@ -588,7 +602,7 @@ export function readCommit(git, sha, { maxFileBytes = DEFAULT_MAX_FILE_BYTES } =
     delete f.newOid;
     delete f.oldOids;
   }
-  return { sha, parents, message, files };
+  return { sha, parents, message, messageLatin1, files };
 }
 
 // ---------------------------------------------------------------------------
@@ -597,11 +611,12 @@ export function readCommit(git, sha, { maxFileBytes = DEFAULT_MAX_FILE_BYTES } =
 
 // The forms one content line is matched in: UTF-8 (and its textViews), latin1
 // when it is not valid UTF-8, and UTF-16LE at both byte alignments when the
-// file has NUL bytes.
+// file has NUL bytes (the odd alignment also reads UTF-16BE).
 function lineViews(l, binary) {
   const utf8 = l.buf.toString('utf8');
   const views = textViews(utf8);
-  if (/[\x80-\xff]/.test(l.key) && lossyUtf8(l.buf, utf8)) views.push(l.key);
+  const latin1 = latin1View(l.buf);
+  if (latin1) views.push(latin1);
   if (binary) {
     views.push(l.buf.toString('utf16le'));
     if (l.buf.length > 1) views.push(l.buf.subarray(1).toString('utf16le'));
@@ -650,8 +665,15 @@ export function scanCommit(commit, { leakCtx = null, denylist = [], isRepoCommit
       hits.push({ sha, where: 'message', line: h.line, check: 'leak-check', label: h.label });
     }
   }
-  for (const m of matchDenylist(commit.message, denylist)) {
-    hits.push({ sha, where: 'message', line: m.line, check: 'private-names', label: `denylist line ${m.entryLine}` });
+  const msgSeen = new Set();
+  for (const text of [commit.message, commit.messageLatin1]) {
+    if (!text) continue;
+    for (const m of matchDenylist(text, denylist)) {
+      const k = `${m.line}\0${m.entryLine}`;
+      if (msgSeen.has(k)) continue;
+      msgSeen.add(k);
+      hits.push({ sha, where: 'message', line: m.line, check: 'private-names', label: `denylist line ${m.entryLine}` });
+    }
   }
 
   for (const f of commit.files) {
@@ -781,7 +803,7 @@ export function runPushScan({
     }
 
     for (const u of unscanned) {
-      warn(`push-scan: warning — ${u.sha.slice(0, 12)}  ${redactor.displayPath(u.file)}  not scanned (size: ${u.size} bytes, over the ${cap.value}-byte cap). Its path was checked; check its content by hand before pushing.`);
+      warn(`push-scan: warning — ${u.sha.slice(0, 12)}  ${redactor.displayPath(u.file)}  not scanned (size): ${u.size} bytes, over the ${cap.value}-byte cap. Its path was checked; check its content by hand before pushing.`);
     }
     const unscannedNote = unscanned.length ? ` ${unscanned.length} file(s) not scanned (size); see the warning(s) above.` : '';
 
