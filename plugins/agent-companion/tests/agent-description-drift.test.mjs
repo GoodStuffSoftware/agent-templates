@@ -157,6 +157,59 @@ test('mutation: a false claim in a description fails the check, including ac-hai
   }
 });
 
+// Round 3: a routing claim written into a config `role` (which --sync then
+// copies into the description) is checked too.
+function sync(agentsDir) {
+  return runScript('scripts/routing-table.mjs', ['--sync-agent-descriptions'], {
+    env: { AGENT_COMPANION_AGENTS_DIR_OVERRIDE: agentsDir },
+  });
+}
+
+test('mutation: a FALSE "default for <type>" claim in a config role fails the check, even after --sync', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    // verify routes to opus/low, not sonnet/low.
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-sonnet-low' ? { ...r, role: `${r.role}; default for verify` } : r)));
+    assert.equal(sync(agentsDir).status, 0);
+    const res = check(agentsDir);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ac-sonnet-low \[false-claim\]/);
+    assert.match(res.stderr, /"verify" currently routes to opus\/low, not this rung/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a TRUE "default for <type>" claim in a config role passes once synced', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-opus-low' ? { ...r, role: `${r.role}; default for verify` } : r)));
+    assert.equal(sync(agentsDir).status, 0);
+    const res = check(agentsDir);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test('mutation: any other routing word in a config role (rare, prefer, typically, reserve, weight-N...) fails the check', () => {
+  for (const claim of ['rare; prefer sonnet unless needed', 'typically used for reviews', 'reserve for weight-5 work', 'usually the default']) {
+    const { dir, stateDir, cleanup } = makeFixture();
+    try {
+      const agentsDir = fixtureAgentsDir(dir);
+      writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-opus-medium' ? { ...r, role: `${r.role} — ${claim}` } : r)));
+      assert.equal(sync(agentsDir).status, 0);
+      const res = check(agentsDir);
+      assert.equal(res.status, 1, `${claim}: ${res.stdout}${res.stderr}`);
+      assert.match(res.stderr, /ac-opus-medium \[unverifiable-claim\]/, claim);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
 test('mutation: a file whose name: is not its rung fails the check', () => {
   const { dir, cleanup } = makeFixture();
   try {

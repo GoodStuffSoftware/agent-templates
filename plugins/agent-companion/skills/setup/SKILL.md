@@ -147,15 +147,37 @@ itself reported success. In the observed case the session had loaded ONLY a
 stale 0.22.0 copy (no `agents/` folder), not the installed one, so nothing
 inside that session could say so. Two checks cover it:
 
-- **Across sessions (daily scout):** the spawn guard stamps its own version and
-  install scope into every `spawns.jsonl` row, and the scout's
-  `stale_guard_running` signal fires when spawns in the last 24h were guarded
-  by a version older than the one installed for that scope. It names both
+- **Across sessions (daily scout):** the spawn guard stamps its own version,
+  install scope and the session's plugin-load time into every `spawns.jsonl`
+  row, and the scout's `stale_guard_running` signal judges each session by
+  the version it LOADED. It fires for spawns in the last 24h, after the latest
+  update for their scope, when the guard is older than what that session
+  should have loaded: the installed version if the session loaded after the
+  update, otherwise the version that update replaced (read from the plugin
+  cache's `.orphaned_at` markers). A session that loaded just before an
+  update and has not reloaded yet is not flagged; one that lags two or more
+  releases is. Rows from a guard older than 0.29.0 carry no stamp; they are
+  judged as "a pre-0.29.0 version", whatever else is installed. It names both
   versions and the sessions.
 - **In session (`hooks/ladder-check.mjs`, SessionStart):** a missing or broken
-  `agents/ac-*.md` file, and an orphaned plugin-cache copy older than the
-  install for this session's scope (fresh processes only; a newer copy or a
-  source checkout is never called stale).
+  `agents/ac-*.md` file, and a loaded copy older than the install for this
+  session's scope: an orphaned plugin-cache copy, or a copy from outside the
+  cache that is not a source checkout (for example a desktop app bundle).
+  Judged only when the process just loaded it: a startup, or a resume in a
+  fresh process. An in-process `/resume` is never judged (told apart by the
+  `CLAUDE_PID` the harness gives hooks; with no `CLAUDE_PID`, no resume is
+  judged). A newer copy or a source checkout is never called stale.
+
+**Known limits (not covered):**
+
+- A guard from 0.29.0 to 0.29.3 writes no version stamp, so its rows are never
+  judged by the scout.
+- A copy outside the plugin cache is recognised as a bundle only by where it
+  runs; a `--plugin-dir` copy that is not a git work tree also counts as a
+  bundle, and a bundle whose own guard predates the stamp is judged only as
+  "pre-0.29.0" (or not at all, if it is 0.29.0 to 0.29.3).
+- With no `.orphaned_at` marker in the plugin cache, the version an update
+  replaced is unknown, and a session loaded before that update is not judged.
 
 Recovery for a stale copy: remove the stale agent-companion entry in the
 desktop plugin manager, `/reload-plugins`, verify with a trivial ladder spawn,
@@ -199,7 +221,10 @@ right place. Test that separately: after `--yes`, try a trivial spawn of the
 BARE `ac-opus-low` in the SAME session first (a user-level copy registers
 under its bare name; `agent-companion:ac-opus-low` exercises the plugin copy,
 not this fallback); if it still fails, start a fresh session before
-concluding the fallback did not work. The script refuses any manifest entry
+concluding the fallback did not work. The spawn guard's best-fit autofill
+rewrites a spawn to a BARE rung only once that exact bare rung has started in
+the session and its file is at user or project scope, so a partial install
+never makes it name a rung that is not registered. The script refuses any manifest entry
 that is not a plain `ac-*.md` name inside the agents folder, and rejects
 unknown or value-less arguments (`--agents-dir` must be followed by a path).
 

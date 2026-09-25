@@ -125,12 +125,125 @@ export function versionBelow(a, b) {
   return compareVersions(a, b) === -1;
 }
 
-// Where a running copy of the plugin lives: "cache" when it is under the
-// harness's plugin cache (an installed copy, current or orphaned), else
-// "checkout" (a --plugin-dir load or a source tree). Only a cache copy can be
-// a stale install; a checkout is the operator's own tree, whatever version.
+// Where a running copy of the plugin lives:
+//   "cache"    under the harness's plugin cache (an installed copy, current
+//              or orphaned);
+//   "checkout" inside a git work tree (a `.git` entry at the copy's root or
+//              any ancestor): the operator's own source tree, whatever its
+//              version, never judged stale;
+//   "bundle"   anywhere else, e.g. an app-extracted per-session desktop
+//              bundle, which can be behind the install at startup. Judged
+//              like a cache copy.
+// Known limit: a --plugin-dir copy that is not a git work tree cannot be told
+// apart from a bundle here, so it counts as "bundle".
+const GIT_WALK_MAX = 12;
 export function copySource(root, claudeDirPath) {
-  return pathUnder(root, join(claudeDirPath, 'plugins', 'cache')) ? 'cache' : 'checkout';
+  if (pathUnder(root, join(claudeDirPath, 'plugins', 'cache'))) return 'cache';
+  try {
+    let dir = resolve(String(root || '.'));
+    for (let i = 0; i < GIT_WALK_MAX; i += 1) {
+      if (existsSync(join(dir, '.git'))) return 'checkout';
+      const up = dirname(dir);
+      if (up === dir) break;
+      dir = up;
+    }
+  } catch { /* unreadable: not provably a checkout */ }
+  return 'bundle';
+}
+
+// A plugin load that lands within this long after an install entry changed
+// may have started just before the update wrote the entry (the harness's own
+// autoupdater runs at startup), so it is not judged against that entry.
+export const LOAD_SETTLE_MS = 5 * 60 * 1000;
+
+// --- Process loads -----------------------------------------------------------
+// A plugin copy is loaded when a Claude Code PROCESS starts, and again on
+// /reload-plugins. SessionStart `source: "resume"` fires both for a fresh
+// `claude --resume` process (a new load) and for /resume inside a running
+// process (no load: the old copy keeps running). The payload cannot tell them
+// apart, but the hook environment carries CLAUDE_PID, the Claude Code
+// process id. One small file per pid, state/process-loads/<pid>.json
+// { at, sid }, records when that process first reached SessionStart:
+//   - startup: always a new process; written (unless this same event already
+//     wrote it, see SAME_EVENT_MS: two SessionStart hooks share one event);
+//   - resume: a pid with no record is a fresh process (written); a pid that
+//     has one is an in-process /resume, whose load time is the record's;
+//   - clear / compact: never a load; the record's time, if any.
+// Returns { fresh: true | false | null, loadedAt: ms | null }; `fresh` is
+// null when CLAUDE_PID is absent and the source is resume, because then it
+// cannot be known. A reused pid only ever makes a fresh resume look
+// in-process, which every caller treats as the quiet side.
+const SAME_EVENT_MS = 60 * 1000;
+const PROCESS_LOAD_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+function processLoadFile(pid) {
+  return join(stateDir(), 'process-loads', `${pid}.json`);
+}
+function validPid(pid) {
+  return /^\d{1,10}$/.test(String(pid ?? '')) ? String(pid) : null;
+}
+export function readProcessLoad(pid = process.env.CLAUDE_PID) {
+  const id = validPid(pid);
+  if (!id) return null;
+  const rec = readJson(processLoadFile(id), null);
+  return rec && typeof rec.at === 'number' ? rec : null;
+}
+export function noteProcessLoad(source, sid, { pid = process.env.CLAUDE_PID, now = Date.now() } = {}) {
+  const id = validPid(pid);
+  const src = String(source || '');
+  if (!id) {
+    return src === 'startup' ? { fresh: true, loadedAt: now } : { fresh: src === 'resume' ? null : false, loadedAt: null };
+  }
+  const rec = readProcessLoad(id);
+  const sameEvent = !!rec && rec.sid === String(sid) && now - rec.at >= 0 && now - rec.at < SAME_EVENT_MS;
+  const write = () => {
+    try {
+      mkdirSync(join(stateDir(), 'process-loads'), { recursive: true });
+      writeJsonAtomic(processLoadFile(id), { at: now, sid: String(sid) });
+    } catch { /* fail open */ }
+  };
+  if (src === 'startup') {
+    if (sameEvent) return { fresh: true, loadedAt: rec.at };
+    write();
+    pruneProcessLoads(now);
+    return { fresh: true, loadedAt: now };
+  }
+  if (src === 'resume') {
+    if (!rec) { write(); return { fresh: true, loadedAt: now }; }
+    return { fresh: sameEvent, loadedAt: rec.at };
+  }
+  return { fresh: false, loadedAt: rec ? rec.at : null };
+}
+function pruneProcessLoads(now) {
+  try {
+    const dir = join(stateDir(), 'process-loads');
+    for (const f of readdirSync(dir)) {
+      try {
+        if (now - statSync(join(dir, f)).mtimeMs > PROCESS_LOAD_KEEP_MS) unlinkSync(join(dir, f));
+      } catch { /* raced or gone */ }
+    }
+  } catch { /* no dir */ }
+}
+
+// The self-update hook's per-session record (state/version-notice-state.json)
+// names how its `loadedAt` was learned. Only these sources are a real plugin
+// load; "first-seen" (no baseline, stamped "now") and "resume-unverified"
+// (a resume with no CLAUDE_PID) can be later than the real load, and a record
+// from a copy older than this one carries no source at all.
+export const TRUSTED_LOAD_SOURCES = new Set(['startup', 'resume', 'resume-in-process', 'reload']);
+
+// When THIS session last loaded its plugins, as ms, or null when unknown:
+// the self-update record if its source is trusted, else this process's own
+// load record (CLAUDE_PID). Used to stamp spawns.jsonl rows (the scout judges
+// a session against what was installed when it LOADED) and to bound the
+// spawn guard's same-session ladder evidence to the current load.
+export function sessionLoadedAt(sid) {
+  try {
+    const st = readJson(stateFile('version-notice-state.json'), {});
+    const rec = st && st[String(sid)];
+    if (rec && TRUSTED_LOAD_SOURCES.has(rec.loadedAtFrom) && typeof rec.loadedAt === 'number') return rec.loadedAt;
+  } catch { /* fall through */ }
+  const pl = readProcessLoad();
+  return pl ? pl.at : null;
 }
 
 // Agent types observed in the shipped binary (2.1.220). The binary tests the
@@ -1542,11 +1655,13 @@ export function ownAgentsDir() {
 // daily scout can tell, across sessions, which guard version a spawn really
 // ran under (hooks/spawn-guard.mjs; scripts/detect.mjs's stale_guard_running).
 //   guard_version: this copy's plugin.json version
-//   guard_source:  "cache" (an installed copy under the plugin cache) or
-//                  "checkout" (a --plugin-dir load or a source tree)
+//   guard_source:  copySource(): "cache", "checkout" (a git work tree) or
+//                  "bundle" (anywhere else, e.g. a desktop bundle)
 //   guard_scope:   scopeKey() of the installed_plugins.json entry that
 //                  applies to `cwd` ("user", or "project:<hash>" — never a
 //                  path), or null when nothing is installed
+//   loaded_at:     sessionLoadedAt(sid) as ISO: when this session last
+//                  loaded its plugins, from a trusted source only, else null
 // Never throws; unknown parts are null.
 let _pluginVersion;
 export function pluginVersion() {
@@ -1558,13 +1673,15 @@ export function pluginVersion() {
   } catch { /* unknown */ }
   return _pluginVersion;
 }
-export function runningCopyStamp(cwd) {
-  const out = { guard_version: null, guard_source: null, guard_scope: null };
+export function runningCopyStamp(cwd, sid, loadedAtMs) {
+  const out = { guard_version: null, guard_source: null, guard_scope: null, loaded_at: null };
   try {
     out.guard_version = pluginVersion();
     out.guard_source = copySource(pluginRootDir(), claudeDir());
     const entries = pluginEntries(readInstalledPlugins(claudeDir()), pluginName());
     out.guard_scope = scopeKey(effectiveEntry(entries, cwd || process.cwd()));
+    const l = loadedAtMs !== undefined ? loadedAtMs : sessionLoadedAt(sid);
+    out.loaded_at = typeof l === 'number' && Number.isFinite(l) ? new Date(l).toISOString() : null;
   } catch { /* partial stamp: whatever was learned before the failure */ }
   return out;
 }
