@@ -6,25 +6,33 @@
 // subagent_type in `updatedInput` is not documented. If it does not, the
 // spawn runs as its ORIGINAL type, which SubagentStart then reports. So:
 //
-//   - the guard records a pending entry for the rewritten spawn, and, while
-//     a rewrite is pending in that session, for every other spawn too, each
-//     with the agent type it expects to start as (premiumAgentType form);
+//   - a session is ARMED the first time the guard sees a ladder spawn or
+//     makes a rewrite there (a rewrite needs a ladder start as evidence, and
+//     that ladder agent was itself spawned through the guard). From then on
+//     the guard records a pending entry for EVERY allowed spawn in that
+//     session: the agent type it expects to start as (premiumAgentType
+//     form), its type before any rewrite, and whether it was rewritten;
 //   - SubagentStart (hooks/spawn-log.mjs) consumes the oldest pending entry
-//     whose expected type matches the start. A start that matches none, but
-//     does match a pending rewrite's ORIGINAL type, is that rewritten spawn
-//     running as what it was before the rewrite: the rewrite was ignored.
-//     That is recorded for the session, and the guard stops rewriting there
-//     for the rest of the session and gives its advisory instead.
-//
-// Every spawn made while a rewrite is pending has its own entry, so a plain
-// general-purpose spawn starting first does not look like an ignored
-// rewrite. A spawn made BEFORE the rewrite whose start arrives after it can
-// still be mistaken for one; that only ever turns rewriting off (the quiet
-// side). Entries expire after PREMIUM_PENDING_MS, the measured spawn-to-start
-// lag with headroom.
+//     whose expected type matches the start, in spawn order, the way the
+//     premium window matches its entries. (SubagentStart carries no
+//     tool_use_id: its hook input is the session fields plus agent_id and
+//     agent_type, checked in the 2.1.280 binary.) A start that matches
+//     none, but does match a pending rewrite's ORIGINAL type, is that
+//     rewritten spawn running as what it was before: the rewrite was
+//     ignored. That is recorded for the session, and the guard stops
+//     rewriting there and gives its advisory instead;
+//   - that conclusion is drawn ONLY when the correlation is positive: the
+//     session was armed at least PREMIUM_PENDING_MS before this start, so
+//     every spawn that could still be starting was recorded, and the only
+//     unmatched spawn of the start's type is the rewrite. Otherwise (armed
+//     too recently: a plain spawn made before arming could be the one
+//     starting) nothing is concluded, nothing is consumed, and no
+//     rewrite_ignored is written.
+// Entries expire after PREMIUM_PENDING_MS, the measured spawn-to-start lag
+// with headroom.
 //
 // state/ladder-rewrites.json:
-//   { "<session_id>": { pending: [{ at, expect, from, rewrite, wanted }],
+//   { "<session_id>": { armedAt, pending: [{ at, expect, from, rewrite, wanted }],
 //                       ignored: { at, wanted, ranAs } | null, touched } }
 
 import { stateFile, readJson, writeJsonAtomic } from './context.mjs';
@@ -41,7 +49,12 @@ function load(f, now) {
     if (!s || typeof s !== 'object' || typeof s.touched !== 'number' || now - s.touched > KEEP_MS) continue;
     const pending = (Array.isArray(s.pending) ? s.pending : [])
       .filter((e) => e && typeof e.at === 'number' && now - e.at < PREMIUM_PENDING_MS);
-    out[sid] = { pending, ignored: s.ignored && typeof s.ignored === 'object' ? s.ignored : null, touched: s.touched };
+    out[sid] = {
+      armedAt: typeof s.armedAt === 'number' ? s.armedAt : null,
+      pending,
+      ignored: s.ignored && typeof s.ignored === 'object' ? s.ignored : null,
+      touched: s.touched,
+    };
   }
   return out;
 }
@@ -57,14 +70,16 @@ export function rewriteState(sid, now = Date.now()) {
 }
 
 // Guard side: record one spawn. `type` is what it will start as, `from` its
-// type before any rewrite, `rewrite` whether the guard rewrote it.
-export function notePendingSpawn(sid, { type, from, rewrite }, now = Date.now()) {
+// type before any rewrite, `rewrite` whether the guard rewrote it, `arm`
+// whether this spawn arms the session (a ladder spawn; a rewrite always does).
+export function notePendingSpawn(sid, { type, from, rewrite, arm }, now = Date.now()) {
   const f = stateFile(REWRITE_FILE);
   try {
     withStateLock(f, () => {
       const all = load(f, now);
       const key = String(sid);
-      const s = all[key] || { pending: [], ignored: null, touched: now };
+      const s = all[key] || { armedAt: null, pending: [], ignored: null, touched: now };
+      if ((arm || rewrite) && typeof s.armedAt !== 'number') s.armedAt = now;
       s.pending.push({
         at: now, expect: premiumAgentType(type), from: premiumAgentType(from), rewrite: !!rewrite,
         wanted: rewrite ? String(type) : null,
@@ -76,9 +91,11 @@ export function notePendingSpawn(sid, { type, from, rewrite }, now = Date.now())
   } catch { /* fail open */ }
 }
 
-// SubagentStart side. Returns null (nothing pending for this session),
-// { matched: true }, or { ignored: { wanted, ranAs } } when this start shows
-// a rewrite was not honoured.
+// SubagentStart side. Returns null (nothing pending for this session, or no
+// entry this start can be tied to), { matched: true }, { ambiguous: true }
+// (it may be an ignored rewrite, or a spawn made before the session was
+// armed: no conclusion, nothing consumed), or { ignored: { wanted, ranAs } }
+// when this start is positively the rewritten spawn run as its original type.
 export function resolveSpawnStart(sid, agentType, now = Date.now()) {
   if (!sid) return null;
   const f = stateFile(REWRITE_FILE);
@@ -100,6 +117,8 @@ export function resolveSpawnStart(sid, agentType, now = Date.now()) {
         result = { matched: true };
       } else {
         idx = s.pending.findIndex((e) => e.rewrite && e.from === t);
+        const armedLongEnough = typeof s.armedAt === 'number' && now - s.armedAt >= PREMIUM_PENDING_MS;
+        if (idx >= 0 && !armedLongEnough) return { ambiguous: true };
         if (idx >= 0) {
           const ranAs = String(agentType || 'general-purpose');
           result = { ignored: { wanted: s.pending[idx].wanted, ranAs } };

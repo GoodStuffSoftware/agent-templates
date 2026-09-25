@@ -113,8 +113,8 @@ const next = { checkedAt: now };
 // readable) complete. Applied to EVERY signal, not just publication-leak
 // ones. See lib/scrub.mjs.
 let knownPublicForScrub = [];
-function sig(kind, detail, dispatch) {
-  signals.push({ kind, detail: String(detail ?? ''), dispatch });
+function sig(kind, detail, dispatch, severity) {
+  signals.push({ kind, detail: String(detail ?? ''), dispatch, ...(severity ? { severity } : {}) });
 }
 
 // Advisory-only, additive signal: SUGGESTS the model-benchmark skill, never
@@ -395,70 +395,103 @@ try {
   if (OWN_MANIFEST && OWN_MANIFEST.version) next.pluginVersion = OWN_MANIFEST.version;
 } catch { /* no install record here (a bare checkout): not a signal */ }
 
-// --- 6b. Stale guard still running ---------------------------------------
+// --- 6b. Stale copy loaded / session outdated -----------------------------
 // The cross-session half of the version check. spawn-guard.mjs stamps its
 // own version, copy source (cache / checkout / bundle), install scope key and
 // the session's plugin-load time (loaded_at) into every spawns.jsonl row. A
-// session is judged by the version it LOADED against what it should have
-// loaded then, never by when it first spawned:
-//   - a row written after its scope's install entry changed (lastUpdated)
-//     counts; earlier rows belong to the previous day's picture;
-//   - if the session loaded after that update (a trusted loaded_at, at
-//     least LOAD_SETTLE_MS after it), it should have loaded the installed
-//     version: a guard below it is a stale copy. This is the incident's
-//     shape and the desktop-bundle shape;
-//   - otherwise (loaded before the update, or when is unknown) it is judged
-//     against the version that update REPLACED: lagging the latest update
-//     is a session that simply has not reloaded yet (a normal update);
-//     lagging more than that is not. The replaced version comes from the
-//     plugin cache, where the harness marks each superseded version
-//     directory with an `.orphaned_at` time; with no marker, such rows are
-//     not judged;
-//   - directional and per scope; a checkout (a source work tree) is never
-//     judged;
-//   - a row with no stamp at all is judged only when it also lacks
-//     route_layer (every guard since 0.29.0 writes that key): a pre-0.29.0
-//     guard, stale whenever the version it is judged against is 0.29.0 or
-//     later. Its scope is unknown, so it is judged against the user-scope
-//     install (else the most recently updated one). This does not depend on
-//     what other installs are listed.
+// session is judged by the version it LOADED against what was installed
+// WHEN it loaded, never by when it first spawned. Two signals, because they
+// have different causes and different remedies:
+//
+//   stale_copy_loaded (high): the session loaded AFTER a version newer than
+//     its guard was installed, yet runs the older guard, so it loaded a copy
+//     that was not the install (the 2026-09-24 incident, a desktop bundle).
+//     Proven one of two ways, both needing a trusted load time L:
+//       - L is at least LOAD_SETTLE_MS after its scope's latest update
+//         (lastUpdated), and the guard is below that install; or
+//       - the plugin cache shows the guard's own version directory was
+//         already replaced (`.orphaned_at`, at least LOAD_SETTLE_MS before
+//         L): markers are written when a version stops being installed in
+//         ANY scope, so another scope's update can never make this true.
+//     Remedy: remove the stale entry in the desktop plugin manager.
+//   session_outdated (low, informational): the session loaded BEFORE the
+//     latest install and still runs what was installed then. That is not a
+//     stale copy, it is an old session, and the remedy is a restart or a
+//     /reload-plugins, never the remove-entry remedy. Quiet unless the
+//     session has been loaded SESSION_OUTDATED_MIN_AGE_MS (at its latest
+//     spawn) AND has missed SESSION_OUTDATED_MIN_UPDATES updates (updates
+//     within LOAD_SETTLE_MS of each other, such as one `claude plugin
+//     update` touching two scopes, count once). At the current pace of a
+//     patch per track (about 8 updates in 43 h, measured 2026-09-25), a
+//     session younger than a day stays quiet.
+//   A session whose load time is unknown (no trusted loaded_at stamp or
+//     self-update record) is neither: it is reported only as a count.
+//
+// Only rows from a guard below the install for their scope, written after
+// that install's lastUpdated, are judged, per scope and directionally; a
+// checkout (a source work tree) is never judged.
+//
+// A row with no stamp comes from a guard older than 0.29.0 when it also
+// lacks route_layer. Its version is bounded above by the keys every guard
+// since a release writes on every row (UNSTAMPED_FINGERPRINTS): a row
+// lacking effective_effort is from a guard below 0.23.0. It is judged
+// against the user-scope install (else the most recently updated one); for
+// the cache proof, every cached version below its bound must already have
+// been replaced when it loaded.
 // Known limit: a 0.29.0 to 0.29.3 guard writes route_layer but no stamp, so
-// its version is unknown and its rows are never judged.
-const STALE_GUARD_REMEDY = 'remove the stale agent-companion entry in the desktop plugin manager, then /reload-plugins, ' +
+// its version is unknown and its rows are never judged; and a stale copy
+// that is one update behind cannot be told from an old session unless the
+// cache still shows its version was replaced before it loaded.
+const STALE_COPY_REMEDY = 'remove the stale agent-companion entry in the desktop plugin manager, then /reload-plugins, ' +
   'then verify with a trivial ladder spawn; fresh session if that still fails';
-const ROUTE_LAYER_SINCE = '0.29.0';
+const SESSION_OUTDATED_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+const SESSION_OUTDATED_MIN_UPDATES = 2;
+// Keys a guard has written on EVERY spawns.jsonl row since `since`
+// (hooks/spawn-guard.mjs; checked against the release commits).
+const UNSTAMPED_FINGERPRINTS = [
+  { key: 'route_layer', since: '0.29.0' },
+  { key: 'effective_effort', since: '0.23.0' },
+];
+// An unstamped row's guard is below this version, or null when every
+// fingerprint key is present (a 0.29.0 to 0.29.3 guard: unknown).
+function unstampedBound(row) {
+  let bound = null;
+  for (const { key, since } of UNSTAMPED_FINGERPRINTS) {
+    if (!(key in row) && (!bound || versionBelow(since, bound))) bound = since;
+  }
+  return bound;
+}
 
 function orphanedAtMs(dir) {
   try {
     const raw = readFileSync(join(dir, '.orphaned_at'), 'utf8').trim();
     const n = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw);
-    return Number.isFinite(n) ? n : null;
+    return Number.isFinite(n) && n <= Date.now() ? n : null;
   } catch {
     return null;
   }
 }
-// The version an install entry replaced at its lastUpdated: among that
-// plugin's cache version directories below the entry's version, the one most
-// recently marked orphaned no later than the update (plus the settle window).
-function replacedVersion(entry) {
-  const updated = Date.parse(entry.lastUpdated || '');
-  if (!Number.isFinite(updated)) return null;
-  const [name, marketplace] = String(entry.key || '').split('@');
+// Every cached version directory of the plugin, with when it was replaced
+// (null: still installed somewhere, or no readable marker).
+function cacheTimeline(entries) {
   const dirs = new Set();
-  if (typeof entry.installPath === 'string' && entry.installPath) dirs.add(dirname(entry.installPath));
-  if (name && marketplace) dirs.add(join(claudeDir(), 'plugins', 'cache', marketplace, name));
-  let best = null;
+  for (const e of entries) {
+    const [name, marketplace] = String(e.key || '').split('@');
+    if (typeof e.installPath === 'string' && e.installPath) dirs.add(dirname(e.installPath));
+    if (name && marketplace) dirs.add(join(claudeDir(), 'plugins', 'cache', marketplace, name));
+  }
+  const out = new Map();
   for (const d of dirs) {
     let versions = [];
     try { versions = readdirSync(d, { withFileTypes: true }).filter((x) => x.isDirectory()).map((x) => x.name); } catch { continue; }
     for (const v of versions) {
-      if (!versionBelow(v, entry.version)) continue;
+      if (compareVersions(v, v) === null) continue; // not a version directory
       const o = orphanedAtMs(join(d, v));
-      if (o === null || o > updated + LOAD_SETTLE_MS) continue;
-      if (!best || o > best.o) best = { v, o };
+      const cur = out.get(v);
+      if (!out.has(v) || (o !== null && (cur === null || o < cur))) out.set(v, o);
     }
   }
-  return best ? best.v : null;
+  return [...out.entries()].map(([v, o]) => ({ v, o }));
 }
 
 try {
@@ -476,24 +509,40 @@ try {
       return Number.isFinite(t) && (!best || t > Date.parse(best.lastUpdated)) ? e : best;
     }, null);
     const unstampedEntry = byScope.get('user') || newestUpdate;
-    const replaced = new Map();
-    const replacedFor = (e) => {
-      if (!replaced.has(e)) replaced.set(e, replacedVersion(e));
-      return replaced.get(e);
-    };
+    const timeline = cacheTimeline(entries);
     // A row without a loaded_at stamp may still have a trusted load time in
     // self-update's per-session record (only a source this version writes).
     const loadState = (() => {
       try { return JSON.parse(readFileSync(stateFile('version-notice-state.json'), 'utf8')) || {}; } catch { return {}; }
     })();
-    const bySession = new Map();
+    // The version installed at L, for the message: the lowest cached version
+    // not yet replaced by then, else the entry's own.
+    const installedAt = (L, entry) => {
+      let best = null;
+      for (const { v, o } of timeline) {
+        if (o === null || o <= L - LOAD_SETTLE_MS) continue;
+        if (!best || versionBelow(v, best)) best = v;
+      }
+      return best && !versionBelow(entry.version, best) ? best : entry.version;
+    };
+    const staleBy = new Map();
+    const outdatedBy = new Map();
+    const unknownSessions = new Set();
     for (const s of recent) {
       if (s.guard_source === 'checkout') continue;
       const stamped = typeof s.guard_version === 'string' && s.guard_version ? s.guard_version : null;
       let entry = null;
+      let bound = null;
       if (stamped) entry = byScope.get(s.guard_scope);
-      else if (!('guard_version' in s) && !('route_layer' in s)) entry = unstampedEntry;
+      else if (!('guard_version' in s)) {
+        bound = unstampedBound(s);
+        if (bound) entry = unstampedEntry;
+      }
       if (!entry) continue;
+      // Is the guard below version v? For an unstamped guard: when v is at
+      // least its bound.
+      const guardBelow = (v) => (stamped ? versionBelow(stamped, v) : !versionBelow(v, bound));
+      if (!guardBelow(entry.version)) continue;
       const updated = Date.parse(entry.lastUpdated || '');
       const at = Date.parse(s.at);
       if (!Number.isFinite(updated) || !Number.isFinite(at) || !(at > updated)) continue;
@@ -503,35 +552,104 @@ try {
         if (r && TRUSTED_LOAD_SOURCES.has(r.loadedAtFrom) && typeof r.loadedAt === 'number') loaded = r.loadedAt;
       }
       if (Number.isFinite(loaded) && loaded > at) loaded = NaN; // a later load is not this row's load
-      const loadedAfter = Number.isFinite(loaded) && loaded - updated >= LOAD_SETTLE_MS;
-      const ref = loadedAfter ? entry.version : replacedFor(entry);
-      if (!ref) continue;
-      const stale = stamped ? versionBelow(stamped, ref) : !versionBelow(ref, ROUTE_LAYER_SINCE);
-      if (!stale) continue;
       const sidKey = String(s.session_id || 'unknown');
-      const cur = bySession.get(sidKey) || {
-        count: 0,
-        guard: stamped || `a pre-${ROUTE_LAYER_SINCE} version`,
-        ref,
-        basis: loadedAfter ? 'installed when it loaded' : `the version the ${entry.lastUpdated} update replaced`,
-        scope: stamped ? (entry.scope || 'user') : `scope unknown, judged against ${entry.scope || 'user'}`,
-      };
+      if (!Number.isFinite(loaded)) { unknownSessions.add(sidKey); continue; }
+      const guard = stamped || `a pre-${bound} version`;
+      const scope = stamped ? (entry.scope || 'user') : `scope unknown, judged against ${entry.scope || 'user'}`;
+      // stale_copy_loaded: a newer version was installed when it loaded.
+      let proof = null;
+      if (loaded - updated >= LOAD_SETTLE_MS) {
+        proof = { ref: entry.version, basis: 'installed when it loaded' };
+      } else {
+        // An unstamped guard's own directory may be gone from the cache. This
+        // ASSUMES a removed one was replaced before every orphaned directory
+        // still present: the harness sweeps orphaned directories by the age
+        // of their marker and marks ones in use (`.in_use`), seen in the
+        // 2.1.280 binary, not tested against it.
+        const own = stamped
+          ? timeline.filter((c) => c.v === stamped)
+          : timeline.filter((c) => versionBelow(c.v, bound));
+        if (own.length && own.every((c) => c.o !== null && c.o <= loaded - LOAD_SETTLE_MS)) {
+          const ref = installedAt(loaded, entry);
+          if (guardBelow(ref)) {
+            proof = {
+              ref,
+              basis: stamped
+                ? `installed when it loaded; ${stamped} had already been replaced`
+                : `installed when it loaded; every cached version below ${bound} had already been replaced`,
+            };
+          }
+        }
+      }
+      if (proof) {
+        const cur = staleBy.get(sidKey) || { count: 0, guard, ...proof, scope };
+        cur.count += 1;
+        staleBy.set(sidKey, cur);
+        continue;
+      }
+      const cur = outdatedBy.get(sidKey) || { count: 0, guard, installed: entry.version, scope, loaded, lastAt: at, stamped, entry };
       cur.count += 1;
-      bySession.set(sidKey, cur);
+      if (at > cur.lastAt) { cur.lastAt = at; cur.loaded = loaded; }
+      outdatedBy.set(sidKey, cur);
     }
-    if (bySession.size) {
-      const total = [...bySession.values()].reduce((n, v) => n + v.count, 0);
-      const list = [...bySession.entries()].slice(0, 5)
-        .map(([sidKey, v]) => `session ${sidKey.slice(0, 8)}: guard ${v.guard} < ${v.ref}, ${v.basis} (${v.scope} scope)`);
-      const more = bySession.size > 5 ? `, +${bySession.size - 5} more` : '';
-      const installs = [...new Set(entries.map((e) => `${e.scope || 'user'}@${e.version}`))];
-      sig('stale_guard_running',
-        `${total} spawn(s) in 24h from ${bySession.size} session(s) were guarded by an older agent-companion than the ` +
-        'one each session should have loaded (the install for its scope when it loaded; for a session loaded before ' +
-        `the latest update, the version that update replaced) — a stale copy is still loaded: ${list.join('; ')}${more}.` +
-        (installs.length > 1 ? ` Installs visible: ${installs.join(', ')}.` : '') +
-        ` Remedy: ${STALE_GUARD_REMEDY}.`,
-        'plugin-update');
+    // A session is reported under one signal only: a proven stale copy wins,
+    // and a known load time beats an unknown one.
+    for (const k of staleBy.keys()) { outdatedBy.delete(k); unknownSessions.delete(k); }
+    for (const k of outdatedBy.keys()) unknownSessions.delete(k);
+    // Updates a session missed between its load and its latest spawn.
+    const updatesMissed = (v) => {
+      const times = [];
+      for (const { v: cv, o } of timeline) {
+        if (o === null) continue;
+        if (v.stamped && versionBelow(cv, v.stamped)) continue; // another scope's older install
+        times.push(o);
+      }
+      for (const e of entries) {
+        if (scopeKey(e) !== scopeKey(v.entry)) continue;
+        const t = Date.parse(e.lastUpdated || '');
+        if (Number.isFinite(t)) times.push(t);
+      }
+      times.sort((a, b) => a - b);
+      let n = 0;
+      let lastEvent = -Infinity;
+      for (const t of times) {
+        if (t - lastEvent <= LOAD_SETTLE_MS) continue;
+        lastEvent = t;
+        if (t > v.loaded && t <= v.lastAt) n += 1;
+      }
+      return n;
+    };
+    const outdated = [...outdatedBy.entries()]
+      .map(([k, v]) => [k, { ...v, missed: updatesMissed(v) }])
+      .filter(([, v]) => v.lastAt - v.loaded >= SESSION_OUTDATED_MIN_AGE_MS && v.missed >= SESSION_OUTDATED_MIN_UPDATES);
+    const installs = [...new Set(entries.map((e) => `${e.scope || 'user'}@${e.version}`))];
+    const installsNote = installs.length > 1 ? ` Installs visible: ${installs.join(', ')}.` : '';
+    const more = (n) => (n > 5 ? `, +${n - 5} more` : '');
+    if (staleBy.size) {
+      const total = [...staleBy.values()].reduce((n, v) => n + v.count, 0);
+      const list = [...staleBy.entries()].slice(0, 5)
+        .map(([k, v]) => `session ${k.slice(0, 8)}: guard ${v.guard} < ${v.ref}, ${v.basis} (${v.scope} scope)`);
+      sig('stale_copy_loaded',
+        `${total} spawn(s) in 24h from ${staleBy.size} session(s) ran an older agent-companion guard than the one ` +
+        `installed when the session loaded, so a stale copy was loaded: ${list.join('; ')}${more(staleBy.size)}.` +
+        `${installsNote} Remedy: ${STALE_COPY_REMEDY}.`,
+        'plugin-update', 'high');
+    }
+    if (outdated.length) {
+      const total = outdated.reduce((n, [, v]) => n + v.count, 0);
+      const list = outdated.slice(0, 5).map(([k, v]) =>
+        `session ${k.slice(0, 8)}: guard ${v.guard}, installed ${v.installed}, ${v.missed} updates since it loaded ` +
+        `${Math.floor((v.lastAt - v.loaded) / 3600000)} h before its latest spawn (${v.scope} scope); ` +
+        `remedy: restart or /reload-plugins this session to pick up ${v.installed}`);
+      sig('session_outdated',
+        `${total} spawn(s) in 24h from ${outdated.length} long-running session(s) that loaded before the latest ` +
+        `update and still run the version installed then (not a stale copy): ${list.join('; ')}${more(outdated.length)}.`,
+        'none', 'low');
+    }
+    if (unknownSessions.size) {
+      sig('session_load_unknown',
+        `${unknownSessions.size} sessions with unknown load time ran a guard older than the one installed for their scope; not judged.`,
+        'none', 'low');
     }
   }
 } catch { /* telemetry or install record unreadable: not a signal */ }

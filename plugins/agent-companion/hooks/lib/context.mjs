@@ -162,18 +162,29 @@ export const LOAD_SETTLE_MS = 5 * 60 * 1000;
 // `claude --resume` process (a new load) and for /resume inside a running
 // process (no load: the old copy keeps running). The payload cannot tell them
 // apart, but the hook environment carries CLAUDE_PID, the Claude Code
-// process id. One small file per pid, state/process-loads/<pid>.json
-// { at, sid }, records when that process first reached SessionStart:
+// process id, and an in-process /resume first raises SessionEnd with reason
+// "resume" for the session the process was running, awaited before the new
+// SessionStart (checked in the 2.1.280 binary). One small file per pid,
+// state/process-loads/<pid>.json { at, sid, start, endResume }: `at` is when
+// that process loaded its plugins, `sid` the session it is running now,
+// `start` the verdict of its latest SessionStart, `endResume` the
+// SessionEnd "resume" it just raised (noteProcessEnd):
 //   - startup: always a new process; written (unless this same event already
 //     wrote it, see SAME_EVENT_MS: two SessionStart hooks share one event);
-//   - resume: a pid with no record is a fresh process (written); a pid that
-//     has one is an in-process /resume, whose load time is the record's;
-//   - clear / compact: never a load; the record's time, if any.
+//   - resume: in-process ONLY when this pid's record shows a SessionEnd
+//     "resume" for the very session the record says it was running, raised
+//     within RESUME_LINK_MS; its load time is then the record's. Anything
+//     else is ambiguous and is treated as a fresh process (written, load
+//     time now): a pid record left by an earlier process that happened to
+//     have this pid carries no such fresh marker, so a reused pid can never
+//     lend a fresh process an older load time;
+//   - clear / compact: never a load; the record's time, if any, and the
+//     record follows the process to its new session id.
 // Returns { fresh: true | false | null, loadedAt: ms | null }; `fresh` is
 // null when CLAUDE_PID is absent and the source is resume, because then it
-// cannot be known. A reused pid only ever makes a fresh resume look
-// in-process, which every caller treats as the quiet side.
+// cannot be known.
 const SAME_EVENT_MS = 60 * 1000;
+const RESUME_LINK_MS = 2 * 60 * 1000;
 const PROCESS_LOAD_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 function processLoadFile(pid) {
   return join(stateDir(), 'process-loads', `${pid}.json`);
@@ -193,25 +204,57 @@ export function noteProcessLoad(source, sid, { pid = process.env.CLAUDE_PID, now
   if (!id) {
     return src === 'startup' ? { fresh: true, loadedAt: now } : { fresh: src === 'resume' ? null : false, loadedAt: null };
   }
+  const s = String(sid);
   const rec = readProcessLoad(id);
-  const sameEvent = !!rec && rec.sid === String(sid) && now - rec.at >= 0 && now - rec.at < SAME_EVENT_MS;
-  const write = () => {
+  const write = (r) => {
     try {
       mkdirSync(join(stateDir(), 'process-loads'), { recursive: true });
-      writeJsonAtomic(processLoadFile(id), { at: now, sid: String(sid) });
+      writeJsonAtomic(processLoadFile(id), r);
     } catch { /* fail open */ }
   };
-  if (src === 'startup') {
-    if (sameEvent) return { fresh: true, loadedAt: rec.at };
-    write();
-    pruneProcessLoads(now);
+  // The latest SessionStart this record saw (a record from before `start`
+  // existed was written by a load).
+  const last = rec && (rec.start && typeof rec.start.at === 'number' ? rec.start : { sid: rec.sid, at: rec.at, fresh: true });
+  const sameEvent = !!last && last.sid === s && now - last.at >= 0 && now - last.at < SAME_EVENT_MS;
+  const end = rec && rec.endResume;
+  const endResume = !!end && typeof end.at === 'number' && end.sid === rec.sid && now - end.at >= 0 &&
+    now - end.at <= RESUME_LINK_MS && (!last || end.at >= last.at);
+  const freshLoad = () => {
+    write({ at: now, sid: s, start: { sid: s, source: src, at: now, fresh: true }, endResume: null });
     return { fresh: true, loadedAt: now };
+  };
+  if (src === 'resume' && endResume) {
+    write({ at: rec.at, sid: s, start: { sid: s, source: src, at: now, fresh: false }, endResume: null });
+    return { fresh: false, loadedAt: rec.at };
   }
-  if (src === 'resume') {
-    if (!rec) { write(); return { fresh: true, loadedAt: now }; }
-    return { fresh: sameEvent, loadedAt: rec.at };
+  if ((src === 'startup' || src === 'resume') && sameEvent) {
+    return { fresh: last.fresh !== false, loadedAt: rec.at };
   }
+  if (src === 'startup') {
+    const out = freshLoad();
+    pruneProcessLoads(now);
+    return out;
+  }
+  if (src === 'resume') return freshLoad();
+  if (rec && rec.sid !== s) write({ ...rec, sid: s });
   return { fresh: false, loadedAt: rec ? rec.at : null };
+}
+// SessionEnd: a "resume" reason is an in-process /resume about to happen in
+// this process; recorded for the session the record says it is running, so
+// the SessionStart that follows can be tied to it (noteProcessLoad). Other
+// reasons change nothing: an ended process's record is harmless, because a
+// later process with the same pid never inherits its load time.
+export function noteProcessEnd(reason, sid, { pid = process.env.CLAUDE_PID, now = Date.now() } = {}) {
+  const id = validPid(pid);
+  if (!id || String(reason || '') !== 'resume') return false;
+  const rec = readProcessLoad(id);
+  if (!rec || rec.sid !== String(sid)) return false;
+  try {
+    writeJsonAtomic(processLoadFile(id), { ...rec, endResume: { sid: String(sid), at: now } });
+    return true;
+  } catch {
+    return false;
+  }
 }
 function pruneProcessLoads(now) {
   try {
@@ -233,7 +276,9 @@ export const TRUSTED_LOAD_SOURCES = new Set(['startup', 'resume', 'resume-in-pro
 
 // When THIS session last loaded its plugins, as ms, or null when unknown:
 // the self-update record if its source is trusted, else this process's own
-// load record (CLAUDE_PID). Used to stamp spawns.jsonl rows (the scout judges
+// load record (CLAUDE_PID), only while that record says it is running this
+// very session (a record another process left under a reused pid, or one
+// from before this session, is not this load). Used to stamp spawns.jsonl rows (the scout judges
 // a session against what was installed when it LOADED) and to bound the
 // spawn guard's same-session ladder evidence to the current load.
 export function sessionLoadedAt(sid) {
@@ -243,7 +288,7 @@ export function sessionLoadedAt(sid) {
     if (rec && TRUSTED_LOAD_SOURCES.has(rec.loadedAtFrom) && typeof rec.loadedAt === 'number') return rec.loadedAt;
   } catch { /* fall through */ }
   const pl = readProcessLoad();
-  return pl ? pl.at : null;
+  return pl && pl.sid === String(sid) ? pl.at : null;
 }
 
 // Agent types observed in the shipped binary (2.1.220). The binary tests the
@@ -1653,7 +1698,7 @@ export function ownAgentsDir() {
 
 // The running copy's own identity, stamped into every spawns.jsonl row so the
 // daily scout can tell, across sessions, which guard version a spawn really
-// ran under (hooks/spawn-guard.mjs; scripts/detect.mjs's stale_guard_running).
+// ran under (hooks/spawn-guard.mjs; scripts/detect.mjs's stale_copy_loaded and session_outdated).
 //   guard_version: this copy's plugin.json version
 //   guard_source:  copySource(): "cache", "checkout" (a git work tree) or
 //                  "bundle" (anywhere else, e.g. a desktop bundle)

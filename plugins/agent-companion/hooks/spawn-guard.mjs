@@ -792,7 +792,7 @@ try {
       // checkout or bundle, install scope key) and when this session last
       // loaded its plugins. The daily scout reads these across sessions to
       // catch a stale copy still guarding spawns after an update
-      // (scripts/detect.mjs, stale_guard_running) — the one channel that
+      // (scripts/detect.mjs, stale_copy_loaded) — the one channel that
       // sees a session whose own hooks are all stale.
       ...runningCopyStamp(p.cwd, sid, loadedAtMs),
       subagent_type_rewritten_to: ladderRewrite ? ladderRewrite.to : null, // the ladder rung autofill swapped a general-purpose spawn to
@@ -1030,19 +1030,26 @@ try {
   allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
 
   // An allowed spawn joins the session's pending list (lib/ladder-rewrite.mjs)
-  // when it is itself a rewrite, or while a rewrite is still pending there, so
-  // SubagentStart can tell an ignored rewrite from an ordinary spawn. Only
-  // allowed spawns: a denied one never starts. Not a probe or a teammate
-  // (no evidence SubagentStart fires for one).
+  // once the session is armed: by this spawn if it is a rewrite or a ladder
+  // spawn (while rewriting can happen at all), or earlier. Recording EVERY
+  // spawn from then on is what lets SubagentStart tie an unexpected start to
+  // the rewritten spawn positively, rather than mistake a plain spawn of the
+  // same type for it. Only allowed spawns: a denied one never starts. Not a
+  // probe or a teammate (no evidence SubagentStart fires for one), and not
+  // once a rewrite was found ignored (rewriting is off there).
   async function notePending() {
     try {
       if (isCanary || input.team_name) return;
-      if (!ladderRewrite && !(rewriteState && rewriteState.pending.length)) return;
+      if (rewriteState && rewriteState.ignored) return;
+      const arm = isLadderSpawn && opt('fit_guard', true) && opt('fit_autofill', true) && opt('fit_autofill_ladder', true);
+      const armed = !!rewriteState && (typeof rewriteState.armedAt === 'number' || rewriteState.pending.length > 0);
+      if (!ladderRewrite && !arm && !armed) return;
       const { notePendingSpawn } = await rewriteModule();
       notePendingSpawn(sid, {
         type: ladderRewrite ? ladderRewrite.to : (input.subagent_type || 'general-purpose'),
         from: input.subagent_type || 'general-purpose',
         rewrite: !!ladderRewrite,
+        arm,
       });
     } catch { /* fail open */ }
   }
