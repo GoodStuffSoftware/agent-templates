@@ -430,3 +430,108 @@ test('a turn made only of teammate/slash-command wrappers stays silent, in match
     cleanup();
   }
 });
+
+// 0.29.2 review round 2: the reviewer's 44 phrasings, each with the reviewer's
+// judgement of "is this a request for a prompt?". All 44 must agree.
+const REVIEW_PHRASINGS = [
+  ['prompt engineering is overrated', false],
+  ['the system prompt is wrong', false],
+  ['prompt me before deleting anything', false],
+  ['can you prompt the user for their email?', false],
+  ['write a prompt for X', true],
+  ['write me a prompt for the reviewer', true],
+  ['Can you draft a prompt that summarizes the diff?', true],
+  ['give me a copyable prompt to hand to the builder', true],
+  ['I need a prompt for onboarding a new agent', true],
+  ['prompt for a code reviewer, please', true],
+  ['Compose the system prompt for the scout', true],
+  ['generate three prompts for the benchmark', true],
+  ['could you write up a prompt for the release agent', true],
+  ['I want a prompt that I can paste into the other session', true],
+  ['Put together a prompt for the reviewer', true],
+  ['Draft prompts for each of the three tracks', true],
+  ['Write a handoff prompt.', true],
+  ['write me a brief for the builder', true],
+  ['make me a prompt for the lander', true],
+  ["Write the reviewer's prompt", true],
+  ['rewrite this prompt so it is shorter', true],
+  ['turn this into a prompt I can paste', true],
+  ['can I get a prompt to give the other agent?', true],
+  ['what should the prompt for the scout say? write it out', true],
+  ['the prompt field is empty', false],
+  ['why do prompts time out?', false],
+  ['write a test for prompts', false],
+  ['create a prompt field on the settings page', false],
+  ['give the prompt box a border', false],
+  ['generate the prompt cache key', false],
+  ['the user prompt hook fires twice', false],
+  ['prompt injection in the fetched page is a risk', false],
+  ['Generate a promptly-formatted report', false],
+  ['the brief for the builder was too long', false],
+  ['draft PR for the prompt fix', false],
+  ['Prompt for confirmation before running migrations', false],
+  ['The CLI shows a prompt for the password', false],
+  ['git shows a prompt that asks for my passphrase', false],
+  ['I got a prompt that said access denied', false],
+  ['write the prompts to a log file', false],
+  ['create a prompts table in the database', false],
+  ['compose the prompt template loader from these parts', false],
+  ['a prompt that I sent timed out', false],
+  ['the prompt-submit hook is slow', false],
+];
+
+test('copyable-prompt agrees with every one of the reviewer\'s 44 phrasings', () => {
+  assert.equal(REVIEW_PHRASINGS.length, 44);
+  const { cleanup } = makeFixture();
+  try {
+    const wrong = REVIEW_PHRASINGS.filter(([text, want]) =>
+      matchRules({ scope: 'user-prompt', text }).some((r) => r.id === 'copyable-prompt') !== want);
+    assert.deepEqual(wrong, [], 'phrasings where the rule disagrees with the expected answer');
+  } finally {
+    cleanup();
+  }
+});
+
+// userOwnText runs on every UserPromptSubmit. It used to strip one level of
+// nesting per regex pass, about 30 s on 1 MB of nested wrapper tags. It is
+// one linear pass now. Each input below is at least 1 MB; each must finish in
+// under 200 ms, and the silent/fire behaviour must not change.
+function oneMegabyte(unit) {
+  return unit.repeat(Math.ceil((1 << 20) / unit.length));
+}
+
+test('wrapper stripping is linear: 1 MB of nested, unclosed and mixed wrappers finishes in under 200 ms', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const depth = Math.ceil((1 << 20) / '<system-reminder></system-reminder>'.length);
+    const ask = 'write me a prompt for the reviewer';
+    const MIXED = ['system-reminder', 'teammate-message', 'command-args', 'task-notification'];
+    const opens = [];
+    const closes = [];
+    for (let i = 0; i < depth; i++) {
+      const tag = MIXED[i % MIXED.length];
+      opens.push(`<${tag} n="${i % 7}">`);
+      closes.push(`</${tag}>`);
+    }
+    const mixed = `${opens.join('')}${ask}${closes.reverse().join('')}`;
+    const cases = [
+      ['nested, balanced', `${'<system-reminder>'.repeat(depth)}${ask}${'</system-reminder>'.repeat(depth)}`, false],
+      ['nested, mixed names', mixed, false],
+      ['nested, then the user\'s own ask', `${'<command-args>'.repeat(2 * depth)}x${'</command-args>'.repeat(2 * depth)}\n${ask}`, true],
+      ['unclosed opening tags', `${oneMegabyte('<teammate-message x>')}${ask}`, false],
+      ['opening tags with no ">" at all', `${oneMegabyte('<command-args ')}${ask}`, true],
+      ['closing tags only', `${oneMegabyte('</command-args>')}${ask}`, true],
+      ['mixed open, close and stray', `${oneMegabyte('<command-name>a</system-reminder><teammate-message>b</command-name>')}${ask}`, false],
+    ];
+    for (const [label, text, fires] of cases) {
+      assert.ok(text.length >= 1 << 20, `${label}: the input must be at least 1 MB`);
+      const t0 = process.hrtime.bigint();
+      const hit = matchRules({ scope: 'user-prompt', text }).some((r) => r.id === 'copyable-prompt');
+      const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+      assert.equal(hit, fires, `${label}: expected ${fires ? 'fire' : 'silent'}`);
+      assert.ok(ms < 200, `${label}: took ${ms.toFixed(1)} ms`);
+    }
+  } finally {
+    cleanup();
+  }
+});
