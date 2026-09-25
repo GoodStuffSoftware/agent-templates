@@ -1,6 +1,6 @@
 ---
 name: ac-opus-xhigh
-description: Rung 9/10: the weight-5 default — deep architecture, novel reasoning, migrations, large-scale refactors.
+description: "Rung 9/10: deep architecture, novel reasoning, migrations, large-scale refactors. Currently the default routing for: critical-change, long-autonomous-run."
 model: opus
 effort: xhigh
 ---

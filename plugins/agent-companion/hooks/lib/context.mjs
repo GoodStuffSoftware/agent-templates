@@ -1316,6 +1316,25 @@ export function rungFor(model, effort) {
   return ladder.find((r) => r.model === alias && (r.effort || null) === e) || null;
 }
 
+// True when `type` names one of the ladder's own generic worker defs
+// (config/model-tiers.json's `ladder[].agent`, e.g. `ac-opus-low`) — with or
+// without the `agent-companion:` namespace prefix a spawn from outside this
+// plugin's own repo carries. Used to distinguish "a ladder rung was spawned
+// by name, model+effort locked together in its file" from "some other agent
+// type was spawned with an explicit model" — the latter is exactly the shape
+// where effort silently falls back to session inheritance (spawn-guard.mjs's
+// SPAWNING RULE 1 advisory).
+export function isLadderAgentName(type) {
+  if (!type) return false;
+  const bare = String(type).includes(':') ? String(type).split(':').pop() : String(type);
+  try {
+    const cfg = modelTiers();
+    return Array.isArray(cfg.ladder) && cfg.ladder.some((r) => r.agent === bare);
+  } catch {
+    return false; // table unreadable: fail toward "not a ladder agent" (the safer, louder side)
+  }
+}
+
 export function readStdin() {
   try {
     let raw = readFileSync(0, 'utf8') || '';

@@ -1,6 +1,6 @@
 ---
 name: ac-sonnet-medium
-description: Rung 3/10: the weight-3 default — bounded multi-step work against a clear spec (1-3 files, known shape).
+description: "Rung 3/10: bounded multi-step work against a clear spec (1-3 files, known shape). Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
 model: sonnet
 effort: medium
 ---

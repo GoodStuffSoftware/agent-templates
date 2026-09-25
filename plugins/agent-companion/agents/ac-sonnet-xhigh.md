@@ -1,6 +1,6 @@
 ---
 name: ac-sonnet-xhigh
-description: Rung 5/10: the hardest sonnet-tier work — long agentic runs or diagnostic work that benefits from real search, still short of needing opus capability.
+description: "Rung 5/10: the hardest sonnet-tier work — long agentic runs or diagnostic work that benefits from real search, still short of needing opus capability. Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
 model: sonnet
 effort: xhigh
 ---
