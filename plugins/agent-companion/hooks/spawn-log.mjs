@@ -12,9 +12,11 @@ try {
   // A start positively tied to a rewritten spawn that ran as its original
   // type turns rewriting off for the rest of this session; an ambiguous one
   // (resolved.ambiguous) concludes nothing and writes no rewrite_ignored.
+  // A repeat start (resolved.repeat: this agent_id already started here, as
+  // when a lead continues a worker with SendMessage) is no spawn at all.
   // Independent of spawn_telemetry.
   let resolved = null;
-  try { resolved = resolveSpawnStart(p.session_id, p.agent_type || null, Date.now()); } catch { resolved = null; }
+  try { resolved = resolveSpawnStart(p.session_id, p.agent_type || null, Date.now(), p.agent_id || null); } catch { resolved = null; }
   if (opt('spawn_telemetry', true)) {
     appendLog('subagent-starts.jsonl', {
       at: new Date().toISOString(),
@@ -33,7 +35,8 @@ try {
   // (confirmPremiumStart in lib/premium-window.mjs). Independent of spawn_telemetry — this is cap state.
   // An ignored rewrite's premium entry was recorded under the rung's type, so
   // it is confirmed under that type.
-  try {
+  // A repeat start is a continued agent, not a new spawn: it confirms nothing.
+  if (!(resolved && resolved.repeat)) try {
     const t = resolved && resolved.ignored && resolved.ignored.wanted ? resolved.ignored.wanted : (p.agent_type || null);
     confirmPremiumStart(p.session_id, Date.now(), t);
   } catch { /* fail open */ }

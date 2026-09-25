@@ -438,3 +438,100 @@ test('new_agent_type source: ladder callers (bare and agent-companion:) are know
     cleanup();
   }
 });
+// Round 5 (V4-1): continuing a worker with SendMessage fires SubagentStart
+// again with the SAME agent_id and no Agent PreToolUse. A repeat start is no
+// spawn: it concludes nothing, consumes nothing and writes nothing.
+const REWRITES = (stateDir) => join(stateDir, 'state', 'ladder-rewrites.json');
+function startAs(dir, sessionId, agentType, agentId, env = {}) {
+  const res = runHook('hooks/spawn-log.mjs', { session_id: sessionId, agent_id: agentId, agent_type: agentType, cwd: dir, hook_event_name: 'SubagentStart' }, { env });
+  assert.equal(res.status, 0, res.stderr);
+}
+function ageArming(stateDir, sessionId, ms) {
+  const all = JSON.parse(readFileSync(REWRITES(stateDir), 'utf8'));
+  all[sessionId].armedAt -= ms;
+  writeFileSync(REWRITES(stateDir), JSON.stringify(all));
+}
+const FOUR_MIN = 4 * 60 * 1000;
+
+test('a continued agent (repeat agent_id) while a rewrite is pending is never an ignored rewrite', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const sid = 'sess-resumed';
+    // A plain general-purpose worker, spawned and started before the session is armed.
+    guard(dir, sid, { ...PLAIN_GP, name: 'w1' });
+    startAs(dir, sid, 'general-purpose', 'agent-A');
+    // A ladder worker arms the session and is the evidence; armed for 4 min.
+    guard(dir, sid, { subagent_type: 'agent-companion:ac-sonnet-low', prompt: 'ladder worker' });
+    startAs(dir, sid, 'agent-companion:ac-sonnet-low', 'agent-L');
+    ageArming(stateDir, sid, FOUR_MIN);
+    // B is rewritten; the lead continues agent-A with SendMessage at the same moment.
+    const b = updated(guard(dir, sid, AUTOFILL_GP))?.subagent_type;
+    assert.equal(b, 'agent-companion:ac-opus-low');
+    const before = readFileSync(REWRITES(stateDir), 'utf8');
+    startAs(dir, sid, 'general-purpose', 'agent-A');
+    assert.equal(readFileSync(REWRITES(stateDir), 'utf8'), before, 'a repeat start writes nothing');
+    startAs(dir, sid, b, 'agent-B'); // B starts as the rung: the rewrite WAS honoured
+    assert.ok(startsFor(stateDir, sid).every((r) => !r.rewrite_ignored));
+    const st = JSON.parse(readFileSync(REWRITES(stateDir), 'utf8'))[sid];
+    assert.equal(st.ignored, null);
+    assert.deepEqual(st.pending, []);
+    assert.equal(updated(guard(dir, sid, AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low', 'rewriting carries on');
+  } finally {
+    cleanup();
+  }
+});
+
+test('many resumed general-purpose workers around a pending rewrite: none counts, and a real ignored rewrite is still found', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const sid = 'sess-resumed-many';
+    // Six plain workers: three before the session is armed, three after.
+    for (let i = 0; i < 3; i++) { guard(dir, sid, { ...PLAIN_GP, name: `pre${i}` }); startAs(dir, sid, 'general-purpose', `pre-${i}`); }
+    guard(dir, sid, { subagent_type: 'agent-companion:ac-sonnet-low', prompt: 'ladder worker' });
+    startAs(dir, sid, 'agent-companion:ac-sonnet-low', 'agent-L');
+    for (let i = 0; i < 3; i++) { guard(dir, sid, { ...PLAIN_GP, name: `post${i}` }); startAs(dir, sid, 'general-purpose', `post-${i}`); }
+    ageArming(stateDir, sid, FOUR_MIN);
+    // Two rewrites pending; every worker is continued, some twice, in between.
+    guard(dir, sid, AUTOFILL_GP);
+    guard(dir, sid, AUTOFILL_GP);
+    const ids = ['pre-0', 'post-0', 'pre-1', 'post-1', 'pre-2', 'post-2', 'pre-0', 'post-2', 'agent-L'];
+    for (const id of ids) startAs(dir, sid, id === 'agent-L' ? 'agent-companion:ac-sonnet-low' : 'general-purpose', id);
+    assert.ok(startsFor(stateDir, sid).every((r) => !r.rewrite_ignored), 'no continuation is an ignored rewrite');
+    let st = JSON.parse(readFileSync(REWRITES(stateDir), 'utf8'))[sid];
+    assert.equal(st.ignored, null);
+    assert.equal(st.pending.filter((e) => e.rewrite).length, 2, 'both rewrites still pending: nothing consumed');
+    // One rewrite honoured; the other really runs as general-purpose (a NEW agent_id).
+    startAs(dir, sid, 'agent-companion:ac-opus-low', 'agent-R1');
+    startAs(dir, sid, 'general-purpose', 'agent-R2');
+    const flagged = startsFor(stateDir, sid).filter((r) => r.rewrite_ignored);
+    assert.deepEqual(flagged.map((r) => r.agent_id), ['agent-R2']);
+    // And a continuation of that one afterwards adds nothing.
+    startAs(dir, sid, 'general-purpose', 'agent-R2');
+    assert.equal(startsFor(stateDir, sid).filter((r) => r.rewrite_ignored).length, 1);
+    st = JSON.parse(readFileSync(REWRITES(stateDir), 'utf8'))[sid];
+    assert.equal(st.ignored.wanted, 'agent-companion:ac-opus-low');
+  } finally {
+    cleanup();
+  }
+});
+
+test('with spawn_telemetry off, an agent started after arming and then continued is still known as a repeat', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const sid = 'sess-resumed-notel';
+    const env = { CLAUDE_PLUGIN_OPTION_SPAWN_TELEMETRY: 'false' };
+    seedStart(stateDir, sid, 'agent-companion:ac-sonnet-low');
+    guard(dir, sid, { subagent_type: 'agent-companion:ac-sonnet-low', prompt: 'ladder worker' });
+    startAs(dir, sid, 'agent-companion:ac-sonnet-low', 'agent-L', env);
+    guard(dir, sid, { ...PLAIN_GP, name: 'w1' });
+    startAs(dir, sid, 'general-purpose', 'agent-A', env);
+    ageArming(stateDir, sid, FOUR_MIN);
+    assert.equal(updated(guard(dir, sid, AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+    startAs(dir, sid, 'general-purpose', 'agent-A', env);
+    const st = JSON.parse(readFileSync(REWRITES(stateDir), 'utf8'))[sid];
+    assert.equal(st.ignored, null);
+    assert.equal(st.pending.filter((e) => e.rewrite).length, 1);
+  } finally {
+    cleanup();
+  }
+});
