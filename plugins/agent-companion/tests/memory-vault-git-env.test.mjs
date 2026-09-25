@@ -814,6 +814,41 @@ test('S1: every vault commit (and every vault git call) runs housekeeping undeta
   }
 });
 
+// The no-hooks, no-fsmonitor and no-signing -c options, read from git's own
+// trace. Under the hermetic env no config from outside the vault can set a
+// hooksPath or signing at all, so the hostile-config tests below cannot see
+// these options go missing. Two places still need them: the vault's own
+// .git/config (the "vault's own .git/config" test below), and `git init`,
+// which runs before that file exists, and tag.gpgsign, which only matters if
+// a tag is ever made. This test pins all of them on every call that carries
+// them: each vaultGit() call (it always names --work-tree=.) and the init.
+test('S1: every vault call and the init carry the no-hooks, no-fsmonitor and no-signing -c options', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const trace = join(fx.dir, 'trace2.jsonl');
+    const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', GIT_TRACE2_EVENT: trace };
+    const res = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(res.status, 0, res.stderr);
+    const top = traceStarts(trace).filter((e) => !String(e.sid || '').includes('/'));
+    const calls = top.filter((e) => e.argv.includes('--work-tree=.'));
+    assert.ok(calls.some((e) => e.argv.includes('commit')), 'the vault commit is traced');
+    for (const e of calls) {
+      const shown = e.argv.join(' ');
+      for (const kv of ['core.hooksPath=.git/agent-companion-no-hooks', 'core.fsmonitor=false', 'commit.gpgsign=false', 'tag.gpgsign=false']) {
+        assert.ok(hasConfigPair(e.argv, kv), `missing -c ${kv}: ${shown}`);
+      }
+    }
+    const inits = top.filter((e) => e.argv.includes('init'));
+    assert.equal(inits.length, 1, 'one init call');
+    const vault = join(fx.stateDir, 'memory-vault');
+    assert.ok(hasConfigPair(inits[0].argv, `core.hooksPath=${join(vault, '.git', 'agent-companion-no-hooks')}`), inits[0].argv.join(' '));
+    assert.ok(hasConfigPair(inits[0].argv, 'core.fsmonitor=false'), inits[0].argv.join(' '));
+  } finally {
+    fx.cleanup();
+  }
+});
+
 // --- 0.29.2 S2: no configuration from outside the vault reaches any call --
 // Every vault git call runs hermetic (hermeticGitEnv()): no global or system
 // config file, whether git finds it through GIT_CONFIG_GLOBAL /
@@ -824,9 +859,9 @@ test('S1: every vault commit (and every vault git call) runs housekeeping undeta
 // if git ever acts on it:
 //   - hooks, an fsmonitor program and a gpg program: the vault's -c options
 //     stop these even without the hermetic env;
-//   - a clean filter (via core.attributesFile) and an excludes file: nothing
-//     but the hermetic env stops these, so every route below goes red when
-//     the hermetic env is removed.
+//   - a clean filter (via core.attributesFile), an excludes file, and git's
+//     default per-user ignore file: nothing but the hermetic env stops these,
+//     so every route below goes red when the hermetic env is removed.
 // The same settings written into the vault's OWN .git/config reach git
 // whatever the env says; only the -c options stop them (the "vault's own
 // .git/config" test further down), so that test goes red when the -c
@@ -878,6 +913,14 @@ function makeHostileConfig(root) {
   const xdg = join(root, 'hostile-xdg');
   mkdirSync(join(xdg, 'git'), { recursive: true });
   writeFileSync(join(xdg, 'git', 'config'), text);
+  // git's DEFAULT per-user ignore file, which it reads when no config sets
+  // core.excludesFile: $XDG_CONFIG_HOME/git/ignore, or
+  // $HOME/.config/git/ignore when XDG_CONFIG_HOME is unset. No config file
+  // names it, so pinning GIT_CONFIG_GLOBAL does not keep it out; only the
+  // XDG_CONFIG_HOME (and HOME) pins do.
+  writeFileSync(join(xdg, 'git', 'ignore'), 'hostile-excluded.md\n');
+  mkdirSync(join(home, '.config', 'git'), { recursive: true });
+  writeFileSync(join(home, '.config', 'git', 'ignore'), 'hostile-excluded.md\n');
   return { flag, file, home, xdg, guardedText: [...guarded, ''].join('\n') };
 }
 
