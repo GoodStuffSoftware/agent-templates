@@ -1,4 +1,4 @@
-// SessionStart — detect when the ladder (config/model-tiers.json's `ladder`,
+// SessionStart (and SessionEnd, only to record an in-process /resume) — detect when the ladder (config/model-tiers.json's `ladder`,
 // the generic ac-* worker definitions under agents/) is broken for THIS
 // session, before a spawn fails on it mid-task.
 //
@@ -11,7 +11,7 @@
 // see it from inside that session. That case is caught ACROSS sessions
 // instead: spawn-guard.mjs stamps its own version and install scope into
 // every spawns.jsonl row, and the daily scout (scripts/detect.mjs,
-// stale_guard_running) flags rows guarded by a version older than what is
+// stale_copy_loaded) flags rows guarded by a version older than what was
 // installed for that scope.
 //
 // Claude Code exposes no registered-agent list to a SessionStart hook, so
@@ -30,8 +30,11 @@
 //      applicable install, never true of a source checkout, and judged only
 //      when this process just loaded it: source startup, or a resume in a
 //      FRESH process (noteProcessLoad: an in-process /resume keeps the copy
-//      the process loaded before any update, which is not a stale install,
-//      and with no CLAUDE_PID a resume is not judged at all). /clear and
+//      the process loaded before any update, which is not a stale install;
+//      it is told apart by CLAUDE_PID plus the SessionEnd "resume" the same
+//      process raises just before, which this hook records too; a resume
+//      that cannot be tied that way is treated as fresh, and with no
+//      CLAUDE_PID a resume is not judged at all). /clear and
 //      compaction are never judged. This is the in-session half of the
 //      version check; it catches a stale copy of this version or later,
 //      which 0.22.0 is not.
@@ -44,7 +47,7 @@ import { join, dirname, resolve } from 'node:path';
 import {
   readStdin, opt, passthrough, claudeDir, modelTiers,
   readInstalledPlugins, pluginEntries, effectiveEntry, pathUnder, versionBelow, copySource,
-  noteProcessLoad, LOAD_SETTLE_MS,
+  noteProcessLoad, noteProcessEnd, LOAD_SETTLE_MS,
 } from './lib/context.mjs';
 
 // The recovery for a stale loaded copy, operator-confirmed on this machine
@@ -59,7 +62,7 @@ const BROKEN_FILES_RECOVERY = 'update or reinstall the plugin (claude plugin upd
 
 // A copy whose install entry changed in the last few minutes may be one this
 // very process started loading just before the update wrote the entry
-// (LOAD_SETTLE_MS, shared with the scout's stale_guard_running).
+// (LOAD_SETTLE_MS, shared with the scout's stale_copy_loaded).
 
 function runningPluginRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -213,10 +216,17 @@ function buildStaleCopyMessage(v) {
 
 try {
   const p = readStdin();
-  // Recorded before the option check: self-update.mjs reads the same
-  // per-process record to tell a fresh resume from an in-process /resume.
+  // Recorded before the option check: self-update.mjs and the spawn guard
+  // read the same per-process record to tell a fresh resume from an
+  // in-process /resume. SessionEnd "resume" is the in-process /resume's own
+  // announcement (noteProcessEnd); /clear and compaction move the record to
+  // the process's new session id.
+  if (p.hook_event_name === 'SessionEnd') {
+    try { noteProcessEnd(p.reason, p.session_id || 'unknown'); } catch { /* fail open */ }
+    passthrough();
+  }
   let load = null;
-  if (p.source === 'startup' || p.source === 'resume') {
+  if (typeof p.source === 'string' && p.source) {
     try { load = noteProcessLoad(p.source, p.session_id || 'unknown'); } catch { load = null; }
   }
   if (!opt('ladder_check', true)) passthrough();

@@ -243,17 +243,28 @@ test('an in-process /resume after a normal update is silent; a resume in a FRESH
     // Process 4242 reaches SessionStart once (startup) and records its load.
     const startup = runFrom(old, { session_id: 'r3-session-a', cwd: dir, source: 'startup' }, { CLAUDE_PID: '4242' });
     assert.equal(startup.status, 0, startup.stderr);
-    // /resume inside that same process, into another session: no plugin load
-    // happened, so it must stay silent.
+    // /resume inside that same process, into another session: the harness
+    // first raises SessionEnd "resume" for the running session, then
+    // SessionStart. No plugin load happened, so it must stay silent.
+    const end = runFrom(old, { hook_event_name: 'SessionEnd', reason: 'resume', session_id: 'r3-session-a', cwd: dir }, { CLAUDE_PID: '4242' });
+    assert.equal(end.status, 0, end.stderr);
+    assert.equal(end.stdout, '');
     const inProcess = runFrom(old, { session_id: 'r3-session-b', cwd: dir, source: 'resume' }, { CLAUDE_PID: '4242' });
     assert.equal(inProcess.status, 0, inProcess.stderr);
     assert.equal(inProcess.stdout, '', `in-process /resume fired: ${inProcess.stdout}`);
+    // The second SessionStart hook of that same event agrees.
+    assert.equal(runFrom(old, { session_id: 'r3-session-b', cwd: dir, source: 'resume' }, { CLAUDE_PID: '4242' }).stdout, '');
     // A resume with no CLAUDE_PID cannot be told apart, so it is not judged.
     const noPid = runFrom(old, { session_id: 'r3-session-c', cwd: dir, source: 'resume' }, { CLAUDE_PID: '' });
     assert.equal(noPid.stdout, '', `resume without CLAUDE_PID fired: ${noPid.stdout}`);
     // A fresh `claude --resume` process (a pid never seen) that loaded this copy: warns.
     const fresh = runFrom(old, { session_id: 'r3-session-d', cwd: dir, source: 'resume' }, { CLAUDE_PID: '5353' });
     assert.match(fresh.json?.systemMessage || '', /older cached copy of the plugin \(0\.29\.1\) than the one installed for it \(0\.29\.2, user scope\)/);
+    // A reused pid: 4242's record is from a process that has ended. A fresh
+    // `claude --resume` that gets pid 4242, with no SessionEnd "resume" of its
+    // own, is ambiguous and so treated as fresh: it is judged, and warns.
+    const reused = runFrom(old, { session_id: 'r3-session-e', cwd: dir, source: 'resume' }, { CLAUDE_PID: '4242' });
+    assert.match(reused.json?.systemMessage || '', /older cached copy of the plugin \(0\.29\.1\)/);
   } finally {
     cleanup();
   }

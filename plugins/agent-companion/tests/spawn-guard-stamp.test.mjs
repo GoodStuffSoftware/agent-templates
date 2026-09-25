@@ -3,7 +3,7 @@
 // (cache/checkout) and guard_scope (the install scope that applies to the
 // spawn's cwd, as a label, never a path) — so the daily scout can compare,
 // across sessions, the version a spawn really ran under with what is
-// installed for that scope (scripts/detect.mjs, stale_guard_running).
+// installed for that scope (scripts/detect.mjs, stale_copy_loaded).
 // Round 1's machine-wide state/spawn-guard-running.json marker is gone.
 import test from 'node:test';
 import assert from 'node:assert/strict';

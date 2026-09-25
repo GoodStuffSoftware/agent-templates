@@ -1,13 +1,17 @@
-// Ladder track rounds 2-3: the daily scout's cross-session version checks.
+// Ladder track rounds 2-4: the daily scout's cross-session version checks.
 //
-// stale_guard_running: spawn-guard.mjs stamps guard_version / guard_source /
-// guard_scope / loaded_at into every spawns.jsonl row, and scripts/detect.mjs
-// judges each session by the version it LOADED: a session that loaded after
-// its scope's latest update is judged against the installed version; one that
-// loaded before it (or whose load time is unknown) against the version that
-// update REPLACED (from the plugin cache's `.orphaned_at` markers). This is
-// the only channel that sees a session whose own hooks are all stale (the
-// 2026-09-24 incident, replayed below from a sanitised fixture).
+// spawn-guard.mjs stamps guard_version / guard_source / guard_scope /
+// loaded_at into every spawns.jsonl row, and scripts/detect.mjs judges each
+// session by the version it LOADED against what was installed when it loaded
+// (round 4: two signals):
+//   - stale_copy_loaded (high): loaded after a newer version was installed,
+//     yet runs the older guard: a stale copy, remedy remove the stale entry;
+//   - session_outdated (low): loaded before the latest install and still on
+//     it: an old session, remedy restart or /reload-plugins; quiet under a
+//     day old or fewer than two updates behind;
+//   - an unknown load time is only counted (session_load_unknown).
+// This is the only channel that sees a session whose own hooks are all stale
+// (the 2026-09-24 incident, replayed below from a sanitised fixture).
 //
 // plugin_version_behind: compares the installed version against the latest
 // AVAILABLE one (the marketplace clone locally, the routine's own checkout in
@@ -77,8 +81,13 @@ function runDetect(dir, { script = 'scripts/detect.mjs', env = {} } = {}) {
   return res.json.signals;
 }
 const find = (signals, kind) => signals.filter((s) => s.kind === kind);
+const STALE = 'stale_copy_loaded';
+const OUTDATED = 'session_outdated';
+const UNKNOWN = 'session_load_unknown';
+const REMOVE_ENTRY = /remove the stale agent-companion entry in the desktop plugin manager/;
+const versionSignals = (signals) => signals.filter((s) => [STALE, OUTDATED, UNKNOWN].includes(s.kind));
 
-test('after a normal update, no warning: pre-update rows, a session open across the update, and fresh sessions on the new version', () => {
+test('after a normal update, nothing is judged stale: pre-update rows, a session open across the update, fresh sessions on the new version', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeInstalled(dir, [{ scope: 'user', version: '0.29.2', installPath: installPath(dir, '0.29.2'), lastUpdated: iso(2 * HOUR) }]);
@@ -87,17 +96,24 @@ test('after a normal update, no warning: pre-update rows, a session open across 
       row('aaaaaaaa-pre-update', 3 * HOUR, stamp('0.29.1', 4 * HOUR)),
       row('bbbbbbbb-straddler', 3 * HOUR, stamp('0.29.1', 5 * HOUR)),
       row('bbbbbbbb-straddler', 1 * HOUR, stamp('0.29.1', 5 * HOUR)),
-      // Same straddler, load time unknown: judged against the replaced 0.29.1, not stale.
+      // Same straddler shape, load time unknown: neither signal, only a count.
       row('bbbbbbbq-straddler-unknown', 1 * HOUR, stamp('0.29.1', null)),
       row('cccccccc-fresh', 0.5 * HOUR, stamp('0.29.2', 1 * HOUR)),
     ]);
-    assert.deepEqual(find(runDetect(dir), 'stale_guard_running'), []);
+    const signals = runDetect(dir);
+    assert.deepEqual(find(signals, STALE), []);
+    assert.deepEqual(find(signals, OUTDATED), []);
+    const unknown = find(signals, UNKNOWN);
+    assert.equal(unknown.length, 1, JSON.stringify(unknown));
+    assert.match(unknown[0].detail, /^1 sessions with unknown load time/);
+    assert.doesNotMatch(unknown[0].detail, /remedy|reload|restart|remove/i);
+    assert.equal(unknown[0].dispatch, 'none');
   } finally {
     cleanup();
   }
 });
 
-test('the normal-update fixture: a session that loads 0.29.1 just before the update and first spawns after it does not warn', () => {
+test('the normal-update fixture: a session that loads 0.29.1 just before the update and first spawns after it says nothing', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeInstalled(dir, [{ scope: 'user', version: '0.29.2', installPath: installPath(dir, '0.29.2'), lastUpdated: iso(3 * HOUR) }]);
@@ -107,16 +123,16 @@ test('the normal-update fixture: a session that loads 0.29.1 just before the upd
       row('11111111-loads-before', 2.5 * HOUR, stamp('0.29.1', 3 * HOUR + MIN)),
       row('11111111-loads-before', 1 * HOUR, stamp('0.29.1', 3 * HOUR + MIN)),
       // The startup autoupdater's race: the load is stamped 1 minute AFTER the
-      // entry changed, inside the settle window, so it still counts as before.
+      // entry changed (and the marker was written), inside the settle window.
       row('22222222-autoupdate-race', 2 * HOUR, stamp('0.29.1', 3 * HOUR - MIN)),
     ]);
-    assert.deepEqual(find(runDetect(dir), 'stale_guard_running'), []);
+    assert.deepEqual(versionSignals(runDetect(dir)), []);
   } finally {
     cleanup();
   }
 });
 
-test('a dev checkout newer than installed is never called stale (nor a newer cache copy)', () => {
+test('a dev checkout newer than installed is never called stale (nor a newer cache copy, nor an older checkout)', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeInstalled(dir, [{ scope: 'user', version: '0.29.1', installPath: installPath(dir, '0.29.1'), lastUpdated: iso(5 * HOUR) }]);
@@ -124,60 +140,144 @@ test('a dev checkout newer than installed is never called stale (nor a newer cac
     writeSpawns(stateDir, [
       row('dddddddd-dev', 1 * HOUR, stamp('0.29.3', 2 * HOUR, { guard_source: 'checkout' })),
       row('eeeeeeee-newer-cache', 1 * HOUR, stamp('0.29.3', 2 * HOUR)),
-      // An OLDER checkout is the operator's own tree, not a stale install.
       row('ffffffff-old-dev', 1 * HOUR, stamp('0.28.0', 2 * HOUR, { guard_source: 'checkout' })),
     ]);
-    assert.deepEqual(find(runDetect(dir), 'stale_guard_running'), []);
+    assert.deepEqual(versionSignals(runDetect(dir)), []);
   } finally {
     cleanup();
   }
 });
 
-test('a session that LOADED after the update but runs an older guard warns, naming both versions, the session and the remedy', () => {
+test('stale_copy_loaded: a new session loaded after 0.29.3 was installed but running 0.29.2 (both stamp), with the remove-entry remedy', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    writeInstalled(dir, [{ scope: 'user', version: '0.29.5', installPath: installPath(dir, '0.29.5'), lastUpdated: iso(3 * HOUR) }]);
+    writeInstalled(dir, [{ scope: 'user', version: '0.29.3', installPath: installPath(dir, '0.29.3'), lastUpdated: iso(3 * HOUR) }]);
+    writeCache(dir, [{ version: '0.29.2', orphanedMsAgo: 3 * HOUR }, { version: '0.29.3' }]);
     writeSpawns(stateDir, [
       row('12345678-stale-session', 1 * HOUR, stamp('0.29.2', 2 * HOUR)),
       row('12345678-stale-session', 0.5 * HOUR, stamp('0.29.2', 2 * HOUR)),
     ]);
-    const hits = find(runDetect(dir), 'stale_guard_running');
+    const signals = runDetect(dir);
+    const hits = find(signals, STALE);
     assert.equal(hits.length, 1, JSON.stringify(hits));
     assert.match(hits[0].detail, /2 spawn\(s\) in 24h from 1 session/);
-    assert.match(hits[0].detail, /guard 0\.29\.2 < 0\.29\.5, installed when it loaded \(user scope\)/);
+    assert.match(hits[0].detail, /guard 0\.29\.2 < 0\.29\.3, installed when it loaded \(user scope\)/);
     assert.match(hits[0].detail, /session 12345678/);
-    assert.match(hits[0].detail, /remove the stale agent-companion entry in the desktop plugin manager, then \/reload-plugins, then verify with a trivial ladder spawn; fresh session if that still fails/);
+    assert.match(hits[0].detail, /Remedy: remove the stale agent-companion entry in the desktop plugin manager, then \/reload-plugins, then verify with a trivial ladder spawn; fresh session if that still fails\./);
     assert.equal(hits[0].dispatch, 'plugin-update');
+    assert.equal(hits[0].severity, 'high');
+    assert.deepEqual(find(signals, OUTDATED), []);
   } finally {
     cleanup();
   }
 });
 
-test('a session loaded before the update is judged against the version that update replaced: two releases behind warns', () => {
+test('stale_copy_loaded from the cache: the guard\'s own version had already been replaced when the session loaded, even one update behind', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    writeInstalled(dir, [{ scope: 'user', version: '0.29.3', installPath: installPath(dir, '0.29.3'), lastUpdated: iso(3 * HOUR) }]);
-    writeCache(dir, [{ version: '0.29.1', orphanedMsAgo: 20 * HOUR }, { version: '0.29.2', orphanedMsAgo: 3 * HOUR }, { version: '0.29.3' }]);
+    // 0.29.2 -> 0.29.3 ten hours ago, 0.29.3 -> 0.29.4 three hours ago. The
+    // session loaded 5 h ago, while 0.29.3 was installed, yet runs 0.29.2.
+    writeInstalled(dir, [{ scope: 'user', version: '0.29.4', installPath: installPath(dir, '0.29.4'), lastUpdated: iso(3 * HOUR) }]);
+    writeCache(dir, [{ version: '0.29.2', orphanedMsAgo: 10 * HOUR }, { version: '0.29.3', orphanedMsAgo: 3 * HOUR }, { version: '0.29.4' }]);
     writeSpawns(stateDir, [
-      row('33333333-two-behind', 1 * HOUR, stamp('0.29.1', 22 * HOUR)),
-      row('44444444-one-behind', 1 * HOUR, stamp('0.29.2', 22 * HOUR)),
+      row('23456789-cache-proof', 1 * HOUR, stamp('0.29.2', 5 * HOUR)),
+      // Loaded 0.29.3 while 0.29.3 was installed: an old session, not a stale copy.
+      row('34567890-just-old', 1 * HOUR, stamp('0.29.3', 5 * HOUR)),
     ]);
-    const hits = find(runDetect(dir), 'stale_guard_running');
+    const signals = runDetect(dir);
+    const hits = find(signals, STALE);
     assert.equal(hits.length, 1, JSON.stringify(hits));
-    assert.match(hits[0].detail, /session 33333333: guard 0\.29\.1 < 0\.29\.2, the version the \S+ update replaced \(user scope\)/);
-    assert.doesNotMatch(hits[0].detail, /44444444/);
+    assert.match(hits[0].detail, /session 23456789: guard 0\.29\.2 < 0\.29\.3, installed when it loaded; 0\.29\.2 had already been replaced/);
+    assert.doesNotMatch(hits[0].detail, /34567890/);
+    assert.deepEqual(find(signals, OUTDATED), []); // 5 h old: quiet
   } finally {
     cleanup();
   }
 });
 
-test('with no .orphaned_at marker the replaced version is unknown, so a session loaded before the update is not judged', () => {
+// R3-1: an ordinary session left open across several quick updates is not a stale copy.
+for (const [label, gapMin] of [['23 min', 23], ['3 min', 3]]) {
+  test(`two updates ${label} apart: a session loaded before both is not a stale copy (trusted and unknown load time)`, () => {
+    const { dir, stateDir, cleanup } = makeFixture();
+    try {
+      const second = 1 * HOUR;
+      const first = second + gapMin * MIN;
+      writeInstalled(dir, [{ scope: 'user', version: '0.29.3', installPath: installPath(dir, '0.29.3'), lastUpdated: iso(second) }]);
+      writeCache(dir, [{ version: '0.29.1', orphanedMsAgo: first }, { version: '0.29.2', orphanedMsAgo: second }, { version: '0.29.3' }]);
+      writeSpawns(stateDir, [
+        row('45678901-two-updates', 0.5 * HOUR, stamp('0.29.1', 5 * HOUR)),
+        row('45678902-two-updates-unknown', 0.5 * HOUR, stamp('0.29.1', null)),
+        // Loaded between the two updates, running what was installed then.
+        row('45678903-between', 0.5 * HOUR, stamp('0.29.2', first - MIN)),
+      ]);
+      const signals = runDetect(dir);
+      assert.deepEqual(find(signals, STALE), []);
+      assert.deepEqual(find(signals, OUTDATED), []);
+      assert.match(find(signals, UNKNOWN)[0]?.detail || '', /^1 sessions with unknown load time/);
+    } finally {
+      cleanup();
+    }
+  });
+}
+
+test('one update touching two scopes: another scope\'s marker is never taken as this session\'s stale proof, and counts as one update', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const project = join(dir, 'proj');
+    // user 0.29.1 -> 0.29.3, then project 0.29.2 -> 0.29.3 a minute later.
+    writeInstalled(dir, [
+      { scope: 'user', version: '0.29.3', installPath: installPath(dir, '0.29.3'), lastUpdated: iso(2 * HOUR) },
+      { scope: 'project', projectPath: project, version: '0.29.3', installPath: installPath(dir, '0.29.3'), lastUpdated: iso(2 * HOUR - MIN) },
+    ]);
+    writeCache(dir, [{ version: '0.29.1', orphanedMsAgo: 2 * HOUR }, { version: '0.29.2', orphanedMsAgo: 2 * HOUR - MIN }, { version: '0.29.3' }]);
+    const projectScope = scopeKey({ scope: 'project', projectPath: project });
+    writeSpawns(stateDir, [
+      // A user-scope session on 0.29.1, loaded 30 h ago: old, and one update behind.
+      row('56789012-user-old', 1 * HOUR, stamp('0.29.1', 30 * HOUR)),
+      row('56789013-user-recent', 1 * HOUR, stamp('0.29.1', 5 * HOUR)),
+      row('56789014-project-old', 1 * HOUR, stamp('0.29.2', 30 * HOUR, { guard_scope: projectScope })),
+    ]);
+    const signals = runDetect(dir);
+    assert.deepEqual(find(signals, STALE), []);
+    assert.deepEqual(find(signals, OUTDATED), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('session_outdated: a session loaded two days ago that missed two updates is informational, never the remove-entry remedy', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    writeInstalled(dir, [{ scope: 'user', version: '0.29.3', installPath: installPath(dir, '0.29.3'), lastUpdated: iso(1 * HOUR) }]);
+    writeCache(dir, [{ version: '0.29.1', orphanedMsAgo: 10 * HOUR }, { version: '0.29.2', orphanedMsAgo: 1 * HOUR }, { version: '0.29.3' }]);
+    writeSpawns(stateDir, [
+      row('67890123-two-days', 0.5 * HOUR, stamp('0.29.1', 48 * HOUR)),
+      row('67890123-two-days', 0.25 * HOUR, stamp('0.29.1', 48 * HOUR)),
+      // Missed the same two updates but loaded 20 h ago: younger than a day, quiet.
+      row('67890124-young', 0.5 * HOUR, stamp('0.29.1', 20 * HOUR)),
+    ]);
+    const signals = runDetect(dir);
+    assert.deepEqual(find(signals, STALE), []);
+    const hits = find(signals, OUTDATED);
+    assert.equal(hits.length, 1, JSON.stringify(hits));
+    assert.match(hits[0].detail, /^2 spawn\(s\) in 24h from 1 long-running session/);
+    assert.match(hits[0].detail, /session 67890123: guard 0\.29\.1, installed 0\.29\.3, 2 updates since it loaded 47 h before its latest spawn \(user scope\); remedy: restart or \/reload-plugins this session to pick up 0\.29\.3/);
+    assert.doesNotMatch(hits[0].detail, /67890124/);
+    assert.doesNotMatch(hits[0].detail, REMOVE_ENTRY);
+    assert.equal(hits[0].dispatch, 'none');
+    assert.equal(hits[0].severity, 'low');
+  } finally {
+    cleanup();
+  }
+});
+
+test('with no .orphaned_at marker, a session loaded before the update is not proven stale', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeInstalled(dir, [{ scope: 'user', version: '0.29.3', installPath: installPath(dir, '0.29.3'), lastUpdated: iso(3 * HOUR) }]);
     writeCache(dir, [{ version: '0.29.1' }, { version: '0.29.3' }]); // no markers
     writeSpawns(stateDir, [row('55555555-unknown-ref', 1 * HOUR, stamp('0.29.1', 22 * HOUR))]);
-    assert.deepEqual(find(runDetect(dir), 'stale_guard_running'), []);
+    assert.deepEqual(versionSignals(runDetect(dir)), []);
   } finally {
     cleanup();
   }
@@ -188,7 +288,7 @@ test('a bundle copy (outside the cache, not a checkout) is judged like a cache c
   try {
     writeInstalled(dir, [{ scope: 'user', version: '0.29.5', installPath: installPath(dir, '0.29.5'), lastUpdated: iso(3 * HOUR) }]);
     writeSpawns(stateDir, [row('66666666-bundle', 1 * HOUR, stamp('0.29.4', 2 * HOUR, { guard_source: 'bundle' }))]);
-    const hits = find(runDetect(dir), 'stale_guard_running');
+    const hits = find(runDetect(dir), STALE);
     assert.equal(hits.length, 1, JSON.stringify(hits));
     assert.match(hits[0].detail, /session 66666666: guard 0\.29\.4 < 0\.29\.5/);
   } finally {
@@ -204,15 +304,12 @@ test('multiple installs: every visible install is listed, and each row is judged
       { scope: 'user', version: '0.29.5', installPath: installPath(dir, '0.29.5'), lastUpdated: iso(3 * HOUR) },
       { scope: 'project', projectPath: project, version: '0.29.4', installPath: installPath(dir, '0.29.4'), lastUpdated: iso(3 * HOUR) },
     ]);
-    // The project-scope hash the guard would stamp for `project`.
     const projectScope = scopeKey({ scope: 'project', projectPath: project });
     writeSpawns(stateDir, [
-      // Loaded after the user install changed, and behind it: stale.
       row('99999999-user-stale', 1 * HOUR, stamp('0.29.4', 2 * HOUR)),
-      // 0.29.4 in the project scope, whose install IS 0.29.4: not stale.
       row('88888888-project-ok', 1 * HOUR, stamp('0.29.4', 2 * HOUR, { guard_scope: projectScope })),
     ]);
-    const hits = find(runDetect(dir), 'stale_guard_running');
+    const hits = find(runDetect(dir), STALE);
     assert.equal(hits.length, 1, JSON.stringify(hits));
     assert.match(hits[0].detail, /from 1 session/);
     assert.match(hits[0].detail, /session 99999999/);
@@ -223,24 +320,23 @@ test('multiple installs: every visible install is listed, and each row is judged
   }
 });
 
-test('an untrusted load time (no loadedAtFrom, or "first-seen") never moves a session to "loaded after the update"', () => {
+test('an untrusted load time (no loadedAtFrom, or "first-seen") is an unknown load time: counted, never judged', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeInstalled(dir, [{ scope: 'user', version: '0.29.2', installPath: installPath(dir, '0.29.2'), lastUpdated: iso(3 * HOUR) }]);
     writeCache(dir, [{ version: '0.29.1', orphanedMsAgo: 3 * HOUR }, { version: '0.29.2' }]);
-    // Rows carry no loaded_at; the per-session records claim a load after the
-    // update, but from sources that can be later than the real load.
     writeSpawns(stateDir, [
       row('77777777-no-source', 1 * HOUR, stamp('0.29.1', null)),
       row('77777778-first-seen', 1 * HOUR, stamp('0.29.1', null)),
-      row('77777779-in-process-resume', 1 * HOUR, stamp('0.29.1', null)),
     ]);
     writeLoadState(stateDir, {
       '77777777-no-source': { loadedAt: Date.now() - 2 * HOUR, shown: [], at: Date.now() },
       '77777778-first-seen': { loadedAt: Date.now() - 2 * HOUR, loadedAtFrom: 'first-seen', shown: [], at: Date.now() },
-      '77777779-in-process-resume': { loadedAt: Date.now() - 5 * HOUR, loadedAtFrom: 'resume-in-process', shown: [], at: Date.now() },
     });
-    assert.deepEqual(find(runDetect(dir), 'stale_guard_running'), []);
+    const signals = runDetect(dir);
+    assert.deepEqual(find(signals, STALE), []);
+    assert.deepEqual(find(signals, OUTDATED), []);
+    assert.match(find(signals, UNKNOWN)[0]?.detail || '', /^2 sessions with unknown load time/);
   } finally {
     cleanup();
   }
@@ -252,6 +348,13 @@ test('an untrusted load time (no loadedAtFrom, or "first-seen") never moves a se
 // minutes from the 22:46 update to 0.29.1, the plugin cache's `.orphaned_at`
 // timeline (public release numbers), and each session's last load as the
 // 0.22.0 self-update hook recorded it. Every id and value is synthetic.
+//
+// What the data shows, against the cache timeline: session 0 loaded at -1116
+// min, while 0.28.0 was installed and after every version below 0.23.0 had
+// been replaced (0.22.0 at -1443), yet its rows lack effective_effort (a
+// guard below 0.23.0): a stale copy. Sessions 1-3 loaded at -1634, -1698 and
+// -1959, while 0.22.0 was still installed: old sessions, 27-34 h old at their
+// last spawn and six updates behind.
 const INCIDENT = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'tests', 'fixtures', 'stale-guard-incident.json'), 'utf8'));
 function materialiseIncident(dir, stateDir, { trustedLoads = false } = {}) {
   // The scout runs `scout_at_offset_min` after the update.
@@ -272,28 +375,38 @@ function materialiseIncident(dir, stateDir, { trustedLoads = false } = {}) {
   writeLoadState(stateDir, records);
 }
 
-test('incident replay (sanitised): all 4 sessions and all 32 spawns under the pre-0.29.0 guard after the update are flagged', () => {
+test('incident replay (sanitised), load times this version would trust: 1 stale copy (22 spawns) and 3 outdated sessions (10 spawns)', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    materialiseIncident(dir, stateDir);
-    const hits = find(runDetect(dir), 'stale_guard_running');
-    assert.equal(hits.length, 1, JSON.stringify(hits));
-    assert.match(hits[0].detail, /^32 spawn\(s\) in 24h from 4 session\(s\)/);
-    for (const sid of INCIDENT.sessions) {
-      assert.match(hits[0].detail, new RegExp(`session ${sid.slice(0, 8)}: guard a pre-0\\.29\\.0 version < 0\\.29\\.0, the version the \\S+ update replaced`));
+    materialiseIncident(dir, stateDir, { trustedLoads: true });
+    const signals = runDetect(dir);
+    const stale = find(signals, STALE);
+    assert.equal(stale.length, 1, JSON.stringify(stale));
+    assert.match(stale[0].detail, /^22 spawn\(s\) in 24h from 1 session\(s\)/);
+    assert.match(stale[0].detail, new RegExp(`session ${INCIDENT.sessions[0].slice(0, 8)}: guard a pre-0\\.23\\.0 version < 0\\.28\\.0, installed when it loaded; every cached version below 0\\.23\\.0 had already been replaced`));
+    const outdated = find(signals, OUTDATED);
+    assert.equal(outdated.length, 1, JSON.stringify(outdated));
+    assert.match(outdated[0].detail, /^10 spawn\(s\) in 24h from 3 long-running session\(s\)/);
+    for (const sid of INCIDENT.sessions.slice(1)) {
+      assert.match(outdated[0].detail, new RegExp(`session ${sid.slice(0, 8)}: guard a pre-0\\.23\\.0 version, installed 0\\.29\\.1, 6 updates since it loaded`));
     }
+    assert.doesNotMatch(outdated[0].detail, REMOVE_ENTRY);
+    assert.deepEqual(find(signals, UNKNOWN), []);
   } finally {
     cleanup();
   }
 });
 
-test('incident replay (sanitised): the same with load times this version would trust — every session loaded before the update, still flagged', () => {
+test('incident replay (sanitised), as recorded: the 0.22.0 writer\'s load times are not trusted, so it is only "4 sessions with unknown load time"', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    materialiseIncident(dir, stateDir, { trustedLoads: true });
-    const hits = find(runDetect(dir), 'stale_guard_running');
-    assert.equal(hits.length, 1, JSON.stringify(hits));
-    assert.match(hits[0].detail, /^32 spawn\(s\) in 24h from 4 session\(s\)/);
+    materialiseIncident(dir, stateDir);
+    const signals = runDetect(dir);
+    assert.deepEqual(find(signals, STALE), []);
+    assert.deepEqual(find(signals, OUTDATED), []);
+    const unknown = find(signals, UNKNOWN);
+    assert.equal(unknown.length, 1, JSON.stringify(unknown));
+    assert.match(unknown[0].detail, /^4 sessions with unknown load time/);
   } finally {
     cleanup();
   }
@@ -314,10 +427,16 @@ test('the unstamped-row check is keyed on the stamp being absent: a listed 0.22.
       // A 0.29.x row with no stamp (route_layer present): version unknown, never guessed.
       row('sess029x-029x', 0.5 * HOUR, {}),
     ]);
-    const hits = find(runDetect(dir), 'stale_guard_running');
+    // Both legacy sessions loaded after the user install changed.
+    writeLoadState(stateDir, {
+      'sessleg1-desktop': { loadedAt: Date.now() - 3 * HOUR, loadedAtFrom: 'startup', shown: [], at: Date.now() },
+      'sessleg2-fresh': { loadedAt: Date.now() - 1 * HOUR, loadedAtFrom: 'startup', shown: [], at: Date.now() },
+      'sess029x-029x': { loadedAt: Date.now() - 1 * HOUR, loadedAtFrom: 'startup', shown: [], at: Date.now() },
+    });
+    const hits = find(runDetect(dir), STALE);
     assert.equal(hits.length, 1, JSON.stringify(hits));
     assert.match(hits[0].detail, /3 spawn\(s\) in 24h from 2 session/);
-    assert.match(hits[0].detail, /guard a pre-0\.29\.0 version < 0\.29\.0, the version the \S+ update replaced \(scope unknown, judged against user scope\)/);
+    assert.match(hits[0].detail, /guard a pre-0\.23\.0 version < 0\.29\.1, installed when it loaded \(scope unknown, judged against user scope\)/);
     assert.match(hits[0].detail, /Installs visible: user@0\.29\.1, project@0\.22\.0/);
     assert.doesNotMatch(hits[0].detail, /sess029x/);
   } finally {
@@ -325,13 +444,17 @@ test('the unstamped-row check is keyed on the stamp being absent: a listed 0.22.
   }
 });
 
-test('legacy rows do not warn when the version they are judged against itself predates the route_layer fingerprint', () => {
+test('an unstamped row is bounded by the keys it carries: a 0.23-0.28 row is not judged against a 0.28.0 install', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeInstalled(dir, [{ scope: 'user', version: '0.28.0', installPath: installPath(dir, '0.28.0'), lastUpdated: iso(5 * HOUR) }]);
     writeCache(dir, [{ version: '0.27.2', orphanedMsAgo: 5 * HOUR }, { version: '0.28.0' }]);
-    writeSpawns(stateDir, [legacyRow('sessleg4-legacy', 1 * HOUR)]);
-    assert.deepEqual(find(runDetect(dir), 'stale_guard_running'), []);
+    writeSpawns(stateDir, [
+      // Has effective_effort, lacks route_layer: a 0.23.0-0.28.x guard, which 0.28.0 may be.
+      { ...legacyRow('sessleg4-legacy', 1 * HOUR), effective_effort: 'inherited(high)' },
+    ]);
+    writeLoadState(stateDir, { 'sessleg4-legacy': { loadedAt: Date.now() - 2 * HOUR, loadedAtFrom: 'startup', shown: [], at: Date.now() } });
+    assert.deepEqual(versionSignals(runDetect(dir)), []);
   } finally {
     cleanup();
   }

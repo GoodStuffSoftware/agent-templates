@@ -29,8 +29,8 @@ ${AGENT_COMPANION_STATE_DIR}                      # override, mostly for tests
     scout-latest.json            # most recent calibration-scout result (overwritten each run)
     scout-history.jsonl          # append-only: one line per scout run
     version-notice-state.json    # per-session plugin-staleness notice state, and each session's plugin-load time (loadedAt, loadedAtFrom)
-    process-loads/                # one <pid>.json per Claude Code process: when it first reached SessionStart
-    ladder-rewrites.json          # the spawn guard's pending ladder rewrites per session, and whether the harness ignored one
+    process-loads/                # one <pid>.json per Claude Code process: when it loaded its plugins, the session it runs now, and a SessionEnd "resume" it just raised
+    ladder-rewrites.json          # per session: when the guard began recording every spawn (armedAt), the pending spawns, and whether the harness ignored a rewrite
     upload-state.json            # telemetry-upload cursor (opt-in feature)
     import-cursors.json          # legacy-import cursors, keyed by source file path
     migrated.json                 # written once, after the first legacy import
@@ -154,8 +154,8 @@ whose.
 | `session_id` | string | the session that requested it |
 | `guard_version` | string \| null | the plugin version of the spawn-guard copy that wrote this row (its own `plugin.json`). Rows written before this field existed have no key at all |
 | `guard_source` | `cache` \| `checkout` \| `bundle` \| null | where that copy runs from: `cache` is an installed copy under the plugin cache (current or orphaned), `checkout` a source work tree with a `.git` entry (the operator's own tree, never judged stale), `bundle` anywhere else, such as an app-extracted desktop bundle (a `--plugin-dir` copy that is not a work tree also counts as `bundle`). Before round 3 every copy outside the cache was written as `checkout` |
-| `loaded_at` | ISO 8601 string \| null | when this session last loaded its plugins, from a trusted source only: self-update's per-session record when it came from a startup, a fresh-process resume, an in-process /resume (the process's own load time) or a /reload-plugins marker; else this process's own load record (`CLAUDE_PID`); else null, never "now". The scout judges a session against what it should have loaded at this time |
-| `guard_scope` | string \| null | the install scope that applies to the spawn's cwd in `installed_plugins.json`: `user`, or `project:<hash>` / `local:<hash>` (first 12 hex of sha256 of the normalised project path, never the path); null when nothing is installed. The daily scout compares `guard_version` against the version installed for this scope (`stale_guard_running`) |
+| `loaded_at` | ISO 8601 string \| null | when this session last loaded its plugins, from a trusted source only: self-update's per-session record when it came from a startup, a fresh-process resume, an in-process /resume (the process's own load time) or a /reload-plugins marker; else this process's own load record (`CLAUDE_PID`), only while that record says the process is running this session; else null, never "now". The scout judges a session against what was installed at this time |
+| `guard_scope` | string \| null | the install scope that applies to the spawn's cwd in `installed_plugins.json`: `user`, or `project:<hash>` / `local:<hash>` (first 12 hex of sha256 of the normalised project path, never the path); null when nothing is installed. The daily scout compares `guard_version` against the version installed for this scope (`stale_copy_loaded`, `session_outdated`) |
 | `subagent_type_rewritten_to` | string \| null | the ladder rung best-fit autofill rewrote a general-purpose (or unnamed) spawn to, so its effort is pinned too (`fit_autofill_ladder`); null when not rewritten. `subagent_type` keeps the type as the caller wrote it |
 | `spawned_by_agent_type` | string | what requested it — `main`, `subagent`, `teammate`, … |
 | `model` | string | the requested model, or the literal `(inherited)` |
@@ -223,7 +223,7 @@ recorded, but into `telemetry/fixtures.jsonl` instead — see Fixtures above.
 | `effort` | string \| null | the effort the harness reported AT SubagentStart (the started subagent's own, once resolved — distinct from `caller_effort` on `spawns.jsonl`, which is the CALLER's) |
 | `transcript_path` | string \| null | the payload's transcript path, when present |
 | `agent_transcript_path` | string \| null | the payload's agent-specific transcript path, when present |
-| `rewrite_ignored` | string, only when set | the ladder rung the spawn guard rewrote this spawn to, when this start shows it ran as its original type instead; the guard then stops rewriting for the rest of that session (`state/ladder-rewrites.json`) |
+| `rewrite_ignored` | string, only when set | the ladder rung the spawn guard rewrote this spawn to, when this start is positively tied to that rewritten spawn and shows it ran as its original type instead (the session had been recording every spawn for at least 3 minutes, so no other spawn of that type was unaccounted for; otherwise nothing is written); the guard then stops rewriting for the rest of that session (`state/ladder-rewrites.json`) |
 
 Pairing this against `spawns.jsonl` shows requested-versus-started. A spawn
 with no corresponding start was denied or failed.
