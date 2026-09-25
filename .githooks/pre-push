@@ -3,7 +3,9 @@
 # commit on every ref, which refs skip the suites, which suites to run, when
 # to use --ci-parity) lives in scripts/ci-local.mjs, so the hook and CI can never
 # drift apart — this file only finds node and execs it, passing the pushed
-# refs through on stdin exactly as git gave them to us.
+# refs through on stdin exactly as git gave them to us, and git's own two
+# arguments (the destination remote's name and URL) through as "$@": the
+# scan counts only what THAT destination already has as public.
 #
 # Must work as a plain POSIX sh script in Git Bash on Windows and in a real
 # shell on Linux/macOS — no bashisms, no non-POSIX utilities.
@@ -19,4 +21,4 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-exec node "$repo_root/scripts/ci-local.mjs" --pre-push-hook
+exec node "$repo_root/scripts/ci-local.mjs" --pre-push-hook "$@"

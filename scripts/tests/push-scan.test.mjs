@@ -12,19 +12,22 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 import {
   compileDenyEntry, parseDenylist, matchDenylist, denylistPath, denylistDisplayPath,
   loadDenylist, decodeDenylist, isNameBoundary, parseRawDiffZ, newLines, makeRedactor,
   escapeControls, scrubHome, formatHits, resolveMaxFileBytes, runPushScan, listPushedCommits,
-  REDACTED, REDACTED_PATH,
+  resolvePublicTips, decodeEscapes, compressedKind, utf16leOf, scanGitEnv,
+  REDACTED, REDACTED_PATH, REDACTED_REF,
 } from '../push-scan.mjs';
 import { buildScanContext } from '../leak-check.mjs';
-import { prePushGate, scrubHomeDir } from '../ci-local.mjs';
+import { prePushGate, scrubHomeDir, parsePrePushStdin } from '../ci-local.mjs';
 import { cleanGitEnv } from '../../plugins/agent-companion/scripts/lib/git-env.mjs';
 
 const temps = [];
@@ -62,22 +65,30 @@ function assertNoControls(out) {
   assert.ok(!/[\x00-\x09\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e]/.test(String(out)), 'a raw control character was printed');
 }
 
+// A throwaway repo with a bare "origin" remote (a second bare repo, "priv",
+// is added on demand). publish(sha, name) puts `sha` on origin as
+// refs/heads/<name> AND sets refs/remotes/origin/<name>, as a push plus a
+// fetch would: the commit is then public on the destination the scan checks.
 function makeRepo(identity = {}) {
   const repo = tmp('push-scan-repo-');
+  const origin = tmp('push-scan-origin-');
   const env = cleanGitEnv(process.env, {
     GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
     GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
     ...identity,
   });
-  const run = (args, input) => {
+  const runIn = (cwd, args, input) => {
     const r = spawnSync('git', ['-c', 'commit.gpgsign=false', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0', '-c', 'core.autocrlf=false', ...args], {
-      cwd: repo, env, input, windowsHide: true,
+      cwd, env, input, windowsHide: true,
     });
     if (r.status !== 0) throw new Error(`git ${args[0]}: ${String(r.stderr)}`);
     return r.stdout.toString('utf8').trim();
   };
+  const run = (args, input) => runIn(repo, args, input);
   const git = (...args) => run(args);
   git('init', '-q', '-b', 'main');
+  runIn(origin, ['init', '-q', '--bare']);
+  git('remote', 'add', 'origin', origin);
   const commit = (files, message = 'change') => {
     for (const [name, body] of Object.entries(files)) {
       const p = join(repo, name);
@@ -114,9 +125,15 @@ function makeRepo(identity = {}) {
     writeFileSync(msgFile, message);
     return run(['commit-tree', tree(entries), ...parents.flatMap((p) => ['-p', p]), '-F', msgFile]);
   };
-  // Mark `sha` as already public: reachable from a remote-tracking ref.
-  const publish = (sha, name = 'main') => git('update-ref', `refs/remotes/origin/${name}`, sha);
-  return { repo, git, commit, rawCommit, publish, env };
+  // Put `sha` on the bare repo `remoteDir` as refs/heads/<name>, with no hook
+  // involved (the bare repo fetches it).
+  const putOn = (remoteDir, sha, name) => runIn(remoteDir, ['fetch', '-q', repo, `+${sha}:refs/heads/${name}`]);
+  // Mark `sha` as already public: on origin, and on its remote-tracking ref.
+  const publish = (sha, name = 'main') => {
+    putOn(origin, sha, name);
+    git('update-ref', `refs/remotes/origin/${name}`, sha);
+  };
+  return { repo, origin, git, runIn, putOn, commit, rawCommit, publish, env };
 }
 
 // A state dir whose denylist is `content`: an array of lines, a Buffer (raw
@@ -133,16 +150,20 @@ function stateDirWith(content) {
 
 // Scan with a captured console, the throwaway denylist, and leak-check's
 // static + path classes (derived names off: a fixture must not depend on
-// this machine's project directories).
+// this machine's project directories). A push goes to "origin" (the repo's
+// bare remote, found through git ls-remote) unless `remote` says otherwise.
 function scan(repo, { stateDir, pushes, commits, env: extraEnv = {}, ...rest }) {
   const out = [];
   const env = { ...process.env, AGENT_COMPANION_STATE_DIR: stateDir, ...extraEnv };
   const leakCtx = buildScanContext({ root: repo, noDerived: true, quiet: true, user: 'fixtureuser' }, {});
   const res = runPushScan({
-    repo, pushes, commits, env, leakCtx, log: (m) => out.push(m), err: (m) => out.push(m), ...rest,
+    repo, pushes, commits, env, leakCtx, remote: 'origin', log: (m) => out.push(m), err: (m) => out.push(m), ...rest,
   });
   return { ...res, output: out.join('\n') };
 }
+
+// A pre-push stdin line object, as ci-local's parser gives it.
+const pushOf = (localSha, remoteRef, remoteSha = ZERO, localRef = remoteRef) => ({ localRef, localSha, remoteRef, remoteSha });
 
 // Hit lines only ("  <sha12>  <where>  [<check>: <label>]"), trimmed.
 const hitLines = (output) => output.split('\n').filter((l) => /^ {2}[0-9a-f]{12} {2}/.test(l)).map((l) => l.trim());
@@ -627,7 +648,8 @@ test('merging already-public history (e.g. main) does not block: its commits are
   const r = scan(repo, { stateDir, pushes: [{ localSha: merge, remoteSha: ZERO, remoteRef: 'refs/heads/wip/feat' }] });
   assert.equal(r.status, 0, 'a merge of public history must not block');
   assert.deepEqual(r.commits, [feat, merge], 'the public commit itself is not in the scan');
-  assert.deepEqual(listPushedCommits((a) => spawnSync('git', a, { cwd: repo, env: cleanGitEnv(), encoding: 'utf8', windowsHide: true }), { localSha: merge, remoteSha: ZERO }), [feat, merge]);
+  const g = (a, input) => spawnSync('git', a, { cwd: repo, env: cleanGitEnv(), encoding: 'utf8', windowsHide: true, input });
+  assert.deepEqual(listPushedCommits(g, { localSha: merge, remoteSha: ZERO }, [pub]), [feat, merge]);
 });
 
 test('an evil merge (a name only in the merge commit\'s resolution) is still caught', () => {
@@ -787,14 +809,16 @@ test('a SHA naming a commit in this repo is fine in a message (git revert); an u
   assert.ok(!r.output.includes(foreign), 'the SHA-like run was printed');
 });
 
-test('listPushedCommits: a known remote sha limits the range to the new commits', () => {
+test('listPushedCommits: a known remote sha, and the public tips, limit the range to the new commits', () => {
   const { repo, commit } = makeRepo();
   const a = commit({ 'a.txt': '1\n' });
   const b = commit({ 'a.txt': '2\n' });
   const c = commit({ 'a.txt': '3\n' });
-  const git = (args) => spawnSync('git', args, { cwd: repo, env: cleanGitEnv(), encoding: 'utf8', windowsHide: true });
+  const git = (args, input) => spawnSync('git', args, { cwd: repo, env: cleanGitEnv(), encoding: 'utf8', windowsHide: true, input });
   assert.deepEqual(listPushedCommits(git, { localSha: c, remoteSha: a }), [b, c]);
-  assert.deepEqual(listPushedCommits(git, { localSha: c, remoteSha: ZERO }), [a, b, c], 'a new ref: everything not on a remote-tracking ref');
+  assert.deepEqual(listPushedCommits(git, { localSha: c, remoteSha: ZERO }), [a, b, c], 'a new ref with no public tips: everything');
+  assert.deepEqual(listPushedCommits(git, { localSha: c, remoteSha: ZERO }, [b]), [c], 'a public tip');
+  assert.deepEqual(listPushedCommits(git, { localSha: c, remoteSha: 'f'.repeat(40) }), [a, b, c], 'a remote sha this clone lacks excludes nothing');
   assert.deepEqual(listPushedCommits(git, { localSha: ZERO, remoteSha: a }), [], 'a delete publishes nothing');
 });
 
@@ -889,4 +913,417 @@ test('pre-push gate: a scan that throws blocks (fails closed), with the home dir
   const text = out.join('\n');
   assert.match(text, /BLOCKED — the pushed-commit scan could not run: boom in ~/);
   assert.ok(!text.toLowerCase().includes(homedir().toLowerCase()), 'the home directory was printed');
+});
+
+// ---------------------------------------------------------------------------
+// Round 3. Special characters are built from code points (cp) and a
+// backslash constant (BS), so this source stays plain ASCII.
+// ---------------------------------------------------------------------------
+
+const cp = (...n) => String.fromCharCode(...n);
+const BS = '\\';
+
+// R1: pushed ref names are scanned, and printed only redacted.
+
+test('R1: a denylisted name in a pushed ref name (branch, tag, or the local ref) blocks; the name is printed as [redacted]', () => {
+  const name = synth();
+  const { repo, commit, publish } = makeRepo();
+  const sha = commit({ 'a.txt': 'clean\n' });
+  publish(sha); // the commit itself is public: only the ref name is new
+  const stateDir = stateDirWith([name]);
+  for (const [what, push, where] of [
+    ['a branch', pushOf(sha, `refs/heads/wip/${name}-notes`), `remote ref refs/heads/wip/${REDACTED}-notes`],
+    ['a tag', pushOf(sha, `refs/tags/v1-${name}`), `remote ref refs/tags/v1-${REDACTED}`],
+    ['the local ref only', pushOf(sha, 'refs/heads/wip/clean', ZERO, `refs/heads/${name}`), `local ref refs/heads/${REDACTED}`],
+  ]) {
+    const r = scan(repo, { stateDir, pushes: [push] });
+    assert.equal(r.status, 1, `${what}: must block`);
+    assert.deepEqual(hitLines(r.output), [`${sha.slice(0, 12)}  ${where}  [private-names: denylist line 1]`], `${what}: the hit line`);
+    assert.match(r.output, /hit\(s\) in the pushed ref name\(s\)/);
+    assert.match(r.output, /push under another name/);
+    assertNoName(r.output, [name], `${what} output`);
+  }
+  const ok = scan(repo, { stateDir, pushes: [pushOf(sha, 'refs/heads/wip/clean')] });
+  assert.equal(ok.status, 0, 'a clean ref name passes');
+  assert.match(ok.output, /no new commits to scan/);
+});
+
+test('R1: a ref name is checked with leak-check too, and a name only its latin1 reading shows is withheld whole', () => {
+  const user = synth('u');
+  const accented = `${synth()}${cp(0xe9)}`;
+  const { repo, commit, publish } = makeRepo();
+  const sha = commit({ 'a.txt': 'clean\n' });
+  publish(sha);
+  const leak = scan(repo, { stateDir: stateDirWith([synth()]), pushes: [pushOf(sha, `refs/heads/wip/C--Users-${user}-notes`)] });
+  assert.equal(leak.status, 1);
+  assert.ok(leak.hits.some((h) => h.where === 'ref' && h.check === 'leak-check'), 'a leak-check hit in the ref name');
+  assert.ok(!leak.output.includes(user), 'the user was printed');
+  // Not valid UTF-8: the ref name's bytes as git sent them.
+  const bytes = Buffer.from(`refs/heads/wip/${accented}`, 'latin1');
+  const l1 = scan(repo, { stateDir: stateDirWith([accented]), pushes: [{ ...pushOf(sha, bytes.toString('utf8')), remoteRefBytes: bytes, localRefBytes: bytes }] });
+  assert.equal(l1.status, 1);
+  assert.deepEqual(hitLines(l1.output), [`${sha.slice(0, 12)}  remote ref ${REDACTED_REF}  [private-names: denylist line 1]`]);
+  assertNoName(l1.output, [accented]);
+});
+
+test('R1: parsePrePushStdin keeps each ref name as the exact bytes git sent', () => {
+  const raw = Buffer.concat([Buffer.from('refs/heads/wip/x'), Buffer.from([0xe9]), Buffer.from('y')]);
+  const line = Buffer.concat([raw, Buffer.from(` ${'a'.repeat(40)} `), raw, Buffer.from(` ${ZERO}\r\n\n`)]);
+  const refs = parsePrePushStdin(line);
+  assert.equal(refs.length, 1);
+  assert.ok(refs[0].localRefBytes.equals(raw) && refs[0].remoteRefBytes.equals(raw), 'byte-exact ref names');
+  assert.equal(refs[0].localSha, 'a'.repeat(40));
+  assert.equal(refs[0].remoteSha, ZERO);
+  assert.equal(refs[0].remoteRef, raw.toString('utf8'));
+  assert.deepEqual(parsePrePushStdin(Buffer.from('\n \n')), []);
+});
+
+test('R1: ci-local prints a ref name only through the scan\'s redactor, and withholds it when the scan gives none', async () => {
+  const name = synth();
+  const refs = [pushOf('a'.repeat(40), `refs/heads/wip/${name}`), pushOf('b'.repeat(40), `refs/heads/feat-${name}`)];
+  const out = [];
+  const opts = { runSuites: () => [{ name: 's', status: 0, outcome: 'pass' }], log: (m) => out.push(m), err: (m) => out.push(m) };
+  assert.equal(await prePushGate(refs, { ...opts, scan: () => ({ status: 0 }) }), 0);
+  let text = out.join('\n');
+  assertNoName(text, [name], 'gate output without a redactor');
+  assert.match(text, /suites skipped for \[ref name withheld\]/);
+  assert.match(text, /\[ref name withheld\] -> full suite/);
+  out.length = 0;
+  assert.equal(await prePushGate(refs, { ...opts, scan: () => ({ status: 0, showRef: (r) => `<${String(r).length}>` }) }), 0);
+  text = out.join('\n');
+  assertNoName(text, [name], 'gate output with a redactor');
+  assert.match(text, /suites skipped for <\d+>/);
+});
+
+test('R1: the real gate blocks a named ref with clean content, and prints no name', async () => {
+  const name = synth();
+  const { repo, commit, publish } = makeRepo();
+  const sha = commit({ 'a.txt': 'clean\n' });
+  publish(sha);
+  const g = gateWith(repo, stateDirWith([name]));
+  const status = await prePushGate([pushOf(sha, `refs/heads/wip/${name}-notes`)], g.opts);
+  assert.equal(status, 1);
+  assert.deepEqual(g.suiteCalls, []);
+  assertNoName(g.out.join('\n'), [name]);
+});
+
+test('pre-push gate: the scan is told the destination (the hook\'s remote name and URL); the hook passes them on', async () => {
+  const seen = [];
+  await prePushGate([pushOf('a'.repeat(40), 'refs/heads/wip/x')], {
+    scan: (refs, target) => { seen.push(target); return { status: 1 }; },
+    runSuites: () => [], log: () => {}, err: () => {}, remote: 'origin', url: 'https://example.invalid/r.git',
+  });
+  assert.deepEqual(seen, [{ remote: 'origin', url: 'https://example.invalid/r.git' }]);
+  const hook = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.githooks', 'pre-push'), 'utf8');
+  assert.match(hook, /ci-local\.mjs" --pre-push-hook "\$@"/);
+});
+
+// R2: git replace and grafts.
+
+test('R2: git replace and a graft file cannot show the scan other objects than the ones the push sends', () => {
+  const name = synth();
+  const { repo, git, commit, publish } = makeRepo();
+  const stateDir = stateDirWith([name]);
+  const base = commit({ 'a.txt': 'clean\n' });
+  publish(base);
+  const bad = commit({ 'a.txt': `clean\n${name}\n` });
+  git('checkout', '-q', '-b', 'good', base);
+  const good = commit({ 'a.txt': 'clean\nnothing\n' });
+  git('replace', bad, good);
+  const r = scan(repo, { stateDir, pushes: [pushOf(bad, 'refs/heads/wip/rep')] });
+  assert.equal(r.status, 1, 'a replaced commit is scanned as itself');
+  assert.deepEqual(r.commits, [bad]);
+  assertNoName(r.output, [name]);
+  git('replace', '-d', bad);
+
+  // A graft that hides a commit: fix's real parent is bad; the graft says base.
+  git('checkout', '-q', 'main');
+  const fix = commit({ 'a.txt': 'clean\n' });
+  writeFileSync(join(repo, '.git', 'info', 'grafts'), `${fix} ${base}\n`);
+  const g = scan(repo, { stateDir, pushes: [pushOf(fix, 'refs/heads/wip/graft')] });
+  assert.equal(g.status, 1, 'the commit a graft hides is scanned');
+  assert.deepEqual(g.commits, [bad, fix]);
+  const env = scanGitEnv({});
+  assert.equal(env.GIT_NO_REPLACE_OBJECTS, '1');
+  assert.ok(env.GIT_GRAFT_FILE, 'the graft file is pointed away');
+});
+
+// R3: denylist line separators.
+
+test('R3: denylist lines end at LF, CRLF, CR, U+2028 or U+2029; blank and comment lines are ignored', () => {
+  const [a, b, c] = [synth(), synth(), synth()];
+  const LS = cp(0x2028);
+  const PS = cp(0x2029);
+  for (const [what, text] of [
+    ['LF', `${a}\n${b}\n${c}\n`], ['CRLF', `${a}\r\n${b}\r\n${c}\r\n`], ['CR only', `${a}\r${b}\r${c}\r`],
+    ['U+2028', `${a}${LS}${b}${LS}${c}`], ['U+2029', `${a}${PS}${b}${PS}${c}`], ['mixed', `${a}\r\n${b}\r${c}${LS}`],
+  ]) {
+    const d = parseDenylist(text);
+    assert.deepEqual(d.entries.map((e) => e.lineNo), [1, 2, 3], what);
+    assert.deepEqual(d.controls, [], what);
+    for (const n of [a, b, c]) assert.equal(matchDenylist(`by ${n}`, d.entries).length, 1, `${what}: each entry matches on its own`);
+  }
+  assert.deepEqual(parseDenylist(`# c\r\r  \r${a}${LS}# x${PS}${b}`).entries.map((e) => e.lineNo), [4, 6]);
+});
+
+test('R3: an entry holding a control character (NEL, VT, FF, a TAB) BLOCKS the push, naming its line only', () => {
+  const [a, b, c] = [synth(), synth(), synth()];
+  const d = parseDenylist(`${a}\n${b}${cp(0x85)}${c}\n${a}\t# note\nx${cp(0x0b)}y\nz${cp(0x0c)}w\n`);
+  assert.deepEqual(d.controls, [2, 3, 4, 5]);
+  assert.deepEqual(d.entries.map((e) => e.lineNo), [1]);
+
+  const { repo, commit } = makeRepo();
+  const sha = commit({ 'a.txt': 'clean\n' });
+  const r = scan(repo, { stateDir: stateDirWith(Buffer.from(`${b}${cp(0x85)}${c}\n`, 'utf8')), commits: [sha] });
+  assert.equal(r.status, 1);
+  assert.match(r.output, /denylist line\(s\) 1 hold a control character/);
+  assertNoName(r.output, [b, c]);
+  // A CR-only file: its SECOND entry now matches (it used to be one entry that matched nothing).
+  const hit = commit({ 'b.txt': `by ${c}\n` });
+  assert.equal(scan(repo, { stateDir: stateDirWith(Buffer.from(`${a}\r${c}\r`)), commits: [hit] }).status, 1);
+});
+
+// R4: names hidden behind escapes.
+
+test('R4: decodeEscapes undoes JSON/JS escapes and percent-encoding, one level; an escaped backslash stays a backslash', () => {
+  const table = [
+    [`hi${BS}nname`, 'hi\nname'],
+    [`a${BS}tb${BS}rc`, 'a\tb\rc'],
+    [`x${BS}u0041y`, 'xAy'],
+    [`x${BS}u{41}y`, 'xAy'],
+    [`x${BS}x41y`, 'xAy'],
+    [`q${BS}"x${BS}/y`, 'q"x/y'],
+    [`C:${BS}${BS}new`, `C:${BS}new`],
+    ['%2Fname%2F', '/name/'],
+    ['caf%C3%A9', `caf${cp(0xe9)}`],
+    ['caf%E9', `caf${cp(0xe9)}`],
+    ['100%', '100%'],
+    ['%zz', '%zz'],
+    ['plain', 'plain'],
+  ];
+  const wrong = table.filter(([s, want]) => decodeEscapes(s) !== want).map(([s]) => JSON.stringify(s));
+  assert.deepEqual(wrong, []);
+});
+
+test('R4: a name right after an escape hits (JSONL \\n, a URL %2F), and the word boundaries still hold', () => {
+  const table = [
+    ['zorblax', `{"text":"hi${BS}nzorblax here"}`, true],
+    ['zorblax', `{"text":"col${BS}tzorblax"}`, true],
+    ['zorblax', `{"text":"a${BS}r${BS}nzorblax"}`, true],
+    ['zorblax', 'https://example.com/?to=%2Fzorblax%2F', true],
+    ['zorblax', 'redirect_uri=https%3A%2F%2Fexample.com%2Fzorblax%2F', true],
+    ['zorblax', 'q=name%3Dzorblax', true],
+    ['zorblax', 'mailto%3Azorblax%40example.com', true],
+    ['zorblax', `zorbl${BS}u0061x`, true],
+    [`ren${cp(0xe9)}e`, `"Ren${BS}u00e9e"`, true],
+    ['ann', `"x${BS}nannotation"`, false],
+    ['ann', '%2Fannotation', false],
+    ['ann', `"${BS}njoann"`, false],
+    ['zorblax', `C:${BS}${BS}nzorblax`, false],
+    ['zorblax', 'x%2Fzorblaxing', false],
+  ];
+  const wrong = table.filter(([entry, text, want]) => hits(entry, text) !== want)
+    .map(([entry, text, want]) => `${JSON.stringify(entry)} vs ${JSON.stringify(text)}: expected ${want ? 'HIT' : 'no hit'}`);
+  assert.deepEqual(wrong, []);
+});
+
+test('R4: through a commit, a JSONL line and a percent-encoded URL block; an escaped name in a path withholds the path', () => {
+  const name = synth();
+  const { repo, commit } = makeRepo();
+  const sha = commit({
+    't.jsonl': `{"role":"user","text":"hi${BS}n${name} here"}\n`,
+    'u.log': `GET /cb?redirect_uri=https%3A%2F%2Fexample.com%2F${name}%2Fhome\n`,
+    [`docs/a%2F${name}.md`]: 'clean\n',
+  });
+  const r = scan(repo, { stateDir: stateDirWith([name]), commits: [sha] });
+  assert.equal(r.status, 1);
+  assert.deepEqual(hitLines(r.output).sort(), [
+    `${sha.slice(0, 12)}  path ${REDACTED_PATH}  [private-names: denylist line 1]`,
+    `${sha.slice(0, 12)}  t.jsonl:1  [private-names: denylist line 1]`,
+    `${sha.slice(0, 12)}  u.log:1  [private-names: denylist line 1]`,
+  ].sort());
+  assertNoName(r.output, [name]);
+});
+
+// R5: what counts as already public.
+
+test('R5: only the destination\'s own tracking refs that it still advertises count as public — every re-review bypass now blocks', () => {
+  const name = synth();
+  const { repo, origin, git, runIn, putOn, commit, publish } = makeRepo();
+  const stateDir = stateDirWith([name]);
+  const base = commit({ 'a.txt': 'clean\n' });
+  publish(base);
+  const bypass = (what, prep) => {
+    git('checkout', '-q', '-B', 'work', base);
+    const c = commit({ [`${synth()}.txt`]: `${name}\n` });
+    prep(c);
+    const r = scan(repo, { stateDir, pushes: [pushOf(c, `refs/heads/wip/${synth()}`)] });
+    assert.equal(r.status, 1, `${what}: must block`);
+    assert.deepEqual(r.commits, [c], `${what}: the commit is scanned`);
+    assertNoName(r.output, [name], `${what} output`);
+    return r;
+  };
+  bypass('a1: a hand-made refs/remotes/origin/*', (c) => git('update-ref', 'refs/remotes/origin/fake', c));
+  bypass('a2: a git-p4 style refs/remotes/p4/master', (c) => git('update-ref', 'refs/remotes/p4/master', c));
+  const priv = tmp('push-scan-priv-');
+  runIn(priv, ['init', '-q', '--bare']);
+  git('remote', 'add', 'priv', priv);
+  bypass('b: a commit only on a second remote', (c) => { putOn(priv, c, 'x'); git('fetch', '-q', 'priv'); });
+  const c1 = bypass('c1: a stale tracking ref (deleted upstream)', (c) => {
+    publish(c, 'wip/gone');
+    runIn(origin, ['update-ref', '-d', 'refs/heads/wip/gone']);
+  });
+  assert.match(c1.output, /remote-tracking ref\(s\) of origin do not match what it advertises now/);
+
+  // c3: scrubbed upstream by a force-push from another clone; this clone
+  // still holds the old tip and pushes a child of it.
+  git('checkout', '-q', '-B', 'work', base);
+  const bad = commit({ 'd.txt': `${name}\n` });
+  publish(bad, 'wip/d');
+  putOn(origin, base, 'wip/d');
+  const child = commit({ 'd2.txt': 'more work\n' });
+  const c3 = scan(repo, { stateDir, pushes: [pushOf(child, 'refs/heads/wip/d-child')] });
+  assert.equal(c3.status, 1, 'c3: re-publishing a scrubbed commit must block');
+  assert.deepEqual(c3.commits, [bad, child]);
+
+  // Controls: a fresh tracking ref the destination advertises counts...
+  git('checkout', '-q', '-B', 'work', base);
+  const pub = commit({ 'p.txt': `${name}\n` });
+  publish(pub, 'wip/public');
+  const fresh = scan(repo, { stateDir, pushes: [pushOf(pub, 'refs/heads/wip/again')] });
+  assert.equal(fresh.status, 0, 'an advertised commit is public');
+  assert.match(fresh.output, /no new commits to scan/);
+  // ...and so does a remote tip git passes on stdin, for every ref in the push.
+  git('update-ref', '-d', 'refs/remotes/origin/wip/public');
+  const next = commit({ 'q.txt': 'clean\n' });
+  const viaStdin = scan(repo, { stateDir, pushes: [pushOf(next, 'refs/heads/wip/public', pub), pushOf(pub, 'refs/heads/wip/copy')] });
+  assert.equal(viaStdin.status, 0, 'a remote tip on stdin is public for the whole push');
+  assert.deepEqual(viaStdin.commits, [next]);
+});
+
+test('R5: resolvePublicTips reports the destination\'s tracking refs, the stale ones, and ls-remote failures; a URL push trusts no tracking ref', () => {
+  const { repo, origin, git, commit, publish } = makeRepo();
+  const a = commit({ 'a.txt': '1\n' });
+  publish(a);
+  const b = commit({ 'a.txt': '2\n' });
+  git('update-ref', 'refs/remotes/origin/stale', b);
+  const g = (args, input) => spawnSync('git', args, { cwd: repo, env: scanGitEnv(), encoding: 'utf8', windowsHide: true, input });
+  g.lsRemote = (target) => {
+    const res = spawnSync('git', ['ls-remote', '--', target], { cwd: repo, env: scanGitEnv(), encoding: 'utf8', windowsHide: true });
+    return res.status === 0 ? { ok: true, shas: new Set(res.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean)) } : { ok: false, reason: `exit ${res.status}` };
+  };
+  assert.deepEqual(resolvePublicTips(g, { remote: 'origin' }), { tips: [a], tracking: 2, stale: 1, lsRemoteFailed: null });
+  assert.deepEqual(resolvePublicTips(g, { remote: 'origin', remoteUrl: origin }), { tips: [a], tracking: 2, stale: 1, lsRemoteFailed: null }, 'the URL is what is listed');
+  const failed = resolvePublicTips(g, { remote: 'origin', remoteUrl: join(tmp('push-scan-none-'), 'no-such-remote') });
+  assert.deepEqual(failed.tips, []);
+  assert.match(failed.lsRemoteFailed, /^exit /);
+  assert.deepEqual(resolvePublicTips(g, { remote: origin, remoteUrl: origin }).tips, [], 'a push to a URL: no tracking ref counts');
+  assert.deepEqual(resolvePublicTips(g, { remote: 'origin', pushes: [pushOf(b, 'refs/heads/x', a)] }).tips.sort(), [a], 'a stdin remote tip counts');
+});
+
+test('R5: when git ls-remote gives no answer, a warning says so, the remote tips on stdin still count, and the URL is never printed', () => {
+  const name = synth();
+  const { repo, commit, publish } = makeRepo();
+  const stateDir = stateDirWith([name]);
+  commit({ 'a.txt': 'clean\n' });
+  const pub = commit({ 'p.txt': `${name}\n` });
+  publish(pub);
+  const next = commit({ 'c.txt': 'clean\n' });
+  const url = join(tmp('push-scan-none-'), `no-such-${synth()}`);
+  const r = scan(repo, { stateDir, pushes: [pushOf(next, 'refs/heads/wip/new')], remoteUrl: url });
+  assert.equal(r.status, 1, 'the public commit is scanned when the destination cannot be listed');
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /could not list what origin has now \(git ls-remote: exit \d+\)/);
+  assert.match(r.output, /commits it may already have were scanned too/);
+  assert.ok(!r.output.includes(url) && !r.output.includes(url.replace(/\\/g, '/')), 'the URL was printed');
+  assertNoName(r.output, [name]);
+  const ff = scan(repo, { stateDir, pushes: [pushOf(next, 'refs/heads/main', pub)], remoteUrl: url });
+  assert.equal(ff.status, 0, 'a fast-forward over the stdin remote tip still passes');
+  assert.deepEqual(ff.commits, [next]);
+});
+
+// The node heap-corruption guard.
+
+test('utf16leOf: odd-offset, odd-length views are decoded from an aligned copy (node v24.21.0 heap corruption)', () => {
+  let total = 0;
+  for (let n = 0; n < 3000; n += 1) {
+    const b = Buffer.alloc(200 + 2 * (n % 400));
+    for (let k = 0; k < b.length; k += 1) b[k] = (k * 7 + n) & 0x7f;
+    total += utf16leOf(b.subarray(1)).length;
+  }
+  assert.ok(total > 0);
+  assert.equal(utf16leOf(Buffer.from([0x78, 0x41, 0x00, 0x42, 0x00]).subarray(1)), 'AB');
+  assert.equal(utf16leOf(Buffer.from([0x41, 0x00, 0x42])), 'A');
+});
+
+// R6 (deferred; the warning ships now): compressed containers.
+
+function zipOf(entries, method) {
+  const locals = [];
+  for (const [nm, content] of entries) {
+    const data = method === 8 ? zlib.deflateRawSync(content) : content;
+    const h = Buffer.alloc(30);
+    h.writeUInt32LE(0x04034b50, 0);
+    h.writeUInt16LE(method, 8);
+    h.writeUInt32LE(data.length, 18);
+    h.writeUInt32LE(content.length, 22);
+    h.writeUInt16LE(Buffer.byteLength(nm), 26);
+    locals.push(h, Buffer.from(nm), data);
+  }
+  return Buffer.concat(locals);
+}
+function pngOf(chunks) {
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    return Buffer.concat([len, Buffer.from(type, 'latin1'), data, Buffer.alloc(4)]);
+  };
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ...chunks.map(([t, d]) => chunk(t, d)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+test('compressedKind: packed zip entries, gzip, bzip2, xz, zstd, 7z, PNG zTXt / compressed iTXt and PDF filters; not stored zips, plain PNG text or plain PDF', () => {
+  const text = Buffer.from('notes by nobody\n');
+  const table = [
+    ['zip, deflated entry', zipOf([['docProps/core.xml', text]], 8), 'zip'],
+    ['zip, stored entries only', zipOf([['a.txt', text]], 0), null],
+    ['gzip', zlib.gzipSync(text), 'gzip'],
+    ['bzip2', Buffer.concat([Buffer.from('BZh9'), Buffer.from([0x31, 0x41, 0x59, 0x26, 0x53, 0x59]), Buffer.alloc(8)]), 'bzip2'],
+    ['text that starts BZh9', Buffer.from('BZh9 is not a bzip2 stream\n'), null],
+    ['xz', Buffer.from([0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0, 0]), 'xz'],
+    ['zstd', Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0, 0]), 'zstd'],
+    ['7z', Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0, 4]), '7z'],
+    ['PNG zTXt', pngOf([['zTXt', Buffer.concat([Buffer.from('Author\0\0'), zlib.deflateSync(text)])]]), 'png'],
+    ['PNG iTXt, compressed', pngOf([['iTXt', Buffer.concat([Buffer.from('Author\0'), Buffer.from([1, 0]), Buffer.from('\0\0'), zlib.deflateSync(text)])]]), 'png'],
+    ['PNG iTXt, plain', pngOf([['iTXt', Buffer.concat([Buffer.from('Author\0'), Buffer.from([0, 0]), Buffer.from('\0\0'), text])]]), null],
+    ['PNG tEXt', pngOf([['tEXt', Buffer.concat([Buffer.from('Author\0'), text])]]), null],
+    ['PDF FlateDecode', Buffer.from('%PDF-1.5\n1 0 obj << /Filter /FlateDecode >> stream\nx\nendstream\n'), 'pdf'],
+    ['PDF plain', Buffer.from('%PDF-1.4\n1 0 obj << /Author (nobody) >> endobj\n'), null],
+    ['plain text', text, null],
+  ];
+  const wrong = table.filter(([, buf, want]) => compressedKind(buf) !== want).map(([what]) => what);
+  assert.deepEqual(wrong, []);
+});
+
+test('a compressed file WARNS "compressed content not scanned" and does not block', () => {
+  const name = synth();
+  const { repo, commit } = makeRepo();
+  const sha = commit({ 'notes.txt.gz': zlib.gzipSync(Buffer.from(`by ${name}\n`)) });
+  const r = scan(repo, { stateDir: stateDirWith([name]), commits: [sha] });
+  assert.equal(r.status, 0, 'compressed content warns, it does not block');
+  assert.equal(r.compressed.length, 1);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /notes\.txt\.gz {2}compressed content not scanned \(gzip\)/);
+  assert.match(r.output, /1 file\(s\) with compressed content not scanned/);
+});
+
+// F1-a (output): a name split by a replacement character.
+
+test('displayPath: a name split by U+FFFD, or by one invalid byte, is withheld rather than printed readable', () => {
+  const r = makeRedactor({ entries: parseDenylist('zorblax').entries });
+  const FFFD = cp(0xfffd);
+  assert.equal(r.displayPath({ text: `docs/zor${FFFD}blax.md`, latin1: null }), REDACTED_PATH);
+  assert.equal(r.displayPath({ text: `docs/zor${FFFD}blax.md`, latin1: `docs/zor${cp(0x85)}blax.md` }), REDACTED_PATH);
+  assert.equal(r.displayPath({ text: `docs/a${FFFD}b.md`, latin1: `docs/a${cp(0xe9)}b.md` }), `docs/a${FFFD}b.md`, 'a clean path is still printed');
+  assert.equal(r.displayPath('refs/heads/wip/zorblax', REDACTED_REF), `refs/heads/wip/${REDACTED}`);
+  assert.equal(r.displayPath(`refs/heads/zor${FFFD}blax`, REDACTED_REF), REDACTED_REF);
 });

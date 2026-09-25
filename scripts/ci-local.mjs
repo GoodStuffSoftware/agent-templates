@@ -23,8 +23,11 @@
 //                                                     shallow clone that mirrors CI
 //   node scripts/ci-local.mjs --ci-parity --suite agent-companion-tests --ref <sha>
 //                                                     one suite, one historical ref
-//   node scripts/ci-local.mjs --pre-push-hook        read pushed refs from stdin
-//                                                     (git pre-push protocol) and
+//   node scripts/ci-local.mjs --pre-push-hook [<remote> [<url>]]
+//                                                     read pushed refs from stdin
+//                                                     (git pre-push protocol; the
+//                                                     hook's own two arguments
+//                                                     name the destination) and
 //                                                     run whatever they require
 //
 // Exit code: 0 if every suite that ran passed; 1 otherwise; 2 on a bad
@@ -48,10 +51,11 @@
 // timing-sensitive tests fail under load.
 //
 // Pre-push only: before any suite, every commit being pushed — on EVERY ref,
-// wip/** and backup/** included — is scanned by scripts/push-scan.mjs
-// (leak-check's classes plus the local private-names denylist, over each
-// commit's added lines, message and touched paths). A hit blocks the push
-// and never prints the matched text.
+// wip/** and backup/** included — and every pushed ref name is scanned by
+// scripts/push-scan.mjs (leak-check's classes plus the local private-names
+// denylist, over each commit's added lines, message and touched paths). A
+// hit blocks the push and never prints the matched text; a ref name this
+// file prints goes through push-scan's redactor first.
 
 import { spawnSync } from 'node:child_process';
 import {
@@ -109,10 +113,19 @@ export const DEFAULT_ORDER = ['scripts-tests', 'leak-check', 'agent-companion-te
 
 export function parseArgs(argv) {
   const opts = {
-    suites: null, ciParity: false, prePushHook: false, ref: 'HEAD', help: false,
+    suites: null, ciParity: false, prePushHook: false, ref: 'HEAD', help: false, pushRemote: null, pushUrl: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
+    if (a === '--pre-push-hook') {
+      opts.prePushHook = true;
+      // git runs the hook as `pre-push <remote name> <remote URL>`, and
+      // .githooks/pre-push passes both on: up to two plain arguments.
+      const rest = [];
+      while (rest.length < 2 && i + 1 < argv.length && !String(argv[i + 1]).startsWith('--')) rest.push(argv[i += 1]);
+      [opts.pushRemote = null, opts.pushUrl = null] = rest;
+      continue;
+    }
     if (a === '--suite') {
       const name = argv[i += 1];
       if (!name) throw new Error('--suite requires a value');
@@ -123,8 +136,6 @@ export function parseArgs(argv) {
       opts.suites.push(name);
     } else if (a === '--ci-parity') {
       opts.ciParity = true;
-    } else if (a === '--pre-push-hook') {
-      opts.prePushHook = true;
     } else if (a === '--ref') {
       const ref = argv[i += 1];
       if (!ref) throw new Error('--ref requires a value');
@@ -175,10 +186,14 @@ function printHelp() {
                         Actions: claude hidden from PATH, checkout depth read
                         from the relevant workflow file, LF line endings.
   --ref <ref>           with --ci-parity, the ref/sha to test (default: HEAD).
-  --pre-push-hook       read pushed refs from stdin (git pre-push protocol),
-                        scan every pushed commit on every ref for leaks and
-                        private names, then run whatever suites the refs
-                        require. Used by .githooks/pre-push.
+  --pre-push-hook [<remote> [<url>]]
+                        read pushed refs from stdin (git pre-push protocol),
+                        scan every pushed ref name and every pushed commit on
+                        every ref for leaks and private names, then run
+                        whatever suites the refs require. <remote> and <url>
+                        are the hook's own arguments (the destination); only
+                        commits that destination already has are skipped.
+                        Used by .githooks/pre-push.
 
   env ${CONCURRENCY_ENV}=<n>
                         run at most n test files at once (default: half the
@@ -211,7 +226,13 @@ export function classifyRef(refName) {
 // classify like any other ref name and simply run nothing useful against a
 // deleted ref's sha, so callers should treat an all-zero local sha as a
 // delete and skip it.
+//
+// Given a Buffer (the hook's raw stdin), each line also carries its two ref
+// names as the exact bytes git sent (`localRefBytes`, `remoteRefBytes`): a
+// ref name may be any bytes git allows, not only valid UTF-8, and the ref
+// name scan reads them byte-exact. The string fields are their UTF-8 reading.
 export function parsePrePushStdin(text) {
+  if (Buffer.isBuffer(text)) return parsePrePushBytes(text);
   return String(text || '')
     .split('\n')
     .map((l) => l.trim())
@@ -222,6 +243,36 @@ export function parsePrePushStdin(text) {
         localRef, localSha, remoteRef, remoteSha,
       };
     });
+}
+
+// Split `buf` on bytes for which `isSep(byte)` holds, dropping empty pieces.
+function splitBytes(buf, isSep) {
+  const out = [];
+  let start = 0;
+  for (let i = 0; i <= buf.length; i += 1) {
+    if (i === buf.length || isSep(buf[i])) {
+      if (i > start) out.push(buf.subarray(start, i));
+      start = i + 1;
+    }
+  }
+  return out;
+}
+
+function parsePrePushBytes(buf) {
+  // A ref name cannot hold ASCII whitespace or a control character, so
+  // splitting on those bytes is exact.
+  const isSpace = (b) => b === 0x20 || b === 0x09 || b === 0x0d || b === 0x0b || b === 0x0c;
+  return splitBytes(buf, (b) => b === 0x0a)
+    .map((line) => splitBytes(line, isSpace))
+    .filter((fields) => fields.length > 0)
+    .map(([localRefBytes, localSha, remoteRefBytes, remoteSha]) => ({
+      localRef: localRefBytes?.toString('utf8'),
+      localSha: localSha?.toString('latin1'),
+      remoteRef: remoteRefBytes?.toString('utf8'),
+      remoteSha: remoteSha?.toString('latin1'),
+      localRefBytes,
+      remoteRefBytes,
+    }));
 }
 
 export function isDeletedRef(localSha) {
@@ -745,13 +796,19 @@ export function scrubHomeDir(s, home = homedir()) {
 }
 
 // The default pushed-commit scan: scripts/push-scan.mjs over every pushed
-// ref, against this repository. Imported lazily so a plain suite run (and a
-// copy of this file on its own, as ci-local-parity.test.mjs builds) never
+// ref, against this repository, for the destination `target` ({ remote,
+// url }: the hook's two arguments). Imported lazily so a plain suite run (and
+// a copy of this file on its own, as ci-local-parity.test.mjs builds) never
 // loads it.
-async function defaultPushScan(refs) {
+async function defaultPushScan(refs, target = {}) {
   const { runPushScan } = await import(pathToFileURL(join(__dirname, 'push-scan.mjs')).href);
-  return runPushScan({ repo: REPO_ROOT, pushes: refs, env: process.env });
+  return runPushScan({
+    repo: REPO_ROOT, pushes: refs, env: process.env, remote: target.remote || null, remoteUrl: target.url || null,
+  });
 }
+
+// A ref name printed when the scan gave no redactor for it: never the name.
+const WITHHELD_REF = '[ref name withheld]';
 
 function defaultRunSuites(cls, localSha) {
   const ciParity = cls === 'parity';
@@ -761,15 +818,18 @@ function defaultRunSuites(cls, localSha) {
 }
 
 // The pre-push gate, with its two effects injectable for tests:
-//   1. `scan(refs)` — the pushed-commit leak scan, over EVERY ref (wip/**
-//      and backup/** included). A non-zero status blocks the push; the
-//      suites are not run.
+//   1. `scan(refs, { remote, url })` — the pushed-commit and ref-name leak
+//      scan, over EVERY ref (wip/** and backup/** included), for the
+//      destination the hook was given. A non-zero status blocks the push;
+//      the suites are not run. Its result's `showRef(ref)` is how a ref name
+//      is printed here; without one, no ref name is printed at all.
 //   2. `runSuites(cls, localSha)` — the suites each non-skipped ref needs,
 //      once per (class, sha).
 // Returns the hook's exit status.
 export async function prePushGate(refs, {
   scan = defaultPushScan, runSuites = defaultRunSuites,
   log = (m) => console.log(m), err = (m) => console.error(m),
+  remote = null, url = null,
 } = {}) {
   const live = refs.filter((r) => !isDeletedRef(r.localSha));
   if (live.length === 0) {
@@ -780,7 +840,7 @@ export async function prePushGate(refs, {
   log(`ci-local pre-push: scanning the commits on ${live.length} pushed ref(s) (every ref, wip/** and backup/** included) for leaks and private names.`);
   let scanRes;
   try {
-    scanRes = await scan(live);
+    scanRes = await scan(live, { remote, url });
   } catch (e) {
     // push-scan redacts its own errors; a failure to even load it (a module
     // error names a file path) gets the home directory shown as "~" here.
@@ -793,19 +853,23 @@ export async function prePushGate(refs, {
     return 1;
   }
 
+  const showRef = typeof scanRes.showRef === 'function'
+    ? (r) => scanRes.showRef(r.remoteRefBytes ?? r.remoteRef)
+    : () => WITHHELD_REF;
   let overallStatus = 0;
   let flaky = false;
   const ran = new Set();
-  for (const { remoteRef, localSha } of live) {
+  for (const r of live) {
+    const { remoteRef, localSha } = r;
     const cls = classifyRef(remoteRef);
     if (cls === 'skip') {
-      log(`ci-local pre-push: suites skipped for ${remoteRef} (wip/** or backup/**, per CONTRIBUTING.md); its commits were scanned above.`);
+      log(`ci-local pre-push: suites skipped for ${showRef(r)} (wip/** or backup/**, per CONTRIBUTING.md); its commits were scanned above.`);
       continue;
     }
     const key = `${cls}:${localSha}`;
     if (ran.has(key)) continue;
     ran.add(key);
-    log(`\nci-local pre-push: ${remoteRef} -> ${cls === 'parity' ? 'full suite, --ci-parity' : 'full suite'} against ${localSha}.`);
+    log(`\nci-local pre-push: ${showRef(r)} -> ${cls === 'parity' ? 'full suite, --ci-parity' : 'full suite'} against ${localSha}.`);
     const results = await runSuites(cls, localSha);
     if (results.some((r) => r.status !== 0)) overallStatus = 1;
     if (results.some((r) => r.outcome === 'flaky')) flaky = true;
@@ -822,15 +886,15 @@ export async function prePushGate(refs, {
   return overallStatus;
 }
 
-async function runPrePushHook() {
-  let stdinText = '';
+async function runPrePushHook(remote, url) {
+  let stdin;
   try {
-    stdinText = readFileSync(0, 'utf8');
+    stdin = readFileSync(0); // raw bytes: ref names are read byte-exact
   } catch (err) {
-    console.error(`ci-local pre-push: could not read stdin: ${err.message}`);
+    console.error(`ci-local pre-push: could not read stdin: ${scrubHomeDir(err.message)}`);
     return 1;
   }
-  return prePushGate(parsePrePushStdin(stdinText));
+  return prePushGate(parsePrePushStdin(stdin), { remote, url });
 }
 
 // ---------------------------------------------------------------------------
@@ -857,7 +921,7 @@ async function main() {
   const conc = resolveTestConcurrency();
   if (conc.warning) console.error(conc.warning);
   if (opts.prePushHook) {
-    process.exitCode = await runPrePushHook();
+    process.exitCode = await runPrePushHook(opts.pushRemote, opts.pushUrl);
     return;
   }
   const results = opts.suites.map((name) => ({
