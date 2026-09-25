@@ -1,6 +1,6 @@
 ---
 name: ac-opus-low
-description: Rung 6/10: opus CAPABILITY needed but the step itself is simple — rare; prefer sonnet unless the task genuinely needs opus's judgement even for a small step.
+description: "Rung 6/10: opus CAPABILITY needed but the step itself is simple. Currently the default routing for: explore, mechanical-edit, bounded-feature, debug-root-cause, subagent-worker, verify, operate."
 model: opus
 effort: low
 ---

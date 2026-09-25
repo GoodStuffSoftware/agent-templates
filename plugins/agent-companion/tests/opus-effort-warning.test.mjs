@@ -61,8 +61,14 @@ test('an EFFORT: line in the BRIEF does NOT silence the warning — brief text c
     const msg = res.json?.systemMessage || '';
     // The warning still fires — an EFFORT: line in the brief is not a real
     // effort-setting mechanism, only `effort:` in the agent definition is.
-    assert.match(msg, /resolves to opus with no effort stated in its agent definition/);
-    assert.match(msg, /brief-level "EFFORT:" line does NOT set it/);
+    // This transcript's caller model (claude-sonnet-4-6) DIFFERS from the
+    // spawn's explicit "opus", and general-purpose is not a ladder agent, so
+    // this is the narrower non-ladder-escalation advisory (ladder track,
+    // 0292), not the generic SPAWNING RULE 1 note — see
+    // tests/ladder-escalation-advisory.test.mjs for that note's own coverage.
+    assert.match(msg, /effort not set/);
+    assert.match(msg, /inherits the session's effort \(medium\)/);
+    assert.doesNotMatch(msg, /brief-level "EFFORT:" line does NOT set it/);
     // Telemetry must stay honest: effective_effort reflects what ACTUALLY
     // runs (inherited from the session), not the EFFORT: line's claim.
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];

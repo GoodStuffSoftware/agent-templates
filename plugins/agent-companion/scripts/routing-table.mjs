@@ -12,8 +12,12 @@
 //   node routing-table.mjs --out FILE    # write markdown to FILE (e.g. docs/ROUTING.md)
 //   node routing-table.mjs --task-type-block          # the compact block skills/recommend/SKILL.md carries
 //   node routing-table.mjs --sync-skill FILE          # rewrite that block in FILE, between its markers
+//   node routing-table.mjs --check-agent-descriptions # exit 1 if any agents/ac-*.md description has drifted
+//   node routing-table.mjs --sync-agent-descriptions  # rewrite those descriptions to match the config now
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { modelTiers, effortFor, routeForWeight, resolveRoute } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
@@ -117,6 +121,146 @@ function spliceSkillBlock(text, block = taskTypeBlock()) {
   const e = text.indexOf(SKILL_BLOCK_END);
   if (s < 0 || e < 0 || e < s) return null;
   return text.slice(0, s) + block + text.slice(e + SKILL_BLOCK_END.length);
+}
+
+// --- Ladder agent descriptions (ladder track, ADR-0292) -------------------
+// Each agents/ac-*.md file's `description:` frontmatter is what a spawner
+// reads to pick a rung, so it must never ASSERT something the current
+// routing config falsifies — the bug this exists to catch: ac-opus-low's
+// hand-written description called opus/low "rare; prefer sonnet unless...",
+// which routing trial v2 flatly contradicts (opus/low is now the trial
+// default for explore, verify, operate, mechanical-edit, bounded-feature,
+// subagent-worker and debug-root-cause). The fix is to stop hand-writing the
+// part that can go stale: each description is ROLE TEXT (a static capability
+// shape, e.g. "opus capability at ordinary depth" — this never claims how
+// OFTEN a rung is used, only what it is FOR, so a trial change cannot
+// contradict it) plus a GENERATED routing-fact suffix naming which task
+// types currently default here, computed fresh from resolveRoute() every
+// time. `--check-agent-descriptions` fails when a file's description does
+// not match what this function would generate right now; `--sync-agent-descriptions`
+// rewrites it.
+//
+// ac-haiku is deliberately excluded: its description is a hand-authored
+// retirement notice (config/model-tiers.json's tiers.haiku.retiresAfter/
+// replacement), not a routing-trial claim, and haiku takes no task-type
+// routing suffix (no trial names it — it is the plain-grid weight-1/2 rung).
+const ROLE_TEXT = {
+  'ac-sonnet-low': 'high-volume/latency-sensitive bounded work that does not need much reasoning depth',
+  'ac-sonnet-medium': 'bounded multi-step work against a clear spec (1-3 files, known shape)',
+  'ac-sonnet-high': 'multi-file, cross-referencing, integration work, or root-causing a specific failure',
+  'ac-sonnet-xhigh': 'the hardest sonnet-tier work — long agentic runs or diagnostic work that benefits from real search, still short of needing opus capability',
+  'ac-opus-low': "opus CAPABILITY needed but the step itself is simple",
+  'ac-opus-medium': "opus capability at ordinary depth — Opus 5.5's own default effort",
+  'ac-opus-high': 'opus capability with real reasoning depth — architecture, non-trivial debugging',
+  'ac-opus-xhigh': 'deep architecture, novel reasoning, migrations, large-scale refactors',
+  'ac-opus-max': 'reserve for genuinely frontier problems where xhigh was tried and fell short — large cost for typically small gain',
+};
+
+// Task types (numeric-weight only — parity types are sized to a writer, not
+// a fixed rung) that resolve, RIGHT NOW, to exactly this rung's (model,
+// effort). Deliberately re-resolves through resolveRoute() rather than
+// reading taskTypes[].override directly, so a profile or a future layer
+// change is picked up the same way a live spawn would see it.
+function typesForRung(rung) {
+  const names = [];
+  for (const [name, t] of Object.entries(cfg.taskTypes || {})) {
+    if (typeof t.weight !== 'number') continue;
+    let r;
+    try { r = resolveRoute({ type: name, profile: false }); } catch { continue; }
+    if (r.model === rung.model && (r.effort || null) === (rung.effort || null)) names.push(name);
+  }
+  return names;
+}
+
+function generatedAgentDescription(rung) {
+  const role = ROLE_TEXT[rung.agent];
+  if (!role) return null; // ac-haiku, or a rung this generator does not cover
+  const types = typesForRung(rung);
+  const suffix = types.length
+    ? `Currently the default routing for: ${types.join(', ')}.`
+    : 'Not currently the default routing for any listed task type — spawn it directly by name when the work needs it.';
+  return `Rung ${rung.rung}/10: ${role}. ${suffix}`;
+}
+
+// Overridable only for tests — same pattern as AGENT_COMPANION_HOME_OVERRIDE
+// elsewhere in this plugin: a fixture directory standing in for the real
+// agents/ tree, so the check/sync CLI can be exercised against mutated
+// copies without ever touching this repo's own committed files.
+function agentsDir() {
+  return process.env.AGENT_COMPANION_AGENTS_DIR_OVERRIDE
+    || join(dirname(fileURLToPath(import.meta.url)), '..', 'agents');
+}
+function agentFile(rung) {
+  return join(agentsDir(), `${rung.agent}.md`);
+}
+
+function readDescription(file) {
+  let text;
+  try { text = readFileSync(file, 'utf8'); } catch { return { text: null, description: null }; }
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return { text, description: null };
+  const dm = m[1].match(/^description:\s*(.*)$/m);
+  if (!dm) return { text, description: null };
+  let val = dm[1].trim();
+  if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1).replace(/\\"/g, '"');
+  return { text, description: val };
+}
+
+function writeDescription(file, text, newDescription) {
+  const quoted = /[:#{}[\],&*!|>'"%@`]/.test(newDescription) || newDescription.includes(': ');
+  const line = quoted ? `description: "${newDescription.replace(/"/g, '\\"')}"` : `description: ${newDescription}`;
+  const updated = text.replace(/^description:\s*.*$/m, line);
+  writeFileSync(file, updated);
+}
+
+function checkAgentDescriptions() {
+  const drift = [];
+  for (const rung of (cfg.ladder || [])) {
+    const expected = generatedAgentDescription(rung);
+    if (expected === null) continue; // not generator-covered (ac-haiku)
+    const file = agentFile(rung);
+    const { description } = readDescription(file);
+    if (description !== expected) {
+      drift.push({ agent: rung.agent, file, expected, actual: description });
+    }
+  }
+  return drift;
+}
+
+function syncAgentDescriptions() {
+  const written = [];
+  for (const rung of (cfg.ladder || [])) {
+    const expected = generatedAgentDescription(rung);
+    if (expected === null) continue;
+    const file = agentFile(rung);
+    const { text, description } = readDescription(file);
+    if (text === null || description === expected) continue;
+    writeDescription(file, text, expected);
+    written.push(file);
+  }
+  return written;
+}
+
+if (has('--check-agent-descriptions')) {
+  const drift = checkAgentDescriptions();
+  if (drift.length === 0) {
+    console.log('agent descriptions match config/model-tiers.json — no drift');
+    process.exit(0);
+  }
+  console.error(`${drift.length} agent description(s) have drifted from config/model-tiers.json:`);
+  for (const d of drift) {
+    console.error(`\n${d.agent} (${d.file}):`);
+    console.error(`  expected: ${d.expected}`);
+    console.error(`  actual:   ${d.actual === null ? '(missing/unparseable)' : d.actual}`);
+  }
+  console.error('\nRun `node scripts/routing-table.mjs --sync-agent-descriptions` to fix.');
+  process.exit(1);
+}
+
+if (has('--sync-agent-descriptions')) {
+  const written = syncAgentDescriptions();
+  console.log(written.length ? `updated: ${written.join(', ')}` : 'no agent descriptions needed updating');
+  process.exit(0);
 }
 
 // CLI only (this file renders at top level and is never imported): the

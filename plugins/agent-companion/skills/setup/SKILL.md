@@ -133,6 +133,57 @@ mkdir -p "$HOME/.claude/skills/ac" && cp "$AC/shims/ac/SKILL.md" "$HOME/.claude/
 It is a pointer, not a copy — it forwards to the plugin skill and never
 re-implements one. Re-run the copy after a plugin update that changes it.
 
+## If ladder agents won't spawn — user-level fallback (documented, never auto-run)
+
+Observed (2026-09-24): `agent-companion:ac-opus-low` (or the bare `ac-opus-low`)
+can fail with "Agent type not found" even right after a `/reload-plugins` that
+itself reported success — a stale plugin-cache entry left loaded alongside the
+new one can keep serving the OLD agent roster. `hooks/ladder-check.mjs`
+(SessionStart) detects two symptoms of this from disk (a broken/missing
+`agents/ac-*.md` file, and spawn-guard.mjs's self-reported running version
+trailing what `installed_plugins.json` says is installed) and names the
+recovery: remove the stale agent-companion entry in the desktop plugin
+manager, `/reload-plugins`, verify with a trivial ladder spawn.
+
+If that still does not register the ladder, `scripts/install-ladder-agents.mjs`
+is the fallback: it copies the ladder's `agents/ac-*.md` files to **user-level**
+agent definitions at `~/.claude/agents/`, a separate registration path from a
+plugin's own `agents/` directory. **This session never runs it for you and
+never installs anything without your explicit yes** — offer it, and only run
+`--yes` after you say to:
+
+```bash
+node "$AC/scripts/install-ladder-agents.mjs"          # plan only — writes nothing
+node "$AC/scripts/install-ladder-agents.mjs" --yes    # copy/update per the plan, only on your say-so
+```
+
+What it guarantees, enforced by the script itself, not just documented here:
+
+- **No write without `--yes`.** The default (or `node install-ladder-agents.mjs`
+  alone) only prints a plan.
+- **Name collisions are never overwritten.** A file already at
+  `~/.claude/agents/ac-opus-low.md` that this script did not itself install —
+  or one it installed that you have since hand-edited — is always SKIPPED and
+  listed separately in the plan, never silently replaced.
+- **Update path:** re-running with `--yes` refreshes only the files it
+  installed before AND that still match what it wrote (tracked in
+  `~/.claude/agents/.agent-companion-ladder-manifest.json`) — the way a plugin
+  update that regenerates a rung's description reaches a user-level copy.
+  Anything you changed since is left alone.
+- **Uninstall path:** `--uninstall` (plan) / `--uninstall --yes` (apply) removes
+  only manifest-tracked files whose content still matches what was installed;
+  a hand-edited copy survives uninstall untouched, on purpose. Uninstalling
+  the PLUGIN does not remove these — they are a separate, user-level path, and
+  this script (or a manual `rm`) is the only way to take them back out.
+
+**UNVERIFIED, recorded here rather than assumed:** whether a user-level agent
+definition actually registers **mid-session** (without starting a fresh one)
+is not confirmed by this track — the script only makes the files exist in the
+right place. Test that separately: after `--yes`, try a trivial spawn of
+`agent-companion:ac-opus-low` (or the bare `ac-opus-low`) in the SAME session
+first; if it still fails, start a fresh session before concluding the fallback
+did not work.
+
 ## Staying current
 
 Updating is the harness's job, and there are two built-in paths. Terminal

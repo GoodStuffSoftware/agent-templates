@@ -1,6 +1,6 @@
 ---
 name: ac-sonnet-high
-description: Rung 4/10: the weight-4 default — multi-file, cross-referencing, integration work, or root-causing a specific failure.
+description: "Rung 4/10: multi-file, cross-referencing, integration work, or root-causing a specific failure. Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
 model: sonnet
 effort: high
 ---
