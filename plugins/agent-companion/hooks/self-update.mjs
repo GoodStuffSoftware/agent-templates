@@ -10,8 +10,10 @@
 //
 //   Was any plugin updated after this session last loaded its plugins?
 //
-// "Loaded" happens at SessionStart (source startup/resume) and again on
-// `/reload-plugins` — which does NOT fire SessionStart, but does write an
+// "Loaded" happens at SessionStart (source startup, or resume in a FRESH
+// process; /resume inside a running process keeps that process's load time,
+// told apart by CLAUDE_PID, see noteProcessLoad in lib/context.mjs) and again
+// on `/reload-plugins` — which does NOT fire SessionStart, but does write an
 // unambiguous `Reloaded: N plugins · ...` record into the session transcript.
 // So `loadedAt` for a session is the LATER of: the last real SessionStart, and
 // the newest such marker seen in the transcript. Once observed, both are
@@ -54,7 +56,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import {
-  readStdin, opt, passthrough, stateFile, readJson, writeJson, tailRecords,
+  readStdin, opt, passthrough, stateFile, readJson, writeJson, tailRecords, noteProcessLoad,
 } from './lib/context.mjs';
 
 // Overridable only for tests (the plugin's verification suite needs to point
@@ -277,11 +279,34 @@ try {
 
   if (p.hook_event_name === 'SessionStart') {
     // Only a real load moves loadedAt. `clear`/`compact` are not plugin
-    // reloads and must not reset the baseline.
-    if (p.source === 'startup' || p.source === 'resume') rec.loadedAt = Date.now();
+    // reloads and must not reset the baseline. A `resume` is a load only in
+    // a fresh process: /resume inside a running process keeps the copy that
+    // process loaded, so its loadedAt is that process's load time
+    // (noteProcessLoad, keyed on CLAUDE_PID). `loadedAtFrom` records which,
+    // so readers that must not over-trust "now" (the spawn guard's stamp,
+    // via sessionLoadedAt) can tell.
+    if (p.source === 'startup' || p.source === 'resume') {
+      const pl = noteProcessLoad(p.source, sessionId);
+      if (p.source === 'startup') {
+        rec.loadedAt = pl.loadedAt ?? Date.now();
+        rec.loadedAtFrom = 'startup';
+      } else if (pl.fresh === true) {
+        rec.loadedAt = pl.loadedAt ?? Date.now();
+        rec.loadedAtFrom = 'resume';
+      } else if (pl.fresh === false && pl.loadedAt != null) {
+        rec.loadedAt = pl.loadedAt;
+        rec.loadedAtFrom = 'resume-in-process';
+      } else {
+        rec.loadedAt = Date.now();
+        rec.loadedAtFrom = 'resume-unverified';
+      }
+    }
   } else if (p.hook_event_name === 'UserPromptSubmit') {
     const marker = newestReloadTimestamp(p.transcript_path);
-    if (marker !== null) rec.loadedAt = rec.loadedAt != null ? Math.max(rec.loadedAt, marker) : marker;
+    if (marker !== null && (rec.loadedAt == null || marker > rec.loadedAt)) {
+      rec.loadedAt = marker;
+      rec.loadedAtFrom = 'reload';
+    }
   }
 
   if (rec.loadedAt == null) {
@@ -289,6 +314,7 @@ try {
     // none stored from before. Record now and say nothing: guessing stale
     // without a baseline is exactly the false positive this hook must avoid.
     rec.loadedAt = Date.now();
+    rec.loadedAtFrom = 'first-seen';
     rec.at = Date.now();
     state[sessionId] = rec;
     writeJson(file, state);

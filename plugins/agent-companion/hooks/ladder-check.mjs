@@ -21,16 +21,20 @@
 //      `ladder` have a matching file that parses and carries the expected
 //      model/effort frontmatter? A broken or missing file means a spawn WILL
 //      fail, whatever the harness registered.
-//   2. Whether THIS copy is an orphaned, older cache copy: its root is under
-//      the plugin cache, it is not the installPath of any installed entry,
-//      and its version is BELOW the entry that applies to this session's
-//      cwd. Directional (a newer copy is never "stale"), scoped to the
-//      applicable install, never true of a --plugin-dir or source checkout,
-//      and only judged on a fresh process (source startup/resume): after a
-//      normal update a new process loads the installed copy, and a /clear or
-//      compaction inside an old process is not a stale install. This is the
-//      in-session half of the version check; it catches a stale copy of this
-//      version or later, which 0.22.0 is not.
+//   2. Whether THIS copy is an older copy than the install that applies to
+//      this session's cwd: an orphaned cache copy (under the plugin cache
+//      but not the installPath of any entry) or a copy loaded from outside
+//      the cache that is not a git work tree (copySource "bundle", e.g. an
+//      app-extracted desktop bundle), whose version is BELOW the applicable
+//      entry. Directional (a newer copy is never "stale"), scoped to the
+//      applicable install, never true of a source checkout, and judged only
+//      when this process just loaded it: source startup, or a resume in a
+//      FRESH process (noteProcessLoad: an in-process /resume keeps the copy
+//      the process loaded before any update, which is not a stale install,
+//      and with no CLAUDE_PID a resume is not judged at all). /clear and
+//      compaction are never judged. This is the in-session half of the
+//      version check; it catches a stale copy of this version or later,
+//      which 0.22.0 is not.
 //
 // Quiet when both checks are clean. Loud, with the concrete recovery step,
 // when either is not.
@@ -40,6 +44,7 @@ import { join, dirname, resolve } from 'node:path';
 import {
   readStdin, opt, passthrough, claudeDir, modelTiers,
   readInstalledPlugins, pluginEntries, effectiveEntry, pathUnder, versionBelow, copySource,
+  noteProcessLoad, LOAD_SETTLE_MS,
 } from './lib/context.mjs';
 
 // The recovery for a stale loaded copy, operator-confirmed on this machine
@@ -53,8 +58,8 @@ const BROKEN_FILES_RECOVERY = 'update or reinstall the plugin (claude plugin upd
   'still fails.';
 
 // A copy whose install entry changed in the last few minutes may be one this
-// very process started loading just before the update wrote the entry.
-const SETTLE_MS = 5 * 60 * 1000;
+// very process started loading just before the update wrote the entry
+// (LOAD_SETTLE_MS, shared with the scout's stale_guard_running).
 
 function runningPluginRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -153,20 +158,24 @@ function cacheVersionDirs(baseName) {
   return out.sort();
 }
 
-// null = nothing to report. An object = this process loaded an orphaned
-// cache copy older than the install that applies to its cwd.
-function checkStaleCopy(root, pj, p, nowMs) {
+// null = nothing to report. An object = this process just loaded an orphaned
+// cache copy, or a non-checkout copy from outside the cache, older than the
+// install that applies to its cwd.
+function checkStaleCopy(root, pj, p, nowMs, load) {
   const source = typeof p.source === 'string' ? p.source : '';
   if (source !== 'startup' && source !== 'resume') return null; // same process as before: not a stale install
-  if (copySource(root, claudeDir()) !== 'cache') return null; // a checkout is the operator's own tree
+  if (source === 'resume' && !(load && load.fresh === true)) return null; // in-process /resume, or unknowable
+  const where = copySource(root, claudeDir());
+  if (where === 'checkout') return null; // a git work tree is the operator's own tree
   const entries = pluginEntries(readInstalledPlugins(claudeDir()), pj.name);
   if (!entries.length) return null;
   if (entries.some((e) => e.installPath && pathUnder(root, e.installPath))) return null; // an installed copy
   const eff = effectiveEntry(entries, p.cwd || process.cwd());
   if (!eff || !versionBelow(pj.version, eff.version)) return null; // directional: never newer, never equal
   const updatedMs = Date.parse(eff.lastUpdated || '');
-  if (Number.isFinite(updatedMs) && nowMs - updatedMs < SETTLE_MS) return null; // an update landing right now
+  if (Number.isFinite(updatedMs) && nowMs - updatedMs < LOAD_SETTLE_MS) return null; // an update landing right now
   return {
+    where,
     runningVersion: pj.version,
     installedVersion: eff.version,
     installedScope: eff.scope || 'user',
@@ -183,7 +192,10 @@ function buildLadderProblemMessage(ladder) {
 }
 
 function buildStaleCopyMessage(v) {
-  let msg = `agent-companion: this session loaded an older cached copy of the plugin (${v.runningVersion}) than the ` +
+  const what = v.where === 'bundle'
+    ? `a copy of the plugin from outside the plugin cache (${v.runningVersion}; for example a desktop app bundle) that is older`
+    : `an older cached copy of the plugin (${v.runningVersion})`;
+  let msg = `agent-companion: this session loaded ${what} than the ` +
     `one installed for it (${v.installedVersion}, ${v.installedScope} scope) — the stale copy's guards and agent ` +
     'roster are the ones running now.';
   const distinct = [...new Set(v.entries.map((e) => `${e.scope || 'user'}@${e.version}`))];
@@ -201,6 +213,12 @@ function buildStaleCopyMessage(v) {
 
 try {
   const p = readStdin();
+  // Recorded before the option check: self-update.mjs reads the same
+  // per-process record to tell a fresh resume from an in-process /resume.
+  let load = null;
+  if (p.source === 'startup' || p.source === 'resume') {
+    try { load = noteProcessLoad(p.source, p.session_id || 'unknown'); } catch { load = null; }
+  }
   if (!opt('ladder_check', true)) passthrough();
 
   const root = runningPluginRoot();
@@ -210,7 +228,7 @@ try {
 
   const ladder = checkLadderFiles(root, p);
   let stale = null;
-  try { stale = pj ? checkStaleCopy(root, pj, p, nowMs) : null; } catch { stale = null; }
+  try { stale = pj ? checkStaleCopy(root, pj, p, nowMs, load) : null; } catch { stale = null; }
 
   if (ladder.ok && !stale) passthrough(); // both clean: say nothing
 

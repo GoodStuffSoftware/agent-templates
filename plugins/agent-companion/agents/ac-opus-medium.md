@@ -1,6 +1,6 @@
 ---
 name: ac-opus-medium
-description: "Rung 7/10: opus capability at ordinary depth — Opus 5.5's own default effort. Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
+description: "Rung 7/10: opus capability at ordinary depth — Opus 5.5's own default effort. Currently the default routing for: integration."
 model: opus
 effort: medium
 ---

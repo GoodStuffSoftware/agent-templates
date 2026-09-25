@@ -24,6 +24,7 @@
 // legitimate work; these are detection, not enforcement.
 
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
@@ -32,6 +33,7 @@ import {
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
+  claudeDir, sessionLoadedAt,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
@@ -64,28 +66,63 @@ function combineNotes(...parts) {
   return joined || null;
 }
 
-// Evidence that THIS session's harness registered the ladder: a SubagentStart
-// (hooks/spawn-log.mjs -> subagent-starts.jsonl) of any ladder rung in this
-// same session. Registration cannot be queried from a hook, and the ladder's
-// registration is exactly what failed in the 2026-09-24 incident ("Agent type
-// not found"), so the guard rewrites a spawn's subagent_type ONLY once a
-// ladder agent has actually started here, and to the exact form (bare or
-// namespaced) that started. Returns that prefix ('' or '<plugin>:'), or null
-// when there is no such evidence. Bounded tail read; never throws.
-function ladderStartedPrefix(sid) {
+// Evidence that THIS session's harness registered the ladder: SubagentStarts
+// (hooks/spawn-log.mjs -> subagent-starts.jsonl) of ladder rungs in this same
+// session, since it last loaded its plugins (loadedAtMs, when known: a
+// /reload-plugins can break registration, which is the 2026-09-24 incident
+// flow, so a start from before it proves nothing now). Registration cannot be
+// queried from a hook, and a rewrite to an unregistered type fails the spawn
+// with "Agent type not found", so the rewrite target must be one the harness
+// has shown it registered:
+//   - the plugin-namespaced rung ("<plugin>:<rung>") once ANY namespaced
+//     ladder agent has started: plugin agents register together, from one
+//     agents/ folder; this is the preferred form;
+//   - the bare rung only when that EXACT bare name has started here AND its
+//     file exists at project or user scope (<cwd>/.claude/agents or
+//     ~/.claude/agents). Outside this plugin's own repo a bare name
+//     registers only from those, and a partial user-level install is common;
+//   - otherwise nothing, and the guard gives its advisory.
+// Returns { target, why }; `why` explains a null target. Bounded tail read;
+// never throws.
+function ladderRewriteTarget(sid, rungAgent, cwd, loadedAtMs) {
+  let namespacedPrefix = null;
+  let bareExact = false;
+  let anyBare = false;
   try {
     const rows = tailRecords(join(telemetryDir(), 'subagent-starts.jsonl'), {
       bytes: 65536,
       filter: (line) => line.includes(String(sid)),
     });
-    for (let i = rows.length - 1; i >= 0; i -= 1) {
-      const r = rows[i];
+    for (const r of rows) {
       if (!r || r.session_id !== sid || !isLadderAgentName(r.agent_type)) continue;
+      if (typeof loadedAtMs === 'number') {
+        const at = Date.parse(r.at || '');
+        if (!(at >= loadedAtMs)) continue;
+      }
       const t = String(r.agent_type);
-      return t.includes(':') ? `${t.slice(0, t.indexOf(':'))}:` : '';
+      if (t.includes(':')) namespacedPrefix = `${t.slice(0, t.indexOf(':'))}:`;
+      else { anyBare = true; if (t === rungAgent) bareExact = true; }
     }
   } catch { /* no evidence */ }
-  return null;
+  if (namespacedPrefix !== null) {
+    const target = `${namespacedPrefix}${rungAgent}`;
+    const d = agentDefinition(target, cwd);
+    if (d && d.model) return { target, def: d, why: null };
+  }
+  if (bareExact) {
+    for (const root of [cwd && join(cwd, '.claude', 'agents'), join(claudeDir(), 'agents')].filter(Boolean)) {
+      if (existsSync(join(root, `${rungAgent}.md`))) {
+        const d = agentDefinition(rungAgent, cwd);
+        if (d && d.model) return { target: rungAgent, def: d, why: null };
+      }
+    }
+  }
+  const since = typeof loadedAtMs === 'number' ? ' since it last loaded its plugins' : '';
+  const why = anyBare
+    ? `only bare ladder names have started in this session${since}, and "${rungAgent}" itself has not started here ` +
+      'from a user- or project-level file, so a bare rewrite could name an unregistered type'
+    : `no ladder agent has started in this session${since}, so the harness has not shown it registered the ladder here`;
+  return { target: null, def: null, why };
 }
 
 try {
@@ -299,17 +336,30 @@ try {
   //   - the original type is general-purpose or unnamed (a ladder rung has
   //     the same full tool set; Explore, Plan or a project agent would lose
   //     its own tools or prompt), and
-  //   - a ladder agent has already STARTED in this session
-  //     (ladderStartedPrefix), which proves the harness registered the
-  //     ladder here. A rewrite to an unregistered type fails the spawn with
-  //     "Agent type not found", and the caller could not see why.
+  //   - the target is registered in this session (ladderRewriteTarget: the
+  //     namespaced rung once a namespaced ladder agent has started since the
+  //     session last loaded its plugins, or the exact bare rung when it has
+  //     started and its file is at user or project scope). A rewrite to an
+  //     unregistered type fails the spawn with "Agent type not found", and
+  //     the caller could not see why.
+  //   - no earlier rewrite in this session was ignored by the harness
+  //     (lib/ladder-rewrite.mjs: SubagentStart showed it ran as its
+  //     original type); after one, the advisory is given instead.
   //   - `fit_autofill_ladder` is on (default).
   // Otherwise the model is still filled in and an advisory names the rung to
   // spawn instead.
+  const loadedAtMs = sessionLoadedAt(sid);
   let autofilled = false;
   let updatedInput = null;
   let ladderRewrite = null;     // { from, to } when the spawn was rewritten to a rung
   let autofillAdvisory = null;  // the note when it could not be
+  let rewriteState = null;      // lib/ladder-rewrite.mjs record for this session, read once
+  const rewriteModule = () => import('./lib/ladder-rewrite.mjs');
+  // Read without loading the module: the file is absent until a rewrite happens.
+  try {
+    const all = readJson(stateFile('ladder-rewrites.json'), null);
+    if (all && all[sid]) rewriteState = (await rewriteModule()).rewriteState(sid);
+  } catch { rewriteState = null; }
   if (fitOn && trulyInherited && route?.model && opt('fit_autofill', true) && !isLadderSpawn) {
     model = route.model;
     autofilled = true;
@@ -318,14 +368,14 @@ try {
     if (rung) {
       const origType = input.subagent_type || '';
       const toolsEquivalent = !origType || origType === 'general-purpose';
-      const prefix = (toolsEquivalent && opt('fit_autofill_ladder', true)) ? ladderStartedPrefix(sid) : null;
-      if (prefix !== null) {
-        const target = `${prefix}${rung.agent}`;
-        const targetDef = agentDefinition(target, p.cwd);
-        if (targetDef && targetDef.model) {
-          updatedInput = { ...input, model, subagent_type: target };
-          ladderRewrite = { from: origType || null, to: target };
-          def = targetDef;
+      const ignored = rewriteState && rewriteState.ignored;
+      let pick = null;
+      if (toolsEquivalent && opt('fit_autofill_ladder', true) && !ignored) {
+        pick = ladderRewriteTarget(sid, rung.agent, p.cwd, loadedAtMs);
+        if (pick.target) {
+          updatedInput = { ...input, model, subagent_type: pick.target };
+          ladderRewrite = { from: origType || null, to: pick.target };
+          def = pick.def;
         }
       }
       if (!ladderRewrite) {
@@ -333,7 +383,10 @@ try {
           ? `"${origType}" has its own tools and prompt, so the guard does not swap it for a ladder rung`
           : !opt('fit_autofill_ladder', true)
             ? 'the fit_autofill_ladder option is off'
-            : 'no ladder agent has started in this session yet, so the harness has not shown it registered the ladder here';
+            : ignored
+              ? `an earlier rewrite in this session ran as "${ignored.ranAs}" instead of "${ignored.wanted}", so the ` +
+                'harness did not honour it; rewriting is off for the rest of this session'
+              : pick.why;
         autofillAdvisory = `agent-companion: effort not pinned — the model was filled in as ${route.model}, but ` +
           `effort ${route.effort} was not: this worker inherits the session's effort. Spawn subagent_type ` +
           `"agent-companion:${rung.agent}" to pin ${route.model}/${route.effort} together (not rewritten here: ${why}).`;
@@ -735,17 +788,18 @@ try {
     appendLog('spawns.jsonl', {
       at: new Date().toISOString(),
       session_id: sid,
-      // Which copy of the guard wrote this row (plugin version, cache vs
-      // checkout, install scope key). The daily scout reads these across
-      // sessions to catch a stale copy still guarding spawns after an update
+      // Which copy of the guard wrote this row (plugin version, cache,
+      // checkout or bundle, install scope key) and when this session last
+      // loaded its plugins. The daily scout reads these across sessions to
+      // catch a stale copy still guarding spawns after an update
       // (scripts/detect.mjs, stale_guard_running) — the one channel that
       // sees a session whose own hooks are all stale.
-      ...runningCopyStamp(p.cwd),
+      ...runningCopyStamp(p.cwd, sid, loadedAtMs),
       subagent_type_rewritten_to: ladderRewrite ? ladderRewrite.to : null, // the ladder rung autofill swapped a general-purpose spawn to
       spawned_by_agent_type: p.agent_type,
       model: model || '(inherited)',      // effective model, when knowable (autofilled counts)
       model_declared: declared || null,   // named at the spawn site
-      model_definition: fromDef || null,  // named in the agent's frontmatter
+      model_definition: (ladderRewrite ? def?.model : fromDef) || null, // named in the frontmatter of the agent that runs (the rung, after a rewrite)
       model_autofilled: autofilled,       // the guard set it from the table
       inherited: trulyInherited,          // true when NEITHER the spawn nor the definition named one
       subagent_type: input.subagent_type,
@@ -824,7 +878,7 @@ try {
   if (autofilled) {
     note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel})${routeLayerNote}.` +
       (ladderRewrite
-        ? ` Rewrote subagent_type ${ladderRewrite.from ? `"${ladderRewrite.from}"` : '(none)'} -> "${ladderRewrite.to}" so effort ${route.effort} is pinned too (a ladder agent has already started in this session).`
+        ? ` Rewrote subagent_type ${ladderRewrite.from ? `"${ladderRewrite.from}"` : '(none)'} -> "${ladderRewrite.to}" so effort ${route.effort} is pinned too (that form of the ladder has already started in this session, so the harness registered it).`
         : '');
     if (autofillAdvisory) note = `${note}\n\n${autofillAdvisory}`;
   } else if (fit?.parityFloor) {
@@ -853,6 +907,7 @@ try {
     // rolling 10 min), so it would throttle nearly every spawn; that effect
     // needs the operator's explicit call. Until then a spawn whose route
     // names its model skips the cap, as before slice 1b.
+    await notePending();
     allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
   }
 
@@ -971,7 +1026,26 @@ try {
     }
   }
 
+  await notePending();
   allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
+
+  // An allowed spawn joins the session's pending list (lib/ladder-rewrite.mjs)
+  // when it is itself a rewrite, or while a rewrite is still pending there, so
+  // SubagentStart can tell an ignored rewrite from an ordinary spawn. Only
+  // allowed spawns: a denied one never starts. Not a probe or a teammate
+  // (no evidence SubagentStart fires for one).
+  async function notePending() {
+    try {
+      if (isCanary || input.team_name) return;
+      if (!ladderRewrite && !(rewriteState && rewriteState.pending.length)) return;
+      const { notePendingSpawn } = await rewriteModule();
+      notePendingSpawn(sid, {
+        type: ladderRewrite ? ladderRewrite.to : (input.subagent_type || 'general-purpose'),
+        from: input.subagent_type || 'general-purpose',
+        rewrite: !!ladderRewrite,
+      });
+    } catch { /* fail open */ }
+  }
 } catch {
   passthrough(); // never break a session
 }

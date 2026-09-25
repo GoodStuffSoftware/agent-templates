@@ -41,6 +41,7 @@ test('every row carries guard_version, guard_source and the user scope; no machi
     assert.equal(r.guard_source, 'checkout'); // this test runs the repo's own copy
     assert.equal(r.guard_scope, 'user');
     assert.equal(r.subagent_type_rewritten_to, null);
+    assert.ok('loaded_at' in r, 'round 3: every row carries loaded_at (null when no trusted load time is known)');
     assert.equal(existsSync(join(stateDir, 'state', 'spawn-guard-running.json')), false);
   } finally {
     cleanup();
