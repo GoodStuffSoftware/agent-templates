@@ -189,7 +189,7 @@ inside that session could say so. Two checks cover it:
 
 **Known limits (not covered):**
 
-- A guard from 0.29.0 up to the release before this one writes no version
+- A guard from 0.29.0 through 0.29.5 writes no version
   stamp, so its rows are never judged by the scout. That includes a stale
   0.29.x copy only one release behind its install, such as a 0.29.2 copy
   running while 0.29.3 is installed: only guards that stamp (this release on)
@@ -210,8 +210,7 @@ inside that session could say so. Two checks cover it:
 - A copy outside the plugin cache is recognised as a bundle only by where it
   runs; a `--plugin-dir` copy that is not a git work tree also counts as a
   bundle, and a bundle whose own guard predates the stamp is judged only by
-  its version bound (or not at all, if it is 0.29.0 up to the release before
-  this one).
+  its version bound (or not at all, if it is 0.29.0 through 0.29.5).
 
 Recovery for a stale copy: remove the stale agent-companion entry in the
 desktop plugin manager, `/reload-plugins`, verify with a trivial ladder spawn,

@@ -438,7 +438,7 @@ try {
 // against the user-scope install (else the most recently updated one); for
 // the cache proof, every cached version below its bound must already have
 // been replaced when it loaded.
-// Known limit: a 0.29.0 to 0.29.3 guard writes route_layer but no stamp, so
+// Known limit: a 0.29.0 through 0.29.5 guard writes route_layer but no stamp, so
 // its version is unknown and its rows are never judged; and a stale copy
 // that is one update behind cannot be told from an old session unless the
 // cache still shows its version was replaced before it loaded.
@@ -453,7 +453,7 @@ const UNSTAMPED_FINGERPRINTS = [
   { key: 'effective_effort', since: '0.23.0' },
 ];
 // An unstamped row's guard is below this version, or null when every
-// fingerprint key is present (a 0.29.0 to 0.29.3 guard: unknown).
+// fingerprint key is present (a 0.29.0 through 0.29.5 guard: unknown).
 function unstampedBound(row) {
   let bound = null;
   for (const { key, since } of UNSTAMPED_FINGERPRINTS) {
