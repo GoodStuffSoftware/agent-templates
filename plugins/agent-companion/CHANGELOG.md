@@ -2,6 +2,51 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.7 — 2026-09-25
+
+Memory-vault git commands no longer read git configuration from outside the
+vault, apart from a few of your settings that read-only lookups pass on, and
+ignore inherited variables that named a program for git to run. The
+`copyable-prompt` rule fires when you ask for a prompt, not whenever a message
+mentions one.
+
+### Memory vault
+- The vault's git housekeeping now finishes before a sync lets go of its lock, so it can no longer run on into the next sync. Automatic housekeeping is still on.
+- Memory-vault git commands, reads and writes alike, no longer read git configuration from outside the vault, apart from the settings lookups described in the next item.
+  - Each command runs with GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM set to the null device (NUL on Windows, /dev/null elsewhere), GIT_CONFIG_NOSYSTEM=1 and GIT_ATTR_NOSYSTEM=1, and HOME and XDG_CONFIG_HOME set to the null device, however an inherited name is capitalised.
+  - As in 0.29.1, inherited GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n, GIT_TEMPLATE_DIR, GIT_DIR and the other repository-locating variables, and GIT_AUTHOR_*/GIT_COMMITTER_* are ignored.
+  - Inherited GIT_ATTR_SOURCE and GIT_EXEC_PATH, and on Windows GIT_REDIRECT_STDIN, GIT_REDIRECT_STDOUT, GIT_REDIRECT_STDERR and GIT_ASK_YESNO, are now ignored by every git command the vault runs, lookups included. git uses its own programs instead of the ones in an inherited GIT_EXEC_PATH, which git itself sets for every hook it runs.
+  - A parent process can no longer inject a setting or a program into a vault command through any of these. Examples: an excludes file that left memory files out of the backup; a filter program that ran on every sync and on `memory-vault status`; an attributes tree under which a CRLF memory file was stored as LF; a redirect that sent git's output to a file outside the vault; a `git` in an inherited GIT_EXEC_PATH that ran on every vault commit; a GIT_ASK_YESNO program that ran over and over, and kept a sync waiting, while a file in the vault's .git was held open.
+- The vault still uses a few of your own git settings. They come from one read-only `git config` lookup per run, plus one read-only `git rev-parse` when that lookup finds a system or global safe.directory entry. Each lookup has a 15-second timeout, and the values are passed to git with -c:
+  - core.autocrlf, core.eol, core.safecrlf and core.quotepath, so line endings and the file names in commit messages come out as before;
+  - whether your own git trusts the vault. The `git rev-parse` runs in the vault with the environment 0.29.1's vault commands had (less the variables named above), so git itself checks the vault's owner against your safe.directory entries, exactly as those commands did. A vault it trusts is then trusted by every vault command through one `-c safe.directory=` entry naming the vault, however many entries your config has; a vault it refuses is refused. So an entry inside an `includeIf "gitdir:…"` or `"onbranch:…"` block does not count, and `~` and `~/…` entries are expanded against your home directory, because that is what git does.
+
+    A vault owned by another account is trusted or refused as it was in 0.29.1.
+  - user.name and user.email, used for a commit only when the vault's own config sets none. Failing those, git's EMAIL variable is used, and then the vault's built-in identity.
+
+  The lookups read your config through HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM, as 0.29.1's vault commands did, and take only these values. Nothing is written into the vault's config. core.longpaths=true is now always passed.
+- Your global and system author.name, author.email, committer.name and committer.email no longer change the author or committer of vault commits. In 0.29.1 they did, even when the vault's own user.email was set. user.useConfigOnly no longer stops a vault commit from using git's EMAIL variable.
+- Your global excludes and attributes files no longer apply to the memory vault. That covers:
+  - core.excludesFile and core.attributesFile from your global or system config;
+  - git's default per-user ignore and attributes files ($XDG_CONFIG_HOME/git/ignore and git/attributes, or ~/.config/git/ when XDG_CONFIG_HOME is unset);
+  - the system gitattributes file.
+
+  A vault may now back up memory files those rules used to leave out, and the next sync commits them. Other global settings no longer affect vault commands either. For example, a global status.showUntrackedFiles=no no longer hides untracked files from `memory-vault status`.
+- If the `git config` lookup fails or times out (for example, your global config file cannot be parsed), a vault whose .gitattributes is not the plugin's `* -text` refuses to commit, so it never stores bytes under line-ending settings it could not read. A vault with the plugin's own .gitattributes keeps syncing. If the `git rev-parse` lookup fails or times out, no safe.directory entry is passed on: a vault owned by another account is refused, and one you own is unaffected.
+
+### Standing rules
+- The built-in `copyable-prompt` rule now fires when a message asks for a prompt in one of the ways it recognises: a verb such as write, draft, craft, prepare, make, give, compose, generate or "send me", or "I need", "I'd like" (with any apostrophe, so "I’d like" too) or "can I get", followed within a few words by "prompt". Examples: "write me a prompt", "make me a prompt", "draft a prompt for the reviewer", "can I get a prompt", "I'd like a prompt for the reviewer", "rewrite this prompt". It also fires on a message that opens with "a prompt for …", and on "write me a brief for …".
+  - It no longer fires when a message only mentions a prompt, as in "the prompt field is empty", "Prompt for confirmation before running migrations", "the CLI shows a prompt for the password" or "I get a UAC prompt every time I run the installer".
+  - It no longer fires on a mention of a brief, such as "the brief for the builder was too long".
+- User-prompt standing rules now ignore the text inside `<teammate-message>`, `<command-message>`, `<command-name>`, `<command-args>`, `<local-command-stdout>` and `<local-command-caveat>` blocks, as they already ignored `<system-reminder>` blocks. A teammate's message, a slash command's arguments and a command's output no longer trigger them. A wrapper tag name you type in your own message with no ">" after it, as in "the <command-args flag is ignored", no longer hides the rest of the message when a real block follows it.
+- Removing those blocks now takes time linear in the message length. A 1 MB message of nested blocks used to take up to about 30 seconds in the UserPromptSubmit hook; it now takes milliseconds.
+
+### Known limits
+- On Windows, when a lookup times out (for example, your git config includes a named pipe that never answers) and `git` on your PATH is Git for Windows' `cmd\git.exe` launcher, the launcher is stopped but the real git it started keeps running until the include answers. It is one of the read-only lookups: it takes no lock, writes nothing into the vault and does not block the next sync, but while it runs the vault directory cannot be renamed or deleted. Stopping the real git on a timeout is follow-up work.
+- When git refuses a vault owned by another account, the refusal says the vault "has no git repository of its own" and shows git's command line, not that ownership was the reason. 0.29.1 said the same.
+- `copyable-prompt` still fires on a few messages that are not asking for a prompt, such as "overwrite the prompt file", "decompose the prompt into steps", "can I get a prompt to confirm deletes?" and "the prompt says to write it in Rust".
+- An inherited GIT_DEFAULT_HASH still makes a new vault use SHA-256, and GIT_LITERAL_PATHSPECS and GIT_ICASE_PATHSPECS set together make a sync fail, as in 0.29.1.
+
 ## 0.29.6 — 2026-09-25
 
 A session-start check names the exact recovery steps when the ladder is
