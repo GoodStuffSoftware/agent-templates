@@ -2,6 +2,18 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.4 — 2026-09-25
+
+The memory nudge finds a worktree's main repository without `git`, and says
+so plainly when it can't. The routing-profile timing check leaves the test
+gate.
+
+### Memory
+- Fixed: in a git worktree, a spawned subagent's memory nudge no longer needs `git` to find the worktree's main repository, so a slow or unavailable `git` can't make it report "no memory here". When a linked worktree's main repository genuinely can't be found, the nudge now says "memory scope unresolved (git unavailable)" instead of "0 here", and `memory-search --here` warns. Submodules, bare-repo worktrees and `--separate-git-dir` checkouts behave as before.
+
+### Tests
+- Changed: the routing-profile timing check is no longer part of the test gate. Run it on demand with `AGENT_COMPANION_PERF=1` (see CONTRIBUTING.md).
+
 ## 0.29.3 — 2026-09-25
 
 Skills stop hard-coding routing answers and point at the routing config and
