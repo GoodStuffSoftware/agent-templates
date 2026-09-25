@@ -11,7 +11,7 @@
 // which shows the harness registered the ladder). Otherwise: an advisory.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 
@@ -219,11 +219,25 @@ function start(dir, sessionId, agentType) {
   assert.equal(res.status, 0, res.stderr);
 }
 const startsFor = (stateDir, sessionId) => readJsonl(join(stateDir, 'telemetry', 'subagent-starts.jsonl')).filter((r) => r.session_id === sessionId);
+// The session was armed (lib/ladder-rewrite.mjs) `msAgo`: the guard has
+// recorded every spawn there since, as it does from the session's first
+// ladder spawn (the one whose start is the rewrite's evidence).
+function seedArmed(stateDir, sessionId, msAgo) {
+  const s = join(stateDir, 'state');
+  mkdirSync(s, { recursive: true });
+  const f = join(s, 'ladder-rewrites.json');
+  let all = {};
+  try { all = JSON.parse(readFileSync(f, 'utf8')); } catch { all = {}; }
+  all[sessionId] = { armedAt: Date.now() - msAgo, pending: [], ignored: null, touched: Date.now() };
+  writeFileSync(f, JSON.stringify(all));
+}
+const TEN_MIN = 10 * 60 * 1000;
 
 test('an ignored rewrite is detected at SubagentStart and turns rewriting off for the rest of the session', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     seedStart(stateDir, 'sess-ignored', 'agent-companion:ac-sonnet-low');
+    seedArmed(stateDir, 'sess-ignored', TEN_MIN);
     const first = guard(dir, 'sess-ignored', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
     assert.equal(updated(first)?.subagent_type, 'agent-companion:ac-opus-low');
     // The harness ran it as general-purpose anyway.
@@ -237,6 +251,7 @@ test('an ignored rewrite is detected at SubagentStart and turns rewriting off fo
     assert.equal(rowFor(stateDir, 'sess-ignored').subagent_type_rewritten_to, null);
     // Another session is unaffected.
     seedStart(stateDir, 'sess-other-ok', 'agent-companion:ac-sonnet-low');
+    seedArmed(stateDir, 'sess-other-ok', TEN_MIN);
     const other = guard(dir, 'sess-other-ok', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
     assert.equal(updated(other)?.subagent_type, 'agent-companion:ac-opus-low');
   } finally {
@@ -248,6 +263,7 @@ test('an honoured rewrite, and a plain general-purpose spawn starting first, nev
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     seedStart(stateDir, 'sess-honoured', 'agent-companion:ac-sonnet-low');
+    seedArmed(stateDir, 'sess-honoured', TEN_MIN);
     const a = guard(dir, 'sess-honoured', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
     assert.equal(updated(a)?.subagent_type, 'agent-companion:ac-opus-low');
     // A plain general-purpose spawn with an explicit model, made while the rewrite is pending.
@@ -259,6 +275,100 @@ test('an honoured rewrite, and a plain general-purpose spawn starting first, nev
     assert.ok(startsFor(stateDir, 'sess-honoured').every((r) => !r.rewrite_ignored));
     const c = guard(dir, 'sess-honoured', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
     assert.equal(updated(c)?.subagent_type, 'agent-companion:ac-opus-low');
+  } finally {
+    cleanup();
+  }
+});
+
+// Round 4 (R3-2): a rewrite is marked ignored only when the start is
+// positively tied to THAT rewritten spawn.
+const PLAIN_GP = { subagent_type: 'general-purpose', model: 'sonnet', prompt: 'plain work' };
+const AUTOFILL_GP = { subagent_type: 'general-purpose', prompt: 'TYPE: explore' };
+
+test('a plain spawn made BEFORE the rewrite, in a session not yet armed: its start draws no conclusion', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    seedStart(stateDir, 'sess-g1', 'agent-companion:ac-sonnet-low');
+    // A: plain general-purpose, before any rewrite, so it was never recorded.
+    guard(dir, 'sess-g1', PLAIN_GP);
+    // B: rewritten (this arms the session, just now).
+    assert.equal(updated(guard(dir, 'sess-g1', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+    // A's start arrives: it could be B ignored, or A. No conclusion either way.
+    start(dir, 'sess-g1', 'general-purpose');
+    assert.ok(startsFor(stateDir, 'sess-g1').every((r) => !r.rewrite_ignored));
+    const st = JSON.parse(readFileSync(join(stateDir, 'state', 'ladder-rewrites.json'), 'utf8'))['sess-g1'];
+    assert.equal(st.ignored, null);
+    // Even if B's start ALSO comes as general-purpose, the session was armed
+    // too recently to know nothing else of that type was in flight: still none.
+    start(dir, 'sess-g1', 'general-purpose');
+    assert.ok(startsFor(stateDir, 'sess-g1').every((r) => !r.rewrite_ignored));
+    // So rewriting carries on, and the note never claims the harness ignored it.
+    const c = guard(dir, 'sess-g1', AUTOFILL_GP);
+    assert.equal(updated(c)?.subagent_type, 'agent-companion:ac-opus-low');
+    assert.doesNotMatch(msgOf(c), /did not honour/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a one-message fan-out mixing plain and rewritten spawns: every start matches its own spawn, nothing is ignored', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    seedStart(stateDir, 'sess-fan', 'agent-companion:ac-sonnet-low');
+    seedArmed(stateDir, 'sess-fan', TEN_MIN);
+    // One assistant message, four Agent calls: every PreToolUse runs first.
+    guard(dir, 'sess-fan', PLAIN_GP);
+    assert.equal(updated(guard(dir, 'sess-fan', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+    guard(dir, 'sess-fan', { subagent_type: 'Explore', model: 'haiku', prompt: 'look around' });
+    assert.equal(updated(guard(dir, 'sess-fan', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+    // Then the starts, in an order unlike the spawn order.
+    start(dir, 'sess-fan', 'agent-companion:ac-opus-low');
+    start(dir, 'sess-fan', 'Explore');
+    start(dir, 'sess-fan', 'general-purpose');
+    start(dir, 'sess-fan', 'agent-companion:ac-opus-low');
+    assert.equal(startsFor(stateDir, 'sess-fan').filter((r) => r.rewrite_ignored).length, 0);
+    const st = JSON.parse(readFileSync(join(stateDir, 'state', 'ladder-rewrites.json'), 'utf8'))['sess-fan'];
+    assert.equal(st.ignored, null);
+    assert.deepEqual(st.pending, []); // each start consumed its own entry
+    assert.equal(updated(guard(dir, 'sess-fan', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+  } finally {
+    cleanup();
+  }
+});
+
+test('the same fan-out where one rewrite really ran as general-purpose: exactly that one is found ignored', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    seedStart(stateDir, 'sess-fan2', 'agent-companion:ac-sonnet-low');
+    seedArmed(stateDir, 'sess-fan2', TEN_MIN);
+    guard(dir, 'sess-fan2', PLAIN_GP);
+    guard(dir, 'sess-fan2', AUTOFILL_GP);
+    guard(dir, 'sess-fan2', AUTOFILL_GP);
+    // Two general-purpose starts (the plain spawn and one ignored rewrite), one rung start.
+    start(dir, 'sess-fan2', 'general-purpose');
+    start(dir, 'sess-fan2', 'agent-companion:ac-opus-low');
+    start(dir, 'sess-fan2', 'general-purpose');
+    const flagged = startsFor(stateDir, 'sess-fan2').filter((r) => r.rewrite_ignored);
+    assert.equal(flagged.length, 1, JSON.stringify(flagged));
+    assert.equal(flagged[0].rewrite_ignored, 'agent-companion:ac-opus-low');
+    assert.match(msgOf(guard(dir, 'sess-fan2', AUTOFILL_GP)), /did not honour it; rewriting is off/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a ladder spawn arms the session: plain spawns after it are recorded', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    guard(dir, 'sess-arm', { subagent_type: 'agent-companion:ac-sonnet-low', prompt: 'ladder work' });
+    guard(dir, 'sess-arm', PLAIN_GP);
+    const st = JSON.parse(readFileSync(join(stateDir, 'state', 'ladder-rewrites.json'), 'utf8'))['sess-arm'];
+    assert.equal(typeof st.armedAt, 'number');
+    assert.deepEqual(st.pending.map((e) => [e.expect, e.rewrite]), [['ac-sonnet-low', false], ['general-purpose', false]]);
+    // A session with no ladder spawn and no rewrite writes nothing.
+    guard(dir, 'sess-unarmed', PLAIN_GP);
+    const all = JSON.parse(readFileSync(join(stateDir, 'state', 'ladder-rewrites.json'), 'utf8'));
+    assert.equal(all['sess-unarmed'], undefined);
   } finally {
     cleanup();
   }

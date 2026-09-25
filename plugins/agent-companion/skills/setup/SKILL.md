@@ -149,35 +149,62 @@ inside that session could say so. Two checks cover it:
 
 - **Across sessions (daily scout):** the spawn guard stamps its own version,
   install scope and the session's plugin-load time into every `spawns.jsonl`
-  row, and the scout's `stale_guard_running` signal judges each session by
-  the version it LOADED. It fires for spawns in the last 24h, after the latest
-  update for their scope, when the guard is older than what that session
-  should have loaded: the installed version if the session loaded after the
-  update, otherwise the version that update replaced (read from the plugin
-  cache's `.orphaned_at` markers). A session that loaded just before an
-  update and has not reloaded yet is not flagged; one that lags two or more
-  releases is. Rows from a guard older than 0.29.0 carry no stamp; they are
-  judged as "a pre-0.29.0 version", whatever else is installed. It names both
-  versions and the sessions.
+  row, and the scout judges each session by the version it LOADED against
+  what was installed WHEN it loaded. Only rows from the last 24h, written
+  after the latest update for their scope, by a guard older than that
+  install, are judged. Two signals, with different remedies:
+  - `stale_copy_loaded` (high): the session loaded after a newer version was
+    installed, yet runs the older guard, so it loaded a copy that was not the
+    install. Proven either by a load at least 5 minutes after its scope's
+    latest update, or by the plugin cache showing the guard's own version
+    had already been replaced (`.orphaned_at`) before the session loaded.
+    Remedy: remove the stale entry in the desktop plugin manager (below).
+  - `session_outdated` (low, informational): the session loaded before the
+    latest install and still runs what was installed then. That is an old
+    session, not a stale copy. Remedy: restart or `/reload-plugins` that
+    session; never the remove-entry remedy. It stays quiet until the session
+    has been loaded for 24 hours (at its latest spawn) AND has missed two or
+    more updates; updates within 5 minutes of each other count as one. At the
+    current pace of a patch per track (about 8 updates in 43 hours), a
+    session younger than a day says nothing.
+  - A session whose load time is unknown is neither: it is reported only as
+    a count, "N sessions with unknown load time", with no remedy.
+
+  Rows from a guard older than 0.29.0 carry no stamp. The keys they do carry
+  bound their version: a row without `effective_effort` is from a guard
+  below 0.23.0. They are judged against the user-scope install, whatever else
+  is installed.
 - **In session (`hooks/ladder-check.mjs`, SessionStart):** a missing or broken
   `agents/ac-*.md` file, and a loaded copy older than the install for this
   session's scope: an orphaned plugin-cache copy, or a copy from outside the
   cache that is not a source checkout (for example a desktop app bundle).
   Judged only when the process just loaded it: a startup, or a resume in a
-  fresh process. An in-process `/resume` is never judged (told apart by the
-  `CLAUDE_PID` the harness gives hooks; with no `CLAUDE_PID`, no resume is
-  judged). A newer copy or a source checkout is never called stale.
+  fresh process. An in-process `/resume` is never judged. It is recognised by
+  the `CLAUDE_PID` the harness gives hooks together with the SessionEnd
+  "resume" that the same process raises, for the session it was running,
+  just before the new SessionStart. A resume that cannot be tied to one that
+  way, such as a fresh process that got a reused pid, is treated as fresh.
+  With no `CLAUDE_PID`, no resume is judged. A newer copy or a source
+  checkout is never called stale.
 
 **Known limits (not covered):**
 
 - A guard from 0.29.0 to 0.29.3 writes no version stamp, so its rows are never
-  judged by the scout.
+  judged by the scout. That includes a stale 0.29.x copy only one release
+  behind its install, such as a 0.29.2 copy running while 0.29.3 is
+  installed: only guards that stamp (releases after 0.29.3) can be proven stale
+  one release behind.
+- A stale copy is proven only with a known load time. With the load time
+  unknown (self-update off and no `CLAUDE_PID`, or a load record from a
+  version before this one), it is only counted.
+- A stale copy one update behind its install, whose session loaded before
+  that update, cannot be told from an old session unless the plugin cache
+  still shows its version had been replaced before it loaded. With no
+  `.orphaned_at` marker, or a cleaned cache, it is at most `session_outdated`.
 - A copy outside the plugin cache is recognised as a bundle only by where it
   runs; a `--plugin-dir` copy that is not a git work tree also counts as a
-  bundle, and a bundle whose own guard predates the stamp is judged only as
-  "pre-0.29.0" (or not at all, if it is 0.29.0 to 0.29.3).
-- With no `.orphaned_at` marker in the plugin cache, the version an update
-  replaced is unknown, and a session loaded before that update is not judged.
+  bundle, and a bundle whose own guard predates the stamp is judged only by
+  its version bound (or not at all, if it is 0.29.0 to 0.29.3).
 
 Recovery for a stale copy: remove the stale agent-companion entry in the
 desktop plugin manager, `/reload-plugins`, verify with a trivial ladder spawn,

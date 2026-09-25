@@ -9,8 +9,10 @@ try {
   const p = readStdin();
   noteAgentType(p);
   // Did a ladder rewrite by the spawn guard actually take? (lib/ladder-rewrite.mjs)
-  // A start that shows the rewritten spawn ran as its original type turns
-  // rewriting off for the rest of this session. Independent of spawn_telemetry.
+  // A start positively tied to a rewritten spawn that ran as its original
+  // type turns rewriting off for the rest of this session; an ambiguous one
+  // (resolved.ambiguous) concludes nothing and writes no rewrite_ignored.
+  // Independent of spawn_telemetry.
   let resolved = null;
   try { resolved = resolveSpawnStart(p.session_id, p.agent_type || null, Date.now()); } catch { resolved = null; }
   if (opt('spawn_telemetry', true)) {
