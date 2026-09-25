@@ -21,7 +21,15 @@ const BUDGET_MS = 5;
 const GUARD_BUDGET_MS = 4;
 // The baseline path's cost on a quiet machine (lower quartile, 2026-09-24).
 const REFERENCE_BASELINE_MS = 10.7;
-const RUNS = 15;
+// 15 interleaved runs made the lower-quartile-of-a-DIFFERENCE statistic
+// (`added = lowQ(with) - lowQ(base)`, two independently-noisy order
+// statistics, not a paired measurement) noisy enough on a busy shared
+// machine to sit within a hair of BUDGET_MS on a run that should clearly
+// pass -- 30-40 concurrent agents is exactly the load PLAN.md measured this
+// flaking under. Raising RUNS shrinks that estimator's variance (a bigger
+// sample, not a looser budget or a longer per-call timeout); BUDGET_MS,
+// GUARD_BUDGET_MS and REFERENCE_BASELINE_MS are unchanged.
+const RUNS = 31;
 const fx = makeFixture();
 test.after(() => fx.cleanup());
 const ctx = await import('../hooks/lib/context.mjs');

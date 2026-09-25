@@ -974,32 +974,99 @@ function readAutoMemoryDirectorySetting(cwd) {
   return null;
 }
 
-// The main working tree for cwd's repo, offset-preserved — null when cwd is
-// not inside a git repo, git is unavailable, or cwd's own checkout root
-// (--show-toplevel) already IS the main tree (an ordinary, non-worktree
-// checkout: nothing for this candidate to add over the literal-cwd
-// fallback). Same fail-quiet discipline as runGit() above (short timeout,
-// never throws). Uses git's OWN answer for both the shared .git dir and the
-// current checkout's toplevel rather than re-deriving either from the .git
-// FILE worktreeInfo() reads — git already gets Windows path/casing quirks
-// right and there is no reason to duplicate that parsing here.
-function mainWorktreeDir(cwd) {
-  const commonDir = runGit(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  if (!commonDir) return null; // not a git repo, or git unavailable
-  const toplevel = runGit(cwd, ['rev-parse', '--show-toplevel']);
-  if (!toplevel) return null; // can't tell whether cwd's checkout IS the main tree already
+// --- Git-free worktree resolution (root cause of the load-sensitive flake) -
+//
+// mainWorktreeDir() used to ALWAYS shell out to `git rev-parse` twice per
+// call. Under heavy concurrent load (dozens of simultaneous spawns), process
+// creation can occasionally exceed runGit()'s 2s timeout, and a timed-out
+// call was indistinguishable from "cwd is not a worktree at all" — both
+// returned null, so resolveMemoryScopeDir() fell through to the literal-cwd
+// candidate. For an actual worktree, literal names a DIFFERENT, essentially
+// always-empty directory (see the module banner above), so a timeout
+// silently masqueraded as a confident "ordinary repo" answer: a real
+// worktree session was told "0 here" while its actual memory sat, populated,
+// under the main tree. That confident-but-wrong `source: 'literal'` also
+// landed in spawns.jsonl telemetry and the delivered nudge text, i.e. it
+// reached beyond this process.
+//
+// The fix is to stop needing a subprocess for the common case at all: a
+// worktree's `.git` entry is already a FILE this module reads directly for
+// worktreeInfo()/findRepoRoot() (`gitdir: <mainRoot>/.git/worktrees/<name>`
+// — git always writes this exact shape for a linked worktree, forward
+// slashes even on Windows), so the main root is three path segments up from
+// that target. That is a plain filesystem read: it cannot time out and is
+// not sensitive to machine load. git is now consulted only for the
+// genuinely rare case this fs-only parse cannot make sense of, and even
+// then a failure there is never conflated with "confirmed not a worktree" —
+// see the `uncertain` handling in resolveMemoryScopeDir() below.
+
+// Given a worktree's own `gitdir:` target, return the main repo root, or
+// null when the shape doesn't match the standard linked-worktree layout.
+function mainRootFromGitdirTarget(gitdirTarget) {
+  const norm = String(gitdirTarget).replace(/\\/g, '/').replace(/\/+$/, '');
+  const m = norm.match(/^(.*)\/\.git\/worktrees\/[^/]+$/);
+  return m ? m[1] : null;
+}
+
+// Git-free equivalent of the git-based resolution below, using only the
+// `.git` marker file already known (by the caller) to belong to a worktree.
+// Returns the resolved main-tree directory (offset-preserved), or null when
+// the gitdir target didn't parse — an unusual layout the caller should fall
+// back to git for, NOT a confirmed non-worktree.
+function mainWorktreeDirFromGitFile(worktreeRoot, cwd) {
+  let content;
+  try { content = readFileSync(join(worktreeRoot, '.git'), 'utf8'); } catch { return null; }
+  const m = content.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m) return null;
+  const gitdirTarget = resolve(worktreeRoot, m[1]);
+  const mainRoot = mainRootFromGitdirTarget(gitdirTarget);
+  if (!mainRoot) return null;
+  const offset = relative(resolve(worktreeRoot), resolve(cwd));
+  return offset ? join(mainRoot, offset) : mainRoot;
+}
+
+// The main working tree for cwd's repo, offset-preserved. `git` is an
+// injectable stand-in for runGit() — production always uses the real one;
+// tests use it to simulate a git timeout/failure deterministically (a stub),
+// never by generating real load. Returns:
+//  - { dir: <path>, uncertain: false } — resolved, confidently
+//  - { dir: null, uncertain: false } — confidently NOT a worktree (or no
+//    repo at all): the literal-cwd fallback is correct here
+//  - { dir: null, uncertain: true } — cwd IS a worktree (known from the
+//    `.git` file alone, no subprocess needed to learn that much), but the
+//    main tree could not be resolved: the fs-only parse was inconclusive
+//    AND git failed or timed out. The caller must NOT treat this the same
+//    as "confirmed not a worktree" — literal is a KNOWN-wrong answer here.
+function mainWorktreeDir(cwd, git = runGit) {
+  const found = findRepoRoot(cwd); // fs-only; cannot time out
+  if (!found || !found.isWorktree) return { dir: null, uncertain: false };
+
+  const fastDir = mainWorktreeDirFromGitFile(found.root, cwd);
+  if (fastDir) return { dir: fastDir, uncertain: false };
+
+  // fs-only parse was inconclusive (unusual gitdir layout). We already know
+  // this is a worktree, so ask git — but its failure here is a genuine
+  // "could not verify", never "not a worktree".
+  const commonDir = git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const toplevel = commonDir ? git(cwd, ['rev-parse', '--show-toplevel']) : null;
+  if (!commonDir || !toplevel) return { dir: null, uncertain: true };
+
   const mainRoot = dirname(commonDir);
   const resolvedMainRoot = resolve(mainRoot);
   const resolvedToplevel = resolve(toplevel);
   // Case-insensitive compare for the "is this actually a worktree" check
   // only (Windows paths are case-insensitive) — the path used to BUILD the
   // result below keeps its original casing from git.
-  if (resolvedMainRoot.toLowerCase() === resolvedToplevel.toLowerCase()) return null;
+  if (resolvedMainRoot.toLowerCase() === resolvedToplevel.toLowerCase()) {
+    return { dir: null, uncertain: false }; // git itself says cwd's checkout IS the main tree
+  }
   const offset = relative(resolvedToplevel, resolve(cwd));
-  return offset ? join(mainRoot, offset) : mainRoot;
+  return { dir: offset ? join(mainRoot, offset) : mainRoot, uncertain: false };
 }
 
-export function resolveMemoryScopeDir({ cwd, root } = {}) {
+export function resolveMemoryScopeDir({
+  cwd, root, gitRunner,
+} = {}) {
   const memRoot = root || memoryRoot();
   const exists = (dir) => {
     if (!dir) return false;
@@ -1007,6 +1074,7 @@ export function resolveMemoryScopeDir({ cwd, root } = {}) {
   };
 
   const candidates = [];
+  let worktreeUncertain = false;
 
   const envName = String(process.env.CLAUDE_CODE_PROJECT_DIR_NAME || '').trim();
   if (envName) candidates.push({ dir: envName, source: 'env:CLAUDE_CODE_PROJECT_DIR_NAME' });
@@ -1015,16 +1083,29 @@ export function resolveMemoryScopeDir({ cwd, root } = {}) {
   if (settingName) candidates.push({ dir: settingName, source: 'settings:autoMemoryDirectory' });
 
   if (cwd) {
-    const mainDir = mainWorktreeDir(cwd);
+    const { dir: mainDir, uncertain } = mainWorktreeDir(cwd, gitRunner || runGit);
     if (mainDir) candidates.push({ dir: encodeProjectDir(mainDir), source: 'worktree-main' });
+    worktreeUncertain = uncertain;
   }
 
   const literal = cwd ? { dir: encodeProjectDir(cwd), source: 'literal' } : { dir: '', source: 'none' };
-  candidates.push(literal);
+  // The literal candidate is a KNOWN-wrong answer when we know cwd is a
+  // worktree but couldn't resolve its main tree — see mainWorktreeDir()'s
+  // `uncertain` case above. Never offer it as a normal fallback then.
+  if (!worktreeUncertain) candidates.push(literal);
 
   for (const c of candidates) {
     if (exists(c.dir)) return c;
   }
+
+  if (worktreeUncertain) {
+    // Honest "could not verify" — the safe answer under a git timeout/
+    // failure is to say so plainly, distinct from both a genuine empty
+    // literal scope and a resolved worktree-main one, rather than silently
+    // reporting the literal candidate we already know is wrong.
+    return { dir: null, source: 'worktree-unresolved' };
+  }
+
   // Nothing on disk matched any candidate — return the most literal guess
   // rather than nothing, so a caller always has SOME directory name to
   // report a (possibly genuinely zero) count against.

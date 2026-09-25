@@ -10,7 +10,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  mkdirSync, writeFileSync, existsSync, rmSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
@@ -45,6 +47,18 @@ function makeRepoWithWorktree(root, { branch = 'wt-branch' } = {}) {
   git(['worktree', 'add', '-q', '-b', branch, worktreeDir], repoRoot);
 
   return { repoRoot, worktreeDir };
+}
+
+// Rewrites a worktree's `.git` marker file so its gitdir target no longer
+// matches the standard ".git/worktrees/<name>" shape mainWorktreeDir()'s
+// fs-only fast path parses. It is still a FILE (still a worktree), just one
+// the fast path can't make sense of — forcing the git-fallback branch.
+// Windows holds this file with attributes that reject a plain overwrite
+// (EPERM), so it is removed and recreated rather than truncated in place.
+function corruptWorktreeGitFile(worktreeDir) {
+  const gitFile = join(worktreeDir, '.git');
+  rmSync(gitFile);
+  writeFileSync(gitFile, 'gitdir: /nonstandard/layout\n');
 }
 
 function makePlainRepo(root) {
@@ -320,6 +334,103 @@ test('spawn-guard.mjs: memory feature off -> memory_addition_* fields are all nu
     assert.equal(row.memory_addition_attached, null);
     assert.equal(row.memory_addition_here_count, null);
     assert.equal(row.memory_addition_here_source, null);
+  } finally {
+    cleanup();
+  }
+});
+
+// --- Production concern: the git-timeout fallback must degrade SAFELY -----
+//
+// Real load (30-40 concurrent spawns) occasionally pushes the git subprocess
+// in mainWorktreeDir() past its 2s timeout. Before this fix, ANY git failure
+// there was treated the same as "not a worktree at all", so resolution fell
+// through to the literal-cwd candidate — a DIFFERENT, essentially-always-
+// empty directory for a real worktree. These tests simulate that failure
+// with an injected `gitRunner` stub, never real load, per the flake-track
+// spec's instruction to prove the production fix with a stub or injection.
+
+test('resolveMemoryScopeDir(): worktree resolution needs NO git call at all in the common case (root-cause fix)', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const { repoRoot, worktreeDir } = makeRepoWithWorktree(dir);
+    const memRoot = join(dir, 'mem-root');
+    makeMemoryStore(memRoot, encodeProjectDir(repoRoot), 3);
+
+    // A gitRunner that always fails: if resolution still finds the main
+    // tree, it proves the fs-only `.git`-file parse — not a subprocess —
+    // did the work. This is what makes the common case immune to the
+    // load-induced timeout in the first place.
+    const scope = resolveMemoryScopeDir({
+      cwd: worktreeDir,
+      root: memRoot,
+      gitRunner: () => { throw new Error('git must not be called for a well-formed worktree'); },
+    });
+    assert.equal(scope.dir, encodeProjectDir(repoRoot));
+    assert.equal(scope.source, 'worktree-main');
+  } finally {
+    cleanup();
+  }
+});
+
+test('resolveMemoryScopeDir(): a simulated git timeout on an unresolvable worktree degrades to "worktree-unresolved", NEVER "literal"', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const { repoRoot, worktreeDir } = makeRepoWithWorktree(dir);
+    const memRoot = join(dir, 'mem-root');
+    // Only the worktree's OWN (literal) encoding has a store — exactly the
+    // shape that would make the pre-fix bug look "successful" (a confident
+    // wrong answer that happens to resolve to something on disk).
+    makeMemoryStore(memRoot, encodeProjectDir(worktreeDir), 1);
+    makeMemoryStore(memRoot, encodeProjectDir(repoRoot), 9);
+
+    // Force the fs-only parse to be inconclusive: rewrite the worktree's
+    // `.git` file so its gitdir target no longer matches the standard
+    // ".git/worktrees/<name>" shape. It is still a FILE, so this module
+    // still knows (with zero subprocess calls) that cwd IS a worktree.
+    corruptWorktreeGitFile(worktreeDir);
+
+    // Simulate every git invocation timing out/failing — a stub, not real
+    // load.
+    const scope = resolveMemoryScopeDir({
+      cwd: worktreeDir,
+      root: memRoot,
+      gitRunner: () => null,
+    });
+
+    assert.equal(scope.dir, null, 'must not confidently name ANY directory, least of all the wrong one');
+    assert.equal(scope.source, 'worktree-unresolved');
+    assert.notEqual(scope.source, 'literal', 'a git failure on a KNOWN worktree must never be reported as a confident literal answer');
+  } finally {
+    cleanup();
+  }
+});
+
+test('buildMemoryNudge(): a simulated git timeout does not silently misreport under the "literal" label', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const { repoRoot, worktreeDir } = makeRepoWithWorktree(dir);
+    const memRoot = join(dir, 'mem-root');
+    // The main repo's store is populated (the real answer), and — as in the
+    // pre-fix defect — an empty worktree-literal store also exists on disk,
+    // so a wrong-but-existent literal candidate would look "successful".
+    makeMemoryStore(memRoot, encodeProjectDir(repoRoot), 5);
+    mkdirSync(join(memRoot, encodeProjectDir(worktreeDir), 'memory'), { recursive: true });
+    corruptWorktreeGitFile(worktreeDir);
+
+    const dataDirPath = join(stateDir, 'data');
+    mkdirSync(dataDirPath, { recursive: true });
+
+    const { facts } = buildMemoryNudge({
+      cwd: worktreeDir,
+      root: memRoot,
+      dataDirPath,
+      repoEnabled: false,
+      gitRunner: () => null, // simulate every git call timing out — a stub, not real load
+    });
+
+    assert.equal(facts.hereSource, 'worktree-unresolved');
+    assert.equal(facts.hereProject, null);
+    assert.notEqual(facts.hereSource, 'literal');
   } finally {
     cleanup();
   }

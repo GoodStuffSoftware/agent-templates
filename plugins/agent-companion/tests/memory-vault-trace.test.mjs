@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeFixture, runScript } from './helpers.mjs';
+import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import { CHECKS } from '../scripts/checks.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
@@ -289,6 +289,28 @@ test('a corrupt status file does not stop a sync from running or recording', () 
 // G5. status() now runs sync's read-only guards first and reports a vault that
 // fails them as refused. The drift check has to say so. Before the guards, it
 // reported whatever `git status` saw in that repository.
+// Root-cause fix for load-sensitivity across the suite: a vault commit that
+// crosses git's auto-gc threshold used to fork a DETACHED `git gc`/
+// maintenance child (an unawaited child outliving vaultGit()'s own process),
+// which then held the vault's .git open and burned CPU/I/O out of band —
+// exactly the kind of load dependency that made this file's own sequential
+// runScript() calls (each with a 15s timeout) occasionally slow enough to
+// flake under a concurrent stress run. See memory-vault.mjs's vaultGit() for
+// the -c maintenance.autoDetach=false / -c gc.autoDetach=false flags this
+// guards; a source check (rather than a timing-based one) keeps this
+// assertion itself immune to the very flakiness it is guarding against.
+test('vaultGit() disables auto-detached maintenance/gc on every invocation (no unawaited background child)', () => {
+  const src = readFileSync(join(PLUGIN_ROOT, 'scripts', 'memory-vault.mjs'), 'utf8');
+  const fnMatch = src.match(/function vaultGit\(dir, args, opts = \{\}\) \{[\s\S]*?\n\}/);
+  assert.ok(fnMatch, 'vaultGit() must exist with its expected shape');
+  const body = fnMatch[0];
+  assert.match(body, /-c',\s*'maintenance\.autoDetach=false'/, 'must disable detached maintenance runs');
+  assert.match(body, /-c',\s*'gc\.autoDetach=false'/, 'must disable detached gc runs');
+  // Never disable gc.auto itself (that is a separate, deliberately-rejected
+  // change — see the handoff): only how it runs (foreground) changes.
+  assert.doesNotMatch(body, /gc\.auto=0|gc\.auto=false/);
+});
+
 test('memory-vault-drift FAILS, naming the guard, for a marker planted in a repository the plugin did not create', () => {
   const fx = makeFixture();
   try {

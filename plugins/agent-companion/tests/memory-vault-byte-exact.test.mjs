@@ -29,8 +29,17 @@ function sha256(buf) {
   return createHash('sha256').update(buf).digest('hex');
 }
 
+// No auto-maintenance/gc: see tests/memory-vault-git-env.test.mjs's own
+// NO_AUTO_MAINT banner — a detached `maintenance run --auto`/`gc --auto`
+// child left running after one of THIS file's own commits (the ones made
+// directly here, not through scripts/memory-vault.mjs's now-hardened
+// vaultGit()) can still hold the same vault's .git open when the very next
+// assertion in the same test calls `git status`/`git show` against it,
+// which is a load-sensitive race on Windows in particular.
+const NO_AUTO_MAINT = ['-c', 'maintenance.autoDetach=false', '-c', 'gc.autoDetach=false'];
+
 function git(dir, args, opts = {}) {
-  return execFileSync('git', ['-C', dir, ...args], {
+  return execFileSync('git', ['-C', dir, ...NO_AUTO_MAINT, ...args], {
     encoding: 'utf8', windowsHide: true, ...opts, env: cleanGitEnv(opts.env || process.env),
   });
 }

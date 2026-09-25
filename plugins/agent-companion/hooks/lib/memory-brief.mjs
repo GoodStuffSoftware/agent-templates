@@ -104,7 +104,7 @@ function repoChunksFor({
 // (user + repo) as one combined pool, same as the CLI's --scope all.
 export function buildMemoryBrief({
   prompt, cwd, maxHits = 3, minScore = 25, root, dataDirPath,
-  repoEnabled = true, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
+  repoEnabled = true, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes, gitRunner,
 }) {
   const text = String(prompt || '');
   const emptyFacts = { attached: false };
@@ -142,7 +142,7 @@ export function buildMemoryBrief({
   // same helper buildMemoryNudge() and memory-search.mjs's --here use, so a
   // worktree session boosts the MAIN repo's memory, not a same-named but
   // empty worktree-encoded store.
-  const scope = resolveMemoryScopeDir({ cwd, root: root || memoryRoot() });
+  const scope = resolveMemoryScopeDir({ cwd, root: root || memoryRoot(), gitRunner });
   const boosted = hits
     .map((h) => ({ ...h, local: h.chunk.scope === 'user' && !!scope.dir && h.chunk.project === scope.dir }))
     .sort((a, z) => (z.score * (z.local ? LOCAL_PROJECT_BOOST : 1)) - (a.score * (a.local ? LOCAL_PROJECT_BOOST : 1)));
@@ -221,7 +221,7 @@ function pluginRoot() {
 // in spawns.jsonl named the memory feature at all, so confirming delivery
 // required a live echo probe.
 export function buildMemoryNudge({
-  cwd, root, dataDirPath, repoEnabled = true, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes,
+  cwd, root, dataDirPath, repoEnabled = true, repoGlobs, repoMaxFileBytes, repoMaxTotalBytes, gitRunner,
 }) {
   const emptyFacts = { attached: false };
   if (!dataDirPath) return { text: '', facts: emptyFacts };
@@ -254,7 +254,7 @@ export function buildMemoryNudge({
   // point of resolveMemoryScopeDir() is that it already names the real
   // on-disk directory, so a fuzzy match would just reintroduce the same
   // class of bug (matching a same-named-but-wrong store) one layer down.
-  const scope = resolveMemoryScopeDir({ cwd, root: root || memoryRoot() });
+  const scope = resolveMemoryScopeDir({ cwd, root: root || memoryRoot(), gitRunner });
   const hereProject = scope.dir && counts.has(scope.dir) ? scope.dir : null;
   const hereCount = hereProject ? counts.get(hereProject) : 0;
   const otherCount = counts.size - (hereProject ? 1 : 0);
