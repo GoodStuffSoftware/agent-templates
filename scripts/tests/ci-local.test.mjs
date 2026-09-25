@@ -60,6 +60,18 @@ test('parseArgs: --pre-push-hook sets the flag', () => {
   assert.equal(parseArgs(['--pre-push-hook']).prePushHook, true);
 });
 
+test('parseArgs: --pre-push-hook takes the hook\'s two arguments, the destination remote name and URL', () => {
+  const o = parseArgs(['--pre-push-hook', 'origin', 'https://example.invalid/r.git']);
+  assert.equal(o.prePushHook, true);
+  assert.equal(o.pushRemote, 'origin');
+  assert.equal(o.pushUrl, 'https://example.invalid/r.git');
+  const bare = parseArgs(['--pre-push-hook']);
+  assert.equal(bare.pushRemote, null);
+  assert.equal(bare.pushUrl, null);
+  assert.equal(parseArgs(['--pre-push-hook', 'origin']).pushUrl, null);
+  assert.throws(() => parseArgs(['--pre-push-hook', 'a', 'b', 'c']), /unknown argument "c"/);
+});
+
 test('parseArgs: --help sets the flag without requiring other args', () => {
   assert.equal(parseArgs(['--help']).help, true);
   assert.equal(parseArgs(['-h']).help, true);
