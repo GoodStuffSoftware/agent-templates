@@ -246,7 +246,7 @@ function statusCacheFile({ create = true } = {}) {
 
 // --- git, pinned to the vault ---------------------------------------------
 // EVERY git call in this file goes through one of these two (git() and
-// vaultGit()), apart from the read-only `git config` lookups in
+// vaultGit()), apart from the read-only operator lookups in
 // operatorConfig(). None of them lets git discover a repository from the
 // environment or the cwd:
 //
@@ -337,9 +337,10 @@ export function vaultGitEnv(env = process.env) {
 //                   commit message is built from.
 //   safe.directory  git refuses a repository owned by another account
 //                   unless protected (system, global or command-line) config
-//                   lists it, so the operator's system and global entries are
-//                   passed on with -c, in order, as git itself reads them
-//                   (see protectedSafeDirectories() below).
+//                   lists it. The operator's own git decides whether it
+//                   trusts the vault, once, and a trusted vault's calls carry
+//                   ONE entry naming the vault (see operatorTrustedVault()
+//                   below).
 //   user.name, user.email
 //                   Only for a commit, and only when the vault's own config
 //                   does not set them (an owner who unset the local email;
@@ -354,9 +355,9 @@ export function vaultGitEnv(env = process.env) {
 // vault, run in the vault with the env 0.29.1 gave vault calls (repository
 // locating variables, config injection and inherited GIT_AUTHOR_* stripped;
 // GIT_CONFIG_GLOBAL, HOME and the rest as inherited), with a timeout. When
-// that call finds a system or global safe.directory entry, up to two more
-// read the entries the way git reads them (protectedSafeDirectories()).
-// `git config` runs no hooks, filters or fsmonitor. If the first call fails
+// that call finds a system or global safe.directory entry, one more lets the
+// operator's git decide whether it trusts the vault (operatorTrustedVault()).
+// Neither runs hooks, filters or fsmonitor. If the first call fails
 // or times out, nothing is carried, and a vault without `* -text` refuses to
 // add or commit (a line-ending setting it cannot read could otherwise
 // rewrite the backup).
@@ -367,76 +368,63 @@ const OWN_SCOPES = new Set(['local', 'worktree']);
 const OPERATOR_LOOKUP_TIMEOUT_MS = 15000;
 const operatorConfigCache = new Map();
 
-// An explicit git dir that is never created: `git config` then runs outside
-// any repository, as git does when it reads safe.directory.
-const NO_REPOSITORY = '.git/agent-companion-no-repository';
-// The key the `~` expansion below hands to git, and the only one it reads back.
-const EXPAND_KEY = 'agent-companion.path';
-const EXPAND_KEY_RE = '^agent-companion\\.path$';
-// `~` or `~/...`: the entries git expands against HOME. `~user/...` is not
-// one (git looks the user up instead), nor is `~\...` (git treats only "/"
-// as the end of the user name).
-const HOME_RELATIVE = /^~(?:\/|$)/;
-
 // The lookups' env: 0.29.1's vault env, so the operator's own config (HOME,
 // XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL as inherited) is what is read, minus the
-// variables that would send git's output to a file (lib/git-env.mjs).
+// variables that would send git's output to a file or name a program for it
+// to run (lib/git-env.mjs).
 function operatorLookupEnv(env = process.env) {
   const out = vaultEnv(env);
   for (const k of Object.keys(out)) if (isRedirectingGitVar(k)) delete out[k];
   return out;
 }
 
-function operatorLookup(dir, gitDir, args) {
-  return gitIsolated([...NO_DETACHED_HOUSEKEEPING, '-C', dir, `--git-dir=${gitDir}`, ...args], {
+function operatorLookup(args) {
+  return gitIsolated([...NO_DETACHED_HOUSEKEEPING, ...args], {
     env: operatorLookupEnv(process.env), stdio: ['ignore', 'pipe', 'ignore'], timeout: OPERATOR_LOOKUP_TIMEOUT_MS,
   });
 }
 
-// The operator's system and global safe.directory entries, as git itself
-// would apply them to the vault. git reads safe.directory from protected
-// config only, before it has found a repository, and every vault call runs
-// with HOME set to the null device. So, to match git:
-//   - The entries are read OUTSIDE any repository (NO_REPOSITORY). An
-//     `includeIf "gitdir:..."` or "onbranch:..." block therefore does not
-//     apply, just as git ignores it for safe.directory; the vault lookup
-//     above, run inside the vault, would have honoured it.
-//   - An entry relative to HOME (`~`, `~/...`) is expanded by git itself,
-//     with `git config --type=path` in the lookup env, so it resolves
-//     against the operator's real home exactly as 0.29.1's vault calls
-//     resolved it. Passed as written, it would resolve under the null device
-//     and never match.
-//   - `~user/...` and `%(prefix)/...` do not depend on HOME. They are passed
-//     as written, and the vault's git expands them as 0.29.1's did (or fails
-//     to, as it did then: Git for Windows cannot expand `~user/`).
-//   - A key with no value, which empties git's list, is passed with no value.
-// If a lookup fails, or an entry cannot be expanded, no safe.directory entry
-// is carried at all. A vault owned by another account is then refused, as git
-// itself refuses it when an entry cannot be expanded; a vault the operator
+// Whether the operator's own git trusts the vault, and if so the vault's
+// path as that git names it. Every vault call runs with HOME set to the null
+// device, so it cannot see the operator's safe.directory entries itself.
+//
+// git decides: `git -C <vault> rev-parse --git-dir --show-toplevel`, in the
+// lookup env, is git's own repository discovery, and discovery is where git
+// checks ownership against the operator's real system and global config.
+// Whatever git does with an entry is therefore exactly what the vault gets:
+// `*`, a value-less or empty key that resets the list, `~/...` against the
+// real HOME, `~user/...`, `%(prefix)/...`, a trailing `/*` or `/`, an
+// `includeIf "gitdir:..."` or "onbranch:..." block (ignored, as git ignores
+// it for safe.directory), and whatever normalization this git version applies.
+//
+// A trusted vault's calls then carry ONE entry, the vault's work tree exactly
+// as git printed it. It is the path git compares an entry with when the
+// vault's own calls discover the repository (the same git, from the same
+// directory), whatever case, slashes, junction or 8.3 name `dir` was spelled
+// with. It trusts that one directory and nothing else. Carrying the
+// operator's entries one by one instead put every one of them on every vault
+// command line, and a few hundred overflowed Windows' 32,767 characters, so
+// every vault call failed, owned vaults included.
+//
+// null when git refuses the vault, when discovery lands anywhere but the
+// vault's own .git, or when the lookup fails or times out. Nothing is carried
+// then: a vault owned by another account is refused, and one the operator
 // owns is unaffected.
-function protectedSafeDirectories(dir) {
-  let found;
+function operatorTrustedVault(dir) {
   try {
-    found = parseScopedConfig(operatorLookup(dir, NO_REPOSITORY,
-      ['config', '--show-scope', '-z', '--get-regexp', '^safe\\.directory$']))
-      .filter((e) => e.key === 'safe.directory' && PROTECTED_SCOPES.has(e.scope));
+    return parseTrustedVault(operatorLookup(['-C', dir, 'rev-parse', '--git-dir', '--show-toplevel']));
   } catch {
-    return []; // none (exit 1), or the lookup failed
+    return null;
   }
-  const home = found.filter((e) => e.value !== null && HOME_RELATIVE.test(e.value));
-  if (home.length === 0) return found;
-  let expanded;
-  try {
-    expanded = parseScopedConfig(operatorLookup(dir, NO_REPOSITORY, [
-      ...home.flatMap((e) => ['-c', `${EXPAND_KEY}=${e.value}`]),
-      'config', '--show-scope', '-z', '--type=path', '--get-regexp', EXPAND_KEY_RE,
-    ])).filter((e) => e.scope === 'command').map((e) => e.value);
-  } catch {
-    return []; // git could not expand them (no HOME at all)
-  }
-  if (expanded.length !== home.length || expanded.some((v) => !v)) return [];
-  const byEntry = new Map(home.map((e, i) => [e, expanded[i]]));
-  return found.map((e) => (byEntry.has(e) ? { ...e, value: byEntry.get(e) } : e));
+}
+
+// `rev-parse --git-dir --show-toplevel` run from the vault prints ".git" (the
+// repository is the directory's own) and then the work tree, one per line.
+export function parseTrustedVault(out) {
+  const s = String(out ?? '');
+  if (!s.startsWith('.git\n')) return null;
+  const top = s.slice('.git\n'.length).replace(/\r?\n$/, '');
+  return top && !/[\r\n]/.test(top) ? top : null;
 }
 
 // `git config --show-scope -z` prints "<scope>\0<key>\n<value>\0" per entry,
@@ -467,15 +455,20 @@ function operatorConfig(dir) {
   if (!isRealDir(vaultGitDir(dir))) return { ok: true, entries: [] };
   let result;
   try {
-    const entries = parseScopedConfig(operatorLookup(dir, '.git',
-      ['config', '--show-scope', '-z', '--get-regexp', OPERATOR_KEYS]));
+    const entries = parseScopedConfig(operatorLookup(['-C', dir, '--git-dir=.git',
+      'config', '--show-scope', '-z', '--get-regexp', OPERATOR_KEYS]));
     // This lookup ran inside the vault, so its safe.directory entries may
     // include conditional ones git would ignore, and are unexpanded. It only
-    // says whether there are any; protectedSafeDirectories() supplies them.
+    // says whether there are any: with none, git cannot trust a vault owned
+    // by another account, and one the operator owns needs no entry.
     const anySafe = entries.some((e) => e.key === 'safe.directory' && PROTECTED_SCOPES.has(e.scope));
+    const trusted = anySafe ? operatorTrustedVault(dir) : null;
     result = {
       ok: true,
-      entries: [...entries.filter((e) => e.key !== 'safe.directory'), ...(anySafe ? protectedSafeDirectories(dir) : [])],
+      entries: [
+        ...entries.filter((e) => e.key !== 'safe.directory'),
+        ...(trusted ? [{ scope: 'command', key: 'safe.directory', value: trusted }] : []),
+      ],
     };
   } catch (e) {
     result = { ok: e?.status === 1 && !e?.signal, entries: [] };
@@ -484,9 +477,10 @@ function operatorConfig(dir) {
   return result;
 }
 
-// The -c options that carry the operator's settings into a vault call. A
-// safe.directory key with no value is passed with none: for git that empties
-// the list so far, as it did in the operator's config.
+// The -c options that carry the operator's settings into a vault call.
+// operatorConfig() supplies at most one safe.directory entry (the vault
+// itself); any protected one given is passed in order, and a key with no
+// value is passed with none (for git that empties the list so far).
 export function carriedConfigArgs(entries) {
   const out = [];
   for (const e of entries) {

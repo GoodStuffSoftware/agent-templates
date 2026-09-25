@@ -1,13 +1,14 @@
 // safe.directory for a vault owned by another account (0.29.2 round 3: F1,
-// F2 of the round-2 re-review).
+// F2 of the round-2 re-review; 0.29.7: V1, V2 of the round-3 verification).
 //
-// Every vault git call runs with HOME set to the null device, so the
-// operator's system and global safe.directory entries are passed to it with
-// -c. An entry relative to HOME ("~/...") used to be passed as written, so it
-// resolved under the null device and never matched: a vault the operator had
-// trusted that way was refused on every run, where 0.29.1 synced it. And the
-// entries were read inside the vault, so one inside `includeIf "gitdir:..."`
-// counted, although git itself ignores it for safe.directory.
+// Every vault git call runs with HOME set to the null device, so it cannot
+// read the operator's system and global safe.directory entries itself.
+// Round 2 passed them on with -c: an entry relative to HOME ("~/...") then
+// resolved under the null device and never matched, and one inside
+// `includeIf "gitdir:..."` counted, although git itself ignores it for
+// safe.directory. Round 3 passed every entry, expanded, with its own -c, and
+// a few hundred overflowed the Windows command line. Now the operator's own
+// git decides once, and a trusted vault's calls carry one entry naming it.
 //
 // Each case runs a real sync. git's own knob GIT_TEST_ASSUME_DIFFERENT_OWNER=1,
 // set in the vault's env only, makes git treat the vault as owned by another
@@ -115,6 +116,143 @@ for (const [label, config, trusted] of CASES) {
     }
   });
 }
+
+// A gitfile planted at the path round 3 used for its "outside any repository"
+// lookup (<vault>/.git/agent-companion-no-repository) made that lookup run in
+// a repository again, so `includeIf "gitdir:..."` applied and its `*`
+// counted. Only whoever can write the vault's .git can plant one, which for a
+// vault owned by another account is that account: safe.directory's own
+// threat model. git ignores the block, so the vault must be refused.
+test('a vault owned by another account stays refused when a gitfile is planted where round 3 looked outside any repository', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const vault = join(fx.dir, ...VAULT_REL.split('/'));
+    const first = runScript(SCRIPT, ['sync', '--json'], {
+      cwd: fx.dir, env: operatorEnv(fx, corpus, '', { differentOwner: false }), timeout: 60000,
+    });
+    assert.equal(first.status, 0, first.stderr);
+    const head = inspect(vault, ['rev-parse', 'HEAD']).out;
+    writeFileSync(join(vault, '.git', 'agent-companion-no-repository'), `gitdir: ${fwd(join(vault, '.git'))}\n`);
+    writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
+    const cfg = `[includeIf "gitdir:**"]\n\tpath = ${include(fx, 'inc-gitdir.gitconfig', '[safe]\n\tdirectory = *\n')}\n`;
+    const res = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env: operatorEnv(fx, corpus, cfg), timeout: 60000 });
+    assert.notEqual(res.status, 0, `git ignores the block for safe.directory, so the sync must fail:\n${res.stdout}`);
+    assert.equal(inspect(vault, ['rev-parse', 'HEAD']).out, head, 'nothing was committed');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// 0.29.7 (V1 of the round-3 verification). Every system and global entry
+// used to be passed as its own -c on every vault call. On Windows, about 500
+// ordinary entries overflowed the 32,767-character command line, so every
+// vault call failed (ENAMETOOLONG), for a vault the operator owns as well,
+// and the sync blamed a missing repository. 0.29.1 handled 2,000. The vault
+// now lets the operator's git decide and carries one entry, whatever the
+// count. Each entry here is about 45 characters; the `~/` ones expand to the
+// fixture's HOME, as they did in round 3.
+function manyEntries(n, form) {
+  const root = process.platform === 'win32' ? 'D:/source/repos' : '/srv/source/repos';
+  const one = (i) => `${form === 'tilde' ? '~/source/repos' : root}/some-team/some-project-${String(i).padStart(4, '0')}`;
+  return Array.from({ length: n }, (_, i) => `\tdirectory = ${one(i)}\n`).join('');
+}
+
+// git's own trace2 event stream records each git process's argv: every call
+// carries at most one safe.directory, so the command line stays short on any
+// platform (CI runs Linux, where the old argv still fit).
+function safeDirectoryArgCounts(trace) {
+  if (!existsSync(trace)) return [];
+  return readFileSync(trace, 'utf8').split('\n').filter(Boolean)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((e) => e && e.event === 'start' && Array.isArray(e.argv))
+    .map((e) => ({
+      safe: e.argv.filter((a, i) => e.argv[i - 1] === '-c' && /^safe\.directory(=|$)/i.test(a)).length,
+      chars: e.argv.join(' ').length,
+    }));
+}
+
+for (const n of [600, 2000]) {
+  for (const form of ['abs', 'tilde']) {
+    test(`${n} ${form === 'abs' ? 'absolute' : '`~/`'} safe.directory entries: a vault the operator owns syncs, with one entry per call at most`, () => {
+      const fx = makeFixture();
+      try {
+        const corpus = makeCorpus(fx.dir);
+        const vault = join(fx.dir, ...VAULT_REL.split('/'));
+        const trace = join(fx.dir, 'trace2.jsonl');
+        const cfg = `[safe]\n${manyEntries(n, form)}`;
+        for (const text of ['# index\n', '# index v2\n']) {
+          writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), text);
+          const res = runScript(SCRIPT, ['sync', '--json'], {
+            cwd: fx.dir, env: operatorEnv(fx, corpus, cfg, { differentOwner: false, extra: { GIT_TRACE2_EVENT: trace } }), timeout: 60000,
+          });
+          assert.equal(res.status, 0, res.stderr);
+          assert.equal(res.json?.committed, true, res.stdout);
+        }
+        assert.equal(inspect(vault, ['show', 'HEAD:projects/proj-a/memory/MEMORY.md']).out, '# index v2');
+        const calls = safeDirectoryArgCounts(trace);
+        assert.ok(calls.length > 5, `expected the vault's git calls in the trace, saw ${calls.length}`);
+        for (const c of calls) {
+          assert.ok(c.safe <= 1, `a git call carried ${c.safe} safe.directory entries`);
+          assert.ok(c.chars < 4000, `a git call's command line is ${c.chars} characters`);
+        }
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
+
+  test(`${n} safe.directory entries: an existing vault owned by another account syncs when one of them names it, and is refused when none does`, () => {
+    const fx = makeFixture();
+    try {
+      const corpus = makeCorpus(fx.dir);
+      const vault = join(fx.dir, ...VAULT_REL.split('/'));
+      const first = runScript(SCRIPT, ['sync', '--json'], {
+        cwd: fx.dir, env: operatorEnv(fx, corpus, '', { differentOwner: false }), timeout: 60000,
+      });
+      assert.equal(first.status, 0, first.stderr);
+      const head = inspect(vault, ['rev-parse', 'HEAD']).out;
+      writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
+      const refused = runScript(SCRIPT, ['sync', '--json'], {
+        cwd: fx.dir, env: operatorEnv(fx, corpus, `[safe]\n${manyEntries(n, 'abs')}`), timeout: 60000,
+      });
+      assert.notEqual(refused.status, 0, `no entry names the vault, so the sync must fail:\n${refused.stdout}`);
+      assert.doesNotMatch(refused.stderr, /ENAMETOOLONG/, 'the refusal is git\'s, not an overflowing command line');
+      assert.equal(inspect(vault, ['rev-parse', 'HEAD']).out, head, 'nothing was committed');
+      const res = runScript(SCRIPT, ['sync', '--json'], {
+        cwd: fx.dir, env: operatorEnv(fx, corpus, `[safe]\n${manyEntries(n, 'tilde')}\tdirectory = ~/${VAULT_REL}\n`), timeout: 60000,
+      });
+      assert.equal(res.status, 0, res.stderr);
+      assert.equal(res.json?.committed, true, res.stdout);
+      assert.equal(inspect(vault, ['show', 'HEAD:projects/proj-a/memory/MEMORY.md']).out, '# index v2');
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
+
+// The one entry carried is the vault as the operator's git names it, so it
+// matches however the vault's path is spelled. Windows paths are
+// case-insensitive, and git compares the entry with the directory's real
+// name.
+test('a vault owned by another account, reached through a differently-cased state path, syncs through `*`', {
+  skip: process.platform !== 'win32' && 'paths are case-sensitive here',
+}, () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const vault = join(fx.dir, ...VAULT_REL.split('/'));
+    const env = operatorEnv(fx, corpus, '[safe]\n\tdirectory = *\n', {
+      extra: { AGENT_COMPANION_STATE_DIR: fx.stateDir.toUpperCase() },
+    });
+    const res = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.json?.committed, true, res.stdout);
+    assert.equal(inspect(vault, ['show', 'HEAD:projects/proj-a/memory/MEMORY.md']).out, '# index');
+  } finally {
+    fx.cleanup();
+  }
+});
 
 // A bare `~` is HOME itself. Here HOME is the vault and the config file is
 // named by GIT_CONFIG_GLOBAL, so the entry can only match if it is expanded

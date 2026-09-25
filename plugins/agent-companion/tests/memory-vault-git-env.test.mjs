@@ -17,17 +17,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, lstatSync, symlinkSync, chmodSync,
-  renameSync, utimesSync,
+  renameSync, utimesSync, rmSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   makeFixture, runScript, assertNotRealHome, PLUGIN_ROOT,
 } from './helpers.mjs';
 import { cleanGitEnv, NULL_DEVICE } from '../scripts/lib/git-env.mjs';
 import {
-  vaultGitEnv, vaultSubcommand, parseScopedConfig, carriedConfigArgs, commitIdentityArgs,
+  vaultGitEnv, vaultSubcommand, parseScopedConfig, carriedConfigArgs, commitIdentityArgs, parseTrustedVault,
 } from '../scripts/memory-vault.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
@@ -1049,15 +1049,120 @@ test('S2: an inherited GIT_REDIRECT_STDOUT/STDERR reaches no git call made by in
   }
 });
 
+// GIT_EXEC_PATH names the directory git runs its own programs from: a
+// commit's automatic housekeeping ran the `git` found there. git exports it
+// into every hook it runs, so a vault run started under another git
+// installation's hook inherits it.
+test('S2: an inherited GIT_EXEC_PATH runs no program during init, sync or status', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const flag = join(fx.dir, 'exec-path-ran');
+    const execDir = join(fx.dir, 'hostile-exec-path');
+    mkdirSync(execDir);
+    for (const n of ['git', 'git-maintenance', 'git-gc', 'git-repack', 'git-commit-graph']) {
+      writeFileSync(join(execDir, n), `#!/bin/sh\necho ${n} >> "${sh(flag)}"\nexit 0\n`);
+      chmodSync(join(execDir, n), 0o755);
+    }
+    // CONTROL: this git does run a program from GIT_EXEC_PATH on a commit.
+    const control = join(fx.dir, 'control');
+    git(['init', '-q', control]);
+    spawnSync('git', [
+      '-C', control, '-c', 'user.name=c', '-c', 'user.email=c@example.invalid', '-c', 'maintenance.auto=true',
+      'commit', '-q', '--allow-empty', '-m', 'control',
+    ], { windowsHide: true, env: { ...cleanGitEnv(), GIT_CONFIG_GLOBAL: NULL_DEVICE, GIT_CONFIG_NOSYSTEM: '1', GIT_EXEC_PATH: execDir } });
+    assert.ok(existsSync(flag), 'control: this git runs a program from GIT_EXEC_PATH on a commit');
+    rmSync(flag);
+
+    const env = vaultEnvFor(corpus, { GIT_EXEC_PATH: execDir });
+    for (const cmd of ['init', 'sync']) {
+      const res = runScript(SCRIPT, [cmd, '--json'], { cwd: fx.dir, env, timeout: 60000 });
+      assert.equal(res.status, 0, `${cmd}: ${res.stderr}`);
+    }
+    writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
+    const res = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.json?.committed, true, res.stdout);
+    const st = runScript(SCRIPT, ['status', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(st.status, 0, st.stderr);
+    assert.ok(!existsSync(flag), `a program from the inherited GIT_EXEC_PATH ran: ${existsSync(flag) ? readFileSync(flag, 'utf8') : ''}`);
+    assert.equal(git(['-C', join(fx.stateDir, 'memory-vault'), 'show', 'HEAD:projects/proj-a/memory/MEMORY.md']), '# index v2');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// Git for Windows asks the program GIT_ASK_YESNO names whether to retry when
+// it cannot replace a file in .git that another process holds open, and the
+// program's exit status decides. Inherited, it ran over and over and kept a
+// sync waiting; without it, git fails at once and the next sync retries.
+test('S2: an inherited GIT_ASK_YESNO runs no program when the vault\'s index is held open', {
+  skip: process.platform !== 'win32' && 'GIT_ASK_YESNO is a Git for Windows variable',
+}, async () => {
+  const fx = makeFixture();
+  let locker = null;
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const first = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env: vaultEnvFor(corpus, {}), timeout: 60000 });
+    assert.equal(first.status, 0, first.stderr);
+    const vault = join(fx.stateDir, 'memory-vault');
+    const flag = join(fx.dir, 'ask-yesno-ran');
+    const ask = join(fx.dir, 'ask-yesno');
+    writeFileSync(ask, `#!/bin/sh\necho asked >> "${sh(flag)}"\nexit 1\n`);
+    chmodSync(ask, 0o755);
+
+    // Hold .git/index open, readable but not replaceable, as an editor or a
+    // virus scanner can.
+    locker = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      "$f = [System.IO.File]::Open($env:AC_HELD_FILE, 'Open', 'Read', 'Read'); Write-Output held; Start-Sleep -Seconds 300; $f.Close()"],
+    { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: { ...process.env, AC_HELD_FILE: join(vault, '.git', 'index') } });
+    await new Promise((resolveHeld, rejectHeld) => {
+      locker.stdout.once('data', resolveHeld);
+      locker.once('exit', (code) => rejectHeld(new Error(`the index holder exited early (${code})`)));
+    });
+
+    // CONTROL: plain git asks the program while the index is held.
+    writeFileSync(join(vault, 'control.txt'), 'x\n');
+    const control = spawnSync('git', ['-C', vault, 'add', 'control.txt'], {
+      windowsHide: true, timeout: 60000,
+      env: { ...cleanGitEnv(), GIT_CONFIG_GLOBAL: NULL_DEVICE, GIT_CONFIG_NOSYSTEM: '1', GIT_ASK_YESNO: sh(ask) },
+    });
+    assert.notEqual(control.status, 0, 'control: the held index cannot be replaced');
+    assert.ok(existsSync(flag), 'control: this git runs GIT_ASK_YESNO when the index is held');
+    rmSync(flag);
+    rmSync(join(vault, 'control.txt'));
+    assert.ok(!existsSync(join(vault, '.git', 'index.lock')), 'control: git released its index lock');
+
+    writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
+    const held = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env: vaultEnvFor(corpus, { GIT_ASK_YESNO: sh(ask) }), timeout: 60000 });
+    assert.notEqual(held.status, 0, `with its index held, the sync fails:\n${held.stdout}`);
+    assert.ok(!existsSync(flag), 'the vault ran the inherited GIT_ASK_YESNO program');
+
+    locker.kill();
+    await new Promise((r) => { if (locker.exitCode !== null || locker.signalCode !== null) r(); else locker.once('exit', r); });
+    locker = null;
+    const after = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env: vaultEnvFor(corpus, {}), timeout: 60000 });
+    assert.equal(after.status, 0, after.stderr);
+    assert.equal(git(['-C', vault, 'show', 'HEAD:projects/proj-a/memory/MEMORY.md']), '# index v2');
+  } finally {
+    if (locker) {
+      locker.kill();
+      await new Promise((r) => { if (locker.exitCode !== null || locker.signalCode !== null) r(); else locker.once('exit', r); });
+    }
+    fx.cleanup();
+  }
+});
+
 test('S2: vaultGitEnv is hermetic: config files, HOME and XDG_CONFIG_HOME pinned, every spelling replaced, identity dropped', () => {
   const env = {
     PATH: '/bin', GIT_CONFIG_GLOBAL: '/g', git_config_system: '/s', GIT_CONFIG_NOSYSTEM: '0', Home: '/h', HOME: '/h',
     xdg_config_home: '/x', GIT_ATTR_NOSYSTEM: '0', GIT_AUTHOR_NAME: 'x', GIT_CONFIG_PARAMETERS: "'a.b'='c'", EMAIL: 'e@example.invalid',
     Git_Attr_Source: 'hostile-tree', git_redirect_stdout: '/o', GIT_REDIRECT_STDERR: '/e',
+    GIT_EXEC_PATH: '/hostile/libexec', git_ask_yesno: '/hostile/ask',
   };
   const out = vaultGitEnv(env);
   assert.deepEqual(
-    Object.keys(out).filter((k) => /^(git_config|git_attr|git_redirect|home$|xdg_config_home$)/i.test(k)).sort(),
+    Object.keys(out).filter((k) => /^(git_config|git_attr|git_redirect|git_exec|git_ask|home$|xdg_config_home$)/i.test(k)).sort(),
     ['GIT_ATTR_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_SYSTEM', 'HOME', 'XDG_CONFIG_HOME'],
   );
   for (const k of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'HOME', 'XDG_CONFIG_HOME']) assert.equal(out[k], NULL_DEVICE, k);
@@ -1107,6 +1212,24 @@ test('S3: carriedConfigArgs passes the effective line-ending settings and protec
     '-c', 'core.autocrlf=input', '-c', 'core.eol',
   ]);
   assert.deepEqual(carriedConfigArgs([]), []);
+});
+
+// The operator's git decides whether it trusts the vault: `rev-parse
+// --git-dir --show-toplevel` from the vault prints ".git" and the work tree
+// when discovery found the vault's own repository and git trusted it.
+test('S3: parseTrustedVault takes the work tree only when discovery found the vault\'s own .git', () => {
+  assert.equal(parseTrustedVault('.git\nD:/vaults/x/memory-vault\n'), 'D:/vaults/x/memory-vault');
+  assert.equal(parseTrustedVault('.git\n/srv/x/a c=é 日本/memory-vault\n'), '/srv/x/a c=é 日本/memory-vault');
+  assert.equal(parseTrustedVault('.git\r\n/v\r\n'), null, 'not the shape git prints');
+  assert.equal(parseTrustedVault('.git\n/v\r\n'), '/v');
+  // Discovery landed elsewhere: an enclosing repository, or a gitfile's target.
+  assert.equal(parseTrustedVault('/elsewhere/.git\n/elsewhere\n'), null);
+  assert.equal(parseTrustedVault('../.git\n/v\n'), null);
+  assert.equal(parseTrustedVault('.git\n'), null, 'no work tree');
+  assert.equal(parseTrustedVault('.git\n\n'), null);
+  assert.equal(parseTrustedVault('.git\n/a\n/b\n'), null, 'a path with a line break is never carried');
+  assert.equal(parseTrustedVault(''), null);
+  assert.equal(parseTrustedVault(undefined), null);
 });
 
 test('S3: commitIdentityArgs fills only what the vault\'s own config leaves unset', () => {

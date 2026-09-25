@@ -145,7 +145,7 @@ export function isolatedGitEnv(env = process.env, overrides = {}) {
 // are case-insensitive). The repository's own .git/config is still read, and
 // `-c` on the command line still applies.
 //
-// Four more variables are removed and not replaced (REDIRECTING_GIT_VARS):
+// Six more variables are removed and not replaced (REDIRECTING_GIT_VARS):
 //   GIT_ATTR_SOURCE      git (2.40+) reads .gitattributes from the tree it
 //                        names instead of the work tree and index. The empty
 //                        tree hid the vault's `* -text`, so autocrlf=true
@@ -155,10 +155,20 @@ export function isolatedGitEnv(env = process.env, overrides = {}) {
 //                        that stream. An inherited GIT_REDIRECT_STDOUT made
 //                        every git child write its output to a file outside
 //                        the repository, and the caller read nothing.
+//   GIT_EXEC_PATH        where git looks for its own programs. A commit's
+//                        automatic housekeeping ran the `git` in the named
+//                        directory. git exports it into every hook it runs,
+//                        so a process started under another installation's
+//                        hook inherits it. Without it, git uses its own.
+//   GIT_ASK_YESNO        (Git for Windows) a program asked whether to retry
+//                        when a file in .git is in use. It ran over and over
+//                        and chose whether git kept retrying. Without it, git
+//                        fails at once.
 export const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
 export const REDIRECTING_GIT_VARS = Object.freeze([
   'GIT_ATTR_SOURCE', 'GIT_REDIRECT_STDIN', 'GIT_REDIRECT_STDOUT', 'GIT_REDIRECT_STDERR',
+  'GIT_EXEC_PATH', 'GIT_ASK_YESNO',
 ]);
 
 const REDIRECTING = new Set(REDIRECTING_GIT_VARS);
@@ -237,8 +247,9 @@ export function samePath(a, b) {
 //   2. `git rev-parse --absolute-git-dir` from the nearest EXISTING ancestor,
 //      with the cleaned env — git's own discovery, which also covers
 //      layouts the walk does not model. git missing is not a failure: the
-//      walk's answer stands. GIT_REDIRECT_* are removed too: its answer is
-//      read from stdout, and it writes nowhere else.
+//      walk's answer stands. REDIRECTING_GIT_VARS are removed too: its
+//      answer is read from stdout, it writes nowhere else, and it runs no
+//      program of a parent's choosing.
 function withoutRedirects(env) {
   const out = { ...env };
   for (const k of Object.keys(out)) if (isRedirectingGitVar(k)) delete out[k];

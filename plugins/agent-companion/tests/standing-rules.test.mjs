@@ -522,6 +522,32 @@ const ROUND3_PHRASINGS = [
   ['make the prompt box wider', false],
 ];
 
+// 0.29.7 (V5 of the round-3 verification): "I'd like" matched only a
+// straight apostrophe, so "I’d like a prompt" (U+2019, as phones and word
+// processors type it) was silent, where 0.29.1 fired.
+const APOSTROPHE_PHRASINGS = [
+  ['I’d like a prompt for the reviewer', true],
+  ['I’d like a copyable prompt for the lander', true],
+  ['Iʼd like a prompt for the scout', true], // U+02BC
+  ['I`d like a prompt for the fixer', true],
+  ["I'd like a prompt for the reviewer", true],
+  ['I’d like to prompt the user before deleting', false],
+  ['I’d like the prompt box wider', false],
+  ['I’d like the prompt field to be taller', false],
+  ['They’d like the prompts table sorted', false],
+];
+
+test('copyable-prompt: "I\'d like" asks for a prompt with any apostrophe', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const wrong = APOSTROPHE_PHRASINGS.filter(([text, want]) =>
+      matchRules({ scope: 'user-prompt', text }).some((r) => r.id === 'copyable-prompt') !== want);
+    assert.deepEqual(wrong, [], 'phrasings where the rule disagrees with the expected answer');
+  } finally {
+    cleanup();
+  }
+});
+
 test('copyable-prompt: craft, prepare, "send me" and "I\'d like" ask for a prompt; a program\'s prompt you "get" does not', () => {
   const { cleanup } = makeFixture();
   try {

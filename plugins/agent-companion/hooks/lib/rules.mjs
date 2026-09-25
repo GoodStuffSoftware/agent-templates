@@ -74,9 +74,10 @@ export function rulesPath() {
 //     preposition, then "prompt(s)": "write me a prompt", "draft a new system
 //     prompt", "craft a prompt", "prepare a prompt", "make me a prompt",
 //     "send me a prompt", "write up a prompt", "rewrite this prompt", "put
-//     together a prompt", "I need a prompt", "I'd like a prompt", "I would
-//     like a prompt", "can I get a prompt", "could I get a prompt", "turn
-//     this into a prompt" (or a brief: "write me a brief for X").
+//     together a prompt", "I need a prompt", "I'd like a prompt" (with any
+//     apostrophe: "I’d like" too), "I would like a prompt", "can I get a
+//     prompt", "could I get a prompt", "turn this into a prompt" (or a
+//     brief: "write me a brief for X").
 //     A bare "get" does not count: "I get a UAC prompt every time" and "why
 //     do I get a prompt for my passphrase?" are about a program's prompt.
 //     A verb may end a longer word ("rewrite", "regenerate", "redraft"), so
@@ -96,7 +97,7 @@ export function rulesPath() {
 // program shows ("the CLI shows a prompt for the password"), so it does not
 // count on its own. Bounded repetition only; kept under WHEN_MAX_CHARS (a
 // test pins the length).
-const PROMPT_VERB = "(?:write|give|[cd]raft|create|compose|generate|make|together|need|want|into|prepare|send me|c(?:an|ould) i get|(?:'d|ould) like)";
+const PROMPT_VERB = '(?:write|give|[cd]raft|create|compose|generate|make|together|need|want|into|prepare|send me|c(?:an|ould) i get|(?:\\Wd|ould) like)';
 const PROMPT_FILLER = '(?:(?!(?:for|to|of|[io]n)\\b)\\S+\\s+){0,3}';
 const PROMPT_NOT_PLUMBING = '(?!\\s(?:field|box|input|bar|hook|cach|inject|text|table|templat|to (?:an?|the)\\b))';
 export const COPYABLE_PROMPT_WHEN = [
