@@ -2,6 +2,29 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.5 — 2026-09-25
+
+The pre-push gate scans every pushed commit and every pushed ref name for
+leaks and private names, on every branch, before anything leaves the
+machine. ci-local reports held and flaky tests exactly.
+
+### Pre-push gate
+- The pre-push gate now scans every commit you push, on every branch including `wip/` and `backup/` branches, and the name of every branch and tag you push (the local name as well as the remote one), for leaks and for names on your private denylist (`~/.claude/agent-companion/config/private-names.txt`). It checks what each commit adds, its message and any new paths. Binary files, files marked `-diff` and UTF-16 files are scanned too. So is text behind JSON or JavaScript escapes (`\n`, `\uXXXX`) or URL percent-encoding (`%2F`). When the scan finds something, it blocks the push and shows the commit and where the problem is, never the matched text. A printed path or ref name has each match replaced by `[redacted]`; one that can't be cleaned that way (for example, a name split by an invalid UTF-8 byte) is shown as `[redacted path]` or `[redacted ref]`.
+- A commit is skipped only when the remote you are pushing to already has it: it is reachable from the tips git reports for the refs you push, or from that remote's own remote-tracking refs that it still advertises, checked with at most one `git ls-remote` per push. So merging that remote's `main` doesn't block on `main`'s own history while your remote-tracking refs are current. Commits that only another remote, a hand-made ref or a stale tracking ref has are scanned. A tracking ref is stale when the remote no longer advertises its commit: the branch was deleted or rewritten, or has moved on since your last fetch. If that makes a push re-scan history that is already public, run `git fetch --prune` and push again. If `git ls-remote` fails, or gives no answer within 30 seconds, a warning says so and more history is scanned. A push to a URL rather than to a named remote trusts only the tips git reports.
+- `git replace` and `.git/info/grafts` don't change what the gate scans: it reads the commits the push actually sends.
+- A denylist entry matches case-insensitively on word boundaries, including inside camelCase and next to digits: `ann` matches `getAnnName` and `ann2`, but not `annotation`. An entry starting `re:` is a regex.
+- Denylist lines may end in LF, CRLF, CR alone, U+2028 or U+2029. A denylist file that exists but can't be used blocks the push instead of being ignored: a directory, an unreadable file, a file saved as UTF-16, invalid UTF-8, a `re:` entry that isn't a valid regex or that matches empty text, or an entry with a control character inside it, such as a TAB. The message says what is wrong (for a bad entry, its line number), never what the file contains. A missing denylist only warns, and the warning shows its location as `~/...` or through the variable that set it, never your expanded home directory.
+- A file over 16 MiB (`PUSH_SCAN_MAX_FILE_BYTES` changes this) is not scanned. A warning names it as "not scanned (size)", its path is still checked, and the push goes on.
+- A compressed file (a zip such as `.docx`, gzip, bzip2, xz, zstd, 7z, a PNG with compressed text, or a PDF with filtered streams) is scanned only as raw bytes. A "compressed content not scanned" warning names it, and the push goes on.
+- `.githooks/pre-push` passes git's remote name and URL on to `ci-local.mjs --pre-push-hook`. A custom hook that calls `--pre-push-hook` without them gets the strictest boundary: only the tips git reports count as already public.
+- Known limits: compressed content is not inflated; a name right next to a CJK, kana, Thai or Arabic letter, a combining mark or an invisible character is not matched (so a ref named that way is pushed and printed); an annotated tag's message and a ref to a blob or tree are not scanned; matching is per line, so an entry split across a line break is missed; homoglyphs are not normalised and UTF-32 is not decoded; ci-local's temp-dir warnings and a crash on a `main` or `release/**` push can print your home path, and on a push that runs the suites, leak-check prints the text of what it finds in the working tree, untracked files included.
+
+### Test runner (ci-local)
+- Held (`todo`) tests are no longer shown as failures. Each suite's summary now reads `pass N · fail N · todo N · skipped N`.
+- A test file that fails is re-run once on its own. If it then passes, it is reported loudly as "flaky on isolated re-run". This does not block a local run or an ordinary push, but it does fail `--ci-parity` and pushes to `main` or `release/**` branches.
+- `ci-local` runs at most half your CPU count of test files at once, from 1 up to 8. Set `CI_LOCAL_TEST_CONCURRENCY` to change it.
+- `scripts/setup-hooks.mjs` sets the hook path in the repository you run it in, even when it is launched from inside another git process.
+
 ## 0.29.4 — 2026-09-25
 
 The memory nudge finds a worktree's main repository without `git`, and says
