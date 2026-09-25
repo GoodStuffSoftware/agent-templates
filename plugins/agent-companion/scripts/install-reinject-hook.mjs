@@ -8,7 +8,7 @@
 //   node install-reinject-hook.mjs [--dry-run] [--file <tpl>]... [--max-chars <n>] [--force]
 //   node install-reinject-hook.mjs --uninstall [--dry-run]
 //   node install-reinject-hook.mjs --status
-//   (--settings <path> --hooks-dir <path> override the ~/.claude defaults)
+//   (--settings <path> --hooks-dir <path> replace the ~/.claude defaults)
 //
 // Detect-existing: if settings.json already has a SessionStart entry that
 // would fire on compaction (matcher empty, "*", or naming "compact") whose

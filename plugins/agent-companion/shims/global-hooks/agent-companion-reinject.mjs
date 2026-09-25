@@ -14,7 +14,7 @@
 //   {session_id}  the session id
 //   {scratchpad}  <tmpdir>/claude/<encoded cwd>/<session_id>/scratchpad
 //   {home}        the user's home directory
-// Defaults (override with one or more `--file <template>` args):
+// Defaults (replaced by one or more `--file <template>` args):
 //   {scratchpad}/SESSION-STATE.md, {cwd}/HANDOFF.md, {cwd}/.claude/HANDOFF.md
 // `--max-chars <n>` caps the injected text (default 20000). Over the cap the
 // END of the file is kept (notes are appended there) behind a marker line.
