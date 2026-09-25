@@ -12,6 +12,7 @@ import { makeFixture } from './helpers.mjs';
 import {
   REPO_LOCATING_GIT_VARS, isRepoLocatingGitVar, cleanGitEnv, gitClean, enclosingGitRepo, samePath,
   isolatedGitEnv, isConfigInjectionGitVar, isIdentityGitVar, hermeticGitEnv, isHermeticGitVar, NULL_DEVICE, HERMETIC_GIT_ENV,
+  REDIRECTING_GIT_VARS, isRedirectingGitVar,
 } from '../scripts/lib/git-env.mjs';
 
 function git(args, cwd) {
@@ -156,6 +157,37 @@ test('hermeticGitEnv pins every config-file route to the null device, in any cas
   assert.equal(other.GIT_CONFIG_GLOBAL, '/hostile/global');
   assert.equal(other.git_config_system, '/hostile/system');
   assert.equal(other.Home, '/hostile/home');
+});
+
+// 0.29.2 round 3: GIT_ATTR_SOURCE makes git read .gitattributes from another
+// tree, and Git for Windows' GIT_REDIRECT_STDIN/STDOUT/STDERR send a stream
+// to a named file. hermeticGitEnv() removes them, in any case, and sets
+// nothing in their place.
+test('hermeticGitEnv removes GIT_ATTR_SOURCE and GIT_REDIRECT_*, in any case; isolatedGitEnv still keeps them', () => {
+  const input = {
+    PATH: '/bin',
+    GIT_ATTR_SOURCE: 'hostile-tree',
+    git_redirect_stdout: '/elsewhere/out',
+    Git_Redirect_Stderr: '2>&1',
+    GIT_REDIRECT_STDIN: '/elsewhere/in',
+    GIT_ATTR_NOSYSTEM: '0',
+  };
+  const snapshot = { ...input };
+  const out = hermeticGitEnv(input);
+  assert.deepEqual(input, snapshot, 'the input object must not be mutated');
+  assert.deepEqual(Object.keys(out).filter((k) => /^git_(attr|redirect)_/i.test(k)), ['GIT_ATTR_NOSYSTEM']);
+  assert.equal(out.GIT_ATTR_NOSYSTEM, '1', 'GIT_ATTR_NOSYSTEM is pinned, not passed through');
+  assert.deepEqual([...REDIRECTING_GIT_VARS].sort(),
+    ['GIT_ATTR_SOURCE', 'GIT_REDIRECT_STDERR', 'GIT_REDIRECT_STDIN', 'GIT_REDIRECT_STDOUT']);
+  for (const k of ['GIT_ATTR_SOURCE', 'git_attr_source', 'GIT_REDIRECT_STDOUT', 'Git_Redirect_Stdin']) {
+    assert.equal(isRedirectingGitVar(k), true, k);
+  }
+  for (const k of ['GIT_ATTR_NOSYSTEM', 'GIT_ATTR', 'GIT_REDIRECT', 'GIT_EXEC_PATH']) {
+    assert.equal(isRedirectingGitVar(k), false, k);
+  }
+  const other = isolatedGitEnv(input);
+  assert.equal(other.GIT_ATTR_SOURCE, input.GIT_ATTR_SOURCE, 'other callers are unchanged');
+  assert.equal(other.git_redirect_stdout, '/elsewhere/out');
 });
 
 test('git under hermeticGitEnv reads no global config, whether named by GIT_CONFIG_GLOBAL, HOME or XDG_CONFIG_HOME', () => {
