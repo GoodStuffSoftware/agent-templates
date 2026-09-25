@@ -7,7 +7,8 @@
 // AGENT_COMPANION_STATE_DIR. Assertions that text is ABSENT from output carry
 // their own message, so a failure never echoes the output it inspected.
 //
-// This file stays plain ASCII: every non-ASCII character is a \u escape.
+// Every non-ASCII test input is written as a \u escape (the only literal
+// non-ASCII characters are the em dashes of the output being matched).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
