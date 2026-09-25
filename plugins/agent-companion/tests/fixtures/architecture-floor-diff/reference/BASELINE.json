@@ -1,0 +1,9 @@
+{
+  "note": "The 0.29.2 tracks' common base (see 0292-SPEC.md, kept outside this repo, for the exact commit id). hooks/lib/context.mjs and config/model-tiers.json here are vendored byte for byte from that commit; tests/architecture-floor-diff.test.mjs checks their sha256 against the values below before trusting them as the baseline, and must never be edited by hand.",
+  "commitSubject": "test(agent-companion): git fixtures that hash a .git run with no auto-maintenance",
+  "commitDate": "2026-09-24T17:40:07-04:00",
+  "sha256": {
+    "hooks/lib/context.mjs": "ae8bb1569c95c1532ea0a4a0e552d4a60dc2701b5f53c6ea6cfcb6c7b42f4d60",
+    "config/model-tiers.json": "50062d0ca9b42191ec45746ceeed1ea811862a51cdec5b77553e5aab3962fc9b"
+  }
+}

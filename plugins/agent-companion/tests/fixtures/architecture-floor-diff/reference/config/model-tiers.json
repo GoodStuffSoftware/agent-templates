@@ -1,0 +1,637 @@
+{
+  "version": 7,
+  "updated": "2026-09-23",
+  "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to ~/.claude/agent-companion/state/model-tiers.json (a legacy copy at $CLAUDE_PLUGIN_DATA/model-tiers.json is still honoured as a fallback); it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
+  "aliasResolution": {
+    "asOf": "2026-09-23",
+    "minClaudeCodeVersion": "2.1.280",
+    "source": "https://code.claude.com/docs/en/model-config",
+    "note": "Below v2.1.280, `opus` resolved to Opus 5 instead of Opus 5.5 on the Anthropic API. Every `resolvesTo` block below is only correct on v2.1.280+. Aliases cannot be pinned — they always track the provider's current recommended version; pin with a full model id (e.g. claude-opus-5-5) or an ANTHROPIC_DEFAULT_*_MODEL env var instead."
+  },
+  "tiers": {
+    "haiku": {
+      "rank": 1,
+      "premium": false,
+      "match": "haiku",
+      "efforts": [],
+      "effortsNote": "Haiku 4.5 takes no effort parameter. Setting one on a haiku agent is at best a no-op — the model has one mode, and asking for more thinking does not get any.",
+      "note": "reads, searches, single commands",
+      "resolvesTo": {
+        "modelId": "claude-haiku-4-5",
+        "datedModelId": "claude-haiku-4-5-20251001",
+        "displayName": "Haiku 4.5",
+        "pricing": { "inputPerMTok": 1, "outputPerMTok": 5, "cacheHitPerMTok": 0.10, "currency": "USD" },
+        "contextTokens": 200000,
+        "maxOutputTokens": 64000,
+        "effortSupport": false,
+        "defaultEffort": null,
+        "thinking": "extended (manual budget_tokens, not adaptive)"
+      },
+      "retiresAfter": "2026-10-15",
+      "retirementNote": "Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. No successor Haiku has been announced (checked live 2026-09-23). Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window (now 30 days, not just fixed milestones — see scripts/detect.mjs).",
+      "replacement": {
+        "model": "sonnet",
+        "effort": "low",
+        "note": "Pre-staged 2026-09-04, re-verified 2026-09-23: still no successor Haiku announced. Sonnet 5 at low effort is the cheapest available tier that takes weight 1-2 work, at roughly 2x Haiku per token (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5). When a new Haiku ships, add its tier and point this at it - the switch is data, not code. This IS the weight 1-2 fallback if haiku disappears before a successor ships."
+      }
+    },
+    "sonnet": {
+      "rank": 2,
+      "premium": false,
+      "match": "sonnet",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "note": "bounded edits, short scripts, multi-file work",
+      "resolvesTo": {
+        "modelId": "claude-sonnet-5",
+        "displayName": "Sonnet 5",
+        "pricing": { "inputPerMTok": 2, "outputPerMTok": 10, "cacheHitPerMTok": 0.20, "currency": "USD" },
+        "contextTokens": 1000000,
+        "maxOutputTokens": 128000,
+        "effortSupport": true,
+        "defaultEffort": "high",
+        "thinking": "adaptive (can disable)"
+      }
+    },
+    "opus": {
+      "rank": 3,
+      "premium": true,
+      "match": "opus",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "note": "architecture, novel debugging",
+      "resolvesTo": {
+        "modelId": "claude-opus-5-5",
+        "displayName": "Opus 5.5",
+        "pricing": { "inputPerMTok": 4, "outputPerMTok": 20, "cacheHitPerMTok": 0.20, "currency": "USD" },
+        "contextTokens": 1000000,
+        "maxOutputTokens": 128000,
+        "effortSupport": true,
+        "defaultEffort": "medium",
+        "thinking": "adaptive, always on, cannot disable"
+      },
+      "effortWarning": "Opus 5.5's OWN API default is MEDIUM effort — one level below Opus 5's old HIGH default (checked live 2026-09-23, https://platform.claude.com/docs/en/build-with-claude/effort) — but that default is reached only for a bare API call outside any Claude Code session. CORRECTED 2026-09-23 (effort-versions.md research): a Claude Code subagent DEFINITION with no `effort` frontmatter does NOT fall back to this model default; per code.claude.com/docs/en/sub-agents it INHERITS the orchestrating session's current effort. Every effort-taking model has this hazard, not just opus — state effort explicitly rather than relying on inheritance; spawn-guard.mjs warns and the agent-defs audit check flags any definition with a model but no effort, opus included."
+    },
+    "fable": {
+      "rank": 4,
+      "premium": true,
+      "match": "fable",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "effortsNote": "Thinking is always on; effort is the only depth control.",
+      "note": "not a routing tier — an exception requiring a stated warrant",
+      "resolvesTo": {
+        "modelId": "claude-fable-5-1",
+        "displayName": "Fable 5.1",
+        "pricing": { "inputPerMTok": 10, "outputPerMTok": 50, "cacheHitPerMTok": 0.25, "currency": "USD" },
+        "contextTokens": 1000000,
+        "maxOutputTokens": 128000,
+        "effortSupport": true,
+        "defaultEffort": "high",
+        "thinking": "adaptive, always on, cannot disable"
+      },
+      "warrantCriterion": "Anthropic's own escalation criterion (choosing-a-model, checked live 2026-09-23): 'Use Claude Fable 5.1 ... when your evals on Claude Opus 5.5 at higher effort still fall short.' Fable is now 2.5x Opus on input/output price ($10/$50 vs Opus 5.5's $4/$20 — it was 2x when Opus priced at $5/$25), which strengthens the exception: the warrant is not 'this task is hard', it is 'Opus 5.5 at higher effort was demonstrably tried and fell short'.",
+      "behaviorNotes": [
+        "OFFICIAL (whats-new-fable-5-1): prefers whole-file rewrites, fewer progress updates, less parallel tool batching. Whole-file rewrites make it a poor fit for scoped or mechanical edits even when a warrant exists.",
+        "OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost ($0.25/MTok, re-verified live 2026-09-23). A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it.",
+        "COMMUNITY, first-hand (Every.to, TheNeuronDaily): \"sticks to what you tell it\" is CONTESTED. Reports of overshooting explicit limits (1,000 words -> 1,288; 8-12 quotes -> 43, 5 fabricated) and unprompted style decisions. The friction is over-inference, not literalism. Do not route on an adherence claim.",
+        "COMMUNITY, first-hand (dev.to): the gap over Opus/Sonnet is procedural discipline, not intelligence - stating a hypothesis before editing, labelling claims VERIFIED/REASONED/ASSUMED. A brief that carries that checklist closes most of the gap on a cheaper tier, which is exactly what the warrant is meant to make you ask."
+      ]
+    },
+    "mythos": {
+      "rank": 4,
+      "premium": true,
+      "match": "mythos",
+      "available": false,
+      "note": "same tier and treatment as fable, but not available on this account — kept so it classifies correctly if access ever changes",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "resolvesTo": {
+        "modelId": null,
+        "displayName": "Mythos",
+        "pricing": null,
+        "note": "Not reachable on this account, so pricing/specs are UNVERIFIED — not fetched live. Fill in from the live docs the day access changes rather than guessing now."
+      }
+    }
+  },
+  "referenceModels": {
+    "opus-5": {
+      "match": "claude-opus-5(?!-5)",
+      "displayName": "Opus 5",
+      "routable": false,
+      "pricing": { "inputPerMTok": 5, "outputPerMTok": 25, "cacheHitPerMTok": 0.50, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive by default (unlike 4.8/4.7); can disable only at <= high, 400 error at xhigh/max",
+      "note": "Superseded by Opus 5.5. The `opus` alias resolved here on Claude Code < v2.1.280 — kept as a reference entry so an agent definition pinned to the dated id (not the alias) still classifies correctly and its effort is validated against what THIS model actually supports, not the current `opus` tier's list."
+    },
+    "fable-5": {
+      "match": "claude-fable-5(?!-1)",
+      "displayName": "Fable 5",
+      "routable": false,
+      "pricing": { "inputPerMTok": 10, "outputPerMTok": 50, "cacheHitPerMTok": 1.00, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive, always on",
+      "note": "Superseded by Fable 5.1. Cache-hit pricing is the 0.1x rate, NOT Fable 5.1's 0.025x rate — do not reuse 5.1's cache economics for a definition pinned to this id."
+    },
+    "opus-4-8": {
+      "match": "claude-opus-4-8",
+      "displayName": "Opus 4.8",
+      "routable": false,
+      "pricing": { "inputPerMTok": 5, "outputPerMTok": 25, "cacheHitPerMTok": 0.50, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive is the ONLY on-mode; omitting `thinking` entirely runs WITHOUT thinking - must be set explicitly. xhigh recommended for coding/agentic use.",
+      "note": "Not validated by this table's effort checks for the thinking-omission hazard (agent definition frontmatter here carries no `thinking` field to check) - flagged as a known gap in the operator's global-doctrine patch, which is kept outside this repo, not silently assumed safe."
+    },
+    "opus-4-7": {
+      "match": "claude-opus-4-7",
+      "displayName": "Opus 4.7",
+      "routable": false,
+      "pricing": { "inputPerMTok": 5, "outputPerMTok": 25, "cacheHitPerMTok": 0.50, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "defaultEffort": "high",
+      "thinking": "same as 4.8 - adaptive is the only on-mode; omitting `thinking` runs WITHOUT it. xhigh recommended.",
+      "note": "Same thinking-omission caveat as opus-4-8."
+    },
+    "opus-4-6": {
+      "match": "claude-opus-4-6",
+      "displayName": "Opus 4.6",
+      "routable": false,
+      "pricing": { "inputPerMTok": 5, "outputPerMTok": 25, "cacheHitPerMTok": 0.50, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive recommended; budget_tokens still functional as a transitional escape hatch",
+      "note": "NO xhigh — this generation stops at max/high/medium/low. An agent definition pinned to this id with effort: xhigh is invalid on this model, not just 'more than needed'; validated via referenceModels, not the current opus tier's effort list."
+    },
+    "sonnet-4-6": {
+      "match": "claude-sonnet-4-6",
+      "displayName": "Sonnet 4.6",
+      "routable": false,
+      "pricing": { "inputPerMTok": 3, "outputPerMTok": 15, "cacheHitPerMTok": 0.30, "currency": "USD" },
+      "contextTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "efforts": ["low", "medium", "high", "max"],
+      "defaultEffort": "high",
+      "thinking": "adaptive recommended (medium recommended default in practice); budget_tokens still functional",
+      "note": "NO xhigh, same as opus-4-6 — validated against this list, not the current sonnet tier's (which does have xhigh)."
+    }
+  },
+  "referenceModelsNote": "Non-routable reference entries for OLDER pinned model ids, so an agent definition pinned to a full/dated id (not an alias) is classified as premium/non-premium correctly by classifyModel() (unchanged — these ids already match the current alias tier's regex loosely) AND has its EFFORT validated against what that specific model actually supports via classifyReferenceModel()/referenceEffortSupported() in hooks/lib/context.mjs, rather than against the current alias tier's (possibly wider) effort list. Source: live-docs.md §1, fetched 2026-09-23. Not part of `routing` — nothing routes here, they exist only for validation of an id someone already pinned.",
+  "availabilityNote": "An entry with available:false is still classified, but an agent definition pinned to it is a finding. A model you cannot reach fails at spawn time with nothing having warned you beforehand, and the failure surfaces as a broken agent rather than as a configuration mistake. Set available:false for anything outside your plan.",
+  "unknownIsPremium": true,
+  "unknownNote": "A model matching no entry is treated as PREMIUM and flagged. Defaulting an unrecognised model to cheap would let a new top-tier model bypass the warrant and the cap on the day it ships — the exact window in which nobody has updated the table yet. Fail toward the expensive assumption; the cost of a spurious warrant is one line in a brief.",
+  "efforts": {
+    "low": {
+      "rank": 1,
+      "note": "skip thinking; reads and single commands"
+    },
+    "medium": {
+      "rank": 2,
+      "note": "light reasoning; bounded edits"
+    },
+    "high": {
+      "rank": 3,
+      "note": "the general sweet spot"
+    },
+    "xhigh": {
+      "rank": 4,
+      "note": "recommended start for agentic work on current top tiers"
+    },
+    "max": {
+      "rank": 5,
+      "note": "reserve for genuinely frontier problems; large cost for small gain"
+    }
+  },
+  "effortNote": "Ranks are global so two agents on different models stay comparable — the reviewer-parity rule needs that. The supported SET is per-tier, under each entry's \"efforts\", because availability genuinely differs by model. An effort not in a tier's list is not a smaller amount of thinking; it is a parameter that model does not take.",
+  "routing": {
+    "1": {
+      "model": "haiku",
+      "effort": "",
+      "label": "trivial — single lookup, read, echo",
+      "effortNote": "haiku takes no effort parameter"
+    },
+    "2": {
+      "model": "haiku",
+      "effort": "",
+      "label": "simple — one-step transform or search",
+      "effortNote": "haiku takes no effort parameter"
+    },
+    "3": {
+      "model": "sonnet",
+      "effort": "medium",
+      "label": "moderate — bounded multi-step, parse structured output"
+    },
+    "4": {
+      "model": "sonnet",
+      "effort": "high",
+      "label": "complex — multi-file, cross-referencing, integration"
+    },
+    "5": {
+      "model": "opus",
+      "effort": "xhigh",
+      "label": "deep — architecture, novel reasoning, migrations"
+    }
+  },
+  "routingNote": "Task weight 1-5 maps to a model AND an effort. Round DOWN when uncertain and escalate on failure; over-provisioning is a rule violation, not a safety margin. Weight 4 may take opus where blast radius warrants it. Nothing routes to fable — it is an exception, not a row.",
+  "ladder": [
+    { "rung": 1, "model": "haiku", "effort": null, "agent": "ac-haiku" },
+    { "rung": 2, "model": "sonnet", "effort": "low", "agent": "ac-sonnet-low" },
+    { "rung": 3, "model": "sonnet", "effort": "medium", "agent": "ac-sonnet-medium" },
+    { "rung": 4, "model": "sonnet", "effort": "high", "agent": "ac-sonnet-high" },
+    { "rung": 5, "model": "sonnet", "effort": "xhigh", "agent": "ac-sonnet-xhigh" },
+    { "rung": 6, "model": "opus", "effort": "low", "agent": "ac-opus-low" },
+    { "rung": 7, "model": "opus", "effort": "medium", "agent": "ac-opus-medium" },
+    { "rung": 8, "model": "opus", "effort": "high", "agent": "ac-opus-high" },
+    { "rung": 9, "model": "opus", "effort": "xhigh", "agent": "ac-opus-xhigh" },
+    { "rung": 10, "model": "opus", "effort": "max", "agent": "ac-opus-max" }
+  ],
+  "ladderNote": "The routing grid (weight x kind, floored by consequence) still picks (model, effort) exactly as before — this ladder does not change that logic, it is the ORDERED VIEW of the same (model, effort) pairs, cheapest to dearest, each mapped to a spawnable generic worker definition under agents/ (namespaced <plugin>:<agent> when spawned from outside this repo, e.g. agent-companion:ac-sonnet-medium) because the Agent tool has no per-spawn effort parameter — effort is locked to whichever definition's frontmatter is used. Fable is deliberately NOT a rung: it sits outside the ladder as a warranted exception (see the fable tier's warrantCriterion), never a routine destination. The CURRENT weight defaults (1-2 haiku, 3 sonnet/medium=rung 3, 4 sonnet/high=rung 4, 5 opus/xhigh=rung 9) are UNCHANGED by adding this view — see `routing` and `taskKinds` for what actually picks a rung; a pending research finding may revise those defaults later as a pure data edit, without touching the ladder shape itself. Consequence floors already raise the rung the same way they raise effort/model in effortFor(): `elevated` floors effort at `high` (>= rung 4 within whichever model the weight already picked), `critical` floors the model at opus AND the effort at xhigh (>= rung 9).",
+  "taskKinds": {
+    "mechanical": {
+      "effortDelta": -1,
+      "examples": [
+        "a routing table",
+        "a rename",
+        "a config edit",
+        "reformatting",
+        "applying a known migration"
+      ],
+      "note": "Small answer space with one right shape. More thinking does not produce a better result, it produces the same result more slowly."
+    },
+    "bounded": {
+      "effortDelta": 0,
+      "examples": [
+        "a feature against a clear spec",
+        "a test for known behaviour",
+        "a scoped refactor"
+      ],
+      "note": "The shape is known; the work is filling it in correctly."
+    },
+    "diagnostic": {
+      "effortDelta": 1,
+      "examples": [
+        "root-causing a failure",
+        "a flaky test",
+        "an unexplained regression",
+        "an adversarial review"
+      ],
+      "note": "A search problem. The answer exists but must be found, and more passes genuinely raise the odds of finding it."
+    },
+    "novel-design": {
+      "effortDelta": 2,
+      "examples": [
+        "a message bus",
+        "a protocol",
+        "concurrency or sync/merge logic",
+        "a data migration",
+        "a security boundary"
+      ],
+      "note": "Large answer space with no known-good shape to copy. Each additional pass tends to surface a failure mode that would otherwise ship."
+    }
+  },
+  "taskKindNote": "Weight sets the MODEL — how much capability the task needs. Kind adjusts the EFFORT — how much the answer benefits from search. They are orthogonal: a routing table and a message bus can touch the same number of files and deserve completely different amounts of thinking. Compute effort as routing[weight].effort shifted by taskKinds[kind].effortDelta, clamped to the efforts table. When the kind is unclear, use bounded and escalate on failure rather than pre-paying for search you may not need.",
+  "reviewerParity": {
+    "modelMustMatch": true,
+    "effortMayExceed": true,
+    "effortMayNotDrop": true,
+    "note": "A reviewer is sized to the writer it gates, never below it. Its MODEL is at least the writer's: a weaker reviewer catches the errors it would itself have avoided and waves through the ones it would itself have made, which is the novel-error class a stronger writer produces. Its EFFORT may go higher and must not go lower — refutation is a search problem and can need more thinking than generation did. The floors then apply as on any route: F1 raises a critical review to at least the critical floor (opus/xhigh) whatever the writer; F2 caps a fable writer's reviewer to the best tier that is a routing destination (opus, which still demands a WARRANT); F4 refuses a writer the table cannot size (a model outside the tier table, one unavailable with no staged replacement, or an effort that is no effort level) and fits the effort to what the reviewer's model accepts (none on haiku). modelMustMatch means the reviewer starts at the writer's model."
+  },
+  "consequence": {
+    "routine": {
+      "effortFloor": null,
+      "modelFloor": null,
+      "note": "Reversible, contained, cheap to redo."
+    },
+    "elevated": {
+      "effortFloor": "high",
+      "modelFloor": null,
+      "triggers": [
+        "shared config",
+        "build or release pipeline",
+        "anything other agents depend on",
+        "public API shape"
+      ],
+      "note": "A mistake here costs other people time but is recoverable."
+    },
+    "critical": {
+      "effortFloor": "xhigh",
+      "modelFloor": "opus",
+      "triggers": [
+        "production data writes",
+        "migrations",
+        "destructive operations",
+        "security or permission boundaries",
+        "auth",
+        "billing or money",
+        "secrets and credentials"
+      ],
+      "note": "A mistake here is expensive or irreversible."
+    }
+  },
+  "consequenceNote": "Consequence is a FLOOR, not a delta, and it is applied AFTER the kind adjustment so it cannot be undercut. This matters because difficulty and consequence are close to orthogonal: a one-line production migration is mechanical by KIND, which would otherwise push its effort DOWN on precisely the change most likely to hurt. The floor is the answer to \"how bad is it if this is wrong\", which is a different question from \"how hard is this to get right\".",
+  "taskTypes": {
+    "explore": {
+      "weight": 1,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "read-only search: where is X, what touches Y, does Z exist",
+      "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven.",
+      "override": {
+        "model": "opus",
+        "effort": "low",
+        "trialVersion": 2,
+        "reason": "ROUTING TRIAL v2 (operator-endorsed, supersedes v1's sonnet/low): Opus 5.5 low measured cheaper than every Sonnet setting on easy and hard tasks (API 0.90x/0.75x vs Sonnet low 0.99x/0.89x), about even on plan usage for real fixes, faster, with roughly half the turns, and equally correct; cache reads cost about the API ratio. This plan has no separate Opus weekly window (get_usage shows only 5-hour, weekly all-models, and weekly Fable), so there is no separate-bucket reason to prefer Sonnet here. v1 finding (Sonnet 5 passed every synthetic task at every effort, Haiku cost roughly 2x Sonnet per task and was the only model to fail) still explains why this is not haiku.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); cache-read-weight-2026-09-23 for the read-cost figure", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    },
+    "mechanical-edit": {
+      "weight": 2,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "rename, config edit, reformat, apply a known migration recipe",
+      "provenance": "COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate.",
+      "override": {
+        "model": "opus",
+        "effort": "low",
+        "trialVersion": 2,
+        "reason": "ROUTING TRIAL v2 (operator-endorsed, supersedes v1's sonnet/low): Opus 5.5 low measured cheaper than every Sonnet setting on easy and hard tasks (API 0.90x/0.75x vs Sonnet low 0.99x/0.89x), about even on plan usage for real fixes, faster, with roughly half the turns, and equally correct; cache reads cost about the API ratio. This plan has no separate Opus weekly window, so there is no separate-bucket reason to prefer Sonnet here. v1 finding (Sonnet 5 passed every synthetic task at every effort, Haiku cost roughly 2x Sonnet per task and was the only model to fail) still explains why this is not haiku.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); cache-read-weight-2026-09-23 for the read-cost figure", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    },
+    "bounded-feature": {
+      "weight": 3,
+      "kind": "bounded",
+      "consequence": "routine",
+      "summary": "a feature against a clear spec, 1-3 files, known shape",
+      "provenance": "OFFICIAL choosing-a-model: Sonnet for everyday code generation and agentic tool use. COMMUNITY: Sonnet 5 delivers near-Opus coding at Sonnet price; escalate to Opus when the spec is incomplete or moves mid-run.",
+      "override": {
+        "model": "opus",
+        "effort": "low",
+        "reason": "Benchmark evidence: Opus 5.5 at low/medium/xhigh effort all scored 7/7 on real bug fixes, but medium used roughly 2x low's tokens (~1.56x plan usage) and xhigh ~3.1x, for no quality gain over low. Where medium cost more than low with no quality gain, don't use medium.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    },
+    "integration": {
+      "weight": 4,
+      "kind": "bounded",
+      "consequence": "elevated",
+      "summary": "multi-file, cross-referencing, touches shared config or things other agents depend on",
+      "provenance": "Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself, but see operatorNote and the ROUTING TRIAL v2 override below.",
+      "operatorNote": "Architecture and deep technical work stay on Opus; Sonnet gets confused on some of the operator's technical/architecture work (operator-observed 2026-09-23). Do not route architecture off Opus on benchmark evidence alone.",
+      "override": {
+        "model": "opus",
+        "effort": "high",
+        "trialVersion": 2,
+        "reason": "ROUTING TRIAL v2 (operator-endorsed): unmeasured by benchmark, but operator first-hand evidence says Sonnet struggles on some of the operator's technical, multi-file work (operator-observed 2026-09-23) -- do not route this off Opus on benchmark evidence alone. opus/high matches the existing weight-4 elevated consequence floor (effortFloor: high), so this changes the MODEL (sonnet -> opus), not the effort.",
+        "evidence": { "source": "operator first-hand observation on integration/multi-file technical work (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    },
+    "debug-root-cause": {
+      "weight": 4,
+      "kind": "diagnostic",
+      "consequence": "routine",
+      "summary": "a specific failure, unexplained regression, flaky test - the answer exists and must be found",
+      "provenance": "COMMUNITY: Sonnet 5 praised first-hand for tracing brownfield failures to root causes rather than patching symptoms. Escalate to Opus when evidence conflicts or constraints are hidden.",
+      "override": {
+        "model": "opus",
+        "effort": "low",
+        "overridesKindDelta": true,
+        "reason": "EXPLICIT override of the diagnostic kind's normal +1 effort bump (which would otherwise push this to medium), not a silent kind change: the operator benchmark showed Opus 5.5 low/medium/xhigh all 7/7 on real bug fixes, with medium costing ~1.56x plan usage and xhigh ~3.1x for no quality gain over low. The operator directive was explicit: no medium.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    },
+    "large-refactor": {
+      "weight": 5,
+      "kind": "bounded",
+      "consequence": "elevated",
+      "summary": "large-scale refactor across a module or subsystem; the target shape is known, the surface is wide",
+      "provenance": "OFFICIAL choosing-a-model: Opus for large-scale refactoring and complex systems engineering. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself, but see operatorNote and the ROUTING TRIAL v2 override below.",
+      "operatorNote": "Architecture and deep technical work stay on Opus; Sonnet gets confused on some of the operator's technical/architecture work (operator-observed 2026-09-23). Do not route architecture off Opus on benchmark evidence alone.",
+      "override": {
+        "model": "opus",
+        "effort": "high",
+        "trialVersion": 2,
+        "reason": "ROUTING TRIAL v2 (operator-endorsed): the plain grid resolves this to opus/xhigh (weight 5, bounded kind, no delta). Real-task benchmark data (bounded-feature/debug-root-cause) showed xhigh costing roughly 3.1x low's tokens for no quality gain over low, and effort scaling on large-refactor work specifically is itself unmeasured -- opus/high is the trial's middle ground rather than paying for xhigh on an unverified assumption. Model stays opus: architecture and deep technical work stay on Opus (operator-observed 2026-09-23) -- do not route architecture off Opus on benchmark evidence alone.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (xhigh-vs-low token scaling); operator first-hand observation on Opus vs Sonnet for architecture work (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    },
+    "novel-design": {
+      "weight": 5,
+      "kind": "novel-design",
+      "consequence": "elevated",
+      "summary": "a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape",
+      "provenance": "Our kind axis. OFFICIAL: Opus for complex systems engineering. Fable only with a warrant - and per the procedural-discipline finding, first try a brief that carries the verification checklist on Opus. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself, but see operatorNote and the ROUTING TRIAL v2 override below.",
+      "operatorNote": "Architecture and deep technical work stay on Opus; Sonnet gets confused on some of the operator's technical/architecture work (operator-observed 2026-09-23). Do not route architecture off Opus on benchmark evidence alone.",
+      "override": {
+        "model": "opus",
+        "effort": "high",
+        "trialVersion": 2,
+        "overridesKindDelta": true,
+        "reason": "ROUTING TRIAL v2 (operator-endorsed): the plain grid would otherwise resolve this to opus/max (weight 5's xhigh, pushed up two ranks by the novel-design kind's +2 delta, clamped at max) -- not a silent kind change, an explicit decision not to pay for that escalation. Real-task benchmark data (bounded-feature/debug-root-cause) showed xhigh costing roughly 3.1x low's tokens for no quality gain over low, and effort scaling specifically on novel-design/architecture work is itself unmeasured, so opus/high is the trial's middle ground. Model stays opus: architecture and deep technical work stay on Opus (operator-observed 2026-09-23) -- do not route architecture off Opus on benchmark evidence alone.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (xhigh-vs-low token scaling); operator first-hand observation on Opus vs Sonnet for architecture work (kept outside this repo)", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    },
+    "critical-change": {
+      "weight": 4,
+      "kind": "bounded",
+      "consequence": "critical",
+      "summary": "production data, migrations, destructive ops, auth, billing, secrets - regardless of size",
+      "provenance": "Consequence axis (arXiv 2606.04402: consequence is orthogonal to difficulty). The floor raises even a one-line change to opus/xhigh. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; the critical floor (opus/xhigh) stays regardless."
+    },
+    "code-review": {
+      "weight": "parity",
+      "kind": "diagnostic",
+      "consequence": "inherit",
+      "summary": "adversarial review of a diff; sized to the writer it gates",
+      "provenance": "Our reviewer-parity rule. BENCHMARK (CodeRabbit, semi-vendor): review precision tops out ~37% across every model tested and no model wins both precision and recall - so tier choice does not make review sufficient; adversarial framing and a human gate on critical changes still matter. CAVEAT under calibration: one first-hand report (Wavect) found HIGH effort slower AND lower-recall than LOW on review. See calibration. UNBENCHMARKED by the 2026-09-23 effort-grid trial (parity-sized, not a fixed model/effort) — routing unchanged."
+    },
+    "long-autonomous-run": {
+      "weight": 5,
+      "kind": "bounded",
+      "consequence": "elevated",
+      "summary": "an agent session expected to run for hours with minimal supervision",
+      "provenance": "OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged."
+    },
+    "subagent-worker": {
+      "weight": 2,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "a delegated worker doing a bounded, well-specified piece of a larger task",
+      "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded.",
+      "override": {
+        "model": "opus",
+        "effort": "low",
+        "trialVersion": 2,
+        "reason": "ROUTING TRIAL v2 (operator-endorsed, supersedes v1's sonnet/low): Opus 5.5 low measured cheaper than every Sonnet setting on easy and hard tasks (API 0.90x/0.75x vs Sonnet low 0.99x/0.89x), about even on plan usage for real fixes, faster, with roughly half the turns, and equally correct; cache reads cost about the API ratio. This plan has no separate Opus weekly window, so there is no separate-bucket reason to prefer Sonnet here. v1 finding (Sonnet 5 passed every synthetic task at every effort, Haiku cost roughly 2x Sonnet per task and was the only model to fail) still explains why this is not haiku.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); cache-read-weight-2026-09-23 for the read-cost figure", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    },
+    "verify": {
+      "weight": 1,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing",
+      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). The defining trait is that nothing changes: the task ends when the answer is read back, not when a step is performed.",
+      "override": {
+        "model": "opus",
+        "effort": "low",
+        "trialVersion": 2,
+        "reason": "ROUTING TRIAL v2 (operator-endorsed, supersedes v1's sonnet/low): Opus 5.5 low measured cheaper than every Sonnet setting on easy and hard tasks (API 0.90x/0.75x vs Sonnet low 0.99x/0.89x), about even on plan usage for real fixes, faster, with roughly half the turns, and equally correct; cache reads cost about the API ratio. This plan has no separate Opus weekly window, so there is no separate-bucket reason to prefer Sonnet here. v1 finding (Sonnet 5 passed every synthetic task at every effort, Haiku cost roughly 2x Sonnet per task and was the only model to fail) still explains why this is not haiku.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); cache-read-weight-2026-09-23 for the read-cost figure", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    },
+    "operate": {
+      "weight": 3,
+      "kind": "bounded",
+      "consequence": "routine",
+      "summary": "execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation",
+      "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). A sequence of trivial-looking steps against a live system is not a verify task: ordering mistakes, partial failures, and side effects compound in a way a single read-only check cannot, so this floors at sonnet even though no one step looks hard. Raise weight/consequence further when a step is itself destructive, production-facing, or irreversible (critical-change already covers that).",
+      "override": {
+        "model": "opus",
+        "effort": "low",
+        "trialVersion": 2,
+        "reason": "Was weight 3 sonnet/medium, then v1 sonnet/low. ROUTING TRIAL v2 (operator-endorsed): Opus 5.5 low measured cheaper than every Sonnet setting on easy and hard tasks (API 0.90x/0.75x vs Sonnet low 0.99x/0.89x), about even on plan usage for real fixes, faster, with roughly half the turns, and equally correct; cache reads cost about the API ratio. This plan has no separate Opus weekly window, so there is no separate-bucket reason to prefer Sonnet here. v1's own finding still applies: at low effort, quality did not improve over the more expensive sonnet/medium, so no reason to pay for medium.",
+        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); cache-read-weight-2026-09-23 for the read-cost figure", "date": "2026-09-23" },
+        "trialSince": "2026-09-23",
+        "reviewBy": "2026-09-30"
+      }
+    }
+  },
+  "taskTypesNote": "A task type is a named preset over (weight, kind, consequence). Resolve it through the same grid as everything else; do not special-case it. \"parity\" as a weight means: sized to the writer being reviewed (at least its model and effort, then the floors; see reviewerParity). \"inherit\" as a consequence means: take the consequence of the change under review. Provenance is recorded per entry because these WILL go stale - the scout re-checks the lineup, and a routing review should re-read the sources, not the table. `--type` is now the PREFERRED input over `--weight`/`--kind` alone, because a named type is the only place the measured evidence (`override`, below) attaches — resolving by raw weight/kind bypasses it and falls back to the grid. An entry may carry an `override` block ({model, effort, reason, evidence, trialSince, reviewBy}, plus `overridesKindDelta: true` where it deliberately bypasses the kind's effort delta) recording a ROUTING TRIAL: a benchmark-backed (model, effort) pair that supersedes this entry's own weight/kind/consequence grid resolution for the stated trial window. It applies only when the type is resolved as-is (no explicit --weight/--kind/--consequence that departs from the preset); passing an explicit weight/kind/consequence that DEPARTS from the preset answers a different question and falls back to the plain grid, while one EQUAL to the preset restates the type and keeps the override. The weight/kind/consequence fields on an overridden entry are kept unchanged for provenance and for `--list`/weight-only callers — only the resolved (model, effort) changes. A type with no `override` is UNBENCHMARKED by this trial and keeps its grid-resolved routing unchanged; say so explicitly rather than leaving it ambiguous.",
+  "cacheTtl": {
+    "default": "5m",
+    "note": "Per-definition prompt-cache TTL recommendation. Not enforced by any guard — set it yourself in a subagent's own frontmatter as a NESTED key, `experimental: { cacheTtl: \"1h\" }` (i.e. `cacheTtl` lives under `experimental`, not at the top level of the frontmatter). Requires Claude Code v2.1.248+; Claude Code ignores `1h` there while the subscription is drawing on usage credits (falls back to 5m). Default stays 5m for every definition unless called out below.",
+    "recommendOneHourFor": {
+      "criterion": "opus-tier definitions (model resolves to the `opus` alias or an opus reference id) whose name or description marks them long-lived / resumed — architect, reviewer, lead roles",
+      "examples": ["{{PROJECT}}-architect", "{{PROJECT}}-reviewer @opus"],
+      "why": "These are the roles the evidence shows actually get resumed more than 5 minutes after their last turn, or sit through long tool waits (test suites, builds, CI). 1h converts what would be a full ~250-340K-token rewrite into a cheap cache read."
+    },
+    "ladderWorkersExcludedNote": "The generic ac-* ladder workers (ac-haiku, ac-sonnet-*, ac-opus-*) are ONE-SHOT: spawned fresh per delegated task and essentially never resumed past 5 minutes. 1h's 2x write multiplier has nothing to earn back for them, so they stay on the 5m default even at opus tiers (ac-opus-high, ac-opus-xhigh, ac-opus-max) — this is a deliberate exception to the opus-tier recommendation above, not an oversight.",
+    "evidence": {
+      "report": "~/.claude/reports/2026-09-23-subagent-cache-ttl.md",
+      "date": "2026-09-23",
+      "method": "30-day measurement (2026-08-24 to 2026-09-23), 1,407 subagent transcripts with billable requests, 100% of in-window subagent transcripts, 84,843 subagent requests reconstructed from usage fields.",
+      "figures": "Cache-hit ratio 99.8% under a 5-minute gap, 13.3% in the 5-60 minute gap, 4.4% beyond 60 minutes — the 5-minute cliff is real. Switching every subagent to 1h is roughly cost-neutral overall (-0.46% of subagent cost, -$32/30d). By model tier: Opus 5.5 -12.0%, Opus 5 -4.7%, Opus 4.8 +4.1%, Sonnet 5 +2.9%, Haiku 4.5 +15.9%. Opus-tier-only 1h (this recommendation's scope): -2.1% of subagent cost (-$144/30d). Break-even: 1h wins for a tier once 5-60m rewrites exceed roughly 39.5% of that tier's cache-write tokens (~1.0-1.1% of requests); observed 35.7% overall, but Opus 5 alone was already at 51.5% (above break-even) while Sonnet sat at 29.3% (below it). By agent type, the pattern is architects/reviewers save under 1h (project-specific architect roles measured -12.9% and -6.1%, project-specific reviewer roles -4.2% to -4.9%) while one-shot builders/general-purpose workers cost more (a project-specific sonnet builder role +8.2%, general-purpose@opus +6.9%)."
+    },
+    "remeasureDate": "2026-10-07",
+    "remeasureNote": "Re-run the report's scripts (~/.claude/reports/2026-09-23-subagent-cache-ttl-scripts/) after two weeks of the resume-window doctrine change (the doctrine patch is kept outside this repo). Turn on the global 1h setting (`subagentPromptCacheTtl`) if subagent rewrites in the 5-60m band exceed ~40% of write tokens overall, or if Sonnet alone crosses the ~39.5% break-even.",
+    "docsVerifiedLive": {
+      "date": "2026-09-23",
+      "frontmatterField": "`experimental.cacheTtl` — a nested map key under the subagent frontmatter's `experimental` field, values `5m` or `1h` only (anything else ignored). Requires Claude Code v2.1.248+. Ignored for `1h` while the subscription is on usage credits.",
+      "precedence": [
+        "FORCE_PROMPT_CACHING_5M=1 (forces 5m everywhere)",
+        "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL (the subagent bucket's env var)",
+        "subagentPromptCacheTtl (the subagent bucket's setting)",
+        "a subagent definition's own experimental.cacheTtl frontmatter — THIS recommendation lives here, and is overridden by any of the three controls above",
+        "ENABLE_PROMPT_CACHING_1H=1 (requests 1h everywhere)",
+        "the bucket default: 5m for subagents/workflows/forks/compaction/titles regardless of subscription, vs 1h for the main conversation on a subscription within plan usage"
+      ],
+      "oneHourWriteMultiplier": "1h cache writes bill at 2x the base input-token price, vs 1.25x for 5m writes; cache reads are 0.1x base input either way. No long-context surcharge.",
+      "sources": [
+        "https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields",
+        "https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself",
+        "https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing"
+      ]
+    }
+  },
+  "planUsageMultipliers": {
+    "note": "Relative PLAN-USAGE burn per unit of (price-weighted) token cost -- NOT api dollar pricing. Plan usage windows deplete at a rate the sticker price does not predict, per the operator's own in-app observation. Keyed by tier alias (see tiers, above); a tier with no entry here gets no plan-usage index computed by bench/runner.mjs's rebuildSummary() rather than a guessed number -- fail toward 'unknown', not toward inventing a multiplier nobody measured.",
+    "sonnet": { "multiplier": 1.0, "source": "baseline (defined as 1.0); every other multiplier here is relative to it", "date": "2026-09-23" },
+    "opus": { "multiplier": 1.5, "source": "in-app tooltip, 2026-09-23, undocumented, may be introductory", "date": "2026-09-23" }
+  },
+  "planUsageMultipliersNote": "Measured 2026-09-23: Opus 5.5 = 1.5x Sonnet 5 per an in-app plan-usage tooltip reading (API pricing is 2x -- the plan-usage rate and the dollar rate are NOT the same number, which is the whole reason this table exists separately from `tiers.*.resolvesTo.pricing`). This may be an introductory rate; re-check before relying on it for a long-lived decision. No haiku or fable reading exists yet -- do not extrapolate one. Reads note (cache-read-weight-2026-09-23, same date): this multiplier is an aggregate index over a whole cell's token mix, not a read-specific weight -- the Opus-vs-Sonnet ratio for cache READS ALONE is separately UNMEASURED (see costDrivers.planUsageWeighting below); don't treat the 1.5x figure as answering the read question too.",
+  "costDrivers": {
+    "note": "Across this machine's real sessions, CACHE READS are the largest cost bucket -- not output tokens. Reads = context size x number of requests, so TURN COUNT and CONTEXT SIZE drive cost more than output tokens do. The two levers: fewer turns per task (less back-and-forth, more done per tool-call batch), and a smaller stable context (less to re-read on every turn). Cache TTL (`cacheTtl` above) only decides re-read vs re-write pricing AFTER an idle gap -- it does not change how many reads happen or how large each one is, so raising TTL is not a substitute for cutting turns or context.",
+    "readPricePerMTokByTier": {
+      "haiku": 0.10,
+      "sonnet": 0.20,
+      "opus": 0.20,
+      "fable": 0.25,
+      "note": "Cache-hit ($/MTok) rate per tier, read from tiers.*.resolvesTo.pricing.cacheHitPerMTok above -- kept here too as a flat lookup for a reader who wants the number without walking the tier objects. Opus 5.5 and Sonnet 5 read at the SAME $0.20/MTok, which is why Opus 5.5 came close to Sonnet on read-heavy real tasks while using roughly 35% fewer turns (fewer re-reads at the same per-read price)."
+    },
+    "planUsageWeighting": {
+      "status": "MEASURED-PARTIAL",
+      "confidence": "low-to-moderate",
+      "date": "2026-09-23",
+      "note": "How cache reads weigh against the Max plan's usage window is not published anywhere Anthropic states it, unlike the API dollar rate above. Plan metering of cache READS is roughly API-price-proportional: 40.1M Sonnet 5 cache reads moved the 5-hour usage meter ~2 points (~0.05 pts per 1M reads, range 0.025-0.075). ~3.95M cache WRITES moved it ~4 points, so per token, writes cost roughly 20x what reads do -- the same direction and order of magnitude as the API list-price ratio (~12.5x). Conclusion: cache MISSES (re-writes) are the expensive event on this plan, not reads. The Opus 5.5 vs Sonnet 5 per-read plan-usage ratio is UNMEASURED -- the Opus arm of this experiment hit a harness caching anomaly (separate claude -p processes do not reliably share prompt cache even with byte-identical content, including --resume; see docs/BENCHMARK.md \"Caching\") before a clean reading could be taken. Do not extrapolate an Opus read weight from the Sonnet figure.",
+      "experiment": "cache-read-weight-2026-09-23",
+      "dataPath": "benchmarks/cache-read-weight-2026-09-23/ under this machine's agent-companion data dir (dataDir())"
+    }
+  },
+  "calibration": {
+    "reviewer-effort-direction": {
+      "question": "Does a reviewer at HIGHER effort than the writer catch more, or less?",
+      "tension": "Our rule says effort may exceed and must not drop. One first-hand report (Wavect) found high-effort review slower and lower-recall than low. Willison observed that past high, Fable drafts the deliverable in thinking and rewrites it - double cost, no gain.",
+      "measure": "From telemetry: for reviews, compare findings-per-review and post-merge defect rate by reviewer effort relative to writer effort. Needs reviewers to report findings structurally.",
+      "status": "open"
+    },
+    "fable-cache-economics": {
+      "question": "Does Fable 5.1 cache-read pricing make long stable-prefix sessions competitive with Opus?",
+      "tension": "Official: cache reads at a quarter of the cost ($0.25/MTok). Our measured cache hit ratio is ~96%. Fable is now 2.5x Opus on sticker price (was 2x, before Opus 5.5 dropped to $4/$20) - the cache discount has a wider gap to close than it did. At max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity.",
+      "measure": "From telemetry: per-session cost by model with cache-read share. Compare fable vs opus on sessions of similar turn count.",
+      "status": "open"
+    },
+    "sonnet-vs-opus-at-weight-5": {
+      "question": "Is Sonnet 5 sufficient for some weight-5 work?",
+      "tension": "Vendor benchmarks put Sonnet 5 above Opus 5 on Terminal-Bench 2.1 and some agentic evals at ~40% less cost. Vendor-run, and an outlier.",
+      "measure": "From telemetry: escalation rate (a Sonnet spawn re-run at Opus) by task type. If weight-5 bounded work rarely escalates from Sonnet, lower the base.",
+      "status": "open"
+    },
+    "procedural-checklist-vs-tier": {
+      "question": "Does a verification checklist in the brief substitute for a higher tier?",
+      "tension": "First-hand: teaching Opus/Sonnet the Fable-style checklist (hypothesis before edit, VERIFIED/REASONED/ASSUMED labels) closes most of the gap. If true, many Fable warrants should be declined in favour of a better brief.",
+      "measure": "From telemetry: warrant acceptance rate, and outcome of warranted Fable spawns vs Opus spawns with a checklist brief on the same task type.",
+      "status": "open"
+    }
+  }
+}
