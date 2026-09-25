@@ -353,23 +353,30 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 //       build half of F4 (aliasResolution.minClaudeCodeVersion) needs the
 //       CALLING session's build, which only the spawn guard can read, so it
 //       stays there (SPAWNING RULE 2).
-//   F5  elevated consequence effort floor (config-driven; see
-//       config/model-tiers.json's consequence.elevated.effortFloor — medium
-//       as of the 0.29.2 "effort" architecture decision, reviewed 2026-09-30).
-//       Soft: a profile row may waive it with waivesFloor: "elevated",
-//       honoured ONLY when the row's source is operator-observed
-//       (result.waiver; explain always prints it). The waiver never touches
-//       F1.
+//   F5  elevated consequence effort floor (config/model-tiers.json's
+//       consequence.elevated.effortFloor — high). Soft: a PROFILE ROW *or a
+//       shipped TRIAL override* may waive it with waivesFloor: "elevated",
+//       honoured ONLY when the row's/override's source is operator-observed
+//       (result.waiver; explain always prints it). The waiver is per-row: it
+//       applies only to the type carrying it, never to the floor generally —
+//       a grid-path elevated route, any other declared CONSEQUENCE: elevated,
+//       and every other trial row still floor to high. As of the 0.29.2
+//       "effort" architecture decision (reviewed 2026-09-30), only
+//       integration's trial override carries this waiver (opus/medium,
+//       operator first-hand evidence) — see tests/architecture-floor-diff.
+//       test.mjs for the differential proof that no other route moved. The
+//       waiver never touches F1.
 //   F6  architecture-class effort floor: a task type flagged
 //       `architectureClass: true` (integration, large-refactor, novel-design,
 //       critical-change, or any local type carrying the flag) never resolves
 //       to opus/low, regardless of layer. Inviolable and NOT waivable by F5's
 //       waivesFloor — architecture work needs sustained reasoning even when
-//       an elevated-consequence waiver is in play. Currently unreachable via
-//       the shipped trial/grid (F1/F5 already keep every shipped
-//       architecture-class type at or above medium), so it fires today only
-//       as a backstop against a future config mistake (e.g. a new consequence
-//       with a model floor but no matching effort floor) — see
+//       an elevated-consequence waiver is in play (integration's own F5
+//       waiver only reaches medium, never low). Currently unreachable via the
+//       shipped trial/grid (F1/F5 already keep every shipped architecture-
+//       class type at or above medium), so it fires today only as a backstop
+//       against a future config mistake (e.g. a new consequence with a model
+//       floor but no matching effort floor) — see
 //       tests/architecture-floor.test.mjs. A profile row is refused outright
 //       at profileRowRefusal() rather than silently floored (operator
 //       decision 2026-09-24: refuse at validation, not waive-and-raise), so
@@ -866,7 +873,7 @@ function applyFloors(r, { consequence, parity, writer, waive = null, now, archit
     if (raised !== effort) {
       // F5 only — a waiver can never reach F1 (critical is not waivable).
       if (waive === 'elevated' && consequence === 'elevated') {
-        floorsApplied.push({ floor: label, waived: `effort ${effort || '(none)'} kept below ${cons.effortFloor} (operator-observed profile row waives F5)` });
+        floorsApplied.push({ floor: label, waived: `effort ${effort || '(none)'} kept below ${cons.effortFloor} (operator-observed row waives F5)` });
       } else {
         floorsApplied.push({ floor: label, raised: `effort ${effort || '(none)'} -> ${raised}` });
         effort = raised;
@@ -874,7 +881,7 @@ function applyFloors(r, { consequence, parity, writer, waive = null, now, archit
     } else if (waive === 'elevated' && consequence === 'elevated' && !rankedEffortsFor(model).length) {
       // A no-effort model is below the floor (P2); an honoured waiver is
       // what lets it run, so it is recorded like any other waived floor.
-      floorsApplied.push({ floor: label, waived: `${classifyModel(model).alias || model} takes no effort, kept below ${cons.effortFloor} (operator-observed profile row waives F5)` });
+      floorsApplied.push({ floor: label, waived: `${classifyModel(model).alias || model} takes no effort, kept below ${cons.effortFloor} (operator-observed row waives F5)` });
     }
   }
 
@@ -1178,6 +1185,13 @@ export function resolveRoute({
           source: 'shipped-trial',
           state: 'trial',
           provenance: trialEntry.meta,
+          // A shipped trial override may carry its own F5 waiver, the SAME
+          // shape a per-user profile row uses (waivesFloor/source) — reused,
+          // not reinvented, so waiverFor() and applyFloors()'s `waive` param
+          // treat a waiving trial row exactly like a waiving profile row.
+          // waiverFor() returns null when the override carries no
+          // waivesFloor, so every other trial type is unaffected.
+          waiver: waiverFor(ov, c),
           rationale: `ROUTING TRIAL (since ${ov.trialSince}, review by ${ov.reviewBy}): ${ov.reason} Grid would otherwise resolve to ${gridLabel}.`,
           trial: {
             trialSince: ov.trialSince,

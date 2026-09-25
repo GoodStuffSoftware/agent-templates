@@ -97,20 +97,31 @@ const cases = casesFor(cfg);
 // every trial used to fail the gate, and ending the explore trial threw).
 //   restated        needs a trial: an explicit preset-equal field keeps it
 //                   here, where the reference fell to the grid;
-//   floorAfterTrial needs a trial below some consequence's floor (the
-//                   matrix passes every consequence without departing).
+//   floorAfterTrial needs a trial below some consequence's floor, with no
+//                   honoured waiver of its own (the matrix passes every
+//                   consequence without departing);
+//   waivedTrial     needs a trial below the elevated floor that DOES carry
+//                   its own honoured F5 waiver (0.29.2 "effort" track).
 const trialTypes = (c) => Object.entries(c.taskTypes || {})
   .filter(([, t]) => t && t.override && typeof t.weight === 'number').map(([n]) => n);
+const isHonouredWaiver = (ov) => ov.waivesFloor === 'elevated' && ov.source === 'operator-observed';
 function reachableClasses(c) {
   const trials = trialTypes(c);
   const floorAfterTrial = trials.some((n) => {
     const ov = c.taskTypes[n].override;
+    if (isHonouredWaiver(ov)) return false; // that type's own gap is waivedTrial, not this class
     return Object.keys(c.consequence || {}).some((k) => {
       const f = floorsFor(c, k, ov.model, ov.effort || '');
       return f.model !== ov.model || f.effort !== (ov.effort || '');
     });
   });
-  return { restated: trials.length > 0, floorAfterTrial };
+  const waivedTrial = trials.some((n) => {
+    const ov = c.taskTypes[n].override;
+    if (!isHonouredWaiver(ov)) return false;
+    const f = floorsFor(c, 'elevated', ov.model, ov.effort || '');
+    return f.model !== ov.model || f.effort !== (ov.effort || '');
+  });
+  return { restated: trials.length > 0, floorAfterTrial, waivedTrial };
 }
 
 test(`LIVE: resolveRoute matches the frozen reference on the current config, all ${cases.length} cases x ${CLOCKS.length} clocks, differing only by the permitted classes`, async (t) => {
@@ -125,6 +136,7 @@ test(`LIVE: resolveRoute matches the frozen reference on the current config, all
   const reach = reachableClasses(cfg);
   if (reach.restated) assert.ok(counts.restated > 0, JSON.stringify(counts));
   if (reach.floorAfterTrial) assert.ok(counts.floorAfterTrial > 0, JSON.stringify(counts));
+  if (reach.waivedTrial) assert.ok(counts.waivedTrial > 0, JSON.stringify(counts));
 });
 
 // --- The gate is not vacuous -------------------------------------------------

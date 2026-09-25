@@ -222,10 +222,9 @@ test('rollback restores a journalled revision exactly even when write-mode F5 wo
   const { entries } = readEntries();
   assert.equal(JSON.stringify(rp.profileContent(readFile())), JSON.stringify(rp.profileContent(rp.rebuildAt(entries, target))), 'restored byte for byte');
   assert.deepEqual([readFile().rows.integration.effort, r.revision], ['low', target + 2]);
-  // Resolve time: F5 raises the restored row as usual (elevated floor:
-  // medium, since the 0.29.2 "effort" decision lowered it from high).
+  // Resolve time: F5 raises the restored row as usual.
   rp._resetProfileCache();
-  assert.equal(ctx.resolveRoute({ type: 'integration', now: NOW }).effort, 'medium');
+  assert.equal(ctx.resolveRoute({ type: 'integration', now: NOW }).effort, 'high');
 
   // rollback --row does the same for one row.
   store.setRow('integration', { model: 'sonnet', effort: 'xhigh', now: NOW });
@@ -364,7 +363,7 @@ test('a stale lock left by a crashed writer is broken; no lock or temp file surv
 test('F5 at write: a haiku row on an elevated type needs --waive-floor elevated (P2)', () => {
   freshRoot('haiku-f5');
   expectCode(() => store.setRow('large-refactor', { model: 'haiku', now: NOW }), 'refused');
-  assert.throws(() => store.setRow('large-refactor', { model: 'haiku', now: NOW }), /F5: haiku takes no effort parameter, so it cannot meet the elevated floor \(medium\); pass --waive-floor elevated/);
+  assert.throws(() => store.setRow('large-refactor', { model: 'haiku', now: NOW }), /F5: haiku takes no effort parameter, so it cannot meet the elevated floor \(high\); pass --waive-floor elevated/);
   assert.equal(store.setRow('large-refactor', { model: 'haiku', waiveFloor: 'elevated', now: NOW }).revision, 1);
   assert.equal(store.setRow('verify', { model: 'haiku', now: NOW }).revision, 2, 'a routine type needs no waiver');
 });
@@ -485,7 +484,7 @@ test('CLI: set/why/unset/rollback/show end to end, with F1-F5 refusals at write'
     assert.match(empty.stdout, /no profile — every route comes from the shipped table/);
 
     const refusals = [
-      [['set', 'integration', '--model', 'sonnet', '--effort', 'low'], /F5: effort 'low' is below the elevated floor \(medium\); pass --waive-floor elevated/],
+      [['set', 'integration', '--model', 'sonnet', '--effort', 'low'], /F5: effort 'low' is below the elevated floor \(high\); pass --waive-floor elevated/],
       [['set', 'critical-change', '--model', 'sonnet', '--effort', 'xhigh'], /F1: critical consequence needs at least opus/],
       [['set', 'critical-change', '--model', 'opus', '--effort', 'high'], /F1: critical consequence needs effort at least xhigh/],
       [['set', 'bounded-feature', '--model', 'fable', '--effort', 'high'], /F2: fable is never a routing destination/],
@@ -524,6 +523,9 @@ test('CLI: set/why/unset/rollback/show end to end, with F1-F5 refusals at write'
     assert.equal(shown.json.journalMatches, true);
 
     assert.equal(cli('unset', 'integration').status, 0);
+    // integration's shipped trial carries its own F5 waiver (0.29.2 "effort"
+    // decision), so it still resolves to opus/medium once the profile row
+    // that was shadowing it is gone.
     assert.match(cli('why', 'integration').stdout, /winner:\s+trial -> opus\/medium/);
     assert.equal(cli('rollback', '--row', 'integration').status, 0);
     assert.match(cli('why', 'integration').stdout, /winner:\s+profile/);

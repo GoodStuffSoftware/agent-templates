@@ -74,6 +74,9 @@ export const ALLOWED = {
     "// a test can set the override env vars per-test and get an isolated tree.",
     "return process.env.AGENT_COMPANION_HOME_OVERRIDE || homedir();",
     "// transcript-harvest/, the legacy model-tiers.json override location). Durable",
+    "// shipped TRIAL override* may waive it with waivesFloor: \"elevated\",",
+    "// honoured ONLY when the row's/override's source is operator-observed",
+    "// integration's trial override carries this waiver (opus/medium,",
   ],
   "hooks/lib/memory-index.mjs": [
     "// itself honours AGENT_COMPANION_HOME_OVERRIDE/CLAUDE_CONFIG_DIR — this used",

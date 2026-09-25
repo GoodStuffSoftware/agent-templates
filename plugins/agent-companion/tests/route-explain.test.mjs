@@ -29,13 +29,9 @@ test('a grid answer raised by F1 inside effortFor() reports both raises, marked 
 });
 
 test('a grid answer raised by F5 inside effortFor() reports the effort raise', () => {
-  // weight 3's own base is sonnet/medium, which already meets the elevated
-  // floor since the 0.29.2 "effort" decision lowered it from high to medium
-  // -- so pair it with the mechanical kind's -1 delta (sonnet/medium ->
-  // sonnet/low) to give F5 something to raise back up to the floor.
-  const r = ctx.resolveRoute({ weight: 3, weightExplicit: true, kind: 'mechanical', kindExplicit: true, consequence: 'elevated', consequenceExplicit: true, now: NOW });
-  assert.equal(label(r), 'sonnet/medium');
-  assert.deepEqual(r.floorsApplied, [{ floor: 'F5', raised: 'effort low -> medium', within: 'grid' }]);
+  const r = ctx.resolveRoute({ weight: 3, weightExplicit: true, consequence: 'elevated', consequenceExplicit: true, now: NOW });
+  assert.equal(label(r), 'sonnet/high');
+  assert.deepEqual(r.floorsApplied, [{ floor: 'F5', raised: 'effort medium -> high', within: 'grid' }]);
 });
 
 test('a grid answer no floor touched still says "none fired"', () => {
@@ -45,11 +41,27 @@ test('a grid answer no floor touched still says "none fired"', () => {
 });
 
 test('the grid floors are not reported when a higher layer won (the grid was only shadowed)', () => {
-  // integration: elevated preset; its trial (opus/medium) wins, and the
-  // grid's own F5 raise belongs to the shadowed grid candidate, not the answer.
-  const r = ctx.resolveRoute({ type: 'integration', now: NOW });
+  // large-refactor: elevated preset; its trial (opus/high) wins, already at
+  // the elevated floor, and carries no F5 waiver of its own (unlike
+  // integration's, see below) -- so floorsApplied is empty, not something
+  // borrowed from the shadowed grid candidate.
+  const r = ctx.resolveRoute({ type: 'large-refactor', now: NOW });
   assert.equal(r.layer, 'trial');
   assert.deepEqual(r.floorsApplied, []);
+});
+
+// integration is the one type whose trial carries its own F5 waiver (the
+// 0.29.2 "effort" architecture decision): opus/medium is below the elevated
+// floor (high), so the waiver's raise-avoidance itself shows up in
+// floorsApplied, distinct from the "not reported" case above.
+test('a waiving trial (integration) reports the waiver in floorsApplied, not an empty list', () => {
+  const r = ctx.resolveRoute({ type: 'integration', now: NOW });
+  assert.equal(r.layer, 'trial');
+  assert.equal(label(r), 'opus/medium');
+  assert.deepEqual(r.floorsApplied, [
+    { floor: 'F5', waived: 'effort medium kept below high (operator-observed row waives F5)' },
+  ]);
+  assert.ok(r.waiver?.honored);
 });
 
 test('effortFor() keeps its return shape; the floors come only through the opt-in array', () => {

@@ -133,11 +133,17 @@ test('F6 (profile rows): a row naming opus/low for an architecture-class type is
   }
 });
 
-test('F6 (profile rows): opus/medium — exactly at the architecture floor — is not refused', async () => {
+test('F6 (profile rows): opus/medium — exactly at the architecture floor — is not refused by F6 (with its own F5 waiver, since the elevated floor is still high)', async () => {
   const ctx = await stage(SHIPPED_CONFIG);
   const typeDef = ctx.taskTypeDef('integration').def;
   const base = { state: 'trial', source: 'operator-observed', since: '2026-09-24' };
-  assert.equal(ctx.profileRowRefusal('integration', { ...base, model: 'opus', effort: 'medium' }, { typeDef, mode: 'write' }), '');
+  // The elevated floor (F5) is high, unaffected by this track: a profile row
+  // at opus/medium needs its OWN F5 waiver to pass at all. This isolates F6
+  // from F5 — proving F6 itself draws the line at low, not at medium.
+  assert.equal(
+    ctx.profileRowRefusal('integration', { ...base, model: 'opus', effort: 'medium', waivesFloor: 'elevated' }, { typeDef, mode: 'write' }),
+    '',
+  );
 });
 
 test('F6 (profile rows): a non-architecture type is unaffected — opus/low is still only an F5 concern there', async () => {

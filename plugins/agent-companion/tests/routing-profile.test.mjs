@@ -239,35 +239,32 @@ test('the trial layer gets the same alias checks (review finding A): unknown ali
 // --- F5: waivable only by an operator-observed row, always explained --------
 
 test('F5 waiver on an operator-observed row: the effort stays below the elevated floor, and explain says so', () => {
-  // integration's own consequence is elevated, whose floor is medium (since
-  // the 0.29.2 "effort" decision lowered it from high) -- use low so F5
-  // still has something to waive.
-  writeProfile(profile({ integration: row('sonnet', 'low', { waivesFloor: 'elevated' }) }));
+  writeProfile(profile({ integration: row('sonnet', 'medium', { waivesFloor: 'elevated' }) }));
   const r = ctx.resolveRoute({ type: 'integration', now: BEFORE });
   assert.equal(r.layer, 'profile');
-  assert.equal(label(r), 'sonnet/low');
+  assert.equal(label(r), 'sonnet/medium');
   assert.deepEqual(r.floorsApplied.map((f) => [f.floor, !!f.waived]), [['F5', true]]);
   assert.deepEqual([r.waiver.honored, r.waiver.applies], [true, true]);
   const lines = ctx.explainRoute(r).join('\n');
-  assert.match(lines, /floors:\s+F5 waived: effort low kept below medium/);
+  assert.match(lines, /floors:\s+F5 waived: effort medium kept below high/);
   assert.match(lines, /waiver:\s+F5 elevated effort floor — HONOURED/);
 });
 
 test('F5 waiver on a non-operator row is ignored: F5 raises the effort, and explain prints the ignored waiver', () => {
-  writeProfile(profile({ integration: row('sonnet', 'low', { waivesFloor: 'elevated', source: 'benchmark' }) }));
+  writeProfile(profile({ integration: row('sonnet', 'medium', { waivesFloor: 'elevated', source: 'benchmark' }) }));
   const r = ctx.resolveRoute({ type: 'integration', now: BEFORE });
   assert.equal(r.layer, 'profile');
-  assert.equal(label(r), 'sonnet/medium');
-  assert.deepEqual(r.floorsApplied.map((f) => [f.floor, f.raised]), [['F5', 'effort low -> medium']]);
+  assert.equal(label(r), 'sonnet/high');
+  assert.deepEqual(r.floorsApplied.map((f) => [f.floor, f.raised]), [['F5', 'effort medium -> high']]);
   assert.equal(r.waiver.honored, false);
   assert.match(ctx.explainRoute(r).join('\n'), /waiver:\s+F5 elevated effort floor — IGNORED: waiver ignored: source benchmark is not operator-observed/);
 });
 
-test('without a waiver, F5 raises a hand-edited elevated row below medium (floors after the winning layer)', () => {
+test('without a waiver, F5 raises a hand-edited elevated row below high (floors after the winning layer)', () => {
   writeProfile(profile({ integration: row('sonnet', 'low') }));
   const r = ctx.resolveRoute({ type: 'integration', now: BEFORE });
   assert.equal(r.layer, 'profile');
-  assert.equal(label(r), 'sonnet/medium');
+  assert.equal(label(r), 'sonnet/high');
   assert.equal(r.waiver, null);
 });
 
@@ -307,7 +304,7 @@ test('F5: a haiku row on an elevated type is skipped without an honoured waiver'
     writeProfile(profile({ 'large-refactor': row('haiku', null, extra) }));
     const r = ctx.resolveRoute({ type: 'large-refactor', now: BEFORE });
     assert.notEqual(r.layer, 'profile', JSON.stringify(extra));
-    assert.match(r.skipped.find((x) => x.layer === 'profile').reason, /^F5: haiku takes no effort parameter, so it cannot meet the elevated floor \(medium\)/);
+    assert.match(r.skipped.find((x) => x.layer === 'profile').reason, /^F5: haiku takes no effort parameter, so it cannot meet the elevated floor \(high\)/);
   }
 });
 
@@ -326,6 +323,45 @@ test('a waiver never reaches F1: a critical declaration still floors a waiving r
   writeProfile(profile({ integration: row('sonnet', 'medium', { waivesFloor: 'elevated' }) }));
   const r = ctx.resolveRoute({ type: 'integration', consequence: 'critical', now: BEFORE });
   assert.ok(r.model === 'opus' && ['xhigh', 'max'].includes(r.effort), label(r));
+});
+
+// --- F6: a refused row is skipped, not the whole profile (lead review, 0.29.2
+// "effort" track) --------------------------------------------------------
+// F6 fires per TYPE, inside profileLayer()/profileRowRefusal() — the same
+// place F1-F5 already fire — never at the whole-file schema-validation stage
+// (parseProfileText()/readProfile(), which only rejects a structurally
+// invalid file: bad JSON, wrong schema id, missing revision, a higher major
+// schemaVersion). An architecture-class row this low fails ONE type's row
+// check and falls back to that type's own trial/grid; every other row in the
+// same file is read and applied completely normally, and the profile's own
+// status stays "ok".
+test('F6 refuses only the offending ROW on read; the rest of the profile still applies, and profileStatus stays ok', () => {
+  writeProfile(profile({
+    integration: row('opus', 'low'), // F6: architecture-class, refused
+    'bounded-feature': row('sonnet', 'medium'), // unaffected, ordinary row
+  }));
+  const bad = ctx.resolveRoute({ type: 'integration', now: BEFORE });
+  assert.notEqual(bad.layer, 'profile', 'the offending row must not win');
+  assert.match(bad.skipped.find((x) => x.layer === 'profile').reason, /^F6: architecture-class task type 'integration' may never route to opus\/low/);
+  // Falls back to integration's own shipped trial (its own F5 waiver, opus/medium) — not a hard failure.
+  assert.equal(bad.layer, 'trial');
+  assert.equal(label(bad), 'opus/medium');
+  assert.equal(bad.profileStatus, 'ok', 'a bad ROW does not invalidate the whole profile');
+
+  const good = ctx.resolveRoute({ type: 'bounded-feature', now: BEFORE });
+  assert.equal(good.layer, 'profile', 'a sibling row in the same file is completely unaffected');
+  assert.equal(label(good), 'sonnet/medium');
+  assert.equal(good.profileStatus, 'ok');
+});
+
+test('F6 at write: the CLI refuses to SET the offending row; it never reaches the file', () => {
+  clearProfile();
+  const r = runScript('scripts/routing-profile.mjs', ['set', 'integration', '--model', 'opus', '--effort', 'low', '--because', 'testing F6'], {
+    env: { AGENT_COMPANION_STATE_DIR: fx.stateDir },
+  });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /F6: architecture-class task type 'integration' may never route to opus\/low/);
+  assert.equal(existsSync(PROFILE), false, 'a refused write creates nothing');
 });
 
 // --- code-review: a minimum effort on top of writer parity (F3) -------------
@@ -544,6 +580,6 @@ test('routing-profile show says what a floor-raised row runs as', () => {
   writeProfile(profile({ integration: row('sonnet', 'low'), 'bounded-feature': row('sonnet', 'medium') }));
   const r = runScript('scripts/routing-profile.mjs', ['show']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /integration[\s\S]*?-> applies \(raised by F5 to sonnet\/medium\)/);
+  assert.match(r.stdout, /integration[\s\S]*?-> applies \(raised by F5 to sonnet\/high\)/);
   assert.match(r.stdout, /bounded-feature[\s\S]*?-> applies(?! \()/);
 });

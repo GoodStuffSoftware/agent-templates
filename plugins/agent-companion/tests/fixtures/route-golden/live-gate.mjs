@@ -11,9 +11,9 @@
 // difference — and a frozen expected.json no longer has to be regenerated,
 // which after merge could only have been done from the code under test.
 //
-// A difference passes only if it belongs to one of the two classes slice 1
-// decided on, and only if it is EXACTLY the answer that class prescribes
-// (computed here from the config and the ADR rule, not by the resolver):
+// A difference passes only if it belongs to one of the three classes below,
+// and only if it is EXACTLY the answer that class prescribes (computed here
+// from the config and the ADR rule, not by the resolver):
 //
 //   restated preset  (slice 1b, operator-approved 2026-09-24; ADR §1): an
 //     explicit weight/kind/consequence EQUAL to the type's preset restates
@@ -25,6 +25,20 @@
 //     trial below the resolved consequence's floor, the answer must be that
 //     trial lifted to exactly the floor (F1 critical, F5 elevated), with the
 //     trial still the winning layer and the lift recorded.
+//   waived trial  (0.29.2 "effort" track, operator-decided 2026-09-24; ADR §1
+//     F5 extended to trial overrides): a trial override may now carry its own
+//     F5 waiver (waivesFloor/source), the SAME shape a per-user profile row
+//     already used to waive F5 — reused, not a parallel mechanism. When the
+//     type's OWN override in the CURRENT config carries an HONOURED waiver
+//     (waivesFloor: "elevated", source: "operator-observed") for the resolved
+//     consequence, the reference's raw (pre-floor) trial answer is the
+//     CORRECT one — the floor must NOT lift it — with the waiver recorded in
+//     floorsApplied instead of a raise. Only the type actually carrying the
+//     waiver is exempted; every other elevated route (grid-path, another
+//     declared CONSEQUENCE: elevated, or a trial with no waiver of its own)
+//     still floors to exactly what floor-after-trial prescribes. See
+//     tests/architecture-floor-diff.test.mjs for the differential proof that
+//     no other route moved when this was introduced.
 //
 // Anything else is a mismatch. A trial the new resolver refuses (F2 fable, F4
 // retired or unsupported effort) is a mismatch too: the shipped table should
@@ -140,7 +154,7 @@ export const liftsOf = (route) => (route.floorsApplied || []).filter((f) => f.wi
 // each class; the caller asserts.
 export function compareLive({ cur, ref, cfg, cases, clocks }) {
   const mismatches = [];
-  const counts = { cases: 0, identical: 0, restated: 0, floorAfterTrial: 0 };
+  const counts = { cases: 0, identical: 0, restated: 0, floorAfterTrial: 0, waivedTrial: 0 };
   for (const clock of clocks) {
     for (const c of cases) {
       counts.cases += 1;
@@ -162,6 +176,30 @@ export function compareLive({ cur, ref, cfg, cases, clocks }) {
       const lifts = liftsOf(route);
       const pred = want.trial ? floorsFor(cfg, want.consequence, want.model, want.effort) : null;
       const floored = !!pred && (pred.model !== want.model || pred.effort !== want.effort);
+
+      // waived trial: the type's OWN override (current config) carries an
+      // honoured F5 waiver for this resolved consequence, so the reference's
+      // raw (unfloored) trial answer is the correct one — not the floor.
+      const ov = want.trial && c.args.type ? (cfg.taskTypes || {})[c.args.type]?.override : null;
+      const waivedTrial = floored && !!ov && ov.waivesFloor === 'elevated' && ov.source === 'operator-observed' && want.consequence === 'elevated';
+
+      if (waivedTrial) {
+        const problems = [];
+        if (route.layer !== 'trial') problems.push(`layer ${route.layer}, want trial (a waived floor never moves the winning layer)`);
+        if (route.model !== want.model || route.effort !== want.effort) problems.push(`${route.model}/${route.effort}, want exactly the reference's raw ${want.model}/${want.effort} (the waiver keeps it there)`);
+        if (lifts.length !== 1 || lifts[0].floor !== 'F5' || !lifts[0].waived) problems.push(`lifts ${JSON.stringify(lifts)}, want exactly one honoured F5 waiver`);
+        // Same shape as floor-after-trial: the rationale text is identical
+        // between old and new code (both read it from the same config), so
+        // only the appended "; floors: ..." suffix may differ.
+        const { rationale: wr, ...wrest } = wrapped;
+        const { rationale: rr, ...rrest } = want;
+        try { assertSame(wrest, rrest); } catch { problems.push(`wrapper ${JSON.stringify(wrest)}`); }
+        if (!(typeof wr === 'string' && wr.startsWith(rr) && /; floors: F5 waived: /.test(wr))) problems.push(`wrapper rationale ${JSON.stringify(wr)}`);
+        if (problems.length) mismatches.push(`${tag}: waived-trial: ${problems.join('; ')}`);
+        else counts.waivedTrial += 1;
+        if (restated) counts.restated += 1;
+        continue;
+      }
 
       if (floored) {
         const label = FLOOR_LABEL[want.consequence];

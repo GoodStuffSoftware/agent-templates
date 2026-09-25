@@ -27,14 +27,19 @@
 // v3 (2026-09-24, 0.29.2 "effort" architecture decision, DECISIONS.md,
 // review 2026-09-30): integration moves again, opus/high -> opus/medium —
 // the operator judged v2's opus/high heavier than integration work needs.
-// Landing on medium required lowering the elevated-consequence effort floor
-// (F5) from high to medium (config/model-tiers.json), since the floor would
-// otherwise have raised any elevated-consequence trial straight back to
-// high. large-refactor and novel-design deliberately stay at opus/high
-// (already above the lower floor); critical-change is unaffected (F1/xhigh).
-// A separate, non-waivable floor (F6) still refuses opus/low for any
-// architecture-class type (integration, large-refactor, novel-design,
-// critical-change) at every layer — see tests/architecture-floor.test.mjs.
+// opus/medium is below the elevated-consequence effort floor (F5, still
+// high — this was NOT lowered globally, so it still floors a grid-path
+// elevated route or any other declared CONSEQUENCE: elevated). Instead,
+// integration's own trial override carries an explicit F5 waiver
+// (waivesFloor/source, the same shape a per-user routing-profile row uses),
+// honoured because the evidence is the operator's own first-hand
+// observation. large-refactor and novel-design stay at opus/high, already at
+// the floor; critical-change is unaffected (F1/xhigh, not F5). A separate,
+// non-waivable floor (F6) still refuses opus/low for any architecture-class
+// type (integration, large-refactor, novel-design, critical-change) at every
+// layer, waiver or not — see tests/architecture-floor.test.mjs. See
+// tests/architecture-floor-diff.test.mjs for the differential proof that no
+// route other than integration's own trial moved.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -101,12 +106,18 @@ test('large-refactor overrides the plain weight-5 xhigh resolution down to high 
   assert.equal(res.json.trial.gridResolution, 'opus/xhigh');
 });
 
-test('integration (v3): the 0.29.2 "effort" decision moved it to opus/medium, which required lowering the elevated-consequence floor from high to medium', () => {
+test('integration (v3): the 0.29.2 "effort" decision moved it to opus/medium via its own explicit F5 waiver (the elevated floor itself stays high)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'integration', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.model, 'opus');
   assert.equal(res.json.effort, 'medium');
   assert.equal(res.json.trial.gridResolution, 'sonnet/high');
+  // The waiver itself is proven via the human-readable --explain text (the
+  // structured --json route shape does not carry it): "why" and "explain"
+  // must both say the row's own waiver is honoured, not a lowered floor.
+  const explained = runScript('scripts/recommend.mjs', ['--type', 'integration', '--explain']);
+  assert.match(explained.stdout, /waiver:\s+F5 elevated effort floor — HONOURED: operator-observed row waives the elevated effort floor \(F5\)/);
+  assert.match(explained.stdout, /floors:\s+F5 waived: effort medium kept below high/);
 });
 
 test('debug-root-cause explicitly overrides the diagnostic kind\'s +1 effort delta, not a silent kind change', () => {
