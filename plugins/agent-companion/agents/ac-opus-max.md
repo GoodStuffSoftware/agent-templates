@@ -1,6 +1,6 @@
 ---
 name: ac-opus-max
-description: Rung 10/10 (dearest, non-fable): reserve for genuinely frontier problems where xhigh was tried and fell short — large cost for typically small gain.
+description: "Rung 10/10: reserve for genuinely frontier problems where xhigh was tried and fell short — large cost for typically small gain. Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
 model: opus
 effort: max
 ---
