@@ -722,6 +722,12 @@ export function scanText(text, { rel = "", derived = [], isSelf = false, realUse
 const IGNORE_DIRS = new Set([".git", "node_modules"]);
 // Heuristic: skip obvious binaries by extension.
 const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|woff2?|ttf|eot|zip|gz|mp4|mov)$/i;
+// Whether leak-check's own classes skip this path as a binary (by extension).
+// scripts/push-scan.mjs applies the same skip to leak-check's classes; its
+// private-names denylist still scans these files' bytes.
+export function skipsAsBinary(rel) {
+  return BINARY_EXT.test(rel);
+}
 // SHA-ONLY skip: a minified bundle, a lockfile, or anything under
 // node_modules/ is never going to carry a real leak worth reporting AS A
 // HASH. Every OTHER class (path, handle, token-file, derived-name) still
