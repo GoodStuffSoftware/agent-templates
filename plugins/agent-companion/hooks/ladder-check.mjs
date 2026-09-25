@@ -37,10 +37,10 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
-import { readStdin, opt, passthrough, claudeDir, modelTiers } from './lib/context.mjs';
 import {
+  readStdin, opt, passthrough, claudeDir, modelTiers,
   readInstalledPlugins, pluginEntries, effectiveEntry, pathUnder, versionBelow, copySource,
-} from './lib/plugin-installs.mjs';
+} from './lib/context.mjs';
 
 // The recovery for a stale loaded copy, operator-confirmed on this machine
 // (2026-09-24). Named once so every message quotes it identically.

@@ -15,7 +15,7 @@ import { mkdirSync, writeFileSync, cpSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import { spawnSync } from 'node:child_process';
-import { scopeKey } from '../hooks/lib/plugin-installs.mjs';
+import { scopeKey } from '../hooks/lib/context.mjs';
 
 const HOUR = 3600 * 1000;
 const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString();
