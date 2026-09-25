@@ -492,6 +492,88 @@ test('copyable-prompt agrees with every one of the reviewer\'s 44 phrasings', ()
   }
 });
 
+// 0.29.2 review round 3 (F5): round 2 had dropped craft/prepare/"send me"/
+// "I'd like", which fired in 0.29.1 and round 1, and added a bare "get" that
+// fired on a program's prompt. Plus the round-2 re-reviewer's other phrasings.
+const ROUND3_PHRASINGS = [
+  ['Could you craft a prompt for the scout?', true],
+  ['Prepare a prompt for the release agent', true],
+  ['Send me a prompt for the lander', true],
+  ["I'd like a prompt for the reviewer", true],
+  ['I would like a prompt that reviews the diff', true],
+  ['could I get a prompt for the lander?', true],
+  ['craft me a prompt', true],
+  ['prepare the prompts for each track', true],
+  ['send me the prompt for the fixer', true],
+  ['Give the reviewer a prompt it can run cold', true],
+  ["Draft the scout's prompt", true],
+  ['Need a quick prompt for onboarding', true],
+  ['Another prompt for the fixer, please', true],
+  ['regenerate the prompt for the scout', true],
+  ['I get a UAC prompt every time I run the installer', false],
+  ['Why do I get a prompt for my SSH passphrase?', false],
+  ['we get a prompt for 2FA on every push', false],
+  ['we get prompted for 2FA every time', false],
+  ['send the prompt to the API', false],
+  ["I'd like the prompt box wider", false],
+  ['I need to prompt the user for a password', false],
+  ['Rewrite the prompt injection filter', false],
+  ['The prompt that you wrote is too long', false],
+  ['make the prompt box wider', false],
+];
+
+test('copyable-prompt: craft, prepare, "send me" and "I\'d like" ask for a prompt; a program\'s prompt you "get" does not', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const wrong = ROUND3_PHRASINGS.filter(([text, want]) =>
+      matchRules({ scope: 'user-prompt', text }).some((r) => r.id === 'copyable-prompt') !== want);
+    assert.deepEqual(wrong, [], 'phrasings where the rule disagrees with the expected answer');
+  } finally {
+    cleanup();
+  }
+});
+
+// 0.29.2 review round 3 (F6): a "<command-args " the user typed took the ">"
+// of the harness's <system-reminder> that followed as its own, so it opened a
+// wrapper that never closed and hid the user's ask. It is text, not a tag,
+// when another wrapper tag starts before its ">".
+test('a stray wrapper-tag name in the user\'s own text does not hide the ask', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    // [text, the user's words that must survive, the real wrapper's text that must not]
+    const cases = [
+      ['the <command-args flag is ignored, write me a prompt for the reviewer\n<system-reminder>todo list is empty</system-reminder>',
+        'write me a prompt for the reviewer', 'todo list'],
+      ['why does <teammate-message from=x get dropped? draft a prompt for the fixer <teammate-message teammate_id="a">hi there</teammate-message>',
+        'draft a prompt for the fixer', 'hi there'],
+      // Inside a wrapper, the same stray name no longer swallows what follows the wrapper.
+      ['<system-reminder>see the <command-args docs</system-reminder>\nwrite me a prompt for the reviewer',
+        'write me a prompt for the reviewer', 'see the'],
+    ];
+    for (const [text, kept, removed] of cases) {
+      const own = userOwnText(text);
+      assert.ok(own.includes(kept), `the user's own words survive: ${text}`);
+      assert.ok(!own.includes(removed), `the real wrapper's text is still removed: ${text}`);
+      assert.deepEqual(matchRules({ scope: 'user-prompt', text }).map((r) => r.id), ['copyable-prompt'], text);
+    }
+    const res = runHook('hooks/standing-rules.mjs',
+      { session_id: 'sess-stray-tag', prompt: cases[0][0], cwd: dir }, { args: ['--event', 'user-prompt'] });
+    assert.equal(res.status, 0);
+    assert.match(res.stdout, /fenced code block/, 'the hook injects the copyable-prompt rule');
+    // The shapes it must still strip: a real opening tag, attributes and all,
+    // including an attribute value that names a wrapper tag.
+    assert.equal(userOwnText('<teammate-message teammate_id="a" color="b">write me a prompt</teammate-message>').trim(), '');
+    assert.equal(userOwnText('<command-args>write me a prompt</command-args>').trim(), '');
+    for (const summary of ['fixed the <system-reminder> parsing', 'the <command-args bug']) {
+      const block = `<teammate-message teammate_id="a" summary="${summary}">write me a prompt</teammate-message>`;
+      assert.equal(userOwnText(block).trim(), '', block);
+      assert.equal(userOwnText(`${block}\nfix the bug`).trim(), 'fix the bug', block);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
 // userOwnText runs on every UserPromptSubmit. It used to strip one level of
 // nesting per regex pass, about 30 s on 1 MB of nested wrapper tags. It is
 // one linear pass now. Each input below is at least 1 MB; each must finish in
