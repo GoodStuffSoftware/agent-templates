@@ -83,7 +83,7 @@ import {
   readdirSync, statSync, createReadStream, readFileSync, openSync, readSync, closeSync, fstatSync,
 } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { claudeDir } from '../../hooks/lib/context.mjs';
 
 export const SYNTHETIC_MODEL = '<synthetic>';
@@ -115,11 +115,14 @@ export function describePath(p) {
     const isWorkflow = parts[subIdx + 1] === 'workflows' && parts.length === subIdx + 4;
     const workflowId = isWorkflow ? parts[subIdx + 2] : null;
     const isAgent = /^agent-/.test(base);
+    // Any JSONL directly in subagents/ is a subagent transcript; under
+    // subagents/workflows/<wf>/ only agent-* is (journal.jsonl is not).
+    const isSub = isWorkflow ? isAgent : parts.length === subIdx + 2;
     return {
-      kind: isAgent ? 'subagent' : 'other',
+      kind: isSub ? 'subagent' : 'other',
       project,
       sessionId,
-      agentId: isAgent ? base.slice('agent-'.length) : null,
+      agentId: isSub ? (isAgent ? base.slice('agent-'.length) : base) : null,
       workflowId,
     };
   }
@@ -148,10 +151,16 @@ function readMeta(jsonlPath) {
 //               scan for a string in any JSONL, not for transcripts
 //   project     function(projectDirName) -> boolean filter
 //   meta        read subagent .meta.json sidecars (default true)
+//   anyDepth    walk every directory under root depth-first and classify
+//               each JSONL by where it sits (parent "subagents" -> subagent,
+//               directly in a project dir -> main, else other). For callers
+//               whose root may be a single project directory rather than the
+//               projects root; the two checks that walked this way before
+//               (coverage, model-mismatch) keep doing so.
 export function discoverTranscripts(root, {
   sinceMs = -Infinity, maxFiles = Infinity, maxBytes = Infinity,
   main = true, subagents = true, workflows = false, other = false,
-  project = null, meta = true,
+  project = null, meta = true, anyDepth = false,
 } = {}) {
   const files = [];
   let truncated = false;
@@ -176,6 +185,41 @@ export function discoverTranscripts(root, {
 
   let top;
   try { top = readdirSync(root, { withFileTypes: true }); } catch { return { files, truncated, exists: false }; }
+
+  if (anyDepth) {
+    // Depth-agnostic walk (depth-first, the order the coverage and
+    // model-mismatch checks always walked in): every *.jsonl anywhere under
+    // root, classified by where it sits rather than by how deep — so a root
+    // that is itself one project directory still finds its subagents.
+    const stack = [root];
+    while (stack.length) {
+      const dir = stack.pop();
+      let entries;
+      try { entries = dir === root ? top : readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) { stack.push(full); continue; }
+        if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
+        const d = describePath(full.slice(root.length));
+        const isMainPos = dir !== root && resolve(dir, '..') === resolve(root);
+        let kind = d.kind === 'subagent' ? 'subagent' : (isMainPos ? 'main' : 'other');
+        if (d.kind === 'subagent' && d.workflowId && !workflows) kind = 'other';
+        if ((kind === 'main' && !main) || (kind === 'subagent' && !subagents) || (kind === 'other' && !other)) continue;
+        if (project) {
+          const projName = full.slice(root.length).split(/[\\/]+/).filter(Boolean)[0];
+          if (!projName || !project(projName)) continue;
+        }
+        consider(full, {
+          kind,
+          project: d.project,
+          sessionId: kind === 'main' ? e.name.slice(0, -'.jsonl'.length) : d.sessionId,
+          agentId: kind === 'subagent' ? d.agentId : null,
+          workflowId: d.workflowId,
+        });
+      }
+    }
+    return { files, truncated, exists: true };
+  }
 
   // Everything under a directory that is not already a known transcript
   // position, for `other`.
@@ -216,12 +260,7 @@ export function discoverTranscripts(root, {
           for (const s of subEntries) {
             const full = join(sFull, s.name);
             if (s.isFile() && s.name.endsWith('.jsonl')) {
-              const isAgent = s.name.startsWith('agent-');
-              if (isAgent && subagents) {
-                consider(full, { kind: 'subagent', project: t.name, sessionId: e.name, agentId: s.name.slice('agent-'.length, -'.jsonl'.length), workflowId: null });
-              } else if (!isAgent && other) {
-                consider(full, { kind: 'other', project: t.name, sessionId: e.name, agentId: null, workflowId: null });
-              }
+              if (subagents) consider(full, { kind: 'subagent', project: t.name, sessionId: e.name, agentId: describePath(full).agentId, workflowId: null });
               continue;
             }
             if (!s.isDirectory()) continue;

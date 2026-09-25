@@ -8,11 +8,11 @@
 // outside this plugin's control. Comparing the two catches the guard going
 // silent while spawns keep happening.
 
-import { existsSync, readdirSync, statSync, createReadStream } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
-import { telemetryDir, claudeDir } from '../../hooks/lib/context.mjs';
+import { telemetryDir } from '../../hooks/lib/context.mjs';
 import { syncLegacy } from '../../hooks/lib/state-sync.mjs';
+import { discoverTranscripts, readRecords, transcriptsRoot as sharedTranscriptsRoot } from './transcripts.mjs';
 
 const DEFAULT_MAX_FILES = 5000;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
@@ -22,47 +22,27 @@ function utcDay(ms) {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-// Recursively collect candidate *.jsonl files (including */subagents/) whose
-// mtime is at or after `sinceMs`, honouring the file/byte caps. Returns
+// Every *.jsonl under the root (main sessions, subagents, workflow agents
+// and any other JSONL) whose mtime is at or after `sinceMs`, honouring the
+// file/byte caps — discovery is lib/transcripts.mjs's. Returns
 // { files, truncated }.
 function collectTranscriptFiles(root, sinceMs, maxFiles, maxBytes) {
-  const files = [];
-  let totalBytes = 0;
-  let truncated = false;
-  const stack = [root];
-  while (stack.length) {
-    const dir = stack.pop();
-    let entries;
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
-    for (const e of entries) {
-      const full = join(dir, e.name);
-      if (e.isDirectory()) {
-        stack.push(full);
-        continue;
-      }
-      if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
-      let st;
-      try { st = statSync(full); } catch { continue; }
-      if (st.mtimeMs < sinceMs) continue;
-      if (files.length >= maxFiles || totalBytes + st.size > maxBytes) { truncated = true; continue; }
-      files.push(full);
-      totalBytes += st.size;
-    }
-  }
-  return { files, truncated };
+  const { files, truncated } = discoverTranscripts(root, {
+    sinceMs, maxFiles, maxBytes, main: true, subagents: true, workflows: true, other: true, meta: false, anyDepth: true,
+  });
+  return { files: files.map((f) => f.path), truncated };
 }
 
-// Stream one transcript file line by line, counting Agent tool_use blocks.
+// Stream one transcript file, counting Agent tool_use blocks. Only lines that
+// mention both an Agent name and a tool_use are parsed (readRecords'
+// prefilter), which keeps this fast on a large corpus.
 // `seenIds` dedups by tool_use.id ACROSS all files (a line can be re-logged).
 // `dayCounts` accumulates per-UTC-day counts for `type:"tool_use"` +
 // `name:"Agent"` blocks whose record timestamp falls in [windowStartMs, now].
 async function scanTranscriptFile(file, seenIds, dayCounts, windowStartMs, nowMs) {
-  const rl = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line.includes('"tool_use"') || !line.includes('"name":"Agent"')) continue;
-    let rec;
-    try { rec = JSON.parse(line); } catch { continue; }
-    const content = rec && rec.message && Array.isArray(rec.message.content) ? rec.message.content : null;
+  const prefilter = (line) => line.includes('"tool_use"') && line.includes('"name":"Agent"');
+  for await (const rec of readRecords(file, { prefilter })) {
+    const content = rec.message && Array.isArray(rec.message.content) ? rec.message.content : null;
     if (!content) continue;
     const ts = Date.parse(rec.timestamp);
     if (Number.isNaN(ts) || ts < windowStartMs || ts > nowMs) continue;
@@ -92,7 +72,7 @@ export async function telemetryCoverage({
   const start = Date.now();
   const nowMs = now.getTime();
   const windowStartMs = nowMs - days * 86400000;
-  const root = transcriptsRoot || process.env.AGENT_COMPANION_TRANSCRIPTS_ROOT || join(claudeDir(), 'projects');
+  const root = sharedTranscriptsRoot(transcriptsRoot);
 
   const dayCounts = new Map();
   let truncated = false;
