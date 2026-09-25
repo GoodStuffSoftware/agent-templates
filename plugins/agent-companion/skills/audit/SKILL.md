@@ -72,7 +72,10 @@ you expected to run reports `SKIP`, find out why before concluding anything.
   200-line guidance for `CLAUDE.md`. Every token here is paid on every session.
 - **agent-defs** — sub-agent frontmatter. Flags a missing `model` hardest: an
   omitted model inherits the *lead's* tier, which is the most expensive default
-  available and the mechanism behind unexamined premium fan-out.
+  available and the mechanism behind unexamined premium fan-out. An omitted
+  `effort` likewise inherits the lead's effort; the fix for both is to spawn
+  the ladder agent (`ac-<model>-<effort>`) that
+  `node "$AC/scripts/recommend.mjs" --type <type>` routes to.
 - **harness-drift** — Claude Code version changes and unrecognised agent types.
   A renamed tool or matcher does not error; the guards just stop firing.
 - **guard-canary** — provokes each guard and asserts it responded. This is the

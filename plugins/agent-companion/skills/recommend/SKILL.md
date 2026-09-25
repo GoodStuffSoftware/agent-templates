@@ -98,6 +98,9 @@ someone asks why.
 
 State the recommendation and the rationale it printed. Then:
 
+- **Spawn the ladder agent for it** — `agent-companion:ac-<model>-<effort>`
+  (e.g. `opus/low` → `ac-opus-low`). A bare `model:` with no effort runs at
+  the lead's effort, not the routed one.
 - **If it names a premium tier, the spawn brief needs a `WARRANT:` line** —
   the guard denies premium spawns without one. The script prints the template.
   A warrant you cannot write honestly is a downgrade in disguise; take it.
