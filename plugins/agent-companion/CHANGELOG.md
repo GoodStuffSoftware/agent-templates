@@ -2,6 +2,18 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.2 — 2026-09-25
+
+The `integration` routing trial moves to opus/medium, and a new floor, F6,
+keeps architecture-class task types off opus/low.
+
+### Routing
+- The `integration` trial moves from opus/high to opus/medium, on an operator decision that is reviewed on 2026-09-30. The trial row carries its own F5 waiver, so the elevated-consequence effort floor stays at high for every other route. `large-refactor` and `novel-design` stay at opus/high, and `critical-change` stays at opus/xhigh (F1).
+- A shipped routing-trial row can now carry the same F5 waiver a routing-profile row already could (`waivesFloor: "elevated"` with `source: "operator-observed"`). The waiver covers only that row's task type. `integration` is the only trial row that carries one, and a test pins that.
+- New floor F6: an architecture-class task type (`integration`, `large-refactor`, `novel-design`, `critical-change`) never resolves to opus/low, and no F5 waiver gets around it. At the trial and grid layers F6 raises the effort to medium. A routing-profile row naming opus/low for one of these types is refused by `routing-profile set` and ignored if hand-edited; only that row is skipped, and the rest of the profile still applies.
+- A local task type in a routing profile can set `architectureClass: true` to get the same F6 protection. Any value other than true, false or null makes the type invalid.
+- `docs/ROUTING.md` and the recommend skill's task-type block are regenerated. `docs/ROUTING-RATIONALE.md` now describes F6, trial-row waivers, and why integration sits at medium.
+
 ## 0.29.1 — 2026-09-24
 
 An incident fix for the memory vault, hardening for the spawn guard's locks
