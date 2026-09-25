@@ -169,14 +169,15 @@ export const ALLOWED = {
     "// override, so the canary's LEAK_CHECK_DEV_ROOT (set via sweepOpts.env)",
   ],
   "scripts/lib/cache-ttl.mjs": [
-    "// --- Transcripts root, mirroring lib/coverage.mjs's own override convention -",
-    "export function transcriptsRoot(override) {",
-    "return override || process.env.AGENT_COMPANION_TRANSCRIPTS_ROOT || join(claudeDir(), 'projects');",
+    "// a premium-tier-only pocket of savings that a per-agent override",
+    "+ `clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests with a negative delta to warrant a per-agent override`;",
+  ],
+  // Pricing moved out of lib/cache-ttl.mjs into its own module (shared with
+  // lib/transcripts.mjs's report); the lines are unchanged.
+  "scripts/lib/pricing.mjs": [
     "// override — one changed price does not require restating the table.",
     "try { over = JSON.parse(readFileSync(join(stateRoot(), 'model-pricing.json'), 'utf8')); } catch { /* no override: expected */ }",
     "// at module scope and a test that writes an override needs the next call to",
-    "// a premium-tier-only pocket of savings that a per-agent override",
-    "+ `clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests with a negative delta to warrant a per-agent override`;",
   ],
   "scripts/lib/leak-scan-core.mjs": [
     "// Checked FIRST and OVERRIDES the generic placeholder set — a real handle",

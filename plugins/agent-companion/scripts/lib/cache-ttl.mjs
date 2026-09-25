@@ -61,16 +61,20 @@
 // deliberately asymmetric (harder to recommend "set it" than to recommend
 // "don't"), not symmetric around zero.
 
+import { existsSync } from 'node:fs';
+import { KNOWN_AGENT_TYPES } from '../../hooks/lib/context.mjs';
 import {
-  readFileSync, readdirSync, statSync, createReadStream, existsSync,
-} from 'node:fs';
-import { createInterface } from 'node:readline';
-import { join, dirname, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { claudeDir, stateRoot, KNOWN_AGENT_TYPES } from '../../hooks/lib/context.mjs';
+  transcriptsRoot as sharedTranscriptsRoot, discoverTranscripts, readTranscript, bandFor,
+  percentile, SYNTHETIC_MODEL as SHARED_SYNTHETIC_MODEL, NO_META_AGENT_TYPE as SHARED_NO_META,
+} from './transcripts.mjs';
+import { pricingTable, classifyPricing, _resetPricingCacheForTests } from './pricing.mjs';
 
-export const SYNTHETIC_MODEL = '<synthetic>';
-export const NO_META_AGENT_TYPE = '(no meta)';
+// Pricing moved to lib/pricing.mjs (shared with lib/transcripts.mjs's report);
+// re-exported so this module's public API is unchanged.
+export { pricingTable, classifyPricing, _resetPricingCacheForTests };
+
+export const SYNTHETIC_MODEL = SHARED_SYNTHETIC_MODEL;
+export const NO_META_AGENT_TYPE = SHARED_NO_META;
 
 // --- Verdict thresholds (named constants, not magic numbers) ---------------
 //
@@ -85,53 +89,10 @@ export const DONT_SET_DELTA_PCT = 1.0;
 export const MIN_TIER_SPEND_SHARE_PCT = 5; // a tier must carry this much of total $ spend to veto/confirm the global call
 export const MIN_REQUESTS_FOR_AGENT_ROW = 500; // per-agent-definition recommendation floor
 export const MIN_AGENT_SAVING_PCT = 1.0; // a candidate needs at least this much saving — a -0.24% "saving" is noise, not a reason to edit a definition
-const FIVE_MIN_MS = 5 * 60 * 1000;
-const SIXTY_MIN_MS = 60 * 60 * 1000;
 
-// --- Transcripts root, mirroring lib/coverage.mjs's own override convention -
-export function transcriptsRoot(override) {
-  return override || process.env.AGENT_COMPANION_TRANSCRIPTS_ROOT || join(claudeDir(), 'projects');
-}
-
-// --- Pricing table (data, not code) ----------------------------------------
-
-let _pricing = null;
-export function pricingTable() {
-  if (_pricing) return _pricing;
-  const shipped = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'model-pricing.json');
-  let cfg = { models: {}, defaultReadMultiplier: 0.1, writeMultiplier5m: 1.25, writeMultiplier1h: 2 };
-  try { cfg = JSON.parse(readFileSync(shipped, 'utf8')); } catch { /* use defaults */ }
-  // Same by-alias merge convention as hooks/lib/context.mjs's modelTiers()
-  // override — one changed price does not require restating the table.
-  let over = null;
-  try { over = JSON.parse(readFileSync(join(stateRoot(), 'model-pricing.json'), 'utf8')); } catch { /* no override: expected */ }
-  if (over) cfg = { ...cfg, ...over, models: { ...(cfg.models || {}), ...(over.models || {}) } };
-  _pricing = cfg;
-  return _pricing;
-}
-
-// Reset the cached table — test-only escape hatch, since pricingTable() caches
-// at module scope and a test that writes an override needs the next call to
-// see it rather than a stale in-process cache from an earlier test.
-export function _resetPricingCacheForTests() { _pricing = null; }
-
-// First match wins, in the order the table lists them — put a more specific
-// pattern (opus-5-5) ahead of the pattern it would otherwise also match
-// (opus-5), same convention as classifyModel() in hooks/lib/context.mjs.
-export function classifyPricing(model, cfg = pricingTable()) {
-  const m = String(model || '');
-  for (const [alias, spec] of Object.entries(cfg.models || {})) {
-    if (m && new RegExp(spec.match || alias, 'i').test(m)) {
-      return {
-        alias,
-        in: spec.in,
-        out: spec.out,
-        readMultiplier: spec.readMultiplier ?? cfg.defaultReadMultiplier ?? 0.1,
-        known: true,
-      };
-    }
-  }
-  return { alias: '', in: null, out: null, readMultiplier: null, known: false };
+// --- Transcripts root: one resolver, in lib/transcripts.mjs ----------------
+export function transcriptsRoot(explicit) {
+  return sharedTranscriptsRoot(explicit);
 }
 
 export function breakEvenSharePct(rm) {
@@ -143,17 +104,6 @@ export function clamp(x, lo, hi) {
   return Math.min(hi, Math.max(lo, x));
 }
 
-function percentile(sortedAsc, p) {
-  if (!sortedAsc.length) return null;
-  if (sortedAsc.length === 1) return sortedAsc[0];
-  const idx = (p / 100) * (sortedAsc.length - 1);
-  const lo = Math.floor(idx);
-  const hi = Math.ceil(idx);
-  if (lo === hi) return sortedAsc[lo];
-  const frac = idx - lo;
-  return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * frac;
-}
-
 export function percentiles(values, ps = [10, 50, 90]) {
   const sorted = [...values].sort((a, b) => a - b);
   const out = {};
@@ -161,63 +111,19 @@ export function percentiles(values, ps = [10, 50, 90]) {
   return out;
 }
 
-function bandFor(gapMs) {
-  if (gapMs < FIVE_MIN_MS) return 'lt5';
-  if (gapMs <= SIXTY_MIN_MS) return '5to60';
-  return 'gt60';
-}
-
 // --- File discovery ----------------------------------------------------------
 //
-// One project directory holds main-session .jsonl files directly, and one
-// subdirectory per session id holding that session's subagent transcripts
-// under subagents/agent-<id>.jsonl, each with a sibling
-// agent-<id>.meta.json ({ agentType, model, requestShape }).
+// Main-session files and ordinary subagent transcripts, in the shared
+// reader's walk order. Workflow agents (subagents/workflows/<wf>/) are left
+// out, as they always were here.
 export function discoverFiles(root, { sinceMs = -Infinity, maxFiles = 20000, maxBytes = 4 * 1024 * 1024 * 1024 } = {}) {
+  const { files, truncated } = discoverTranscripts(root, { sinceMs, maxFiles, maxBytes });
   const main = [];
   const subagent = [];
-  let truncated = false;
-  let totalBytes = 0;
-  let projDirs;
-  try {
-    projDirs = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory());
-  } catch {
-    return { main, subagent, truncated };
-  }
-
-  const consider = (file, push, extra) => {
-    let st;
-    try { st = statSync(file); } catch { return; }
-    if (st.mtimeMs < sinceMs) return; // file untouched since the window opened: cannot hold a newer request
-    if (main.length + subagent.length >= maxFiles || totalBytes + st.size > maxBytes) { truncated = true; return; }
-    totalBytes += st.size;
-    push({ path: file, ...extra });
-  };
-
-  for (const proj of projDirs) {
-    const projDir = join(root, proj.name);
-    let entries;
-    try { entries = readdirSync(projDir, { withFileTypes: true }); } catch { continue; }
-    for (const e of entries) {
-      if (e.isFile() && e.name.endsWith('.jsonl')) {
-        consider(join(projDir, e.name), main.push.bind(main), { project: proj.name });
-        continue;
-      }
-      if (!e.isDirectory()) continue;
-      const subDir = join(projDir, e.name, 'subagents');
-      let subEntries;
-      try { subEntries = readdirSync(subDir, { withFileTypes: true }); } catch { continue; }
-      for (const s of subEntries) {
-        if (!s.isFile() || !s.name.endsWith('.jsonl')) continue;
-        const metaPath = join(subDir, s.name.replace(/\.jsonl$/, '.meta.json'));
-        let meta = {};
-        try { meta = JSON.parse(readFileSync(metaPath, 'utf8')); } catch { /* missing/unreadable sidecar: fail open to unknowns */ }
-        consider(join(subDir, s.name), subagent.push.bind(subagent), {
-          project: proj.name,
-          agentType: meta.agentType || NO_META_AGENT_TYPE,
-          declaredModel: meta.model || null,
-        });
-      }
+  for (const f of files) {
+    if (f.kind === 'main') main.push({ path: f.path, project: f.project });
+    else if (f.kind === 'subagent') {
+      subagent.push({ path: f.path, project: f.project, agentType: f.agentType, declaredModel: f.declaredModel });
     }
   }
   return { main, subagent, truncated };
@@ -225,36 +131,37 @@ export function discoverFiles(root, { sinceMs = -Infinity, maxFiles = 20000, max
 
 // --- Per-file request extraction --------------------------------------------
 //
-// Streams one transcript, grouping assistant lines by requestId (falling
-// back to message.id) into REQUESTS, and returns them in file order with
-// gap/band/cause/convertedTokens already computed against the PREVIOUS
-// request in the same file (never across files — a gap only means something
-// within one continuous transcript).
-export async function parseFile(path, { kind, agentType = null } = {}) {
-  let rl;
+// Requests come from lib/transcripts.mjs (its header states the dedup rules:
+// usage is the field-wise max over a request's lines, grouping is file-wide,
+// re-logged lines and cross-file copies are not new requests). This adds the
+// cache-TTL view: gap/band/cause/convertedTokens against the PREVIOUS request
+// in the same file (never across files — a gap only means something within
+// one continuous transcript). `ts` is the request's start (the user record
+// that led to it).
+//
+// `seen` (optional) is a Set shared across files; a request another file
+// already claimed comes back with duplicate: true and must be left out of
+// every total. It is still returned, and still counts as the previous request
+// for the gap of the one after it.
+export async function parseFile(path, { kind, agentType = null, seen = null } = {}) {
+  let result;
   try {
-    rl = createInterface({ input: createReadStream(path, { encoding: 'utf8' }), crlfDelay: Infinity });
+    result = await readTranscript(path, { kind, agentType, seen });
   } catch {
     return [];
   }
-
-  const requests = [];
-  let lastUserRec = null; // { ts, hasToolResult, isMeta, isCompaction }
-  let pendingCompactBoundary = false; // saw a system compact_boundary; the NEXT user line is presumed to be its summary
-  let current = null; // in-progress request accumulator
-  let prevFinalized = null; // previous FINALIZED request, for gap/cause/conv
-
-  function finalizeCurrent() {
-    if (!current) return;
-    const ts = current.startTs;
+  const out = [];
+  let prev = null;
+  for (const r of result.requests) {
+    const ts = r.startTs;
     let gapMs = null;
     let band = null;
     let cause = null;
     let convertedTokens = 0;
-    if (prevFinalized != null && Number.isFinite(ts) && Number.isFinite(prevFinalized.startTs)) {
-      gapMs = ts - prevFinalized.startTs;
+    if (prev != null && Number.isFinite(ts) && Number.isFinite(prev.startTs)) {
+      gapMs = ts - prev.startTs;
       band = bandFor(gapMs);
-      const connUser = current.connectingUser;
+      const connUser = r.connectingUser;
       if (connUser?.isCompaction) {
         // Compaction forces a fresh write no matter what the TTL is set to —
         // the OLD cache is discarded along with the summarised context, not
@@ -266,100 +173,32 @@ export async function parseFile(path, { kind, agentType = null } = {}) {
         cause = { type: 'compaction' };
       } else if (band === '5to60') {
         if (connUser?.hasToolResult) {
-          cause = { type: 'long-tool-call', toolNames: [...prevFinalized.toolUseNames], waitMs: gapMs };
-        } else if (prevFinalized.lastBlockType === 'text' && connUser?.isMeta) {
+          cause = { type: 'long-tool-call', toolNames: [...prev.toolUseNames], waitMs: gapMs };
+        } else if (prev.lastBlockType === 'text' && connUser?.isMeta) {
           cause = { type: 'resume-by-lead' };
         } else {
           cause = { type: 'unknown' };
         }
-        const prevPrefix = prevFinalized.usage.input + prevFinalized.usage.write + prevFinalized.usage.read;
-        convertedTokens = clamp(prevPrefix - current.usage.read, 0, current.usage.write);
+        const prevPrefix = prev.usage.input + prev.usage.cacheWrite + prev.usage.cacheRead;
+        convertedTokens = clamp(prevPrefix - r.usage.cacheRead, 0, r.usage.cacheWrite);
       }
     }
-    requests.push({
+    out.push({
       ts, gapMs, band, cause, convertedTokens,
-      model: current.model, kind, agentType,
-      usage: { ...current.usage },
+      model: r.model, kind, agentType,
+      duplicate: r.duplicate,
+      usage: {
+        input: r.usage.input,
+        write: r.usage.cacheWrite,
+        write5m: r.usage.cacheWrite5m,
+        write1h: r.usage.cacheWrite1h,
+        read: r.usage.cacheRead,
+        output: r.usage.output,
+      },
     });
-    prevFinalized = {
-      startTs: ts,
-      usage: current.usage,
-      toolUseNames: current.toolUseNames,
-      lastBlockType: current.lastBlockType,
-    };
-    current = null;
+    prev = r;
   }
-
-  for await (const line of rl) {
-    if (!line) continue;
-    let rec;
-    try { rec = JSON.parse(line); } catch { continue; }
-
-    // A compact_boundary system record is immediately followed by a
-    // synthetic user record carrying the compaction summary (see
-    // transcript-harvest.mjs, which relies on the same adjacency). Track it
-    // so the NEXT user line is flagged even on the rare chance the harness
-    // ever drops the isCompactSummary flag but keeps the boundary marker —
-    // isCompactSummary on the user record itself is still the primary,
-    // authoritative signal below.
-    if (rec.type === 'system' && rec.subtype === 'compact_boundary') {
-      pendingCompactBoundary = true;
-      continue;
-    }
-
-    if (rec.type === 'user') {
-      const content = rec.message?.content;
-      const hasToolResult = Array.isArray(content) && content.some((b) => b && b.type === 'tool_result');
-      const isCompaction = rec.isCompactSummary === true || pendingCompactBoundary;
-      lastUserRec = { ts: Date.parse(rec.timestamp), hasToolResult, isMeta: rec.isMeta === true, isCompaction };
-      pendingCompactBoundary = false;
-      continue;
-    }
-
-    pendingCompactBoundary = false; // any other intervening line breaks the adjacency
-
-    if (rec.type !== 'assistant') continue;
-    const model = rec.message?.model;
-    if (model === SYNTHETIC_MODEL) continue; // never counted, never starts/ends a request
-
-    const key = rec.requestId || rec.message?.id;
-    if (!key) continue;
-
-    if (!current || current.id !== key) {
-      finalizeCurrent();
-      const startTs = lastUserRec ? lastUserRec.ts : Date.parse(rec.timestamp);
-      current = {
-        id: key,
-        model,
-        startTs,
-        connectingUser: lastUserRec,
-        usage: { input: 0, write: 0, write5m: 0, write1h: 0, read: 0, output: 0 },
-        toolUseNames: new Set(),
-        lastBlockType: null,
-      };
-    }
-
-    const u = rec.message?.usage || {};
-    const write5m = u.cache_creation?.ephemeral_5m_input_tokens ?? 0;
-    const write1h = u.cache_creation?.ephemeral_1h_input_tokens ?? 0;
-    const writeFlat = u.cache_creation_input_tokens;
-    const write = typeof writeFlat === 'number' ? writeFlat : write5m + write1h;
-
-    current.usage.input = Math.max(current.usage.input, u.input_tokens || 0);
-    current.usage.write = Math.max(current.usage.write, write);
-    current.usage.write5m = Math.max(current.usage.write5m, write5m);
-    current.usage.write1h = Math.max(current.usage.write1h, write1h);
-    current.usage.read = Math.max(current.usage.read, u.cache_read_input_tokens || 0);
-    current.usage.output = Math.max(current.usage.output, u.output_tokens || 0);
-
-    const content = rec.message?.content;
-    if (Array.isArray(content)) {
-      for (const b of content) if (b && b.type === 'tool_use' && b.name) current.toolUseNames.add(b.name);
-      if (content.length) current.lastBlockType = content[content.length - 1]?.type || current.lastBlockType;
-    }
-  }
-  finalizeCurrent();
-  return requests;
+  return out;
 }
 
 // --- Cost math ---------------------------------------------------------------
@@ -502,6 +341,7 @@ export async function computeCacheTtl({
   transcriptsRoot: root,
   maxFiles = 20000,
   maxBytes = 4 * 1024 * 1024 * 1024,
+  crossFileDedup = true,
 } = {}) {
   const nowMs = now.getTime();
   const windowStartMs = nowMs - days * 86400000;
@@ -526,12 +366,18 @@ export async function computeCacheTtl({
   const toolNameCounts = new Map();
   let subagentWrite1hTotal = 0;
   let subagentRequestsScanned = 0;
+  // A resumed or forked transcript carries copies of requests another file
+  // already holds (lib/transcripts.mjs, rule D4). Summing per file counted
+  // each copy again; one Set across every file counts each request once.
+  const seen = crossFileDedup ? new Set() : null;
+  let crossFileDuplicatesSkipped = 0;
 
   for (const f of subagent) {
     let reqs;
-    try { reqs = await parseFile(f.path, { kind: 'subagent', agentType: f.agentType }); } catch { continue; }
+    try { reqs = await parseFile(f.path, { kind: 'subagent', agentType: f.agentType, seen }); } catch { continue; }
     for (const r of reqs) {
       if (!Number.isFinite(r.ts) || r.ts < windowStartMs || r.ts > nowMs) continue;
+      if (r.duplicate) { crossFileDuplicatesSkipped += 1; continue; }
       subagentRequestsScanned += 1;
 
       const cls = classifyPricing(r.model, price);
@@ -584,9 +430,10 @@ export async function computeCacheTtl({
   let mainRequestsScanned = 0;
   for (const f of main) {
     let reqs;
-    try { reqs = await parseFile(f.path, { kind: 'main', agentType: null }); } catch { continue; }
+    try { reqs = await parseFile(f.path, { kind: 'main', agentType: null, seen }); } catch { continue; }
     for (const r of reqs) {
       if (!Number.isFinite(r.ts) || r.ts < windowStartMs || r.ts > nowMs) continue;
+      if (r.duplicate) { crossFileDuplicatesSkipped += 1; continue; }
       mainRequestsScanned += 1;
       mainWrite5m += r.usage.write5m;
       mainWrite1h += r.usage.write1h;
@@ -653,6 +500,7 @@ export async function computeCacheTtl({
     truncated,
     subagentRequestsScanned,
     mainRequestsScanned,
+    crossFileDuplicatesSkipped,
     totals: {
       requests: grand.requests,
       band560Requests: grand.band560,
