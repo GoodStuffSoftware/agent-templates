@@ -382,6 +382,44 @@ test('an existing vault WITHOUT `* -text` stores the same bytes as 0.29.1 did un
   }
 });
 
+// 0.29.2 round 3: GIT_ATTR_SOURCE (git 2.40+) makes git read .gitattributes
+// from the tree it names instead of the work tree. Inherited and naming the
+// empty tree, it hid the vault's `* -text`, and the operator's autocrlf=true
+// then stored a CRLF memory file as LF. Vault git calls now drop it.
+test('a CRLF memory file round-trips byte for byte when a hostile GIT_ATTR_SOURCE is inherited', () => {
+  const fx = makeFixture();
+  try {
+    // The empty tree's id, from git itself (the vault uses git's default object format).
+    const EMPTY_TREE = execFileSync('git', ['hash-object', '-t', 'tree', '--stdin'],
+      { input: '', cwd: fx.dir, encoding: 'utf8', windowsHide: true, env: cleanGitEnv() }).trim();
+    const opEnv = operatorAutocrlfEnv(fx.dir);
+    const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index\n', ...LINE_ENDING_FILES } });
+    const hostile = process.platform === 'win32' ? { git_attr_source: EMPTY_TREE } : { GIT_ATTR_SOURCE: EMPTY_TREE };
+    const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', ...opEnv, ...hostile };
+    const r = runScript(SCRIPT, ['sync', '--json'], { env });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json?.committed, true, r.stdout);
+    const vault = vaultPathFor(fx.stateDir);
+    const opGitEnv = { ...cleanGitEnv(), ...opEnv };
+    for (const k of Object.keys(opGitEnv)) if (opGitEnv[k] === undefined) delete opGitEnv[k];
+    let control = 0;
+    for (const [name, body] of Object.entries(LINE_ENDING_FILES)) {
+      const rel = `projects/proj-a/memory/${name}`;
+      const blob = execFileSync('git', ['-C', vault, 'show', `HEAD:${rel}`], { encoding: 'buffer', windowsHide: true, env: cleanGitEnv() });
+      assert.equal(sha256(blob), sha256(Buffer.from(body, 'utf8')), `${name}: committed blob`);
+      // CONTROL: the variable reaches git and changes what it stores: plain
+      // git under the operator's config, with it, would convert this file.
+      const src = join(corpus, 'proj-a', 'memory', name);
+      const plain = git(vault, ['hash-object', `--path=${rel}`, src], { env: opGitEnv }).trim();
+      const attr = git(vault, ['hash-object', `--path=${rel}`, src], { env: { ...opGitEnv, GIT_ATTR_SOURCE: EMPTY_TREE } }).trim();
+      if (plain !== attr) control += 1;
+    }
+    assert.ok(control >= 1, 'the fixture must include a file GIT_ATTR_SOURCE makes git convert, or this proves nothing');
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test('if the operator\'s config cannot be read, a vault without `* -text` refuses to commit; a byte-exact vault carries on', () => {
   const fx = makeFixture();
   try {

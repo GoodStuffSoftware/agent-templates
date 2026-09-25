@@ -1021,14 +1021,43 @@ test('S2: hooks, fsmonitor and signing set in the vault\'s own .git/config do no
   }
 });
 
+// Git for Windows opens the file GIT_REDIRECT_STDOUT / GIT_REDIRECT_STDERR
+// names as git's own stdout / stderr. Inherited, it made every vault git
+// call write its output to that file, outside the vault, and the vault read
+// nothing back.
+test('S2: an inherited GIT_REDIRECT_STDOUT/STDERR reaches no git call made by init, sync or status', {
+  skip: process.platform !== 'win32' && 'GIT_REDIRECT_* is a Git for Windows variable',
+}, () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const out = join(fx.dir, 'redirected-stdout');
+    const err = join(fx.dir, 'redirected-stderr');
+    // CONTROL: the variable does reach a plain git child here.
+    const probe = join(fx.dir, 'probe-stdout');
+    spawnSync('git', ['--version'], { windowsHide: true, env: { ...cleanGitEnv(), GIT_REDIRECT_STDOUT: probe } });
+    assert.ok(existsSync(probe), 'control: this git honours GIT_REDIRECT_STDOUT');
+    const env = vaultEnvFor(corpus, { git_redirect_stdout: out, GIT_REDIRECT_STDERR: err });
+    for (const cmd of ['init', 'sync', 'status']) {
+      const res = runScript(SCRIPT, [cmd, '--json'], { cwd: fx.dir, env, timeout: 60000 });
+      assert.equal(res.status, 0, `${cmd}: ${res.stderr}`);
+    }
+    assert.ok(!existsSync(out) && !existsSync(err), 'a git child wrote its output to the inherited redirect file');
+    assert.equal(git(['-C', join(fx.stateDir, 'memory-vault'), 'show', 'HEAD:projects/proj-a/memory/MEMORY.md']), '# index');
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test('S2: vaultGitEnv is hermetic: config files, HOME and XDG_CONFIG_HOME pinned, every spelling replaced, identity dropped', () => {
   const env = {
     PATH: '/bin', GIT_CONFIG_GLOBAL: '/g', git_config_system: '/s', GIT_CONFIG_NOSYSTEM: '0', Home: '/h', HOME: '/h',
     xdg_config_home: '/x', GIT_ATTR_NOSYSTEM: '0', GIT_AUTHOR_NAME: 'x', GIT_CONFIG_PARAMETERS: "'a.b'='c'", EMAIL: 'e@example.invalid',
+    Git_Attr_Source: 'hostile-tree', git_redirect_stdout: '/o', GIT_REDIRECT_STDERR: '/e',
   };
   const out = vaultGitEnv(env);
   assert.deepEqual(
-    Object.keys(out).filter((k) => /^(git_config|git_attr|home$|xdg_config_home$)/i.test(k)).sort(),
+    Object.keys(out).filter((k) => /^(git_config|git_attr|git_redirect|home$|xdg_config_home$)/i.test(k)).sort(),
     ['GIT_ATTR_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_SYSTEM', 'HOME', 'XDG_CONFIG_HOME'],
   );
   for (const k of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'HOME', 'XDG_CONFIG_HOME']) assert.equal(out[k], NULL_DEVICE, k);
@@ -1066,13 +1095,15 @@ test('S3: carriedConfigArgs passes the effective line-ending settings and protec
     { scope: 'system', key: 'core.autocrlf', value: 'true' },
     { scope: 'global', key: 'core.autocrlf', value: 'input' },
     { scope: 'system', key: 'safe.directory', value: '/srv/a' },
+    { scope: 'global', key: 'safe.directory', value: null },
     { scope: 'global', key: 'safe.directory', value: '*' },
     { scope: 'local', key: 'safe.directory', value: '/ignored-by-git-from-local-scope' },
     { scope: 'local', key: 'core.eol', value: null },
     { scope: 'global', key: 'user.email', value: 'op@example.invalid' },
   ];
+  // In order; a key with no value (git: empty the list so far) keeps no value.
   assert.deepEqual(carriedConfigArgs(entries), [
-    '-c', 'safe.directory=/srv/a', '-c', 'safe.directory=*',
+    '-c', 'safe.directory=/srv/a', '-c', 'safe.directory', '-c', 'safe.directory=*',
     '-c', 'core.autocrlf=input', '-c', 'core.eol',
   ]);
   assert.deepEqual(carriedConfigArgs([]), []);

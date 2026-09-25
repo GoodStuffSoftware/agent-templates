@@ -144,7 +144,28 @@ export function isolatedGitEnv(env = process.env, overrides = {}) {
 // Every case spelling of those names is removed first (Windows env names
 // are case-insensitive). The repository's own .git/config is still read, and
 // `-c` on the command line still applies.
+//
+// Four more variables are removed and not replaced (REDIRECTING_GIT_VARS):
+//   GIT_ATTR_SOURCE      git (2.40+) reads .gitattributes from the tree it
+//                        names instead of the work tree and index. The empty
+//                        tree hid the vault's `* -text`, so autocrlf=true
+//                        stored a CRLF memory file as LF.
+//   GIT_REDIRECT_STDIN, GIT_REDIRECT_STDOUT, GIT_REDIRECT_STDERR
+//                        Git for Windows opens the file each one names as
+//                        that stream. An inherited GIT_REDIRECT_STDOUT made
+//                        every git child write its output to a file outside
+//                        the repository, and the caller read nothing.
 export const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
+
+export const REDIRECTING_GIT_VARS = Object.freeze([
+  'GIT_ATTR_SOURCE', 'GIT_REDIRECT_STDIN', 'GIT_REDIRECT_STDOUT', 'GIT_REDIRECT_STDERR',
+]);
+
+const REDIRECTING = new Set(REDIRECTING_GIT_VARS);
+
+export function isRedirectingGitVar(name) {
+  return REDIRECTING.has(String(name).toUpperCase());
+}
 
 export const HERMETIC_GIT_ENV = Object.freeze({
   GIT_CONFIG_GLOBAL: NULL_DEVICE,
@@ -163,7 +184,7 @@ export function isHermeticGitVar(name) {
 
 export function hermeticGitEnv(env = process.env) {
   const out = isolatedGitEnv(env);
-  for (const k of Object.keys(out)) if (isHermeticGitVar(k)) delete out[k];
+  for (const k of Object.keys(out)) if (isHermeticGitVar(k) || isRedirectingGitVar(k)) delete out[k];
   return Object.assign(out, HERMETIC_GIT_ENV);
 }
 
@@ -216,7 +237,14 @@ export function samePath(a, b) {
 //   2. `git rev-parse --absolute-git-dir` from the nearest EXISTING ancestor,
 //      with the cleaned env — git's own discovery, which also covers
 //      layouts the walk does not model. git missing is not a failure: the
-//      walk's answer stands.
+//      walk's answer stands. GIT_REDIRECT_* are removed too: its answer is
+//      read from stdout, and it writes nowhere else.
+function withoutRedirects(env) {
+  const out = { ...env };
+  for (const k of Object.keys(out)) if (isRedirectingGitVar(k)) delete out[k];
+  return out;
+}
+
 export function enclosingGitRepo(target) {
   const start = resolve(String(target));
   let nearestExisting = null;
@@ -229,15 +257,16 @@ export function enclosingGitRepo(target) {
     if (up === a) break;
   }
   if (nearestExisting) {
+    const env = withoutRedirects(process.env);
     try {
       const gitDir = gitClean(['-C', nearestExisting, 'rev-parse', '--absolute-git-dir'], {
-        stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000,
+        stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000, env,
       }).trim();
       if (gitDir) {
         let top = '';
         try {
           top = gitClean(['-C', nearestExisting, 'rev-parse', '--show-toplevel'], {
-            stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000,
+            stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000, env,
           }).trim();
         } catch { /* inside a git dir, not a work tree: --show-toplevel fails */ }
         return top
