@@ -2,6 +2,14 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.3 — 2026-09-25
+
+Skills stop hard-coding routing answers and point at the routing config and
+the `ac-*` ladder agents instead.
+
+### Skills
+- evaluate, recommend (prose), calibration-scout and audit now take tiers, models and effort from the routing config (`config/model-tiers.json` via `recommend.mjs`) instead of hard-coding them, and tell you to spawn the matching ladder agent (`agent-companion:ac-<model>-<effort>`) so the routed effort is pinned rather than inherited from the lead. evaluate now always passes `--effort`, and notes that the spawn guard's autofill sets the model only. calibration-scout no longer lists the eval suite's expected routes. evaluate notes that `haiku` retires on 2026-10-15.
+
 ## 0.29.2 — 2026-09-25
 
 The `integration` routing trial moves to opus/medium, and a new floor, F6,
