@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { makeFixture } from './helpers.mjs';
 import {
   REPO_LOCATING_GIT_VARS, isRepoLocatingGitVar, cleanGitEnv, gitClean, enclosingGitRepo, samePath,
-  isolatedGitEnv, isConfigInjectionGitVar, isIdentityGitVar, isolatedWriteGitEnv, isConfigFileRedirectGitVar,
+  isolatedGitEnv, isConfigInjectionGitVar, isIdentityGitVar, hermeticGitEnv, isHermeticGitVar, NULL_DEVICE, HERMETIC_GIT_ENV,
 } from '../scripts/lib/git-env.mjs';
 
 function git(args, cwd) {
@@ -116,33 +116,74 @@ test('isIdentityGitVar names exactly the author/committer name, email and date v
   assert.equal(isolatedGitEnv({ GIT_AUTHOR_DATE: 'x' }).GIT_AUTHOR_DATE, 'x');
 });
 
-// 0.29.2: GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM name whole config files, so an
-// inherited one could inject any setting into a vault write.
-test('isolatedWriteGitEnv also drops GIT_CONFIG_GLOBAL/SYSTEM, in any case; isolatedGitEnv still keeps them', () => {
+// 0.29.2: git finds global and system config through GIT_CONFIG_GLOBAL,
+// GIT_CONFIG_SYSTEM, HOME and XDG_CONFIG_HOME, so any of them could inject a
+// setting into a vault call. hermeticGitEnv() pins all of them.
+test('hermeticGitEnv pins every config-file route to the null device, in any case; isolatedGitEnv still keeps them', () => {
   const input = {
     PATH: '/bin',
     GIT_DIR: '/elsewhere/.git',
     GIT_CONFIG_PARAMETERS: "'core.hooksPath'='/elsewhere/hooks'",
     GIT_CONFIG_GLOBAL: '/hostile/global',
     git_config_system: '/hostile/system',
-    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_NOSYSTEM: '0',
+    Home: '/hostile/home',
+    xdg_config_home: '/hostile/xdg',
     GIT_AUTHOR_NAME: 'a',
     GIT_SSH_COMMAND: 'ssh',
   };
   const snapshot = { ...input };
-  const out = isolatedWriteGitEnv(input);
+  const out = hermeticGitEnv(input);
   assert.deepEqual(input, snapshot, 'the input object must not be mutated');
-  assert.deepEqual(Object.keys(out).sort(), ['GIT_AUTHOR_NAME', 'GIT_CONFIG_NOSYSTEM', 'GIT_SSH_COMMAND', 'PATH']);
-  for (const k of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'Git_Config_Global', 'git_config_system']) {
-    assert.equal(isConfigFileRedirectGitVar(k), true, k);
+  assert.deepEqual(Object.keys(out).sort(), [
+    'GIT_ATTR_NOSYSTEM', 'GIT_AUTHOR_NAME', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_SYSTEM',
+    'GIT_SSH_COMMAND', 'HOME', 'PATH', 'XDG_CONFIG_HOME',
+  ]);
+  assert.deepEqual({
+    GIT_CONFIG_GLOBAL: out.GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM: out.GIT_CONFIG_SYSTEM,
+    GIT_CONFIG_NOSYSTEM: out.GIT_CONFIG_NOSYSTEM, GIT_ATTR_NOSYSTEM: out.GIT_ATTR_NOSYSTEM,
+    HOME: out.HOME, XDG_CONFIG_HOME: out.XDG_CONFIG_HOME,
+  }, HERMETIC_GIT_ENV);
+  assert.equal(NULL_DEVICE, process.platform === 'win32' ? 'NUL' : '/dev/null');
+  for (const k of ['GIT_CONFIG_GLOBAL', 'git_config_system', 'GIT_CONFIG_NOSYSTEM', 'Git_Attr_NoSystem', 'home', 'XDG_CONFIG_HOME']) {
+    assert.equal(isHermeticGitVar(k), true, k);
   }
-  for (const k of ['GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_GLOBALX']) {
-    assert.equal(isConfigFileRedirectGitVar(k), false, k);
+  for (const k of ['GIT_CONFIG', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_GLOBALX', 'HOMEDRIVE', 'USERPROFILE', 'XDG_DATA_HOME']) {
+    assert.equal(isHermeticGitVar(k), false, k);
   }
-  // Read paths are unchanged.
-  const read = isolatedGitEnv(input);
-  assert.equal(read.GIT_CONFIG_GLOBAL, '/hostile/global');
-  assert.equal(read.git_config_system, '/hostile/system');
+  // Other callers are unchanged.
+  const other = isolatedGitEnv(input);
+  assert.equal(other.GIT_CONFIG_GLOBAL, '/hostile/global');
+  assert.equal(other.git_config_system, '/hostile/system');
+  assert.equal(other.Home, '/hostile/home');
+});
+
+test('git under hermeticGitEnv reads no global config, whether named by GIT_CONFIG_GLOBAL, HOME or XDG_CONFIG_HOME', () => {
+  const fx = makeFixture();
+  try {
+    const repo = join(fx.dir, 'repo');
+    mkdirSync(repo, { recursive: true });
+    git(['init', '-q', repo]);
+    const cfg = '[user]\n\tname = FROM-OUTSIDE\n';
+    const file = join(fx.dir, 'g.gitconfig');
+    writeFileSync(file, cfg);
+    const home = join(fx.dir, 'home');
+    mkdirSync(join(home, 'git'), { recursive: true });
+    writeFileSync(join(home, '.gitconfig'), cfg);
+    writeFileSync(join(home, 'git', 'config'), cfg);
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: file, GIT_CONFIG_SYSTEM: file, HOME: home, XDG_CONFIG_HOME: home };
+    const plain = spawnSync('git', ['-C', repo, 'config', '--get', 'user.name'], { encoding: 'utf8', windowsHide: true, env: isolatedGitEnv(env) });
+    assert.equal(plain.stdout.trim(), 'FROM-OUTSIDE', 'control: without the hermetic env the setting is read');
+    for (const route of [{ GIT_CONFIG_GLOBAL: file }, { GIT_CONFIG_SYSTEM: file }, { HOME: home }, { XDG_CONFIG_HOME: home }]) {
+      const r = spawnSync('git', ['-C', repo, 'config', '--show-origin', '--list'],
+        { encoding: 'utf8', windowsHide: true, env: hermeticGitEnv({ ...process.env, ...route }) });
+      assert.equal(r.status, 0, r.stderr);
+      assert.doesNotMatch(r.stdout, /FROM-OUTSIDE/, JSON.stringify(Object.keys(route)));
+      assert.doesNotMatch(r.stdout, /^file:(?!\.git\/config)/m, 'only the repository\'s own config is read');
+    }
+  } finally {
+    fx.cleanup();
+  }
 });
 
 test('cleanGitEnv defaults to process.env and returns a copy', () => {
