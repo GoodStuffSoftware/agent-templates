@@ -50,21 +50,61 @@ import {
   readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claudeDir, modelTiers } from '../hooks/lib/context.mjs';
 
-const argv = process.argv.slice(2);
-const has = (n) => argv.includes(n);
-const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
+// Strict argument parsing: an unknown flag, or an --agents-dir with no value
+// (or with another flag where its value should be), is an error. A loose
+// parser once took `--agents-dir --yes` as a folder named "--yes" and still
+// honoured --yes, writing the ladder there.
+function usageError(msg) {
+  console.error(`install-ladder-agents: ${msg}`);
+  console.error('usage: install-ladder-agents.mjs [--uninstall] [--yes | --dry-run] [--agents-dir <path>]');
+  process.exit(2);
+}
+function parseArgs(args) {
+  const out = { yes: false, uninstall: false, dryRun: false, agentsDir: null };
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a === '--yes') out.yes = true;
+    else if (a === '--uninstall') out.uninstall = true;
+    else if (a === '--dry-run') out.dryRun = true;
+    else if (a === '--agents-dir' || a.startsWith('--agents-dir=')) {
+      if (out.agentsDir !== null) usageError('--agents-dir given more than once');
+      const v = a.includes('=') ? a.slice(a.indexOf('=') + 1) : args[i + 1];
+      if (!a.includes('=')) i += 1;
+      if (typeof v !== 'string' || !v.trim() || v.startsWith('-')) usageError('--agents-dir needs a path value');
+      out.agentsDir = v;
+    } else usageError(`unknown argument "${a}"`);
+  }
+  if (out.yes && out.dryRun) usageError('--yes and --dry-run contradict each other');
+  return out;
+}
+const ARGS = parseArgs(process.argv.slice(2));
+// How many files an install run had written when it stopped (the catch at
+// the bottom reports it; a failure part-way must not claim nothing changed).
+const WRITE_STATE = { writtenCount: 0 };
 
-const YES = has('--yes');
-const UNINSTALL = has('--uninstall');
+const YES = ARGS.yes && !ARGS.dryRun;
+const UNINSTALL = ARGS.uninstall;
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sourceAgentsDir = join(pluginRoot, 'agents');
-const targetAgentsDir = val('--agents-dir') || join(claudeDir(), 'agents');
+const targetAgentsDir = resolve(ARGS.agentsDir || join(claudeDir(), 'agents'));
 const manifestPath = join(targetAgentsDir, '.agent-companion-ladder-manifest.json');
+
+// A manifest key is trusted only when it is a plain ladder-shaped file name
+// that lands directly inside the agents dir: no "..", no separator, not
+// absolute. The manifest is a file on disk that anything can edit, so an
+// entry like "../settings.json" with a matching hash must never become a
+// delete outside the agents dir.
+function safeManifestName(file) {
+  if (typeof file !== 'string' || !file) return false;
+  if (file.includes('/') || file.includes('\\') || file.includes('..') || isAbsolute(file)) return false;
+  if (basename(file) !== file || !/^ac-[A-Za-z0-9._-]+\.md$/.test(file)) return false;
+  return dirname(resolve(targetAgentsDir, file)) === targetAgentsDir;
+}
 
 function sha256(text) {
   return createHash('sha256').update(text).digest('hex');
@@ -94,7 +134,7 @@ function ladderFiles() {
     console.error(`install-ladder-agents: config/model-tiers.json unreadable: ${e.message}`);
     process.exit(1);
   }
-  return (Array.isArray(cfg.ladder) ? cfg.ladder : []).map((r) => `${r.agent}.md`);
+  return (Array.isArray(cfg.ladder) ? cfg.ladder : []).map((r) => `${r?.agent}.md`).filter(safeManifestName);
 }
 
 // One of: 'create' (target absent), 'update' (target present, manifest hash
@@ -144,6 +184,11 @@ try {
     console.log('install-ladder-agents --uninstall: plan');
     const removable = [];
     for (const [file, rec] of entries) {
+      if (!safeManifestName(file)) {
+        console.log(`  ${JSON.stringify(file)}: REFUSED (not a plain ac-*.md name inside ${targetAgentsDir} — never touched)`);
+        continue;
+      }
+      if (!rec || typeof rec.sha256 !== 'string') { console.log(`  ${file}: SKIP (manifest entry has no hash)`); continue; }
       const dest = join(targetAgentsDir, file);
       if (!existsSync(dest)) { console.log(`  ${file}: already absent`); continue; }
       const current = readFileSync(dest, 'utf8');
@@ -192,16 +237,26 @@ try {
   mkdirSync(targetAgentsDir, { recursive: true });
   const version = readPluginVersion();
   const nextManifest = { ...manifest };
-  for (const p of toWrite) {
-    writeFileSync(join(targetAgentsDir, p.file), p.src);
-    nextManifest[p.file] = { sha256: p.srcHash, installedAt: new Date().toISOString(), sourceVersion: version };
+  const written = [];
+  try {
+    for (const p of toWrite) {
+      writeFileSync(join(targetAgentsDir, p.file), p.src);
+      written.push(p.file);
+      WRITE_STATE.writtenCount = written.length;
+      nextManifest[p.file] = { sha256: p.srcHash, installedAt: new Date().toISOString(), sourceVersion: version };
+    }
+  } finally {
+    // Whatever was written is recorded, even when a later write failed, so
+    // update and uninstall still recognise those files as this script's own.
+    if (written.length) writeFileSync(manifestPath, JSON.stringify(nextManifest, null, 2));
   }
-  writeFileSync(manifestPath, JSON.stringify(nextManifest, null, 2));
   console.log(`\ninstall-ladder-agents: wrote ${toWrite.length} file(s) to ${targetAgentsDir}.`);
-  console.log('Registration mid-session is UNVERIFIED — spawn agent-companion:ac-opus-low (or the bare ac-opus-low)');
-  console.log('as a trivial check; start a fresh session if it does not resolve.');
+  console.log('Registration mid-session is UNVERIFIED. A user-level copy registers under its BARE name, so check it');
+  console.log('with a trivial spawn of the bare ac-opus-low (agent-companion:ac-opus-low exercises the plugin copy');
+  console.log('instead); start a fresh session if it does not resolve.');
   process.exit(0);
 } catch (e) {
-  console.error(`install-ladder-agents: aborted, nothing written (${e.message})`);
+  console.error(`install-ladder-agents: aborted (${e.message}).` +
+    (WRITE_STATE.writtenCount ? ` ${WRITE_STATE.writtenCount} file(s) were written before the failure and are recorded in the manifest.` : ' Nothing was written.'));
   process.exit(1);
 }

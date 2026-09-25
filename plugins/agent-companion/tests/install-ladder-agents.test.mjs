@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { runScript, PLUGIN_ROOT } from './helpers.mjs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 
 function tempAgentsDir() {
   return mkdtempSync(join(tmpdir(), 'ac-ladder-agents-'));
@@ -109,6 +110,83 @@ test('--uninstall without --yes only plans, and with --yes removes only manifest
     assert.equal(applyRes.status, 0, applyRes.stderr);
     assert.equal(existsSync(join(dir, 'ac-opus-low.md')), false);
     assert.ok(existsSync(join(dir, 'ac-haiku.md')), 'hand-edited file must survive uninstall');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Round 2 hardening -----------------------------------------------------
+
+test('uninstall refuses manifest entries that are not plain ac-*.md names inside the agents dir, even with matching hashes', () => {
+  const root = tempAgentsDir();
+  try {
+    const agentsDir = join(root, 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    const victims = {
+      '../settings.json': join(root, 'settings.json'),
+      'sub/ac-x.md': join(agentsDir, 'sub', 'ac-x.md'),
+      'notes.md': join(agentsDir, 'notes.md'),
+    };
+    mkdirSync(join(agentsDir, 'sub'), { recursive: true });
+    const manifest = {};
+    for (const [key, file] of Object.entries(victims)) {
+      writeFileSync(file, `content of ${key}`);
+      manifest[key] = { sha256: createHash('sha256').update(`content of ${key}`).digest('hex') };
+    }
+    const abs = join(root, 'abs-victim.md');
+    writeFileSync(abs, 'abs');
+    manifest[abs] = { sha256: createHash('sha256').update('abs').digest('hex') };
+    writeFileSync(join(agentsDir, '.agent-companion-ladder-manifest.json'), JSON.stringify(manifest));
+
+    const res = runScript('scripts/install-ladder-agents.mjs', ['--uninstall', '--yes', '--agents-dir', agentsDir]);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /REFUSED/);
+    for (const file of [...Object.values(victims), abs]) assert.ok(existsSync(file), `must survive: ${file}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('uninstall deletes only manifest-named files whose hash still matches', () => {
+  const dir = tempAgentsDir();
+  try {
+    assert.equal(runScript('scripts/install-ladder-agents.mjs', ['--agents-dir', dir, '--yes']).status, 0);
+    writeFileSync(join(dir, 'ac-opus-high.md'), 'hand edited\n');
+    writeFileSync(join(dir, 'my-agent.md'), 'mine\n'); // never in the manifest
+    const res = runScript('scripts/install-ladder-agents.mjs', ['--uninstall', '--yes', '--agents-dir', dir]);
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(existsSync(join(dir, 'ac-opus-low.md')), false);
+    assert.equal(readFileSync(join(dir, 'ac-opus-high.md'), 'utf8'), 'hand edited\n');
+    assert.ok(existsSync(join(dir, 'my-agent.md')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('argument parsing: --agents-dir followed by a flag, a dangling --agents-dir, and unknown flags are errors that write nothing', () => {
+  const cwd = tempAgentsDir();
+  try {
+    for (const args of [['--agents-dir', '--yes'], ['--yes', '--agents-dir'], ['--agents-dir=', '--yes'], ['--yse'], ['--yes', '--dry-run']]) {
+      // HOME redirected too: a parse bug must never reach the real ~/.claude/agents.
+      const res = runScript('scripts/install-ladder-agents.mjs', args, { cwd, env: { AGENT_COMPANION_HOME_OVERRIDE: cwd, CLAUDE_CONFIG_DIR: '' } });
+      assert.equal(res.status, 2, `${args.join(' ')}: ${res.stdout}${res.stderr}`);
+      assert.match(res.stderr, /usage:/);
+    }
+    assert.equal(existsSync(join(cwd, '--yes')), false, 'no folder named "--yes"');
+    assert.equal(existsSync(join(cwd, 'ac-opus-low.md')), false);
+    assert.equal(existsSync(join(cwd, '.claude', 'agents')), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('--agents-dir=<path> is accepted as well as --agents-dir <path>', () => {
+  const dir = tempAgentsDir();
+  try {
+    const res = runScript('scripts/install-ladder-agents.mjs', [`--agents-dir=${dir}`, '--yes']);
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(existsSync(join(dir, 'ac-opus-low.md')));
+    assert.match(res.stdout, /bare ac-opus-low/); // a user-level copy registers under its bare name
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

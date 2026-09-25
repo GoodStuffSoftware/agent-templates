@@ -155,8 +155,6 @@ export const ALLOWED = {
     "// A taskType's `override` (config/model-tiers.json's routing trial: a",
     "// date. Past that date the override is still live and still routing spawns —",
     "// taskTypes.<type>.override — so a trial that stops winning (skipped by a",
-    "// AGENT_COMPANION_HOME_OVERRIDE entirely, so a test (or this script's own",
-    "// even with the override set. claudeDir() honours the override like every",
     "// actually worked in. AGENT_COMPANION_DISCOVERY_CLAUDE_JSON overrides the",
     "// through homeRoot(); AGENT_COMPANION_DISCOVERY_DEV_ROOT overrides them",
     "const devRootOverride = process.env.AGENT_COMPANION_DISCOVERY_DEV_ROOT;",

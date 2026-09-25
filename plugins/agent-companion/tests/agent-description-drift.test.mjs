@@ -81,10 +81,126 @@ test('--sync-agent-descriptions rewrites a drifted description in place, preserv
   }
 });
 
-test('a rung with NO current default task type gets the "not currently the default" suffix, not a false claim', () => {
-  // ac-sonnet-medium (rung 3) has no taskType currently overriding to it
-  // under trial v2 — proves the generator does not invent usage that is not
-  // actually true right now.
-  const res = runScript('scripts/routing-table.mjs', ['--check-agent-descriptions']);
-  assert.equal(res.status, 0, res.stdout + res.stderr);
+// --- Coverage is driven by config/model-tiers.json (round 2) ---------------
+// Each mutation below must FAIL the check. A per-machine model-tiers.json
+// override in the fixture's state root replaces the `ladder` wholesale, and
+// AGENT_COMPANION_AGENTS_DIR_OVERRIDE points at a fixture copy of agents/.
+
+function shippedLadder() {
+  return JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8')).ladder;
+}
+function writeLadderOverride(stateDir, ladder) {
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, 'model-tiers.json'), JSON.stringify({ ladder }));
+}
+function check(agentsDir) {
+  return runScript('scripts/routing-table.mjs', ['--check-agent-descriptions'], {
+    env: { AGENT_COMPANION_AGENTS_DIR_OVERRIDE: agentsDir },
+  });
+}
+
+test('mutation: adding a rung to config fails the check (no file for it, and every "/N" count is now wrong)', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    writeLadderOverride(stateDir, [...shippedLadder(), { rung: 11, model: 'opus', effort: 'max', agent: 'ac-opus-extra', role: 'a new rung' }]);
+    const res = check(agentsDir);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ac-opus-extra \[missing-file\]/);
+    assert.match(res.stderr, /Rung 6\/11/); // counts come from ladder.length, not a literal 10
+  } finally {
+    cleanup();
+  }
+});
+
+test('mutation: a rung with no role text in config fails the check (never a silent skip)', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-sonnet-high' ? { ...r, role: undefined } : r)));
+    const res = check(agentsDir);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ac-sonnet-high \[no-role\]/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('mutation: renaming a rung in config fails the check (the new name has no file, the old file is no longer a rung)', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-opus-low' ? { ...r, agent: 'ac-opus-small' } : r)));
+    const res = check(agentsDir);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ac-opus-small \[missing-file\]/);
+    assert.match(res.stderr, /ac-opus-low \[not-a-rung\]/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('mutation: a false claim in a description fails the check, including ac-haiku\'s', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    const haiku = join(agentsDir, 'ac-haiku.md');
+    writeFileSync(haiku, readFileSync(haiku, 'utf8').replace(/^description:.*$/m, 'description: "Rung 1/10: the default routing for every task type."'));
+    const med = join(agentsDir, 'ac-sonnet-medium.md');
+    writeFileSync(med, readFileSync(med, 'utf8').replace(/^description:.*$/m, 'description: "Rung 3/10: bounded multi-step work against a clear spec (1-3 files, known shape). Currently the default routing for: explore."'));
+    const res = check(agentsDir);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ac-haiku \[drift\]/);
+    assert.match(res.stderr, /ac-sonnet-medium \[drift\]/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('mutation: a file whose name: is not its rung fails the check', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    const f = join(agentsDir, 'ac-opus-max.md');
+    writeFileSync(f, readFileSync(f, 'utf8').replace(/^name:.*$/m, 'name: ac-opus-maximum'));
+    const res = check(agentsDir);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ac-opus-max \[name-mismatch\]/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('ac-haiku: generated from the tier\'s retiresAfter and replacement, keeps RETIRING, and no longer claims "verification"', () => {
+  const text = readFileSync(join(PLUGIN_ROOT, 'agents', 'ac-haiku.md'), 'utf8');
+  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
+  const desc = text.match(/^description:\s*"(.*)"$/m)[1];
+  assert.match(desc, new RegExp(`^RETIRING \\(no sooner than ${cfg.tiers.haiku.retiresAfter}\\)`));
+  assert.match(desc, new RegExp(`falls back to rung \\d+, ac-${cfg.tiers.haiku.replacement.model}-${cfg.tiers.haiku.replacement.effort}`));
+  assert.doesNotMatch(desc, /verification/);
+});
+
+test('every "Not currently the default" and "Currently the default routing for" claim is true against the live routes', async () => {
+  const { cleanup } = makeFixture();
+  try {
+    const { resolveRoute, modelTiers } = await import('../hooks/lib/context.mjs');
+    const cfg = modelTiers();
+    const routes = Object.entries(cfg.taskTypes).filter(([, t]) => typeof t.weight === 'number')
+      .map(([name]) => [name, resolveRoute({ type: name, profile: false })]);
+    let sawNone = false;
+    for (const rung of cfg.ladder) {
+      const desc = readFileSync(join(PLUGIN_ROOT, 'agents', `${rung.agent}.md`), 'utf8').match(/^description:\s*"?(.*?)"?$/m)[1];
+      const actual = routes.filter(([, r]) => r.model === rung.model && (r.effort || null) === (rung.effort || null)).map(([n]) => n);
+      if (/Not currently the default routing/.test(desc)) {
+        sawNone = true;
+        assert.deepEqual(actual, [], `${rung.agent} says no task type routes to it`);
+      } else {
+        const claimed = desc.match(/Currently the default routing for: ([^.]*)\./)[1].split(', ');
+        assert.deepEqual(claimed, actual, rung.agent);
+      }
+    }
+    assert.ok(sawNone, 'at least one rung carries the "not currently the default" suffix');
+  } finally {
+    cleanup();
+  }
 });

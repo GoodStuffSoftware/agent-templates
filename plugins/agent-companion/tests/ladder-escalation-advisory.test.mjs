@@ -83,7 +83,7 @@ test('when the lead\'s own effort cannot be read, the advisory says so instead o
   }
 });
 
-test('a LADDER agent type explicitly named (even if its local def cannot be found) does NOT get the non-ladder advisory', () => {
+test('a LADDER agent type explicitly named does NOT get the non-ladder advisory, nor a false rule-1 note', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const transcriptPath = transcriptWithModel(dir, 'claude-sonnet-4-6', 'high');
@@ -103,9 +103,10 @@ test('a LADDER agent type explicitly named (even if its local def cannot be foun
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
     assert.doesNotMatch(msg, /is not a ladder agent/);
-    // Still falls to the generic rule-1 note (no local agents/ac-opus-low.md
-    // in this fixture to supply `effort:`), just not the escalation-specific one.
-    assert.match(msg, /SPAWNING RULE 1/);
+    // Round 2: the bare ladder name now resolves to the plugin's own
+    // agents/ac-opus-low.md, whose `effort: low` is stated, so the generic
+    // rule-1 note no longer fires falsely either.
+    assert.doesNotMatch(msg, /SPAWNING RULE 1/);
   } finally {
     cleanup();
   }

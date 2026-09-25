@@ -105,7 +105,7 @@
     "ladder_check": {
       "type": "boolean",
       "title": "Ladder registration check",
-      "description": "At session start, check that the ladder's generic worker definitions (agents/ac-*.md) are present and parse correctly, and that spawn-guard.mjs's self-reported running version matches what installed_plugins.json says is installed for this session. Registration ITSELF cannot be verified from a hook (Claude Code exposes no registered-agent list to SessionStart); this only confirms what is on disk. Silent when both checks are clean; a concrete recovery step otherwise.",
+      "description": "At session start, check that the ladder's generic worker definitions (agents/ac-*.md) are present and parse correctly, and that this session did not load an orphaned plugin-cache copy OLDER than the version installed for its scope (directional, per install scope, fresh processes only, never a --plugin-dir or source checkout). Registration ITSELF cannot be verified from a hook (Claude Code exposes no registered-agent list to SessionStart); this only confirms what is on disk. A stale copy that predates this check is caught across sessions by the daily scout instead (stale_guard_running). Silent when both checks are clean; a concrete recovery step otherwise.",
       "default": true
     },
     "ci_status_signal": {
@@ -124,6 +124,12 @@
       "type": "boolean",
       "title": "Best-fit autofill",
       "description": "When a spawn declares WEIGHT but names no model, set the model from the routing table instead of letting it inherit the lead’s tier. Premium results still require a WARRANT line.",
+      "default": true
+    },
+    "fit_autofill_ladder": {
+      "type": "boolean",
+      "title": "Autofill to a ladder rung",
+      "description": "When best-fit autofill sets a model on a general-purpose (or unnamed) spawn and the route names an effort, also rewrite the spawn to the matching ladder agent (agent-companion:ac-<model>-<effort>) so effort is pinned too, but only once a ladder agent has already started in the same session, which shows the harness registered the ladder there. Otherwise, and for any other agent type, the model is filled in and an advisory names the rung to spawn instead.",
       "default": true
     },
     "routing_profile": {
