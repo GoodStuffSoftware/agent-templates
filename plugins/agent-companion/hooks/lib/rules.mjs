@@ -69,28 +69,33 @@ export function rulesPath() {
 
 // copyable-prompt's `when`: a REQUEST for a prompt, not any mention of one.
 // A bare \bprompts?\b fired on "the prompt field is empty" and "why do
-// prompts time out?". Three shapes count:
-//   - a making verb aimed at a prompt: "write me a prompt", "draft a new
-//     system prompt", "give me prompts for three reviewers", "write the
-//     prompt for the next worker" (or a brief: "write me a brief for X").
-//     UI and plumbing nouns after "prompt" (field, box, hook, caching,
-//     injection, ...) do not count: "create a prompt field" is a form change;
-//   - an indefinite prompt with a purpose: "I need a prompt for X",
-//     "a prompt that checks Y";
-//   - a turn that opens with "prompt for ...".
-// Up to two filler words may sit between the article and "prompt" ("a short
-// copyable prompt"), but not a preposition, so "write a test for prompts"
-// stays silent. Bounded repetition only; kept under WHEN_MAX_CHARS (a test
-// pins the length).
-const PROMPT_VERB = '(?:write|give|draft|create|compose|generate|craft|prepare)';
-const PROMPT_DET = '(?:an?|another|the)';
-const PROMPT_FILLER = '(?:(?!(?:for|to|of|about|on|in|with)\\b)[\\w-]+\\s+){0,2}?';
-const PROMPT_NOT_PLUMBING = '(?!\\s+(?:field|box|input|bar|hook|cach|inject|text))';
+// prompts time out?". Four shapes count:
+//   - a verb that asks for one, then up to three words that are not a
+//     preposition, then "prompt(s)": "write me a prompt", "draft a new system
+//     prompt", "make me a prompt", "write up a prompt", "rewrite this prompt",
+//     "put together a prompt", "I need a prompt", "can I get a prompt",
+//     "turn this into a prompt" (or a brief: "write me a brief for X").
+//     A plumbing noun after "prompt" does not count ("create a prompt field",
+//     "generate the prompt cache key", "a prompts table", "the prompt template
+//     loader"), and neither does "prompt(s) to a/the ..." ("write the prompts
+//     to a log file"): that names a destination, not a purpose;
+//   - a turn that opens with "a prompt for" / "a prompt that", unless "that"
+//     is followed by I/you/we/they ("a prompt that I sent timed out");
+//   - a turn that opens with "prompt for a/the ..." ("Prompt for the
+//     reviewer"), but not "Prompt for confirmation before ...";
+//   - "... prompt ... write it out/up" within one short stretch.
+// Seen elsewhere in a sentence, "a prompt for/that" is usually something a
+// program shows ("the CLI shows a prompt for the password"), so it does not
+// count on its own. Bounded repetition only; kept under WHEN_MAX_CHARS (a
+// test pins the length).
+const PROMPT_VERB = '(?:(?:re)?write|give|draft|create|compose|generate|make|put together|need|want|get|into)';
+const PROMPT_FILLER = "(?:(?!(?:for|to|of|in|on)\\b)[\\w'-]+\\s+){0,3}?";
+const PROMPT_NOT_PLUMBING = '(?!\\s+(?:field|box|input|bar|hook|cach|inject|text|table|templat|to (?:an?|the)\\b))';
 export const COPYABLE_PROMPT_WHEN = [
-  `\\b${PROMPT_VERB}(?:\\s+(?:me|us))?\\s+(?:${PROMPT_DET}\\s+)?${PROMPT_FILLER}`
-    + `(?:prompts?\\b${PROMPT_NOT_PLUMBING}|brief\\s+(?:for|to|that)\\b)`,
-  `\\b(?:an?|another)\\s+${PROMPT_FILLER}prompts?\\s+(?:for|that)\\b`,
-  '^\\s*prompts?\\s+for\\b',
+  `\\b${PROMPT_VERB}\\s+${PROMPT_FILLER}(?:prompts?\\b${PROMPT_NOT_PLUMBING}|brief\\s+(?:for|to|that)\\b)`,
+  '^\\s*an?(?:other)?\\s+prompts?\\s(?:for|that\\s(?!(?:i|you|we|they)\\b))',
+  '^\\s*prompts?\\sfor\\s(?:an?|the)\\b',
+  'prompt.{0,60}write it (?:out|up)',
 ].join('|');
 
 function builtinRules() {
@@ -337,9 +342,8 @@ function gateSatisfied(gate, sessionId) {
 // field. Their text (another agent's brief, a task summary) routinely says
 // "prompt", which fired copyable-prompt on turns where the user asked for
 // nothing. A user-prompt rule therefore matches only what is left once those
-// blocks are removed. Innermost blocks go first (repeated until stable), an
-// unterminated opening tag swallows the rest of the text, and a stray closing
-// tag is dropped.
+// blocks are removed (nested blocks included), an unterminated opening tag
+// swallows the rest of the text, and a stray closing tag is dropped.
 //
 // Slash-command and teammate turns arrive the same way: <teammate-message>
 // carries another agent's text, and <command-message>, <command-name>,
@@ -351,19 +355,60 @@ const WRAPPER_TAGS = [
   'teammate-message', 'command-message', 'command-name', 'command-args',
   'local-command-stdout', 'local-command-caveat',
 ].join('|');
-const WRAPPER_BLOCK_RE = new RegExp(
-  `<(${WRAPPER_TAGS})(?:\\s[^>]*)?>(?:(?!<(?:${WRAPPER_TAGS})(?:\\s|>))[\\s\\S])*?</\\1\\s*>`, 'gi',
-);
-const WRAPPER_OPEN_RE = new RegExp(`<(?:${WRAPPER_TAGS})(?:\\s[^>]*)?>[\\s\\S]*$`, 'i');
-const WRAPPER_CLOSE_RE = new RegExp(`</(?:${WRAPPER_TAGS})\\s*>`, 'gi');
+// A candidate tag: "<name" or "</name" followed by whitespace or ">". An
+// opening tag runs to the next ">" (attributes may hold anything else); a
+// closing tag allows only whitespace before its ">".
+const WRAPPER_TAG_RE = new RegExp(`<(/?)(${WRAPPER_TAGS})(?=[\\s>])`, 'gi');
+const SPACES_RE = /\s*/y;
 
+// One left-to-right pass with a stack of open wrappers, so the cost is
+// linear in the length of the text whatever the nesting. (It used to repeat
+// a regex replace until nothing changed, removing one level of nesting per
+// pass: about 30 s on 1 MB of nested tags, inside a UserPromptSubmit hook.)
+// Same rules as before:
+//   - a closing tag that matches the innermost open wrapper closes it; when
+//     that empties the stack, the whole outermost block becomes one space;
+//   - a closing tag for any other name, inside a wrapper, is part of that
+//     wrapper's text;
+//   - a closing tag outside every wrapper is dropped (one space);
+//   - a wrapper still open at the end swallows the rest of the text.
 export function userOwnText(text) {
-  let s = String(text ?? '');
-  for (let prev = null; prev !== s;) {
-    prev = s;
-    s = s.replace(WRAPPER_BLOCK_RE, ' ');
+  const s = String(text ?? '');
+  const stack = [];
+  let out = '';
+  let copied = 0; // s[copied..] is not yet in `out`
+  let blockStart = 0; // where the outermost open wrapper began
+  let gt = -2; // cached s.indexOf('>', ...): the scan only moves forward
+  WRAPPER_TAG_RE.lastIndex = 0;
+  for (let m = WRAPPER_TAG_RE.exec(s); m; m = WRAPPER_TAG_RE.exec(s)) {
+    const nameEnd = m.index + m[0].length;
+    const name = m[2].toLowerCase();
+    if (m[1]) {
+      SPACES_RE.lastIndex = nameEnd;
+      SPACES_RE.exec(s);
+      if (s[SPACES_RE.lastIndex] !== '>') { WRAPPER_TAG_RE.lastIndex = nameEnd; continue; }
+      const end = SPACES_RE.lastIndex + 1;
+      WRAPPER_TAG_RE.lastIndex = end;
+      if (stack.length === 0) {
+        out += `${s.slice(copied, m.index)} `;
+        copied = end;
+      } else if (stack[stack.length - 1] === name) {
+        stack.pop();
+        if (stack.length === 0) {
+          out += `${s.slice(copied, blockStart)} `;
+          copied = end;
+        }
+      }
+      continue;
+    }
+    if (gt !== -1 && gt < nameEnd) gt = s.indexOf('>', nameEnd);
+    if (gt === -1) break; // no ">" left: nothing after this can be a tag
+    WRAPPER_TAG_RE.lastIndex = gt + 1;
+    if (stack.length === 0) blockStart = m.index;
+    stack.push(name);
   }
-  return s.replace(WRAPPER_OPEN_RE, ' ').replace(WRAPPER_CLOSE_RE, ' ');
+  if (stack.length > 0) return `${out}${s.slice(copied, blockStart)} `;
+  return out + s.slice(copied);
 }
 
 export function matchRules({ scope, text, sessionId } = {}) {
