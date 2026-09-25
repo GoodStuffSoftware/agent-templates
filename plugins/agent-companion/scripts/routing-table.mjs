@@ -227,15 +227,54 @@ function writeDescription(file, text, newDescription) {
   writeFileSync(file, updated);
 }
 
+// A role is a capability shape. The only routing claim it may make is the
+// checkable "default for <type>[, <type>...]", which is verified against
+// resolveRoute() like the generated suffix; any other routing vocabulary
+// (how often, which weight, what to prefer) cannot be checked, so it fails.
+// "own default effort" is a fact about the model, not a routing claim.
+const ROLE_CLAIM = /\bdefault(?: routing)? for:?\s+([a-z0-9-]+(?:\s*,\s*[a-z0-9-]+)*)/gi;
+const ROLE_ROUTING_WORDS = /\b(defaults?|rare|rarely|prefer|preferred|usually|often|typically|mostly|commonly|reserve|reserved|weight[- ]?\d)\b/i;
+function roleClaimProblems(rung) {
+  const role = typeof rung.role === 'string' ? rung.role : '';
+  const out = [];
+  let rest = role.replace(/\bown default effort\b/gi, '');
+  for (const m of role.matchAll(ROLE_CLAIM)) {
+    rest = rest.replace(m[0], '');
+    for (const type of m[1].split(',').map((x) => x.trim()).filter(Boolean)) {
+      let r = null;
+      try { r = (cfg.taskTypes || {})[type] ? resolveRoute({ type, profile: false }) : null; } catch { r = null; }
+      if (!r || r.model !== rung.model || (r.effort || null) !== (rung.effort || null)) {
+        out.push({
+          problem: 'false-claim',
+          expected: r ? `"${type}" currently routes to ${r.model}${r.effort ? '/' + r.effort : ''}, not this rung` : `"${type}" is not a task type`,
+          actual: role,
+        });
+      }
+    }
+  }
+  const word = rest.match(ROLE_ROUTING_WORDS);
+  if (word) {
+    out.push({
+      problem: 'unverifiable-claim',
+      expected: `a role with no routing claim other than "default for <type>" (found "${word[0]}")`,
+      actual: role,
+    });
+  }
+  return out;
+}
+
 // Every problem, one entry each: { agent, file, problem, expected, actual }.
 // `problem` is one of: no-role (config gives the rung no role text),
-// missing-file, name-mismatch, drift (description differs from the
-// generated one), not-a-rung (an agents/ac-*.md file no rung names).
+// false-claim / unverifiable-claim (the role's own routing claim, see
+// roleClaimProblems), missing-file, name-mismatch, drift (description
+// differs from the generated one), not-a-rung (an agents/ac-*.md file no
+// rung names).
 function checkAgentDescriptions() {
   const out = [];
   const rungs = ladderRungs();
   for (const rung of rungs) {
     const file = agentFile(rung);
+    for (const c of roleClaimProblems(rung)) out.push({ agent: rung.agent, file, ...c });
     const expected = generatedAgentDescription(rung);
     const { text, description, name } = readDescription(file);
     if (expected === null) {

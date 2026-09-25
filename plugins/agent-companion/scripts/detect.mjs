@@ -11,13 +11,14 @@
 // Emits JSON to stdout: { changed: bool, signals: [...], baseline: {...} }
 
 import { execSyncHidden } from './lib/proc.mjs';
-import { readFileSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { readFileSync, existsSync, writeFileSync, appendFileSync, readdirSync } from 'node:fs';
+import { join, basename, dirname } from 'node:path';
 import { userInfo, homedir } from 'node:os';
 import {
   modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
   homeRoot, stateRoot, resolveRoute, isLadderAgentName,
   readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
+  LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES,
 } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
@@ -396,25 +397,70 @@ try {
 
 // --- 6b. Stale guard still running ---------------------------------------
 // The cross-session half of the version check. spawn-guard.mjs stamps its
-// own version, copy source (cache/checkout) and install scope key into every
-// spawns.jsonl row. A spawn in the last 24h that was guarded by a version
-// BELOW the version installed for that same scope means a stale copy of the
-// plugin is still loaded somewhere — the 2026-09-24 incident, where a
-// session loaded only an old 0.22.0 copy and nothing inside that session
-// could say so. Rules, all chosen so a normal update never fires:
-//   - directional and per scope: guard below installed for ITS scope only;
-//     a checkout guard (the operator's own tree) is never judged;
-//   - only rows written AFTER that scope's install entry's lastUpdated, and
-//     only from sessions whose first spawn is also after it — a session
-//     that was already open across an update runs its old hooks until it
-//     reloads, which is expected, not a stale install;
+// own version, copy source (cache / checkout / bundle), install scope key and
+// the session's plugin-load time (loaded_at) into every spawns.jsonl row. A
+// session is judged by the version it LOADED against what it should have
+// loaded then, never by when it first spawned:
+//   - a row written after its scope's install entry changed (lastUpdated)
+//     counts; earlier rows belong to the previous day's picture;
+//   - if the session loaded after that update (a trusted loaded_at, at
+//     least LOAD_SETTLE_MS after it), it should have loaded the installed
+//     version: a guard below it is a stale copy. This is the incident's
+//     shape and the desktop-bundle shape;
+//   - otherwise (loaded before the update, or when is unknown) it is judged
+//     against the version that update REPLACED: lagging the latest update
+//     is a session that simply has not reloaded yet (a normal update);
+//     lagging more than that is not. The replaced version comes from the
+//     plugin cache, where the harness marks each superseded version
+//     directory with an `.orphaned_at` time; with no marker, such rows are
+//     not judged;
+//   - directional and per scope; a checkout (a source work tree) is never
+//     judged;
 //   - a row with no stamp at all is judged only when it also lacks
-//     route_layer (every guard since 0.29.0 writes that key), i.e. it came
-//     from a pre-0.29.0 guard, and only when every install is >= 0.29.0 —
-//     its scope is unknown, so it must be behind every install to count.
+//     route_layer (every guard since 0.29.0 writes that key): a pre-0.29.0
+//     guard, stale whenever the version it is judged against is 0.29.0 or
+//     later. Its scope is unknown, so it is judged against the user-scope
+//     install (else the most recently updated one). This does not depend on
+//     what other installs are listed.
+// Known limit: a 0.29.0 to 0.29.3 guard writes route_layer but no stamp, so
+// its version is unknown and its rows are never judged.
 const STALE_GUARD_REMEDY = 'remove the stale agent-companion entry in the desktop plugin manager, then /reload-plugins, ' +
   'then verify with a trivial ladder spawn; fresh session if that still fails';
 const ROUTE_LAYER_SINCE = '0.29.0';
+
+function orphanedAtMs(dir) {
+  try {
+    const raw = readFileSync(join(dir, '.orphaned_at'), 'utf8').trim();
+    const n = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+// The version an install entry replaced at its lastUpdated: among that
+// plugin's cache version directories below the entry's version, the one most
+// recently marked orphaned no later than the update (plus the settle window).
+function replacedVersion(entry) {
+  const updated = Date.parse(entry.lastUpdated || '');
+  if (!Number.isFinite(updated)) return null;
+  const [name, marketplace] = String(entry.key || '').split('@');
+  const dirs = new Set();
+  if (typeof entry.installPath === 'string' && entry.installPath) dirs.add(dirname(entry.installPath));
+  if (name && marketplace) dirs.add(join(claudeDir(), 'plugins', 'cache', marketplace, name));
+  let best = null;
+  for (const d of dirs) {
+    let versions = [];
+    try { versions = readdirSync(d, { withFileTypes: true }).filter((x) => x.isDirectory()).map((x) => x.name); } catch { continue; }
+    for (const v of versions) {
+      if (!versionBelow(v, entry.version)) continue;
+      const o = orphanedAtMs(join(d, v));
+      if (o === null || o > updated + LOAD_SETTLE_MS) continue;
+      if (!best || o > best.o) best = { v, o };
+    }
+  }
+  return best ? best.v : null;
+}
+
 try {
   const entries = pluginEntries(readInstalledPlugins(claudeDir()), PLUGIN_NAME);
   if (entries.length && recent.length) {
@@ -429,46 +475,60 @@ try {
       const t = Date.parse(e.lastUpdated || '');
       return Number.isFinite(t) && (!best || t > Date.parse(best.lastUpdated)) ? e : best;
     }, null);
-    const everyInstallHasRouteLayer = entries.every((e) => !versionBelow(e.version, ROUTE_LAYER_SINCE));
-    const firstSeen = new Map();
-    for (const s of spawns) {
-      const t = Date.parse(s.at);
-      if (!Number.isFinite(t) || !s.session_id) continue;
-      if (!firstSeen.has(s.session_id) || t < firstSeen.get(s.session_id)) firstSeen.set(s.session_id, t);
-    }
+    const unstampedEntry = byScope.get('user') || newestUpdate;
+    const replaced = new Map();
+    const replacedFor = (e) => {
+      if (!replaced.has(e)) replaced.set(e, replacedVersion(e));
+      return replaced.get(e);
+    };
+    // A row without a loaded_at stamp may still have a trusted load time in
+    // self-update's per-session record (only a source this version writes).
+    const loadState = (() => {
+      try { return JSON.parse(readFileSync(stateFile('version-notice-state.json'), 'utf8')) || {}; } catch { return {}; }
+    })();
     const bySession = new Map();
     for (const s of recent) {
       if (s.guard_source === 'checkout') continue;
-      let guard;
-      let entry;
-      if (typeof s.guard_version === 'string' && s.guard_version) {
-        entry = byScope.get(s.guard_scope);
-        if (!entry || !versionBelow(s.guard_version, entry.version)) continue;
-        guard = s.guard_version;
-      } else if (!('guard_version' in s) && !('route_layer' in s) && everyInstallHasRouteLayer && newestUpdate) {
-        entry = newestUpdate;
-        guard = `a pre-${ROUTE_LAYER_SINCE} version`;
-      } else {
-        continue;
-      }
+      const stamped = typeof s.guard_version === 'string' && s.guard_version ? s.guard_version : null;
+      let entry = null;
+      if (stamped) entry = byScope.get(s.guard_scope);
+      else if (!('guard_version' in s) && !('route_layer' in s)) entry = unstampedEntry;
+      if (!entry) continue;
       const updated = Date.parse(entry.lastUpdated || '');
       const at = Date.parse(s.at);
-      if (!Number.isFinite(updated) || !(at > updated)) continue;
-      if (!((firstSeen.get(s.session_id) ?? at) > updated)) continue;
+      if (!Number.isFinite(updated) || !Number.isFinite(at) || !(at > updated)) continue;
+      let loaded = Date.parse(typeof s.loaded_at === 'string' ? s.loaded_at : '');
+      if (!Number.isFinite(loaded)) {
+        const r = loadState[s.session_id];
+        if (r && TRUSTED_LOAD_SOURCES.has(r.loadedAtFrom) && typeof r.loadedAt === 'number') loaded = r.loadedAt;
+      }
+      if (Number.isFinite(loaded) && loaded > at) loaded = NaN; // a later load is not this row's load
+      const loadedAfter = Number.isFinite(loaded) && loaded - updated >= LOAD_SETTLE_MS;
+      const ref = loadedAfter ? entry.version : replacedFor(entry);
+      if (!ref) continue;
+      const stale = stamped ? versionBelow(stamped, ref) : !versionBelow(ref, ROUTE_LAYER_SINCE);
+      if (!stale) continue;
       const sidKey = String(s.session_id || 'unknown');
-      const cur = bySession.get(sidKey) || { count: 0, guard, installed: entry.version, scope: entry.scope || 'user' };
+      const cur = bySession.get(sidKey) || {
+        count: 0,
+        guard: stamped || `a pre-${ROUTE_LAYER_SINCE} version`,
+        ref,
+        basis: loadedAfter ? 'installed when it loaded' : `the version the ${entry.lastUpdated} update replaced`,
+        scope: stamped ? (entry.scope || 'user') : `scope unknown, judged against ${entry.scope || 'user'}`,
+      };
       cur.count += 1;
       bySession.set(sidKey, cur);
     }
     if (bySession.size) {
       const total = [...bySession.values()].reduce((n, v) => n + v.count, 0);
       const list = [...bySession.entries()].slice(0, 5)
-        .map(([sidKey, v]) => `session ${sidKey.slice(0, 8)}: guard ${v.guard} < installed ${v.installed} (${v.scope} scope)`);
+        .map(([sidKey, v]) => `session ${sidKey.slice(0, 8)}: guard ${v.guard} < ${v.ref}, ${v.basis} (${v.scope} scope)`);
       const more = bySession.size > 5 ? `, +${bySession.size - 5} more` : '';
       const installs = [...new Set(entries.map((e) => `${e.scope || 'user'}@${e.version}`))];
       sig('stale_guard_running',
-        `${total} spawn(s) in 24h from ${bySession.size} session(s) were guarded by an older agent-companion than the one ` +
-        `installed for their scope — a stale copy is still loaded: ${list.join('; ')}${more}.` +
+        `${total} spawn(s) in 24h from ${bySession.size} session(s) were guarded by an older agent-companion than the ` +
+        'one each session should have loaded (the install for its scope when it loaded; for a session loaded before ' +
+        `the latest update, the version that update replaced) — a stale copy is still loaded: ${list.join('; ')}${more}.` +
         (installs.length > 1 ? ` Installs visible: ${installs.join(', ')}.` : '') +
         ` Remedy: ${STALE_GUARD_REMEDY}.`,
         'plugin-update');

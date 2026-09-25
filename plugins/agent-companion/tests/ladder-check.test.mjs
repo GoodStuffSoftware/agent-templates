@@ -220,3 +220,58 @@ test('the ladder_check option turns the whole hook off', () => {
     cleanup();
   }
 });
+
+// --- round 3: in-process /resume, and copies outside the cache ---------------
+
+// A copy of the plugin outside the plugin cache and outside any source
+// checkout: what an app-extracted desktop bundle looks like to copySource().
+function bundleCopy(dir, version) {
+  const root = join(dir, 'app-bundle', 'agent-companion');
+  for (const d of ['hooks', 'config', 'agents', '.claude-plugin']) {
+    cpSync(join(PLUGIN_ROOT, d), join(root, d), { recursive: true });
+  }
+  const pjFile = join(root, '.claude-plugin', 'plugin.json');
+  writeFileSync(pjFile, JSON.stringify({ ...JSON.parse(readFileSync(pjFile, 'utf8')), version }, null, 2));
+  return root;
+}
+
+test('an in-process /resume after a normal update is silent; a resume in a FRESH process that loaded the stale copy warns', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const old = cacheCopy(dir, '0.29.1');
+    writeInstalled(dir, [{ scope: 'user', version: '0.29.2', installPath: join(dir, 'elsewhere', '0.29.2'), lastUpdated: iso(1 * HOUR) }]);
+    // Process 4242 reaches SessionStart once (startup) and records its load.
+    const startup = runFrom(old, { session_id: 'r3-session-a', cwd: dir, source: 'startup' }, { CLAUDE_PID: '4242' });
+    assert.equal(startup.status, 0, startup.stderr);
+    // /resume inside that same process, into another session: no plugin load
+    // happened, so it must stay silent.
+    const inProcess = runFrom(old, { session_id: 'r3-session-b', cwd: dir, source: 'resume' }, { CLAUDE_PID: '4242' });
+    assert.equal(inProcess.status, 0, inProcess.stderr);
+    assert.equal(inProcess.stdout, '', `in-process /resume fired: ${inProcess.stdout}`);
+    // A resume with no CLAUDE_PID cannot be told apart, so it is not judged.
+    const noPid = runFrom(old, { session_id: 'r3-session-c', cwd: dir, source: 'resume' }, { CLAUDE_PID: '' });
+    assert.equal(noPid.stdout, '', `resume without CLAUDE_PID fired: ${noPid.stdout}`);
+    // A fresh `claude --resume` process (a pid never seen) that loaded this copy: warns.
+    const fresh = runFrom(old, { session_id: 'r3-session-d', cwd: dir, source: 'resume' }, { CLAUDE_PID: '5353' });
+    assert.match(fresh.json?.systemMessage || '', /older cached copy of the plugin \(0\.29\.1\) than the one installed for it \(0\.29\.2, user scope\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a copy loaded from outside the plugin cache (a desktop bundle) older than the install warns; an equal one is silent', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const bundle = bundleCopy(dir, '0.29.1');
+    writeInstalled(dir, [{ scope: 'user', version: '0.29.2', installPath: join(dir, 'elsewhere', '0.29.2'), lastUpdated: iso(2 * HOUR) }]);
+    const res = runFrom(bundle, { session_id: 'r3-bundle', cwd: dir, source: 'startup' });
+    assert.equal(res.status, 0, res.stderr);
+    const msg = res.json?.systemMessage || '';
+    assert.match(msg, /a copy of the plugin from outside the plugin cache \(0\.29\.1; for example a desktop app bundle\) that is older than the one installed for it \(0\.29\.2, user scope\)/);
+    assert.match(msg, /remove the stale agent-companion entry in the desktop plugin manager/);
+    writeInstalled(dir, [{ scope: 'user', version: '0.29.1', installPath: join(dir, 'elsewhere', '0.29.1'), lastUpdated: iso(2 * HOUR) }]);
+    assert.equal(runFrom(bundle, { session_id: 'r3-bundle-eq', cwd: dir, source: 'startup' }).stdout, '');
+  } finally {
+    cleanup();
+  }
+});
