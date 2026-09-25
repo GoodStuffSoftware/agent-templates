@@ -276,6 +276,131 @@ test('an LF memory file round-trips byte-identically through a real vault sync u
   }
 });
 
+// --- 0.29.2: the operator's line-ending settings still apply ---------------
+// Vault git calls read no global or system config any more. Git for Windows
+// sets core.autocrlf=true in its SYSTEM config, and an operator may set it
+// globally, so the vault now looks that value up once and passes it with -c.
+// These fixtures put core.autocrlf=true where an operator's machine has it,
+// in config outside the vault ($HOME/.gitconfig here), never in the vault's
+// own config, and check that an existing vault stores exactly the bytes
+// 0.29.1 stored.
+function operatorAutocrlfEnv(dir, text = '[core]\n\tautocrlf = true\n') {
+  const home = join(dir, 'operator-home');
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, '.gitconfig'), text);
+  const env = { HOME: home, XDG_CONFIG_HOME: join(home, 'no-xdg'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: undefined };
+  for (const k of Object.keys(process.env)) {
+    if (/^(git_config_global|xdg_config_home)$/i.test(k) && !(k in env)) env[k] = undefined;
+  }
+  return env;
+}
+
+const LINE_ENDING_FILES = {
+  'lf.md': '# lf\n\n- one\n- two\n',
+  'crlf.md': '# crlf\r\n\r\n- one\r\n- two\r\n',
+  'mixed.md': '# mixed\n- one\r\n- two\n',
+};
+
+function blobOf(vault, rel) {
+  return git(vault, ['rev-parse', `HEAD:${rel}`]).trim();
+}
+
+test('an existing byte-exact vault round-trips LF, CRLF and mixed files byte for byte with the operator\'s autocrlf=true', () => {
+  const fx = makeFixture();
+  const out = mkdtempSync(join(tmpdir(), 'ac-vault-restore-'));
+  try {
+    const opEnv = operatorAutocrlfEnv(fx.dir);
+    const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index\n' } });
+    const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', ...opEnv };
+    assert.equal(runScript(SCRIPT, ['sync', '--json'], { env }).status, 0);
+    // The existing vault: now sync the line-ending fixtures into it.
+    for (const [name, body] of Object.entries(LINE_ENDING_FILES)) writeFileSync(join(corpus, 'proj-a', 'memory', name), body);
+    const r = runScript(SCRIPT, ['sync', '--json'], { env });
+    assert.equal(r.json?.committed, true, r.stderr);
+    const vault = vaultPathFor(fx.stateDir);
+    // Restore through a checkout that honours the same operator config.
+    const opGitEnv = { ...cleanGitEnv(), ...opEnv };
+    for (const k of Object.keys(opGitEnv)) if (opGitEnv[k] === undefined) delete opGitEnv[k];
+    execFileSync('git', ['--work-tree', out, '-C', vault, 'checkout-index', '-a', '-f'], { windowsHide: true, env: opGitEnv });
+    for (const [name, body] of Object.entries(LINE_ENDING_FILES)) {
+      const rel = `projects/proj-a/memory/${name}`;
+      const original = Buffer.from(body, 'utf8');
+      const blob = execFileSync('git', ['-C', vault, 'show', `HEAD:${rel}`], { encoding: 'buffer', windowsHide: true, env: cleanGitEnv() });
+      assert.equal(sha256(blob), sha256(original), `${name}: committed blob`);
+      assert.equal(sha256(readFileSync(join(out, ...rel.split('/')))), sha256(original), `${name}: fresh checkout`);
+    }
+  } finally {
+    rmSync(out, { recursive: true, force: true, maxRetries: 3 });
+    fx.cleanup();
+  }
+});
+
+test('an existing vault WITHOUT `* -text` stores the same bytes as 0.29.1 did under the operator\'s autocrlf=true', () => {
+  const fx = makeFixture();
+  try {
+    const opEnv = operatorAutocrlfEnv(fx.dir);
+    const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index\n' } });
+    const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', ...opEnv };
+    assert.equal(runScript(SCRIPT, ['sync', '--json'], { env }).status, 0);
+    const vault = vaultPathFor(fx.stateDir);
+    // An operator's own .gitattributes that leaves text conversion on: the
+    // vault reports it and never replaces it (see 'differs').
+    writeFileSync(join(vault, '.gitattributes'), '*.bin binary\n');
+    git(vault, ['add', '--', '.gitattributes']);
+    git(vault, ['-c', 'user.name=o', '-c', 'user.email=o@example.invalid', 'commit', '-q', '-m', 'operator attributes']);
+    for (const [name, body] of Object.entries(LINE_ENDING_FILES)) writeFileSync(join(corpus, 'proj-a', 'memory', name), body);
+    const r = runScript(SCRIPT, ['sync', '--json'], { env });
+    assert.equal(r.json?.committed, true, r.stderr);
+    // The oracle is plain git with the operator's config, as 0.29.1 ran it:
+    // `hash-object --path` applies exactly the conversion `add` would.
+    const opGitEnv = { ...cleanGitEnv(), ...opEnv };
+    for (const k of Object.keys(opGitEnv)) if (opGitEnv[k] === undefined) delete opGitEnv[k];
+    const plainEnv = { ...opGitEnv, HOME: join(fx.dir, 'nowhere') };
+    let converted = 0;
+    for (const name of Object.keys(LINE_ENDING_FILES)) {
+      const rel = `projects/proj-a/memory/${name}`;
+      const src = join(corpus, 'proj-a', 'memory', name);
+      const expected = git(vault, ['hash-object', `--path=${rel}`, src], { env: opGitEnv }).trim();
+      assert.equal(blobOf(vault, rel), expected, `${name}: the vault stored different bytes than 0.29.1 would have`);
+      // CONTROL: without the operator's autocrlf the CRLF files would be stored differently.
+      if (git(vault, ['hash-object', `--path=${rel}`, src], { env: plainEnv }).trim() !== expected) converted += 1;
+    }
+    assert.ok(converted >= 1, 'the fixture must include a file autocrlf actually converts, or this proves nothing');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('if the operator\'s config cannot be read, a vault without `* -text` refuses to commit; a byte-exact vault carries on', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index\n' } });
+    const base = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
+    assert.equal(runScript(SCRIPT, ['sync', '--json'], { env: base }).status, 0);
+    const vault = vaultPathFor(fx.stateDir);
+    // A config file git cannot parse makes the one lookup fail.
+    const broken = operatorAutocrlfEnv(fx.dir, '[core\n\tautocrlf = true\n');
+    const env = { ...base, ...broken };
+
+    writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), 'index v2\n');
+    const ok = runScript(SCRIPT, ['sync', '--json'], { env });
+    assert.equal(ok.status, 0, `a byte-exact vault does not need the operator's line-ending settings:\n${ok.stderr}`);
+    assert.equal(ok.json?.committed, true, ok.stdout);
+
+    writeFileSync(join(vault, '.gitattributes'), '*.bin binary\n');
+    git(vault, ['add', '--', '.gitattributes']);
+    git(vault, ['-c', 'user.name=o', '-c', 'user.email=o@example.invalid', 'commit', '-q', '-m', 'operator attributes']);
+    const head = git(vault, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), 'index v3\r\n');
+    const refused = runScript(SCRIPT, ['sync', '--json'], { env });
+    assert.notEqual(refused.status, 0, refused.stdout);
+    assert.match(refused.stderr, /refusing to write — could not read your git configuration's line-ending settings/);
+    assert.equal(git(vault, ['rev-parse', 'HEAD']).trim(), head, 'nothing committed');
+  } finally {
+    fx.cleanup();
+  }
+});
+
 // --- the audit notices ---------------------------------------------------
 
 test('memory-vault-drift warns about a vault that is not byte-exact', () => {

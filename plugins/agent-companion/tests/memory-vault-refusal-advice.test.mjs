@@ -19,7 +19,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mkdirSync, writeFileSync, existsSync, renameSync, rmSync, readdirSync,
+  mkdirSync, writeFileSync, existsSync, renameSync, rmSync, readdirSync, chmodSync,
 } from 'node:fs';
 import { join, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -191,29 +191,63 @@ test('G1: an empty repository with no commits and no files is the one case where
 
 // The shape the review found. The vault is recognised by its history, and a
 // changed identity only earns a note.
-for (const change of [
-  ['changed', (v) => git(['-C', v, 'config', '--file', join(v, '.git', 'config'), 'user.email', 'owner@example.invalid'])],
-  ['unset', (v) => git(['-C', v, 'config', '--file', join(v, '.git', 'config'), '--unset', 'user.email'])],
+//
+// Vault calls read no global config (0.29.2), so the identity a commit falls
+// back to when the owner unset the vault's local user.email is looked up
+// separately, from the operator's own git config, and passed with -c. These
+// fixtures give the operator an identity the usual way ($HOME/.gitconfig)
+// or none at all, with system config, XDG_CONFIG_HOME and EMAIL out of the
+// way unless a case sets them. `undefined` removes a variable from the child.
+function operatorEnv(fx, { identity = null, email } = {}) {
+  const home = join(fx.dir, 'operator-home');
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, '.gitconfig'),
+    identity ? `[user]\n\tname = ${identity.name}\n\temail = ${identity.email}\n` : '');
+  const env = {
+    HOME: home, XDG_CONFIG_HOME: join(home, 'no-xdg'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: undefined, EMAIL: email,
+  };
+  // Windows env names are case-insensitive: clear any other spelling too.
+  for (const k of Object.keys(process.env)) {
+    if (/^(email|git_config_global|xdg_config_home)$/i.test(k) && !(k in env)) env[k] = undefined;
+  }
+  return env;
+}
+
+const OPERATOR = { name: 'Operator Person', email: 'operator@example.invalid' };
+const setEmail = (v) => git(['-C', v, 'config', '--file', join(v, '.git', 'config'), 'user.email', 'owner@example.invalid']);
+const unsetEmail = (v) => git(['-C', v, 'config', '--file', join(v, '.git', 'config'), '--unset', 'user.email']);
+
+for (const [label, change, envFor, expectedEmail] of [
+  // The owner's own identity is never replaced, even with an operator identity available.
+  ['changed', setEmail, (fx) => operatorEnv(fx, { identity: OPERATOR }), 'owner@example.invalid'],
+  // Unset: the operator's configured identity, as 0.29.1 got it from global config.
+  ['unset (operator identity in ~/.gitconfig)', unsetEmail, (fx) => operatorEnv(fx, { identity: OPERATOR }), OPERATOR.email],
+  // Unset, no configured identity: git's own EMAIL fallback, as in 0.29.1.
+  ['unset (EMAIL only)', unsetEmail, (fx) => operatorEnv(fx, { email: 'env@example.invalid' }), 'env@example.invalid'],
+  // Unset, nothing anywhere: the vault's own identity rather than a failed commit.
+  ['unset (no identity anywhere)', unsetEmail, (fx) => operatorEnv(fx), VAULT_EMAIL],
 ]) {
-  test(`G1: a genuine vault whose owner ${change[0]} its local user.email is accepted, with a note`, () => {
+  test(`G1: a genuine vault whose owner ${label} its local user.email is accepted, with a note`, () => {
     const fx = fixture();
     try {
       const first = runVault(fx, 'sync');
       assert.equal(first.status, 0, first.stderr);
       const before = commitCount(fx.vault);
-      change[1](fx.vault);
+      change(fx.vault);
+      const configBefore = git(['-C', fx.vault, 'config', '--file', join(fx.vault, '.git', 'config'), '--list']);
       writeFileSync(join(fx.corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
-      // An email for the unset case, so the commit itself can be made on a
-      // host with no global identity (CI). Vault writes ignore an env-named
-      // GIT_CONFIG_GLOBAL (0.29.2), so it comes from git's EMAIL fallback,
-      // which only applies when no user.email is configured anywhere.
-      const res = runVault(fx, 'sync', { EMAIL: 'owner@example.invalid' });
+      const res = runVault(fx, 'sync', envFor(fx));
       assert.equal(res.status, 0, `a drifted identity must not refuse the vault:\n${res.stderr}`);
       assert.equal(res.json?.committed, true, res.stdout);
       assert.match(res.stderr, /note — .* is a vault this plugin created, but its local user\.email is/);
       assert.equal(res.stderr.match(/note —/g).length, 1, 'the note is said once per run');
       assert.equal(commitCount(fx.vault), before + 1);
       assert.equal(git(['-C', fx.vault, 'show', 'HEAD:projects/proj-a/memory/MEMORY.md']), '# index v2');
+      assert.equal(git(['-C', fx.vault, 'log', '-1', '--format=%ae|%ce']), `${expectedEmail}|${expectedEmail}`);
+      assert.equal(git(['-C', fx.vault, 'log', '-1', '--format=%an']), 'agent-companion memory-vault',
+        'the vault\'s own user.name is kept');
+      assert.equal(git(['-C', fx.vault, 'config', '--file', join(fx.vault, '.git', 'config'), '--list']), configBefore,
+        'nothing is written into the vault\'s config');
       assert.deepEqual(readdirSync(fx.stateDir).filter((n) => n.includes('moved-aside')), []);
     } finally {
       fx.cleanup();
@@ -226,29 +260,61 @@ for (const change of [
 // commit failed, for example because a global commit.gpgsign had no working
 // signer, the result was a marker, the vault identity and zero commits. Every
 // later run refused it as "not rooted in memory-vault: initialize".
-
-function signingGlobalConfig(fx) {
-  const cfg = join(fx.dir, 'signing.gitconfig');
+//
+// The signing config reaches git by every route a global config file has:
+// GIT_CONFIG_GLOBAL, $HOME/.gitconfig and $XDG_CONFIG_HOME/git/config. It
+// also names a clean filter for every path, which writes a sentinel if git
+// runs it. The vault's -c commit.gpgsign=false keeps its commits unsigned
+// even where the signing setting is read, and under the hermetic env it is
+// never read at all. A clean filter has no -c answer, so the sentinel is
+// what catches the hermetic env being removed. The 0.29.2 handoff's mutation
+// table lists which removal turns which test red.
+function signingConfig(fx) {
   const noGpg = join(fx.dir, 'no-such-gpg-program').replace(/\\/g, '/');
-  writeFileSync(cfg, `[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n[gpg]\n\tprogram = ${noGpg}\n`);
-  return cfg;
+  const flag = join(fx.dir, 'SIGNING_SENTINEL');
+  const filter = join(fx.dir, 'signing-filter');
+  writeFileSync(filter, `#!/bin/sh\necho filter >> "${flag.replace(/\\/g, '/')}"\ncat\n`);
+  chmodSync(filter, 0o755);
+  const attributes = join(fx.dir, 'signing-attributes');
+  writeFileSync(attributes, '* filter=signing-probe\n');
+  const text = `[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n[gpg]\n\tprogram = ${noGpg}\n`
+    + `[core]\n\tattributesFile = ${attributes.replace(/\\/g, '/')}\n`
+    + `[filter "signing-probe"]\n\tclean = ${filter.replace(/\\/g, '/')}\n`;
+  const file = join(fx.dir, 'signing.gitconfig');
+  writeFileSync(file, text);
+  const home = join(fx.dir, 'signing-home');
+  mkdirSync(join(home, 'git'), { recursive: true });
+  writeFileSync(join(home, '.gitconfig'), text);
+  writeFileSync(join(home, 'git', 'config'), text);
+  return { flag, file, home };
 }
 
-test('G2: a global commit.gpgsign with no working signer does not break init; vault commits are unsigned', () => {
-  const fx = fixture();
-  try {
-    const env = { GIT_CONFIG_GLOBAL: signingGlobalConfig(fx) };
-    const init = runVault(fx, 'init', env);
-    assert.equal(init.status, 0, `init must not depend on the operator's signer:\n${init.stderr}`);
-    const sync = runVault(fx, 'sync', env);
-    assert.equal(sync.status, 0, sync.stderr);
-    assert.equal(sync.json?.committed, true, sync.stdout);
-    assert.equal(git(['-C', fx.vault, 'log', '--format=%s', '--max-parents=0']), 'memory-vault: initialize');
-    assert.equal(commitCount(fx.vault), 2);
-  } finally {
-    fx.cleanup();
-  }
-});
+for (const [label, route] of [
+  ['GIT_CONFIG_GLOBAL', (s) => ({ GIT_CONFIG_GLOBAL: s.file })],
+  ['HOME (~/.gitconfig)', (s) => ({ HOME: s.home })],
+  ['XDG_CONFIG_HOME (git/config)', (s) => ({ XDG_CONFIG_HOME: s.home })],
+]) {
+  test(`G2: commit.gpgsign with no working signer, reached through ${label}, does not break init; vault commits are unsigned`, () => {
+    const fx = fixture();
+    try {
+      const s = signingConfig(fx);
+      const env = route(s);
+      const init = runVault(fx, 'init', env);
+      assert.equal(init.status, 0, `init must not depend on the operator's signer:\n${init.stderr}`);
+      const sync = runVault(fx, 'sync', env);
+      assert.equal(sync.status, 0, sync.stderr);
+      assert.equal(sync.json?.committed, true, sync.stdout);
+      assert.equal(git(['-C', fx.vault, 'log', '--format=%s', '--max-parents=0']), 'memory-vault: initialize');
+      assert.equal(commitCount(fx.vault), 2);
+      for (const sha of git(['-C', fx.vault, 'rev-list', 'HEAD']).split('\n')) {
+        assert.doesNotMatch(git(['-C', fx.vault, 'cat-file', 'commit', sha]), /gpgsig/, `commit ${sha} is signed`);
+      }
+      assert.ok(!existsSync(s.flag), 'a clean filter from the operator\'s config ran on a vault write');
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
 
 test('G2: a vault whose initialize commit never landed is finished on the next run', () => {
   const fx = fixture();

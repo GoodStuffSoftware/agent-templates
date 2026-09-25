@@ -38,7 +38,7 @@ import {
 } from 'node:fs';
 import { join, dirname, relative, sep, resolve, isAbsolute } from 'node:path';
 import {
-  gitIsolated, isolatedWriteGitEnv, enclosingGitRepo, samePath, isIdentityGitVar,
+  gitIsolated, hermeticGitEnv, enclosingGitRepo, samePath, isIdentityGitVar,
 } from './lib/git-env.mjs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -245,8 +245,10 @@ function statusCacheFile({ create = true } = {}) {
 }
 
 // --- git, pinned to the vault ---------------------------------------------
-// EVERY git call in this file goes through one of these two. Neither ever
-// lets git discover a repository from the environment or the cwd:
+// EVERY git call in this file goes through one of these two (git() and
+// vaultGit()), apart from the single read-only `git config` lookup in
+// operatorConfig(). None of them lets git discover a repository from the
+// environment or the cwd:
 //
 //   - gitIsolated() strips GIT_DIR and the other repo-locating variables
 //     (see lib/git-env.mjs for the incident this prevents). An inherited
@@ -269,11 +271,19 @@ function statusCacheFile({ create = true } = {}) {
 //   - Both also drop inherited GIT_AUTHOR_*/GIT_COMMITTER_* names, emails and
 //     dates (vaultEnv()), which would otherwise override the vault's own
 //     identity and the real commit time.
-//   - A call that can WRITE also drops GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM
-//     (isolatedWriteGitEnv()), so a config file an inherited variable points
-//     at cannot inject settings into what the vault stores. Which calls count
-//     as writes is decided by vaultGitWrites() below, from the subcommand:
-//     anything not known to be read-only is treated as a write.
+//   - Both run with NO configuration from outside the vault, reads and
+//     writes alike (hermeticGitEnv() in lib/git-env.mjs): GIT_CONFIG_GLOBAL
+//     and GIT_CONFIG_SYSTEM name the null device, GIT_CONFIG_NOSYSTEM and
+//     GIT_ATTR_NOSYSTEM are set, and HOME and XDG_CONFIG_HOME name the null
+//     device, so no $HOME/.gitconfig, $XDG_CONFIG_HOME/git/config, git/ignore
+//     or git/attributes is found. Before, a parent that set HOME, or named a
+//     config file through GIT_CONFIG_GLOBAL, could inject any setting: an
+//     excludes file that left memory files out of the backup, a clean filter
+//     that ran a program on every sync and on `status`. git now reads the
+//     vault's own .git/config and the -c options this file passes, nothing
+//     else.
+//   - What the vault used to get from the operator's global or system config
+//     is passed explicitly with -c instead. See operatorConfig() below.
 //   - Both run git's automatic housekeeping in the FOREGROUND
 //     (NO_DETACHED_HOUSEKEEPING). A commit can start `git maintenance run
 //     --auto` / `git gc --auto`, which by default detaches and keeps working
@@ -285,28 +295,15 @@ const NO_DETACHED_HOUSEKEEPING = Object.freeze([
   '-c', 'maintenance.autoDetach=false', '-c', 'gc.autoDetach=false',
 ]);
 
-// Subcommands the vault only ever uses to READ. `status` counts only with
-// --no-optional-locks (otherwise it refreshes and rewrites the index),
-// `hash-object` only without -w, and `config` only with a query flag.
-const READ_ONLY_SUBCOMMANDS = new Set(['rev-parse', 'log', 'rev-list', 'ls-files', 'diff', 'show', 'cat-file']);
-const CONFIG_QUERY = new Set(['--get', '--get-all', '--get-regexp', '--list', '-l']);
-
-// true unless `args` is recognisably read-only. The subcommand is the first
-// argument that is not a global option (`-c <kv>` and `-C <dir>` take a value).
-export function vaultGitWrites(args) {
+// The subcommand of a vault git call: the first argument that is not a
+// global option (`-c <kv>` and `-C <dir>` take a value).
+export function vaultSubcommand(args) {
   const a = (args || []).map(String);
-  let i = 0;
-  for (; i < a.length; i++) {
+  for (let i = 0; i < a.length; i++) {
     if (a[i] === '-c' || a[i] === '-C') { i++; continue; }
-    if (!a[i].startsWith('-')) break;
+    if (!a[i].startsWith('-')) return a[i];
   }
-  const sub = a[i];
-  const rest = a.slice(i + 1);
-  if (READ_ONLY_SUBCOMMANDS.has(sub)) return false;
-  if (sub === 'status') return !a.slice(0, i).includes('--no-optional-locks');
-  if (sub === 'hash-object') return rest.includes('-w');
-  if (sub === 'config') return !rest.some((x) => CONFIG_QUERY.has(x));
-  return true;
+  return '';
 }
 
 function vaultEnv(env = process.env) {
@@ -315,16 +312,145 @@ function vaultEnv(env = process.env) {
   return out;
 }
 
-// The env a vault git child gets for `args`. gitIsolated() then applies
-// isolatedGitEnv() on top (repo-locating variables and config injection).
-export function vaultGitEnv(args, env = process.env) {
-  const out = vaultEnv(env);
-  return vaultGitWrites(args) ? isolatedWriteGitEnv(out) : out;
+// The env every vault git child gets: inherited identity dropped, then
+// hermetic. gitIsolated() applies isolatedGitEnv() on top, which changes
+// nothing further.
+export function vaultGitEnv(env = process.env) {
+  return hermeticGitEnv(vaultEnv(env));
 }
 
-function git(args, opts = {}) {
-  const full = [...NO_DETACHED_HOUSEKEEPING, ...args];
-  return gitIsolated(full, { ...opts, env: vaultGitEnv(full, opts.env || process.env) });
+// --- what the vault still takes from the operator's git config ------------
+// Under the hermetic env, git no longer sees the operator's global or system
+// config. Four things the vault relied on came from there. Each is now
+// supplied explicitly:
+//
+//   core.longpaths  Always passed as -c core.longpaths=true (vaultGit(),
+//                   git()), whatever the operator's config says.
+//   core.autocrlf, core.eol, core.safecrlf, core.quotepath
+//                   The value git would have used in 0.29.1, taken from the
+//                   lookup below and passed with -c. Git for Windows' system
+//                   config sets core.autocrlf=true. A vault whose
+//                   .gitattributes carries `* -text` ignores it, but a vault
+//                   without that file does not, and it must keep storing
+//                   bytes exactly as before. core.quotepath only changes how
+//                   `diff --name-status` prints non-ASCII paths, which the
+//                   commit message is built from.
+//   safe.directory  git refuses a repository owned by another account
+//                   unless protected (system, global or command-line) config
+//                   lists it, so the operator's system and global entries are
+//                   passed on with -c, in order.
+//   user.name, user.email
+//                   Only for a commit, and only when the vault's own config
+//                   does not set them (an owner who unset the local email;
+//                   see assertVaultIdentity()). Then, as in 0.29.1: the
+//                   operator's configured identity; for the email, git's own
+//                   EMAIL fallback next; the vault's built-in identity last,
+//                   rather than failing. An identity the vault's config sets
+//                   is never replaced, and the operator's is never written
+//                   into the vault's config.
+//
+// All of it comes from ONE read-only `git config` call per process and
+// vault, run in the vault with the env 0.29.1 gave vault calls (repository
+// locating variables, config injection and inherited GIT_AUTHOR_* stripped;
+// GIT_CONFIG_GLOBAL, HOME and the rest as inherited), with a timeout.
+// `git config` runs no hooks, filters or fsmonitor. If it fails or times out,
+// nothing is carried, and a vault without `* -text` refuses to add or commit
+// (a line-ending setting it cannot read could otherwise rewrite the backup).
+const OPERATOR_KEYS = '^(user\\.(name|email)|safe\\.directory|core\\.(autocrlf|eol|safecrlf|quotepath))$';
+const CARRIED_KEYS = Object.freeze(['core.autocrlf', 'core.eol', 'core.safecrlf', 'core.quotepath']);
+const PROTECTED_SCOPES = new Set(['system', 'global', 'command']);
+const OWN_SCOPES = new Set(['local', 'worktree']);
+const OPERATOR_LOOKUP_TIMEOUT_MS = 15000;
+const operatorConfigCache = new Map();
+
+// `git config --show-scope -z` prints "<scope>\0<key>\n<value>\0" per entry,
+// and "<scope>\0<key>\0" for a key given with no value.
+export function parseScopedConfig(out) {
+  const parts = String(out || '').split('\0');
+  const entries = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const kv = parts[i + 1];
+    const nl = kv.indexOf('\n');
+    entries.push({
+      scope: parts[i],
+      key: (nl < 0 ? kv : kv.slice(0, nl)).toLowerCase(),
+      value: nl < 0 ? null : kv.slice(nl + 1),
+    });
+  }
+  return entries;
+}
+
+// { ok, entries }. ok is false only when the lookup itself failed; no match
+// at all (git exits 1) is ok with no entries. Nothing is looked up, or
+// cached, until the vault has a real .git directory of its own: never
+// through a link, so a junctioned .git is not even read.
+function operatorConfig(dir) {
+  const key = resolve(dir);
+  const hit = operatorConfigCache.get(key);
+  if (hit) return hit;
+  if (!isRealDir(vaultGitDir(dir))) return { ok: true, entries: [] };
+  let result;
+  try {
+    const out = gitIsolated([
+      ...NO_DETACHED_HOUSEKEEPING, '-C', dir, '--git-dir=.git',
+      'config', '--show-scope', '-z', '--get-regexp', OPERATOR_KEYS,
+    ], { env: vaultEnv(process.env), stdio: ['ignore', 'pipe', 'ignore'], timeout: OPERATOR_LOOKUP_TIMEOUT_MS });
+    result = { ok: true, entries: parseScopedConfig(out) };
+  } catch (e) {
+    result = { ok: e?.status === 1 && !e?.signal, entries: [] };
+  }
+  operatorConfigCache.set(key, result);
+  return result;
+}
+
+// The -c options that carry the operator's settings into a vault call.
+export function carriedConfigArgs(entries) {
+  const out = [];
+  for (const e of entries) {
+    if (e.key === 'safe.directory' && PROTECTED_SCOPES.has(e.scope) && e.value !== null) {
+      out.push('-c', `safe.directory=${e.value}`);
+    }
+  }
+  for (const k of CARRIED_KEYS) {
+    const last = entries.filter((e) => e.key === k).pop();
+    if (last) out.push('-c', last.value === null ? k : `${k}=${last.value}`);
+  }
+  return out;
+}
+
+function envHasEmail(env) {
+  return Object.entries(env || {}).some(([k, v]) => v
+    && (process.platform === 'win32' ? k.toUpperCase() === 'EMAIL' : k === 'EMAIL'));
+}
+
+// The -c options a commit needs for an identity the vault's own config does
+// not set. `own` is what the vault's config sets (hermetic read), `operator`
+// the lookup's entries.
+export function commitIdentityArgs(own, operator, env = process.env) {
+  const has = new Set(own.filter((e) => OWN_SCOPES.has(e.scope) && e.value).map((e) => e.key));
+  const args = [];
+  for (const [k, builtin] of [['user.name', VAULT_USER_NAME], ['user.email', VAULT_USER_EMAIL]]) {
+    if (has.has(k)) continue;
+    const found = operator.filter((e) => e.key === k && !OWN_SCOPES.has(e.scope) && e.value).pop();
+    if (found) args.push('-c', `${k}=${found.value}`);
+    else if (k === 'user.email' && envHasEmail(env)) continue; // git's own EMAIL fallback
+    else args.push('-c', `${k}=${builtin}`);
+  }
+  return args;
+}
+
+function vaultOwnIdentity(dir) {
+  try {
+    return parseScopedConfig(vaultGit(dir, ['config', '--show-scope', '-z', '--get-regexp', '^user\\.(name|email)$'], QUIET));
+  } catch { return []; } // exit 1: the vault's config sets neither
+}
+
+function git(dir, args, opts = {}) {
+  const full = [
+    ...NO_DETACHED_HOUSEKEEPING, '-c', 'core.longpaths=true',
+    ...carriedConfigArgs(operatorConfig(dir).entries), ...args,
+  ];
+  return gitIsolated(full, { ...opts, env: vaultGitEnv(opts.env || process.env) });
 }
 
 // Relative hooksPath resolves against the vault's work tree. Never created:
@@ -346,18 +472,31 @@ function vaultGitDir(dir) {
 // commit.gpgsign / tag.gpgsign are off for the same reason the hooks are: an
 // operator's global signing setting has no business on a local backup, and a
 // signer that is missing or locked made the initialize commit fail, leaving a
-// vault that no later run could use (see finishInit()).
+// vault that no later run could use (see finishInit()). The hermetic env
+// already hides global config; these still stop a signing or hooks setting
+// in the vault's own .git/config.
 //
-// core.fsmonitor=false: a global fsmonitor setting names a program (or starts
-// a daemon) that git would run against the vault. The vault needs none.
+// core.fsmonitor=false: an fsmonitor setting names a program (or starts a
+// daemon) that git would run against the vault. The vault needs none.
 function vaultGit(dir, args, opts = {}) {
+  const sub = vaultSubcommand(args);
+  const carried = operatorConfig(dir);
+  if ((sub === 'add' || sub === 'commit') && !carried.ok && !vaultIsByteExact(dir)) {
+    throw new Error(
+      `refusing to write — could not read your git configuration's line-ending settings for ${dir}, and the `
+      + `vault has no \`* -text\` ${GITATTRIBUTES_NAME}, so git could store different bytes than before. `
+      + 'Nothing was committed. Run `git config --list` to see the error, fix it, then retry.',
+    );
+  }
   const full = [
     ...NO_DETACHED_HOUSEKEEPING,
     '-c', 'core.longpaths=true', '-c', `core.hooksPath=${NO_HOOKS}`, '-c', 'core.fsmonitor=false',
     '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
+    ...carriedConfigArgs(carried.entries),
+    ...(sub === 'commit' ? commitIdentityArgs(vaultOwnIdentity(dir), carried.entries) : []),
     '-C', dir, '--git-dir=.git', '--work-tree=.', ...args,
   ];
-  return gitIsolated(full, { ...opts, env: vaultGitEnv(full, opts.env || process.env) });
+  return gitIsolated(full, { ...opts, env: vaultGitEnv(opts.env || process.env) });
 }
 
 // Git for Windows finds a repository by checking <dir>\.git\objects against
@@ -401,7 +540,7 @@ function assertVaultGitDir(dir) {
   const expected = vaultGitDir(dir);
   let actual = '';
   try {
-    actual = git(['-C', dir, 'rev-parse', '--absolute-git-dir'], { stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    actual = git(dir, ['-C', dir, 'rev-parse', '--absolute-git-dir'], { stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   } catch (e) {
     throw new Error(`refusing to write — ${dir} has no git repository of its own (${String(e?.message || e).split('\n')[0]})`);
   }
@@ -471,7 +610,9 @@ function assertVaultIdentity(dir, { note = true } = {}) {
     process.stderr.write(
       `memory-vault: note — ${dir} is a vault this plugin created, but its local user.email is `
       + `${email ? `"${email}"` : 'unset'} rather than ${VAULT_USER_EMAIL}. The vault is still used; its `
-      + 'new commits carry the identity its config now names.\n',
+      + (email
+        ? 'new commits carry the identity its config now names.\n'
+        : 'new commits carry the email your own git config names (or EMAIL), or the vault\'s own if there is none.\n'),
     );
   }
 }
@@ -774,8 +915,8 @@ function createVault(dir) {
   // the operator's global core.hooksPath. So init gets the same no-hooks
   // override as every other vault call. It is absolute here because init runs
   // before there is a vault work tree to resolve a relative path against.
-  git([
-    '-c', 'core.longpaths=true', '-c', `core.hooksPath=${join(dir, NO_HOOKS)}`, '-c', 'core.fsmonitor=false',
+  git(dir, [
+    '-c', `core.hooksPath=${join(dir, NO_HOOKS)}`, '-c', 'core.fsmonitor=false',
     'init', '-q', '--template=', '-b', 'main', dir,
   ]);
   // Proven BEFORE the first config write: the repository git just made is
