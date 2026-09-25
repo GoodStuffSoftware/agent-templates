@@ -18,7 +18,7 @@
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { modelTiers, effortFor, routeForWeight, resolveRoute } from '../hooks/lib/context.mjs';
+import { modelTiers, effortFor, routeForWeight, resolveRoute, rungFor } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -128,33 +128,21 @@ function spliceSkillBlock(text, block = taskTypeBlock()) {
 // reads to pick a rung, so it must never ASSERT something the current
 // routing config falsifies — the bug this exists to catch: ac-opus-low's
 // hand-written description called opus/low "rare; prefer sonnet unless...",
-// which routing trial v2 flatly contradicts (opus/low is now the trial
-// default for explore, verify, operate, mechanical-edit, bounded-feature,
-// subagent-worker and debug-root-cause). The fix is to stop hand-writing the
-// part that can go stale: each description is ROLE TEXT (a static capability
-// shape, e.g. "opus capability at ordinary depth" — this never claims how
-// OFTEN a rung is used, only what it is FOR, so a trial change cannot
-// contradict it) plus a GENERATED routing-fact suffix naming which task
-// types currently default here, computed fresh from resolveRoute() every
-// time. `--check-agent-descriptions` fails when a file's description does
-// not match what this function would generate right now; `--sync-agent-descriptions`
-// rewrites it.
+// which routing trial v2 flatly contradicts. Coverage is driven entirely by
+// config/model-tiers.json: EVERY `ladder` rung is generated and checked,
+// including one added or renamed later, and the check also fails for a rung
+// with no `role`, a rung with no file, a file whose `name:` is not its rung,
+// and an agents/ac-*.md file that is no longer a rung (a rename leaves one).
 //
-// ac-haiku is deliberately excluded: its description is a hand-authored
-// retirement notice (config/model-tiers.json's tiers.haiku.retiresAfter/
-// replacement), not a routing-trial claim, and haiku takes no task-type
-// routing suffix (no trial names it — it is the plain-grid weight-1/2 rung).
-const ROLE_TEXT = {
-  'ac-sonnet-low': 'high-volume/latency-sensitive bounded work that does not need much reasoning depth',
-  'ac-sonnet-medium': 'bounded multi-step work against a clear spec (1-3 files, known shape)',
-  'ac-sonnet-high': 'multi-file, cross-referencing, integration work, or root-causing a specific failure',
-  'ac-sonnet-xhigh': 'the hardest sonnet-tier work — long agentic runs or diagnostic work that benefits from real search, still short of needing opus capability',
-  'ac-opus-low': "opus CAPABILITY needed but the step itself is simple",
-  'ac-opus-medium': "opus capability at ordinary depth — Opus 5.5's own default effort",
-  'ac-opus-high': 'opus capability with real reasoning depth — architecture, non-trivial debugging',
-  'ac-opus-xhigh': 'deep architecture, novel reasoning, migrations, large-scale refactors',
-  'ac-opus-max': 'reserve for genuinely frontier problems where xhigh was tried and fell short — large cost for typically small gain',
-};
+// Each description is the rung's config `role` (a static capability shape
+// that never says how OFTEN the rung is used) plus a GENERATED suffix naming
+// which task types currently default here, computed fresh from
+// resolveRoute(). A rung whose model carries a `retiresAfter` gets its
+// retirement notice generated from that date and the tier's `replacement`
+// as well, so neither can go stale as a hand-typed copy.
+function ladderRungs() {
+  return Array.isArray(cfg.ladder) ? cfg.ladder.filter((r) => r && r.agent) : [];
+}
 
 // Task types (numeric-weight only — parity types are sized to a writer, not
 // a fixed rung) that resolve, RIGHT NOW, to exactly this rung's (model,
@@ -172,14 +160,37 @@ function typesForRung(rung) {
   return names;
 }
 
+function retirementNotice(rung, total) {
+  const tier = (cfg.tiers || {})[rung.model] || {};
+  if (!tier.retiresAfter) return null;
+  const rep = tier.replacement || {};
+  const fallback = rep.model ? rungFor(rep.model, rep.effort || null) : null;
+  const to = fallback
+    ? `rung ${fallback.rung}, ${fallback.agent} (${fallback.model}${fallback.effort ? '/' + fallback.effort : ''})`
+    : 'no staged replacement';
+  return {
+    prefix: `RETIRING (no sooner than ${tier.retiresAfter}): rung ${rung.rung}/${total}`,
+    tail: `After that date the routing table stops naming this rung on its own (config/model-tiers.json tiers.${rung.model}.retiresAfter/replacement) and falls back to ${to}.`,
+  };
+}
+
+// null when the config gives this rung no `role` (a coverage failure the
+// check reports, never a silent skip).
 function generatedAgentDescription(rung) {
-  const role = ROLE_TEXT[rung.agent];
-  if (!role) return null; // ac-haiku, or a rung this generator does not cover
+  const role = typeof rung.role === 'string' ? rung.role.trim() : '';
+  if (!role) return null;
+  const total = ladderRungs().length;
   const types = typesForRung(rung);
   const suffix = types.length
     ? `Currently the default routing for: ${types.join(', ')}.`
     : 'Not currently the default routing for any listed task type — spawn it directly by name when the work needs it.';
-  return `Rung ${rung.rung}/10: ${role}. ${suffix}`;
+  const tier = (cfg.tiers || {})[rung.model] || {};
+  const noEffort = Array.isArray(tier.efforts) && tier.efforts.length === 0
+    ? ` ${tier.resolvesTo?.displayName || rung.model} takes no effort parameter.`
+    : '';
+  const ret = retirementNotice(rung, total);
+  if (ret) return `${ret.prefix} — ${role}.${noEffort} ${suffix} ${ret.tail}`;
+  return `Rung ${rung.rung}/${total}: ${role}.${noEffort} ${suffix}`;
 }
 
 // Overridable only for tests — same pattern as AGENT_COMPANION_HOME_OVERRIDE
@@ -194,16 +205,19 @@ function agentFile(rung) {
   return join(agentsDir(), `${rung.agent}.md`);
 }
 
+function frontmatterValue(fmText, key) {
+  const m = fmText.match(new RegExp(`^${key}:\\s*(.*)$`, 'm'));
+  if (!m) return null;
+  let val = m[1].trim();
+  if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1).replace(/\\"/g, '"');
+  return val;
+}
 function readDescription(file) {
   let text;
-  try { text = readFileSync(file, 'utf8'); } catch { return { text: null, description: null }; }
+  try { text = readFileSync(file, 'utf8'); } catch { return { text: null, description: null, name: null }; }
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!m) return { text, description: null };
-  const dm = m[1].match(/^description:\s*(.*)$/m);
-  if (!dm) return { text, description: null };
-  let val = dm[1].trim();
-  if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1).replace(/\\"/g, '"');
-  return { text, description: val };
+  if (!m) return { text, description: null, name: null };
+  return { text, description: frontmatterValue(m[1], 'description'), name: frontmatterValue(m[1], 'name') };
 }
 
 function writeDescription(file, text, newDescription) {
@@ -213,25 +227,42 @@ function writeDescription(file, text, newDescription) {
   writeFileSync(file, updated);
 }
 
+// Every problem, one entry each: { agent, file, problem, expected, actual }.
+// `problem` is one of: no-role (config gives the rung no role text),
+// missing-file, name-mismatch, drift (description differs from the
+// generated one), not-a-rung (an agents/ac-*.md file no rung names).
 function checkAgentDescriptions() {
-  const drift = [];
-  for (const rung of (cfg.ladder || [])) {
-    const expected = generatedAgentDescription(rung);
-    if (expected === null) continue; // not generator-covered (ac-haiku)
+  const out = [];
+  const rungs = ladderRungs();
+  for (const rung of rungs) {
     const file = agentFile(rung);
-    const { description } = readDescription(file);
-    if (description !== expected) {
-      drift.push({ agent: rung.agent, file, expected, actual: description });
+    const expected = generatedAgentDescription(rung);
+    const { text, description, name } = readDescription(file);
+    if (expected === null) {
+      out.push({ agent: rung.agent, file, problem: 'no-role', expected: `a "role" for rung ${rung.rung} in config/model-tiers.json ladder`, actual: null });
+      continue;
     }
+    if (text === null) {
+      out.push({ agent: rung.agent, file, problem: 'missing-file', expected, actual: null });
+      continue;
+    }
+    if (name !== rung.agent) out.push({ agent: rung.agent, file, problem: 'name-mismatch', expected: `name: ${rung.agent}`, actual: name === null ? null : `name: ${name}` });
+    if (description !== expected) out.push({ agent: rung.agent, file, problem: 'drift', expected, actual: description });
   }
-  return drift;
+  const known = new Set(rungs.map((r) => `${r.agent}.md`));
+  let files = [];
+  try { files = readdirSync(agentsDir()); } catch { /* no agents dir: every rung already reported missing */ }
+  for (const f of files.filter((x) => /^ac-.*\.md$/.test(x) && !known.has(x)).sort()) {
+    out.push({ agent: f.replace(/\.md$/, ''), file: join(agentsDir(), f), problem: 'not-a-rung', expected: 'a config/model-tiers.json ladder rung naming this file', actual: f });
+  }
+  return out;
 }
 
 function syncAgentDescriptions() {
   const written = [];
-  for (const rung of (cfg.ladder || [])) {
+  for (const rung of ladderRungs()) {
     const expected = generatedAgentDescription(rung);
-    if (expected === null) continue;
+    if (expected === null) continue; // no role: only the check can report it
     const file = agentFile(rung);
     const { text, description } = readDescription(file);
     if (text === null || description === expected) continue;
@@ -240,20 +271,19 @@ function syncAgentDescriptions() {
   }
   return written;
 }
-
 if (has('--check-agent-descriptions')) {
   const drift = checkAgentDescriptions();
   if (drift.length === 0) {
     console.log('agent descriptions match config/model-tiers.json — no drift');
     process.exit(0);
   }
-  console.error(`${drift.length} agent description(s) have drifted from config/model-tiers.json:`);
+  console.error(`${drift.length} ladder agent description problem(s) against config/model-tiers.json's ladder:`);
   for (const d of drift) {
-    console.error(`\n${d.agent} (${d.file}):`);
+    console.error(`\n${d.agent} [${d.problem}] (${d.file}):`);
     console.error(`  expected: ${d.expected}`);
     console.error(`  actual:   ${d.actual === null ? '(missing/unparseable)' : d.actual}`);
   }
-  console.error('\nRun `node scripts/routing-table.mjs --sync-agent-descriptions` to fix.');
+  console.error('\nDrifted descriptions: run `node scripts/routing-table.mjs --sync-agent-descriptions`. A missing role, file or rung, a name mismatch or a file that is no longer a rung needs a config or file edit.');
   process.exit(1);
 }
 

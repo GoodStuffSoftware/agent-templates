@@ -1,6 +1,6 @@
 ---
 name: ac-haiku
-description: "RETIRING 2026-10-15: rung 1/10 (cheapest) — reads, searches, single commands, verification (weight 1-2). Haiku 4.5 takes no effort parameter. After the retirement date, the routing table stops naming this rung on its own (see config/model-tiers.json tiers.haiku.retiresAfter/replacement) and falls back to rung 2, ac-sonnet-low (sonnet/low)."
+description: "RETIRING (no sooner than 2026-10-15): rung 1/10 — reads, searches, single commands. Haiku 4.5 takes no effort parameter. Not currently the default routing for any listed task type — spawn it directly by name when the work needs it. After that date the routing table stops naming this rung on its own (config/model-tiers.json tiers.haiku.retiresAfter/replacement) and falls back to rung 2, ac-sonnet-low (sonnet/low)."
 model: haiku
 ---
 

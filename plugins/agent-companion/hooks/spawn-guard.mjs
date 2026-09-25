@@ -24,16 +24,14 @@
 // legitimate work; these are detection, not enforcement.
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
   writeJsonAtomic,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
-  taskTypeDef, isLadderAgentName,
+  taskTypeDef, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
@@ -66,32 +64,31 @@ function combineNotes(...parts) {
   return joined || null;
 }
 
-// Self-report — cheap (one plugin.json read + one small state write), and
-// deliberately NOT the same mechanism self-update.mjs's runningPlugin() uses
-// for ITSELF: that reads self-update.mjs's own import.meta.url, which tells
-// you what self-update.mjs resolved to, not what THIS file (spawn-guard.mjs)
-// did. The bug this exists to catch is exactly a divergence between the two —
-// self-update.mjs (and /reload-plugins) reporting a fresh load while
-// spawn-guard.mjs, loaded earlier in the same process tree or from a stale
-// cache path, keeps running old code. Recording spawn-guard.mjs's OWN
-// resolved version on every invocation gives hooks/ladder-check.mjs
-// (SessionStart) a fact to compare against installed_plugins.json instead of
-// trusting the reload's own self-report. Fails open on any error — this must
-// never be the reason a spawn is blocked.
-function reportOwnVersion() {
+// Evidence that THIS session's harness registered the ladder: a SubagentStart
+// (hooks/spawn-log.mjs -> subagent-starts.jsonl) of any ladder rung in this
+// same session. Registration cannot be queried from a hook, and the ladder's
+// registration is exactly what failed in the 2026-09-24 incident ("Agent type
+// not found"), so the guard rewrites a spawn's subagent_type ONLY once a
+// ladder agent has actually started here, and to the exact form (bare or
+// namespaced) that started. Returns that prefix ('' or '<plugin>:'), or null
+// when there is no such evidence. Bounded tail read; never throws.
+function ladderStartedPrefix(sid) {
   try {
-    const here = fileURLToPath(import.meta.url); // .../hooks/spawn-guard.mjs
-    const root = join(dirname(here), '..');
-    const pj = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8'));
-    if (!pj || !pj.version || !pj.name) return;
-    writeJsonAtomic(stateFile('spawn-guard-running.json'), {
-      name: pj.name, version: pj.version, file: here, at: new Date().toISOString(),
+    const rows = tailRecords(join(telemetryDir(), 'subagent-starts.jsonl'), {
+      bytes: 65536,
+      filter: (line) => line.includes(String(sid)),
     });
-  } catch { /* fail open: no self-report this invocation, ladder-check stays silent on it */ }
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const r = rows[i];
+      if (!r || r.session_id !== sid || !isLadderAgentName(r.agent_type)) continue;
+      const t = String(r.agent_type);
+      return t.includes(':') ? `${t.slice(0, t.indexOf(':'))}:` : '';
+    }
+  } catch { /* no evidence */ }
+  return null;
 }
 
 try {
-  reportOwnVersion();
   const p = readStdin();
   noteAgentType(p);
 
@@ -105,7 +102,11 @@ try {
   // a premium tier slipped past the warrant and the cap entirely, because the
   // spawn itself named no model.
   const declared = input.model || '';
-  const def = agentDefinition(input.subagent_type, p.cwd);
+  // agentDefinition() resolves `<plugin>:<agent>` to that plugin's own
+  // agents/ folder, so a ladder spawn's model AND effort come from its rung
+  // file here, the same way the harness reads them.
+  const isLadderSpawn = isLadderAgentName(input.subagent_type);
+  let def = agentDefinition(input.subagent_type, p.cwd);
   const fromDef = def?.model || '';
   let model = declared || fromDef;              // what will actually run, when knowable
   const trulyInherited = !declared && !fromDef; // nobody chose: the real hazard
@@ -286,12 +287,58 @@ try {
   const routeMatchesModel = routingKnown && !!spawnAlias && classifyModel(route.model).alias === spawnAlias;
   const isPremiumForSpawn = spawnAlias === 'fable' ? true : (routeMatchesModel ? false : isPremium(model));
 
+  // Autofill. Never on a ladder spawn: a rung's model and effort are locked
+  // in its own file, and a route's model written over it would silently
+  // change the rung (the bug that turned agent-companion:ac-haiku into an
+  // opus spawn for a TYPE: novel-design brief).
+  //
+  // On a NON-ladder spawn, a model alone leaves effort to inherit from the
+  // session. So when the route names an effort, the guard also rewrites the
+  // spawn to the matching ladder rung (ac-<model>-<effort>), which pins both
+  // — but only where that rewrite is safe:
+  //   - the original type is general-purpose or unnamed (a ladder rung has
+  //     the same full tool set; Explore, Plan or a project agent would lose
+  //     its own tools or prompt), and
+  //   - a ladder agent has already STARTED in this session
+  //     (ladderStartedPrefix), which proves the harness registered the
+  //     ladder here. A rewrite to an unregistered type fails the spawn with
+  //     "Agent type not found", and the caller could not see why.
+  //   - `fit_autofill_ladder` is on (default).
+  // Otherwise the model is still filled in and an advisory names the rung to
+  // spawn instead.
   let autofilled = false;
   let updatedInput = null;
-  if (fitOn && trulyInherited && route?.model && opt('fit_autofill', true)) {
+  let ladderRewrite = null;     // { from, to } when the spawn was rewritten to a rung
+  let autofillAdvisory = null;  // the note when it could not be
+  if (fitOn && trulyInherited && route?.model && opt('fit_autofill', true) && !isLadderSpawn) {
     model = route.model;
     autofilled = true;
     updatedInput = { ...input, model };
+    const rung = route.effort ? rungFor(route.model, route.effort) : null;
+    if (rung) {
+      const origType = input.subagent_type || '';
+      const toolsEquivalent = !origType || origType === 'general-purpose';
+      const prefix = (toolsEquivalent && opt('fit_autofill_ladder', true)) ? ladderStartedPrefix(sid) : null;
+      if (prefix !== null) {
+        const target = `${prefix}${rung.agent}`;
+        const targetDef = agentDefinition(target, p.cwd);
+        if (targetDef && targetDef.model) {
+          updatedInput = { ...input, model, subagent_type: target };
+          ladderRewrite = { from: origType || null, to: target };
+          def = targetDef;
+        }
+      }
+      if (!ladderRewrite) {
+        const why = !toolsEquivalent
+          ? `"${origType}" has its own tools and prompt, so the guard does not swap it for a ladder rung`
+          : !opt('fit_autofill_ladder', true)
+            ? 'the fit_autofill_ladder option is off'
+            : 'no ladder agent has started in this session yet, so the harness has not shown it registered the ladder here';
+        autofillAdvisory = `agent-companion: effort not pinned — the model was filled in as ${route.model}, but ` +
+          `effort ${route.effort} was not: this worker inherits the session's effort. Spawn subagent_type ` +
+          `"agent-companion:${rung.agent}" to pin ${route.model}/${route.effort} together (not rewritten here: ${why}).`;
+      }
+    }
   }
 
   // A subagent definition with no `effort` frontmatter does NOT fall back to
@@ -335,16 +382,20 @@ try {
   // fires for ANY effort-taking model with no stated effort, ladder or not):
   // this one names the actual hazard — a DIFFERENT model than the lead is
   // running was chosen on purpose, and effort came along for free, uninvited.
-  const isNonLadderExplicitEscalation = !isLadderAgentName(input.subagent_type)
-    && !!declared && !!callerModel
-    && classifyModel(declared).alias !== classifyModel(callerModel).alias;
-  const noEffortStatedNote = (modelTakesEffort && !effortStatedSomewhere)
+  // A lead model the tier table cannot classify (a `<synthetic>` record, an
+  // empty transcript) is unknown, not "different".
+  const callerAlias = callerModel ? classifyModel(callerModel).alias : '';
+  const isNonLadderExplicitEscalation = !isLadderSpawn
+    && !!declared && !!callerAlias
+    && classifyModel(declared).alias !== callerAlias;
+  const noEffortStatedNote = autofillAdvisory ? null : (modelTakesEffort && !effortStatedSomewhere)
     ? (isNonLadderExplicitEscalation
       ? `agent-companion: effort not set — "${input.subagent_type || 'this worker'}" is not a ladder agent ` +
         `(agent-companion:ac-*) and names "${declared}" explicitly, which differs from the lead's own model ` +
         `(${callerModel}); with no \`effort:\` in a definition, this worker inherits the session's effort ` +
         `(${callerEffort || "unknown — the lead's own effort could not be read from its transcript either"}). ` +
-        'Spawn the matching ladder agent instead (see `node scripts/recommend.mjs`) to pin model and effort together.'
+        'Spawn the matching ladder agent instead (see `node scripts/recommend.mjs`) to pin model and effort together; ' +
+        'if ladder agents will not spawn in this session, see the setup skill\'s "If ladder agents won\'t spawn" section.'
       : `agent-companion (SPAWNING RULE 1): this spawn resolves to ${classifyModel(model).alias || model} with no ` +
         'effort stated in its agent definition — it will INHERIT the orchestrating session\'s current effort ' +
         'rather than any model default, which couples this subagent\'s depth of thinking to whatever the caller ' +
@@ -684,6 +735,13 @@ try {
     appendLog('spawns.jsonl', {
       at: new Date().toISOString(),
       session_id: sid,
+      // Which copy of the guard wrote this row (plugin version, cache vs
+      // checkout, install scope key). The daily scout reads these across
+      // sessions to catch a stale copy still guarding spawns after an update
+      // (scripts/detect.mjs, stale_guard_running) — the one channel that
+      // sees a session whose own hooks are all stale.
+      ...runningCopyStamp(p.cwd),
+      subagent_type_rewritten_to: ladderRewrite ? ladderRewrite.to : null, // the ladder rung autofill swapped a general-purpose spawn to
       spawned_by_agent_type: p.agent_type,
       model: model || '(inherited)',      // effective model, when knowable (autofilled counts)
       model_declared: declared || null,   // named at the spawn site
@@ -764,7 +822,11 @@ try {
   const who = input.subagent_type || 'an agent';
   let note = null;
   if (autofilled) {
-    note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel})${routeLayerNote}.`;
+    note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel})${routeLayerNote}.` +
+      (ladderRewrite
+        ? ` Rewrote subagent_type ${ladderRewrite.from ? `"${ladderRewrite.from}"` : '(none)'} -> "${ladderRewrite.to}" so effort ${route.effort} is pinned too (a ladder agent has already started in this session).`
+        : '');
+    if (autofillAdvisory) note = `${note}\n\n${autofillAdvisory}`;
   } else if (fit?.parityFloor) {
     note = `agent-companion: spawning ${who} at ${model}${def?.effort ? '/' + def.effort : ''} for a critical ${declaredType} is under-provisioned — ${fit.reason}. ` +
       `F1: a critical review is never sized below ${parityFloorLabel}, whatever its writer (no writer is declared, so parity with it is not checked here). ${fit.action}.`;
@@ -887,7 +949,7 @@ try {
       // under-counting it would reopen the fan-out this cap exists to bound.
       // `atype` lets SubagentStart confirm this entry only on a start of the
       // same agent type (confirmPremiumStart, lib/premium-window.mjs).
-      if (!isCanary) writeJsonAtomic(f, [...recent, { t: now, sid, confirmed: !!input.team_name, atype: premiumAgentType(input.subagent_type) }]);
+      if (!isCanary) writeJsonAtomic(f, [...recent, { t: now, sid, confirmed: !!input.team_name, atype: premiumAgentType(ladderRewrite ? ladderRewrite.to : input.subagent_type) }]);
       return null;
     });
 
