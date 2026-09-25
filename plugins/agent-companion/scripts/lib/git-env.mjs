@@ -30,8 +30,8 @@
 //     canary relies on it (url.<base>.insteadOf) to clone without network.
 //   - GIT_SSH_COMMAND, GIT_ASKPASS, GIT_TERMINAL_PROMPT — clone/fetch auth.
 //   - GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG_NOSYSTEM — hermetic
-//     test setups point these at throwaway files. (isolatedWriteGitEnv()
-//     below drops GLOBAL and SYSTEM for the memory vault's writes.)
+//     test setups point these at throwaway files. (hermeticGitEnv() below
+//     pins them to the null device for the memory vault.)
 // GIT_CONFIG (the legacy "`git config` reads and writes THIS file" variable)
 // IS stripped: it redirects config writes, which is exactly the failure class.
 //
@@ -124,26 +124,47 @@ export function isolatedGitEnv(env = process.env, overrides = {}) {
   return out;
 }
 
-// --- config FILES named by env ----------------------------------------------
-// GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM replace the files git reads as its
-// global and system config. isolatedGitEnv() keeps them (hermetic test
-// setups and read-only callers rely on them), which let an inherited
-// GIT_CONFIG_GLOBAL inject any setting at all into a vault WRITE: a
-// core.excludesFile that drops memory files from the backup, an identity, a
-// hooksPath. isolatedWriteGitEnv() is isolatedGitEnv() minus those two, so a
-// write reads only the default global and system files, as a plain `git`
-// run by the operator would. GIT_CONFIG_NOSYSTEM stays: it only removes a
-// config source, never adds one.
-const CONFIG_FILE_REDIRECT = new Set(['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']);
+// --- hermetic: no config from outside the repository at all ---------------
+// isolatedGitEnv() still lets git read the global and system config files,
+// and those are reachable from the environment in more ways than one:
+// GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM name them outright, and HOME and
+// XDG_CONFIG_HOME decide where git looks for $HOME/.gitconfig,
+// $XDG_CONFIG_HOME/git/config and the default ignore and attributes files
+// (git/ignore, git/attributes). A parent that sets any of them can inject
+// any setting into a git child: an excludes file that silently leaves files
+// out of a commit, a clean filter that runs a program on every add, a
+// hooksPath. hermeticGitEnv() closes all of them for a caller that needs
+// nothing from outside its own repository (memory-vault.mjs):
+//   GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM  -> the null device
+//   GIT_CONFIG_NOSYSTEM, GIT_ATTR_NOSYSTEM -> 1
+//   HOME, XDG_CONFIG_HOME                -> the null device, so every per-user
+//                                           file git derives from them is a
+//                                           path under a device that can hold
+//                                           no files, and git finds none
+// Every case spelling of those names is removed first (Windows env names
+// are case-insensitive). The repository's own .git/config is still read, and
+// `-c` on the command line still applies.
+export const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
-export function isConfigFileRedirectGitVar(name) {
-  return CONFIG_FILE_REDIRECT.has(String(name).toUpperCase());
+export const HERMETIC_GIT_ENV = Object.freeze({
+  GIT_CONFIG_GLOBAL: NULL_DEVICE,
+  GIT_CONFIG_SYSTEM: NULL_DEVICE,
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_ATTR_NOSYSTEM: '1',
+  HOME: NULL_DEVICE,
+  XDG_CONFIG_HOME: NULL_DEVICE,
+});
+
+const HERMETIC_NAMES = new Set(Object.keys(HERMETIC_GIT_ENV));
+
+export function isHermeticGitVar(name) {
+  return HERMETIC_NAMES.has(String(name).toUpperCase());
 }
 
-export function isolatedWriteGitEnv(env = process.env) {
+export function hermeticGitEnv(env = process.env) {
   const out = isolatedGitEnv(env);
-  for (const k of Object.keys(out)) if (isConfigFileRedirectGitVar(k)) delete out[k];
-  return out;
+  for (const k of Object.keys(out)) if (isHermeticGitVar(k)) delete out[k];
+  return Object.assign(out, HERMETIC_GIT_ENV);
 }
 
 // --- identity and dates -----------------------------------------------------

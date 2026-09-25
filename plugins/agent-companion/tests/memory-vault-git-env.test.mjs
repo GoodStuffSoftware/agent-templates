@@ -25,8 +25,10 @@ import { createHash } from 'node:crypto';
 import {
   makeFixture, runScript, assertNotRealHome, PLUGIN_ROOT,
 } from './helpers.mjs';
-import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
-import { vaultGitWrites, vaultGitEnv } from '../scripts/memory-vault.mjs';
+import { cleanGitEnv, NULL_DEVICE } from '../scripts/lib/git-env.mjs';
+import {
+  vaultGitEnv, vaultSubcommand, parseScopedConfig, carriedConfigArgs, commitIdentityArgs,
+} from '../scripts/memory-vault.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
 const VAULT_NAME = 'agent-companion memory-vault';
@@ -430,8 +432,9 @@ test('a relative AGENT_COMPANION_VAULT_DIR is refused with nothing written', () 
 // V5. gitClean() keeps per-process config injection (the leak-sweep canary
 // needs it), so an inherited GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT reached
 // vault commits: a parent's core.hooksPath ran the parent's hooks inside the
-// vault and an include.path rewrote the vault's author. A hooksPath from the
-// operator's global config ran them too.
+// vault and an include.path rewrote the vault's author. (A hooksPath from the
+// operator's global config ran them too: see S2 and G3 below, which reach
+// git through every config-file route.)
 function makeHooks(root) {
   const hooks = join(root, 'parent-hooks');
   mkdirSync(hooks, { recursive: true });
@@ -442,16 +445,13 @@ function makeHooks(root) {
   }
   const include = join(root, 'include.cfg');
   writeFileSync(include, '[user]\n\tname = INCLUDED-IDENT\n\temail = included@example.invalid\n');
-  const globalCfg = join(root, 'global.gitconfig');
-  writeFileSync(globalCfg, `[core]\n\thooksPath = ${hooks.replace(/\\/g, '/')}\n`);
-  return { hooks: hooks.replace(/\\/g, '/'), flag, include: include.replace(/\\/g, '/'), globalCfg };
+  return { hooks: hooks.replace(/\\/g, '/'), flag, include: include.replace(/\\/g, '/') };
 }
 
 const INJECTED_ENVS = [
   ['GIT_CONFIG_PARAMETERS core.hooksPath', (h) => ({ GIT_CONFIG_PARAMETERS: `'core.hooksPath'='${h.hooks}'` })],
   ['GIT_CONFIG_PARAMETERS include.path', (h) => ({ GIT_CONFIG_PARAMETERS: `'include.path'='${h.include}'` })],
   ['GIT_CONFIG_COUNT core.hooksPath', (h) => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: h.hooks })],
-  ['a global config with core.hooksPath', (h) => ({ GIT_CONFIG_GLOBAL: h.globalCfg })],
 ];
 
 for (const [label, inject] of INJECTED_ENVS) {
@@ -471,47 +471,6 @@ for (const [label, inject] of INJECTED_ENVS) {
       const authors = git(['-C', join(fx.stateDir, 'memory-vault'), 'log', '--format=%an <%ae>']).split('\n');
       assert.equal(authors.length, 2, 'init + sync commits');
       for (const a of authors) assert.equal(a, `${VAULT_NAME} <memory-vault@agent-companion.local>`);
-    } finally {
-      fx.cleanup();
-    }
-  });
-}
-
-// G3. `git init` ran without the no-hooks override, so a reference-transaction
-// hook from the operator's global core.hooksPath ran while the vault was being
-// created. A global core.fsmonitor program ran on every vault call too.
-function makeGlobalHookConfig(root) {
-  const hooks = join(root, 'global-hooks');
-  mkdirSync(hooks, { recursive: true });
-  const flag = join(root, 'GLOBAL_HOOK_RAN');
-  const f = flag.replace(/\\/g, '/');
-  for (const h of ['reference-transaction', 'post-checkout', 'post-index-change']) {
-    writeFileSync(join(hooks, h), `#!/bin/sh\necho ${h} >> "${f}"\ncat >/dev/null\nexit 0\n`);
-    chmodSync(join(hooks, h), 0o755);
-  }
-  const fsmon = join(root, 'fsmonitor-program');
-  writeFileSync(fsmon, `#!/bin/sh\necho fsmonitor >> "${f}"\nexit 1\n`);
-  chmodSync(fsmon, 0o755);
-  const globalCfg = join(root, 'hooks-global.gitconfig');
-  writeFileSync(globalCfg,
-    `[core]\n\thooksPath = ${hooks.replace(/\\/g, '/')}\n\tfsmonitor = ${fsmon.replace(/\\/g, '/')}\n`);
-  return { flag, globalCfg };
-}
-
-for (const cmd of ['init', 'sync']) {
-  test(`G3: ${cmd} of a new vault runs no hook or fsmonitor program from the operator's global config`, () => {
-    const fx = makeFixture();
-    try {
-      const corpus = makeCorpus(fx.dir);
-      const { flag, globalCfg } = makeGlobalHookConfig(fx.dir);
-      const res = runScript(SCRIPT, [cmd, '--json'], {
-        cwd: fx.dir,
-        env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', GIT_CONFIG_GLOBAL: globalCfg },
-        timeout: 60000,
-      });
-      assert.equal(res.status, 0, res.stderr);
-      assert.ok(!existsSync(flag), `a global hook ran during vault ${cmd}: ${existsSync(flag) ? readFileSync(flag, 'utf8') : ''}`);
-      assert.equal(git(['-C', join(fx.stateDir, 'memory-vault'), 'log', '--max-parents=0', '--format=%s']), 'memory-vault: initialize');
     } finally {
       fx.cleanup();
     }
@@ -855,110 +814,243 @@ test('S1: every vault commit (and every vault git call) runs housekeeping undeta
   }
 });
 
-// --- 0.29.2 S2: config files named by env are ignored on vault WRITES -----
-// isolatedGitEnv() kept GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM, so an
-// inherited one could inject any setting into a vault write. The -c
-// overrides already neutralise hooksPath and signing, and the vault's own
-// config wins for its identity, so this fixture also sets a
-// core.excludesFile: without the strip it silently drops a memory file from
-// the backup.
-function makeHostileGlobal(root) {
+// --- 0.29.2 S2: no configuration from outside the vault reaches any call --
+// Every vault git call runs hermetic (hermeticGitEnv()): no global or system
+// config file, whether git finds it through GIT_CONFIG_GLOBAL /
+// GIT_CONFIG_SYSTEM, through HOME ($HOME/.gitconfig) or through
+// XDG_CONFIG_HOME ($XDG_CONFIG_HOME/git/config, git/ignore,
+// git/attributes). The hostile config below reaches git by each of those
+// routes in turn. Each setting in it announces itself in the sentinel file
+// if git ever acts on it:
+//   - hooks, an fsmonitor program and a gpg program: the vault's -c options
+//     stop these even without the hermetic env;
+//   - a clean filter (via core.attributesFile) and an excludes file: nothing
+//     but the hermetic env stops these, so every route below goes red when
+//     the hermetic env is removed.
+// The same settings written into the vault's OWN .git/config reach git
+// whatever the env says; only the -c options stop them (the "vault's own
+// .git/config" test further down), so that test goes red when the -c
+// options are removed.
+function sh(p) { return p.replace(/\\/g, '/'); }
+
+function makeHostileConfig(root) {
+  const flag = join(root, 'HOSTILE_SENTINEL');
+  const F = sh(flag);
   const hooks = join(root, 'hostile-hooks');
   mkdirSync(hooks, { recursive: true });
-  const flag = join(root, 'HOSTILE_HOOK_RAN');
-  for (const h of ['pre-commit', 'commit-msg', 'post-commit', 'reference-transaction']) {
-    writeFileSync(join(hooks, h), `#!/bin/sh\necho ${h} >> "${flag.replace(/\\/g, '/')}"\ncat >/dev/null\nexit 0\n`);
+  for (const h of ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'reference-transaction',
+    'post-index-change', 'post-checkout']) {
+    writeFileSync(join(hooks, h), `#!/bin/sh\necho hook:${h} >> "${F}"\ncat >/dev/null 2>&1\nexit 0\n`);
     chmodSync(join(hooks, h), 0o755);
   }
+  const prog = (name, body) => {
+    const p = join(root, name);
+    writeFileSync(p, `#!/bin/sh\necho ${name} >> "${F}"\n${body}\n`);
+    chmodSync(p, 0o755);
+    return sh(p);
+  };
+  const fsmonitor = prog('hostile-fsmonitor', 'exit 1');
+  const gpg = prog('hostile-gpg', 'exit 1');
+  const clean = prog('hostile-filter', 'cat');
   const excludes = join(root, 'hostile-excludes');
   writeFileSync(excludes, 'hostile-excluded.md\n');
-  const cfg = join(root, 'hostile.gitconfig');
-  writeFileSync(cfg, [
-    '[core]',
-    `\thooksPath = ${hooks.replace(/\\/g, '/')}`,
-    `\texcludesFile = ${excludes.replace(/\\/g, '/')}`,
-    '[user]',
-    '\tname = HOSTILE-GLOBAL-IDENT',
-    '\temail = hostile@example.invalid',
-    '',
-  ].join('\n'));
-  return { cfg, flag };
+  const attributes = join(root, 'hostile-attributes');
+  writeFileSync(attributes, '* filter=hostile\n');
+  // Settings the vault's -c options answer for.
+  const guarded = [
+    '[core]', `\thooksPath = ${sh(hooks)}`, `\tfsmonitor = ${fsmonitor}`,
+    '[commit]', '\tgpgsign = true',
+    '[tag]', '\tgpgsign = true',
+    '[gpg]', `\tprogram = ${gpg}`,
+  ];
+  // Settings only the hermetic env keeps out.
+  const unguarded = [
+    '[core]', `\texcludesFile = ${sh(excludes)}`, `\tattributesFile = ${sh(attributes)}`,
+    '[filter "hostile"]', `\tclean = ${clean}`, `\tsmudge = ${clean}`,
+    '[user]', '\tname = HOSTILE-GLOBAL-IDENT', '\temail = hostile@example.invalid',
+  ];
+  const text = [...guarded, ...unguarded, ''].join('\n');
+  const file = join(root, 'hostile.gitconfig');
+  writeFileSync(file, text);
+  const home = join(root, 'hostile-home');
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, '.gitconfig'), text);
+  const xdg = join(root, 'hostile-xdg');
+  mkdirSync(join(xdg, 'git'), { recursive: true });
+  writeFileSync(join(xdg, 'git', 'config'), text);
+  return { flag, file, home, xdg, guardedText: [...guarded, ''].join('\n') };
 }
 
-for (const [label, envFor] of [
-  ['GIT_CONFIG_GLOBAL', (cfg) => ({ GIT_CONFIG_GLOBAL: cfg })],
-  ['GIT_CONFIG_SYSTEM', (cfg) => ({ GIT_CONFIG_SYSTEM: cfg })],
-  ...(process.platform === 'win32' ? [['lower-case git_config_global (Windows)', (cfg) => ({ git_config_global: cfg })]] : []),
-]) {
-  test(`S2: a hostile ${label} (hooksPath, user.name, excludesFile) cannot reach a vault write`, () => {
+function sentinel(h) {
+  return existsSync(h.flag) ? readFileSync(h.flag, 'utf8').trim().split(/\s+/).join(', ') : '';
+}
+
+// Every route by which a global or system config file reaches git. Windows
+// env names are case-insensitive, so a lower-case spelling is covered too.
+const CONFIG_ROUTES = [
+  ['GIT_CONFIG_GLOBAL', (h) => ({ GIT_CONFIG_GLOBAL: h.file })],
+  ['GIT_CONFIG_SYSTEM', (h) => ({ GIT_CONFIG_SYSTEM: h.file })],
+  ['HOME (~/.gitconfig)', (h) => ({ HOME: h.home })],
+  ['XDG_CONFIG_HOME (git/config)', (h) => ({ XDG_CONFIG_HOME: h.xdg })],
+  ...(process.platform === 'win32' ? [['lower-case git_config_global (Windows)', (h) => ({ git_config_global: h.file })]] : []),
+];
+
+function vaultEnvFor(corpus, extra) {
+  return { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', ...extra };
+}
+
+for (const [label, route] of CONFIG_ROUTES) {
+  test(`S2: a hostile config reached through ${label} never touches sync or status: no program runs, nothing is left out`, () => {
     const fx = makeFixture();
     try {
       const corpus = makeCorpus(fx.dir);
       writeFileSync(join(corpus, 'proj-a', 'memory', 'hostile-excluded.md'), 'must be backed up\n');
-      const { cfg, flag } = makeHostileGlobal(fx.dir);
-      const res = runScript(SCRIPT, ['sync', '--json'], {
-        cwd: fx.dir,
-        env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true', ...envFor(cfg) },
-        timeout: 60000,
-      });
+      const h = makeHostileConfig(fx.dir);
+      const env = vaultEnvFor(corpus, route(h));
+      const res = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
       assert.equal(res.status, 0, res.stderr);
       assert.equal(res.json?.committed, true, res.stdout);
       const vault = join(fx.stateDir, 'memory-vault');
-      assert.ok(!existsSync(flag), `a hostile hook ran: ${existsSync(flag) ? readFileSync(flag, 'utf8') : ''}`);
+      assert.equal(sentinel(h), '', 'a program from the hostile config ran during sync');
       assert.equal(git(['-C', vault, 'show', 'HEAD:projects/proj-a/memory/hostile-excluded.md']), 'must be backed up',
-        'an env-named config file excluded a memory file from the backup');
+        'a hostile excludes file left a memory file out of the backup');
       for (const a of git(['-C', vault, 'log', '--format=%an <%ae>|%cn <%ce>']).split('\n')) {
         assert.equal(a, `${VAULT_NAME} <memory-vault@agent-companion.local>|${VAULT_NAME} <memory-vault@agent-companion.local>`);
       }
-      const cfgText = readFileSync(join(vault, '.git', 'config'), 'utf8');
-      assert.doesNotMatch(cfgText, /HOSTILE|hostile/, 'nothing from the hostile file was written into the vault config');
+      assert.doesNotMatch(readFileSync(join(vault, '.git', 'config'), 'utf8'), /HOSTILE|hostile/,
+        'nothing from the hostile config was written into the vault config');
+      // status re-reads a stat-dirty file's content, which is where a clean
+      // filter would run on the read path.
+      const later = new Date(Date.now() + 5000);
+      utimesSync(join(vault, 'projects', 'proj-a', 'memory', 'MEMORY.md'), later, later);
+      const st = runScript(SCRIPT, ['status', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+      assert.equal(st.status, 0, st.stderr);
+      assert.equal(sentinel(h), '', 'a program from the hostile config ran during status');
     } finally {
       fx.cleanup();
     }
   });
+
+  // G3. `git init` runs hooks too (creating HEAD fires reference-transaction),
+  // and a global core.fsmonitor program ran on every vault call.
+  for (const cmd of ['init', 'sync']) {
+    test(`G3: ${cmd} of a new vault runs no program from a config reached through ${label}`, () => {
+      const fx = makeFixture();
+      try {
+        const corpus = makeCorpus(fx.dir);
+        const h = makeHostileConfig(fx.dir);
+        const res = runScript(SCRIPT, [cmd, '--json'], { cwd: fx.dir, env: vaultEnvFor(corpus, route(h)), timeout: 60000 });
+        assert.equal(res.status, 0, res.stderr);
+        assert.equal(sentinel(h), '', `a program from the hostile config ran during vault ${cmd}`);
+        assert.equal(git(['-C', join(fx.stateDir, 'memory-vault'), 'log', '--max-parents=0', '--format=%s']), 'memory-vault: initialize');
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
 }
 
-test('S2: vaultGitWrites classifies every vault call shape; unknown subcommands count as writes', () => {
-  const V = ['-c', 'core.longpaths=true', '-C', '/v', '--git-dir=.git', '--work-tree=.'];
-  const writes = [
-    ['-c', 'core.hooksPath=/x', 'init', '-q', '--template=', '-b', 'main', '/v'],
-    [...V, 'add', '-A'],
-    [...V, 'add', '-A', '--', 'projects'],
-    [...V, 'commit', '-q', '-F', '-'],
-    [...V, 'config', '--file', '.git/config', 'user.name', 'n'],
-    [...V, 'hash-object', '-w', '--stdin-paths'],
-    [...V, 'status', '--porcelain'],
-    [...V, 'gc'],
-    [...V, 'some-future-subcommand'],
-    [],
-  ];
-  const reads = [
-    ['-C', '/v', 'rev-parse', '--absolute-git-dir'],
-    [...V, 'rev-parse', 'HEAD'],
-    [...V, 'config', '--file', '.git/config', '--get', 'user.email'],
-    [...V, 'log', '--max-parents=0', '--format=%s', 'HEAD'],
-    [...V, 'rev-list', '--all', '--reflog', '--count'],
-    [...V, 'ls-files', '-s', '-z'],
-    [...V, 'hash-object', '--no-filters', '--stdin-paths'],
-    [...V, 'diff', '--cached', '--name-status'],
-    [...V, '--no-optional-locks', 'status', '--porcelain'],
-    [...V, '--no-optional-locks', 'log', '-1'],
-  ];
-  for (const a of writes) assert.equal(vaultGitWrites(a), true, a.join(' '));
-  for (const a of reads) assert.equal(vaultGitWrites(a), false, a.join(' '));
+// The -c options, on their own. A hooksPath, an fsmonitor program or commit
+// signing set in the vault's OWN .git/config reaches git whatever the env
+// says (the vault's config is the one file git still reads). The vault's
+// -c options are what stop them.
+test('S2: hooks, fsmonitor and signing set in the vault\'s own .git/config do not run on sync or status', () => {
+  const fx = makeFixture();
+  try {
+    const corpus = makeCorpus(fx.dir);
+    const env = vaultEnvFor(corpus, {});
+    const first = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(first.status, 0, first.stderr);
+    const vault = join(fx.stateDir, 'memory-vault');
+    const h = makeHostileConfig(fx.dir);
+    writeFileSync(join(vault, '.git', 'config'), readFileSync(join(vault, '.git', 'config'), 'utf8') + h.guardedText);
+    writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), '# index v2\n');
+    const res = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.json?.committed, true, res.stdout);
+    assert.equal(sentinel(h), '', 'a hook, fsmonitor or gpg program from the vault\'s own config ran during sync');
+    assert.doesNotMatch(git(['-C', vault, 'cat-file', 'commit', 'HEAD']), /gpgsig/, 'the vault commit was signed');
+    const st = runScript(SCRIPT, ['status', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(st.status, 0, st.stderr);
+    assert.equal(sentinel(h), '', 'an fsmonitor program from the vault\'s own config ran during status');
+  } finally {
+    fx.cleanup();
+  }
 });
 
-test('S2: vaultGitEnv drops GIT_CONFIG_GLOBAL/SYSTEM for writes only, and identity for both', () => {
+test('S2: vaultGitEnv is hermetic: config files, HOME and XDG_CONFIG_HOME pinned, every spelling replaced, identity dropped', () => {
   const env = {
-    PATH: '/bin', GIT_CONFIG_GLOBAL: '/g', GIT_CONFIG_SYSTEM: '/s', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'x',
+    PATH: '/bin', GIT_CONFIG_GLOBAL: '/g', git_config_system: '/s', GIT_CONFIG_NOSYSTEM: '0', Home: '/h', HOME: '/h',
+    xdg_config_home: '/x', GIT_ATTR_NOSYSTEM: '0', GIT_AUTHOR_NAME: 'x', GIT_CONFIG_PARAMETERS: "'a.b'='c'", EMAIL: 'e@example.invalid',
   };
-  const w = vaultGitEnv(['-C', '/v', 'commit', '-q'], env);
-  assert.equal(w.GIT_CONFIG_GLOBAL, undefined);
-  assert.equal(w.GIT_CONFIG_SYSTEM, undefined);
-  assert.equal(w.GIT_CONFIG_NOSYSTEM, '1');
-  assert.equal(w.GIT_AUTHOR_NAME, undefined);
-  const r = vaultGitEnv(['-C', '/v', 'rev-parse', 'HEAD'], env);
-  assert.equal(r.GIT_CONFIG_GLOBAL, '/g');
-  assert.equal(r.GIT_CONFIG_SYSTEM, '/s');
-  assert.equal(r.GIT_AUTHOR_NAME, undefined);
+  const out = vaultGitEnv(env);
+  assert.deepEqual(
+    Object.keys(out).filter((k) => /^(git_config|git_attr|home$|xdg_config_home$)/i.test(k)).sort(),
+    ['GIT_ATTR_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_SYSTEM', 'HOME', 'XDG_CONFIG_HOME'],
+  );
+  for (const k of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'HOME', 'XDG_CONFIG_HOME']) assert.equal(out[k], NULL_DEVICE, k);
+  assert.equal(out.GIT_CONFIG_NOSYSTEM, '1');
+  assert.equal(out.GIT_ATTR_NOSYSTEM, '1');
+  assert.equal(out.GIT_AUTHOR_NAME, undefined);
+  assert.equal(out.PATH, '/bin');
+  assert.equal(out.EMAIL, 'e@example.invalid', 'EMAIL stays: it is git\'s own identity fallback, not config');
+  assert.equal(env.HOME, '/h', 'the input is not mutated');
+});
+
+test('S2: vaultSubcommand finds the subcommand past global options', () => {
+  const V = ['-c', 'core.longpaths=true', '-C', '/v', '--git-dir=.git', '--work-tree=.'];
+  assert.equal(vaultSubcommand([...V, 'commit', '-q']), 'commit');
+  assert.equal(vaultSubcommand([...V, '--no-optional-locks', 'status', '--porcelain']), 'status');
+  assert.equal(vaultSubcommand(['-c', 'x=1', 'init', '-q', '/v']), 'init');
+  assert.equal(vaultSubcommand(['add', '-A']), 'add');
+  assert.equal(vaultSubcommand([]), '');
+});
+
+// --- what the vault still takes from the operator's config -----------------
+test('S3: parseScopedConfig reads `git config --show-scope -z` output, including a key with no value', () => {
+  const out = 'system\0core.autocrlf\ntrue\0global\0user.name\nA B\0global\0safe.directory\n*\0local\0Core.Eol\0';
+  assert.deepEqual(parseScopedConfig(out), [
+    { scope: 'system', key: 'core.autocrlf', value: 'true' },
+    { scope: 'global', key: 'user.name', value: 'A B' },
+    { scope: 'global', key: 'safe.directory', value: '*' },
+    { scope: 'local', key: 'core.eol', value: null },
+  ]);
+  assert.deepEqual(parseScopedConfig(''), []);
+});
+
+test('S3: carriedConfigArgs passes the effective line-ending settings and protected safe.directory entries, nothing else', () => {
+  const entries = [
+    { scope: 'system', key: 'core.autocrlf', value: 'true' },
+    { scope: 'global', key: 'core.autocrlf', value: 'input' },
+    { scope: 'system', key: 'safe.directory', value: '/srv/a' },
+    { scope: 'global', key: 'safe.directory', value: '*' },
+    { scope: 'local', key: 'safe.directory', value: '/ignored-by-git-from-local-scope' },
+    { scope: 'local', key: 'core.eol', value: null },
+    { scope: 'global', key: 'user.email', value: 'op@example.invalid' },
+  ];
+  assert.deepEqual(carriedConfigArgs(entries), [
+    '-c', 'safe.directory=/srv/a', '-c', 'safe.directory=*',
+    '-c', 'core.autocrlf=input', '-c', 'core.eol',
+  ]);
+  assert.deepEqual(carriedConfigArgs([]), []);
+});
+
+test('S3: commitIdentityArgs fills only what the vault\'s own config leaves unset', () => {
+  const operator = [
+    { scope: 'global', key: 'user.name', value: 'Op Name' },
+    { scope: 'global', key: 'user.email', value: 'op@example.invalid' },
+    { scope: 'local', key: 'user.email', value: 'never-from-the-lookup@example.invalid' },
+  ];
+  const own = (email) => [{ scope: 'local', key: 'user.name', value: VAULT_NAME },
+    ...(email ? [{ scope: 'local', key: 'user.email', value: email }] : [])];
+  // The owner's own identity is never replaced.
+  assert.deepEqual(commitIdentityArgs(own('owner@example.invalid'), operator, {}), []);
+  // Unset email: the operator's configured one.
+  assert.deepEqual(commitIdentityArgs(own(''), operator, {}), ['-c', 'user.email=op@example.invalid']);
+  // Unset email, no operator identity: git's EMAIL fallback, else the vault's own.
+  assert.deepEqual(commitIdentityArgs(own(''), [], { EMAIL: 'env@example.invalid' }), []);
+  assert.deepEqual(commitIdentityArgs(own(''), [], {}), ['-c', 'user.email=memory-vault@agent-companion.local']);
+  // Nothing set in the vault at all.
+  assert.deepEqual(commitIdentityArgs([], [], {}),
+    ['-c', `user.name=${VAULT_NAME}`, '-c', 'user.email=memory-vault@agent-companion.local']);
 });
