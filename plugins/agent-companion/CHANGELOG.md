@@ -2,6 +2,40 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.6 — 2026-09-25
+
+A session-start check names the exact recovery steps when the ladder is
+broken or a stale copy is loaded. The scout tells a stale copy from a session
+that was simply left open. Ladder spawns take model and effort from the rung.
+
+### Ladder check
+- Added a session-start ladder check. It names the exact recovery steps when an `ac-*` agent file is missing or broken, or when a session loaded a copy older than the install for its scope: an orphaned plugin-cache copy, or an older copy from outside the cache such as a desktop app bundle. It stays quiet after a normal update, across projects, for a newer dev checkout, and on `/resume` inside a running session.
+- An in-process `/resume` is recognised by the SessionEnd "resume" the same process raises just before it. A fresh `claude --resume` that gets an earlier process's id is treated as a fresh load and no longer gets a false "updated after this session loaded" notice.
+- When a ladder agent can't be spawned, an opt-in fallback (`node scripts/install-ladder-agents.mjs --yes`, never automatic) registers the ladder as user-level agent definitions. It rejects malformed arguments and never deletes anything outside the agents folder.
+
+### Scout
+- The daily scout's version check now reports two different things:
+  - `stale_copy_loaded` (high): a session loaded after a newer agent-companion was installed, yet runs the older guard, so it loaded a stale copy. Remedy: remove the stale agent-companion entry in the desktop plugin manager, `/reload-plugins`, and verify with a trivial ladder spawn.
+  - `session_outdated` (low, informational): a session loaded before the latest update and still runs the version installed then. Remedy: restart or `/reload-plugins` that session. It is shown only for sessions loaded at least 24 hours that have missed two or more updates.
+  - A session left open across updates is never reported as a stale copy. Sessions whose load time is unknown are reported only as a count ("N sessions with unknown load time"), with no remedy.
+- The 2026-09-24 stale-copy incident itself would NOT have been flagged by this release. Its 0.22.0 guard recorded no load time this version trusts, so the scout shows it only as "4 sessions with unknown load time". Future stale copies are caught: guards from this release on record their version and load time, and a stale copy is flagged whenever its session's load time is known (`CLAUDE_PID`, or self-update on).
+- Rows from guards older than 0.29.0 are dated by the fields they carry (a row without `effective_effort` comes from a guard older than 0.23.0) and are judged against the user-scope install.
+- `plugin_version_behind` compares against the latest available release, not whichever checkout ran the scout. The scout no longer reports the ladder's own agent types as unknown.
+
+### Spawns
+- Ladder spawns (`agent-companion:ac-*`) now read model and effort from the rung's own file. They no longer draw a false "no effort stated" note, and no routing model is written over the rung.
+- When best-fit autofill picks a model for a general-purpose spawn, it now also switches the spawn to the matching ladder agent so effort is pinned. It does this only once a ladder agent has started in that session; otherwise it says which rung to use. The `fit_autofill_ladder` option turns this off.
+  - If the harness runs a switched spawn as its original type anyway, the guard records that and stops switching for the rest of the session. A start is tied to a switch only when that is certain: never for a plain spawn of the same type in the same fan-out, and never for a worker continued with SendMessage.
+- A repeated SubagentStart (a worker resumed with SendMessage) no longer counts toward premium_cap.
+- Spawn advisories now call out a non-ladder worker given an explicit model different from the lead's own, which silently inherits the session's effort.
+- `ac-opus-low`'s description no longer calls opus/low "rare". Agent descriptions are generated from the routing config and checked against every rung, including new or renamed ones (`node scripts/routing-table.mjs --check-agent-descriptions`); `ac-haiku`'s retirement notice comes from the config.
+
+### Known limits
+- Guards from 0.29.0 through 0.29.5 write no version stamp, so their rows are never checked, including a stale copy only one release behind.
+- A stale copy one update behind, in a session that loaded before that update, is recognised only while the plugin cache still shows its version was replaced before the session loaded.
+- Ignored-switch detection needs the session to have recorded spawns for 3 minutes; a switch inside that window is never judged, and switching carries on (the quiet side).
+- With `spawn_telemetry` off, an agent that started before the session was armed and is continued during a pending switch, 3 or more minutes after arming, is not recognised as a repeat start.
+
 ## 0.29.5 — 2026-09-25
 
 The pre-push gate scans every pushed commit and every pushed ref name for
