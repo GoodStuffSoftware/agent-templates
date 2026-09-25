@@ -295,6 +295,25 @@ previews the change without touching anything. `--uninstall` removes it.
 Optional — `version_notice` already works without it, just one
 `/reload-plugins` behind on the one thing only a fresh load can see.
 
+### Optional: re-inject saved state after compaction (ask first)
+
+Not installed by default. OFFER it and run it only after the operator says
+yes. It adds a user-level SessionStart hook (matcher `compact`) that, after a
+compaction, re-injects the first non-empty file of: the session scratchpad's
+`SESSION-STATE.md`, `<cwd>/HANDOFF.md`, `<cwd>/.claude/HANDOFF.md` —
+capped at 20,000 chars, keeping the end. Run `--status` first: if an
+equivalent personal hook is already configured, the installer says so and
+installs nothing (no double injection).
+
+```bash
+node "$AC/scripts/install-reinject-hook.mjs" --status
+node "$AC/scripts/install-reinject-hook.mjs"              # after a yes; --dry-run previews
+node "$AC/scripts/install-reinject-hook.mjs" --uninstall  # removes it again
+```
+
+`--file <template>` (repeatable; `{cwd}`, `{session_id}`, `{scratchpad}`,
+`{home}`) replaces the candidate list; `--max-chars <n>` changes the cap.
+
 Releasing: bump `version` in **both** `plugin.json` and the plugin's entry in
 `marketplace.json` — Claude Code reads the first, the claude.ai plugin
 directory keys on the second, and the manifest check fails if they differ.
