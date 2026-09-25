@@ -364,6 +364,37 @@ test('F6 at write: the CLI refuses to SET the offending row; it never reaches th
   assert.equal(existsSync(PROFILE), false, 'a refused write creates nothing');
 });
 
+test('F6 on a LOCAL type: `architectureClass: true` survives loading, so an opus/low row for it is refused like a shipped one', () => {
+  writeProfile(profile({
+    'x-arch-local': row('opus', 'low'), // F6: the local type is flagged architecture-class
+    'x-plain-local': row('opus', 'low'), // same row, unflagged local type: applies
+  }, {
+    types: {
+      'x-arch-local': { weight: 3, kind: 'bounded', consequence: 'routine', architectureClass: true, summary: 'local architecture work' },
+      'x-plain-local': { weight: 3, kind: 'bounded', consequence: 'routine', summary: 'local ordinary work' },
+      'x-bad-flag': { weight: 3, kind: 'bounded', consequence: 'routine', architectureClass: 'yes' },
+    },
+  }));
+  const td = ctx.taskTypeDef('x-arch-local');
+  assert.equal(td.origin, 'local');
+  assert.equal(td.def.architectureClass, true, 'the flag must survive taskTypeDef()');
+  assert.equal(ctx.taskTypeDef('x-plain-local').def.architectureClass, undefined);
+  assert.match(ctx.profileRowRefusal('x-arch-local', row('opus', 'low'), { typeDef: td.def, mode: 'write' }), /^F6:/);
+
+  const arch = ctx.resolveRoute({ type: 'x-arch-local', now: BEFORE });
+  assert.notEqual(arch.layer, 'profile', 'the F6-refused row must not win');
+  assert.match(arch.skipped.find((x) => x.layer === 'profile').reason, /^F6: architecture-class task type 'x-arch-local'/);
+  assert.notEqual(label(arch), 'opus/low');
+  assert.equal(arch.profileStatus, 'ok');
+
+  const plain = ctx.resolveRoute({ type: 'x-plain-local', now: BEFORE });
+  assert.deepEqual([plain.layer, label(plain)], ['profile', 'opus/low'], 'an unflagged local type is not held to F6');
+
+  // A non-boolean flag is a shape error: the type is dropped, not silently read as architecture or not.
+  assert.equal(ctx.taskTypeDef('x-bad-flag'), null);
+  assert.ok(rp.typeShapeErrors({ weight: 3, kind: 'bounded', consequence: 'routine', architectureClass: 'yes' }).some((e) => /architectureClass/.test(e)));
+});
+
 // --- code-review: a minimum effort on top of writer parity (F3) -------------
 
 test('a code-review row sets a minimum effort over writer parity, never the model', () => {

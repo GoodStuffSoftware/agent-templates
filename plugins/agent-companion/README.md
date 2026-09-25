@@ -502,7 +502,10 @@ or above (F1), nothing routes to fable (F2), a reviewer matches its writer
 (F4). A row that breaks any of these is refused when written and ignored if
 the file is edited by hand. The elevated effort floor (F5, high) can be waived
 on one row with `--waive-floor elevated`, and only on a row you set yourself;
-`why` always prints the waiver.
+`why` always prints the waiver. No waiver lets an architecture-class type
+(integration, large-refactor, novel-design, critical-change, or a local type
+you flag `architectureClass: true`) route to opus/low: `set` refuses that row
+and the resolver ignores it if hand-edited (F6).
 
 ```bash
 node "$AC/scripts/routing-profile.mjs" set integration --model sonnet --effort high --because "sonnet handles my integration work"

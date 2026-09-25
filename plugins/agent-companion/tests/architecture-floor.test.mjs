@@ -2,11 +2,11 @@
 // (integration, large-refactor, novel-design, critical-change, or any local
 // type carrying `architectureClass: true`) may ever resolve to opus/low, at
 // any layer. Added 2026-09-24 alongside the "effort" architecture decision
-// that moved integration's trial from opus/high to opus/medium, which
-// required lowering the elevated-consequence effort floor (F5) from high to
-// medium (config/model-tiers.json) -- this file pins that architecture-class
-// types still cannot slip below opus/medium once that floor moved, whatever
-// layer or config mistake might otherwise let them.
+// that moved integration's trial from opus/high to opus/medium. That move is
+// made by an F5 waiver on integration's own trial row (the elevated floor
+// itself stays at high); this file pins that the waiver stays scoped to
+// integration alone, and that no architecture-class type can slip to
+// opus/low through a waiver, a local type, or a future config mistake.
 //
 // Each staged resolver is a FRESH module instance (tests/fixtures/route-
 // golden/live-gate.mjs's stageResolver), so a synthetic config never leaks
@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PLUGIN_ROOT, makeFixture } from './helpers.mjs';
-import { stageResolver } from './fixtures/route-golden/live-gate.mjs';
+import { stageResolver, WAIVED_TRIAL_TYPES } from './fixtures/route-golden/live-gate.mjs';
 
 const fx = makeFixture();
 const staged = [];
@@ -33,6 +33,21 @@ async function stage(configText) {
 }
 
 // --- Trial layer: the shipped table itself -----------------------------
+
+test('F5 waiver scope: the shipped trial rows carrying waivesFloor are EXACTLY {integration}', () => {
+  const cfg = JSON.parse(SHIPPED_CONFIG);
+  // Presence of the key, whatever its value: a row that even names a waiver
+  // is a scope change for the operator to decide, not a quiet table edit.
+  const waived = Object.entries(cfg.taskTypes || {})
+    .filter(([, t]) => t && ((t.override && Object.hasOwn(t.override, 'waivesFloor')) || Object.hasOwn(t, 'waivesFloor')))
+    .map(([n]) => n)
+    .sort();
+  assert.deepEqual(waived, ['integration'], 'only the integration trial row may carry an F5 waiver (0.29.2 "effort" decision)');
+  // The live gate's waived-trial class is scoped to the same set.
+  assert.deepEqual([...WAIVED_TRIAL_TYPES].sort(), waived);
+  const ov = cfg.taskTypes.integration.override;
+  assert.deepEqual([ov.waivesFloor, ov.source], ['elevated', 'operator-observed']);
+});
 
 test('every shipped architecture-class task type is flagged, and none resolves to opus/low', async () => {
   const ctx = await stage(SHIPPED_CONFIG);

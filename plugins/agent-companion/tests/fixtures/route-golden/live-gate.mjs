@@ -36,7 +36,9 @@
 //     floorsApplied instead of a raise. Only the type actually carrying the
 //     waiver is exempted; every other elevated route (grid-path, another
 //     declared CONSEQUENCE: elevated, or a trial with no waiver of its own)
-//     still floors to exactly what floor-after-trial prescribes. See
+//     still floors to exactly what floor-after-trial prescribes. The class is
+//     further limited to WAIVED_TRIAL_TYPES (integration only): a waiver
+//     appearing on any other trial row is a mismatch here, not a pass. See
 //     tests/architecture-floor-diff.test.mjs for the differential proof that
 //     no other route moved when this was introduced.
 //
@@ -147,6 +149,11 @@ export function floorsFor(cfg, consequence, model, effort) {
 // `within: 'grid'` report the raises effortFor() made inside the grid: they
 // are part of the grid's answer, which the reference produced too, and the
 // exact-answer comparison already covers them.
+// The only shipped trial rows allowed to carry an F5 waiver (0.29.2 "effort"
+// track). tests/architecture-floor.test.mjs pins the shipped table to exactly
+// this set; widening it is an operator decision, not a fixture edit.
+export const WAIVED_TRIAL_TYPES = Object.freeze(['integration']);
+
 export const liftsOf = (route) => (route.floorsApplied || []).filter((f) => f.within !== 'grid');
 
 // Run the gate. `cur` is the resolver under test, `ref` the staged reference,
@@ -181,7 +188,8 @@ export function compareLive({ cur, ref, cfg, cases, clocks }) {
       // honoured F5 waiver for this resolved consequence, so the reference's
       // raw (unfloored) trial answer is the correct one — not the floor.
       const ov = want.trial && c.args.type ? (cfg.taskTypes || {})[c.args.type]?.override : null;
-      const waivedTrial = floored && !!ov && ov.waivesFloor === 'elevated' && ov.source === 'operator-observed' && want.consequence === 'elevated';
+      const waivedTrial = floored && !!ov && WAIVED_TRIAL_TYPES.includes(c.args.type)
+        && ov.waivesFloor === 'elevated' && ov.source === 'operator-observed' && want.consequence === 'elevated';
 
       if (waivedTrial) {
         const problems = [];

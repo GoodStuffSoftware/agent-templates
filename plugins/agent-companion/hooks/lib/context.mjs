@@ -509,8 +509,8 @@ function localTypeErrors(def, cfg) {
 // `TYPE: <name>` resolution: SHIPPED types first, then the profile's local
 // `types` (only while the profile is on and valid). Returns
 // { def, origin: 'shipped' | 'local' } or null. A local definition is
-// returned as its preset fields only — a local type can never carry a
-// shipped trial.
+// returned as its preset fields (plus `architectureClass`, F6's trigger)
+// only — a local type can never carry a shipped trial.
 export function taskTypeDef(name, { profile = true, state } = {}) {
   if (!name) return null;
   const cfg = modelTiers();
@@ -519,7 +519,12 @@ export function taskTypeDef(name, { profile = true, state } = {}) {
   const local = st.profile && hasOwn(st.profile.types, name) ? st.profile.types[name] : null;
   if (local && !localTypeErrors(local, cfg).length) {
     return {
-      def: { weight: local.weight, kind: local.kind, consequence: local.consequence, summary: typeof local.summary === 'string' ? local.summary : '' },
+      def: {
+        weight: local.weight, kind: local.kind, consequence: local.consequence, summary: typeof local.summary === 'string' ? local.summary : '',
+        // F6's trigger rides through, so a local type the operator classes as
+        // architecture is held to the same opus/low refusal as a shipped one.
+        ...(local.architectureClass === true ? { architectureClass: true } : {}),
+      },
       origin: 'local',
     };
   }

@@ -613,6 +613,7 @@ optional.
    git-plumbing may want to.
    **Decided:** soft, waivable only by an operator-observed row — as
    recommended.
+   *Superseded by 0.29.2: integration's trial now waives F5 on its own row; see plugins/agent-companion/docs/ROUTING-RATIONALE.md.*
 3. **A model generation changes under a row.** Keep applying the row and flag
    it (as designed), or fall through to shipped defaults?
    *Recommendation:* keep and flag. A mass fall-through on release day is an

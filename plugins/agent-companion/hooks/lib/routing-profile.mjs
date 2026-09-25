@@ -138,6 +138,9 @@ export function typeShapeErrors(def) {
   if (typeof def.kind !== 'string' || !def.kind) e.push('kind must be a string');
   if (typeof def.consequence !== 'string' || !def.consequence) e.push('consequence must be a string');
   if (!isStrOrNull(def.summary)) e.push('summary must be a string');
+  if (!(def.architectureClass === undefined || def.architectureClass === null || typeof def.architectureClass === 'boolean')) {
+    e.push('architectureClass must be true, false or null');
+  }
   return e;
 }
 

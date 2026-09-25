@@ -52,7 +52,9 @@ node "$AC/scripts/routing-profile.mjs" rollback --to <revision>
 - A refusal (exit 1) names the floor it breaks. Relay it; do not look for a
   way around it. F1-F4 cannot be waived. F5 (the elevated effort floor) can be
   waived only with `--waive-floor elevated`, and only when the operator asks
-  for it.
+  for it. F6 cannot be waived either: `set` refuses opus/low for an
+  architecture-class type (integration, large-refactor, novel-design,
+  critical-change, or a local type flagged `architectureClass`).
 - `why` prints the same explain stack as `recommend --explain`.
 - `rollback --to` takes a revision from `show`'s recent changes.
 - The `routing_profile` option is the kill switch. Off, only the shipped

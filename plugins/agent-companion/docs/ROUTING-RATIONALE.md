@@ -74,7 +74,7 @@ silently escalated *into* it either — a writer on that tier gets the best
 tier that *is* a routing destination as its reviewer, which still demands its
 own warrant rather than inheriting the writer's.
 
-## Consequence floors: five things that never depend on difficulty
+## Consequence floors: six things that never depend on difficulty
 
 Difficulty and consequence are close to orthogonal — a one-line production
 migration is trivial by *kind* (mechanical, small answer space) but severe by
@@ -101,9 +101,23 @@ cannot be undercut by it. Each floor protects a specific failure mode:
   that breaks at runtime.
 - **F5 — elevated-consequence effort floor.** Softer than F1: an elevated
   (not critical) consequence floors *effort* only, and — unlike the other
-  floors — may be waived by a per-user profile row when the waiver's own
-  evidence is first-hand and observed, never by default and never touching
-  F1.
+  floors — may be waived by one row that carries its own waiver whose
+  evidence is first-hand and operator-observed, never by default and never
+  touching F1. Two kinds of row can carry it: a per-user profile row, and a
+  shipped routing-trial row. The waiver covers only the task type on that
+  row; the floor itself does not move for any other route. `integration` is
+  the only shipped trial row that carries one (see below), and a test pins
+  that set.
+- **F6 — architecture-class floor.** A task type flagged as architecture work
+  (`integration`, `large-refactor`, `novel-design` and `critical-change`
+  ship flagged; a user's own local type can carry the flag too) never
+  resolves to opus/low, at any layer.
+  Architecture work needs sustained reasoning even when an F5 waiver is in
+  play, so F6 is not waivable. At the trial and grid layers it raises the
+  effort to medium. A profile row naming that route is refused instead,
+  when written and when read, so a hand-edited row cannot hide the mistake
+  behind a silent raise. The shipped table never reaches F6 today; it is a
+  backstop against a future config mistake or an over-broad waiver.
 
 ## Trials and per-user profiles
 
@@ -129,6 +143,17 @@ narrower and more provisional than the one below it:
 Both layers are explicitly reversible and time-boxed rather than permanent
 amendments to the table, which is what makes it safe to try a change before
 being sure of it.
+
+**Why `integration` sits at medium.** In 0.29.2 the `integration` trial
+moved from opus/high to opus/medium on an operator decision: the operator
+judged high heavier than day-to-day integration work needs, and first-hand
+experience says the work should stay on opus rather than move to a cheaper
+model. Medium is below the elevated-consequence floor (F5, high), so the
+trial row carries its own operator-observed F5 waiver. The floor was not
+lowered, because that would have moved every other elevated route too.
+`large-refactor` and `novel-design` stay at opus/high, and `critical-change`
+stays at opus/xhigh under F1. The move is unmeasured by benchmark and is
+reviewed on 2026-09-30, the trial's review-by date.
 
 ## Cost basis: dollars, not a price-weighted token count
 
@@ -184,7 +209,7 @@ To restate the order these interact in, cheapest layer first: the shipped
 grid (weight x kind, floored by consequence) is the baseline; a shipped
 routing trial can override one named task type's grid answer, with its own
 evidence and a review date; a per-user routing profile can override that
-again, per operator, per machine; and the five floors (F1-F5) apply **after**
+again, per operator, per machine; and the six floors (F1-F6) apply **after**
 whichever layer wins, so no layer — trial or profile — can produce a route
 that violates one of them. See `docs/ROUTING.md` for the live table these
 rules currently resolve to, and `config/model-tiers.json` for the data they

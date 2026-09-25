@@ -1,5 +1,5 @@
 // ADR 0003 slice 1 acceptance gate: resolveRoute() changes no routing beyond
-// the two differences slice 1 decided on.
+// the three permitted classes of difference listed below.
 //
 // The gate is LIVE (tests/fixtures/route-golden/live-gate.mjs has the full
 // rules): the pre-ADR resolver, vendored byte for byte under
@@ -13,7 +13,11 @@
 //   - restated preset (slice 1b): an explicit field equal to the preset keeps
 //     the type's trial;
 //   - floor after trial (ADR §9 slice 1 carve-out): a trial below the resolved
-//     consequence's floor is lifted to exactly that floor.
+//     consequence's floor is lifted to exactly that floor;
+//   - waived trial (0.29.2 "effort" track): a trial override carrying its own
+//     honoured F5 waiver keeps its raw answer below the elevated floor, the
+//     waiver recorded. Only the types in live-gate.mjs's WAIVED_TRIAL_TYPES
+//     (integration) may take this class.
 // Each is checked against the answer the ADR rule prescribes, computed from
 // the config — not merely tolerated. Any other difference fails here: a data
 // finding to report, not a fixture to regenerate.
@@ -29,7 +33,7 @@ import { join } from 'node:path';
 import { PLUGIN_ROOT, makeFixture } from './helpers.mjs';
 import { buildCases, CLOCKS } from './fixtures/route-golden/cases.mjs';
 import {
-  REFERENCE_DIR, REFERENCE_FILES, sha256Text, stageResolver, atClock, compareLive, floorsFor,
+  REFERENCE_DIR, REFERENCE_FILES, sha256Text, stageResolver, atClock, compareLive, floorsFor, WAIVED_TRIAL_TYPES,
 } from './fixtures/route-golden/live-gate.mjs';
 
 // Hermetic BEFORE the first modelTiers() call: no per-machine override file.
@@ -101,15 +105,16 @@ const cases = casesFor(cfg);
 //                   honoured waiver of its own (the matrix passes every
 //                   consequence without departing);
 //   waivedTrial     needs a trial below the elevated floor that DOES carry
-//                   its own honoured F5 waiver (0.29.2 "effort" track).
+//                   its own honoured F5 waiver, on a WAIVED_TRIAL_TYPES type
+//                   (0.29.2 "effort" track).
 const trialTypes = (c) => Object.entries(c.taskTypes || {})
   .filter(([, t]) => t && t.override && typeof t.weight === 'number').map(([n]) => n);
-const isHonouredWaiver = (ov) => ov.waivesFloor === 'elevated' && ov.source === 'operator-observed';
+const isHonouredWaiver = (n, ov) => WAIVED_TRIAL_TYPES.includes(n) && ov.waivesFloor === 'elevated' && ov.source === 'operator-observed';
 function reachableClasses(c) {
   const trials = trialTypes(c);
   const floorAfterTrial = trials.some((n) => {
     const ov = c.taskTypes[n].override;
-    if (isHonouredWaiver(ov)) return false; // that type's own gap is waivedTrial, not this class
+    if (isHonouredWaiver(n, ov)) return false; // that type's own gap is waivedTrial, not this class
     return Object.keys(c.consequence || {}).some((k) => {
       const f = floorsFor(c, k, ov.model, ov.effort || '');
       return f.model !== ov.model || f.effort !== (ov.effort || '');
@@ -117,7 +122,7 @@ function reachableClasses(c) {
   });
   const waivedTrial = trials.some((n) => {
     const ov = c.taskTypes[n].override;
-    if (!isHonouredWaiver(ov)) return false;
+    if (!isHonouredWaiver(n, ov)) return false;
     const f = floorsFor(c, 'elevated', ov.model, ov.effort || '');
     return f.model !== ov.model || f.effort !== (ov.effort || '');
   });
