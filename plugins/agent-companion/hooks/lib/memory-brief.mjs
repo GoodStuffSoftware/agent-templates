@@ -275,8 +275,14 @@ export function buildMemoryNudge({
 
   if (hereCount === 0 && otherCount === 0 && repoFileCount === 0) return { text: '', facts };
 
-  const here = hereCount > 0 ? `${hereCount} here` : '0 here';
-  const others = `${otherCount} elsewhere`;
+  // worktree-unresolved: cwd is a linked worktree, but git failed or timed
+  // out before its main tree was found (memory-index.mjs,
+  // mainWorktreeDir()). Its own store is then unknown, not empty, so the
+  // line says that instead of "0 here", and every store counts as elsewhere.
+  const unresolved = scope.source === 'worktree-unresolved';
+  const userPart = unresolved
+    ? `memory scope unresolved (git unavailable); this worktree's memory not loaded; user ${otherCount} elsewhere`
+    : `user ${hereCount > 0 ? `${hereCount} here` : '0 here'}, ${otherCount} elsewhere`;
   // Only says "unmerged" when HEAD is actually ahead of a resolved default
   // ref (getMergeStatus) — never asserted from worktree-ness alone, and
   // never fetched: as-of-last-fetch, same as the rest of this line.
@@ -293,7 +299,7 @@ export function buildMemoryNudge({
   // short deliberately — the resolved script path below is the variable
   // part of this line's length and cannot be shortened further, so the
   // fixed wording stays terse to leave it room.
-  const text = `\n\n[agent-companion: memory — user ${here}, ${others}; ${repoPart} — ` +
+  const text = `\n\n[agent-companion: memory — ${userPart}; ${repoPart} — ` +
     `unfamiliar? try: node ${script} "<query>" --scope all]`;
   return { text, facts };
 }

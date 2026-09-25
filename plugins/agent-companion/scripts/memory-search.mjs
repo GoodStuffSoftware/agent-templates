@@ -87,6 +87,10 @@ const cwdArg = args.values['--cwd'] || process.cwd();
 // --stats can always show which store this cwd resolves to — the exact
 // before/after check for the worktree-scope bug this flag exists to fix.
 const hereScope = resolveMemoryScopeDir({ cwd: cwdArg, root: memoryRoot() });
+if (hereFlag && hereScope.source === 'worktree-unresolved') {
+  console.error('memory-search: --here: memory scope unresolved (git unavailable): this worktree\'s own '
+    + 'memory could not be located, so --here searches no user memory. Retry, or drop --here.');
+}
 
 const scopeArg = (args.values['--scope'] || 'all').toLowerCase();
 if (!['user', 'repo', 'all'].includes(scopeArg)) {

@@ -11,9 +11,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mkdirSync, writeFileSync, existsSync, rmSync,
+  mkdirSync, writeFileSync, existsSync, rmSync, symlinkSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   makeFixture, runHook, readJsonl, assertNotRealHome,
@@ -47,18 +47,6 @@ function makeRepoWithWorktree(root, { branch = 'wt-branch' } = {}) {
   git(['worktree', 'add', '-q', '-b', branch, worktreeDir], repoRoot);
 
   return { repoRoot, worktreeDir };
-}
-
-// Rewrites a worktree's `.git` marker file so its gitdir target no longer
-// matches the standard ".git/worktrees/<name>" shape mainWorktreeDir()'s
-// fs-only fast path parses. It is still a FILE (still a worktree), just one
-// the fast path can't make sense of — forcing the git-fallback branch.
-// Windows holds this file with attributes that reject a plain overwrite
-// (EPERM), so it is removed and recreated rather than truncated in place.
-function corruptWorktreeGitFile(worktreeDir) {
-  const gitFile = join(worktreeDir, '.git');
-  rmSync(gitFile);
-  writeFileSync(gitFile, 'gitdir: /nonstandard/layout\n');
 }
 
 function makePlainRepo(root) {
@@ -341,13 +329,115 @@ test('spawn-guard.mjs: memory feature off -> memory_addition_* fields are all nu
 
 // --- Production concern: the git-timeout fallback must degrade SAFELY -----
 //
-// Real load (30-40 concurrent spawns) occasionally pushes the git subprocess
-// in mainWorktreeDir() past its 2s timeout. Before this fix, ANY git failure
-// there was treated the same as "not a worktree at all", so resolution fell
-// through to the literal-cwd candidate — a DIFFERENT, essentially-always-
-// empty directory for a real worktree. These tests simulate that failure
-// with an injected `gitRunner` stub, never real load, per the flake-track
-// spec's instruction to prove the production fix with a stub or injection.
+// Under load, the git subprocess in mainWorktreeDir() can miss its 2 s
+// timeout. For a linked worktree of an ordinary repository, the literal-cwd
+// store is then KNOWN to be the wrong one, so the answer is
+// "worktree-unresolved", never "literal". For every other layout whose
+// `.git` is a file (a submodule, a --separate-git-dir checkout, a worktree
+// of a bare repo) a git failure falls back to literal, exactly as 0.29.1
+// did. Git failure is simulated with an injected `gitRunner` stub (and, end
+// to end, by taking git off PATH), never with real load.
+//
+// The layouts below are written directly to disk, in the shapes git itself
+// writes: they need no git process, and the only thing under test is what
+// this module reads from the filesystem when git gives no answer.
+
+const GIT_FAILS = () => null;
+
+function writeFileEnsuring(file, content) {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, content);
+}
+
+// <root>/main/.git/{HEAD, worktrees/<name>/{HEAD, commondir}} and the
+// worktree's own `.git` file. `gitdirVia` lets the `.git` file name the
+// worktree's gitdir through another path (a junction), so the fs-only fast
+// path cannot parse it while it is still a real linked worktree.
+function fakeLinkedWorktree(root, { gitdirVia } = {}) {
+  const main = join(root, 'main');
+  writeFileEnsuring(join(main, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  const gitdir = join(main, '.git', 'worktrees', 'wt');
+  writeFileEnsuring(join(gitdir, 'HEAD'), 'ref: refs/heads/wt\n');
+  writeFileEnsuring(join(gitdir, 'commondir'), '../..\n');
+  const wt = join(root, 'wt');
+  let named = gitdir;
+  if (gitdirVia) {
+    symlinkSync(join(main, '.git', 'worktrees'), join(root, gitdirVia), 'junction');
+    named = join(root, gitdirVia, 'wt');
+  }
+  writeFileEnsuring(join(wt, '.git'), `gitdir: ${named.replace(/\\/g, '/')}\n`);
+  return { main, wt };
+}
+
+const LAYOUTS = {
+  // gitdir: ../.git/modules/sub, which holds no commondir.
+  submodule(root) {
+    const sup = join(root, 'super');
+    writeFileEnsuring(join(sup, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    writeFileEnsuring(join(sup, '.git', 'modules', 'sub', 'HEAD'), 'ref: refs/heads/main\n');
+    const cwd = join(sup, 'sub');
+    writeFileEnsuring(join(cwd, '.git'), 'gitdir: ../.git/modules/sub\n');
+    return cwd;
+  },
+  // `git init --separate-git-dir <store>`: the checkout's gitdir is the
+  // store itself, which holds no commondir.
+  'separate-git-dir main checkout'(root) {
+    writeFileEnsuring(join(root, 'store', 'HEAD'), 'ref: refs/heads/main\n');
+    const cwd = join(root, 'checkout');
+    writeFileEnsuring(join(cwd, '.git'), `gitdir: ${join(root, 'store').replace(/\\/g, '/')}\n`);
+    return cwd;
+  },
+  // A worktree of a --separate-git-dir checkout: commondir names the store,
+  // not a `.git` beside a work tree.
+  'separate-git-dir worktree'(root) {
+    writeFileEnsuring(join(root, 'store', 'HEAD'), 'ref: refs/heads/main\n');
+    writeFileEnsuring(join(root, 'store', 'worktrees', 'w', 'HEAD'), 'ref: refs/heads/w\n');
+    writeFileEnsuring(join(root, 'store', 'worktrees', 'w', 'commondir'), '../..\n');
+    const cwd = join(root, 'w');
+    writeFileEnsuring(join(cwd, '.git'), `gitdir: ${join(root, 'store', 'worktrees', 'w').replace(/\\/g, '/')}\n`);
+    return cwd;
+  },
+  // A worktree of a bare repository: commondir names x.git, and there is
+  // no main working tree at all.
+  'bare-repo worktree'(root) {
+    writeFileEnsuring(join(root, 'x.git', 'HEAD'), 'ref: refs/heads/main\n');
+    writeFileEnsuring(join(root, 'x.git', 'worktrees', 'w', 'HEAD'), 'ref: refs/heads/w\n');
+    writeFileEnsuring(join(root, 'x.git', 'worktrees', 'w', 'commondir'), '../..\n');
+    const cwd = join(root, 'w');
+    writeFileEnsuring(join(cwd, '.git'), `gitdir: ${join(root, 'x.git', 'worktrees', 'w').replace(/\\/g, '/')}\n`);
+    return cwd;
+  },
+  // A `.git` file with no gitdir line at all.
+  'garbage .git file'(root) {
+    const cwd = join(root, 'garbage');
+    writeFileEnsuring(join(cwd, '.git'), 'this is not a gitdir line\n');
+    return cwd;
+  },
+};
+
+for (const [name, build] of Object.entries(LAYOUTS)) {
+  test(`resolveMemoryScopeDir(): ${name}, git failing -> literal, as in 0.29.1 (not a linked worktree of an ordinary repo)`, () => {
+    const { dir, cleanup } = makeFixture();
+    try {
+      const cwd = build(dir);
+      const memRoot = join(dir, 'mem-root');
+      makeMemoryStore(memRoot, encodeProjectDir(cwd), 4);
+      let calls = 0;
+      const scope = resolveMemoryScopeDir({ cwd, root: memRoot, gitRunner: (...a) => { calls += 1; return GIT_FAILS(...a); } });
+      assert.equal(scope.source, 'literal');
+      assert.equal(scope.dir, encodeProjectDir(cwd));
+      assert.ok(calls >= 1, 'an unusual `.git`-file layout still asks git first, as 0.29.1 did');
+
+      // And the delivered nudge says "4 here", as before.
+      const dataDirPath = join(dir, 'data');
+      mkdirSync(dataDirPath, { recursive: true });
+      const { text } = buildMemoryNudge({ cwd, root: memRoot, dataDirPath, repoEnabled: false, gitRunner: GIT_FAILS });
+      assert.match(text, /user 4 here, 0 elsewhere/);
+    } finally {
+      cleanup();
+    }
+  });
+}
 
 test('resolveMemoryScopeDir(): worktree resolution needs NO git call at all in the common case (root-cause fix)', () => {
   const { dir, cleanup } = makeFixture();
@@ -357,9 +447,7 @@ test('resolveMemoryScopeDir(): worktree resolution needs NO git call at all in t
     makeMemoryStore(memRoot, encodeProjectDir(repoRoot), 3);
 
     // A gitRunner that always fails: if resolution still finds the main
-    // tree, it proves the fs-only `.git`-file parse — not a subprocess —
-    // did the work. This is what makes the common case immune to the
-    // load-induced timeout in the first place.
+    // tree, the fs-only `.git`-file parse did the work, not a subprocess.
     const scope = resolveMemoryScopeDir({
       cwd: worktreeDir,
       root: memRoot,
@@ -372,65 +460,108 @@ test('resolveMemoryScopeDir(): worktree resolution needs NO git call at all in t
   }
 });
 
-test('resolveMemoryScopeDir(): a simulated git timeout on an unresolvable worktree degrades to "worktree-unresolved", NEVER "literal"', () => {
+test('resolveMemoryScopeDir(): a linked worktree the fs-only parse cannot read, with git failing, is "worktree-unresolved", NEVER "literal"', () => {
   const { dir, cleanup } = makeFixture();
   try {
-    const { repoRoot, worktreeDir } = makeRepoWithWorktree(dir);
+    const { main, wt } = fakeLinkedWorktree(dir, { gitdirVia: 'alias' });
     const memRoot = join(dir, 'mem-root');
-    // Only the worktree's OWN (literal) encoding has a store — exactly the
-    // shape that would make the pre-fix bug look "successful" (a confident
-    // wrong answer that happens to resolve to something on disk).
-    makeMemoryStore(memRoot, encodeProjectDir(worktreeDir), 1);
-    makeMemoryStore(memRoot, encodeProjectDir(repoRoot), 9);
+    // Only a literal store and the main store exist: a literal answer would
+    // look "successful" while naming the wrong store.
+    makeMemoryStore(memRoot, encodeProjectDir(wt), 1);
+    makeMemoryStore(memRoot, encodeProjectDir(main), 9);
 
-    // Force the fs-only parse to be inconclusive: rewrite the worktree's
-    // `.git` file so its gitdir target no longer matches the standard
-    // ".git/worktrees/<name>" shape. It is still a FILE, so this module
-    // still knows (with zero subprocess calls) that cwd IS a worktree.
-    corruptWorktreeGitFile(worktreeDir);
-
-    // Simulate every git invocation timing out/failing — a stub, not real
-    // load.
-    const scope = resolveMemoryScopeDir({
-      cwd: worktreeDir,
-      root: memRoot,
-      gitRunner: () => null,
-    });
-
+    const scope = resolveMemoryScopeDir({ cwd: wt, root: memRoot, gitRunner: GIT_FAILS });
     assert.equal(scope.dir, null, 'must not confidently name ANY directory, least of all the wrong one');
     assert.equal(scope.source, 'worktree-unresolved');
-    assert.notEqual(scope.source, 'literal', 'a git failure on a KNOWN worktree must never be reported as a confident literal answer');
   } finally {
     cleanup();
   }
 });
 
-test('buildMemoryNudge(): a simulated git timeout does not silently misreport under the "literal" label', () => {
+test('resolveMemoryScopeDir(): the same worktree without the junction resolves fs-only; a missing commondir is not a linked worktree', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const { main, wt } = fakeLinkedWorktree(dir);
+    const memRoot = join(dir, 'mem-root');
+    makeMemoryStore(memRoot, encodeProjectDir(main), 2);
+    const scope = resolveMemoryScopeDir({ cwd: wt, root: memRoot, gitRunner: GIT_FAILS });
+    assert.equal(scope.source, 'worktree-main');
+
+    // Point the `.git` file through a junction (fast path fails) and drop
+    // commondir: git writes one for every linked worktree, so without it
+    // this is not one, and literal stands.
+    const other = fakeLinkedWorktree(join(dir, 'b'), { gitdirVia: 'alias' });
+    rmSync(join(other.main, '.git', 'worktrees', 'wt', 'commondir'));
+    makeMemoryStore(memRoot, encodeProjectDir(other.wt), 1);
+    const s2 = resolveMemoryScopeDir({ cwd: other.wt, root: memRoot, gitRunner: GIT_FAILS });
+    assert.equal(s2.source, 'literal');
+  } finally {
+    cleanup();
+  }
+});
+
+test('buildMemoryNudge(): worktree-unresolved is said in the text, never delivered as "0 here"', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    const { repoRoot, worktreeDir } = makeRepoWithWorktree(dir);
+    const { main, wt } = fakeLinkedWorktree(dir, { gitdirVia: 'alias' });
     const memRoot = join(dir, 'mem-root');
-    // The main repo's store is populated (the real answer), and — as in the
-    // pre-fix defect — an empty worktree-literal store also exists on disk,
-    // so a wrong-but-existent literal candidate would look "successful".
-    makeMemoryStore(memRoot, encodeProjectDir(repoRoot), 5);
-    mkdirSync(join(memRoot, encodeProjectDir(worktreeDir), 'memory'), { recursive: true });
-    corruptWorktreeGitFile(worktreeDir);
-
+    makeMemoryStore(memRoot, encodeProjectDir(main), 5);
+    mkdirSync(join(memRoot, encodeProjectDir(wt), 'memory'), { recursive: true });
     const dataDirPath = join(stateDir, 'data');
     mkdirSync(dataDirPath, { recursive: true });
 
-    const { facts } = buildMemoryNudge({
-      cwd: worktreeDir,
-      root: memRoot,
-      dataDirPath,
-      repoEnabled: false,
-      gitRunner: () => null, // simulate every git call timing out — a stub, not real load
+    const { text, facts } = buildMemoryNudge({
+      cwd: wt, root: memRoot, dataDirPath, repoEnabled: false, gitRunner: GIT_FAILS,
     });
-
     assert.equal(facts.hereSource, 'worktree-unresolved');
     assert.equal(facts.hereProject, null);
-    assert.notEqual(facts.hereSource, 'literal');
+    assert.match(text, /memory scope unresolved \(git unavailable\); this worktree's memory not loaded; user 1 elsewhere/);
+    assert.doesNotMatch(text, /\b0 here\b/);
+  } finally {
+    cleanup();
+  }
+});
+
+// PATH with every directory that holds a git executable removed, under the
+// same key the environment already uses (Windows spells it "Path").
+function pathWithoutGit() {
+  const key = Object.keys(process.env).find((k) => k.toLowerCase() === 'path') || 'PATH';
+  const kept = String(process.env[key] || '').split(delimiter).filter((d) => d
+    && !existsSync(join(d, 'git.exe')) && !existsSync(join(d, 'git')) && !existsSync(join(d, 'git.cmd')));
+  return { [key]: kept.join(delimiter) };
+}
+
+test('spawn-guard.mjs end to end, git off PATH: an unresolvable worktree delivers the unresolved message and records "worktree-unresolved"', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const { main, wt } = fakeLinkedWorktree(dir, { gitdirVia: 'alias' });
+    const memRoot = join(dir, 'mem-root');
+    makeMemoryStore(memRoot, encodeProjectDir(main), 6);
+    makeMemoryStore(memRoot, 'some-other-project', 2);
+
+    const res = runHook('hooks/spawn-guard.mjs', {
+      session_id: 'sess-memscope-unresolved',
+      agent_type: 'main',
+      cwd: wt,
+      tool_input: { subagent_type: 'general-purpose', prompt: 'WEIGHT: 2\ndo the thing' },
+    }, {
+      env: {
+        ...pathWithoutGit(),
+        CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'),
+        AGENT_COMPANION_MEMORY_ROOT: memRoot,
+        CLAUDE_PLUGIN_OPTION_MEMORY_SEARCH: 'true',
+        CLAUDE_PLUGIN_OPTION_MEMORY_BRIEF: 'true',
+        CLAUDE_PLUGIN_OPTION_MEMORY_SEARCH_REPO: 'false',
+        CLAUDE_PLUGIN_OPTION_WARRANT_REQUIRED: 'false',
+      },
+    });
+    assert.equal(res.status, 0, `spawn-guard exited ${res.status}: ${res.stderr}`);
+    const [row] = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'));
+    assert.equal(row.memory_addition_here_source, 'worktree-unresolved');
+    assert.equal(row.memory_addition_attached, true);
+    const prompt = res.json?.hookSpecificOutput?.updatedInput?.prompt || '';
+    assert.match(prompt, /memory scope unresolved \(git unavailable\); this worktree's memory not loaded; user 2 elsewhere/);
+    assert.doesNotMatch(prompt, /\b0 here\b/);
   } finally {
     cleanup();
   }

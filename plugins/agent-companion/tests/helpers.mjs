@@ -101,9 +101,29 @@ export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, 
   return { status: res.status, stdout: res.stdout, stderr: res.stderr, json, error: res.error };
 }
 
+// A hang guard for a child that runs a CHAIN of git processes (a first
+// memory-vault sync starts about 13 of them in series, plus its own node).
+// Measured on the Windows dev box, 2026-09-25:
+//   - alone: about 1.3 s for a first sync;
+//   - in a passing full-suite run (node --test's default concurrency, one
+//     test file per core): about 3 s, the whole 4-sync test 6.4 s;
+//   - in the failing gate runs: the same sync passed 15 s. Every git-heavy
+//     test in the suite was 4-5x slower in the same window (memory-scope's
+//     worktree test 13 s against 2.9 s), so git process creation was taking
+//     over 1 s per process. Injecting 1.3 s of latency before each git call
+//     reproduces those failures exactly (empty stderr, no status file, 15.0 s).
+// So 15 s was a hang guard sized for one fast process, and it killed a
+// sync that was only slow. This budget is about 8x the worst observed
+// in-suite duration. It exists to catch a sync that HANGS; a result from a
+// killed child is reported as a timeout (timedOut, below), never as a sync
+// outcome.
+export const GIT_CHAIN_TIMEOUT_MS = 120000;
+
 // Run any plugin script (not just a hook) as a child process with CLI args,
 // no stdin payload. Same shape as runHook but for scripts that take argv
 // instead of a JSON payload on stdin (e.g. memory-vault.mjs, memory-doctor.mjs).
+// `timedOut` is true when the child was killed by `timeout`: its stdout and
+// exit status are then not the script's answer.
 export function runScript(scriptRelPath, args = [], { env = {}, cwd, timeout = 15000 } = {}) {
   const script = join(PLUGIN_ROOT, scriptRelPath);
   const res = spawnSync(process.execPath, [script, ...args], {
@@ -116,7 +136,8 @@ export function runScript(scriptRelPath, args = [], { env = {}, cwd, timeout = 1
   const out = (res.stdout || '').trim();
   let json = null;
   if (out) { try { json = JSON.parse(out); } catch { /* not JSON: leave null */ } }
-  return { status: res.status, stdout: res.stdout, stderr: res.stderr, json, error: res.error };
+  const timedOut = res.error?.code === 'ETIMEDOUT';
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr, json, error: res.error, timedOut };
 }
 
 export function readJsonl(file) {

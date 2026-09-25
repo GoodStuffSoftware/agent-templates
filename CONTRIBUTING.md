@@ -70,6 +70,8 @@ This points git at the repo-tracked `.githooks/` directory (`core.hooksPath`) in
 
 Run the same checks by hand at any time with `node scripts/ci-local.mjs` (fast, in place) or `node scripts/ci-local.mjs --ci-parity` (slower, exact CI reproduction) — this is also what CI itself calls, so there is only one implementation of "the suite" to keep green, not two that can drift apart.
 
+**Perf checks are not in the gate.** A wall-clock budget can't be asserted reliably under the suite's parallel load, so agent-companion's timing checks are skipped unless `AGENT_COMPANION_PERF=1` is set, and show up as `skipped` in a normal run. Run them on demand, one file at a time, on a quiet machine: `AGENT_COMPANION_PERF=1 node --test plugins/agent-companion/tests/routing-profile-timing.test.mjs`. The behaviour those checks depend on stays in the gate and is asserted without a clock.
+
 **Never use `--no-verify` on a real branch.** It skips the hook entirely, which is fine for a `wip/**`/`backup/**` push (the hook would have skipped it anyway) and not fine for anything else — it's the exact gap this hook exists to close.
 
 **Post-push:** after any push to a CI-visible branch (i.e. not `wip/**`/`backup/**`), watch the run rather than walking away from it:

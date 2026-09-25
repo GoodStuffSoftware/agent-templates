@@ -12,10 +12,10 @@
 // scripts/memory-search.mjs for the "why not incremental" reasoning.
 
 import {
-  readFileSync, readdirSync, statSync, lstatSync, existsSync, writeFileSync,
+  readFileSync, readdirSync, statSync, lstatSync, existsSync, writeFileSync, realpathSync,
 } from 'node:fs';
 import {
-  join, relative, sep, resolve, dirname,
+  join, relative, sep, resolve, dirname, basename,
 } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -1025,6 +1025,35 @@ function mainWorktreeDirFromGitFile(worktreeRoot, cwd) {
   return offset ? join(mainRoot, offset) : mainRoot;
 }
 
+// Whether a checkout whose `.git` is a FILE is a linked worktree of an
+// ordinary (non-bare) repository: its gitdir holds a `commondir` file (git
+// writes one only for linked worktrees), and the common dir it names is a
+// `.git` directory, so a main working tree exists at its parent. Only then
+// is the literal-cwd store known to be the wrong one. Other `.git`-file
+// layouts are not this case and keep the literal fallback when git fails:
+//   - a submodule (gitdir: <super>/.git/modules/<name>, no commondir);
+//   - a --separate-git-dir main checkout (gitdir: <store>, no commondir);
+//   - a worktree of a bare repo, or of a --separate-git-dir checkout
+//     (commondir names <x>.git or <store>, not a `.git` beside a work tree);
+//   - a `.git` file with no readable gitdir line.
+// fs only, never throws. realpath first, so commondir's relative content
+// ("../..") resolves against the real gitdir, not a junction's path.
+function isLinkedWorktreeOfWorkTree(worktreeRoot) {
+  try {
+    const content = readFileSync(join(worktreeRoot, '.git'), 'utf8');
+    const m = content.match(/^gitdir:\s*(.+?)\s*$/m);
+    if (!m) return false;
+    let gitdir = resolve(worktreeRoot, m[1]);
+    try { gitdir = realpathSync(gitdir); } catch { return false; }
+    const commondirFile = join(gitdir, 'commondir');
+    if (!existsSync(commondirFile)) return false;
+    const commonDir = resolve(gitdir, readFileSync(commondirFile, 'utf8').trim());
+    return basename(commonDir).toLowerCase() === '.git';
+  } catch {
+    return false;
+  }
+}
+
 // The main working tree for cwd's repo, offset-preserved. `git` is an
 // injectable stand-in for runGit() — production always uses the real one;
 // tests use it to simulate a git timeout/failure deterministically (a stub),
@@ -1032,11 +1061,13 @@ function mainWorktreeDirFromGitFile(worktreeRoot, cwd) {
 //  - { dir: <path>, uncertain: false } — resolved, confidently
 //  - { dir: null, uncertain: false } — confidently NOT a worktree (or no
 //    repo at all): the literal-cwd fallback is correct here
-//  - { dir: null, uncertain: true } — cwd IS a worktree (known from the
-//    `.git` file alone, no subprocess needed to learn that much), but the
+//  - { dir: null, uncertain: true } — cwd is a linked worktree of an
+//    ordinary repository (isLinkedWorktreeOfWorkTree(), fs only), but the
 //    main tree could not be resolved: the fs-only parse was inconclusive
 //    AND git failed or timed out. The caller must NOT treat this the same
 //    as "confirmed not a worktree" — literal is a KNOWN-wrong answer here.
+//    Every other `.git`-file layout answers exactly as before this change
+//    when git fails: { dir: null, uncertain: false }, so literal.
 function mainWorktreeDir(cwd, git = runGit) {
   const found = findRepoRoot(cwd); // fs-only; cannot time out
   if (!found || !found.isWorktree) return { dir: null, uncertain: false };
@@ -1044,12 +1075,14 @@ function mainWorktreeDir(cwd, git = runGit) {
   const fastDir = mainWorktreeDirFromGitFile(found.root, cwd);
   if (fastDir) return { dir: fastDir, uncertain: false };
 
-  // fs-only parse was inconclusive (unusual gitdir layout). We already know
-  // this is a worktree, so ask git — but its failure here is a genuine
-  // "could not verify", never "not a worktree".
+  // fs-only parse was inconclusive: an unusual linked-worktree layout, or a
+  // `.git` file that is not a linked worktree at all (a submodule, a
+  // --separate-git-dir checkout). Ask git, as before this change. Its
+  // failure is "could not verify" only for a linked worktree of an ordinary
+  // repository; everywhere else it falls back to literal, as it always did.
   const commonDir = git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   const toplevel = commonDir ? git(cwd, ['rev-parse', '--show-toplevel']) : null;
-  if (!commonDir || !toplevel) return { dir: null, uncertain: true };
+  if (!commonDir || !toplevel) return { dir: null, uncertain: isLinkedWorktreeOfWorkTree(found.root) };
 
   const mainRoot = dirname(commonDir);
   const resolvedMainRoot = resolve(mainRoot);

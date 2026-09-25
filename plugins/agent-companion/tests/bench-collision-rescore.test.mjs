@@ -71,31 +71,9 @@ function tmpOut() {
 // Mirrors scripts/benchmark.mjs's own launch() dispatch: a needs_rescore
 // retry (run.isRescoreRetry, stamped by bench/scheduler.mjs) goes to
 // rescoreOne() -- NEVER runOne() again, and never touches runClaudeImpl.
-//
-// `waitBeforeRescore` (optional): bench/scheduler.mjs fires its 'finish'
-// event WITHOUT awaiting the handler (see scheduler.mjs's onEvent banner --
-// it is documented as an "instrumentation hook", not a synchronization
-// point), then immediately queues and can admit the rescore retry in the
-// same synchronous pass. Scenario A's onEvent handler below releases the
-// port holder via an ASYNC socket close in reaction to that same event, so
-// without this, "the holder is closed" and "the rescore retry starts" race
-// with NO happens-before relationship -- usually the retry's own process-
-// spawn overhead wins that race by a wide enough margin to mask it, but
-// under heavy concurrent load either side of the race can be delayed
-// unevenly, and this is exactly the load-sensitivity the flake-track spec
-// asks to root-cause rather than paper over with a longer timeout. Letting
-// the launch() the scheduler DOES await (its return value is what settles
-// the run) wait on an explicit promise -- resolved only once the close
-// callback has actually fired -- turns that race into a real ordering
-// guarantee. Left undefined for scenario B and the __rescoreState test,
-// neither of which depends on this ordering (scenario B never closes the
-// holder at all).
-function makeLaunch({
-  tasksMap, outDir, answersDir, runClaudeImpl, onModelCall, waitBeforeRescore,
-}) {
+function makeLaunch({ tasksMap, outDir, answersDir, runClaudeImpl, onModelCall }) {
   return async (run, ctx) => {
     if (run.isRescoreRetry) {
-      if (waitBeforeRescore) await waitBeforeRescore();
       return rescoreOne({
         rescoreState: run.rescoreState, outDir, answersDir,
         slot: ctx.slot, concurrency: ctx.concurrency, coScheduledRunIds: ctx.coScheduledRunIds,
@@ -152,16 +130,8 @@ test('a subprocess collision under real co-scheduling is re-scored alone and PAS
   let modelCalls = 0;
   let releasedHolder = false;
   let sandboxExistedAtOriginalFinish = null;
-  // Resolved only once closeHolder()'s callback has actually fired -- see
-  // makeLaunch()'s `waitBeforeRescore` banner above for why this, rather than
-  // the timing of the unawaited 'finish' event, is what the rescore retry
-  // waits on.
-  let holderClosedResolve;
-  const holderClosed = new Promise((resolve) => { holderClosedResolve = resolve; });
   try {
-    const launch = makeLaunch({
-      tasksMap, outDir, answersDir, runClaudeImpl: stubClaude, onModelCall: () => { modelCalls += 1; }, waitBeforeRescore: () => holderClosed,
-    });
+    const launch = makeLaunch({ tasksMap, outDir, answersDir, runClaudeImpl: stubClaude, onModelCall: () => { modelCalls += 1; } });
     const rows = await scheduleRuns({
       runs: buildRuns(),
       concurrency: 2,
@@ -174,7 +144,6 @@ test('a subprocess collision under real co-scheduling is re-scored alone and PAS
           sandboxExistedAtOriginalFinish = existsSync(e.row.sandbox_cwd);
           releasedHolder = true;
           await closeHolder(holder);
-          holderClosedResolve();
         }
       },
     });

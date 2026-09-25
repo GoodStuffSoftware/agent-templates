@@ -10,11 +10,22 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { makeFixture, runScript } from './helpers.mjs';
+import { makeFixture, runScript, GIT_CHAIN_TIMEOUT_MS } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 import { scanForSecrets } from '../scripts/memory-vault.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
+
+// Every memory-vault.mjs run in this file goes through here: a git-chain hang
+// guard (see GIT_CHAIN_TIMEOUT_MS in helpers.mjs for the measurements), and a
+// killed child fails as a timeout, not as a wrong sync result.
+function runVault(args, opts = {}) {
+  const res = runScript(SCRIPT, args, { timeout: GIT_CHAIN_TIMEOUT_MS, ...opts });
+  assert.ok(!res.timedOut,
+    `memory-vault.mjs ${args.join(' ')} was killed after ${opts.timeout ?? GIT_CHAIN_TIMEOUT_MS} ms without finishing `
+    + '(the sync hung, or the machine is badly overloaded) — this is not a sync result');
+  return res;
+}
 
 function vaultPathFor(stateDir) {
   return join(stateDir, 'memory-vault');
@@ -69,7 +80,7 @@ test('sync is a no-op when memory_vault is off (default) and creates no vault', 
   const fx = makeFixture();
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
-    const res = runScript(SCRIPT, ['sync', '--json'], {
+    const res = runVault(['sync', '--json'], {
       env: { AGENT_COMPANION_MEMORY_ROOT: corpus }, // memory_vault option NOT set
     });
     assert.equal(res.status, 0, `sync exited ${res.status}: ${res.stderr}`);
@@ -88,14 +99,14 @@ test('init is idempotent — a second call is a no-op that leaves the repo alone
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
     const env = baseEnv(fx, corpus);
 
-    const first = runScript(SCRIPT, ['init', '--json'], { env });
+    const first = runVault(['init', '--json'], { env });
     assert.equal(first.status, 0, first.stderr);
     assert.equal(first.json.created, true);
 
     const vault = vaultPathFor(fx.stateDir);
     const shaBefore = git(vault, ['rev-parse', 'HEAD']).trim();
 
-    const second = runScript(SCRIPT, ['init', '--json'], { env });
+    const second = runVault(['init', '--json'], { env });
     assert.equal(second.status, 0, second.stderr);
     assert.equal(second.json.created, false, 'second init should report created:false');
 
@@ -114,7 +125,7 @@ test('init refuses to clobber a non-empty directory that is not already a memory
     mkdirSync(vault, { recursive: true });
     writeFileSync(join(vault, 'unrelated-file.txt'), 'pre-existing content that must survive');
 
-    const res = runScript(SCRIPT, ['init', '--json'], { env: baseEnv(fx, corpus) });
+    const res = runVault(['init', '--json'], { env: baseEnv(fx, corpus) });
     assert.notEqual(res.status, 0, 'init must fail rather than clobber');
     assert.match(res.stderr, /refusing to initialize/);
     assert.ok(existsSync(join(vault, 'unrelated-file.txt')), 'pre-existing content must be untouched');
@@ -136,7 +147,7 @@ test('sync commits adds, then modifies and deletes on the next run, and a third 
     const env = baseEnv(fx, corpus);
     const vault = vaultPathFor(fx.stateDir);
 
-    const s1 = runScript(SCRIPT, ['sync', '--json'], { env });
+    const s1 = runVault(['sync', '--json'], { env });
     assert.equal(s1.status, 0, s1.stderr);
     assert.equal(s1.json.committed, true);
     assert.equal(s1.json.added, 3);
@@ -144,7 +155,7 @@ test('sync commits adds, then modifies and deletes on the next run, and a third 
     const sha1 = git(vault, ['rev-parse', 'HEAD']).trim();
 
     // No changes: second sync must commit nothing.
-    const s2 = runScript(SCRIPT, ['sync', '--json'], { env });
+    const s2 = runVault(['sync', '--json'], { env });
     assert.equal(s2.status, 0, s2.stderr);
     assert.equal(s2.json.committed, false);
     const sha2 = git(vault, ['rev-parse', 'HEAD']).trim();
@@ -154,7 +165,7 @@ test('sync commits adds, then modifies and deletes on the next run, and a third 
     writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), 'index v2');
     unlinkSync(join(corpus, 'proj-a', 'memory', 'fact1.md'));
 
-    const s3 = runScript(SCRIPT, ['sync', '--json'], { env });
+    const s3 = runVault(['sync', '--json'], { env });
     assert.equal(s3.status, 0, s3.stderr);
     assert.equal(s3.json.committed, true);
     assert.equal(s3.json.modified, 1);
@@ -187,9 +198,9 @@ test('a deleted memory file is recoverable from vault history after the deletion
     const env = baseEnv(fx, corpus);
     const vault = vaultPathFor(fx.stateDir);
 
-    runScript(SCRIPT, ['sync', '--json'], { env });
+    runVault(['sync', '--json'], { env });
     unlinkSync(join(corpus, 'proj-a', 'memory', 'fact1.md'));
-    const del = runScript(SCRIPT, ['sync', '--json'], { env });
+    const del = runVault(['sync', '--json'], { env });
     assert.equal(del.json.removed, 1);
 
     // Gone from HEAD...
@@ -213,11 +224,11 @@ test('a session transcript sitting beside memory/ is never copied into the vault
     const env = baseEnv(fx, corpus);
     const vault = vaultPathFor(fx.stateDir);
 
-    runScript(SCRIPT, ['sync', '--json'], { env });
+    runVault(['sync', '--json'], { env });
     // Change something and sync again so there are 2 real content commits,
     // maximizing the chance a leak would have shown up somewhere in history.
     writeFileSync(join(corpus, 'proj-a', 'memory', 'MEMORY.md'), 'index v2');
-    runScript(SCRIPT, ['sync', '--json'], { env });
+    runVault(['sync', '--json'], { env });
 
     const allTrackedFiles = walkFiles(join(vault, 'projects'));
     assert.ok(!allTrackedFiles.some((f) => f.endsWith('.jsonl')), 'no .jsonl file should ever be tracked in the vault');
@@ -244,7 +255,7 @@ test('a file that looks like it carries a live credential is excluded from the c
     const env = baseEnv(fx, corpus);
     const vault = vaultPathFor(fx.stateDir);
 
-    const res = runScript(SCRIPT, ['sync', '--json'], { env });
+    const res = runVault(['sync', '--json'], { env });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.flagged, 1);
     assert.equal(res.json.flaggedFiles[0].file, 'proj-a/leaky.md');
@@ -320,7 +331,7 @@ test('sync aborts without deleting anything when the corpus enumerates to zero f
     const env = baseEnv(fx, corpus);
     const vault = vaultPathFor(fx.stateDir);
 
-    const first = runScript(SCRIPT, ['sync', '--json'], { env });
+    const first = runVault(['sync', '--json'], { env });
     assert.equal(first.json.committed, true);
     const shaBefore = git(vault, ['rev-parse', 'HEAD']).trim();
     const filesBefore = walkFiles(join(vault, 'projects'));
@@ -329,7 +340,7 @@ test('sync aborts without deleting anything when the corpus enumerates to zero f
     // Point at a corpus root that does not exist — discoverFiles() fails open
     // to [], which is exactly the dangerous case this guard exists for.
     const brokenEnv = { ...env, AGENT_COMPANION_MEMORY_ROOT: join(fx.dir, 'does-not-exist') };
-    const res = runScript(SCRIPT, ['sync', '--json'], { env: brokenEnv });
+    const res = runVault(['sync', '--json'], { env: brokenEnv });
     assert.notEqual(res.status, 0, 'an aborted sync must exit non-zero');
     assert.equal(res.json.aborted, true);
     assert.equal(res.json.reason, 'empty-enumeration-guard');
@@ -359,9 +370,9 @@ test('the live corpus is never written to by init or sync (mtime proof)', () => 
     const before = new Map(corpusFiles.map((f) => [f, statSync(f).mtimeMs]));
     const contentBefore = new Map(corpusFiles.map((f) => [f, readFileSync(f, 'utf8')]));
 
-    runScript(SCRIPT, ['init', '--json'], { env });
-    runScript(SCRIPT, ['sync', '--json'], { env });
-    runScript(SCRIPT, ['status', '--json'], { env });
+    runVault(['init', '--json'], { env });
+    runVault(['sync', '--json'], { env });
+    runVault(['status', '--json'], { env });
 
     const after = walkFiles(corpus);
     assert.deepEqual(after.sort(), corpusFiles.sort(), 'no corpus file should be added or removed');
@@ -382,12 +393,12 @@ test('status reports uninitialized, then reflects a real sync', () => {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
     const env = baseEnv(fx, corpus);
 
-    const before = runScript(SCRIPT, ['status', '--json'], { env });
+    const before = runVault(['status', '--json'], { env });
     assert.equal(before.json.initialized, false);
     assert.equal(before.json.enabled, true);
 
-    runScript(SCRIPT, ['sync', '--json'], { env });
-    const after = runScript(SCRIPT, ['status', '--json'], { env });
+    runVault(['sync', '--json'], { env });
+    const after = runVault(['status', '--json'], { env });
     assert.equal(after.json.initialized, true);
     assert.equal(after.json.dirty, false);
     assert.equal(after.json.fileCount, 1);

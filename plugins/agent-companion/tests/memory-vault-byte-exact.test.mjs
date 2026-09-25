@@ -18,28 +18,30 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { makeFixture, runScript, assertNotRealHome } from './helpers.mjs';
+import { makeFixture, runScript, GIT_CHAIN_TIMEOUT_MS, assertNotRealHome } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 import { CHECKS } from '../scripts/checks.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
+
+// Every memory-vault.mjs run in this file goes through here: a git-chain hang
+// guard (see GIT_CHAIN_TIMEOUT_MS in helpers.mjs for the measurements), and a
+// killed child fails as a timeout, not as a wrong sync result.
+function runVault(args, opts = {}) {
+  const res = runScript(SCRIPT, args, { timeout: GIT_CHAIN_TIMEOUT_MS, ...opts });
+  assert.ok(!res.timedOut,
+    `memory-vault.mjs ${args.join(' ')} was killed after ${opts.timeout ?? GIT_CHAIN_TIMEOUT_MS} ms without finishing `
+    + '(the sync hung, or the machine is badly overloaded) — this is not a sync result');
+  return res;
+}
 const DRIFT = CHECKS.find((c) => c.id === 'memory-vault-drift');
 
 function sha256(buf) {
   return createHash('sha256').update(buf).digest('hex');
 }
 
-// No auto-maintenance/gc: see tests/memory-vault-git-env.test.mjs's own
-// NO_AUTO_MAINT banner — a detached `maintenance run --auto`/`gc --auto`
-// child left running after one of THIS file's own commits (the ones made
-// directly here, not through scripts/memory-vault.mjs's now-hardened
-// vaultGit()) can still hold the same vault's .git open when the very next
-// assertion in the same test calls `git status`/`git show` against it,
-// which is a load-sensitive race on Windows in particular.
-const NO_AUTO_MAINT = ['-c', 'maintenance.autoDetach=false', '-c', 'gc.autoDetach=false'];
-
 function git(dir, args, opts = {}) {
-  return execFileSync('git', ['-C', dir, ...NO_AUTO_MAINT, ...args], {
+  return execFileSync('git', ['-C', dir, ...args], {
     encoding: 'utf8', windowsHide: true, ...opts, env: cleanGitEnv(opts.env || process.env),
   });
 }
@@ -65,7 +67,7 @@ test('init writes a .gitattributes that disables normalisation, and commits it',
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index\n' } });
     const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
-    const r = runScript(SCRIPT, ['init', '--json'], { env });
+    const r = runVault(['init', '--json'], { env });
     assert.equal(r.status, 0, `init exited ${r.status}: ${r.stderr}`);
     assert.equal(r.json?.gitattributes, 'created');
 
@@ -89,11 +91,11 @@ test('init is still idempotent: a second run neither rewrites nor re-commits .gi
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index\n' } });
     const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
-    runScript(SCRIPT, ['init', '--json'], { env });
+    runVault(['init', '--json'], { env });
     const vault = vaultPathFor(fx.stateDir);
     const headBefore = git(vault, ['rev-parse', 'HEAD']).trim();
 
-    const second = runScript(SCRIPT, ['init', '--json'], { env });
+    const second = runVault(['init', '--json'], { env });
     assert.equal(second.json?.created, false);
     assert.equal(second.json?.gitattributes, 'present');
     assert.equal(git(vault, ['rev-parse', 'HEAD']).trim(), headBefore, 'no new commit');
@@ -108,7 +110,7 @@ test('init never clobbers a .gitattributes the operator wrote differently — it
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index\n' } });
     const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
-    runScript(SCRIPT, ['init', '--json'], { env });
+    runVault(['init', '--json'], { env });
     const vault = vaultPathFor(fx.stateDir);
 
     const mine = '# mine\n*.md text eol=lf\n';
@@ -116,7 +118,7 @@ test('init never clobbers a .gitattributes the operator wrote differently — it
     git(vault, ['add', '--', '.gitattributes']);
     git(vault, ['commit', '-q', '-m', 'operator edit']);
 
-    const again = runScript(SCRIPT, ['init'], { env });
+    const again = runVault(['init'], { env });
     assert.equal(again.status, 0);
     assert.equal(readFileSync(join(vault, '.gitattributes'), 'utf8'), mine, 'left exactly as written');
     assert.match(again.stdout, /does NOT disable line-ending conversion/);
@@ -131,7 +133,7 @@ test('backfill into an older vault refuses when it would renormalise tracked con
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index\n' } });
     const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
-    runScript(SCRIPT, ['sync', '--json'], { env });
+    runVault(['sync', '--json'], { env });
     const vault = vaultPathFor(fx.stateDir);
 
     // Recreate the pre-fix situation: no .gitattributes, autocrlf on, and a
@@ -150,7 +152,7 @@ test('backfill into an older vault refuses when it would renormalise tracked con
     assert.equal(git(vault, ['diff']).trim(), '', 'autocrlf hides the divergence from a normal diff');
 
     const headBefore = git(vault, ['rev-parse', 'HEAD']).trim();
-    const r = runScript(SCRIPT, ['init'], { env });
+    const r = runVault(['init'], { env });
     assert.equal(r.status, 0);
     assert.match(r.stdout, /could not add \.gitattributes/);
     assert.match(r.stdout, /renormalisation/);
@@ -167,7 +169,7 @@ test('backfill into a clean older vault adds .gitattributes as its own single-fi
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'lf-native\n' } });
     const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
-    runScript(SCRIPT, ['sync', '--json'], { env });
+    runVault(['sync', '--json'], { env });
     const vault = vaultPathFor(fx.stateDir);
 
     git(vault, ['rm', '-q', '--cached', '--', '.gitattributes']);
@@ -175,7 +177,7 @@ test('backfill into a clean older vault adds .gitattributes as its own single-fi
     git(vault, ['commit', '-q', '-m', 'drop gitattributes']);
     git(vault, ['config', 'core.autocrlf', 'true']);
 
-    const r = runScript(SCRIPT, ['init'], { env });
+    const r = runVault(['init'], { env });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /added \.gitattributes/);
     const files = git(vault, ['show', '--name-only', '--format=', 'HEAD']).trim().split('\n').filter(Boolean);
@@ -264,10 +266,10 @@ test('an LF memory file round-trips byte-identically through a real vault sync u
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': body } });
     const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
 
-    runScript(SCRIPT, ['init', '--json'], { env });
+    runVault(['init', '--json'], { env });
     const vault = vaultPathFor(fx.stateDir);
     git(vault, ['config', 'core.autocrlf', 'true']); // the hazard, left ON
-    const r = runScript(SCRIPT, ['sync', '--json'], { env });
+    const r = runVault(['sync', '--json'], { env });
     assert.equal(r.json?.committed, true, `sync should commit: ${r.stderr}`);
 
     const rel = 'projects/proj-a/memory/MEMORY.md';
@@ -293,7 +295,7 @@ test('memory-vault-drift warns about a vault that is not byte-exact', () => {
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index\n' } });
     const env = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
-    runScript(SCRIPT, ['sync', '--json'], { env });
+    runVault(['sync', '--json'], { env });
     const vault = vaultPathFor(fx.stateDir);
     process.env.CLAUDE_PLUGIN_OPTION_MEMORY_VAULT = 'true';
 

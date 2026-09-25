@@ -21,6 +21,12 @@ import { PLUGIN_ROOT } from './helpers.mjs';
 import { acquireLock, releaseLock, withFileLock, pidAlive, LockTimeoutError } from '../hooks/lib/file-lock.mjs';
 
 const HELPER = pathToFileURL(join(PLUGIN_ROOT, 'hooks', 'lib', 'file-lock.mjs')).href;
+// The wait for an acquire that MUST succeed. acquire() returns the moment
+// it has the lock, so this costs nothing when the helper is right; it is
+// only spent when the helper is wrong. A short budget here (100-500 ms)
+// asserted "succeeds within N ms of wall time" instead of "succeeds", and a
+// loaded machine can stall a few fs calls past that.
+const GETS_IT_MS = 30_000;
 const deadPid = () => spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid;
 
 function scratch() {
@@ -38,7 +44,7 @@ test('pidAlive: this process is alive, an exited one is not, garbage is not', ()
 test('a lock carries its owner, and release removes only a lock still holding the releaser\'s token', () => {
   const s = scratch();
   try {
-    const h = acquireLock(s.lock, { waitMs: 100 });
+    const h = acquireLock(s.lock, { waitMs: GETS_IT_MS });
     assert.ok(h);
     const owner = JSON.parse(readFileSync(s.lock, 'utf8'));
     assert.equal(owner.pid, process.pid);
@@ -68,7 +74,7 @@ test('a dead owner\'s lock is broken only once it is old enough', () => {
     writeFileSync(s.lock, JSON.stringify({ pid, token: 'dead-fresh', at: Date.now() }));
     assert.equal(acquireLock(s.lock, { waitMs: 150, staleMs: 60_000 }), null, 'a fresh lock is not broken');
     writeFileSync(s.lock, JSON.stringify({ pid, token: 'dead-old', at: Date.now() - 120_000 }));
-    const h = acquireLock(s.lock, { waitMs: 500, staleMs: 60_000 });
+    const h = acquireLock(s.lock, { waitMs: GETS_IT_MS, staleMs: 60_000 });
     assert.ok(h, 'an old lock of a dead owner is broken');
     releaseLock(h);
     assert.equal(existsSync(s.lock), false);
@@ -81,7 +87,7 @@ test('a lock with no readable owner is broken once old (a crash mid-create)', ()
   try {
     writeFileSync(s.lock, '');
     assert.equal(acquireLock(s.lock, { waitMs: 100, staleMs: 60_000 }), null);
-    const h = acquireLock(s.lock, { waitMs: 500, staleMs: 0 });
+    const h = acquireLock(s.lock, { waitMs: GETS_IT_MS, staleMs: 0 });
     assert.ok(h);
     releaseLock(h);
   } finally { s.cleanup(); }
@@ -126,7 +132,7 @@ test('F3: a future-dated lock of a dead owner is broken; a live owner\'s is not'
   const s = scratch();
   try {
     writeFileSync(s.lock, JSON.stringify({ pid: deadPid(), token: 'future-dead', at: Date.now() + 3_600_000 }));
-    const h = acquireLock(s.lock, { waitMs: 500, staleMs: 1000 });
+    const h = acquireLock(s.lock, { waitMs: GETS_IT_MS, staleMs: 1000 });
     assert.ok(h, 'a dead owner\'s future-dated lock is broken');
     releaseLock(h);
     writeFileSync(s.lock, JSON.stringify({ pid: process.pid, token: 'future-live', at: Date.now() + 3_600_000 }));
@@ -148,14 +154,17 @@ test('F3: a directory at the lock path is reported at once as unusable, never wa
     mkdirSync(s.lock);
     const old = new Date(Date.now() - 3_600_000);
     (await import('node:fs')).utimesSync(s.lock, old, old);
+    // "At once" means "without waiting out waitMs": the budget is set far
+    // above anything a loaded machine adds, and the bound is half of it.
+    const WAIT = 60_000;
     let t0 = Date.now();
-    assert.equal(acquireLock(s.lock, { waitMs: 3000, staleMs: 10 }), null);
-    assert.ok(Date.now() - t0 < 1500, `waited ${Date.now() - t0} ms on a directory`);
+    assert.equal(acquireLock(s.lock, { waitMs: WAIT, staleMs: 10 }), null);
+    assert.ok(Date.now() - t0 < WAIT / 2, `waited ${Date.now() - t0} ms on a directory`);
     t0 = Date.now();
     assert.equal(typeof LockUnusableError, 'function', 'LockUnusableError is exported');
-    assert.throws(() => withFileLock(s.lock, () => 1, { waitMs: 3000, failOpen: false }), (e) => e instanceof LockUnusableError && /a directory/.test(e.message));
-    assert.deepEqual(withFileLock(s.lock, (st) => st, { waitMs: 3000, failOpen: true }), { locked: false });
-    assert.ok(Date.now() - t0 < 1500, `waited ${Date.now() - t0} ms on a directory`);
+    assert.throws(() => withFileLock(s.lock, () => 1, { waitMs: WAIT, failOpen: false }), (e) => e instanceof LockUnusableError && /a directory/.test(e.message));
+    assert.deepEqual(withFileLock(s.lock, (st) => st, { waitMs: WAIT, failOpen: true }), { locked: false });
+    assert.ok(Date.now() - t0 < WAIT / 2, `waited ${Date.now() - t0} ms on a directory`);
     assert.deepEqual(readdirSync(s.dir), ['x.lock'], 'the directory was left where it stands');
   } finally { s.cleanup(); }
 });
@@ -186,7 +195,7 @@ test('F5: the next acquire sweeps old crash debris beside the lock, and only tha
     for (const n of [...debris, ...keep]) { writeFileSync(join(s.dir, n), 'x'); utimesSync(join(s.dir, n), old, old); }
     const fresh = [`x.lock.${dead}.${hx('e')}.new`, `state.json.${dead}.${hx('e')}.tmp`];
     for (const n of fresh) writeFileSync(join(s.dir, n), 'x');
-    const h = acquireLock(s.lock, { waitMs: 200, debris: [guarded] });
+    const h = acquireLock(s.lock, { waitMs: GETS_IT_MS, debris: [guarded] });
     assert.ok(h);
     assert.deepEqual(readdirSync(s.dir).sort(), [...keep, ...fresh, 'x.lock'].sort());
     releaseLock(h);
@@ -202,6 +211,19 @@ test('F5: the next acquire sweeps old crash debris beside the lock, and only tha
 // those instants, each through the helper's own acquireLock (B is a real
 // waiter following the same protocol, not a raw rename). Run in a child
 // process because the wrap patches node:fs for the whole process.
+//
+// The probe runs on a LOGICAL clock, so no wall-clock budget decides it.
+// On the real clock C had 200 ms of wall time to reach its rename and then
+// take the freed lock, and under the full suite's load stalled fs calls
+// spent it: C gave up at stage 0 ("the interleaving point was reached",
+// a --ci-parity run, 2026-09-25), or after the break with no holder (the
+// same budget, spent later; reproduced by stalling each statSync 120 ms).
+// Here Date.now() stands still until the interleaving point is reached, and
+// after it advances only by the protocol's own backoff sleeps. So C always
+// reaches the point, and its waitMs is then a budget of backoff, which the
+// correct protocol never spends: the lock is free once the dead one is
+// broken. A protocol that never reaches the point hangs the probe, and the
+// spawn's hang guard reports that as its own failure.
 test('F1: the put-back interleaving never leaves two holders (3+ waiters racing a crashed holder)', () => {
   const s = scratch();
   try {
@@ -211,6 +233,13 @@ test('F1: the put-back interleaving never leaves two holders (3+ waiters racing 
       import { syncBuiltinESMExports } from 'node:module';
       const [lock, deadPid] = process.argv.slice(2);
       fs.writeFileSync(lock, JSON.stringify({ pid: Number(deadPid), token: 'crashed', at: Date.now() - 60000 }));
+      let logical = Date.now();
+      Date.now = () => logical;
+      const realWait = Atomics.wait;
+      Atomics.wait = function (ta, i, v, ms) {
+        if (stage >= 1 && Number.isFinite(ms)) logical += ms;
+        return realWait.call(Atomics, ta, i, v, ms);
+      };
       const realRename = fs.renameSync, realLink = fs.linkSync;
       let mod; let stage = 0; const h = { A: null, B: null, D: null };
       const opts = { waitMs: 0, staleMs: 1000 };
@@ -234,7 +263,8 @@ test('F1: the put-back interleaving never leaves two holders (3+ waiters racing 
       const holders = Object.entries(h).filter(([, v]) => v).map(([k, v]) => ({ k, token: v.token }));
       process.stdout.write(JSON.stringify({ stage, holders, onDisk }));
     `);
-    const r = spawnSync(process.execPath, [probe, s.lock, String(deadPid())], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+    const r = spawnSync(process.execPath, [probe, s.lock, String(deadPid())], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    assert.ok(r.error?.code !== 'ETIMEDOUT', 'the probe hung: waiter C never reached the interleaving point, or never finished after it');
     assert.equal(r.status, 0, r.stderr);
     const out = JSON.parse(r.stdout);
     assert.ok(out.stage >= 1, 'the interleaving point was reached');

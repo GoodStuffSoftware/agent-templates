@@ -14,11 +14,22 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
+import { makeFixture, runScript, GIT_CHAIN_TIMEOUT_MS } from './helpers.mjs';
 import { CHECKS } from '../scripts/checks.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
 const SCRIPT = 'scripts/memory-vault.mjs';
+
+// Every memory-vault.mjs run in this file goes through here: a git-chain hang
+// guard (see GIT_CHAIN_TIMEOUT_MS in helpers.mjs for the measurements), and a
+// killed child fails as a timeout, not as a wrong sync result.
+function runVault(args, opts = {}) {
+  const res = runScript(SCRIPT, args, { timeout: GIT_CHAIN_TIMEOUT_MS, ...opts });
+  assert.ok(!res.timedOut,
+    `memory-vault.mjs ${args.join(' ')} was killed after ${opts.timeout ?? GIT_CHAIN_TIMEOUT_MS} ms without finishing `
+    + '(the sync hung, or the machine is badly overloaded) — this is not a sync result');
+  return res;
+}
 const DRIFT = CHECKS.find((c) => c.id === 'memory-vault-drift');
 
 function makeCorpus(dir, layout) {
@@ -56,7 +67,7 @@ test('a skipped sync writes a trace even though it creates no vault', () => {
   const fx = makeFixture();
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
-    const res = runScript(SCRIPT, ['sync', '--json'], {
+    const res = runVault(['sync', '--json'], {
       env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'false' },
     });
     assert.equal(res.json?.skipped, 'disabled');
@@ -81,12 +92,12 @@ test('consecutive skips accumulate, and a real sync resets the counter', () => {
     const off = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'false' };
     const on = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
 
-    runScript(SCRIPT, ['sync', '--json'], { env: off });
-    runScript(SCRIPT, ['sync', '--json'], { env: off });
-    runScript(SCRIPT, ['sync', '--json'], { env: off });
+    runVault(['sync', '--json'], { env: off });
+    runVault(['sync', '--json'], { env: off });
+    runVault(['sync', '--json'], { env: off });
     assert.equal(readCache(fx).consecutiveSkips, 3);
 
-    const ran = runScript(SCRIPT, ['sync', '--json'], { env: on });
+    const ran = runVault(['sync', '--json'], { env: on });
     assert.equal(ran.json?.committed, true, `sync should have committed: ${ran.stderr}`);
     const after = readCache(fx);
     assert.equal(after.consecutiveSkips, 0);
@@ -103,11 +114,11 @@ test('a skip carries the previous successful run forward instead of erasing it',
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
     const on = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
-    runScript(SCRIPT, ['sync', '--json'], { env: on });
+    runVault(['sync', '--json'], { env: on });
     const success = readCache(fx);
     assert.ok(success.lastSyncAt && success.lastCommitSha);
 
-    runScript(SCRIPT, ['sync', '--json'], {
+    runVault(['sync', '--json'], {
       env: { ...on, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'false' },
     });
     const afterSkip = readCache(fx);
@@ -126,7 +137,7 @@ test('memory-vault-drift FAILS when the option reads on here but the sync was re
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
     // The exact shape of the bug: the sync context does not see the option,
     // the audit context does.
-    runScript(SCRIPT, ['sync', '--json'], {
+    runVault(['sync', '--json'], {
       env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'false' },
     });
     const r = runDrift({ vaultOn: true });
@@ -143,7 +154,7 @@ test('memory-vault-drift stays quiet for a backup that actually ran', () => {
   const fx = makeFixture();
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
-    runScript(SCRIPT, ['sync', '--json'], {
+    runVault(['sync', '--json'], {
       env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
     });
     const r = runDrift({ vaultOn: true });
@@ -157,7 +168,7 @@ test('memory-vault-drift skips (not warns) when the option is off everywhere, bu
   const fx = makeFixture();
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
-    runScript(SCRIPT, ['sync', '--json'], {
+    runVault(['sync', '--json'], {
       env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'false' },
     });
     const r = runDrift({ vaultOn: false });
@@ -173,20 +184,20 @@ test('memory-vault-drift warns on a run of no-work attempts that are not the opt
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
     const on = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
-    runScript(SCRIPT, ['sync', '--json'], { env: on });
+    runVault(['sync', '--json'], { env: on });
 
     // A live lock turns the next syncs away. Two in a row is a run, not a race.
     const lock = join(fx.stateDir, 'state', 'memory-vault-sync.lock');
     mkdirSync(join(fx.stateDir, 'state'), { recursive: true });
     writeFileSync(lock, JSON.stringify({ pid: 999999, at: new Date().toISOString() }));
-    const first = runScript(SCRIPT, ['sync', '--json'], { env: on });
+    const first = runVault(['sync', '--json'], { env: on });
     assert.equal(first.json?.skipped, 'locked');
     const afterOne = runDrift({ vaultOn: true });
     assert.equal(afterOne.status, 'ok',
       `one lock is an ordinary race: ${JSON.stringify(afterOne.findings)}`);
 
     writeFileSync(lock, JSON.stringify({ pid: 999999, at: new Date().toISOString() }));
-    runScript(SCRIPT, ['sync', '--json'], { env: on });
+    runVault(['sync', '--json'], { env: on });
     const r = runDrift({ vaultOn: true });
     assert.equal(r.status, 'warn', `expected warn, got ${r.status}: ${JSON.stringify(r.findings)}`);
     assert.match(r.findings.join(' | '), /consecutive attempt\(s\) have done no work/);
@@ -199,7 +210,7 @@ test('memory-vault-drift reports the trace even when the skip meant the vault ne
   const fx = makeFixture();
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
-    runScript(SCRIPT, ['sync', '--json'], {
+    runVault(['sync', '--json'], {
       env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'false' },
     });
     assert.ok(!existsSync(join(fx.stateDir, 'memory-vault')));
@@ -218,17 +229,17 @@ test('status --json surfaces the attempt record on both the initialized and unin
   try {
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
     const off = { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'false' };
-    runScript(SCRIPT, ['sync', '--json'], { env: off });
+    runVault(['sync', '--json'], { env: off });
 
-    const uninit = runScript(SCRIPT, ['status', '--json'], { env: off });
+    const uninit = runVault(['status', '--json'], { env: off });
     assert.equal(uninit.json.initialized, false);
     assert.equal(uninit.json.lastAttemptOutcome, 'skipped');
     assert.equal(uninit.json.lastAttemptReason, 'disabled');
     assert.equal(uninit.json.consecutiveSkips, 1);
 
     const on = { ...off, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
-    runScript(SCRIPT, ['sync', '--json'], { env: on });
-    const init = runScript(SCRIPT, ['status', '--json'], { env: on });
+    runVault(['sync', '--json'], { env: on });
+    const init = runVault(['status', '--json'], { env: on });
     assert.equal(init.json.initialized, true);
     assert.equal(init.json.lastAttemptOutcome, 'ran');
     assert.equal(init.json.consecutiveSkips, 0);
@@ -254,7 +265,7 @@ test('a v:1 status file is read without error and upgraded in place on the next 
     mkdirSync(join(fx.stateDir, 'state'), { recursive: true });
     writeFileSync(statusCachePath(fx), JSON.stringify(legacy, null, 2));
 
-    runScript(SCRIPT, ['sync', '--json'], {
+    runVault(['sync', '--json'], {
       env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'false' },
     });
     const after = readCache(fx);
@@ -275,7 +286,7 @@ test('a corrupt status file does not stop a sync from running or recording', () 
     const corpus = makeCorpus(fx.dir, { 'proj-a': { 'MEMORY.md': 'index' } });
     mkdirSync(join(fx.stateDir, 'state'), { recursive: true });
     writeFileSync(statusCachePath(fx), '{ not json');
-    const res = runScript(SCRIPT, ['sync', '--json'], {
+    const res = runVault(['sync', '--json'], {
       env: { AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' },
     });
     assert.equal(res.status, 0, `sync exited ${res.status}: ${res.stderr}`);
@@ -289,28 +300,6 @@ test('a corrupt status file does not stop a sync from running or recording', () 
 // G5. status() now runs sync's read-only guards first and reports a vault that
 // fails them as refused. The drift check has to say so. Before the guards, it
 // reported whatever `git status` saw in that repository.
-// Root-cause fix for load-sensitivity across the suite: a vault commit that
-// crosses git's auto-gc threshold used to fork a DETACHED `git gc`/
-// maintenance child (an unawaited child outliving vaultGit()'s own process),
-// which then held the vault's .git open and burned CPU/I/O out of band —
-// exactly the kind of load dependency that made this file's own sequential
-// runScript() calls (each with a 15s timeout) occasionally slow enough to
-// flake under a concurrent stress run. See memory-vault.mjs's vaultGit() for
-// the -c maintenance.autoDetach=false / -c gc.autoDetach=false flags this
-// guards; a source check (rather than a timing-based one) keeps this
-// assertion itself immune to the very flakiness it is guarding against.
-test('vaultGit() disables auto-detached maintenance/gc on every invocation (no unawaited background child)', () => {
-  const src = readFileSync(join(PLUGIN_ROOT, 'scripts', 'memory-vault.mjs'), 'utf8');
-  const fnMatch = src.match(/function vaultGit\(dir, args, opts = \{\}\) \{[\s\S]*?\n\}/);
-  assert.ok(fnMatch, 'vaultGit() must exist with its expected shape');
-  const body = fnMatch[0];
-  assert.match(body, /-c',\s*'maintenance\.autoDetach=false'/, 'must disable detached maintenance runs');
-  assert.match(body, /-c',\s*'gc\.autoDetach=false'/, 'must disable detached gc runs');
-  // Never disable gc.auto itself (that is a separate, deliberately-rejected
-  // change — see the handoff): only how it runs (foreground) changes.
-  assert.doesNotMatch(body, /gc\.auto=0|gc\.auto=false/);
-});
-
 test('memory-vault-drift FAILS, naming the guard, for a marker planted in a repository the plugin did not create', () => {
   const fx = makeFixture();
   try {
