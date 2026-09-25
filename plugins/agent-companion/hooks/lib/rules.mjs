@@ -372,6 +372,12 @@ const SPACES_RE = /\s*/y;
 //     wrapper's text;
 //   - a closing tag outside every wrapper is dropped (one space);
 //   - a wrapper still open at the end swallows the rest of the text.
+// The output matches the old replace-until-stable on every input where each
+// opening tag's ">" comes before the next "<". On malformed input it does
+// not: the old passes replaced a removed block with a space, which could
+// turn a preceding "<system-reminder" (no ">") into an opening tag, or find
+// a tag inside another tag's attributes. Here a tag is only what the text
+// itself spells.
 export function userOwnText(text) {
   const s = String(text ?? '');
   const stack = [];

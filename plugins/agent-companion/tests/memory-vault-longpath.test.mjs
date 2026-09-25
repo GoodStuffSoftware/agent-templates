@@ -17,7 +17,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { makeFixture, runScript } from './helpers.mjs';
@@ -93,6 +93,60 @@ for (let len = 243; len <= 250; len += 1) {
     }
   });
 }
+
+// 0.29.2: vault git calls no longer read the operator's global or system
+// config (hermeticGitEnv()), where Git for Windows installs usually set
+// core.longpaths=true. The vault passes -c core.longpaths=true itself. This
+// fixture gives the operator that setting the usual way ($HOME/.gitconfig),
+// not the empty config above, and checks that an EXISTING vault still
+// stores, and restores, a memory file whose full path in the vault passes
+// 260 characters, byte for byte. Remove the vault's own -c and this goes red
+// on Windows, because the operator's setting no longer reaches git.
+test('an existing vault at a long path round-trips a memory file past 260 characters byte for byte', () => {
+  const fx = makeFixture();
+  try {
+    const home = join(fx.dir, 'operator-home');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, '.gitconfig'), '[core]\n\tlongpaths = true\n');
+    const opEnv = { HOME: home, XDG_CONFIG_HOME: join(home, 'no-xdg'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: undefined };
+    for (const k of Object.keys(process.env)) {
+      if (/^(git_config_global|xdg_config_home)$/i.test(k) && !(k in opEnv)) opEnv[k] = undefined;
+    }
+    const corpus = join(fx.dir, 'c');
+    mkdirSync(join(corpus, 'p', 'memory'), { recursive: true });
+    writeFileSync(join(corpus, 'p', 'memory', 'MEMORY.md'), '# idx\n');
+    const state = stateRootForVaultLength(fx.dir, WIN_MAX_VAULT_PATH);
+    const vault = join(state, 'memory-vault');
+    const env = { ...opEnv, AGENT_COMPANION_STATE_DIR: state, AGENT_COMPANION_MEMORY_ROOT: corpus, CLAUDE_PLUGIN_OPTION_MEMORY_VAULT: 'true' };
+    const first = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(first.status, 0, `sync failed: ${first.stderr}`);
+
+    // The existing vault now gets a deep file, LF and CRLF lines mixed.
+    const project = `long-project-${'q'.repeat(20)}`;
+    const name = `long-memory-file-${'m'.repeat(20)}.md`;
+    const rel = `projects/${project}/memory/${name}`;
+    assert.ok(vault.length + 1 + rel.length > 260, 'the file must pass 260 characters, or this proves nothing');
+    const body = Buffer.from('# deep\n\n- one\r\n- two\n', 'utf8');
+    mkdirSync(join(corpus, project, 'memory'), { recursive: true });
+    writeFileSync(join(corpus, project, 'memory', name), body);
+    const second = runScript(SCRIPT, ['sync', '--json'], { cwd: fx.dir, env, timeout: 60000 });
+    assert.equal(second.status, 0, `sync failed: ${second.stderr}`);
+    assert.equal(second.json?.committed, true, second.stdout);
+
+    const plain = cleanGitEnv(process.env, { GIT_CONFIG_NOSYSTEM: '1', HOME: join(fx.dir, 'nowhere'), XDG_CONFIG_HOME: join(fx.dir, 'nowhere') });
+    const blob = spawnSync('git', ['-c', 'core.longpaths=true', '-C', vault, 'show', `HEAD:${rel}`], { encoding: 'buffer', windowsHide: true, env: plain });
+    assert.equal(blob.status, 0, String(blob.stderr));
+    assert.ok(Buffer.compare(blob.stdout, body) === 0, 'the committed blob differs from the memory file');
+    const out = join(fx.dir, 'restore');
+    mkdirSync(out, { recursive: true });
+    const co = spawnSync('git', ['-c', 'core.longpaths=true', '--work-tree', out, '-C', vault, 'checkout-index', '-f', '--', rel],
+      { encoding: 'utf8', windowsHide: true, env: plain });
+    assert.equal(co.status, 0, co.stderr);
+    assert.ok(Buffer.compare(readFileSync(join(out, ...rel.split('/'))), body) === 0, 'a fresh checkout differs from the memory file');
+  } finally {
+    fx.cleanup();
+  }
+});
 
 test('a vault directory holding a repository but no marker is refused as a partial vault, not "inside a repository"', () => {
   const fx = makeFixture();
