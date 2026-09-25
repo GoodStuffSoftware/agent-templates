@@ -18,6 +18,9 @@ import {
   readProfile, rowShapeErrors, typeShapeErrors, ACTIVE_STATES,
   PROFILE_FILE, INVALID_MARKER_FILE,
 } from './routing-profile.mjs';
+import {
+  readInstalledPlugins, pluginEntries, effectiveEntry, scopeKey, copySource,
+} from './plugin-installs.mjs';
 
 // Agent types observed in the shipped binary (2.1.220). The binary tests the
 // main thread with `agentType === "main"`, but mainThreadAgentType is settable
@@ -1317,22 +1320,72 @@ export function rungFor(model, effort) {
 }
 
 // True when `type` names one of the ladder's own generic worker defs
-// (config/model-tiers.json's `ladder[].agent`, e.g. `ac-opus-low`) — with or
-// without the `agent-companion:` namespace prefix a spawn from outside this
-// plugin's own repo carries. Used to distinguish "a ladder rung was spawned
-// by name, model+effort locked together in its file" from "some other agent
-// type was spawned with an explicit model" — the latter is exactly the shape
-// where effort silently falls back to session inheritance (spawn-guard.mjs's
-// SPAWNING RULE 1 advisory).
+// (config/model-tiers.json's `ladder[].agent`, e.g. `ac-opus-low`), either
+// bare or under THIS plugin's own namespace (`agent-companion:ac-opus-low`,
+// the form a spawn from outside this plugin's repo carries). Another
+// plugin's `other:ac-opus-low` is NOT a ladder agent: it is that plugin's
+// own definition, resolved (and judged) through agentDefinition(). Used to
+// tell "a ladder rung was spawned by name, model+effort locked together in
+// its file" from "some other agent type was spawned with an explicit model",
+// the shape where effort silently falls back to session inheritance
+// (spawn-guard.mjs's SPAWNING RULE 1 advisory).
 export function isLadderAgentName(type) {
   if (!type) return false;
-  const bare = String(type).includes(':') ? String(type).split(':').pop() : String(type);
+  const t = String(type);
+  const colon = t.indexOf(':');
+  let bare = t;
+  if (colon >= 0) {
+    if (t.slice(0, colon) !== pluginName()) return false;
+    bare = t.slice(colon + 1);
+  }
   try {
-    const cfg = modelTiers();
-    return Array.isArray(cfg.ladder) && cfg.ladder.some((r) => r.agent === bare);
+    return ladderAgentNames().has(bare);
   } catch {
     return false; // table unreadable: fail toward "not a ladder agent" (the safer, louder side)
   }
+}
+
+// Every ladder agent name from config/model-tiers.json's `ladder`, bare.
+export function ladderAgentNames() {
+  const cfg = modelTiers();
+  return new Set((Array.isArray(cfg.ladder) ? cfg.ladder : []).map((r) => r && r.agent).filter(Boolean));
+}
+
+// This plugin's own agents/ directory — the copy of the plugin this code is
+// running from, which is the copy the harness loaded for this session.
+export function ownAgentsDir() {
+  return join(pluginRootDir(), 'agents');
+}
+
+// The running copy's own identity, stamped into every spawns.jsonl row so the
+// daily scout can tell, across sessions, which guard version a spawn really
+// ran under (hooks/spawn-guard.mjs; scripts/detect.mjs's stale_guard_running).
+//   guard_version: this copy's plugin.json version
+//   guard_source:  "cache" (an installed copy under the plugin cache) or
+//                  "checkout" (a --plugin-dir load or a source tree)
+//   guard_scope:   scopeKey() of the installed_plugins.json entry that
+//                  applies to `cwd` ("user", or "project:<hash>" — never a
+//                  path), or null when nothing is installed
+// Never throws; unknown parts are null.
+let _pluginVersion;
+export function pluginVersion() {
+  if (_pluginVersion !== undefined) return _pluginVersion;
+  _pluginVersion = null;
+  try {
+    const m = JSON.parse(readFileSync(join(pluginRootDir(), '.claude-plugin', 'plugin.json'), 'utf8'));
+    if (typeof m?.version === 'string' && m.version) _pluginVersion = m.version;
+  } catch { /* unknown */ }
+  return _pluginVersion;
+}
+export function runningCopyStamp(cwd) {
+  const out = { guard_version: null, guard_source: null, guard_scope: null };
+  try {
+    out.guard_version = pluginVersion();
+    out.guard_source = copySource(pluginRootDir(), claudeDir());
+    const entries = pluginEntries(readInstalledPlugins(claudeDir()), pluginName());
+    out.guard_scope = scopeKey(effectiveEntry(entries, cwd || process.cwd()));
+  } catch { /* partial stamp: whatever was learned before the failure */ }
+  return out;
 }
 
 export function readStdin() {
@@ -1660,26 +1713,62 @@ export function isMainThread(p) {
 // Look up a named agent's own definition. This is what distinguishes a
 // PROJECT-DEFINED agent from genuine harness drift, and a configured model from
 // an unexamined default — the two things the raw payload cannot tell apart.
+//
+// A plugin-namespaced type (`<plugin>:<agent>`, the form every plugin agent
+// is spawned under from outside that plugin's repo) resolves to THAT plugin's
+// own agents/ folder: this plugin's from the running copy, any other plugin's
+// from the installed_plugins.json entry that applies to `cwd`. Before this,
+// `agent-companion:ac-opus-low` resolved to nothing, so every ladder spawn
+// drew a false "states no model/effort" note and, with no model on the call,
+// had the route's model autofilled over the rung's own frontmatter. A bare
+// ladder name (`ac-opus-low`) that no project or user definition shadows
+// resolves to this plugin's own copy too.
+function readAgentDefFile(file) {
+  try {
+    if (!existsSync(file)) return null;
+    const m = readFileSync(file, 'utf8').match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!m) return { file, model: '', effort: '' };
+    const fm = {};
+    for (const line of m[1].split(/\r?\n/)) {
+      const kv = line.match(/^(\w[\w-]*):\s*(.*)$/);
+      if (kv) fm[kv[1]] = kv[2].trim().replace(/^(["'])(.*)\1$/, '$2');
+    }
+    return { file, model: fm.model || '', effort: fm.effort || '' };
+  } catch {
+    return null;
+  }
+}
+function pluginAgentsDirFor(plugin, cwd) {
+  if (plugin === pluginName()) return ownAgentsDir();
+  try {
+    const e = effectiveEntry(pluginEntries(readInstalledPlugins(claudeDir()), plugin), cwd || process.cwd());
+    return e && e.installPath ? join(e.installPath, 'agents') : null;
+  } catch {
+    return null;
+  }
+}
+const UNSAFE_AGENT_NAME = /[\\/]|\.\./;
 export function agentDefinition(type, cwd) {
   if (!type) return null;
+  const t = String(type);
+  const colon = t.indexOf(':');
+  if (colon > 0) {
+    const plugin = t.slice(0, colon);
+    const name = t.slice(colon + 1);
+    if (!name || UNSAFE_AGENT_NAME.test(plugin) || UNSAFE_AGENT_NAME.test(name) || name.includes(':')) return null;
+    const dir = pluginAgentsDirFor(plugin, cwd);
+    return dir ? readAgentDefFile(join(dir, `${name}.md`)) : null;
+  }
+  if (UNSAFE_AGENT_NAME.test(t)) return null;
   const roots = [
     cwd && join(cwd, '.claude', 'agents'),
     join(claudeDir(), 'agents'),
   ].filter(Boolean);
   for (const root of roots) {
-    const file = join(root, `${type}.md`);
-    try {
-      if (!existsSync(file)) continue;
-      const m = readFileSync(file, 'utf8').match(/^---\r?\n([\s\S]*?)\r?\n---/);
-      if (!m) return { file, model: '', effort: '' };
-      const fm = {};
-      for (const line of m[1].split(/\r?\n/)) {
-        const kv = line.match(/^(\w[\w-]*):\s*(.*)$/);
-        if (kv) fm[kv[1]] = kv[2].trim();
-      }
-      return { file, model: fm.model || '', effort: fm.effort || '' };
-    } catch { /* keep looking */ }
+    const d = readAgentDefFile(join(root, `${t}.md`));
+    if (d) return d;
   }
+  if (isLadderAgentName(t)) return readAgentDefFile(join(ownAgentsDir(), `${t}.md`));
   return null;
 }
 
@@ -1719,6 +1808,9 @@ function agentTypeMarkerName(t) {
 export function noteAgentType(p) {
   const t = p.agent_type;
   if (!t || KNOWN_AGENT_TYPES.has(t)) return;
+  // The ladder's own rungs (bare or agent-companion:-namespaced), derived
+  // from config/model-tiers.json: this plugin's own types, never drift.
+  if (isLadderAgentName(t)) return;
   if (agentDefinition(t, p.cwd)) return; // defined somewhere: known, not drift
   const sid = p.session_id;
   try {

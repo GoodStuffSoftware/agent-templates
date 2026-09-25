@@ -104,7 +104,7 @@ Report only when there is something to act on:
 node "$AC/scripts/detect.mjs"
 ```
 
-Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`, `enforcement_silent`.
+Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`, `enforcement_silent`, `plugin_version_behind`, `stale_guard_running`.
 
 ## STEP 2 — lineup and pricing diff (the one check that needs the web)
 
@@ -249,7 +249,8 @@ Not a summary, not a confirmation. Silence is the success case.
 | `lineup_drift` | report the exact diff against `config/model-tiers.json`, field by field |
 | `inherited_model_spawns` | report the count; spawns with no model inherit the lead's tier — the mechanism behind unexamined premium fan-out |
 | `harness_version_unreadable` | report it; do not guess |
-| `plugin_version_behind` | the installed plugin is older than the current copy. Cloud: the claude.ai plugin directory needs its **Sync** pressed on the marketplace page — cloud sessions are running the old guards until then. Local: `claude plugin marketplace update`, `claude plugin update`, restart |
+| `plugin_version_behind` | the installed plugin is older than the latest AVAILABLE version (locally the marketplace clone, in the cloud this routine's own checkout of the marketplace repo; never fires for an older or unreleased checkout running this scout). Cloud: the claude.ai plugin directory needs its **Sync** pressed on the marketplace page — cloud sessions are running the old guards until then. Local: `claude plugin update`, restart |
+| `stale_guard_running` | spawns in the last 24h were guarded by an OLDER agent-companion than the one installed for their install scope, so a stale copy is still loaded (the 2026-09-24 incident). Report both versions and the sessions named. Remedy: remove the stale agent-companion entry in the desktop plugin manager, `/reload-plugins`, verify with a trivial ladder spawn; fresh session if that still fails |
 | `enforcement_silent` | report which day(s) and their status; transcripts show real `Agent` spawns but `spawns.jsonl` has no matching rows for that day — the guard may have stopped recording (renamed matcher, exception before the append, telemetry flag off) even though spawning itself is fine. Run `node "$AC/scripts/audit.mjs" --only telemetry-coverage,guard-canary` for the detail |
 | `publication_leak` | report each repo/file/line/label, and that it is a NEW hit (not previously accepted) in a repo listed under `publication_leak_repos` — a real name reached origin past the local pre-push gate. This needs a human decision (genericize and push a fix, or accept and let it fall into the baseline); do not edit or push on the routine's own authority |
 | `publication_leak_sweep_error` | report which repo(s) the sweep could not reach and why (bad path/URL, missing `scripts/leak-check.mjs` in that repo, clone failure, or — cloud only — the checkout's `HEAD` not matching origin's default branch) — a repo listed in the option that can no longer be swept is itself a finding, not silence |
