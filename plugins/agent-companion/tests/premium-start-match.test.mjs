@@ -14,6 +14,9 @@ import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
 
 const SID = 'sess-start-match';
+// Each start is a new agent: a repeated agent_id is a CONTINUED agent, which
+// confirms nothing (lib/ladder-rewrite.mjs, hooks/spawn-log.mjs).
+let startSeq = 0;
 
 function harness() {
   const fx = makeFixture();
@@ -30,7 +33,7 @@ function harness() {
       tool_input: { ...(subagentType ? { subagent_type: subagentType } : {}), model: 'fable', run_in_background: true, name: 'w', prompt: 'WARRANT: x\ngo' },
     }, { env }),
     start: (agentType) => runHook('hooks/spawn-log.mjs', {
-      session_id: SID, agent_id: 'a1', hook_event_name: 'SubagentStart', ...(agentType ? { agent_type: agentType } : {}),
+      session_id: SID, agent_id: `a${++startSeq}`, hook_event_name: 'SubagentStart', ...(agentType ? { agent_type: agentType } : {}),
     }, { env }),
   };
 }
@@ -78,5 +81,21 @@ test('with no type on either side, a start still confirms by session (over-count
     h.seed([{ t, sid: SID, confirmed: false, atype: 'ac-opus' }]);
     h.start(null); // a payload with no agent_type
     assert.equal(h.window()[0].confirmed, true);
+  } finally { h.cleanup(); }
+});
+
+test('a repeat start of the same agent_id (a continued agent) confirms no further premium entry', () => {
+  const h = harness();
+  try {
+    const startId = (agentType, id) => runHook('hooks/spawn-log.mjs', {
+      session_id: SID, agent_id: id, hook_event_name: 'SubagentStart', agent_type: agentType,
+    }, { env: { CLAUDE_PLUGIN_DATA: join(h.dir, 'pdata') } });
+    h.spawn('agent-companion:ac-opus-xhigh');
+    startId('agent-companion:ac-opus-xhigh', 'agent-X');
+    h.spawn('agent-companion:ac-opus-xhigh');
+    startId('agent-companion:ac-opus-xhigh', 'agent-X'); // agent-X continued with SendMessage
+    assert.deepEqual(h.window().map((e) => e.confirmed), [true, false]);
+    startId('agent-companion:ac-opus-xhigh', 'agent-Y'); // the second spawn really starts
+    assert.deepEqual(h.window().map((e) => e.confirmed), [true, true]);
   } finally { h.cleanup(); }
 });

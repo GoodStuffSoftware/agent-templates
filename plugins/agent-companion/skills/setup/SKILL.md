@@ -189,14 +189,20 @@ inside that session could say so. Two checks cover it:
 
 **Known limits (not covered):**
 
-- A guard from 0.29.0 to 0.29.3 writes no version stamp, so its rows are never
-  judged by the scout. That includes a stale 0.29.x copy only one release
-  behind its install, such as a 0.29.2 copy running while 0.29.3 is
-  installed: only guards that stamp (releases after 0.29.3) can be proven stale
-  one release behind.
+- A guard from 0.29.0 up to the release before this one writes no version
+  stamp, so its rows are never judged by the scout. That includes a stale
+  0.29.x copy only one release behind its install, such as a 0.29.2 copy
+  running while 0.29.3 is installed: only guards that stamp (this release on)
+  can be proven stale one release behind.
 - A stale copy is proven only with a known load time. With the load time
   unknown (self-update off and no `CLAUDE_PID`, or a load record from a
   version before this one), it is only counted.
+- The 2026-09-24 stale-copy incident itself would NOT have been flagged. Its
+  0.22.0 guard wrote no version stamp and recorded no load time this version
+  trusts, so the scout shows it only as "4 sessions with unknown load time".
+  Future stale copies are caught: guards from this release on record their
+  version and load time, and a stale copy is flagged whenever its session's
+  load time is known (`CLAUDE_PID`, or self-update on).
 - A stale copy one update behind its install, whose session loaded before
   that update, cannot be told from an old session unless the plugin cache
   still shows its version had been replaced before it loaded. With no
@@ -204,7 +210,8 @@ inside that session could say so. Two checks cover it:
 - A copy outside the plugin cache is recognised as a bundle only by where it
   runs; a `--plugin-dir` copy that is not a git work tree also counts as a
   bundle, and a bundle whose own guard predates the stamp is judged only by
-  its version bound (or not at all, if it is 0.29.0 to 0.29.3).
+  its version bound (or not at all, if it is 0.29.0 up to the release before
+  this one).
 
 Recovery for a stale copy: remove the stale agent-companion entry in the
 desktop plugin manager, `/reload-plugins`, verify with a trivial ladder spawn,

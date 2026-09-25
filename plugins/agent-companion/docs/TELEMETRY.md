@@ -223,7 +223,7 @@ recorded, but into `telemetry/fixtures.jsonl` instead — see Fixtures above.
 | `effort` | string \| null | the effort the harness reported AT SubagentStart (the started subagent's own, once resolved — distinct from `caller_effort` on `spawns.jsonl`, which is the CALLER's) |
 | `transcript_path` | string \| null | the payload's transcript path, when present |
 | `agent_transcript_path` | string \| null | the payload's agent-specific transcript path, when present |
-| `rewrite_ignored` | string, only when set | the ladder rung the spawn guard rewrote this spawn to, when this start is positively tied to that rewritten spawn and shows it ran as its original type instead (the session had been recording every spawn for at least 3 minutes, so no other spawn of that type was unaccounted for; otherwise nothing is written); the guard then stops rewriting for the rest of that session (`state/ladder-rewrites.json`) |
+| `rewrite_ignored` | string, only when set | the ladder rung the spawn guard rewrote this spawn to, when this start is positively tied to that rewritten spawn and shows it ran as its original type instead (the session had been recording every spawn for at least 3 minutes, so no other spawn of that type was unaccounted for; otherwise nothing is written; a repeat start of an agent_id that already started in this session, as when a worker is continued with SendMessage, is never flagged and changes nothing); the guard then stops rewriting for the rest of that session (`state/ladder-rewrites.json`) |
 
 Pairing this against `spawns.jsonl` shows requested-versus-started. A spawn
 with no corresponding start was denied or failed.
