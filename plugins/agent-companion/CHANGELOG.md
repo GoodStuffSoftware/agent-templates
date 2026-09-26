@@ -2,6 +2,12 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.15 — 2026-09-26
+
+- Added the `compact_window_drift` scout signal. It fires when the recommended global auto-compact window moves more than `compact_window_drift_pct` (default 20; invalid values fall back to 20) from the anchored full-read recommendation, then re-anchors, so it fires once per material move.
+  - Only full reads are recorded; a partial read never touches the history. The detector reads only the history file (no transcript scan).
+  - The history is numbers-only, capped at 90 entries, and written atomically with a mirror copy. A corrupt file is kept aside (`.corrupt-<time>`) with a warning rather than reset, and the scout's anchor update no longer drops a concurrent advisor entry.
+
 ## 0.29.14 — 2026-09-26
 
 - Added `scripts/cache-advisor.mjs`, the break-even auto-compact window advisor. It finds the window that costs least for each model, and the one value for your model mix, from a replay of your own transcripts. Benchmark transcripts are excluded from real traffic.
