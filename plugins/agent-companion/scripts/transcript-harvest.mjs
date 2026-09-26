@@ -73,7 +73,7 @@ import {
 // Same root ~/.claude/projects that hooks/lib/memory-index.mjs walks for
 // memory/*.md — this script walks the OTHER half of that same tree (the raw
 // session JSONL). AGENT_COMPANION_TRANSCRIPTS_ROOT mirrors that module's own
-// AGENT_COMPANION_MEMORY_ROOT variable, for the same reason: tests need a
+// AGENT_COMPANION_MEMORY_ROOT override, for the same reason: tests need a
 // scratch corpus, not the operator's real sessions. The resolver, the walk
 // and the compaction pairing all live in scripts/lib/transcripts.mjs.
 

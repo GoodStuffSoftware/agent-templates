@@ -465,6 +465,30 @@ price; override without a release by writing the same shape to
 `~/.claude/agent-companion/state/model-pricing.json` (merged by alias, like
 every other override in this plugin).
 
+## Transcript report
+
+`node scripts/transcript-report.mjs` reads the operator's transcripts and
+prints what they say about tokens and cache: per-model totals with a
+price-derived cost, compaction counts with pre/post token sizes, a histogram
+of the time between consecutive requests (with how many were cache hits vs.
+rewrites), the first-request "spawn baseline" per subagent type, and context
+peaks and growth. It is read-only and local, and `--json` gives the full
+object.
+
+```bash
+node scripts/transcript-report.mjs                 # last 30 days
+node scripts/transcript-report.mjs --days 7 --json
+node scripts/transcript-report.mjs --workflows     # include workflow agents
+```
+
+Every transcript reader in this plugin (this report, cache-ttl, transcript
+harvest, the telemetry-coverage and model-mismatch checks) goes through one
+module, `scripts/lib/transcripts.mjs`. Its header states the dedup rules. One
+API request is written as several lines, so it counts once, with the
+field-wise max of their usage. Lines re-logged later in the same file are not
+new requests. Requests copied into a resumed or forked transcript count once
+across files.
+
 ## Model tiers are data, not code
 
 Which models count as premium, and how they rank against each other, lives in
