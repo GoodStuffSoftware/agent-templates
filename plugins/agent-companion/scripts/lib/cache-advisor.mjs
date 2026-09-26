@@ -1092,7 +1092,75 @@ export function saveAdvisorSummary(advice, dir = stateDir()) {
     if (prev && !prev.truncated) return null;
   }
   writeFileSync(path, `${JSON.stringify(s, null, 2)}\n`);
+  try { appendAdvisorHistory(s, dir); } catch { /* history is advisory: never fails the save */ }
   return path;
+}
+
+// --- Recommendation history (drift signal) ---------------------------------------------
+// Numbers only: date, recommended global window, its band, model-mix shares
+// (model ids only) and days covered. Never paths, project names or session ids.
+// `anchor` is the baseline the scout's compact_window_drift signal compares
+// against: the first full entry, reset to the newest entry each time the
+// signal fires, so slow cumulative drift fires once per material move.
+export const ADVISOR_HISTORY_FILE = 'cache-advisor-history.json';
+export const ADVISOR_HISTORY_MAX = 90;
+
+export function historyEntryOf(s) {
+  if (!s || s.truncated || !(Number(s.global?.window) > 0)) return null;
+  const models = Object.entries(s.models || {});
+  const total = models.reduce((n, [, m]) => n + (Number(m?.requests) || 0), 0);
+  return {
+    date: s.generatedAt ?? null,
+    window: Number(s.global.window),
+    band5: s.global.band5 ?? null,
+    mix: total > 0
+      ? Object.fromEntries(models.map(([id, m]) => [id, Math.round(((Number(m?.requests) || 0) / total) * 1000) / 1000]))
+      : {},
+    days: s.completeDays ?? s.windowDays ?? null,
+  };
+}
+
+export function loadAdvisorHistory(dir = stateDir()) {
+  try {
+    const h = JSON.parse(readFileSync(join(dir, ADVISOR_HISTORY_FILE), 'utf8'));
+    return h && Array.isArray(h.entries) ? h : null;
+  } catch { return null; }
+}
+
+// Appends a FULL-read entry; a partial read never touches the history.
+export function appendAdvisorHistory(summary, dir = stateDir()) {
+  const e = historyEntryOf(summary);
+  if (!e) return null;
+  const h = loadAdvisorHistory(dir) || { anchor: null, entries: [] };
+  h.entries.push(e);
+  if (h.entries.length > ADVISOR_HISTORY_MAX) h.entries = h.entries.slice(-ADVISOR_HISTORY_MAX);
+  if (!(Number(h.anchor?.window) > 0)) h.anchor = e;
+  writeFileSync(join(dir, ADVISOR_HISTORY_FILE), `${JSON.stringify(h, null, 2)}\n`);
+  return e;
+}
+
+// Compares the newest full entry with the anchor. Null (no signal) on
+// missing/corrupt history, fewer than two entries, or a move within the
+// threshold. On a fire the anchor moves to the newest entry (persisted
+// unless `persist` is false); returns { from, to, pct, entry }.
+export function checkWindowDrift(dir = stateDir(), { thresholdPct = 20, persist = true } = {}) {
+  const h = loadAdvisorHistory(dir);
+  if (!h || h.entries.length < 2) return null;
+  const newest = h.entries[h.entries.length - 1];
+  const from = Number(h.anchor?.window);
+  const to = Number(newest?.window);
+  if (!(from > 0) || !(to > 0)) return null;
+  const thr = Number(thresholdPct);
+  const limit = Number.isFinite(thr) && thr >= 0 ? thr : 20;
+  const pct = (Math.abs(to - from) / from) * 100;
+  if (!(pct > limit)) return null;
+  if (persist) {
+    try {
+      h.anchor = newest;
+      writeFileSync(join(dir, ADVISOR_HISTORY_FILE), `${JSON.stringify(h, null, 2)}\n`);
+    } catch { /* unwritable: the signal still fires this run */ }
+  }
+  return { from, to, pct: Math.round(pct * 10) / 10, entry: newest };
 }
 
 export function loadAdvisorSummary(dir = stateDir()) {

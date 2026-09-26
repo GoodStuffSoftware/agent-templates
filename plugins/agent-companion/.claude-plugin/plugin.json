@@ -114,6 +114,12 @@
       "description": "Suggestion-only: detects when a repo's default branch has a red (failure/cancelled/timed_out) latest completed workflow run via `gh`, and surfaces it — as a `main_ci_red` signal in the daily scout, and as a cheap SessionStart note (read from a 10-minute cache only; never a network call from SessionStart itself) when the current project's cached status is red. Never re-runs, cancels, or fixes anything. Silent when `gh` is missing, unauthenticated, or offline. Scope: the current project's own repo, plus any repo already confirmed public by the publication-leak sweep (see `publication_leak_sweep`) — never a repo of unknown or private visibility beyond the current project itself.",
       "default": true
     },
+    "compact_window_drift_pct": {
+      "type": "number",
+      "title": "Auto-compact window drift threshold (%)",
+      "description": "The daily scout raises `compact_window_drift` when the cache advisor's newest FULL-read recommended auto-compact window differs from the baseline recommendation by more than this percentage. The baseline is the first full read and moves to the newest one each time the signal fires. Partial (time-budgeted) reads never count. Reads only the advisor's saved numbers-only history, never transcripts.",
+      "default": 20
+    },
     "fit_guard": {
       "type": "boolean",
       "title": "Best-fit guard",
