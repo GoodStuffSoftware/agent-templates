@@ -231,6 +231,7 @@ export function emptyModelInput(model) {
     growth: { sum: 0, n: 0 },
     idleExpiries: 0,
     ttl1hSteps: 0,
+    observedUnits: 0,
     money: { input: 0, output: 0, read: 0, write5m: 0, write1h: 0, rewrite: { 'idle-expiry': 0, compaction: 0, 'prefix-change': 0 } },
   };
 }
@@ -249,7 +250,7 @@ function moneyOf(usage, price) {
 
 // Folds one readTranscript() result into `models` (Map model -> input) and
 // `spawns` (array). inWindow(ts) limits what counts.
-export function foldTranscript(res, { models, spawns, inWindow = () => true }) {
+export function foldTranscript(res, { models, spawns, inWindow = () => true, reworkRequests = 50 }) {
   const kind = res.file.kind === 'main' ? 'main' : 'subagent';
   const gapByIndex = new Map(gapsOf(res.requests).map((g) => [g.index, g]));
   const get = (m) => { if (!models.has(m)) models.set(m, emptyModelInput(m)); return models.get(m); };
@@ -278,6 +279,9 @@ export function foldTranscript(res, { models, spawns, inWindow = () => true }) {
 
     const ttl1h = g ? (g.ttl === '1h' ? 1 : 0) : (kind === 'main' ? 1 : 0);
     const idle = g && g.cause === 'idle-expiry' ? 1 : 0;
+    // What the replay's cost model says this request actually cost, for the
+    // fit check: its real context read, or rewritten when the cache expired.
+    if (price) mi.observedUnits += r.contextTokens * (idle ? (ttl1h ? price.w1 : price.w5) : price.r);
     if (idle) mi.idleExpiries += 1;
     if (ttl1h) mi.ttl1hSteps += 1;
     if (!track || track.model !== model) {
@@ -294,10 +298,23 @@ export function foldTranscript(res, { models, spawns, inWindow = () => true }) {
     prev = r;
   }
 
-  for (const c of res.compactions) {
-    if (c.duplicate || !inWindow(c.ts)) continue;
+  // Rework: how much more the context grows in the first reworkRequests
+  // requests after a compaction than over the same number of requests just
+  // before it, in the same transcript (the model re-reads what the summary
+  // dropped). Null when either side is too short.
+  const own = res.requests.filter((q) => !q.duplicate);
+  const epochOf = (n) => own.filter((q) => q.compactionsBefore === n);
+  res.compactions.forEach((c, ci) => {
+    if (c.duplicate || !inWindow(c.ts)) return;
     const model = c.firstRequestAfter?.model || null;
-    if (!model) continue;
+    if (!model) return;
+    const before = epochOf(ci);
+    const after = epochOf(ci + 1);
+    const K = reworkRequests;
+    const last = before.length - 1;
+    const reworkTokens = before.length > K && after.length > K
+      ? (after[K].contextTokens - after[0].contextTokens) - (before[last].contextTokens - before[last - K].contextTokens)
+      : null;
     get(model).compactions.push({
       kind,
       trigger: c.trigger,
@@ -306,8 +323,9 @@ export function foldTranscript(res, { models, spawns, inWindow = () => true }) {
       firstAfterContext: c.firstRequestAfter.contextTokens,
       firstAfterWrite: c.firstRequestAfter.cacheWrite,
       requestsAfter: c.requestsAfter,
+      reworkTokens,
     });
-  }
+  });
 
   const sb = spawnBaselineOf(res);
   if (sb && inWindow(sb.ts)) spawns.push(sb);
@@ -347,12 +365,18 @@ export function postCompactionParams(model, kind, allInputs) {
     [everyone.filter((c) => c.kind === kind), 'all models, this kind'],
     [everyone, 'all models'],
   ];
+  // Rework is sparse (it needs long epochs on both sides of a compaction), so
+  // it is pooled over every compaction of every model.
+  const rw = everyone.map((c) => c.reworkTokens).filter((x) => Number.isFinite(x));
+  const rework = rw.length >= MIN_PARAM_SAMPLES ? Math.max(0, median(rw)) : 0;
   for (const [list, source] of tiers) {
     if (list.length >= MIN_PARAM_SAMPLES) {
       return {
         P: median(list.map((c) => c.firstAfterContext)),
         Pw: median(list.map((c) => c.firstAfterWrite || 0)),
         S: median(list.map((c) => c.postTokens || 0)),
+        rework,
+        reworkSamples: rw.length,
         n: list.length,
         source,
       };
@@ -366,7 +390,7 @@ export function postCompactionParams(model, kind, allInputs) {
 // Replays one track with compaction at threshold T. Costs are in input-token
 // equivalents (multiply by the input price for dollars). Returns
 // { cost, compactions, steps }.
-export function replayTrack(track, T, { P, Pw, S, r, w5, w1, outRatio }) {
+export function replayTrack(track, T, { P, Pw, S, r, w5, w1, outRatio, rework = 0 }) {
   let C = track.start;
   let cost = 0;
   let compactions = 0;
@@ -376,8 +400,8 @@ export function replayTrack(track, T, { P, Pw, S, r, w5, w1, outRatio }) {
     const w = track.ttl1h[i] ? w1 : w5;
     if (C >= T) {
       compactions += 1;
-      cost += C * r + S * outRatio + Pw * (w - r);
-      C = P;
+      cost += C * r + S * outRatio + Pw * (w - r) + rework * w;
+      C = P + rework;
     }
     cost += C * (track.idle[i] ? w : r);
   }
@@ -392,11 +416,14 @@ export function uncompactedPeak(track) {
   return peak;
 }
 
-export function closedFormWindow({ P, Pw, S, r, wMean, outRatio, g, lambda }) {
+// With rework, the context after a compaction is P + rework and the rework is
+// written once per compaction, so P becomes P + rework and k0 gains rework x w.
+export function closedFormWindow({ P, Pw, S, r, wMean, outRatio, g, lambda, rework = 0 }) {
   if (!(g > 0) || !(r > 0)) return null;
   const R = r + lambda * (wMean - r);
-  const k0 = S * outRatio + Pw * (wMean - r);
-  return P + Math.sqrt((2 * g * (k0 + r * P)) / R);
+  const P1 = P + rework;
+  const k0 = S * outRatio + Pw * (wMean - r) + rework * wMean;
+  return P1 + Math.sqrt((2 * g * (k0 + r * P1)) / R);
 }
 
 export function candidateWindows(spec, cfg = compactionConfig()) {
@@ -412,12 +439,15 @@ export function candidateWindows(spec, cfg = compactionConfig()) {
 // window, and a window at or above its tuned default behaves as the default.
 export const thresholdFor = (window, spec) => Math.min(window, spec.contextWindow, spec.defaultCompactAt);
 
+export const DEFAULT_MIN_REQUESTS = 1000;
+export const DEFAULT_MIN_TRACKS_REACHING = 5;
+
 // Evaluates one model. opts: { cfg, calibration, configured (tokens|null),
-// minRequests (500), minTracksReaching (3), requestsPerTurnPooled }.
+// minRequests, minTracksReaching, minTurnsPerCompaction, requestsPerTurnPooled }.
 export function evaluateModel(mi, allInputs, opts = {}) {
   const cfg = opts.cfg || compactionConfig();
-  const minRequests = opts.minRequests ?? 500;
-  const minTracksReaching = opts.minTracksReaching ?? 3;
+  const minRequests = opts.minRequests ?? DEFAULT_MIN_REQUESTS;
+  const minTracksReaching = opts.minTracksReaching ?? DEFAULT_MIN_TRACKS_REACHING;
   const minTurns = opts.minTurnsPerCompaction ?? cfg.minTurnsPerCompaction ?? 10;
   const spec = windowSpecFor(mi.model, cfg);
   const price = priceSpecFor(mi.model);
@@ -458,8 +488,10 @@ export function evaluateModel(mi, allInputs, opts = {}) {
   const requestsPerTurn = mi.mainTurns >= 10 ? mi.mainRequests / mi.mainTurns : (opts.requestsPerTurnPooled || null);
   const minRequestsPerCompaction = requestsPerTurn ? minTurns * requestsPerTurn : null;
 
-  const pOf = (kind) => ({ ...params[kind], r: price.r, w5: price.w5, w1: price.w1, outRatio: price.outRatio });
-  const maxP = Math.max(...Object.values(params).map((p) => p.P));
+  let noRework = false; // flipped once below for the sensitivity view
+  const pOf = (kind) => ({ ...params[kind], ...(noRework ? { rework: 0 } : {}), r: price.r, w5: price.w5, w1: price.w1, outRatio: price.outRatio });
+  // A window at or below the post-compaction size would compact on every request.
+  const maxP = Math.max(...Object.values(params).map((p) => p.P + p.rework));
   const usdOf = (units) => units * price.inUsd * anchor.factor;
   const replayAt = (T) => {
     let units = 0;
@@ -472,7 +504,7 @@ export function evaluateModel(mi, allInputs, opts = {}) {
       if (x.compactions) stepsInCompacting += x.steps;
     }
     const requestsPerCompaction = compactions ? stepsInCompacting / compactions : null;
-    return { usd: usdOf(units), compactions, requestsPerCompaction };
+    return { usd: usdOf(units), compactions, stepsInCompacting, requestsPerCompaction };
   };
 
   const curve = [];
@@ -482,8 +514,33 @@ export function evaluateModel(mi, allInputs, opts = {}) {
     const x = replayAt(T);
     const turnsPerCompaction = x.requestsPerCompaction != null && requestsPerTurn ? x.requestsPerCompaction / requestsPerTurn : null;
     const allowed = x.requestsPerCompaction == null || minRequestsPerCompaction == null || x.requestsPerCompaction >= minRequestsPerCompaction;
-    curve.push({ window: W, threshold: T, feasible: true, usd: x.usd, compactions: x.compactions, requestsPerCompaction: x.requestsPerCompaction, turnsPerCompaction, allowed });
+    curve.push({
+      window: W, threshold: T, feasible: true, usd: x.usd, compactions: x.compactions,
+      stepsInCompacting: x.stepsInCompacting, requestsPerCompaction: x.requestsPerCompaction, turnsPerCompaction, allowed,
+    });
   }
+
+  // Fit: the replay at the threshold this model actually compacted at (the
+  // median auto-compaction size, else its default) against what the same cost
+  // model says the recorded requests and compactions cost. Near 1 means the
+  // replay reproduces the real history before it is asked about other windows.
+  const autoPre = base.autoCompactionPreTokens;
+  const fitT = autoPre.length ? Math.min(median(autoPre), spec.defaultCompactAt) : spec.defaultCompactAt;
+  let observedUnits = mi.observedUnits;
+  for (const c of mi.compactions) {
+    if (!Number.isFinite(c.preTokens)) continue;
+    const w = c.kind === 'main' ? price.w1 : price.w5;
+    observedUnits += c.preTokens * price.r + (c.postTokens || 0) * price.outRatio + (c.firstAfterWrite || 0) * (w - price.r);
+  }
+  const fitReplay = fitT > maxP ? replayAt(fitT) : null;
+  const fit = fitReplay ? {
+    threshold: fitT,
+    replayUsd: fitReplay.usd,
+    observedUsd: usdOf(observedUnits),
+    ratio: observedUnits ? fitReplay.usd / usdOf(observedUnits) : null,
+    replayCompactions: fitReplay.compactions,
+    observedCompactions: mi.compactions.length,
+  } : null;
   const feasible = curve.filter((c) => c.feasible);
   const allowed = feasible.filter((c) => c.allowed);
   const best = (list) => list.reduce((a, b) => (b.usd < a.usd ? b : a), list[0]);
@@ -498,13 +555,25 @@ export function evaluateModel(mi, allInputs, opts = {}) {
     return [Math.min(...inside), Math.max(...inside)];
   };
 
+  // Sensitivity: the same choice with no rework term (rework is the least
+  // certain parameter: a pooled median over few long epochs).
+  noRework = true;
+  let noReworkOptimum = null;
+  for (const c of allowed) {
+    const x = replayAt(c.threshold);
+    if (!noReworkOptimum || x.usd < noReworkOptimum.usd) noReworkOptimum = { window: c.window, usd: x.usd };
+  }
+  noRework = false;
+
   // Closed-form cross-check, with the main-kind parameters when there are any.
   const pk = params.main || Object.values(params)[0];
   const steps = mi.tracks.reduce((a, t) => a + t.inc.length, 0);
   const lambda = steps ? mi.idleExpiries / steps : 0;
   const wMean = steps ? (mi.ttl1hSteps * price.w1 + (steps - mi.ttl1hSteps) * price.w5) / steps : price.w5;
   const g = mi.growth.n ? mi.growth.sum / mi.growth.n : 0;
-  const closedForm = closedFormWindow({ P: pk.P, Pw: pk.Pw, S: pk.S, r: price.r, wMean, outRatio: price.outRatio, g, lambda });
+  const closedForm = closedFormWindow({
+    P: pk.P, Pw: pk.Pw, S: pk.S, rework: pk.rework, r: price.r, wMean, outRatio: price.outRatio, g, lambda,
+  });
 
   const cacheUsd = (mi.money.read + mi.money.write5m + mi.money.write1h) * anchor.factor;
   const saving = (ref) => (ref && optimum ? { usd: ref.usd - optimum.usd, pctOfWindowCost: ref.usd ? ((ref.usd - optimum.usd) / ref.usd) * 100 : null, pctOfCacheSpend: cacheUsd ? ((ref.usd - optimum.usd) / cacheUsd) * 100 : null } : null);
@@ -532,16 +601,26 @@ export function evaluateModel(mi, allInputs, opts = {}) {
     savingVsDefault: saving(atDefault),
     savingVsConfigured: saving(atConfigured),
     closedFormWindow: closedForm,
+    noReworkOptimum: noReworkOptimum && noReworkOptimum.window,
+    fit,
     cacheUsd,
   };
 }
 
 // The one setting across the model mix: for each window on the common grid,
 // the sum of every evaluated model's replayed cost at that window (a model
-// whose context window is smaller runs at its own cap). Models that are not
-// 'ok' do not vote. weights (alias -> factor) gives the plan-usage view.
-export function combineModels(evaluated, { cfg = compactionConfig(), weights = null } = {}) {
-  const voters = evaluated.filter((e) => e.status === 'ok');
+// whose context window is smaller runs at its own cap). Every model with a
+// replayed curve votes ('ok' or 'no-allowed-window'); a model with too little
+// data does not. The turn floor applies to the mix as a whole — requests
+// between compactions over every voter, in turns at the pooled requests per
+// turn — so one thin model cannot veto a window on its own; each voter's own
+// turns per compaction at the chosen value is reported beside it.
+// weights (alias -> factor) gives the plan-usage view.
+export function combineModels(evaluated, {
+  cfg = compactionConfig(), weights = null, requestsPerTurn = null, minTurnsPerCompaction,
+} = {}) {
+  const minTurns = minTurnsPerCompaction ?? cfg.minTurnsPerCompaction ?? 10;
+  const voters = evaluated.filter((e) => (e.status === 'ok' || e.status === 'no-allowed-window') && e.curve);
   if (!voters.length) return null;
   const { min, max, step } = cfg.window;
   const grid = [];
@@ -555,15 +634,22 @@ export function combineModels(evaluated, { cfg = compactionConfig(), weights = n
   for (const W of grid) {
     let usd = 0;
     let ok = true;
-    let allowed = true;
+    let compactions = 0;
+    let steps = 0;
+    const perModel = {};
     for (const e of voters) {
       const pt = costAt(e, W);
       if (!pt) { ok = false; break; }
       const wt = weights ? (weights[e.alias] ?? 1) : 1;
       usd += pt.usd * wt;
-      if (!pt.allowed) allowed = false;
+      compactions += pt.compactions;
+      steps += pt.stepsInCompacting || 0;
+      perModel[e.model] = pt.turnsPerCompaction ?? null;
     }
-    if (ok) rows.push({ window: W, usd, allowed });
+    if (!ok) continue;
+    const turnsPerCompaction = compactions && requestsPerTurn ? steps / compactions / requestsPerTurn : null;
+    const allowed = turnsPerCompaction == null || turnsPerCompaction >= minTurns;
+    rows.push({ window: W, usd, compactions, turnsPerCompaction, allowed, perModelTurnsPerCompaction: perModel });
   }
   const allowedRows = rows.filter((r) => r.allowed);
   if (!allowedRows.length) return { voters: voters.map((e) => e.model), optimum: null, rows };
@@ -575,10 +661,13 @@ export function combineModels(evaluated, { cfg = compactionConfig(), weights = n
   const top = rows[rows.length - 1];
   return {
     voters: voters.map((e) => e.model),
-    optimum: { window: opt.window, usd: opt.usd },
+    optimum: {
+      window: opt.window, usd: opt.usd, compactions: opt.compactions, turnsPerCompaction: opt.turnsPerCompaction,
+      perModelTurnsPerCompaction: opt.perModelTurnsPerCompaction,
+    },
     band1: band(1),
     band5: band(5),
-    atMax: top ? { window: top.window, usd: top.usd } : null,
+    atMax: top ? { window: top.window, usd: top.usd, compactions: top.compactions } : null,
     rows,
   };
 }
@@ -659,13 +748,14 @@ export function adviseFromInputs(inputs, {
     .map((m) => evaluateModel(m, models, {
       cfg, calibration, configured: configured.tokens, requestsPerTurnPooled, minRequests, minTracksReaching, minTurnsPerCompaction,
     }));
-  const global = combineModels(evaluated, { cfg });
+  const combineOpts = { cfg, requestsPerTurn: requestsPerTurnPooled, minTurnsPerCompaction };
+  const global = combineModels(evaluated, combineOpts);
   const planWeights = cfg.planUsage?.weights || null;
-  const globalPlan = planWeights && Object.keys(planWeights).length ? combineModels(evaluated, { cfg, weights: planWeights }) : null;
+  const globalPlan = planWeights && Object.keys(planWeights).length ? combineModels(evaluated, { ...combineOpts, weights: planWeights }) : null;
   const configuredGlobal = global && configured.tokens
     ? (() => {
       let usd = 0;
-      for (const e of evaluated.filter((x) => x.status === 'ok')) {
+      for (const e of evaluated.filter((x) => global.voters.includes(x.model))) {
         const T = thresholdFor(configured.tokens, e);
         const pt = e.curve.find((c) => c.threshold === T && c.feasible);
         if (!pt) return null;
@@ -777,6 +867,10 @@ export function formatAdvice(a, { curve = false } = {}) {
     if (e.unconstrainedOptimum && e.unconstrainedOptimum.window !== e.optimum.window) {
       out.push(`  ${''.padEnd(28)} (cheapest ignoring the ${a.minTurnsPerCompaction}-turn floor: ${K(e.unconstrainedOptimum.window)}, about every ${e.unconstrainedOptimum.turnsPerCompaction?.toFixed(0)} turns)`);
     }
+    const pk = e.params.byKind.main || Object.values(e.params.byKind)[0];
+    out.push(`  ${''.padEnd(28)} inputs: after-compaction size ${K(pk.P)} (${pk.source}, n=${pk.n}), rework ${K(pk.rework)} (n=${pk.reworkSamples}; optimum without it ${K(e.noReworkOptimum)}), `
+      + `growth ${Math.round(e.params.growthPerRequestMean)}/request, ${e.params.requestsPerTurn == null ? 'n/a' : e.params.requestsPerTurn.toFixed(1)} requests/turn`
+      + `${e.fit ? `; fit at ${K(e.fit.threshold)}: replay/recorded ${e.fit.ratio.toFixed(3)}` : ''}`);
     if (curve) {
       for (const p of e.curve.filter((x) => x.feasible)) {
         out.push(`      ${K(p.window).padStart(6)} ${usd(p.usd).padStart(12)} compactions ${String(p.compactions).padStart(4)}${p.allowed ? '' : '  (below the turn floor)'}`);
@@ -788,6 +882,9 @@ export function formatAdvice(a, { curve = false } = {}) {
     const g = a.global;
     out.push(`-- one setting for your model mix (autoCompactWindow is global) --`);
     out.push(`  cheapest: ${K(g.optimum.window)}  within 1%: ${K(g.band1[0])}-${K(g.band1[1])}  within 5%: ${K(g.band5[0])}-${K(g.band5[1])}  (voters: ${g.voters.join(', ')})`);
+    const tpc = g.optimum.perModelTurnsPerCompaction || {};
+    out.push(`  at ${K(g.optimum.window)}: a compaction about every ${g.optimum.turnsPerCompaction == null ? 'n/a' : g.optimum.turnsPerCompaction.toFixed(0)} turns overall; per model `
+      + Object.entries(tpc).map(([m, t]) => `${m} ${t == null ? 'none' : t.toFixed(0)}`).join(', '));
     if (g.configured) out.push(`  at configured ${K(g.configured.window)}: ${usd(g.configured.usd - g.optimum.usd)} more than the cheapest over ${a.windowDays}d`);
     if (g.atMax) out.push(`  at ${K(g.atMax.window)} (each model's default): ${usd(g.atMax.usd - g.optimum.usd)} more than the cheapest over ${a.windowDays}d`);
     if (a.globalPlanUsage?.optimum) out.push(`  plan-usage view (weights as of ${a.globalPlanUsage.asOf}, may be introductory): cheapest ${K(a.globalPlanUsage.optimum.window)}, within 5%: ${K(a.globalPlanUsage.band5[0])}-${K(a.globalPlanUsage.band5[1])}`);
@@ -801,7 +898,7 @@ export function formatAdvice(a, { curve = false } = {}) {
   for (const m of a.moneyByModel) {
     if (!m.cacheUsd) continue;
     out.push(`  ${m.model.padEnd(28)} cache ${usd(m.cacheUsd).padStart(11)}: reads ${pct(m.pct.read)}, 5m writes ${pct(m.pct.write5m)}, 1h writes ${pct(m.pct.write1h)}; `
-      + `of the writes, idle-expiry rewrites ${pct(m.pct.idleExpiryRewrite)}, compaction rewrites ${pct(m.pct.compactionRewrite)}, prefix-change rewrites ${pct(m.pct.prefixChangeRewrite)}`);
+      + `rewrites by cause (also share of cache spend): idle expiry ${pct(m.pct.idleExpiryRewrite)}, compaction ${pct(m.pct.compactionRewrite)}, prefix change ${pct(m.pct.prefixChangeRewrite)}`);
   }
   out.push('');
 
