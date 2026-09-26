@@ -61,8 +61,8 @@
 // deliberately asymmetric (harder to recommend "set it" than to recommend
 // "don't"), not symmetric around zero.
 
-import { existsSync } from 'node:fs';
-import { KNOWN_AGENT_TYPES } from '../../hooks/lib/context.mjs';
+import { existsSync, readFileSync } from 'node:fs';
+import { KNOWN_AGENT_TYPES, agentDefinition } from '../../hooks/lib/context.mjs';
 import {
   transcriptsRoot as sharedTranscriptsRoot, discoverTranscripts, readTranscript, resolveCrossFile, bandFor,
   percentile, SYNTHETIC_MODEL as SHARED_SYNTHETIC_MODEL, NO_META_AGENT_TYPE as SHARED_NO_META,
@@ -293,6 +293,35 @@ function rowFromAgg(label, agg, price) {
 //      Explore, ...) or a subagent with no sidecar metadata at all
 //      (NO_META_AGENT_TYPE) cannot be pointed at a definition to edit, so
 //      both are excluded regardless of their delta.
+// Whether an agentType's OWN live agent definition already carries
+// `experimental.cacheTtl: "1h"` — read directly off disk via
+// agentDefinition() (hooks/lib/context.mjs), which resolves a bare ladder
+// name ("ac-opus-medium") and a namespaced one ("agent-companion:ac-opus-medium")
+// to the same file, so a definition already on 1h is never re-recommended
+// by computeVerdict() below (config/model-tiers.json's `ladder[].cacheTtl`
+// put four rungs there 2026-09-26 — see routing-table.mjs's generator).
+// Config-driven, not a hardcoded name list: whatever the live definition
+// says right now is what counts, so a future config change is picked up
+// here for free. Duplicated (not imported) from scripts/checks.mjs's
+// cacheTtlFrontmatter() / hooks/lib/resume-guard.mjs's
+// cacheTtlFromDefinition(): three call sites, three different questions,
+// each reader kept small rather than sharing one import. Never throws; an
+// unreadable or missing definition (a harness built-in, a deleted file)
+// reads as "not set".
+export function alreadyOneHourFrom(agentType) {
+  try {
+    const def = agentDefinition(agentType);
+    if (!def || !def.file) return false;
+    const text = readFileSync(def.file, 'utf8');
+    const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!m) return false;
+    const ttl = m[1].match(/cacheTtl:\s*["']?(5m|1h)["']?/);
+    return ttl ? ttl[1] === '1h' : false;
+  } catch {
+    return false;
+  }
+}
+
 export function computeVerdict({
   perModel, perAgentModel, totals, policy, excludedAgentTypes = KNOWN_AGENT_TYPES,
 }) {
@@ -323,20 +352,34 @@ export function computeVerdict({
     text = `don't set subagentPromptCacheTtl — observed delta ${fmtPct(totals.deltaPct)}, `
       + `and the opus/fable-only policy is also non-negative (${fmtPct(policy.opusFableOnlyDeltaPct)})`;
   } else {
-    const candidates = perAgentModel.filter((r) => {
+    // Negative-delta, high-volume rows worth a standing config edit — before
+    // splitting off the ones whose OWN definition already carries the
+    // override, so re-running this after a rung was flipped to 1h reports it
+    // as "already on", not as a fresh recommendation to make the same edit
+    // again.
+    const eligible = perAgentModel.filter((r) => {
       if (r.deltaPct > -MIN_AGENT_SAVING_PCT) return false; // e.g. -0.24% is noise, not a saving worth a standing config edit
       if (r.requests < MIN_REQUESTS_FOR_AGENT_ROW) return false;
       const agentType = r.label.split(' → ')[0];
       if (agentType === NO_META_AGENT_TYPE || excludedAgentTypes.has(agentType)) return false;
       return true;
     });
-    if (!candidates.length) {
+    const already = eligible.filter((r) => alreadyOneHourFrom(r.label.split(' → ')[0]));
+    const candidates = eligible.filter((r) => !already.includes(r));
+    if (!candidates.length && !already.length) {
       text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}) — no named agent definition `
         + `clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests with a negative delta to warrant a per-agent override`;
     } else {
-      text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}) — set `
-        + 'experimental: { cacheTtl: "1h" } on: '
-        + candidates.map((r) => `${r.label} (${fmtPct(r.deltaPct)}, today $${r.costToday.toFixed(2)} -> 1h $${r.cost1h.toFixed(2)})`).join('; ');
+      const parts = [];
+      if (candidates.length) {
+        parts.push('set experimental: { cacheTtl: "1h" } on: '
+          + candidates.map((r) => `${r.label} (${fmtPct(r.deltaPct)}, today $${r.costToday.toFixed(2)} -> 1h $${r.cost1h.toFixed(2)})`).join('; '));
+      }
+      if (already.length) {
+        parts.push('already on experimental.cacheTtl: "1h" (no action needed): '
+          + already.map((r) => `${r.label} (${fmtPct(r.deltaPct)})`).join('; '));
+      }
+      text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}) — ${parts.join('; ')}`;
     }
   }
   return { text, breakEvenByTier };

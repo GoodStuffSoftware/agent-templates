@@ -81,6 +81,75 @@ test('--sync-agent-descriptions rewrites a drifted description in place, preserv
   }
 });
 
+// --- cacheTtl coverage (ladder track "rungttl", 2026-09-26) ----------------
+// The same --check/--sync pair also generates/verifies the nested
+// `experimental.cacheTtl` frontmatter block from each rung's own config
+// `cacheTtl` field (independent of the description text).
+
+test('mutation: a rung config gives a NEW cacheTtl:"1h" that its file lacks fails the check as cache-ttl-drift', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-sonnet-low' ? { ...r, cacheTtl: '1h' } : r)));
+    const res = check(agentsDir);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ac-sonnet-low \[cache-ttl-drift\]/);
+    assert.match(res.stderr, /expected: experimental\.cacheTtl: "1h"/);
+    assert.match(res.stderr, /actual:\s+\(absent\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('--sync-agent-descriptions adds the experimental.cacheTtl block for a rung config newly marks "1h", leaving the rest of the file untouched', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-sonnet-low' ? { ...r, cacheTtl: '1h' } : r)));
+    const file = join(agentsDir, 'ac-sonnet-low.md');
+    const before = readFileSync(file, 'utf8');
+
+    assert.equal(sync(agentsDir).status, 0);
+    const after = readFileSync(file, 'utf8');
+    assert.match(after, /experimental:\r?\n\s+cacheTtl: "1h"/);
+    // Nothing else in the frontmatter or body changed.
+    assert.equal(after.replace(/experimental:\r?\n\s+cacheTtl: "1h"\r?\n/, ''), before);
+
+    assert.equal(check(agentsDir).status, 0);
+    // Idempotent: syncing again writes nothing further.
+    const secondSync = sync(agentsDir);
+    assert.equal(secondSync.status, 0);
+    assert.match(secondSync.stdout, /no agent descriptions needed updating/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('mutation: a rung config REMOVES a cacheTtl:"1h" the file still carries also fails as cache-ttl-drift, and --sync removes the block', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    const file = join(agentsDir, 'ac-opus-high.md');
+    const original = readFileSync(file, 'utf8'); // shipped file already carries the 1h block
+    assert.match(original, /cacheTtl: "1h"/);
+
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-opus-high' ? { ...r, cacheTtl: undefined } : r)));
+    const res = check(agentsDir);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ac-opus-high \[cache-ttl-drift\]/);
+    assert.match(res.stderr, /expected: no experimental\.cacheTtl block/);
+    assert.match(res.stderr, /actual:\s+experimental\.cacheTtl: "1h"/);
+
+    assert.equal(sync(agentsDir).status, 0);
+    const after = readFileSync(file, 'utf8');
+    assert.doesNotMatch(after, /experimental/);
+    assert.doesNotMatch(after, /cacheTtl/);
+    assert.equal(check(agentsDir).status, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 // --- Coverage is driven by config/model-tiers.json (round 2) ---------------
 // Each mutation below must FAIL the check. A per-machine model-tiers.json
 // override in the fixture's state root replaces the `ladder` wholesale, and

@@ -20,7 +20,7 @@ import { execSyncHidden, execFileSyncHidden } from './lib/proc.mjs';
 
 import {
   classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir, opt, claudeDir,
-  referenceEffortSupported, retirement,
+  referenceEffortSupported, retirement, modelTiers,
 } from '../hooks/lib/context.mjs';
 import {
   memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
@@ -87,6 +87,22 @@ function cacheTtlFrontmatter(text) {
   if (!m) return null;
   const ttl = m[1].match(/cacheTtl:\s*["']?(5m|1h)["']?/);
   return ttl ? ttl[1] : null;
+}
+
+// A ladder rung's own cacheTtl EXPECTATION from config/model-tiers.json's
+// `ladder` (e.g. ac-opus-medium/high/xhigh/max carry "1h" as of the
+// 2026-09-26 decision; every other rung carries none, meaning the subagent
+// 5m default). Data-driven on purpose — see the config's own
+// `ladderCacheTtlNote` — so a future rung added or re-tiered there is
+// classified correctly here without a matching code change. null for a
+// name that is not a ladder agent at all, or that config gives no override.
+function ladderCacheTtlExpectation(agentName) {
+  try {
+    const rung = (modelTiers().ladder || []).find((r) => r && r.agent === agentName);
+    return rung && rung.cacheTtl === '1h' ? '1h' : null;
+  } catch {
+    return null;
+  }
 }
 
 // --- 1. memory index reachability ---------------------------------------
@@ -249,8 +265,15 @@ const agentDefs = {
         // (30-day measurement, config/model-tiers.json's `cacheTtl` block
         // carries the full figures/citations). The generic ac-* ladder
         // workers are one-shot and excluded from the opus-tier suggestion
-        // even when pinned to opus, per that same block.
+        // even when pinned to opus, per that same block — EXCEPT the four
+        // rungs config's `ladder[].cacheTtl` itself calls out (ac-opus-medium/
+        // high/xhigh/max, decision 2026-09-26: their saving comes from slow
+        // tool waits inside a task, not from being resumed — see
+        // ladderCacheTtlExpectation() above, which reads this live rather
+        // than hardcoding the four names so a future config change is
+        // classified correctly here for free).
         const isLadderWorker = /^ac-/i.test(name);
+        const ladderExpectsOneHour = isLadderWorker && ladderCacheTtlExpectation(name) === '1h';
         const modelAlias = fm.model ? classifyModel(fm.model).alias : null;
         const isOpusTier = modelAlias === 'opus';
         const isLongLivedRole = /architect|review|lead/i.test(name) || /architect|review|lead/i.test(fm.description || '');
@@ -260,7 +283,7 @@ const agentDefs = {
             + 'consider experimental: { cacheTtl: "1h" } (see config/model-tiers.json cacheTtl.evidence; measured Opus 5.5 -12%, Opus 5 -4.7% under 1h)',
           );
         }
-        if (cacheTtl === '1h' && (modelAlias === 'haiku' || isLadderWorker)) {
+        if (cacheTtl === '1h' && (modelAlias === 'haiku' || (isLadderWorker && !ladderExpectsOneHour))) {
           findings.push(
             `${rel}: cacheTtl set to "1h" on a haiku or one-shot ladder definition — likely costs MORE, not less `
             + '(measured Haiku +15.9% under 1h; one-shot workers pay the 2x write rate every spawn and rarely idle past 5 minutes)',

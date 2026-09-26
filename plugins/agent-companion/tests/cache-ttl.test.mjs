@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { makeFixture } from './helpers.mjs';
 import {
   parseFile, computeCacheTtl, classifyPricing, breakEvenSharePct, clamp,
-  costToday, costWith1h, pricingTable, computeVerdict,
+  costToday, costWith1h, pricingTable, computeVerdict, alreadyOneHourFrom,
   SET_GLOBALLY_DELTA_PCT, DONT_SET_DELTA_PCT, MIN_TIER_SPEND_SHARE_PCT, MIN_REQUESTS_FOR_AGENT_ROW,
   MIN_AGENT_SAVING_PCT, NO_META_AGENT_TYPE,
 } from '../scripts/lib/cache-ttl.mjs';
@@ -524,6 +524,39 @@ test('verdict: dead zone with tier disagreement -> per-agent recommendation, bui
   assert.doesNotMatch(v.text, new RegExp(NO_META_AGENT_TYPE.replace(/[()]/g, '\\$&')));
   assert.doesNotMatch(v.text, /widget-debugger/, 'below the request floor must be excluded');
   assert.doesNotMatch(v.text, /widget-builder/, 'a positive delta must be excluded even in the per-agent branch');
+});
+
+// --- Verdict: a rung whose OWN definition already carries the override ----
+// (config/model-tiers.json's `ladder[].cacheTtl`, 2026-09-26) must not be
+// re-recommended forever just because its measured delta stays negative.
+
+test('alreadyOneHourFrom: true for a real ladder rung config sets cacheTtl 1h on, false for one it does not', () => {
+  assert.equal(alreadyOneHourFrom('ac-opus-high'), true);
+  assert.equal(alreadyOneHourFrom('agent-companion:ac-opus-high'), true, 'namespaced form resolves to the same file');
+  assert.equal(alreadyOneHourFrom('ac-opus-low'), false);
+  assert.equal(alreadyOneHourFrom('not-a-real-agent-type-xyz'), false, 'unresolvable name never throws');
+});
+
+test('verdict: an agentType already on cacheTtl 1h is reported as already-set, not re-recommended', () => {
+  const perModel = [modelRow('opus-5-5', { costToday: 1000, deltaPct: 0.2 })];
+  const perAgentModel = [
+    // Real ladder rung, already carrying experimental.cacheTtl: "1h" in its
+    // shipped agents/ac-opus-high.md — must be excluded from the "set
+    // experimental..." list and named as already-set instead.
+    agentRow('ac-opus-high → opus-5-5', { requests: 2000, costToday: 500, deltaPct: -8 }),
+    // Ordinary named definition with no override yet -> still a fresh candidate.
+    agentRow('widget-architect → opus-5-5', { requests: 2000, costToday: 500, deltaPct: -8 }),
+  ];
+  const v = computeVerdict({
+    perModel, perAgentModel, totals: { costToday: 1000, deltaPct: 0.2 }, policy: { opusFableOnlyDeltaPct: -1 },
+  });
+  assert.match(v.text, /already on experimental\.cacheTtl: "1h"/);
+  assert.match(v.text, /ac-opus-high/);
+  assert.match(v.text, /set experimental: \{ cacheTtl: "1h" \} on:/);
+  assert.match(v.text, /widget-architect/);
+  // The already-set row must not appear in the "set ... on:" clause itself.
+  const setClause = v.text.split('already on experimental')[0];
+  assert.doesNotMatch(setClause, /ac-opus-high/);
 });
 
 test('verdict: dead zone with no qualifying candidate falls back to an explanatory "don\'t set" message', () => {
