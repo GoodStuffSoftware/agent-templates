@@ -646,7 +646,7 @@ test('evaluateModel: the rework-off view is the whole evaluation with rework 0, 
   const all = new Map([[mi.model, mi]]);
   const e = evaluateModel(mi, all);
   assert.equal(e.params.byKind.main.rework, 30000);
-  const direct = evaluateModel(mi, all, { reworkOverride: 0 });
+  const direct = evaluateModel(mi, all, { reworkFixed: 0 });
   assert.equal(direct.params.reworkUsed, 0);
   assert.equal(e.noRework.window, direct.optimum.window);
   assert.deepEqual(e.noRework.band5, direct.band5);

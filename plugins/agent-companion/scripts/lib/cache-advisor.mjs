@@ -644,7 +644,7 @@ export const DEFAULT_MIN_TRACKS_REACHING = 5;
 
 // Evaluates one model. opts: { cfg, calibration, configured (tokens|null),
 // minRequests, minTracksReaching, minTurnsPerCompaction, requestsPerTurnPooled,
-// reworkOverride (a number replaces the measured rework; the rework-off view
+// reworkFixed (a number used in place of the measured rework; the rework-off view
 // passes 0) }. Every `window` in the result is a SETTING; `threshold` is where
 // that setting compacts.
 export function evaluateModel(mi, allInputs, opts = {}) {
@@ -652,7 +652,7 @@ export function evaluateModel(mi, allInputs, opts = {}) {
   const minRequests = opts.minRequests ?? DEFAULT_MIN_REQUESTS;
   const minTracksReaching = opts.minTracksReaching ?? DEFAULT_MIN_TRACKS_REACHING;
   const minTurns = opts.minTurnsPerCompaction ?? cfg.minTurnsPerCompaction ?? 10;
-  const reworkOverride = opts.reworkOverride ?? null;
+  const reworkFixed = opts.reworkFixed ?? null;
   const spec = windowSpecFor(mi.model, cfg);
   const price = priceSpecFor(mi.model);
   const check = priceCheckFor(mi.model, opts.calibration);
@@ -693,7 +693,7 @@ export function evaluateModel(mi, allInputs, opts = {}) {
   const requestsPerTurn = mi.mainTurns >= 10 ? mi.mainRequests / mi.mainTurns : (opts.requestsPerTurnPooled || null);
   const minRequestsPerCompaction = requestsPerTurn ? minTurns * requestsPerTurn : null;
 
-  const reworkOf = (p) => (reworkOverride != null ? reworkOverride : p.rework);
+  const reworkOf = (p) => (reworkFixed != null ? reworkFixed : p.rework);
   const pOf = (kind) => ({ ...params[kind], rework: reworkOf(params[kind]), r: price.r, w5: price.w5, w1: price.w1, outRatio: price.outRatio });
   // A threshold at or below the post-compaction size would compact on every request.
   const maxP = Math.max(...Object.values(params).map((p) => p.P + reworkOf(p)));
@@ -763,7 +763,7 @@ export function evaluateModel(mi, allInputs, opts = {}) {
 
   // Sensitivity: the whole evaluation again with no rework term (rework is
   // the least certain parameter), over its own feasible and allowed windows.
-  const nr = reworkOverride == null ? evaluateModel(mi, allInputs, { ...opts, reworkOverride: 0 }) : null;
+  const nr = reworkFixed == null ? evaluateModel(mi, allInputs, { ...opts, reworkFixed: 0 }) : null;
 
   // Closed-form cross-check, with the main-kind parameters when there are any.
   const pk = params.main || Object.values(params)[0];
