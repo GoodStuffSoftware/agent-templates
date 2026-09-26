@@ -34,6 +34,22 @@ function writeSession(root, project, sessionId, lines) {
   return path;
 }
 
+// A backgrounded Agent launch and its completion notification — see
+// hooks/lib/poll-guard.mjs hasInFlightLaunch(); the corroborating "harness-
+// tracked work in flight" evidence guard-b's fix (finding 1) requires.
+function backgroundAgentLaunchLine(ts, name) {
+  return assistantWakeLine(ts, { toolName: 'Agent', input: { run_in_background: true, ...(name ? { name } : {}) } });
+}
+function taskNotificationLine(ts, name) {
+  return JSON.stringify({
+    type: 'user',
+    timestamp: ts,
+    isMeta: true,
+    origin: { kind: 'task-notification' },
+    message: { content: [{ type: 'text', text: `<task-notification>\n<summary>Agent "${name}" completed</summary>\n</task-notification>` }] },
+  });
+}
+
 test('scanPollGuardEpisodes: empty root reports exists:false and no episodes', async () => {
   const { dir, cleanup } = makeFixture();
   try {
@@ -45,11 +61,12 @@ test('scanPollGuardEpisodes: empty root reports exists:false and no episodes', a
   } finally { cleanup(); }
 });
 
-test('scanPollGuardEpisodes: a noop-streak ScheduleWakeup run is counted as one episode, wakes = streak + 1', async () => {
+test('scanPollGuardEpisodes: a noop-streak ScheduleWakeup run, with a backgrounded launch in flight, is counted as one episode, wakes = streak + 1', async () => {
   const { dir, cleanup } = makeFixture();
   try {
     const root = join(dir, 'projects');
     writeSession(root, 'proj1', 'sess1', [
+      backgroundAgentLaunchLine(plusMs(-1000)),
       assistantWakeLine(plusMs(0), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 1000 }),
       assistantWakeLine(plusMs(1000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 2000 }),
       // 3rd call: streak of 2 priors reaches the default threshold -> episode
@@ -60,9 +77,70 @@ test('scanPollGuardEpisodes: a noop-streak ScheduleWakeup run is counted as one 
     const ep = result.episodes[0];
     assert.equal(ep.wakes, 3, 'wakes = streak(2) + the triggering call itself');
     assert.equal(ep.toolName, 'ScheduleWakeup');
-    // contextTokens sums the triggering call + its 2 prior calls' contexts
-    // (input 100 + read N for each of the 3 lines: 1100+2100+3100 = 6300)
+    // contextTokens sums the triggering call + its 2 prior ScheduleWakeup
+    // calls' contexts (input 100 + read N for each of the 3 lines:
+    // 1100+2100+3100 = 6300) -- the launch line's own context is never
+    // counted in a ScheduleWakeup episode's re-read cost.
     assert.equal(ep.contextTokens, 1100 + 2100 + 3100);
+  } finally { cleanup(); }
+});
+
+test('scanPollGuardEpisodes: a noop-streak ScheduleWakeup run with NO backgrounded launch anywhere is not an episode (FIX finding 1)', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const root = join(dir, 'projects');
+    writeSession(root, 'proj1', 'sess1b', [
+      assistantWakeLine(plusMs(0), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 1000 }),
+      assistantWakeLine(plusMs(1000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 2000 }),
+      assistantWakeLine(plusMs(2000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 3000 }),
+    ]);
+    const result = await scanPollGuardEpisodes({ root });
+    assert.equal(result.episodeCount, 0, 'no corroborating harness-tracked launch: this reads as external-state polling');
+  } finally { cleanup(); }
+});
+
+test('scanPollGuardEpisodes: a launch that already completed (its task-notification is in the file) is not an episode (FIX: in-flight means not yet completed)', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const root = join(dir, 'projects');
+    writeSession(root, 'proj1', 'sess1d', [
+      backgroundAgentLaunchLine(plusMs(-2000), 'worker-1'),
+      taskNotificationLine(plusMs(-1000), 'worker-1'),
+      assistantWakeLine(plusMs(0), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true } }),
+      assistantWakeLine(plusMs(1000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true } }),
+      assistantWakeLine(plusMs(2000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true } }),
+    ]);
+    const result = await scanPollGuardEpisodes({ root });
+    assert.equal(result.episodeCount, 0, 'launched then completed: nothing is actually in flight, so this reads as external-state polling');
+  } finally { cleanup(); }
+});
+
+test('scanPollGuardEpisodes: a continuous escalating watch merges into ONE episode, not one per tick (FIX decision 1, second half)', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const root = join(dir, 'projects');
+    writeSession(root, 'proj1', 'sess1c', [
+      backgroundAgentLaunchLine(plusMs(-1000)),
+      assistantWakeLine(plusMs(0), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 100 }),
+      assistantWakeLine(plusMs(1000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 100 }),
+      // From here on, every call is ALREADY flagged (streak keeps climbing
+      // 2, 3, 4, 5) -- the review's own complaint was this reported as 4
+      // separate escalating episodes instead of one continuous watch.
+      assistantWakeLine(plusMs(2000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 100 }),
+      assistantWakeLine(plusMs(3000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 100 }),
+      assistantWakeLine(plusMs(4000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 100 }),
+      assistantWakeLine(plusMs(5000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 100 }),
+    ]);
+    const result = await scanPollGuardEpisodes({ root });
+    assert.equal(result.episodeCount, 1, `expected the whole continuous run to merge into 1 episode; got ${JSON.stringify(result.episodes)}`);
+    // 6 ScheduleWakeup calls total; the first 2 never flag on their own
+    // (streak below the default threshold of 2), flagging starts on the
+    // 3rd (streak 2, wakes 3) and climbs through the 6th (streak 5, wakes
+    // 6) -- the merged episode's final wakes/contextTokens cover the WHOLE
+    // continuous run (all 6 calls: 6 x 200 context tokens each), not just
+    // the last tick and not one row per escalating tick.
+    assert.equal(result.episodes[0].wakes, 6);
+    assert.equal(result.episodes[0].contextTokens, 1200);
   } finally { cleanup(); }
 });
 
@@ -114,6 +192,7 @@ test('scanPollGuardEpisodes: opts thresholds are honoured, same as the live hook
   try {
     const root = join(dir, 'projects');
     writeSession(root, 'proj1', 'sess5', [
+      backgroundAgentLaunchLine(plusMs(-1000)),
       assistantWakeLine(plusMs(0), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true } }),
       assistantWakeLine(plusMs(1000), { toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true } }),
     ]);
@@ -128,9 +207,12 @@ test('scanPollGuardEpisodes: two sessions each contribute their own episode; tot
   const { dir, cleanup } = makeFixture();
   try {
     const root = join(dir, 'projects');
-    const streak3 = (offset) => [0, 1000, 2000].map((ms) => assistantWakeLine(plusMs(offset + ms), {
-      toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 500,
-    }));
+    const streak3 = (offset) => [
+      backgroundAgentLaunchLine(plusMs(offset - 1000)),
+      ...[0, 1000, 2000].map((ms) => assistantWakeLine(plusMs(offset + ms), {
+        toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, read: 500,
+      })),
+    ];
     writeSession(root, 'proj1', 'sessA', streak3(0));
     writeSession(root, 'proj1', 'sessB', streak3(10000));
     const result = await scanPollGuardEpisodes({ root });

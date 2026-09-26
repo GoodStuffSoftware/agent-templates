@@ -29,10 +29,16 @@ try {
 
   const input = p.tool_input || {};
   const path = callerTranscriptPath(p);
+  // Both assistant tool_use lines (launches) AND user task-notification
+  // lines (their completions) are needed — hasInFlightLaunch() pairs the
+  // two (see hooks/lib/poll-guard.mjs) — so the cheap substring prefilter
+  // keeps both kinds and drops everything else (prompts, tool results with
+  // no notification wrapper, ...).
   const records = path
     ? tailRecords(path, {
       bytes: opt('poll_guard_tail_bytes', TAIL_BYTES),
-      filter: (line) => line.includes('"type":"assistant"'),
+      filter: (line) => line.includes('"type":"assistant"')
+        || (line.includes('"type":"user"') && (line.includes('task-notification') || line.includes('"isMeta":true'))),
     })
     : [];
 
@@ -44,6 +50,7 @@ try {
       noopStreak: opt('poll_guard_noop_streak', 2),
       shortDelaySeconds: opt('poll_guard_short_delay_seconds', 600),
       monitorRearmStreak: opt('poll_guard_monitor_rearm_streak', 2),
+      monitorShortTimeoutMs: opt('poll_guard_monitor_short_timeout_ms', 600000),
     },
   });
 
