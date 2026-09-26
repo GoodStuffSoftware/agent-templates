@@ -23,8 +23,10 @@
 // no `name` field at all — see hooks/spawn-log.mjs), so this delivery check
 // was the closest available analogue.
 
-import { basename } from 'node:path';
-import { telemetryDir, isFixtureSession, tailRecords } from './context.mjs';
+import { basename, join } from 'node:path';
+import { mkdirSync, writeFileSync, readdirSync, statSync, unlinkSync, rmdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { telemetryDir, isFixtureSession, tailRecords, stateDir } from './context.mjs';
 
 // Only these characters may appear in an autofilled name; a name built from
 // project/repo directory names, subagent types or a free-text description
@@ -123,18 +125,140 @@ export function sessionSpawnNames(sid, { bytes = 262144 } = {}) {
   }
 }
 
-// Append -2, -3, ... until `candidate` does not collide with `existing`.
-// Capped so a pathological existing-list can't loop unboundedly; the last
-// resort falls back to a short random suffix rather than looping forever.
+// Names the harness itself reserves for addressing (fix round, review
+// finding 2, 2026-09-25): an autofilled name must never equal one of these,
+// case-insensitively, or a later SendMessage("team-lead"), say, would not
+// reach the worker namegate meant to address. Checked against this repo's
+// own docs/tool descriptions for others beyond the two the review brief
+// named; none found (no agent-teams.md ships in this repo, and no other
+// reserved-keyword doc exists here) — if the harness ever documents more,
+// add them here and both makeUnique() and reserveUniqueName() below inherit
+// the exclusion automatically.
+const RESERVED_NAMES = new Set(['main', 'team-lead']);
+export function isReservedName(name) {
+  return RESERVED_NAMES.has(String(name || '').trim().toLowerCase());
+}
+
+// Append -2, -3, ... until `candidate` collides with neither `existing` nor
+// a reserved name. Capped so a pathological existing-list can't loop
+// unboundedly; the last resort falls back to a short random suffix rather
+// than looping forever. Pure/in-memory — no reservation of the result, so
+// two concurrent callers can still both pick the same name (review finding
+// 1); reserveUniqueName() below is the race-safe wrapper the hook actually
+// uses. Kept exported and still used as reserveUniqueName()'s own fail-open
+// fallback when the state dir is unusable.
 export function makeUnique(candidate, existing) {
   const taken = new Set(existing || []);
-  if (!taken.has(candidate)) return candidate;
+  const blocked = (n) => taken.has(n) || isReservedName(n);
+  if (!blocked(candidate)) return candidate;
   const base = candidate.slice(0, MAX_NAME - 3); // room for "-NN"
   for (let n = 2; n <= 50; n += 1) {
     const c = `${base}-${n}`;
-    if (!taken.has(c)) return c;
+    if (!blocked(c)) return c;
   }
-  return `${base}-${Math.random().toString(36).slice(2, 6)}`;
+  const fallback = `${base}-${Math.random().toString(36).slice(2, 6)}`;
+  return blocked(fallback) ? `${base}-${Math.random().toString(36).slice(2, 6)}` : fallback;
+}
+
+// Marker debris (review finding 1's fix): bounded by age, not by an explicit
+// release step — a hook process exiting mid-session leaves its markers
+// behind on purpose (they must outlive the process so a LATER spawn in the
+// same session still sees them as taken), so there is no "done, delete mine"
+// moment to hook a cleanup into. Mirrors PROCESS_LOAD_KEEP_MS's own sizing
+// rationale (context.mjs): a session's whole spawn burst is minutes, never
+// remotely close to this, so the margin is generous on purpose.
+const MARKER_KEEP_MS = 24 * 60 * 60 * 1000;
+
+function sidHash(sid) {
+  return createHash('sha1').update(String(sid)).digest('hex').slice(0, 16);
+}
+
+// One marker subdirectory per session (not one flat directory of
+// session+name markers) so the age-sweep below can decide and delete a
+// whole finished session's debris in one shot, and so two sessions that
+// happen to pick the same candidate name never share a marker file.
+function namegateMarkerDir(sid) {
+  return join(stateDir(), 'namegate-names', sidHash(sid));
+}
+
+// Best-effort age sweep of finished sessions' marker subdirectories, run
+// opportunistically on every reservation attempt (like noteAgentType()'s
+// wx-marker, no separate cron/hook is needed). Never throws — a raced or
+// already-gone directory is left alone rather than retried.
+function pruneNamegateMarkers(now) {
+  const root = join(stateDir(), 'namegate-names');
+  let dirs;
+  try { dirs = readdirSync(root); } catch { return; } // nothing written yet
+  for (const d of dirs) {
+    const full = join(root, d);
+    try {
+      const files = readdirSync(full);
+      let newest = 0;
+      for (const f of files) {
+        try { newest = Math.max(newest, statSync(join(full, f)).mtimeMs); } catch { /* raced */ }
+      }
+      if (files.length === 0 || now - newest > MARKER_KEEP_MS) {
+        for (const f of files) { try { unlinkSync(join(full, f)); } catch { /* raced */ } }
+        try { rmdirSync(full); } catch { /* raced, or another process just reserved into it */ }
+      }
+    } catch { /* raced or gone: leave it */ }
+  }
+}
+
+// Exclusive-create a marker for (sid, name) — the same `wx` atomicity
+// hooks/spawn-log.mjs's noteAgentType() already uses for the identical
+// read-check-append race (see tests/race.test.mjs). Returns true only for
+// the ONE caller whose create wins; false on any conflict OR any failure
+// (state dir missing/unwritable) — reserveUniqueName() below treats both
+// alike: try the next candidate.
+function tryReserve(sid, name) {
+  const dir = namegateMarkerDir(sid);
+  try { mkdirSync(dir, { recursive: true }); } catch { /* may already exist */ }
+  try {
+    writeFileSync(join(dir, `${name}.reserved`), '', { flag: 'wx' });
+    return true;
+  } catch {
+    return false; // EEXIST (lost the race) or the dir is unusable
+  }
+}
+
+// Race-safe replacement for a bare makeUnique() call (review finding 1): the
+// chosen name is RESERVED before this returns, so two truly-concurrent hook
+// invocations racing on the identical candidate (the parallel-Agent-calls-
+// in-one-message shape this plugin's own orchestration doctrine recommends)
+// cannot both walk away with the same name the way a plain read-then-decide
+// check could — sessionSpawnNames()'s `existing` list is necessarily stale
+// mid-race (a concurrent sibling's telemetry row may not be written yet);
+// the marker reservation is what actually closes the gap. Also excludes
+// reserved addressing names (review finding 2) via the same `blocked()`
+// makeUnique() uses, since a candidate that resolves to one must never even
+// attempt reservation.
+//
+// Fails open exactly like every other gate in this hook: if the state dir is
+// unusable, EVERY tryReserve() call below fails, the loop exhausts, and this
+// returns makeUnique()'s plain in-memory pick with no reservation at all —
+// the pre-fix behaviour. Never throws, never blocks the spawn.
+export function reserveUniqueName(sid, candidate, existing, { now = Date.now() } = {}) {
+  try { pruneNamegateMarkers(now); } catch { /* best effort */ }
+  const taken = new Set(existing || []);
+  const blocked = (n) => taken.has(n) || isReservedName(n);
+  const attempt = (n) => (!blocked(n) && tryReserve(sid, n)) ? n : null;
+
+  let picked = attempt(candidate);
+  if (picked) return picked;
+
+  const base = candidate.slice(0, MAX_NAME - 3); // room for "-NN"
+  for (let n = 2; n <= 50; n += 1) {
+    picked = attempt(`${base}-${n}`);
+    if (picked) return picked;
+  }
+  for (let i = 0; i < 8; i += 1) {
+    picked = attempt(`${base}-${Math.random().toString(36).slice(2, 6)}`);
+    if (picked) return picked;
+  }
+  // Exhausted every slot (state dir unusable, or a wildly unlucky/adversarial
+  // `existing` set) — fail open to the unreserved pick rather than block.
+  return makeUnique(candidate, existing);
 }
 
 // The boilerplate appended to an autofilled worker's own prompt: who it is,

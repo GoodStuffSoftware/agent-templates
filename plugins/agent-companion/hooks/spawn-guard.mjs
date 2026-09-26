@@ -41,7 +41,7 @@ import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract } from './lib/brevity.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
 import {
-  buildCandidateName, sessionSpawnNames, makeUnique, buildNamegateBrief,
+  buildCandidateName, sessionSpawnNames, reserveUniqueName, buildNamegateBrief,
 } from './lib/namegate.mjs';
 
 // Allow — optionally saying something to the user, and/or rewriting the tool
@@ -721,7 +721,13 @@ try {
   // spawns (sessionSpawnNames, read from the same spawns.jsonl/fixtures.jsonl
   // telemetry every other consumer of session history reads here), which
   // doubles as the peer list the autofilled worker's own brief addition
-  // names. Never denies; fails open to "no name, no note" on any error.
+  // names — PLUS an atomic reservation (reserveUniqueName, wx-marker per
+  // (session, name), mirroring spawn-log.mjs's noteAgentType()) so two
+  // truly-concurrent spawns in one message cannot both read the same
+  // pre-existing peer set and autofill the identical name (fix round,
+  // review finding 1). Also excludes the harness's reserved addressing
+  // names ("main", "team-lead" — review finding 2). Never denies; fails
+  // open to "no name, no note" on any error.
   const gate4Applicable = !callerIsSubagent && runsInBackground && !input.name && opt('namegate', true);
   let gate4Action = 'none'; // none | hint | autofill
   let namegateName = null;
@@ -732,7 +738,7 @@ try {
           cwd: p.cwd, declaredType, subagentType: input.subagent_type, description: input.description,
         });
         const peers = sessionSpawnNames(sid);
-        namegateName = makeUnique(candidate, peers);
+        namegateName = reserveUniqueName(sid, candidate, peers);
         updatedInput = { ...(updatedInput || input), name: namegateName };
         namegateSuffix = buildNamegateBrief({ name: namegateName, peers });
         gate4Action = 'autofill';

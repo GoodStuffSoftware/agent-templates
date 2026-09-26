@@ -7,10 +7,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { makeFixture, runHook, readJsonl } from './helpers.mjs';
+import { spawn } from 'node:child_process';
+import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { makeUnique, reserveUniqueName, isReservedName } from '../hooks/lib/namegate.mjs';
 
 function baseEnv(dir) {
   return { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') };
+}
+
+// Async (not spawnSync) child launch — needed to get truly overlapping hook
+// processes for the stress test below; spawnSync would serialize them and
+// prove nothing about the race the fix closes (see spawn-namegate-review-
+// findings.test.mjs's own note on this same distinction).
+function runAsync(script, payload, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [script], { windowsHide: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', reject);
+    child.on('close', (code) => resolve({ code, out, err }));
+    child.stdin.write(JSON.stringify(payload));
+    child.stdin.end();
+  });
 }
 
 test('namegate: background + no name -> hint AND autofill (default on)', () => {
@@ -228,6 +248,107 @@ test('namegate: namegate=false disables the whole gate (no hint, no autofill)', 
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.gate4_applicable, false);
     assert.equal(row.gate4_action, 'none');
+  } finally {
+    cleanup();
+  }
+});
+
+// Fix round (review finding 1) — the primary regression the review filed:
+// tests/spawn-namegate-review-findings.test.mjs proves 2 concurrent spawns no
+// longer collide. This is the "8 concurrent spawns" stress variant the fix
+// brief additionally asks for, and — per the lead's correction — it uses an
+// IDENTICAL payload (same session, cwd, subagent_type, description) for all
+// 8, because that is the exact shape that used to collide: distinct payloads
+// never raced in the first place and would prove nothing about the fix.
+test('namegate: 8 truly concurrent background+no-name spawns, IDENTICAL payload, all get distinct names', async () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const script = join(PLUGIN_ROOT, 'hooks', 'spawn-guard.mjs');
+    const env = { ...process.env, ...baseEnv(dir) };
+    const payload = {
+      session_id: 'sess-ng-stress-8',
+      agent_type: 'main',
+      cwd: join(dir, 'proj'),
+      tool_input: {
+        subagent_type: 'general-purpose', model: 'sonnet', run_in_background: true,
+        description: 'same task', prompt: 'do a bounded task',
+      },
+    };
+    const N = 8;
+    const results = await Promise.all(Array.from({ length: N }, () => runAsync(script, payload, env)));
+    const names = results.map((r, i) => {
+      assert.equal(r.code, 0, `run ${i} exited ${r.code}: ${r.err}`);
+      const n = JSON.parse(r.out.trim())?.hookSpecificOutput?.updatedInput?.name;
+      assert.ok(n, `run ${i} must autofill a name`);
+      return n;
+    });
+    assert.equal(new Set(names).size, N, `expected ${N} distinct names, got: ${names.join(', ')}`);
+
+    const rows = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))
+      .filter((r) => r.session_id === 'sess-ng-stress-8');
+    assert.equal(rows.length, N);
+  } finally {
+    cleanup();
+  }
+});
+
+// Fix round (review finding 2) — explicit, tested invariant at the SOURCE OF
+// TRUTH (the naming functions themselves), not just an incidental property
+// of today's slug assembly. Before this fix, "main" was only unreachable as
+// a side effect of buildCandidateName() always joining >= 2 segments
+// (deriveTypeSlug() never returns '') — nothing stated or asserted the
+// invariant, so a future refactor (e.g. allowing a single-segment name when
+// project/type coincide) could reopen it silently with no test catching the
+// regression. Testing makeUnique()/reserveUniqueName() directly with
+// candidate="main" proves the exclusion holds regardless of how a future
+// buildCandidateName() might assemble its input — the end-to-end hook tests
+// above and the review's own finding-2 regression test prove "team-lead" is
+// excluded through the full pipeline; this proves "main" is excluded at the
+// layer that actually enforces it, both case-insensitively.
+test('namegate: makeUnique()/reserveUniqueName() never return the reserved name "main", case-insensitively', () => {
+  assert.equal(isReservedName('main'), true);
+  assert.equal(isReservedName('MAIN'), true);
+  assert.equal(isReservedName('Main'), true);
+  assert.notEqual(makeUnique('main', []), 'main');
+  assert.notEqual(makeUnique('MAIN', []).toLowerCase(), 'main');
+
+  const { cleanup } = makeFixture();
+  try {
+    const picked = reserveUniqueName('sess-ng-unit-reserved', 'main', []);
+    assert.notEqual(picked.toLowerCase(), 'main');
+  } finally {
+    cleanup();
+  }
+});
+
+// Fix round (review "coverage gap", not a bug): the review's own live check
+// confirmed gate3_fired flips to false on the SAME row Gate 4 autofills a
+// name for, but no test asserted this directly — the only existing Gate 3
+// coverage change was disabling namegate in the OLD Gate 3 test, not a new
+// assertion on the interaction itself. This closes that gap on the primary
+// autofill test's own telemetry row.
+test('namegate: an autofilled spawn never also fires Gate 3 (it now has an address)', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const payload = {
+      session_id: 'sess-ng-gate3-interaction',
+      agent_type: 'main',
+      cwd: join(dir, 'my-project'),
+      tool_input: {
+        subagent_type: 'general-purpose', model: 'sonnet', run_in_background: true,
+        description: 'probe thing', prompt: 'do a bounded task',
+        // deliberately no name, no isolation: the exact shape that used to fire Gate 3
+      },
+    };
+    const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
+    assert.equal(res.status, 0, `exited ${res.status}: ${res.stderr}`);
+    assert.ok(res.json?.hookSpecificOutput?.updatedInput?.name, 'Gate 4 must have autofilled a name');
+    assert.doesNotMatch(res.json?.systemMessage || '', /no address to re-brief it later/,
+      'Gate 3\'s message must not fire once Gate 4 has assigned this same spawn a name');
+
+    const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
+    assert.equal(row.gate4_action, 'autofill');
+    assert.equal(row.gate3_fired, false, 'gate3_fired must be false on the same row Gate 4 autofilled');
   } finally {
     cleanup();
   }
