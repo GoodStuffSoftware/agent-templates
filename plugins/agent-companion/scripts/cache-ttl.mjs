@@ -10,7 +10,9 @@
 // Usage:
 //   node cache-ttl.mjs                  # last 30 days, human report
 //   node cache-ttl.mjs --days 60        # a different window
-//   node cache-ttl.mjs --json           # machine-readable
+//   node cache-ttl.mjs --json           # machine-readable (perRung is sorted and
+//                                       # rounded so two dates' outputs diff cleanly)
+//   node cache-ttl.mjs --include-experiments   # also count bench / temp-dir projects
 //
 // Also registered in audit.mjs as `--only cache-ttl` (see scripts/checks.mjs).
 
@@ -23,7 +25,9 @@ const has = (n) => argv.includes(n);
 const days = Number(val('--days')) || 30;
 const asJson = has('--json');
 
-const result = await computeCacheTtl({ days, transcriptsRoot: transcriptsRoot() });
+const includeExperiments = has('--include-experiments');
+
+const result = await computeCacheTtl({ days, transcriptsRoot: transcriptsRoot(), includeExperiments });
 
 if (asJson) {
   console.log(JSON.stringify(result, null, 2));
@@ -37,7 +41,8 @@ const fmtMs = (ms) => (ms == null ? 'n/a' : ms < 60000 ? `${(ms / 1000).toFixed(
 
 console.log(`cache-ttl — subagent prompt-cache TTL analysis (last ${result.windowDays}d)`);
 console.log(`generated: ${result.generatedAt}`);
-console.log(`files scanned: ${result.filesScanned.main} main, ${result.filesScanned.subagent} subagent${result.truncated ? ' (TRUNCATED by file/byte cap)' : ''}`);
+console.log(`experiment projects: ${result.experimentProjects.included ? 'INCLUDED (--include-experiments)' : `${result.experimentProjects.excludedProjects} excluded (bench / system-temp-dir projects; --include-experiments counts them)`}`);
+console.log(`files scanned:${result.filesScanned.main} main, ${result.filesScanned.subagent} subagent${result.truncated ? ' (TRUNCATED by file/byte cap)' : ''}`);
 console.log(`subagent requests in window: ${result.subagentRequestsScanned}  |  main-session requests in window: ${result.mainRequestsScanned}`);
 console.log('');
 
@@ -114,6 +119,22 @@ console.log('-- break-even: observed rewrite share vs. required, per tier (alway
 for (const b of result.breakEvenByTier) {
   console.log(`  ${b.alias.padEnd(12)} observed=${b.observedPct.toFixed(1).padEnd(6)}% breakeven=${b.breakEvenPct.toFixed(1).padEnd(6)}% `
     + `spend-share=${b.spendSharePct.toFixed(1).padEnd(6)}% delta=${fmtPct(b.deltaPct)}`);
+}
+console.log('');
+
+console.log(`-- per rung: 1h net saving, and each gap kind's share of it (experiment projects ${result.experimentProjects.included ? 'INCLUDED' : `excluded: ${result.experimentProjects.excludedProjects}`}) --`);
+console.log(`  floor for a verdict: >=${result.rungFloor.files} files, >=${result.rungFloor.requests} requests, >=${result.rungFloor.viewGaps5to60} 5-60min gaps`);
+console.log('  baseline = the 2x write premium with no gap credited; the gap kinds\' contributions sum to (all - baseline)');
+for (const r of result.perRung) {
+  const s = r.sample;
+  const a = r.views.all;
+  console.log(`  ${r.rung}  [${r.models.join(',')}] files=${s.files} req=${s.requests} gaps=${s.gaps} 5-60=${s.gaps5to60} resume-rewrites=${r.resumeRewrites}`);
+  console.log(`    all        gaps=${String(a.gaps5to60).padEnd(5)} net=${fmtUsd(a.netSavingUsd).padEnd(10)} delta=${fmtPct(a.deltaPct).padEnd(8)} ${a.verdict}`);
+  console.log(`    baseline   net=${fmtUsd(r.baseline.netSavingUsd)}`);
+  for (const [v, x] of Object.entries(r.views)) {
+    if (v === 'all') continue;
+    console.log(`    ${v.padEnd(10)} gaps=${String(x.gaps5to60).padEnd(5)} contributes=${fmtUsd(x.contributionUsd).padEnd(10)} share=${x.sharePct.toFixed(1)}%`);
+  }
 }
 console.log('');
 

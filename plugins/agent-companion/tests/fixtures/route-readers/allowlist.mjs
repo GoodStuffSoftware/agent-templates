@@ -170,7 +170,7 @@ export const ALLOWED = {
   ],
   "scripts/lib/cache-ttl.mjs": [
     "// a premium-tier-only pocket of savings that a per-agent override",
-    "+ `clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests with a negative delta to warrant a per-agent override`;",
+    "+ `clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests with a negative delta to warrant a per-agent override${thinNote}`;",
   ],
   // Pricing moved out of lib/cache-ttl.mjs into its own module (shared with
   // lib/transcripts.mjs's report); the lines are unchanged.
