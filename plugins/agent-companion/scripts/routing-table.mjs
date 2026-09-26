@@ -157,7 +157,7 @@ function ladderRungs() {
 // else null (meaning "no experimental.cacheTtl block" — the subagent 5m
 // default applies with nothing stated). Never any other string: Claude Code
 // itself only recognises "5m"/"1h" (code.claude.com/docs/en/sub-agents), and
-// a config value that is neither is treated as "no override" rather than
+// a config value that is neither is treated as absent (5m) rather than
 // guessed at, same convention as scripts/checks.mjs's cacheTtlFrontmatter().
 function expectedCacheTtl(rung) {
   return rung && rung.cacheTtl === '1h' ? '1h' : null;
@@ -180,7 +180,7 @@ function readCacheTtl(fmText) {
 
 // Sets or removes the `experimental.cacheTtl` block in a whole file's TEXT
 // (frontmatter fences included), returning the updated text. `ttl` is "1h"
-// to add/update the override, or null to remove it (falling back to the
+// to add/update that setting, or null to remove it (falling back to the
 // subagent 5m default). Only the two-line shape this generator itself
 // writes — a bare `experimental:` line immediately followed by one indented
 // `cacheTtl:` line, nothing else nested under it — is understood; every

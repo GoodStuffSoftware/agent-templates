@@ -95,7 +95,7 @@ function cacheTtlFrontmatter(text) {
 // 5m default). Data-driven on purpose — see the config's own
 // `ladderCacheTtlNote` — so a future rung added or re-tiered there is
 // classified correctly here without a matching code change. null for a
-// name that is not a ladder agent at all, or that config gives no override.
+// name that is not a ladder agent at all, or that config leaves at 5m.
 function ladderCacheTtlExpectation(agentName) {
   try {
     const rung = (modelTiers().ladder || []).find((r) => r && r.agent === agentName);

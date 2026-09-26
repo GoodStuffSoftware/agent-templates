@@ -353,9 +353,9 @@ export function computeVerdict({
       + `and the opus/fable-only policy is also non-negative (${fmtPct(policy.opusFableOnlyDeltaPct)})`;
   } else {
     // Negative-delta, high-volume rows worth a standing config edit — before
-    // splitting off the ones whose OWN definition already carries the
-    // override, so re-running this after a rung was flipped to 1h reports it
-    // as "already on", not as a fresh recommendation to make the same edit
+    // splitting off the ones whose OWN definition already sets it, so
+    // re-running this after a rung was flipped to 1h reports it as
+    // "already on", not as a fresh recommendation to make the same edit
     // again.
     const eligible = perAgentModel.filter((r) => {
       if (r.deltaPct > -MIN_AGENT_SAVING_PCT) return false; // e.g. -0.24% is noise, not a saving worth a standing config edit
