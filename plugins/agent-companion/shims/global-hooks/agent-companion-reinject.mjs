@@ -12,11 +12,17 @@
 // wins. Each candidate is a template; placeholders:
 //   {cwd}         the session's working directory
 //   {session_id}  the session id
-//   {scratchpad}  <tmpdir>/claude/<encoded cwd>/<session_id>/scratchpad
+//   {scratchpad}  <tmpdir>/claude/<project dir>/<session_id>/scratchpad, where
+//                 <project dir> is the folder of the hook input's
+//                 transcript_path (the harness's own encoding of the session's
+//                 ORIGINAL cwd), else the cwd with every non-alphanumeric
+//                 character replaced by '-'
 //   {home}        the user's home directory
 // Defaults (replaced by one or more `--file <template>` args):
 //   {scratchpad}/SESSION-STATE.md, {cwd}/HANDOFF.md, {cwd}/.claude/HANDOFF.md
-// `--max-chars <n>` caps the injected text (default 20000). Over the cap the
+// `--max-chars <n>` caps the injected text (default and ceiling 9500: Claude
+// Code caps additionalContext at 10,000 chars and replaces anything longer
+// with a file path plus a preview of the HEAD). Over the cap the
 // END of the file is kept (notes are appended there) behind a marker line.
 //
 // MUST NEVER throw or exit non-zero, and prints nothing when there is
@@ -24,7 +30,7 @@
 
 import { readFileSync, statSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join, resolve, isAbsolute } from 'node:path';
+import { join, resolve, isAbsolute, basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const DEFAULT_FILES = [
@@ -32,10 +38,21 @@ export const DEFAULT_FILES = [
   '{cwd}/HANDOFF.md',
   '{cwd}/.claude/HANDOFF.md',
 ];
-export const DEFAULT_MAX_CHARS = 20000;
+// Claude Code caps a hook's additionalContext at 10,000 characters
+// (code.claude.com/docs/en/hooks); stay safely below it, marker included.
+export const HARNESS_CAP = 10000;
+export const DEFAULT_MAX_CHARS = 9500;
 
 export function encodeCwd(cwd) {
-  return cwd.replace(/[:\\/.]/g, '-');
+  return cwd.replace(/[^A-Za-z0-9]/g, '-');
+}
+
+export function projectDir(cwd, transcriptPath) {
+  if (typeof transcriptPath === 'string' && transcriptPath) {
+    const d = basename(dirname(transcriptPath));
+    if (d && d !== '.' && !/^[\\/]$/.test(d)) return d;
+  }
+  return encodeCwd(cwd);
 }
 
 export function parseArgs(argv) {
@@ -45,14 +62,14 @@ export function parseArgs(argv) {
     if (argv[i] === '--file' && argv[i + 1]) files.push(argv[++i]);
     else if (argv[i] === '--max-chars' && argv[i + 1]) {
       const n = Number(argv[++i]);
-      if (Number.isFinite(n) && n >= 200) maxChars = Math.floor(n);
+      if (Number.isFinite(n) && n >= 200) maxChars = Math.min(Math.floor(n), DEFAULT_MAX_CHARS);
     }
   }
   return { files: files.length ? files : DEFAULT_FILES, maxChars };
 }
 
-export function expand(template, { cwd, sessionId, tmp = tmpdir(), home = homedir() }) {
-  const scratchpad = join(tmp, 'claude', encodeCwd(cwd), sessionId, 'scratchpad');
+export function expand(template, { cwd, sessionId, transcriptPath, tmp = tmpdir(), home = homedir() }) {
+  const scratchpad = join(tmp, 'claude', projectDir(cwd, transcriptPath), sessionId, 'scratchpad');
   const out = template
     .replace(/\{scratchpad\}/g, scratchpad)
     .replace(/\{session_id\}/g, sessionId)
@@ -67,11 +84,11 @@ export function buildContext(input, { files, maxChars }, env = {}) {
   // Belt and braces: the settings entry already matches "compact", but a
   // hand-edited entry without a matcher must not inject on every startup.
   if (input.source !== undefined && input.source !== 'compact') return '';
-  const { session_id: sessionId, cwd } = input;
+  const { session_id: sessionId, cwd, transcript_path: transcriptPath } = input;
   if (typeof sessionId !== 'string' || !sessionId || typeof cwd !== 'string' || !cwd) return '';
   for (const tpl of files) {
     let path;
-    try { path = expand(tpl, { cwd, sessionId, ...env }); } catch { continue; }
+    try { path = expand(tpl, { cwd, sessionId, transcriptPath, ...env }); } catch { continue; }
     let content;
     try {
       if (!statSync(path).isFile()) continue;
@@ -82,7 +99,11 @@ export function buildContext(input, { files, maxChars }, env = {}) {
     if (header.length + content.length <= maxChars) return header + content;
     const marker = `[... truncated: kept the last part of ${content.length} chars ...]\n`;
     const budget = Math.max(0, maxChars - header.length - marker.length);
-    return header + marker + content.slice(content.length - budget);
+    let start = content.length - budget;
+    // Never start on the low half of a surrogate pair.
+    const c = content.charCodeAt(start);
+    if (c >= 0xDC00 && c <= 0xDFFF) start += 1;
+    return header + marker + content.slice(start);
   }
   return '';
 }

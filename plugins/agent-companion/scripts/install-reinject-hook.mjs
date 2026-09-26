@@ -10,7 +10,8 @@
 //   node install-reinject-hook.mjs --status
 //   (--settings <path> --hooks-dir <path> replace the ~/.claude defaults)
 //
-// Detect-existing: if settings.json already has a SessionStart entry that
+// Detect-existing (by NAME only; user settings.json and settings.local.json,
+// not project-level .claude/settings*.json): if either already has a SessionStart entry that
 // would fire on compaction (matcher empty, "*", or naming "compact") whose
 // command/args mention "reinject", "re-inject", "SESSION-STATE" or
 // "HANDOFF" and is NOT ours, install refuses (exit 0, nothing written) so
@@ -74,8 +75,28 @@ function scan(settings) {
   return { ours, others };
 }
 
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+// Returns a problem string when the settings shape is one this installer
+// must not rewrite (it would report success without installing, or drop the
+// user's value), else ''.
+function shapeProblem(settings) {
+  if (!isObj(settings)) return 'the top level is not a JSON object';
+  if (settings.hooks !== undefined && !isObj(settings.hooks)) return '"hooks" is not an object';
+  if (settings.hooks?.[EVENT] !== undefined && !Array.isArray(settings.hooks[EVENT])) return `"hooks.${EVENT}" is not an array`;
+  return '';
+}
+
 function loadSettings() {
   return existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {};
+}
+const localPath = join(dirname(settingsPath), 'settings.local.json');
+function localOthers() {
+  try {
+    if (!existsSync(localPath)) return [];
+    const l = JSON.parse(readFileSync(localPath, 'utf8'));
+    return isObj(l) && !shapeProblem(l) ? scan(l).others.map((o) => `${o} (settings.local.json)`) : [];
+  } catch { return []; }
 }
 function backup(path) {
   if (!existsSync(path)) return null;
@@ -102,10 +123,20 @@ try {
     console.error(`install-reinject-hook: cannot parse ${settingsPath}: ${e.message}; nothing written.`);
     process.exit(1);
   }
-  const { ours, others } = scan(settings);
+  const problem = shapeProblem(settings);
+  if (problem) {
+    console.error(`install-reinject-hook: ${settingsPath}: ${problem}; refusing to rewrite it, nothing written.`);
+    process.exit(1);
+  }
+  const scanned = scan(settings);
+  const ours = scanned.ours;
+  const others = [...scanned.others, ...localOthers()];
 
   if (STATUS) {
-    console.log(`install-reinject-hook: ${ours ? 'installed' : 'not installed'}${others.length ? `; equivalent hook(s) present: ${others.join(' | ')}` : ''}`);
+    const state = !ours ? 'not installed'
+      : existsSync(shimDest) ? 'installed'
+        : `settings entry present but hook file missing (${shimDest}); re-run the installer or --uninstall`;
+    console.log(`install-reinject-hook: ${state}${others.length ? `; equivalent hook(s) present: ${others.join(' | ')}` : ''}`);
     process.exit(0);
   }
 
@@ -119,7 +150,11 @@ try {
       next.hooks[EVENT] = next.hooks[EVENT]
         .map((g) => ({ ...g, hooks: (g.hooks || []).filter((h) => !isOurs(h)) }))
         .filter((g) => g.hooks.length > 0);
-      if (next.hooks[EVENT].length === 0) delete next.hooks[EVENT];
+      if (next.hooks[EVENT].length === 0) {
+        delete next.hooks[EVENT];
+        // We emptied it, so an empty "hooks" left behind is ours to remove.
+        if (Object.keys(next.hooks).length === 0) delete next.hooks;
+      }
       const b = backup(settingsPath);
       write(next);
       if (b) console.log(`install-reinject-hook: settings backed up to ${b}.`);

@@ -301,9 +301,16 @@ Not installed by default. OFFER it and run it only after the operator says
 yes. It adds a user-level SessionStart hook (matcher `compact`) that, after a
 compaction, re-injects the first non-empty file of: the session scratchpad's
 `SESSION-STATE.md`, `<cwd>/HANDOFF.md`, `<cwd>/.claude/HANDOFF.md` —
-capped at 20,000 chars, keeping the end. Run `--status` first: if an
-equivalent personal hook is already configured, the installer says so and
-installs nothing (no double injection).
+capped at 9,500 chars (Claude Code caps hook context at 10,000), keeping
+the end. Run `--status` first: if an equivalent personal hook is already
+configured, the installer says so and installs nothing (no double injection).
+
+Detection limits: it matches by NAME (a command mentioning `reinject`,
+`SESSION-STATE` or `HANDOFF` on a compaction matcher) and reads only the
+user-level `settings.json` and `settings.local.json`, not project-level
+`.claude/settings*.json`. Ask the operator whether they already have a
+hook that restores state after compaction under another name or in a
+project; if they do, do not install this one.
 
 ```bash
 node "$AC/scripts/install-reinject-hook.mjs" --status

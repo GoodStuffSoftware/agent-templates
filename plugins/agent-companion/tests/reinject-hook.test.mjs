@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runScript, PLUGIN_ROOT } from './helpers.mjs';
-import { buildContext, parseArgs, encodeCwd, DEFAULT_MAX_CHARS } from '../shims/global-hooks/agent-companion-reinject.mjs';
+import { buildContext, parseArgs, encodeCwd, projectDir, DEFAULT_MAX_CHARS, HARNESS_CAP } from '../shims/global-hooks/agent-companion-reinject.mjs';
 
 const SHIM = join(PLUGIN_ROOT, 'shims', 'global-hooks', 'agent-companion-reinject.mjs');
 const tmp = (p) => mkdtempSync(join(tmpdir(), p));
@@ -157,5 +157,91 @@ test('a lookalike hook that never fires on compaction does not block install', (
     writeFileSync(e.settings, JSON.stringify({ hooks: { SessionStart: [{ matcher: 'startup', hooks: [
       { type: 'command', command: 'cat HANDOFF.md' }] }] } }));
     assert.match(e.run().stdout, /installed\./);
+  } finally { e.done(); }
+});
+
+// ---- fix round (review findings 1-6) ----
+
+test('scratchpad dir comes from transcript_path, not the (moved) cwd', () => {
+  const cwd = tmp('ac-reinj-cwd-'); const t = tmp('ac-reinj-tmp-');
+  try {
+    const proj = 'C--Users-you-dev-orig-project';
+    const sp = join(t, 'claude', proj, 'sid', 'scratchpad');
+    mkdirSync(sp, { recursive: true });
+    writeFileSync(join(sp, 'SESSION-STATE.md'), 'state');
+    const input = { session_id: 'sid', cwd, source: 'compact',
+      transcript_path: join(t, 'projects', proj, 'sid.jsonl') };
+    assert.match(buildContext(input, parseArgs([]), { tmp: t }), /state$/);
+    assert.equal(projectDir(cwd, input.transcript_path), proj);
+  } finally { rmSync(cwd, { recursive: true, force: true }); rmSync(t, { recursive: true, force: true }); }
+});
+
+test('fallback encoding maps every non-alphanumeric to "-" (matches ~/.claude/projects names)', () => {
+  assert.equal(encodeCwd('C:/a b/x_y/w$z'), 'C--a-b-x-y-w-z');
+  assert.equal(encodeCwd('\\\\wsl$\\Ubuntu\\home'), '--wsl--Ubuntu-home');
+  assert.equal(projectDir('C:\\p.q', undefined), 'C--p-q');
+});
+
+test('default cap stays below the harness 10,000-char additionalContext cap, marker included', () => {
+  assert.ok(DEFAULT_MAX_CHARS < HARNESS_CAP);
+  assert.equal(parseArgs(['--max-chars', '50000']).maxChars, DEFAULT_MAX_CHARS);
+  const cwd = tmp('ac-reinj-cwd-');
+  try {
+    writeFileSync(join(cwd, 'HANDOFF.md'), 'z'.repeat(40000));
+    const out = buildContext({ session_id: 's', cwd, source: 'compact' }, parseArgs([]));
+    assert.ok(out.length <= DEFAULT_MAX_CHARS && out.length < HARNESS_CAP, String(out.length));
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test('truncation never starts on a lone low surrogate', () => {
+  const cwd = tmp('ac-reinj-cwd-');
+  try {
+    writeFileSync(join(cwd, 'HANDOFF.md'), `y${'\u{1F600}'.repeat(15000)}`);
+    for (let m = 1000; m < 1010; m++) {
+      const out = buildContext({ session_id: 's', cwd, source: 'compact' }, parseArgs(['--max-chars', String(m)]));
+      const body = out.slice(out.indexOf('...]\n') + 5);
+      const c = body.charCodeAt(0);
+      assert.ok(!(c >= 0xDC00 && c <= 0xDFFF), `max ${m}`);
+      assert.ok(out.length <= m);
+    }
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test('installer refuses (rc 1, nothing written) on a wrong-typed settings shape', () => {
+  for (const bad of [[], 'str', { hooks: [] }, { hooks: { SessionStart: {} } }]) {
+    const e = installerEnv();
+    try {
+      const text = JSON.stringify(bad);
+      writeFileSync(e.settings, text);
+      const r = e.run();
+      assert.equal(r.status, 1, `${text}: ${r.stdout}`);
+      assert.match(r.stderr, /refusing to rewrite/);
+      assert.equal(readFileSync(e.settings, 'utf8'), text);
+      assert.equal(existsSync(e.hooksDir), false);
+      assert.equal(readdirSync(e.home).length, 1);
+    } finally { e.done(); }
+  }
+});
+
+test('a personal re-inject hook in settings.local.json is detected too', () => {
+  const e = installerEnv();
+  try {
+    writeFileSync(join(e.home, 'settings.local.json'), JSON.stringify({ hooks: { SessionStart: [{ matcher: 'compact', hooks: [
+      { type: 'command', command: 'node restore-HANDOFF.mjs' }] }] } }));
+    const r = e.run();
+    assert.match(r.stdout, /already configured .*settings\.local\.json/);
+    assert.equal(existsSync(e.settings), false);
+  } finally { e.done(); }
+});
+
+test('uninstall drops an empty hooks object it emptied; status flags a missing hook file', () => {
+  const e = installerEnv();
+  try {
+    writeFileSync(e.settings, JSON.stringify({ theme: 'dark' }));
+    assert.match(e.run().stdout, /installed\./);
+    rmSync(join(e.hooksDir, 'agent-companion-reinject.mjs'));
+    assert.match(e.run('--status').stdout, /entry present but hook file missing/);
+    assert.match(e.run('--uninstall').stdout, /uninstalled/);
+    assert.deepEqual(JSON.parse(readFileSync(e.settings, 'utf8')), { theme: 'dark' });
   } finally { e.done(); }
 });
