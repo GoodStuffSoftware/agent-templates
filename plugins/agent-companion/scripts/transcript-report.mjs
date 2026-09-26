@@ -80,6 +80,8 @@ for (const e of report.gapsByViaTtl) {
 const ra = report.resumeAfterIdle;
 console.log(`  resumed after idle (prompt or message, gap > TTL): ${ra.count}, hit ${ra.hits}, rewrite ${ra.rewrites} `
   + `(idle-expiry ${ra.causes['idle-expiry']}) ${JSON.stringify(ra.byKindTtl)}`);
+console.log(`  guard (a) evidence: idle-expiry rewrites cost ${m(ra.idleExpiryRewriteTokens)} tokens, `
+  + `${usd(ra.idleExpiryRewriteUsd)}${ra.idleExpiryUnpricedTokens ? ` (+${m(ra.idleExpiryUnpricedTokens)} unpriced tokens)` : ''}`);
 console.log('');
 
 console.log('-- spawn baseline (first request of each subagent) --');
