@@ -200,7 +200,11 @@ whose.
 | `gate1_exempt` | boolean | applicable, but excused: the resolved `model` (post-autofill) classifies as the plugin's own cheapest known tier (haiku) per `config/model-tiers.json` |
 | `gate1_action` | `none` \| `warn` \| `block` | what THIS spawn actually got, after mode and exemption: `none` when not applicable, exempt, mode is `off`, or a `block`-mode spawn carried a `FOREGROUND:` justification |
 | `gate2_fired` | boolean | `name` and `isolation` were both set — per agent-teams.md this spawn is an ordinary subagent, not a teammate, despite being named |
-| `gate3_fired` | boolean | neither `name` nor `isolation` was set — this spawn shares the lead's own working tree and has no address to re-brief it later |
+| `gate3_fired` | boolean | neither `name` nor `isolation` was set (after namegate's own autofill, if any — see `gate4_action`) — this spawn shares the lead's own working tree and has no address to re-brief it later |
+| `gate4_applicable` | boolean | main-session caller, `run_in_background` explicitly `true`, no `name`, and `namegate` is on — the population namegate (track "namegate", operator decision 2026-09-25) considers |
+| `gate4_action` | `none` \| `hint` \| `autofill` | what THIS spawn actually got: `none` when not applicable; `hint` when applicable but `namegate_autofill` is off; `autofill` when the guard set `name` via `updatedInput` |
+| `name_autofilled` | boolean | `gate4_action === 'autofill'` — namegate set the spawn's name via `updatedInput` |
+| `name_effective` | string \| null | what the spawn actually ran under: `name` as declared, or namegate's autofilled name when `name_autofilled` is true |
 
 **`model: "(inherited)"` is the field that matters most.** It means no model
 was specified, so the spawn silently ran at the *lead's* tier. That is the

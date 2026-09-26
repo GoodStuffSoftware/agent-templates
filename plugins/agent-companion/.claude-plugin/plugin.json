@@ -156,6 +156,18 @@
       "description": "Tell the caller when a spawn has NEITHER a name NOR isolation: it runs in the lead's own working tree (can commit there, moving HEAD) and has no address to re-brief it later — the worst-of-both-worlds shape. Deliberately narrow (unnamed AND unisolated only, not every unisolated spawn — most unisolated spawns are harmless reads) so the notice stays rare enough to read rather than becoming background noise.",
       "default": true
     },
+    "namegate": {
+      "type": "boolean",
+      "title": "Namegate (background workers get a name)",
+      "description": "Operator decision 2026-09-25: every background worker gets a name. When a MAIN-SESSION spawn runs in the background (run_in_background: true) and names no worker, this advises (never blocks) that an unnamed background worker cannot be addressed by SendMessage afterward and is invisible to a peer list. Scope: main-session, explicitly-background spawns only — a spawn from inside a subagent, or one with no run_in_background field at all, is left alone (the hook has no reliable way to tell whether an omitted field defaults to background for a given session type). See namegate_autofill for the stronger behaviour.",
+      "default": true
+    },
+    "namegate_autofill": {
+      "type": "boolean",
+      "title": "Namegate autofill",
+      "description": "When namegate fires, also set a unique name (`<project>-<type>-<slug>`, sanitised to [A-Za-z0-9._-]) via updatedInput instead of only advising. Proven honoured by the harness (2026-09-25, live probe outside this repo: an injected `updatedInput.name` on a nameless background spawn was later reachable by SendMessage under that exact name). The autofilled worker's own brief gets a short addition naming itself, `main` as its lead, and this session's other already-named workers as peers. Off: namegate still advises, but never rewrites the spawn.",
+      "default": true
+    },
     "version_notice": {
       "type": "boolean",
       "title": "Version divergence notice",
