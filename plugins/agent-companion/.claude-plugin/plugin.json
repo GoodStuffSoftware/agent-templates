@@ -347,6 +347,12 @@
       "description": "Consecutive prior Monitor calls with the identical description that trip the hint on the next re-arm.",
       "default": 2
     },
+    "poll_guard_monitor_short_timeout_ms": {
+      "type": "number",
+      "title": "Poll guard: Monitor short-watch threshold (ms)",
+      "description": "A Monitor arm's own timeout_ms at or below this reads as a short-interval watch by construction; above it, a re-arm only counts toward the streak when it happened before that arm's own timeout could have naturally expired (a persistent/long watch re-armed after its own expiry is never counted).",
+      "default": 600000
+    },
     "poll_guard_tail_bytes": {
       "type": "number",
       "title": "Poll guard: transcript tail bytes",

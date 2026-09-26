@@ -12,7 +12,9 @@ import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
 import {
   evaluate, priorCallsOf, trailingNoopStreak, trailingSameDescriptionStreak,
+  hasInFlightLaunch, gatedMonitorStreak,
   POLL_TOOLS, DEFAULT_NOOP_STREAK, DEFAULT_SHORT_DELAY_S, DEFAULT_MONITOR_REARM_STREAK,
+  DEFAULT_MONITOR_SHORT_TIMEOUT_MS,
 } from '../hooks/lib/poll-guard.mjs';
 
 // --- pure logic --------------------------------------------------------------
@@ -70,6 +72,30 @@ test('trailingSameDescriptionStreak is case/whitespace-insensitive and stops at 
   assert.equal(trailingSameDescriptionStreak(calls, ''), 0);
 });
 
+// A background launch the harness will notify on completion, per the
+// review-b fix: this is the corroborating evidence that turns a short-delay
+// noop streak into an actual banned poll of harness-tracked work, rather
+// than a sanctioned watch on external state (findings 1/2,
+// tests/poll-guard-review-findings.test.mjs).
+function backgroundAgentLaunch(ts, name) {
+  return assistantToolUse('Agent', { subagent_type: 'general-purpose', run_in_background: true, ...(name ? { name } : {}) }, ts);
+}
+
+// The harness's own completion signal for a backgrounded Agent — verified
+// shape (scripts/lib/transcripts.mjs origin.kind === 'task-notification';
+// tests/standing-rules.test.mjs, tests/transcripts-fix.test.mjs):
+// `type:"user"`, `isMeta:true`, text wrapped as
+// `<task-notification><summary>Agent "NAME" completed</summary></task-notification>`.
+function taskNotification(name, ts) {
+  return {
+    type: 'user',
+    timestamp: ts,
+    isMeta: true,
+    origin: { kind: 'task-notification' },
+    message: { content: [{ type: 'text', text: `<task-notification>\n<summary>Agent "${name}" completed</summary>\n</task-notification>` }] },
+  };
+}
+
 test('evaluate: ScheduleWakeup with stop:true is never a poll, whatever the history', () => {
   const records = Array(5).fill(0).map((_, i) => assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, `t${i}`));
   const result = evaluate({ toolName: 'ScheduleWakeup', input: { stop: true }, records });
@@ -82,17 +108,95 @@ test('evaluate: ScheduleWakeup below the noop-streak threshold does not hint', (
   assert.equal(result, null, `1 prior noop should be below the default streak of ${DEFAULT_NOOP_STREAK}`);
 });
 
-test('evaluate: ScheduleWakeup at the noop-streak threshold AND a short delay hints, with a concrete streak count', () => {
+test('evaluate: ScheduleWakeup at the noop-streak threshold AND a short delay, with an in-flight background launch, hints with a concrete streak count', () => {
+  const records = [
+    backgroundAgentLaunch('t0'),
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't1'),
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't2'),
+  ];
+  const result = evaluate({ toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true, reason: 'poll', prompt: 'x' }, records });
+  assert.ok(result, 'expected a hint at the threshold with harness-tracked work in flight');
+  assert.equal(result.kind, 'schedule-wakeup-noop-streak');
+  assert.equal(result.streak, DEFAULT_NOOP_STREAK);
+  assert.match(result.hint, /one completion/i);
+  assert.match(result.hint, /2 consecutive no-op wakes/);
+});
+
+test('evaluate: the SAME noop streak with no in-flight background launch anywhere in the tail does not hint (FIX: finding 1, external-state polling)', () => {
   const records = [
     assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't1'),
     assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't2'),
   ];
   const result = evaluate({ toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true, reason: 'poll', prompt: 'x' }, records });
-  assert.ok(result, 'expected a hint at the threshold');
-  assert.equal(result.kind, 'schedule-wakeup-noop-streak');
-  assert.equal(result.streak, DEFAULT_NOOP_STREAK);
-  assert.match(result.hint, /one completion/i);
-  assert.match(result.hint, /2 consecutive no-op wakes/);
+  assert.equal(result, null, 'no corroborating harness-tracked launch: this must not fire the banned-poll hint');
+});
+
+test('evaluate: a backgrounded Bash task in flight is corroborating evidence too (not just Agent)', () => {
+  const records = [
+    assistantToolUse('Bash', { command: 'npm run build', run_in_background: true }, 't0'),
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't1'),
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't2'),
+  ];
+  const result = evaluate({ toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, records });
+  assert.ok(result, 'a backgrounded Bash launch is harness-tracked work in flight');
+});
+
+test('evaluate: a FOREGROUND Agent call (no run_in_background) is not in-flight evidence', () => {
+  const records = [
+    assistantToolUse('Agent', { subagent_type: 'general-purpose' }, 't0'), // no run_in_background: true
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't1'),
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't2'),
+  ];
+  const result = evaluate({ toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, records });
+  assert.equal(result, null, 'a foreground spawn already returned before this loop started; it is not in-flight work');
+});
+
+test('evaluate: a single 1200s+ idle-hold ScheduleWakeup never hints, even with in-flight background work (long fallback, not a poll)', () => {
+  const records = [
+    backgroundAgentLaunch('t0'),
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 1200, noop: true }, 't1'),
+  ];
+  const result = evaluate({ toolName: 'ScheduleWakeup', input: { delaySeconds: 1200, noop: true }, records });
+  assert.equal(result, null, 'a 1200s+ fallback delay is the tool\'s own long-wait guidance, not a poll cadence');
+});
+
+test('evaluate: a single long fallback wake (below the streak threshold) with in-flight work still does not hint', () => {
+  const records = [backgroundAgentLaunch('t0'), assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't1')];
+  const result = evaluate({ toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, records });
+  assert.equal(result, null, 'in-flight work alone is not sufficient without the streak too');
+});
+
+// FIX (main's follow-up on finding 1): "in flight" means launched AND NOT
+// YET COMPLETED. A launch whose own completion notification already
+// appears later in the tail is resolved -- it must not keep the hint alive
+// just because it happened at some point in the history.
+test('evaluate: a launch that already COMPLETED (its task-notification is in the tail) is not in-flight evidence -- no hint', () => {
+  const records = [
+    backgroundAgentLaunch('t0', 'worker-1'),
+    taskNotification('worker-1', 't1'),
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't2'),
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't3'),
+  ];
+  const result = evaluate({ toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, records });
+  assert.equal(result, null, 'launched then completed: nothing is actually in flight any more, so this reads as external-state polling');
+});
+
+test('evaluate: a launch that is STILL in flight (no matching completion) does hint, even with an unrelated completion present', () => {
+  const records = [
+    backgroundAgentLaunch('t0', 'worker-1'),
+    backgroundAgentLaunch('t1', 'worker-2'),
+    taskNotification('worker-1', 't2'), // resolves worker-1 only
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't3'),
+    assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't4'),
+  ];
+  const result = evaluate({ toolName: 'ScheduleWakeup', input: { delaySeconds: 60, noop: true }, records });
+  assert.ok(result, 'worker-2 is still outstanding: this is still harness-tracked work in flight');
+});
+
+test('hasInFlightLaunch: a named launch paired with its own completion resolves; an unrelated completion does not resolve a different name', () => {
+  assert.equal(hasInFlightLaunch([backgroundAgentLaunch('t0', 'worker-1'), taskNotification('worker-1', 't1')]), false);
+  assert.equal(hasInFlightLaunch([backgroundAgentLaunch('t0', 'worker-1'), taskNotification('worker-2', 't1')]), true);
+  assert.equal(hasInFlightLaunch([backgroundAgentLaunch('t0', 'worker-1')]), true, 'no completion at all: still outstanding');
 });
 
 test('evaluate: ScheduleWakeup with the same noop streak but a long delay does not hint (it reads as a deliberate fallback)', () => {
@@ -119,14 +223,14 @@ test('evaluate: a real streak-breaking noop:false in the middle resets the count
 });
 
 test('evaluate: caller-supplied thresholds are honoured (opts override defaults)', () => {
-  const records = [assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't1')];
+  const records = [backgroundAgentLaunch('t0'), assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't1')];
   const result = evaluate({
     toolName: 'ScheduleWakeup',
     input: { delaySeconds: 60, noop: true },
     records,
     opts: { noopStreak: 1 },
   });
-  assert.ok(result, 'a lowered threshold of 1 must fire on a single prior noop');
+  assert.ok(result, 'a lowered threshold of 1 must fire on a single prior noop, with harness-tracked work in flight');
 });
 
 test('evaluate: Monitor re-arming the identical description hits the default streak and hints', () => {
@@ -154,6 +258,64 @@ test('evaluate: Monitor with a genuinely different description each time never h
   assert.equal(result, null);
 });
 
+test('evaluate: a LONG-timeout Monitor re-armed genuinely early (elapsed < its own timeout_ms) still hints (FIX finding 2, positive branch)', () => {
+  const t0 = Date.parse('2026-08-25T00:00:00.000Z');
+  const t1 = t0 + 60000; // re-armed 60s later
+  const nowTs = t1 + 60000; // about to re-arm again 60s after that
+  const records = [
+    assistantToolUse('Monitor', { description: 'watch deploy', timeout_ms: 3600000 }, new Date(t0).toISOString()),
+    assistantToolUse('Monitor', { description: 'watch deploy', timeout_ms: 3600000 }, new Date(t1).toISOString()),
+  ];
+  const result = evaluate({
+    toolName: 'Monitor',
+    input: { description: 'watch deploy', timeout_ms: 3600000 },
+    records,
+    opts: { now: nowTs },
+  });
+  assert.ok(result, 'each rearm landed 60s after the prior one, far inside its 1h timeout: a real short-interval poll even though timeout_ms is long');
+  assert.equal(result.kind, 'monitor-rearm-streak');
+});
+
+test('evaluate: a LONG-timeout Monitor re-armed only after its own timeout naturally expired never hints (FIX finding 2, negative branch)', () => {
+  const HOUR_MS = 3600000;
+  const t0 = Date.parse('2026-08-25T00:00:00.000Z');
+  const t1 = t0 + HOUR_MS; // re-armed exactly when the prior watch's own timeout expired
+  const nowTs = t1 + HOUR_MS;
+  const records = [
+    assistantToolUse('Monitor', { description: 'watch deploy', persistent: true, timeout_ms: HOUR_MS }, new Date(t0).toISOString()),
+    assistantToolUse('Monitor', { description: 'watch deploy', persistent: true, timeout_ms: HOUR_MS }, new Date(t1).toISOString()),
+  ];
+  const result = evaluate({
+    toolName: 'Monitor',
+    input: { description: 'watch deploy', persistent: true, timeout_ms: HOUR_MS },
+    records,
+    opts: { now: nowTs },
+  });
+  assert.equal(result, null, 'each rearm only followed the prior watch\'s own long timeout naturally expiring: not a poll');
+});
+
+test('gatedMonitorStreak: a short timeout_ms counts as a short watch regardless of the measured gap', () => {
+  const calls = [{ input: { timeout_ms: 60000 }, ts: '2026-01-01T00:00:00.000Z' }];
+  const streak = gatedMonitorStreak(calls, Date.parse('2026-06-01T00:00:00.000Z'), { shortTimeoutMs: DEFAULT_MONITOR_SHORT_TIMEOUT_MS });
+  assert.equal(streak, 1);
+});
+
+test('gatedMonitorStreak: an unparseable timestamp with a long timeout fails open (does not count)', () => {
+  const calls = [{ input: { timeout_ms: 3600000 }, ts: 'not-a-date' }];
+  const streak = gatedMonitorStreak(calls, Date.now(), { shortTimeoutMs: DEFAULT_MONITOR_SHORT_TIMEOUT_MS });
+  assert.equal(streak, 0, 'no timestamp evidence and a non-short timeout: cannot show it was early, so it must not count');
+});
+
+test('hasInFlightLaunch: true for a backgrounded Agent, Bash, or Monitor call; false for none of those', () => {
+  assert.equal(hasInFlightLaunch([]), false);
+  assert.equal(hasInFlightLaunch([assistantToolUse('Agent', { run_in_background: true }, 't1')]), true);
+  assert.equal(hasInFlightLaunch([assistantToolUse('Agent', {}, 't1')]), false, 'no run_in_background: true is a foreground (already-returned) call');
+  assert.equal(hasInFlightLaunch([assistantToolUse('Bash', { run_in_background: true }, 't1')]), true);
+  assert.equal(hasInFlightLaunch([assistantToolUse('Bash', {}, 't1')]), false);
+  assert.equal(hasInFlightLaunch([assistantToolUse('Monitor', { description: 'x' }, 't1')]), true);
+  assert.equal(hasInFlightLaunch([assistantToolUse('ScheduleWakeup', { delaySeconds: 60 }, 't1')]), false);
+});
+
 test('evaluate: an unrecognised tool name is never evaluated', () => {
   assert.equal(evaluate({ toolName: 'Bash', input: {}, records: [] }), null);
 });
@@ -171,8 +333,9 @@ test('hook: fires a systemMessage hint and still allows, on a noop-streak Schedu
   try {
     mkdirSync(dir, { recursive: true });
     const transcriptPath = writeTranscript(dir, [
-      assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true, reason: 'poll', prompt: 'x' }, '2026-01-01T00:00:00Z'),
-      assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true, reason: 'poll', prompt: 'x' }, '2026-01-01T00:01:00Z'),
+      backgroundAgentLaunch('2026-01-01T00:00:00Z'),
+      assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true, reason: 'poll', prompt: 'x' }, '2026-01-01T00:00:05Z'),
+      assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true, reason: 'poll', prompt: 'x' }, '2026-01-01T00:01:05Z'),
     ]);
     const payload = {
       session_id: 'poll-guard-hook-1',
@@ -300,7 +463,8 @@ test('hook: thresholds are configurable via plugin options', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const transcriptPath = writeTranscript(dir, [
-      assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, 't1'),
+      backgroundAgentLaunch('2026-01-01T00:00:00Z'),
+      assistantToolUse('ScheduleWakeup', { delaySeconds: 60, noop: true }, '2026-01-01T00:00:05Z'),
     ]);
     const payload = {
       session_id: 'poll-guard-hook-7',
