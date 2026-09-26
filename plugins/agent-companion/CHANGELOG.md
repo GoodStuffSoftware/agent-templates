@@ -2,6 +2,27 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.11 — 2026-09-25
+
+- Added `scripts/transcript-report.mjs`, a read-only report of transcript tokens. It shows:
+  - price-derived cost;
+  - compactions;
+  - the gap between requests, split by what connected them (tool result, prompt, message from another agent, harness record) and the cache TTL that applied, with each rewrite's cause (cache expired while idle, prompt prefix changed, compaction);
+  - the resumes after idle;
+  - the spawn baseline per subagent type;
+  - context growth.
+  `--json` gives the full object. `--max-ms` reads the newest transcripts first and reports how many it skipped.
+- Added `scripts/lib/transcripts.mjs`, the one transcript reader. cache-ttl, transcript-harvest, the telemetry-coverage check and the model-mismatch check all read through it. Its dedup rules are written down and tested.
+- Changed (behaviour): cache-ttl's main-session request count drops. It used to count three things wrongly:
+  - a request re-logged later in the same transcript counted as an extra request with a negative gap;
+  - a request copied into a resumed or forked transcript counted once per copy;
+  - a request with no prompt or tool result of its own reused the previous one's start time.
+  Within-file re-logs and cross-file copies are now counted once. On one measured 30-day window, 26,815 main-session requests became 25,364; subagent figures were unchanged. A copied request now belongs to its original transcript and carries the largest usage of any copy.
+- Changed (behaviour): transcript-harvest now fills trigger and token counts for compaction summaries it used to leave empty (attachment records sitting between a compaction boundary and its summary).
+- Fixed: a transcript that starts with a UTF-8 byte-order mark no longer loses its first record.
+- Added prices for claude-opus-4-7 ($5 in / $25 out) and claude-sonnet-4-6 ($3 / $15), both at 0.1x cache read, from a live read of Anthropic's pricing page on 2026-09-25 (provenance in `config/model-pricing.json`). Their requests were previously left out of every cost total.
+- Pricing moved to `scripts/lib/pricing.mjs`. cache-ttl.mjs re-exports it, so its API is unchanged.
+
 ## 0.29.10 — 2026-09-25
 
 - Added: optional "Compact instructions" block for CLAUDE.md (`scripts/install-compact-instructions.mjs`, offered by `/ac setup`, which shows the exact block and asks first). It tells automatic compaction to keep the current task, open decisions, file paths and branches, and where the session's handoff/state file lives. Flags `--print`, `--status`, `--dry-run`, `--uninstall`, `--force`, `--target`. Defaults to the user-level CLAUDE.md and says plainly that the docs describe the project-root CLAUDE.md (`--target <repo>/CLAUDE.md`). Install then uninstall restores the file byte for byte, and removes it if install created it. No PreCompact hook ships: per the hooks docs a PreCompact hook can only block compaction, not steer the summary.
