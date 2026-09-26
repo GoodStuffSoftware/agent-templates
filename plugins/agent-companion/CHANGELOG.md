@@ -2,6 +2,11 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.10 — 2026-09-25
+
+- Added: optional "Compact instructions" block for CLAUDE.md (`scripts/install-compact-instructions.mjs`, offered by `/ac setup`, which shows the exact block and asks first). It tells automatic compaction to keep the current task, open decisions, file paths and branches, and where the session's handoff/state file lives. Flags `--print`, `--status`, `--dry-run`, `--uninstall`, `--force`, `--target`. Defaults to the user-level CLAUDE.md and says plainly that the docs describe the project-root CLAUDE.md (`--target <repo>/CLAUDE.md`). Install then uninstall restores the file byte for byte, and removes it if install created it. No PreCompact hook ships: per the hooks docs a PreCompact hook can only block compaction, not steer the summary.
+- Changed: the opt-in installers (compact instructions, and 0.29.8's re-inject hook) name their backups `<file>.bak-agent-companion-<timestamp>` and keep only the newest 3 of those; any other backup, including plain `.bak-<timestamp>` files written by 0.29.8, is never touched. They check the target is writable before backing up, and do nothing when imported.
+
 ## 0.29.9 — 2026-09-25
 
 A background worker spawned from the main session with no name now gets one.
