@@ -328,8 +328,11 @@ itself. A PreCompact hook cannot do that (it can only block compaction), so
 the documented mechanism is a `# Compact instructions` section in CLAUDE.md.
 Not installed by default: run `--print`, SHOW the operator the exact block
 (4 body lines, paid at every session start), and run the installer only
-after a yes. Default target is the user-level `~/.claude/CLAUDE.md`
-(`--target <path>` for a project's). If a `Compact instructions` section
+after a yes. Default target is the user-level `~/.claude/CLAUDE.md`, and
+tell the operator plainly: the docs describe Compact instructions in the
+project-root CLAUDE.md; the user-level file is in context at compaction but
+not documented to steer it. For the documented path use
+`--target <repo>/CLAUDE.md` (it then shows up in git). If a `Compact instructions` section
 already exists it installs nothing (`--force` overrides). For a manual
 compaction, `/compact <focus>` steers that one summary without this.
 

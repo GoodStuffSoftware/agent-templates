@@ -5,9 +5,12 @@
 // imported; the installer runs as a child process.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, chmodSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
+import { pruneBackups } from '../scripts/lib/backup-file.mjs';
 import { runScript } from './helpers.mjs';
 import { BEGIN, END, BODY, BLOCK_LINES, inspect, withBlock, withoutBlock } from '../scripts/lib/compact-instructions.mjs';
 
@@ -61,7 +64,7 @@ test('install into a missing file, then status, idempotent re-run, uninstall', (
     assert.equal(readFileSync(s.target, 'utf8'), before);
     r = s.run('--uninstall');
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(readFileSync(s.target, 'utf8'), '');
+    assert.equal(existsSync(s.target), false, 'install created it, so uninstall removes it');
     assert.match(s.run('--uninstall').stdout, /nothing to uninstall/);
   } finally { s.done(); }
 });
@@ -106,7 +109,109 @@ test('--print shows the exact block and writes nothing', () => {
   const s = sandbox();
   try {
     const r = s.run('--print');
-    assert.equal(r.stdout.trim(), BLOCK_LINES.join('\n'));
+    assert.ok(r.stdout.startsWith(`${BLOCK_LINES.join('\n')}\n`), r.stdout);
     assert.equal(existsSync(s.target), false);
   } finally { s.done(); }
+});
+
+const SHAPES = ['', 'abc', 'abc\n', 'abc\n\n', 'abc\n\n\n', '\n', '\n\n', 'a\r\nb', 'a\r\nb\r\n', 'a\r\nb\r\n\r\n', '﻿# x\n', '﻿'];
+
+test('F3 pure round trip is byte-identical for every trailing-newline shape', () => {
+  for (const t of SHAPES) {
+    const w = withBlock(t);
+    assert.equal(inspect(w).state, 'ours', JSON.stringify(t));
+    assert.equal(withBlock(w), w, `idempotent ${JSON.stringify(t)}`);
+    assert.equal(withoutBlock(w), t, `round trip ${JSON.stringify(t)}`);
+  }
+});
+
+test('F3 installer round trip is byte-identical on disk for every shape', () => {
+  for (const t of SHAPES) {
+    const s = sandbox();
+    try {
+      writeFileSync(s.target, t);
+      assert.equal(s.run().status, 0);
+      assert.equal(s.run('--uninstall').status, 0);
+      assert.equal(existsSync(s.target), true, `existing file kept: ${JSON.stringify(t)}`);
+      assert.equal(readFileSync(s.target, 'utf8'), t, JSON.stringify(t));
+    } finally { s.done(); }
+  }
+});
+
+test('F4 uninstall removes a file install created, keeps a pre-existing empty one', () => {
+  const s = sandbox();
+  try {
+    assert.equal(s.run().status, 0);
+    assert.equal(s.run('--uninstall').status, 0);
+    assert.equal(existsSync(s.target), false);
+    writeFileSync(s.target, '');
+    s.run(); s.run('--uninstall');
+    assert.equal(existsSync(s.target), true);
+    assert.equal(readFileSync(s.target, 'utf8'), '');
+    // Created, then the operator added text: the file stays with their text.
+    rmSync(s.target); s.run();
+    writeFileSync(s.target, `${readFileSync(s.target, 'utf8')}mine\n`);
+    s.run('--uninstall');
+    assert.equal(readFileSync(s.target, 'utf8'), 'mine\n');
+  } finally { s.done(); }
+});
+
+test('F2 the block names no operator-specific files and stays <= ~400 chars', () => {
+  const text = BLOCK_LINES.join('\n');
+  assert.doesNotMatch(text, /SESSION-STATE|HANDOFF[.]md/);
+  assert.ok(text.length <= 420, `${text.length} chars`);
+});
+
+test('F1 --print and --status on the default target state the documented path', () => {
+  const s = sandbox();
+  try {
+    const env = { HOME: s.home, USERPROFILE: s.home, CLAUDE_CONFIG_DIR: join(s.home, '.claude') };
+    assert.match(runScript(SCRIPT, ['--print'], { env }).stdout, /project-root CLAUDE[.]md.*--target <repo>\/CLAUDE[.]md/s);
+    assert.match(runScript(SCRIPT, ['--status'], { env }).stdout, /not documented to steer it/);
+    assert.equal(existsSync(join(s.home, '.claude', 'CLAUDE.md')), false);
+  } finally { s.done(); }
+});
+
+test('F5 backups: newest 3 per target are kept, older ones pruned', () => {
+  const s = sandbox();
+  try {
+    writeFileSync(s.target, 'x\n');
+    for (let i = 0; i < 4; i += 1) { s.run(); s.run('--uninstall'); }
+    const baks = readdirSync(s.home).filter((f) => f.startsWith('CLAUDE.md.bak-'));
+    assert.equal(baks.length, 3, baks.join(','));
+    writeFileSync(join(s.home, 'other.md.bak-2000'), '');
+    for (const n of ['1999', '2001', '2002', '2003']) writeFileSync(join(s.home, `CLAUDE.md.bak-${n}`), '');
+    pruneBackups(s.target, 3);
+    assert.equal(readdirSync(s.home).filter((f) => f.startsWith('CLAUDE.md.bak-')).length, 3);
+    assert.ok(existsSync(join(s.home, 'other.md.bak-2000')), 'other targets untouched');
+  } finally { s.done(); }
+});
+
+test('F6 a read-only target: exit 1, file untouched, no backup written', () => {
+  const s = sandbox();
+  try {
+    writeFileSync(s.target, 'ro\n');
+    chmodSync(s.target, 0o444);
+    const r = s.run();
+    assert.equal(r.status, 1, r.stdout);
+    assert.equal(readFileSync(s.target, 'utf8'), 'ro\n');
+    assert.equal(readdirSync(s.home).filter((f) => f.includes('.bak-')).length, 0);
+  } finally { chmodSync(s.target, 0o666); s.done(); }
+});
+
+test('F7 importing either installer runs nothing and writes nothing', () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  for (const f of ['scripts/install-compact-instructions.mjs', 'scripts/install-reinject-hook.mjs']) {
+    const home = mkdtempSync(join(tmpdir(), 'ac-import-'));
+    try {
+      const url = pathToFileURL(join(root, f)).href;
+      const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(url)}); console.log('IMPORTED');`], {
+        cwd: home, encoding: 'utf8', windowsHide: true,
+        env: { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: join(home, '.claude') },
+      });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout.trim(), 'IMPORTED', f);
+      assert.deepEqual(readdirSync(home), [], f);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }
 });

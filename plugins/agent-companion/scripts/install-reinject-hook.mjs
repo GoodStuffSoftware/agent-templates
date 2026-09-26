@@ -27,6 +27,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claudeDir } from '../hooks/lib/context.mjs';
 import { backupFile as backup } from './lib/backup-file.mjs';
+import { isMain } from './lib/is-main.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -112,7 +113,8 @@ function hookArgs() {
   return args;
 }
 
-try {
+// CLI only when run directly: importing this file runs and writes nothing.
+if (isMain(import.meta.url)) try {
   let settings;
   try { settings = loadSettings(); } catch (e) {
     console.error(`install-reinject-hook: cannot parse ${settingsPath}: ${e.message}; nothing written.`);
