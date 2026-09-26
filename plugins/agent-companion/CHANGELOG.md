@@ -2,6 +2,15 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.17 — 2026-09-26
+
+- Behaviour change: `ac-opus-medium`, `ac-opus-high`, `ac-opus-xhigh` and `ac-opus-max` now use a 1-hour prompt cache (`experimental.cacheTtl: "1h"` in their generated frontmatter, from `config/model-tiers.json` `ladder[].cacheTtl`). `ac-opus-low` and every sonnet/haiku rung stay on the 5-minute default.
+  - Why: architecture and review work on these rungs waits on long tool calls inside a task, and the measured 1h saving came from long-lived Opus architects/reviewers.
+  - Takes effect after the plugin update and a session restart; an already-running session keeps the definitions it loaded.
+- Resume doctrine: these four rungs stay warm for up to an hour between turns, so resuming one within that hour is cheap; the others still go cold after 5 minutes.
+- `routing-table.mjs --check-agent-descriptions` / `--sync-agent-descriptions` also check and generate that `experimental.cacheTtl` block (new `cache-ttl-drift` problem). `docs/ROUTING.md`'s effort-ladder table has a Cache TTL column.
+- The agent-defs check and the `cache-ttl.mjs` verdict treat these four rungs as intended: the check no longer flags them, and the verdict lists a rung already on 1h as "already on ... (no action needed)" instead of recommending it again. The per-rung data floor still applies first.
+
 ## 0.29.16 — 2026-09-26
 
 - Behaviour change: `cache-ttl.mjs` totals and `audit --only cache-ttl` now exclude experiment projects by default — the benchmark projects plus any project inside the system temp dir (a real repo merely named like `temp-tools` is not excluded). Both outputs say how many projects were excluded; `--include-experiments` counts them.
