@@ -383,10 +383,16 @@ export function isCompactSummary(rec) {
 
 // Pairs a compact_boundary with the summary user record that follows it.
 // feed(rec) returns a finished event { boundary, summary } when rec is a
-// summary (boundary is null when no boundary came immediately before it),
-// or null otherwise. A user record straight after a boundary counts as the
-// summary even without the flag or the wording. Any other record in between
-// breaks the pairing. flush() returns a boundary that no summary followed.
+// summary (boundary is null when no boundary came before it), or null
+// otherwise. A user record after a boundary counts as the summary even
+// without the flag or the wording. Only conversation records (user,
+// assistant, system) break the pairing: newer transcripts write attachment
+// records between the boundary and the summary (measured: 2-3 of them, in
+// about a third of recent compactions), and an adjacency-only rule split
+// each of those into a boundary with no summary plus a summary with no
+// trigger or token counts. flush() returns a boundary no summary followed.
+const PAIRING_TYPES = new Set(['user', 'assistant', 'system']);
+
 export class CompactionTracker {
   constructor() { this.pending = null; }
 
@@ -396,6 +402,7 @@ export class CompactionTracker {
       this.pending = rec;
       return orphan ? { boundary: orphan, summary: null } : null;
     }
+    if (this.pending && !PAIRING_TYPES.has(rec && rec.type)) return null;
     if (rec && rec.type === 'user' && (this.pending || isCompactSummary(rec))) {
       const ev = { boundary: this.pending, summary: rec };
       this.pending = null;
@@ -428,6 +435,7 @@ function compactionFromEvent(ev, index) {
     durationMs: meta.durationMs ?? null,
     hasBoundary: !!ev.boundary,
     hasSummary: !!ev.summary,
+    duplicate: false,
     requestsBefore: 0,
     requestsAfter: 0,
     firstRequestAfter: null, // { contextTokens, cacheRead, cacheWrite, model } of the next new request
@@ -516,6 +524,12 @@ export async function readTranscript(path, opts = {}) {
   const onCompaction = (ev) => {
     const c = compactionFromEvent(ev, compactions.length);
     c.requestsBefore = requests.filter((r) => !r.duplicate).length;
+    // D4 for compactions: a copied history carries the same boundary record.
+    const cKey = ev.boundary?.uuid || ev.summary?.uuid;
+    if (seen && cKey) {
+      const k = `compaction:${cKey}`;
+      if (seen.has(k)) { c.duplicate = true; stats.crossFileDuplicates += 1; } else seen.add(k);
+    }
     if (opts.keepSummaries) {
       c.summaryRecord = ev.summary || null;
       c.boundaryRecord = ev.boundary || null;

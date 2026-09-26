@@ -1,0 +1,194 @@
+// transcript-report — corpus-wide numbers from lib/transcripts.mjs, for a
+// person to read (scripts/transcript-report.mjs) and for later consumers
+// (the cache/compaction advisor, the calibrator) to build on.
+//
+// Every dollar figure here is PRICE-DERIVED: list price x tokens, from
+// config/model-pricing.json through lib/pricing.mjs. It is labelled
+// basis: 'price-derived' at every level it appears. A consumer that has a
+// measured cost (bench results' cost_usd) passes its own `costOf` and its
+// basis label replaces this one — that is the seam; nothing else changes.
+
+import {
+  scanCorpus, gapsOf, spawnBaselineOf, percentile, emptyUsage, addUsage,
+} from './transcripts.mjs';
+import { priceUsage, PRICE_BASIS } from './pricing.mjs';
+
+// Resume-gap histogram buckets (upper bound exclusive). 5m and 60m are the
+// two prompt-cache TTLs, so both are bucket edges.
+export const GAP_BUCKETS = [
+  { label: '<1m', toMs: 60 * 1000 },
+  { label: '1-5m', toMs: 5 * 60 * 1000 },
+  { label: '5-10m', toMs: 10 * 60 * 1000 },
+  { label: '10-30m', toMs: 30 * 60 * 1000 },
+  { label: '30-60m', toMs: 60 * 60 * 1000 },
+  { label: '1-2h', toMs: 2 * 60 * 60 * 1000 },
+  { label: '2-6h', toMs: 6 * 60 * 60 * 1000 },
+  { label: '>=6h', toMs: Infinity },
+];
+
+function bucketFor(gapMs) {
+  for (const b of GAP_BUCKETS) if (gapMs < b.toMs) return b.label;
+  return GAP_BUCKETS[GAP_BUCKETS.length - 1].label;
+}
+
+const sorted = (xs) => [...xs].sort((a, b) => a - b);
+const pct = (xs, p) => percentile(sorted(xs), p);
+
+function defaultCostOf(usage, model) {
+  const r = priceUsage(usage, model);
+  return r ? { usd: r.usd, alias: r.alias, basis: r.basis } : null;
+}
+
+// buildTranscriptReport(opts) -> report object (see scripts/transcript-report.mjs
+// for the fields as printed). Options:
+//   root, days (30), now (Date), workflows (false), crossFileDedup (true),
+//   maxFiles, maxBytes, maxMs, costOf(usage, model) -> { usd, alias, basis } | null
+export async function buildTranscriptReport({
+  root, days = 30, now = new Date(), workflows = false, crossFileDedup = true,
+  maxFiles, maxBytes, maxMs = null, costOf = defaultCostOf,
+} = {}) {
+  const nowMs = now.getTime();
+  const sinceMs = nowMs - days * 86400000;
+  const inWindow = (ts) => Number.isFinite(ts) && ts >= sinceMs && ts <= nowMs;
+
+  const perModel = new Map();
+  const dedup = {
+    reloggedLines: 0, duplicateUuidLines: 0, crossFileDuplicates: 0, syntheticLines: 0,
+    unparseableLines: 0, truncatedTails: 0,
+  };
+  const files = { main: 0, subagent: 0, withRequests: 0 };
+  const compaction = { count: 0, byTrigger: {}, byKind: {}, pre: [], post: [], firstAfter: [], requestsAfter: [] };
+  const gapBuckets = new Map(GAP_BUCKETS.map((b) => [b.label, {
+    label: b.label, count: 0, hits: 0, rewrites: 0, rereadTokens: 0, rewriteTokens: 0, afterCompaction: 0,
+  }]));
+  const spawn = new Map();
+  const peaks = [];
+  const growth = [];
+  let basis = null;
+
+  const scan = await scanCorpus({
+    root, sinceMs, maxFiles, maxBytes, maxMs, workflows, crossFileDedup,
+    onFile: (res) => {
+      const s = res.stats;
+      dedup.reloggedLines += s.reloggedLines;
+      dedup.duplicateUuidLines += s.duplicateUuidLines;
+      dedup.crossFileDuplicates += s.crossFileDuplicates;
+      dedup.syntheticLines += s.syntheticLines;
+      dedup.unparseableLines += s.unparseable;
+      if (s.truncatedTail) dedup.truncatedTails += 1;
+      if (res.file.kind === 'main') files.main += 1; else if (res.file.kind === 'subagent') files.subagent += 1;
+
+      const own = res.requests.filter((r) => !r.duplicate && inWindow(r.startTs));
+      if (own.length) files.withRequests += 1;
+      for (const r of own) {
+        const key = r.model || '(no model)';
+        if (!perModel.has(key)) {
+          perModel.set(key, { model: key, alias: null, requests: 0, mainRequests: 0, subagentRequests: 0, usage: emptyUsage(), usd: 0, priced: false });
+        }
+        const row = perModel.get(key);
+        row.requests += 1;
+        if (r.kind === 'main') row.mainRequests += 1; else row.subagentRequests += 1;
+        addUsage(row.usage, r.usage);
+        const c = costOf(r.usage, r.model);
+        if (c) {
+          row.usd += c.usd;
+          row.priced = true;
+          row.alias = c.alias ?? row.alias;
+          basis = basis || c.basis;
+        }
+      }
+
+      // Context growth: peak per file, and per-request growth inside one
+      // compaction epoch (a compaction resets context, so its drop is not
+      // "growth").
+      if (own.length) peaks.push(Math.max(...own.map((r) => r.contextTokens)));
+      for (let i = 1; i < own.length; i++) {
+        if (own[i].compactionsBefore === own[i - 1].compactionsBefore) growth.push(own[i].contextTokens - own[i - 1].contextTokens);
+      }
+
+      for (const c of res.compactions) {
+        if (c.duplicate || !inWindow(c.ts)) continue;
+        compaction.count += 1;
+        const trig = c.trigger || '(unrecorded)';
+        compaction.byTrigger[trig] = (compaction.byTrigger[trig] || 0) + 1;
+        compaction.byKind[res.file.kind] = (compaction.byKind[res.file.kind] || 0) + 1;
+        if (c.preTokens != null) compaction.pre.push(c.preTokens);
+        if (c.postTokens != null) compaction.post.push(c.postTokens);
+        if (c.firstRequestAfter) compaction.firstAfter.push(c.firstRequestAfter.contextTokens);
+        compaction.requestsAfter.push(c.requestsAfter);
+      }
+
+      for (const g of gapsOf(res.requests)) {
+        const r = res.requests[g.index];
+        if (!inWindow(r.startTs)) continue;
+        const b = gapBuckets.get(bucketFor(g.gapMs));
+        b.count += 1;
+        b.rereadTokens += g.rereadTokens;
+        if (g.afterCompaction) b.afterCompaction += 1;
+        if (g.outcome === 'hit') b.hits += 1;
+        else { b.rewrites += 1; b.rewriteTokens += g.cacheWrite; }
+      }
+
+      const sb = spawnBaselineOf(res);
+      if (sb && inWindow(sb.ts)) {
+        const k = sb.agentType || '(unknown)';
+        if (!spawn.has(k)) spawn.set(k, { agentType: k, count: 0, context: [], cacheWrite: [], cacheRead: [] });
+        const e = spawn.get(k);
+        e.count += 1;
+        e.context.push(sb.contextTokens);
+        e.cacheWrite.push(sb.cacheWrite);
+        e.cacheRead.push(sb.cacheRead);
+      }
+    },
+  });
+
+  const models = [...perModel.values()]
+    .map((r) => ({ ...r, usd: r.priced ? r.usd : null }))
+    .sort((a, b) => b.requests - a.requests);
+  const totals = { requests: 0, usage: emptyUsage(), usd: 0, unpricedRequests: 0 };
+  for (const r of models) {
+    totals.requests += r.requests;
+    addUsage(totals.usage, r.usage);
+    if (r.usd == null) totals.unpricedRequests += r.requests; else totals.usd += r.usd;
+  }
+
+  return {
+    generatedAt: new Date(nowMs).toISOString(),
+    windowDays: days,
+    costBasis: basis || PRICE_BASIS,
+    options: { workflows, crossFileDedup },
+    scan: {
+      rootExists: scan.exists, filesFound: scan.filesFound, filesRead: scan.filesRead, truncated: scan.truncated,
+      wallMs: scan.wallMs, mainFiles: files.main, subagentFiles: files.subagent, filesWithRequestsInWindow: files.withRequests,
+    },
+    dedup,
+    totals,
+    perModel: models,
+    compactions: {
+      count: compaction.count,
+      byTrigger: compaction.byTrigger,
+      byKind: compaction.byKind,
+      preTokensP50: pct(compaction.pre, 50),
+      postTokensP50: pct(compaction.post, 50),
+      firstContextAfterP50: pct(compaction.firstAfter, 50),
+      requestsAfterP50: pct(compaction.requestsAfter, 50),
+    },
+    resumeGaps: [...gapBuckets.values()],
+    spawnBaseline: [...spawn.values()]
+      .map((e) => ({
+        agentType: e.agentType,
+        count: e.count,
+        contextP50: pct(e.context, 50),
+        contextP90: pct(e.context, 90),
+        cacheWriteP50: pct(e.cacheWrite, 50),
+        cacheReadP50: pct(e.cacheRead, 50),
+      }))
+      .sort((a, b) => b.count - a.count),
+    context: {
+      filePeakP50: pct(peaks, 50),
+      filePeakP90: pct(peaks, 90),
+      growthPerRequestP50: pct(growth, 50),
+      growthPerRequestMean: growth.length ? growth.reduce((a, b) => a + b, 0) / growth.length : null,
+    },
+  };
+}
