@@ -2,6 +2,20 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.14 — 2026-09-26
+
+- Added `scripts/cache-advisor.mjs`, the break-even auto-compact window advisor. It finds the window that costs least for each model, and the one value for your model mix, from a replay of your own transcripts. Benchmark transcripts are excluded from real traffic.
+  - It shows a 1% and a 5% band, the same result with the rework term off, a closed-form cross-check and a fit check.
+  - It prints the recommendation as the value to type: `/autocompact 275k`, or the settings.json integer `275000`. A window W set this way compacts at about W − 33K.
+  - It also shows where each model's cache money goes and the cold first-request cost of each subagent type.
+  - Dollar figures are API list price. It is advice only and never writes settings.json.
+- The advisor reports the window Claude Code actually applies, resolved the way Claude Code does: the environment variable first, then managed, local project, shared project and user settings. A settings value must be an integer from 100000 to 1000000; anything else (for example the string `"400k"`) is silently ignored by Claude Code and the default applies. The advisor warns loudly when a value you configured is ignored.
+- Added the `cache-advisor` audit check. Its reading is bounded by the new `cache_advisor_max_ms` option (20 s by default, newest files first).
+  - It warns when the window in effect costs more than 5% above the cheapest, or when a configured value is ignored.
+  - A read cut short by the time budget is labelled PARTIAL with what it covers, and never replaces a saved full-read summary.
+- `/ac recommend` now prints an `auto-compact:` line quoting the last advisor run for the model the alias resolves to, with the run's date and whether it was a full or partial read.
+- Added `config/compaction.json`: context windows, default auto-compact points (about 967K on 1M models, about 167K on 200K models) and the 33K compaction reserve, with sources.
+
 ## 0.29.13 — 2026-09-26
 
 - Added the polling-wakes guard (cache-advisor guard b), a PreToolUse hook on ScheduleWakeup and Monitor. It is advisory only and never blocks. It names the doctrine "one completion wait, never per-item wakes" when recent wakes look like a short-interval poll producing no new work:
