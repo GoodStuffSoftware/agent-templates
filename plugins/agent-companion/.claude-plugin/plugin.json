@@ -117,7 +117,7 @@
     "compact_window_drift_pct": {
       "type": "number",
       "title": "Auto-compact window drift threshold (%)",
-      "description": "The daily scout raises `compact_window_drift` when the cache advisor's newest FULL-read recommended auto-compact window differs from the baseline recommendation by more than this percentage. The baseline is the first full read and moves to the newest one each time the signal fires. Partial (time-budgeted) reads never count. Reads only the advisor's saved numbers-only history, never transcripts.",
+      "description": "The daily scout raises `compact_window_drift` when the cache advisor's newest FULL-read recommended auto-compact window differs from the baseline recommendation by more than this percentage. The baseline is the first full read and moves to the newest one each time the signal fires. Partial (time-budgeted) reads never count. Reads only the advisor's saved numbers-only history, never transcripts. A value that is not a finite number of 0 or more falls back to 20.",
       "default": 20
     },
     "fit_guard": {

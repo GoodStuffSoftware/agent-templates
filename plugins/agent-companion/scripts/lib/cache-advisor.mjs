@@ -93,13 +93,13 @@
 // inflates requests per turn. isBenchProject() excludes them before reading;
 // the report says how many were left out.
 
-import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, renameSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { scanCorpus, gapsOf, spawnBaselineOf, percentile } from './transcripts.mjs';
 import { pricingTable, classifyPricing, priceUsage } from './pricing.mjs';
-import { stateRoot, stateDir, claudeDir, dataDir } from '../../hooks/lib/context.mjs';
+import { stateRoot, stateDir, claudeDir, dataDir, writeJsonAtomic } from '../../hooks/lib/context.mjs';
 
 export const ADVISOR_SUMMARY_FILE = 'cache-advisor.json';
 const MIN_PARAM_SAMPLES = 3;
@@ -1120,11 +1120,43 @@ export function historyEntryOf(s) {
   };
 }
 
+// The history lives in two copies written atomically: the file and a `.bak`
+// mirror. A copy that fails to parse is renamed aside (`.corrupt-<ms>`) with a
+// one-line warning instead of being overwritten, and the other copy is used. A
+// main file whose entries are a strict prefix of the mirror's lost an update
+// (a writer persisted a stale read), so the mirror's entries win and the main
+// file's anchor is kept.
+const readHistoryCopy = (file) => {
+  if (!existsSync(file)) return null;
+  let h;
+  try { h = JSON.parse(readFileSync(file, 'utf8')); } catch (e) {
+    if (e instanceof SyntaxError) {
+      const aside = `${file}.corrupt-${Date.now()}`;
+      try { renameSync(file, aside); process.stderr.write(`agent-companion: unreadable ${file} kept as ${aside}; using the other copy or starting fresh\n`); } catch { /* leave it in place */ }
+    }
+    return null;
+  }
+  return h && Array.isArray(h.entries) ? h : null;
+};
+
 export function loadAdvisorHistory(dir = stateDir()) {
   try {
-    const h = JSON.parse(readFileSync(join(dir, ADVISOR_HISTORY_FILE), 'utf8'));
-    return h && Array.isArray(h.entries) ? h : null;
+    const file = join(dir, ADVISOR_HISTORY_FILE);
+    const m = readHistoryCopy(file);
+    const b = readHistoryCopy(`${file}.bak`);
+    if (!m) return b;
+    if (b && b.entries.length > m.entries.length
+      && JSON.stringify(b.entries.slice(0, m.entries.length)) === JSON.stringify(m.entries)) {
+      return { ...m, entries: b.entries };
+    }
+    return m;
   } catch { return null; }
+}
+
+function writeAdvisorHistory(h, dir) {
+  const file = join(dir, ADVISOR_HISTORY_FILE);
+  writeJsonAtomic(file, h);
+  writeJsonAtomic(`${file}.bak`, h);
 }
 
 // Appends a FULL-read entry; a partial read never touches the history.
@@ -1135,29 +1167,32 @@ export function appendAdvisorHistory(summary, dir = stateDir()) {
   h.entries.push(e);
   if (h.entries.length > ADVISOR_HISTORY_MAX) h.entries = h.entries.slice(-ADVISOR_HISTORY_MAX);
   if (!(Number(h.anchor?.window) > 0)) h.anchor = e;
-  writeFileSync(join(dir, ADVISOR_HISTORY_FILE), `${JSON.stringify(h, null, 2)}\n`);
+  writeAdvisorHistory(h, dir);
   return e;
 }
 
 // Compares the newest full entry with the anchor. Null (no signal) on
-// missing/corrupt history, fewer than two entries, or a move within the
-// threshold. On a fire the anchor moves to the newest entry (persisted
-// unless `persist` is false); returns { from, to, pct, entry }.
+// missing/corrupt history, fewer than two entries, a non-finite window, or a
+// move within the threshold. On a fire the anchor moves to the newest entry
+// (persisted unless `persist` is false): the history is re-read just before
+// the write and only `anchor` changes, so a concurrent append is kept.
+// Returns { from, to, pct, entry }.
 export function checkWindowDrift(dir = stateDir(), { thresholdPct = 20, persist = true } = {}) {
   const h = loadAdvisorHistory(dir);
   if (!h || h.entries.length < 2) return null;
   const newest = h.entries[h.entries.length - 1];
   const from = Number(h.anchor?.window);
   const to = Number(newest?.window);
-  if (!(from > 0) || !(to > 0)) return null;
+  if (!Number.isFinite(from) || !Number.isFinite(to) || !(from > 0) || !(to > 0)) return null;
   const thr = Number(thresholdPct);
   const limit = Number.isFinite(thr) && thr >= 0 ? thr : 20;
   const pct = (Math.abs(to - from) / from) * 100;
-  if (!(pct > limit)) return null;
+  if (!Number.isFinite(pct) || !(pct > limit)) return null;
   if (persist) {
     try {
-      h.anchor = newest;
-      writeFileSync(join(dir, ADVISOR_HISTORY_FILE), `${JSON.stringify(h, null, 2)}\n`);
+      const fresh = loadAdvisorHistory(dir) || h;
+      fresh.anchor = newest;
+      writeAdvisorHistory(fresh, dir);
     } catch { /* unwritable: the signal still fires this run */ }
   }
   return { from, to, pct: Math.round(pct * 10) / 10, entry: newest };
