@@ -468,26 +468,41 @@ every other override in this plugin).
 ## Transcript report
 
 `node scripts/transcript-report.mjs` reads the operator's transcripts and
-prints what they say about tokens and cache: per-model totals with a
-price-derived cost, compaction counts with pre/post token sizes, a histogram
-of the time between consecutive requests (with how many were cache hits vs.
-rewrites), the first-request "spawn baseline" per subagent type, and context
-peaks and growth. It is read-only and local, and `--json` gives the full
-object.
+prints what they say about tokens and cache:
+- per-model totals with a price-derived cost;
+- compaction counts with pre/post token sizes;
+- a histogram of the time between consecutive requests, with how many were
+  cache hits vs. rewrites and why each rewrite happened (the cache expired
+  while idle, the prompt prefix changed, or a compaction). The histogram is
+  also split by what connected the two requests (a tool result, a prompt, a
+  message from another agent, a harness record) and the cache TTL that
+  applied (5m or 1h);
+- the gaps where a prompt or a message resumed the conversation after longer
+  than the TTL;
+- the first-request "spawn baseline" per subagent type;
+- context peaks and growth.
+
+It is read-only and local, and `--json` gives the full object.
 
 ```bash
 node scripts/transcript-report.mjs                 # last 30 days
 node scripts/transcript-report.mjs --days 7 --json
 node scripts/transcript-report.mjs --workflows     # include workflow agents
+node scripts/transcript-report.mjs --max-ms 20000  # time budget; newest files are read first
 ```
 
 Every transcript reader in this plugin (this report, cache-ttl, transcript
 harvest, the telemetry-coverage and model-mismatch checks) goes through one
-module, `scripts/lib/transcripts.mjs`. Its header states the dedup rules. One
-API request is written as several lines, so it counts once, with the
-field-wise max of their usage. Lines re-logged later in the same file are not
-new requests. Requests copied into a resumed or forked transcript count once
-across files.
+module, `scripts/lib/transcripts.mjs`. Its header states the dedup rules:
+- One API request is written as several lines, so it counts once, with the
+  field-wise max of their usage.
+- Lines re-logged later in the same file are not new requests.
+- A request copied into a resumed or forked transcript counts once across
+  files. It belongs to the original transcript and carries the largest usage
+  of any copy.
+
+After a compaction, the working context size is the first request's context,
+not the summary's `postTokens`.
 
 ## Model tiers are data, not code
 

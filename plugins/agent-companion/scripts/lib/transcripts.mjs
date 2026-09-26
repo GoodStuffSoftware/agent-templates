@@ -949,9 +949,10 @@ export function spawnBaselineOf(result) {
 export async function scanCorpus({
   root, sinceMs = -Infinity, maxFiles, maxBytes, maxMs = null,
   main = true, subagents = true, workflows = false, project = null,
-  crossFileDedup = true, keepSummaries = false, onFile,
+  crossFileDedup = true, keepSummaries = false, onFile, clock = Date.now,
 } = {}) {
-  const started = Date.now();
+  // clock: the time source for maxMs (a test passes a fake one).
+  const started = clock();
   const dir = transcriptsRoot(root);
   const disc = discoverTranscripts(dir, {
     sinceMs, maxFiles, maxBytes, main, subagents, workflows, project,
@@ -963,7 +964,7 @@ export async function scanCorpus({
   let attempted = 0;
   const buffered = [];
   for (const f of files) {
-    if (maxMs != null && Date.now() - started > maxMs) { truncated = true; break; }
+    if (maxMs != null && clock() - started > maxMs) { truncated = true; break; }
     attempted += 1;
     let result;
     try {
@@ -990,7 +991,7 @@ export async function scanCorpus({
   }
   return {
     root: dir, exists: disc.exists, filesFound: disc.files.length, filesRead: read,
-    filesSkipped: files.length - attempted, truncated, wallMs: Date.now() - started, crossFile,
+    filesSkipped: files.length - attempted, truncated, wallMs: clock() - started, crossFile,
   };
 }
 
