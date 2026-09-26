@@ -31,6 +31,8 @@ import {
 } from './lib/repo-discovery.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
+import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
+import { stateDir as advisorStateDir } from '../hooks/lib/context.mjs';
 import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/ci-status.mjs';
 
 // The operator's raw OS handle(s), for scrubbing signal text.
@@ -304,6 +306,24 @@ try {
     }
   }
 } catch { /* config unreadable: the audit reports that separately */ }
+
+// --- 5a. Recommended auto-compact window drift ---------------------------
+// Reads only the cache advisor's saved numbers-only history (never re-scans
+// transcripts). Fires when the newest FULL-read recommendation has moved more
+// than compact_window_drift_pct (default 20) from the anchor; the anchor then
+// resets to the newest entry, so it fires once per material move. Missing,
+// short or corrupt history: no signal.
+try {
+  const drift = checkWindowDrift(advisorStateDir(), { thresholdPct: opt('compact_window_drift_pct', 20) });
+  if (drift) {
+    const forms = settingForms(drift.to);
+    sig('compact_window_drift',
+      `recommended auto-compact window moved ${drift.to > drift.from ? 'up' : 'down'} ${drift.pct}% `
+      + `(${drift.from} -> ${drift.to} tokens). Re-run the cache advisor (/ac audit, or scripts/cache-advisor.mjs) `
+      + `to confirm, then type ${forms.command} (settings value ${forms.settingsValue}).`,
+      'manual-check');
+  }
+} catch { /* fail open */ }
 
 // --- 5b. Routing trial due for review -----------------------------------
 // A taskType's `override` (config/model-tiers.json's routing trial: a
