@@ -24,6 +24,7 @@
 import {
   modelTiers, resolveRoute, classifyModel, classifyEffort, rungFor, explainRoute, taskTypeDef, taskTypeNames,
 } from '../hooks/lib/context.mjs';
+import { loadAdvisorSummary, windowHintFor } from './lib/cache-advisor.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -143,6 +144,12 @@ if (cls.premium) {
 }
 
 if (route?.cacheTtl) out.cacheTtl = route.cacheTtl; // advisory hint; only a profile row carries one
+
+// Auto-compact window: quoted from the last cache-advisor run (its saved
+// summary), never computed here — a transcript replay is far too slow for this
+// command. Shown only when a summary exists. Advice: nothing is changed.
+const autoCompact = windowHintFor(loadAdvisorSummary(), out.model, { modelId: modelTiers().tiers?.[out.model]?.resolvesTo?.modelId || null });
+if (autoCompact) out.autoCompact = autoCompact;
 if (route?.layer === 'profile') out.routeLayer = 'profile';
 
 const explain = has('--explain');
@@ -169,6 +176,20 @@ if (out.spawnAgentNamespaced) {
 console.log(`reviewer:       ${out.reviewer.model} at effort ${out.reviewer.effort}`);
 if (route?.layer === 'profile') console.log(`route layer:    your routing profile (rev ${route.profileRevision}) — /ac routing why ${out.taskType} explains it`);
 if (route?.cacheTtl) console.log(`cache TTL hint: ${route.cacheTtl} (advisory, from your routing profile; no guard enforces it)`);
+if (out.autoCompact) {
+  const a = out.autoCompact;
+  const K = (x) => `${Math.round(x / 1000)}K`;
+  const ageDays = (Date.now() - Date.parse(a.generatedAt)) / 86400000;
+  const parts = [];
+  if (a.window) parts.push(`${a.model} breaks even at ${K(a.window)}${a.band5 ? ` (within 5%: ${K(a.band5[0])}-${K(a.band5[1])})` : ''}`);
+  if (a.global) parts.push(`one setting for your model mix: ${K(a.global)} (/autocompact ${Math.round(a.global / 1000)}k)`);
+  parts.push(a.configured ? `yours: ${K(a.configured)}` : `yours: unset${a.configuredIgnored ? ' (a value you set is IGNORED by Claude Code: run scripts/cache-advisor.mjs)' : ''}`);
+  const basis = a.truncated
+    ? `PARTIAL read, ${a.filesRead ?? '?'} of ${a.filesFound ?? '?'} files`
+    : `full ${a.windowDays ?? '?'}d read`;
+  console.log(`auto-compact:   ${parts.join('; ')} — advice from cache-advisor on ${String(a.generatedAt).slice(0, 10)} (${basis})`
+    + `${ageDays > 14 ? `, ${Math.floor(ageDays)} days old: run scripts/cache-advisor.mjs again` : ''}`);
+}
 if (out.trial) {
   console.log(`\nROUTING TRIAL — this type's output is a benchmark override, not the plain grid:`);
   console.log(`  trial window:  ${out.trial.trialSince} -> review by ${out.trial.reviewBy}`);

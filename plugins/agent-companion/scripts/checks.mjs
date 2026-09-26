@@ -28,6 +28,9 @@ import {
 import { telemetryCoverage } from './lib/coverage.mjs';
 import { scanModelMismatches } from './lib/model-mismatch.mjs';
 import { computeCacheTtl, transcriptsRoot as cacheTtlTranscriptsRoot } from './lib/cache-ttl.mjs';
+import {
+  runCacheAdvisor, saveAdvisorSummary, spanPhrase, ignoredWindowLines,
+} from './lib/cache-advisor.mjs';
 import { status as memoryVaultStatus } from './memory-vault.mjs';
 
 const est = (s) => Math.ceil(s.length / 4);
@@ -1416,6 +1419,77 @@ const cacheTtlCheck = {
   },
 };
 
+// --- 17. cache-advisor: the break-even auto-compact window --------------------
+//
+// Replays the operator's own transcripts under every candidate auto-compact
+// window (scripts/lib/cache-advisor.mjs has the method) and compares the
+// cheapest single value for their model mix with what they have set (or the
+// per-model defaults when unset). Advice only: this never writes a setting.
+// Graded 'warn' when the window in effect costs more than 5% above the
+// cheapest value (outside the 5% band), or when a configured value is one
+// Claude Code silently ignores; otherwise 'ok'; 'skip' with nothing to
+// replay. Reading is bounded by a time budget (option cache_advisor_max_ms,
+// default 20 s) and goes newest file first; a run cut short says it is
+// partial, says what it covers instead of "over 30d", and never replaces a
+// saved full-read summary. Same 30-day default window as cache-ttl unless
+// --days is given. Saves a small summary (numbers and model ids) for
+// /ac recommend.
+const cacheAdvisorCheck = {
+  id: 'cache-advisor',
+  title: 'Auto-compact window: break-even per model and for your model mix',
+  vendor: 'anthropic',
+  fixable: false,
+  async run(ctx) {
+    const days = ctx.daysExplicit ? ctx.days : 30;
+    const maxMs = Number(opt('cache_advisor_max_ms', 20000)) || 20000;
+    let a;
+    try {
+      a = await runCacheAdvisor({ days, maxMs });
+    } catch (e) {
+      return { status: 'skip', findings: [`cache-advisor failed: ${e.message}`] };
+    }
+    // A partial (time-budgeted) read never replaces a saved full-read summary.
+    let saved = null;
+    try { saved = saveAdvisorSummary(a); } catch { /* fail open: the finding still stands */ }
+    const K = (x) => `${Math.round(x / 1000)}K`;
+    const span = spanPhrase(a.coverage);
+    const findings = [];
+    if (a.coverage?.truncated) {
+      findings.push(`PARTIAL READ: ${a.coverage.filesRead} of ${a.coverage.filesFound} transcripts in the ${Math.round(maxMs / 1000)}s budget, newest first — `
+        + `complete only for the newest ${a.coverage.completeDays.toFixed(1)}d, so the model mix leans to recent work; `
+        + `${saved ? 'saved as a partial summary' : 'the saved full-read summary was kept'}. For the full ${days}d run node scripts/cache-advisor.mjs`);
+    }
+    const ignored = ignoredWindowLines(a.configured);
+    for (const line of ignored) findings.push(`WARNING: ${line}`);
+    if (a.configured?.autoCompactDisabled) findings.push(`WARNING: auto-compact is disabled (${a.configured.autoCompactDisabled})`);
+    for (const e of a.models) {
+      if (e.status === 'ok') {
+        findings.push(`${e.model}: optimum ${K(e.optimum.window)} (compacts at ${K(e.optimum.threshold)}; within 5%: ${K(e.band5[0])}-${K(e.band5[1])}; `
+          + `saves $${(e.savingVsDefault?.usd ?? 0).toFixed(2)} at API list price vs unset (compacts at ${K(e.defaultCompactAt)}) ${span})`);
+      } else {
+        findings.push(`${e.model}: ${e.status}${e.reason ? ` (${e.reason})` : ''}`);
+      }
+    }
+    const g = a.global;
+    if (!g?.optimum) {
+      findings.push('no model had enough data to recommend a window');
+      return { status: ignored.length ? 'warn' : 'skip', findings, data: a };
+    }
+    const forms = g.toType;
+    findings.push(`one setting for this model mix: ${K(g.optimum.window)} (within 5%: ${K(g.band5[0])}-${K(g.band5[1])}) — type ${forms.command}, or "autoCompactWindow": ${forms.settingsValue} (an integer) in settings.json`);
+    for (const b of g.optimum.belowFloor || []) {
+      findings.push(`WARNING: at ${K(g.optimum.window)}, ${b.model} compacts about every ${b.turnsPerCompaction.toFixed(1)} turns (below the ${a.minTurnsPerCompaction}-turn floor the mix meets${b.atCap ? '; at its context-window cap, no setting helps' : ''})`);
+    }
+    if (g.noRework?.optimum) findings.push(`rework off: ${K(g.noRework.optimum.window)} (within 5%: ${K(g.noRework.band5[0])}-${K(g.noRework.band5[1])})`);
+    const inEffect = g.configured || g.atDefault;
+    const label = g.configured ? `in effect ${K(g.configured.window)} (${a.configured.source})` : 'unset (each model\'s default)';
+    const extra = inEffect ? inEffect.usd - g.optimum.usd : 0;
+    findings.push(`${label}: $${extra.toFixed(2)} more than the cheapest at API list price ${span} — advice only; nothing was changed`);
+    const outside = inEffect && inEffect.usd > g.optimum.usd * 1.05;
+    return { status: outside || ignored.length ? 'warn' : 'ok', findings, data: a };
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
@@ -1433,4 +1507,5 @@ export const CHECKS = [
   memoryVaultDrift,
   modelResolutionMismatch,
   cacheTtlCheck,
+  cacheAdvisorCheck,
 ];
