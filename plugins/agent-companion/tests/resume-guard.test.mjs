@@ -11,6 +11,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeFixture, runHook } from './helpers.mjs';
 import { resolveTarget, lastActivityOf, ttlFor, normalizeTo, TTL_MS } from '../hooks/lib/resume-guard.mjs';
+import { buildTranscriptReport } from '../scripts/lib/transcript-report.mjs';
+import { priceUsage } from '../scripts/lib/pricing.mjs';
 
 function assistantLine({ ts, cacheRead = 0, cacheWrite5m = 0, cacheWrite1h = 0, input = 10 }) {
   const cacheWrite = cacheWrite5m + cacheWrite1h;
@@ -271,6 +273,152 @@ test('hook: a 1h-TTL worker is not flagged at 20m idle, but is past 65m', () => 
     cleanup();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// FIX ROUND (guard-a-fix-brief.md item 1): the two cases the review's fix
+// itself was asked for. Both continue a real split write with one or more
+// PURE-READ turns (no new split write at all), which is exactly the shape
+// REVIEW FINDING 1 caught guard-a's original single-last-record logic
+// getting wrong (see guard-a-review.md, resume-guard-review.test.mjs).
+
+test('hook: last write 1h, then pure-read turns, idle 30 min -> no hint (still within the real 1h TTL)', () => {
+  const { cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      id: 'h30', name: 'worker-1h-30',
+      lines: [
+        // A real 1h-bucket write 50 minutes ago...
+        assistantLine({ ts: now - 50 * 60 * 1000, cacheRead: 1000, cacheWrite1h: 150000 }),
+        // ...then two pure-read turns that write nothing split at all, the
+        // most recent one 30 minutes ago. Still comfortably inside the real
+        // 1h TTL measured from THIS record's own timestamp, not the write's.
+        assistantLine({ ts: now - 40 * 60 * 1000, cacheRead: 151000 }),
+        assistantLine({ ts: now - 30 * 60 * 1000, cacheRead: 151000 }),
+      ],
+    });
+    const res = callHook(root, { to: 'worker-1h-30', mainTranscriptPath });
+    assert.equal(res.json, null,
+      `expected passthrough (idle only 30m, well inside a real 1h TTL) but got: ${res.json && res.json.systemMessage}`);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hook: last write 5m, pure-read turn, idle 8 min -> hint (past the real 5m TTL)', () => {
+  const { cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      id: 'm8', name: 'worker-5m-8',
+      lines: [
+        // A real 5m-bucket write 20 minutes ago...
+        assistantLine({ ts: now - 20 * 60 * 1000, cacheRead: 1000, cacheWrite5m: 150000 }),
+        // ...then one pure-read turn 8 minutes ago -- past the real 5m TTL
+        // measured from this record's own timestamp. The pure-read tail must
+        // not accidentally clear the TTL bucket either (0/0 would wrongly
+        // fall through to the agent-definition/default path); it must still
+        // read as 5m and still fire.
+        assistantLine({ ts: now - 8 * 60 * 1000, cacheRead: 151000 }),
+      ],
+    });
+    const res = callHook(root, { to: 'worker-5m-8', mainTranscriptPath });
+    assert.ok(res.json, 'expected a hint (idle 8m is past the real 5m TTL)');
+    assert.ok(res.json.systemMessage.includes('5m cache TTL'), res.json.systemMessage);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hook: no split write anywhere in the tail falls back to the agent definition\'s own experimental.cacheTtl', () => {
+  const { dir, cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    // Bare (non-namespaced) agentType so agentDefinition() resolves it under
+    // <claudeDir()>/agents/<type>.md -- claudeDir() follows
+    // AGENT_COMPANION_HOME_OVERRIDE, which makeFixture() already points at
+    // `dir`, so this never touches the real ~/.claude.
+    const agentsDir = join(dir, '.claude', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(
+      join(agentsDir, 'my-1h-worker.md'),
+      '---\nname: my-1h-worker\ndescription: a long-lived architect\nmodel: opus\neffort: high\nexperimental:\n  cacheTtl: 1h\n---\nbody\n',
+    );
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      id: 'defttl', name: 'worker-def', agentType: 'my-1h-worker',
+      // Every turn is a pure read -- no split write anywhere in the tail --
+      // so lastActivityOf()'s backward walk finds nothing at all (0/0).
+      lines: [
+        assistantLine({ ts: now - 25 * 60 * 1000, cacheRead: 150000 }),
+        assistantLine({ ts: now - 20 * 60 * 1000, cacheRead: 150000 }),
+      ],
+    });
+    const res = callHook(root, { to: 'worker-def', mainTranscriptPath });
+    // Without the definition fallback, ttlFor() would default to 5m and
+    // wrongly fire at 20m idle. With it, the real 1h TTL applies and 20m is
+    // still well within it.
+    assert.equal(res.json, null,
+      `expected passthrough (definition declares 1h, idle only 20m) but got: ${res.json && res.json.systemMessage}`);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// FIX ROUND item 2: land a test for the transcript-report.mjs additions
+// (idleExpiryRewriteTokens/Usd/UnpricedTokens) in this suite -- guard-a
+// shipped these with zero tests (REVIEW FINDING 2); modeled directly on the
+// reviewer's own independent check (resume-guard-review.test.mjs), which is
+// kept as-is there too so the review's own evidence stays intact.
+test('report: idleExpiryRewriteTokens/Usd/UnpricedTokens on transcript-report.mjs is arithmetically correct', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const T0 = Date.parse('2026-09-01T00:00:00.000Z');
+    const MIN = 60 * 1000;
+    const at = (ms) => new Date(T0 + ms).toISOString();
+    let n = 0;
+    const uuid = () => `fx-guard-a-fix-${++n}`;
+    const user = (ms, opts = {}) => ({
+      type: 'user', uuid: uuid(), timestamp: at(ms), sessionId: 's1',
+      message: { role: 'user', content: opts.toolResult ? [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] : [{ type: 'text', text: 'hi' }] },
+      ...(opts.isMeta ? { isMeta: true } : {}),
+      ...(opts.origin ? { origin: { kind: opts.origin } } : {}),
+    });
+    const asst = (ms, { requestId, read = 0, write5m = 0, write1h = 0, model = 'claude-sonnet-5' }) => ({
+      type: 'assistant', uuid: uuid(), timestamp: at(ms), sessionId: 's1', requestId,
+      message: {
+        id: `msg-${requestId}`, model, content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: read, cache_creation: { ephemeral_5m_input_tokens: write5m, ephemeral_1h_input_tokens: write1h } },
+      },
+    });
+    const root = join(dir, 'projects');
+    const path = join(root, 'p', 'sess', 'subagents', 'agent-guardfix.jsonl');
+    mkdirSync(join(path, '..'), { recursive: true });
+    const recs = [
+      user(0), asst(1000, { requestId: 'r1', write1h: 60000 }), // spawn baseline write, not a gap
+      user(2 * MIN, { toolResult: true }), asst(2 * MIN + 1, { requestId: 'r2', read: 60000 }), // hit, no resume
+      // idle-expiry rewrite: gap 90min > 1h ttl (r1 wrote 1h), via 'message' (SendMessage)
+      user(90 * MIN, { isMeta: true, origin: 'coordinator' }), asst(90 * MIN + 1, { requestId: 'r3', write1h: 88000 }),
+    ];
+    writeFileSync(path, recs.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+
+    const r = await buildTranscriptReport({ root, days: 1, now: new Date(T0 + 120 * MIN) });
+    assert.equal(r.resumeAfterIdle.causes['idle-expiry'], 1, 'sanity: exactly one idle-expiry rewrite in this fixture');
+
+    // The ONE idle-expiry rewrite (r3) wrote 88000 tokens to the 1h bucket
+    // (ttlSource is 'write' from r1's own 1h write, so g.ttl === '1h').
+    const expectedUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 88000, cacheWrite1h: 88000 };
+    const expected = priceUsage(expectedUsage, 'claude-sonnet-5');
+    assert.equal(r.resumeAfterIdle.idleExpiryRewriteTokens, 88000);
+    assert.ok(Math.abs(r.resumeAfterIdle.idleExpiryRewriteUsd - expected.usd) < 1e-9,
+      `expected usd ${expected.usd}, got ${r.resumeAfterIdle.idleExpiryRewriteUsd}`);
+    assert.equal(r.resumeAfterIdle.idleExpiryUnpricedTokens, 0);
+  } finally { cleanup(); }
 });
 
 test('hook: resume_guard_min_tokens is configurable', () => {

@@ -23,7 +23,7 @@
 // enough here).
 
 import { readStdin, opt, passthrough } from './lib/context.mjs';
-import { resolveTarget, lastActivityOf, ttlFor, TTL_MS } from './lib/resume-guard.mjs';
+import { resolveTarget, lastActivityOf, ttlFor, cacheTtlFromDefinition, TTL_MS } from './lib/resume-guard.mjs';
 
 function allow(systemMessage) {
   process.stdout.write(JSON.stringify({
@@ -47,7 +47,17 @@ try {
   const last = lastActivityOf(target.transcriptPath);
   if (!last) passthrough();
 
-  const ttl = ttlFor(last);
+  let ttl = ttlFor(last);
+  // No record anywhere in the read-tail carried a split write (0/0): the
+  // default alone would silently assume 5m even for a target whose
+  // definition declares a real 1h TTL. Try that before accepting the
+  // default — fixes REVIEW FINDING 1's root cause for the case the tail
+  // walk itself cannot see (the write happened further back than the tail
+  // window reaches).
+  if (!last.cacheWrite1h && !last.cacheWrite5m) {
+    const fromDef = cacheTtlFromDefinition(target.agentType, p.cwd);
+    if (fromDef) ttl = fromDef;
+  }
   const idleMs = Date.now() - last.ts;
   if (!(idleMs > TTL_MS[ttl])) passthrough(); // still warm (or clock skew): nothing to say
 
