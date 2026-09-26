@@ -116,6 +116,13 @@ State the recommendation and the rationale it printed. Then:
   to opus, which still needs a WARRANT (F2). A reviewer sized below the writer
   catches the errors it would itself have avoided and waves through the ones
   it would itself have made.
+- **An `auto-compact:` line is cost advice for long-running work.** It quotes the
+  last cache-advisor run: the auto-compact window that breaks even for the
+  recommended model on the operator's own transcripts, and the one value for
+  their model mix (the setting is global). Relay it when the work is a long or
+  resumed session; it is advice only, and the operator applies it with
+  `/autocompact <value>`. No line means no advisor run yet
+  (`scripts/cache-advisor.mjs`).
 - **Do not route on "this model sticks to instructions better."** That claim is
   not in Anthropic's docs and first-hand reports contradict it. Route on
   capability needed, search benefit, and consequence.

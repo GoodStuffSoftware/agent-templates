@@ -504,6 +504,56 @@ module, `scripts/lib/transcripts.mjs`. Its header states the dedup rules:
 After a compaction, the working context size is the first request's context,
 not the summary's `postTokens`.
 
+## Cache advisor: the auto-compact window
+
+`node scripts/cache-advisor.mjs` works out, from your own transcripts, the
+auto-compact window that costs least for each model, and the one value that
+costs least for your model mix. Claude Code has a single window setting
+(`autoCompactWindow`, set with `/autocompact`; the `--autocompact` flag and
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` take precedence), from 100K to 1M tokens and
+capped at each model's context window. Unset, native-1M models compact at
+about 967K and 200K models at the 200K boundary (`config/compaction.json`,
+which cites the docs it came from).
+
+The trade-off: every request re-reads the whole context from cache, so a
+larger window costs more per request, and more again when a resume after the
+cache expired rewrites it. A compaction costs the summarising call, a rewrite
+of the post-compaction context, and the re-reading the model does afterwards
+("rework", measured as extra context growth in the 50 requests after a
+compaction). The advisor replays each transcript's real context growth and
+real idle expiries under every candidate window and sums the cost. The replay
+at the window you actually ran with is checked against what those requests
+cost (`fit`, near 1.0), and a closed-form optimum is printed beside it as a
+cross-check. `scripts/lib/cache-advisor.mjs` states the whole model.
+
+- Dollar figures are list price x tokens, checked against the benchmark rows'
+  `cost_usd` and scaled by their median ratio. A plan-usage view uses the
+  dated weights in `config/compaction.json`.
+- Not priced: the detail a compaction loses and the time it takes. The advisor
+  never recommends a window that would compact more often than once every 10
+  turns (`minTurnsPerCompaction`, measured with each model's own requests per
+  turn), and it shows the cheapest window without that floor beside it.
+- A model with fewer than 1,000 requests, or fewer than 5 sessions that grew
+  past 100K, is reported as insufficient data rather than extrapolated.
+- It also prints where each model's cache money goes (reads, 5m and 1h writes,
+  and rewrites by cause) and the cold first-request cost of each subagent type,
+  median and p90, per day.
+
+It is advice only and never writes a Claude Code setting; apply it with
+`/autocompact <value>` yourself. It saves a small summary (numbers and model
+ids) in the plugin's state directory so `/ac recommend` can quote the window
+for the model it recommends. It also runs as the `cache-advisor` audit check,
+bounded by the `cache_advisor_max_ms` option (20 s by default, newest files
+first), which warns when the window in effect costs more than 5% above the
+cheapest.
+
+```bash
+node scripts/cache-advisor.mjs                  # last 30 days
+node scripts/cache-advisor.mjs --days 14 --json
+node scripts/cache-advisor.mjs --curve          # every model's full cost curve
+node scripts/cache-advisor.mjs --max-ms 20000   # time budget for reading
+```
+
 ## Model tiers are data, not code
 
 Which models count as premium, and how they rank against each other, lives in

@@ -114,6 +114,14 @@ you expected to run reports `SKIP`, find out why before concluding anything.
   never writes a setting or an agent definition, and never will. Runs
   standalone too: `node "$AC/scripts/cache-ttl.mjs" --days 30 [--json]`. See
   `plugins/agent-companion/README.md#cache-ttl-analysis` for the method.
+- **cache-advisor** — the auto-compact window that costs least for each model,
+  and the one value for the operator's model mix, from a replay of their own
+  transcripts (default 30-day window, reading bounded by the
+  `cache_advisor_max_ms` option, newest files first). Warns only when the
+  window in effect costs more than 5% above the cheapest. Advice only: it never
+  writes a setting; the operator applies it with `/autocompact <value>`. Runs
+  standalone too: `node "$AC/scripts/cache-advisor.mjs" [--days 30] [--json]`.
+  See `plugins/agent-companion/README.md#cache-advisor-the-auto-compact-window`.
 
 ## Fixing
 
