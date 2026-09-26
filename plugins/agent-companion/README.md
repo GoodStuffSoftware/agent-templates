@@ -513,8 +513,25 @@ costs least for your model mix. Claude Code has a single window setting
 (`autoCompactWindow`, set with `/autocompact`; the `--autocompact` flag and
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` take precedence), from 100K to 1M tokens and
 capped at each model's context window. Unset, native-1M models compact at
-about 967K and 200K models at the 200K boundary (`config/compaction.json`,
-which cites the docs it came from).
+about 967K and 200K models at about 167K (`config/compaction.json`, which
+cites where it came from).
+
+Three things about the setting that change the number you type:
+
+- **A window compacts 33K below its value.** Claude Code compacts at
+  min(window, context window) minus min(max output, 20K) minus 13K, so
+  `/autocompact 275k` compacts at about 242K. That is also why the 1M default
+  is "about 967K". Every window the advisor prints is the value to type, with
+  the compaction point beside it.
+- **In settings.json it must be an integer** from 100000 to 1000000. Claude
+  Code silently drops anything else (the string `"400k"`, or `400`) and the
+  default applies. The advisor resolves what is really in effect the way
+  Claude Code does (the environment variable, then managed, project and user
+  settings; a running session's `--autocompact` flag cannot be seen from
+  outside it) and prints a warning for every value Claude Code ignores.
+- **`/autocompact <value>` applies at once** in that session and saves the
+  number to your user settings; an edit to settings.json is read when a
+  session starts.
 
 The trade-off: every request re-reads the whole context from cache, so a
 larger window costs more per request, and more again when a resume after the
@@ -527,13 +544,26 @@ at the window you actually ran with is checked against what those requests
 cost (`fit`, near 1.0), and a closed-form optimum is printed beside it as a
 cross-check. `scripts/lib/cache-advisor.mjs` states the whole model.
 
-- Dollar figures are list price x tokens, checked against the benchmark rows'
-  `cost_usd` and scaled by their median ratio. A plan-usage view uses the
-  dated weights in `config/compaction.json`.
+- Dollar figures are tokens x API list price. On a subscription plan they are
+  notional: they rank windows, they are not a bill. The benchmark rows'
+  `cost_usd` is Claude Code's own figure from the same list prices, so it is
+  used only to check the price table (a warning prints if they disagree by
+  more than 2%), never to scale anything. A plan-usage view uses the dated
+  weights in `config/compaction.json`.
+- Real traffic only: benchmark sessions (the harness's `bench-*` and
+  `rescore-*` working directories in the OS temp dir) are excluded before
+  reading, and the report says how many project directories were left out.
+- Rework is measured, and a control at points with no compaction shows it is
+  caused by compaction, but it is the least certain input. The whole
+  evaluation is repeated with rework set to 0 and printed beside the main
+  result, per model and for the mix.
 - Not priced: the detail a compaction loses and the time it takes. The advisor
   never recommends a window that would compact more often than once every 10
   turns (`minTurnsPerCompaction`, measured with each model's own requests per
-  turn), and it shows the cheapest window without that floor beside it.
+  turn), and it shows the cheapest window without that floor beside it. For
+  the one global value the floor applies to the model mix as a whole, and any
+  model that would still compact more often than that at the recommended
+  value gets its own warning line.
 - A model with fewer than 1,000 requests, or fewer than 5 sessions that grew
   past 100K, is reported as insufficient data rather than extrapolated.
 - It also prints where each model's cache money goes (reads, 5m and 1h writes,
@@ -543,10 +573,13 @@ cross-check. `scripts/lib/cache-advisor.mjs` states the whole model.
 It is advice only and never writes a Claude Code setting; apply it with
 `/autocompact <value>` yourself. It saves a small summary (numbers and model
 ids) in the plugin's state directory so `/ac recommend` can quote the window
-for the model it recommends. It also runs as the `cache-advisor` audit check,
-bounded by the `cache_advisor_max_ms` option (20 s by default, newest files
-first), which warns when the window in effect costs more than 5% above the
-cheapest.
+for the model it recommends, with the date of the run. It also runs as the
+`cache-advisor` audit check, bounded by the `cache_advisor_max_ms` option
+(20 s by default, newest files first), which warns when the window in effect
+costs more than 5% above the cheapest, or when a value you set is ignored. A
+run cut short by the budget says it is partial and which days it covers
+completely (reading newest first skews the model mix toward recent work), and
+it never replaces a saved full-read summary.
 
 ```bash
 node scripts/cache-advisor.mjs                  # last 30 days

@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "updated": "2026-09-25",
+  "updated": "2026-09-26",
   "provenance": "Live reads on 2026-09-25: https://code.claude.com/docs/en/model-config (section 'Context window and auto-compaction'), https://code.claude.com/docs/en/settings-reference (autoCompactWindow), https://code.claude.com/docs/en/env-vars (CLAUDE_CODE_AUTO_COMPACT_WINDOW, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE), https://platform.claude.com/docs/en/about-claude/models/overview (context windows), https://platform.claude.com/docs/en/about-claude/pricing (no long-context premium on 4.6 and later), and the Claude Code CHANGELOG (2.1.247: Sonnet 5 compacts at about 967K; 2.1.260: Opus and Fable compact shortly before 1M).",
-  "note": "Context windows and default auto-compact thresholds as DATA, read by scripts/lib/cache-advisor.mjs. There is ONE auto-compact window setting (autoCompactWindow in settings, the --autocompact flag, or CLAUDE_CODE_AUTO_COMPACT_WINDOW), not one per model; Claude Code caps it at each model's context window. Unset, a model compacts at its defaultCompactAt. Keys match config/model-pricing.json's aliases and are matched in the order written, first match wins. A local copy of this shape at ~/.claude/agent-companion/compaction.json is merged over it by alias, the same convention as model-pricing.json.",
+  "note": "Context windows and default auto-compact thresholds as DATA, read by scripts/lib/cache-advisor.mjs. There is ONE auto-compact window setting (autoCompactWindow in settings, the --autocompact flag, or CLAUDE_CODE_AUTO_COMPACT_WINDOW), not one per model; Claude Code caps it at each model's context window. In settings it must be an integer from 100000 to 1000000: anything else (a string such as \"400k\", or 400) is silently dropped and the default applies. Unset, a model compacts at its defaultCompactAt. Keys match config/model-pricing.json's aliases and are matched in the order written, first match wins. A local copy of this shape at ~/.claude/agent-companion/compaction.json is merged over it by alias, the same convention as model-pricing.json.",
   "models": {
     "opus-5-5": { "match": "opus-5-5", "contextWindow": 1000000, "defaultCompactAt": 967000 },
     "opus-5": { "match": "opus-5(?!-5)", "contextWindow": 1000000, "defaultCompactAt": 967000 },
@@ -11,11 +11,13 @@
     "fable-5-1": { "match": "fable-5-1", "contextWindow": 1000000, "defaultCompactAt": 967000 },
     "fable-5": { "match": "fable-5(?!-1)", "contextWindow": 1000000, "defaultCompactAt": 967000 },
     "sonnet-5": { "match": "sonnet-5", "contextWindow": 1000000, "defaultCompactAt": 967000 },
-    "sonnet-4-6": { "match": "sonnet-4-6", "contextWindow": 200000, "defaultCompactAt": 200000 },
-    "haiku-4-5": { "match": "haiku-4-5", "contextWindow": 200000, "defaultCompactAt": 200000 }
+    "sonnet-4-6": { "match": "sonnet-4-6", "contextWindow": 200000, "defaultCompactAt": 167000 },
+    "haiku-4-5": { "match": "haiku-4-5", "contextWindow": 200000, "defaultCompactAt": 167000 }
   },
-  "defaultsNote": "defaultCompactAt 967000 is the documented 'about 967K tokens' for native-1M models on the Anthropic API; 200000 is the documented '200K boundary' for 200K models (measured auto-compactions on this kind of model land a little under it). A model matching no entry is treated as a 200K model.",
-  "unknownModel": { "contextWindow": 200000, "defaultCompactAt": 200000 },
+  "defaultsNote": "defaultCompactAt is where a model compacts with no window set: its context window minus the reserve below, so about 967K on native-1M models (the documented 'about 967K tokens') and about 167K on 200K models (measured auto-compactions on 200K models land at 167K-174K, not at the 200K boundary). A model matching no entry is treated as a 200K model.",
+  "compactReserve": { "outputCap": 20000, "buffer": 13000 },
+  "compactReserveNote": "A set window W compacts at min(W, context window) - min(max output, outputCap) - buffer, i.e. W - 33K for every current model (max output is at least 20K on all of them; a model entry may carry maxOutput to lower it). Read from Claude Code 2.1.280 (effective window = window - min(maxOutput, 20000); compaction at effective - 13000), and matched by real compactions at about 967K on 1M models and 167K-174K on 200K models. So /autocompact 275k compacts at about 242K.",
+  "unknownModel": { "contextWindow": 200000, "defaultCompactAt": 167000 },
   "window": { "min": 100000, "max": 1000000, "step": 25000 },
   "minTurnsPerCompaction": 10,
   "minTurnsNote": "Compaction loses detail, and that loss is not priced. A candidate window is only recommended when the replay compacts no more often than once every this many turns (a turn is a prompt or a SendMessage that starts work), measured per model as requests per turn in main sessions.",
