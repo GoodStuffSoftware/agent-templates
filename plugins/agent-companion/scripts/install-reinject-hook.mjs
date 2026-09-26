@@ -26,6 +26,8 @@ import {
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claudeDir } from '../hooks/lib/context.mjs';
+import { backupFile as backup } from './lib/backup-file.mjs';
+import { isMain } from './lib/is-main.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -98,12 +100,6 @@ function localOthers() {
     return isObj(l) && !shapeProblem(l) ? scan(l).others.map((o) => `${o} (settings.local.json)`) : [];
   } catch { return []; }
 }
-function backup(path) {
-  if (!existsSync(path)) return null;
-  const dest = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-  copyFileSync(path, dest);
-  return dest;
-}
 function write(next) {
   JSON.parse(JSON.stringify(next));
   writeFileSync(settingsPath, `${JSON.stringify(next, null, 2)}\n`);
@@ -117,7 +113,8 @@ function hookArgs() {
   return args;
 }
 
-try {
+// CLI only when run directly: importing this file runs and writes nothing.
+if (isMain(import.meta.url)) try {
   let settings;
   try { settings = loadSettings(); } catch (e) {
     console.error(`install-reinject-hook: cannot parse ${settingsPath}: ${e.message}; nothing written.`);

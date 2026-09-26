@@ -321,6 +321,28 @@ node "$AC/scripts/install-reinject-hook.mjs" --uninstall  # removes it again
 `--file <template>` (repeatable; `{cwd}`, `{session_id}`, `{scratchpad}`,
 `{home}`) replaces the candidate list; `--max-chars <n>` changes the cap.
 
+### Optional: steer what compaction keeps (ask first; pairs with the re-inject hook)
+
+The re-inject hook restores state AFTER compaction; this steers the summary
+itself. A PreCompact hook cannot do that (it can only block compaction), so
+the documented mechanism is a `# Compact instructions` section in CLAUDE.md.
+Not installed by default: run `--print`, SHOW the operator the exact block
+(4 body lines, paid at every session start), and run the installer only
+after a yes. Default target is the user-level `~/.claude/CLAUDE.md`, and
+tell the operator plainly: the docs describe Compact instructions in the
+project-root CLAUDE.md; the user-level file is in context at compaction but
+not documented to steer it. For the documented path use
+`--target <repo>/CLAUDE.md` (it then shows up in git). If a `Compact instructions` section
+already exists it installs nothing (`--force` overrides). For a manual
+compaction, `/compact <focus>` steers that one summary without this.
+
+```bash
+node "$AC/scripts/install-compact-instructions.mjs" --print      # show the block
+node "$AC/scripts/install-compact-instructions.mjs" --status
+node "$AC/scripts/install-compact-instructions.mjs"              # after a yes; --dry-run previews
+node "$AC/scripts/install-compact-instructions.mjs" --uninstall  # removes it again
+```
+
 Releasing: bump `version` in **both** `plugin.json` and the plugin's entry in
 `marketplace.json` — Claude Code reads the first, the claude.ai plugin
 directory keys on the second, and the manifest check fails if they differ.
