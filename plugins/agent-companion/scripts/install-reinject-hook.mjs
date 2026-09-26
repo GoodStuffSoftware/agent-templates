@@ -26,6 +26,7 @@ import {
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claudeDir } from '../hooks/lib/context.mjs';
+import { backupFile as backup } from './lib/backup-file.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -97,12 +98,6 @@ function localOthers() {
     const l = JSON.parse(readFileSync(localPath, 'utf8'));
     return isObj(l) && !shapeProblem(l) ? scan(l).others.map((o) => `${o} (settings.local.json)`) : [];
   } catch { return []; }
-}
-function backup(path) {
-  if (!existsSync(path)) return null;
-  const dest = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-  copyFileSync(path, dest);
-  return dest;
 }
 function write(next) {
   JSON.parse(JSON.stringify(next));
