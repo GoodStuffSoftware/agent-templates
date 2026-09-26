@@ -41,7 +41,8 @@ const fmtMs = (ms) => (ms == null ? 'n/a' : ms < 60000 ? `${(ms / 1000).toFixed(
 
 console.log(`cache-ttl — subagent prompt-cache TTL analysis (last ${result.windowDays}d)`);
 console.log(`generated: ${result.generatedAt}`);
-console.log(`files scanned: ${result.filesScanned.main} main, ${result.filesScanned.subagent} subagent${result.truncated ? ' (TRUNCATED by file/byte cap)' : ''}`);
+console.log(`experiment projects: ${result.experimentProjects.included ? 'INCLUDED (--include-experiments)' : `${result.experimentProjects.excludedProjects} excluded (bench / system-temp-dir projects; --include-experiments counts them)`}`);
+console.log(`files scanned:${result.filesScanned.main} main, ${result.filesScanned.subagent} subagent${result.truncated ? ' (TRUNCATED by file/byte cap)' : ''}`);
 console.log(`subagent requests in window: ${result.subagentRequestsScanned}  |  main-session requests in window: ${result.mainRequestsScanned}`);
 console.log('');
 
@@ -121,13 +122,18 @@ for (const b of result.breakEvenByTier) {
 }
 console.log('');
 
-console.log(`-- per rung: 1h net saving by how the 5-60min gap was connected (experiment projects ${result.experimentProjects.included ? 'INCLUDED' : `excluded: ${result.experimentProjects.excludedProjects}`}) --`);
-console.log(`  floor for a verdict: >=${result.rungFloor.files} files, >=${result.rungFloor.requests} requests, >=${result.rungFloor.viewGaps5to60} 5-60min gaps in the view`);
+console.log(`-- per rung: 1h net saving, and each gap kind's share of it (experiment projects ${result.experimentProjects.included ? 'INCLUDED' : `excluded: ${result.experimentProjects.excludedProjects}`}) --`);
+console.log(`  floor for a verdict: >=${result.rungFloor.files} files, >=${result.rungFloor.requests} requests, >=${result.rungFloor.viewGaps5to60} 5-60min gaps`);
+console.log('  baseline = the 2x write premium with no gap credited; the gap kinds\' contributions sum to (all - baseline)');
 for (const r of result.perRung) {
   const s = r.sample;
+  const a = r.views.all;
   console.log(`  ${r.rung}  [${r.models.join(',')}] files=${s.files} req=${s.requests} gaps=${s.gaps} 5-60=${s.gaps5to60} resume-rewrites=${r.resumeRewrites}`);
+  console.log(`    all        gaps=${String(a.gaps5to60).padEnd(5)} net=${fmtUsd(a.netSavingUsd).padEnd(10)} delta=${fmtPct(a.deltaPct).padEnd(8)} ${a.verdict}`);
+  console.log(`    baseline   net=${fmtUsd(r.baseline.netSavingUsd)}`);
   for (const [v, x] of Object.entries(r.views)) {
-    console.log(`    ${v.padEnd(10)} gaps=${String(x.gaps5to60).padEnd(5)} net=${fmtUsd(x.netSavingUsd).padEnd(10)} delta=${fmtPct(x.deltaPct).padEnd(8)} ${x.verdict}`);
+    if (v === 'all') continue;
+    console.log(`    ${v.padEnd(10)} gaps=${String(x.gaps5to60).padEnd(5)} contributes=${fmtUsd(x.contributionUsd).padEnd(10)} share=${x.sharePct.toFixed(1)}%`);
   }
 }
 console.log('');

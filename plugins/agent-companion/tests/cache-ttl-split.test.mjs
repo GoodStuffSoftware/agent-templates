@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture } from './helpers.mjs';
 import {
-  computeCacheTtl, rungVerdict, isExperimentProject, TOO_LITTLE_DATA, RUNG_VIEWS,
+  computeCacheTtl, computeVerdict, rungVerdict, isExperimentProject, TOO_LITTLE_DATA, RUNG_VIEWS,
   MIN_RUNG_FILES, MIN_RUNG_REQUESTS, MIN_RUNG_VIEW_GAPS, MIN_AGENT_SAVING_PCT, DONT_SET_DELTA_PCT,
 } from '../scripts/lib/cache-ttl.mjs';
 
@@ -66,13 +66,22 @@ test('perRung: 5-60 gaps split by via, resume rewrites counted, thin rung is TOO
     assert.equal(r.views.all.gaps5to60, 2);
     assert.equal(r.views.message.gaps5to60, 1);
     assert.equal(r.views.toolResult.gaps5to60, 1);
-    assert.equal(r.views.prompt.gaps5to60, 0);
+    assert.equal(r.views.meta.gaps5to60, 0);
+    assert.equal(r.views.other.gaps5to60, 0);
     // conv: tool gap clamps to its own write 1000; message gap to prev prefix 1010.
     assert.equal(r.views.toolResult.convMTok, 0.001);
     assert.equal(r.views.message.convMTok, 0.00101);
     assert.equal(r.views.all.convMTok, 0.00201);
-    assert.ok(r.views.all.netSavingUsd > r.views.message.netSavingUsd, 'more conversions, more saving');
-    for (const v of RUNG_VIEWS) assert.equal(r.views[v].verdict, TOO_LITTLE_DATA);
+    assert.equal(r.views.all.verdict, TOO_LITTLE_DATA);
+    // Views are contributions, not standalone policies: no verdict, a
+    // positive contribution each, and they sum to all - baseline.
+    for (const v of RUNG_VIEWS.slice(1)) assert.equal(r.views[v].verdict, undefined);
+    assert.ok(r.views.message.contributionUsd > 0 && r.views.toolResult.contributionUsd > 0);
+    assert.ok(r.baseline.netSavingUsd < 0, 'the baseline is the bare 2x write premium');
+    const sum = RUNG_VIEWS.slice(1).reduce((t, v) => t + r.views[v].contributionUsd, 0);
+    assert.ok(Math.abs(sum - (r.views.all.netSavingUsd - r.baseline.netSavingUsd)) < 1e-3, 'contributions sum to all - baseline');
+    const share = RUNG_VIEWS.slice(1).reduce((t, v) => t + r.views[v].sharePct, 0);
+    assert.ok(Math.abs(share - 100) < 0.05);
     assert.deepEqual(res.rungFloor, { files: MIN_RUNG_FILES, requests: MIN_RUNG_REQUESTS, viewGaps5to60: MIN_RUNG_VIEW_GAPS });
   } finally { cleanup(); }
 });
@@ -88,12 +97,40 @@ test('rungVerdict: floor first, then PAYS / NEUTRAL / COSTS', () => {
   assert.equal(rungVerdict({ ...big, viewGaps: MIN_RUNG_VIEW_GAPS - 1, deltaPct: -50 }), TOO_LITTLE_DATA);
 });
 
-test('isExperimentProject: bench prefixes and any temp-dir project; real projects are not', () => {
-  assert.equal(isExperimentProject('C--Users-you-AppData-Local-Temp-bench-x-y', { tmp: 'C:\\Users\\you\\AppData\\Local\\Temp' }), true);
-  assert.equal(isExperimentProject('C--Users-you-AppData-Local-Temp-ttl-exp-1'), true);
-  assert.equal(isExperimentProject('-tmp-whatever'), true);
-  assert.equal(isExperimentProject('C--Users-you-dev-proj'), false);
-  assert.equal(isExperimentProject('C--Users-you-dev-template-tools'), false);
+test('isExperimentProject: bench prefixes and projects in the system temp dir; real repos named temp/tmp are kept', () => {
+  const tmp = 'C:\\Users\\you\\AppData\\Local\\Temp';
+  assert.equal(isExperimentProject('C--Users-you-AppData-Local-Temp-bench-x-y', { tmp }), true);
+  assert.equal(isExperimentProject('C--Users-you-AppData-Local-Temp-ttl-exp-1', { tmp }), true);
+  assert.equal(isExperimentProject('-tmp-whatever', { tmp: '/tmp' }), true);
+  assert.equal(isExperimentProject('C--Users-you-dev-proj', { tmp }), false);
+  assert.equal(isExperimentProject('C--Users-you-dev-template-tools', { tmp }), false);
+  assert.equal(isExperimentProject('C--Users-you-dev-temp-tools', { tmp }), false);
+  assert.equal(isExperimentProject('C--Users-you-dev-my-tmp-app', { tmp }), false);
+  assert.equal(isExperimentProject('-home-you-dev-tmp-app', { tmp: '/tmp' }), false);
+});
+
+test('computeVerdict: a per-agent 1h candidate below the per-rung floor reads too little data, not a recommendation', () => {
+  const row = (label, requests, deltaPct) => ({
+    label, requests, band560Requests: 0, writeMTok: 1, convMTok: 0, convOverWritePct: 0,
+    breakEvenPct: 39.5, costToday: 100, cost1h: 100 * (1 + deltaPct / 100), deltaPct,
+  });
+  const args = {
+    perModel: [row('sonnet-5', 5000, 0.2)],
+    perAgentModel: [row('widget-thin → sonnet-5', 600, -8), row('widget-fat → sonnet-5', 5000, -8)],
+    totals: { costToday: 1000, deltaPct: 0.2 },
+    policy: { opusFableOnlyDeltaPct: -1 },
+    rungSamples: new Map([
+      ['widget-thin', { files: 3, requests: 600, gaps: 20, gaps5to60: MIN_RUNG_VIEW_GAPS - 1 }],
+      ['widget-fat', { files: MIN_RUNG_FILES, requests: 5000, gaps: 200, gaps5to60: MIN_RUNG_VIEW_GAPS }],
+    ]),
+  };
+  const v = computeVerdict(args);
+  assert.match(v.text, /experimental: \{ cacheTtl: "1h" \} on: widget-fat/);
+  assert.match(v.text, /too little data for: widget-thin → sonnet-5/);
+  assert.doesNotMatch(v.text, /on: [^(]*widget-thin/);
+  const only = computeVerdict({ ...args, perAgentModel: [args.perAgentModel[0]] });
+  assert.match(only.text, /no named agent definition clears/);
+  assert.match(only.text, /too little data for: widget-thin/);
 });
 
 test('experiment projects are excluded by default and counted with includeExperiments', async () => {
@@ -102,14 +139,15 @@ test('experiment projects are excluded by default and counted with includeExperi
     const root = join(dir, 'projects');
     writeAgent(root, 'C--Users-you-dev-proj', 'a', 'rung-a', rungLines('a'));
     writeAgent(root, 'C--Users-you-AppData-Local-Temp-exp', 'b', 'rung-b', rungLines('b'));
-    const opts = { days: 30, now: new Date(T0 + 86400000), transcriptsRoot: root };
+    writeAgent(root, 'C--Users-you-dev-temp-tools', 'c', 'rung-c', rungLines('c'));
+    const opts = { days: 30, now: new Date(T0 + 86400000), transcriptsRoot: root, tmp: 'C:\\Users\\you\\AppData\\Local\\Temp' };
     const def = await computeCacheTtl(opts);
-    assert.deepEqual(def.perRung.map((r) => r.rung), ['rung-a']);
+    assert.deepEqual(def.perRung.map((r) => r.rung), ['rung-a', 'rung-c'], 'a real repo named temp-tools is kept');
     assert.deepEqual(def.experimentProjects, { included: false, excludedProjects: 1 });
-    assert.equal(def.subagentRequestsScanned, 4);
+    assert.equal(def.subagentRequestsScanned, 8);
     const all = await computeCacheTtl({ ...opts, includeExperiments: true });
-    assert.deepEqual(all.perRung.map((r) => r.rung), ['rung-a', 'rung-b']);
-    assert.equal(all.subagentRequestsScanned, 8);
+    assert.deepEqual(all.perRung.map((r) => r.rung), ['rung-a', 'rung-b', 'rung-c']);
+    assert.equal(all.subagentRequestsScanned, 12);
   } finally { cleanup(); }
 });
 

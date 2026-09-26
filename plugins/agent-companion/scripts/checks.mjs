@@ -1401,6 +1401,10 @@ const cacheTtlCheck = {
       `break-even per tier: ${result.breakEvenByTier.map((b) => `${b.alias} obs=${b.observedPct.toFixed(1)}% `
         + `be=${b.breakEvenPct.toFixed(1)}%`).join(', ')}`,
       `verdict: ${result.verdict}`,
+      result.experimentProjects.included
+        ? 'experiment projects included'
+        : `${result.experimentProjects.excludedProjects} experiment project(s) excluded from every total `
+          + '(bench / system-temp-dir projects; cache-ttl.mjs --include-experiments counts them)',
     ];
     if (result.causes.counts.compaction) {
       findings.push(`${result.causes.counts.compaction} request(s) followed a compaction (any band) — `

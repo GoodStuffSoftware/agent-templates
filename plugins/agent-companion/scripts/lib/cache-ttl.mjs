@@ -62,6 +62,7 @@
 // "don't"), not symmetric around zero.
 
 import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { KNOWN_AGENT_TYPES } from '../../hooks/lib/context.mjs';
 import {
   transcriptsRoot as sharedTranscriptsRoot, discoverTranscripts, readTranscript, resolveCrossFile, bandFor,
@@ -96,27 +97,36 @@ export const MIN_AGENT_SAVING_PCT = 1.0; // a candidate needs at least this much
 //
 // A per-rung verdict (see perRungOf) is only called PAYS / COSTS / NEUTRAL
 // when the rung clears ALL of these in the window; below any of them it reads
-// TOO LITTLE DATA, so a thin rung is never called PAYS. The gap floor applies
-// to the view being judged (e.g. only the 5-60 min gaps connected by a
-// SendMessage for the `message` view).
+// TOO LITTLE DATA, so a thin rung is never called PAYS. Only the `all` view
+// gets a verdict (the other views are contributions to it, see perRungOf).
+// The same floor gates the per-agent recommendation in computeVerdict, so the
+// two never disagree.
 export const MIN_RUNG_FILES = 10;
 export const MIN_RUNG_REQUESTS = MIN_REQUESTS_FOR_AGENT_ROW;
 export const MIN_RUNG_VIEW_GAPS = 30;
 export const TOO_LITTLE_DATA = 'TOO LITTLE DATA';
 // The 5-60 min gaps split by what connected them (lib/transcripts.mjs viaOf):
-// `message` = a worker you came back to with SendMessage, `prompt` = a person
-// typed, `toolResult` = a slow tool call. `all` is every non-compaction gap.
-export const RUNG_VIEWS = ['all', 'message', 'prompt', 'toolResult'];
+// `message` = a worker you came back to with SendMessage, `toolResult` = a
+// slow tool call, `meta` = a harness record (e.g. a task notification),
+// `other` = anything else (a typed prompt, no connecting record). `all` is
+// every non-compaction gap; the other four partition it.
+export const RUNG_VIEWS = ['all', 'message', 'toolResult', 'meta', 'other'];
+const splitViewOf = (via) => (via === 'message' || via === 'toolResult' || via === 'meta' ? via : 'other');
 
 // --- Experiment projects: excluded by default --------------------------------
 //
 // One rule: the cache advisor's isBenchProject() (the benchmark harness's
-// temp-dir prefixes), widened to ANY project whose working directory sat in a
-// temp dir (a "-Temp-" or "-tmp-" segment), which is where the TTL / variant
-// experiments ran. Pass includeExperiments to count them.
-export function isExperimentProject(name, opts) {
+// temp-dir prefixes), widened to ANY project whose working directory sat
+// inside this machine's system temp dir (os.tmpdir(), sanitised the way the
+// transcript folder names are), which is where the TTL / variant experiments
+// ran. A real repo that merely has "temp" or "tmp" in its name (e.g.
+// dev/temp-tools) is kept. Pass includeExperiments to count them.
+const sanitiseDir = (p) => String(p).replace(/[^A-Za-z0-9]/g, '-');
+export function isExperimentProject(name, { tmp = tmpdir() } = {}) {
   const n = String(name || '');
-  return isBenchProject(n, opts) || /-(?:temp|tmp)-/i.test(n);
+  if (isBenchProject(n, { tmp })) return true;
+  const t = sanitiseDir(tmp);
+  return Boolean(t) && n.toLowerCase().startsWith(`${t}-`.toLowerCase());
 }
 
 // --- Transcripts root: one resolver, in lib/transcripts.mjs ----------------
@@ -322,8 +332,12 @@ function rowFromAgg(label, agg, price) {
 //      Explore, ...) or a subagent with no sidecar metadata at all
 //      (NO_META_AGENT_TYPE) cannot be pointed at a definition to edit, so
 //      both are excluded regardless of their delta.
+//   The per-agent candidates must also clear the per-rung floor
+//   (MIN_RUNG_FILES files and MIN_RUNG_VIEW_GAPS 5-60 min gaps) when
+//   rungSamples (agentType -> perRung sample) is given; one below it is
+//   named as "too little data" instead of recommended.
 export function computeVerdict({
-  perModel, perAgentModel, totals, policy, excludedAgentTypes = KNOWN_AGENT_TYPES,
+  perModel, perAgentModel, totals, policy, excludedAgentTypes = KNOWN_AGENT_TYPES, rungSamples = null,
 }) {
   const fmtPct = (n) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 
@@ -352,20 +366,27 @@ export function computeVerdict({
     text = `don't set subagentPromptCacheTtl — observed delta ${fmtPct(totals.deltaPct)}, `
       + `and the opus/fable-only policy is also non-negative (${fmtPct(policy.opusFableOnlyDeltaPct)})`;
   } else {
+    const thin = [];
     const candidates = perAgentModel.filter((r) => {
       if (r.deltaPct > -MIN_AGENT_SAVING_PCT) return false; // e.g. -0.24% is noise, not a saving worth a standing config edit
       if (r.requests < MIN_REQUESTS_FOR_AGENT_ROW) return false;
       const agentType = r.label.split(' → ')[0];
       if (agentType === NO_META_AGENT_TYPE || excludedAgentTypes.has(agentType)) return false;
+      if (rungSamples) {
+        const s = rungSamples.get(agentType);
+        if (!s || s.files < MIN_RUNG_FILES || s.gaps5to60 < MIN_RUNG_VIEW_GAPS) { thin.push(r.label); return false; }
+      }
       return true;
     });
+    const thinNote = thin.length ? ` (${TOO_LITTLE_DATA.toLowerCase()} for: ${thin.join('; ')})` : '';
     if (!candidates.length) {
       text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}) — no named agent definition `
-        + `clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests with a negative delta to warrant a per-agent override`;
+        + `clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests with a negative delta to warrant a per-agent override${thinNote}`;
     } else {
       text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}) — set `
         + 'experimental: { cacheTtl: "1h" } on: '
-        + candidates.map((r) => `${r.label} (${fmtPct(r.deltaPct)}, today $${r.costToday.toFixed(2)} -> 1h $${r.cost1h.toFixed(2)})`).join('; ');
+        + candidates.map((r) => `${r.label} (${fmtPct(r.deltaPct)}, today ${r.costToday.toFixed(2)} -> 1h ${r.cost1h.toFixed(2)})`).join('; ')
+        + thinNote;
     }
   }
   return { text, breakEvenByTier };
@@ -380,12 +401,19 @@ export function computeVerdict({
 //   gaps5to60ByVia  the 5-60 min gaps counted by what connected them
 //   resumeRewrites  resume-after-idle gaps (lib/transcripts.mjs
 //                   isResumeAfterIdle) that cost a rewrite (cause idle-expiry)
-//   views[view]   for each RUNG_VIEWS entry: the 5-60 gaps in that view, the
-//                 tokens a 1h TTL would convert, today's cost, cost with a 1h
-//                 TTL when ONLY that view's gaps are converted (every write
-//                 still pays the 2x 1h rate), net saving (today - 1h, positive
-//                 = saves), delta %, and a verdict: PAYS / NEUTRAL / COSTS or
-//                 TOO LITTLE DATA below the MIN_RUNG_* floor.
+//   baseline      the no-saving 1h cost: every write pays the 2x 1h rate and
+//                 no gap is credited (cost1h, and netSavingUsd = today -
+//                 cost1h, always <= 0: the fixed premium)
+//   views.all     today's cost, the real 1h cost (every 5-60 gap converted),
+//                 net saving (today - 1h, positive = saves), delta %, and the
+//                 rung's one verdict: PAYS / NEUTRAL / COSTS, or TOO LITTLE
+//                 DATA below the MIN_RUNG_* floor.
+//   views[split]  message / toolResult / meta / other: that gap kind's
+//                 CONTRIBUTION to the saving (baseline cost1h - cost1h with
+//                 only those gaps converted) and its share of the total
+//                 contribution. No verdict: a view is not a standalone policy
+//                 (a real 1h TTL converts every gap). The four contributions
+//                 sum to views.all.netSavingUsd - baseline.netSavingUsd.
 // Requests outside [windowStartMs, nowMs], cross-file duplicates and
 // unpriced models are left out, as in the totals.
 export function rungVerdict({ files, requests, viewGaps, deltaPct }) {
@@ -428,8 +456,7 @@ export function perRungOf(files, { windowStartMs = -Infinity, nowMs = Infinity, 
       if (g.band !== '5to60' || g.afterCompaction || g.via === 'compaction') return;
       R.gaps5to60 += 1;
       R.byVia[g.via] = (R.byVia[g.via] || 0) + 1;
-      for (const v of RUNG_VIEWS) {
-        if (v !== 'all' && v !== g.via) continue;
+      for (const v of ['all', splitViewOf(g.via)]) {
         R.viewGaps[v] += 1;
         A.conv[v] += r.convertedTokens;
       }
@@ -440,25 +467,42 @@ export function perRungOf(files, { windowStartMs = -Infinity, nowMs = Infinity, 
   const out = [];
   for (const key of [...rungs.keys()].sort()) {
     const R = rungs.get(key);
-    const views = {};
-    for (const v of RUNG_VIEWS) {
+    // cost with 1h converting `conv(alias)` tokens, summed over the rung's models
+    const costsFor = (convOf) => {
       let today = 0; let with1h = 0; let conv = 0;
       for (const [alias, A] of R.byAlias) {
         const spec = price.models[alias] || {};
         const p = { in: spec.in ?? 0, out: spec.out ?? 0, readMultiplier: spec.readMultiplier ?? price.defaultReadMultiplier };
         today += costToday(A.agg, p);
-        with1h += costWith1h({ ...A.agg, conv: A.conv[v] }, p);
-        conv += A.conv[v];
+        with1h += costWith1h({ ...A.agg, conv: convOf(A) }, p);
+        conv += convOf(A);
       }
-      const deltaPct = today > 0 ? ((with1h - today) / today) * 100 : 0;
+      return { today, with1h, conv };
+    };
+    const base = costsFor(() => 0);
+    const all = costsFor((A) => A.conv.all);
+    const allDeltaPct = all.today > 0 ? ((all.with1h - all.today) / all.today) * 100 : 0;
+    const allContribution = base.with1h - all.with1h;
+    const baseline = { cost1h: round(base.with1h), netSavingUsd: round(base.today - base.with1h) };
+    const views = {
+      all: {
+        gaps5to60: R.viewGaps.all,
+        convMTok: round(all.conv / 1e6, 6),
+        costToday: round(all.today),
+        cost1h: round(all.with1h),
+        netSavingUsd: round(all.today - all.with1h),
+        deltaPct: round(allDeltaPct),
+        verdict: rungVerdict({ files: R.files, requests: R.requests, viewGaps: R.viewGaps.all, deltaPct: allDeltaPct }),
+      },
+    };
+    for (const v of RUNG_VIEWS.slice(1)) {
+      const c = costsFor((A) => A.conv[v]);
+      const contribution = base.with1h - c.with1h;
       views[v] = {
         gaps5to60: R.viewGaps[v],
-        convMTok: round(conv / 1e6, 6),
-        costToday: round(today),
-        cost1h: round(with1h),
-        netSavingUsd: round(today - with1h),
-        deltaPct: round(deltaPct),
-        verdict: rungVerdict({ files: R.files, requests: R.requests, viewGaps: R.viewGaps[v], deltaPct }),
+        convMTok: round(c.conv / 1e6, 6),
+        contributionUsd: round(contribution),
+        sharePct: allContribution > 0 ? round((contribution / allContribution) * 100, 2) : 0,
       };
     }
     const byVia = {};
@@ -469,6 +513,7 @@ export function perRungOf(files, { windowStartMs = -Infinity, nowMs = Infinity, 
       sample: { files: R.files, requests: R.requests, gaps: R.gaps, gaps5to60: R.gaps5to60 },
       gaps5to60ByVia: byVia,
       resumeRewrites: R.resumeRewrites,
+      baseline,
       views,
     });
   }
@@ -483,6 +528,7 @@ export async function computeCacheTtl({
   maxBytes = 4 * 1024 * 1024 * 1024,
   crossFileDedup = true,
   includeExperiments = false,
+  tmp = tmpdir(),
 } = {}) {
   const nowMs = now.getTime();
   const windowStartMs = nowMs - days * 86400000;
@@ -495,7 +541,7 @@ export async function computeCacheTtl({
   const { truncated } = discovered;
   const excludedProjects = new Set();
   const keep = (f) => {
-    if (includeExperiments || !isExperimentProject(f.project)) return true;
+    if (includeExperiments || !isExperimentProject(f.project, { tmp })) return true;
     excludedProjects.add(f.project);
     return false;
   };
@@ -642,12 +688,16 @@ export async function computeCacheTtl({
   const toolWaitPct = percentiles(toolWaits, [10, 50, 90]);
   const topTools = [...toolNameCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
 
+  // --- Per-rung split (its sample floor also gates the verdict) ------------
+  const perRung = perRungOf(loaded.filter((l) => l.kind === 'subagent'), { windowStartMs, nowMs, price });
+
   // --- Verdict ----------------------------------------------------------
   const { text: verdict, breakEvenByTier } = computeVerdict({
     perModel: perModelRows,
     perAgentModel: perAgentModelRows,
     totals: { costToday: costTodayTotal, deltaPct: globalDeltaPct },
     policy: { opusFableOnlyDeltaPct: opusFableDeltaPct },
+    rungSamples: new Map(perRung.map((r) => [r.rung, r.sample])),
   });
 
   return {
@@ -699,7 +749,7 @@ export async function computeCacheTtl({
     subagentWrite1hMTok: subagentWrite1hTotal / 1e6,
     experimentProjects: { included: includeExperiments, excludedProjects: excludedProjects.size },
     rungFloor: { files: MIN_RUNG_FILES, requests: MIN_RUNG_REQUESTS, viewGaps5to60: MIN_RUNG_VIEW_GAPS },
-    perRung: perRungOf(loaded.filter((l) => l.kind === 'subagent'), { windowStartMs, nowMs, price }),
+    perRung,
     policy: {
       allFiveMin: costTodayTotal,
       allOneHour: cost1hTotal,
