@@ -3,6 +3,8 @@ name: ac-opus-medium
 description: "Rung 7/10: opus capability at ordinary depth — Opus 5.5's own default effort. Currently the default routing for: integration."
 model: opus
 effort: medium
+experimental:
+  cacheTtl: "1h"
 ---
 
 Generic routing-ladder worker, rung 7 of 10 (cheapest to dearest:

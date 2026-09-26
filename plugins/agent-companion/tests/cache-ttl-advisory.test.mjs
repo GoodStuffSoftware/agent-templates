@@ -118,20 +118,42 @@ test('haiku definition set to cacheTtl: 1h is flagged as likely costing more', (
   } finally { cleanup(); }
 });
 
-test('ac-* ladder worker set to cacheTtl: 1h is flagged as likely costing more, even on opus', () => {
+test('ac-* ladder worker set to cacheTtl: 1h is flagged as likely costing more, even on opus (a rung config does NOT except)', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const agentsDir = join(dir, '.claude', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    // ac-opus-low deliberately: same opus tier as the four 2026-09-26
+    // exception rungs (ac-opus-medium/high/xhigh/max), but config/model-tiers.json's
+    // `ladder` gives ac-opus-low no `cacheTtl` override — it stays a
+    // one-shot worker that should NOT be on 1h, so this must still flag.
+    writeFileSync(
+      join(agentsDir, 'ac-opus-low.md'),
+      '---\nname: ac-opus-low\ndescription: generic ladder rung\nmodel: opus\neffort: low\nexperimental:\n  cacheTtl: 1h\n---\nbody\n',
+    );
+    const result = runAgentDefsAudit(dir, fixtureEnv(dir));
+    assert.ok(result, 'agent-defs check did not run');
+    assert.ok(
+      result.findings.some((f) => /ac-opus-low/.test(f) && /likely costs MORE/.test(f)),
+      `expected a "costs more" note for a one-shot ladder worker at 1h; got: ${JSON.stringify(result.findings)}`,
+    );
+  } finally { cleanup(); }
+});
+
+test('ac-opus-high (a rung config DOES except, 2026-09-26 decision) with cacheTtl: 1h is NOT flagged as costing more', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const agentsDir = join(dir, '.claude', 'agents');
     mkdirSync(agentsDir, { recursive: true });
     writeFileSync(
-      join(agentsDir, 'ac-opus-max.md'),
-      '---\nname: ac-opus-max\ndescription: generic ladder rung\nmodel: opus\neffort: max\nexperimental:\n  cacheTtl: 1h\n---\nbody\n',
+      join(agentsDir, 'ac-opus-high.md'),
+      '---\nname: ac-opus-high\ndescription: generic ladder rung\nmodel: opus\neffort: high\nexperimental:\n  cacheTtl: 1h\n---\nbody\n',
     );
     const result = runAgentDefsAudit(dir, fixtureEnv(dir));
     assert.ok(result, 'agent-defs check did not run');
     assert.ok(
-      result.findings.some((f) => /ac-opus-max/.test(f) && /likely costs MORE/.test(f)),
-      `expected a "costs more" note for a one-shot ladder worker at 1h; got: ${JSON.stringify(result.findings)}`,
+      !result.findings.some((f) => /ac-opus-high/.test(f) && /likely costs MORE/.test(f)),
+      `did not expect a "costs more" note for ac-opus-high — config/model-tiers.json's ladder marks it as the deliberate exception; got: ${JSON.stringify(result.findings)}`,
     );
   } finally { cleanup(); }
 });

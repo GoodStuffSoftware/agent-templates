@@ -428,6 +428,38 @@ thresholds below account for that by being harder to satisfy in the
 | global delta ≥ `DONT_SET_DELTA_PCT` (+1.0%) **and** the opus/fable-only policy is also non-negative | don't set it, full stop |
 | otherwise — tiers disagree, or the global delta sits inside the ±1% dead zone | don't set it globally; instead list every `agentType × model` row with a delta at or past `-MIN_AGENT_SAVING_PCT` (1.0% — a -0.24% "saving" is noise, not a reason to edit a definition), at least `MIN_REQUESTS_FOR_AGENT_ROW` (500) requests, and a **named, editable** agent definition — excluding harness built-ins (`general-purpose`, `Explore`, `Plan`, ...; reuses `KNOWN_AGENT_TYPES` from `hooks/lib/context.mjs`) and subagents with no sidecar `.meta.json` at all (`(no meta)`), neither of which has any frontmatter to set `experimental: { cacheTtl: "1h" }` on |
 
+A candidate that qualifies for the per-agent list above but whose OWN
+definition **already** carries `experimental: { cacheTtl: "1h" }` (read live
+via `agentDefinition()`, not a hardcoded name list) is reported separately as
+"already on `experimental.cacheTtl: "1h"` (no action needed)" instead of
+being re-recommended — otherwise a rung that was already switched would show
+up as a fresh suggestion to make the same edit again, forever, as long as its
+measured delta stayed negative (`alreadyOneHourFrom()` in `scripts/lib/cache-ttl.mjs`).
+
+**Which ladder rungs use the 1-hour cache today, and why.** Four of the ten
+generic `ac-*` ladder workers — `ac-opus-medium`, `ac-opus-high`,
+`ac-opus-xhigh`, `ac-opus-max` — carry `experimental: { cacheTtl: "1h" }` in
+their shipped `agents/ac-*.md` frontmatter (`config/model-tiers.json`'s
+`ladder[].cacheTtl`, generated into the file by
+`scripts/routing-table.mjs --sync-agent-descriptions`, decided 2026-09-26).
+This is NOT the "long-lived, gets resumed" pattern the `recommendOneHourFor`
+criterion above targets: a dedicated measurement
+(`~/.claude/tasks/ac-cache-advisor/variants-report.md`) found close to zero
+`via=message` resumes on any ladder rung across 30 days of real traffic — the
+generic workers really are spawned fresh and rarely messaged again. The
+saving instead comes from the ALL-CAUSE view: long tool waits (`Bash`, test
+suites, builds) idling a single task's cache past 5 minutes, which
+`ac-opus-medium` and `ac-opus-xhigh` converted well past the ~38.5–39.5%
+break-even (53.9% and 43.5% of write tokens). `ac-opus-low` measured below
+break-even (10.9%) and stays on the 5m default, along with every non-opus
+rung — see `config/model-tiers.json`'s `ladderCacheTtlNote` and
+`cacheTtl.ladderWorkersExcludedNote` for the full evidence. The resume
+doctrine itself is unchanged: resume a stopped worker only while its cache is
+warm — now up to an hour on these four rungs — otherwise spawn a fresh ladder
+worker from a file handoff (`hooks/resume-guard.mjs`; its
+`cacheTtlFromDefinition()` already reads any agent definition's
+`experimental.cacheTtl`, including these four, generically).
+
 A **compaction** immediately before a request (`isCompactSummary: true` on
 the synthetic user record, or its preceding `compact_boundary` system
 marker) forces a fresh cache write regardless of TTL — the old cache is

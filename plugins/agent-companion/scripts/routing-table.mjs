@@ -12,8 +12,8 @@
 //   node routing-table.mjs --out FILE    # write markdown to FILE (e.g. docs/ROUTING.md)
 //   node routing-table.mjs --task-type-block          # the compact block skills/recommend/SKILL.md carries
 //   node routing-table.mjs --sync-skill FILE          # rewrite that block in FILE, between its markers
-//   node routing-table.mjs --check-agent-descriptions # exit 1 if any agents/ac-*.md description has drifted
-//   node routing-table.mjs --sync-agent-descriptions  # rewrite those descriptions to match the config now
+//   node routing-table.mjs --check-agent-descriptions # exit 1 if any agents/ac-*.md description OR cacheTtl has drifted
+//   node routing-table.mjs --sync-agent-descriptions  # rewrite those descriptions/cacheTtl to match the config now
 
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -140,8 +140,77 @@ function spliceSkillBlock(text, block = taskTypeBlock()) {
 // resolveRoute(). A rung whose model carries a `retiresAfter` gets its
 // retirement notice generated from that date and the tier's `replacement`
 // as well, so neither can go stale as a hand-typed copy.
+//
+// A rung's optional `cacheTtl` config field ("1h", or omitted for the
+// subagent 5m default) is covered the same way, into the SAME frontmatter
+// block, as a NESTED `experimental: { cacheTtl: "1h" }` (block-style: an
+// `experimental:` line followed by one indented `cacheTtl:` line — see
+// readCacheTtl()/setCacheTtl() below). It is checked/synced independently of
+// the description text (a rung can drift on one and not the other), by the
+// same --check-agent-descriptions / --sync-agent-descriptions pair, so there
+// is still exactly one generator and one drift check for this file, not two.
 function ladderRungs() {
   return Array.isArray(cfg.ladder) ? cfg.ladder.filter((r) => r && r.agent) : [];
+}
+
+// The rung's expected cache-TTL frontmatter value: "1h" when config says so,
+// else null (meaning "no experimental.cacheTtl block" — the subagent 5m
+// default applies with nothing stated). Never any other string: Claude Code
+// itself only recognises "5m"/"1h" (code.claude.com/docs/en/sub-agents), and
+// a config value that is neither is treated as absent (5m) rather than
+// guessed at, same convention as scripts/checks.mjs's cacheTtlFrontmatter().
+function expectedCacheTtl(rung) {
+  return rung && rung.cacheTtl === '1h' ? '1h' : null;
+}
+
+// Reads the nested `experimental.cacheTtl` value out of a frontmatter block's
+// TEXT (the capture group between the `---` fences, not the whole file) —
+// frontmatterValue()/readDescription() below are flat, single-line parsers
+// and do not descend into a nested map, so this searches directly rather
+// than hand-rolling a YAML parser for one field. Duplicated (not imported)
+// in scripts/checks.mjs's cacheTtlFrontmatter() and
+// hooks/lib/resume-guard.mjs's cacheTtlFromDefinition(): hooks/ must not
+// import scripts/, and keeping each reader small and self-contained beats a
+// shared import three call sites would need to agree on.
+const CACHE_TTL_LINE = /^([ \t]*)cacheTtl:\s*["']?(5m|1h)["']?[ \t]*$/m;
+function readCacheTtl(fmText) {
+  const m = fmText.match(CACHE_TTL_LINE);
+  return m ? m[2] : null;
+}
+
+// Sets or removes the `experimental.cacheTtl` block in a whole file's TEXT
+// (frontmatter fences included), returning the updated text. `ttl` is "1h"
+// to add/update that setting, or null to remove it (falling back to the
+// subagent 5m default). Only the two-line shape this generator itself
+// writes — a bare `experimental:` line immediately followed by one indented
+// `cacheTtl:` line, nothing else nested under it — is understood; every
+// shipped agents/ac-*.md file is written by this function, so that shape is
+// the only one that needs round-tripping. Idempotent: calling it again with
+// the same `ttl` returns byte-identical text.
+function setCacheTtl(text, ttl) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return text; // no frontmatter fences: nothing this function can touch
+  let fm = m[1];
+  const nl = fm.includes('\r\n') ? '\r\n' : '\n';
+  const hasLine = CACHE_TTL_LINE.test(fm);
+  if (ttl === '1h') {
+    if (hasLine) {
+      fm = fm.replace(CACHE_TTL_LINE, '  cacheTtl: "1h"');
+    } else if (/^experimental:[ \t]*$/m.test(fm)) {
+      fm = fm.replace(/^experimental:[ \t]*$/m, `experimental:${nl}  cacheTtl: "1h"`);
+    } else {
+      fm = `${fm}${nl}experimental:${nl}  cacheTtl: "1h"`;
+    }
+  } else if (hasLine) {
+    const lines = fm.split(/\r?\n/);
+    const idx = lines.findIndex((l) => CACHE_TTL_LINE.test(l));
+    const expIdx = idx > 0 && /^experimental:[ \t]*$/.test(lines[idx - 1]) ? idx - 1 : -1;
+    const nextIsNested = idx + 1 < lines.length && /^[ \t]+\S/.test(lines[idx + 1]);
+    lines.splice(idx, 1);
+    if (expIdx >= 0 && !nextIsNested) lines.splice(expIdx, 1); // last child removed: drop the now-empty header too
+    fm = lines.join(nl);
+  }
+  return text.slice(0, m.index) + '---' + nl + fm + nl + '---' + text.slice(m.index + m[0].length);
 }
 
 // Task types (numeric-weight only — parity types are sized to a writer, not
@@ -214,17 +283,24 @@ function frontmatterValue(fmText, key) {
 }
 function readDescription(file) {
   let text;
-  try { text = readFileSync(file, 'utf8'); } catch { return { text: null, description: null, name: null }; }
+  try { text = readFileSync(file, 'utf8'); } catch { return { text: null, description: null, name: null, cacheTtl: null }; }
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!m) return { text, description: null, name: null };
-  return { text, description: frontmatterValue(m[1], 'description'), name: frontmatterValue(m[1], 'name') };
+  if (!m) return { text, description: null, name: null, cacheTtl: null };
+  return {
+    text,
+    description: frontmatterValue(m[1], 'description'),
+    name: frontmatterValue(m[1], 'name'),
+    cacheTtl: readCacheTtl(m[1]),
+  };
 }
 
-function writeDescription(file, text, newDescription) {
+// Pure: returns the updated file text with `description:` rewritten, never
+// writes. Split from the old writeDescription() so a caller changing BOTH
+// the description and the cacheTtl block writes the file once, not twice.
+function applyDescription(text, newDescription) {
   const quoted = /[:#{}[\],&*!|>'"%@`]/.test(newDescription) || newDescription.includes(': ');
   const line = quoted ? `description: "${newDescription.replace(/"/g, '\\"')}"` : `description: ${newDescription}`;
-  const updated = text.replace(/^description:\s*.*$/m, line);
-  writeFileSync(file, updated);
+  return text.replace(/^description:\s*.*$/m, line);
 }
 
 // A role is a capability shape. The only routing claim it may make is the
@@ -267,8 +343,9 @@ function roleClaimProblems(rung) {
 // `problem` is one of: no-role (config gives the rung no role text),
 // false-claim / unverifiable-claim (the role's own routing claim, see
 // roleClaimProblems), missing-file, name-mismatch, drift (description
-// differs from the generated one), not-a-rung (an agents/ac-*.md file no
-// rung names).
+// differs from the generated one), cache-ttl-drift (the frontmatter's
+// experimental.cacheTtl does not match the rung's config `cacheTtl` field),
+// not-a-rung (an agents/ac-*.md file no rung names).
 function checkAgentDescriptions() {
   const out = [];
   const rungs = ladderRungs();
@@ -276,7 +353,7 @@ function checkAgentDescriptions() {
     const file = agentFile(rung);
     for (const c of roleClaimProblems(rung)) out.push({ agent: rung.agent, file, ...c });
     const expected = generatedAgentDescription(rung);
-    const { text, description, name } = readDescription(file);
+    const { text, description, name, cacheTtl } = readDescription(file);
     if (expected === null) {
       out.push({ agent: rung.agent, file, problem: 'no-role', expected: `a "role" for rung ${rung.rung} in config/model-tiers.json ladder`, actual: null });
       continue;
@@ -287,6 +364,14 @@ function checkAgentDescriptions() {
     }
     if (name !== rung.agent) out.push({ agent: rung.agent, file, problem: 'name-mismatch', expected: `name: ${rung.agent}`, actual: name === null ? null : `name: ${name}` });
     if (description !== expected) out.push({ agent: rung.agent, file, problem: 'drift', expected, actual: description });
+    const expectedTtl = expectedCacheTtl(rung);
+    if (cacheTtl !== expectedTtl) {
+      out.push({
+        agent: rung.agent, file, problem: 'cache-ttl-drift',
+        expected: expectedTtl ? 'experimental.cacheTtl: "1h"' : 'no experimental.cacheTtl block (subagent 5m default)',
+        actual: cacheTtl ? `experimental.cacheTtl: "${cacheTtl}"` : '(absent)',
+      });
+    }
   }
   const known = new Set(rungs.map((r) => `${r.agent}.md`));
   let files = [];
@@ -303,9 +388,15 @@ function syncAgentDescriptions() {
     const expected = generatedAgentDescription(rung);
     if (expected === null) continue; // no role: only the check can report it
     const file = agentFile(rung);
-    const { text, description } = readDescription(file);
-    if (text === null || description === expected) continue;
-    writeDescription(file, text, expected);
+    const { text, description, cacheTtl } = readDescription(file);
+    if (text === null) continue;
+    const expectedTtl = expectedCacheTtl(rung);
+    let updated = text;
+    let changed = false;
+    if (description !== expected) { updated = applyDescription(updated, expected); changed = true; }
+    if (cacheTtl !== expectedTtl) { updated = setCacheTtl(updated, expectedTtl); changed = true; }
+    if (!changed) continue;
+    writeFileSync(file, updated);
     written.push(file);
   }
   return written;
@@ -316,13 +407,13 @@ if (has('--check-agent-descriptions')) {
     console.log('agent descriptions match config/model-tiers.json — no drift');
     process.exit(0);
   }
-  console.error(`${drift.length} ladder agent description problem(s) against config/model-tiers.json's ladder:`);
+  console.error(`${drift.length} ladder agent definition problem(s) against config/model-tiers.json's ladder:`);
   for (const d of drift) {
     console.error(`\n${d.agent} [${d.problem}] (${d.file}):`);
     console.error(`  expected: ${d.expected}`);
     console.error(`  actual:   ${d.actual === null ? '(missing/unparseable)' : d.actual}`);
   }
-  console.error('\nDrifted descriptions: run `node scripts/routing-table.mjs --sync-agent-descriptions`. A missing role, file or rung, a name mismatch or a file that is no longer a rung needs a config or file edit.');
+  console.error('\nDrifted: run `node scripts/routing-table.mjs --sync-agent-descriptions`. A missing role, file or rung, a name mismatch, a cacheTtl mismatch, or a file that is no longer a rung needs a config or file edit.');
   process.exit(1);
 }
 
@@ -388,12 +479,18 @@ if (Array.isArray(cfg.ladder) && cfg.ladder.length) {
   L.push(``);
   L.push(`The same routing grid's (model, effort) pairs, ordered, each mapped to a spawnable generic worker definition under \`agents/\` — namespaced \`agent-companion:<agent>\` when spawned from outside this repo. Fable stays outside the ladder as a warranted exception, never a routine destination.`);
   L.push(``);
-  L.push(`| Rung | Model | Effort | Spawn as |`);
-  L.push(`|---|---|---|---|`);
+  L.push(`| Rung | Model | Effort | Cache TTL | Spawn as |`);
+  L.push(`|---|---|---|---|---|`);
   for (const r of cfg.ladder) {
-    L.push(`| ${r.rung} | \`${r.model}\` | ${r.effort ? `\`${r.effort}\`` : '_none_'} | \`agent-companion:${r.agent}\` |`);
+    const ttl = r.cacheTtl === '1h' ? '`1h`' : '5m (default)';
+    L.push(`| ${r.rung} | \`${r.model}\` | ${r.effort ? `\`${r.effort}\`` : '_none_'} | ${ttl} | \`agent-companion:${r.agent}\` |`);
   }
   L.push(``);
+  const oneHourRungs = cfg.ladder.filter((r) => r.cacheTtl === '1h');
+  if (oneHourRungs.length) {
+    L.push(`Rungs ${oneHourRungs.map((r) => `\`${r.agent}\``).join(', ')} carry \`experimental: { cacheTtl: "1h" }\` in their \`agents/ac-*.md\` frontmatter — generated from each rung's \`cacheTtl\` field above by this script (\`--sync-agent-descriptions\`), never hand-edited. The saving there does not come from being resumed: 30 days of real traffic showed close to zero message-level resumes on any ladder rung. It comes from slow tool waits (long \`Bash\` calls, test suites, builds) idling the cache past 5 minutes inside a single task — the all-cause measurement captures that, the resume-only measurement does not. \`ac-opus-low\` and every non-opus rung stay on the 5m default: resume doctrine is unchanged (resume a stopped worker only while its cache is warm — now up to an hour on these four rungs — otherwise spawn a fresh ladder worker from a file handoff; see \`hooks/resume-guard.mjs\`).`);
+    L.push(``);
+  }
 }
 
 if (cfg.referenceModels && Object.keys(cfg.referenceModels).length) {
