@@ -2,6 +2,15 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.13 — 2026-09-26
+
+- Added the polling-wakes guard (cache-advisor guard b), a PreToolUse hook on ScheduleWakeup and Monitor. It is advisory only and never blocks. It names the doctrine "one completion wait, never per-item wakes" when recent wakes look like a short-interval poll producing no new work:
+  - ScheduleWakeup: a streak of at least `poll_guard_noop_streak` (default 2) `noop` wakes at or below `poll_guard_short_delay_seconds` (default 600). The hint fires only while harness-tracked background work (a background Agent/subagent, Bash/PowerShell or Monitor call) is still in flight; polling external state the harness cannot track, such as CI or a merge gate, is left alone.
+  - Monitor: at least `poll_guard_monitor_rearm_streak` (default 2) re-arms of the identical watch. A re-arm counts only if it happens before the previous arm could have timed out, and only when that arm's `timeout_ms` was at or below `poll_guard_monitor_short_timeout_ms` (default 600000); re-arming a watch after it naturally expired is not flagged.
+  Kill switch: `poll_guard: false`. `poll_guard_tail_bytes` (default 131072) bounds how much of the transcript it reads.
+- Added the standing rule `poll-guard-doctrine` (session start). Seven rules now ship built in.
+- Added `scripts/poll-guard-report.mjs`, a read-only report of polling-wake episodes (wake count and context re-read size) from your own transcripts. A continuous escalating watch is reported as one episode.
+
 ## 0.29.12 — 2026-09-26
 
 - Added the resume guard, a PreToolUse hook on SendMessage. It is advisory only and never blocks. It speaks up when all of these hold:
