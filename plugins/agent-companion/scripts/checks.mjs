@@ -1478,7 +1478,7 @@ const cacheAdvisorCheck = {
     const forms = g.toType;
     findings.push(`one setting for this model mix: ${K(g.optimum.window)} (within 5%: ${K(g.band5[0])}-${K(g.band5[1])}) — type ${forms.command}, or "autoCompactWindow": ${forms.settingsValue} (an integer) in settings.json`);
     for (const b of g.optimum.belowFloor || []) {
-      findings.push(`WARNING: at ${K(g.optimum.window)}, ${b.model} compacts about every ${b.turnsPerCompaction.toFixed(0)} turns (below the ${a.minTurnsPerCompaction}-turn floor the mix meets)`);
+      findings.push(`WARNING: at ${K(g.optimum.window)}, ${b.model} compacts about every ${b.turnsPerCompaction.toFixed(1)} turns (below the ${a.minTurnsPerCompaction}-turn floor the mix meets${b.atCap ? '; at its context-window cap, no setting helps' : ''})`);
     }
     if (g.noRework?.optimum) findings.push(`rework off: ${K(g.noRework.optimum.window)} (within 5%: ${K(g.noRework.band5[0])}-${K(g.noRework.band5[1])})`);
     const inEffect = g.configured || g.atDefault;

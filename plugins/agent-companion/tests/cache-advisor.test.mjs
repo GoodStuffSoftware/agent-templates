@@ -671,6 +671,8 @@ test('combineModels: a model that compacts more often than the floor at the mix 
   assert.ok(t['claude-fable-5-1'] != null && t['claude-fable-5-1'] < 10, `fable turns ${t['claude-fable-5-1']}`);
   assert.deepEqual(g.optimum.belowFloor.map((x) => x.model), Object.entries(t).filter(([, v]) => v != null && v < 10).map(([m]) => m));
   assert.ok(g.optimum.belowFloor.some((x) => x.model === 'claude-fable-5-1'));
+  const fb = g.optimum.belowFloor.find((x) => x.model === 'claude-fable-5-1');
+  assert.equal(fb.atCap, g.optimum.window >= 1000000, 'at its cap only when the setting reaches its context window');
 });
 
 function adviceFixture({ truncated = false, configured } = {}) {

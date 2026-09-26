@@ -872,9 +872,11 @@ export function combineModels(evaluated, {
     const inside = allowedRows.filter((r) => r.usd <= opt.usd * (1 + pct / 100)).map((r) => r.window);
     return [Math.min(...inside), Math.max(...inside)];
   };
+  // atCap: the setting is at or above this model's context window, so it
+  // already compacts as late as it can; no value of the setting helps it.
   const belowFloor = Object.entries(opt.perModelTurnsPerCompaction)
     .filter(([, t]) => t != null && t < minTurns)
-    .map(([model, t]) => ({ model, turnsPerCompaction: t }));
+    .map(([model, t]) => ({ model, turnsPerCompaction: t, atCap: opt.window >= (voters.find((e) => e.model === model)?.contextWindow ?? Infinity) }));
   return {
     voters: voters.map((e) => e.model),
     optimum: {
@@ -1204,7 +1206,8 @@ export function formatAdvice(a, { curve = false } = {}) {
     out.push(`  at ${K(W)}: a compaction about every ${turnsTxt(g.optimum.turnsPerCompaction)} turns overall; per model `
       + Object.entries(tpc).map(([m, t]) => `${m} ${t == null ? 'none' : t.toFixed(0)}`).join(', '));
     for (const b of g.optimum.belowFloor || []) {
-      out.push(`  WARNING: at ${K(W)}, ${b.model} would compact about every ${b.turnsPerCompaction.toFixed(0)} turns — more often than the ${a.minTurnsPerCompaction}-turn floor, which binds the mix as a whole, not each model`);
+      out.push(`  WARNING: at ${K(W)}, ${b.model} would compact about every ${b.turnsPerCompaction.toFixed(1)} turns — more often than the ${a.minTurnsPerCompaction}-turn floor, which binds the mix as a whole, not each model`
+        + `${b.atCap ? ' (it is at its context-window cap already: no value of the setting makes it compact less often)' : ''}`);
     }
     if (g.noRework?.optimum) {
       out.push(`  rework off: cheapest ${K(g.noRework.optimum.window)}, within 5%: ${K(g.noRework.band5[0])}-${K(g.noRework.band5[1])} `
