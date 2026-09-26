@@ -61,12 +61,12 @@
 //   node transcript-harvest.mjs --out ./digest.md
 //   node transcript-harvest.mjs --include-subagents   # also scan the (huge) subagent half
 
-import {
-  createReadStream, readdirSync, statSync, mkdirSync, writeFileSync,
-} from 'node:fs';
-import { createInterface } from 'node:readline';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
-import { dataDir, claudeDir } from '../hooks/lib/context.mjs';
+import { dataDir } from '../hooks/lib/context.mjs';
+import {
+  transcriptsRoot, discoverTranscripts as discoverShared, readRecords, CompactionTracker, flattenContent,
+} from './lib/transcripts.mjs';
 
 // --- Corpus location ---------------------------------------------------
 
@@ -74,10 +74,8 @@ import { dataDir, claudeDir } from '../hooks/lib/context.mjs';
 // memory/*.md — this script walks the OTHER half of that same tree (the raw
 // session JSONL). AGENT_COMPANION_TRANSCRIPTS_ROOT mirrors that module's own
 // AGENT_COMPANION_MEMORY_ROOT override, for the same reason: tests need a
-// scratch corpus, not the operator's real sessions.
-function transcriptsRoot() {
-  return process.env.AGENT_COMPANION_TRANSCRIPTS_ROOT || join(claudeDir(), 'projects');
-}
+// scratch corpus, not the operator's real sessions. The resolver, the walk
+// and the compaction pairing all live in scripts/lib/transcripts.mjs.
 
 // --- Arg parsing (mirrors scripts/memory-search.mjs's parser) -----------
 
@@ -114,65 +112,21 @@ if (args.values['--since']) {
 // Main-session files sit directly in a project directory; subagent
 // transcripts live one level deeper, in <project>/<sessionId>/subagents/*.jsonl
 // (the same <sessionId> that names the main .jsonl file's own basename).
+// Workflow agents (subagents/workflows/<wf>/) are not scanned.
 function discoverTranscripts(root, { withSubagents }) {
-  const files = [];
-  let projectDirs;
-  try {
-    projectDirs = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory());
-  } catch {
-    return files; // no corpus at all: fail open to an empty scan, not a crash
-  }
-
-  for (const proj of projectDirs) {
-    if (projectFilter && !proj.name.toLowerCase().includes(projectFilter.toLowerCase())) continue;
-    const projDir = join(root, proj.name);
-    let entries;
-    try { entries = readdirSync(projDir, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-        files.push({ project: proj.name, kind: 'main', path: join(projDir, entry.name) });
-        continue;
-      }
-      if (withSubagents && entry.isDirectory()) {
-        const subDir = join(projDir, entry.name, 'subagents');
-        let subEntries;
-        try { subEntries = readdirSync(subDir, { withFileTypes: true }); } catch { continue; }
-        for (const s of subEntries) {
-          if (s.isFile() && s.name.endsWith('.jsonl')) {
-            files.push({ project: proj.name, kind: 'subagent', path: join(subDir, s.name) });
-          }
-        }
-      }
-    }
-  }
-  return files;
+  const project = projectFilter
+    ? (name) => name.toLowerCase().includes(projectFilter.toLowerCase())
+    : null;
+  const { files } = discoverShared(root, { main: true, subagents: withSubagents, project, meta: false });
+  return files.map((f) => ({ project: f.project, kind: f.kind, path: f.path, mtimeMs: f.mtimeMs }));
 }
 
 // --- Compact-summary detection --------------------------------------------
-
-const SUMMARY_PREFIX = 'this session is being continued from a previous conversation that ran out of context';
-
-function isCompactBoundary(rec) {
-  return !!rec && rec.type === 'system' && rec.subtype === 'compact_boundary';
-}
-
-function flattenContent(content) {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content.map((b) => (typeof b === 'string' ? b : (b && typeof b.text === 'string' ? b.text : ''))).join('\n');
-  }
-  return '';
-}
-
-// isCompactSummary:true is the authoritative signal (set by the harness on
-// the synthetic record itself); the text-prefix check is a fallback only, in
-// case a future format keeps the wording but drops the flag.
-function isCompactSummary(rec) {
-  if (!rec || rec.type !== 'user' || !rec.message) return false;
-  if (rec.isCompactSummary === true) return true;
-  const text = flattenContent(rec.message.content);
-  return text.slice(0, 200).toLowerCase().includes(SUMMARY_PREFIX);
-}
+//
+// A `type:"system"` compact_boundary record is followed by the synthetic
+// summary `type:"user"` record; lib/transcripts.mjs's CompactionTracker does
+// the pairing (isCompactSummary:true is authoritative, the opening wording is
+// a fallback, and a user record straight after a boundary counts too).
 
 const SUMMARY_CAP_CHARS = 4000; // a sane cap for a REVIEWABLE digest, not a full archive
 
@@ -191,35 +145,19 @@ function capText(text) {
 // mid-write truncated last line, a corrupt record) — this is a best-effort
 // harvest, not a strict parser.
 async function scanFile(file, stats, onSummary) {
-  let pendingBoundary = null;
-  let rl;
+  const tracker = new CompactionTracker();
+  const fileStats = {};
   try {
-    rl = createInterface({
-      input: createReadStream(file.path, { encoding: 'utf8' }),
-      crlfDelay: Infinity,
-    });
-  } catch {
-    return; // unreadable file: skip it, do not crash the whole harvest
-  }
-
-  for await (const line of rl) {
-    if (!line) continue;
-    stats.bytesRead += Buffer.byteLength(line, 'utf8') + 1;
-    let rec;
-    try { rec = JSON.parse(line); } catch { continue; }
-
-    if (isCompactBoundary(rec)) { pendingBoundary = rec; continue; }
-
-    if (isCompactSummary(rec)) {
-      const ts = Date.parse(rec.timestamp || '');
-      if (!Number.isNaN(ts) && ts < sinceMs) { pendingBoundary = null; continue; }
-      onSummary(rec, pendingBoundary, file);
-      if (stats.summaries.length >= limit) { rl.close(); return; }
-      pendingBoundary = null;
-      continue;
+    for await (const rec of readRecords(file.path, { stats: fileStats })) {
+      const ev = tracker.feed(rec);
+      if (!ev || !ev.summary) continue;
+      const ts = Date.parse(ev.summary.timestamp || '');
+      if (!Number.isNaN(ts) && ts < sinceMs) continue;
+      onSummary(ev.summary, ev.boundary, file);
+      if (stats.summaries.length >= limit) return;
     }
-
-    pendingBoundary = null; // any other line in between breaks the adjacency
+  } finally {
+    stats.bytesRead += fileStats.bytes || 0;
   }
 }
 
@@ -233,11 +171,6 @@ const allFiles = discoverTranscripts(root, { withSubagents: includeSubagents });
 // most-recently-modified first so --limit yields the most RECENT summaries
 // rather than whatever directory order the filesystem happens to return.
 const candidates = allFiles
-  .map((f) => {
-    let mtimeMs = 0;
-    try { mtimeMs = statSync(f.path).mtimeMs; } catch { /* stat failed: keep at 0, still scanned */ }
-    return { ...f, mtimeMs };
-  })
   .filter((f) => sinceMs === -Infinity || f.mtimeMs >= sinceMs || f.mtimeMs === 0)
   .sort((a, z) => z.mtimeMs - a.mtimeMs);
 

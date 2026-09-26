@@ -23,13 +23,14 @@
 // scripts/lib/coverage.mjs's telemetry-coverage check.
 
 import {
-  existsSync, readdirSync, statSync, openSync, fstatSync, readSync, closeSync, readFileSync,
+  existsSync, openSync, fstatSync, readSync, closeSync, readFileSync,
 } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { join } from 'node:path';
 import {
-  claudeDir, telemetryDir, classifyModel, classifyReferenceModel, modelTiers,
+  telemetryDir, classifyModel, classifyReferenceModel, modelTiers,
   parseSemver, semverBelow, tailRecords,
 } from '../../hooks/lib/context.mjs';
+import { discoverTranscripts, transcriptsRoot as sharedTranscriptsRoot } from './transcripts.mjs';
 
 const DEFAULT_HOURS = 48;
 const DEFAULT_MAX_FILES = 3000;
@@ -82,35 +83,22 @@ function lastAssistantModel(path) {
   return (last && last.message && typeof last.message.model === 'string') ? last.message.model : null;
 }
 
-// Recursively collect `*/subagents/*.jsonl` files under root with mtime at or
-// after sinceMs, honouring file/byte caps. Returns { bySession, truncated }
+// Collect `<session>/subagents/agent-*.jsonl` files under root with mtime at
+// or after sinceMs, honouring file/byte caps. Returns { bySession, truncated }
 // where bySession maps sessionId (the directory name one level above
 // `subagents/`) -> [{ file, mtimeMs }].
+//
+// Discovery is lib/transcripts.mjs's: ordinary subagent transcripts only.
+// Workflow agents (subagents/workflows/<wf>/) are left out — a workflow agent
+// is not started by an Agent spawn, so it has no spawns.jsonl row to match.
 function collectSubagentFiles(root, sinceMs, maxFiles, maxBytes) {
   const bySession = new Map();
-  let totalBytes = 0;
-  let count = 0;
-  let truncated = false;
-  const stack = [root];
-  while (stack.length) {
-    const dir = stack.pop();
-    let entries;
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
-    for (const e of entries) {
-      const full = join(dir, e.name);
-      if (e.isDirectory()) { stack.push(full); continue; }
-      if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
-      if (basename(dirname(full)) !== 'subagents') continue; // only nested per-agent transcripts
-      let st;
-      try { st = statSync(full); } catch { continue; }
-      if (st.mtimeMs < sinceMs) continue;
-      if (count >= maxFiles || totalBytes + st.size > maxBytes) { truncated = true; continue; }
-      count += 1;
-      totalBytes += st.size;
-      const sessionId = basename(dirname(dirname(full))); // .../<sessionId>/subagents/<file>
-      if (!bySession.has(sessionId)) bySession.set(sessionId, []);
-      bySession.get(sessionId).push({ file: full, mtimeMs: st.mtimeMs });
-    }
+  const { files, truncated } = discoverTranscripts(root, {
+    sinceMs, maxFiles, maxBytes, main: false, subagents: true, workflows: false, meta: false, anyDepth: true,
+  });
+  for (const f of files) {
+    if (!bySession.has(f.sessionId)) bySession.set(f.sessionId, []);
+    bySession.get(f.sessionId).push({ file: f.path, mtimeMs: f.mtimeMs });
   }
   return { bySession, truncated };
 }
@@ -163,7 +151,7 @@ export async function scanModelMismatches({
   const start = Date.now();
   const nowMs = now.getTime();
   const sinceMs = nowMs - hours * 3600000;
-  const root = transcriptsRoot || process.env.AGENT_COMPANION_TRANSCRIPTS_ROOT || join(claudeDir(), 'projects');
+  const root = sharedTranscriptsRoot(transcriptsRoot);
 
   const spawnRows = readSpawnRows(sinceMs, nowMs);
   if (!existsSync(root) || !spawnRows.length) {
