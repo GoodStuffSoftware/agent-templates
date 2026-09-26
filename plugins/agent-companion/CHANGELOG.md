@@ -2,6 +2,14 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.16 — 2026-09-26
+
+- Behaviour change: `cache-ttl.mjs` totals and `audit --only cache-ttl` now exclude experiment projects by default — the benchmark projects plus any project inside the system temp dir (a real repo merely named like `temp-tools` is not excluded). Both outputs say how many projects were excluded; `--include-experiments` counts them.
+- `cache-ttl.mjs` has a per-rung table: each rung's 5-60 min gaps split by what connected them (message, tool result, meta i.e. harness-injected, other), with resume-after-idle rewrite counts and sample sizes.
+  - Each gap kind shows its contribution to the 1h net saving and its share of it. A no-saving baseline (the 2x write premium with no gap credited) is shown; the contributions sum to the overall saving minus the baseline.
+  - Only the rung's overall line gets a verdict (PAYS / COSTS / NEUTRAL / TOO LITTLE DATA); a rung below 10 files, 500 requests or 30 gaps of 5-60 min reads TOO LITTLE DATA.
+- The per-agent `experimental: { cacheTtl: "1h" }` recommendation no longer names an agent whose rung is below that data floor; such agents are listed as "too little data" instead.
+
 ## 0.29.15 — 2026-09-26
 
 - Added the `compact_window_drift` scout signal. It fires when the recommended global auto-compact window moves more than `compact_window_drift_pct` (default 20; invalid values fall back to 20) from the anchored full-read recommendation, then re-anchors, so it fires once per material move.
