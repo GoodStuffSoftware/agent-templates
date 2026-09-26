@@ -65,6 +65,12 @@ export async function buildTranscriptReport({
   const gapBuckets = newBuckets();
   const byViaTtl = new Map(); // "via|ttl" -> { via, ttl, count, buckets }
   const resumeAfterIdle = { count: 0, hits: 0, rewrites: 0, causes: { 'idle-expiry': 0, 'prefix-change': 0, compaction: 0 }, byKindTtl: {} };
+  // The resume guard's own evidence (deliverable 6): idle-expiry rewrites are
+  // the ones caused by resuming past the cache TTL, never a prefix change or
+  // a compaction (see gapsOf's `cause` in lib/transcripts.mjs). Accumulated
+  // per model, since the write price and the 1h/5m split both vary by model;
+  // priced below, same costOf() every other total in this report uses.
+  const idleExpiryByModel = new Map(); // model -> { model, tokens, usage }
   const addGap = (buckets, g) => {
     const b = buckets.get(bucketFor(g.gapMs));
     b.count += 1;
@@ -142,7 +148,23 @@ export async function buildTranscriptReport({
         if (isResumeAfterIdle(g)) {
           resumeAfterIdle.count += 1;
           if (g.outcome === 'hit') resumeAfterIdle.hits += 1;
-          else { resumeAfterIdle.rewrites += 1; resumeAfterIdle.causes[g.cause] += 1; }
+          else {
+            resumeAfterIdle.rewrites += 1;
+            resumeAfterIdle.causes[g.cause] += 1;
+            if (g.cause === 'idle-expiry') {
+              const key = g.model || '(no model)';
+              if (!idleExpiryByModel.has(key)) idleExpiryByModel.set(key, { model: key, tokens: 0, usage: emptyUsage() });
+              const e = idleExpiryByModel.get(key);
+              e.tokens += g.cacheWrite;
+              e.usage.cacheWrite += g.cacheWrite;
+              // The gap does not carry the request's own 1h/5m split, but
+              // idle-expiry means the previous cache had already lapsed, so
+              // this write went to the TTL bucket the gap itself resolved
+              // (g.ttl) — the same assumption ttlSource:'default' already
+              // makes for gaps with no earlier write to read the split from.
+              if (g.ttl === '1h') e.usage.cacheWrite1h += g.cacheWrite; else e.usage.cacheWrite5m += g.cacheWrite;
+            }
+          }
           const kt = `${g.kind}|${g.ttl}`;
           resumeAfterIdle.byKindTtl[kt] = (resumeAfterIdle.byKindTtl[kt] || 0) + 1;
         }
@@ -160,6 +182,24 @@ export async function buildTranscriptReport({
       }
     },
   });
+
+  // Guard (a)'s own numbers: what idle-expiry resumes actually cost, over
+  // the window. Priced the same way every other dollar figure in this report
+  // is (costOf, price-derived); a model this report cannot price is counted
+  // in idleExpiryUnpricedTokens rather than silently dropped from the total,
+  // same pattern as totals.unpricedRequests below.
+  let idleExpiryRewriteTokens = 0;
+  let idleExpiryRewriteUsd = 0;
+  let idleExpiryUnpricedTokens = 0;
+  for (const e of idleExpiryByModel.values()) {
+    idleExpiryRewriteTokens += e.tokens;
+    const c = costOf(e.usage, e.model);
+    if (c) idleExpiryRewriteUsd += c.usd;
+    else idleExpiryUnpricedTokens += e.tokens;
+  }
+  resumeAfterIdle.idleExpiryRewriteTokens = idleExpiryRewriteTokens;
+  resumeAfterIdle.idleExpiryRewriteUsd = idleExpiryRewriteUsd;
+  resumeAfterIdle.idleExpiryUnpricedTokens = idleExpiryUnpricedTokens;
 
   const models = [...perModel.values()]
     .map((r) => ({ ...r, usd: r.priced ? r.usd : null }))

@@ -26,6 +26,19 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "^SendMessage$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/resume-guard.mjs"
+            ],
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SessionStart": [

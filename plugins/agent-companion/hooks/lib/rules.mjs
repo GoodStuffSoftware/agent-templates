@@ -155,6 +155,20 @@ function builtinRules() {
       note: null,
     },
     {
+      // Guard (a)'s own doctrine (CACHE-ADVISOR-HANDOFF.md deliverable 6;
+      // hooks/resume-guard.mjs is the enforcement — this rule is the
+      // standing reminder that applies even where the hook cannot see far
+      // enough, e.g. a cross-session peer).
+      id: 'resume-doctrine',
+      enabled: true,
+      builtin: true,
+      scope: 'session-start',
+      when: null,
+      then: 'Resume only while a worker\'s cache is warm; past its TTL, spawn fresh from a file handoff instead of resuming it with SendMessage.',
+      gate: null,
+      note: null,
+    },
+    {
       // The only shipped 'always'-scope rule, deliberately: it is the reason
       // gates exist at all. Silent (free) in a session that never drifts;
       // repeats on EVERY turn once delegation-guard.mjs has fired for this

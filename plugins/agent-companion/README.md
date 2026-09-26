@@ -100,13 +100,14 @@ Four scopes, each deciding what `when` is tested against and where the directive
 | `session-start` | *(ignored — fires once)* | the main session, at start |
 | `spawn` | the brief of an agent being spawned | that subagent's prompt |
 
-Five rules ship built in:
+Six rules ship built in:
 
 | id | scope | fires |
 |---|---|---|
 | `copyable-prompt` | `user-prompt` | the user asks for a prompt — puts the whole thing in one fenced block, commentary outside it |
 | `lead-brevity` | `session-start` | every session, while brevity resolves on globally |
 | `delegate-first` | `session-start` | every session — the orchestrator rules, restated where they are actually read |
+| `resume-doctrine` | `session-start` | every session — resume a stopped worker only while its cache is warm; otherwise spawn fresh from a file handoff (enforced by `hooks/resume-guard.mjs`) |
 | `delegate-reminder` | `always` | gated — see below |
 | `agent-brevity` | `spawn` | disabled by default; reserved so the `spawn` scope shows up in `rules list` |
 

@@ -273,7 +273,7 @@
     "standing_rules": {
       "type": "boolean",
       "title": "Standing rules",
-      "description": "Operator-authored “always do X if Y” rules, injected at session start, on matching prompts, and into matching spawn briefs. Conditions are a regex over the text (`when`) plus an optional session-state gate. Edit with scripts/rules.mjs; five rules ship built in.",
+      "description": "Operator-authored “always do X if Y” rules, injected at session start, on matching prompts, and into matching spawn briefs. Conditions are a regex over the text (`when`) plus an optional session-state gate. Edit with scripts/rules.mjs; six rules ship built in.",
       "default": true
     },
     "standing_rules_max_chars": {
@@ -281,6 +281,18 @@
       "title": "Standing rules budget (characters)",
       "description": "Ceiling on the rendered rule block per injection. Rules past the ceiling are dropped and the count is stated, so a budget overrun is visible rather than silent.",
       "default": 2000
+    },
+    "resume_guard": {
+      "type": "boolean",
+      "title": "Resume guard (cache-expired resume)",
+      "description": "Advisory only, never blocks: on SendMessage to a background subagent this SESSION spawned, when that agent's own last activity is older than the cache TTL that applied to it (5m default, or 1h when its own writes show it used the 1h bucket) AND its last context was at or above resume_guard_min_tokens, name the doctrine (resume only while the cache is warm; otherwise spawn fresh from a file handoff) and estimate the rewrite size. A currently-running target is not flagged — its own last activity is necessarily recent. Kill switch for this guard; resume_guard_min_tokens is its size floor.",
+      "default": true
+    },
+    "resume_guard_min_tokens": {
+      "type": "number",
+      "title": "Resume guard: minimum context (tokens)",
+      "description": "A resume past the cache TTL is only worth flagging when the context that would be rewritten is at least this large. Default picked well below this operator's own measured idle-expiry-resume average (well over 100K tokens per scripts/transcript-report.mjs's resumeAfterIdle.idleExpiryRewriteTokens) so the guard fires on nearly every real case while staying quiet on a genuinely small worker.",
+      "default": 50000
     },
     "capacity_probe": {
       "type": "boolean",
