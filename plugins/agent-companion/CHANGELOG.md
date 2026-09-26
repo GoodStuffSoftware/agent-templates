@@ -2,6 +2,16 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.12 — 2026-09-26
+
+- Added the resume guard, a PreToolUse hook on SendMessage. It is advisory only and never blocks. It speaks up when all of these hold:
+  - the target is a background subagent this session spawned;
+  - the target's own last activity is older than the cache TTL that applied to it;
+  - the target's last context was at least `resume_guard_min_tokens` (default 50000).
+  It then names the doctrine (resume only while the cache is warm; otherwise spawn fresh from a file handoff) and estimates the rewrite size. The TTL comes from the last record in the target's transcript that actually wrote a split cache entry (1h or 5m bucket); if there is none, from the target's agent definition `experimental.cacheTtl`; else 5m. A turn that only read the cache no longer hides a 1h TTL. Kill switch: `resume_guard: false`.
+- Added the standing rule `resume-doctrine` (session start). It states the same doctrine for cases the hook cannot see, such as a peer in another session. Six rules now ship built in.
+- Added to `scripts/transcript-report.mjs`'s `resumeAfterIdle`: `idleExpiryRewriteTokens`, `idleExpiryRewriteUsd` and `idleExpiryUnpricedTokens`, priced the same way as every other dollar figure in that report, with tests.
+
 ## 0.29.11 — 2026-09-25
 
 - Added `scripts/transcript-report.mjs`, a read-only report of transcript tokens. It shows:
