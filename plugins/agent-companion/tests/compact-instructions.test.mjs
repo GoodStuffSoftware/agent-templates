@@ -5,7 +5,7 @@
 // imported; the installer runs as a child process.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, chmodSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -177,14 +177,38 @@ test('F5 backups: newest 3 per target are kept, older ones pruned', () => {
   try {
     writeFileSync(s.target, 'x\n');
     for (let i = 0; i < 4; i += 1) { s.run(); s.run('--uninstall'); }
-    const baks = readdirSync(s.home).filter((f) => f.startsWith('CLAUDE.md.bak-'));
+    const baks = readdirSync(s.home).filter((f) => f.startsWith('CLAUDE.md.bak-agent-companion-'));
     assert.equal(baks.length, 3, baks.join(','));
-    writeFileSync(join(s.home, 'other.md.bak-2000'), '');
-    for (const n of ['1999', '2001', '2002', '2003']) writeFileSync(join(s.home, `CLAUDE.md.bak-${n}`), '');
-    pruneBackups(s.target, 3);
-    assert.equal(readdirSync(s.home).filter((f) => f.startsWith('CLAUDE.md.bak-')).length, 3);
-    assert.ok(existsSync(join(s.home, 'other.md.bak-2000')), 'other targets untouched');
+    // Look-alikes that are not exactly ours (no valid timestamp) survive.
+    for (const n of ['agent-companion-x', 'agent-companion-2026-01-01', '2026-01-01T00-00-00-000Z']) writeFileSync(join(s.home, `CLAUDE.md.bak-${n}`), 'k');
+    pruneBackups(s.target, 0);
+    assert.deepEqual(readdirSync(s.home).filter((f) => f.includes('.bak-')).sort(),
+      ['CLAUDE.md.bak-2026-01-01T00-00-00-000Z', 'CLAUDE.md.bak-agent-companion-2026-01-01', 'CLAUDE.md.bak-agent-companion-x']);
   } finally { s.done(); }
+});
+
+test('F5 operator backups survive 5 install/uninstall cycles of both installers', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ac-baks-'));
+  try {
+    const cfg = join(home, '.claude'); mkdirSync(cfg);
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: cfg };
+    const md = join(cfg, 'CLAUDE.md'); const settings = join(cfg, 'settings.json');
+    writeFileSync(md, '# mine\n'); writeFileSync(settings, '{}\n');
+    const keep = { 'CLAUDE.md.bak-2026-07-07': 'hand', 'settings.json.bak-foo': 'hand', 'settings.json.bak-2026-09-24-compact': 'hand' };
+    for (const [f, c] of Object.entries(keep)) writeFileSync(join(cfg, f), c);
+    const rh = ['--settings', settings, '--hooks-dir', join(cfg, 'hooks')];
+    for (let i = 0; i < 5; i += 1) {
+      for (const a of [[], ['--uninstall']]) {
+        assert.equal(runScript(SCRIPT, ['--target', md, ...a], { env }).status, 0);
+        assert.equal(runScript('scripts/install-reinject-hook.mjs', [...rh, ...a], { env }).status, 0);
+      }
+    }
+    for (const [f, c] of Object.entries(keep)) assert.equal(readFileSync(join(cfg, f), 'utf8'), c, f);
+    const files = readdirSync(cfg);
+    assert.equal(files.filter((f) => f.startsWith('CLAUDE.md.bak-agent-companion-')).length, 3);
+    assert.equal(files.filter((f) => f.startsWith('settings.json.bak-agent-companion-')).length, 3);
+    assert.equal(readFileSync(md, 'utf8'), '# mine\n');
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 test('F6 a read-only target: exit 1, file untouched, no backup written', () => {
