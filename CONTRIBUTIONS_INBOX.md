@@ -1,5 +1,11 @@
 # Contributions Inbox
 
+## 2026-09-26 - a settings value of the wrong type can be silently ignored; check the schema before trusting a setting ({{PROJECT}})
+
+- **A lenient settings parser can drop a wrong-typed value with no warning.** An auto-compaction window was set as the string `"400k"`. The tool's settings schema takes an integer and falls back to the default on any parse failure, so the value was discarded and the much larger default applied for two days, costing a four-figure sum per month on one operator's usage. Nothing in the UI or the logs said so.
+- **Verify a setting took effect by its observable result, not by reading the file back.** Here the tell was in the transcripts: compactions still fired near the default size after the change. When a cost or behaviour setting "doesn't seem to do anything", check the value's TYPE against the schema (the shipped binary's validator is the ground truth when the docs are vague) before blaming the feature.
+- **Write numbers as plain integers** in JSON settings, never with unit suffixes, unless the schema explicitly says it accepts strings.
+
 ## 2026-09-26 - doctrine an agent can skip is not a control; gate review loops on progress, not on round count ({{PROJECT}})
 
 - **Written doctrine gets skipped or routed around, so the rules that matter need a hook.** An audit of one operator's multi-agent sessions found that 10 of 17 spawning lead sessions never loaded the orchestration skill. In one of them the trigger was in context five times and the operator asked for it directly, and it still wasn't loaded. Sessions that did load it still churned, because the rule they needed hadn't been written yet. Moving the doctrine around would have fixed neither case. The durable fix is enforcement at the tool boundary: a spawn-time hook that checks the rule is loaded, a scope budget, and a review-churn gate, with the written doctrine kept as the explanation.
