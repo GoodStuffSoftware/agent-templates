@@ -39,6 +39,19 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "^(ScheduleWakeup|Monitor)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/poll-guard.mjs"
+            ],
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SessionStart": [

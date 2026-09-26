@@ -100,7 +100,7 @@ Four scopes, each deciding what `when` is tested against and where the directive
 | `session-start` | *(ignored — fires once)* | the main session, at start |
 | `spawn` | the brief of an agent being spawned | that subagent's prompt |
 
-Six rules ship built in:
+Seven rules ship built in:
 
 | id | scope | fires |
 |---|---|---|
@@ -110,6 +110,7 @@ Six rules ship built in:
 | `resume-doctrine` | `session-start` | every session — resume a stopped worker only while its cache is warm; otherwise spawn fresh from a file handoff (enforced by `hooks/resume-guard.mjs`) |
 | `delegate-reminder` | `always` | gated — see below |
 | `agent-brevity` | `spawn` | disabled by default; reserved so the `spawn` scope shows up in `rules list` |
+| `poll-guard-doctrine` | `session-start` | every session — cache-advisor guard (b): "one completion wait, never per-item wakes" (see `hooks/poll-guard.mjs`) |
 
 ### `delegate-reminder` — the direct answer to "my delegation rules stop being followed"
 
