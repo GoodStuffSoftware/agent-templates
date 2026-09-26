@@ -119,7 +119,8 @@ State the recommendation and the rationale it printed. Then:
 - **An `auto-compact:` line is cost advice for long-running work.** It quotes the
   last cache-advisor run: the auto-compact window that breaks even for the
   recommended model on the operator's own transcripts, and the one value for
-  their model mix (the setting is global). Relay it when the work is a long or
+  their model mix (the setting is global), with the date of that run and
+  whether it was a full or PARTIAL read. Relay it when the work is a long or
   resumed session; it is advice only, and the operator applies it with
   `/autocompact <value>`. No line means no advisor run yet
   (`scripts/cache-advisor.mjs`).

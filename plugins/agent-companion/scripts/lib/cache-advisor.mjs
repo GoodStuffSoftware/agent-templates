@@ -9,11 +9,22 @@
 //
 // Claude Code has ONE auto-compact window (autoCompactWindow in settings, the
 // --autocompact flag, or CLAUDE_CODE_AUTO_COMPACT_WINDOW), 100K to 1M tokens,
-// capped at each model's context window. Unset, a model compacts at its
-// default threshold (config/compaction.json: about 967K on native-1M models,
-// the 200K boundary on 200K models). So the advice has two parts: the
-// per-model optimum, and the one value that is cheapest across the operator's
-// actual model mix (the sum of every model's cost at that value).
+// capped at each model's context window. A set window W does NOT compact at W:
+// it compacts at min(W, context window) - min(max output, 20K) - 13K, i.e.
+// W - 33K for every current model (Claude Code 2.1.280; real compactions at
+// about 967K on 1M models and 167K-174K on 200K models agree). Unset, a model
+// compacts at its default threshold (config/compaction.json: about 967K on
+// native-1M models, about 167K on 200K models). So the advice has two parts:
+// the per-model optimum, and the one value that is cheapest across the
+// operator's actual model mix (the sum of every model's cost at that value).
+// Every window in the output is the value to TYPE (the setting), and the
+// compaction point it gives is printed beside it.
+//
+// What is in effect is resolved the way Claude Code resolves it
+// (configuredWindow): the environment variable first, then settings (managed,
+// local, project, user; a value that fails the settings schema — anything but
+// an integer from 100000 to 1000000 — is dropped silently by Claude Code, and
+// loudly here), then the model's default.
 //
 // --- The economics (all costs in input-token equivalents x the model's input
 // price; r = cache-read multiplier, w = cache-write multiplier for the TTL
@@ -48,24 +59,43 @@
 //   with R = r + lambda (w - r) and k0 = S x out/in + Pw x (w - r)
 //   minimised at W* = P + sqrt(2 g (k0 + r P) / R).
 //
+// (W here is the compaction point; the setting that gives it is W + reserve.)
+//
 // What is NOT priced: the detail compaction loses, and the minutes a
 // compaction takes. The advisor never recommends a window that would compact
 // more often than once every minTurnsPerCompaction turns (config), measured
-// with each model's own requests per turn.
+// with each model's own requests per turn. For the one global value the floor
+// binds the model MIX, and every model that would still compact more often
+// than the floor at that value gets its own warning line.
+//
+// Rework (extra context growth in the 50 requests after a compaction over the
+// 50 before) is priced; the whole evaluation is repeated with rework 0 and
+// printed beside it, so the reader sees how far the answer leans on it.
 //
 // --- Money ------------------------------------------------------------------
 //
-// Token costs come from config/model-pricing.json (price-derived). They are
-// ANCHORED on the benchmark rows' cost_usd (Claude Code's own per-run cost
-// figure, in bench results.jsonl): calibrate() prices each row's tokens both
-// ways (all cache writes 5m, all 1h), keeps the assumption whose
-// cost_usd / price-derived ratio is tighter, and scales every dollar figure by
-// that model's median ratio (or the pooled one). Plan usage (subscription
-// limits) is a dated secondary view with per-model weights in
-// config/compaction.json planUsage.
+// Every dollar is tokens x API LIST PRICE from config/model-pricing.json. On a
+// subscription plan these dollars are notional; they rank windows, they are
+// not a bill. calibrate() is a CHECK of the price table, not an anchor: it
+// prices the benchmark rows' tokens and compares them with those rows'
+// cost_usd, which is Claude Code's own figure computed from the same list
+// prices, so a ratio of 1.000 only says the two price tables agree. Nothing is
+// scaled by it; a ratio off by more than 2% is printed as a warning. Plan
+// usage (subscription limits) is a dated secondary view with per-model
+// weights in config/compaction.json planUsage.
+//
+// --- Real traffic only ------------------------------------------------------
+//
+// Benchmark runs (bench/runner.mjs, judge.mjs and rescore.mjs without
+// isolate_home) write headless sessions under a project directory named after
+// their mkdtemp working directory in the OS temp dir (bench-*, rescore-*).
+// Those are synthetic tasks, and a headless run has no counted turn, which
+// inflates requests per turn. isBenchProject() excludes them before reading;
+// the report says how many were left out.
 
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { scanCorpus, gapsOf, spawnBaselineOf, percentile } from './transcripts.mjs';
 import { pricingTable, classifyPricing, priceUsage } from './pricing.mjs';
@@ -80,7 +110,10 @@ let _cfg = null;
 export function compactionConfig() {
   if (_cfg) return _cfg;
   const shipped = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'compaction.json');
-  let cfg = { models: {}, unknownModel: { contextWindow: 200000, defaultCompactAt: 200000 }, window: { min: 100000, max: 1000000, step: 25000 }, minTurnsPerCompaction: 10, planUsage: { weights: {} } };
+  let cfg = {
+    models: {}, unknownModel: { contextWindow: 200000, defaultCompactAt: 167000 }, compactReserve: { outputCap: 20000, buffer: 13000 },
+    window: { min: 100000, max: 1000000, step: 25000 }, minTurnsPerCompaction: 10, planUsage: { weights: {} },
+  };
   try { cfg = { ...cfg, ...JSON.parse(readFileSync(shipped, 'utf8')) }; } catch { /* use defaults */ }
   let local = null;
   try { local = JSON.parse(readFileSync(join(stateRoot(), 'compaction.json'), 'utf8')); } catch { /* none: expected */ }
@@ -90,16 +123,25 @@ export function compactionConfig() {
 }
 export function _resetCompactionConfigForTests() { _cfg = null; }
 
-// { alias, contextWindow, defaultCompactAt, known }
+// How far below the set window a model compacts: min(maxOutput, outputCap) +
+// buffer (33K for every current model).
+function reserveOf(spec, cfg) {
+  const r = cfg.compactReserve || { outputCap: 20000, buffer: 13000 };
+  return Math.min(spec.maxOutput ?? Infinity, r.outputCap) + r.buffer;
+}
+
+// { alias, contextWindow, defaultCompactAt, reserve, known }
 export function windowSpecFor(model, cfg = compactionConfig()) {
   const m = String(model || '');
   for (const [alias, spec] of Object.entries(cfg.models || {})) {
     if (m && new RegExp(spec.match || alias, 'i').test(m)) {
-      return { alias, contextWindow: spec.contextWindow, defaultCompactAt: spec.defaultCompactAt ?? spec.contextWindow, known: true };
+      const reserve = reserveOf(spec, cfg);
+      return { alias, contextWindow: spec.contextWindow, defaultCompactAt: spec.defaultCompactAt ?? spec.contextWindow - reserve, reserve, known: true };
     }
   }
-  const u = cfg.unknownModel || { contextWindow: 200000, defaultCompactAt: 200000 };
-  return { alias: '', contextWindow: u.contextWindow, defaultCompactAt: u.defaultCompactAt ?? u.contextWindow, known: false };
+  const u = cfg.unknownModel || { contextWindow: 200000 };
+  const reserve = reserveOf(u, cfg);
+  return { alias: '', contextWindow: u.contextWindow, defaultCompactAt: u.defaultCompactAt ?? u.contextWindow - reserve, reserve, known: false };
 }
 
 // Prices in the shape the replay needs, or null for an unpriced model.
@@ -116,10 +158,15 @@ export function priceSpecFor(model, cfg = pricingTable()) {
   };
 }
 
-// --- The configured window (read-only) ---------------------------------------------
+// --- The window in effect (read-only) ----------------------------------------------
+
+export const WINDOW_MIN = 100000;
+export const WINDOW_MAX = 1000000;
 
 // "400k", "1M", 400000, "400000" -> tokens; anything else -> null. A bare
-// number from 100 to 1000 means thousands, as the /autocompact command reads it.
+// number from 100 to 1000 means thousands, as /autocompact and the
+// --autocompact flag read it. NOT how settings.json is read: see
+// settingsWindowValid.
 export function parseWindow(v) {
   if (typeof v === 'number' && Number.isFinite(v)) return v >= 100 && v <= 1000 ? v * 1000 : v;
   if (typeof v !== 'string') return null;
@@ -130,25 +177,126 @@ export function parseWindow(v) {
   return n >= 100 && n <= 1000 ? n * 1000 : n;
 }
 
-// What the operator has set, from the environment variable (plain integer only,
-// as documented) or the user settings file. Never writes either.
-export function configuredWindow({ env = process.env, settingsPath = join(claudeDir(), 'settings.json') } = {}) {
-  const ev = env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
-  if (ev != null && ev !== '') {
-    const n = /^\d+$/.test(String(ev).trim()) ? Number(ev) : null;
-    return { tokens: n, raw: ev, source: 'env CLAUDE_CODE_AUTO_COMPACT_WINDOW' };
-  }
-  try {
-    const s = JSON.parse(readFileSync(settingsPath, 'utf8'));
-    if (s && s.autoCompactWindow != null) return { tokens: parseWindow(s.autoCompactWindow), raw: s.autoCompactWindow, source: 'user settings autoCompactWindow' };
-  } catch { /* no settings or unreadable: unset */ }
-  return { tokens: null, raw: null, source: 'unset' };
+// The settings schema Claude Code applies to autoCompactWindow (2.1.280:
+// number().int().min(100000).max(1000000).optional().catch(undefined)). A value
+// that fails it — the string "400k", a bare 400, 250000.5 — is replaced by
+// undefined without a word, and the next source (or the default) applies.
+export function settingsWindowValid(v) {
+  return typeof v === 'number' && Number.isInteger(v) && v >= WINDOW_MIN && v <= WINDOW_MAX;
 }
 
-// --- Money anchor: bench cost_usd vs price-derived -----------------------------------
+// Claude Code's integer parse of an environment value (2.1.280): trimmed;
+// scientific notation ("5e5") and thousands separators ("500,000", "500_000")
+// are read as whole numbers; anything else goes through parseInt, so "500k"
+// reads as 500.
+export function parseEnvInt(raw) {
+  const s = String(raw).trim();
+  if (s.length <= 32) {
+    if (/^[+-]?(\d+(\.\d*)?|\.\d+)[eE][+-]?\d+$/.test(s)) { const n = Number(s); return Number.isInteger(n) ? n : NaN; }
+    if (/^[+-]?\d{1,3}([_,\u00A0\u202F ])\d{3}(?:\1\d{3})*$/.test(s)) return parseInt(s.replace(/[_,\u00A0\u202F ]/g, ''), 10);
+  }
+  return parseInt(s, 10);
+}
+
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW as Claude Code applies it: not a number or
+// <= 0 is invalid and ignored (settings then apply); above 1M is capped at 1M;
+// below 100K is raised to 100K (docs, env-vars: "a value like 500k reads as 500
+// and clamps to the 100K minimum").
+export function envWindow(raw) {
+  const n = parseEnvInt(raw);
+  if (Number.isNaN(n) || n <= 0) return { tokens: null, parsed: n, status: 'invalid' };
+  const tokens = Math.max(WINDOW_MIN, Math.min(n, WINDOW_MAX));
+  return { tokens, parsed: n, status: tokens === n ? 'valid' : 'clamped' };
+}
+
+// Where Claude Code reads managed-settings.json (2.1.280). MDM, registry and
+// server-managed policy are not read here.
+export function managedSettingsPath(plat = platform()) {
+  if (plat === 'win32') return 'C:\\Program Files\\ClaudeCode\\managed-settings.json';
+  if (plat === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json';
+  return '/etc/claude-code/managed-settings.json';
+}
+
+// The window in effect, resolved in Claude Code's order:
+//   1. CLAUDE_CODE_AUTO_COMPACT_WINDOW (parsed and clamped as envWindow says;
+//      an invalid value is ignored);
+//   2. the --autocompact flag — per process, so a running session's flag cannot
+//      be seen from here; used only when the caller passes `flag`;
+//   3. settings, highest precedence first: managed, local project, shared
+//      project (only when projectDir is given: project settings differ per
+//      project), user. A value failing the schema is skipped, as Claude Code
+//      skips it, and listed in `ignored` so the report can say so loudly;
+//   4. otherwise null: each model's default.
+// Returns { tokens, raw, source, ignored: [{ source, raw, reason }], notes: [],
+// autoCompactDisabled: null | where }. Never writes anything.
+export function configuredWindow({
+  env = process.env, settingsPath = join(claudeDir(), 'settings.json'), projectDir = null,
+  managedPath = managedSettingsPath(), flag,
+} = {}) {
+  const ignored = [];
+  const notes = [];
+  let result = null;
+  const ev = env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+  if (ev != null && ev !== '') {
+    const e = envWindow(ev);
+    if (e.status === 'invalid') ignored.push({ source: 'env CLAUDE_CODE_AUTO_COMPACT_WINDOW', raw: ev, reason: 'it is not a positive whole number' });
+    else {
+      if (e.status === 'clamped') notes.push(`CLAUDE_CODE_AUTO_COMPACT_WINDOW="${ev}" reads as ${e.parsed} and is clamped to ${e.tokens}`);
+      result = { tokens: e.tokens, raw: ev, source: 'env CLAUDE_CODE_AUTO_COMPACT_WINDOW' };
+    }
+  }
+  if (!result && flag != null) {
+    const t = String(flag).trim().toLowerCase() === 'auto' ? 'auto' : parseWindow(flag);
+    if (t === 'auto') result = { tokens: null, raw: flag, source: '--autocompact auto' };
+    else if (t != null && t >= WINDOW_MIN && t <= WINDOW_MAX) result = { tokens: Math.round(t), raw: flag, source: '--autocompact flag' };
+    else ignored.push({ source: '--autocompact flag', raw: flag, reason: 'it must be auto or 100k-1M' });
+  }
+  const files = [['managed settings', managedPath]];
+  if (projectDir) {
+    files.push(['local project settings', join(projectDir, '.claude', 'settings.local.json')]);
+    files.push(['project settings', join(projectDir, '.claude', 'settings.json')]);
+  }
+  files.push(['user settings', settingsPath]);
+  let disabled = null;
+  let enabledDecided = false;
+  for (const [source, path] of files) {
+    if (!path) continue;
+    let s;
+    try { s = JSON.parse(readFileSync(path, 'utf8')); } catch { continue; } // absent or unreadable: nothing set there
+    if (!s || typeof s !== 'object') continue;
+    if (!enabledDecided && typeof s.autoCompactEnabled === 'boolean') {
+      enabledDecided = true;
+      if (s.autoCompactEnabled === false) disabled = `${source} autoCompactEnabled false`;
+    }
+    if (s.autoCompactWindow == null) continue;
+    if (!settingsWindowValid(s.autoCompactWindow)) {
+      ignored.push({ source: `${source} autoCompactWindow`, raw: s.autoCompactWindow, reason: 'it must be an integer from 100000 to 1000000' });
+      continue;
+    }
+    if (!result) result = { tokens: s.autoCompactWindow, raw: s.autoCompactWindow, source: `${source} autoCompactWindow` };
+  }
+  for (const k of ['DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT']) {
+    const v = env[k];
+    if (v && !/^(0|false|no|off)$/i.test(String(v).trim())) disabled = disabled || `env ${k}`;
+  }
+  return { ...(result || { tokens: null, raw: null, source: 'unset' }), ignored, notes, autoCompactDisabled: disabled };
+}
+
+// One loud line per value Claude Code ignores, saying what applies instead.
+export function ignoredWindowLines(configured) {
+  const instead = configured?.tokens
+    ? `${Math.round(configured.tokens / 1000)}K from ${configured.source} applies`
+    : "each model's default applies (about 967K on 1M models)";
+  return (configured?.ignored || []).map((i) => `your ${i.source} ${JSON.stringify(i.raw)} is IGNORED by Claude Code: ${i.reason}; ${instead}`);
+}
+
+// --- Price-table check: bench cost_usd vs list price ---------------------------------
 
 const median = (xs) => percentile([...xs].sort((a, b) => a - b), 50);
 
+// A CHECK, not an anchor (see the header): cost_usd is Claude Code's own
+// figure from the same list prices, so a ratio near 1 says the price tables
+// agree and nothing more. Nothing is scaled by it.
 // Reads every <resultsRoot>/*/results.jsonl (the rows bench/estimate.mjs reads)
 // and returns { assumption, pooled:{n,ratio,p10,p90}, perModel:{model:{n,ratio}} }.
 // Rows without a positive cost_usd, auth errors, rescore retries (their cost is
@@ -204,12 +352,23 @@ function readBenchRows(root) {
   return out;
 }
 
-// The factor a model's price-derived dollars are scaled by, and where it came from.
-export function anchorFor(model, cal, minRows = 5) {
+export const MONEY_BASIS = 'API list price';
+export const PRICE_CHECK_TOLERANCE = 0.02;
+
+// How a model's list-price dollars were checked: { basis, check, agrees }.
+// agrees is null with too few rows, else whether the median ratio is within
+// PRICE_CHECK_TOLERANCE of 1.
+export function priceCheckFor(model, cal, minRows = 5) {
   const pm = cal?.perModel?.[model];
-  if (pm && pm.n >= minRows && Number.isFinite(pm.ratio)) return { factor: pm.ratio, basis: `cost_usd-anchored (this model, n=${pm.n})` };
-  if (cal?.pooled?.n >= minRows && Number.isFinite(cal.pooled.ratio)) return { factor: cal.pooled.ratio, basis: `cost_usd-anchored (pooled, n=${cal.pooled.n})` };
-  return { factor: 1, basis: 'price-derived (no cost_usd rows to anchor on)' };
+  const pick = pm && pm.n >= minRows && Number.isFinite(pm.ratio) ? { ...pm, scope: 'this model' }
+    : cal?.pooled?.n >= minRows && Number.isFinite(cal.pooled.ratio) ? { ...cal.pooled, scope: 'pooled' } : null;
+  if (!pick) return { basis: MONEY_BASIS, check: 'price table not checked (no bench cost_usd rows)', agrees: null };
+  const agrees = Math.abs(pick.ratio - 1) <= PRICE_CHECK_TOLERANCE;
+  return {
+    basis: MONEY_BASIS,
+    check: `Claude Code's cost_usd / list price = ${pick.ratio.toFixed(3)} (${pick.scope}, n=${pick.n})${agrees ? ': the price tables agree' : ': the price table DISAGREES with Claude Code'}`,
+    agrees,
+  };
 }
 
 // --- Collection: transcripts -> per-model inputs --------------------------------------
@@ -324,6 +483,7 @@ export function foldTranscript(res, { models, spawns, inWindow = () => true, rew
       firstAfterWrite: c.firstRequestAfter.cacheWrite,
       requestsAfter: c.requestsAfter,
       reworkTokens,
+      session: `${res.file.project || ''}/${res.file.sessionId || res.file.path}`,
     });
   });
 
@@ -331,21 +491,53 @@ export function foldTranscript(res, { models, spawns, inWindow = () => true, rew
   if (sb && inWindow(sb.ts)) spawns.push(sb);
 }
 
+// A project directory is Claude Code's sanitised working directory (every
+// character outside [A-Za-z0-9] becomes '-'). The benchmark harness runs its
+// headless sessions in mkdtemp directories directly under the OS temp dir:
+// bench/runner.mjs "bench-<cell>-<task>-" and "bench-tmp-", bench/judge.mjs
+// "bench-judge-", bench/rescore.mjs "rescore-<task>-" (a test pins these
+// prefixes to the harness source). A project is a bench project when it is
+// this machine's temp dir followed by one of those prefixes, or — for a corpus
+// copied from another machine — any temp-like segment (Temp, tmp) followed by
+// one.
+export const BENCH_DIR_PREFIXES = ['bench-', 'rescore-'];
+const sanitiseDir = (p) => String(p).replace(/[^A-Za-z0-9]/g, '-');
+export function isBenchProject(name, { tmp = tmpdir() } = {}) {
+  const n = String(name || '');
+  const t = sanitiseDir(tmp);
+  if (t && BENCH_DIR_PREFIXES.some((p) => n.toLowerCase().startsWith(`${t}-${p}`.toLowerCase()))) return true;
+  return new RegExp(`-(?:temp|tmp)-(?:${BENCH_DIR_PREFIXES.map((p) => p.replace('-', '')).join('|')})-`, 'i').test(n);
+}
+
 // Scans the corpus and folds every transcript. Returns { models, spawns, scan,
-// windowDays, sinceMs, nowMs }.
+// windowDays, sinceMs, nowMs, excludedBenchProjects, oldestReadMtimeMs }.
+// Bench projects are excluded unless includeBench is set. oldestReadMtimeMs is
+// the modification time of the oldest file read: when a time budget cut the
+// scan short (newest first), traffic after it is complete and traffic before
+// it is only partly read.
 export async function collectAdvisorInputs({
-  root, days = 30, now = new Date(), maxMs = null, workflows = false, crossFileDedup = true,
+  root, days = 30, now = new Date(), maxMs = null, workflows = false, crossFileDedup = true, includeBench = false,
 } = {}) {
   const nowMs = now.getTime();
   const sinceMs = nowMs - days * 86400000;
   const inWindow = (ts) => Number.isFinite(ts) && ts >= sinceMs && ts <= nowMs;
   const models = new Map();
   const spawns = [];
+  const excluded = new Set();
+  let oldestReadMtimeMs = null;
+  const project = includeBench ? null : (name) => {
+    if (!isBenchProject(name)) return true;
+    excluded.add(name);
+    return false;
+  };
   const scan = await scanCorpus({
-    root, sinceMs, maxMs, workflows, crossFileDedup,
-    onFile: (res) => foldTranscript(res, { models, spawns, inWindow }),
+    root, sinceMs, maxMs, workflows, crossFileDedup, project,
+    onFile: (res, entry) => {
+      if (entry && Number.isFinite(entry.mtimeMs) && (oldestReadMtimeMs == null || entry.mtimeMs < oldestReadMtimeMs)) oldestReadMtimeMs = entry.mtimeMs;
+      foldTranscript(res, { models, spawns, inWindow });
+    },
   });
-  return { models, spawns, scan, windowDays: days, sinceMs, nowMs };
+  return { models, spawns, scan, windowDays: days, sinceMs, nowMs, excludedBenchProjects: excluded.size, oldestReadMtimeMs };
 }
 
 // --- Parameters of the post-compaction state --------------------------------------------
@@ -367,8 +559,10 @@ export function postCompactionParams(model, kind, allInputs) {
   ];
   // Rework is sparse (it needs long epochs on both sides of a compaction), so
   // it is pooled over every compaction of every model.
-  const rw = everyone.map((c) => c.reworkTokens).filter((x) => Number.isFinite(x));
+  const rwc = everyone.filter((c) => Number.isFinite(c.reworkTokens));
+  const rw = rwc.map((c) => c.reworkTokens);
   const rework = rw.length >= MIN_PARAM_SAMPLES ? Math.max(0, median(rw)) : 0;
+  const reworkSessions = new Set(rwc.map((c) => c.session ?? null)).size;
   for (const [list, source] of tiers) {
     if (list.length >= MIN_PARAM_SAMPLES) {
       return {
@@ -377,6 +571,7 @@ export function postCompactionParams(model, kind, allInputs) {
         S: median(list.map((c) => c.postTokens || 0)),
         rework,
         reworkSamples: rw.length,
+        reworkSessions,
         n: list.length,
         source,
       };
@@ -426,45 +621,55 @@ export function closedFormWindow({ P, Pw, S, r, wMean, outRatio, g, lambda, rewo
   return P1 + Math.sqrt((2 * g * (k0 + r * P1)) / R);
 }
 
+// The window SETTINGS a model can be given: the grid from 100K up to its
+// context window (a larger setting is capped there and behaves the same).
 export function candidateWindows(spec, cfg = compactionConfig()) {
   const { min, max, step } = cfg.window;
   const top = Math.min(max, spec.contextWindow);
   const out = [];
   for (let w = min; w <= top; w += step) out.push(w);
-  if (!out.includes(spec.defaultCompactAt) && spec.defaultCompactAt <= top) out.push(spec.defaultCompactAt);
-  return out.sort((a, b) => a - b);
+  if (!out.includes(top)) out.push(top);
+  return out;
 }
 
-// The threshold a window setting gives this model: capped at its context
-// window, and a window at or above its tuned default behaves as the default.
-export const thresholdFor = (window, spec) => Math.min(window, spec.contextWindow, spec.defaultCompactAt);
+// Where a model compacts for a window SETTING: min(setting, context window)
+// minus the reserve, min(max output, 20K) + 13K = 33K for current models
+// (config/compaction.json compactReserve). null = unset: the model's default.
+export const thresholdFor = (window, spec) => (window == null
+  ? spec.defaultCompactAt
+  : Math.min(window, spec.contextWindow) - (spec.reserve ?? 33000));
 
 export const DEFAULT_MIN_REQUESTS = 1000;
 export const DEFAULT_MIN_TRACKS_REACHING = 5;
 
 // Evaluates one model. opts: { cfg, calibration, configured (tokens|null),
-// minRequests, minTracksReaching, minTurnsPerCompaction, requestsPerTurnPooled }.
+// minRequests, minTracksReaching, minTurnsPerCompaction, requestsPerTurnPooled,
+// reworkOverride (a number replaces the measured rework; the rework-off view
+// passes 0) }. Every `window` in the result is a SETTING; `threshold` is where
+// that setting compacts.
 export function evaluateModel(mi, allInputs, opts = {}) {
   const cfg = opts.cfg || compactionConfig();
   const minRequests = opts.minRequests ?? DEFAULT_MIN_REQUESTS;
   const minTracksReaching = opts.minTracksReaching ?? DEFAULT_MIN_TRACKS_REACHING;
   const minTurns = opts.minTurnsPerCompaction ?? cfg.minTurnsPerCompaction ?? 10;
+  const reworkOverride = opts.reworkOverride ?? null;
   const spec = windowSpecFor(mi.model, cfg);
   const price = priceSpecFor(mi.model);
-  const anchor = anchorFor(mi.model, opts.calibration);
+  const check = priceCheckFor(mi.model, opts.calibration);
   const base = {
     model: mi.model,
     alias: price?.alias || spec.alias || null,
     contextWindow: spec.contextWindow,
     defaultCompactAt: spec.defaultCompactAt,
+    reserve: spec.reserve,
     requests: mi.requests,
     mainRequests: mi.mainRequests,
     subagentRequests: mi.subagentRequests,
     tracks: mi.tracks.length,
     compactionsObserved: mi.compactions.length,
     autoCompactionPreTokens: mi.compactions.filter((c) => c.trigger === 'auto' && c.preTokens != null).map((c) => c.preTokens),
-    moneyBasis: anchor.basis,
-    anchorFactor: anchor.factor,
+    moneyBasis: check.basis,
+    priceCheck: check.check,
   };
   const minWin = cfg.window.min;
   const peaks = mi.tracks.map(uncompactedPeak);
@@ -488,11 +693,11 @@ export function evaluateModel(mi, allInputs, opts = {}) {
   const requestsPerTurn = mi.mainTurns >= 10 ? mi.mainRequests / mi.mainTurns : (opts.requestsPerTurnPooled || null);
   const minRequestsPerCompaction = requestsPerTurn ? minTurns * requestsPerTurn : null;
 
-  let noRework = false; // flipped once below for the sensitivity view
-  const pOf = (kind) => ({ ...params[kind], ...(noRework ? { rework: 0 } : {}), r: price.r, w5: price.w5, w1: price.w1, outRatio: price.outRatio });
-  // A window at or below the post-compaction size would compact on every request.
-  const maxP = Math.max(...Object.values(params).map((p) => p.P + p.rework));
-  const usdOf = (units) => units * price.inUsd * anchor.factor;
+  const reworkOf = (p) => (reworkOverride != null ? reworkOverride : p.rework);
+  const pOf = (kind) => ({ ...params[kind], rework: reworkOf(params[kind]), r: price.r, w5: price.w5, w1: price.w1, outRatio: price.outRatio });
+  // A threshold at or below the post-compaction size would compact on every request.
+  const maxP = Math.max(...Object.values(params).map((p) => p.P + reworkOf(p)));
+  const usdOf = (units) => units * price.inUsd; // API list price
   const replayAt = (T) => {
     let units = 0;
     let compactions = 0;
@@ -546,7 +751,8 @@ export function evaluateModel(mi, allInputs, opts = {}) {
   const best = (list) => list.reduce((a, b) => (b.usd < a.usd ? b : a), list[0]);
   const optimum = allowed.length ? best(allowed) : null;
   const unconstrained = feasible.length ? best(feasible) : null;
-  const atDefault = feasible.find((c) => c.threshold === spec.defaultCompactAt) || null;
+  // Unset: each model's own default threshold, replayed directly.
+  const atDefault = spec.defaultCompactAt > maxP ? { window: null, threshold: spec.defaultCompactAt, ...replayAt(spec.defaultCompactAt) } : null;
   const configuredT = opts.configured ? thresholdFor(opts.configured, spec) : null;
   const atConfigured = configuredT ? (configuredT > maxP ? { window: opts.configured, threshold: configuredT, ...replayAt(configuredT) } : null) : null;
   const band = (pct) => {
@@ -555,15 +761,9 @@ export function evaluateModel(mi, allInputs, opts = {}) {
     return [Math.min(...inside), Math.max(...inside)];
   };
 
-  // Sensitivity: the same choice with no rework term (rework is the least
-  // certain parameter: a pooled median over few long epochs).
-  noRework = true;
-  let noReworkOptimum = null;
-  for (const c of allowed) {
-    const x = replayAt(c.threshold);
-    if (!noReworkOptimum || x.usd < noReworkOptimum.usd) noReworkOptimum = { window: c.window, usd: x.usd };
-  }
-  noRework = false;
+  // Sensitivity: the whole evaluation again with no rework term (rework is
+  // the least certain parameter), over its own feasible and allowed windows.
+  const nr = reworkOverride == null ? evaluateModel(mi, allInputs, { ...opts, reworkOverride: 0 }) : null;
 
   // Closed-form cross-check, with the main-kind parameters when there are any.
   const pk = params.main || Object.values(params)[0];
@@ -571,11 +771,11 @@ export function evaluateModel(mi, allInputs, opts = {}) {
   const lambda = steps ? mi.idleExpiries / steps : 0;
   const wMean = steps ? (mi.ttl1hSteps * price.w1 + (steps - mi.ttl1hSteps) * price.w5) / steps : price.w5;
   const g = mi.growth.n ? mi.growth.sum / mi.growth.n : 0;
-  const closedForm = closedFormWindow({
-    P: pk.P, Pw: pk.Pw, S: pk.S, rework: pk.rework, r: price.r, wMean, outRatio: price.outRatio, g, lambda,
+  const closedFormThreshold = closedFormWindow({
+    P: pk.P, Pw: pk.Pw, S: pk.S, rework: reworkOf(pk), r: price.r, wMean, outRatio: price.outRatio, g, lambda,
   });
 
-  const cacheUsd = (mi.money.read + mi.money.write5m + mi.money.write1h) * anchor.factor;
+  const cacheUsd = mi.money.read + mi.money.write5m + mi.money.write1h;
   const saving = (ref) => (ref && optimum ? { usd: ref.usd - optimum.usd, pctOfWindowCost: ref.usd ? ((ref.usd - optimum.usd) / ref.usd) * 100 : null, pctOfCacheSpend: cacheUsd ? ((ref.usd - optimum.usd) / cacheUsd) * 100 : null } : null);
 
   return {
@@ -590,18 +790,29 @@ export function evaluateModel(mi, allInputs, opts = {}) {
       requestsPerTurn,
       minRequestsPerCompaction,
       readMultiplier: price.r,
+      reworkUsed: reworkOf(pk),
     },
     curve,
-    optimum: optimum && { window: optimum.window, usd: optimum.usd, compactions: optimum.compactions, turnsPerCompaction: optimum.turnsPerCompaction },
-    unconstrainedOptimum: unconstrained && { window: unconstrained.window, usd: unconstrained.usd, compactions: unconstrained.compactions, turnsPerCompaction: unconstrained.turnsPerCompaction },
+    optimum: optimum && { window: optimum.window, threshold: optimum.threshold, usd: optimum.usd, compactions: optimum.compactions, turnsPerCompaction: optimum.turnsPerCompaction },
+    unconstrainedOptimum: unconstrained && { window: unconstrained.window, threshold: unconstrained.threshold, usd: unconstrained.usd, compactions: unconstrained.compactions, turnsPerCompaction: unconstrained.turnsPerCompaction },
     band1: band(1),
     band5: band(5),
-    atDefault: atDefault && { window: atDefault.window, usd: atDefault.usd, compactions: atDefault.compactions },
-    atConfigured: atConfigured && { window: atConfigured.window, usd: atConfigured.usd, compactions: atConfigured.compactions },
+    atDefault: atDefault && { window: null, threshold: atDefault.threshold, usd: atDefault.usd, compactions: atDefault.compactions },
+    atConfigured: atConfigured && { window: atConfigured.window, threshold: atConfigured.threshold, usd: atConfigured.usd, compactions: atConfigured.compactions },
     savingVsDefault: saving(atDefault),
     savingVsConfigured: saving(atConfigured),
-    closedFormWindow: closedForm,
-    noReworkOptimum: noReworkOptimum && noReworkOptimum.window,
+    // The closed form gives a compaction point; the setting that gives it is
+    // that plus the reserve.
+    closedFormThreshold,
+    closedFormWindow: closedFormThreshold == null ? null : closedFormThreshold + spec.reserve,
+    noRework: nr && {
+      status: nr.status,
+      window: nr.optimum?.window ?? null,
+      band1: nr.band1 ?? null,
+      band5: nr.band5 ?? null,
+      curve: nr.curve || null,
+    },
+    noReworkOptimum: nr?.optimum?.window ?? null,
     fit,
     cacheUsd,
   };
@@ -614,22 +825,25 @@ export function evaluateModel(mi, allInputs, opts = {}) {
 // data does not. The turn floor applies to the mix as a whole — requests
 // between compactions over every voter, in turns at the pooled requests per
 // turn — so one thin model cannot veto a window on its own; each voter's own
-// turns per compaction at the chosen value is reported beside it.
-// weights (alias -> factor) gives the plan-usage view.
+// turns per compaction at the chosen value is reported beside it, and every
+// model that would compact more often than the floor there is listed in
+// optimum.belowFloor (the floor binds the mix, so the report must say which
+// models it does not protect).
+// weights (alias -> factor) gives the plan-usage view; noRework uses each
+// model's rework-off curve.
 export function combineModels(evaluated, {
-  cfg = compactionConfig(), weights = null, requestsPerTurn = null, minTurnsPerCompaction,
+  cfg = compactionConfig(), weights = null, requestsPerTurn = null, minTurnsPerCompaction, noRework = false,
 } = {}) {
   const minTurns = minTurnsPerCompaction ?? cfg.minTurnsPerCompaction ?? 10;
-  const voters = evaluated.filter((e) => (e.status === 'ok' || e.status === 'no-allowed-window') && e.curve);
+  const curveOf = (e) => (noRework ? e.noRework?.curve : e.curve);
+  const statusOf = (e) => (noRework ? e.noRework?.status : e.status);
+  const voters = evaluated.filter((e) => (statusOf(e) === 'ok' || statusOf(e) === 'no-allowed-window') && curveOf(e));
   if (!voters.length) return null;
   const { min, max, step } = cfg.window;
   const grid = [];
   for (let w = min; w <= max; w += step) grid.push(w);
-  const costAt = (e, W) => {
-    const T = thresholdFor(W, { contextWindow: e.contextWindow, defaultCompactAt: e.defaultCompactAt });
-    const pt = e.curve.find((c) => c.threshold === T && c.feasible);
-    return pt || null;
-  };
+  // A setting above a model's context window is capped there.
+  const costAt = (e, W) => curveOf(e).find((c) => c.window === Math.min(W, e.contextWindow) && c.feasible) || null;
   const rows = [];
   for (const W of grid) {
     let usd = 0;
@@ -658,23 +872,25 @@ export function combineModels(evaluated, {
     const inside = allowedRows.filter((r) => r.usd <= opt.usd * (1 + pct / 100)).map((r) => r.window);
     return [Math.min(...inside), Math.max(...inside)];
   };
-  const top = rows[rows.length - 1];
+  const belowFloor = Object.entries(opt.perModelTurnsPerCompaction)
+    .filter(([, t]) => t != null && t < minTurns)
+    .map(([model, t]) => ({ model, turnsPerCompaction: t }));
   return {
     voters: voters.map((e) => e.model),
     optimum: {
       window: opt.window, usd: opt.usd, compactions: opt.compactions, turnsPerCompaction: opt.turnsPerCompaction,
       perModelTurnsPerCompaction: opt.perModelTurnsPerCompaction,
+      belowFloor,
     },
     band1: band(1),
     band5: band(5),
-    atMax: top ? { window: top.window, usd: top.usd, compactions: top.compactions } : null,
     rows,
   };
 }
 
 // --- Spawn overhead and where the money goes ----------------------------------------------
 
-export function spawnOverhead(spawns, { days, calibration } = {}) {
+export function spawnOverhead(spawns, { days } = {}) {
   const by = new Map();
   for (const s of spawns) {
     const k = s.agentType || '(unknown)';
@@ -684,7 +900,7 @@ export function spawnOverhead(spawns, { days, calibration } = {}) {
     e.count += 1;
     e.context.push(s.contextTokens);
     e.models[s.model || '(no model)'] = (e.models[s.model || '(no model)'] || 0) + 1;
-    if (p) e.usd.push(p.usd * anchorFor(s.model, calibration).factor);
+    if (p) e.usd.push(p.usd);
   }
   const rows = [...by.values()].map((e) => {
     const usd = [...e.usd].sort((a, b) => a - b);
@@ -708,8 +924,8 @@ export function spawnOverhead(spawns, { days, calibration } = {}) {
   return { rows, spawns: spawns.length, perDay: days ? spawns.length / days : null, contextP50: percentile(allCtx, 50), contextP90: percentile(allCtx, 90), usdPerDay: totalPerDay };
 }
 
-export function whereMoneyGoes(mi, calibration) {
-  const f = anchorFor(mi.model, calibration).factor;
+export function whereMoneyGoes(mi) {
+  const f = 1; // API list price, unscaled
   const m = mi.money;
   const cache = (m.read + m.write5m + m.write1h) * f;
   const pct = (x) => (cache ? (x * f * 100) / cache : null);
@@ -733,8 +949,35 @@ export function whereMoneyGoes(mi, calibration) {
 
 // --- The whole advice --------------------------------------------------------------------
 
+// The two forms to type for a window setting: the settings.json integer and
+// the /autocompact command (applies at once in that session).
+export function settingForms(window) {
+  if (!window) return null;
+  return { settingsValue: Math.round(window), command: `/autocompact ${Math.round(window / 1000)}k` };
+}
+
+// What the numbers cover. A time-budgeted read goes newest file first, so
+// traffic newer than the oldest file read is complete and older traffic is
+// only partly read (and the model mix leans to recent work).
+export function coverageOf(inputs) {
+  const s = inputs.scan || {};
+  const truncated = !!s.truncated;
+  const oldest = inputs.oldestReadMtimeMs;
+  const completeDays = truncated
+    ? (Number.isFinite(oldest) ? Math.max(0, Math.min(inputs.windowDays, (inputs.nowMs - oldest) / 86400000)) : 0)
+    : inputs.windowDays;
+  return { truncated, filesRead: s.filesRead ?? null, filesFound: s.filesFound ?? null, windowDays: inputs.windowDays, completeDays };
+}
+
+// "over 30d", or for a partial read what it actually covers.
+export function spanPhrase(cov) {
+  if (!cov?.truncated) return `over ${cov?.windowDays}d`;
+  return `over the transcripts read (PARTIAL: ${cov.filesRead} of ${cov.filesFound} files, complete only for the newest ${cov.completeDays.toFixed(1)}d)`;
+}
+
 export function adviseFromInputs(inputs, {
-  cfg = compactionConfig(), calibration = { pooled: { n: 0 }, perModel: {} }, configured = { tokens: null, source: 'unset' },
+  cfg = compactionConfig(), calibration = { pooled: { n: 0 }, perModel: {} },
+  configured = { tokens: null, source: 'unset', ignored: [], notes: [], autoCompactDisabled: null },
   minRequests, minTracksReaching, minTurnsPerCompaction,
 } = {}) {
   const models = inputs.models;
@@ -750,58 +993,83 @@ export function adviseFromInputs(inputs, {
     }));
   const combineOpts = { cfg, requestsPerTurn: requestsPerTurnPooled, minTurnsPerCompaction };
   const global = combineModels(evaluated, combineOpts);
+  const globalNoRework = combineModels(evaluated, { ...combineOpts, noRework: true });
   const planWeights = cfg.planUsage?.weights || null;
   const globalPlan = planWeights && Object.keys(planWeights).length ? combineModels(evaluated, { ...combineOpts, weights: planWeights }) : null;
-  const configuredGlobal = global && configured.tokens
-    ? (() => {
-      let usd = 0;
-      for (const e of evaluated.filter((x) => global.voters.includes(x.model))) {
-        const T = thresholdFor(configured.tokens, e);
-        const pt = e.curve.find((c) => c.threshold === T && c.feasible);
-        if (!pt) return null;
-        usd += pt.usd;
-      }
-      return { window: configured.tokens, usd };
-    })()
-    : null;
+  // A reference point summed over the global voters, or null if any voter lacks it.
+  const sumOver = (pick) => {
+    if (!global) return null;
+    let usd = 0;
+    for (const e of evaluated.filter((x) => global.voters.includes(x.model))) {
+      const p = pick(e);
+      if (!p) return null;
+      usd += p.usd;
+    }
+    return usd;
+  };
+  const configuredUsd = configured.tokens ? sumOver((e) => e.atConfigured) : null;
+  const defaultUsd = sumOver((e) => e.atDefault);
+  const coverage = coverageOf(inputs);
+  const pooledCheck = priceCheckFor(null, calibration);
   return {
     generatedAt: new Date(inputs.nowMs).toISOString(),
     windowDays: inputs.windowDays,
     scan: inputs.scan && {
       filesFound: inputs.scan.filesFound, filesRead: inputs.scan.filesRead, filesSkipped: inputs.scan.filesSkipped,
       truncated: inputs.scan.truncated, wallMs: inputs.scan.wallMs, rootExists: inputs.scan.exists,
+      excludedBenchProjects: inputs.excludedBenchProjects ?? 0,
     },
+    coverage,
     configured,
+    moneyBasis: MONEY_BASIS,
+    priceCheck: pooledCheck,
     calibration,
     requestsPerTurnPooled,
     minTurnsPerCompaction: minTurnsPerCompaction ?? cfg.minTurnsPerCompaction,
     models: evaluated,
-    global: global && { ...global, configured: configuredGlobal },
+    global: global && {
+      ...global,
+      toType: global.optimum ? settingForms(global.optimum.window) : null,
+      configured: configured.tokens && configuredUsd != null ? { window: configured.tokens, usd: configuredUsd } : null,
+      atDefault: defaultUsd != null ? { usd: defaultUsd } : null,
+      noRework: globalNoRework && { optimum: globalNoRework.optimum && { window: globalNoRework.optimum.window, belowFloor: globalNoRework.optimum.belowFloor }, band1: globalNoRework.band1 ?? null, band5: globalNoRework.band5 ?? null },
+    },
     globalPlanUsage: globalPlan && { asOf: cfg.planUsage.asOf, weights: planWeights, optimum: globalPlan.optimum, band5: globalPlan.band5 },
-    moneyByModel: [...models.values()].filter((m) => priceSpecFor(m.model)).sort((a, b) => b.requests - a.requests).map((m) => whereMoneyGoes(m, calibration)),
-    spawnOverhead: spawnOverhead(inputs.spawns, { days: inputs.windowDays, calibration }),
+    moneyByModel: [...models.values()].filter((m) => priceSpecFor(m.model)).sort((a, b) => b.requests - a.requests).map((m) => whereMoneyGoes(m)),
+    spawnOverhead: spawnOverhead(inputs.spawns, { days: inputs.windowDays }),
   };
 }
 
 export async function runCacheAdvisor({
-  root, days = 30, now = new Date(), maxMs = null, workflows = false, resultsRoot, env, settingsPath,
-  minRequests, minTracksReaching, minTurnsPerCompaction,
+  root, days = 30, now = new Date(), maxMs = null, workflows = false, resultsRoot, env, settingsPath, projectDir, managedPath,
+  minRequests, minTracksReaching, minTurnsPerCompaction, includeBench = false,
 } = {}) {
-  const inputs = await collectAdvisorInputs({ root, days, now, maxMs, workflows });
+  const inputs = await collectAdvisorInputs({ root, days, now, maxMs, workflows, includeBench });
   const calibration = calibrate(resultsRoot ? { resultsRoot } : {});
-  const configured = configuredWindow({ ...(env ? { env } : {}), ...(settingsPath ? { settingsPath } : {}) });
+  const configured = configuredWindow({
+    ...(env ? { env } : {}), ...(settingsPath ? { settingsPath } : {}), ...(projectDir ? { projectDir } : {}), ...(managedPath !== undefined ? { managedPath } : {}),
+  });
   return adviseFromInputs(inputs, { calibration, configured, minRequests, minTracksReaching, minTurnsPerCompaction });
 }
 
 // --- The saved summary (numbers and model ids only) -----------------------------------------
 
 export function summaryOf(advice) {
+  const cov = advice.coverage || { truncated: !!advice.scan?.truncated };
   return {
     generatedAt: advice.generatedAt,
     windowDays: advice.windowDays,
-    truncated: !!advice.scan?.truncated,
+    truncated: !!cov.truncated,
+    filesRead: cov.filesRead ?? advice.scan?.filesRead ?? null,
+    filesFound: cov.filesFound ?? advice.scan?.filesFound ?? null,
+    completeDays: cov.completeDays ?? null,
     configured: advice.configured?.tokens ?? null,
-    global: advice.global?.optimum ? { window: advice.global.optimum.window, band5: advice.global.band5 } : null,
+    configuredIgnored: (advice.configured?.ignored || []).length,
+    global: advice.global?.optimum ? {
+      window: advice.global.optimum.window,
+      band5: advice.global.band5,
+      belowFloor: (advice.global.optimum.belowFloor || []).map((b) => ({ model: b.model, turnsPerCompaction: b.turnsPerCompaction })),
+    } : null,
     models: Object.fromEntries(advice.models.map((e) => [e.model, {
       status: e.status,
       window: e.optimum?.window ?? null,
@@ -811,9 +1079,17 @@ export function summaryOf(advice) {
   };
 }
 
+// Writes the summary unless it is a partial read and a full-read summary is
+// already saved: a time-budgeted audit run must not replace what a full run
+// found. Returns the path written, or null when the full summary was kept.
 export function saveAdvisorSummary(advice, dir = stateDir()) {
   const path = join(dir, ADVISOR_SUMMARY_FILE);
-  writeFileSync(path, `${JSON.stringify(summaryOf(advice), null, 2)}\n`);
+  const s = summaryOf(advice);
+  if (s.truncated) {
+    const prev = loadAdvisorSummary(dir);
+    if (prev && !prev.truncated) return null;
+  }
+  writeFileSync(path, `${JSON.stringify(s, null, 2)}\n`);
   return path;
 }
 
@@ -821,17 +1097,32 @@ export function loadAdvisorSummary(dir = stateDir()) {
   try { return JSON.parse(readFileSync(join(dir, ADVISOR_SUMMARY_FILE), 'utf8')); } catch { return null; }
 }
 
-// The summary's line for a routing alias (opus, sonnet, haiku, fable): the
-// busiest model id containing that alias that has a recommendation.
-export function windowHintFor(summary, alias) {
+// The summary's line for a routing alias (opus, sonnet, haiku, fable). With a
+// modelId (the id the alias resolves to, config/model-tiers.json) that id is
+// matched exactly (or with a date suffix) first, so "opus" quotes Opus 5.5 and
+// not the busier Opus 5; otherwise the busiest id containing the alias.
+export function windowHintFor(summary, alias, { modelId = null } = {}) {
   if (!summary || !alias) return null;
-  const cands = Object.entries(summary.models || {})
-    .filter(([id, m]) => id.toLowerCase().includes(String(alias).toLowerCase()) && m.status === 'ok' && m.window)
-    .sort((a, b) => (b[1].requests || 0) - (a[1].requests || 0));
+  const usable = Object.entries(summary.models || {}).filter(([, m]) => m.status === 'ok' && m.window);
+  const byRequests = (a, b) => (b[1].requests || 0) - (a[1].requests || 0);
+  const exact = modelId ? usable.filter(([id]) => id === modelId || new RegExp(`^${modelId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d{8}$`).test(id)).sort(byRequests) : [];
+  const cands = exact.length ? exact : (modelId ? [] : usable.filter(([id]) => id.toLowerCase().includes(String(alias).toLowerCase())).sort(byRequests));
   const global = summary.global?.window || null;
   if (!cands.length && !global) return null;
-  const [id, m] = cands[0] || [null, null];
-  return { model: id, window: m?.window ?? null, band5: m?.band5 ?? null, global, configured: summary.configured, generatedAt: summary.generatedAt };
+  const [id, m] = cands[0] || [modelId, null];
+  return {
+    model: id,
+    window: m?.window ?? null,
+    band5: m?.band5 ?? null,
+    global,
+    configured: summary.configured,
+    configuredIgnored: summary.configuredIgnored || 0,
+    generatedAt: summary.generatedAt,
+    windowDays: summary.windowDays,
+    truncated: !!summary.truncated,
+    filesRead: summary.filesRead ?? null,
+    filesFound: summary.filesFound ?? null,
+  };
 }
 
 // --- The human report (the CLI prints it; the audit check reuses parts) --------------------
@@ -841,60 +1132,93 @@ export function formatAdvice(a, { curve = false } = {}) {
   const K = (x) => (x == null ? 'n/a' : `${Math.round(x / 1000)}K`);
   const usd = (x) => (x == null ? 'n/a' : `$${x.toFixed(2)}`);
   const pct = (x) => (x == null ? 'n/a' : `${x.toFixed(1)}%`);
+  const R = windowSpecFor('').reserve; // how far below a set window it compacts (33K today)
+  const turnsTxt = (t) => (t == null ? 'n/a' : t.toFixed(0));
   const s = a.scan || {};
+  const cov = a.coverage || { truncated: !!s.truncated, windowDays: a.windowDays, filesRead: s.filesRead, filesFound: s.filesFound, completeDays: 0 };
+  const span = spanPhrase(cov);
   out.push(`cache-advisor — last ${a.windowDays}d (${a.generatedAt})`);
-  out.push(`files: ${s.filesRead} read of ${s.filesFound}${s.truncated ? ` — TRUNCATED by the time budget (${s.filesSkipped} older files skipped)` : ''}, ${((s.wallMs || 0) / 1000).toFixed(1)}s`);
+  out.push(`files: ${s.filesRead} read of ${s.filesFound}, ${((s.wallMs || 0) / 1000).toFixed(1)}s; `
+    + `${s.excludedBenchProjects || 0} benchmark project dir(s) excluded (synthetic runs are never pooled with your traffic)`);
+  if (cov.truncated) {
+    out.push(`PARTIAL READ: the time budget stopped after ${cov.filesRead} of ${cov.filesFound} files, newest first. Traffic is complete only for the newest ${cov.completeDays.toFixed(1)}d; `
+      + `older traffic is partly read, so the model mix leans to recent work. Run without --max-ms for the full ${a.windowDays}d.`);
+  }
   const cal = a.calibration;
+  out.push(`money: $ at API list price (config/model-pricing.json); on a subscription plan these dollars are notional — they rank windows, they are not a bill.`);
   out.push(cal?.pooled?.n
-    ? `money: price table checked against bench cost_usd (n=${cal.pooled.n}, writes priced ${cal.assumption}): median ratio ${cal.pooled.ratio.toFixed(3)} (p10 ${cal.pooled.p10.toFixed(3)}, p90 ${cal.pooled.p90.toFixed(3)})`
-    : 'money: price-derived only (no bench cost_usd rows to check against)');
-  out.push(`configured window: ${a.configured.tokens ? K(a.configured.tokens) : 'unset'} (${a.configured.source})`);
+    ? `  price-table check: Claude Code's own cost_usd / list price on ${cal.pooled.n} bench rows = ${cal.pooled.ratio.toFixed(3)} (p10 ${cal.pooled.p10.toFixed(3)}, p90 ${cal.pooled.p90.toFixed(3)})`
+      + `${a.priceCheck?.agrees === false ? ' — the price table DISAGREES with Claude Code; fix config/model-pricing.json before trusting the dollars' : ': the tables agree (a check of the table, not a measurement of spend)'}`
+    : '  price table not checked (no bench cost_usd rows)');
+  const c = a.configured || { tokens: null, source: 'unset' };
+  out.push(c.tokens
+    ? `window in effect: ${K(c.tokens)} (${c.source}) — compacts at about ${K(c.tokens - R)} on 1M models, ${K(Math.min(c.tokens, 200000) - R)} on 200K models`
+    : "window in effect: unset — each model's default (compacts at about 967K on 1M models, 167K on 200K models)");
+  out.push('  (read: the environment variable and the managed and user settings files; a running session\'s --autocompact flag cannot be seen from here)');
+  for (const line of ignoredWindowLines(c)) out.push(`  WARNING: ${line}`);
+  for (const n of c.notes || []) out.push(`  note: ${n}`);
+  if (c.autoCompactDisabled) out.push(`  WARNING: auto-compact is disabled (${c.autoCompactDisabled}); no window applies until it is enabled`);
   out.push('');
 
-  out.push('-- auto-compact window per model (replayed on your transcripts) --');
+  out.push('-- auto-compact window per model (the setting to type; replayed on your transcripts) --');
   for (const e of a.models) {
     if (e.status !== 'ok') {
       out.push(`  ${e.model.padEnd(28)} ${e.status}: ${e.reason || ''} (${e.requests} requests)`);
       continue;
     }
-    out.push(`  ${e.model.padEnd(28)} optimum ${K(e.optimum.window)}  within 1%: ${K(e.band1[0])}-${K(e.band1[1])}  within 5%: ${K(e.band5[0])}-${K(e.band5[1])}  `
+    const pad = ''.padEnd(28);
+    out.push(`  ${e.model.padEnd(28)} optimum ${K(e.optimum.window)} (compacts at ${K(e.optimum.threshold)})  within 1%: ${K(e.band1[0])}-${K(e.band1[1])}  within 5%: ${K(e.band5[0])}-${K(e.band5[1])}  `
       + `closed form ${K(e.closedFormWindow)}  (${e.requests} requests, ${e.tracksReaching} sessions past ${K(100000)})`);
     const d = e.savingVsDefault;
-    const c = e.savingVsConfigured;
-    out.push(`  ${''.padEnd(28)} vs default ${K(e.defaultCompactAt)}: saves ${usd(d?.usd)} (${pct(d?.pctOfCacheSpend)} of its cache spend)`
-      + `${c ? `; vs configured ${K(a.configured.tokens)}: saves ${usd(c.usd)} (${pct(c.pctOfCacheSpend)})` : ''}`
-      + `; compactions at optimum ${e.optimum.compactions}, about every ${e.optimum.turnsPerCompaction == null ? 'n/a' : e.optimum.turnsPerCompaction.toFixed(0)} turns`);
+    const cf = e.savingVsConfigured;
+    out.push(`  ${pad} vs unset (compacts at ${K(e.defaultCompactAt)}): saves ${usd(d?.usd)} (${pct(d?.pctOfCacheSpend)} of its cache spend)`
+      + `${cf ? `; vs your ${K(c.tokens)}: saves ${usd(cf.usd)} (${pct(cf.pctOfCacheSpend)})` : ''}`
+      + `; compactions at optimum ${e.optimum.compactions}, about every ${turnsTxt(e.optimum.turnsPerCompaction)} turns`);
     if (e.unconstrainedOptimum && e.unconstrainedOptimum.window !== e.optimum.window) {
-      out.push(`  ${''.padEnd(28)} (cheapest ignoring the ${a.minTurnsPerCompaction}-turn floor: ${K(e.unconstrainedOptimum.window)}, about every ${e.unconstrainedOptimum.turnsPerCompaction?.toFixed(0)} turns)`);
+      out.push(`  ${pad} (cheapest ignoring the ${a.minTurnsPerCompaction}-turn floor: ${K(e.unconstrainedOptimum.window)}, about every ${turnsTxt(e.unconstrainedOptimum.turnsPerCompaction)} turns)`);
+    }
+    if (e.noRework) {
+      out.push(`  ${pad} rework off: ${e.noRework.window ? `optimum ${K(e.noRework.window)}, within 5%: ${K(e.noRework.band5[0])}-${K(e.noRework.band5[1])}` : e.noRework.status}`);
     }
     const pk = e.params.byKind.main || Object.values(e.params.byKind)[0];
-    out.push(`  ${''.padEnd(28)} inputs: after-compaction size ${K(pk.P)} (${pk.source}, n=${pk.n}), rework ${K(pk.rework)} (n=${pk.reworkSamples}; optimum without it ${K(e.noReworkOptimum)}), `
+    out.push(`  ${pad} inputs: after-compaction size ${K(pk.P)} (${pk.source}, n=${pk.n}), rework ${K(pk.rework)} (n=${pk.reworkSamples} from ${pk.reworkSessions ?? 'n/a'} sessions), `
       + `growth ${Math.round(e.params.growthPerRequestMean)}/request, ${e.params.requestsPerTurn == null ? 'n/a' : e.params.requestsPerTurn.toFixed(1)} requests/turn`
       + `${e.fit ? `; fit at ${K(e.fit.threshold)}: replay/recorded ${e.fit.ratio.toFixed(3)}` : ''}`);
     if (curve) {
       for (const p of e.curve.filter((x) => x.feasible)) {
-        out.push(`      ${K(p.window).padStart(6)} ${usd(p.usd).padStart(12)} compactions ${String(p.compactions).padStart(4)}${p.allowed ? '' : '  (below the turn floor)'}`);
+        out.push(`      ${K(p.window).padStart(6)} (at ${K(p.threshold).padStart(5)}) ${usd(p.usd).padStart(12)} compactions ${String(p.compactions).padStart(4)}${p.allowed ? '' : '  (below the turn floor)'}`);
       }
     }
   }
   out.push('');
   if (a.global?.optimum) {
     const g = a.global;
+    const W = g.optimum.window;
+    const forms = g.toType || settingForms(W);
     out.push(`-- one setting for your model mix (autoCompactWindow is global) --`);
-    out.push(`  cheapest: ${K(g.optimum.window)}  within 1%: ${K(g.band1[0])}-${K(g.band1[1])}  within 5%: ${K(g.band5[0])}-${K(g.band5[1])}  (voters: ${g.voters.join(', ')})`);
+    out.push(`  cheapest: ${K(W)} (compacts at about ${K(W - R)} on 1M models, ${K(Math.min(W, 200000) - R)} on 200K models)  `
+      + `within 1%: ${K(g.band1[0])}-${K(g.band1[1])}  within 5%: ${K(g.band5[0])}-${K(g.band5[1])}  (voters: ${g.voters.join(', ')})`);
+    out.push(`  TO APPLY, type one of: ${forms.command}   (in a session: applies at once, and saves it to your user settings)`);
+    out.push(`                     or: "autoCompactWindow": ${forms.settingsValue}   (settings.json: an INTEGER — a string like "${Math.round(W / 1000)}k" is silently ignored; read when a session starts)`);
     const tpc = g.optimum.perModelTurnsPerCompaction || {};
-    out.push(`  at ${K(g.optimum.window)}: a compaction about every ${g.optimum.turnsPerCompaction == null ? 'n/a' : g.optimum.turnsPerCompaction.toFixed(0)} turns overall; per model `
+    out.push(`  at ${K(W)}: a compaction about every ${turnsTxt(g.optimum.turnsPerCompaction)} turns overall; per model `
       + Object.entries(tpc).map(([m, t]) => `${m} ${t == null ? 'none' : t.toFixed(0)}`).join(', '));
-    if (g.configured) out.push(`  at configured ${K(g.configured.window)}: ${usd(g.configured.usd - g.optimum.usd)} more than the cheapest over ${a.windowDays}d`);
-    if (g.atMax) out.push(`  at ${K(g.atMax.window)} (each model's default): ${usd(g.atMax.usd - g.optimum.usd)} more than the cheapest over ${a.windowDays}d`);
+    for (const b of g.optimum.belowFloor || []) {
+      out.push(`  WARNING: at ${K(W)}, ${b.model} would compact about every ${b.turnsPerCompaction.toFixed(0)} turns — more often than the ${a.minTurnsPerCompaction}-turn floor, which binds the mix as a whole, not each model`);
+    }
+    if (g.noRework?.optimum) {
+      out.push(`  rework off: cheapest ${K(g.noRework.optimum.window)}, within 5%: ${K(g.noRework.band5[0])}-${K(g.noRework.band5[1])} `
+        + '(the rework term is measured extra growth after a compaction; this shows how far the answer leans on it)');
+    }
+    if (g.configured) out.push(`  at your ${K(g.configured.window)}: ${usd(g.configured.usd - g.optimum.usd)} more than the cheapest ${span}`);
+    if (g.atDefault) out.push(`  unset (each model's default): ${usd(g.atDefault.usd - g.optimum.usd)} more than the cheapest ${span}`);
     if (a.globalPlanUsage?.optimum) out.push(`  plan-usage view (weights as of ${a.globalPlanUsage.asOf}, may be introductory): cheapest ${K(a.globalPlanUsage.optimum.window)}, within 5%: ${K(a.globalPlanUsage.band5[0])}-${K(a.globalPlanUsage.band5[1])}`);
-    out.push(`  advice only — to apply it, run /autocompact ${Math.round(g.optimum.window / 1000)}k in Claude Code`);
   } else {
     out.push('-- one setting for your model mix -- no model had enough data to vote');
   }
   out.push('');
 
-  out.push('-- where the cache money goes (per model) --');
+  out.push(`-- where the cache money goes (per model, API list price, ${span}) --`);
   for (const m of a.moneyByModel) {
     if (!m.cacheUsd) continue;
     out.push(`  ${m.model.padEnd(28)} cache ${usd(m.cacheUsd).padStart(11)}: reads ${pct(m.pct.read)}, 5m writes ${pct(m.pct.write5m)}, 1h writes ${pct(m.pct.write1h)}; `

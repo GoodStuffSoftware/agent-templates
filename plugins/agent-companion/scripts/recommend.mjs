@@ -148,7 +148,7 @@ if (route?.cacheTtl) out.cacheTtl = route.cacheTtl; // advisory hint; only a pro
 // Auto-compact window: quoted from the last cache-advisor run (its saved
 // summary), never computed here — a transcript replay is far too slow for this
 // command. Shown only when a summary exists. Advice: nothing is changed.
-const autoCompact = windowHintFor(loadAdvisorSummary(), out.model);
+const autoCompact = windowHintFor(loadAdvisorSummary(), out.model, { modelId: modelTiers().tiers?.[out.model]?.resolvesTo?.modelId || null });
 if (autoCompact) out.autoCompact = autoCompact;
 if (route?.layer === 'profile') out.routeLayer = 'profile';
 
@@ -182,9 +182,13 @@ if (out.autoCompact) {
   const ageDays = (Date.now() - Date.parse(a.generatedAt)) / 86400000;
   const parts = [];
   if (a.window) parts.push(`${a.model} breaks even at ${K(a.window)}${a.band5 ? ` (within 5%: ${K(a.band5[0])}-${K(a.band5[1])})` : ''}`);
-  if (a.global) parts.push(`one setting for your model mix: ${K(a.global)}`);
-  parts.push(a.configured ? `yours: ${K(a.configured)}` : 'yours: unset');
-  console.log(`auto-compact:   ${parts.join('; ')} — advice from cache-advisor${ageDays > 14 ? `, ${Math.floor(ageDays)} days old: run scripts/cache-advisor.mjs again` : ''}`);
+  if (a.global) parts.push(`one setting for your model mix: ${K(a.global)} (/autocompact ${Math.round(a.global / 1000)}k)`);
+  parts.push(a.configured ? `yours: ${K(a.configured)}` : `yours: unset${a.configuredIgnored ? ' (a value you set is IGNORED by Claude Code: run scripts/cache-advisor.mjs)' : ''}`);
+  const basis = a.truncated
+    ? `PARTIAL read, ${a.filesRead ?? '?'} of ${a.filesFound ?? '?'} files`
+    : `full ${a.windowDays ?? '?'}d read`;
+  console.log(`auto-compact:   ${parts.join('; ')} — advice from cache-advisor on ${String(a.generatedAt).slice(0, 10)} (${basis})`
+    + `${ageDays > 14 ? `, ${Math.floor(ageDays)} days old: run scripts/cache-advisor.mjs again` : ''}`);
 }
 if (out.trial) {
   console.log(`\nROUTING TRIAL — this type's output is a benchmark override, not the plain grid:`);

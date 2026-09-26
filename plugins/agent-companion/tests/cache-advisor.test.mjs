@@ -17,8 +17,9 @@ after(() => FILE_FIXTURE.cleanup());
 import {
   parseWindow, configuredWindow, windowSpecFor, priceSpecFor, replayTrack, uncompactedPeak, closedFormWindow,
   candidateWindows, thresholdFor, evaluateModel, combineModels, emptyModelInput, postCompactionParams,
-  calibrate, anchorFor, collectAdvisorInputs, runCacheAdvisor, formatAdvice, saveAdvisorSummary,
-  loadAdvisorSummary, windowHintFor, summaryOf, spawnOverhead, compactionConfig,
+  calibrate, priceCheckFor, collectAdvisorInputs, runCacheAdvisor, formatAdvice, saveAdvisorSummary,
+  loadAdvisorSummary, windowHintFor, summaryOf, spawnOverhead, compactionConfig, adviseFromInputs,
+  settingsWindowValid, envWindow, ignoredWindowLines, isBenchProject, BENCH_DIR_PREFIXES, coverageOf, settingForms,
 } from '../scripts/lib/cache-advisor.mjs';
 
 // --- builders ------------------------------------------------------------------------
@@ -73,49 +74,106 @@ test('parseWindow: the forms /autocompact accepts, and junk', () => {
   assert.equal(parseWindow(null), null);
 });
 
-test('configuredWindow: the environment variable wins, takes a plain integer only; settings next; else unset', () => {
+// Claude Code 2.1.280: the env var first (parseInt-style, clamped to 100K-1M,
+// invalid ignored), then settings (managed > local > project > user), where a
+// value failing number().int().min(100000).max(1000000) is dropped silently.
+test('configuredWindow: env wins and is clamped; a string in settings is ignored, loudly; else unset', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const settingsPath = join(dir, 'settings.json');
+    const managedPath = join(dir, 'managed-settings.json');
     writeFileSync(settingsPath, JSON.stringify({ autoCompactWindow: '400k' }));
-    assert.deepEqual(configuredWindow({ env: {}, settingsPath }), { tokens: 400000, raw: '400k', source: 'user settings autoCompactWindow' });
-    const env = configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '300000' }, settingsPath });
+    const str = configuredWindow({ env: {}, settingsPath, managedPath });
+    assert.equal(str.tokens, null, 'the string "400k" is dropped by the schema: the default applies');
+    assert.equal(str.source, 'unset');
+    assert.deepEqual(str.ignored, [{ source: 'user settings autoCompactWindow', raw: '400k', reason: 'it must be an integer from 100000 to 1000000' }]);
+    assert.match(ignoredWindowLines(str)[0], /"400k" is IGNORED by Claude Code: it must be an integer .*; each model's default applies/);
+    const env = configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '300000' }, settingsPath, managedPath });
     assert.equal(env.tokens, 300000);
     assert.match(env.source, /env/);
-    assert.equal(configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500k' }, settingsPath }).tokens, null, 'the env var reads only a plain integer');
-    assert.equal(configuredWindow({ env: {}, settingsPath: join(dir, 'missing.json') }).source, 'unset');
+    assert.match(ignoredWindowLines(env)[0], /300K from env CLAUDE_CODE_AUTO_COMPACT_WINDOW applies/);
+    const k = configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500k' }, settingsPath, managedPath });
+    assert.equal(k.tokens, 100000, '"500k" reads as 500 and is clamped to the 100K minimum');
+    assert.match(k.notes[0], /reads as 500 and is clamped to 100000/);
+    assert.equal(configuredWindow({ env: {}, settingsPath: join(dir, 'missing.json'), managedPath }).source, 'unset');
     // Read-only: the settings file is byte-identical afterwards.
     assert.equal(readFileSync(settingsPath, 'utf8'), JSON.stringify({ autoCompactWindow: '400k' }));
+  } finally { cleanup(); }
+});
+
+test('settingsWindowValid / envWindow: the schema and the env parse as Claude Code applies them', () => {
+  for (const v of [100000, 275000, 1000000]) assert.equal(settingsWindowValid(v), true, String(v));
+  for (const v of ['400k', '400000', 400, 99999, 1000001, 250000.5, null, true]) assert.equal(settingsWindowValid(v), false, String(v));
+  assert.deepEqual(envWindow('300000'), { tokens: 300000, parsed: 300000, status: 'valid' });
+  assert.equal(envWindow('5e5').tokens, 500000, 'scientific notation is a whole number');
+  assert.equal(envWindow('500,000').tokens, 500000, 'thousands separators are read');
+  assert.equal(envWindow('2000000').tokens, 1000000, 'capped at 1M');
+  assert.equal(envWindow('1M').tokens, 100000, '"1M" reads as 1 and is raised to 100K');
+  assert.equal(envWindow('abc').status, 'invalid');
+  assert.equal(envWindow('0').status, 'invalid');
+});
+
+test('configuredWindow: precedence managed > local > project > user; an invalid value falls through to the next; flag and disable', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const proj = join(dir, 'proj');
+    mkdirSync(join(proj, '.claude'), { recursive: true });
+    const settingsPath = join(dir, 'user.json');
+    const managedPath = join(dir, 'managed.json');
+    writeFileSync(settingsPath, JSON.stringify({ autoCompactWindow: 400000 }));
+    writeFileSync(join(proj, '.claude', 'settings.json'), JSON.stringify({ autoCompactWindow: 350000 }));
+    writeFileSync(join(proj, '.claude', 'settings.local.json'), JSON.stringify({ autoCompactWindow: '300k' }));
+    let c = configuredWindow({ env: {}, settingsPath, managedPath, projectDir: proj });
+    assert.equal(c.tokens, 350000, 'the invalid local value is skipped; project settings apply');
+    assert.equal(c.source, 'project settings autoCompactWindow');
+    assert.equal(c.ignored.length, 1);
+    assert.match(c.ignored[0].source, /local project settings/);
+    assert.equal(configuredWindow({ env: {}, settingsPath, managedPath }).tokens, 400000, 'no projectDir: user settings');
+    writeFileSync(managedPath, JSON.stringify({ autoCompactWindow: 500000 }));
+    c = configuredWindow({ env: {}, settingsPath, managedPath, projectDir: proj });
+    assert.equal(c.tokens, 500000);
+    assert.match(c.source, /managed/);
+    assert.equal(configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'abc' }, settingsPath, managedPath }).tokens, 500000, 'an invalid env value is ignored');
+    assert.equal(configuredWindow({ env: {}, settingsPath, managedPath, flag: '275k' }).tokens, 275000, 'a flag the caller knows beats settings');
+    assert.equal(configuredWindow({ env: {}, settingsPath, managedPath, flag: 'auto' }).tokens, null);
+    assert.equal(configuredWindow({ env: { DISABLE_AUTO_COMPACT: '1' }, settingsPath, managedPath }).autoCompactDisabled, 'env DISABLE_AUTO_COMPACT');
+    writeFileSync(settingsPath, JSON.stringify({ autoCompactEnabled: false }));
+    assert.match(configuredWindow({ env: {}, settingsPath, managedPath: join(dir, 'none') }).autoCompactDisabled, /user settings/);
   } finally { cleanup(); }
 });
 
 // =============================================================================
 // Model specs: 200K vs 1M
 
-test('windowSpecFor: 1M models compact at about 967K by default, 200K models at 200K; unknown is treated as 200K', () => {
+test('windowSpecFor: 1M models compact at about 967K by default, 200K models at about 167K; unknown is treated as 200K', () => {
   const o55 = windowSpecFor('claude-opus-5-5');
   assert.equal(o55.alias, 'opus-5-5');
   assert.equal(o55.contextWindow, 1000000);
   assert.equal(o55.defaultCompactAt, 967000);
+  assert.equal(o55.reserve, 33000);
   assert.equal(windowSpecFor('claude-opus-5').alias, 'opus-5', 'opus-5 does not swallow opus-5-5 or the reverse');
   const h = windowSpecFor('claude-haiku-4-5-20251001');
   assert.equal(h.contextWindow, 200000);
+  assert.equal(h.defaultCompactAt, 167000);
   const u = windowSpecFor('claude-unknown-9');
   assert.equal(u.known, false);
   assert.equal(u.contextWindow, 200000);
+  assert.equal(u.defaultCompactAt, 167000);
 });
 
-test('candidateWindows / thresholdFor: a 200K model never goes past 200K; a big setting behaves as the default', () => {
+test('candidateWindows / thresholdFor: settings run 100K to the context window; a setting compacts 33K below min(setting, context)', () => {
   const h = windowSpecFor('claude-haiku-4-5');
   assert.deepEqual(candidateWindows(h), [100000, 125000, 150000, 175000, 200000]);
-  assert.equal(thresholdFor(400000, h), 200000);
+  assert.equal(thresholdFor(400000, h), 167000, 'capped at 200K, then 33K below');
+  assert.equal(thresholdFor(null, h), 167000, 'unset: the default');
   const s = windowSpecFor('claude-sonnet-5');
   const c = candidateWindows(s);
   assert.equal(c[0], 100000);
-  assert.ok(c.includes(967000), 'the default threshold is itself a candidate');
-  assert.equal(c[c.length - 1], 1000000);
+  assert.equal(c[c.length - 1], 1000000, 'the 1M setting (which compacts at the 967K default) is a candidate');
   assert.equal(thresholdFor(1000000, s), 967000);
-  assert.equal(thresholdFor(250000, s), 250000);
+  assert.equal(thresholdFor(275000, s), 242000);
+  assert.equal(thresholdFor(null, s), 967000);
+  assert.deepEqual(settingForms(275000), { settingsValue: 275000, command: '/autocompact 275k' });
 });
 
 // =============================================================================
@@ -264,12 +322,17 @@ test('evaluateModel: the turn floor lifts a window that would compact every few 
   assert.ok(strict.optimum.compactions === 0);
 });
 
-test('evaluateModel: a 200K model stops at 200K and its default is 200K', () => {
+test('evaluateModel: a 200K model stops at the 200K setting, which compacts at its 167K default', () => {
   const mi = modelInput('claude-haiku-4-5', longTracks(6), { compactions: threeComps });
   const e = evaluateModel(mi, new Map([[mi.model, mi]]));
   assert.equal(e.status, 'ok');
   assert.equal(Math.max(...e.curve.map((c) => c.window)), 200000);
-  assert.equal(e.atDefault.window, 200000);
+  assert.equal(e.curve.find((c) => c.window === 200000).threshold, 167000);
+  assert.equal(e.atDefault.threshold, 167000);
+  assert.equal(e.atDefault.usd, e.curve.find((c) => c.window === 200000).usd, 'unset costs what the 200K setting costs');
+  // Every window is a setting; its compaction point is 33K below it.
+  for (const c of e.curve) assert.equal(c.threshold, c.window - 33000);
+  assert.equal(e.optimum.threshold, e.optimum.window - 33000);
 });
 
 // =============================================================================
@@ -322,13 +385,18 @@ test('calibrate: picks the write-TTL assumption the cost_usd rows agree with, an
   assert.equal(cal.assumption, '1h');
   assert.equal(cal.pooled.n, 6);
   assert.ok(Math.abs(cal.pooled.ratio - 1) < 1e-9);
-  const a = anchorFor('claude-sonnet-5', cal);
-  assert.ok(Math.abs(a.factor - 1) < 1e-9);
-  assert.match(a.basis, /this model/);
-  assert.match(anchorFor('claude-opus-5', cal).basis, /pooled/);
+  // A check of the price table, never an anchor: the basis is list price.
+  const a = priceCheckFor('claude-sonnet-5', cal);
+  assert.equal(a.basis, 'API list price');
+  assert.equal(a.agrees, true);
+  assert.match(a.check, /this model, n=6.*agree/);
+  assert.match(priceCheckFor('claude-opus-5', cal).check, /pooled/);
   const none = calibrate({ rows: [] });
-  assert.equal(anchorFor('claude-sonnet-5', none).factor, 1);
-  assert.match(anchorFor('claude-sonnet-5', none).basis, /price-derived/);
+  assert.equal(priceCheckFor('claude-sonnet-5', none).agrees, null);
+  assert.match(priceCheckFor('claude-sonnet-5', none).check, /not checked/);
+  const off = priceCheckFor('m', { pooled: { n: 9, ratio: 1.1 }, perModel: {} });
+  assert.equal(off.agrees, false);
+  assert.match(off.check, /DISAGREES/);
 });
 
 test('calibrate: reads results.jsonl under a results root; a missing root is not an error', () => {
@@ -412,7 +480,7 @@ test('runCacheAdvisor: a small corpus says insufficient data, reads the configur
     buildCorpus(root);
     const settingsPath = join(dir, 'settings.json');
     writeFileSync(settingsPath, JSON.stringify({ autoCompactWindow: 400000 }));
-    const a = await runCacheAdvisor({ root, days: 30, now: new Date(T0 + 86400000), resultsRoot: join(dir, 'none'), env: {}, settingsPath });
+    const a = await runCacheAdvisor({ root, days: 30, now: new Date(T0 + 86400000), resultsRoot: join(dir, 'none'), env: {}, settingsPath, managedPath: join(dir, 'no-managed.json') });
     assert.equal(a.configured.tokens, 400000);
     assert.equal(a.models[0].status, 'insufficient-data');
     assert.equal(a.global, null);
@@ -449,6 +517,11 @@ test('saved summary: round-trips through the state directory; windowHintFor pick
     const h = windowHintFor(s, 'opus');
     assert.equal(h.model, 'claude-opus-5');
     assert.equal(h.window, 225000);
+    const o55 = windowHintFor(s, 'opus', { modelId: 'claude-opus-5-5' });
+    assert.equal(o55.model, 'claude-opus-5-5', 'the id the alias resolves to wins over the busier opus-5');
+    assert.equal(o55.window, 250000);
+    assert.equal(o55.generatedAt, '2026-09-25T00:00:00.000Z');
+    assert.equal(o55.truncated, false);
     assert.equal(h.global, 250000);
     assert.equal(h.configured, 400000);
     const f = windowHintFor(s, 'fable');
@@ -510,6 +583,7 @@ test('/ac recommend quotes a saved advisor summary, and prints nothing about it 
     const after = run('scripts/recommend.mjs', ['--type', 'explore'], {});
     assert.equal(after.status, 0, after.stderr);
     assert.match(after.stdout, /auto-compact: .*250K.*yours: unset/);
+    assert.match(after.stdout, /advice from cache-advisor on \d{4}-\d{2}-\d{2} \(full 30d read\)/, 'the date is always shown');
     const json = JSON.parse(run('scripts/recommend.mjs', ['--type', 'explore', '--json'], {}).stdout);
     assert.equal(json.autoCompact.global, 250000);
   } finally { cleanup(); }
@@ -524,4 +598,151 @@ test('config/compaction.json: every priced model has a window spec, and the grid
     assert.ok(cfg.models[alias], `config/compaction.json has no entry for priced model ${alias}`);
     assert.ok(priceSpecFor(`claude-${alias}`), alias);
   }
+});
+
+// =============================================================================
+// Fix round: real traffic only, rework off, the per-model floor, partial reads
+
+test('isBenchProject: the harness temp dirs are excluded; ordinary projects are not', () => {
+  const tmp = 'C:\\Users\\you\\AppData\\Local\\Temp';
+  assert.equal(isBenchProject('C--Users-you-AppData-Local-Temp-bench-sonnet-medium-task-AbC123', { tmp }), true);
+  assert.equal(isBenchProject('C--Users-you-AppData-Local-Temp-bench-judge-x1', { tmp }), true);
+  assert.equal(isBenchProject('C--Users-you-AppData-Local-Temp-rescore-task-x1', { tmp }), true);
+  assert.equal(isBenchProject('-var-folders-ab-cd-T-bench-haiku-t-x', { tmp: '/var/folders/ab/cd/T' }), true, "macOS temp, this machine's own prefix");
+  assert.equal(isBenchProject('-tmp-bench-haiku-t-x', { tmp: '/somewhere/else' }), true, 'a corpus copied from a Linux machine');
+  assert.equal(isBenchProject('C--Users-you-dev-bench-tools', { tmp }), false, 'a real project called bench is real traffic');
+  assert.equal(isBenchProject('C--Users-you-dev-proj', { tmp }), false);
+});
+
+test('isBenchProject: the prefixes it relies on are still the ones the benchmark harness creates', () => {
+  const src = (f) => readFileSync(join(PLUGIN_ROOT, 'bench', f), 'utf8');
+  assert.match(src('runner.mjs'), /mkdtempSync\(path\.join\(os\.tmpdir\(\), "bench-" \+ cellId/);
+  assert.match(src('judge.mjs'), /mkdtempSync\(path\.join\(os\.tmpdir\(\), 'bench-judge-'\)\)/);
+  assert.match(src('rescore.mjs'), /mkdtempSync\(path\.join\(os\.tmpdir\(\), "rescore-" \+ taskId/);
+  assert.deepEqual(BENCH_DIR_PREFIXES, ['bench-', 'rescore-']);
+});
+
+test('collectAdvisorInputs: bench projects are counted as excluded; includeBench reads them', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const root = join(dir, 'projects');
+    buildCorpus(root);
+    const S = 1000;
+    writeJsonl(join(root, 'C--Users-you-AppData-Local-Temp-bench-sonnet-low-t-Xy1', 'b1.jsonl'), [userRec(0), asstRec(1 * S, 'b1', { write5m: 1000 }), userRec(2 * S, { toolResult: true }), asstRec(3 * S, 'b2', { read: 1000, write5m: 10 })]);
+    const now = new Date(T0 + 86400000);
+    const real = await collectAdvisorInputs({ root, days: 30, now });
+    assert.equal(real.excludedBenchProjects, 1);
+    assert.equal(real.models.get('claude-sonnet-5').requests, 7, 'the bench session is not pooled');
+    const all = await collectAdvisorInputs({ root, days: 30, now, includeBench: true });
+    assert.equal(all.models.get('claude-sonnet-5').requests, 9);
+    assert.equal(all.excludedBenchProjects, 0);
+  } finally { cleanup(); }
+});
+
+const reworkComps = [30000, 30000, 30000].map((r) => comp('main', { reworkTokens: r }));
+
+test('evaluateModel: the rework-off view is the whole evaluation with rework 0, over its own allowed windows', () => {
+  const mi = modelInput('claude-sonnet-5', longTracks(6), { compactions: reworkComps, mainTurns: 240 });
+  const all = new Map([[mi.model, mi]]);
+  const e = evaluateModel(mi, all);
+  assert.equal(e.params.byKind.main.rework, 30000);
+  const direct = evaluateModel(mi, all, { reworkOverride: 0 });
+  assert.equal(direct.params.reworkUsed, 0);
+  assert.equal(e.noRework.window, direct.optimum.window);
+  assert.deepEqual(e.noRework.band5, direct.band5);
+  assert.equal(e.noReworkOptimum, direct.optimum.window);
+  assert.ok(e.noRework.window <= e.optimum.window, 'rework makes a compaction dearer, so it never lowers the optimum');
+  assert.equal(direct.noRework, null, 'no nested sensitivity inside the sensitivity');
+  // The closed form is a compaction point; the setting is 33K above it.
+  assert.equal(e.closedFormWindow, e.closedFormThreshold + 33000);
+});
+
+test('combineModels: a model that compacts more often than the floor at the mix optimum is listed, not hidden', () => {
+  // Same traffic; model B does 200 requests per turn, so at any window where it
+  // compacts, it compacts every turn or so. The mix floor (at 1 request/turn)
+  // allows small windows.
+  const a = modelInput('claude-sonnet-5', longTracks(6), { compactions: threeComps, mainTurns: 2400 });
+  const b = modelInput('claude-fable-5-1', longTracks(6), { compactions: threeComps, mainTurns: 12 });
+  const all = new Map([[a.model, a], [b.model, b]]);
+  const ea = evaluateModel(a, all);
+  const eb = evaluateModel(b, all);
+  const g = combineModels([ea, eb], { requestsPerTurn: 1, minTurnsPerCompaction: 10 });
+  const t = g.optimum.perModelTurnsPerCompaction;
+  assert.ok(t['claude-fable-5-1'] != null && t['claude-fable-5-1'] < 10, `fable turns ${t['claude-fable-5-1']}`);
+  assert.deepEqual(g.optimum.belowFloor.map((x) => x.model), Object.entries(t).filter(([, v]) => v != null && v < 10).map(([m]) => m));
+  assert.ok(g.optimum.belowFloor.some((x) => x.model === 'claude-fable-5-1'));
+});
+
+function adviceFixture({ truncated = false, configured } = {}) {
+  const s = modelInput('claude-sonnet-5', longTracks(6), { compactions: reworkComps, mainTurns: 240 });
+  const models = new Map([[s.model, s]]);
+  const nowMs = T0 + 30 * 86400000;
+  const inputs = {
+    models, spawns: [], windowDays: 30, nowMs, sinceMs: T0, excludedBenchProjects: 2,
+    scan: { filesFound: 10, filesRead: truncated ? 4 : 10, filesSkipped: truncated ? 6 : 0, truncated, wallMs: 1000, exists: true },
+    oldestReadMtimeMs: truncated ? nowMs - 3 * 86400000 : T0,
+  };
+  return adviseFromInputs(inputs, { configured: configured || { tokens: null, source: 'unset', ignored: [], notes: [] } });
+}
+
+test('formatAdvice: the value to type in both forms, list price, the rework-off line, and an ignored setting said loudly', () => {
+  const ignored = { tokens: null, source: 'unset', ignored: [{ source: 'user settings autoCompactWindow', raw: '400k', reason: 'it must be an integer from 100000 to 1000000' }], notes: [] };
+  const a = adviceFixture({ configured: ignored });
+  const W = a.global.optimum.window;
+  assert.deepEqual(a.global.toType, { settingsValue: W, command: `/autocompact ${W / 1000}k` });
+  assert.equal(a.moneyBasis, 'API list price');
+  assert.equal(a.models[0].moneyBasis, 'API list price');
+  const text = formatAdvice(a).join('\n');
+  assert.ok(text.includes(`TO APPLY, type one of: /autocompact ${W / 1000}k`));
+  assert.ok(text.includes(`"autoCompactWindow": ${W}`));
+  assert.match(text, /compacts at about \d+K on 1M models/);
+  assert.match(text, /API list price/);
+  assert.doesNotMatch(text, /anchored/);
+  assert.match(text, /WARNING: your user settings autoCompactWindow "400k" is IGNORED by Claude Code/);
+  assert.match(text, /rework off: cheapest \d+K/);
+  assert.match(text, /2 benchmark project dir\(s\) excluded/);
+  assert.match(text, /more than the cheapest over 30d/);
+  assert.doesNotMatch(text, /PARTIAL/);
+});
+
+test('a partial read says so, does not claim 30 days, and never replaces a saved full-read summary', () => {
+  const { stateDir, cleanup } = makeFixture();
+  try {
+    const dir = join(stateDir, 'state');
+    mkdirSync(dir, { recursive: true });
+    const part = adviceFixture({ truncated: true });
+    assert.equal(part.coverage.truncated, true);
+    assert.ok(Math.abs(part.coverage.completeDays - 3) < 1e-9);
+    const text = formatAdvice(part).join('\n');
+    assert.match(text, /PARTIAL READ: the time budget stopped after 4 of 10 files, newest first/);
+    assert.doesNotMatch(text, /over 30d/);
+    assert.match(text, /PARTIAL: 4 of 10 files, complete only for the newest 3\.0d/);
+    // No saved summary yet: the partial one is written, flagged.
+    assert.ok(saveAdvisorSummary(part, dir));
+    assert.equal(loadAdvisorSummary(dir).truncated, true);
+    // A full read replaces it; a later partial read does not replace the full one.
+    const full = adviceFixture();
+    assert.ok(saveAdvisorSummary(full, dir));
+    assert.equal(saveAdvisorSummary(part, dir), null);
+    const kept = loadAdvisorSummary(dir);
+    assert.equal(kept.truncated, false);
+    assert.equal(kept.filesRead, 10);
+    assert.equal(windowHintFor(kept, 'sonnet').truncated, false);
+    assert.deepEqual(coverageOf({ scan: { truncated: false }, windowDays: 30 }).completeDays, 30);
+  } finally { cleanup(); }
+});
+
+test('/ac recommend marks a partial summary as partial', () => {
+  const { stateDir, cleanup } = makeFixture();
+  try {
+    const dir = join(stateDir, 'state');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'cache-advisor.json'), JSON.stringify({
+      generatedAt: '2026-09-26T00:00:00.000Z', windowDays: 30, truncated: true, filesRead: 505, filesFound: 2742, configured: 400000,
+      global: { window: 275000, band5: [250000, 350000] }, models: {},
+    }));
+    const r = run('scripts/recommend.mjs', ['--type', 'explore'], {});
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /auto-compact: .*275K \(\/autocompact 275k\).*yours: 400K — advice from cache-advisor on 2026-09-26 \(PARTIAL read, 505 of 2742 files\)/);
+  } finally { cleanup(); }
 });

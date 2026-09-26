@@ -17,6 +17,9 @@
 //   node cache-advisor.mjs --root <dir>     # a different transcripts root
 //   node cache-advisor.mjs --min-turns 10   # fewest turns between compactions to allow
 //   node cache-advisor.mjs --curve          # print every model's full cost curve
+//   node cache-advisor.mjs --include-bench  # also read benchmark sessions (excluded by default)
+//
+// A run cut short by --max-ms never replaces a saved full-read summary.
 
 import { runCacheAdvisor, saveAdvisorSummary, formatAdvice } from './lib/cache-advisor.mjs';
 
@@ -31,6 +34,7 @@ const advice = await runCacheAdvisor({
   maxMs: val('--max-ms') ? Number(val('--max-ms')) : null,
   workflows: has('--workflows'),
   minTurnsPerCompaction: val('--min-turns') ? Number(val('--min-turns')) : undefined,
+  includeBench: has('--include-bench'),
 });
 if (!has('--no-save')) {
   try { advice.savedTo = saveAdvisorSummary(advice); } catch { /* fail open: the report still prints */ }
