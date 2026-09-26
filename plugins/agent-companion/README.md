@@ -109,6 +109,7 @@ Five rules ship built in:
 | `delegate-first` | `session-start` | every session — the orchestrator rules, restated where they are actually read |
 | `delegate-reminder` | `always` | gated — see below |
 | `agent-brevity` | `spawn` | disabled by default; reserved so the `spawn` scope shows up in `rules list` |
+| `poll-guard-doctrine` | `session-start` | every session — cache-advisor guard (b): "one completion wait, never per-item wakes" (see `hooks/poll-guard.mjs`) |
 
 ### `delegate-reminder` — the direct answer to "my delegation rules stop being followed"
 

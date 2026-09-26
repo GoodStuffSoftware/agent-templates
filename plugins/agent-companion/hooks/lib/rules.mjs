@@ -170,6 +170,19 @@ function builtinRules() {
       then: 'Delegation reminder: this session has already run execution work on the main thread. Route the next read, search, command, test run or edit to a subagent rather than doing it here.',
       note: null,
     },
+    {
+      // Cache-advisor guard (b), deliverable 7. Doctrine-only text; the
+      // enforcement (a per-turn hint on the actual poll) is
+      // hooks/poll-guard.mjs on ScheduleWakeup/Monitor, not this rule.
+      id: 'poll-guard-doctrine',
+      enabled: true,
+      builtin: true,
+      scope: 'session-start',
+      when: null,
+      then: 'One completion wait, never per-item wakes: harness-tracked background work notifies you when it finishes — arm one long fallback, not a short-interval poll.',
+      gate: null,
+      note: null,
+    },
   ];
 }
 

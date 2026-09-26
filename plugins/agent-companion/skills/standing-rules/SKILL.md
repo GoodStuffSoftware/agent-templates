@@ -78,6 +78,7 @@ documentation. `--when 'deploy|ship it|push to prod'` beats `--when
 | `delegate-first` | `session-start` | every session — the orchestrator rules, restated where they are read |
 | `delegate-reminder` | `always` | **only once this session has actually drifted** — see below |
 | `agent-brevity` | `spawn` | disabled; it exists so `list` shows you the spawn scope is available |
+| `poll-guard-doctrine` | `session-start` | every session — one completion wait, never per-item wakes (cache-advisor guard b, `hooks/poll-guard.mjs`) |
 
 Disable any of them by id (`disable copyable-prompt`) — they are never removed,
 so a plugin update can still improve their wording while your choice stands.

@@ -322,7 +322,37 @@
       "type": "string",
       "title": "Publication-leak sweep: private token file",
       "description": "Path to a private token file (same format as LEAK_CHECK_TOKEN_FILE: one name per line, `prefix: xyz` for a prefix) fed into EVERY sweep scan — universal, applies regardless of a repo's strict status. Default: ~/.claude/agent-companion/leak-tokens.txt, used automatically IF that file exists; set this only to point elsewhere. The file must live outside any repo the sweep scans (the same rule scripts/leak-check.mjs's own --token-file enforces).",
-      "default": ""    }
+      "default": ""    },
+    "poll_guard": {
+      "type": "boolean",
+      "title": "Polling-wake guard",
+      "description": "Hint on ScheduleWakeup/Monitor when recent wakes are a short-interval poll producing no new work (cache-advisor guard b). Advisory only — never blocks.",
+      "default": true
+    },
+    "poll_guard_noop_streak": {
+      "type": "number",
+      "title": "Poll guard: no-op streak",
+      "description": "Consecutive prior ScheduleWakeup calls with noop:true that trip the hint on the next short-delay call.",
+      "default": 2
+    },
+    "poll_guard_short_delay_seconds": {
+      "type": "number",
+      "title": "Poll guard: short-delay threshold (seconds)",
+      "description": "A ScheduleWakeup delaySeconds at or below this reads as a poll cadence rather than a long fallback heartbeat.",
+      "default": 600
+    },
+    "poll_guard_monitor_rearm_streak": {
+      "type": "number",
+      "title": "Poll guard: Monitor re-arm streak",
+      "description": "Consecutive prior Monitor calls with the identical description that trip the hint on the next re-arm.",
+      "default": 2
+    },
+    "poll_guard_tail_bytes": {
+      "type": "number",
+      "title": "Poll guard: transcript tail bytes",
+      "description": "How much of the caller's own transcript (tail, most recent bytes) the guard reads for prior ScheduleWakeup/Monitor history.",
+      "default": 131072
+    }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "displayName": "Agent Companion",
