@@ -222,6 +222,12 @@
       "description": "A day is flagged 'partial' (not fully silent, but under-recorded) when spawns.jsonl has fewer than this fraction of that day's real Agent tool_use calls seen in transcripts. Used by the telemetry-coverage audit check and the enforcement_silent scout signal.",
       "default": 0.5
     },
+    "cache_advisor_max_ms": {
+      "type": "number",
+      "title": "Cache advisor read budget (ms)",
+      "description": "Time budget for reading transcripts in the cache-advisor audit check. Files are read newest first, so a run cut short by the budget still covers recent traffic; the check says how many files it read. The standalone script (scripts/cache-advisor.mjs) has no budget unless given --max-ms.",
+      "default": 20000
+    },
     "brevity": {
       "type": "boolean",
       "title": "Reporting contract",

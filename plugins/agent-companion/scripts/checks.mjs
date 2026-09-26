@@ -28,6 +28,7 @@ import {
 import { telemetryCoverage } from './lib/coverage.mjs';
 import { scanModelMismatches } from './lib/model-mismatch.mjs';
 import { computeCacheTtl, transcriptsRoot as cacheTtlTranscriptsRoot } from './lib/cache-ttl.mjs';
+import { runCacheAdvisor, saveAdvisorSummary } from './lib/cache-advisor.mjs';
 import { status as memoryVaultStatus } from './memory-vault.mjs';
 
 const est = (s) => Math.ceil(s.length / 4);
@@ -1416,6 +1417,59 @@ const cacheTtlCheck = {
   },
 };
 
+// --- 17. cache-advisor: the break-even auto-compact window --------------------
+//
+// Replays the operator's own transcripts under every candidate auto-compact
+// window (scripts/lib/cache-advisor.mjs has the method) and compares the
+// cheapest single value for their model mix with what they have set (or the
+// per-model defaults when unset). Advice only: this never writes a setting.
+// Graded 'warn' only when the setting in effect costs more than 5% above the
+// cheapest value (outside the 5% band); otherwise 'ok'; 'skip' with nothing to
+// replay. Reading is bounded by a time budget (option cache_advisor_max_ms,
+// default 20 s) and goes newest file first, so a truncated run still speaks for
+// recent traffic. Same 30-day default window as cache-ttl unless --days is
+// given. Saves a small summary (numbers and model ids) for /ac recommend.
+const cacheAdvisorCheck = {
+  id: 'cache-advisor',
+  title: 'Auto-compact window: break-even per model and for your model mix',
+  vendor: 'anthropic',
+  fixable: false,
+  async run(ctx) {
+    const days = ctx.daysExplicit ? ctx.days : 30;
+    const maxMs = Number(opt('cache_advisor_max_ms', 20000)) || 20000;
+    let a;
+    try {
+      a = await runCacheAdvisor({ days, maxMs });
+    } catch (e) {
+      return { status: 'skip', findings: [`cache-advisor failed: ${e.message}`] };
+    }
+    try { saveAdvisorSummary(a); } catch { /* fail open: the finding still stands */ }
+    const K = (x) => `${Math.round(x / 1000)}K`;
+    const findings = [];
+    if (a.scan?.truncated) findings.push(`read ${a.scan.filesRead} of ${a.scan.filesFound} transcripts in the ${Math.round(maxMs / 1000)}s budget (newest first)`);
+    for (const e of a.models) {
+      if (e.status === 'ok') {
+        findings.push(`${e.model}: optimum ${K(e.optimum.window)} (within 5%: ${K(e.band5[0])}-${K(e.band5[1])}; `
+          + `saves $${(e.savingVsDefault?.usd ?? 0).toFixed(2)} vs the ${K(e.defaultCompactAt)} default over ${days}d)`);
+      } else {
+        findings.push(`${e.model}: ${e.status}${e.reason ? ` (${e.reason})` : ''}`);
+      }
+    }
+    const g = a.global;
+    if (!g?.optimum) {
+      findings.push('no model had enough data to recommend a window');
+      return { status: 'skip', findings, data: a };
+    }
+    findings.push(`one setting for this model mix: ${K(g.optimum.window)} (within 5%: ${K(g.band5[0])}-${K(g.band5[1])})`);
+    const inEffect = g.configured || g.atMax;
+    const label = g.configured ? `configured ${K(g.configured.window)}` : 'unset (each model\'s default)';
+    const extra = inEffect ? inEffect.usd - g.optimum.usd : 0;
+    findings.push(`${label}: $${extra.toFixed(2)} more than the cheapest over ${days}d — advice only; to change it run /autocompact ${Math.round(g.optimum.window / 1000)}k`);
+    const outside = inEffect && inEffect.usd > g.optimum.usd * 1.05;
+    return { status: outside ? 'warn' : 'ok', findings, data: a };
+  },
+};
+
 export const CHECKS = [
   memoryIndex,
   instructionBudget,
@@ -1433,4 +1487,5 @@ export const CHECKS = [
   memoryVaultDrift,
   modelResolutionMismatch,
   cacheTtlCheck,
+  cacheAdvisorCheck,
 ];
