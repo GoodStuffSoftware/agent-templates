@@ -281,7 +281,13 @@ test('gate3 (shared-tree notice): fires only when BOTH name and isolation are ab
         prompt: 'unnamed, unisolated work',
       },
     };
-    const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
+    // namegate off: this test isolates Gate 3 from Gate 4 (namegate), which
+    // by default would autofill a name for this exact shape (main session,
+    // explicitly background, no name) and legitimately suppress Gate 3 —
+    // see spawn-namegate.test.mjs for that interaction.
+    const res = runHook('hooks/spawn-guard.mjs', payload, {
+      env: { ...baseEnv(dir), CLAUDE_PLUGIN_OPTION_NAMEGATE: 'false' },
+    });
     assert.equal(res.status, 0);
     assert.match(res.json?.systemMessage || '', /own working tree/i);
 

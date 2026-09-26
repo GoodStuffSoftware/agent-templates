@@ -40,6 +40,9 @@ import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs'
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract } from './lib/brevity.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
+import {
+  buildCandidateName, sessionSpawnNames, makeUnique, buildNamegateBrief,
+} from './lib/namegate.mjs';
 
 // Allow — optionally saying something to the user, and/or rewriting the tool
 // input (`updatedInput` is how a PreToolUse hook fills in a model the spawn
@@ -542,6 +545,11 @@ try {
   //   "off"      — memory_brief is on but neither behaviour runs.
   let memoryAddition = ''; // exact string appended to the prompt; '' = nothing to add
   let memoryFacts = null;  // telemetry-shaped facts; null = the feature never ran for this spawn
+  // Namegate (Gate 4, below): set once a name is autofilled. Declared here,
+  // alongside memoryAddition, so withAdditions() below can close over it
+  // regardless of where in the file it is assigned — the same reason
+  // memoryAddition is declared ahead of the gates that follow it.
+  let namegateSuffix = '';
   if (opt('memory_search', false) && opt('memory_brief', false)) {
     const mode = String(opt('memory_brief_mode', 'nudge')).toLowerCase();
     if (mode !== 'off') {
@@ -616,6 +624,10 @@ try {
     //    the telemetry row whether or not this spawn is ultimately allowed.
     suffix += memoryAddition || '';
 
+    // 4. Namegate's own brief boilerplate for a worker this guard just named
+    //    (see Gate 4 below): who it is, its lead, its known peers.
+    suffix += namegateSuffix || '';
+
     if (!suffix) return baseInput;
     return { ...(baseInput || input), prompt: `${input.prompt || ''}${suffix}` };
   }
@@ -678,6 +690,61 @@ try {
   // agent-teams.md directly so the claim is checkable, not just asserted.
   const gate2Fired = opt('isolation_demotion_notice', true) && !!input.name && !!input.isolation;
 
+  // --- Gate 4: namegate (track "namegate", operator decision 2026-09-25:
+  // "every background worker gets a name") --------------------------------
+  // Computed BEFORE Gate 3 below, not after: if this gate autofills a name,
+  // Gate 3's own "no address to re-brief it later" claim would otherwise be
+  // stated falsely for the same spawn (it now HAS an address). See
+  // namegateEffectiveName.
+  //
+  // Scope: MAIN-session spawns only (a subagent-originated spawn is out of
+  // scope for both the hint and autofill — same callerIsSubagent exclusion
+  // Gate 1 already uses), and only an EXPLICIT run_in_background: true
+  // (reusing runsInBackground exactly as Gate 1 defines it above). The hook
+  // input carries no field revealing whether THIS session defaults an
+  // omitted run_in_background to background or foreground — no
+  // entrypoint/session-type marker appears anywhere in the PreToolUse
+  // payload this hook reads (session_id, agent_type, cwd, tool_input; see
+  // the fixtures in tests/spawn-shape-gates.test.mjs) — and that default is
+  // known to vary by session type (interactive fork mode vs SDK/headless).
+  // Rather than guess "absent means background" and risk a false hint on a
+  // spawn that is really running foreground, this stays scoped to the one
+  // case the hook can actually verify.
+  //
+  // Autofill mechanics: `<project>-<type>-<slug>` (lib/namegate.mjs),
+  // written into updatedInput exactly as the fit_autofill block above
+  // writes `model`/`subagent_type` — proven honoured by the harness via a
+  // live probe (2026-09-25, outside this repo, never committed): see
+  // lib/namegate.mjs's own header comment for the full method, since there
+  // is no passive SubagentStart signal for `name` the way 0.29.6 had for
+  // `subagent_type`. Uniqueness is against this session's own already-named
+  // spawns (sessionSpawnNames, read from the same spawns.jsonl/fixtures.jsonl
+  // telemetry every other consumer of session history reads here), which
+  // doubles as the peer list the autofilled worker's own brief addition
+  // names. Never denies; fails open to "no name, no note" on any error.
+  const gate4Applicable = !callerIsSubagent && runsInBackground && !input.name && opt('namegate', true);
+  let gate4Action = 'none'; // none | hint | autofill
+  let namegateName = null;
+  if (gate4Applicable) {
+    if (opt('namegate_autofill', true)) {
+      try {
+        const candidate = buildCandidateName({
+          cwd: p.cwd, declaredType, subagentType: input.subagent_type, description: input.description,
+        });
+        const peers = sessionSpawnNames(sid);
+        namegateName = makeUnique(candidate, peers);
+        updatedInput = { ...(updatedInput || input), name: namegateName };
+        namegateSuffix = buildNamegateBrief({ name: namegateName, peers });
+        gate4Action = 'autofill';
+      } catch { gate4Action = 'none'; namegateName = null; } // fail open
+    } else {
+      gate4Action = 'hint';
+    }
+  }
+  // What Gate 3 (below) should treat as "this spawn has an address":
+  // its own original name, or the one Gate 4 just assigned.
+  const namegateEffectiveName = input.name || namegateName;
+
   // Gate 3: scoped narrowly to the exact worst-of-both-worlds shape measured
   // above — unnamed AND unisolated. Considered and rejected a subagent_type
   // "plausibly read-only" refinement: even Explore, the built-in read-only
@@ -688,7 +755,7 @@ try {
   // Narrow-and-honest beats broad-and-guessed, so this stays exactly the
   // unnamed-and-unisolated case rather than trying to also exclude
   // "probably read-only" types on weak evidence.
-  const gate3Fired = opt('shared_tree_notice', true) && !input.name && !input.isolation;
+  const gate3Fired = opt('shared_tree_notice', true) && !namegateEffectiveName && !input.isolation;
 
   const gate1WarnMsg = gate1Action === 'warn'
     ? 'agent-companion: this spawn runs in the FOREGROUND and will block the lead\'s entire turn until it returns ' +
@@ -705,7 +772,16 @@ try {
     ? 'agent-companion: this spawn has no name and no isolation - it runs in the LEAD\'S OWN working tree (it can ' +
       'commit and move HEAD there) and has no address to re-brief it later. Consider isolation: "worktree" and/or a name.'
     : '';
-  const gateMessage = [gate1WarnMsg, gate2Msg, gate3Msg].filter(Boolean).join('\n\n');
+  const gate4Msg = gate4Action === 'autofill'
+    ? `agent-companion (namegate): this spawn ran in the background with no name; set name="${namegateName}" - an ` +
+      'unnamed background worker cannot be addressed with SendMessage afterward. Set namegate_autofill: false to ' +
+      'only advise instead of naming.'
+    : gate4Action === 'hint'
+      ? 'agent-companion (namegate): this spawn runs in the background with no name - it will not be addressable ' +
+        'by SendMessage afterward, and other workers this session won\'t see it in a peer list. Add a name (e.g. ' +
+        '"<project>-<type>-<slug>"), or turn on namegate_autofill so the guard assigns one.'
+      : '';
+  const gateMessage = [gate1WarnMsg, gate2Msg, gate3Msg, gate4Msg].filter(Boolean).join('\n\n');
 
   let fit = null;
   if (fitOn && model && !autofilled) {
@@ -805,7 +881,8 @@ try {
       subagent_type: input.subagent_type,
       run_in_background: typeof input.run_in_background === 'boolean' ? input.run_in_background : null,
       isolation: input.isolation ?? null,
-      name: input.name ?? null,
+      name: input.name ?? null,          // as declared at the spawn site (null when namegate later assigned one)
+      name_effective: (input.name || namegateName) ?? null, // what the spawn actually ran under, namegate included
       team_name: input.team_name ?? null,
       desc_sha: descSha,       // sha256(description).slice(0,16) — hashed, never stored raw
       desc_len: descLen,
@@ -851,6 +928,9 @@ try {
       gate1_action: gate1Action,         // none | warn | block — what THIS spawn actually got
       gate2_fired: gate2Fired,           // name+isolation both set: teammate silently demoted to subagent
       gate3_fired: gate3Fired,           // unnamed AND unisolated: shares the lead's tree, unaddressable
+      gate4_applicable: gate4Applicable, // main-session, explicitly background, no name, namegate on
+      gate4_action: gate4Action,         // none | hint | autofill — what THIS spawn actually got
+      name_autofilled: gate4Action === 'autofill', // namegate set `name` via updatedInput
     });
   }
 
