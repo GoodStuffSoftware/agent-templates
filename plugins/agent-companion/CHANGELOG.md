@@ -2,6 +2,23 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.9 — 2026-09-25
+
+A background worker spawned from the main session with no name now gets one.
+When a main-session Agent spawn sets `run_in_background: true` and gives no
+`name`, the spawn guard fills one in: `<project>-<type>-<slug>`, unique within
+the session, and never `main` or `team-lead`. To turn autofill off, set the
+plugin option `namegate_autofill` to false (you then get only an advisory);
+`namegate` set to false turns the gate off entirely. Only spawns that set
+`run_in_background: true` explicitly are affected; a spawn with no
+`run_in_background` field, a foreground spawn, a named spawn, and a spawn from
+inside a subagent are left alone.
+
+### Spawns
+- Added Gate 4, "namegate". A main-session spawn with `run_in_background: true` and no `name` gets an advisory (never a block); by default the guard also sets a unique `<project>-<type>-<slug>` name via `updatedInput` (sanitised to `[A-Za-z0-9._-]`, at most 60 characters) and adds a short note to the worker's brief naming the worker, `main` as its lead, and this session's other already-named workers as peers. The harness was shown to honour the rewritten name by a live probe outside this repo. New options `namegate` and `namegate_autofill` (both default on). New `spawns.jsonl` fields: `gate4_applicable`, `gate4_action`, `name_autofilled`, `name_effective`.
+- Each autofilled name is reserved atomically per (session, name) with an exclusive-create marker under the plugin state directory (`namegate-names/`, swept after 24 hours), so concurrent background spawns in one message never get the same name. If the state directory is unusable it falls back to an unreserved unique pick. Reserved addressing names (`main`, `team-lead`, compared case-insensitively) are never chosen.
+- Fixed: Gate 3 (shared-tree notice) no longer fires for a spawn that namegate just gave a name.
+
 ## 0.29.8 — 2026-09-25
 
 `/ac setup` can now install an optional hook that restores a session's saved
