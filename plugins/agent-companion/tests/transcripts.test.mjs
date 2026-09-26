@@ -467,7 +467,7 @@ test('transcript-report CLI: --json on a synthetic root', () => {
     assert.equal(r.costBasis, 'price-derived');
     assert.equal(r.perModel[0].model, 'claude-sonnet-5');
     assert.ok(r.perModel[0].usd > 0);
-    const b = r.resumeGaps.find((g) => g.label === '5-10m');
+    const b = r.interRequestGaps.find((g) => g.label === '5-10m');
     assert.deepEqual([b.count, b.rewrites], [1, 1]);
     const human = execFileSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'transcript-report.mjs'), '--days', '1', '--root', root], {
       encoding: 'utf8', windowsHide: true, env: { ...process.env },

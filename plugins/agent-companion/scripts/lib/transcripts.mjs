@@ -38,27 +38,41 @@
 //
 //   D1  A request is keyed by requestId, falling back to message.id. Its
 //       usage is the FIELD-WISE MAX over all its lines — never a sum.
-//   D2  Grouping is FILE-WIDE, not just over adjacent lines. Real main-session
-//       transcripts re-log earlier assistant lines much later in the file
-//       (hundreds to thousands of lines on, with earlier timestamps and
-//       smaller usage). An adjacent-only grouping — what cache-ttl.mjs did
-//       before this module — counts each such re-log as an extra request
-//       with a negative gap. The request keeps the position, timestamp and
-//       content of its FIRST run of lines; a later re-appearance only feeds
-//       the usage max (D1) and is counted in stats.reloggedLines.
+//   D2  Grouping is FILE-WIDE, not just over adjacent lines. Two requests
+//       running at once in one transcript (measured: only in subagent files,
+//       the two runs fewer than 100 lines apart) interleave their lines, so
+//       request A's lines resume after request B's. An adjacent-only
+//       grouping would count A's second run as another request. The request
+//       keeps the position and start of its FIRST run; a later run feeds the
+//       usage max (D1), its tool_use names and its end time, and is counted
+//       in stats.reloggedLines.
 //   D3  A line whose uuid already appeared in the same file is an exact
-//       re-log and is skipped entirely (stats.duplicateUuidLines).
+//       re-log and is skipped entirely (stats.duplicateUuidLines). This is
+//       what real main-session transcripts do when they write earlier
+//       assistant lines again much later in the file; an adjacent-only
+//       grouping (what cache-ttl.mjs did before this module) counted each of
+//       those as an extra request with a negative gap.
 //   D4  ACROSS files: a resumed or forked session's new JSONL carries copies
-//       of earlier requests (same requestId, same timestamp, same usage). On
-//       the machine this was built on, about 11% of all requestIds appear in
-//       more than one file, subagent forks up to a hundred-plus times. Pass a
-//       shared `seen` Set to readTranscript() (scanCorpus() does this by
-//       default) and a request already claimed by an earlier file comes back
-//       marked duplicate:true. Duplicates stay in the per-file list so the
-//       gap chain inside that file is unbroken, but every total must skip
-//       them. Copies are identical, so which file claims one does not change
-//       any total; scanCorpus() processes files in path order so the choice
-//       is deterministic.
+//       of earlier requests (same requestId, same timestamp). On the machine
+//       this was built on, about 11% of all requestIds appear in more than
+//       one file, subagent forks up to a hundred-plus times. Copies are NOT
+//       always identical: about a quarter of multi-file ids differ, almost
+//       always in output_tokens (one copy was written before the stream
+//       finished). So the ids are resolved over the whole corpus
+//       (resolveCrossFile(); scanCorpus() does it by default):
+//         - ONE logical request per id, owned by the ORIGINAL file: the file
+//           whose earliest record is earliest (ties: older mtime, then path).
+//           Never path order alone — a copy's file can sort first.
+//         - Its usage is the field-wise max over every copy (D1 again).
+//         - Its timestamps and position are the original file's.
+//         - Every other copy comes back duplicate:true, carrying the same
+//           merged usage. Duplicates stay in the per-file list so the gap
+//           chain inside that file is unbroken, but every total must skip
+//           them.
+//       Compactions copied into another file are resolved the same way, by
+//       the boundary (or summary) record's uuid. readTranscript() still takes
+//       a shared `seen` Set for a caller that reads files one at a time; that
+//       claims in call order and does not max-merge.
 //   D5  model "<synthetic>" lines (harness-written error placeholders) are
 //       never requests.
 //
@@ -69,13 +83,22 @@
 //   gaps           start-to-start time between consecutive requests in ONE
 //                  file (never across files). A request's start is the
 //                  timestamp of the user record that led to it (the prompt or
-//                  tool result that was sent), falling back to its first
-//                  assistant line. Start-to-start is what a cache TTL is
-//                  measured against: the previous request read or wrote the
-//                  cache when it was sent.
+//                  tool result that was sent). A user record leads to ONE
+//                  request only; a request with no user record of its own
+//                  starts at its own first assistant line. Start-to-start is
+//                  what a cache TTL is measured against: the previous request
+//                  read or wrote the cache when it was sent. Each gap says
+//                  what connected the two requests (`via`), which cache TTL
+//                  applied (`ttl`), whether the cache held (`outcome`) and,
+//                  for a rewrite, why (`cause`); see gapsOf().
 //   compactions    one per compact_boundary (or a compact-summary user record
 //                  with no boundary before it), with the pre/post token counts
 //                  the harness recorded and the first request after it.
+//                  postTokens is the size of the SUMMARY only. The working
+//                  size after a compaction (summary + system prompt + tools +
+//                  re-attached files) is firstRequestAfter.contextTokens,
+//                  measured at 1.4x to 7.8x postTokens. Advice about the
+//                  auto-compact window must use firstRequestAfter.contextTokens.
 //   spawn baseline the first request of a subagent transcript, when it is a
 //                  real cold start (not a copied-history duplicate).
 
@@ -324,8 +347,11 @@ export async function* readRecords(path, { prefilter = null, stats = null } = {}
     return;
   }
   let lastBad = false;
+  let first = true;
   try {
-    for await (const line of rl) {
+    for await (let line of rl) {
+      // A UTF-8 byte-order mark would make the first record unparseable.
+      if (first) { first = false; if (line.charCodeAt(0) === 0xfeff) line = line.slice(1); }
       if (!line) continue;
       s.lines += 1;
       s.bytes += Buffer.byteLength(line, 'utf8') + 1;
@@ -438,7 +464,11 @@ function compactionFromEvent(ev, index) {
     duplicate: false,
     requestsBefore: 0,
     requestsAfter: 0,
-    firstRequestAfter: null, // { contextTokens, cacheRead, cacheWrite, model } of the next new request
+    // { contextTokens, cacheRead, cacheWrite, model } of the first request
+    // after it that is not a copy. contextTokens is the post-compaction
+    // working size (see the module header); postTokens is the summary alone.
+    firstRequestAfter: null,
+    key: ev.boundary?.uuid || ev.summary?.uuid || null, // cross-file identity (D4)
   };
 }
 
@@ -492,8 +522,19 @@ export function addUsage(into, u) {
 //   id, messageId, model, ts (first assistant line), startTs, endTs (last
 //   assistant line of its first run), sessionId, agentId, isSidechain, kind,
 //   agentType, agentName, usage, contextTokens, lines, toolUseNames[],
-//   lastBlockType, connectingUser { ts, hasToolResult, isMeta, isCompaction }
-//   | null, compactionsBefore, duplicate, index
+//   lastBlockType, connectingUser { ts, hasToolResult, isMeta, isCompaction,
+//   origin, isMessage } | null, compactionsBefore, duplicate, index
+//
+// connectingUser is the user record that led to this request, or null when
+// none came between it and the request before (then startTs is its own first
+// line). origin is the record's origin.kind when it has one (coordinator,
+// peer, task-notification, ...) or 'teammate-message' for the older
+// plain-text <teammate-message> shape. isMessage is true for a message another
+// agent sent with SendMessage: origin coordinator or peer (written with
+// isMeta:true), or a <teammate-message> record.
+//
+// file.firstTs is the earliest record timestamp in the file: the key
+// resolveCrossFile() uses to find the original of a copied request.
 export async function readTranscript(path, opts = {}) {
   const desc = describePath(path);
   const file = {
@@ -505,6 +546,7 @@ export async function readTranscript(path, opts = {}) {
     workflowId: opts.workflowId ?? desc.workflowId,
     agentType: opts.agentType ?? null,
     agentName: opts.agentName ?? null,
+    firstTs: null,
   };
   const seen = opts.seen || null;
   const stats = {
@@ -518,16 +560,13 @@ export async function readTranscript(path, opts = {}) {
   const tracker = new CompactionTracker();
   const uuids = new Set();
   let current = null; // request whose first run of lines is still open
-  let lastUserRec = null;
-  let awaitingFirstAfter = null; // compaction waiting for its first request
+  let lastUserRec = null; // the user record the next new request starts from (consumed by it)
 
   const onCompaction = (ev) => {
     const c = compactionFromEvent(ev, compactions.length);
-    c.requestsBefore = requests.filter((r) => !r.duplicate).length;
     // D4 for compactions: a copied history carries the same boundary record.
-    const cKey = ev.boundary?.uuid || ev.summary?.uuid;
-    if (seen && cKey) {
-      const k = `compaction:${cKey}`;
+    if (seen && c.key) {
+      const k = `compaction:${c.key}`;
       if (seen.has(k)) { c.duplicate = true; stats.crossFileDuplicates += 1; } else seen.add(k);
     }
     if (opts.keepSummaries) {
@@ -535,7 +574,6 @@ export async function readTranscript(path, opts = {}) {
       c.boundaryRecord = ev.boundary || null;
     }
     compactions.push(c);
-    awaitingFirstAfter = c;
   };
 
   for await (const rec of readRecords(path, { stats })) {
@@ -543,17 +581,24 @@ export async function readTranscript(path, opts = {}) {
       if (uuids.has(rec.uuid)) { stats.duplicateUuidLines += 1; continue; }
       uuids.add(rec.uuid);
     }
+    const recTs = Date.parse(rec.timestamp);
+    if (Number.isFinite(recTs) && (file.firstTs == null || recTs < file.firstTs)) file.firstTs = recTs;
 
     const ev = tracker.feed(rec);
     if (ev) onCompaction(ev);
 
     if (rec.type === 'user') {
       const content = rec.message?.content;
+      const teammate = /^\s*<teammate-message/.test(flattenContent(content).slice(0, 200));
+      const origin = (rec.origin && typeof rec.origin.kind === 'string' ? rec.origin.kind : null)
+        || (teammate ? 'teammate-message' : null);
       lastUserRec = {
-        ts: Date.parse(rec.timestamp),
+        ts: recTs,
         hasToolResult: Array.isArray(content) && content.some((b) => b && b.type === 'tool_result'),
         isMeta: rec.isMeta === true,
         isCompaction: !!(ev && ev.summary === rec),
+        origin,
+        isMessage: origin === 'coordinator' || origin === 'peer' || origin === 'teammate-message',
       };
       continue;
     }
@@ -568,28 +613,36 @@ export async function readTranscript(path, opts = {}) {
     if (current && current.id === key) {
       maxInto(current.usage, u);
       current.lines += 1;
-      const endTs = Date.parse(rec.timestamp);
-      if (Number.isFinite(endTs)) current.endTs = endTs;
+      if (Number.isFinite(recTs) && recTs > current.endTs) current.endTs = recTs;
       absorbContent(current, msg.content);
       continue;
     }
     const earlier = byId.get(key);
     if (earlier) {
-      // D2: a re-log of a request whose first run already closed.
+      // D2: a later run of a request whose first run already closed (two
+      // requests interleaving). Usage, content and end time all count.
       maxInto(earlier.usage, u);
       earlier.lines += 1;
+      // A run that is later in time continues the request (its last block
+      // is the request's last block); an earlier-timestamped copy only adds
+      // tool_use names.
+      const continues = Number.isFinite(recTs) && recTs >= earlier.endTs;
+      if (continues) earlier.endTs = recTs;
+      absorbContent(earlier, msg.content, { updateLast: continues });
       stats.reloggedLines += 1;
       current = null;
       continue;
     }
 
-    const firstTs = Date.parse(rec.timestamp);
+    const firstTs = recTs;
+    const connecting = lastUserRec;
+    lastUserRec = null; // F4: a user record leads to one request only
     const req = {
       id: key,
       messageId: msg.id || null,
       model: msg.model || null,
       ts: firstTs,
-      startTs: lastUserRec ? lastUserRec.ts : firstTs,
+      startTs: connecting && Number.isFinite(connecting.ts) ? connecting.ts : firstTs,
       endTs: firstTs,
       sessionId: rec.sessionId || file.sessionId || null,
       agentId: rec.agentId || file.agentId || null,
@@ -602,7 +655,7 @@ export async function readTranscript(path, opts = {}) {
       lines: 1,
       toolUseNames: new Set(),
       lastBlockType: null,
-      connectingUser: lastUserRec,
+      connectingUser: connecting,
       compactionsBefore: compactions.length,
       duplicate: false,
       index: requests.length,
@@ -614,38 +667,113 @@ export async function readTranscript(path, opts = {}) {
     byId.set(key, req);
     requests.push(req);
     current = req;
-    if (awaitingFirstAfter && !req.duplicate) {
-      awaitingFirstAfter.pendingRequest = req;
-      awaitingFirstAfter = null;
-    }
   }
   const orphan = tracker.flush();
   if (orphan) onCompaction(orphan);
 
-  for (const r of requests) {
-    r.contextTokens = contextTokensOf(r.usage);
-    r.toolUseNames = [...r.toolUseNames];
-  }
+  for (const r of requests) r.toolUseNames = [...r.toolUseNames];
+  const result = { file, requests, compactions, stats };
+  finalizeTranscript(result);
+  return result;
+}
+
+// Everything derived from usage and the duplicate flags: contextTokens, and
+// each compaction's requestsBefore / requestsAfter / firstRequestAfter.
+// Runs at the end of readTranscript() and again after resolveCrossFile()
+// changes flags or usage.
+export function finalizeTranscript(result) {
+  const { requests, compactions } = result;
+  for (const r of requests) r.contextTokens = contextTokensOf(r.usage);
   const own = requests.filter((r) => !r.duplicate);
   for (let i = 0; i < compactions.length; i++) {
     const c = compactions[i];
-    const r = c.pendingRequest;
-    delete c.pendingRequest;
-    if (r) {
-      c.firstRequestAfter = {
-        contextTokens: r.contextTokens, cacheRead: r.usage.cacheRead, cacheWrite: r.usage.cacheWrite, model: r.model,
-      };
-    }
-    // Requests between this compaction and the next one (or end of file).
+    // Own requests written before it, and between it and the next one.
+    c.requestsBefore = own.filter((q) => q.compactionsBefore <= i).length;
     c.requestsAfter = own.filter((q) => q.compactionsBefore === i + 1).length;
+    const r = own.find((q) => q.compactionsBefore === i + 1);
+    c.firstRequestAfter = r
+      ? { contextTokens: r.contextTokens, cacheRead: r.usage.cacheRead, cacheWrite: r.usage.cacheWrite, model: r.model }
+      : null;
   }
-  return { file, requests, compactions, stats };
+  return result;
 }
 
-function absorbContent(req, content) {
+function absorbContent(req, content, { updateLast = true } = {}) {
   if (!Array.isArray(content)) return;
   for (const b of content) if (b && b.type === 'tool_use' && b.name) req.toolUseNames.add(b.name);
-  if (content.length) req.lastBlockType = content[content.length - 1]?.type || req.lastBlockType;
+  if (updateLast && content.length) req.lastBlockType = content[content.length - 1]?.type || req.lastBlockType;
+}
+
+// --- Cross-file resolution (D4) ------------------------------------------------
+//
+// resolveCrossFile(items) where each item is { result, mtimeMs } (result from
+// readTranscript() called WITHOUT `seen`). Mutates the results in place:
+// marks copies duplicate:true, max-merges usage into one logical request per
+// id, re-derives contextTokens and compaction fields, and sets each file's
+// stats.crossFileDuplicates. Returns counters:
+//   ids                 requestIds found in more than one file
+//   idsMaxDiffers       of those, ids whose merged usage differs from the copy
+//                       the old rule kept (the first file in path order)
+//   ownerNotPathFirst   ids whose original file is not the first in path order
+//   compactionKeys      compactions found in more than one file
+export function resolveCrossFile(items) {
+  const byPath = (a, b) => (a.result.file.path < b.result.file.path ? -1 : a.result.file.path > b.result.file.path ? 1 : 0);
+  const originalOrder = [...items].sort((a, b) => {
+    const fa = a.result.file.firstTs ?? Infinity;
+    const fb = b.result.file.firstTs ?? Infinity;
+    if (fa !== fb) return fa - fb;
+    const ma = a.mtimeMs ?? Infinity;
+    const mb = b.mtimeMs ?? Infinity;
+    if (ma !== mb) return ma - mb;
+    return byPath(a, b);
+  });
+  const pathRank = new Map([...items].sort(byPath).map((it, i) => [it.result, i]));
+
+  // id -> copies, in original order (the first one owns the id)
+  const copies = new Map();
+  const cCopies = new Map();
+  for (const it of originalOrder) {
+    it.result.stats.crossFileDuplicates = 0;
+    for (const r of it.result.requests) {
+      const list = copies.get(r.id);
+      if (list) list.push({ r, res: it.result }); else copies.set(r.id, [{ r, res: it.result }]);
+    }
+    for (const c of it.result.compactions) {
+      if (!c.key) continue;
+      const list = cCopies.get(c.key);
+      if (list) list.push({ c, res: it.result }); else cCopies.set(c.key, [{ c, res: it.result }]);
+    }
+  }
+
+  const out = { ids: 0, idsMaxDiffers: 0, ownerNotPathFirst: 0, compactionKeys: 0 };
+  const touched = new Set();
+  for (const list of copies.values()) {
+    if (list.length < 2) continue;
+    out.ids += 1;
+    const merged = emptyUsage();
+    for (const { r } of list) maxInto(merged, r.usage);
+    let pathFirst = list[0];
+    for (const x of list) if (pathRank.get(x.res) < pathRank.get(pathFirst.res)) pathFirst = x;
+    if (Object.keys(merged).some((k) => merged[k] !== pathFirst.r.usage[k])) out.idsMaxDiffers += 1;
+    if (pathFirst !== list[0]) out.ownerNotPathFirst += 1;
+    list.forEach(({ r, res }, i) => {
+      r.usage = { ...merged };
+      r.duplicate = i > 0;
+      if (i > 0) res.stats.crossFileDuplicates += 1;
+      touched.add(res);
+    });
+  }
+  for (const list of cCopies.values()) {
+    if (list.length < 2) continue;
+    out.compactionKeys += 1;
+    list.forEach(({ c, res }, i) => {
+      c.duplicate = i > 0;
+      if (i > 0) res.stats.crossFileDuplicates += 1;
+      touched.add(res);
+    });
+  }
+  for (const res of touched) finalizeTranscript(res);
+  return out;
 }
 
 // --- Gaps, resumes, spawn baseline ------------------------------------------------
@@ -656,41 +784,126 @@ export function bandFor(gapMs) {
   return 'gt60';
 }
 
+export const TTL_MS = { '5m': FIVE_MIN_MS, '1h': SIXTY_MIN_MS };
+
+// What connected a request to the one before it, from its connectingUser:
+//   'compaction'  the compaction summary
+//   'toolResult'  a tool result (a tool round-trip, however slow the tool)
+//   'message'     a message another agent sent with SendMessage
+//   'meta'        any other harness-written record (task notifications,
+//                 reminders, hook output)
+//   'prompt'      a prompt typed by the person
+//   'none'        no user record came between the two requests
+export function viaOf(connectingUser) {
+  const u = connectingUser;
+  if (!u) return 'none';
+  if (u.isCompaction) return 'compaction';
+  if (u.hasToolResult) return 'toolResult';
+  if (u.isMessage) return 'message';
+  if (u.isMeta) return 'meta';
+  return 'prompt';
+}
+
+// The TTL bucket a request's writes went to: the larger of the 1h/5m split,
+// or null when it wrote nothing split by bucket.
+function writeTtlOf(usage) {
+  const w1 = usage.cacheWrite1h || 0;
+  const w5 = usage.cacheWrite5m || 0;
+  if (!w1 && !w5) return null;
+  return w1 >= w5 ? '1h' : '5m';
+}
+
 // One entry per request after the first in a file. A duplicate request (D4)
 // gets no entry of its own — its copy in the owning file has it — but it
 // still serves as the previous request for the next one, so the gap at the
 // point where a forked or resumed file starts its own work is kept.
 //
 //   gapMs          start-to-start, see the module header
+//   via            what connected the two requests, see viaOf()
+//   origin         the connecting record's origin (coordinator, peer,
+//                  task-notification, teammate-message, ...) or null
+//   kind           the file's kind (main | subagent)
+//   ttl, ttlMs     the cache TTL that applied: the bucket the most recent
+//                  request that wrote a split cache entry wrote into, or when
+//                  none has, the default for the kind (main 1h, subagent 5m).
+//                  ttlSource says which ('write' | 'default').
 //   prevContext    what the previous request's cache could hold
 //   rereadTokens   this request's context (what had to be read or rewritten)
 //   cacheRead, cacheWrite   how it actually came back
-//   outcome        'hit' when most of the context came from cache reads,
-//                  'rewrite' when most was written fresh
+//   outcome        'hit' when cacheRead covers at least half of prevContext
+//                  (a full read followed by a large append is still a hit),
+//                  else 'rewrite'. With no previous context, read >= write.
+//   cause          null for a hit. For a rewrite: 'compaction' (a compaction
+//                  came between), 'idle-expiry' (the gap is longer than the
+//                  TTL: the cache expired), or 'prefix-change' (inside the TTL:
+//                  something changed the prompt prefix, typically an isMeta
+//                  record). Only 'idle-expiry' is caused by idle time.
 //   afterCompaction   a compaction came between the two requests
 export function gapsOf(requests) {
   const out = [];
-  for (let i = 1; i < requests.length; i++) {
+  let lastTtl = null;
+  for (let i = 0; i < requests.length; i++) {
     const r = requests[i];
-    if (r.duplicate) continue;
+    const prevTtl = lastTtl;
+    const wt = writeTtlOf(r.usage);
+    if (wt) lastTtl = wt;
+    if (i === 0 || r.duplicate) continue;
     const p = requests[i - 1];
     if (!Number.isFinite(r.startTs) || !Number.isFinite(p.startTs)) continue;
     const gapMs = r.startTs - p.startTs;
+    const via = viaOf(r.connectingUser);
+    const ttl = prevTtl || (r.kind === 'main' ? '1h' : '5m');
+    const ttlMs = TTL_MS[ttl];
+    const prevContext = p.contextTokens;
+    const hit = prevContext > 0
+      ? r.usage.cacheRead >= 0.5 * prevContext
+      : r.usage.cacheRead >= r.usage.cacheWrite;
+    const afterCompaction = r.compactionsBefore > p.compactionsBefore;
+    let cause = null;
+    if (!hit) {
+      if (afterCompaction || via === 'compaction') cause = 'compaction';
+      else if (gapMs > ttlMs) cause = 'idle-expiry';
+      else cause = 'prefix-change';
+    }
     out.push({
       index: r.index,
       gapMs,
       band: bandFor(gapMs),
       model: r.model,
-      prevContext: p.contextTokens,
+      kind: r.kind,
+      via,
+      origin: r.connectingUser?.origin ?? null,
+      ttl,
+      ttlMs,
+      ttlSource: prevTtl ? 'write' : 'default',
+      prevContext,
       rereadTokens: r.contextTokens,
       cacheRead: r.usage.cacheRead,
       cacheWrite: r.usage.cacheWrite,
-      outcome: r.usage.cacheRead >= r.usage.cacheWrite ? 'hit' : 'rewrite',
-      afterCompaction: r.compactionsBefore > p.compactionsBefore,
+      outcome: hit ? 'hit' : 'rewrite',
+      cause,
+      afterCompaction,
       connectingUser: r.connectingUser,
     });
   }
   return out;
+}
+
+// The advisor's "resumed after idle" gaps: the conversation was picked up
+// again by a person's prompt or another agent's SendMessage (via 'prompt' or
+// 'message'), after longer than the cache TTL that applied. A tool
+// round-trip, however slow, is not a resume. Of these, the ones that cost a
+// rewrite are cause === 'idle-expiry'; that is the count the resume guard
+// uses. Task notifications (via 'meta', origin 'task-notification') also wake
+// an idle agent; pass { includeTaskNotifications: true } to count them.
+export function isResumeAfterIdle(g, { includeTaskNotifications = false } = {}) {
+  const resumed = g.via === 'prompt' || g.via === 'message'
+    || (includeTaskNotifications && g.via === 'meta' && g.origin === 'task-notification');
+  return resumed && g.gapMs > g.ttlMs;
+}
+
+export function resumeAfterIdleGaps(gaps, opts) {
+  return gaps.filter((g) => isResumeAfterIdle(g, opts));
 }
 
 // The cold write a subagent pays on spawn: its first request, when that
@@ -715,11 +928,24 @@ export function spawnBaselineOf(result) {
 
 // --- Corpus scan ------------------------------------------------------------------
 //
-// Discovers and reads every transcript, one file at a time, calling
-// onFile(result, fileEntry) for each. Cross-file dedup (D4) is ON by default
-// (crossFileDedup: false turns it off). Files are read in path order so which
-// copy of a duplicated request is claimed first is deterministic. maxMs stops
-// reading early (truncated: true) for callers with a time budget.
+// Discovers and reads every transcript, calling onFile(result, fileEntry) for
+// each, in path order.
+//
+// Cross-file dedup (D4) is ON by default (crossFileDedup: false turns it
+// off). With it on, every file is read first and kept in memory, the copies
+// are resolved across the whole set (resolveCrossFile()), and only then does
+// onFile run: the max over copies needs every copy, and a copy can sit in a
+// file read after the original. With it off, files stream through onFile one
+// at a time.
+//
+// maxMs is a time budget for READING: once spent, the remaining files are
+// skipped (truncated: true, filesSkipped counts them). Under a budget, files
+// are read NEWEST first (by mtime), so a truncated scan covers recent
+// activity across every project rather than the alphabetically first ones.
+//
+// Returns { root, exists, filesFound, filesRead, filesSkipped, truncated,
+// wallMs, crossFile } where crossFile is resolveCrossFile()'s counters (null
+// with dedup off).
 export async function scanCorpus({
   root, sinceMs = -Infinity, maxFiles, maxBytes, maxMs = null,
   main = true, subagents = true, workflows = false, project = null,
@@ -730,26 +956,41 @@ export async function scanCorpus({
   const disc = discoverTranscripts(dir, {
     sinceMs, maxFiles, maxBytes, main, subagents, workflows, project,
   });
-  const files = [...disc.files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  const seen = crossFileDedup ? new Set() : null;
+  const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const files = [...disc.files].sort(maxMs != null ? (a, b) => (b.mtimeMs - a.mtimeMs) || byPath(a, b) : byPath);
   let truncated = disc.truncated;
   let read = 0;
+  let attempted = 0;
+  const buffered = [];
   for (const f of files) {
     if (maxMs != null && Date.now() - started > maxMs) { truncated = true; break; }
+    attempted += 1;
     let result;
     try {
       result = await readTranscript(f.path, {
         kind: f.kind, project: f.project, sessionId: f.sessionId, agentId: f.agentId, workflowId: f.workflowId,
         agentType: f.kind === 'subagent' ? f.agentType : null,
         agentName: f.kind === 'subagent' ? f.agentName : null,
-        seen, keepSummaries,
+        keepSummaries,
       });
     } catch { continue; }
     read += 1;
-    if (onFile) await onFile(result, f);
+    if (crossFileDedup) buffered.push({ result, entry: f, mtimeMs: f.mtimeMs });
+    else if (onFile) await onFile(result, f);
+  }
+  let crossFile = null;
+  if (crossFileDedup) {
+    crossFile = resolveCrossFile(buffered);
+    buffered.sort((a, b) => byPath(a.entry, b.entry));
+    for (let i = 0; i < buffered.length; i++) {
+      const { result, entry } = buffered[i];
+      buffered[i] = null; // let each file go once its consumer is done with it
+      if (onFile) await onFile(result, entry);
+    }
   }
   return {
-    root: dir, exists: disc.exists, filesFound: disc.files.length, filesRead: read, truncated, wallMs: Date.now() - started,
+    root: dir, exists: disc.exists, filesFound: disc.files.length, filesRead: read,
+    filesSkipped: files.length - attempted, truncated, wallMs: Date.now() - started, crossFile,
   };
 }
 

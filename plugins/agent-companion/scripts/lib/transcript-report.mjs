@@ -9,11 +9,11 @@
 // basis label replaces this one — that is the seam; nothing else changes.
 
 import {
-  scanCorpus, gapsOf, spawnBaselineOf, percentile, emptyUsage, addUsage,
+  scanCorpus, gapsOf, isResumeAfterIdle, spawnBaselineOf, percentile, emptyUsage, addUsage,
 } from './transcripts.mjs';
 import { priceUsage, PRICE_BASIS } from './pricing.mjs';
 
-// Resume-gap histogram buckets (upper bound exclusive). 5m and 60m are the
+// Gap histogram buckets (upper bound exclusive). 5m and 60m are the
 // two prompt-cache TTLs, so both are bucket edges.
 export const GAP_BUCKETS = [
   { label: '<1m', toMs: 60 * 1000 },
@@ -58,9 +58,21 @@ export async function buildTranscriptReport({
   };
   const files = { main: 0, subagent: 0, withRequests: 0 };
   const compaction = { count: 0, byTrigger: {}, byKind: {}, pre: [], post: [], firstAfter: [], requestsAfter: [] };
-  const gapBuckets = new Map(GAP_BUCKETS.map((b) => [b.label, {
+  const newBuckets = () => new Map(GAP_BUCKETS.map((b) => [b.label, {
     label: b.label, count: 0, hits: 0, rewrites: 0, rereadTokens: 0, rewriteTokens: 0, afterCompaction: 0,
+    causes: { 'idle-expiry': 0, 'prefix-change': 0, compaction: 0 },
   }]));
+  const gapBuckets = newBuckets();
+  const byViaTtl = new Map(); // "via|ttl" -> { via, ttl, count, buckets }
+  const resumeAfterIdle = { count: 0, hits: 0, rewrites: 0, causes: { 'idle-expiry': 0, 'prefix-change': 0, compaction: 0 }, byKindTtl: {} };
+  const addGap = (buckets, g) => {
+    const b = buckets.get(bucketFor(g.gapMs));
+    b.count += 1;
+    b.rereadTokens += g.rereadTokens;
+    if (g.afterCompaction) b.afterCompaction += 1;
+    if (g.outcome === 'hit') b.hits += 1;
+    else { b.rewrites += 1; b.rewriteTokens += g.cacheWrite; b.causes[g.cause] = (b.causes[g.cause] || 0) + 1; }
+  };
   const spawn = new Map();
   const peaks = [];
   const growth = [];
@@ -121,12 +133,19 @@ export async function buildTranscriptReport({
       for (const g of gapsOf(res.requests)) {
         const r = res.requests[g.index];
         if (!inWindow(r.startTs)) continue;
-        const b = gapBuckets.get(bucketFor(g.gapMs));
-        b.count += 1;
-        b.rereadTokens += g.rereadTokens;
-        if (g.afterCompaction) b.afterCompaction += 1;
-        if (g.outcome === 'hit') b.hits += 1;
-        else { b.rewrites += 1; b.rewriteTokens += g.cacheWrite; }
+        addGap(gapBuckets, g);
+        const k = `${g.via}|${g.ttl}`;
+        if (!byViaTtl.has(k)) byViaTtl.set(k, { via: g.via, ttl: g.ttl, count: 0, buckets: newBuckets() });
+        const vt = byViaTtl.get(k);
+        vt.count += 1;
+        addGap(vt.buckets, g);
+        if (isResumeAfterIdle(g)) {
+          resumeAfterIdle.count += 1;
+          if (g.outcome === 'hit') resumeAfterIdle.hits += 1;
+          else { resumeAfterIdle.rewrites += 1; resumeAfterIdle.causes[g.cause] += 1; }
+          const kt = `${g.kind}|${g.ttl}`;
+          resumeAfterIdle.byKindTtl[kt] = (resumeAfterIdle.byKindTtl[kt] || 0) + 1;
+        }
       }
 
       const sb = spawnBaselineOf(res);
@@ -158,7 +177,8 @@ export async function buildTranscriptReport({
     costBasis: basis || PRICE_BASIS,
     options: { workflows, crossFileDedup },
     scan: {
-      rootExists: scan.exists, filesFound: scan.filesFound, filesRead: scan.filesRead, truncated: scan.truncated,
+      rootExists: scan.exists, filesFound: scan.filesFound, filesRead: scan.filesRead, filesSkipped: scan.filesSkipped,
+      truncated: scan.truncated, crossFile: scan.crossFile,
       wallMs: scan.wallMs, mainFiles: files.main, subagentFiles: files.subagent, filesWithRequestsInWindow: files.withRequests,
     },
     dedup,
@@ -173,7 +193,18 @@ export async function buildTranscriptReport({
       firstContextAfterP50: pct(compaction.firstAfter, 50),
       requestsAfterP50: pct(compaction.requestsAfter, 50),
     },
-    resumeGaps: [...gapBuckets.values()],
+    // Every gap between consecutive requests, whatever connected them.
+    interRequestGaps: [...gapBuckets.values()],
+    // The same, split by what connected the two requests (via) and the cache
+    // TTL that applied (ttl). Only via prompt/message after more than the TTL
+    // is a resume after idle; see resumeAfterIdle.
+    gapsByViaTtl: [...byViaTtl.values()]
+      .map((e) => ({ via: e.via, ttl: e.ttl, count: e.count, buckets: [...e.buckets.values()].filter((b) => b.count) }))
+      .sort((a, b) => b.count - a.count),
+    // Gaps where a prompt or SendMessage picked the conversation up again
+    // after longer than the TTL (lib/transcripts.mjs isResumeAfterIdle).
+    // causes['idle-expiry'] is the count the resume guard uses.
+    resumeAfterIdle,
     spawnBaseline: [...spawn.values()]
       .map((e) => ({
         agentType: e.agentType,

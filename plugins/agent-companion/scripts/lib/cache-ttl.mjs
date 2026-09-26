@@ -64,7 +64,7 @@
 import { existsSync } from 'node:fs';
 import { KNOWN_AGENT_TYPES } from '../../hooks/lib/context.mjs';
 import {
-  transcriptsRoot as sharedTranscriptsRoot, discoverTranscripts, readTranscript, bandFor,
+  transcriptsRoot as sharedTranscriptsRoot, discoverTranscripts, readTranscript, resolveCrossFile, bandFor,
   percentile, SYNTHETIC_MODEL as SHARED_SYNTHETIC_MODEL, NO_META_AGENT_TYPE as SHARED_NO_META,
 } from './transcripts.mjs';
 import { pricingTable, classifyPricing, _resetPricingCacheForTests } from './pricing.mjs';
@@ -121,9 +121,9 @@ export function discoverFiles(root, { sinceMs = -Infinity, maxFiles = 20000, max
   const main = [];
   const subagent = [];
   for (const f of files) {
-    if (f.kind === 'main') main.push({ path: f.path, project: f.project });
+    if (f.kind === 'main') main.push({ path: f.path, project: f.project, mtimeMs: f.mtimeMs });
     else if (f.kind === 'subagent') {
-      subagent.push({ path: f.path, project: f.project, agentType: f.agentType, declaredModel: f.declaredModel });
+      subagent.push({ path: f.path, project: f.project, agentType: f.agentType, declaredModel: f.declaredModel, mtimeMs: f.mtimeMs });
     }
   }
   return { main, subagent, truncated };
@@ -142,7 +142,9 @@ export function discoverFiles(root, { sinceMs = -Infinity, maxFiles = 20000, max
 // `seen` (optional) is a Set shared across files; a request another file
 // already claimed comes back with duplicate: true and must be left out of
 // every total. It is still returned, and still counts as the previous request
-// for the gap of the one after it.
+// for the gap of the one after it. computeCacheTtl() does not use `seen`: it
+// reads every file first and resolves copies with resolveCrossFile(), which
+// picks the original file and takes the max over copies.
 export async function parseFile(path, { kind, agentType = null, seen = null } = {}) {
   let result;
   try {
@@ -150,6 +152,11 @@ export async function parseFile(path, { kind, agentType = null, seen = null } = 
   } catch {
     return [];
   }
+  return ttlRowsOf(result, { kind, agentType });
+}
+
+// The cache-TTL rows for one readTranscript() result.
+export function ttlRowsOf(result, { kind, agentType = null } = {}) {
   const out = [];
   let prev = null;
   for (const r of result.requests) {
@@ -368,13 +375,22 @@ export async function computeCacheTtl({
   let subagentRequestsScanned = 0;
   // A resumed or forked transcript carries copies of requests another file
   // already holds (lib/transcripts.mjs, rule D4). Summing per file counted
-  // each copy again; one Set across every file counts each request once.
-  const seen = crossFileDedup ? new Set() : null;
+  // each copy again. Every file is read first, then the copies are resolved
+  // across all of them: one request per id, owned by the original file, with
+  // the max usage over its copies.
   let crossFileDuplicatesSkipped = 0;
+  const loaded = [];
+  const load = async (f, kind, agentType) => {
+    try {
+      loaded.push({ result: await readTranscript(f.path, { kind, agentType }), mtimeMs: f.mtimeMs, kind, agentType });
+    } catch { /* unreadable: skip */ }
+  };
+  for (const f of subagent) await load(f, 'subagent', f.agentType);
+  for (const f of main) await load(f, 'main', null);
+  const crossFile = crossFileDedup ? resolveCrossFile(loaded) : null;
+  const rowsOf = (kind) => loaded.filter((l) => l.kind === kind).map((l) => ttlRowsOf(l.result, { kind, agentType: l.agentType }));
 
-  for (const f of subagent) {
-    let reqs;
-    try { reqs = await parseFile(f.path, { kind: 'subagent', agentType: f.agentType, seen }); } catch { continue; }
+  for (const reqs of rowsOf('subagent')) {
     for (const r of reqs) {
       if (!Number.isFinite(r.ts) || r.ts < windowStartMs || r.ts > nowMs) continue;
       if (r.duplicate) { crossFileDuplicatesSkipped += 1; continue; }
@@ -428,9 +444,7 @@ export async function computeCacheTtl({
   let mainWrite5m = 0;
   let mainWrite1h = 0;
   let mainRequestsScanned = 0;
-  for (const f of main) {
-    let reqs;
-    try { reqs = await parseFile(f.path, { kind: 'main', agentType: null, seen }); } catch { continue; }
+  for (const reqs of rowsOf('main')) {
     for (const r of reqs) {
       if (!Number.isFinite(r.ts) || r.ts < windowStartMs || r.ts > nowMs) continue;
       if (r.duplicate) { crossFileDuplicatesSkipped += 1; continue; }
@@ -501,6 +515,10 @@ export async function computeCacheTtl({
     subagentRequestsScanned,
     mainRequestsScanned,
     crossFileDuplicatesSkipped,
+    // ids in more than one file, and how many of them the max-over-copies
+    // rule changed against keeping the first copy in path order (all-time
+    // counts over the files read, not limited to the window).
+    crossFile,
     totals: {
       requests: grand.requests,
       band560Requests: grand.band560,
