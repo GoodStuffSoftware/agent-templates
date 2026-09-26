@@ -10,7 +10,9 @@
 // Usage:
 //   node cache-ttl.mjs                  # last 30 days, human report
 //   node cache-ttl.mjs --days 60        # a different window
-//   node cache-ttl.mjs --json           # machine-readable
+//   node cache-ttl.mjs --json           # machine-readable (perRung is sorted and
+//                                       # rounded so two dates' outputs diff cleanly)
+//   node cache-ttl.mjs --include-experiments   # also count bench / temp-dir projects
 //
 // Also registered in audit.mjs as `--only cache-ttl` (see scripts/checks.mjs).
 
@@ -23,7 +25,9 @@ const has = (n) => argv.includes(n);
 const days = Number(val('--days')) || 30;
 const asJson = has('--json');
 
-const result = await computeCacheTtl({ days, transcriptsRoot: transcriptsRoot() });
+const includeExperiments = has('--include-experiments');
+
+const result = await computeCacheTtl({ days, transcriptsRoot: transcriptsRoot(), includeExperiments });
 
 if (asJson) {
   console.log(JSON.stringify(result, null, 2));
@@ -114,6 +118,17 @@ console.log('-- break-even: observed rewrite share vs. required, per tier (alway
 for (const b of result.breakEvenByTier) {
   console.log(`  ${b.alias.padEnd(12)} observed=${b.observedPct.toFixed(1).padEnd(6)}% breakeven=${b.breakEvenPct.toFixed(1).padEnd(6)}% `
     + `spend-share=${b.spendSharePct.toFixed(1).padEnd(6)}% delta=${fmtPct(b.deltaPct)}`);
+}
+console.log('');
+
+console.log(`-- per rung: 1h net saving by how the 5-60min gap was connected (experiment projects ${result.experimentProjects.included ? 'INCLUDED' : `excluded: ${result.experimentProjects.excludedProjects}`}) --`);
+console.log(`  floor for a verdict: >=${result.rungFloor.files} files, >=${result.rungFloor.requests} requests, >=${result.rungFloor.viewGaps5to60} 5-60min gaps in the view`);
+for (const r of result.perRung) {
+  const s = r.sample;
+  console.log(`  ${r.rung}  [${r.models.join(',')}] files=${s.files} req=${s.requests} gaps=${s.gaps} 5-60=${s.gaps5to60} resume-rewrites=${r.resumeRewrites}`);
+  for (const [v, x] of Object.entries(r.views)) {
+    console.log(`    ${v.padEnd(10)} gaps=${String(x.gaps5to60).padEnd(5)} net=${fmtUsd(x.netSavingUsd).padEnd(10)} delta=${fmtPct(x.deltaPct).padEnd(8)} ${x.verdict}`);
+  }
 }
 console.log('');
 
