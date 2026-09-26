@@ -2,6 +2,14 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.8 — 2026-09-25
+
+`/ac setup` can now install an optional hook that restores a session's saved
+state after compaction.
+
+### Added
+- Optional compaction re-inject hook. `/ac setup` offers `scripts/install-reinject-hook.mjs`, which installs a user-level SessionStart (matcher `compact`) hook that re-injects the session's saved state (the session scratchpad's SESSION-STATE.md, else HANDOFF.md) after compaction. It finds the scratchpad through the hook input's transcript_path, caps injected state at 9,500 characters (under Claude Code's 10,000-character hook context cap) keeping the end, and never splits a surrogate pair. It is never auto-installed; the installer refuses when an equivalent hook is already configured (user settings.json or settings.local.json, matched by name), refuses to rewrite a wrong-shaped settings.json, and `--uninstall` / `--status` manage it.
+
 ## 0.29.7 — 2026-09-25
 
 Memory-vault git commands no longer read git configuration from outside the
