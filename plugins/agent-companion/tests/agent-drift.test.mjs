@@ -65,6 +65,38 @@ test('parity coverage: a writer needs a code-review agent on its model at >= its
   } finally { fx.cleanup(); }
 });
 
+test('parity follows the table\'s own reviewer sizing: stronger model counts, fable writer capped at opus, critical writer needs the F1 floor', () => {
+  const fx = makeFixture();
+  try {
+    // A stronger reviewer model covers a weaker writer.
+    agent(fx.dir, 'builder', { model: 'sonnet', effort: 'medium', routingType: 'bounded-feature' });
+    agent(fx.dir, 'reviewer', { model: 'opus', effort: 'xhigh', routingType: 'code-review' });
+    assert.equal(projectAgentDrift(fx.dir).parityGaps.length, 0, 'opus/xhigh reviews a sonnet/medium writer');
+    // Fable writer: F2 caps its reviewer at opus.
+    agent(fx.dir, 'builder', { model: 'fable', effort: 'high', routingType: 'bounded-feature' });
+    agent(fx.dir, 'reviewer', { model: 'opus', effort: 'max', routingType: 'code-review' });
+    assert.equal(projectAgentDrift(fx.dir).parityGaps.length, 0, 'opus/max covers a fable/high writer');
+    // A critical-change writer's review is raised to the critical floor (F1).
+    agent(fx.dir, 'builder', { model: 'opus', effort: 'medium', routingType: 'critical-change' });
+    agent(fx.dir, 'reviewer', { model: 'opus', effort: 'medium', routingType: 'code-review' });
+    const d = projectAgentDrift(fx.dir);
+    assert.equal(d.parityGaps.length, 1);
+    assert.match(d.parityGaps[0].need, /opus\/xhigh/);
+  } finally { fx.cleanup(); }
+});
+
+test('a writer with no effort is unverifiable, never covered', () => {
+  const fx = makeFixture();
+  try {
+    agent(fx.dir, 'builder', { model: 'opus', routingType: 'bounded-feature' });
+    agent(fx.dir, 'reviewer', { model: 'opus', effort: 'max', routingType: 'code-review' });
+    const d = projectAgentDrift(fx.dir);
+    assert.equal(d.parityGaps.length, 0);
+    assert.equal(d.parityUnverifiable.length, 1);
+    assert.ok(driftFindings(d).some((x) => /builder sets no effort .* unverifiable/.test(x)));
+  } finally { fx.cleanup(); }
+});
+
 test('no code-review agent: no parity check at all', () => {
   const fx = makeFixture();
   try {

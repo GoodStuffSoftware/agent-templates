@@ -12,31 +12,13 @@ import {
   readStdin, isMainThread, noteAgentType, opt, stateFile, readJson, writeJson,
   allow, deny, passthrough, recordDenial,
 } from './lib/context.mjs';
-import { drainNotices, renderNotices } from './lib/runaway.mjs';
-
-// Queued runaway-spawn notices (hooks/runaway-check.mjs) ride on this hook's
-// output: it already runs on nearly every main-thread tool call, so the lead
-// sees a notice within the turn a subagent finished in, without a new
-// process on its hot path. Drained only on the main thread; see
-// lib/runaway.mjs for the queue and hooks/runaway-notice.mjs for the
-// UserPromptSubmit drainer.
-let notice = '';
-function out(decision, reason) {
-  const o = { hookEventName: 'PreToolUse' };
-  if (decision) o.permissionDecision = decision;
-  if (reason) o.permissionDecisionReason = reason;
-  if (notice) o.additionalContext = notice;
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: o }));
-  process.exit(0);
-}
 
 try {
   const p = readStdin();
   noteAgentType(p);
 
+  if (!opt('delegation_guard', true)) passthrough();
   if (!isMainThread(p)) passthrough();
-  try { notice = renderNotices(drainNotices(p.session_id)); } catch { notice = ''; }
-  if (!opt('delegation_guard', true)) { if (notice) out(null, null); passthrough(); }
 
   const threshold = Math.max(2, opt('delegation_threshold', 4));
   const f = stateFile('delegation-streak.json');
@@ -55,7 +37,7 @@ try {
     const fired = (st[sid]?.fired || 0) + 1;
     writeJson(f, { ...st, [sid]: { streak: 0, firedAt: Date.now(), fired } });
     recordDenial('delegation', p, `${streak} consecutive ${p.tool_name} calls on the main thread`);
-    (notice ? (r) => out('deny', r) : deny)(
+    deny(
       `Delegation guard: that is ${streak} execution-class tool calls in a row on the MAIN thread ` +
       `(${p.tool_name}). This is the pattern the orchestrator rules exist to prevent — the main ` +
       `session holds decisions, workers hold token volume.\n\n` +
@@ -68,7 +50,6 @@ try {
   }
 
   writeJson(f, { ...st, [sid]: { streak, firedAt: st[sid]?.firedAt, fired: st[sid]?.fired || 0 } });
-  if (notice) out('allow', null);
   allow();
 } catch {
   passthrough(); // never break a session

@@ -11,7 +11,7 @@
 // Emits JSON to stdout: { changed: bool, signals: [...], baseline: {...} }
 
 import { execSyncHidden } from './lib/proc.mjs';
-import { readFileSync, existsSync, writeFileSync, appendFileSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, appendFileSync, readdirSync, statSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
 import { userInfo, homedir } from 'node:os';
 import {
@@ -31,7 +31,7 @@ import {
   readClaudeJsonProjectPaths,
 } from './lib/repo-discovery.mjs';
 import { projectAgentDrift, driftCounts } from './lib/agent-drift.mjs';
-import { churnVerdict } from './lib/session-churn.mjs';
+import { churnVerdict, churnFreshness } from './lib/session-churn.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
@@ -253,7 +253,7 @@ const inheritedEffort = recent.filter((s) => s.spawn_effort_source === 'inherite
 next.spawnTotal = spawns.length;
 if (recent.length) {
   sig('spawn_activity',
-    `${recent.length} spawns/24h; ${premium.length} premium; ${inherited.length} with no explicit model`,
+    `${recent.length} spawns/24h; ${premium.length} unrouted premium; ${inherited.length} with no explicit model`,
     premium.length > (baseline.premiumPerDay ?? 0) * 2 ? 'spend-deep-dive' : 'none');
 }
 next.premiumPerDay = premium.length;
@@ -287,11 +287,12 @@ try {
   const drifted = [];
   for (const p of candidates) {
     const c = driftCounts(projectAgentDrift(p));
-    const bad = c.below + c.above + c.inherits + c.unknownType + c.parityGaps;
+    const bad = c.below + c.above + c.inherits + c.unknownType + c.parityGaps + c.parityUnverifiable;
     if (bad) {
       drifted.push(`${basename(p)}: ${[
         c.below && `${c.below} below`, c.above && `${c.above} above`, c.inherits && `${c.inherits} inherit effort`,
         c.unknownType && `${c.unknownType} unknown routingType`, c.parityGaps && `${c.parityGaps} writer(s) without a parity reviewer`,
+        c.parityUnverifiable && `${c.parityUnverifiable} writer(s) with unverifiable parity`,
       ].filter(Boolean).join(', ')}`);
     }
   }
@@ -305,11 +306,19 @@ try {
 // --- 3c. Session churn (offline aggregate) ---------------------------------
 // session-churn.jsonl is written by `transcript-harvest.mjs --churn`
 // (lib/session-churn.mjs, where the thresholds are defined and explained).
+// A missing or stale file is SAID, never read as "no churn": the signal would
+// otherwise go quiet exactly when its refresh step stopped running. A missing
+// file is only reported once there is spawn activity to churn over.
 try {
+  const churnPath = join(telemetryDir, 'session-churn.jsonl');
+  const churnExists = existsSync(churnPath);
   const churnRows = readJsonl('session-churn.jsonl');
-  const verdict = churnVerdict(churnRows, { now: nowDate() });
-  if (verdict.fire) {
-    sig('session_churn', verdict.detail, 'routing-review');
+  const fresh = churnFreshness(churnExists ? statSync(churnPath).mtimeMs : null, { now: nowDate() });
+  if (fresh.stale && (churnExists || spawns.length > 0)) {
+    sig('session_churn', fresh.detail, 'manual-check');
+  } else if (!fresh.stale) {
+    const verdict = churnVerdict(churnRows, { now: nowDate() });
+    if (verdict.fire) sig('session_churn', verdict.detail, 'routing-review');
   }
 } catch { /* fail open */ }
 

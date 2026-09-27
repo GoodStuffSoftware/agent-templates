@@ -225,6 +225,21 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^Agent$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
