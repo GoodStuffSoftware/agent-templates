@@ -2,6 +2,21 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.19 — 2026-09-27
+
+- Spawn-time reviewer parity: a `code-review` brief can name its writer with a `WRITER: <model>/<effort>` or `WRITER: <agent-name>` line (also `opus xhigh`, `Claude Opus 5.5 at xhigh`, backticked or bold). The spawn guard compares the reviewer with that writer and WARNS when it is below; it does not block this release. A reviewer with no model inherits the writer's pair. The verdict names what it compared against: the writer, the F1 critical-review floor (opus/xhigh), or the parity route after floor F2 (fable is never a routing destination). An effort word that is not an effort level is reported as "not understood" and parity is checked on the model alone; a line read only in part never autofills a model.
+- Code-review messages: a `TYPE: code-review` spawn with no WRITER line gets a note asking for one instead of a generic "no TYPE or WEIGHT" message. Fix: a writer-less review carrying a `WARRANT: weight N` was fit-denied against the grid with an empty route ("sends to . ..."); a WARRANT's weight no longer triggers that check. The premium-cap deny no longer says "run at sonnet"; it says how to route (add a TYPE, spawn a ladder rung, add a WRITER line, or the parity rung).
+- Behaviour change: the premium fan-out cap no longer counts deliberate opus choices: a typed spawn whose route is opus, `ac-opus-*` rungs other than `ac-opus-max`, the project's own and user-level agent definitions that pin opus, and a reviewer matching its writer. It still counts fable, `ac-opus-max`, other plugins' agents, definitions named like a built-in, and unrouted opus. A spawn that inherits the lead's model is still not counted (`inherit_guard` covers that shape).
+- `spawns.jsonl` rows carry `routed`: whether the spawn's model came from the routing table or a definition pin. The scout's unrouted-premium count reads it.
+- New option `inherit_guard` (default `warn`, `block` available): flags a spawn that names no model and whose definition states neither model nor effort, so it silently runs on the lead's pair; `block` denies it under a premium lead. A TYPE the table knows, or a WEIGHT, lifts it; an unknown TYPE is named in the message.
+- New runaway flag: at SubagentStop a worker past `runaway_turns` (default 300) or `runaway_usd` (default $40) is recorded, and the lead gets a notice on its next prompt or Agent result. Detection and deny behaviour elsewhere are unchanged.
+- Project agents may declare `routingType:` in frontmatter; the drift check compares the agent's model/effort with that task type's route, and counts reviewers below their writer's parity.
+- New scout signals: `session_churn` (correction-heavy sessions, harvested offline by `transcript-harvest.mjs --churn`; flagged when the harvest is stale), `inherited_effort_spawns`, `project_agent_drift` and `runaway_spawns`.
+- Eval canaries are keyed by task type (`evals/route-<type>/`); their graders are generated from the routing table by `scripts/sync-eval-graders.mjs`, and the suite fails when one is stale.
+- Fix: the compaction advisor's plan-usage figure. Opus plan usage is its tokens priced at Sonnet rates x 1.5, not API dollars x 0.75.
+- Fix: namegate autofilled names always match the Agent tool's name pattern (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`). A dotted description ("release 0.29.19") or a project directory starting with `_` or `.` produced a name the tool rejected; uniqueness suffixes are checked too, falling back to `worker-<suffix>`.
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.18 — 2026-09-27
 
 - Behaviour change (routing trial v3, operator-approved amendment): `bounded-feature` and `debug-root-cause` now route to opus/medium (`ac-opus-medium`, was opus/low), and `large-refactor` and `novel-design` to opus/xhigh (`ac-opus-xhigh`, was opus/high). Nothing routes to max. Every other route is unchanged.
