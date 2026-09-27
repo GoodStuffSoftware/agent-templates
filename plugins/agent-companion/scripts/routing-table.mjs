@@ -557,6 +557,8 @@ if (cfg.reviewerParity) {
   const critFloor = cfg.consequence?.critical || {};
   L.push(`That parity match is then floored, same as any other route (operator-decided 2026-09-24, see resolveRoute() in hooks/lib/context.mjs): a **critical** review is never sized below \`${critFloor.modelFloor}\`/\`${critFloor.effortFloor}\` (F1), never routed to fable — capped to the best available tier that is not one, which still demands its own WARRANT (F2) — and refused outright for a writer model outside the tier table, or unavailable with no staged replacement (F4). A per-user routing profile row for a parity type may only raise the resulting minimum effort further; it can never name a model.`);
   L.push(``);
+  L.push(`**At spawn time** a review brief names its writer on a line of its own, next to \`TYPE:\` — \`WRITER: <model>/<effort>\` or \`WRITER: <agent-name>\` (a ladder rung or project agent, read from its definition). Example: \`TYPE: code-review\` + \`WRITER: opus/xhigh\` is sized to \`opus/xhigh\`, so spawn \`ac-opus-xhigh\`. The spawn guard then judges the reviewer against that parity route in notes only: below the writer, above it, or on an inherited effort it cannot verify. A reviewer on its writer's model needs no WARRANT and is not counted by the premium cap. With no WRITER line the guard cannot size a review at all, and says so.`);
+  L.push(``);
   if (p.liveEvidence) {
     L.push(`**Live evidence:** ${p.liveEvidence}`);
     L.push(``);

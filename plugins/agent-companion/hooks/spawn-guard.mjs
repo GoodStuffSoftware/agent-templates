@@ -21,7 +21,10 @@
 //      is below aliasResolution.minClaudeCodeVersion, restart the session
 //      before spawning; don't pin around it.
 // This hook WARNS, never blocks, on either rule — a false block stops
-// legitimate work; these are detection, not enforcement.
+// legitimate work; these are detection, not enforcement. The one opt-in
+// exception is `inherit_guard: block`, which denies the rule-1 shape at its
+// worst: model AND effort both inherited from an opus or fable lead, with no
+// TYPE or WEIGHT line to route it (default "warn": the note only).
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -33,7 +36,7 @@ import {
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
-  claudeDir, sessionLoadedAt,
+  claudeDir, sessionLoadedAt, writerFromDeclaration,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
@@ -128,6 +131,24 @@ function ladderRewriteTarget(sid, rungAgent, cwd, loadedAtMs) {
   return { target: null, def: null, why };
 }
 
+// "explore -> opus/low (agent-companion:ac-opus-low); ..." — the current
+// routes of a few common task types, read through the same resolver the
+// guard uses (routing profile included), for the deny texts that tell a
+// spawner how to route instead. Read at deny time only, so the advice
+// follows the table. '' when the table cannot be read.
+function commonTypeRoutes(names = ['explore', 'bounded-feature', 'debug-root-cause', 'novel-design']) {
+  const out = [];
+  for (const n of names) {
+    try {
+      const r = resolveRoute({ type: n });
+      if (!r.model) continue;
+      const rung = r.effort ? rungFor(r.model, r.effort) : null;
+      out.push(`${n} -> ${r.model}${r.effort ? '/' + r.effort : ''}${rung ? ` (agent-companion:${rung.agent})` : ''}`);
+    } catch { /* skip this type */ }
+  }
+  return out.join('; ');
+}
+
 try {
   const p = readStdin();
   noteAgentType(p);
@@ -220,6 +241,25 @@ try {
   // (no route from it), and declared_type records exactly that header value.
   const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
   const declaredType = tm ? tm[1].toLowerCase() : null;
+  // WRITER: the writer a review gates — the one input a parity-sized type
+  // (code-review) needs before the table can size it (reviewer parity,
+  // config/model-tiers.json reviewerParity; resolveRoute()'s F3). First line
+  // wins, like every label. `<model>/<effort>` (opus/xhigh) or `<agent-name>`
+  // (a ladder rung, a plugin agent or a project agent, read through its own
+  // definition, where its model and effort are locked). A WRITER line whose
+  // value names neither is ignored, and the note says so.
+  let writer = null;        // writerFromDeclaration() result, when usable
+  let writerProblem = null; // why a declared WRITER line was not used
+  // The line's value as written (bounded), for the note when it is ignored.
+  const writerRaw = decls.WRITER ? String(decls.WRITER.rest).replace(/[*_`]/g, '').trim().slice(0, 80) : '';
+  if (decls.WRITER) {
+    const wv = declarationValue(decls, 'WRITER', /`?([A-Za-z0-9][A-Za-z0-9._:/-]*)`?/.source);
+    const parsed = wv
+      ? writerFromDeclaration(wv[1], p.cwd)
+      : { ok: false, reason: 'its value is neither <model>/<effort> nor an agent name' };
+    if (parsed.ok) writer = parsed;
+    else writerProblem = parsed.reason;
+  }
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
@@ -246,7 +286,12 @@ try {
   if (declaredType) {
     try { typeWeight = taskTypeDef(declaredType)?.def?.weight ?? null; } catch { /* table unreadable */ }
   }
-  const fitOn = opt('fit_guard', true) && (weightWasDeclared || typeof typeWeight === 'number');
+  // A parity-sized type (code-review) routes only once its writer is known:
+  // with a usable WRITER line the resolver sizes the reviewer to it (F3, then
+  // F4/F2/F1), so the parity route exists here exactly as it does for
+  // `recommend.mjs --type code-review --writer <m>/<e>`.
+  const typeIsParity = typeWeight === 'parity';
+  const fitOn = opt('fit_guard', true) && (weightWasDeclared || typeof typeWeight === 'number' || (typeIsParity && !!writer));
   let route = null;
   if (fitOn) {
     try {
@@ -257,6 +302,7 @@ try {
         // real WEIGHT: line is a deliberate deviation from a named TYPE's own
         // preset; a WARRANT's incidental weight must not silently discard it.
         weightExplicit: weightLineExplicit, kindExplicit: kindWasDeclared, consequenceExplicit: consequenceWasDeclared,
+        writer: typeIsParity && writer ? { model: writer.model, effort: writer.effort } : null,
       });
       if (resolved.model) {
         route = resolved;
@@ -264,16 +310,27 @@ try {
         // filled in from the type's own preset, same coalescing
         // `recommend.mjs --type` already does — every message and telemetry
         // field below that reads declaredWeight/Kind/Consequence picks this
-        // up unchanged rather than needing its own type-aware branch.
-        if (!weightWasDeclared) declaredWeight = resolved.weight;
+        // up unchanged rather than needing its own type-aware branch. A
+        // parity route's weight is the string 'parity', never a 1-5 weight,
+        // so declared_weight stays null for it.
+        if (!weightWasDeclared && typeof resolved.weight === 'number') declaredWeight = resolved.weight;
         if (!kindWasDeclared) declaredKind = resolved.kind;
         if (!consequenceWasDeclared) declaredConsequence = resolved.consequence;
+      } else if (typeIsParity && writer && resolved.weight === 'parity') {
+        // F4: the resolver refused to size a reviewer to this writer (a
+        // model it cannot run on, or one retired with no stand-in).
+        writerProblem = resolved.rationale || 'no reviewer can be sized to it';
+        writer = null;
       }
-      // resolved.model === '' means no routing row (e.g. a parity-sized type,
-      // or an unrecognised TYPE with no WEIGHT to fall back on) — leave
-      // route null, same as the old "no weight declared" no-op path.
+      // resolved.model === '' means no routing row (e.g. a parity-sized type
+      // with no writer, or an unrecognised TYPE with no WEIGHT to fall back
+      // on) — leave route null, same as the old "no weight declared" no-op path.
     } catch { /* table unreadable */ }
   }
+  // True when the route is reviewer parity (sized to the WRITER line), not a
+  // weight's row. Parity is judged in notes only in this release: it never
+  // feeds the fit deny or the warrant deny below (see "Reviewer parity").
+  const parityRoute = !!route && route.weight === 'parity';
   // --- F1 on a critical parity-sized spawn (RC review R6) -----------------
   // A parity-sized type (code-review) has no route without a writer, so the
   // fit check above never ran for it, and "TYPE: code-review" +
@@ -283,9 +340,11 @@ try {
   // critical consequence's model and effort floor (opus/xhigh). Below that
   // is "under", said out loud like any other under-provisioned fit. Only
   // the under direction is judged: with no writer, a tier above the floor
-  // (a fable writer's reviewer) cannot be called over-provisioned.
+  // (a fable writer's reviewer) cannot be called over-provisioned. With a
+  // usable WRITER line the parity route above already carries F1, so this
+  // floor-only check is for the writer-less case alone.
   let parityFloor = null;
-  if (opt('fit_guard', true) && typeWeight === 'parity') {
+  if (opt('fit_guard', true) && typeWeight === 'parity' && !route) {
     try {
       const pr = resolveRoute({
         type: declaredType,
@@ -326,6 +385,11 @@ try {
   const routingKnown = fitOn && !!route?.model;
   const routeMatchesModel = routingKnown && !!spawnAlias && classifyModel(route.model).alias === spawnAlias;
   const isPremiumForSpawn = spawnAlias === 'fable' ? true : (routeMatchesModel ? false : isPremium(model));
+  // A parity route (TYPE: code-review + WRITER:) counts like any other route
+  // here: a reviewer on the model it names (its writer's, after the floors)
+  // is not premium for this spawn, so it needs no WARRANT and the cap does
+  // not count it. A reviewer on another model is judged by the parity note
+  // below and is never denied for that in this release.
 
   // Autofill. Never on a ladder spawn: a rung's model and effort are locked
   // in its own file, and a route's model written over it would silently
@@ -469,13 +533,43 @@ try {
   // computed above (neither the spawn parameter nor the definition named
   // one); read here, after autofill, so an autofilled spawn does not also
   // get this more generic note layered on top of its own.
+  //
+  // It is also the ONE inheritance note for this shape: with no model named
+  // anywhere, the no-effort note above never fires (it needs a model to
+  // judge), so this says both halves at once — the model and, unless a
+  // definition states one, the effort — and names the lead's own pair when
+  // its transcript shows it.
+  //
+  // inherit_guard (warn | block, default warn): "block" denies the shape this
+  // note describes when it is the whole of it — model AND effort inherited
+  // from an opus or fable lead, and no TYPE or WEIGHT line to route it — with
+  // the exact line to add. "warn" is this note alone. A lead whose model
+  // cannot be read is never blocked (fail open).
+  const bothInherited = trulyInherited && !autofilled && !def?.effort;
+  const leadLabel = callerAlias
+    ? `${callerAlias}${callerEffort && bothInherited ? '/' + callerEffort : ''}`
+    : '';
   const missingModelNote = (trulyInherited && !autofilled)
     ? 'agent-companion (SPAWNING RULE 1): this spawn names no model, and its definition' +
       (input.subagent_type ? ` ("${input.subagent_type}")` : '') +
-      ' states none either — it will inherit the lead\'s current model rather than a stated one. Every spawn ' +
-      'must name a definition that states BOTH model and effort; name a model at the spawn site or in the ' +
-      'agent definition\'s frontmatter.'
+      ` states ${bothInherited ? 'neither model nor effort' : 'none either'} — it will inherit the lead's ` +
+      `${bothInherited ? 'model AND effort' : 'current model'}` +
+      (leadLabel ? ` (${leadLabel} now)` : '') +
+      ' rather than stated ones. ' +
+      (!declaredType
+        ? 'Add a `TYPE: <task type>` line so the routing table sets them (on general-purpose the guard also ' +
+          'swaps in the ladder rung that pins effort), or'
+        : typeIsParity
+          ? `Add a \`WRITER: <model>/<effort>\` line so TYPE: ${declaredType} can be sized to its writer, or`
+          : `TYPE: ${declaredType} did not route it (not a known task type — see \`node scripts/recommend.mjs --list\` — ` +
+            'or fit_autofill is off); name a known type, or') +
+      ' spawn a ladder rung (agent-companion:ac-<model>-<effort>) or another definition that states BOTH model and effort.'
     : null;
+  const inheritModeRaw = String(opt('inherit_guard', 'warn')).toLowerCase();
+  const inheritMode = ['warn', 'block'].includes(inheritModeRaw) ? inheritModeRaw : 'warn';
+  const inheritBlock = inheritMode === 'block' && bothInherited
+    && (callerAlias === 'opus' || callerAlias === 'fable')
+    && !declaredType && !weightWasDeclared;
 
   // --- Build-version floor (SPAWNING RULE 2) -------------------------------
   // config/model-tiers.json's aliasResolution.minClaudeCodeVersion records the
@@ -789,8 +883,15 @@ try {
       : '';
   const gateMessage = [gate1WarnMsg, gate2Msg, gate3Msg, gate4Msg].filter(Boolean).join('\n\n');
 
+  // With no route, the plain grid is the yardstick only for a weight the
+  // brief itself declared. Never for a parity-sized TYPE whose only weight is
+  // a WARRANT's: a warrant never outranks a declared TYPE (see the weight
+  // parsing above), and a writer-less review judged against the grid row of
+  // its warrant's weight was DENIED with an empty route in the message
+  // ("TYPE: code-review" + "WARRANT: weight 4 — ..." on opus, 0.29.18).
+  const gridYardstick = declaredWeight !== null && !(typeIsParity && !weightLineExplicit);
   let fit = null;
-  if (fitOn && model && !autofilled) {
+  if (fitOn && model && !autofilled && (route || gridYardstick)) {
     try {
       fit = evaluateFit({
         model, effort: def?.effort || '', weight: declaredWeight,
@@ -800,9 +901,83 @@ try {
         // against it directly instead of recomputing an override-blind
         // default from the plain grid.
         expected: route,
+        // Reviewer parity: effort above the writer's is allowed (never
+        // "over"), below it is "under" with the parity reason.
+        parity: parityRoute,
       });
     } catch { /* table unreadable: the audit reports that separately */ }
   }
+
+  // --- Reviewer parity (TYPE: code-review + WRITER:) ----------------------
+  // Judged against the parity route (the writer's model and effort, after
+  // F4/F2/F1), NOTES ONLY in this release — a mis-read WRITER line must never
+  // block a review. The reviewer's effort is the one its definition states
+  // (effort is locked to frontmatter); a reviewer with none (general-purpose,
+  // Explore, Plan) runs at the session's effort, so parity cannot be verified
+  // and the note names the ladder rung that pins the parity pair instead.
+  const parityRung = parityRoute && route.effort ? rungFor(route.model, route.effort) : null;
+  const parityRungName = parityRung ? `agent-companion:${parityRung.agent}` : null;
+  const parityFloorsText = parityRoute && (route.floorsApplied || []).length
+    ? ` (the writer's ${writer.label}, after floor ${[...new Set(route.floorsApplied.map((f) => f.floor))].join('/')})`
+    : '';
+  const reviewerEffort = def?.effort || '';
+  const reviewerLabel = model ? `${classifyModel(model).alias || model}${reviewerEffort ? '/' + reviewerEffort : ''}` : '';
+  const instead = parityRungName ? `spawn ${parityRungName} (${routeLabel}) instead` : `re-spawn at ${routeLabel}`;
+  let parityNote = null;
+  let parityInheritedEffort = false;
+  if (parityRoute && fit && !autofilled) {
+    const head = `agent-companion (reviewer parity): ${input.subagent_type || 'this reviewer'} reviews at ${reviewerLabel}` +
+      ` for a writer at ${writer.label}${writer.agent ? ` ("${writer.agent}")` : ''}; the parity route is ${routeLabel}${parityFloorsText}.`;
+    if (fit.verdict === 'under') {
+      parityNote = `${head} It is BELOW its writer — ${fit.reason}. A reviewer below its writer waves through the ` +
+        `errors the writer would make; ${instead}. Not blocking.`;
+    } else if (fit.verdict === 'over') {
+      parityNote = `${head} Its model is ABOVE the writer's — parity says match the writer's model (effort may ` +
+        `exceed it); ${instead}. Not blocking${isPremiumForSpawn ? ', but a premium tier the route does not name counts toward the premium cap' : ''}.`;
+    } else if (fit.verdict === 'fit' && !reviewerEffort && modelTakesEffort) {
+      parityInheritedEffort = true;
+      parityNote = `${head} Its model matches, but it states no effort, so it runs at the session's effort ` +
+        `(${callerEffort || 'unreadable here'}) and parity with the writer's effort cannot be verified; ` +
+        `${parityRungName ? `spawn ${parityRungName} to pin ${routeLabel}` : `use a definition that pins ${routeLabel}`}.`;
+    }
+  }
+  // A declared WRITER line that could not be used. (A usable WRITER on a
+  // brief whose TYPE is not parity-sized is simply unused: nothing to size.)
+  const writerNote = writerProblem
+    ? `agent-companion: the WRITER line${writerRaw ? ` ("${writerRaw}")` : ''} was ignored — ${writerProblem}. Write it as \`WRITER: <model>/<effort>\` ` +
+      '(e.g. `WRITER: opus/xhigh`) or `WRITER: <agent-name>` (e.g. `WRITER: ac-opus-xhigh`).'
+    : null;
+  // TYPE: code-review (or any parity-sized type) with no usable writer: the
+  // table sizes a reviewer from its writer, so without one it cannot size
+  // this spawn at all. Said once here; the warrant soft note below reuses
+  // it instead of claiming no TYPE was declared.
+  const parityNoWriter = typeIsParity && !route && opt('fit_guard', true);
+  const parityNoWriterNote = parityNoWriter && !fit?.parityFloor
+    ? `agent-companion: TYPE: ${declaredType} is sized from its writer, and this brief names no usable writer, so ` +
+      'the routing table cannot size this reviewer. Add a line `WRITER: <model>/<effort>` (e.g. `WRITER: opus/xhigh`) ' +
+      'or `WRITER: <agent-name>` (e.g. `WRITER: ac-opus-xhigh`) naming the writer this review gates.'
+    : null;
+
+  // --- Was this spawn's model a routing choice? ----------------------------
+  // `routed` (spawns.jsonl) and the premium cap's exemptions share one
+  // answer. The model came from a routing choice when it is:
+  //   - the model a resolved route names (routeMatchesModel), or one the
+  //     guard filled in from it (autofilled; a ladder rewrite is one too);
+  //   - pinned by the definition that runs — a ladder rung (a rung IS a
+  //     routing choice, TYPE line or not) or a project/plugin agent — and
+  //     not overridden by a different model on the spawn call;
+  //   - a reviewer's model matching the WRITER it gates (reviewer parity).
+  // Anything else — a model inherited from the lead, or one set per-spawn on
+  // a built-in type with no route naming it — was nobody's routing choice.
+  // Fable is never routed, whatever pinned it: nothing routes to fable (the
+  // table's own rule; F2 sizes even a fable writer's reviewer to opus), so a
+  // fable spawn is always a warranted exception and always counted.
+  const finalAlias = model ? classifyModel(model).alias : '';
+  const defAlias = fromDef ? classifyModel(fromDef).alias : '';
+  const modelFromDefinition = !!defAlias && (!declared || classifyModel(declared).alias === defAlias);
+  const reviewerMatchesWriter = typeIsParity && !!writer && !!finalAlias && finalAlias === writer.model;
+  const routed = !!finalAlias && finalAlias !== 'fable'
+    && (autofilled || routeMatchesModel || modelFromDefinition || reviewerMatchesWriter);
   // F1 on a critical parity-sized spawn (see parityFloor above): under only.
   if (!fit && parityFloor && model && !autofilled) {
     try {
@@ -909,6 +1084,13 @@ try {
       route_profile_rev: route?.layer === 'profile' ? (route.profileRevision ?? null) : null, // routing-profile revision behind a profile answer; null for every other layer. The row's content is never logged.
       fit: autofilled ? 'fit' : fit ? fit.verdict : null, // over | under | fit | unknown, when a weight was declared
       fit_expected: routeLabel || (fit?.parityFloor ? parityFloorLabel : null),
+      // true when the model came from a routing choice (a matching route or
+      // autofill, a ladder rung or other definition pin, or a reviewer
+      // matching its WRITER); false when it was inherited or set per-spawn
+      // with no route naming it. scripts/detect.mjs counts `routed === false`
+      // premium rows; older rows carry no field at all.
+      routed,
+      declared_writer: writer ? writer.label : null, // the WRITER line, resolved to model/effort; null when absent or unusable
       // --- Memory nudge/brief observability -------------------------------
       // null across the board when the feature never ran for this spawn
       // (memory_search/memory_brief off, or mode "off") — distinct from
@@ -959,17 +1141,44 @@ try {
     );
   }
 
+  // --- Inherit guard, block mode (inherit_guard: "block") -----------------
+  // Before the early allow below, like Gate 1: an inherited spawn names no
+  // model, so it is never premium for this spawn and would otherwise pass.
+  if (inheritBlock) {
+    recordDenial('inherit', p, `${input.subagent_type || 'an agent'} would inherit model and effort from a ${callerAlias} lead; no TYPE or WEIGHT`);
+    const rewritable = !input.subagent_type || input.subagent_type === 'general-purpose';
+    const examples = commonTypeRoutes();
+    deny(
+      `Inherit guard: this spawn names no model, and its definition${input.subagent_type ? ` ("${input.subagent_type}")` : ''} ` +
+      `states neither model nor effort, so it would run on the lead's own ${leadLabel || callerAlias} — model AND effort ` +
+      'inherited, chosen by nobody. (inherit_guard is "block".)\n\n' +
+      'Add ONE of these:\n' +
+      '  - a line of its own in the brief:  TYPE: <task type>\n' +
+      `    The guard then sets the routed model${rewritable ? ' and swaps in the ladder rung that pins its effort' : ''}.` +
+      (examples ? ` Current routes: ${examples}.` : '') + ' Full list: `node scripts/recommend.mjs --list`.\n' +
+      '  - or spawn a ladder rung that pins both, e.g. subagent_type: "agent-companion:ac-opus-low".\n\n' +
+      'Set inherit_guard to "warn" to allow this shape with a note instead.'
+    );
+  }
+
   const who = input.subagent_type || 'an agent';
+  const routeBasis = parityRoute
+    ? `TYPE ${declaredType} sized to its writer ${writer.label}`
+    : `declared weight ${declaredWeight}`;
   let note = null;
   if (autofilled) {
-    note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for declared weight ${declaredWeight} (${routeLabel})${routeLayerNote}.` +
+    note = `agent-companion: spawn of ${who} named no model; set model=${model} from the routing table for ${routeBasis} (${routeLabel})${routeLayerNote}.` +
       (ladderRewrite
         ? ` Rewrote subagent_type ${ladderRewrite.from ? `"${ladderRewrite.from}"` : '(none)'} -> "${ladderRewrite.to}" so effort ${route.effort} is pinned too (that form of the ladder has already started in this session, so the harness registered it).`
         : '');
     if (autofillAdvisory) note = `${note}\n\n${autofillAdvisory}`;
   } else if (fit?.parityFloor) {
     note = `agent-companion: spawning ${who} at ${model}${def?.effort ? '/' + def.effort : ''} for a critical ${declaredType} is under-provisioned — ${fit.reason}. ` +
-      `F1: a critical review is never sized below ${parityFloorLabel}, whatever its writer (no writer is declared, so parity with it is not checked here). ${fit.action}.`;
+      `F1: a critical review is never sized below ${parityFloorLabel}, whatever its writer (no writer is declared, so parity with it is not checked here — add \`WRITER: <model>/<effort>\` to check it). ${fit.action}.`;
+  } else if (parityRoute) {
+    // Reviewer parity speaks for itself (see "Reviewer parity" above); null
+    // when the reviewer matches its writer.
+    note = parityNote;
   } else if (fit?.verdict === 'under') {
     // The cheap direction is never blocked, but a weight-4 task on haiku is
     // the failure that ships wrong code, so it is said out loud.
@@ -983,6 +1192,21 @@ try {
   // runs once we are already past the point where isPremiumForSpawn is
   // known true — see the warrant section).
   let warrantSoftNote = null;
+  // Every note this spawn carries, in order. The parity notes stand in for
+  // the generic ones they would repeat: the inherited-effort parity note for
+  // the rule-1 no-effort note, and the missing-model note or the writer-less
+  // warrant note (each already asks for the WRITER line) for the writer-less
+  // parity note.
+  const notes = () => combineNotes(
+    note,
+    (missingModelNote || (parityNoWriter && warrantSoftNote)) ? null : parityNoWriterNote,
+    writerNote,
+    gateMessage,
+    missingModelNote,
+    parityInheritedEffort ? null : noEffortStatedNote,
+    buildFloorNote,
+    warrantSoftNote,
+  );
 
   if (!isPremiumForSpawn) {
     // HELD DECISION (ADR 0003 open question 8, 2026-09-24): counting a
@@ -993,15 +1217,21 @@ try {
     // rolling 10 min), so it would throttle nearly every spawn; that effect
     // needs the operator's explicit call. Until then a spawn whose route
     // names its model skips the cap, as before slice 1b.
+    // Trial v3 (2026-09-27) makes it UNSAFE, not just costly: every listed
+    // task type now routes to opus, so counting routed opus would cap nearly
+    // all correctly routed work at 2 per 10 minutes, machine-wide. Keep held.
     await notePending();
-    allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
+    allowWith(notes(), withAdditions(updatedInput));
   }
 
   // --- Best fit, premium: deny ------------------------------------------
   // A premium tier for a declared weight the table sends elsewhere is the
   // over-provisioning this plugin exists to stop, stated by the spawner
-  // itself. Deny with the exact correction rather than a nudge.
-  if (fit?.verdict === 'over') {
+  // itself. Deny with the exact correction rather than a nudge. Never on a
+  // parity route: reviewer parity is a note in this release (a mis-read
+  // WRITER line must not block a review), so a reviewer above its writer is
+  // said out loud by the parity note instead.
+  if (fit?.verdict === 'over' && !parityRoute) {
     recordDenial('fit', p, `${model} requested for declared weight ${declaredWeight}; table says ${routeLabel}`);
     deny(
       `Best fit: this spawn requests "${model}" but declares weight ${declaredWeight}` +
@@ -1027,9 +1257,11 @@ try {
   // missing warrant still blocks. An unknown/unrecognised route is the
   // case the fix's own instruction calls out: warn, don't block, since
   // nothing here can confirm the premium tier either way.
+  // A parity route is "known" but never denies here either (see the fit deny
+  // above): a premium reviewer its route does not name gets the soft note.
   if (opt('warrant_required', true)) {
     if (!warrantDeclared) {
-      if (spawnAlias === 'fable' || routingKnown) {
+      if (spawnAlias === 'fable' || (routingKnown && !parityRoute)) {
         recordDenial('warrant', p, `premium tier ${model} requested with no warrant`);
         deny(
           (autofilled
@@ -1042,14 +1274,32 @@ try {
           `and audited, so a weak one is worse than a downgrade.`
         );
       } else {
-        // Routing can't be inferred at all (no TYPE, no WEIGHT anywhere) —
-        // warn rather than block: a false block here stops legitimate work
-        // the guard has no basis to judge either direction.
-        warrantSoftNote = `agent-companion: this spawn resolves to ${model}, a premium tier, with no WARRANT line — ` +
-          'and no TYPE or WEIGHT is declared either, so the routing table has nothing to check it against. Not ' +
-          'blocking: this guard cannot confirm the tier is unwarranted, only that it cannot confirm it IS ' +
-          'warranted. Add a TYPE (or WEIGHT) line so the guard can judge fit, or add ' +
-          '"WARRANT: weight <1-5> — <why a cheaper tier cannot do this>" to state it explicitly.';
+        // Routing can't be inferred (no TYPE or WEIGHT; a TYPE that routes
+        // nothing; a parity-sized TYPE with no writer), or it is reviewer
+        // parity, which is judged in notes only — warn rather than block: a
+        // false block here stops legitimate work the guard has no basis to
+        // judge either direction. Each case says what it actually lacks.
+        const warrantLine = '"WARRANT: weight <1-5> — <why a cheaper tier cannot do this>"';
+        warrantSoftNote = parityRoute
+          ? `agent-companion: this reviewer runs on ${model}, a premium tier its parity route (${routeLabel}) does ` +
+            `not name, with no WARRANT line. Not blocking — reviewer parity is judged in notes only; add ${warrantLine} ` +
+            'if the tier is deliberate.'
+          : parityNoWriter
+            ? `agent-companion: this spawn resolves to ${model}, a premium tier, with no WARRANT line — and ` +
+              `TYPE: ${declaredType} is sized from its writer, which this brief does not name, so the routing table ` +
+              'cannot size it. Not blocking. Add `WRITER: <model>/<effort>` (e.g. `WRITER: opus/xhigh`) or ' +
+              '`WRITER: <agent-name>` (e.g. `WRITER: ac-opus-xhigh`): a reviewer on its writer\'s model needs no ' +
+              `WARRANT. Or add ${warrantLine}.`
+            : declaredType
+              ? `agent-companion: this spawn resolves to ${model}, a premium tier, with no WARRANT line — and ` +
+                `TYPE: ${declaredType} did not resolve a route (not a task type the table knows — see ` +
+                '`node scripts/recommend.mjs --list` — or fit_guard is off), so the routing table has nothing to ' +
+                `check it against. Not blocking. Name a known TYPE so the guard can judge fit, or add ${warrantLine}.`
+              : `agent-companion: this spawn resolves to ${model}, a premium tier, with no WARRANT line — ` +
+                'and no TYPE or WEIGHT is declared either, so the routing table has nothing to check it against. Not ' +
+                'blocking: this guard cannot confirm the tier is unwarranted, only that it cannot confirm it IS ' +
+                'warranted. Add a TYPE (or WEIGHT) line so the guard can judge fit, or add ' +
+                `${warrantLine} to state it explicitly.`;
       }
     }
   }
@@ -1059,7 +1309,16 @@ try {
   // premium tier its route does not name). Counting route-exempt premium
   // spawns too (open question 8) is a HELD decision — see the early allow
   // above. `routeExempt` stays so that version is a one-line change.
-  await enforcePremiumCap(false);
+  //
+  // Not counted either: an opus spawn whose model was still a deliberate
+  // routing choice with no route to match it — a ladder rung (with or
+  // without a TYPE line), a project or plugin agent whose definition pins
+  // opus, or a reviewer on its WRITER's model. Counted: fable always, and
+  // opus that nobody routed — set per-spawn on a built-in type with no TYPE
+  // or WEIGHT, or with a TYPE that routes nothing. (An inherited model is
+  // unknown here, so it is never counted: see inherit_guard.)
+  const capExempt = spawnAlias === 'opus' && (modelFromDefinition || reviewerMatchesWriter);
+  if (!capExempt) await enforcePremiumCap(false);
   async function enforcePremiumCap(routeExempt) {
     if (!opt('premium_cap', true)) return;
     // Loaded here, not at the top: only a premium spawn reaches the cap, and
@@ -1096,12 +1355,35 @@ try {
 
     if (counted !== null) {
       recordDenial('premium-cap', p, `${counted} premium agents in window, cap ${cap}`);
+      // What would have kept this spawn out of the count, for its own shape.
+      // The routes are read from the table at deny time, so the advice
+      // follows the table instead of naming a tier it no longer routes to.
+      const wait = 'or wait for the in-flight premium agents to finish.';
+      let how;
+      if (spawnAlias === 'fable') {
+        how = 'Fable is never a routing destination, so no TYPE or rung can stand in for it: wait for the in-flight ' +
+          'premium agents to finish, or raise premium_max_concurrent if a batch of warranted fable work genuinely needs it.';
+      } else if (parityNoWriter) {
+        how = `TYPE: ${declaredType} is sized from its writer, and this brief names none. Add \`WRITER: <model>/<effort>\` ` +
+          '(e.g. `WRITER: opus/xhigh`) or `WRITER: <agent-name>`: a reviewer on its writer\'s model is not counted — ' + wait;
+      } else if (parityRoute) {
+        how = `This reviewer's ${spawnAlias || model} is not the model its WRITER sizes it to (${routeLabel}). Spawn ` +
+          `${parityRungName || `the ladder rung for ${routeLabel}`}, which is not counted — ${wait}`;
+      } else {
+        const examples = commonTypeRoutes();
+        how = 'Route it — a routed spawn is not counted:\n' +
+          '  - declare the task type on a line of its own, `TYPE: <task type>`' +
+          (examples ? `; current routes: ${examples}` : '') + ' (full list: `node scripts/recommend.mjs --list`);\n' +
+          '  - or spawn the matching ladder rung by name (e.g. agent-companion:ac-opus-medium), which pins model and ' +
+          'effort together;\n' +
+          `  - ${wait}`;
+      }
       deny(
         `Premium fan-out cap: ${counted} premium-tier agents already started in the last ` +
         `${PREMIUM_WINDOW_MS / 60000} minutes and the cap is ${cap}.\n\n` +
         `This is the exact shape of the four-Fable incident: each spawn looked reasonable ` +
-        `alone, and nothing was counting them together. Run this one at sonnet, or wait for ` +
-        `the in-flight premium agents to finish.\n\n` +
+        `alone, and nothing was counting them together.\n\n` +
+        `${how}\n\n` +
         (routeExempt
           ? `(This spawn's own route names ${spawnAlias || model}, which exempts it from the WARRANT but not ` +
             `from this cap: the cap counts every premium-tier spawn by its tier, regardless of route.)\n\n`
@@ -1113,7 +1395,7 @@ try {
   }
 
   await notePending();
-  allowWith(combineNotes(note, gateMessage, missingModelNote, noEffortStatedNote, buildFloorNote, warrantSoftNote), withAdditions(updatedInput));
+  allowWith(notes(), withAdditions(updatedInput));
 
   // An allowed spawn joins the session's pending list (lib/ladder-rewrite.mjs)
   // once the session is armed: by this spawn if it is a rewrite or a ladder

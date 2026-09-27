@@ -45,6 +45,10 @@ defaults are the recommended ones. Two are worth a conscious decision:
   only if an Agent Audit ingest exists to receive it; the token goes in the
   `AGENT_AUDIT_TOKEN` environment variable, never in plugin config.
 - `premium_max_concurrent` — the Fable/Opus instance cap. Default 2.
+- `inherit_guard` — `"warn"` (default) or `"block"`. Block denies a spawn
+  that would inherit BOTH model and effort from an opus or fable lead with no
+  `TYPE:` or `WEIGHT:` line (un-TYPEd Explore/Plan spawns included); the deny
+  says what to add.
 - `capacity_probe` — a session-start line estimating how many concurrent Claude Code SESSIONS (not individual subagents/teammates, which run in-process) THIS machine can carry, from free memory and cpu count, with a policy of idle-teammates-ok or stop-between-rounds. Useful alongside `premium_max_concurrent` when sizing fan-out width: `node scripts/capacity.mjs --text`.
 - `publication_leak_sweep` — EMPTY/OFF BY DEFAULT (fully disabled, silent,
   zero git/API activity). The master switch for the daily scout's

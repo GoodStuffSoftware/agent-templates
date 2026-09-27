@@ -1,5 +1,7 @@
 // Brief directives: the "LABEL: value" lines a spawn brief declares
-// (TYPE, WEIGHT, KIND, CONSEQUENCE, WARRANT, EFFORT), read by the spawn guard.
+// (TYPE, WEIGHT, KIND, CONSEQUENCE, WARRANT, WRITER, EFFORT), read by the spawn
+// guard. WRITER names the writer a review brief gates (`WRITER: opus/xhigh` or
+// `WRITER: <agent-name>`), so a parity-sized review can be sized at spawn time.
 //
 // Two rules (release-candidate review of 0.29.0, lead decision R1):
 //   1. A line inside a fenced code block (``` or ~~~), an indented code
@@ -40,7 +42,7 @@
 // caller's regex source, applied to what follows the colon exactly as the
 // single-regex form did before.
 
-export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'EFFORT'];
+export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'WRITER', 'EFFORT'];
 
 const BOLD = '(?:\\*\\*|__)?';
 const LINE = new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?${BOLD}(${DIRECTIVE_LABELS.join('|')})${BOLD}[ \\t]*:(.*)$`, 'i');
