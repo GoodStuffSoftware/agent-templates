@@ -2118,49 +2118,81 @@ export function agentDefinition(type, cwd) {
 // The writer a review brief names on its `WRITER:` line (hooks/spawn-guard.mjs,
 // lib/brief-directives.mjs), resolved to the (model, effort) resolveRoute()
 // needs to size a parity-sized review (reviewer parity: F3, then F4/F2/F1).
-// Two forms:
-//   - `<model>/<effort>` (`opus/xhigh`, `sonnet/high`): read from the tier
-//     table. A bare model id (`haiku`, `opus`, `claude-opus-...`) is accepted
-//     with no effort, so only the model half of parity can be checked.
-//   - `<agent-name>` (`ac-opus-xhigh`, `agent-companion:ac-opus-xhigh`, a
-//     project or user agent): resolved through agentDefinition() to its
-//     frontmatter model and effort, where the harness itself reads them.
-// An agent name wins over a bare model id of the same spelling. Returns
-// { ok: true, model (tier alias), effort ('' when none is stated), label,
-// via: 'tier' | 'agent', agent } or { ok: false, reason }. Never throws.
+// `value` is the rest of the line; markdown emphasis and backticks are
+// dropped, and it is read as tokens split on whitespace, "/" and "@".
+// Two forms, tried in this order:
+//   - a model, then an optional effort: `opus/xhigh`, `opus xhigh`,
+//     `opus at xhigh`, `Opus 5.5 xhigh`, `claude-opus-5-5/xhigh`, `opus`.
+//     The model token must BE a tier alias (any case), optionally with a
+//     "claude-" prefix and numeric version parts (`opus-5.5`,
+//     `claude-opus-5-5`) — never a word that merely contains one
+//     (`my-opus-helper` is an agent name, not opus). A leading "Claude",
+//     version numbers ("5.5") and the fillers "at", "on", "with" and
+//     "effort" are skipped; the next token must then be an exact effort
+//     level. Any other word there is reported (effortIssue 'not-understood',
+//     effortToken) and the writer is used on its model alone.
+//   - an agent name (`ac-opus-xhigh`, `agent-companion:ac-opus-xhigh`, a
+//     project or user agent), when the first token is not a model: resolved
+//     through agentDefinition() to its frontmatter model and effort, where
+//     the harness itself reads them. An effort level after the name counts
+//     only when the definition states none (`my-agent/high`).
+// A token that is both (an agent file named `opus.md`) reads as the model.
+// Returns { ok: true, model (tier alias), effort ('' when none is known),
+// label, via: 'tier' | 'agent', agent, effortIssue, effortToken } or
+// { ok: false, reason }. effortIssue is null, 'not-understood' (a word where
+// the effort goes is not an effort level), 'none' (no effort named, on a
+// model that takes one) or 'agent-none' (the agent's definition states none).
+// Never throws.
+const WRITER_FILLERS = new Set(['at', 'on', 'with', 'effort']);
 export function writerFromDeclaration(value, cwd) {
-  const raw = String(value || '').trim();
   try {
-    if (!raw) return { ok: false, reason: 'the WRITER line names nothing' };
-    const slash = raw.indexOf('/');
-    if (slash >= 0) {
-      const m = raw.slice(0, slash);
-      const e = raw.slice(slash + 1).toLowerCase();
-      const cls = classifyModel(m);
-      if (!m || !cls.known) return { ok: false, reason: `"${m}" is not a model in the tier table` };
-      const ce = classifyEffort(e);
-      if (!ce.known) {
-        return { ok: false, reason: `"${e}" is not an effort level (${Object.keys(modelTiers().efforts || {}).join(', ')})` };
-      }
-      return { ok: true, model: cls.alias, effort: ce.level, label: routeLabelOf(cls.alias, ce.level), via: 'tier', agent: null };
+    const tokens = String(value || '')
+      .replace(/[`*]/g, ' ').replace(/__/g, ' ')
+      .split(/[\s/@]+/)
+      .map((t) => t.replace(/^[("'[]+/, '').replace(/[)"'\].,;:!?]+$/, ''))
+      .filter(Boolean);
+    if (!tokens.length) return { ok: false, reason: 'the WRITER line names nothing' };
+    const cfg = modelTiers();
+    const aliases = Object.keys(cfg.tiers || {});
+    const takesEffort = (alias) => ((cfg.tiers || {})[alias]?.efforts || []).length > 0;
+    // A tier alias, alone or with a "claude-" prefix and numeric version parts.
+    const modelToken = (tok) => {
+      const parts = tok.toLowerCase().split('-');
+      if (parts[0] === 'claude') parts.shift();
+      const words = parts.filter((x) => !/^\d+(?:\.\d+)*$/.test(x));
+      return words.length === 1 && aliases.includes(words[0]) ? words[0] : null;
+    };
+    const ok = (model, effort, via, agent, effortIssue = null, effortToken = null) => ({
+      ok: true, model, effort, label: routeLabelOf(model, effort), via, agent, effortIssue, effortToken,
+    });
+
+    const start = tokens[0].toLowerCase() === 'claude' && tokens.length > 1 ? 1 : 0;
+    const model = modelToken(tokens[start]);
+    if (model) {
+      let j = start + 1;
+      while (j < tokens.length && (/^v?\d+(?:\.\d+)*$/i.test(tokens[j]) || WRITER_FILLERS.has(tokens[j].toLowerCase()))) j += 1;
+      if (j >= tokens.length) return ok(model, '', 'tier', null, takesEffort(model) ? 'none' : null);
+      const ce = classifyEffort(tokens[j]);
+      if (ce.known) return ok(model, ce.level, 'tier', null);
+      return ok(model, '', 'tier', null, 'not-understood', tokens[j].slice(0, 40));
     }
-    const d = agentDefinition(raw, cwd);
+
+    const name = tokens[0];
+    const d = agentDefinition(name, cwd);
     if (d) {
-      if (!d.model) return { ok: false, reason: `agent "${raw}" states no model in its definition, so its tier follows its lead and cannot be read` };
+      if (!d.model) return { ok: false, reason: `agent "${name}" states no model in its definition, so its tier follows its lead and cannot be read` };
       const cls = classifyModel(d.model);
-      if (!cls.known) return { ok: false, reason: `agent "${raw}" pins model "${d.model}", which is not in the tier table` };
-      const ce = d.effort ? classifyEffort(d.effort) : null;
-      const effort = ce && ce.known ? ce.level : '';
-      return { ok: true, model: cls.alias, effort, label: routeLabelOf(cls.alias, effort), via: 'agent', agent: raw };
+      if (!cls.known) return { ok: false, reason: `agent "${name}" pins model "${d.model}", which is not in the tier table` };
+      const own = d.effort ? classifyEffort(d.effort) : null;
+      if (own && own.known) return ok(cls.alias, own.level, 'agent', name);
+      const given = tokens[1] ? classifyEffort(tokens[1]) : null;
+      if (given && given.known) return ok(cls.alias, given.level, 'agent', name);
+      return ok(cls.alias, '', 'agent', name, takesEffort(cls.alias) ? 'agent-none' : null);
     }
-    // A bare model id: the alias itself, or a full claude-* id. Anything else
-    // that merely CONTAINS a tier's name ("my-opus-helper") is an agent name
-    // that was not found, not a model.
-    const cls = classifyModel(raw);
-    if (cls.known && (raw.toLowerCase() === cls.alias || /^claude-/i.test(raw))) {
-      return { ok: true, model: cls.alias, effort: '', label: cls.alias, via: 'tier', agent: null };
-    }
-    return { ok: false, reason: `"${raw}" is neither <model>/<effort> nor an agent definition found from this project` };
+    return {
+      ok: false,
+      reason: `"${name.slice(0, 60)}" is neither a model in the tier table (${aliases.join(', ')}) nor an agent definition found from this project`,
+    };
   } catch {
     return { ok: false, reason: 'the tier table could not be read' };
   }
@@ -2303,6 +2335,7 @@ export function evaluateFit({ model, effort = '', weight, kind = 'bounded', cons
   if (!eff) effortNote = 'no effort given';
   else if (!sup.ok) effortNote = sup.reason;
   else if (exp.effort) effortDelta = classifyEffort(eff).rank - classifyEffort(exp.effort).rank;
+  else if (effortSupported(exp.model, 'high').ok) effortNote = `${exp.model} is expected with no effort named (e.g. a writer given without one); effort is not compared`;
   else effortNote = `${exp.model} takes no effort parameter; effort is not comparable`;
 
   const expLabel = `${exp.model}${exp.effort ? '/' + exp.effort : ''}`;
@@ -2317,7 +2350,7 @@ export function evaluateFit({ model, effort = '', weight, kind = 'bounded', cons
   } else if (effortDelta !== null && effortDelta < 0) {
     verdict = 'under';
     reason = parity
-      ? `reviewer effort ${eff} is below the writer's ${exp.effort}; a reviewer may exceed but must not drop`
+      ? `reviewer effort ${eff} is below the parity route's ${exp.effort}; a reviewer may exceed the route's effort but must not drop below it`
       : `right tier; effort ${eff} is below ${exp.effort}`;
   } else if (effortDelta !== null && effortDelta > 1 && !parity) {
     verdict = 'over'; reason = `right tier; effort ${eff} is ${effortDelta} steps above ${exp.effort}`;
