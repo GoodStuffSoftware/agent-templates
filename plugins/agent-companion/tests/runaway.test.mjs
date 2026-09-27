@@ -1,15 +1,17 @@
 // Runaway-spawn flag: hooks/runaway-check.mjs (SubagentStop) measures the
 // finished subagent's transcript, logs runaway.jsonl and queues a notice;
-// hooks/runaway-notice.mjs (UserPromptSubmit) and the main-thread delegation
-// guard (PreToolUse) drain it into the lead's context exactly once.
+// hooks/runaway-notice.mjs (UserPromptSubmit, PostToolUse ^Agent$, lead
+// payloads only) drains it into the lead's context exactly once.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook, readJsonl } from './helpers.mjs';
-import { telemetryDir } from '../hooks/lib/context.mjs';
-import { measureTranscript } from '../hooks/lib/runaway.mjs';
+import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { telemetryDir, stateDir } from '../hooks/lib/context.mjs';
+import {
+  measureTranscript, derivedAgentTranscript, resolveAgentTranscript, pruneRunawayState,
+} from '../hooks/lib/runaway.mjs';
 
 // n requests, each written as two assistant lines sharing a requestId (the
 // streaming shape), output growing on the second line.
@@ -65,6 +67,7 @@ test('over the turn threshold: one runaway.jsonl row, one notice, drained once',
     const ctx = first.json?.hookSpecificOutput?.additionalContext || '';
     assert.match(ctx, /runaway spawn: ac-opus-medium/);
     assert.match(ctx, /5 turns > 3/);
+    assert.equal(first.json.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
     const second = runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 'sess-rw', prompt: 'hi' });
     assert.equal(second.stdout.trim(), '', 'exactly once');
   } finally { fx.cleanup(); }
@@ -93,18 +96,77 @@ test('dollar threshold alone flags; transcript path falls back to subagent-start
   } finally { fx.cleanup(); }
 });
 
-test('the main-thread delegation guard carries a queued notice; a subagent tool call does not drain it', () => {
+// Payload shapes as the harness sends them (field sets checked against real
+// hook input: the main thread carries no agent_id and no agent_type; a hook
+// firing inside a subagent carries both).
+const leadPost = (sid) => ({
+  session_id: sid, transcript_path: 'x/lead.jsonl', cwd: 'x', permission_mode: 'default',
+  hook_event_name: 'PostToolUse', tool_name: 'Agent', tool_use_id: 'toolu_1',
+  tool_input: { description: 'd', prompt: 'p', subagent_type: 'general-purpose' }, tool_response: { status: 'completed' },
+});
+
+test('PostToolUse on Agent drains for the lead only, once; a subagent-side payload never drains', () => {
   const fx = makeFixture();
   try {
-    stop({ agent_id: 'agent-dg', agent_transcript_path: writeTranscript(fx.dir, 5) }, { CLAUDE_PLUGIN_OPTION_RUNAWAY_TURNS: '3' });
-    const sub = runHook('hooks/delegation-guard.mjs', { session_id: 'sess-rw', agent_type: 'general-purpose', agent_id: 'x', tool_name: 'Read' });
-    assert.equal(sub.stdout.trim(), '');
-    const lead = runHook('hooks/delegation-guard.mjs', { session_id: 'sess-rw', agent_type: 'main', tool_name: 'Read' });
+    stop({ agent_id: 'agent-post', agent_transcript_path: writeTranscript(fx.dir, 5) }, { CLAUDE_PLUGIN_OPTION_RUNAWAY_TURNS: '3' });
+    const sub = runHook('hooks/runaway-notice.mjs', { ...leadPost('sess-rw'), agent_id: 'a1b2c3', agent_type: 'general-purpose' });
+    assert.equal(sub.stdout.trim(), '', 'inside a subagent: no drain');
+    const lead = runHook('hooks/runaway-notice.mjs', leadPost('sess-rw'));
     const o = lead.json?.hookSpecificOutput || {};
-    assert.equal(o.permissionDecision, 'allow');
-    assert.match(o.additionalContext || '', /runaway spawn/);
-    const again = runHook('hooks/delegation-guard.mjs', { session_id: 'sess-rw', agent_type: 'main', tool_name: 'Read' });
-    assert.equal(again.json?.hookSpecificOutput?.additionalContext, undefined);
+    assert.equal(o.hookEventName, 'PostToolUse');
+    assert.match(o.additionalContext || '', /runaway spawn: ac-opus-medium/);
+    assert.equal(runHook('hooks/runaway-notice.mjs', leadPost('sess-rw')).stdout.trim(), '', 'exactly once');
+    assert.equal(runHook('hooks/runaway-notice.mjs', { ...leadPost('sess-rw'), hook_event_name: 'Stop' }).stdout.trim(), '');
+  } finally { fx.cleanup(); }
+});
+
+test('hooks.json registers the drainer on UserPromptSubmit and PostToolUse ^Agent$, and the check on SubagentStop', () => {
+  const h = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
+  const has = (ev, file, matcher) => (h[ev] || []).some((g) => (matcher === undefined || g.matcher === matcher)
+    && g.hooks.some((x) => x.args.some((a) => a.endsWith(file))));
+  assert.ok(has('UserPromptSubmit', 'runaway-notice.mjs'));
+  assert.ok(has('PostToolUse', 'runaway-notice.mjs', '^Agent$'));
+  assert.ok(has('SubagentStop', 'runaway-check.mjs'));
+});
+
+test('transcript path derived from the lead transcript_path: <dir>/<session>/subagents/agent-<id>.jsonl', () => {
+  const fx = makeFixture();
+  try {
+    const proj = join(fx.dir, 'projects', 'proj-x');
+    const sub = join(proj, 'sess-der', 'subagents');
+    mkdirSync(sub, { recursive: true });
+    const real = writeTranscript(fx.dir, 5);
+    writeFileSync(join(sub, 'agent-agent-first-id.jsonl'), readFileSync(real));
+    const lead = join(proj, 'sess-der.jsonl');
+    writeFileSync(lead, '');
+    assert.equal(derivedAgentTranscript(lead, 'sess-der', 'agent-first-id'), join(sub, 'agent-agent-first-id.jsonl'));
+    assert.equal(derivedAgentTranscript(lead, 'sess-der', '../x'), null, 'ids are never path fragments');
+    // SubagentStop payload with no agent_transcript_path: derived from transcript_path.
+    runHook('hooks/runaway-check.mjs', { hook_event_name: 'SubagentStop', session_id: 'sess-der', transcript_path: lead, agent_id: 'agent-first-id', agent_type: 'Explore' },
+      { env: { CLAUDE_PLUGIN_OPTION_RUNAWAY_TURNS: '3' } });
+    assert.equal(readJsonl(join(telemetryDir(), 'runaway.jsonl')).length, 1);
+    // Starts-log fallback: the row's own transcript_path, agent_transcript_path null (the real shape).
+    writeFileSync(join(sub, 'agent-agent-second-id.jsonl'), readFileSync(real));
+    writeFileSync(join(telemetryDir(), 'subagent-starts.jsonl'), JSON.stringify({ session_id: 'sess-der', agent_id: 'agent-second-id', transcript_path: lead, agent_transcript_path: null }) + '\n');
+    assert.equal(resolveAgentTranscript({ agent_id: 'agent-second-id' }), join(sub, 'agent-agent-second-id.jsonl'));
+  } finally { fx.cleanup(); }
+});
+
+test('no session_id: logged, never queued under a shared name; old queue/marker state is pruned', () => {
+  const fx = makeFixture();
+  try {
+    runHook('hooks/runaway-check.mjs', { hook_event_name: 'SubagentStop', agent_id: 'agent-nosid', agent_transcript_path: writeTranscript(fx.dir, 5) },
+      { env: { CLAUDE_PLUGIN_OPTION_RUNAWAY_TURNS: '3' } });
+    assert.equal(readJsonl(join(telemetryDir(), 'runaway.jsonl')).length, 1);
+    assert.equal(existsSync(join(stateDir(), 'runaway-queue', 'unknown.jsonl')), false);
+    const q = join(stateDir(), 'runaway-queue');
+    mkdirSync(q, { recursive: true });
+    const stale = join(q, 'old.jsonl.123.draining');
+    writeFileSync(stale, '{}\n');
+    const old = new Date(Date.now() - 8 * 86400000);
+    utimesSync(stale, old, old);
+    pruneRunawayState();
+    assert.equal(existsSync(stale), false);
   } finally { fx.cleanup(); }
 });
 

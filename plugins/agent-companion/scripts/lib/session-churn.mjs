@@ -36,11 +36,12 @@ export const RUN_LENGTH = 3;
 
 // Precision over recall: each pattern is something a person types when the
 // agent did the wrong thing, and rarely otherwise. A plain "no" is only
-// counted as the FIRST word followed by punctuation ("no, ..." / "no.").
+// counted as the FIRST word followed by punctuation ("no, ..." / "no."), and
+// not when an approval follows it ("no, that's fine", "nope, all good").
 // Prompts over MAX_CORRECTION_CHARS are skipped — long pastes are specs and
 // logs, not corrections.
 export const CORRECTION_PATTERNS = [
-  /^\s*(?:no|nope)\s*[,.!]/i,
+  /^\s*(?:no|nope)\s*[,.!](?!\s*(?:that(?:'s| is) )?(?:fine|ok|okay|good|all good|go ahead|ship)\b)/i,
   /\bthat(?:'s| is) (?:not what i (?:asked|meant|said|wanted)|wrong)\b/i,
   /\bi (?:already )?(?:told|asked) you\b/i,
   /\byou (?:ignored|missed|forgot|didn'?t (?:read|follow|listen))\b/i,
@@ -57,6 +58,24 @@ export const MAX_CORRECTION_CHARS = 1500;
 // re-reviewed; an effort flipped mid-session is a sizing decision made late).
 export const CHURN_THRESHOLDS = { effort_switches: 3, tool_error_runs: 2, corrections: 3, review_rounds: 4 };
 export const CHURN_MIN_SESSION_DAYS = 2;
+// session-churn.jsonl older than this is reported as stale by the scout,
+// never read as "no churn" (the daily scout routine refreshes it).
+export const CHURN_STALE_MS = 2 * 86400000;
+
+const HARVEST = 'transcript-harvest.mjs --churn';
+
+// { stale, detail } for the scout, from the file's last write (mtimeMs, null
+// when it does not exist) against CHURN_STALE_MS. The write time, not the
+// newest row: a run over a quiet week writes the file with no fresh rows and
+// is still a fresh run.
+export function churnFreshness(mtimeMs, { now = new Date() } = {}) {
+  if (mtimeMs == null) return { stale: true, detail: `session-churn.jsonl has never been written, so session_churn cannot fire until ${HARVEST} runs (a daily scout step)` };
+  const age = now.getTime() - mtimeMs;
+  if (age > CHURN_STALE_MS) {
+    return { stale: true, detail: `session-churn.jsonl is stale: last written ${(age / 86400000).toFixed(1)} days ago, so session_churn is reading old data; the daily scout's ${HARVEST} step has not run` };
+  }
+  return { stale: false, detail: '' };
+}
 
 export function isCorrection(text) {
   const t = String(text || '');
@@ -153,9 +172,22 @@ export async function scanChurn({
 } = {}) {
   const sinceMs = now - days * 86400000;
   const started = Date.now();
-  const { files, truncated: capped } = discoverTranscripts(root, {
-    sinceMs, maxFiles, maxBytes, main: true, subagents: false, workflows: false, meta: false,
+  // Discover with no cap (a stat per file only), then keep the NEWEST files
+  // first: discoverTranscripts caps in directory order, which would always
+  // drop the alphabetically last projects, not the oldest sessions.
+  const { files: found } = discoverTranscripts(root, {
+    sinceMs, main: true, subagents: false, workflows: false, meta: false,
   });
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const files = [];
+  let bytes = 0;
+  for (const f of found) {
+    if (files.length >= maxFiles || bytes + f.size > maxBytes) continue;
+    bytes += f.size;
+    files.push(f);
+  }
+  const dropped = found.length - files.length;
+  const capped = dropped > 0;
   const byKey = new Map();
   let timedOut = false;
   let scanned = 0;
@@ -183,7 +215,10 @@ export async function scanChurn({
   }
   return {
     rows: [...byKey.values()].filter((r) => r.day >= sinceDay),
-    stats: { files: files.length, scanned, truncated: capped || timedOut, timedOut },
+    stats: {
+      found: found.length, files: files.length, dropped, scanned,
+      unscanned: files.length - scanned, truncated: capped || timedOut, timedOut,
+    },
   };
 }
 

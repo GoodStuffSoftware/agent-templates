@@ -3,36 +3,25 @@
 // A subagent that ran past `runaway_turns` API turns (default 300) or
 // `runaway_usd` price-derived dollars (default 40; either <= 0 turns that half
 // off) gets (a) one row in runaway.jsonl beside spawns.jsonl, and (b) a
-// one-line notice QUEUED for the lead session, which a lead-side hook drains
-// into the lead's context on its next prompt or main-thread tool call. See
-// lib/runaway.mjs for why the notice is not emitted from this event, and for
-// the bounded read (tail window, assistant lines only) that keeps this hook
-// cheap on every subagent end.
+// one-line notice QUEUED for the lead session, which hooks/runaway-notice.mjs
+// drains into the lead's context on its next prompt (a background worker's
+// task notification included) or right after a foreground Agent call
+// returns. See lib/runaway.mjs for why the notice is not emitted from this
+// event, and for the bounded read (tail window, assistant lines only) that
+// keeps this hook cheap on every subagent end.
 //
-// The transcript path comes from the payload's agent_transcript_path, or —
-// when a harness build leaves it out — from this agent_id's own SubagentStart
-// row in subagent-starts.jsonl (hooks/spawn-log.mjs records it there).
+// Transcript path, first found wins (lib/runaway.mjs resolveAgentTranscript):
+// the payload's agent_transcript_path; the path derived from the lead's
+// transcript_path, <dir>/<session_id>/subagents/agent-<agent_id>.jsonl; this
+// agent's SubagentStart row in subagent-starts.jsonl.
 //
 // Silent on every path: this hook never writes stdout. Fails open.
 
-import { join } from 'node:path';
-import { readStdin, opt, passthrough, appendLog, telemetryDir, tailRecords } from './lib/context.mjs';
+import { readStdin, opt, passthrough, appendLog } from './lib/context.mjs';
 import {
-  measureTranscript, runawayReasons, claimAgentOnce, queueNotice,
+  measureTranscript, runawayReasons, claimAgentOnce, queueNotice, resolveAgentTranscript, pruneRunawayState,
   RUNAWAY_DEFAULT_TURNS, RUNAWAY_DEFAULT_USD,
 } from './lib/runaway.mjs';
-
-function transcriptFromStarts(agentId) {
-  if (!agentId) return null;
-  const needle = JSON.stringify(String(agentId));
-  const rows = tailRecords(join(telemetryDir(), 'subagent-starts.jsonl'), {
-    bytes: 1024 * 1024, filter: (l) => l.includes(needle),
-  });
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    if (rows[i].agent_id === agentId && rows[i].agent_transcript_path) return rows[i].agent_transcript_path;
-  }
-  return null;
-}
 
 try {
   const p = readStdin();
@@ -40,7 +29,7 @@ try {
   const usd = opt('runaway_usd', RUNAWAY_DEFAULT_USD);
   if (!(turns > 0) && !(usd > 0)) passthrough();
 
-  const path = p.agent_transcript_path || transcriptFromStarts(p.agent_id);
+  const path = resolveAgentTranscript(p);
   const m = measureTranscript(path);
   const reasons = runawayReasons(m, { turns, usd });
   if (!reasons.length) passthrough();
@@ -62,8 +51,14 @@ try {
     reasons,
   });
 
-  const who = `${p.agent_type || 'subagent'}${p.agent_id ? ` (${String(p.agent_id).slice(0, 12)})` : ''}`;
-  queueNotice(p.session_id, `[agent-companion] runaway spawn: ${who} finished after ${reasons.join(', ')}`
-    + `${m.partial ? ' (lower bound: transcript tail only)' : ''}. Check it was not looping or mis-sized before resuming or re-spawning it; row in runaway.jsonl.`);
+  // No session id: no lead to deliver to (an `unknown` queue would be drained
+  // by whichever other session also lacked one). The row above still stands.
+  if (p.session_id) {
+    const who = `${p.agent_type || 'subagent'}${p.agent_id ? ` (${String(p.agent_id).slice(0, 12)})` : ''}`;
+    const unpriced = m.unpricedTurns ? `; ${m.unpricedTurns} turn(s) on a model with no price, so no dollar figure for them` : '';
+    queueNotice(p.session_id, `[agent-companion] runaway spawn: ${who} was at ${reasons.join(', ')} when it stopped`
+      + `${m.partial ? ' (lower bound: transcript tail only)' : ''}${unpriced}. Check it was not looping or mis-sized before resuming or re-spawning it; row in runaway.jsonl.`);
+  }
+  pruneRunawayState();
 } catch { /* fail open */ }
 passthrough();

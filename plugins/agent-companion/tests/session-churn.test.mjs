@@ -5,12 +5,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript, readJsonl } from './helpers.mjs';
 import { telemetryDir, stateFile } from '../hooks/lib/context.mjs';
 import {
-  isCorrection, churnOfTranscript, scanChurn, mergeChurnRows, churnVerdict, CHURN_THRESHOLDS,
+  isCorrection, churnOfTranscript, scanChurn, mergeChurnRows, churnVerdict, churnFreshness, CHURN_THRESHOLDS,
 } from '../scripts/lib/session-churn.mjs';
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -156,7 +156,64 @@ test('spawn_activity premium: routed === false only when the field exists, regex
       { model: 'sonnet', routed: false },
     ]);
     const s = detect(fx).find((x) => x.kind === 'spawn_activity');
-    assert.match(s.detail, /6 spawns\/24h; 2 premium/);
+    assert.match(s.detail, /6 spawns\/24h; 2 unrouted premium/);
     assert.equal(s.dispatch, 'none', '2 is not more than twice the baseline of 1');
+  } finally { fx.cleanup(); }
+});
+
+test('isCorrection: an approval after "no," is not a correction', () => {
+  for (const t of ['No, that is fine, go ahead', 'nope, all good!', 'No. Ship it.', 'no, ok']) assert.equal(isCorrection(t), false, t);
+  assert.ok(isCorrection('no, that is the wrong file'));
+});
+
+test('the scan cap keeps the NEWEST transcripts, not the alphabetically first projects, and says how many it dropped', async () => {
+  const fx = makeFixture();
+  try {
+    const root = join(fx.dir, 'projects');
+    const mk = (proj, sid, ageMin) => {
+      const d = join(root, proj);
+      mkdirSync(d, { recursive: true });
+      const p = join(d, `${sid}.jsonl`);
+      writeFileSync(p, `${JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { content: 'go' } })}\n`);
+      const t = new Date(Date.now() - ageMin * 60000);
+      utimesSync(p, t, t);
+    };
+    mk('a-proj', 'sess-old1', 30);
+    mk('b-proj', 'sess-old2', 20);
+    mk('z-proj', 'sess-new', 1);
+    const { rows, stats } = await scanChurn({ root, spawnRows: [], maxFiles: 1 });
+    assert.deepEqual(rows.map((r) => r.session_id), ['sess-new']);
+    assert.equal(stats.found, 3);
+    assert.equal(stats.dropped, 2);
+    const h = runScript('scripts/transcript-harvest.mjs', ['--churn'], { env: { AGENT_COMPANION_TRANSCRIPTS_ROOT: root } });
+    assert.match(h.stdout, /3\/3 transcript\(s\) scanned, newest first/);
+  } finally { fx.cleanup(); }
+});
+
+test('session_churn reports a stale or missing aggregate instead of going quiet', () => {
+  const fx = makeFixture();
+  try {
+    assert.equal(churnFreshness(null).stale, true);
+    assert.equal(churnFreshness(Date.now() - 3600000).stale, false);
+    assert.match(churnFreshness(Date.now() - 3 * 86400000).detail, /stale: last written 3\.0 days ago/);
+
+    const run = () => {
+      const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, timeout: 60000 });
+      assert.equal(d.status, 0, d.stderr);
+      return d.json.signals.find((x) => x.kind === 'session_churn');
+    };
+    assert.equal(run(), undefined, 'no file and no spawn activity (a fresh sandbox): quiet');
+    writeFileSync(join(telemetryDir(), 'spawns.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), session_id: 'sess-s', model: 'opus' })}\n`);
+    let s = run();
+    assert.equal(s?.dispatch, 'manual-check');
+    assert.match(s.detail, /never been written/);
+    const f = join(telemetryDir(), 'session-churn.jsonl');
+    writeFileSync(f, '');
+    assert.equal(run(), undefined, 'freshly written, even empty: fresh, no churn');
+    const old = new Date(Date.now() - 3 * 86400000);
+    utimesSync(f, old, old);
+    s = run();
+    assert.equal(s?.dispatch, 'manual-check');
+    assert.match(s.detail, /stale/);
   } finally { fx.cleanup(); }
 });

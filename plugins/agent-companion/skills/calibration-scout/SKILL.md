@@ -36,6 +36,7 @@ Every command below assumes `$AC` is set.
 ## Step 1 — detect (deterministic, no judgement)
 
 ```bash
+node "$AC/scripts/transcript-harvest.mjs" --churn   # refreshes session-churn.jsonl for session_churn
 node "$AC/scripts/detect.mjs"
 ```
 
@@ -56,7 +57,7 @@ Only for signals that fired:
 | `inherited_model_spawns` | routing review |
 | `inherited_effort_spawns` | routing review (spawns that ran at the lead's effort) |
 | `project_agent_drift` | routing review (a project's `routingType:` agents off the table, or a writer with no parity reviewer) |
-| `session_churn` | routing review (from `session-churn.jsonl`; refresh with `transcript-harvest.mjs --churn`) |
+| `session_churn` | routing review (from `session-churn.jsonl`; refresh with `transcript-harvest.mjs --churn`). With dispatch `manual-check`: the file is missing or older than 2 days, so the refresh step is not running; report it |
 | `spawn_activity` with `spend-deep-dive` | spend attribution |
 | `harness_version_unreadable` | report to the operator; do not guess |
 | `main_ci_red` | report to the operator (repo, workflow, red-since, run URL) — suggestion only, never re-run or fix the workflow yourself |

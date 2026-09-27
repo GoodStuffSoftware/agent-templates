@@ -120,7 +120,11 @@ if (args.flags.has('--churn')) {
   const merged = churn.mergeChurnRows(churn.readChurnRows(), rows);
   churn.writeChurnRows(merged);
   const churning = rows.filter((r) => churn.churnReasons(r).length).length;
-  console.log(`transcript-harvest --churn: ${stats.scanned}/${stats.files} transcript(s) scanned${stats.truncated ? ' (capped)' : ''}; ${rows.length} session-day row(s), ${churning} over a threshold; wrote ${churn.churnFile()}`);
+  const cap = [
+    stats.dropped ? `${stats.dropped} older transcript(s) dropped by the file/byte cap` : '',
+    stats.timedOut ? `${stats.unscanned} left unscanned by the time cap` : '',
+  ].filter(Boolean).join(', ');
+  console.log(`transcript-harvest --churn: ${stats.scanned}/${stats.found} transcript(s) scanned, newest first${cap ? ` (${cap})` : ''}; ${rows.length} session-day row(s), ${churning} over a threshold; wrote ${churn.churnFile()}`);
   process.exit(0);
 }
 

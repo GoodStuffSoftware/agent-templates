@@ -404,7 +404,7 @@
     "runaway_turns": {
       "type": "number",
       "title": "Runaway spawn: turn threshold",
-      "description": "A finished subagent that ran more API turns than this is logged to runaway.jsonl and flagged to the lead once, on its next prompt or main-thread tool call. 0 turns the turn check off.",
+      "description": "A finished subagent that ran more API turns than this is logged to runaway.jsonl and flagged to the lead once: on its next prompt (a background worker's completion notice included), or as soon as a foreground Agent call returns. 0 turns the turn check off.",
       "default": 300
     },
     "runaway_usd": {
