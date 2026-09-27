@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.18 — 2026-09-27
+
+- Behaviour change (routing trial v3, operator-approved amendment): `bounded-feature` and `debug-root-cause` now route to opus/medium (`ac-opus-medium`, was opus/low), and `large-refactor` and `novel-design` to opus/xhigh (`ac-opus-xhigh`, was opus/high). Nothing routes to max. Every other route is unchanged.
+  - Why: an operator-local live study (789 real subagent spawns, 2026-09-21 to 09-27), a hard architecture benchmark task and Artificial Analysis. Low to medium is Opus 5.5's largest cheap capability step (+9 index points; Terminal-Bench 0.31 to 0.53), and opus/low passed the hard task's hidden tests only 2/4. Only xhigh passed the subtle-rule architecture task 4/4 and was perfect on both the hidden tests and the design judge; max adds +2 index points over xhigh for 1.73x the cost.
+  - Cost: about $1 more per bounded-feature spawn (opus/low averaged about $1.29); about 2x high for the xhigh rows.
+  - The four moved rows carry `trialVersion: 3`, `trialSince: 2026-09-27` and `reviewBy: 2026-10-04`, so their review sees a week of data. Every other trial row still reviews on 2026-09-30.
+- Corrected the cost claim on the rows that stay on opus/low (`explore`, `mechanical-edit`, `subagent-worker`, `verify`, `operate`): real-world tasks measured Opus 5.5 low at 1.05-1.53x Sonnet 5 medium at API prices (median 1.28x), so it is not cheaper than Sonnet. Its case is capability (Artificial Analysis index 42 vs 28).
+- Reviewer parity is unchanged: `recommend` and `evaluate` size a reviewer to the writer's model and effort, so a writer at xhigh gets an xhigh-or-above reviewer. `docs/ROUTING.md` now shows the live review evidence (xhigh reviews clean 26/26 vs 18/21 at high, suggestive, p≈0.08). Spawn-time parity enforcement is not implemented yet; the spawn guard still checks only the critical-change floor for a review.
+- The routing eval canaries are renamed to `debug-routes-opus-medium` and `architecture-routes-opus-xhigh`, and expect the new routes.
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.17 — 2026-09-26
 
 - Behaviour change: `ac-opus-medium`, `ac-opus-high`, `ac-opus-xhigh` and `ac-opus-max` now use a 1-hour prompt cache (`experimental.cacheTtl: "1h"` in their generated frontmatter, from `config/model-tiers.json` `ladder[].cacheTtl`). `ac-opus-low` and every sonnet/haiku rung stay on the 5-minute default.
