@@ -2115,6 +2115,57 @@ export function agentDefinition(type, cwd) {
   return null;
 }
 
+// The writer a review brief names on its `WRITER:` line (hooks/spawn-guard.mjs,
+// lib/brief-directives.mjs), resolved to the (model, effort) resolveRoute()
+// needs to size a parity-sized review (reviewer parity: F3, then F4/F2/F1).
+// Two forms:
+//   - `<model>/<effort>` (`opus/xhigh`, `sonnet/high`): read from the tier
+//     table. A bare model id (`haiku`, `opus`, `claude-opus-...`) is accepted
+//     with no effort, so only the model half of parity can be checked.
+//   - `<agent-name>` (`ac-opus-xhigh`, `agent-companion:ac-opus-xhigh`, a
+//     project or user agent): resolved through agentDefinition() to its
+//     frontmatter model and effort, where the harness itself reads them.
+// An agent name wins over a bare model id of the same spelling. Returns
+// { ok: true, model (tier alias), effort ('' when none is stated), label,
+// via: 'tier' | 'agent', agent } or { ok: false, reason }. Never throws.
+export function writerFromDeclaration(value, cwd) {
+  const raw = String(value || '').trim();
+  try {
+    if (!raw) return { ok: false, reason: 'the WRITER line names nothing' };
+    const slash = raw.indexOf('/');
+    if (slash >= 0) {
+      const m = raw.slice(0, slash);
+      const e = raw.slice(slash + 1).toLowerCase();
+      const cls = classifyModel(m);
+      if (!m || !cls.known) return { ok: false, reason: `"${m}" is not a model in the tier table` };
+      const ce = classifyEffort(e);
+      if (!ce.known) {
+        return { ok: false, reason: `"${e}" is not an effort level (${Object.keys(modelTiers().efforts || {}).join(', ')})` };
+      }
+      return { ok: true, model: cls.alias, effort: ce.level, label: routeLabelOf(cls.alias, ce.level), via: 'tier', agent: null };
+    }
+    const d = agentDefinition(raw, cwd);
+    if (d) {
+      if (!d.model) return { ok: false, reason: `agent "${raw}" states no model in its definition, so its tier follows its lead and cannot be read` };
+      const cls = classifyModel(d.model);
+      if (!cls.known) return { ok: false, reason: `agent "${raw}" pins model "${d.model}", which is not in the tier table` };
+      const ce = d.effort ? classifyEffort(d.effort) : null;
+      const effort = ce && ce.known ? ce.level : '';
+      return { ok: true, model: cls.alias, effort, label: routeLabelOf(cls.alias, effort), via: 'agent', agent: raw };
+    }
+    // A bare model id: the alias itself, or a full claude-* id. Anything else
+    // that merely CONTAINS a tier's name ("my-opus-helper") is an agent name
+    // that was not found, not a model.
+    const cls = classifyModel(raw);
+    if (cls.known && (raw.toLowerCase() === cls.alias || /^claude-/i.test(raw))) {
+      return { ok: true, model: cls.alias, effort: '', label: cls.alias, via: 'tier', agent: null };
+    }
+    return { ok: false, reason: `"${raw}" is neither <model>/<effort> nor an agent definition found from this project` };
+  } catch {
+    return { ok: false, reason: 'the tier table could not be read' };
+  }
+}
+
 // Session ids that must never be treated as real activity: the guard-canary
 // probe (checks.mjs, session_id starting `canary`) and this plugin's own test
 // fixtures (`verify-`, `test-`, `fixture-`). Canary rows are dropped entirely,
