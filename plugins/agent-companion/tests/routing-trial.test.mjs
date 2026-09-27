@@ -40,7 +40,8 @@
 // tests/architecture-floor-diff.test.mjs for the differential proof that no
 // route other than integration's own trial moved.
 //
-// v3 amendment (2026-09-27, operator-approved, reviewBy still 2026-09-30):
+// v3 amendment (2026-09-27, operator-approved, reviewBy 2026-10-04 for the
+// four moved rows so their review sees a week of data; others stay 2026-09-30):
 // live evidence moves four rows. bounded-feature and debug-root-cause go
 // opus/low -> opus/medium (low -> medium is Opus 5.5's largest cheap
 // capability step; opus/low fell short on the hard architecture task).
@@ -66,7 +67,7 @@ const CHANGED = [
 ];
 
 // The 2026-09-27 amendment (trial v3): these four moved, so their
-// trialSince is the amendment date; reviewBy is unchanged.
+// trialSince is the amendment date and their reviewBy is a week later.
 const AMENDED = [
   ['bounded-feature', 'opus', 'medium'],
   ['debug-root-cause', 'opus', 'medium'],
@@ -74,6 +75,7 @@ const AMENDED = [
   ['novel-design', 'opus', 'xhigh'],
 ];
 const AMENDED_SINCE = '2026-09-27';
+const AMENDED_REVIEW_BY = '2026-10-04';
 
 for (const [type, model, effort] of AMENDED) {
   test(`recommend --type ${type} routes to ${model}/${effort} under the trial (v3, since ${AMENDED_SINCE})`, () => {
@@ -83,7 +85,7 @@ for (const [type, model, effort] of AMENDED) {
     assert.equal(res.json.effort, effort);
     assert.ok(res.json.trial, `${type} must report trial metadata`);
     assert.equal(res.json.trial.trialSince, AMENDED_SINCE);
-    assert.equal(res.json.trial.reviewBy, '2026-09-30');
+    assert.equal(res.json.trial.reviewBy, AMENDED_REVIEW_BY);
   });
 }
 
@@ -228,7 +230,8 @@ test('every override in config/model-tiers.json carries evidence, trialSince and
     assert.ok(ov.reason, `${name}.override.reason`);
     assert.ok(ov.evidence?.source, `${name}.override.evidence.source`);
     assert.equal(ov.trialSince, trialSinceByType[name] || '2026-09-23', `${name}.override.trialSince`);
-    assert.equal(ov.reviewBy, '2026-09-30', `${name}.override.reviewBy`);
+    const amended = AMENDED.some(([type]) => type === name);
+    assert.equal(ov.reviewBy, amended ? AMENDED_REVIEW_BY : '2026-09-30', `${name}.override.reviewBy`);
   }
 });
 
@@ -244,14 +247,36 @@ test('scout raises routing_trial_review_due once reviewBy has passed', () => {
     });
     assert.equal(res.status, 0, res.stderr);
     const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
-    const trials = CHANGED.length + AMENDED.length;
-    assert.ok(sigs.length >= trials, `expected at least ${trials} routing_trial_review_due signals, got ${sigs.length}`);
+    assert.ok(sigs.length >= CHANGED.length, `expected at least ${CHANGED.length} routing_trial_review_due signals, got ${sigs.length}`);
     const names = sigs.map((s) => s.detail);
-    assert.ok(names.some((d) => d.startsWith('debug-root-cause routing trial due for review')));
+    assert.ok(names.some((d) => d.startsWith('explore routing trial due for review')));
+    // The four v3 rows review on 2026-10-04, so they are not due yet.
+    for (const [type] of AMENDED) {
+      assert.ok(!names.some((d) => d.startsWith(`${type} routing trial due`)), `${type} is not due before ${AMENDED_REVIEW_BY}`);
+    }
     assert.match(sigs[0].detail, /routing trial due for review: compare spawn telemetry outcomes and escalation rates since 2026-09-23/);
     assert.match(sigs[0].detail, /reviewBy 2026-09-30/);
     for (const s of sigs) assert.equal(s.dispatch, 'routing-review');
     void stateDir;
+  } finally {
+    cleanup();
+  }
+});
+
+test('scout raises the four v3 rows on their own reviewBy (2026-10-04)', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const res = runScript('scripts/detect.mjs', [], {
+      cwd: dir,
+      env: { AGENT_COMPANION_FAKE_NOW: '2026-10-04T00:00:00.000Z' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
+    for (const [type] of AMENDED) {
+      const s = sigs.find((x) => x.detail.startsWith(`${type} routing trial due for review`));
+      assert.ok(s, `${type} must be due on ${AMENDED_REVIEW_BY}`);
+      assert.match(s.detail, /since 2026-09-27 \(reviewBy 2026-10-04 has passed\)/);
+    }
   } finally {
     cleanup();
   }

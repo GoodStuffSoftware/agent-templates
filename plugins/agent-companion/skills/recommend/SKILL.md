@@ -37,11 +37,11 @@ Config v7 (updated 2026-09-27). **Premium** = the spawn brief needs a `WARRANT:`
 |---|---|---|---|
 | `explore` | `opus/low` (routing trial, review by 2026-09-30) | yes | read-only search: where is X, what touches Y, does Z exist |
 | `mechanical-edit` | `opus/low` (routing trial, review by 2026-09-30) | yes | rename, config edit, reformat, apply a known migration recipe |
-| `bounded-feature` | `opus/medium` (routing trial, review by 2026-09-30) | yes | a feature against a clear spec, 1-3 files, known shape |
+| `bounded-feature` | `opus/medium` (routing trial, review by 2026-10-04) | yes | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | `opus/medium` (routing trial, review by 2026-09-30) | yes | multi-file, cross-referencing, touches shared config or things other agents depend on |
-| `debug-root-cause` | `opus/medium` (routing trial, review by 2026-09-30) | yes | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
-| `large-refactor` | `opus/xhigh` (routing trial, review by 2026-09-30) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
-| `novel-design` | `opus/xhigh` (routing trial, review by 2026-09-30) | yes | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
+| `debug-root-cause` | `opus/medium` (routing trial, review by 2026-10-04) | yes | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
+| `large-refactor` | `opus/xhigh` (routing trial, review by 2026-10-04) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
+| `novel-design` | `opus/xhigh` (routing trial, review by 2026-10-04) | yes | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
 | `critical-change` | `opus/xhigh` | yes | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
 | `code-review` | writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's | as writer (opus if critical or fable) | adversarial review of a diff; sized to the writer it gates |
 | `long-autonomous-run` | `opus/xhigh` | yes | an agent session expected to run for hours with minimal supervision |

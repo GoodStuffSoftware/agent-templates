@@ -156,8 +156,9 @@ benchmark and is reviewed on 2026-09-30, the trial's review-by date.
 
 **The 2026-09-27 amendment (trial v3).** An operator-local live study
 (789 real subagent spawns, 2026-09-21 to 09-27), a hard architecture
-benchmark task and Artificial Analysis moved four rows, with the review-by
-date unchanged:
+benchmark task and Artificial Analysis moved four rows. Their review-by date
+moved to 2026-10-04, so the review sees a week of data on the new routes
+rather than three days; every other trial row still reviews on 2026-09-30:
 
 - *Opus low is a capability choice, not a price one.* Synthetic tasks had put
   Opus 5.5 low at 0.75-0.9x Sonnet 5's cost; real-world tasks measured
@@ -169,19 +170,24 @@ date unchanged:
   medium is the largest cheap capability step on Artificial Analysis (+9
   index points; Terminal-Bench 0.31 to 0.53), and on the hard architecture
   task opus/low passed the hidden tests 2/4 and the blind design judge 1/4.
-  At about $1.29 per low spawn in live use, the move costs about $1 more per
-  spawn.
+  At about $1.29 per opus/low bounded-feature spawn in live use, the move
+  costs about $1 more per spawn; debug-root-cause had no opus/low spawns in
+  the study, so its cost change was not measured live.
 - *`large-refactor` and `novel-design` move to opus/xhigh.* On the
   subtle-rule architecture task only xhigh passed 4/4 (high 2/3, medium 2/3,
   low 2/4) and was also perfect on the design judge. In live use, reviews at
-  xhigh were clean 26/26 against 18/21 at high, and raising churning
+  xhigh were clean 26/26 against 18/21 at high (suggestive, p≈0.08), and
+  raising churning
   sessions to xhigh by hand eased the churn in 3 of 6. It costs about 2x high
   per spawn.
 - *Nothing routes to max by default.* Artificial Analysis gives max +2 index
   points over xhigh for 1.73x the cost, and +0 on agentic coding.
 
-Reviewer parity follows the writers up: a writer at xhigh gets a reviewer at
-xhigh or above, so xhigh reviews are no longer confined to critical changes.
+Reviewer parity follows the writers up: `recommend` and `evaluate` size a
+reviewer to the writer, so a writer at xhigh gets a reviewer at xhigh or
+above and xhigh reviews are no longer confined to critical changes. Nothing
+enforces this at spawn time yet (the spawn guard checks only the
+critical-change floor, since a brief names no writer); that is a follow-up.
 Live xhigh reviews cost in line with pre-trial xhigh reviews (about 1.25x,
 a thin sample); what grew was the number of reviews.
 

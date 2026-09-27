@@ -534,6 +534,13 @@ anything.
   and the "high, not xhigh/max" effort choice rests on measured token
   scaling. The shipped trial v2 then runs to its own 2026-09-30 review as
   normal. Nothing in this ADR extends it.
+
+  _Addendum, 2026-09-27:_ trial v3 moved novel-design and large-refactor to
+  opus/xhigh, and bounded-feature and debug-root-cause to opus/medium, on
+  an operator-local live study (789 real subagent spawns, 2026-09-21 to
+  09-27) plus a hard architecture benchmark task and Artificial Analysis.
+  Those four rows now review on 2026-10-04. The text above is left as
+  written; see `plugins/agent-companion/docs/ROUTING-RATIONALE.md`.
 - **The legacy `<stateRoot>/model-tiers.json` override** keeps working for
   tier additions. If it contains `taskTypes`, the migration offers to convert
   those into profile rows, and fixes the README path mismatch.

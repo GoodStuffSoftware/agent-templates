@@ -48,7 +48,7 @@ test('every ladder rung names an agent definition file that actually exists with
 test('recommend.mjs prints the namespaced spawnable agent name for a routed task', () => {
   // bounded-feature is under the routing trial (config/model-tiers.json
   // taskTypes.bounded-feature.override, v3 amended 2026-09-27, reviewBy
-  // 2026-09-30): opus/medium, not the plain grid's sonnet/medium — see
+  // 2026-10-04): opus/medium, not the plain grid's sonnet/medium — see
   // routing-trial.test.mjs and routing-table-docs.test.mjs for the trial.
   const res = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--json']);
   assert.equal(res.status, 0, res.stderr);
