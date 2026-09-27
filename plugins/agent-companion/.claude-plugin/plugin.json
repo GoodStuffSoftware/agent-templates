@@ -33,7 +33,7 @@
     "inherit_guard": {
       "type": "string",
       "title": "Inherited model and effort",
-      "description": "How to treat a spawn that names no model and whose definition states neither model nor effort, so it runs on the lead's own model AND effort. \"warn\" (default): one note naming the lead's pair and the line to add. \"block\": deny it when the lead is on opus or fable and the brief has no TYPE or WEIGHT line; the deny says to add `TYPE: <task type>` or spawn a ladder rung (agent-companion:ac-<model>-<effort>). Block also stops un-TYPEd Explore, Plan and claude-code-guide spawns from such a lead, which name no model of their own. A lead whose model cannot be read is never blocked.",
+      "description": "How to treat a spawn that names no model and whose definition states neither model nor effort, so it runs on the lead's own model AND effort. \"warn\" (default): one note naming the lead's pair and the line to add. \"block\": deny it when the lead is on a premium tier (opus, fable, mythos) and the brief has no WEIGHT line and no TYPE the table knows (an unknown TYPE routes nothing); the deny says to add `TYPE: <task type>` or spawn a ladder rung (agent-companion:ac-<model>-<effort>). Block also stops un-TYPEd Explore, Plan and claude-code-guide spawns from such a lead, which name no model of their own. A lead whose model cannot be read or classified is never blocked.",
       "default": "warn"
     },
     "warrant_required": {

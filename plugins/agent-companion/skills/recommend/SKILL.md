@@ -116,8 +116,9 @@ State the recommendation and the rationale it printed. Then:
   to opus, which still needs a WARRANT (F2). A reviewer sized below the writer
   catches the errors it would itself have avoided and waves through the ones
   it would itself have made. **Name the writer in the review brief** on a line
-  of its own next to `TYPE:` — `WRITER: <model>/<effort>` or
-  `WRITER: <agent-name>` (a ladder rung or project agent):
+  of its own next to `TYPE:` — `WRITER: <model>/<effort>` (`opus xhigh` and
+  `opus at xhigh` read the same) or `WRITER: <agent-name>` (a ladder rung or
+  project agent):
 
   ```
   TYPE: code-review
@@ -125,9 +126,11 @@ State the recommendation and the rationale it printed. Then:
   ```
 
   The spawn guard then sizes the reviewer the same way and notes one below,
-  above, or with an effort it cannot verify; a reviewer on its writer's model
-  needs no WARRANT and is not counted by the premium cap. Without the line the
-  guard cannot size a review at all.
+  above, or with an effort it cannot verify; a reviewer on its parity route's
+  model (the writer's, after the floors) needs no WARRANT and is not counted
+  by the premium cap. Without the line the guard cannot size a review at all;
+  a line with no effort, or an effort it cannot read, is checked on the model
+  alone, and the note says so.
 - **An `auto-compact:` line is cost advice for long-running work.** It quotes the
   last cache-advisor run: the auto-compact window that breaks even for the
   recommended model on the operator's own transcripts, and the one value for

@@ -87,9 +87,10 @@ The spawn guard applies the same table to every brief that declares `WEIGHT:`
   restate the weight or consequence honestly. A warrant that contradicts its
   own weight is the over-provisioning the guard exists to stop.
 - **A review (`TYPE: code-review`)** is sized to the writer it gates, named on
-  a `WRITER:` line — `WRITER: opus/xhigh`, or `WRITER: <agent-name>` read from
-  that agent's definition. The reviewer is judged for parity with it (below,
-  above, or on an inherited effort that cannot be verified) in notes only,
+  a `WRITER:` line — `WRITER: opus/xhigh` (or `opus xhigh`), or
+  `WRITER: <agent-name>` read from that agent's definition. The reviewer is
+  judged against its parity route, the writer's pair after the floors (below,
+  above, or on an inherited effort that cannot be verified), in notes only,
   never denied. With no `WRITER:` line the guard says it cannot size the
   review.
 

@@ -487,11 +487,20 @@ const spawnAudit = {
     }
     findings.push(`mix: ${Object.entries(byModel).map(([m, n]) => `${m}=${n}`).join(', ')}`);
     const declared = rows.filter((r) => r.fit);
-    if (declared.length) {
-      const n = (v) => declared.filter((r) => r.fit === v).length;
-      findings.push('fit where weight was declared: over=' + n('over') + ' under=' + n('under') + ' fit=' + n('fit') + ' of ' + declared.length +
-        (n('under') ? ' - under-provisioned spawns ship wrong code; see the evaluate skill' : ''));
-    }
+    // Two yardsticks, counted apart: a weight's row (a WEIGHT line, a
+    // WARRANT's weight, or a TYPE's preset weight) and reviewer parity (a
+    // review sized to its WRITER, or held to the F1 floor with none), whose
+    // rows carry a declared_writer and/or no declared_weight at all.
+    const isParityRow = (r) => !!r.declared_writer || typeof r.declared_weight !== 'number';
+    const fitLine = (label, set) => {
+      const n = (v) => set.filter((r) => r.fit === v).length;
+      return `${label}: over=${n('over')} under=${n('under')} fit=${n('fit')} of ${set.length}` +
+        (n('under') ? ' - under-provisioned spawns ship wrong code; see the evaluate skill' : '');
+    };
+    const weightRows = declared.filter((r) => !isParityRow(r));
+    const parityRows = declared.filter(isParityRow);
+    if (weightRows.length) findings.push(fitLine('fit where a weight or task type was declared', weightRows));
+    if (parityRows.length) findings.push(fitLine('fit of reviewers sized to their writer (reviewer parity)', parityRows));
     // Once haiku is past its staged retirement (config/model-tiers.json
     // tiers.haiku.retiresAfter), the routing table stops sending anything
     // there on its own — an empty haiku bucket is then the CORRECT outcome,
