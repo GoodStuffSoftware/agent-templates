@@ -557,6 +557,10 @@ if (cfg.reviewerParity) {
   const critFloor = cfg.consequence?.critical || {};
   L.push(`That parity match is then floored, same as any other route (operator-decided 2026-09-24, see resolveRoute() in hooks/lib/context.mjs): a **critical** review is never sized below \`${critFloor.modelFloor}\`/\`${critFloor.effortFloor}\` (F1), never routed to fable — capped to the best available tier that is not one, which still demands its own WARRANT (F2) — and refused outright for a writer model outside the tier table, or unavailable with no staged replacement (F4). A per-user routing profile row for a parity type may only raise the resulting minimum effort further; it can never name a model.`);
   L.push(``);
+  if (p.liveEvidence) {
+    L.push(`**Live evidence:** ${p.liveEvidence}`);
+    L.push(``);
+  }
 }
 
 if (cfg.taskTypes) {

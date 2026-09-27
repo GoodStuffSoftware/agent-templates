@@ -37,7 +37,7 @@ const cases = existsSync(EVALS)
 
 test('the routing eval suite exists with its five canaries', () => {
   assert.deepEqual(cases.sort(), [
-    'architecture-routes-opus-high', 'debug-routes-opus-low', 'fable-request-needs-warrant',
+    'architecture-routes-opus-xhigh', 'debug-routes-opus-medium', 'fable-request-needs-warrant',
     'trivial-read-not-fable', 'unrelated-request-no-routing',
   ]);
 });
@@ -77,9 +77,9 @@ test('canary expectations match what config/model-tiers.json routes to today', (
     const m = fm.pattern.match(/opus\[-0-9\.\]\*\\s\*\/\\s\*(\w+)/);
     return m ? `opus/${m[1]}` : null;
   };
-  assert.equal(expects('debug-routes-opus-low'), route('debug-root-cause'),
-    'debug canary disagrees with the debug-root-cause route: update evals/debug-routes-opus-low with the config');
-  assert.equal(expects('architecture-routes-opus-high'), route('novel-design'),
-    'architecture canary disagrees with the novel-design route: update evals/architecture-routes-opus-high with the config');
+  assert.equal(expects('debug-routes-opus-medium'), route('debug-root-cause'),
+    'debug canary disagrees with the debug-root-cause route: update evals/debug-routes-opus-medium with the config');
+  assert.equal(expects('architecture-routes-opus-xhigh'), route('novel-design'),
+    'architecture canary disagrees with the novel-design route: update evals/architecture-routes-opus-xhigh with the config');
   assert.equal(cfg.tiers.fable.premium, true, 'the fable warrant canary assumes fable is premium');
 });

@@ -41,7 +41,7 @@ test('a grid answer no floor touched still says "none fired"', () => {
 });
 
 test('the grid floors are not reported when a higher layer won (the grid was only shadowed)', () => {
-  // large-refactor: elevated preset; its trial (opus/high) wins, already at
+  // large-refactor: elevated preset; its trial (opus/xhigh) wins, above
   // the elevated floor, and carries no F5 waiver of its own (unlike
   // integration's, see below) -- so floorsApplied is empty, not something
   // borrowed from the shadowed grid candidate.

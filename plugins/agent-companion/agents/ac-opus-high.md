@@ -1,6 +1,6 @@
 ---
 name: ac-opus-high
-description: "Rung 8/10: opus capability with real reasoning depth — architecture, non-trivial debugging. Currently the default routing for: large-refactor, novel-design."
+description: "Rung 8/10: opus capability with real reasoning depth — architecture, non-trivial debugging. Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
 model: opus
 effort: high
 experimental:

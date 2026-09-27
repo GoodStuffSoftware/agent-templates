@@ -36,7 +36,7 @@ test('skills/recommend/SKILL.md carries a fresh generated task-type block (works
   const skill = readFileSync(join(PLUGIN_ROOT, 'skills', 'recommend', 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
   assert.ok(skill.includes(block), 'recommend skill block is stale — run: node scripts/routing-table.mjs --sync-skill skills/recommend/SKILL.md');
   // The canaries in evals/ depend on these two rows.
-  assert.match(block, /\| `debug-root-cause` \| `opus\/low`/);
-  assert.match(block, /\| `novel-design` \| `opus\/high`/);
+  assert.match(block, /\| `debug-root-cause` \| `opus\/medium`/);
+  assert.match(block, /\| `novel-design` \| `opus\/xhigh`/);
   assert.doesNotMatch(block, /\| `fable/, 'fable is never a route');
 });

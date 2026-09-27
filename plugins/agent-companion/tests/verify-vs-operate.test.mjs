@@ -15,9 +15,10 @@
 // default.
 //
 // UPDATED 2026-09-23 (v2, same trial window, operator-endorsed): Opus 5.5
-// low measured cheaper than every Sonnet setting on easy/hard tasks and
-// about even on plan usage for real fixes, with roughly half the turns and
-// equal correctness; this plan has no separate Opus weekly window. verify
+// low took roughly half the turns with equal correctness on the benchmark
+// tasks (its case is capability, not price: real-world tasks measured it at
+// 1.05-1.53x Sonnet 5 medium at API prices, corrected 2026-09-27); this plan
+// has no separate Opus weekly window. verify
 // and operate move again, from v1's sonnet/low to opus/low. The underlying
 // weights (1 and >=3) and the plain grid resolutions checked below are
 // unchanged by either version — only the resolved model/effort moved.

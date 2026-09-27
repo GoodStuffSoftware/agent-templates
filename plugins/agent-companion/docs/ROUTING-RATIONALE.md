@@ -151,9 +151,39 @@ experience says the work should stay on opus rather than move to a cheaper
 model. Medium is below the elevated-consequence floor (F5, high), so the
 trial row carries its own operator-observed F5 waiver. The floor was not
 lowered, because that would have moved every other elevated route too.
-`large-refactor` and `novel-design` stay at opus/high, and `critical-change`
-stays at opus/xhigh under F1. The move is unmeasured by benchmark and is
-reviewed on 2026-09-30, the trial's review-by date.
+`critical-change` stays at opus/xhigh under F1. The move is unmeasured by
+benchmark and is reviewed on 2026-09-30, the trial's review-by date.
+
+**The 2026-09-27 amendment (trial v3).** An operator-local live study
+(789 real subagent spawns, 2026-09-21 to 09-27), a hard architecture
+benchmark task and Artificial Analysis moved four rows, with the review-by
+date unchanged:
+
+- *Opus low is a capability choice, not a price one.* Synthetic tasks had put
+  Opus 5.5 low at 0.75-0.9x Sonnet 5's cost; real-world tasks measured
+  1.05-1.53x Sonnet 5 medium at API prices (median 1.28x). The rows that stay
+  on opus/low (`explore`, `mechanical-edit`, `subagent-worker`, `verify`,
+  `operate`) stay there for capability — Artificial Analysis Intelligence
+  Index 42 against 28 for Sonnet 5 medium — not because they are cheaper.
+- *`bounded-feature` and `debug-root-cause` move to opus/medium.* Low to
+  medium is the largest cheap capability step on Artificial Analysis (+9
+  index points; Terminal-Bench 0.31 to 0.53), and on the hard architecture
+  task opus/low passed the hidden tests 2/4 and the blind design judge 1/4.
+  At about $1.29 per low spawn in live use, the move costs about $1 more per
+  spawn.
+- *`large-refactor` and `novel-design` move to opus/xhigh.* On the
+  subtle-rule architecture task only xhigh passed 4/4 (high 2/3, medium 2/3,
+  low 2/4) and was also perfect on the design judge. In live use, reviews at
+  xhigh were clean 26/26 against 18/21 at high, and raising churning
+  sessions to xhigh by hand eased the churn in 3 of 6. It costs about 2x high
+  per spawn.
+- *Nothing routes to max by default.* Artificial Analysis gives max +2 index
+  points over xhigh for 1.73x the cost, and +0 on agentic coding.
+
+Reviewer parity follows the writers up: a writer at xhigh gets a reviewer at
+xhigh or above, so xhigh reviews are no longer confined to critical changes.
+Live xhigh reviews cost in line with pre-trial xhigh reviews (about 1.25x,
+a thin sample); what grew was the number of reviews.
 
 ## Cost basis: dollars, not a price-weighted token count
 

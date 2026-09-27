@@ -50,12 +50,12 @@ test('evaluate --type debug-root-cause --model sonnet --effort xhigh (the PLAIN 
   // fix, evaluate.mjs computed its own "expected" from the plain grid,
   // which for this exact model/effort pair IS sonnet/xhigh — so the actual
   // and (bug-computed) expected matched and the call wrongly returned "fit".
-  // With the shared resolver, expected is the trial's opus/low, and sonnet
-  // outranks nothing above it, so this is UNDER-provisioned, not fit.
+  // With the shared resolver, expected is the trial's opus/medium (v3,
+  // 2026-09-27), and sonnet is below opus, so this is UNDER-provisioned, not fit.
   const res = runScript('scripts/evaluate.mjs', ['--model', 'sonnet', '--effort', 'xhigh', '--type', 'debug-root-cause', '--json']);
   assert.equal(res.json.verdict, 'under', JSON.stringify(res.json));
   assert.equal(res.json.expected.model, 'opus');
-  assert.equal(res.json.expected.effort, 'low');
+  assert.equal(res.json.expected.effort, 'medium');
 });
 
 for (const [type, t] of UNMEASURED) {
@@ -114,7 +114,7 @@ for (const [type, t] of OVERRIDDEN) {
   });
 }
 
-test('spawn-guard: TYPE: debug-root-cause with the PLAIN GRID model (sonnet) is judged UNDER against the trial\'s opus/low', () => {
+test('spawn-guard: TYPE: debug-root-cause with the PLAIN GRID model (sonnet) is judged UNDER against the trial\'s opus/medium', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const payload = {
@@ -132,7 +132,7 @@ test('spawn-guard: TYPE: debug-root-cause with the PLAIN GRID model (sonnet) is 
     assert.match(res.json?.systemMessage || '', /under-provisioned/i, JSON.stringify(res.json));
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.fit, 'under');
-    assert.equal(row.fit_expected, 'opus/low');
+    assert.equal(row.fit_expected, 'opus/medium');
     assert.equal(row.fit_trial, true);
   } finally {
     cleanup();

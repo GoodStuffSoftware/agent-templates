@@ -8,10 +8,9 @@
 // override on debug-root-cause, that unmeasured types are untouched, and that
 // the scout raises a finding once reviewBy has passed.
 //
-// v2 (same trial window, operator-endorsed): Opus 5.5 low measured cheaper
-// than every Sonnet setting on easy/hard tasks and about even on plan usage
-// for real fixes, with roughly half the turns and equal correctness, and
-// this plan has no separate Opus weekly window -- so explore,
+// v2 (same trial window, operator-endorsed): Opus 5.5 low took roughly half
+// the turns with equal correctness on the benchmark tasks, and this plan has
+// no separate Opus weekly window -- so explore,
 // mechanical-edit, subagent-worker, verify, and operate move from v1's
 // sonnet/low to opus/low. integration, large-refactor, and novel-design pick
 // up their own v2 overrides too: integration (unmeasured by benchmark) moved
@@ -40,6 +39,16 @@
 // layer, waiver or not — see tests/architecture-floor.test.mjs. See
 // tests/architecture-floor-diff.test.mjs for the differential proof that no
 // route other than integration's own trial moved.
+//
+// v3 amendment (2026-09-27, operator-approved, reviewBy still 2026-09-30):
+// live evidence moves four rows. bounded-feature and debug-root-cause go
+// opus/low -> opus/medium (low -> medium is Opus 5.5's largest cheap
+// capability step; opus/low fell short on the hard architecture task).
+// large-refactor and novel-design go opus/high -> opus/xhigh (only xhigh
+// passed the subtle-rule architecture task 4/4). Nothing routes to max. The
+// v2 cost claim for opus/low is corrected: real-world tasks put it at
+// 1.05-1.53x Sonnet 5 medium at API prices, so its case is capability, not
+// price. The other opus/low rows keep their route and trialSince.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -54,11 +63,45 @@ const CHANGED = [
   ['subagent-worker', 'opus', 'low'],
   ['verify', 'opus', 'low'],
   ['operate', 'opus', 'low'],
-  ['bounded-feature', 'opus', 'low'],
-  ['debug-root-cause', 'opus', 'low'],
-  ['large-refactor', 'opus', 'high'],
-  ['novel-design', 'opus', 'high'],
 ];
+
+// The 2026-09-27 amendment (trial v3): these four moved, so their
+// trialSince is the amendment date; reviewBy is unchanged.
+const AMENDED = [
+  ['bounded-feature', 'opus', 'medium'],
+  ['debug-root-cause', 'opus', 'medium'],
+  ['large-refactor', 'opus', 'xhigh'],
+  ['novel-design', 'opus', 'xhigh'],
+];
+const AMENDED_SINCE = '2026-09-27';
+
+for (const [type, model, effort] of AMENDED) {
+  test(`recommend --type ${type} routes to ${model}/${effort} under the trial (v3, since ${AMENDED_SINCE})`, () => {
+    const res = runScript('scripts/recommend.mjs', ['--type', type, '--json']);
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.json.model, model);
+    assert.equal(res.json.effort, effort);
+    assert.ok(res.json.trial, `${type} must report trial metadata`);
+    assert.equal(res.json.trial.trialSince, AMENDED_SINCE);
+    assert.equal(res.json.trial.reviewBy, '2026-09-30');
+  });
+}
+
+test('nothing in the shipped table routes to max', () => {
+  for (const name of Object.keys(cfg.taskTypes)) {
+    if (cfg.taskTypes[name].weight === 'parity') continue;
+    const res = runScript('scripts/recommend.mjs', ['--type', name, '--json']);
+    assert.equal(res.status, 0, res.stderr);
+    assert.notEqual(res.json.effort, 'max', `${name} must not route to max`);
+  }
+});
+
+test('no shipped trial reason still claims Opus low is cheaper than Sonnet', () => {
+  for (const [name, t] of Object.entries(cfg.taskTypes)) {
+    if (!t.override) continue;
+    assert.doesNotMatch(t.override.reason, /cheaper than (every )?sonnet/i, `${name}.override.reason`);
+  }
+});
 
 for (const [type, model, effort] of CHANGED) {
   test(`recommend --type ${type} routes to ${model}/${effort} under the trial`, () => {
@@ -90,19 +133,19 @@ test('novel-design explicitly overrides the novel-design kind\'s +2 effort delta
   const res = runScript('scripts/recommend.mjs', ['--type', 'novel-design', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.model, 'opus');
-  assert.equal(res.json.effort, 'high');
+  assert.equal(res.json.effort, 'xhigh');
   assert.equal(res.json.trial.overridesKindDelta, true);
   // weight 5 -> xhigh, pushed up two ranks by the novel-design kind's +2
   // delta, clamped at max -- the override is a deliberate departure from
-  // that escalation, not an unlabelled one.
+  // that escalation (stop at xhigh), not an unlabelled one.
   assert.equal(res.json.trial.gridResolution, 'opus/max');
 });
 
-test('large-refactor overrides the plain weight-5 xhigh resolution down to high (no kind delta involved)', () => {
+test('large-refactor (v3) resolves to opus/xhigh, the same answer as the plain weight-5 grid (no kind delta involved)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'large-refactor', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.model, 'opus');
-  assert.equal(res.json.effort, 'high');
+  assert.equal(res.json.effort, 'xhigh');
   assert.equal(res.json.trial.gridResolution, 'opus/xhigh');
 });
 
@@ -124,7 +167,7 @@ test('debug-root-cause explicitly overrides the diagnostic kind\'s +1 effort del
   const res = runScript('scripts/recommend.mjs', ['--type', 'debug-root-cause', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.model, 'opus');
-  assert.equal(res.json.effort, 'low', 'operator directive: no medium, even though diagnostic kind would normally add +1');
+  assert.equal(res.json.effort, 'medium', 'v3: level with bounded-feature at medium, even though the diagnostic kind would normally add +1');
   assert.equal(res.json.trial.overridesKindDelta, true);
   // The grid resolution recorded alongside the override must show what the
   // diagnostic +1 delta would otherwise have produced (sonnet/xhigh: weight 4
@@ -134,9 +177,11 @@ test('debug-root-cause explicitly overrides the diagnostic kind\'s +1 effort del
   assert.match(res.json.rationale, /EXPLICIT override/i);
 });
 
-test('debug-root-cause never resolves to medium effort regardless of how it is reached', () => {
-  const res = runScript('scripts/recommend.mjs', ['--type', 'debug-root-cause', '--json']);
-  assert.notEqual(res.json.effort, 'medium');
+test('debug-root-cause (v3) sits level with bounded-feature, not one rung above it', () => {
+  const debug = runScript('scripts/recommend.mjs', ['--type', 'debug-root-cause', '--json']);
+  const feature = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--json']);
+  assert.equal(debug.json.effort, feature.json.effort);
+  assert.notEqual(debug.json.effort, 'low');
 });
 
 const UNMEASURED = [
@@ -169,7 +214,13 @@ test('every override in config/model-tiers.json carries evidence, trialSince and
   // integration's trial moved again on 2026-09-24 (0.29.2 "effort" decision),
   // so it carries a later trialSince than the rest of the 2026-09-23 window;
   // every override still shares the same reviewBy.
-  const trialSinceByType = { integration: '2026-09-24' };
+  const trialSinceByType = {
+    integration: '2026-09-24',
+    'bounded-feature': '2026-09-27',
+    'debug-root-cause': '2026-09-27',
+    'large-refactor': '2026-09-27',
+    'novel-design': '2026-09-27',
+  };
   for (const [name, t] of Object.entries(cfg.taskTypes)) {
     if (!t.override) continue;
     const ov = t.override;
@@ -193,7 +244,8 @@ test('scout raises routing_trial_review_due once reviewBy has passed', () => {
     });
     assert.equal(res.status, 0, res.stderr);
     const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
-    assert.ok(sigs.length >= CHANGED.length, `expected at least ${CHANGED.length} routing_trial_review_due signals, got ${sigs.length}`);
+    const trials = CHANGED.length + AMENDED.length;
+    assert.ok(sigs.length >= trials, `expected at least ${trials} routing_trial_review_due signals, got ${sigs.length}`);
     const names = sigs.map((s) => s.detail);
     assert.ok(names.some((d) => d.startsWith('debug-root-cause routing trial due for review')));
     assert.match(sigs[0].detail, /routing trial due for review: compare spawn telemetry outcomes and escalation rates since 2026-09-23/);

@@ -18,7 +18,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { PLUGIN_ROOT, makeFixture, runScript, runHook, readJsonl } from './helpers.mjs';
 
-// debug-root-cause: preset 4/diagnostic/routine, trial opus/low.
+// debug-root-cause: preset 4/diagnostic/routine, trial opus/medium (v3, 2026-09-27).
 // Explicit elevated -> grid 4/diagnostic/elevated = sonnet/xhigh.
 // (Non-explicit elevated would be the floored trial, opus/high.)
 const TYPE = 'debug-root-cause';
@@ -115,14 +115,14 @@ test('recommend --explain prints the full stack, the winner, the floors and a pr
     assert.equal(res.status, 0, res.stderr);
     assert.match(res.stdout, /EXPLAIN/);
     assert.match(res.stdout, /profile\s+absent\s+-/);
-    assert.match(res.stdout, /trial\s+won\s+opus\/low/);
+    assert.match(res.stdout, /trial\s+won\s+opus\/medium/);
     assert.match(res.stdout, /grid\s+shadowed\s+sonnet\/xhigh/);
-    assert.match(res.stdout, /winner:\s+trial -> opus\/low/);
+    assert.match(res.stdout, /winner:\s+trial -> opus\/medium/);
     assert.match(res.stdout, /floors:\s+none fired/);
     assert.match(res.stdout, /provenance: shipped trial/);
 
     const dep = runScript('scripts/recommend.mjs', ['--type', TYPE, '--weight', '3', '--explain']);
-    assert.match(dep.stdout, /trial\s+skipped\s+opus\/low\s+\(explicit weight departs/);
+    assert.match(dep.stdout, /trial\s+skipped\s+opus\/medium\s+\(explicit weight departs/);
     assert.match(dep.stdout, /winner:\s+grid/);
 
     const j = runScript('scripts/recommend.mjs', ['--type', TYPE, '--explain', '--json']).json;

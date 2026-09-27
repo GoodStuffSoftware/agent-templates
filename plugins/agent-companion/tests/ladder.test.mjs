@@ -46,14 +46,14 @@ test('every ladder rung names an agent definition file that actually exists with
 });
 
 test('recommend.mjs prints the namespaced spawnable agent name for a routed task', () => {
-  // bounded-feature is under the 2026-09-23 routing trial (config/model-tiers.json
-  // taskTypes.bounded-feature.override, reviewBy 2026-09-30): opus/low, not
-  // the plain grid's sonnet/medium — see verify-vs-operate.test.mjs and
-  // routing-table-docs.test.mjs for the same trial on other types.
+  // bounded-feature is under the routing trial (config/model-tiers.json
+  // taskTypes.bounded-feature.override, v3 amended 2026-09-27, reviewBy
+  // 2026-09-30): opus/medium, not the plain grid's sonnet/medium — see
+  // routing-trial.test.mjs and routing-table-docs.test.mjs for the trial.
   const res = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-opus-low');
-  assert.equal(res.json.rung, 6);
+  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-opus-medium');
+  assert.equal(res.json.rung, 7);
 });
 
 // CHANGED in slice 1b (ADR 0003 §1, operator-approved 2026-09-24): this used
@@ -72,7 +72,7 @@ test('an explicit --weight/--kind that departs from the preset bypasses the tria
 test('an explicit --kind EQUAL to the preset keeps the bounded-feature trial (slice 1b)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--kind', 'bounded', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-opus-low');
+  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-opus-medium');
   assert.ok(res.json.trial);
 });
 

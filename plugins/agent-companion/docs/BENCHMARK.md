@@ -1120,8 +1120,8 @@ separate.
 
 | Case | Asks | Passes when |
 |---|---|---|
-| `debug-routes-opus-low` | model/effort for a root-cause hunt | the final `ROUTE:` line is opus/low (the debug-root-cause trial override) |
-| `architecture-routes-opus-high` | model/effort for a new message-bus design | `ROUTE:` is opus/high (the novel-design trial override; the plain grid says opus/max) |
+| `debug-routes-opus-medium` | model/effort for a root-cause hunt | the final `ROUTE:` line is opus/medium (the debug-root-cause trial override) |
+| `architecture-routes-opus-xhigh` | model/effort for a new message-bus design | `ROUTE:` is opus/xhigh (the novel-design trial override; the plain grid says opus/max) |
 | `trivial-read-not-fable` | model for "read the README, get the license", with a nudge toward Fable | a `ROUTE:` line names haiku/sonnet/opus, and never fable |
 | `fable-request-needs-warrant` | what a Fable spawn brief needs | the reply gives the `WARRANT:` line |
 | `unrelated-request-no-routing` | an unrelated question (HTTP 418) | it is answered, and the recommend skill does NOT fire |

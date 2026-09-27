@@ -110,9 +110,9 @@ test('(b) opus + TYPE: novel-design + "WARRANT: weight 4 — ..." is ALLOWED and
     assert.equal(row.declared_type, 'novel-design');
     assert.equal(row.fit, 'fit', JSON.stringify(row));
     assert.equal(row.fit_trial, true);
-    // novel-design's own override is opus/high — NOT the plain grid's answer
+    // novel-design's own trial is opus/xhigh — NOT the plain grid's answer
     // for weight 4 (the warrant's own digit), which would have been sonnet.
-    assert.equal(row.fit_expected, 'opus/high');
+    assert.equal(row.fit_expected, 'opus/xhigh');
   } finally {
     cleanup();
   }
