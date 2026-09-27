@@ -31,7 +31,18 @@ import { telemetryDir, isFixtureSession, tailRecords, stateDir } from './context
 // Only these characters may appear in an autofilled name; a name built from
 // project/repo directory names, subagent types or a free-text description
 // can otherwise carry spaces, slashes, unicode or shell-hostile characters.
-const NAME_SAFE = /[^A-Za-z0-9._-]+/g;
+// No '.': the Agent tool rejects any name outside AGENT_NAME_RE below.
+const NAME_SAFE = /[^A-Za-z0-9_-]+/g;
+// The Agent tool's own `name` schema pattern; every name namegate returns
+// must match it or the spawn fails schema validation.
+export const AGENT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+function randSuffix() { return Math.random().toString(36).slice(2, 6).padEnd(4, '0'); }
+// Last line of defence: a name that still fails the pattern becomes
+// "worker-<suffix>" rather than a spawn the harness refuses.
+export function toAgentName(name) {
+  const n = String(name || '');
+  return AGENT_NAME_RE.test(n) ? n : `worker-${randSuffix()}`;
+}
 const MAX_SEGMENT = 24; // cap per segment so one long description can't dominate
 const MAX_NAME = 60; // cap the assembled name; SendMessage/roster displays stay readable
 
@@ -85,8 +96,8 @@ export function buildCandidateName({ cwd, declaredType, subagentType, descriptio
     deriveTypeSlug({ declaredType, subagentType }),
     deriveHintSlug(description),
   ].filter(Boolean);
-  const joined = parts.join('-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '');
-  return (joined || 'worker').slice(0, MAX_NAME).replace(/-+$/g, '');
+  const joined = parts.join('-').replace(/-{2,}/g, '-').replace(/^[^A-Za-z0-9]+|-+$/g, '');
+  return toAgentName((joined || 'worker').slice(0, MAX_NAME).replace(/-+$/g, ''));
 }
 
 // This session's already-named spawns, oldest first, read from the same
@@ -148,6 +159,7 @@ export function isReservedName(name) {
 // uses. Kept exported and still used as reserveUniqueName()'s own fail-open
 // fallback when the state dir is unusable.
 export function makeUnique(candidate, existing) {
+  candidate = toAgentName(candidate);
   const taken = new Set(existing || []);
   const blocked = (n) => taken.has(n) || isReservedName(n);
   if (!blocked(candidate)) return candidate;
@@ -156,8 +168,8 @@ export function makeUnique(candidate, existing) {
     const c = `${base}-${n}`;
     if (!blocked(c)) return c;
   }
-  const fallback = `${base}-${Math.random().toString(36).slice(2, 6)}`;
-  return blocked(fallback) ? `${base}-${Math.random().toString(36).slice(2, 6)}` : fallback;
+  const fallback = toAgentName(`${base}-${randSuffix()}`);
+  return blocked(fallback) ? toAgentName(`${base}-${randSuffix()}`) : fallback;
 }
 
 // Marker debris (review finding 1's fix): bounded by age, not by an explicit
@@ -240,9 +252,10 @@ function tryReserve(sid, name) {
 // the pre-fix behaviour. Never throws, never blocks the spawn.
 export function reserveUniqueName(sid, candidate, existing, { now = Date.now() } = {}) {
   try { pruneNamegateMarkers(now); } catch { /* best effort */ }
+  candidate = toAgentName(candidate);
   const taken = new Set(existing || []);
   const blocked = (n) => taken.has(n) || isReservedName(n);
-  const attempt = (n) => (!blocked(n) && tryReserve(sid, n)) ? n : null;
+  const attempt = (n) => (AGENT_NAME_RE.test(n) && !blocked(n) && tryReserve(sid, n)) ? n : null;
 
   let picked = attempt(candidate);
   if (picked) return picked;
@@ -253,7 +266,7 @@ export function reserveUniqueName(sid, candidate, existing, { now = Date.now() }
     if (picked) return picked;
   }
   for (let i = 0; i < 8; i += 1) {
-    picked = attempt(`${base}-${Math.random().toString(36).slice(2, 6)}`);
+    picked = attempt(`${base}-${randSuffix()}`);
     if (picked) return picked;
   }
   // Exhausted every slot (state dir unusable, or a wildly unlucky/adversarial
