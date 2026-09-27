@@ -9,9 +9,12 @@
 //     first, telling you to update the eval with the config.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { PLUGIN_ROOT } from './helpers.mjs';
+import { resolveRoute } from '../hooks/lib/context.mjs';
+import { checkGraders, syncGraders, graderFor } from '../scripts/sync-eval-graders.mjs';
 
 const EVALS = join(PLUGIN_ROOT, 'evals');
 const PROMPT_KEYS = new Set(['schema_version', 'name', 'description', 'tags', 'plugins', 'runs', 'expected_outcome', 'model', 'max_turns', 'timeout_seconds', 'allowed_tools', 'append_system_prompt', 'env']);
@@ -37,7 +40,7 @@ const cases = existsSync(EVALS)
 
 test('the routing eval suite exists with its five canaries', () => {
   assert.deepEqual(cases.sort(), [
-    'architecture-routes-opus-xhigh', 'debug-routes-opus-medium', 'fable-request-needs-warrant',
+    'fable-request-needs-warrant', 'route-debug-root-cause', 'route-novel-design',
     'trivial-read-not-fable', 'unrelated-request-no-routing',
   ]);
 });
@@ -69,17 +72,31 @@ test('negative trigger is scored in BOTH arms (two-arm fairness rule)', () => {
   assert.equal(fm.max, '0');
 });
 
-test('canary expectations match what config/model-tiers.json routes to today', () => {
+test('route canaries are keyed by task type and their graders agree with the table', () => {
+  // graders/route.md is GENERATED (scripts/sync-eval-graders.mjs); this fails
+  // when the table moved and the graders were not regenerated.
+  const results = checkGraders();
+  assert.deepEqual(results.map((r) => r.type).sort(), ['debug-root-cause', 'novel-design']);
+  for (const r of results) {
+    assert.ok(r.ok, `evals/${r.dir}/graders/route.md disagrees with the table's ${r.type} route (${r.route}): run node scripts/sync-eval-graders.mjs`);
+    const want = resolveRoute({ type: r.type, profile: false });
+    const { fm } = frontmatter(join(EVALS, r.dir, 'graders', 'route.md'));
+    const re = new RegExp(fm.pattern, fm.flags || '');
+    assert.match(`ROUTE: ${want.model}/${want.effort}`, re, 'the generated pattern accepts the table route');
+    assert.doesNotMatch('ROUTE: fable/max', re);
+  }
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
-  const route = (t) => `${cfg.taskTypes[t].override.model}/${cfg.taskTypes[t].override.effort}`;
-  const expects = (c) => {
-    const { fm } = frontmatter(join(EVALS, c, 'graders', 'route.md'));
-    const m = fm.pattern.match(/opus\[-0-9\.\]\*\\s\*\/\\s\*(\w+)/);
-    return m ? `opus/${m[1]}` : null;
-  };
-  assert.equal(expects('debug-routes-opus-medium'), route('debug-root-cause'),
-    'debug canary disagrees with the debug-root-cause route: update evals/debug-routes-opus-medium with the config');
-  assert.equal(expects('architecture-routes-opus-xhigh'), route('novel-design'),
-    'architecture canary disagrees with the novel-design route: update evals/architecture-routes-opus-xhigh with the config');
   assert.equal(cfg.tiers.fable.premium, true, 'the fable warrant canary assumes fable is premium');
+});
+
+test('a hand-edited grader that disagrees with the table fails the check', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ac-evals-'));
+  try {
+    mkdirSync(join(dir, 'route-debug-root-cause', 'graders'), { recursive: true });
+    const f = join(dir, 'route-debug-root-cause', 'graders', 'route.md');
+    writeFileSync(f, graderFor('debug-root-cause').text.replace(/opus/g, 'sonnet'));
+    assert.equal(checkGraders(dir)[0].ok, false);
+    assert.deepEqual(syncGraders(dir), ['route-debug-root-cause']);
+    assert.equal(checkGraders(dir)[0].ok, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

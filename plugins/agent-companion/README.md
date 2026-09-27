@@ -40,6 +40,7 @@ It was built after two observed failures:
 | `fit_autofill` | A spawn that declares `WEIGHT:` but names no model gets the table's model filled in, instead of inheriting the lead's tier by accident. | no |
 | `routing_profile` | Routes a declared `TYPE:` through **your** routing profile ahead of the shipped table (see [Routing profile](#routing-profile)). The kill switch: off means only the shipped table routes, from the next hook invocation, and the file is left untouched. On by default because the file exists only once you write a row. | no |
 | *(spawning rule)* | Three operator-approved checks, always on (not a togglable option, same as the no-effort-stated warning below): a spawn naming no model anywhere is flagged even with no `WEIGHT:` declared; an opus/fable spawn from a session on a Claude Code build below the alias-resolution floor is flagged; the audit separately verifies the RESOLVED model against what ran. See [Spawning rule](#spawning-rule-operator-approved-2026-09-23). | no |
+| `runaway_turns`, `runaway_usd` | Runaway-spawn flag. When a subagent finishes, its transcript is read (bounded: the last 8 MB, assistant records only) and its API turns counted and priced at list price. Over `runaway_turns` (default 300) or `runaway_usd` (default $40, price-derived, not a bill) it writes one row to `runaway.jsonl` beside `spawns.jsonl` and queues a one-line notice for the lead, delivered once on the lead's next prompt or main-thread tool call (a SubagentStop hook's own output belongs to the finished subagent, not the lead). Set either to 0 to turn that half off. | no |
 | `brevity` | Appends a short reporting contract to every spawned agent's brief — status line, blockers in full, outcome as facts, no narration — plus a peer-brevity clause on inter-agent messages. | no (an opt-in sub-toggle can block once per agent) |
 | `standing_rules` | Injects operator-authored "always do X if Y" rules at session start, on matching prompts, and into matching spawn briefs. | no |
 | `memory_vault` | Keeps a local git history of the memory corpus in a separate repository, so a rewrite or truncation is no longer unrecoverable. Strictly read-only against the live corpus. **Off by default** — see [Memory vault](#memory-vault). | no |
@@ -581,8 +582,9 @@ cross-check. `scripts/lib/cache-advisor.mjs` states the whole model.
   notional: they rank windows, they are not a bill. The benchmark rows'
   `cost_usd` is Claude Code's own figure from the same list prices, so it is
   used only to check the price table (a warning prints if they disagree by
-  more than 2%), never to scale anything. A plan-usage view uses the dated
-  weights in `config/compaction.json`.
+  more than 2%), never to scale anything. A plan-usage view prices every model's tokens at Sonnet's price vector
+  times the dated `planUsageMultipliers` in `config/model-tiers.json` (the
+  benchmark's plan-usage method; a tier with no multiplier has no plan figure).
 - Real traffic only: benchmark sessions (the harness's `bench-*` and
   `rescore-*` working directories in the OS temp dir) are excluded before
   reading, and the report says how many project directories were left out.

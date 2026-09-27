@@ -28,7 +28,10 @@ import {
 import {
   discoverViaGh, discoverOwners, discoverFromClaudeProjects, discoverLocalCheckouts,
   defaultDevRoots, parseExtraSpec, publicNameTokens, defaultCheckVisibility, cachedVisibility,
+  readClaudeJsonProjectPaths,
 } from './lib/repo-discovery.mjs';
+import { projectAgentDrift, driftCounts } from './lib/agent-drift.mjs';
+import { churnVerdict } from './lib/session-churn.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
@@ -232,8 +235,20 @@ if (unknownRecords.length) {
 const spawns = readJsonl('spawns.jsonl');
 const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
 const recent = spawns.filter((s) => Date.parse(s.at) > dayAgo);
-const premium = recent.filter((s) => /fable|opus/i.test(s.model || ''));
+// "Premium" here means premium WITHOUT a routing reason. Under a table whose
+// default tier is opus, counting every opus spawn would trip spend-deep-dive
+// on ordinary routed traffic. A row carrying the spawn guard's boolean
+// `routed` (true = the opus/fable model was a deliberate routing choice)
+// counts only when routed === false; a row from before that field existed
+// falls back to the model regex.
+const isUnroutedPremium = (s) => /fable|opus/i.test(s.model || '')
+  && (typeof s.routed === 'boolean' ? s.routed === false : true);
+const premium = recent.filter(isUnroutedPremium);
 const inherited = recent.filter((s) => s.model === '(inherited)');
+// A spawn can name its model and still inherit the lead's EFFORT (no effort in
+// its definition; every built-in type) — the guard records that as
+// spawn_effort_source 'inherited'. inherited_model_spawns cannot see it.
+const inheritedEffort = recent.filter((s) => s.spawn_effort_source === 'inherited');
 
 next.spawnTotal = spawns.length;
 if (recent.length) {
@@ -250,6 +265,53 @@ if (inherited.length > 0) {
     `${inherited.length} spawn(s) in 24h specified no model and inherited the lead's tier`,
     'routing-review');
 }
+if (inheritedEffort.length > 0) {
+  sig('inherited_effort_spawns',
+    `${inheritedEffort.length} spawn(s) in 24h set no effort (neither the call nor the agent definition) and ran at the lead session's effort`,
+    'routing-review');
+}
+
+// --- 3b. Project-agent drift against the routing table -------------------
+// Projects come from the scout's own local enumeration — ~/.claude.json's
+// `projects` map (the publication sweep's primary source, same test env var),
+// plus this run's cwd. Only projects with a .claude/agents directory are
+// read, capped at PROJECT_DRIFT_MAX. Only agents that opt in with
+// `routingType:` frontmatter can drift (lib/agent-drift.mjs).
+const PROJECT_DRIFT_MAX = 200;
+try {
+  const claudeJsonPath = process.env.AGENT_COMPANION_DISCOVERY_CLAUDE_JSON || join(homeRoot(), '.claude.json');
+  const listed = readClaudeJsonProjectPaths({ claudeJsonPath }) || [];
+  const candidates = [...new Set([process.cwd(), ...listed])]
+    .filter((p) => existsSync(join(p, '.claude', 'agents')))
+    .slice(0, PROJECT_DRIFT_MAX);
+  const drifted = [];
+  for (const p of candidates) {
+    const c = driftCounts(projectAgentDrift(p));
+    const bad = c.below + c.above + c.inherits + c.unknownType + c.parityGaps;
+    if (bad) {
+      drifted.push(`${basename(p)}: ${[
+        c.below && `${c.below} below`, c.above && `${c.above} above`, c.inherits && `${c.inherits} inherit effort`,
+        c.unknownType && `${c.unknownType} unknown routingType`, c.parityGaps && `${c.parityGaps} writer(s) without a parity reviewer`,
+      ].filter(Boolean).join(', ')}`);
+    }
+  }
+  if (drifted.length) {
+    sig('project_agent_drift',
+      `${drifted.length} project(s) have agents off the routing table: ${drifted.slice(0, 8).join('; ')}${drifted.length > 8 ? '; ...' : ''} — run /ac audit agent-defs in each`,
+      'routing-review');
+  }
+} catch { /* fail open: a drift read never blocks the scout */ }
+
+// --- 3c. Session churn (offline aggregate) ---------------------------------
+// session-churn.jsonl is written by `transcript-harvest.mjs --churn`
+// (lib/session-churn.mjs, where the thresholds are defined and explained).
+try {
+  const churnRows = readJsonl('session-churn.jsonl');
+  const verdict = churnVerdict(churnRows, { now: nowDate() });
+  if (verdict.fire) {
+    sig('session_churn', verdict.detail, 'routing-review');
+  }
+} catch { /* fail open */ }
 
 // --- 4. Silent-failure canary -----------------------------------------
 // A guard that stopped matching looks identical to one never tripped.

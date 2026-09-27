@@ -394,6 +394,18 @@
       "title": "Poll guard: transcript tail bytes",
       "description": "How much of the caller's own transcript (tail, most recent bytes) the guard reads for prior ScheduleWakeup/Monitor history.",
       "default": 131072
+    },
+    "runaway_turns": {
+      "type": "number",
+      "title": "Runaway spawn: turn threshold",
+      "description": "A finished subagent that ran more API turns than this is logged to runaway.jsonl and flagged to the lead once, on its next prompt or main-thread tool call. 0 turns the turn check off.",
+      "default": 300
+    },
+    "runaway_usd": {
+      "type": "number",
+      "title": "Runaway spawn: dollar threshold",
+      "description": "A finished subagent whose price-derived cost (list price x tokens, not a bill) exceeds this many US dollars is logged and flagged the same way. 0 turns the dollar check off.",
+      "default": 40
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",

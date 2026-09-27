@@ -60,6 +60,7 @@
 //   node transcript-harvest.mjs --since 2026-08-01
 //   node transcript-harvest.mjs --out ./digest.md
 //   node transcript-harvest.mjs --include-subagents   # also scan the (huge) subagent half
+//   node transcript-harvest.mjs --churn               # session-churn.jsonl aggregate only (see lib/session-churn.mjs)
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
@@ -105,6 +106,22 @@ if (args.values['--since']) {
     process.exit(2);
   }
   sinceMs = parsed;
+}
+
+// --- --churn: the session-churn aggregate, instead of the summary harvest ---
+// Counts only (lib/session-churn.mjs): per lead session per day, effort
+// switches, runs of consecutive tool errors, correction prompts and review
+// rounds. Bounded by that module's window and caps; writes
+// session-churn.jsonl beside spawns.jsonl for the scout (detect.mjs
+// `session_churn`). --since is ignored here: the window is the module's.
+if (args.flags.has('--churn')) {
+  const churn = await import('./lib/session-churn.mjs');
+  const { rows, stats } = await churn.scanChurn();
+  const merged = churn.mergeChurnRows(churn.readChurnRows(), rows);
+  churn.writeChurnRows(merged);
+  const churning = rows.filter((r) => churn.churnReasons(r).length).length;
+  console.log(`transcript-harvest --churn: ${stats.scanned}/${stats.files} transcript(s) scanned${stats.truncated ? ' (capped)' : ''}; ${rows.length} session-day row(s), ${churning} over a threshold; wrote ${churn.churnFile()}`);
+  process.exit(0);
 }
 
 // --- Discover candidate files --------------------------------------------
