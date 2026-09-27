@@ -75,7 +75,12 @@ you expected to run reports `SKIP`, find out why before concluding anything.
   available and the mechanism behind unexamined premium fan-out. An omitted
   `effort` likewise inherits the lead's effort; the fix for both is to spawn
   the ladder agent (`ac-<model>-<effort>`) that
-  `node "$AC/scripts/recommend.mjs" --type <type>` routes to.
+  `node "$AC/scripts/recommend.mjs" --type <type>` routes to. A project agent
+  that declares `routingType: <task type>` in its frontmatter (Claude Code
+  ignores keys it does not recognise) is compared with that type's route and
+  reported below / above / match; `routingType: code-review` agents must cover
+  every writer agent at the same model and an equal or higher effort. Agents
+  without `routingType` are listed as unmapped (info, never a failure).
 - **harness-drift** — Claude Code version changes and unrecognised agent types.
   A renamed tool or matcher does not error; the guards just stop firing.
 - **guard-canary** — provokes each guard and asserts it responded. This is the

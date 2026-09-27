@@ -54,6 +54,9 @@ Only for signals that fired:
 | `new_agent_type` | harness-surface diff |
 | `zero_denials` | canary — guards may have stopped matching |
 | `inherited_model_spawns` | routing review |
+| `inherited_effort_spawns` | routing review (spawns that ran at the lead's effort) |
+| `project_agent_drift` | routing review (a project's `routingType:` agents off the table, or a writer with no parity reviewer) |
+| `session_churn` | routing review (from `session-churn.jsonl`; refresh with `transcript-harvest.mjs --churn`) |
 | `spawn_activity` with `spend-deep-dive` | spend attribution |
 | `harness_version_unreadable` | report to the operator; do not guess |
 | `main_ci_red` | report to the operator (repo, workflow, red-since, run URL) — suggestion only, never re-run or fix the workflow yourself |

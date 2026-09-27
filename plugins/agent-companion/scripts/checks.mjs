@@ -26,6 +26,7 @@ import {
   memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
 } from '../hooks/lib/memory-index.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
+import { projectAgentDrift, driftFindings, driftCounts } from './lib/agent-drift.mjs';
 import { scanModelMismatches } from './lib/model-mismatch.mjs';
 import { computeCacheTtl, transcriptsRoot as cacheTtlTranscriptsRoot } from './lib/cache-ttl.mjs';
 import {
@@ -233,6 +234,7 @@ const agentDefs = {
         const cacheTtl = cacheTtlFrontmatter(raw);
         roster.push({
           name, model: fm.model || '', effort: fm.effort || '', rel, cacheTtl,
+          routingType: fm.routingType || '',
         });
         // An omitted model inherits the LEAD's tier - the most expensive
         // default available, and the mechanism behind unexamined premium fan-out.
@@ -362,11 +364,18 @@ const agentDefs = {
       }
     }
 
+    // Routing-table drift for agents that declare `routingType:` in their
+    // frontmatter (lib/agent-drift.mjs). An `info:` finding (the unmapped
+    // list) is shown but never moves the status.
+    const drift = projectAgentDrift(ctx.target, { agents: roster });
+    findings.push(...driftFindings(drift));
+
     const bad = findings.some((x) => /NO model|FABLE|at least the tier it reviews/.test(x));
+    const counted = findings.filter((x) => !x.startsWith('info:'));
     return {
-      status: bad ? 'fail' : (findings.length ? 'warn' : 'ok'),
+      status: bad ? 'fail' : (counted.length ? 'warn' : 'ok'),
       findings,
-      data: { count, roster },
+      data: { count, roster, routing: driftCounts(drift) },
     };
   },
 };

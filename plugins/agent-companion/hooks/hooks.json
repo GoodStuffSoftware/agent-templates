@@ -130,6 +130,14 @@
               "user-prompt"
             ],
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs"
+            ],
+            "timeout": 5
           }
         ]
       }
@@ -204,6 +212,14 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/subagent-brevity.mjs",
               "--event",
               "stop"
+            ],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-check.mjs"
             ],
             "timeout": 10
           }

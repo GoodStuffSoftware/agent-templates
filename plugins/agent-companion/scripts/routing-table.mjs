@@ -82,8 +82,8 @@ const cell = (w, k) => {
 // sandbox, a read-only session) cannot run recommend.mjs or open
 // docs/ROUTING.md, so without this block the skill has no routing data and
 // the model falls back to its own taste -- found by the routing eval suite
-// (evals/), where the architecture canary answered opus/xhigh instead of the
-// trial's opus/high. GENERATED like docs/ROUTING.md, and checked by the same
+// (evals/), where the novel-design canary (evals/route-novel-design) answered
+// opus/xhigh instead of the trial's then opus/high. GENERATED like docs/ROUTING.md, and checked by the same
 // routing-doc audit check, so it cannot drift from the config.
 const SKILL_BLOCK_BEGIN = '<!-- routing-table:task-types BEGIN (generated from config/model-tiers.json by scripts/routing-table.mjs --sync-skill; do not edit by hand) -->';
 const SKILL_BLOCK_END = '<!-- routing-table:task-types END -->';

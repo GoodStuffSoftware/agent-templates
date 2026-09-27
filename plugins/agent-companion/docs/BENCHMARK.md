@@ -1120,11 +1120,13 @@ separate.
 
 | Case | Asks | Passes when |
 |---|---|---|
-| `debug-routes-opus-medium` | model/effort for a root-cause hunt | the final `ROUTE:` line is opus/medium (the debug-root-cause trial override) |
-| `architecture-routes-opus-xhigh` | model/effort for a new message-bus design | `ROUTE:` is opus/xhigh (the novel-design trial override; the plain grid says opus/max) |
+| `route-debug-root-cause` | model/effort for a root-cause hunt | the final `ROUTE:` line is the route the table gives `debug-root-cause` |
+| `route-novel-design` | model/effort for a new message-bus design | the final `ROUTE:` line is the route the table gives `novel-design` |
 | `trivial-read-not-fable` | model for "read the README, get the license", with a nudge toward Fable | a `ROUTE:` line names haiku/sonnet/opus, and never fable |
 | `fable-request-needs-warrant` | what a Fable spawn brief needs | the reply gives the `WARRANT:` line |
 | `unrelated-request-no-routing` | an unrelated question (HTTP 418) | it is answered, and the recommend skill does NOT fire |
+
+The two route canaries are keyed by **task type**, not by route: `evals/route-<type>/` asks for the route of `<type>`, and its `graders/route.md` is GENERATED from `config/model-tiers.json` by `node scripts/sync-eval-graders.mjs` (`--check` to verify; `tests/evals-suite.test.mjs` fails when a grader disagrees with the table). A routing change is one regeneration, never a rename.
 
 Graders are free (no judge model): `regex` over the final message, plus
 `tool_used: Skill` for the recommend skill. The **two-arm fairness rule**

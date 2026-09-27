@@ -81,8 +81,9 @@
 // cost_usd, which is Claude Code's own figure computed from the same list
 // prices, so a ratio of 1.000 only says the two price tables agree. Nothing is
 // scaled by it; a ratio off by more than 2% is printed as a warning. Plan
-// usage (subscription limits) is a dated secondary view with per-model
-// weights in config/compaction.json planUsage.
+// usage (subscription limits) is a dated secondary view: each model's tokens
+// priced at Sonnet's price vector times config/model-tiers.json
+// planUsageMultipliers (planPriceSpecFor), as bench/runner.mjs does.
 //
 // --- Real traffic only ------------------------------------------------------
 //
@@ -99,7 +100,9 @@ import { tmpdir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { scanCorpus, gapsOf, spawnBaselineOf, percentile } from './transcripts.mjs';
 import { pricingTable, classifyPricing, priceUsage } from './pricing.mjs';
-import { stateRoot, stateDir, claudeDir, dataDir, writeJsonAtomic } from '../../hooks/lib/context.mjs';
+import {
+  stateRoot, stateDir, claudeDir, dataDir, writeJsonAtomic, modelTiers, classifyModel,
+} from '../../hooks/lib/context.mjs';
 
 export const ADVISOR_SUMMARY_FILE = 'cache-advisor.json';
 const MIN_PARAM_SAMPLES = 3;
@@ -112,7 +115,7 @@ export function compactionConfig() {
   const shipped = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'compaction.json');
   let cfg = {
     models: {}, unknownModel: { contextWindow: 200000, defaultCompactAt: 167000 }, compactReserve: { outputCap: 20000, buffer: 13000 },
-    window: { min: 100000, max: 1000000, step: 25000 }, minTurnsPerCompaction: 10, planUsage: { weights: {} },
+    window: { min: 100000, max: 1000000, step: 25000 }, minTurnsPerCompaction: 10, planUsage: {},
   };
   try { cfg = { ...cfg, ...JSON.parse(readFileSync(shipped, 'utf8')) }; } catch { /* use defaults */ }
   let local = null;
@@ -156,6 +159,27 @@ export function priceSpecFor(model, cfg = pricingTable()) {
     w5: cfg.writeMultiplier5m ?? 1.25,
     w1: cfg.writeMultiplier1h ?? 2,
   };
+}
+
+// Plan usage (subscription limits), priced the way bench/runner.mjs prices
+// its plan_usage_index: every model's tokens at the BASELINE tier's price
+// vector (the tier config/model-tiers.json planUsageMultipliers defines as
+// 1.0, i.e. Sonnet), times the model's own tier multiplier from that table
+// (opus 1.5 as of its date). Not a scalar on the model's API price: Opus 5.5
+// input and output cost 2x Sonnet 5 but cache reads cost the same, so the
+// API ratio depends on the token mix and a fixed weight is wrong for every
+// mix but one. null when the model's tier has no measured multiplier (no
+// plan figure, never a guessed 1.0) or the baseline tier is unpriced.
+export function planPriceSpecFor(model, tiersCfg = modelTiers(), pricing = pricingTable()) {
+  const mults = tiersCfg.planUsageMultipliers || {};
+  const alias = classifyModel(model).alias;
+  const own = mults[alias];
+  if (!own || typeof own.multiplier !== 'number') return null;
+  const baseAlias = Object.keys(mults).find((k) => mults[k]?.multiplier === 1);
+  const baseModel = baseAlias && tiersCfg.tiers?.[baseAlias]?.resolvesTo?.modelId;
+  const base = baseModel ? priceSpecFor(baseModel, pricing) : null;
+  if (!base) return null;
+  return { ...base, baseline: baseAlias, multiplier: own.multiplier };
 }
 
 // --- The window in effect (read-only) ----------------------------------------------
@@ -711,6 +735,17 @@ export function evaluateModel(mi, allInputs, opts = {}) {
     const requestsPerCompaction = compactions ? stepsInCompacting / compactions : null;
     return { usd: usdOf(units), compactions, stepsInCompacting, requestsPerCompaction };
   };
+  // Plan usage (planPriceSpecFor): the same replay, its tokens priced at the
+  // baseline tier's price vector, times this tier's plan multiplier. null for
+  // a tier with no measured multiplier.
+  const plan = planPriceSpecFor(mi.model);
+  const planAt = plan ? (T) => {
+    let units = 0;
+    for (const t of mi.tracks) {
+      units += replayTrack(t, T, { ...params[t.kind], rework: reworkOf(params[t.kind]), r: plan.r, w5: plan.w5, w1: plan.w1, outRatio: plan.outRatio }).cost;
+    }
+    return units * plan.inUsd * plan.multiplier;
+  } : () => null;
 
   const curve = [];
   for (const W of candidateWindows(spec, cfg)) {
@@ -720,7 +755,7 @@ export function evaluateModel(mi, allInputs, opts = {}) {
     const turnsPerCompaction = x.requestsPerCompaction != null && requestsPerTurn ? x.requestsPerCompaction / requestsPerTurn : null;
     const allowed = x.requestsPerCompaction == null || minRequestsPerCompaction == null || x.requestsPerCompaction >= minRequestsPerCompaction;
     curve.push({
-      window: W, threshold: T, feasible: true, usd: x.usd, compactions: x.compactions,
+      window: W, threshold: T, feasible: true, usd: x.usd, planUsd: planAt(T), compactions: x.compactions,
       stepsInCompacting: x.stepsInCompacting, requestsPerCompaction: x.requestsPerCompaction, turnsPerCompaction, allowed,
     });
   }
@@ -829,15 +864,23 @@ export function evaluateModel(mi, allInputs, opts = {}) {
 // model that would compact more often than the floor there is listed in
 // optimum.belowFloor (the floor binds the mix, so the report must say which
 // models it does not protect).
-// weights (alias -> factor) gives the plan-usage view; noRework uses each
-// model's rework-off curve.
+// plan: true sums each point's planUsd (planPriceSpecFor) and leaves out a
+// model with none, listed in `excluded`. weights (alias -> factor) scales a
+// model's API usd (kept for callers; the plan view no longer uses it).
+// noRework uses each model's rework-off curve.
 export function combineModels(evaluated, {
-  cfg = compactionConfig(), weights = null, requestsPerTurn = null, minTurnsPerCompaction, noRework = false,
+  cfg = compactionConfig(), weights = null, requestsPerTurn = null, minTurnsPerCompaction, noRework = false, plan = false,
 } = {}) {
   const minTurns = minTurnsPerCompaction ?? cfg.minTurnsPerCompaction ?? 10;
   const curveOf = (e) => (noRework ? e.noRework?.curve : e.curve);
   const statusOf = (e) => (noRework ? e.noRework?.status : e.status);
-  const voters = evaluated.filter((e) => (statusOf(e) === 'ok' || statusOf(e) === 'no-allowed-window') && curveOf(e));
+  const eligible = evaluated.filter((e) => (statusOf(e) === 'ok' || statusOf(e) === 'no-allowed-window') && curveOf(e));
+  // plan: sum each voter's planUsd (planPriceSpecFor) instead of its API usd;
+  // a model with no plan figure (no measured multiplier) cannot vote there
+  // and is listed in `excluded`.
+  const hasPlan = (e) => curveOf(e).some((c) => c.feasible && typeof c.planUsd === 'number');
+  const voters = plan ? eligible.filter(hasPlan) : eligible;
+  const excluded = plan ? eligible.filter((e) => !hasPlan(e)).map((e) => e.model) : [];
   if (!voters.length) return null;
   const { min, max, step } = cfg.window;
   const grid = [];
@@ -854,8 +897,9 @@ export function combineModels(evaluated, {
     for (const e of voters) {
       const pt = costAt(e, W);
       if (!pt) { ok = false; break; }
+      if (plan && typeof pt.planUsd !== 'number') { ok = false; break; }
       const wt = weights ? (weights[e.alias] ?? 1) : 1;
-      usd += pt.usd * wt;
+      usd += plan ? pt.planUsd : pt.usd * wt;
       compactions += pt.compactions;
       steps += pt.stepsInCompacting || 0;
       perModel[e.model] = pt.turnsPerCompaction ?? null;
@@ -866,7 +910,7 @@ export function combineModels(evaluated, {
     rows.push({ window: W, usd, compactions, turnsPerCompaction, allowed, perModelTurnsPerCompaction: perModel });
   }
   const allowedRows = rows.filter((r) => r.allowed);
-  if (!allowedRows.length) return { voters: voters.map((e) => e.model), optimum: null, rows };
+  if (!allowedRows.length) return { voters: voters.map((e) => e.model), excluded, optimum: null, rows };
   const opt = allowedRows.reduce((a, b) => (b.usd < a.usd ? b : a), allowedRows[0]);
   const band = (pct) => {
     const inside = allowedRows.filter((r) => r.usd <= opt.usd * (1 + pct / 100)).map((r) => r.window);
@@ -879,6 +923,7 @@ export function combineModels(evaluated, {
     .map(([model, t]) => ({ model, turnsPerCompaction: t, atCap: opt.window >= (voters.find((e) => e.model === model)?.contextWindow ?? Infinity) }));
   return {
     voters: voters.map((e) => e.model),
+    excluded,
     optimum: {
       window: opt.window, usd: opt.usd, compactions: opt.compactions, turnsPerCompaction: opt.turnsPerCompaction,
       perModelTurnsPerCompaction: opt.perModelTurnsPerCompaction,
@@ -996,8 +1041,7 @@ export function adviseFromInputs(inputs, {
   const combineOpts = { cfg, requestsPerTurn: requestsPerTurnPooled, minTurnsPerCompaction };
   const global = combineModels(evaluated, combineOpts);
   const globalNoRework = combineModels(evaluated, { ...combineOpts, noRework: true });
-  const planWeights = cfg.planUsage?.weights || null;
-  const globalPlan = planWeights && Object.keys(planWeights).length ? combineModels(evaluated, { ...combineOpts, weights: planWeights }) : null;
+  const globalPlan = combineModels(evaluated, { ...combineOpts, plan: true });
   // A reference point summed over the global voters, or null if any voter lacks it.
   const sumOver = (pick) => {
     if (!global) return null;
@@ -1036,7 +1080,13 @@ export function adviseFromInputs(inputs, {
       atDefault: defaultUsd != null ? { usd: defaultUsd } : null,
       noRework: globalNoRework && { optimum: globalNoRework.optimum && { window: globalNoRework.optimum.window, belowFloor: globalNoRework.optimum.belowFloor }, band1: globalNoRework.band1 ?? null, band5: globalNoRework.band5 ?? null },
     },
-    globalPlanUsage: globalPlan && { asOf: cfg.planUsage.asOf, weights: planWeights, optimum: globalPlan.optimum, band5: globalPlan.band5 },
+    globalPlanUsage: globalPlan && {
+      asOf: modelTiers().planUsageMultipliers?.opus?.date || cfg.planUsage?.asOf || null,
+      basis: 'tokens priced at the baseline tier (planUsageMultipliers = 1.0) x the tier multiplier',
+      multipliers: Object.fromEntries(Object.entries(modelTiers().planUsageMultipliers || {}).filter(([, v]) => typeof v?.multiplier === 'number').map(([k, v]) => [k, v.multiplier])),
+      voters: globalPlan.voters, excluded: globalPlan.excluded,
+      optimum: globalPlan.optimum, band5: globalPlan.band5 ?? null,
+    },
     moneyByModel: [...models.values()].filter((m) => priceSpecFor(m.model)).sort((a, b) => b.requests - a.requests).map((m) => whereMoneyGoes(m)),
     spawnOverhead: spawnOverhead(inputs.spawns, { days: inputs.windowDays }),
   };
@@ -1318,7 +1368,7 @@ export function formatAdvice(a, { curve = false } = {}) {
     }
     if (g.configured) out.push(`  at your ${K(g.configured.window)}: ${usd(g.configured.usd - g.optimum.usd)} more than the cheapest ${span}`);
     if (g.atDefault) out.push(`  unset (each model's default): ${usd(g.atDefault.usd - g.optimum.usd)} more than the cheapest ${span}`);
-    if (a.globalPlanUsage?.optimum) out.push(`  plan-usage view (weights as of ${a.globalPlanUsage.asOf}, may be introductory): cheapest ${K(a.globalPlanUsage.optimum.window)}, within 5%: ${K(a.globalPlanUsage.band5[0])}-${K(a.globalPlanUsage.band5[1])}`);
+    if (a.globalPlanUsage?.optimum) out.push(`  plan-usage view (tokens at Sonnet prices x plan multipliers as of ${a.globalPlanUsage.asOf}, may be introductory${a.globalPlanUsage.excluded?.length ? `; no plan figure for ${a.globalPlanUsage.excluded.join(', ')}` : ''}): cheapest ${K(a.globalPlanUsage.optimum.window)}, within 5%: ${K(a.globalPlanUsage.band5[0])}-${K(a.globalPlanUsage.band5[1])}`);
   } else {
     out.push('-- one setting for your model mix -- no model had enough data to vote');
   }
