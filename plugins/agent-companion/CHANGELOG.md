@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.20 — 2026-09-27
+
+- Fix: the delegation guard now actually fires. It only acted on `agent_type === 'main'`, which real main-thread payloads never carry, so it never ran outside its tests. Main-thread detection is now shared (`hooks/lib/context.mjs`: `agent_id` absent means main thread) and used by the delegation guard, spawn-guard and runaway-notice.
+- Behaviour change: `delegation_guard` is now `"off"` | `"warn"` | `"block"`, shipped default `warn`. Warn lets the call run and hands the model the instructions; block denies. Old booleans still read (`true` -> warn, `false` -> off; `"none"`/`"disabled"` read as off).
+- New option `delegation_guard_scope`: `"attended"` (default) | `"all"`. Under `attended`, a call whose hook env has `CLAUDE_CODE_SESSION_ATTENDED` exactly `"0"` (claude -p, SDK, woken/dispatched and background workers) is neither counted nor blocked. New scout signal `attended_env_missing`: a day of counted calls never saw the variable.
+- The delegation streak resets only on a main-thread Agent spawn or SendMessage that ran (PostToolUse), never on a denied spawn or a subagent's own.
+- Agent, SendMessage, ToolSearch, AskUserQuestion, TaskStop and every `mcp__` tool are never counted or blocked.
+- SECURITY: no hook returns permissionDecision `"allow"` any more. poll-guard, resume-guard and spawn-guard used to return it, skipping the permission prompt; their hints and autofills now carry no decision (`updatedInput` still applies), so spawns go through the normal permission flow. A new test enforces it.
+- Stale-lock handling: the streak lock breaks a lock older than 3 s whoever owns it, and the streak file waits at most 1 s; stale sessions are pruned after 7 days.
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.19 — 2026-09-27
 
 - Spawn-time reviewer parity: a `code-review` brief can name its writer with a `WRITER: <model>/<effort>` or `WRITER: <agent-name>` line (also `opus xhigh`, `Claude Opus 5.5 at xhigh`, backticked or bold). The spawn guard compares the reviewer with that writer and WARNS when it is below; it does not block this release. A reviewer with no model inherits the writer's pair. The verdict names what it compared against: the writer, the F1 critical-review floor (opus/xhigh), or the parity route after floor F2 (fable is never a routing destination). An effort word that is not an effort level is reported as "not understood" and parity is checked on the model alone; a line read only in part never autofills a model.
