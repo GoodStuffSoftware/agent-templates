@@ -15,13 +15,24 @@
 //
 // delegation_guard (lib/delegation.mjs delegationMode):
 //   "off"    nothing is counted.
-//   "warn"   (shipped default) at the threshold the call runs, and the model
+//   "warn"   (shipped default) at the threshold the guard lets the call go on
+//            (it is not the guard that stops it, if anything does), and the model
 //            gets the same instructions as additionalContext.
 //   "block"  at the threshold the call is denied with those instructions.
 // Either way the streak restarts at 0 when the guard fires, so a denied call
 // repeated once runs — the escape hatch for the one read a lead needs in
 // order to decide what to delegate. It is a speed bump per threshold calls,
 // not a wall: a guard that stopped every later call would get turned off.
+//
+// delegation_guard_scope (lib/delegation.mjs delegationScope):
+//   "attended" (default)  a session whose hooks see CLAUDE_CODE_SESSION_ATTENDED
+//                         exactly "0" (`claude -p`, SDK, woken/dispatched and
+//                         background workers, separate-process teammates) is
+//                         neither counted nor blocked: it IS the delegate. An
+//                         absent variable counts, as before the option existed.
+//   "all"                 every main thread counts, headless ones included.
+// Calls a remote session had this machine run (session_id "served:...") are
+// never counted: they are not this machine's lead.
 //
 // A call that does not fire gets NO decision (passthrough), never "allow":
 // "allow" skips the permission prompt, and this hook runs on every main-thread
@@ -34,6 +45,7 @@ import {
 } from './lib/context.mjs';
 import {
   guardSettings, isExecutionTool, isResetTool, recordExecutionCall, resetStreak, EXECUTION_TOOLS,
+  outOfScope, isServedCall, attendedValue,
 } from './lib/delegation.mjs';
 
 const argv = process.argv.slice(2);
@@ -68,7 +80,8 @@ function instructions({ mode, streak, threshold, tool }) {
     ? `Delegation guard (delegation_guard: block): this ${tool} call was NOT run. It is main-thread execution-class ` +
       `call ${streak} in a row with no delegation in between; the threshold is ${threshold} (delegation_threshold).`
     : `Delegation guard (delegation_guard: warn): that ${tool} call is main-thread execution-class call ${streak} ` +
-      `in a row with no delegation in between; the threshold is ${threshold} (delegation_threshold). The call ran.`;
+      `in a row with no delegation in between; the threshold is ${threshold} (delegation_threshold). ` +
+      'This guard did not stop the call.';
   return `${head}\n\n` +
     'Next: delegate the work with the Agent tool, naming a ladder rung so model and effort are explicit, backgrounded, ' +
     'with the task type on its own line in the brief:\n' +
@@ -91,9 +104,11 @@ try {
   const p = readStdin();
   noteAgentType(p);
 
-  const { mode, threshold } = guardSettings();
+  const { mode, scope, threshold } = guardSettings();
   if (mode === 'off') passthrough();
+  if (isServedCall(p)) passthrough();
   if (!isMainThread(p)) passthrough();
+  if (outOfScope(scope)) passthrough();
 
   if (EVENT === 'reset') {
     if (isResetTool(p.tool_name)) resetStreak(p.session_id);
@@ -101,10 +116,12 @@ try {
   }
 
   if (!isExecutionTool(p.tool_name)) passthrough();
-  const v = recordExecutionCall(p.session_id, threshold);
+  const attended = attendedValue();
+  const v = recordExecutionCall(p.session_id, threshold, { attended });
   if (!v.fires) passthrough();
 
-  const detail = `${v.streak} consecutive execution-class calls on the main thread (threshold ${threshold}), last ${p.tool_name}`;
+  const detail = `${v.streak} consecutive execution-class calls on the main thread (threshold ${threshold}), ` +
+    `last ${p.tool_name}; scope ${scope}, attended ${attended}`;
   const text = instructions({ mode, streak: v.streak, threshold, tool: p.tool_name });
   if (mode === 'block') {
     recordDenial('delegation', p, detail);

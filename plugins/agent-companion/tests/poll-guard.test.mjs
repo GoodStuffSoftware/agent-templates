@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook } from './helpers.mjs';
+import { makeFixture, runHook, decisionOf } from './helpers.mjs';
 import {
   evaluate, priorCallsOf, trailingNoopStreak, trailingSameDescriptionStreak,
   hasInFlightLaunch, gatedMonitorStreak,
@@ -349,7 +349,9 @@ test('hook: fires a systemMessage hint and still allows, on a noop-streak Schedu
     assert.equal(res.status, 0, `hook must exit 0: stderr=${res.stderr}`);
     assert.ok(res.json, `expected a JSON decision: stdout=${res.stdout}`);
     assert.equal(res.json.hookSpecificOutput.hookEventName, 'PreToolUse');
-    assert.equal(res.json.hookSpecificOutput.permissionDecision, 'allow', 'this guard is advisory: it must never deny');
+    assert.equal(decisionOf(res.json), 'proceed', 'this guard is advisory: it must never deny');
+    assert.equal('permissionDecision' in res.json.hookSpecificOutput, false,
+      'a hint carries no permissionDecision: "allow" would also skip the permission prompt');
     assert.match(res.json.systemMessage || '', /one completion/i);
   } finally {
     cleanup();
@@ -452,7 +454,9 @@ test('hook: Monitor re-arm streak on the same description also hints and still a
       env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
     });
     assert.equal(res.status, 0);
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow');
+    assert.equal(decisionOf(res.json), 'proceed');
+    assert.equal('permissionDecision' in res.json.hookSpecificOutput, false,
+      'a hint carries no permissionDecision: "allow" would also skip the permission prompt');
     assert.match(res.json?.systemMessage || '', /one completion/i);
   } finally {
     cleanup();

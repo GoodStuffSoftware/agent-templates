@@ -27,7 +27,7 @@ It was built after two observed failures:
 
 | Toggle | Does | Blocks? |
 |---|---|---|
-| `delegation_guard` | Fires when the **main thread** makes `delegation_threshold` (default 4) execution-class calls in a row (`Bash`, `PowerShell`, `Edit`, `Write`, `NotebookEdit`, `Read`, `Grep`, `Glob`) with no delegation in between; an `Agent` spawn or `SendMessage` that runs resets the count, and so does every firing. `"off"`; `"warn"` (default): the call runs and the model is told to delegate; `"block"`: the call is denied, and repeating it once runs it. The message names the next step: an `Agent` spawn of a ladder rung the routing table names, backgrounded, with a `TYPE:` line. Never counts or blocks a subagent's calls, and never blocks `Agent`, `SendMessage`, `ToolSearch`, `AskUserQuestion`, `TaskStop` or any `mcp__` tool. Legacy `true`/`false` read as `"warn"`/`"off"`. See [Delegation guard](#delegation-guard). | only in `block` |
+| `delegation_guard` | Fires when the **main thread** makes `delegation_threshold` (default 4) execution-class calls in a row (`Bash`, `PowerShell`, `Edit`, `Write`, `NotebookEdit`, `Read`, `Grep`, `Glob`) with no delegation in between; an `Agent` spawn or `SendMessage` that runs resets the count, and so does every firing. `"off"` (also `"none"`, `"disabled"`); `"warn"` (default): the guard does not stop the call, and the model is told to delegate; `"block"`: the call is denied, and repeating it once runs it. The message names the next step: an `Agent` spawn of a ladder rung the routing table names, backgrounded, with a `TYPE:` line. Never counts or blocks a subagent's calls, and never blocks `Agent`, `SendMessage`, `ToolSearch`, `AskUserQuestion`, `TaskStop` or any `mcp__` tool. `delegation_guard_scope`: `"attended"` (default) leaves headless sessions (`claude -p`, SDK, woken or dispatched workers) alone; `"all"` counts them too. Legacy `true`/`false` read as `"warn"`/`"off"`. See [Delegation guard](#delegation-guard). | only in `block` |
 | `premium_cap` | Caps concurrent premium-tier subagents at `premium_max_concurrent`. Counted: fable always (whatever pins it); `ac-opus-max`; another plugin's agent whose definition pins opus; a definition named like a built-in type (a project `general-purpose.md` pinning opus); and opus that nobody routed — set on a built-in type (general-purpose, Explore, Plan) with no `TYPE:` or `WEIGHT:`, or with a `TYPE:` that routes nothing (a built-in reviewer above its writer's model included). Not counted, because the model was the operator's or the table's choice: a spawn whose route names its model (e.g. a trial routing to opus, which also needs no warrant), an `ac-opus-*` ladder rung below `ac-opus-max` with or without a `TYPE:` line, a project agent (`.claude/agents/`) or user agent (`~/.claude/agents/`) whose definition pins opus, and a reviewer on its parity route (its `WRITER:`'s model after the floors). A model inherited from the lead is unknown at spawn time and is not counted (see `inherit_guard`). The deny says how to route the spawn instead. Only spawns that start count for the full 10-minute window; one that never starts (the harness rejected it) stops counting after 3 minutes. | yes, at the cap |
 | `inherit_guard` | A spawn that names no model, on a definition that states neither model nor effort, runs on the lead's own model AND effort. `"warn"` (default): one note naming the lead's pair and the line to add. `"block"`: deny it when the lead is on a premium tier (opus, fable, mythos) and the brief has no `WEIGHT:` line and no `TYPE:` the table knows (an unknown `TYPE:` routes nothing, so it does not lift the block); the deny says to add `TYPE: <task type>` or spawn a ladder rung. Block also stops un-TYPEd Explore, Plan and claude-code-guide spawns from such a lead. A lead whose model cannot be read or classified is never blocked. | only in `block` |
 | `warrant_required` | Premium spawns must carry a `WARRANT:` line stating task weight and why a cheaper tier will not do. | yes |
@@ -54,13 +54,15 @@ unexamined defaults, not the model itself.
 
 `delegation_guard` enforces "the main session delegates" at the tool call rather than in a document. It counts the main thread's execution-class calls (`Bash`, `PowerShell`, `Edit`, `Write`, `NotebookEdit`, `Read`, `Grep`, `Glob`); an `Agent` spawn or a `SendMessage` that actually runs (PostToolUse, so a spawn another guard denied does not count) ends the streak. When a call brings the streak to `delegation_threshold` (default 4, minimum 2) the guard fires and the streak restarts at 0:
 
-- `"warn"` (the shipped default): the call runs, and the model receives the instructions as `additionalContext`. The guard decides nothing on the call, so the normal permission prompt still applies.
+- `"warn"` (the shipped default): the guard does not stop the call, and the model receives the instructions as `additionalContext`. The guard decides nothing on the call, so the normal permission prompt still applies.
 - `"block"`: the call is denied with the same instructions. They state the streak and the threshold, and the next step: spawn a ladder rung with the `Agent` tool (`subagent_type: "agent-companion:ac-opus-low"`, or whichever rung the routing table names for the task type, with `run_in_background: true` and `TYPE: <task type>` on its own line in the brief). They warn against a model-less general-purpose, Explore or Plan spawn, which `inherit_guard: block` refuses from a premium lead.
-- `"off"`: nothing is counted.
+- `"off"` (also spelled `"none"`, `"disabled"`, or the legacy `false`): nothing is counted.
 
-The escape hatch is the restart itself: a lead that genuinely needs one more read on the main thread repeats the denied call, and it runs as call 1 of a new streak. So block is a speed bump every `delegation_threshold` calls, not a wall. Never counted or blocked: any call from inside a subagent, and `Agent`, `SendMessage`, `ToolSearch`, `AskUserQuestion`, `TaskStop`, `TaskOutput` and every `mcp__` tool (an agent bus's messaging and task-board tools included), so a stopped lead can always delegate, message a worker and ask the operator. Every firing increments `fired` in `state/delegation-streak.json`, which switches on the [`delegate-reminder`](#delegate-reminder--the-direct-answer-to-my-delegation-rules-stop-being-followed) standing rule, and writes a `denials.jsonl` row (`outcome: "deny"` or `"warn"`).
+The escape hatch is the restart itself: a lead that genuinely needs one more read on the main thread repeats the denied call, and it runs as call 1 of a new streak. So block is a speed bump every `delegation_threshold` calls, not a wall. Never counted or blocked: any call from inside a subagent, and `Agent`, `SendMessage`, `ToolSearch`, `AskUserQuestion`, `TaskStop`, `TaskOutput` and every `mcp__` tool (an agent bus's messaging and task-board tools included), so a stopped lead can always delegate, message a worker and ask the operator. Every firing increments `fired` in `state/delegation-streak.json`, which makes the [`delegate-reminder`](#delegate-reminder--the-direct-answer-to-my-delegation-rules-stop-being-followed) standing rule due on the next prompt (once per firing), and writes a `denials.jsonl` row (`outcome: "deny"` or `"warn"`).
 
-Every top-level session is a main thread to the guard, headless ones included: a `claude -p` run or a dispatched session that does its own execution work is counted like an interactive lead. Separate-process teammates are too, if their calls carry no `agent_id`.
+`delegation_guard_scope` decides which main threads count. Under `"attended"` (the default) a headless session is left alone: a `claude -p` run, an SDK program, a woken or dispatched worker, a background session, a separate-process teammate. It is the delegate, and doing the work itself is its job. Claude Code marks those sessions with `CLAUDE_CODE_SESSION_ATTENDED=0` in every hook's environment ("1" in an attended terminal, desktop or IDE session); the guard passes a call with exactly `"0"` through uncounted. The variable is undocumented, so an absent value counts, as it did before the option existed, and the guard records per session what it saw: if a day of counted calls saw it nowhere, the calibration scout's `attended_env_missing` signal fires, because the harness has stopped setting it and headless workers are being counted again. `"all"` counts every main thread, headless ones included.
+
+Tool calls a remote session has this machine run (hook `session_id` `"served:<caller>"`) are never counted: they are not this machine's lead, and every unknown caller would share one streak.
 
 Until this fix the guard required `agent_type === "main"`, which no real main-thread payload carries, so it never ran outside its own tests. Any mode that acts is therefore new behaviour on every install, which is why the shipped default is `"warn"`.
 
@@ -130,9 +132,9 @@ Seven rules ship built in:
 
 ### `delegate-reminder` — the direct answer to "my delegation rules stop being followed"
 
-This is the only shipped `always`-scope rule, and it is gated on purpose: its `delegation-drift` gate is satisfied only once `delegation_guard` has actually caught this session running execution-class tool calls on the main thread. Until then it injects nothing — a session that never drifts pays nothing for it. Once it fires, it repeats on every subsequent turn for the rest of the session.
+This is the only shipped `always`-scope rule, and it is gated on purpose: its `delegation-drift` gate is satisfied only once `delegation_guard` has actually caught this session running execution-class tool calls on the main thread. Until then it injects nothing — a session that never drifts pays nothing for it. After each firing it is injected once, on the next prompt, and is then silent until the guard fires again.
 
-That behaviour is exactly what a document read once at session start cannot have. A written rule's influence only ever decays as more context piles on top of it; a hook-injected rule can instead be conditional on the session's own behaviour — silent when it is not needed, and reappearing on every turn exactly when it has been earned, for as long as the behaviour it is correcting persists.
+That behaviour is exactly what a document read once at session start cannot have. A written rule's influence only ever decays as more context piles on top of it; a hook-injected rule can instead be conditional on the session's own behaviour — silent when it is not needed, and reappearing exactly when it has been earned, each time the behaviour it is correcting recurs.
 
 Drive this from `/agent-companion:standing-rules` (`node scripts/rules.mjs`) — the skill has `add`/`test`/`enable`/`disable`.
 
@@ -813,8 +815,11 @@ type — all allow.
 `agent_id` absent (`callerIsSubagent()` in `hooks/lib/context.mjs`, shared by
 every lead-only hook): the harness's own hook-input schema says `agent_id` is
 present only inside a subagent and absent for the main thread, even in `--agent`
-sessions, and tells hooks to use it rather than `agent_type`. A payload that did
-not parse, or carries no `session_id`, is never treated as the main thread. An
+sessions, and tells hooks to use it rather than `agent_type`. The delegation
+guard adds one condition (`isMainThread()`): a payload that did not parse, or
+carries no `session_id`, is never counted as the main thread. The spawn guard and
+the runaway notice test `agent_id` alone (`callerIsSubagent()`), so such a payload
+is still the lead to them. An
 agent type we do not recognise is never blocked — but it *is* recorded to
 `unknown-agent-types.jsonl`, so a new type introduced by a harness update
 surfaces in the next calibration run instead of silently changing behaviour.
@@ -834,6 +839,7 @@ files:
     "agent-companion@agent-templates": {
       "options": {
         "delegation_guard": "warn",
+        "delegation_guard_scope": "attended",
         "delegation_threshold": 4,
         "premium_max_concurrent": 2,
         "memory_budget_tokens": 3000,
@@ -878,7 +884,7 @@ the legacy-data import, and the schema.
 | `telemetry/unknown-agent-types.jsonl` | state root | agent types not in the known set |
 | `telemetry/fixtures.jsonl` | state root | rows from `verify-`/`test-`/`fixture-` sessions, routed here instead of a production stream |
 | `telemetry/brevity.jsonl` | state root | one row per `SubagentStart` self-heal and per `SubagentStop`: agent type, report length, whether the contract was on, whether it was gated |
-| `state/delegation-streak.json` | state root | per-session main-thread streak counter and firing count (`fired`, read by the `delegation-drift` gate); read-modify-written under `delegation-streak.json.lock`; sessions untouched for 7 days are pruned |
+| `state/delegation-streak.json` | state root | per-session main-thread streak counter, firing count (`fired`) and reminders sent (`reminded`; the `delegation-drift` gate is due while `fired > reminded`), plus what the last counted call's env said for `CLAUDE_CODE_SESSION_ATTENDED` (`attended`: `"1"`, `"0"` or `"absent"`, for `attended_env_missing`); read-modify-written under `delegation-streak.json.lock`, which waits at most 1 s and is broken once 3 s old whoever owns it; sessions untouched for 7 days are pruned |
 | `state/premium-window.json` | state root | rolling window used to approximate premium concurrency; read-modify-written only under `premium-window.json.lock` (a transient lock both hooks share, via hooks/lib/file-lock.mjs: it names its owner, and is broken only when that process is gone and the lock is over 1 s old) |
 | `state/baseline.json` | state root | previous harness version + counters, for daily drift detection; also the publication-leak sweep's per-repo hit fingerprints (keyed HMACs, not guessable hashes), so an accepted finding doesn't re-fire daily, and its repo-visibility cache (only public answers kept, for 24h; not-public and unknown ones are rechecked every run, so a repo made public is swept on the next run) |
 | `leak-fingerprint.key` | state root | per-machine random key for those hit fingerprints, created on the first sweep (owner-only permissions) |

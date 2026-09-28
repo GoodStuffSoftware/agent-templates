@@ -18,7 +18,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, unlinkSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { PLUGIN_ROOT, makeFixture } from './helpers.mjs';
+import { PLUGIN_ROOT, makeFixture, decisionOf } from './helpers.mjs';
 
 const WARRANTED = 'WARRANT: frontier reasoning\ndo the work';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -34,7 +34,7 @@ function runAsync(hook, payload, env) {
     ch.on('close', (code) => {
       let json = null;
       try { json = JSON.parse(out.trim()); } catch { /* no decision */ }
-      resolve({ code, ms: Date.now() - t0, err, decision: json?.hookSpecificOutput?.permissionDecision || null });
+      resolve({ code, ms: Date.now() - t0, err, decision: decisionOf(json) });
     });
     ch.stdin.end(JSON.stringify(payload));
   });
@@ -91,15 +91,15 @@ test('only a premium spawn loads the premium window and the lock helper', () => 
       });
       assert.equal(r.status, 0, r.stderr);
       const names = readFileSync(log, 'utf8').split('\n').filter(Boolean).map((u) => u.split('/').pop());
-      return { names, decision: JSON.parse(r.stdout).hookSpecificOutput?.permissionDecision };
+      return { names, decision: decisionOf(JSON.parse(r.stdout)) };
     };
     const plain = loaded('sonnet', 'sonnet', 'TYPE: bounded-feature\ngo');
     assert.ok(plain.names.includes('spawn-guard.mjs') && plain.names.includes('context.mjs'), plain.names.join(' '));
-    assert.equal(plain.decision, 'allow');
+    assert.equal(plain.decision, 'proceed');
     assert.equal(plain.names.includes('premium-window.mjs'), false, 'a non-premium spawn loaded the premium window');
     assert.equal(plain.names.includes('file-lock.mjs'), false, 'a non-premium spawn loaded the lock helper');
     const premium = loaded('fable', 'fable', WARRANTED);
-    assert.equal(premium.decision, 'allow');
+    assert.equal(premium.decision, 'proceed');
     assert.ok(premium.names.includes('premium-window.mjs') && premium.names.includes('file-lock.mjs'), premium.names.join(' '));
     assert.equal(readWindow(fx.file).length, 1, 'the premium spawn was counted');
   } finally { fx.cleanup(); }
@@ -145,7 +145,7 @@ test('an old lock of a dead owner (a crashed holder) is broken, and the guard pr
     holdLock(fx, { pid: deadPid(), ageMs: 60_000 });
     const r = await runAsync('spawn-guard.mjs', guardPayload(fx.dir), fx.env);
     assert.equal(r.code, 0, r.err);
-    assert.equal(r.decision, 'allow');
+    assert.equal(r.decision, 'proceed');
     assert.equal(readWindow(fx.file).length, 1);
     assert.equal(existsSync(fx.lock), false);
   } finally { fx.cleanup(); }
@@ -157,7 +157,7 @@ test('an old lock whose owner is ALIVE is never broken: the guard waits, then fa
     holdLock(fx, { ageMs: 60_000 });
     const r = await runAsync('spawn-guard.mjs', guardPayload(fx.dir), fx.env);
     assert.equal(r.code, 0, r.err);
-    assert.equal(r.decision, 'allow');
+    assert.equal(r.decision, 'proceed');
     assert.equal(JSON.parse(readFileSync(fx.lock, 'utf8')).token, 'test-holder', 'a live owner\'s lock was broken');
   } finally { fx.cleanup(); }
 });
@@ -168,7 +168,7 @@ test('a lock held past the wait fails open: the guard still answers within the h
     holdLock(fx);
     const r = await runAsync('spawn-guard.mjs', guardPayload(fx.dir), fx.env);
     assert.equal(r.code, 0, r.err);
-    assert.equal(r.decision, 'allow');
+    assert.equal(r.decision, 'proceed');
     assert.ok(r.ms < 8000, `took ${r.ms} ms`);
     assert.equal(readWindow(fx.file).length, 1, 'fail-open still records the spawn');
     assert.equal(JSON.parse(readFileSync(fx.lock, 'utf8')).token, 'test-holder', 'a lock the guard never took is not its to remove');
@@ -182,7 +182,7 @@ test('a concurrent burst of premium spawns allows exactly the cap, and every wri
     try {
       const rs = await Promise.all(Array.from({ length: N }, (_, i) => runAsync('spawn-guard.mjs', guardPayload(fx.dir, `S${i}`), fx.env)));
       for (const r of rs) assert.equal(r.code, 0, r.err);
-      const allowed = rs.filter((r) => r.decision === 'allow').length;
+      const allowed = rs.filter((r) => r.decision === 'proceed').length;
       assert.equal(allowed, 2, `round ${round}: ${allowed} of ${N} allowed under a cap of 2`);
       assert.equal(readWindow(fx.file).length, 2);
       const leftovers = readdirSync(fx.stateSub).filter((n) => n.endsWith('.tmp') || n.endsWith('.lock'));
@@ -201,7 +201,7 @@ test('a guard and a SubagentStart racing on the window never lose an entry', asy
         await sleep(delay);
         const l = runAsync('spawn-log.mjs', startPayload(), fx.env);
         const [gr] = await Promise.all([g, l]);
-        assert.equal(gr.decision, 'allow');
+        assert.equal(gr.decision, 'proceed');
         const w = readWindow(fx.file);
         assert.equal(w.length, 2, `delay ${delay}: an entry was lost`);
         assert.equal(w.filter((e) => e.confirmed).length, 1, `delay ${delay}: the start was not confirmed exactly once`);

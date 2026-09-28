@@ -25,10 +25,13 @@
 import { readStdin, opt, passthrough } from './lib/context.mjs';
 import { resolveTarget, lastActivityOf, ttlFor, cacheTtlFromDefinition, TTL_MS } from './lib/resume-guard.mjs';
 
-function allow(systemMessage) {
+// The hint, and NO permissionDecision: "allow" would also skip the permission
+// prompt for the SendMessage, which advice has no business deciding. Without
+// a decision the normal permission flow applies.
+function hint(systemMessage) {
   process.stdout.write(JSON.stringify({
     ...(systemMessage ? { systemMessage } : {}),
-    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+    hookSpecificOutput: { hookEventName: 'PreToolUse' },
   }));
   process.exit(0);
 }
@@ -71,7 +74,7 @@ try {
 
   const idleMin = Math.round(idleMs / 60000);
   const sizeK = Math.round(last.contextTokens / 1000);
-  allow(
+  hint(
     `agent-companion (resume guard): "${to}" has been idle ${idleMin}m, past its ${ttl} cache TTL — messaging it now ` +
     `will likely rewrite its whole context (~${sizeK}K tokens, not read from cache). Doctrine: resume only while the ` +
     'cache is warm; otherwise spawn a fresh ladder worker briefed from a file handoff (its branch, report, or a ' +

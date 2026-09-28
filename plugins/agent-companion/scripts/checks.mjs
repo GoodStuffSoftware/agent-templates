@@ -469,6 +469,10 @@ const guardCanary = {
     // dir, so the probe neither depends on nor touches the operator's own
     // settings and streak file. Before this probe existed the guard keyed
     // on agent_type === 'main', matched no real payload, and nothing noticed.
+    // The attended variable is pinned per probe (the default scope,
+    // "attended", reads it): "1" for the lead case, "0" for a headless
+    // session, which must never be counted — a canary run from `claude -p`
+    // would otherwise inherit "0" and report the guard inert.
     let scratch = null;
     try {
       scratch = mkdtempSync(join(tmpdir(), 'ac-canary-'));
@@ -476,17 +480,27 @@ const guardCanary = {
         AGENT_COMPANION_STATE_DIR: scratch,
         CLAUDE_PLUGIN_OPTION_DELEGATION_GUARD: 'block',
         CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2',
+        CLAUDE_PLUGIN_OPTION_DELEGATION_GUARD_SCOPE: 'attended',
+        CLAUDE_CODE_SESSION_ATTENDED: '1',
       };
-      const call = (extra) => probe('delegation-guard.mjs', {
+      const call = (extra, over = {}) => probe('delegation-guard.mjs', {
         session_id: 'canary-delegation', hook_event_name: 'PreToolUse', tool_name: 'Bash',
         tool_input: { command: 'echo canary' }, ...extra,
-      }, env);
+      }, { ...env, ...over });
       let workerDenied = false;
       for (let i = 0; i < 3; i += 1) {
         const w = call({ agent_id: 'canary-agent', agent_type: 'general-purpose' });
         if (w?.hookSpecificOutput?.permissionDecision === 'deny') workerDenied = true;
       }
       if (workerDenied) findings.push('delegation-guard DENIED a subagent - workers are being blocked');
+      let headlessDenied = false;
+      for (let i = 0; i < 3; i += 1) {
+        const h = call({ session_id: 'canary-delegation-headless' }, { CLAUDE_CODE_SESSION_ATTENDED: '0' });
+        if (h?.hookSpecificOutput?.permissionDecision === 'deny') headlessDenied = true;
+      }
+      if (headlessDenied) {
+        findings.push('delegation-guard DENIED a headless session (CLAUDE_CODE_SESSION_ATTENDED=0) under scope "attended" - headless workers are being blocked');
+      }
       call({});
       const mainCase = call({});
       if (mainCase === undefined) findings.push('delegation-guard did not run at all');
@@ -1168,8 +1182,10 @@ const brevityCanary = {
     });
     if (spawnOut === undefined) {
       findings.push('spawn-guard.mjs: did not run at all on the canary payload');
-    } else if (spawnOut?.hookSpecificOutput?.permissionDecision !== 'allow') {
-      findings.push('spawn-guard.mjs: did NOT allow a cheap-model canary spawn - expected permissionDecision "allow"');
+    } else if (spawnOut?.hookSpecificOutput?.permissionDecision) {
+      // A let-through carries NO decision: "allow" would also skip the
+      // permission prompt, "deny"/"ask" would stop a cheap spawn.
+      findings.push(`spawn-guard.mjs: answered a cheap-model canary spawn with permissionDecision "${spawnOut.hookSpecificOutput.permissionDecision}" - expected a let-through with no decision`);
     } else {
       const rewritten = String(spawnOut.hookSpecificOutput?.updatedInput?.prompt || '');
       if (!rewritten.includes(CONTRACT_MARKER)) {

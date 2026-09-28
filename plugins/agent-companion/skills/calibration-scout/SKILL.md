@@ -54,6 +54,7 @@ Only for signals that fired:
 | `harness_version_changed` | harness-surface diff, then the canary |
 | `new_agent_type` | harness-surface diff |
 | `zero_denials` | canary — guards may have stopped matching |
+| `attended_env_missing` | harness-surface diff (`CLAUDE_CODE_SESSION_ATTENDED` below) — main-thread calls were counted for a day and no session's hooks saw the variable, so `delegation_guard_scope: attended` can no longer tell a headless worker from the operator's lead |
 | `inherited_model_spawns` | routing review |
 | `inherited_effort_spawns` | routing review (spawns that ran at the lead's effort) |
 | `project_agent_drift` | routing review (a project's `routingType:` agents off the table, or a writer with no parity reviewer) |
@@ -99,6 +100,12 @@ still exists:
   `callerIsSubagent()` in hooks/lib/context.mjs, reads `agent_id`, never
   `agent_type`)
 - `userConfig`, `pluginConfigs`, `CLAUDE_PLUGIN_OPTION_`
+- `CLAUDE_CODE_SESSION_ATTENDED` in the hook env builder, next to
+  `CLAUDE_PROJECT_DIR`, still set to "1" for an attended session and "0" for
+  `-p` / SDK / background ones. It is undocumented; the delegation guard's
+  default scope (`delegation_guard_scope: attended`) is the only reader. If
+  it is gone, the guard counts headless workers again (an absent value
+  counts) — a break, and `attended_env_missing` is the runtime symptom
 
 Anything missing or renamed is a **break, not a curiosity** — open a fix
 immediately, because the guards are already silently inert.
@@ -115,9 +122,11 @@ Expect `permissionDecision: "deny"`. Anything else means the guard is broken.
 
 The delegation guard is probed by `node "$AC/scripts/audit.mjs" --only guard-canary`,
 which runs it in block mode against a throwaway state dir: a subagent-shaped
-payload (it carries `agent_id`) must never be denied, and a main-thread-shaped
-one (no `agent_id`, no `agent_type`, like every real main-thread call) must be
-denied at the second call. Either finding means the guard is broken.
+payload (it carries `agent_id`) must never be denied, a main-thread-shaped
+one (no `agent_id`, no `agent_type`, like every real main-thread call) from an
+attended session (`CLAUDE_CODE_SESSION_ATTENDED=1`) must be denied at the
+second call, and the same calls from a headless one (`=0`) never. Any finding
+means the guard is broken.
 
 ### roster sweep — run this whenever a routing signal fires
 

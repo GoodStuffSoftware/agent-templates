@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { makeFixture, runHook } from './helpers.mjs';
+import { makeFixture, runHook, decisionOf } from './helpers.mjs';
 import {
   resolveTarget, lastActivityOf, ttlFor, normalizeTo, TTL_MS, cacheTtlFromDefinition,
 } from '../hooks/lib/resume-guard.mjs';
@@ -218,7 +218,9 @@ test('hook: past 5m TTL with a large context -> fires, names the doctrine and an
     const res = callHook(root, { mainTranscriptPath });
     assert.ok(res.json, 'expected a hookSpecificOutput');
     assert.equal(res.json.hookSpecificOutput.hookEventName, 'PreToolUse');
-    assert.equal(res.json.hookSpecificOutput.permissionDecision, 'allow');
+    assert.equal(decisionOf(res.json), 'proceed');
+    assert.equal('permissionDecision' in res.json.hookSpecificOutput, false,
+      'a hint carries no permissionDecision: "allow" would also skip the permission prompt');
     assert.ok(res.json.systemMessage.includes('5m cache TTL'), res.json.systemMessage);
     assert.ok(res.json.systemMessage.includes('fresh ladder worker'));
     assert.ok(res.json.systemMessage.includes('~155K tokens'), res.json.systemMessage);

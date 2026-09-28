@@ -11,13 +11,15 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT, childEnv, decisionOf } from './helpers.mjs';
 import {
-  EXECUTION_TOOLS, RESET_TOOLS, countCall, delegationMode, delegationThreshold,
+  EXECUTION_TOOLS, RESET_TOOLS, countCall, delegationMode, delegationThreshold, delegationScope,
+  outOfScope, isServedCall, attendedCoverage, LOCK_MAX_AGE_MS,
 } from '../hooks/lib/delegation.mjs';
+import { acquireLock, releaseLock } from '../hooks/lib/file-lock.mjs';
 import { callerIsSubagent, isMainThread } from '../hooks/lib/context.mjs';
 
 const TOOL_INPUT = {
@@ -31,10 +33,14 @@ const TOOL_INPUT = {
   NotebookEdit: { notebook_path: 'C:/repo/n.ipynb', new_source: 'x' },
 };
 
+// Every hook run gets the attended variable set the way an attended
+// (terminal, desktop, IDE) session's hooks see it, unless a test overrides
+// it; runHook() strips whatever the test runner itself inherited.
 function harness(extraEnv = {}) {
   const fx = makeFixture();
   const env = {
     CLAUDE_PLUGIN_DATA: join(fx.dir, '.claude', 'plugins', 'data', 'agent-companion-x'),
+    CLAUDE_CODE_SESSION_ATTENDED: '1',
     ...extraEnv,
   };
   let n = 0;
@@ -61,13 +67,13 @@ function harness(extraEnv = {}) {
     const payload = { ...base(tool, sid), agent_id: 'agent-sub-one', agent_type: agentType };
     return result(runHook('hooks/delegation-guard.mjs', payload, { env: { ...env, ...e } }));
   };
-  const post = (tool, { sid = SID, subagent = false } = {}) => {
+  const post = (tool, { sid = SID, subagent = false, env: e = {} } = {}) => {
     const payload = {
       ...base(tool, sid), hook_event_name: 'PostToolUse',
       tool_response: { status: 'async_launched' },
       ...(subagent ? { agent_id: 'agent-sub-one', agent_type: 'general-purpose' } : {}),
     };
-    return result(runHook('hooks/delegation-guard.mjs', payload, { env, args: ['--event', 'reset'] }));
+    return result(runHook('hooks/delegation-guard.mjs', payload, { env: { ...env, ...e }, args: ['--event', 'reset'] }));
   };
   const streakFile = join(fx.stateDir, 'state', 'delegation-streak.json');
   const streaks = () => { try { return JSON.parse(readFileSync(streakFile, 'utf8')); } catch { return null; } };
@@ -180,7 +186,7 @@ test('a payload that did not parse, or has no session_id, is never counted', () 
 
 // --- modes -------------------------------------------------------------------
 
-test('warn is the shipped default: the call runs, the model is told, the firing is recorded as warn', () => {
+test('warn is the shipped default: the guard does not stop the call, the model is told, the firing is recorded as warn', () => {
   const manifest = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
   assert.equal(manifest.userConfig.delegation_guard.default, 'warn');
   assert.equal(manifest.userConfig.delegation_guard.type, 'string');
@@ -193,7 +199,8 @@ test('warn is the shipped default: the call runs, the model is told, the firing 
     assert.equal(r.decision, null, 'warn never decides: the normal permission flow applies');
     assert.match(r.context, /delegation_guard: warn/);
     assert.match(r.context, /threshold is 4/);
-    assert.match(r.context, /The call ran/);
+    assert.match(r.context, /This guard did not stop the call\./);
+    assert.doesNotMatch(r.context, /The call ran/, 'at PreToolUse the call has not run: the prompt, another hook or the operator can still stop it');
     assert.deepEqual(h.denials().map((d) => [d.guard, d.outcome]), [['delegation', 'warn']]);
     assert.equal(h.streaks()[h.SID].fired, 1, 'fired feeds the standing-rules delegation-drift gate');
   } finally { h.cleanup(); }
@@ -209,6 +216,7 @@ test('off counts nothing; legacy booleans map to warn/off; unknown values fall t
   assert.equal(delegationMode(true), 'warn');
   assert.equal(delegationMode('false'), 'off');
   assert.equal(delegationMode('0'), 'off');
+  for (const v of ['none', 'None', 'disabled', 'DISABLE', ' no ']) assert.equal(delegationMode(v), 'off', v);
   assert.equal(delegationMode('BLOCK'), 'block');
   assert.equal(delegationMode('blok'), 'warn');
   assert.equal(delegationMode(undefined), 'warn');
@@ -321,13 +329,13 @@ test('the rung the deny names passes the spawn guard with inherit_guard AND fore
       }, { env });
       assert.equal(res.status, 0, res.stderr);
       return {
-        decision: res.json?.hookSpecificOutput?.permissionDecision,
+        decision: decisionOf(res.json),
         reason: res.json?.hookSpecificOutput?.permissionDecisionReason || '',
       };
     };
     for (const prompt of ['TYPE: explore\nfind where the config is read', 'find where the config is read']) {
       const ok = spawnAs({ subagent_type: rung, run_in_background: true, prompt });
-      assert.equal(ok.decision, 'allow', `${rung} with ${JSON.stringify(prompt)}: ${ok.reason}`);
+      assert.equal(ok.decision, 'proceed', `${rung} with ${JSON.stringify(prompt)}: ${ok.reason}`);
     }
     // The shape the deny warns against is the one inherit_guard refuses.
     const bad = spawnAs({ subagent_type: 'general-purpose', run_in_background: true, prompt: 'find where the config is read' });
@@ -343,7 +351,7 @@ test('parallel calls in one message are counted exactly once each (state lock)',
   try {
     const one = (i) => new Promise((resolve) => {
       const child = spawn(process.execPath, [join(PLUGIN_ROOT, 'hooks', 'delegation-guard.mjs')], {
-        env: { ...process.env, ...h.env }, windowsHide: true,
+        env: childEnv(h.env), windowsHide: true,
       });
       let out = '';
       child.stdout.on('data', (d) => { out += d; });
@@ -375,4 +383,183 @@ test('stale sessions are pruned from the streak file', () => {
     assert.equal(after['legacy-no-stamp'], undefined);
     assert.ok(existsSync(h.streakFile));
   } finally { h.cleanup(); }
+});
+
+// --- scope: headless sessions are the delegates ---------------------------------
+
+test('scope "attended" (default): a session whose hooks see CLAUDE_CODE_SESSION_ATTENDED=0 is never counted or blocked', () => {
+  const manifest = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
+  assert.equal(manifest.userConfig.delegation_guard_scope.default, 'attended');
+  assert.equal(manifest.userConfig.delegation_guard_scope.type, 'string');
+
+  const h = harness({ ...BLOCK, CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2' });
+  try {
+    const headless = { env: { CLAUDE_CODE_SESSION_ATTENDED: '0' } };
+    for (const tool of EXECUTION_TOOLS) assert.equal(h.main(tool, headless).raw, '', `${tool} from a -p session`);
+    assert.equal(h.post('Agent', headless).raw, '');
+    assert.equal(h.streaks(), null, 'nothing written for a headless session');
+    assert.deepEqual(h.denials(), []);
+
+    // The attended lead in another session is still counted and blocked.
+    assert.equal(h.main('Read', { sid: 'sess-lead' }).raw, '');
+    assert.equal(h.main('Read', { sid: 'sess-lead' }).decision, 'deny');
+    assert.equal(h.streaks()['sess-lead'].attended, '1', 'what the env said is recorded');
+  } finally { h.cleanup(); }
+});
+
+test('scope "attended": an ABSENT variable counts (the pre-scope behaviour), and is recorded as "absent"', () => {
+  const h = harness({ ...BLOCK, CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2', CLAUDE_CODE_SESSION_ATTENDED: undefined });
+  try {
+    assert.equal(h.main('Bash').raw, '');
+    assert.equal(h.streaks()[h.SID].attended, 'absent');
+    assert.equal(h.main('Bash').decision, 'deny');
+    assert.match(h.denials()[0].detail, /scope attended, attended absent/);
+  } finally { h.cleanup(); }
+});
+
+test('scope "all": a headless session is counted and blocked like a lead', () => {
+  const h = harness({ ...BLOCK, CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2', CLAUDE_PLUGIN_OPTION_DELEGATION_GUARD_SCOPE: 'all' });
+  try {
+    const headless = { env: { CLAUDE_CODE_SESSION_ATTENDED: '0' } };
+    assert.equal(h.main('Bash', headless).raw, '');
+    assert.equal(h.streaks()[h.SID].attended, '0');
+    assert.equal(h.main('Bash', headless).decision, 'deny');
+  } finally { h.cleanup(); }
+  assert.equal(delegationScope('ALL'), 'all');
+  assert.equal(delegationScope('attended'), 'attended');
+  assert.equal(delegationScope('bogus'), 'attended', 'an unknown value keeps the safe default');
+  assert.equal(delegationScope(undefined), 'attended');
+  assert.equal(outOfScope('attended', { CLAUDE_CODE_SESSION_ATTENDED: '0' }), true);
+  assert.equal(outOfScope('attended', { CLAUDE_CODE_SESSION_ATTENDED: '1' }), false);
+  assert.equal(outOfScope('attended', {}), false, 'absent is in scope');
+  assert.equal(outOfScope('attended', { CLAUDE_CODE_SESSION_ATTENDED: 'false' }), false, 'only exactly "0" is headless');
+  assert.equal(outOfScope('all', { CLAUDE_CODE_SESSION_ATTENDED: '0' }), false);
+});
+
+test('a tool call served to a remote caller (session_id "served:...") is never counted', () => {
+  const h = harness({ ...BLOCK, CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2' });
+  try {
+    for (const sid of ['served:caller-session', 'served:unknown']) {
+      for (let i = 0; i < 3; i += 1) assert.equal(h.main('Bash', { sid }).raw, '', sid);
+    }
+    assert.equal(h.streaks(), null);
+    assert.equal(isServedCall({ session_id: 'served:x' }), true);
+    assert.equal(isServedCall({ session_id: 'sess-served' }), false);
+    assert.equal(isServedCall({}), false);
+  } finally { h.cleanup(); }
+});
+
+test('attendedCoverage (the attended_env_missing signal): only recent entries that recorded a value count', () => {
+  const now = Date.now();
+  const since = now - 24 * 60 * 60 * 1000;
+  assert.deepEqual(attendedCoverage({
+    a: { touched: now, attended: 'absent' },
+    b: { touched: now, attended: '1' },
+    c: { touched: now - 2 * 24 * 60 * 60 * 1000, attended: '1' }, // too old
+    d: { touched: now }, // written before the field existed
+  }, since), { recorded: 2, seen: 1 });
+  assert.deepEqual(attendedCoverage(null, since), { recorded: 0, seen: 0 });
+});
+
+test('detect.mjs raises attended_env_missing when a day of counted calls never saw the variable', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const sd = join(stateDir, 'state');
+    mkdirSync(sd, { recursive: true });
+    const f = join(sd, 'delegation-streak.json');
+    const now = Date.now();
+    const signal = () => {
+      const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+      assert.equal(res.status, 0, res.stderr);
+      return res.json.signals.find((s) => s.kind === 'attended_env_missing');
+    };
+    writeFileSync(f, JSON.stringify({ s1: { streak: 1, fired: 0, touched: now, attended: 'absent' }, s2: { streak: 2, fired: 0, touched: now, attended: 'absent' } }));
+    const s = signal();
+    assert.ok(s, 'fires');
+    assert.equal(s.dispatch, 'harness-surface-diff');
+    assert.match(s.detail, /2 session\(s\)/);
+    writeFileSync(f, JSON.stringify({ s1: { streak: 1, fired: 0, touched: now, attended: 'absent' }, s2: { streak: 1, fired: 0, touched: now, attended: '1' } }));
+    assert.equal(signal(), undefined, 'one session saw it: the harness still sets it');
+    writeFileSync(f, JSON.stringify({ s1: { streak: 1, fired: 0, touched: now } }));
+    assert.equal(signal(), undefined, 'entries from before the field existed say nothing');
+  } finally { cleanup(); }
+});
+
+// --- the spawn guard no longer touches the streak --------------------------------
+
+function opusLead(dir) {
+  const lead = join(dir, 'lead-opus.jsonl');
+  writeFileSync(lead, `${JSON.stringify({
+    type: 'assistant', effort: 'xhigh', timestamp: '2026-09-27T10:00:00.000Z',
+    message: { role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'ok' }] },
+  })}\n`);
+  return lead;
+}
+
+test('repro A: a SUBAGENT\'s Agent spawn (agent_id, lead\'s session_id) leaves the lead\'s streak alone', () => {
+  const h = harness(BLOCK);
+  try {
+    for (let i = 0; i < 3; i += 1) h.main('Read');
+    assert.equal(h.streaks()[h.SID].streak, 3);
+    const res = runHook('hooks/spawn-guard.mjs', {
+      session_id: h.SID, agent_id: 'sub-1', agent_type: 'general-purpose', transcript_path: opusLead(h.dir), cwd: h.dir,
+      hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_use_id: 'toolu_sub_spawn',
+      tool_input: { subagent_type: 'agent-companion:ac-opus-low', description: 'x', prompt: 'TYPE: explore\nlook' },
+    }, { env: h.env });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(h.streaks()[h.SID].streak, 3, 'the spawn guard wrote nothing to the streak');
+    assert.equal(h.main('Read').decision, 'deny', 'the lead\'s 4th call still fires');
+  } finally { h.cleanup(); }
+});
+
+test('repro B: a lead spawn the spawn guard DENIES (inherit_guard: block) leaves the streak alone', () => {
+  const h = harness({ ...BLOCK, CLAUDE_PLUGIN_OPTION_INHERIT_GUARD: 'block' });
+  try {
+    for (let i = 0; i < 3; i += 1) h.main('Read');
+    const res = runHook('hooks/spawn-guard.mjs', {
+      session_id: h.SID, transcript_path: opusLead(h.dir), cwd: h.dir, permission_mode: 'default',
+      hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_use_id: 'toolu_denied_spawn',
+      tool_input: { subagent_type: 'general-purpose', run_in_background: true, description: 'x', prompt: 'find where the config is read' },
+    }, { env: h.env });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(decisionOf(res.json), 'deny', JSON.stringify(res.json));
+    assert.equal(h.streaks()[h.SID].streak, 3, 'a denied spawn is not delegation');
+    assert.equal(h.main('Read').decision, 'deny');
+  } finally { h.cleanup(); }
+});
+
+// --- a stuck lock ------------------------------------------------------------------
+
+test('a stuck streak lock (live pid, an hour old) is broken at once, not waited on by every call', () => {
+  const h = harness(BLOCK);
+  try {
+    mkdirSync(join(h.stateDir, 'state'), { recursive: true });
+    const lock = `${h.streakFile}.lock`;
+    // A live pid (this test process), as when a killed hook's pid is reused.
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, token: 'stuck-holder', at: Date.now() - 60 * 60 * 1000 }));
+    const t0 = Date.now();
+    assert.equal(h.main('Read').raw, '');
+    const ms = Date.now() - t0;
+    assert.equal(existsSync(lock), false, 'the stuck lock was broken (and the new holder released its own)');
+    assert.equal(h.streaks()[h.SID].streak, 1);
+    // The old code waited the full 2 s on every call and never cleared it.
+    assert.ok(ms < 2000, `took ${ms} ms`);
+    const t1 = Date.now();
+    h.main('Read');
+    assert.ok(Date.now() - t1 < 2000, 'the next call does not wait either');
+  } finally { h.cleanup(); }
+});
+
+test('file-lock maxAgeMs: a live owner\'s lock is broken once older than maxAgeMs, never before', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const lock = join(dir, 'x.lock');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, token: 'old-live', at: Date.now() - (LOCK_MAX_AGE_MS + 1000) }));
+    assert.equal(acquireLock(lock, { waitMs: 50, staleMs: 1000 }), null, 'without maxAgeMs a live owner\'s lock stands');
+    const got = acquireLock(lock, { waitMs: 50, staleMs: 1000, maxAgeMs: LOCK_MAX_AGE_MS });
+    assert.ok(got, 'with maxAgeMs it is broken');
+    releaseLock(got);
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, token: 'young-live', at: Date.now() }));
+    assert.equal(acquireLock(lock, { waitMs: 50, staleMs: 1000, maxAgeMs: LOCK_MAX_AGE_MS }), null, 'a young live lock is never broken');
+  } finally { cleanup(); }
 });

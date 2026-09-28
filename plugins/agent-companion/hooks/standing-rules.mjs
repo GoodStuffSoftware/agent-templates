@@ -66,6 +66,14 @@ try {
 
     const text = renderRules(matched);
     if (!text) passthrough();
+    // A delegation-drift rule is due once per guard firing: record that this
+    // one went out, so the next prompt is silent until the guard fires again.
+    if (matched.some((r) => r.gate === 'delegation-drift')) {
+      try {
+        const { markReminded } = await import('./lib/delegation.mjs');
+        markReminded(sessionId);
+      } catch { /* fail open: at worst the reminder repeats */ }
+    }
     emit('UserPromptSubmit', text);
   } else {
     passthrough(); // unknown/missing --event: never guess which payload shape this is

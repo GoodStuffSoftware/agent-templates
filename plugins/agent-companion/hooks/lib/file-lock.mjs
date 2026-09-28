@@ -134,10 +134,17 @@ function lockAge(seen) {
   return t - now > CLOCK_SKEW_MS ? Infinity : now - t;
 }
 
-// Stale: older than staleMs, and its owner is not a live process.
-function isStale(seen, staleMs) {
+// Stale: older than staleMs, and its owner is not a live process. Or, for a
+// caller that passes maxAgeMs, older than that whoever owns it: the answer to
+// the residual in the header (a dead owner's pid reused by a live process
+// keeps its lock "alive" forever). Only for locks whose critical section is
+// milliseconds, where a lock that old can only be stuck; the break still goes
+// through the claim below, so it stays one breaker at a time.
+function isStale(seen, staleMs, maxAgeMs = Infinity) {
   if (seen.notFile) return false;
-  return lockAge(seen) > staleMs && !(seen.owner && pidAlive(seen.owner.pid));
+  const age = lockAge(seen);
+  if (age > maxAgeMs) return true;
+  return age > staleMs && !(seen.owner && pidAlive(seen.owner.pid));
 }
 
 // The claim that makes this process the ONE breaker of the stale lock `id`:
@@ -162,12 +169,12 @@ function claimBreak(lockPath, id, staleMs) {
 }
 
 // Break `lockPath` if it is still exactly the lock judged stale (`seen`).
-function breakStale(lockPath, seen, staleMs) {
+function breakStale(lockPath, seen, staleMs, maxAgeMs = Infinity) {
   const claim = claimBreak(lockPath, seen.id, staleMs);
   if (!claim) return;
   try {
     const cur = readLock(lockPath);
-    if (!cur || cur.id !== seen.id || !isStale(cur, staleMs)) return; // already broken, or replaced
+    if (!cur || cur.id !== seen.id || !isStale(cur, staleMs, maxAgeMs)) return; // already broken, or replaced
     // Holding the claim, nothing can replace the lock before this rename. A
     // rename (not an unlink) frees the name at once, even while a reader on
     // Windows holds the file open.
@@ -233,7 +240,7 @@ function sweepDebris(lockPath, debris) {
 // { handle } when acquired; { unusable: reason } when no lock can be created
 // at this path at all (answered at once: waiting cannot help); {} when
 // another holder kept it past waitMs.
-function acquire(lockPath, { waitMs, staleMs, debris = [] }) {
+function acquire(lockPath, { waitMs, staleMs, debris = [], maxAgeMs = Infinity }) {
   try { mkdirSync(dirname(lockPath), { recursive: true }); } catch { /* create reports it */ }
   const token = newToken();
   const deadline = Date.now() + waitMs;
@@ -246,8 +253,8 @@ function acquire(lockPath, { waitMs, staleMs, debris = [] }) {
     if (got === null) return { unusable: 'the lock file cannot be created there' };
     const seen = readLock(lockPath);
     if (seen?.notFile) return { unusable: `something other than a lock file stands at the lock path (${seen.st.isDirectory() ? 'a directory' : 'not a regular file'})` };
-    if (seen && isStale(seen, staleMs)) {
-      breakStale(lockPath, seen, staleMs);
+    if (seen && isStale(seen, staleMs, maxAgeMs)) {
+      breakStale(lockPath, seen, staleMs, maxAgeMs);
       if (Date.now() < deadline) continue;
     }
     if (Date.now() >= deadline) return {};
@@ -257,8 +264,8 @@ function acquire(lockPath, { waitMs, staleMs, debris = [] }) {
 
 // Acquire: a handle { lockPath, token } or null when not acquired within
 // waitMs (or the lock cannot be created here at all).
-export function acquireLock(lockPath, { waitMs = 2000, staleMs = 5000, debris = [] } = {}) {
-  return acquire(lockPath, { waitMs, staleMs, debris }).handle || null;
+export function acquireLock(lockPath, { waitMs = 2000, staleMs = 5000, debris = [], maxAgeMs = Infinity } = {}) {
+  return acquire(lockPath, { waitMs, staleMs, debris, maxAgeMs }).handle || null;
 }
 
 // Release: unlink only while the lock still holds this handle's token. On
@@ -302,9 +309,9 @@ export class LockUnusableError extends Error {
 // Run fn under the lock. failOpen (hooks): on a timeout, or when no lock can
 // be taken at this path, fn still runs, unlocked. Otherwise a timeout throws
 // LockTimeoutError and an unusable path LockUnusableError. fn must not exit
-// the process while holding the lock.
-export function withFileLock(lockPath, fn, { waitMs = 2000, staleMs = 5000, failOpen = true, debris = [] } = {}) {
-  const { handle = null, unusable } = acquire(lockPath, { waitMs, staleMs, debris });
+// the process while holding the lock. maxAgeMs: see isStale.
+export function withFileLock(lockPath, fn, { waitMs = 2000, staleMs = 5000, failOpen = true, debris = [], maxAgeMs = Infinity } = {}) {
+  const { handle = null, unusable } = acquire(lockPath, { waitMs, staleMs, debris, maxAgeMs });
   if (!handle && !failOpen) throw unusable ? new LockUnusableError(lockPath, unusable) : new LockTimeoutError(lockPath);
   try {
     return fn({ locked: !!handle });

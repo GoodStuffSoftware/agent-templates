@@ -11,7 +11,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { makeFixture, runHook, readJsonl } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, decisionOf } from './helpers.mjs';
 
 function baseEnv(dir) {
   return { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') };
@@ -31,7 +31,7 @@ test('gate1 (foreground guard): warn is the default and fires for a plain main-s
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0, `exited ${res.status}: ${res.stderr}`);
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow');
+    assert.equal(decisionOf(res.json), 'proceed');
     assert.match(res.json?.systemMessage || '', /FOREGROUND/);
     assert.match(res.json?.systemMessage || '', /not Anthropic guidance/i);
 
@@ -59,7 +59,7 @@ test('gate1: resolved haiku-tier model is exempt (cheapest known tier)', () => {
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0);
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow');
+    assert.equal(decisionOf(res.json), 'proceed');
     assert.equal(res.json?.systemMessage, undefined, 'an exempt haiku-tier spawn must add no gate1 message');
 
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
@@ -188,7 +188,7 @@ test('gate1: mode "block" allows a spawn whose brief carries a FOREGROUND justif
       env: { ...baseEnv(dir), CLAUDE_PLUGIN_OPTION_FOREGROUND_GUARD: 'block' },
     });
     assert.equal(res.status, 0);
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow');
+    assert.equal(decisionOf(res.json), 'proceed');
 
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.gate1_action, 'none');
@@ -354,7 +354,7 @@ test('regression: fit-autofill + premium warrant + memory nudge + gates all coex
       },
     });
     assert.equal(res.status, 0, `exited ${res.status}: ${res.stderr}`);
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow', JSON.stringify(res.json));
+    assert.equal(decisionOf(res.json), 'proceed', JSON.stringify(res.json));
 
     // Exactly one updatedInput object, carrying every feature's contribution.
     const out = res.json.hookSpecificOutput;

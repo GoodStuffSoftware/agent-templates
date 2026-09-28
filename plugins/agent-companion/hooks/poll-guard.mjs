@@ -12,10 +12,13 @@ import {
 } from './lib/context.mjs';
 import { evaluate, POLL_TOOLS, TAIL_BYTES } from './lib/poll-guard.mjs';
 
-function allowWith(systemMessage) {
+// The hint, and NO permissionDecision: "allow" would also skip the permission
+// prompt for the ScheduleWakeup / Monitor call, which advice has no business
+// deciding. Without a decision the normal permission flow applies.
+function hint(systemMessage) {
   process.stdout.write(JSON.stringify({
     ...(systemMessage ? { systemMessage } : {}),
-    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+    hookSpecificOutput: { hookEventName: 'PreToolUse' },
   }));
   process.exit(0);
 }
@@ -54,7 +57,7 @@ try {
     },
   });
 
-  if (result) allowWith(result.hint);
+  if (result) hint(result.hint);
 } catch {
   // fail open — this guard is advice, not enforcement
 }

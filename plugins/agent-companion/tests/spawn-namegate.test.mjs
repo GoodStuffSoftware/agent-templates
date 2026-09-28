@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, PLUGIN_ROOT, decisionOf } from './helpers.mjs';
 import { makeUnique, reserveUniqueName, isReservedName } from '../hooks/lib/namegate.mjs';
 
 function baseEnv(dir) {
@@ -47,7 +47,7 @@ test('namegate: background + no name -> hint AND autofill (default on)', () => {
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0, `exited ${res.status}: ${res.stderr}`);
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow', 'namegate never blocks');
+    assert.equal(decisionOf(res.json), 'proceed', 'namegate never blocks');
     assert.match(res.json?.systemMessage || '', /namegate/i);
 
     const assignedName = res.json?.hookSpecificOutput?.updatedInput?.name;

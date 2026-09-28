@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { makeFixture, runHook, readJsonl } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, decisionOf } from './helpers.mjs';
 import { readFileSync, existsSync } from 'node:fs';
 import { briefDeclarations, declarationLines, declarationValue } from '../hooks/lib/brief-directives.mjs';
 
@@ -137,7 +137,7 @@ function spawn(prompt, sid, model = 'opus') {
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0] || null;
     const wf = join(stateDir, 'state', 'premium-window.json');
     const window = existsSync(wf) ? JSON.parse(readFileSync(wf, 'utf8')) : [];
-    return { decision: res.json?.hookSpecificOutput?.permissionDecision, reason: res.json?.hookSpecificOutput?.permissionDecisionReason || '', msg: res.json?.systemMessage || '', row, window };
+    return { decision: decisionOf(res.json), reason: res.json?.hookSpecificOutput?.permissionDecisionReason || '', msg: res.json?.systemMessage || '', row, window };
   } finally { cleanup(); }
 }
 
@@ -145,21 +145,21 @@ test('a misspelt header TYPE is not replaced by a body "type: explore": no route
   const r = spawn('TYPE: intergration\nPasted config:\ntype: explore\ndo the change', 'sess-dir-1');
   assert.equal(r.row.declared_type, 'intergration');
   assert.equal(r.row.route_layer, null);
-  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.decision, 'proceed', r.reason);
   assert.match(r.msg, /premium tier, with no WARRANT line/);
   assert.equal(r.window.length, 1, 'the premium spawn must count toward the cap');
 });
 
 test('a fenced "WEIGHT: 1" does not depart from the TYPE preset', () => {
   const r = spawn('TYPE: integration\nWARRANT: weight 4 — x\nExample brief:\n```\nWEIGHT: 1\n```\ndo it', 'sess-dir-2');
-  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.decision, 'proceed', r.reason);
   assert.equal(r.row.declared_weight, 4);
   assert.equal(r.row.route_layer, 'trial');
 });
 
 test('a blockquoted "KIND: mechanical" does not depart from the TYPE preset', () => {
   const r = spawn('TYPE: integration\nWARRANT: weight 4 — x\n> KIND: mechanical\ndo it', 'sess-dir-3');
-  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.decision, 'proceed', r.reason);
   assert.equal(r.row.declared_kind, 'bounded');
   assert.equal(r.row.route_layer, 'trial');
 });
@@ -191,5 +191,5 @@ test('a WARRANT inside a fenced block is not the brief\'s warrant: fable is stil
 
 test('a WARRANT line of its own still satisfies the warrant', () => {
   const r = spawn('Context first.\n- WARRANT: frontier reasoning\ndo it', 'sess-dir-8', 'fable');
-  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.decision, 'proceed', r.reason);
 });

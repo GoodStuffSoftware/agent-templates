@@ -37,6 +37,7 @@ import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
 import { stateDir as advisorStateDir } from '../hooks/lib/context.mjs';
 import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/ci-status.mjs';
+import { STREAK_FILE, attendedCoverage } from '../hooks/lib/delegation.mjs';
 
 // The operator's raw OS handle(s), for scrubbing signal text.
 function rawOsHandles() {
@@ -334,6 +335,23 @@ if (weekSpawns.length > 20 && recentDenials.length === 0) {
     `${weekSpawns.length} spawns in 7d and zero guard denials — guards may have stopped matching`,
     'guardrail-canary');
 }
+
+// The delegation guard's default scope ("attended") tells the operator's lead
+// from a headless worker by CLAUDE_CODE_SESSION_ATTENDED, a variable Claude
+// Code sets in hook env but does not document. Every counted main-thread call
+// records what its env said (delegation-streak.json `attended`). A day of
+// counted calls in which NO session's hooks saw it means the harness stopped
+// setting it: an absent value counts, so headless workers are being counted
+// (and under delegation_guard: block, stopped) again.
+try {
+  const cov = attendedCoverage(JSON.parse(readFileSync(stateFile(STREAK_FILE), 'utf8')), nowDate().getTime() - 24 * 60 * 60 * 1000);
+  if (cov.recorded > 0 && cov.seen === 0) {
+    sig('attended_env_missing',
+      `${cov.recorded} session(s) made delegation-guard-counted main-thread calls in 24h and none saw CLAUDE_CODE_SESSION_ATTENDED — ` +
+      'delegation_guard_scope "attended" can no longer exempt headless workers',
+      'harness-surface-diff');
+  }
+} catch { /* no streak file yet: nothing counted, nothing to say */ }
 
 // --- 5. Model retirement ------------------------------------------------
 // A tier alias that retires does not error; it resolves to whatever replaces

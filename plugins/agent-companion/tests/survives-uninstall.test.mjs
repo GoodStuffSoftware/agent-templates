@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook, readJsonl } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, decisionOf } from './helpers.mjs';
 
 test('spawns.jsonl survives a plugin uninstall (rm -rf on the plugin data dir)', () => {
   const { dir, stateDir, cleanup } = makeFixture();
@@ -29,7 +29,7 @@ test('spawns.jsonl survives a plugin uninstall (rm -rf on the plugin data dir)',
     });
     assert.equal(res.status, 0, `spawn-guard exited ${res.status}: ${res.stderr}`);
     assert.ok(res.json, `spawn-guard produced no JSON output: stdout=${res.stdout} stderr=${res.stderr}`);
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow');
+    assert.equal(decisionOf(res.json), 'proceed');
 
     // Confirm the row landed under the DURABLE state root, not the plugin
     // data dir, before we destroy the latter.
