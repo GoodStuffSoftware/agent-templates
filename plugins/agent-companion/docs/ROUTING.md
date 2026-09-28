@@ -1,8 +1,8 @@
 # Model routing table
 
-_Generated from `config/model-tiers.json` v7 (updated 2026-09-27) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
+_Generated from `config/model-tiers.json` v7 (updated 2026-09-28) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
 
-For WHY the table is shaped this way — lowest-sufficient tier, effort as a separate lever, reviewer parity, the consequence floors, trials and per-user profiles, cost basis, and haiku-as-validator — see [`docs/ROUTING-RATIONALE.md`](./ROUTING-RATIONALE.md), a hand-written companion doc (this file is generated and cannot carry hand-written prose).
+For WHY the table is shaped this way — lowest-sufficient tier, effort as a separate lever, reviewer parity, self-review, the consequence floors, trials and per-user profiles, cost basis, and haiku-as-validator — see [`docs/ROUTING-RATIONALE.md`](./ROUTING-RATIONALE.md), a hand-written companion doc (this file is generated and cannot carry hand-written prose).
 
 ## Tiers
 
@@ -108,6 +108,24 @@ That parity match is then floored, same as any other route (operator-decided 202
 **At spawn time** a review brief names its writer on a line of its own, next to `TYPE:` — `WRITER: <model>/<effort>` (`opus xhigh` and `opus at xhigh` read the same) or `WRITER: <agent-name>` (a ladder rung or project agent, read from its definition). Example: `TYPE: code-review` + `WRITER: opus/xhigh` is sized to `opus/xhigh`, so spawn `ac-opus-xhigh`. The spawn guard then judges the reviewer against that parity route (the writer's pair after the floors above) in notes only: below it, above it, or on an inherited effort it cannot verify. A reviewer on the parity route's model needs no WARRANT and is not counted by the premium cap. With no WRITER line the guard cannot size a review at all, and says so; a WRITER line with no effort, or an effort it cannot read, is checked on the model alone, and the note says so.
 
 **Live evidence:** operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27: code reviews at xhigh were clean 26/26 vs 18/21 at high (suggestive, p≈0.08), and live xhigh reviews cost in line with pre-trial xhigh reviews (about 1.25x, thin sample) -- what grew under the 2026-09-27 routes was the NUMBER of reviews, not the cost per review. recommend.mjs and evaluate.mjs size a reviewer to the writer (--writer): a writer raised to xhigh (large-refactor, novel-design) gets a reviewer at xhigh or above, so xhigh reviews are not reserved for critical changes. At spawn time a review brief's WRITER line (WRITER: opus/xhigh, or an agent name) lets spawn-guard size the reviewer the same way, judged in notes only, never a deny; with no WRITER line it checks only the critical-change floor (F1).
+
+## Self-review (architect-class writers)
+
+A writer spawned as `novel-design`, `large-refactor`, `critical-change`, `long-autonomous-run` reviews its own work before it returns (it commits, spawns ONE foreground parity reviewer on its own rung, runs one fix round, and returns the verdict line verbatim), unless its brief carries the line `REVIEW: lead`. The protocol is in the body of `agent-companion:ac-opus-xhigh`; a writer on any other rung does not self-review, and the lead reviews it as before.
+
+| Setting | Value |
+|---|---|
+| Types | `novel-design`, `large-refactor`, `critical-change`, `long-autonomous-run` |
+| Fix rounds | 1 (never a second review) |
+| Opt-out brief line | `REVIEW: lead` |
+| Rungs carrying the protocol | `ac-opus-xhigh` |
+| Updated | 2026-09-28 |
+
+The protocol text is generated into those rungs' `agents/ac-*.md` bodies from `config/model-tiers.json` `selfReview` by this script (`--sync-agent-descriptions`), and `--check-agent-descriptions` fails when a rung that routes a listed type lacks it, or a rung that no longer does still carries it. The reviewer's brief opens with `TYPE: code-review` and `WRITER: <the writer's model>/<effort>`, and carries the lead's brief verbatim (or its path), the branch, sha and diff range, the adversarial instruction and the review file path. At spawn time a code-review a subagent spawns with no `WRITER:` line is sized to the caller's own definition (its model and effort), and the spawn guard denies a code-review spawned by an agent that was itself spawned as a code-review: reviewers never spawn reviewers.
+
+The lead still lands and merges the work, settles the disputed findings the writer returns, and spot-checks the review file against the diff.
+
+**Why:** Operator request 2026-09-28 (DECISIONS.md): architect-class writers spawn their own reviewer instead of routing the review through the lead. A writer of one of these types, whose brief has no `REVIEW: lead` line, commits, spawns ONE parity reviewer in the foreground on its own rung (TYPE: code-review, WRITER: its own model/effort, the lead's brief verbatim, the diff range, the review file path), runs `fixRounds` fix rounds on blocker and should-fix findings, never re-reviews, and returns the reviewer's verdict line verbatim, the review path, the post-fix sha and any disputed findings. Why: every lead-routed review costs two lead round-trips (spawn reviewer, then resume or re-spawn the writer), each stalling on the lead being free, and the fix round often starts on a cold cache; done by the writer, the fix round runs on its warm 1h cache. Risk: the writer frames its own review; mitigated by the fixed brief the protocol dictates (the lead's brief verbatim, no scoping of the reviewer), the verbatim verdict line, and the lead spot-checking the review file. The lead still lands, merges and settles disputed findings. Not applied to medium-effort writers yet: measure first. The protocol text is GENERATED into the body of every agents/ac-*.md rung that is currently the default route for one of these types (scripts/routing-table.mjs --sync-agent-descriptions; --check-agent-descriptions fails on drift), so a routing-table move carries it along. hooks/spawn-guard.mjs denies a code-review spawned by an agent that was itself spawned as a code-review (reviewers never spawn reviewers; positive match only). Reverse: empty `types`, or put `REVIEW: lead` in briefs.
 
 ## Task types → routing (the task model list)
 

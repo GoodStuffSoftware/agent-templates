@@ -138,6 +138,12 @@
       "description": "When a spawn brief declares WEIGHT (and optionally KIND / CONSEQUENCE), grade the named model against the routing table: under- and cheap-over-provisioned spawns are allowed and announced; a premium model over-provisioned for its own declared weight is denied with the correction. Off = telemetry only.",
       "default": true
     },
+    "review_recursion_guard": {
+      "type": "boolean",
+      "title": "Reviewers never spawn reviewers",
+      "description": "Deny a TYPE: code-review spawned by a subagent that was itself spawned as a TYPE: code-review. Denied only on a positive match: the caller's own spawns.jsonl row, found through the id of the Agent call that started it (the caller's sidecar toolUseId). When that row cannot be found, the spawn is allowed. A writer spawning a review of its own work (the self-review flow) is never denied by this.",
+      "default": true
+    },
     "fit_autofill": {
       "type": "boolean",
       "title": "Best-fit autofill",
