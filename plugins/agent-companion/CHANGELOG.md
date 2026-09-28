@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.21 — 2026-09-28
+
+- New: writer self-review protocol. `selfReview.types` in `config/model-tiers.json` names the task types whose writer reviews its own work: `novel-design`, `large-refactor`, `critical-change` and `long-autonomous-run`. The writer spawns one foreground parity reviewer (its own model and effort) and does one fix round before it reports. The protocol text is appended to the ladder rungs' agent definitions.
+- For a nested review, the reviewer's `WRITER` is inferred from the caller (the spawning writer's model and effort), so the writer does not need to write a WRITER line.
+- New deny: a reviewer that tries to spawn its own reviewer is blocked, so reviews do not recurse.
+- Opt-out: a brief carrying `REVIEW: lead` skips the self-review; the lead reviews instead.
+- `spawns.jsonl` rows carry three new fields: `parent_agent_id`, `self_review` and `caller_tool_use_id`.
+- Fixes from the parity review of this feature (nested opus/xhigh review): all five should-fix items.
+- Known limits: the recursion check looks only one level up; project and built-in agents carry the protocol only if their own definition says so; a warning when the reviewer-recursion guard goes inert is deferred to the card "Warn when the reviewer-recursion guard goes inert".
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.20 — 2026-09-27
 
 - Fix: the delegation guard now actually fires. It only acted on `agent_type === 'main'`, which real main-thread payloads never carry, so it never ran outside its tests. Main-thread detection is now shared (`hooks/lib/context.mjs`: `agent_id` absent means main thread) and used by the delegation guard, spawn-guard and runaway-notice.
