@@ -93,9 +93,12 @@ still exists:
 - the hook event list
 - the `Agent` tool name (the spawn matcher; **not** `TaskCreate`, which is the
   to-do tool — these have been confused before)
-- `agent_type`, `agent_id` in the hook payload builder
+- `agent_type`, `agent_id` in the hook payload builder — and that the
+  hook-input schema still describes `agent_id` as present only inside a
+  subagent and absent for the main thread (the plugin's main-thread test,
+  `callerIsSubagent()` in hooks/lib/context.mjs, reads `agent_id`, never
+  `agent_type`)
 - `userConfig`, `pluginConfigs`, `CLAUDE_PLUGIN_OPTION_`
-- the main-thread test (`agentType === "main"`)
 
 Anything missing or renamed is a **break, not a curiosity** — open a fix
 immediately, because the guards are already silently inert.
@@ -110,11 +113,11 @@ echo '{"session_id":"canary","agent_type":"main","tool_input":{"model":"claude-f
 
 Expect `permissionDecision: "deny"`. Anything else means the guard is broken.
 
-Then confirm it stays inert for workers — this must **never** deny:
-
-```bash
-echo '{"session_id":"canary","agent_type":"subagent","tool_name":"Bash"}' | node "$AC/hooks/delegation-guard.mjs"
-```
+The delegation guard is probed by `node "$AC/scripts/audit.mjs" --only guard-canary`,
+which runs it in block mode against a throwaway state dir: a subagent-shaped
+payload (it carries `agent_id`) must never be denied, and a main-thread-shaped
+one (no `agent_id`, no `agent_type`, like every real main-thread call) must be
+denied at the second call. Either finding means the guard is broken.
 
 ### roster sweep — run this whenever a routing signal fires
 

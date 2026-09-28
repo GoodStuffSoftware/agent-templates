@@ -241,10 +241,10 @@ with no corresponding start was denied or failed.
 | `v` | number | schema version |
 | `at` | ISO 8601 string | when the guard fired |
 | `session_id` | string | session it fired in |
-| `agent_type` | string | the agent whose call was denied |
+| `agent_type` | string \| absent | the payload's `agent_type`; absent on a main-thread call, which carries none |
 | `tool_name` | string \| null | the tool the call was for (`Agent`, `Bash`, …) |
 | `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, or `inherit` (`inherit_guard: block`) |
-| `outcome` | string | currently always `deny` |
+| `outcome` | string | `deny`, or `warn` for a `delegation_guard: warn` firing (the guard matched and the call ran). A consumer counting blocked calls filters on `deny`; any row proves the guard still fires |
 | `detail` | string | short reason, truncated to 300 chars |
 
 **A consumer must not treat a zero count here as good news.** A guard that

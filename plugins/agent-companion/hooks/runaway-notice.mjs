@@ -9,18 +9,19 @@
 //   PostToolUse ^Agent$  right after a FOREGROUND spawn returns (its
 //                        SubagentStop has already run).
 // Lead only: a payload carrying agent_id comes from inside a subagent (real
-// main-thread payloads carry no agent_id and no agent_type), and is ignored.
+// main-thread payloads carry no agent_id and no agent_type), and is ignored —
+// callerIsSubagent(), the one shared test (lib/context.mjs).
 // The event name is taken from the payload. The drain's rename makes each
 // notice appear exactly once. Empty stdout when there is nothing queued.
 
-import { readStdin, passthrough } from './lib/context.mjs';
+import { readStdin, passthrough, callerIsSubagent } from './lib/context.mjs';
 import { drainNotices, renderNotices } from './lib/runaway.mjs';
 
 const EVENTS = new Set(['UserPromptSubmit', 'PostToolUse']);
 
 try {
   const p = readStdin();
-  if (p.agent_id) passthrough();
+  if (callerIsSubagent(p)) passthrough();
   const event = EVENTS.has(p.hook_event_name) ? p.hook_event_name : null;
   if (!event) passthrough();
   const text = renderNotices(drainNotices(p.session_id));
