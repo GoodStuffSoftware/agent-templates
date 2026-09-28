@@ -12,13 +12,17 @@
 //   node routing-table.mjs --out FILE    # write markdown to FILE (e.g. docs/ROUTING.md)
 //   node routing-table.mjs --task-type-block          # the compact block skills/recommend/SKILL.md carries
 //   node routing-table.mjs --sync-skill FILE          # rewrite that block in FILE, between its markers
-//   node routing-table.mjs --check-agent-descriptions # exit 1 if any agents/ac-*.md description OR cacheTtl has drifted
-//   node routing-table.mjs --sync-agent-descriptions  # rewrite those descriptions/cacheTtl to match the config now
+//   node routing-table.mjs --check-agent-descriptions # exit 1 if any agents/ac-*.md description, cacheTtl OR self-review protocol block has drifted
+//   node routing-table.mjs --sync-agent-descriptions  # rewrite those descriptions/cacheTtl/self-review blocks to match the config now
 
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { modelTiers, effortFor, routeForWeight, resolveRoute, rungFor } from '../hooks/lib/context.mjs';
+import {
+  selfReviewConfig, selfReviewTypesForRung, selfReviewConfigProblems, selfReviewBlock,
+  readSelfReviewBlock, setSelfReviewBlock,
+} from '../hooks/lib/self-review.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -29,6 +33,7 @@ const tiers = Object.entries(cfg.tiers || {}).sort((a, b) => (a[1].rank ?? 0) - 
 const efforts = Object.entries(cfg.efforts || {}).sort((a, b) => (a[1].rank ?? 0) - (b[1].rank ?? 0));
 const kinds = Object.keys(cfg.taskKinds || {});
 const weights = Object.keys(cfg.routing || {}).sort();
+const selfReview = selfReviewConfig(cfg);
 
 // Which layers the table renders. The DEFAULT is the shipped table only —
 // profile:false — because this output is committed (docs/ROUTING.md, the
@@ -110,6 +115,10 @@ function taskTypeBlock() {
     }
     B.push(`| \`${name}\` | ${route} | ${premium} | ${t.summary || ''} |`);
   }
+  if (selfReview.types.length) {
+    B.push('');
+    B.push(`**Self-review:** ${selfReviewSummary()}`);
+  }
   B.push(SKILL_BLOCK_END);
   return B.join('\n');
 }
@@ -151,6 +160,31 @@ function spliceSkillBlock(text, block = taskTypeBlock()) {
 // is still exactly one generator and one drift check for this file, not two.
 function ladderRungs() {
   return Array.isArray(cfg.ladder) ? cfg.ladder.filter((r) => r && r.agent) : [];
+}
+
+// The self-review protocol (config/model-tiers.json `selfReview`,
+// hooks/lib/self-review.mjs) is covered by the same generator and the same
+// check: every rung that is RIGHT NOW the default route (shipped table,
+// profile:false) for a selfReview type carries the generated block in its
+// BODY, between its markers, and no other rung carries one. So a table move
+// (a trial that takes novel-design off opus/xhigh, say) fails --check on
+// both the rung that lost the type and the rung that gained it, and --sync
+// moves the block with it. Checked independently of the description and the
+// cacheTtl, the way the cacheTtl is checked independently of the description.
+function expectedSelfReviewBlock(rung) {
+  return selfReviewTypesForRung(rung, selfReview).length ? selfReviewBlock(rung, selfReview) : null;
+}
+function selfReviewRungNames() {
+  return ladderRungs().filter((r) => selfReviewTypesForRung(r, selfReview).length).map((r) => r.agent);
+}
+// One sentence, shared by the recommend skill's block and docs/ROUTING.md.
+function selfReviewSummary() {
+  const rungs = selfReviewRungNames();
+  const rounds = selfReview.fixRounds === 0 ? 'no fix round' : selfReview.fixRounds === 1 ? 'one fix round' : `at most ${selfReview.fixRounds} fix rounds`;
+  return `a writer spawned as ${selfReview.types.map((x) => `\`${x}\``).join(', ')} reviews its own work before it returns ` +
+    `(it commits, spawns ONE foreground parity reviewer on its own rung, runs ${rounds}, and returns the verdict line verbatim), ` +
+    `unless its brief carries the line \`${selfReview.optOut.line}\`. The protocol is in the body of ${rungs.length ? rungs.map((a) => `\`agent-companion:${a}\``).join(', ') : 'no rung'}; ` +
+    'a writer on any other rung does not self-review, and the lead reviews it as before.';
 }
 
 // The rung's expected cache-TTL frontmatter value: "1h" when config says so,
@@ -345,10 +379,22 @@ function roleClaimProblems(rung) {
 // roleClaimProblems), missing-file, name-mismatch, drift (description
 // differs from the generated one), cache-ttl-drift (the frontmatter's
 // experimental.cacheTtl does not match the rung's config `cacheTtl` field),
-// not-a-rung (an agents/ac-*.md file no rung names).
+// not-a-rung (an agents/ac-*.md file no rung names), self-review-drift (the
+// body's self-review protocol block is missing, stale, or on a rung that is
+// no longer the default for any selfReview type), self-review-malformed
+// (unbalanced or repeated markers: fixed by hand), self-review-config (the
+// selfReview section names an unknown type, a parity type, or a type whose
+// route is no ladder rung).
 function checkAgentDescriptions() {
   const out = [];
   const rungs = ladderRungs();
+  for (const problem of selfReviewConfigProblems(selfReview)) {
+    out.push({
+      agent: 'selfReview', file: 'config/model-tiers.json', problem: 'self-review-config',
+      expected: 'selfReview.types lists numeric-weight task types, each routing to a ladder rung',
+      actual: problem,
+    });
+  }
   for (const rung of rungs) {
     const file = agentFile(rung);
     for (const c of roleClaimProblems(rung)) out.push({ agent: rung.agent, file, ...c });
@@ -370,6 +416,20 @@ function checkAgentDescriptions() {
         agent: rung.agent, file, problem: 'cache-ttl-drift',
         expected: expectedTtl ? 'experimental.cacheTtl: "1h"' : 'no experimental.cacheTtl block (subagent 5m default)',
         actual: cacheTtl ? `experimental.cacheTtl: "${cacheTtl}"` : '(absent)',
+      });
+    }
+    const srTypes = selfReviewTypesForRung(rung, selfReview);
+    const expectedBlock = expectedSelfReviewBlock(rung);
+    const actualBlock = readSelfReviewBlock(text);
+    if (actualBlock.malformed) {
+      out.push({ agent: rung.agent, file, problem: 'self-review-malformed', expected: 'one BEGIN/END pair of self-review protocol markers, or none', actual: actualBlock.malformed });
+    } else if ((actualBlock.block || null) !== expectedBlock) {
+      out.push({
+        agent: rung.agent, file, problem: 'self-review-drift',
+        expected: expectedBlock
+          ? `the generated self-review protocol block (this rung is the default route for selfReview type(s): ${srTypes.join(', ')})`
+          : 'no self-review protocol block (this rung is the default route for no selfReview type)',
+        actual: actualBlock.block ? 'a self-review protocol block that differs from the generated one' : '(absent)',
       });
     }
   }
@@ -395,6 +455,10 @@ function syncAgentDescriptions() {
     let changed = false;
     if (description !== expected) { updated = applyDescription(updated, expected); changed = true; }
     if (cacheTtl !== expectedTtl) { updated = setCacheTtl(updated, expectedTtl); changed = true; }
+    // null: malformed markers, left for the check to report (sync never
+    // guesses where a block ends).
+    const withBlock = setSelfReviewBlock(updated, expectedSelfReviewBlock(rung));
+    if (withBlock !== null && withBlock !== updated) { updated = withBlock; changed = true; }
     if (!changed) continue;
     writeFileSync(file, updated);
     written.push(file);
@@ -413,7 +477,7 @@ if (has('--check-agent-descriptions')) {
     console.error(`  expected: ${d.expected}`);
     console.error(`  actual:   ${d.actual === null ? '(missing/unparseable)' : d.actual}`);
   }
-  console.error('\nDrifted: run `node scripts/routing-table.mjs --sync-agent-descriptions`. A missing role, file or rung, a name mismatch, a cacheTtl mismatch, or a file that is no longer a rung needs a config or file edit.');
+  console.error('\nDrifted: run `node scripts/routing-table.mjs --sync-agent-descriptions`. A missing role, file or rung, a name mismatch, a file that is no longer a rung, malformed self-review markers, or a self-review-config problem needs a config or file edit.');
   process.exit(1);
 }
 
@@ -452,7 +516,7 @@ L.push(`# Model routing table`);
 L.push(``);
 L.push(`_Generated from \`config/model-tiers.json\` v${cfg.version} (updated ${cfg.updated}) by \`scripts/routing-table.mjs\`. Do not edit by hand — change the config and regenerate._`);
 L.push(``);
-L.push(`For WHY the table is shaped this way — lowest-sufficient tier, effort as a separate lever, reviewer parity, the consequence floors, trials and per-user profiles, cost basis, and haiku-as-validator — see [\`docs/ROUTING-RATIONALE.md\`](./ROUTING-RATIONALE.md), a hand-written companion doc (this file is generated and cannot carry hand-written prose).`);
+L.push(`For WHY the table is shaped this way — lowest-sufficient tier, effort as a separate lever, reviewer parity, self-review, the consequence floors, trials and per-user profiles, cost basis, and haiku-as-validator — see [\`docs/ROUTING-RATIONALE.md\`](./ROUTING-RATIONALE.md), a hand-written companion doc (this file is generated and cannot carry hand-written prose).`);
 L.push(``);
 
 L.push(`## Tiers`);
@@ -561,6 +625,29 @@ if (cfg.reviewerParity) {
   L.push(``);
   if (p.liveEvidence) {
     L.push(`**Live evidence:** ${p.liveEvidence}`);
+    L.push(``);
+  }
+}
+
+if (selfReview.types.length) {
+  L.push(`## Self-review (architect-class writers)`);
+  L.push(``);
+  L.push(`${selfReviewSummary().replace(/^a writer/, 'A writer')}`);
+  L.push(``);
+  L.push(`| Setting | Value |`);
+  L.push(`|---|---|`);
+  L.push(`| Types | ${selfReview.types.map((x) => `\`${x}\``).join(', ')} |`);
+  L.push(`| Fix rounds | ${selfReview.fixRounds} (never a second review) |`);
+  L.push(`| Opt-out brief line | \`${selfReview.optOut.line}\` |`);
+  L.push(`| Rungs carrying the protocol | ${selfReviewRungNames().map((a) => `\`${a}\``).join(', ') || '_none_'} |`);
+  if (selfReview.updated) L.push(`| Updated | ${selfReview.updated} |`);
+  L.push(``);
+  L.push(`The protocol text is generated into those rungs' \`agents/ac-*.md\` bodies from \`config/model-tiers.json\` \`selfReview\` by this script (\`--sync-agent-descriptions\`), and \`--check-agent-descriptions\` fails when a rung that routes a listed type lacks it, or a rung that no longer does still carries it. The reviewer's brief opens with \`TYPE: code-review\` and \`WRITER: <the writer's model>/<effort>\`, and carries the lead's brief verbatim (or its path), the branch, sha and diff range, the adversarial instruction and the review file path. At spawn time a code-review a subagent spawns with no \`WRITER:\` line is sized to the caller's own definition (its model and effort), and the spawn guard denies a code-review spawned by an agent that was itself spawned as a code-review: reviewers never spawn reviewers.`);
+  L.push(``);
+  L.push(`The lead still lands and merges the work, settles the disputed findings the writer returns, and spot-checks the review file against the diff.`);
+  L.push(``);
+  if (selfReview.rationale) {
+    L.push(`**Why:** ${selfReview.rationale}`);
     L.push(``);
   }
 }

@@ -184,7 +184,14 @@ whose.
 | `fit` | `over`, `under`, `fit`, `unknown`, or null | the spawn compared to the routing table for its declared weight; null when no weight was declared. A parity-sized type (`code-review`) with a usable `WRITER:` line is compared to its parity route (the writer's model and effort, after the floors; effort above it is `fit`, never `over`). With no writer, one declared `CONSEQUENCE: critical` is `under` below the F1 floor (opus/xhigh) and null otherwise |
 | `fit_expected` | string or null | what the table routed that weight to, e.g. `sonnet/high`; for a review with a writer, its parity route; for the critical parity case above, the F1 floor it fell below |
 | `routed` | boolean | true when the spawn's model came from a routing choice: the model a resolved route names (or one the guard filled in from it), a ladder rung's or other agent definition's own pin (not overridden by a different model on the spawn), or a reviewer on its parity route (its `WRITER:`'s model after the floors, never merely the raw writer's). false when the model was inherited from the lead or set per-spawn with no route naming it, and always false for fable (nothing routes to fable, whatever pinned it) and for a model the tier table does not know. A provenance fact, broader than the premium cap's exemptions: the cap still counts `ac-opus-max`, another plugin's agent and a definition named like a built-in type, all of which are `routed`. Absent on rows written before 0.29.19 |
-| `declared_writer` | string or null | the brief's `WRITER:` line resolved to `<model>/<effort>` (just `<model>` when no effort is stated or the effort could not be read), whether it was written that way (`opus/xhigh`, `opus xhigh`, `opus at xhigh`) or as an agent name read from its definition; null when there is no such line, it could not be used, or the brief's `TYPE:` is not parity-sized (the line is read only on a review). Only the resolved pair is logged, never the line's text |
+| `declared_writer` | string or null | the brief's `WRITER:` line resolved to `<model>/<effort>` (just `<model>` when no effort is stated or the effort could not be read), whether it was written that way (`opus/xhigh`, `opus xhigh`, `opus at xhigh`) or as an agent name read from its definition; null when there is no such line, it could not be used, or the brief's `TYPE:` is not parity-sized (the line is read only on a review). Only the resolved pair is logged, never the line's text. A writer inferred from the caller is in `inferred_writer`, never here |
+| `inferred_writer` | string or null | for a parity-sized review spawned by a subagent with no `WRITER:` line: the writer read from the caller's own definition (`agent_type` -> its agent file's `model`/`effort`), as `<model>/<effort>` or just `<model>`; null when a `WRITER:` line was present, the caller is the main thread, or nothing could be inferred (a built-in or missing `agent_type`, a definition that pins no model). Absent on rows written before the self-review change (2026-09-28) |
+| `tool_use_id` | string \| null | the `Agent` call's own id (the PreToolUse payload's `tool_use_id`). The harness names the same id in the spawned agent's sidecar (`<session>/subagents/agent-<agent_id>.meta.json`, `toolUseId`), which is how a later spawn by that agent finds this row. null when the payload carried none. Absent on rows written before 2026-09-28 |
+| `parent_agent_id` | string \| null | the agent that made this spawn: the same value as `caller_agent_id`, named for lineage; null for the main thread. Absent on rows written before 2026-09-28 |
+| `self_review` | boolean | a parity-sized review spawned by a subagent whose own spawn row is not positively a review — a writer reviewing its own work. Absent on rows written before 2026-09-28 |
+| `self_review_expected` | boolean \| null | for a spawn whose `TYPE:` is listed in `config/model-tiers.json` `selfReview.types`: true when the spawned definition carries the generated self-review protocol and the brief has no `REVIEW: lead` line; false when it opted out or the rung carries no protocol; null for any other type, and for an agent file this plugin does not generate (a project agent may carry its own wording) |
+| `caller_row_found` | boolean \| null | for a parity-sized review spawned by a subagent: whether the caller's own spawn row was found (caller `agent_id` -> sidecar `toolUseId` -> the row with that `tool_use_id` in the same session, rows agreeing on `declared_type`); null when not looked up |
+| `caller_declared_type` | string \| null | that row's `declared_type`, when found. A parity-sized value here is what the `review-recursion` deny fires on |
 | `declared_type` | string or null | the task type named on the brief's `TYPE:` line (a `config/model-tiers.json` `taskTypes` name, or an unknown name exactly as written, lower-cased; with several `TYPE:` lines, only the first counts, known or not); null when the brief names none or its first `TYPE:` value is not a name. Only the name is logged, never brief text. When set, `declared_weight`/`declared_kind`/`declared_consequence` are filled from that type's preset where the brief did not state them |
 | `fit_trial` | boolean | true when the fit judgement used a shipped ROUTING TRIAL (`taskTypes.<type>.override`) rather than the plain grid; equivalent to `route_layer == "trial"` |
 | `route_layer` | `profile` \| `trial` \| `grid` \| null | which layer of `resolveRoute()` answered for this spawn (see docs/adr/0003-per-user-routing-profiles.md §2): a per-user routing-profile row, the shipped trial, or the grid (which includes reviewer parity). null when no route was resolved (no TYPE or WEIGHT declared, `fit_guard` off, or a parity type with no usable `WRITER:` line). `profile` means a row of the operator's routing profile won (`routing_profile` on, the row applicable). Only the enum is logged, never a row's content |
@@ -243,7 +250,7 @@ with no corresponding start was denied or failed.
 | `session_id` | string | session it fired in |
 | `agent_type` | string \| absent | the payload's `agent_type`; absent on a main-thread call, which carries none |
 | `tool_name` | string \| null | the tool the call was for (`Agent`, `Bash`, …) |
-| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, or `inherit` (`inherit_guard: block`) |
+| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, `inherit` (`inherit_guard: block`), or `review-recursion` (a reviewer spawning a reviewer, `review_recursion_guard`) |
 | `outcome` | string | `deny`, or `warn` for a `delegation_guard: warn` firing (the guard matched and did not stop the call). A consumer counting blocked calls filters on `deny`; any row proves the guard still fires |
 | `detail` | string | short reason, truncated to 300 chars. A `delegation` row ends with the scope and what the call's env said for `CLAUDE_CODE_SESSION_ATTENDED` (`scope attended, attended 1`) |
 
@@ -341,6 +348,14 @@ so `callerTranscriptPath()` could walk it and count segments. Neither exists
 in the harness surface this plugin can observe today (checked 2026-09-23).
 Tracked as a gap, not silently worked around with a value that looks like
 depth but is not one.
+
+**Update 2026-09-28.** The harness now writes a sidecar next to each
+subagent transcript, `<session>/subagents/agent-<agent_id>.meta.json`, that
+names the `Agent` call which started it (`toolUseId`), its `spawnDepth`, and
+for a nested agent its `parentAgentId`. The spawn guard reads only
+`toolUseId` from it (the `review_recursion_guard` lookup) and logs every
+spawn's own `tool_use_id`, so a row can be joined to the agent it started.
+Logging depth itself from the sidecar is still open.
 
 ## Enforcement-silent coverage
 

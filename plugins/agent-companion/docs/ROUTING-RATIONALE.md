@@ -74,6 +74,55 @@ silently escalated *into* it either — a writer on that tier gets the best
 tier that *is* a routing destination as its reviewer, which still demands its
 own warrant rather than inheriting the writer's.
 
+## Self-review: an architect-class writer spawns its own parity reviewer
+
+Parity says how big the reviewer is. Self-review says who spawns it. For the
+architect-class types listed in `selfReview` (novel-design, large-refactor,
+critical-change, long-autonomous-run), the writer commits and spawns one
+foreground reviewer on its own rung, runs one fix round, and returns the
+reviewer's verdict line verbatim with the review path, the post-fix sha and
+any findings it disputes. The lead is out of the first review pass, not out
+of the decision.
+
+**Why the writer, not the lead.** A lead-routed review costs two extra lead
+round-trips: spawn the reviewer, then resume or re-spawn the writer for the
+fixes. Each waits for the lead to be free, and the fix round often starts on
+a cold cache. Done by the writer, the fix round runs on the writer's own warm
+cache, and the lead sees a reviewed diff instead of an unreviewed one. The
+cost is the same reviewer either way, because parity sizes it to the writer
+in both cases.
+
+**The risk, and what holds it.** A writer frames its own review: it could
+scope the reviewer away from its weak spots, or summarise the change in its
+own favour. Three things hold that. The protocol text is fixed and generated,
+not written by the writer: the reviewer gets the lead's brief verbatim, the
+diff range and a refute-this instruction, and the writer is told to add
+nothing that narrows it. The verdict line comes back verbatim, so a `FIX`
+cannot be paraphrased into a pass. And the lead still spot-checks the review
+file against the diff, settles disputed findings, and lands the work.
+
+**Bounded, not recursive.** Reviewers never spawn reviewers, and a writer
+never re-reviews after its fix round. The chain is at most writer -> reviewer,
+so a disagreement ends at the lead, not in a loop. The spawn guard enforces
+the first rule, and it denies only on a positive match: the caller's own
+spawn row, found by the id of the Agent call that started it, says it was a
+review. When the guard cannot tell, it allows. A false deny would stop a
+writer's legitimate review, and the protocol already tells a reviewer not to
+spawn one.
+
+**Why the protocol is generated into the rung.** A writer can only follow a
+protocol it can see, and the routing table decides which rung a type lands
+on. So the text lives in the body of every ladder rung that is currently the
+default for a listed type, generated from the config, and the drift check
+fails when a table move leaves it on the wrong rung. It sits with the task
+types so the two move together.
+
+**Why not medium-effort writers yet.** The saving is lead round-trips, and
+the cost is a parity reviewer spawned on every such task, including ones the
+lead would have waved through. For architect-class work a review is always
+warranted. For bounded work that is not yet shown, so it is measured first
+(`self_review` and `self_review_expected` in `spawns.jsonl`).
+
 ## Consequence floors: six things that never depend on difficulty
 
 Difficulty and consequence are close to orthogonal — a one-line production
