@@ -7,15 +7,15 @@
   },
   "userConfig": {
     "delegation_guard": {
-      "type": "boolean",
+      "type": "string",
       "title": "Delegation guard",
-      "description": "Nudge the MAIN thread to delegate after repeated execution-class tool calls. Never applies inside subagents.",
-      "default": true
+      "description": "What to do when the MAIN thread makes delegation_threshold execution-class calls in a row (Bash, PowerShell, Edit, Write, NotebookEdit, Read, Grep, Glob) with no Agent spawn or SendMessage in between. \"off\": nothing. \"warn\" (default): the call runs and the model is told to delegate, naming a ladder rung. \"block\": the call is denied with the same instructions; repeating it once runs it (the count restarts at every firing). Never counts or blocks a subagent's calls, and never blocks Agent, SendMessage, ToolSearch, AskUserQuestion, TaskStop or any mcp__ tool. Legacy boolean values: true reads as \"warn\", false as \"off\".",
+      "default": "warn"
     },
     "delegation_threshold": {
       "type": "number",
       "title": "Delegation threshold",
-      "description": "Consecutive main-thread execution calls tolerated before the guard fires.",
+      "description": "Consecutive main-thread execution-class calls at which the delegation guard fires (the call that reaches it is the one warned about or denied). Minimum 2.",
       "default": 4
     },
     "premium_cap": {

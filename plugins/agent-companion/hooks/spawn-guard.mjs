@@ -36,7 +36,7 @@ import {
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
-  claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir,
+  claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
@@ -812,9 +812,9 @@ try {
   //
   // Anthropic publishes no foreground-vs-background guidance. Gate 1 is
   // this plugin's own operating decision, and its message says so.
-  const callerIsSubagent = !!p.agent_id; // identical to spawns.jsonl's own caller_is_subagent
+  const subagentCaller = callerIsSubagent(p); // the shared test (lib/context.mjs); = spawns.jsonl caller_is_subagent
   const runsInBackground = input.run_in_background === true;
-  const gate1Applicable = !callerIsSubagent && !runsInBackground;
+  const gate1Applicable = !subagentCaller && !runsInBackground;
 
   // Exemption: the resolved model (post-autofill — what will ACTUALLY run)
   // is the plugin's own cheapest KNOWN tier per config/model-tiers.json
@@ -892,7 +892,7 @@ try {
   // review finding 1). Also excludes the harness's reserved addressing
   // names ("main", "team-lead" — review finding 2). Never denies; fails
   // open to "no name, no note" on any error.
-  const gate4Applicable = !callerIsSubagent && runsInBackground && !input.name && opt('namegate', true);
+  const gate4Applicable = !subagentCaller && runsInBackground && !input.name && opt('namegate', true);
   let gate4Action = 'none'; // none | hint | autofill
   let namegateName = null;
   if (gate4Applicable) {
@@ -1210,7 +1210,7 @@ try {
       team_name: input.team_name ?? null,
       desc_sha: descSha,       // sha256(description).slice(0,16) — hashed, never stored raw
       desc_len: descLen,
-      caller_is_subagent: !!p.agent_id,
+      caller_is_subagent: subagentCaller,
       caller_agent_id: p.agent_id || null,
       caller_model: callerModel,
       caller_effort: callerEffort,        // the CALLER's effort — what v1 `effort` held

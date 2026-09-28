@@ -87,9 +87,10 @@ so a plugin update can still improve their wording while your choice stands.
 
 This is the rule that answers "the delegation rules get ignored". Its gate is
 `delegation-drift`: it is satisfied only once `delegation-guard` has actually
-caught this session running execution work on the main thread. Until then it
-injects nothing at all; after that it repeats on every turn for the rest of the
-session.
+caught this session running execution work on the main thread (it fired, in
+`warn` or `block`, at `delegation_threshold` execution-class calls in a row;
+`off` never fires, so the rule stays silent). Until then it injects nothing at
+all; after that it repeats on every turn for the rest of the session.
 
 A constant reminder is a tax everyone learns to skim. An adaptive one arrives
 exactly when it has been earned, and keeps arriving while the behaviour lasts.

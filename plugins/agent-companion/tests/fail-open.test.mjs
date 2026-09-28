@@ -42,12 +42,21 @@ test('delegation-guard fails open the same way', () => {
     writeFileSync(blocker, 'file, not a directory');
     process.env.AGENT_COMPANION_STATE_DIR = blocker;
 
-    const payload = { session_id: 'sess-failopen-2', agent_type: 'main', tool_name: 'Bash', cwd: dir };
-    const res = runHook('hooks/delegation-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
-    });
-
-    assert.equal(res.status, 0, `delegation-guard must exit 0 even when its state dir is unwritable: stderr=${res.stderr}`);
+    // A real main-thread payload (no agent_id, no agent_type), in block mode
+    // at the lowest threshold, so the counting path — lock, read, write — runs
+    // against the unwritable dir.
+    const payload = { session_id: 'sess-failopen-2', hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: dir };
+    const env = {
+      CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'),
+      CLAUDE_PLUGIN_OPTION_DELEGATION_GUARD: 'block',
+      CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2',
+    };
+    for (let i = 0; i < 3; i += 1) {
+      const res = runHook('hooks/delegation-guard.mjs', payload, { env });
+      assert.equal(res.status, 0, `delegation-guard must exit 0 even when its state dir is unwritable: stderr=${res.stderr}`);
+      assert.notEqual(res.json?.hookSpecificOutput?.permissionDecision, 'deny',
+        'with no state to count in, the guard must fail open, never deny');
+    }
   } finally {
     cleanup();
   }

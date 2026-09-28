@@ -13,7 +13,9 @@
 
 import {
   readFileSync, existsSync, readdirSync, mkdirSync, renameSync, copyFileSync, writeFileSync, statSync,
+  mkdtempSync, rmSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execSyncHidden, execFileSyncHidden } from './lib/proc.mjs';
@@ -439,10 +441,11 @@ const guardCanary = {
     if (!existsSync(hooks)) return { status: 'skip', findings: ['plugin hooks directory not found'] };
     const findings = [];
 
-    const probe = (script, payload) => {
+    const probe = (script, payload, env = null) => {
       try {
         const out = execFileSyncHidden('node', [join(hooks, script)], {
           input: JSON.stringify(payload), encoding: 'utf8', timeout: 15000,
+          ...(env ? { env: { ...process.env, ...env } } : {}),
         });
         return out.trim() ? JSON.parse(out) : null;
       } catch {
@@ -460,11 +463,38 @@ const guardCanary = {
       findings.push('spawn-guard did NOT deny an unwarranted premium spawn - the guard is inert');
     }
 
-    const workerCase = probe('delegation-guard.mjs', {
-      session_id: 'canary-sub', agent_type: 'subagent', tool_name: 'Bash',
-    });
-    if (workerCase?.hookSpecificOutput?.permissionDecision === 'deny') {
-      findings.push('delegation-guard DENIED a subagent - workers are being blocked');
+    // The delegation guard, on payloads shaped like the real ones: a main
+    // thread carries no agent_id (and no agent_type), a subagent carries
+    // agent_id. Run in block mode at threshold 2 against a throwaway state
+    // dir, so the probe neither depends on nor touches the operator's own
+    // settings and streak file. Before this probe existed the guard keyed
+    // on agent_type === 'main', matched no real payload, and nothing noticed.
+    let scratch = null;
+    try {
+      scratch = mkdtempSync(join(tmpdir(), 'ac-canary-'));
+      const env = {
+        AGENT_COMPANION_STATE_DIR: scratch,
+        CLAUDE_PLUGIN_OPTION_DELEGATION_GUARD: 'block',
+        CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2',
+      };
+      const call = (extra) => probe('delegation-guard.mjs', {
+        session_id: 'canary-delegation', hook_event_name: 'PreToolUse', tool_name: 'Bash',
+        tool_input: { command: 'echo canary' }, ...extra,
+      }, env);
+      let workerDenied = false;
+      for (let i = 0; i < 3; i += 1) {
+        const w = call({ agent_id: 'canary-agent', agent_type: 'general-purpose' });
+        if (w?.hookSpecificOutput?.permissionDecision === 'deny') workerDenied = true;
+      }
+      if (workerDenied) findings.push('delegation-guard DENIED a subagent - workers are being blocked');
+      call({});
+      const mainCase = call({});
+      if (mainCase === undefined) findings.push('delegation-guard did not run at all');
+      else if (mainCase?.hookSpecificOutput?.permissionDecision !== 'deny') {
+        findings.push('delegation-guard did NOT fire on a main-thread-shaped payload in block mode - the guard is inert');
+      }
+    } catch { /* could not stage the probe: say nothing rather than guess */ } finally {
+      if (scratch) { try { rmSync(scratch, { recursive: true, force: true }); } catch { /* best effort */ } }
     }
 
     return { status: findings.length ? 'fail' : 'ok', findings };

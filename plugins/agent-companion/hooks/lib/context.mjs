@@ -291,10 +291,9 @@ export function sessionLoadedAt(sid) {
   return pl && pl.sid === String(sid) ? pl.at : null;
 }
 
-// Agent types observed in the shipped binary (2.1.220). The binary tests the
-// main thread with `agentType === "main"`, but mainThreadAgentType is settable
-// at runtime, so we treat this as an allowlist rather than a guarantee.
-export const MAIN_THREAD_TYPES = new Set(['main', 'main-session']);
+// Agent types observed in the shipped binary (2.1.220). Used only to keep
+// known types out of the drift record (noteAgentType): whether a call comes
+// from the main thread is NOT read from agent_type (see callerIsSubagent).
 export const KNOWN_AGENT_TYPES = new Set([
   'main', 'main-session', 'subagent', 'teammate', 'worker',
   'workflow-subagent', 'general-purpose', 'claude', 'statusline-setup',
@@ -1658,6 +1657,18 @@ export function rungFor(model, effort) {
   return ladder.find((r) => r.model === alias && (r.effort || null) === e) || null;
 }
 
+// The ladder rung a task type routes to, plugin-namespaced (the form that
+// spawns from any project), through the same resolver the spawn guard uses
+// (routing profile included), or null when the route names no rung. Read at
+// deny time by the delegation guard, so its advice follows the table.
+export function routedRung(type) {
+  try {
+    const r = resolveRoute({ type });
+    const rung = r.model && r.effort ? rungFor(r.model, r.effort) : null;
+    return rung ? { type: `${pluginName()}:${rung.agent}`, model: r.model, effort: r.effort } : null;
+  } catch { return null; }
+}
+
 // True when `type` names one of the ladder's own generic worker defs
 // (config/model-tiers.json's `ladder[].agent`, e.g. `ac-opus-low`), either
 // bare or under THIS plugin's own namespace (`agent-companion:ac-opus-low`,
@@ -2048,9 +2059,30 @@ export function opt(key, fallback) {
   return raw;
 }
 
-// Positive confirmation only. Unknown or missing => NOT main => no enforcement.
+// Main thread or subagent: THE one test, for every hook that acts on the lead
+// only (the spawn guard's gates, the runaway notice, the delegation guard).
+//
+// agent_id, never agent_type. The harness's own hook-input schema (Claude
+// Code 2.1.281) documents agent_id as "Present only when the hook fires from
+// within a subagent ... Absent for the main thread, even in --agent
+// sessions. Use this field (not agent_type) to distinguish subagent calls
+// from main-thread calls", and agent_type as present inside a subagent OR on
+// the main thread of an --agent session. Real main-thread payloads carry
+// neither field: on this plugin's own telemetry, every main-session spawn row
+// has no agent_type and every subagent-originated row has agent_id
+// (spawns.jsonl caller_is_subagent === !!agent_id). The delegation guard used
+// to require agent_type === 'main', which no real payload carries, so it
+// never ran outside its own tests.
+export function callerIsSubagent(p) {
+  return !!(p && typeof p === 'object' && p.agent_id);
+}
+
+// Still positive confirmation: a payload that did not parse (readStdin()
+// returns {}) or carries no session_id is NOT the main thread, so a garbled
+// call is never counted or blocked. Everything else without agent_id is.
 export function isMainThread(p) {
-  return typeof p.agent_type === 'string' && MAIN_THREAD_TYPES.has(p.agent_type);
+  return !!p && typeof p === 'object' && typeof p.session_id === 'string' && p.session_id !== ''
+    && !callerIsSubagent(p);
 }
 
 // Look up a named agent's own definition. This is what distinguishes a
@@ -2400,15 +2432,17 @@ export function appendLog(name, record) {
 // Record a guard firing. Without this the denial count is always zero, and a
 // guard that has silently stopped matching is indistinguishable from one with
 // nothing to deny — which is exactly the signal the calibration canary exists
-// to raise. Call this BEFORE deny(), which exits the process.
-export function recordDenial(guard, payload, detail) {
+// to raise. Call this BEFORE deny(), which exits the process. `outcome` is
+// 'deny' unless a guard in warn mode records that it matched and let the
+// call run ('warn': delegation_guard: warn) — still proof the guard fires.
+export function recordDenial(guard, payload, detail, outcome = 'deny') {
   appendLog('denials.jsonl', {
     at: new Date().toISOString(),
     session_id: String(payload?.session_id ?? ''),
     agent_type: payload?.agent_type,
     tool_name: payload?.tool_name,
     guard,
-    outcome: 'deny',
+    outcome,
     detail: String(detail ?? '').slice(0, 300),
   });
 }
