@@ -16,6 +16,10 @@
 //      --check-agent-descriptions fails on drift), between the markers
 //      below, so a routing-table move carries it to the new rung and off the
 //      old one. A writer reads it because it is in its own system prompt.
+//      Shipped files cannot follow a routing profile or a local copy of the table, so
+//      a listed type spawned on any OTHER ladder rung gets the same text,
+//      sized to that rung, appended to its brief by the spawn guard
+//      (injectionRung, selfReviewBriefText).
 //   2. WRITER INFERENCE for a review a subagent spawns with no WRITER line:
 //      the caller's own agent_type, resolved through agentDefinition() to
 //      the model and effort its definition pins (writerFromCaller).
@@ -35,7 +39,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import {
   modelTiers, taskTypeDef, agentDefinition, classifyModel, classifyEffort, callerIsSubagent,
-  tailRecords, telemetryDir, isFixtureSession, resolveRoute, isLadderAgentName,
+  tailRecords, telemetryDir, isFixtureSession, resolveRoute, isLadderAgentName, effortSupported, rungFor,
 } from './context.mjs';
 import { declarationLines } from './brief-directives.mjs';
 
@@ -166,7 +170,8 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
     '   - the lead\'s original brief, verbatim, or the path of a file that holds it verbatim;',
     '   - the branch, the commit sha and the diff range under review;',
     '   - this instruction: "Try to refute this change. Run the tests. Start with a verdict line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit, with file:line and a repro.";',
-    '   - the review file to write: the path the lead\'s brief names for it, if any; otherwise `REVIEW-<name>.md` next to your report file, `<name>` being a short name for this task.',
+    '   - the review file to write: the path the lead\'s brief names for it, if any; otherwise `REVIEW-<name>.md` next to your report file, `<name>` being a short name for this task;',
+    '   - where to work: its own checkout of that sha (for example `git worktree add --detach <path> <sha>`, run from your working tree), never your working tree; it makes no commits and no pushes.',
     '   Add nothing that narrows the review: no areas to skip, no findings to expect, no summary of your own that stands in for the diff.',
     `4. ${fix}`,
     '5. Return: your report, the reviewer\'s verdict line verbatim, the review file path, the post-fix commit sha, and the disputed findings.',
@@ -237,22 +242,51 @@ export function definitionCarriesProtocol(type, def) {
 // its definition pins — the same place the harness reads them. Returns the
 // writerFromDeclaration() shape with via: 'caller', or { ok: false, reason }.
 // Never guesses: a caller with no agent_type, a built-in type (no definition
-// file), or a definition with no model yields no writer. Never throws.
-export function writerFromCaller(p) {
+// file), or a definition with no model (or `model: inherit`) yields no writer.
+//
+// `observed` is what the caller was actually seen running: `model` from the
+// last assistant record of its own transcript (its previous turn), `effort`
+// from the payload or that record. A model set on the caller's own spawn, or
+// a configured default subagent model, takes precedence over the definition's, so when
+// the observed model's alias differs from the definition's, the definition
+// is not the writer and nothing is inferred (review round, 2026-09-28). When
+// the definition states no effort, the observed effort (the one it inherited)
+// is used if the model takes it. No observation (a first turn) falls back to
+// the definition alone. Never throws.
+const BUILT_IN_TYPES = new Set(['general-purpose', 'explore', 'plan', 'claude', 'fork', 'statusline-setup', 'claude-code-guide']);
+export function writerFromCaller(p, observed = {}) {
   try {
     if (!callerIsSubagent(p)) return { ok: false, reason: 'the caller is the main thread, not a subagent' };
     const t = typeof p.agent_type === 'string' ? p.agent_type.trim() : '';
     if (!t) return { ok: false, reason: "the caller's hook payload names no agent_type" };
+    const tq = t.slice(0, 80);
     const d = agentDefinition(t, p.cwd);
     if (!d) {
-      return { ok: false, reason: `the caller's agent type "${t.slice(0, 80)}" has no definition file the guard can read (a built-in type pins no model or effort)` };
+      const why = BUILT_IN_TYPES.has(t.toLowerCase())
+        ? 'a built-in type pins no model or effort'
+        : t.includes(':') ? 'a plugin agent that is not installed here, or not readable' : 'no such agent file in this project or ~/.claude/agents';
+      return { ok: false, reason: `the caller's agent type "${tq}" has no definition file the guard can read (${why})` };
     }
-    if (!d.model) return { ok: false, reason: `the caller's definition "${t.slice(0, 80)}" states no model, so it ran on its own lead's model` };
+    if (!d.model) return { ok: false, reason: `the caller's definition "${tq}" states no model, so it ran on its own lead's model` };
+    if (/^inherit$/i.test(String(d.model).trim())) return { ok: false, reason: `the caller's definition "${tq}" sets \`model: inherit\`, so it ran on its own lead's model` };
     const cls = classifyModel(d.model);
-    if (!cls.known) return { ok: false, reason: `the caller's definition "${t.slice(0, 80)}" pins model "${String(d.model).slice(0, 40)}", which is not in the tier table` };
-    const own = d.effort ? classifyEffort(d.effort) : null;
-    const effort = own && own.known ? own.level : '';
+    if (!cls.known) return { ok: false, reason: `the caller's definition "${tq}" pins model "${String(d.model).slice(0, 40)}", which is not in the tier table` };
+    const seen = observed && observed.model ? classifyModel(observed.model) : null;
+    if (seen && seen.known && seen.alias && seen.alias !== cls.alias) {
+      return {
+        ok: false,
+        reason: `the caller "${tq}" is defined on ${cls.alias}, but its last turn ran on ${String(observed.model).slice(0, 40)} ` +
+          '(a model set on its own spawn, or a default subagent model, takes precedence over the definition), so its definition is not its writer',
+      };
+    }
     const takesEffort = (((modelTiers().tiers || {})[cls.alias] || {}).efforts || []).length > 0;
+    const own = d.effort ? classifyEffort(d.effort) : null;
+    let effort = own && own.known ? own.level : '';
+    let effortSource = effort ? 'definition' : null;
+    if (!effort && takesEffort && observed && observed.effort) {
+      const oe = classifyEffort(observed.effort);
+      if (oe.known && effortSupported(cls.alias, oe.level).ok) { effort = oe.level; effortSource = 'observed'; }
+    }
     return {
       ok: true,
       model: cls.alias,
@@ -260,12 +294,38 @@ export function writerFromCaller(p) {
       label: effort ? `${cls.alias}/${effort}` : cls.alias,
       via: 'caller',
       agent: t,
+      effortSource,
       effortIssue: !effort && takesEffort ? 'agent-none' : null,
       effortToken: null,
     };
   } catch {
     return { ok: false, reason: 'the tier table could not be read' };
   }
+}
+
+// The ladder rung whose protocol text a writer should get appended to its
+// brief, when the definition that will run is a ladder rung WITHOUT the
+// generated block (a routing profile, a local copy of the table or a deliberate choice
+// put a self-reviewing TYPE on a rung the shipped table does not route it
+// to). The rung is the one matching what will actually run: the model the
+// spawn names (or the rung's own) at the effort the rung pins. null when the
+// running type is not a ladder rung, or that pair is no rung.
+export function injectionRung(runningType, def, spawnModel) {
+  try {
+    if (!isLadderAgentName(runningType) || !def || !def.model) return null;
+    const alias = classifyModel(spawnModel || def.model).alias || '';
+    if (!alias) return null;
+    return rungFor(alias, def.effort || null);
+  } catch { return null; }
+}
+
+// The protocol as appended to a writer's BRIEF (not its definition): the
+// generated block without its file markers, under a line saying where it
+// came from, so the text a writer reads is the same wherever it lands.
+export function selfReviewBriefText(rung, sr = selfReviewConfig(), plugin = 'agent-companion') {
+  const body = selfReviewBlock(rung, sr, plugin).split('\n')
+    .filter((l) => l !== SELF_REVIEW_BEGIN && l !== SELF_REVIEW_END).join('\n');
+  return '\n\n---\n(agent-companion: your definition does not carry the self-review protocol for this task type, so it is appended here from config/model-tiers.json `selfReview`.)\n\n' + body + '\n';
 }
 
 // The caller's sidecar: <dir>/<session>/subagents/agent-<agent_id>.meta.json,

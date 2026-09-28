@@ -41,7 +41,8 @@ When it applies, before you return:
    - the lead's original brief, verbatim, or the path of a file that holds it verbatim;
    - the branch, the commit sha and the diff range under review;
    - this instruction: "Try to refute this change. Run the tests. Start with a verdict line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit, with file:line and a repro.";
-   - the review file to write: the path the lead's brief names for it, if any; otherwise `REVIEW-<name>.md` next to your report file, `<name>` being a short name for this task.
+   - the review file to write: the path the lead's brief names for it, if any; otherwise `REVIEW-<name>.md` next to your report file, `<name>` being a short name for this task;
+   - where to work: its own checkout of that sha (for example `git worktree add --detach <path> <sha>`, run from your working tree), never your working tree; it makes no commits and no pushes.
    Add nothing that narrows the review: no areas to skip, no findings to expect, no summary of your own that stands in for the diff.
 4. Do one fix round on the blocker and should-fix findings. A finding you disagree with stays unfixed and is listed as disputed, with your reason. Never re-review: do not spawn a second reviewer.
 5. Return: your report, the reviewer's verdict line verbatim, the review file path, the post-fix commit sha, and the disputed findings.

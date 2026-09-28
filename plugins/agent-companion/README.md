@@ -37,8 +37,8 @@ It was built after two observed failures:
 | `scout_surface` | At session start, surfaces unresolved signals from the last locally scheduled scout run. Silent on a quiet day. | no |
 | `ci_status_signal` | Detects a repo's default branch sitting on a red (failure/cancelled/timed_out) latest completed workflow run, via `gh`. Suggestion-only — never re-runs, cancels, or fixes anything. Surfaced two ways: a `main_ci_red` signal in the daily scout (repo, workflow name(s), "red since" timestamp, failing run URL(s)), and a one-line SessionStart note ("main CI red since ...") read from a 10-minute cache only — the SessionStart path never calls `gh` or the network itself. Silent when `gh` is missing, unauthenticated, or offline. Scope: the current project's own repo, plus any repo already confirmed public by `publication_leak_sweep` — see [Main-branch CI status](#main-branch-ci-status) for why. | no |
 | `version_notice` | At session start and on the next prompt, says once per (plugin, lastUpdated) pair when ANY installed plugin — not just this one — was updated after this session last loaded its plugins (session start, or the last `/reload-plugins`), catching a stale parent (and everything it spawns) mid-session, not just at startup. Also keeps this plugin's own running-vs-installed self-check, merged into the same notice when both fire, for the one case timestamps alone miss: a desktop session that loaded a stale app-extracted bundle at startup. Updating itself is the harness's job: the native autoupdater in terminal sessions, the built-in `plugin update` commands run by the daily local scout in desktop sessions. Install the global hook (see below) to run this checker itself from a fixed path that is never stale. | no |
-| `fit_guard` | Best fit at the spawn, both directions. A brief that declares `WEIGHT:` gets its model graded against the routing table: under- and cheap-over-provisioned spawns are announced; a premium model over-provisioned for its own declared weight is denied with the correction. A review brief names the writer it gates on a `WRITER:` line — `WRITER: <model>/<effort>` (also `opus xhigh`, `opus at xhigh`, `Opus 5.5 xhigh`) or `WRITER: <agent-name>`, e.g. `TYPE: code-review` + `WRITER: opus/xhigh` — and the reviewer is judged for parity with it (below, above, or an inherited effort it cannot verify), in notes only. The line is read only on a parity-sized `TYPE:` (`code-review`); a missing or unreadable effort is said in a note, and parity is then checked on the model alone. When a **subagent** spawns a review with no `WRITER:` line, the writer is taken from the caller's own definition (its `agent_type` -> the agent file's `model`/`effort`), and a note says so; a built-in or missing caller type infers nothing, and a `WRITER:` line always wins. A spawn declaring a [self-reviewing type](#self-review-architect-class-writers) on a rung that carries no self-review protocol gets a note naming the rung that does. | premium-over only (never on parity) |
-| `review_recursion_guard` | Reviewers never spawn reviewers. A parity-sized review (`TYPE: code-review`) spawned by a subagent is denied when that subagent's own spawn row in `spawns.jsonl` is itself a review — found by the id of the `Agent` call that started it (the harness's `subagents/agent-<id>.meta.json` names it; rows record it as `tool_use_id`). Anything short of that positive match — no sidecar, no id, no row, a row from another session, rows that disagree — allows. A reviewer's other spawns (a search, a check) are not affected. Default on. See [Self-review](#self-review-architect-class-writers). | yes, on a positive match |
+| `fit_guard` | Best fit at the spawn, both directions. A brief that declares `WEIGHT:` gets its model graded against the routing table: under- and cheap-over-provisioned spawns are announced; a premium model over-provisioned for its own declared weight is denied with the correction. A review brief names the writer it gates on a `WRITER:` line — `WRITER: <model>/<effort>` (also `opus xhigh`, `opus at xhigh`, `Opus 5.5 xhigh`) or `WRITER: <agent-name>`, e.g. `TYPE: code-review` + `WRITER: opus/xhigh` — and the reviewer is judged for parity with it (below, above, or an inherited effort it cannot verify), in notes only. The line is read only on a parity-sized `TYPE:` (`code-review`); a missing or unreadable effort is said in a note, and parity is then checked on the model alone. When a **subagent** spawns a review with no `WRITER:` line, the writer is taken from the caller's own definition (its `agent_type` -> the agent file's `model`/`effort`), and a note says so. Nothing is inferred for a built-in or missing caller type, for `model: inherit`, or when the caller's own transcript shows it running on a different model than its definition (a model set on its spawn); a definition with no effort takes the effort the caller runs at, and a `WRITER:` line always wins. A [self-reviewing](#self-review-architect-class-writers) writer that names a `WRITER:` below its own pair gets a note, and a critical-change writer's review is floored by F1. A self-reviewing type on a ladder rung without the protocol gets the protocol appended to its brief; on a built-in type, a note. | premium-over only (never on parity) |
+| `review_recursion_guard` | Reviewers never spawn reviewers. A parity-sized review (`TYPE: code-review`) spawned by a subagent is denied when that subagent's own spawn row in `spawns.jsonl` is itself a review — found by the id of the `Agent` call that started it (the harness's `subagents/agent-<id>.meta.json` names it; rows record it as `tool_use_id`). Anything short of that positive match — no sidecar, no id, no row, a row from another session, rows that disagree — allows. It looks one level up only, and a reviewer's other spawns (a search, a check) are not affected. The rows are its only input, so it does nothing while `spawn_telemetry` is off, and it relies on that harness sidecar: if the harness renames it, every lookup reads unknown and nothing is denied (`caller_row_found` goes false on every row). Default on. See [Self-review](#self-review-architect-class-writers). | yes, on a positive match |
 | `fit_autofill` | A spawn that declares `WEIGHT:` but names no model gets the table's model filled in, instead of inheriting the lead's tier by accident. | no |
 | `routing_profile` | Routes a declared `TYPE:` through **your** routing profile ahead of the shipped table (see [Routing profile](#routing-profile)). The kill switch: off means only the shipped table routes, from the next hook invocation, and the file is left untouched. On by default because the file exists only once you write a row. | no |
 | *(spawning rule)* | Three operator-approved checks, always on (not a togglable option, same as the no-effort-stated warning below): a spawn naming no model anywhere is flagged even with no `WEIGHT:` declared; an opus/fable spawn from a session on a Claude Code build below the alias-resolution floor is flagged; the audit separately verifies the RESOLVED model against what ran. See [Spawning rule](#spawning-rule-operator-approved-2026-09-23). | no |
@@ -729,34 +729,53 @@ of every ladder rung that is currently the default for a listed type (today
 `ac-opus-xhigh`), between `self-review protocol BEGIN/END` markers, by
 `scripts/routing-table.mjs --sync-agent-descriptions`. `--check-agent-descriptions`
 fails on drift, so when the table moves a type to another rung the block
-has to move with it, and a hand edit is caught. The text tells the writer to:
+has to move with it, and a hand edit is caught. A listed type spawned on any
+other ladder rung (a routing profile or a local table override can put it
+there) gets the same text, sized to that rung, appended to its brief by the
+spawn guard. The text tells the writer to:
 
 1. commit, then spawn ONE foreground reviewer on the rung matching its own
    model and effort, with `TYPE: code-review` and `WRITER: <model>/<effort>`;
 2. give that reviewer the lead's brief (verbatim or its path), the branch, sha
    and diff range, the adversarial instruction (verdict `PASS` or `FIX`,
-   findings ranked blocker/should-fix/nit with file:line and a repro), and the
-   review file path (the lead's, else `REVIEW-<name>.md` next to the report);
+   findings ranked blocker/should-fix/nit with file:line and a repro), the
+   review file path (the lead's, else `REVIEW-<name>.md` next to the report),
+   and a checkout of its own to work in;
 3. do one fix round, list the findings it disputes, and never re-review;
 4. return the report, the reviewer's verdict line verbatim, the review path,
    the post-fix sha and the disputed findings.
 
 A brief carrying `REVIEW: lead` on a line of its own opts that spawn out: the
-lead reviews it as before.
+lead reviews it as before. A built-in type (its effort is not pinned) or a
+project agent (`.claude/agents/`) does not get the text; give a project agent
+the same wording by hand if it should self-review.
 
 **What the guard adds.** A review spawned by a subagent with no `WRITER:` line
-is sized to the caller's own definition (see `fit_guard`). Reviewers never
-spawn reviewers (`review_recursion_guard`), so the chain is at most writer ->
-reviewer. `spawns.jsonl` rows record `parent_agent_id`, `tool_use_id`,
-`self_review` (a review spawned by a non-reviewer subagent),
-`self_review_expected` and `inferred_writer`
-([docs/TELEMETRY.md](docs/TELEMETRY.md)).
+is sized to the caller (see `fit_guard`); a self-reviewing writer that names a
+`WRITER:` below itself gets a note; a critical-change writer's review is
+floored by F1. Reviewers never spawn reviewers (`review_recursion_guard`, one
+level up). `spawns.jsonl` rows record `tool_use_id`, `parent_agent_id`,
+`caller_tool_use_id`, `self_review` (a review by a writer of a listed type),
+`review_by_subagent`, `self_review_expected`, `self_review_injected` and
+`inferred_writer` ([docs/TELEMETRY.md](docs/TELEMETRY.md)).
+
+**What the guard cannot see.** The writer writes its reviewer's brief and
+relays the verdict. A review spawned with no `TYPE:` line, a second review, a
+background review, or no review at all pass without a note. The protocol
+tells the writer not to do these things; nothing enforces it.
 
 **Where the lead still acts.** The lead lands the work and merges it, settles
-the findings the writer disputes, and spot-checks the review file against the
-diff. The protocol moves the first review pass off the lead; it does not move
-the decision to ship. A project agent (`.claude/agents/`) does not get the
-generated block; give it the same wording by hand if it should self-review.
+the findings the writer disputes, and spot-checks the review. The protocol
+moves the first review pass off the lead; it does not move the decision to
+ship. What to check:
+
+- the review file exists, and its first line is the verdict the writer
+  relayed;
+- the reviewer's actual brief is the first user record of its transcript,
+  `<session>/subagents/agent-<reviewer id>.jsonl`: it should carry the lead's
+  brief and the diff range, with nothing narrowing the review;
+- the reviewer's `spawns.jsonl` row has `caller_tool_use_id` equal to the
+  writer row's `tool_use_id`, and a `fit` of `fit` against its writer.
 
 ## Model benchmark
 

@@ -25,6 +25,9 @@ import {
   modelTiers, resolveRoute, classifyModel, classifyEffort, rungFor, explainRoute, taskTypeDef, taskTypeNames,
 } from '../hooks/lib/context.mjs';
 import { loadAdvisorSummary, windowHintFor } from './lib/cache-advisor.mjs';
+import { selfReviewConfig, readSelfReviewBlock } from '../hooks/lib/self-review.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -145,6 +148,28 @@ if (cls.premium) {
 
 if (route?.cacheTtl) out.cacheTtl = route.cacheTtl; // advisory hint; only a profile row carries one
 
+// Self-review (config selfReview): a writer of a listed type reviews its own
+// work, so the lead does not spawn the reviewer printed above unless the brief
+// opts out. `protocol` says where the writer reads it: its rung's own body, or
+// appended to its brief by the spawn guard (a ladder rung without the block).
+try {
+  const sr = selfReviewConfig();
+  if (out.taskType && sr.types.includes(out.taskType)) {
+    let inBody = false;
+    if (out.spawnAgent) {
+      try {
+        const f = fileURLToPath(new URL(`../agents/${out.spawnAgent}.md`, import.meta.url));
+        inBody = !!readSelfReviewBlock(readFileSync(f, 'utf8')).block;
+      } catch { inBody = false; }
+    }
+    out.selfReview = {
+      protocol: out.spawnAgent ? (inBody ? 'rung' : 'appended') : 'none',
+      fixRounds: sr.fixRounds,
+      optOut: sr.optOut.line,
+    };
+  }
+} catch { /* no self-review line */ }
+
 // Auto-compact window: quoted from the last cache-advisor run (its saved
 // summary), never computed here — a transcript replay is far too slow for this
 // command. Shown only when a summary exists. Advice: nothing is changed.
@@ -174,6 +199,13 @@ if (out.spawnAgentNamespaced) {
   console.log(`spawn as:       no ladder rung mapped for ${out.model}${out.effort ? '/' + out.effort : ''} — spawn with model="${out.model}"${out.effort ? ` and an agent definition carrying effort: ${out.effort}` : ''}`);
 }
 console.log(`reviewer:       ${out.reviewer.model} at effort ${out.reviewer.effort}`);
+if (out.selfReview) {
+  const s = out.selfReview;
+  console.log(s.protocol === 'none'
+    ? `self-review:    none — no ladder rung for this route carries or can take the protocol; the lead spawns the reviewer above`
+    : `self-review:    the writer spawns that reviewer itself (protocol ${s.protocol === 'rung' ? `in ${out.spawnAgentNamespaced}'s body` : 'appended to its brief by the spawn guard'}), ` +
+      `runs ${s.fixRounds === 1 ? 'one fix round' : `${s.fixRounds} fix round(s)`} and returns the verdict; the lead does not spawn a reviewer unless the brief carries \`${s.optOut}\``);
+}
 if (route?.layer === 'profile') console.log(`route layer:    your routing profile (rev ${route.profileRevision}) — /ac routing why ${out.taskType} explains it`);
 if (route?.cacheTtl) console.log(`cache TTL hint: ${route.cacheTtl} (advisory, from your routing profile; no guard enforces it)`);
 if (out.autoCompact) {

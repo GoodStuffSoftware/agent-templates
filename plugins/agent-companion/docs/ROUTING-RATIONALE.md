@@ -93,35 +93,56 @@ cost is the same reviewer either way, because parity sizes it to the writer
 in both cases.
 
 **The risk, and what holds it.** A writer frames its own review: it could
-scope the reviewer away from its weak spots, or summarise the change in its
-own favour. Three things hold that. The protocol text is fixed and generated,
-not written by the writer: the reviewer gets the lead's brief verbatim, the
-diff range and a refute-this instruction, and the writer is told to add
-nothing that narrows it. The verdict line comes back verbatim, so a `FIX`
-cannot be paraphrased into a pass. And the lead still spot-checks the review
-file against the diff, settles disputed findings, and lands the work.
+scope the reviewer away from its weak spots, summarise the change in its own
+favour, size the reviewer below itself, or paraphrase a `FIX` into a pass.
+The writer composes the reviewer's brief and relays the verdict, so none of
+that is prevented; what exists is instruction, a few checks, and evidence
+the lead can read:
 
-**Bounded, not recursive.** Reviewers never spawn reviewers, and a writer
-never re-reviews after its fix round. The chain is at most writer -> reviewer,
-so a disagreement ends at the lead, not in a loop. The spawn guard enforces
-the first rule, and it denies only on a positive match: the caller's own
-spawn row, found by the id of the Agent call that started it, says it was a
-review. When the guard cannot tell, it allows. A false deny would stop a
-writer's legitimate review, and the protocol already tells a reviewer not to
-spawn one.
+- The instructions are fixed and generated, not written by the writer: they
+  tell it to give the reviewer the lead's brief verbatim, the diff range and
+  a refute-this instruction, to add nothing that narrows the review, and to
+  return the verdict line verbatim.
+- The spawn guard checks what it can see at the reviewer's spawn: a
+  `WRITER:` line below the writer's own pair gets a note, a critical-change
+  writer's review is floored by F1 (opus at xhigh or above), and a writer
+  with no `WRITER:` line is sized from its own definition.
+- The lead checks the rest: the reviewer's actual brief is the first user
+  record of its transcript (`<session>/subagents/agent-<id>.jsonl`), its
+  `spawns.jsonl` row joins to the writer's (`caller_tool_use_id` = the
+  writer row's `tool_use_id`), and the relayed verdict line should match the
+  first line of the review file. A writer that returns with no review file
+  skipped its review. The lead also settles disputed findings and lands the
+  work.
+
+**Bounded, not recursive.** The protocol says a writer never re-reviews after
+its fix round and a reviewer never spawns a reviewer, so the intended chain is
+writer -> reviewer and a disagreement ends at the lead. The spawn guard
+enforces the second rule only, and only one level up: it denies a
+`TYPE: code-review` spawned by an agent whose own spawn row, found by the id
+of the Agent call that started it, says it was a review. When the guard
+cannot tell, it allows. A false deny would stop a writer's legitimate review,
+and the protocol already tells a reviewer not to spawn one. A second review,
+a review spawned without a `TYPE:` line, or one routed through a helper are
+not caught; they show up in `spawns.jsonl`.
 
 **Why the protocol is generated into the rung.** A writer can only follow a
 protocol it can see, and the routing table decides which rung a type lands
 on. So the text lives in the body of every ladder rung that is currently the
 default for a listed type, generated from the config, and the drift check
 fails when a table move leaves it on the wrong rung. It sits with the task
-types so the two move together.
+types so the two move together. The shipped files cannot follow a routing
+profile or a local table override, so a listed type spawned on any other
+ladder rung gets the same generated text appended to its brief at spawn,
+sized to that rung. A built-in type pins no effort, so it gets a note
+instead, and a project agent keeps its own wording.
 
 **Why not medium-effort writers yet.** The saving is lead round-trips, and
 the cost is a parity reviewer spawned on every such task, including ones the
 lead would have waved through. For architect-class work a review is always
 warranted. For bounded work that is not yet shown, so it is measured first
-(`self_review` and `self_review_expected` in `spawns.jsonl`).
+(`self_review`, `self_review_expected` and `review_by_subagent` in
+`spawns.jsonl`).
 
 ## Consequence floors: six things that never depend on difficulty
 
