@@ -1,3 +1,129 @@
+## 2026-09-28 - a brief that says "isolate this path, and report on the real one" builds an undetectable mix-up ({{PROJECT}})
+
+- **The failure:** a lead briefed a subagent to point a shared-state env var at a scratch file for safety, and separately to report that shared file's record count before and after. The agent reported **1 entry** in a file that actually held **470**. It had read its own scratch file and named the real path. The claim reached the lead as catastrophic shared-state truncation on a machine where a dozen sessions depended on that file.
+- **Why it beat every check.** The number was specific, the quoted path was correct, the agent had genuinely performed the isolation it claimed, and the finding was exactly the sort of thing you want escalated loudly. There was nothing incoherent to notice. Alarm is what shortcuts verification, so the most alarming reports are the ones most likely to be relayed unverified.
+- **The brief caused it.** Asking one agent to *redirect* a path and to *report on the original* makes two paths live in its head with one name in its output. Ask for BOTH values explicitly — "the real file's count and your scratch file's count" — so a mix-up surfaces as two numbers that disagree rather than one number that is simply wrong. A single figure with a path attached is unfalsifiable from the outside.
+- **Lead-side rule:** verify an alarming claim at the named location yourself before acting on it or passing it upstream. This cost nothing here because the check was one command; relaying it would have sent an operator chasing a data-loss incident that never happened.
+- **Same family, same day, different tools:** a test runner's result laundered by `| tail -n` so the pipeline reported the filter's exit status instead of the run's; a deploy exit code that said nothing about whether the thing it deployed was live. In all three the tool's success channel and the outcome being claimed were never connected. The generalisation that covers them: **ask what specifically would have had to fail for this signal to look bad, and whether that thing was even in the chain you measured.**
+
+## A scheduled job needs a "registered but not yet observed" state, or it gets marked done on deploy day
+
+**Date:** 2026-09-28 · **Context:** shipping a project's first scheduled (cron) function
+
+Companion to the deploy-evidence entry below, which covers why a green deploy is not a live feature.
+This is the narrower, reusable fix for the scheduled-job case specifically: the problem is not only
+that people misread the signal, it is that **the status vocabulary has no word for the true state**,
+so the default recorded outcome is "done".
+
+Deploying a scheduled job proves the scheduler REGISTERED it. It proves nothing about whether it has
+ever fired or ever succeeded. Those are different facts, and for any cadence longer than "every few
+minutes" they are separated by a real, possibly multi-day window. A weekly job deployed on a Thursday
+cannot be confirmed until the following Monday. During that window "succeeded" is a lie and "failed"
+is also a lie, so a runbook offering only those two options will record success — on deploy day, from
+an exit code.
+
+**The technique, three parts:**
+
+1. **Make the job write a heartbeat record every run, including failed runs.** A run that fails and
+   leaves no trace is indistinguishable from a schedule that never fired, which is the ambiguity that
+   costs the debugging time. Keep TWO timestamps, not one: `lastRunAt` advancing on every run, and
+   `lastOkAt` advancing only on a clean run.
+
+2. **Make the record readable without credentials** — a narrowly-scoped public read on that ONE
+   record, never the collection, and never write. This is what lets the confirmation run from any
+   host: a deploy box, a laptop, a CI job holding no service account. A check that needs a credential
+   is the check most likely not to run. Keep identifying data and error TEXT out of it; publish the
+   failing keys or dates and leave the messages in the log.
+
+3. **Give the runbook the missing third state, by name.** Record `deployed, unconfirmed` until a run
+   has actually been observed, and say plainly that it is a real state rather than a soft success.
+   Then the two timestamps give a three-way diagnosis that points at different fixes:
+   - **no record at all** → the scheduler never fired; the job registration itself is missing or broken
+   - **`lastRunAt` fresh, `lastOkAt` absent or stale** → it IS firing and the work is failing; go to the logs
+   - **both fresh** → confirmed healthy; only now mark it done
+
+**Two traps worth stating in the same breath:**
+
+A staleness check on the heartbeat must be sized to the CADENCE. Moving a job from daily to weekly
+while leaving a 48-hour staleness window turns a healthy producer into a permanently-failing check —
+and a check that always fails trains everyone to ignore it, which is the original disease wearing a
+new coat.
+
+And a staleness check does not substitute for the first-run confirmation: before anything has ever
+run there is no record, so a well-built check correctly reports "not applicable" or "could not check"
+rather than failing. That is right, and it means nothing blocks on a scheduler that has simply never
+fired. Only the explicit first-run confirmation catches that.
+
+**Why it bit:** the deadline that would have surfaced a dead scheduler early was removed by a
+backfill, which was good news that quietly deleted the forcing function. Coverage was extended three
+months, so a scheduler that registered and never fired would have gone unnoticed until the data ran
+out. The confirmation step became the only remaining detector at exactly the moment it stopped
+feeling urgent.
+
+**Generalises to:** any cron/scheduled function, any queue consumer, any job whose first execution is
+later than its deployment.
+
+---
+
+## A successful deploy is evidence only about the legs it actually shipped
+
+**Date:** 2026-09-28 · **Context:** three agents converged on a wrong conclusion about a deploy pipeline
+
+Two related traps, found together. Both are about mistaking a green signal for a verified outcome.
+
+**1. Scope the evidence to the leg.** Three independent agents concluded a deploy pipeline's
+function-deploy stage had not run for seven weeks. Each had queried the run history for runs whose
+*target* was that stage. But the stage also runs as a STEP inside a full-scope bundle run, which
+that filter never matches. The evidence was in the build logs the whole time. "No run with
+target X" means "no standalone X run" — not "X never ran". Three agents agreeing was not three
+agents being right; they had all made the same query mistake, so their agreement carried no
+independent information.
+
+**2. A green deploy is not a live feature.** In the same codebase, three separate incidents where
+a deploy reported success while the deployed thing was dark: a conditionally-declared secret that
+was never bound because module scope was evaluated before config load (the runtime still received
+the config, so the feature ran unprotected and every payment verification failed); a deploy wrapper
+that reported a hard refusal as a timeout or a possible success; and a scheduled job whose deploy
+exited 0 while nothing proved it would ever fire.
+
+**Lesson:** confirmation means reading the DEPLOYED ARTIFACT or a runtime signal — the live
+revision, a version poll armed before the deploy fired, a heartbeat record, the endpoint actually
+answering. Never an exit code, never "no errors in the log" (runs predating per-step capture retain
+no stdout at all, so "no error" can mean "no logs"). Treat an ambiguous deploy result as a failure.
+A tool that calls a hard failure maybe-fine is worse than the failure.
+
+**Corollary:** keep declarations that gate deploy-time validation UNCONDITIONAL. A required value
+that must exist everywhere is a cheap, loud problem; one silently skipped by a flag that was
+undefined at scan time is an expensive, quiet one. Where the dependency is genuinely inert in some
+environment, a placeholder value satisfies the existence check — verify by tracing the validation
+call chain, since existence checks and value reads are usually different code paths.
+
+## Progress-tracker fields are not documents — check for a silent write-time cap
+
+**Date:** 2026-09-28 · **Context:** agent handoff via a task-board card
+
+A coordinating agent wrote long-form guidance into a task board's *step / subtask label*
+fields — a NOT-IN-SCOPE list, and "four ways the verified state differs from this card" —
+then briefed its successor that **the steps mattered more than the card description**.
+
+The board capped every label at 200 characters **at write time**, silently. No error, no
+warning, no truncation marker. Three of the four stated contradictions were never stored.
+The successor was pointed at content that did not exist, and burned a subagent proving the
+remainder was unrecoverable rather than merely hard to fetch.
+
+**Lesson, generalised:** before putting load-bearing prose into any field of a tracker,
+wiki, issue label, commit trailer or API metadata blob, check whether that field has a
+length cap and whether the cap is enforced on WRITE (lossy) or on DISPLAY (recoverable).
+Short structured fields are usually the former. Progress fields track progress; long-form
+content belongs in a description, an attachment, or a file under version control.
+
+**Corollary for handoff authors:** never tell a successor that one container outranks
+another without verifying the content actually survived the write. Read your own handoff
+back through the same interface the successor will use.
+
+**Corollary for handoff readers:** a field ending mid-sentence is evidence of a write-time
+cap, not of a fetch problem. The remainder is gone — ask the author instead of hunting.
+
 # Contributions Inbox
 
 A holding area for generic improvements contributed back from real projects when no pull-request workflow is available. Entries here are **not yet applied** — a maintainer folds each one into its proper template/shared file (see [CONTRIBUTING.md](CONTRIBUTING.md) → "Where it goes") and then removes it from this file.
@@ -21,6 +147,123 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 **Placement note:** every pending entry goes under `## Entries` below, newest first — not above that section, and not below the fold history. Entries drifted out of it in the 2026-08-31, 2026-09-07 and 2026-09-14 folds, which is easy to do and harmless, but the queue reads correctly only when every pending entry lives in one place. A free-form entry is fine too — the template is a convenience, not a schema.
 
 ## Entries
+
+### 2026-09-28 — An ignore rule protects a spelling, not a concept — audit deny-lists by what they miss
+
+- **Trigger:** two separate exclusion lists in one codebase were each found, on the same day, to cover one spelling of the thing they were meant to exclude while leaving near-identical variants exposed. In both cases the list's existence made reviewers assume the category had been considered. It had — and the wrong member of it was named.
+- **Is it generic?** Yes. Stripped: the project, the tools, the file names. Reusable kernel: a deny-list is a list of strings, not a statement of intent, but it reads to a later reviewer as a statement of intent. The presence of a plausible-looking entry actively suppresses the question "what else belongs here?"
+- **Target:** `lessons/` — new tagged lesson file (not scaffolding). Tag for security review and for config review; applies to `.gitignore`, deploy/upload ignore lists, bundler excludes, log redaction rules, secret scanners and lint ignores alike.
+- **Proposed change:**
+
+  **A deny-list tells you what someone thought of, not what is covered.** The failure is not an empty list — an empty list gets noticed. It is a list with one or two reasonable-looking entries, which reads as evidence the category was handled and therefore stops anyone looking further.
+
+  Two real instances, same day, same codebase:
+  - A deployment upload ignore list excluded exactly one environment-file pattern — the one that appears in the tool's own documentation examples — while the project's actual generated env files, named by a different convention, were uploaded on every deploy. Env files had plainly been considered. The wrong pattern was covered.
+  - A source-control ignore rule covered one hyphenated spelling of a credential filename. The camelCase spelling — the one the cloud provider's own documentation uses, and therefore the likelier one for a person to create by hand — was unignored, so a single `git add -A` would have committed it.
+
+  Note the shared shape: in both cases the covered spelling was the one from the *documentation*, and the exposed spelling was the one from *practice*. Deny-lists tend to be written while reading docs and exercised while writing code.
+
+  **How to audit one properly:**
+  - **Enumerate by category, then check coverage — never read the list and judge it plausible.** Ask "what are all the files that would be catastrophic here?" and test each against the rule.
+  - **Test the rule, do not read it.** Most ignore mechanisms have a query mode (`git check-ignore -v <path>` and equivalents). Probe a file that does not exist yet; that is the case you care about. Reading a pattern tells you what you think it means.
+  - **Check anchoring as well as spelling.** Whether a pattern applies at any depth or only at the root is a second, independent failure mode, and it is invisible in the pattern text to most readers.
+  - **Distinguish "is not there" from "cannot be added."** Untracked-but-unignored is one careless command from committed. Those are different states with different risks, and only the second is safe.
+  - **Prefer a broad pattern plus deliberate, commented exceptions** over an enumeration of the specific things someone happened to think of. Verify mechanically that the intended exceptions survive the broadening.
+
+- **Applied?** `no`
+
+### 2026-09-28 — A mitigation that delays a symptom also delays the diagnosis
+
+- **Trigger:** designing an access check that depends on a network lookup. To stop a transient outage locking out every legitimate user, a successful verdict was cached and honoured through a long grace window when the lookup was unavailable. Correct design — but it means that if the underlying credential is ever rotated and one copy is missed, nothing appears wrong until the grace expires, and the failure then surfaces days later looking like an unrelated outage.
+- **Is it generic?** Yes. Stripped: the product, the access check, the credential, the specific windows. Reusable kernel: every mechanism that keeps a system working through a fault — caching, retries, fallbacks, graceful degradation, generous timeouts — converts a loud immediate failure into a quiet delayed one. That is usually the point. It is also a cost, it is almost never written down, and it is invisible precisely because the system is behaving as designed.
+- **Target:** `lessons/` — new tagged lesson file (not scaffolding). Tag for resilience/design review and for runbooks; it belongs wherever fallback behaviour is being chosen.
+- **Proposed change:**
+
+  **State the diagnostic cost of every resilience mechanism, next to the mechanism.** A cache, a retry, a fallback path or a grace window buys availability by absorbing a fault. What it spends is the signal that the fault happened. The system keeps working, nobody investigates, and the eventual failure arrives decoupled in time from its cause — often long enough that the obvious suspect is whatever changed most recently, which is the wrong thing.
+
+  This is worse than an ordinary hidden failure in one specific way: **nobody suspects a component that is working as designed.** An outright bug attracts attention. A grace window doing exactly its job, while masking a misconfiguration behind it, does not.
+
+  Three practical consequences worth building in:
+
+  - **Pair every fallback with a signal.** When the system serves from a degraded path — cache-on-error, fallback transport, retry-after-failure — emit something an operator can see, even though the user saw no problem. Availability and observability are separate goals, and the mechanism that delivers the first will silently cost you the second unless you ask for both.
+  - **Write the lag into the runbook, in time units.** Not "responses may be cached" but "a failure here will not be visible for up to N days." Whoever debugs it later needs the size of the gap between cause and symptom, because that is the number that tells them how far back to look.
+  - **Enumerate the things that can silently invalidate the dependency**, especially credential rotation and config moves. If a secret or endpoint lives in several places, list every one, and mark which copy is the one whose omission fails quietly rather than loudly.
+
+  **A useful asymmetric default, where it fits:** cache a positive result long and honour it through a generous grace window when the dependency is unavailable, but cache a negative result only briefly. Availability is preserved for anyone already known-good, while a newly-valid subject is not trapped behind a stale denial. The asymmetry is the point — the two directions have different costs and should not share a TTL.
+
+- **Applied?** `no`
+
+### 2026-09-28 — Four ways a claim survives scrutiny it should not have survived
+
+- **Trigger:** three agent sessions spent several hours disputing whether a deploy path was blocked. The claim cycled through four incompatible states — refused, disproved, unexercised, actually fine — and every transition came from a flaw in how the claim was checked rather than any change in the system. Separately, in the same session, a documented agent-to-agent request ("please warn us before shipping X") was restated as an operator-imposed freeze and propagated three hops into a branch's code comments. Nobody acted wrongly on any of it, so it cost only time — but each of the four failures is reusable and none is specific to deploys.
+- **Is it generic?** Yes, and unusually so. Stripped: the product, the tool, the subsystem, the specific claims. Reusable kernel: four distinct mechanisms by which a false claim passes verification, all of which get *more* likely as more agents look at something, not less.
+- **Target:** `lessons/` — new tagged lesson file (not scaffolding). Tag for multi-agent verification and for decision records. Relevant to any workflow where agents check each other's findings or inherit claims from briefs, cards or handoffs.
+- **Proposed change:**
+
+  **1. Agreement between agents who share a method is not corroboration — it is a shared blind spot.** Three sessions independently queried a run history by a `target` field, all found nothing, and all concluded the same wrong thing. The agreement felt like triangulation. It was one method run three times. Independent confirmation requires a different *method*, not a different agent: a second agent running your query is a reliability check on the query, not on the answer. When agents agree, ask what they each did — if the procedure was the same, you have one observation.
+
+  **2. A wrong premise that produces the right conclusion is the hardest kind to catch, because the outcome vouches for it.** An agent asserted a constraint that was stronger than the truth. It happened to yield the correct decision for the case at hand, so nothing challenged it, and it was one message away from being written into a durable record as settled fact — with a second agent's endorsement attached. Premises that produce *wrong* answers get caught by the wrong answer. Premises that produce right answers have to be checked on their own, deliberately, and almost never are. When a conclusion is confirmed, that is not evidence for the reasoning that reached it.
+
+  **3. A claim inherited from a brief, card or handoff is a claim, not a fact — and the most perishable claims are the ones describing a blocker.** Blockers are what get fixed, so a note saying "X is blocked" decays faster than almost anything else a handoff can contain. Worse, the document asserting it may have been revised to retract it while the quote stays in circulation: in this case the very card being cited as the blocker had already been rewritten to say "nothing is blocked today." Say "the brief told me X" rather than "X", until you have checked. The two sound alike and commit you to very different things.
+
+  **4. A constraint's author determines its authority, and every summary strips the author.** A peer's request ("warn us before this ships") and an operator's instruction ("do not ship this") read almost identically once compressed into an index line, a handoff bullet or a brief — but they license completely different actions. Once the author is gone, a request reliably drifts upward into a mandate, because treating a request as binding looks like diligence and nothing ever pushes back on it. Two sessions independently deferred real work on a constraint that turned out to be nobody's. **Before treating a recorded constraint as the operator's, find the sentence naming who asked for it.** If you cannot find that sentence, say "the brief calls this a freeze" and not "there is a freeze."
+
+  This one is the most dangerous of the four, because of how it interacts with (2): **a false premise that prescribes the same conduct as the true one is invisible by construction.** "There is a freeze" and "warn them before shipping" both produce careful behaviour, so nothing looks wrong, no outcome contradicts it, and no suspicion ever arrives to trigger a check. That is the whole point — the source check has to be a standing habit, not a response to doubt, because in exactly the cases that matter most the doubt never comes.
+
+  **A practical corollary for correcting one.** When you find that a constraint was never real, do not simply delete it. Work out what the true obligation is and write THAT in its place — here, a duty to notify rather than a bar on shipping. A correction that removes a false constraint and leaves nothing behind invites the opposite error later, by someone who now believes there was never anything to respect. And when the false version has already been committed to a durable record, prefer a correcting entry on top over a rewritten history: the record of having believed it, propagated it and then found it baseless is more useful to the next reader than a clean past in which the failure never happened.
+
+  **Two corollaries about the artefacts themselves.**
+
+  **A warning comment that is wrong is worse than no comment,** because it recruits the next reader into the bug with the authority of someone who appeared to have thought about it. If a comment states a guarantee ("these cannot disagree", "this is always safe"), it should say what mechanism enforces it, so a reader can check the mechanism rather than trust the assurance.
+
+  **Record "this can be done and should not be" rather than "this cannot be done."** They close a decision identically and read identically to whoever arrives next — but only the first leaves them able to reopen it on new information, and only the first is true when an option was found and rejected. A decision record that overstates impossibility is a premise failure aimed at the future.
+
+- **Applied?** `no`
+
+### 2026-09-28 — A failed pre-commit hook leaves the index staged, so the next commit lints a stale copy
+
+- **Trigger:** an agent hit a lint error in a pre-commit hook, fixed the error in the worktree, then committed a *different* set of files — and the hook failed again on the error it had just fixed. The hook was re-checking the still-staged copy from the first attempt, not the corrected worktree file.
+- **Is it generic?** Yes. Stripped: the project, the linter, the hook manager, the specific files. Reusable kernel: a failed commit aborts the commit but does NOT unstage anything, so a partial-staging workflow silently carries the previous attempt's snapshot into the next one — and staged-file hook runners check the staged snapshot, which is exactly the copy the fix did not touch.
+- **Target:** `lessons/` — new tagged lesson file (not scaffolding). Tag for git workflow and for agent commit hygiene; it costs a confusing debug cycle every time and the symptom actively misdirects.
+- **Proposed change:**
+
+  **A failed `git commit` leaves the index exactly as it was.** The commit is aborted; nothing is unstaged. That is ordinary git behaviour and it is usually harmless — but it interacts badly with staged-file hook runners (`lint-staged` and equivalents), which deliberately check the STAGED snapshot rather than the working tree.
+
+  The failure sequence:
+  1. `git add` a set of files, commit, a hook fails on a lint error.
+  2. Fix the error in the working tree.
+  3. `git add` a *different* file and commit again.
+  4. The hook fails on the same error — because the broken file from step 1 is still staged, and the runner is checking that stale snapshot, not the fix.
+
+  The symptom is actively misleading: the reported error no longer exists in any file you can open, so the natural reading is "the hook is broken" or "the fix did not work." Both are wrong.
+
+  **Fix:** `git reset` with no paths before re-staging. It clears the index and leaves the working tree untouched, so the next `git add` stages the corrected content. Re-add deliberately rather than assuming the previous staging is still what you want.
+
+  **Implication for agents specifically:** an agent committing in logical groups stages a subset per commit, which is precisely the workflow this bites. Treat a hook failure as invalidating the index, not just the commit — and never resolve a repeat hook failure by passing a skip flag (`--no-verify` or equivalent), because the hook is reporting real staged content and skipping it commits the broken snapshot. Also avoid `git stash` as the reflex cleanup here: the stash stack is shared across worktrees and concurrent sessions, so a stash/pop can capture or restore someone else's work. `git reset` touches only your index.
+
+- **Applied?** `no`
+
+### 2026-09-28 — Hashing is not anonymisation when the input space is guessable
+
+- **Trigger:** a staging access gate admitted testers by matching SHA-256 hashes of their email addresses against a checked-in allowlist. The proposed fix was to mirror an external tester list into a readable datastore document, still as hashes, so the client could check membership without a server round-trip. The hash list was treated throughout as if it protected the identities on it. It does not.
+- **Is it generic?** Yes. Stripped: the product, the gate, the external tester service, the datastore, the specific field and constant names. Reusable kernel: a hash of a low-entropy, enumerable input is a confirm-a-guess oracle, not a one-way veil — so "we only store hashes" is not by itself a privacy property, and the reviewer question is always "how large is the input space?"
+- **Target:** `lessons/` — new tagged lesson file (not scaffolding). Tag it for both security review and design review; it most often surfaces while weighing a client-side membership check against a server lookup.
+- **Proposed change:**
+
+  **A readable list of hashed identifiers leaks membership whenever the identifier space is guessable.** Email addresses, usernames, phone numbers, employee IDs and customer numbers are all guessable in this sense. Anyone who can read the list can hash a candidate and check for the digest, which answers "is this specific person on the list?" — usually the exact question the list was meant to keep private. Enumerating the whole list is harder, but confirming a guess is the attack that matters, and it is cheap.
+
+  Three corollaries worth stating, because each one gets proposed as the fix and none of them works:
+  - **Requiring authentication to read the list does not fix it.** It narrows the audience; every reader still downloads the full list and can test any candidate offline, indefinitely, after a single read.
+  - **A salt does not fix it if the salt ships with the list.** Client-side verification requires the client to have the salt, so a per-entry salt travels alongside the hash it protects. It raises cost per guess, not the property.
+  - **Slow hashes (bcrypt/scrypt/argon2) narrow but do not close it.** They price bulk enumeration out; they do not stop an attacker confirming one address they already suspect.
+
+  **The shape that does work:** do not ship the membership set at all. Put the lookup behind a server endpoint that takes the identity from a VERIFIED credential (a signed token the caller already holds), never from a caller-supplied parameter, and return a verdict about that caller only. The endpoint answers "am I a member?" and cannot be asked "is `{{SOME_OTHER_IDENTITY}}` a member?". Nothing is enumerable because nothing is enumerated — no list is ever transmitted. If the upstream source supports a single-identity query, query one identity rather than fetching the set and filtering locally.
+
+  **Availability note, since this trade is usually where the design goes wrong:** moving the check server-side introduces a network dependency on an access decision, so state the failure direction deliberately rather than inheriting one. Failing open defeats the gate; failing closed on every transient error locks out legitimate users and is how gates quietly deny everyone. A workable default is asymmetric caching — cache a positive verdict long and honour it through a generous grace window when the lookup is unavailable, cache a negative verdict briefly so newly added members are not stuck behind a stale denial, and deny only when there is no usable cached verdict at all.
+
+  **Observability note:** a gate that fails closed silently is indistinguishable, from the outside, from a gate correctly denying everyone. Emit a signal on the *unavailable* branch specifically — never on ordinary denials, which are the gate working — and keep identities out of that signal, or the telemetry reintroduces the leak the design just removed.
+
+- **Applied?** `no`
 
 ### 2026-09-28 — Claude desktop hides sessions per account, but the work files are shared
 
