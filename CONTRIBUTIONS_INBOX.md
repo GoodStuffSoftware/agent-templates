@@ -22,6 +22,23 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
+### 2026-09-28 — Claude desktop hides sessions per account, but the work files are shared
+
+- **Trigger:** on Windows, switching the signed-in account in the Claude desktop app made the Code-tab sidebar's session list, titles, and archive state change out from under a user, even though the underlying project files hadn't moved.
+- **Is it generic?** Yes. Stripped: the specific account/org identifiers involved (replaced with placeholders below), the exact machine. Reusable kernel: desktop-app UI state can be partitioned per signed-in account while the actual work product (transcripts, memory, config) is partitioned per project path instead — the two partitioning schemes don't match, so an account switch looks like data loss when it isn't.
+- **Target:** `lessons/` — new tagged lesson file (not scaffolding).
+- **Proposed change:**
+
+  The Claude desktop app keeps its Code-tab session INDEX (sidebar list, titles, archive state) under `%APPDATA%\Claude\claude-code-sessions\{{ACCOUNT_UUID}}\{{ORG_UUID}}\` on Windows, and `local-agent-mode-sessions` is split the same way. Signing into a different account makes the app read a different folder, so earlier sessions drop out of the sidebar — but they are not deleted.
+
+  The actual work product is keyed by PROJECT PATH, not account, and stays usable regardless of which account is signed in: transcripts (`~/.claude/projects/<cwd>/*.jsonl`), auto-memory, `CLAUDE.md`, skills, plugins, and settings. Account identity itself lives in `~/.claude.json` (`oauthAccount`), with credentials in `~/.claude/.credentials.json` — never copy the credentials file when syncing or backing up state.
+
+  **Implication for tooling:** anything that syncs or backs up Claude state should treat the desktop session index as account-partitioned (don't expect it to be complete or stable across account switches) and must never copy credential files. After an account switch, recover "missing" sessions from the transcripts — e.g. CLI resume from inside the project directory — rather than by editing the desktop app's session-index store directly. Separately, `claude.ai`-side state (connectors, cloud sessions, Remote Control, scheduled routines, Artifacts, chat memory) belongs to the signed-in account and does not carry over on a switch at all — it isn't merely hidden, it's genuinely a different account's data. Also note: setting `CLAUDE_CONFIG_DIR` to different values per profile separates ALL local state (not just the session index) per profile — it splits history across profiles rather than sharing it, which is a different mechanism from the per-account sidebar partitioning above.
+
+  **Evidence level:** the per-account folder layout under `%APPDATA%\Claude\claude-code-sessions\` was verified on disk (MEASURED). That the sidebar visibly empties after switching accounts is inferred from that layout (INFERENCE) — not directly observed with a second account signed in.
+
+- **Applied?** `no`
+
 ---
 
 _Append new entries above this line, newest first._
