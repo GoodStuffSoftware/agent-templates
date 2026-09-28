@@ -24,8 +24,8 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ### 2026-09-28 — Claude desktop hides sessions per account, but the work files are shared
 
-- **Trigger:** on Windows, switching the signed-in account in the Claude desktop app made the Code-tab sidebar's session list, titles, and archive state change out from under a user, even though the underlying project files hadn't moved.
-- **Is it generic?** Yes. Stripped: the specific account/org identifiers involved (replaced with placeholders below), the exact machine. Reusable kernel: desktop-app UI state can be partitioned per signed-in account while the actual work product (transcripts, memory, config) is partitioned per project path instead — the two partitioning schemes don't match, so an account switch looks like data loss when it isn't.
+- **Trigger:** a user weighing a second Claude account asked what would carry over. An on-disk survey found the desktop session index split by account/org UUID, while transcripts and memory are split by project path. No account switch was actually performed.
+- **Is it generic?** Yes. Stripped: the specific account/org identifiers involved (replaced with placeholders below), the exact machine. Reusable kernel: desktop-app UI state can be partitioned per signed-in account while the actual work product (transcripts, memory, config) is partitioned per project path instead — the two partitioning schemes don't match, so an account switch WOULD look like data loss when it isn't.
 - **Target:** `lessons/` — new tagged lesson file (not scaffolding).
 - **Proposed change:**
 
