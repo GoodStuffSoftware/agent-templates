@@ -244,8 +244,8 @@ with no corresponding start was denied or failed.
 | `agent_type` | string \| absent | the payload's `agent_type`; absent on a main-thread call, which carries none |
 | `tool_name` | string \| null | the tool the call was for (`Agent`, `Bash`, …) |
 | `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, or `inherit` (`inherit_guard: block`) |
-| `outcome` | string | `deny`, or `warn` for a `delegation_guard: warn` firing (the guard matched and the call ran). A consumer counting blocked calls filters on `deny`; any row proves the guard still fires |
-| `detail` | string | short reason, truncated to 300 chars |
+| `outcome` | string | `deny`, or `warn` for a `delegation_guard: warn` firing (the guard matched and did not stop the call). A consumer counting blocked calls filters on `deny`; any row proves the guard still fires |
+| `detail` | string | short reason, truncated to 300 chars. A `delegation` row ends with the scope and what the call's env said for `CLAUDE_CODE_SESSION_ATTENDED` (`scope attended, attended 1`) |
 
 **A consumer must not treat a zero count here as good news.** A guard that
 has silently stopped matching — after a harness rename, say — produces

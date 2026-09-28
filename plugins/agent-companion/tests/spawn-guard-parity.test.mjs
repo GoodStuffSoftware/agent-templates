@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, PLUGIN_ROOT, decisionOf } from './helpers.mjs';
 import { writerFromDeclaration } from '../hooks/lib/context.mjs';
 
 function harness(extraEnv = {}) {
@@ -32,7 +32,7 @@ function harness(extraEnv = {}) {
     assert.equal(res.status, 0, res.stderr);
     const rows = readJsonl(join(fx.stateDir, 'telemetry', 'spawns.jsonl'));
     return {
-      decision: res.json?.hookSpecificOutput?.permissionDecision,
+      decision: decisionOf(res.json),
       reason: res.json?.hookSpecificOutput?.permissionDecisionReason || '',
       msg: res.json?.systemMessage || '',
       updated: res.json?.hookSpecificOutput?.updatedInput || null,
@@ -124,7 +124,7 @@ test('WRITER: opus xhigh (space-separated) sizes the review like opus/xhigh: the
   try {
     for (const w of ['opus xhigh', 'Opus 5.5 at xhigh']) {
       const r = h.spawn({ subagent_type: 'agent-companion:ac-opus-low', prompt: REVIEW(w) });
-      assert.equal(r.decision, 'allow', r.reason);
+      assert.equal(r.decision, 'proceed', r.reason);
       assert.equal(r.row.declared_writer, 'opus/xhigh', w);
       assert.equal(r.row.fit, 'under', w);
       assert.match(r.msg, /It is BELOW its writer, opus\/xhigh — effort low is below xhigh/, w);
@@ -137,7 +137,7 @@ test('a WRITER effort that is not understood, or missing, is said out loud; the 
   const h = harness();
   try {
     let r = h.spawn({ subagent_type: 'agent-companion:ac-opus-low', prompt: REVIEW('opus extreme') });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.equal(r.row.declared_writer, 'opus');
     assert.match(r.msg, /WRITER effort not understood — in "opus extreme", "extreme" is not an effort level/);
     assert.match(r.msg, /parity is checked on the model alone/);
@@ -158,7 +158,7 @@ test('a prose "Writer:" line on a review never moves the model: no autofill from
   const h = harness();
   try {
     const r = h.spawn({ subagent_type: 'general-purpose', prompt: 'TYPE: code-review\nWriter: haiku did the mechanical part\nreview it' });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.equal(r.updated?.model, undefined, 'no model filled in from a partly-read WRITER line');
     assert.equal(r.row.model_autofilled, false);
     assert.match(r.msg, /WRITER effort not understood/);
@@ -173,7 +173,7 @@ test('WRITER is read only on a parity-sized TYPE: elsewhere it is ignored in sil
   const h = harness();
   try {
     let r = h.spawn({ subagent_type: 'agent-companion:ac-opus-low', prompt: 'TYPE: mechanical-edit\nWriter: keep the tone plain\nedit it' });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.doesNotMatch(r.msg, /WRITER/);
     assert.equal(r.row.declared_writer, null);
     // A model-shaped WRITER on a non-review brief is not a route either: the
@@ -201,7 +201,7 @@ test('an unparseable WRITER line is ignored, and the note says so; the spawn is 
   const h = harness();
   try {
     const r = h.spawn({ subagent_type: 'agent-companion:ac-opus-xhigh', prompt: 'TYPE: code-review\nWRITER: the refactor agent\nreview' });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /the WRITER line \("the refactor agent"\) was ignored/);
     assert.match(r.msg, /WRITER: <model>\/<effort>/);
     assert.equal(r.row.declared_writer, null);
@@ -215,7 +215,7 @@ test('(i) TYPE: code-review + WRITER: opus/xhigh on ac-opus-medium: a below-writ
   const h = harness();
   try {
     const r = h.spawn({ subagent_type: 'agent-companion:ac-opus-medium', prompt: REVIEW('opus/xhigh') });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /reviewer parity/);
     assert.match(r.msg, /reviews at opus\/medium for a writer at opus\/xhigh/);
     assert.match(r.msg, /BELOW its writer/);
@@ -234,7 +234,7 @@ test('(ii) TYPE: code-review + WRITER: opus/xhigh on ac-opus-xhigh: no parity no
   try {
     for (let i = 0; i < 3; i += 1) {
       const r = h.spawn({ subagent_type: 'agent-companion:ac-opus-xhigh', prompt: REVIEW('opus/xhigh') });
-      assert.equal(r.decision, 'allow', r.reason);
+      assert.equal(r.decision, 'proceed', r.reason);
       assert.doesNotMatch(r.msg, /reviewer parity|Premium warrant|no WARRANT line/);
       assert.equal(r.row.fit, 'fit');
       assert.equal(r.row.routed, true);
@@ -262,7 +262,7 @@ test('trap: a general-purpose opus reviewer with no WARRANT whose model matches 
   try {
     for (let i = 0; i < 3; i += 1) {
       const r = h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: REVIEW('opus/xhigh') });
-      assert.equal(r.decision, 'allow', r.reason);
+      assert.equal(r.decision, 'proceed', r.reason);
       // Effort is inherited on a built-in type: parity cannot be verified.
       assert.match(r.msg, /states no effort, so it runs at the session's effort/);
       assert.match(r.msg, /spawn agent-companion:ac-opus-xhigh to pin opus\/xhigh/);
@@ -278,7 +278,7 @@ test('a reviewer ABOVE its writer gets a note, not a deny, even as a premium tie
   const h = harness();
   try {
     const r = h.spawn({ subagent_type: 'agent-companion:ac-opus-high', prompt: REVIEW('sonnet/high') });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /Its model is ABOVE its writer, sonnet\/high/);
     assert.match(r.msg, /spawn agent-companion:ac-sonnet-high \(sonnet\/high\) instead/);
     assert.match(r.msg, /premium tier its parity route \(sonnet\/high\) does not name/);
@@ -294,14 +294,14 @@ test('the above-writer note claims a cap count only when the cap counts the spaw
     // An opus rung above its writer is exempt from the cap: no claim, no count.
     for (let i = 0; i < 4; i += 1) {
       const r = h.spawn({ subagent_type: 'agent-companion:ac-opus-xhigh', prompt: REVIEW('sonnet/high') });
-      assert.equal(r.decision, 'allow', r.reason);
+      assert.equal(r.decision, 'proceed', r.reason);
       assert.match(r.msg, /ABOVE its writer/);
       assert.doesNotMatch(r.msg, /counts toward the premium cap/);
     }
     assert.equal(h.window(), 0);
     // A built-in type given opus per spawn IS counted, and the note says so.
     const r = h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: REVIEW('sonnet/high') });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /counts toward the premium cap/);
     assert.equal(h.window(), 1);
   } finally { h.cleanup(); }
@@ -317,7 +317,7 @@ test('a reviewer below its writer\'s MODEL gets the below note with the rung to 
   const h = harness();
   try {
     const r = h.spawn({ subagent_type: 'agent-companion:ac-sonnet-high', prompt: REVIEW('opus/xhigh') });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /BELOW its writer, opus\/xhigh — sonnet is 1 tier\(s\) below opus\./);
     assert.match(r.msg, /A reviewer below its writer waves through the errors the writer would make/);
     assert.match(r.msg, /agent-companion:ac-opus-xhigh/);
@@ -330,7 +330,7 @@ test('a critical review is floored by F1 even when the writer is sonnet; the not
   try {
     // The reviewer equals its writer; it is below the F1 floor, not below its writer.
     let r = h.spawn({ subagent_type: 'agent-companion:ac-sonnet-high', prompt: 'TYPE: code-review\nCONSEQUENCE: critical\nWRITER: sonnet/high\nreview' });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /the parity route is opus\/xhigh \(the writer's sonnet\/high, after floor F1: a critical review is at least opus\/xhigh\)/);
     assert.match(r.msg, /It is BELOW the F1 floor for critical reviews, opus\/xhigh — sonnet is 1 tier\(s\) below opus/);
     assert.match(r.msg, /A critical review is never sized below opus\/xhigh, whatever its writer/);
@@ -347,7 +347,7 @@ test('a fable reviewer of a fable writer with a WARRANT is noted, not fit-denied
   const h = harness();
   try {
     let r = h.spawn({ subagent_type: 'general-purpose', model: 'fable', prompt: `${REVIEW('fable/high')}\nWARRANT: weight 5 — reviewing a fable writer` });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     // The reviewer IS on its writer's model; F2 capped the route to opus.
     assert.match(r.msg, /Its model is ABOVE its parity route, opus\/high/);
     assert.doesNotMatch(r.msg, /ABOVE (the|its) writer/);
@@ -365,7 +365,7 @@ test('a writer-sized review naming no model is autofilled to the parity route', 
   const h = harness();
   try {
     const r = h.spawn({ subagent_type: 'general-purpose', prompt: REVIEW('opus/xhigh') });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.equal(r.updated?.model, 'opus');
     assert.match(r.msg, /from the routing table for TYPE code-review sized to its writer opus\/xhigh \(opus\/xhigh\)/);
     assert.equal(r.row.model_autofilled, true);
@@ -379,14 +379,14 @@ test('(iii) TYPE: code-review with no WRITER: the new message, never "no TYPE or
   const h = harness();
   try {
     let r = h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: REVIEW(null) });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /TYPE: code-review is sized from its writer/);
     assert.match(r.msg, /WRITER: <model>\/<effort>/);
     assert.match(r.msg, /WRITER: <agent-name>/);
     assert.doesNotMatch(r.msg, /no TYPE or WEIGHT/);
     // A cheap reviewer gets the same pointer, as a note.
     r = h.spawn({ subagent_type: 'agent-companion:ac-sonnet-high', prompt: REVIEW(null) });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /TYPE: code-review is sized from its writer/);
     assert.doesNotMatch(r.msg, /no TYPE or WEIGHT/);
   } finally { h.cleanup(); }
@@ -396,7 +396,7 @@ test('a writer-less review whose only weight is its WARRANT\'s is not fit-denied
   const h = harness();
   try {
     const r = h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: 'TYPE: code-review\nWARRANT: weight 2 — deep review\nreview' });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /TYPE: code-review is sized from its writer/);
     assert.equal(r.row.fit, null);
     assert.deepEqual(h.denials(), []);
@@ -414,7 +414,7 @@ test('(iv) three ac-opus-medium spawns with NO TYPE line in 10 minutes: none den
   try {
     for (let i = 0; i < 3; i += 1) {
       const r = h.spawn({ subagent_type: 'agent-companion:ac-opus-medium', prompt: 'do the change' });
-      assert.equal(r.decision, 'allow', r.reason);
+      assert.equal(r.decision, 'proceed', r.reason);
       assert.equal(r.row.routed, true);
     }
     assert.equal(h.window(), 0);
@@ -426,7 +426,7 @@ test('a project agent whose definition pins opus is not counted, TYPE line or no
   const h = harness();
   try {
     h.agent('proj-architect', 'model: opus\neffort: xhigh');
-    for (let i = 0; i < 3; i += 1) assert.equal(h.spawn({ subagent_type: 'proj-architect', prompt: 'design it' }).decision, 'allow');
+    for (let i = 0; i < 3; i += 1) assert.equal(h.spawn({ subagent_type: 'proj-architect', prompt: 'design it' }).decision, 'proceed');
     assert.equal(h.window(), 0);
     assert.deepEqual(h.denials(), []);
   } finally { h.cleanup(); }
@@ -437,7 +437,7 @@ test('a reviewer matching its writer is exempt from the cap even with no route (
   try {
     for (let i = 0; i < 3; i += 1) {
       const r = h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: `${REVIEW('opus/xhigh')}\nWARRANT: weight 4 — review` });
-      assert.equal(r.decision, 'allow', r.reason);
+      assert.equal(r.decision, 'proceed', r.reason);
       assert.equal(r.row.routed, true);
     }
     assert.equal(h.window(), 0);
@@ -447,8 +447,8 @@ test('a reviewer matching its writer is exempt from the cap even with no route (
 test('(v) three general-purpose opus spawns with no TYPE: the third is denied, with the routing advice and no "run at sonnet"', () => {
   const h = harness();
   try {
-    assert.equal(h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: 'do it' }).decision, 'allow');
-    assert.equal(h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: 'do it' }).decision, 'allow');
+    assert.equal(h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: 'do it' }).decision, 'proceed');
+    assert.equal(h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: 'do it' }).decision, 'proceed');
     const r = h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: 'do it' });
     assert.equal(r.decision, 'deny');
     assert.match(r.reason, /Premium fan-out cap: 2 premium-tier agents/);
@@ -469,8 +469,8 @@ test('(vi) fable is still capped, and its deny says it cannot be routed around',
     // A WARRANT with no weight: a stated weight would route (to opus) and the
     // fit check would deny fable before the cap is reached.
     const f = () => h.spawn({ subagent_type: 'general-purpose', model: 'fable', prompt: 'WARRANT: frontier problem, opus fell short\ndo it' });
-    assert.equal(f().decision, 'allow');
-    assert.equal(f().decision, 'allow');
+    assert.equal(f().decision, 'proceed');
+    assert.equal(f().decision, 'proceed');
     const r = f();
     assert.equal(r.decision, 'deny');
     assert.match(r.reason, /Premium fan-out cap/);
@@ -523,7 +523,7 @@ test('(vii) inherit_guard block denies model+effort inherited from an opus lead 
   try {
     const t = warn.lead('claude-opus-5-5', 'xhigh');
     const r = warn.spawn({ subagent_type: 'general-purpose', prompt: 'look around' }, { transcript: t });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /SPAWNING RULE 1/);
     assert.match(r.msg, /names no model, and its definition/);
     assert.match(r.msg, /inherit the lead's model AND effort \(opus\/xhigh now\)/);
@@ -546,12 +546,12 @@ test('(vii) inherit_guard block denies model+effort inherited from an opus lead 
     assert.equal(r.decision, 'deny');
     // What the deny asks for lifts it.
     r = block.spawn({ subagent_type: 'general-purpose', prompt: 'TYPE: explore\nlook around' }, { transcript: t });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     r = block.spawn({ subagent_type: 'agent-companion:ac-opus-low', prompt: 'look around' }, { transcript: t });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     // A model on the spawn is not the both-inherited shape.
     r = block.spawn({ subagent_type: 'general-purpose', model: 'sonnet', prompt: 'look around' }, { transcript: t });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
   } finally { block.cleanup(); }
 });
 
@@ -559,8 +559,8 @@ test('inherit_guard block never fires for a sonnet lead, or when the lead cannot
   const h = harness({ CLAUDE_PLUGIN_OPTION_INHERIT_GUARD: 'block' });
   try {
     const t = h.lead('claude-sonnet-5', 'high');
-    assert.equal(h.spawn({ subagent_type: 'general-purpose', prompt: 'x' }, { transcript: t }).decision, 'allow');
-    assert.equal(h.spawn({ subagent_type: 'general-purpose', prompt: 'x' }).decision, 'allow');
+    assert.equal(h.spawn({ subagent_type: 'general-purpose', prompt: 'x' }, { transcript: t }).decision, 'proceed');
+    assert.equal(h.spawn({ subagent_type: 'general-purpose', prompt: 'x' }).decision, 'proceed');
     assert.deepEqual(h.denials(), []);
   } finally { h.cleanup(); }
 });
@@ -579,10 +579,10 @@ test('inherit_guard block: an unknown TYPE does not lift it, any premium lead tr
     assert.match(r.reason, /Inherit guard/);
     // A lead model the table cannot classify is never blocked (fail open).
     const odd = h.lead('some-unlisted-model', 'high');
-    assert.equal(h.spawn({ subagent_type: 'general-purpose', prompt: 'look around' }, { transcript: odd }).decision, 'allow');
+    assert.equal(h.spawn({ subagent_type: 'general-purpose', prompt: 'look around' }, { transcript: odd }).decision, 'proceed');
     // A known TYPE lifts it, even one that routes only with a writer; so does a WEIGHT.
-    assert.equal(h.spawn({ subagent_type: 'Explore', prompt: 'TYPE: code-review\nreview it' }, { transcript: opus }).decision, 'allow');
-    assert.equal(h.spawn({ subagent_type: 'Explore', prompt: 'WEIGHT: 2\nfind it' }, { transcript: opus }).decision, 'allow');
+    assert.equal(h.spawn({ subagent_type: 'Explore', prompt: 'TYPE: code-review\nreview it' }, { transcript: opus }).decision, 'proceed');
+    assert.equal(h.spawn({ subagent_type: 'Explore', prompt: 'WEIGHT: 2\nfind it' }, { transcript: opus }).decision, 'proceed');
     assert.deepEqual(h.denials(), ['inherit', 'inherit']);
   } finally { h.cleanup(); }
 });
@@ -627,7 +627,7 @@ test('routed and the reviewer cap exemption compare the reviewer with the FLOORE
   try {
     for (let i = 0; i < 3; i += 1) {
       const r = off.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: `${REVIEW('fable/high')}\nWARRANT: weight 4 — review` });
-      assert.equal(r.decision, 'allow', r.reason);
+      assert.equal(r.decision, 'proceed', r.reason);
       assert.equal(r.row.routed, true);
     }
     assert.equal(off.window(), 0);
@@ -657,14 +657,14 @@ test('the definition-pin cap exemption: ac-opus rungs below max, project and use
 
     for (const t of ['agent-companion:ac-opus-low', 'ac-opus-medium', 'agent-companion:ac-opus-xhigh', 'proj-architect', 'user-architect']) {
       const r = h.spawn({ subagent_type: t, prompt: 'do it' }, { cwd: proj });
-      assert.equal(r.decision, 'allow', `${t}: ${r.reason}`);
+      assert.equal(r.decision, 'proceed', `${t}: ${r.reason}`);
       assert.equal(r.row.model, 'opus', t);
       assert.equal(h.window(), 0, `${t} must not be counted`);
     }
     let want = 0;
     for (const t of ['agent-companion:ac-opus-max', 'other-plugin:architect', 'general-purpose', 'Explore']) {
       const r = h.spawn({ subagent_type: t, prompt: 'do it' }, { cwd: proj });
-      assert.equal(r.decision, 'allow', `${t}: ${r.reason}`);
+      assert.equal(r.decision, 'proceed', `${t}: ${r.reason}`);
       assert.equal(r.row.model, 'opus', t);
       want += 1;
       assert.equal(h.window(), want, `${t} must be counted`);
@@ -675,7 +675,7 @@ test('the definition-pin cap exemption: ac-opus rungs below max, project and use
     want += 1;
     // Fable pinned by the operator's own project agent is still counted.
     const f = h.spawn({ subagent_type: 'proj-fable', prompt: 'WARRANT: frontier problem\ndo it' }, { cwd: proj });
-    assert.equal(f.decision, 'allow', f.reason);
+    assert.equal(f.decision, 'proceed', f.reason);
     assert.equal(h.window(), want + 1);
   } finally { h.cleanup(); }
 });

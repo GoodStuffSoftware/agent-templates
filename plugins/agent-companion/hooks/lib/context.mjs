@@ -2542,12 +2542,11 @@ export function callerTranscriptPath(p) {
   return (p && p.transcript_path) || null;
 }
 
-export function allow() {
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
-  }));
-  process.exit(0);
-}
+// No allow() helper, on purpose: permissionDecision "allow" also skips the
+// permission prompt, and no hook here is entitled to decide that. A hook that
+// lets a call through says so with passthrough() (or, to add a note or an
+// updatedInput, with JSON that carries no permissionDecision).
+// tests/no-allow-decision.test.mjs holds every hook to it.
 
 export function deny(reason) {
   process.stdout.write(JSON.stringify({

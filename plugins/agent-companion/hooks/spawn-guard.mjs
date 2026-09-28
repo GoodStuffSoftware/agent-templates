@@ -30,7 +30,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
-  readStdin, noteAgentType, isPremium, opt, stateFile, readJson, writeJson,
+  readStdin, noteAgentType, isPremium, opt, stateFile, readJson,
   writeJsonAtomic,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
@@ -47,16 +47,22 @@ import {
   buildCandidateName, sessionSpawnNames, reserveUniqueName, buildNamegateBrief,
 } from './lib/namegate.mjs';
 
-// Allow — optionally saying something to the user, and/or rewriting the tool
-// input (`updatedInput` is how a PreToolUse hook fills in a model the spawn
-// left blank). The guard never blocks the cheap direction, but neither
-// direction passes in silence once the brief has declared a weight.
+// Let the spawn through — optionally saying something to the user, and/or
+// rewriting the tool input (`updatedInput` is how a PreToolUse hook fills in a
+// model the spawn left blank). The guard never blocks the cheap direction, but
+// neither direction passes in silence once the brief has declared a weight.
+//
+// NO permissionDecision. "allow" would skip the permission prompt for the
+// spawn (the Agent tool asks in some permission modes), which is not this
+// guard's call to make. Claude Code applies updatedInput with no decision
+// (verified in the 2.1.280 and 2.1.281 binaries: a hook result carrying
+// updatedInput and no permissionBehavior yields hookUpdatedInput), so the
+// model fill-in does not need one.
 function allowWith(systemMessage, updatedInput) {
   process.stdout.write(JSON.stringify({
     ...(systemMessage ? { systemMessage } : {}),
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
-      permissionDecision: 'allow',
       ...(updatedInput ? { updatedInput } : {}),
     },
   }));
@@ -204,12 +210,10 @@ try {
   let model = declared || fromDef;              // what will actually run, when knowable
   const trulyInherited = !declared && !fromDef; // nobody chose: the real hazard
 
-  // A spawn means delegation happened — clear the main-thread streak.
-  try {
-    const df = stateFile('delegation-streak.json');
-    const dst = readJson(df, {});
-    if (dst[sid]) writeJson(df, { ...dst, [sid]: { ...dst[sid], streak: 0 } });
-  } catch { /* fail open */ }
+  // No delegation-streak write here: the streak ends only when a main-thread
+  // Agent spawn actually RUNS (delegation-guard.mjs --event reset, PostToolUse).
+  // A PreToolUse reset here fired on spawns this guard then denied, and on a
+  // subagent's own spawns, which carry the lead's session_id.
 
   // The canary deliberately provokes this guard, so it must not be recorded as
   // real activity — otherwise the probe pollutes the very telemetry the audit

@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   PLUGIN_ROOT, makeFixture, runScript, runHook, readJsonl,
+  decisionOf,
 } from './helpers.mjs';
 
 const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
@@ -97,7 +98,7 @@ for (const [type, t] of OVERRIDDEN) {
       };
       const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
       assert.equal(res.status, 0, res.stderr);
-      assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow', JSON.stringify(res.json));
+      assert.equal(decisionOf(res.json), 'proceed', JSON.stringify(res.json));
       assert.doesNotMatch(res.json?.systemMessage || '', /over-provisioned|under-provisioned/i);
 
       const denials = readJsonl(join(stateDir, 'telemetry', 'denials.jsonl'));

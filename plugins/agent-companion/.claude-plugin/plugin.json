@@ -9,8 +9,14 @@
     "delegation_guard": {
       "type": "string",
       "title": "Delegation guard",
-      "description": "What to do when the MAIN thread makes delegation_threshold execution-class calls in a row (Bash, PowerShell, Edit, Write, NotebookEdit, Read, Grep, Glob) with no Agent spawn or SendMessage in between. \"off\": nothing. \"warn\" (default): the call runs and the model is told to delegate, naming a ladder rung. \"block\": the call is denied with the same instructions; repeating it once runs it (the count restarts at every firing). Never counts or blocks a subagent's calls, and never blocks Agent, SendMessage, ToolSearch, AskUserQuestion, TaskStop or any mcp__ tool. Legacy boolean values: true reads as \"warn\", false as \"off\".",
+      "description": "What to do when the MAIN thread makes delegation_threshold execution-class calls in a row (Bash, PowerShell, Edit, Write, NotebookEdit, Read, Grep, Glob) with no Agent spawn or SendMessage in between. \"off\": nothing. \"warn\" (default): this guard does not stop the call, and the model is told to delegate, naming a ladder rung. \"block\": the call is denied with the same instructions; repeating it once runs it (the count restarts at every firing). Never counts or blocks a subagent's calls, and never blocks Agent, SendMessage, ToolSearch, AskUserQuestion, TaskStop or any mcp__ tool. Legacy boolean values: true reads as \"warn\", false as \"off\"; \"none\" and \"disabled\" also read as \"off\". Which sessions count: delegation_guard_scope.",
       "default": "warn"
+    },
+    "delegation_guard_scope": {
+      "type": "string",
+      "title": "Delegation guard scope",
+      "description": "Which main threads the delegation guard counts. \"attended\" (default): not a headless session (claude -p, SDK programs, woken or dispatched workers, background sessions, separate-process teammates), which Claude Code marks with CLAUDE_CODE_SESSION_ATTENDED=0 in hook env; those are the delegates, never counted or blocked. A session where the variable is absent still counts. \"all\": every main thread, headless ones included.",
+      "default": "attended"
     },
     "delegation_threshold": {
       "type": "number",

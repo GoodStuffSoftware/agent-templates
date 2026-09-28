@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook } from './helpers.mjs';
+import { makeFixture, runHook, decisionOf } from './helpers.mjs';
 
 test('spawn-guard fails open when the state dir path is unwritable (a file, not a dir)', () => {
   const { dir, cleanup } = makeFixture();
@@ -26,9 +26,11 @@ test('spawn-guard fails open when the state dir path is unwritable (a file, not 
     assert.equal(res.status, 0, `spawn-guard must exit 0 even when its state dir is unwritable: stderr=${res.stderr}`);
     assert.ok(res.json, `spawn-guard must still emit a decision: stdout=${res.stdout} stderr=${res.stderr}`);
     assert.equal(res.json?.hookSpecificOutput?.hookEventName, 'PreToolUse');
+    // 'proceed': let through with no permissionDecision (the guard never
+    // emits "allow", which would skip the permission prompt).
     assert.ok(
-      ['allow', 'deny'].includes(res.json?.hookSpecificOutput?.permissionDecision),
-      `expected an allow/deny decision, got ${JSON.stringify(res.json)}`,
+      ['proceed', 'deny'].includes(decisionOf(res.json)),
+      `expected a let-through or a deny, got ${JSON.stringify(res.json)}`,
     );
   } finally {
     cleanup();
@@ -50,6 +52,7 @@ test('delegation-guard fails open the same way', () => {
       CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'),
       CLAUDE_PLUGIN_OPTION_DELEGATION_GUARD: 'block',
       CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2',
+      CLAUDE_CODE_SESSION_ATTENDED: '1',
     };
     for (let i = 0; i < 3; i += 1) {
       const res = runHook('hooks/delegation-guard.mjs', payload, { env });

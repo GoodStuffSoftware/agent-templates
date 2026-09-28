@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { makeFixture, runHook, readJsonl } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, decisionOf } from './helpers.mjs';
 
 const DEFS = { 'opus-high': 'model: opus\neffort: high', 'opus-xhigh': 'model: opus\neffort: xhigh' };
 
@@ -25,7 +25,7 @@ function spawn(prompt, { model, subagent = 'general-purpose' } = {}) {
     }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
     assert.equal(res.status, 0, res.stderr);
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0] || null;
-    return { decision: res.json?.hookSpecificOutput?.permissionDecision, reason: res.json?.hookSpecificOutput?.permissionDecisionReason || '', msg: res.json?.systemMessage || '', row };
+    return { decision: decisionOf(res.json), reason: res.json?.hookSpecificOutput?.permissionDecisionReason || '', msg: res.json?.systemMessage || '', row };
   } finally { cleanup(); }
 }
 
@@ -34,7 +34,7 @@ const CRITICAL = 'TYPE: code-review\nCONSEQUENCE: critical\nreview the migration
 for (const model of ['sonnet', 'haiku']) {
   test(`a critical code review on ${model} is under-provisioned (F1: opus/xhigh)`, () => {
     const r = spawn(CRITICAL, { model });
-    assert.equal(r.decision, 'allow', r.reason);
+    assert.equal(r.decision, 'proceed', r.reason);
     assert.match(r.msg, /under-provisioned/);
     assert.match(r.msg, /F1: a critical review is never sized below opus\/xhigh/);
     assert.equal(r.row.fit, 'under');
@@ -44,28 +44,28 @@ for (const model of ['sonnet', 'haiku']) {
 
 test('a critical code review on opus/high (from its definition) is under on effort', () => {
   const r = spawn(`${CRITICAL}\nWARRANT: critical review`, { subagent: 'opus-high' });
-  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.decision, 'proceed', r.reason);
   assert.match(r.msg, /under-provisioned — right tier; effort high is below xhigh/);
   assert.equal(r.row.fit, 'under');
 });
 
 test('a critical code review on opus/xhigh meets the floor: no note, no fit verdict', () => {
   const r = spawn(`${CRITICAL}\nWARRANT: critical review`, { subagent: 'opus-xhigh' });
-  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.decision, 'proceed', r.reason);
   assert.doesNotMatch(r.msg, /under-provisioned|F1:/);
   assert.equal(r.row.fit, null);
 });
 
 test('a routine code review on sonnet is unchanged: no floor, no verdict', () => {
   const r = spawn('TYPE: code-review\nreview the diff', { model: 'sonnet' });
-  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.decision, 'proceed', r.reason);
   assert.doesNotMatch(r.msg, /under-provisioned|F1:/);
   assert.equal(r.row.fit, null);
 });
 
 test('a critical code review on fable is not judged over-provisioned (no writer to size against)', () => {
   const r = spawn(`${CRITICAL}\nWARRANT: reviewing a fable writer`, { model: 'fable' });
-  assert.equal(r.decision, 'allow', r.reason);
+  assert.equal(r.decision, 'proceed', r.reason);
   assert.equal(r.row.fit, null);
 });
 

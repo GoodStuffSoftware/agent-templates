@@ -90,10 +90,12 @@ This is the rule that answers "the delegation rules get ignored". Its gate is
 caught this session running execution work on the main thread (it fired, in
 `warn` or `block`, at `delegation_threshold` execution-class calls in a row;
 `off` never fires, so the rule stays silent). Until then it injects nothing at
-all; after that it repeats on every turn for the rest of the session.
+all. After each firing it is injected once, on the next prompt, and then stays
+silent until the guard fires again (the gate compares the session's `fired`
+count with the reminders already sent).
 
 A constant reminder is a tax everyone learns to skim. An adaptive one arrives
-exactly when it has been earned, and keeps arriving while the behaviour lasts.
+exactly when it has been earned, and again each time the behaviour recurs.
 That is a shape a document cannot have.
 
 ## Where rules live

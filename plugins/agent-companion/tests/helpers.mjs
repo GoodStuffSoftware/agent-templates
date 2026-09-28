@@ -92,13 +92,33 @@ export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, 
     input: payload === undefined ? '' : JSON.stringify(payload),
     encoding: 'utf8',
     cwd: cwd || PLUGIN_ROOT,
-    env: { ...process.env, ...env },
+    env: childEnv(env),
     timeout,
   });
   const out = (res.stdout || '').trim();
   let json = null;
   if (out) { try { json = JSON.parse(out); } catch { /* not JSON: leave null */ } }
   return { status: res.status, stdout: res.stdout, stderr: res.stderr, json, error: res.error };
+}
+
+// The runner's own env, minus what Claude Code sets per session: a suite run
+// from inside a session inherits CLAUDE_CODE_SESSION_ATTENDED ("1" attended,
+// "0" under `claude -p`), which would decide the delegation guard's scope
+// for every test. A test that needs it passes it in `env`.
+export function childEnv(env = {}) {
+  const base = { ...process.env };
+  delete base.CLAUDE_CODE_SESSION_ATTENDED;
+  return { ...base, ...env };
+}
+
+// What a PreToolUse hook's stdout decided: its permissionDecision ('deny',
+// 'ask', 'allow') when it set one; 'proceed' when it printed JSON with NO
+// decision (the call goes on through the normal permission flow — the shape
+// every advisory and let-through path uses, since "allow" would also skip the
+// permission prompt); null when it printed nothing.
+export function decisionOf(json) {
+  if (!json) return null;
+  return json.hookSpecificOutput?.permissionDecision ?? 'proceed';
 }
 
 // A hang guard for a child that runs a CHAIN of git processes (a first
@@ -129,7 +149,7 @@ export function runScript(scriptRelPath, args = [], { env = {}, cwd, timeout = 1
   const res = spawnSync(process.execPath, [script, ...args], {
     encoding: 'utf8',
     cwd: cwd || PLUGIN_ROOT,
-    env: { ...process.env, ...env },
+    env: childEnv(env),
     timeout,
     windowsHide: true,
   });

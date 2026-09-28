@@ -171,10 +171,11 @@ function builtinRules() {
     {
       // The only shipped 'always'-scope rule, deliberately: it is the reason
       // gates exist at all. Silent (free) in a session that never drifts;
-      // repeats on EVERY turn once delegation-guard.mjs has fired for this
-      // session — a behaviour a document read once cannot have, because it
-      // competes with everything that follows it. See gate:'delegation-drift'
-      // below for how "already drifted" is decided.
+      // injected on the first prompt after each NEW delegation-guard.mjs
+      // firing in this session, then silent again until the guard fires
+      // again — a reminder a document read once cannot give, because it
+      // lands right after the drift. See gate:'delegation-drift' below for
+      // how "drifted since the last reminder" is decided.
       id: 'delegate-reminder',
       enabled: true,
       builtin: true,
@@ -329,14 +330,15 @@ export function writeRules(cfg) {
 // on), so this reads the same layer resolveBrevity(null) would give the
 // main thread: file `global` override, then the plugin's `brevity` option.
 //
-// gate:'delegation-drift' asks whether THIS session has already tripped
-// delegation-guard.mjs — `fired > 0` in its delegation-streak.json entry.
-// That file's shape is delegation-guard.mjs's to define; the `fired` field
-// is landing there concurrently with this work, so its absence (old file,
-// or a session that never fired) must read as 0, not as missing/undefined
-// breaking a comparison. No sessionId at all (CLI usage with no live
-// session) resolves to NOT satisfied — a drift rule must never claim to be
-// active when there is no session to have drifted.
+// gate:'delegation-drift' asks whether THIS session has tripped
+// delegation-guard.mjs since it was last reminded — `fired > reminded` in its
+// delegation-streak.json entry (lib/delegation.mjs reminderDue; inlined here
+// so matching rules never loads the guard's lock code). hooks/standing-rules.mjs
+// catches `reminded` up (markReminded) once the reminder is injected, so it
+// goes out once per firing, not on every later turn. Either field absent
+// (old file, a session that never fired) reads as 0. No sessionId at all
+// (CLI usage with no live session) resolves to NOT satisfied — a drift rule
+// must never claim to be active when there is no session to have drifted.
 function gateSatisfied(gate, sessionId) {
   if (!gate) return true;
 
@@ -353,8 +355,8 @@ function gateSatisfied(gate, sessionId) {
     if (!sessionId) return false;
     try {
       const st = readJson(stateFile('delegation-streak.json'), {});
-      const fired = (st && st[sessionId] && st[sessionId].fired) || 0;
-      return fired > 0;
+      const e = (st && st[sessionId]) || {};
+      return (e.fired || 0) > (e.reminded || 0);
     } catch {
       return false;
     }

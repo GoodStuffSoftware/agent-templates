@@ -199,11 +199,47 @@ test('gate: delegation-drift — only satisfied once this session has actually f
       true,
     );
 
+    // Already reminded for both firings: not due until the guard fires again.
+    writeJson(stateFile('delegation-streak.json'), { 'sess-drift-1': { streak: 0, fired: 2, reminded: 2 } });
+    assert.equal(
+      matchRules({ scope: 'always', sessionId: 'sess-drift-1' }).some((r) => r.id === 'delegate-reminder'),
+      false,
+    );
+    writeJson(stateFile('delegation-streak.json'), { 'sess-drift-1': { streak: 0, fired: 3, reminded: 2 } });
+    assert.equal(
+      matchRules({ scope: 'always', sessionId: 'sess-drift-1' }).some((r) => r.id === 'delegate-reminder'),
+      true,
+    );
+
     // No sessionId at all (e.g. CLI usage) must never claim drift is active.
     assert.equal(
       matchRules({ scope: 'always' }).some((r) => r.id === 'delegate-reminder'),
       false,
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test('hook --event user-prompt: delegate-reminder goes out once per guard firing, not on every later prompt', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const env = { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') };
+    const SID = 'sess-remind-once';
+    const prompt = () => runHook('hooks/standing-rules.mjs', { session_id: SID, prompt: 'what next?' }, { env, args: ['--event', 'user-prompt'] });
+    const reminded = (res) => /Delegation reminder/.test(res.json?.hookSpecificOutput?.additionalContext || '');
+    const guardFires = () => runHook('hooks/delegation-guard.mjs', {
+      session_id: SID, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' },
+    }, { env: { ...env, CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2', CLAUDE_CODE_SESSION_ATTENDED: '1' } });
+
+    assert.equal(reminded(prompt()), false, 'no firing yet: silent');
+    guardFires(); guardFires(); // threshold 2: the second call fires (warn)
+    assert.equal(reminded(prompt()), true, 'first prompt after a firing: reminded');
+    assert.equal(reminded(prompt()), false, 'second prompt, no new firing: silent');
+    assert.equal(reminded(prompt()), false);
+    guardFires(); guardFires();
+    assert.equal(reminded(prompt()), true, 'a new firing earns one more reminder');
+    assert.equal(reminded(prompt()), false);
   } finally {
     cleanup();
   }

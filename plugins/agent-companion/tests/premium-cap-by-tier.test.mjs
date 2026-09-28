@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook, readJsonl } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, decisionOf } from './helpers.mjs';
 
 // HELD DECISION — ADR 0003 open question 8 (counting route-exempt premium
 // spawns toward premium_cap). Implemented on feat/ac-routing-profile-s1b,
@@ -33,7 +33,7 @@ function harness(extraEnv = {}) {
       tool_input: { subagent_type: 'general-purpose', ...(model ? { model } : {}), run_in_background: true, name: `w${n}`, prompt },
     }, { env });
     assert.equal(res.status, 0, res.stderr);
-    return { decision: res.json?.hookSpecificOutput?.permissionDecision, reason: res.json?.hookSpecificOutput?.permissionDecisionReason || '' };
+    return { decision: decisionOf(res.json), reason: res.json?.hookSpecificOutput?.permissionDecisionReason || '' };
   };
   const window = () => { try { return JSON.parse(readFileSync(join(fx.stateDir, 'state', 'premium-window.json'), 'utf8')).length; } catch { return 0; } };
   const denials = () => readJsonl(join(fx.stateDir, 'telemetry', 'denials.jsonl')).map((d) => d.guard);
@@ -43,8 +43,8 @@ function harness(extraEnv = {}) {
 test('routed opus spawns (no warrant needed) now count toward the cap, and the third is denied', { todo: HELD_OQ8 }, () => {
   const h = harness();
   try {
-    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'allow');
-    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'allow');
+    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'proceed');
+    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'proceed');
     assert.equal(h.window(), 2);
     const third = h.spawn('TYPE: debug-root-cause\ngo', 'opus');
     assert.equal(third.decision, 'deny');
@@ -58,7 +58,7 @@ test('routed opus spawns (no warrant needed) now count toward the cap, and the t
 test('an autofilled opus (no model named, TYPE routes to opus) counts too', { todo: HELD_OQ8 }, () => {
   const h = harness();
   try {
-    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', null).decision, 'allow');
+    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', null).decision, 'proceed');
     assert.equal(h.window(), 1);
   } finally { h.cleanup(); }
 });
@@ -66,8 +66,8 @@ test('an autofilled opus (no model named, TYPE routes to opus) counts too', { to
 test('non-premium tiers never count, routed or not', () => {
   const h = harness();
   try {
-    for (let i = 0; i < 3; i += 1) assert.equal(h.spawn('WEIGHT: 3\ngo', 'sonnet').decision, 'allow');
-    assert.equal(h.spawn('TYPE: explore\nWEIGHT: 1\ngo', 'haiku').decision, 'allow');
+    for (let i = 0; i < 3; i += 1) assert.equal(h.spawn('WEIGHT: 3\ngo', 'sonnet').decision, 'proceed');
+    assert.equal(h.spawn('TYPE: explore\nWEIGHT: 1\ngo', 'haiku').decision, 'proceed');
     assert.equal(h.window(), 0);
   } finally { h.cleanup(); }
 });
@@ -75,7 +75,7 @@ test('non-premium tiers never count, routed or not', () => {
 test('a canary probe on a routed opus spawn does not consume the cap', () => {
   const h = harness();
   try {
-    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus', 'canary-cap-probe').decision, 'allow');
+    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus', 'canary-cap-probe').decision, 'proceed');
     assert.equal(h.window(), 0);
   } finally { h.cleanup(); }
 });
@@ -83,7 +83,7 @@ test('a canary probe on a routed opus spawn does not consume the cap', () => {
 test('premium_cap off: routed opus spawns are neither counted nor capped', () => {
   const h = harness({ CLAUDE_PLUGIN_OPTION_PREMIUM_CAP: 'false' });
   try {
-    for (let i = 0; i < 3; i += 1) assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'allow');
+    for (let i = 0; i < 3; i += 1) assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'proceed');
     assert.equal(h.window(), 0);
   } finally { h.cleanup(); }
 });
@@ -93,8 +93,8 @@ test('premium_cap off: routed opus spawns are neither counted nor capped', () =>
 test('SHIPPED while OQ8 is held: routed and autofilled opus spawns are not counted toward the cap', () => {
   const h = harness();
   try {
-    for (let i = 0; i < 3; i += 1) assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'allow');
-    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', null).decision, 'allow');
+    for (let i = 0; i < 3; i += 1) assert.equal(h.spawn('TYPE: debug-root-cause\ngo', 'opus').decision, 'proceed');
+    assert.equal(h.spawn('TYPE: debug-root-cause\ngo', null).decision, 'proceed');
     assert.equal(h.window(), 0);
     assert.deepEqual(h.denials(), []);
   } finally { h.cleanup(); }

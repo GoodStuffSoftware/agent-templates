@@ -41,7 +41,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { makeFixture, runHook, readJsonl } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, decisionOf } from './helpers.mjs';
 
 function baseEnv(dir) {
   return { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') };
@@ -66,7 +66,7 @@ test('(a) opus + TYPE: integration with NO warrant is ALLOWED — the trial rout
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0, res.stderr);
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow', JSON.stringify(res.json));
+    assert.equal(decisionOf(res.json), 'proceed', JSON.stringify(res.json));
     assert.doesNotMatch(res.json?.systemMessage || '', /Premium warrant|Best fit/i);
 
     const denials = readJsonl(join(stateDir, 'telemetry', 'denials.jsonl'));
@@ -100,7 +100,7 @@ test('(b) opus + TYPE: novel-design + "WARRANT: weight 4 — ..." is ALLOWED and
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0, res.stderr);
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow', JSON.stringify(res.json));
+    assert.equal(decisionOf(res.json), 'proceed', JSON.stringify(res.json));
     assert.doesNotMatch(res.json?.systemMessage || '', /Premium warrant|Best fit|over-provisioned/i);
 
     const denials = readJsonl(join(stateDir, 'telemetry', 'denials.jsonl'));
@@ -205,7 +205,7 @@ test('(d) opus with NO TYPE, NO WEIGHT and no warrant: routing cannot be inferre
     // spawn (base tier-table classification) still applies, but a missing
     // warrant is a WARNING here, not a denial, because the guard has no
     // routing information to confirm the tier either way.
-    assert.equal(res.json?.hookSpecificOutput?.permissionDecision, 'allow', JSON.stringify(res.json));
+    assert.equal(decisionOf(res.json), 'proceed', JSON.stringify(res.json));
     assert.match(res.json?.systemMessage || '', /no WARRANT line/i, JSON.stringify(res.json));
     assert.match(res.json?.systemMessage || '', /no TYPE or WEIGHT is declared/i);
 
