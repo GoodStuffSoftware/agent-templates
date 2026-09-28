@@ -30,12 +30,16 @@
 // generated into the rung by scripts/routing-table.mjs, lib/self-review.mjs):
 //   - a parity-sized review spawned by a SUBAGENT with no WRITER line is sized
 //     to the caller's own definition (agent_type -> its model/effort), in a
-//     note; a built-in or missing caller type infers nothing;
+//     note; a built-in or missing caller type, or a caller seen running a
+//     different model than its definition, infers nothing;
 //   - reviewers never spawn reviewers: such a review is DENIED when the
 //     caller's own spawn row (agent_id -> sidecar toolUseId -> row tool_use_id)
 //     is itself a parity review. Positive match only: anything unknown allows
 //     (`review_recursion_guard`, default on);
-//   - a self-reviewing TYPE on a rung without the protocol gets a note.
+//   - a self-reviewing writer's review: a WRITER line below the writer's own
+//     pair gets a note, and a critical writer TYPE floors it by F1;
+//   - a self-reviewing TYPE on a ladder rung without the protocol gets it
+//     appended to the brief; on a built-in type, a note.
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -45,7 +49,7 @@ import {
   writeJsonAtomic,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
-  classifyModel, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
+  classifyModel, classifyEffort, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
   claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent,
 } from './lib/context.mjs';
@@ -53,6 +57,7 @@ import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
 import {
   selfReviewConfig, optedOut, isParityType, writerFromCaller, callerSpawnRow, definitionCarriesProtocol,
+  injectionRung, selfReviewBriefText,
 } from './lib/self-review.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract } from './lib/brevity.mjs';
@@ -358,11 +363,54 @@ try {
   // writer-less, exactly as before, with a note saying why. A WRITER line,
   // usable or not, always wins: inference runs only when there is none. The
   // main thread never infers (the lead names the writer it is gating).
+  //
+  // The CALLER's own transcript, read once here so WRITER inference, the
+  // non-ladder advisory and the spawn-telemetry row below share one answer.
+  // `p.effort?.level` wins when the harness supplies it directly; the
+  // transcript tail-read is the fallback for payload shapes that don't. The
+  // model is the caller's PREVIOUS turn's (null on its first turn).
+  const callerTranscript = callerTranscriptPath(p);
+  const callerMeta = callerTranscript ? lastAssistantMeta(callerTranscript) : null;
+  const callerModel = (callerMeta && callerMeta.model) || null;
+  const callerEffort = p.effort?.level || (callerMeta && callerMeta.effort) || null;
   let writerInferred = null;     // the caller-derived writer, while it is the one in use
   let writerInferProblem = null; // why inference was tried and yielded no writer
+  // What the calling subagent was seen running, for inference: its model only
+  // from its OWN transcript (callerTranscriptPath falls back to the lead's
+  // transcript when the subagent's cannot be found, and the lead's model says
+  // nothing about the subagent's), its effort from the payload or that record.
+  const callerOwnTranscript = subagentCaller && !!callerTranscript && callerTranscript !== p.transcript_path;
+  const callerObserved = {
+    model: callerOwnTranscript ? callerModel : null,
+    effort: p.effort?.level || (callerOwnTranscript && callerMeta && callerMeta.effort) || null,
+  };
   if (!decls.WRITER && typeIsParity && subagentCaller) {
-    const inf = writerFromCaller(p);
+    const inf = writerFromCaller(p, callerObserved);
     if (inf.ok) { writer = inf; writerInferred = inf; } else writerInferProblem = inf.reason;
+  }
+  // The caller's OWN spawn row, for a parity review spawned by a subagent
+  // (see "Reviewers never spawn reviewers" below, which denies on it). Looked
+  // up here, before the parity route is resolved, because a self-reviewing
+  // writer's own TYPE can carry a critical consequence the review inherits.
+  let callerRow = null; // callerSpawnRow() result, when the lookup ran
+  if (typeIsParity && subagentCaller) {
+    try { callerRow = callerSpawnRow(p); } catch { callerRow = { state: 'unknown', why: 'the lookup failed' }; }
+  }
+  const callerDeclaredType = callerRow && callerRow.state === 'found'
+    ? (typeof callerRow.row.declared_type === 'string' ? callerRow.row.declared_type : null)
+    : null;
+  // A review of a critical change is a critical review (F1), whoever spawns
+  // it: when the brief states no CONSEQUENCE and the caller's own row
+  // declares a type whose preset is critical (critical-change), the review
+  // takes that consequence. Only from a positively found row, never a guess.
+  let consequenceFromCaller = false;
+  if (!consequenceWasDeclared && callerDeclaredType && !isParityType(callerDeclaredType)) {
+    try {
+      if (taskTypeDef(callerDeclaredType)?.def?.consequence === 'critical') {
+        declaredConsequence = 'critical';
+        consequenceFromCaller = true;
+      }
+    } catch { /* table unreadable: no inherited consequence */ }
   }
   const fitOn = opt('fit_guard', true) && (weightWasDeclared || typeof typeWeight === 'number' || (typeIsParity && !!writer));
   let route = null;
@@ -575,15 +623,8 @@ try {
   const modelTakesEffort = !!model && effortSupported(model, 'high').ok;
   const effortStatedSomewhere = !!def?.effort;
 
-  // The CALLER's own transcript, read once here so both the non-ladder
-  // advisory just below and the spawn-telemetry row further down (which used
-  // to compute this independently) share one answer. `p.effort?.level` wins
-  // when the harness supplies it directly; the transcript tail-read is the
-  // fallback for payload shapes that don't.
-  const callerTranscript = callerTranscriptPath(p);
-  const callerMeta = callerTranscript ? lastAssistantMeta(callerTranscript) : null;
-  const callerModel = (callerMeta && callerMeta.model) || null;
-  const callerEffort = p.effort?.level || (callerMeta && callerMeta.effort) || null;
+  // (callerTranscript/callerMeta/callerModel/callerEffort: read once, above
+  // WRITER inference, which checks the caller's definition against them.)
 
   // Non-ladder + explicit differing model: the shape a ladder-registration
   // failure pushes a caller into (spawn a built-in type like general-purpose
@@ -809,8 +850,15 @@ try {
   // rebuilding the prompt from `input.prompt` independently would make the LAST
   // one win and silently drop the others, with no error anywhere. So they
   // accumulate into one suffix and the prompt is rebuilt exactly once, below.
+  let selfReviewSuffix = ''; // set by the self-review block further down, before any call
   function withAdditions(baseInput) {
     let suffix = '';
+
+    // 0. The self-review protocol, for a self-reviewing TYPE on a ladder rung
+    //    whose definition does not carry it (set below, see "Is this writer
+    //    expected to review itself?"). Task instructions first, then the
+    //    reporting contract.
+    suffix += selfReviewSuffix || '';
 
     // 1. The reporting contract — the operator's token spend is dominated by
     //    subagents narrating their journey when only blockers and an outcome
@@ -1152,11 +1200,13 @@ try {
   // to, and said when inference was tried and found nothing to use.
   const writerInferredNote = writerNotesOn && writerInferred
     ? `agent-companion: this review names no WRITER line, so its writer was inferred from the subagent spawning it: ` +
-      `"${writerInferred.agent}" pins ${writerInferred.label} in its definition, and the review is sized to that (a ` +
+      `"${writerInferred.agent}" runs at ${writerInferred.label}, and the review is sized to that (a ` +
       'subagent that spawns a code-review is taken to be the writer it gates).' +
-      (writerInferred.effortIssue === 'agent-none'
-        ? ' That definition states no effort, so parity is checked on the model alone.'
-        : '') +
+      (writerInferred.effortSource === 'observed'
+        ? ` Its definition states no effort; ${writerInferred.effort} is the effort it was seen running at (inherited).`
+        : writerInferred.effortIssue === 'agent-none'
+          ? ' That definition states no effort, so parity is checked on the model alone.'
+          : '') +
       ' Add `WRITER: <model>/<effort>` if it gates other work.'
     : null;
   const writerInferNote = writerNotesOn && !writer && writerInferProblem
@@ -1208,20 +1258,43 @@ try {
   // read), rows that disagree — is unknown, and unknown allows. A writer's
   // review of its own work (its row declares a writer type, or none) is
   // allowed: that is the self-review flow. `review_recursion_guard: false`
-  // turns the deny off; the lookup still runs for telemetry.
-  let callerRow = null; // callerSpawnRow() result, when the lookup ran
-  if (typeIsParity && subagentCaller) {
-    try { callerRow = callerSpawnRow(p); } catch { callerRow = { state: 'unknown', why: 'the lookup failed' }; }
-  }
-  const callerDeclaredType = callerRow && callerRow.state === 'found'
-    ? (typeof callerRow.row.declared_type === 'string' ? callerRow.row.declared_type : null)
-    : null;
+  // turns the deny off; the lookup still runs for telemetry. (callerRow and
+  // callerDeclaredType are read above, before the parity route.)
   const reviewByReviewer = !!callerDeclaredType && isParityType(callerDeclaredType);
   const recursionDeny = reviewByReviewer && opt('review_recursion_guard', true);
-  // A review a subagent spawns of its own work: the self-review flow's
-  // reviewer. Every parity review from a subagent counts except one whose
-  // caller is positively a reviewer (that is recursion, not self-review).
-  const selfReviewSpawn = typeIsParity && subagentCaller && !reviewByReviewer;
+  let srCfg = null;
+  try { srCfg = selfReviewConfig(); } catch { srCfg = null; }
+  // A parity review spawned by a subagent whose caller is not positively a
+  // reviewer (the broad count), and the narrow one the self-review flow is
+  // measured on: the caller's own row was FOUND and declares a type listed in
+  // selfReview.types, so this is an architect-class writer reviewing itself.
+  const reviewBySubagent = typeIsParity && subagentCaller && !reviewByReviewer;
+  const selfReviewSpawn = reviewBySubagent && !!callerDeclaredType && !!srCfg && srCfg.types.includes(callerDeclaredType);
+
+  // --- A self-reviewing writer sizing its own reviewer below itself --------
+  // The WRITER line always wins over inference, so a writer can name a pair
+  // below its own and the parity route follows it. When the caller is
+  // positively a self-reviewing writer (selfReviewSpawn) and names a WRITER,
+  // compare it with the caller's own pair (its definition, checked against
+  // the model it was seen running) and say so when it is lower. Notes only.
+  let writerBelowCallerNote = null;
+  if (selfReviewSpawn && decls.WRITER && writer && !writerInferred && opt('fit_guard', true)) {
+    try {
+      const own = writerFromCaller(p, callerObserved);
+      if (own.ok) {
+        const tiers = modelTiers().tiers || {};
+        const rank = (a) => (tiers[a] && typeof tiers[a].rank === 'number' ? tiers[a].rank : null);
+        const rw = rank(writer.model), ro = rank(own.model);
+        const effortLower = writer.model === own.model && own.effort && writer.effort
+          && classifyEffort(writer.effort).rank < classifyEffort(own.effort).rank;
+        if ((rw !== null && ro !== null && rw < ro) || effortLower) {
+          writerBelowCallerNote = `agent-companion (self-review): the WRITER line names ${writer.label}, but the agent ` +
+            `spawning this review ("${own.agent}", spawned as TYPE: ${callerDeclaredType}) runs at ${own.label}. A writer ` +
+            `reviewing its own work names its own pair: \`WRITER: ${own.label}\`, on the rung that matches it.`;
+        }
+      }
+    } catch { writerBelowCallerNote = null; }
+  }
 
   // --- Is this writer expected to review itself? ---------------------------
   // For a TYPE listed in config/model-tiers.json selfReview.types: false when
@@ -1229,33 +1302,52 @@ try {
   // will run carries the generated protocol (lib/self-review.mjs
   // definitionCarriesProtocol: true, false for a ladder rung without it or a
   // built-in type, null for another agent file that may word it its own
-  // way). null for every other TYPE. When the running definition cannot
-  // carry it, the lead is told it gets an unreviewed result, as before.
+  // way). null for every other TYPE.
+  //
+  // A LADDER RUNG without the block (a routing profile, a local copy of the table or
+  // a deliberate choice put the type on a rung the shipped table does not
+  // route it to) gets the same generated text appended to its brief instead
+  // (review round, 2026-09-28): the rung that matches what will run, so its
+  // WRITER line and reviewer rung are its own. A built-in type (no
+  // definition, so its effort is not pinned) and a pair that is no rung get
+  // nothing appended and a note: the lead reviews that writer, as before.
   let selfReviewExpected = null;
   let selfReviewNote = null;
+  let selfReviewInjected = false;
   try {
-    const sr = selfReviewConfig();
+    const sr = srCfg || selfReviewConfig();
     if (declaredType && sr.types.includes(declaredType)) {
       if (optedOut(brief, sr)) {
         selfReviewExpected = false;
       } else {
         const runningType = ladderRewrite ? ladderRewrite.to : input.subagent_type;
         selfReviewExpected = definitionCarriesProtocol(runningType, def);
-        if (selfReviewExpected === false && opt('fit_guard', true)) {
-          let home = null;
-          try {
-            const r = resolveRoute({ type: declaredType, profile: false });
-            const rung = r.model && r.effort ? rungFor(r.model, r.effort) : null;
-            home = rung ? `agent-companion:${rung.agent}` : null;
-          } catch { home = null; }
-          selfReviewNote = `agent-companion (self-review): TYPE: ${declaredType} is a self-reviewing type, but ` +
-            `"${runningType || 'general-purpose'}" carries no self-review protocol, so this writer will not spawn its own ` +
-            `reviewer: the lead reviews it${home ? `. Spawn ${home}, whose body carries the protocol, for a reviewed result` : ''}; ` +
-            `add \`${sr.optOut.line}\` to say the lead reviews it on purpose.`;
+        if (selfReviewExpected === false) {
+          const rung = injectionRung(runningType, def, model);
+          if (rung) {
+            selfReviewSuffix = selfReviewBriefText(rung, sr);
+            selfReviewInjected = true;
+            selfReviewExpected = true;
+          } else if (opt('fit_guard', true)) {
+            // Name a rung only when its INSTALLED file carries the block: a
+            // local copy of the table moves the route but not the installed files.
+            let home = null;
+            try {
+              const r = resolveRoute({ type: declaredType });
+              const hr = r.model && r.effort ? rungFor(r.model, r.effort) : null;
+              const hdef = hr ? agentDefinition(`agent-companion:${hr.agent}`, p.cwd) : null;
+              home = hr && definitionCarriesProtocol(hr.agent, hdef) === true ? `agent-companion:${hr.agent}` : null;
+            } catch { home = null; }
+            selfReviewNote = `agent-companion (self-review): TYPE: ${declaredType} is a self-reviewing type, but ` +
+              `"${runningType || 'general-purpose'}" carries no self-review protocol and is no ladder rung it can be added ` +
+              `to, so this writer will not spawn its own reviewer: the lead reviews it` +
+              `${home ? `. Spawn ${home} (its routed rung) for a self-reviewed result` : ''}; ` +
+              `add \`${sr.optOut.line}\` to say the lead reviews it on purpose.`;
+          }
         }
       }
     }
-  } catch { selfReviewExpected = null; selfReviewNote = null; }
+  } catch { selfReviewExpected = null; selfReviewNote = null; selfReviewInjected = false; selfReviewSuffix = ''; }
 
   if (opt('spawn_telemetry', true) && !isCanary) {
     // --- Schema v2 additions: who is spawning, and at what effort ----------
@@ -1370,10 +1462,16 @@ try {
       tool_use_id: typeof p.tool_use_id === 'string' ? p.tool_use_id : null,
       parent_agent_id: p.agent_id || null, // the agent that made this spawn (same value as caller_agent_id); null = the main thread
       inferred_writer: writerInferred ? writerInferred.label : null, // a review's writer read from its caller's definition (no WRITER line)
-      self_review: selfReviewSpawn,      // a parity review spawned by a subagent whose own row is not positively a review
+      self_review: selfReviewSpawn,      // a parity review by a subagent whose own row was FOUND and declares a selfReview type
+      review_by_subagent: reviewBySubagent, // the broad count: a parity review by a subagent whose row is not positively a review
       self_review_expected: selfReviewExpected, // for a selfReview TYPE: will this writer review itself? null for other types
+      self_review_injected: selfReviewInjected, // the protocol was appended to this writer's brief (a ladder rung without it)
       caller_row_found: callerRow ? callerRow.state === 'found' : null, // the caller's own spawn row was found by tool_use_id; null when not looked up
       caller_declared_type: callerDeclaredType, // that row's declared_type; null when not found or none declared
+      // The caller's own Agent call id, from its sidecar: joins this review's
+      // row to its writer's row (that row's tool_use_id) from spawns.jsonl alone.
+      caller_tool_use_id: callerRow && typeof callerRow.toolUseId === 'string' ? callerRow.toolUseId : null,
+      consequence_from_caller: consequenceFromCaller, // declared_consequence "critical" came from the caller's own TYPE (F1)
       // --- Memory nudge/brief observability -------------------------------
       // null across the board when the feature never ran for this spawn
       // (memory_search/memory_brief off, or mode "off") — distinct from
@@ -1459,7 +1557,9 @@ try {
       'A review ends with its verdict: return it to the writer that spawned you, who runs the fix round and ' +
       'returns your verdict line verbatim. Whether a change needs a second review is the lead\'s call, not the ' +
       'reviewer\'s.\n\n' +
-      'If this is not a review of a review, set review_recursion_guard to false.'
+      'If this is not a review of a review (you were re-tasked as a fixer, say, or the brief carries a pasted ' +
+      'reviewer header), return to the lead with the work and the reason: the lead can spawn the review itself. ' +
+      'The operator can turn this deny off with review_recursion_guard: false.'
     );
   }
 
@@ -1507,6 +1607,11 @@ try {
     writerInferNote,
     writerEffortNote,
     selfReviewNote,
+    selfReviewInjected && opt('fit_guard', true)
+      ? `agent-companion (self-review): TYPE: ${declaredType} is a self-reviewing type and "${(ladderRewrite ? ladderRewrite.to : input.subagent_type) || 'this rung'}" ` +
+        'does not carry the protocol in its definition, so it was appended to the brief.'
+      : null,
+    writerBelowCallerNote,
     gateMessage,
     missingModelNote,
     parityInheritedEffort ? null : noEffortStatedNote,

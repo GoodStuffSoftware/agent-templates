@@ -49,7 +49,7 @@ Config v7 (updated 2026-09-28). **Premium** = the spawn brief needs a `WARRANT:`
 | `verify` | `opus/low` (routing trial, review by 2026-09-30) | yes | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
 | `operate` | `opus/low` (routing trial, review by 2026-09-30) | yes | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
 
-**Self-review:** a writer spawned as `novel-design`, `large-refactor`, `critical-change`, `long-autonomous-run` reviews its own work before it returns (it commits, spawns ONE foreground parity reviewer on its own rung, runs one fix round, and returns the verdict line verbatim), unless its brief carries the line `REVIEW: lead`. The protocol is in the body of `agent-companion:ac-opus-xhigh`; a writer on any other rung does not self-review, and the lead reviews it as before.
+**Self-review:** a writer spawned as `novel-design`, `large-refactor`, `critical-change`, `long-autonomous-run` reviews its own work before it returns (it commits, spawns ONE foreground parity reviewer on its own rung, runs one fix round, and returns the verdict line verbatim), unless its brief carries the line `REVIEW: lead`. The protocol is in the body of `agent-companion:ac-opus-xhigh`; on any other ladder rung (a routing profile or a local copy of the table can put a listed type there) the spawn guard appends the same text to the brief. A built-in or project agent does not self-review unless its own definition says so, and the lead reviews it as before.
 <!-- routing-table:task-types END -->
 
 ## Step 1 — classify the task
@@ -135,11 +135,12 @@ State the recommendation and the rationale it printed. Then:
   subagent's own definition and a note says so; a line with no effort, or an
   effort it cannot read, is checked on the model alone, and the note says so.
 - **Self-reviewing types review themselves; `REVIEW: lead` opts out.** A
-  writer spawned on the rung that carries the self-review protocol (see the
-  **Self-review** line above) commits, spawns its own parity reviewer, does one
-  fix round and returns the reviewer's verdict line. Leave that alone unless
-  the lead must review this one itself: then add a line of its own to the
-  writer's brief —
+  writer of a listed type on a ladder rung (see the **Self-review** line
+  above; `recommend.mjs` prints a `self-review:` line for these) commits,
+  spawns its own parity reviewer, does one fix round and returns the
+  reviewer's verdict line, so the lead does not spawn the reviewer printed
+  above. Leave that alone unless the lead must review this one itself: then
+  add a line of its own to the writer's brief —
 
   ```
   TYPE: novel-design
@@ -147,8 +148,10 @@ State the recommendation and the rationale it printed. Then:
   ```
 
   The lead still lands and merges the work, settles the findings the writer
-  disputes, and spot-checks the review file against the diff. A reviewer
-  never spawns a reviewer: the spawn guard denies it.
+  disputes, and spot-checks the review: the review file's first line should
+  be the verdict the writer relayed, and the reviewer's real brief is the
+  first user record of its transcript. A reviewer never spawns a reviewer:
+  the spawn guard denies it.
 - **An `auto-compact:` line is cost advice for long-running work.** It quotes the
   last cache-advisor run: the auto-compact window that breaks even for the
   recommended model on the operator's own transcripts, and the one value for

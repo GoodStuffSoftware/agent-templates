@@ -184,7 +184,8 @@ function selfReviewSummary() {
   return `a writer spawned as ${selfReview.types.map((x) => `\`${x}\``).join(', ')} reviews its own work before it returns ` +
     `(it commits, spawns ONE foreground parity reviewer on its own rung, runs ${rounds}, and returns the verdict line verbatim), ` +
     `unless its brief carries the line \`${selfReview.optOut.line}\`. The protocol is in the body of ${rungs.length ? rungs.map((a) => `\`agent-companion:${a}\``).join(', ') : 'no rung'}; ` +
-    'a writer on any other rung does not self-review, and the lead reviews it as before.';
+    'on any other ladder rung (a routing profile or a local copy of the table can put a listed type there) the spawn guard appends the same text to the brief. ' +
+    'A built-in or project agent does not self-review unless its own definition says so, and the lead reviews it as before.';
 }
 
 // The rung's expected cache-TTL frontmatter value: "1h" when config says so,
@@ -642,9 +643,9 @@ if (selfReview.types.length) {
   L.push(`| Rungs carrying the protocol | ${selfReviewRungNames().map((a) => `\`${a}\``).join(', ') || '_none_'} |`);
   if (selfReview.updated) L.push(`| Updated | ${selfReview.updated} |`);
   L.push(``);
-  L.push(`The protocol text is generated into those rungs' \`agents/ac-*.md\` bodies from \`config/model-tiers.json\` \`selfReview\` by this script (\`--sync-agent-descriptions\`), and \`--check-agent-descriptions\` fails when a rung that routes a listed type lacks it, or a rung that no longer does still carries it. The reviewer's brief opens with \`TYPE: code-review\` and \`WRITER: <the writer's model>/<effort>\`, and carries the lead's brief verbatim (or its path), the branch, sha and diff range, the adversarial instruction and the review file path. At spawn time a code-review a subagent spawns with no \`WRITER:\` line is sized to the caller's own definition (its model and effort), and the spawn guard denies a code-review spawned by an agent that was itself spawned as a code-review: reviewers never spawn reviewers.`);
+  L.push(`The protocol text is generated into those rungs' \`agents/ac-*.md\` bodies from \`config/model-tiers.json\` \`selfReview\` by this script (\`--sync-agent-descriptions\`), and \`--check-agent-descriptions\` fails when a rung that routes a listed type lacks it, or a rung that no longer does still carries it. A listed type spawned on another ladder rung gets the same text, sized to that rung, appended to its brief by the spawn guard. The protocol tells the writer to open the reviewer's brief with \`TYPE: code-review\` and \`WRITER: <the writer's model>/<effort>\`, and to include the lead's brief verbatim (or its path), the branch, sha and diff range, the adversarial instruction, the review file path and a checkout of its own. At spawn time a code-review a subagent spawns with no \`WRITER:\` line is sized to the caller's own definition (checked against the model it was seen running), a self-reviewing writer that names a \`WRITER:\` below itself gets a note, a critical-change writer's review is floored by F1, and the spawn guard denies a code-review spawned by an agent that was itself spawned as a code-review: reviewers never spawn reviewers.`);
   L.push(``);
-  L.push(`The lead still lands and merges the work, settles the disputed findings the writer returns, and spot-checks the review file against the diff.`);
+  L.push(`The lead still lands and merges the work, settles the disputed findings the writer returns, and spot-checks the review file against the diff. The guard cannot see what the writer puts in its reviewer's brief or how it relays the verdict; the lead can: the reviewer's actual brief is the first user record of its transcript (\`<session>/subagents/agent-<reviewer id>.jsonl\`), its \`spawns.jsonl\` row joins to the writer's by \`caller_tool_use_id\` = the writer row's \`tool_use_id\`, and the relayed verdict line should match the first line of the review file.`);
   L.push(``);
   if (selfReview.rationale) {
     L.push(`**Why:** ${selfReview.rationale}`);
