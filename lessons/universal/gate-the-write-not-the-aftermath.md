@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-07
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 When a script resolves a known-shape conflict automatically — a keep-both union of a changelog's unreleased section, a merged config, a regenerated manifest — every safety check must run on the **resolved text in memory** and **gate** both the write and the commit. A check placed after the write cannot prevent anything; at best it reports on damage already done.
 
@@ -27,3 +27,12 @@ The incident: a placement check threw a false positive *after* the file had alre
 - Make "does this actually block?" a reviewer's headline question for any new gate added to an existing pipeline, and answer it by reading the invocation chain end to end and then RUNNING it — never by reading the diff that introduces the check in isolation.
 - Wherever a check is added to an existing pipeline, require the reviewer to state, explicitly, the call order they verified (what runs before the check, what runs after, and what happens on each outcome) — a described intent to block is not evidence of an enforced order.
 - Related: [[an-open-ticket-is-not-clearance]] (a different way a gate can look satisfied while nothing was actually cleared) and [[a-guard-that-reads-ambient-state-is-not-reading-the-target]] (a gate that runs at the right time but checks the wrong thing).
+
+**A third incident, inside a single handler rather than between pipeline steps: a kill switch is only as good as the earliest branch that can fire the side effect it is meant to stop.** A trigger used a "close the promotion" flag as the standard safety procedure before a bulk write. The flag did stop the grant it guarded. It did not stop a notification email the same handler sent, because the email branch ran and returned BEFORE the closed-flag check — that branch was gated only on "already granted, not yet notified," a condition with no reference to the kill switch at all.
+
+**How to apply (continued):**
+- When you rely on a disable flag, read the handler from the TOP and confirm nothing carrying a side effect returns above the check. A flag that guards the branch you were thinking about says nothing about branches you weren't.
+- Note whether the flag is asymmetric in timing: here, disabling took effect immediately while re-enabling took a cache TTL to propagate — the same flag is not equally trustworthy in both directions.
+- Enumerate every side-effecting branch in the handler (not just the one the flag was introduced to stop) before deploying a kill switch, and add each one to the check's scope or document explicitly why it's exempt.
+
+Related: [[an-open-ticket-is-not-clearance]], [[a-guard-that-reads-ambient-state-is-not-reading-the-target]], [[fail-open-on-the-action-never-on-the-record]].

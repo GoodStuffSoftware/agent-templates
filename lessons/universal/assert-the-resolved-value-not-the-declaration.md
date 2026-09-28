@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-17
 provenance: [contrib-2]
-corroborated: 4
+corroborated: 5
 ---
 A declaration in a config file is an input to a resolution, not the outcome of one. Tests and reviews that read the declaration confirm the input and say nothing about what the system will actually use. Two failures with the same shape, from one week:
 
@@ -27,4 +27,5 @@ A declaration in a config file is an input to a resolution, not the outcome of o
 - **Verify a test by breaking the fix and confirming the test fails.** Apply it to every property the change claims, not only the headline one — in the case above the same technique had already proven a sibling fix in the same change, and would have caught this one on day one.
 - Fix at the layer that resolves, not the layer that is convenient. In the signing case the tempting fix — set it on the build type — would have applied the wrong identity to every other flavour, which the suite explicitly forbade. See [[safeguard-the-operation-not-the-entry-point]].
 - **Never RE-DERIVE a value the tool will resolve for itself.** A fourth case: a scheduler sized its work plan by recomputing the parallel worker count from the same inputs the test runner uses, instead of reading the count the runner had actually resolved. The two formulas agreed until one of them was tuned, after which the plan described a run that never happened. If the consumer exposes its resolved value, read it; a faithful reimplementation of someone else's resolution is a copy that starts drifting the day you ship it.
+- **A wrong-typed declaration can resolve to a silently-substituted default, not an error.** A fifth case: a numeric setting was declared as the string `"400k"`. The schema takes an integer and, on any parse failure, falls back to its default with no warning anywhere — UI, logs, or otherwise. The much larger default stayed in effect for days, at real ongoing cost, while the file on disk still read the intended value. The resolved value and the declared value were not just different, they were in different unit systems. Check the setting's TYPE against its schema (the shipped tool's own validator is the ground truth when docs are vague) whenever a cost or behaviour setting "doesn't seem to do anything" — and verify a numeric/behavioural setting took effect by its observable downstream result (does the behaviour it controls actually change near the new value?), not by reading the file back.
 - Related: [[probe-behaviour-not-version-stamps]] (behaviour outranks self-reported state) and [[unenforced-absence-invariant]] (a claim nothing enforces).
