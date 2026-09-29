@@ -39,8 +39,10 @@ function pluginFiles() {
   return files;
 }
 
-test('the plugin ships exactly one .claude-plugin/plugin.json, at its root', () => {
-  const manifests = pluginFiles().filter((f) => /(^|\/)\.claude-plugin\/plugin\.json$/i.test(f));
+// Every .claude-plugin/ entry, not only plugin.json: a nested marketplace.json
+// would make the folder read as a marketplace too.
+test('the only .claude-plugin/ entry in the plugin is its root plugin.json', () => {
+  const manifests = pluginFiles().filter((f) => /(^|\/)\.claude-plugin\//i.test(f));
   assert.deepEqual(
     manifests,
     ['.claude-plugin/plugin.json'],
@@ -50,7 +52,8 @@ test('the plugin ships exactly one .claude-plugin/plugin.json, at its root', () 
   );
 });
 
-test('the plugin has no top-level bin/ directory', () => {
-  const bin = pluginFiles().filter((f) => /^bin\//i.test(f));
+// `bin` as a directory or as a plain file: either is a top-level bin entry.
+test('the plugin has no top-level bin', () => {
+  const bin = pluginFiles().filter((f) => /^bin(\/|$)/i.test(f));
   assert.deepEqual(bin, [], 'claude.ai refuses a plugin with a top-level bin/ directory');
 });
