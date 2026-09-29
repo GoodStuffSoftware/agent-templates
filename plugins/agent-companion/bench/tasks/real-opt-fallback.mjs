@@ -14,6 +14,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_SRC = path.join(__dirname, '..', 'fixtures', 'real-opt-fallback');
 const HIDDEN_TEST = path.join(FIXTURE_SRC, 'hidden-tests', 'opt.test.mjs');
 const HIDDEN_TEST_DEST = 'test/opt.test.mjs';
+// The sandbox's own plugin manifest. Stored OUTSIDE src/ under a non-manifest
+// name and written to src/.claude-plugin/plugin.json by setup(): claude.ai
+// refuses to package a plugin whose folder holds a second
+// .claude-plugin/plugin.json (tests/plugin-package-shape.test.mjs). The
+// sandbox the model sees is byte-identical to when the file lived in src/.
+const MANIFEST_SRC = path.join(FIXTURE_SRC, 'plugin-manifest.json');
+const MANIFEST_DEST = path.join('src', '.claude-plugin', 'plugin.json');
 
 const FORBIDDEN_PHRASES = [
   'resolve plugin options from settings.json outside hooks',
@@ -24,6 +31,8 @@ const FORBIDDEN_PHRASES = [
 
 function setup(sandboxDir) {
   copyDir(path.join(FIXTURE_SRC, 'src'), path.join(sandboxDir, 'src'));
+  fs.mkdirSync(path.dirname(path.join(sandboxDir, MANIFEST_DEST)), { recursive: true });
+  fs.copyFileSync(MANIFEST_SRC, path.join(sandboxDir, MANIFEST_DEST));
   fs.copyFileSync(path.join(FIXTURE_SRC, 'package.json'), path.join(sandboxDir, 'package.json'));
   addGuardFile(sandboxDir);
   assertNoLeakedFixLanguage(sandboxDir, FORBIDDEN_PHRASES);
