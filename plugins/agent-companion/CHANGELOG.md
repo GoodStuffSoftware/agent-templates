@@ -2,6 +2,12 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.22 — 2026-09-29
+
+- Fix: claude.ai refused to register the plugin. It packages the plugin folder and requires exactly one `.claude-plugin/plugin.json`, and since 0.25.0 the folder held a second one: the `real-opt-fallback` benchmark fixture's own manifest. The fixture now keeps it at `bench/fixtures/real-opt-fallback/plugin-manifest.json`, and the task's `setup()` writes it to `src/.claude-plugin/plugin.json` in the sandbox. The sandbox is byte-identical to before, so its `task_fixture_sha256` is unchanged and earlier benchmark rows stay comparable.
+- New test `tests/plugin-package-shape.test.mjs`: fails when the plugin's committable files (tracked, plus untracked and not ignored) include any `.claude-plugin/plugin.json` other than the root one, or a top-level `bin/`, which claude.ai also refuses. `claude plugin validate --strict` accepts both, so it did not catch this.
+- No hook or script behaviour changes; nothing to restart.
+
 ## 0.29.21 — 2026-09-28
 
 - New: writer self-review protocol. `selfReview.types` in `config/model-tiers.json` names the task types whose writer reviews its own work: `novel-design`, `large-refactor`, `critical-change` and `long-autonomous-run`. The writer spawns one foreground parity reviewer (its own model and effort) and does one fix round before it reports. The protocol text is appended to the ladder rungs' agent definitions.
