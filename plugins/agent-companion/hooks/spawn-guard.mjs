@@ -875,7 +875,7 @@ try {
     try {
       if (opt('standing_rules', true)) {
         const hits = matchRules({ scope: 'spawn', text: brief, sessionId: sid });
-        suffix += renderRules(hits, { maxChars: opt('standing_rules_max_chars', 2000) }) || '';
+        suffix += renderRules(hits, { maxChars: opt('standing_rules_max_chars', 3000) }) || '';
       }
     } catch { /* fail open */ }
 

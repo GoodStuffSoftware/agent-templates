@@ -2,6 +2,13 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.27 — 2026-10-02
+
+- New built-in standing rule `lead-effort-check` (session start), off by default. Turn it on with `{"id":"lead-effort-check","enabled":true}` in `standing-rules.json`; the wording then ships with the plugin instead of living in the operator's file (a full `then` in the file still wins). When the session will orchestrate and its effort is below xhigh, the lead asks the operator with the AskUserQuestion options selector (header "Lead effort"; "Raise to xhigh (Recommended)" or "Stay at <current>") and makes no spawn or other tool call until it is answered. "Raise" loads `set_session_effort` with ToolSearch and sets the session to xhigh; if that tool is missing or fails, the operator is told to use the app's effort control. Unattended sessions (a `scheduledTaskId`, headless or `-p`, no AskUserQuestion) are never asked: they continue and state the effort once. It never raises to max and never lowers. Checked before the first spawn and again after a resume or compaction, as before. This replaces the older prose ask ("say so in one line and ask them to raise it").
+- `standing_rules_max_chars` default 2000 -> 3000, in the option, the rule renderer and the spawn-guard call, so the new rule is not dropped beside the other session-start rules. Eight rules now ship built in.
+- Tests: `lead-effort-check.test.mjs` (default off, the enable override, the exact wording pins, an operator file's own wording winning, the block fitting under the default cap, and the session-start hook output); `standing-rules.test.mjs` built-in list updated.
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.26 — 2026-10-02
 
 - `scripts/version.mjs` no longer says "Desktop copy: none found" when the desktop app has no copy of its own. It now prints "no separate desktop copy; desktop sessions load the CLI cache copy", and `--json` has a new top-level `desktopCopy: { present, count, usesCliCache }` field (`desktop` stays the array it was). The verdict logic is unchanged; a desktop copy that exists and lags is still STALE. Verified 2026-10-02: after the operator disabled and re-enabled agent-companion in the desktop app's plugin manager, the stale 0.29.22 desktop copy was gone and desktop Code-tab sessions loaded the plugin from the CLI cache.

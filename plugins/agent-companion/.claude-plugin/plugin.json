@@ -303,14 +303,14 @@
     "standing_rules": {
       "type": "boolean",
       "title": "Standing rules",
-      "description": "Operator-authored “always do X if Y” rules, injected at session start, on matching prompts, and into matching spawn briefs. Conditions are a regex over the text (`when`) plus an optional session-state gate. Edit with scripts/rules.mjs; six rules ship built in.",
+      "description": "Operator-authored “always do X if Y” rules, injected at session start, on matching prompts, and into matching spawn briefs. Conditions are a regex over the text (`when`) plus an optional session-state gate. Edit with scripts/rules.mjs; eight rules ship built in (one, lead-effort-check, is off until you enable it).",
       "default": true
     },
     "standing_rules_max_chars": {
       "type": "number",
       "title": "Standing rules budget (characters)",
       "description": "Ceiling on the rendered rule block per injection. Rules past the ceiling are dropped and the count is stated, so a budget overrun is visible rather than silent.",
-      "default": 2000
+      "default": 3000
     },
     "resume_guard": {
       "type": "boolean",

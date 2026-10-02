@@ -50,7 +50,7 @@ export const RULES_VERSION = 1;
 export const SCOPES = ['user-prompt', 'always', 'session-start', 'spawn'];
 
 const WHEN_MAX_CHARS = 400;
-const DEFAULT_MAX_CHARS = 2000;
+const DEFAULT_MAX_CHARS = 3000;
 
 let resolveBrevity = null;
 try {
@@ -105,6 +105,18 @@ export const COPYABLE_PROMPT_WHEN = [
   '^\\s*(?:an?\\S*\\sprompts?\\s(?:for|that\\s(?!(?:i|you|we|they)\\b))|prompts?\\sfor\\s(?:an?|the)\\b)',
   'prompt.{0,60}write it\\b',
 ].join('|');
+
+// The lead-effort-check directive. Plain and short on purpose: it is read at
+// session start and has to survive a long session. Exported so the tests pin
+// the exact injected wording.
+export const LEAD_EFFORT_CHECK_TEXT = [
+  'If this session will orchestrate agents (spawning workers or reviewers, several open threads, or releases), check your own effort before the first spawn and again after any resume or compaction: call get_session with session_id "self" and read its effort field. An orchestration lead runs at xhigh.',
+  'Unattended (get_session shows a scheduledTaskId, a headless or -p run, or no AskUserQuestion tool): do not ask. Continue at the current effort and state it once in your output.',
+  'Interactive and below xhigh: ask with the AskUserQuestion tool (the options selector), not in prose, and make no spawn and no other tool call until it is answered. Header "Lead effort"; the question names the current effort and why this looks like orchestration.',
+  'Option 1 "Raise to xhigh (Recommended)": load mcp__ccd_session_mgmt__set_session_effort with ToolSearch (select:mcp__ccd_session_mgmt__set_session_effort) and set this session to xhigh, using the sessionId from get_session "self". If that tool is unavailable or fails, tell the operator to raise it in the app\'s effort control, and wait.',
+  'Option 2 "Stay at <current>": continue, and do not ask again this session.',
+  'Never raise to max this way, never lower the effort.',
+].join(' ');
 
 function builtinRules() {
   return [
@@ -183,6 +195,24 @@ function builtinRules() {
       gate: 'delegation-drift',
       when: null,
       then: 'Delegation reminder: this session has already run execution work on the main thread. Route the next read, search, command, test run or edit to a subagent rather than doing it here.',
+      note: null,
+    },
+    {
+      // Lead-effort check. DISABLED by default: it states a house policy
+      // (an orchestrating lead runs at xhigh), and this plugin is distributed
+      // publicly. An operator who wants it turns it on with
+      // {"id":"lead-effort-check","enabled":true} in standing-rules.json, which
+      // keeps the wording shipping from here rather than from their file.
+      // Interactive sessions get an options-selector ASK (AskUserQuestion), not
+      // prose, so the question cannot be missed and the turn stops until it is
+      // answered; unattended sessions are never asked.
+      id: 'lead-effort-check',
+      enabled: false,
+      builtin: true,
+      scope: 'session-start',
+      when: null,
+      then: LEAD_EFFORT_CHECK_TEXT,
+      gate: null,
       note: null,
     },
     {

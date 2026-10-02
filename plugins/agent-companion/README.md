@@ -121,7 +121,7 @@ Four scopes, each deciding what `when` is tested against and where the directive
 | `session-start` | *(ignored — fires once)* | the main session, at start |
 | `spawn` | the brief of an agent being spawned | that subagent's prompt |
 
-Seven rules ship built in:
+Eight rules ship built in:
 
 | id | scope | fires |
 |---|---|---|
@@ -132,6 +132,7 @@ Seven rules ship built in:
 | `delegate-reminder` | `always` | gated — see below |
 | `agent-brevity` | `spawn` | disabled by default; reserved so the `spawn` scope shows up in `rules list` |
 | `poll-guard-doctrine` | `session-start` | every session — cache-advisor guard (b): "one completion wait, never per-item wakes" (see `hooks/poll-guard.mjs`) |
+| `lead-effort-check` | `session-start` | disabled by default. Turn on with `{"id":"lead-effort-check","enabled":true}`. When the session will orchestrate and its effort is below xhigh, asks the operator with the AskUserQuestion options selector ("Raise to xhigh (Recommended)" or "Stay at <current>"), with no spawn or other tool call until answered; "Raise" sets the session to xhigh through `set_session_effort`. Unattended sessions (a `scheduledTaskId`, headless, no AskUserQuestion) are never asked: they continue and state the effort once. Never raises to max, never lowers |
 
 ### `delegate-reminder` — the direct answer to "my delegation rules stop being followed"
 
@@ -916,7 +917,7 @@ files:
         "brevity_stop_gate": false,
         "brevity_report_max_chars": 4000,
         "standing_rules": true,
-        "standing_rules_max_chars": 2000,
+        "standing_rules_max_chars": 3000,
         "review_recursion_guard": true
       }
     }
