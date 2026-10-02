@@ -30,7 +30,7 @@
 // tests/isolation-guard.test.mjs asserts all of this, and that every test file
 // imports this module one way or the other.
 
-import fs, { mkdtempSync, rmSync } from 'node:fs';
+import fs, { mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -61,10 +61,17 @@ const originalStateDir = process.env.AGENT_COMPANION_STATE_DIR
   ? resolve(process.env.AGENT_COMPANION_STATE_DIR).replace(/\\/g, '/')
   : null;
 const underTmp = (p) => canon(p).startsWith(canon(tmpdir()) + '/');
-export const WATCHED_ROOTS = Object.freeze([
+const lexicalRoots = [
   ...REAL_CLAUDE_DIRS,
   ...(originalStateDir && !underTmp(originalStateDir) ? [originalStateDir] : []),
-]);
+];
+// A symlink or junction into the real home, or its long-name spelling, is the
+// same place: watch the canonical path too (resolved before anything is patched).
+const canonicalRoots = [];
+for (const r of lexicalRoots) {
+  try { canonicalRoots.push(realpathSync(r).replace(/\\/g, '/')); } catch { /* does not exist: nothing to alias */ }
+}
+export const WATCHED_ROOTS = Object.freeze([...new Set([...lexicalRoots, ...canonicalRoots])]);
 
 // --- the sandbox ------------------------------------------------------------
 
@@ -113,12 +120,14 @@ const FNS = [
   // reads
   'existsSync', 'readFileSync', 'readdirSync', 'statSync', 'lstatSync', 'openSync', 'accessSync',
   'realpathSync', 'readlinkSync', 'opendirSync', 'createReadStream', 'readFile', 'readdir', 'stat',
-  'lstat', 'open', 'access', 'realpath', 'readlink', 'opendir', 'exists', 'watch', 'watchFile',
+  'lstat', 'open', 'access', 'realpath', 'readlink', 'opendir', 'exists', 'watch', 'watchFile', 'globSync', 'glob',
+  'statfs', 'statfsSync', 'openAsBlob',
   // writes
   'writeFileSync', 'appendFileSync', 'mkdirSync', 'rmSync', 'rmdirSync', 'unlinkSync', 'renameSync',
   'copyFileSync', 'cpSync', 'truncateSync', 'utimesSync', 'chmodSync', 'symlinkSync', 'linkSync',
   'mkdtempSync', 'createWriteStream', 'writeFile', 'appendFile', 'mkdir', 'rm', 'rmdir', 'unlink',
   'rename', 'copyFile', 'cp', 'truncate', 'utimes', 'chmod', 'symlink', 'link', 'mkdtemp',
+  'chownSync', 'lchownSync', 'lutimesSync', 'lchmodSync', 'chown', 'lchown', 'lutimes', 'lchmod',
 ];
 
 function patch(mod, name, label) {
@@ -135,10 +144,13 @@ function patch(mod, name, label) {
     return orig.apply(this, args);
   };
   wrapper.__acGuard = true;
-  // Carry own properties across (e.g. realpathSync.native, exists.__promisify__).
+  // Carry own properties across (exists.__promisify__ and the like); the
+  // .native variants of realpath are functions of their own, so they are
+  // wrapped, not copied.
   for (const k of Object.keys(orig)) {
     try { wrapper[k] = orig[k]; } catch { /* non-writable: skip */ }
   }
+  if (typeof orig.native === 'function') patch(wrapper, 'native', `${label}${name}.`);
   try { mod[name] = wrapper; } catch { /* frozen: skip */ }
 }
 

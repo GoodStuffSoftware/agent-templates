@@ -559,9 +559,8 @@ try {
       const hours = Math.round(c.behindMs / 3600000);
       sig('plugin_copy_stale',
         `${c.label} is ${c.version}; the marketplace has had ${latest} for ${hours} h, so ${c.sessions || 'sessions on this copy'} run the older plugin. Fix: ${c.fix}`,
-        c.kind === 'desktop-rpm' ? 'desktop-plugin-sync' : 'plugin-update');
+        c.kind === 'desktop-rpm' ? 'desktop-plugin-refresh' : 'plugin-update');
     }
-    if (report.this && report.this.version) next.thisCopyVersion = report.this.version;
   }
 } catch { /* version.mjs could not read the installs: not a signal */ }
 

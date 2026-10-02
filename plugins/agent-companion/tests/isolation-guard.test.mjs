@@ -10,7 +10,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, realpathSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -104,19 +106,24 @@ test('the tripwire throws and records on any access under the real Claude home',
   clearRealHomeViolations();
   const root = REAL_CLAUDE_DIRS[0];
   const probe = join(root, 'agent-companion', 'config', 'routing-profile.json');
-  const writeProbe = join(root, 'agent-companion-guard-probe');
+  // READ probes first: if the tripwire is not armed they fail the test before
+  // anything is written to the real home.
   assert.throws(() => existsSync(probe), /REAL Claude home/, 'a probe of the real routing profile must throw');
   assert.throws(() => readFileSync(probe), /REAL Claude home/);
   assert.throws(() => readdirSync(join(root, 'agent-companion')), /REAL Claude home/);
-  assert.throws(() => mkdirSync(writeProbe, { recursive: true }), /REAL Claude home/);
-  assert.equal(realHomeViolations().length, 4, 'each probe is recorded');
+  // The write-side wrappers, probed with calls that create nothing even when
+  // the tripwire is somehow off (removing a path that does not exist).
+  const missing = join(root, 'agent-companion-guard-probe-does-not-exist');
+  assert.throws(() => rmSync(missing, { force: true }), /REAL Claude home/);
+  assert.throws(() => unlinkSync(missing), /REAL Claude home/);
+  assert.equal(realHomeViolations().length, 5, 'each probe is recorded');
   clearRealHomeViolations();
-  // The write was refused BEFORE it happened: ask a child (no tripwire) whether
-  // the directory exists.
-  const res = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(require("node:fs").existsSync(process.argv[1])))', writeProbe], {
-    encoding: 'utf8', windowsHide: true,
-  });
-  assert.equal(res.stdout, 'false', 'the refused mkdir must not have created anything');
+});
+
+test('the .native variants of realpath are wrapped too', () => {
+  clearRealHomeViolations();
+  assert.throws(() => realpathSync.native(join(REAL_CLAUDE_DIRS[0], 'x')), /REAL Claude home/);
+  clearRealHomeViolations();
 });
 
 test('the tripwire leaves temp paths and a relative path alone', () => {

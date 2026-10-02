@@ -53,10 +53,14 @@ runs the marketplace clone's script, which finds the same installs.
      agent-templates`, then `claude plugin update agent-companion@agent-templates`,
      then restart the session or `/reload-plugins`.
    - **Desktop copy stale** (Desktop Code-tab sessions): `claude plugin update`
-     does not touch it. The desktop app syncs it from claude.ai: press Sync on the
-     agent-templates marketplace there, then restart the desktop app. If it is
-     still behind, remove and re-add agent-companion in the desktop plugin manager.
-     Be plain that what exactly refreshes this copy is only partly verified.
+     does not touch it; the desktop app syncs it from claude.ai. What worked
+     before: remove and re-add agent-companion in the desktop plugin manager (not
+     `claude plugin uninstall`, which wipes the plugin options), then
+     `/reload-plugins`; a full app restart alone did not. Pressing Sync on the
+     agent-templates marketplace in claude.ai is untested. Say plainly that what
+     refreshes this copy is not verified.
+   - **This session's copy is an older cache folder** than the installed one: the
+     session predates an update. Restart the session (or `/reload-plugins`).
 
 A copy younger than about 6 hours behind is normal after a release; say so rather
 than raising an alarm. Never print tokens or credentials; the script prints none.

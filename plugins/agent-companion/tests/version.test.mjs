@@ -8,12 +8,12 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, utimesSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import { HOUR, FIXTURE_SHA, writeManifest, machine as buildMachine } from './version-fixture.mjs';
 import {
   collect, classifyPath, thisCopy, cliCopies, desktopCopies, desktopSessionRoots, marketplaceInfo,
-  remoteInfo, lagStartMs, staleBeyondGrace, renderText, parseArgs, redact, STALE_GRACE_MS,
+  remoteInfo, lagStart, changelogDates, safeUrl, staleBeyondGrace, renderText, parseArgs, redact, STALE_GRACE_MS,
 } from '../scripts/version.mjs';
 
 const NOW = Date.parse('2026-10-02T20:00:00.000Z');
@@ -48,11 +48,12 @@ test('a desktop copy behind the CLI copy: STALE, names the desktop sessions and 
     assert.equal(v.ok, false);
     assert.match(v.line, /^STALE: desktop copy \(plugin_FIX0\) is 0\.29\.22, latest is 0\.29\.24/);
     assert.match(v.line, /Desktop Code-tab sessions/);
-    assert.match(v.line, /restart the desktop app/);
+    assert.match(v.line, /fix \(unverified\): remove and re-add agent-companion in the desktop plugin manager/);
+    assert.doesNotMatch(v.line, /Sync/, 'an untested step must not lead the one-line verdict');
     assert.doesNotMatch(v.line, /CLI cache copy/, 'the CLI copy is current and must not be named');
     const text = run(fx).stdout;
     assert.match(text, /Verdict:\s+STALE: desktop copy/);
-    assert.match(text, /Fix \(desktop\):.*claude\.ai.*not fully verified/);
+    assert.match(text, /Fix \(desktop\):.*a full app restart alone did not.*Untested: press Sync.*not verified/);
     assert.match(text, /<- STALE/);
   } finally { fx.cleanup(); }
 });
@@ -120,7 +121,7 @@ test('THIS copy is the directory the script runs from, resolved from its own loc
     machine(fx.dir);
     const j = run(fx, ['--json']).json;
     assert.equal(j.this.path, PLUGIN_ROOT);
-    assert.equal(j.this.kind, 'checkout', 'the repo checkout is a git work tree');
+    assert.ok(['checkout', 'unknown'].includes(j.this.kind), `a source tree is a checkout (or unknown when exported without .git), got ${j.this.kind}`);
     assert.match(j.this.version, /^\d+\.\d+\.\d+$/);
     assert.equal(j.copies.filter((c) => c.isThis).length, 1);
   } finally { fx.cleanup(); }
@@ -135,7 +136,7 @@ test('classifyPath tells a CLI cache copy, a desktop rpm copy and a marketplace 
     assert.equal(classifyPath(m.desktopPaths[0], claude), 'desktop-rpm');
     assert.equal(classifyPath(join(m.marketplacePath, 'plugins', 'agent-companion'), claude), 'marketplace-clone');
     assert.equal(classifyPath(join(fx.dir, 'somewhere-else'), claude), 'unknown');
-    assert.equal(classifyPath(PLUGIN_ROOT, claude), 'checkout');
+    assert.ok(['checkout', 'unknown'].includes(classifyPath(PLUGIN_ROOT, claude)));
   } finally { fx.cleanup(); }
 });
 
@@ -211,9 +212,10 @@ test('with a real marketplace history, lag starts at the OLDEST release newer th
     assert.equal(market.publishedFrom, 'release-commit');
     assert.equal(Date.parse(market.publishedAt), Date.parse('2026-10-02T18:00:00Z'));
     // A copy on 0.29.22 has lagged since 0.29.23, not since 0.29.24.
-    assert.equal(lagStartMs(market, '0.29.22', 1), Date.parse('2026-10-02T09:00:00Z'));
-    assert.equal(lagStartMs(market, '0.29.23', 1), Date.parse('2026-10-02T18:00:00Z'));
-    assert.equal(lagStartMs(market, '0.29.24', 1), 1, 'a current copy has no newer release: the fallback');
+    assert.equal(market.shallow, false);
+    assert.deepEqual(lagStart(market, '0.29.22', 1), { ms: Date.parse('2026-10-02T09:00:00Z'), basis: 'release-commit' });
+    assert.deepEqual(lagStart(market, '0.29.23', 1), { ms: Date.parse('2026-10-02T18:00:00Z'), basis: 'release-commit' });
+    assert.deepEqual(lagStart(market, '0.29.24', 1), { ms: 1, basis: 'latest-release' }, 'a current copy has no newer release: the fallback');
   } finally { fx.cleanup(); }
 });
 
@@ -380,4 +382,151 @@ test('thisCopy reads a plain directory\'s manifest', () => {
     writeManifest(d, '1.2.3');
     assert.equal(thisCopy(d, join(d, 'nowhere')).version, '1.2.3');
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// --- review round: shallow clones, the session's own old copy, credentials ------
+
+// A marketplace clone with a CHANGELOG, as a git repo with ONE commit (what
+// `claude plugin marketplace add` makes: shallow).
+function shallowMarketplace(fx, { changelog = true } = {}) {
+  const src = join(fx.dir, 'src-repo');
+  const rel = join('plugins', 'agent-companion');
+  mkdirSync(join(src, rel, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(src, rel, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'agent-companion', version: '0.29.24' }));
+  if (changelog) {
+    writeFileSync(join(src, rel, 'CHANGELOG.md'), [
+      '# Changelog', '', '## 0.29.24 \u2014 2026-10-02', '- c', '', '## 0.29.23 \u2014 2026-10-02', '- b', '', '## 0.29.22 \u2014 2026-09-29', '- a', '',
+    ].join('\n'));
+  }
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid' };
+  for (const k of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|INDEX_FILE)$/.test(k)) delete env[k];
+  const git = (cwd, args) => execFileSync('git', args, { cwd, env, stdio: 'ignore', windowsHide: true });
+  git(src, ['init', '--quiet', '-b', 'main']);
+  git(src, ['add', '-A']);
+  git(src, ['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'release']);
+  const clone = join(fx.dir, '.claude', 'plugins', 'marketplaces', 'agent-templates');
+  mkdirSync(join(fx.dir, '.claude', 'plugins', 'marketplaces'), { recursive: true });
+  // file:// so --depth is honoured for a local path
+  git(fx.dir, ['clone', '--quiet', '--depth', '1', `file://${src.replace(/\\/g, '/')}`, clone]);
+  writeFileSync(join(fx.dir, '.claude', 'plugins', 'known_marketplaces.json'), JSON.stringify({ 'agent-templates': { installLocation: clone } }));
+  return join(fx.dir, '.claude');
+}
+
+test('a SHALLOW marketplace clone dates a missed release from its CHANGELOG, not from the latest commit', () => {
+  const fx = makeFixture();
+  try {
+    const claude = shallowMarketplace(fx);
+    const market = marketplaceInfo(claude, 'agent-templates');
+    assert.equal(market.isRepo, true);
+    assert.equal(market.shallow, true, 'a depth-1 clone is shallow');
+    assert.equal(market.version, '0.29.24');
+    // The latest release was published "now"; the copy has missed 0.29.23 (2026-10-02) since that day.
+    const latestMs = Date.parse(market.publishedAt);
+    const got = lagStart(market, '0.29.22', latestMs);
+    assert.equal(got.basis, 'changelog');
+    assert.equal(got.ms, Date.parse('2026-10-02T23:59:59Z'));
+    // 0.29.21 predates every listed release: the oldest NEWER one is 0.29.22.
+    assert.equal(lagStart(market, '0.29.21', latestMs).ms, Date.parse('2026-09-29T23:59:59Z'));
+    // A current copy has nothing newer: the fallback.
+    assert.equal(lagStart(market, '0.29.24', latestMs).basis, 'latest-release');
+  } finally { fx.cleanup(); }
+});
+
+test('a shallow clone with no CHANGELOG falls back to the latest release, honestly labelled', () => {
+  const fx = makeFixture();
+  try {
+    const claude = shallowMarketplace(fx, { changelog: false });
+    const market = marketplaceInfo(claude, 'agent-templates');
+    assert.deepEqual(lagStart(market, '0.29.22', 123), { ms: 123, basis: 'latest-release' });
+  } finally { fx.cleanup(); }
+});
+
+test('changelogDates reads the headings, takes the first date for a version, and ignores the rest', () => {
+  const d = mkdtempSync(join(tmpdir(), 'ac-cl-'));
+  try {
+    writeFileSync(join(d, 'CHANGELOG.md'), '# Changelog\n\n## 0.2.0 \u2014 2026-01-02\n- x\n\n## 0.1.0 - 2026-01-01\n\n## Unreleased\n\n## 0.2.0 \u2014 2025-01-01\n');
+    const m = changelogDates(d);
+    assert.equal(m.get('0.2.0'), Date.parse('2026-01-02T23:59:59Z'));
+    assert.equal(m.get('0.1.0'), Date.parse('2026-01-01T23:59:59Z'));
+    assert.equal(m.size, 2);
+    assert.equal(changelogDates(join(d, 'nowhere')).size, 0);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('the scout signal counts the lag from the CHANGELOG date when the clone is shallow (the 2026-10-02 incident shape)', () => {
+  const fx = makeFixture();
+  try {
+    const claude = shallowMarketplace(fx);
+    mkdirSync(join(fx.dir, 'desktop', 'a', 'o', 'rpm', 'plugin_X'), { recursive: true });
+    writeManifest(join(fx.dir, 'desktop', 'a', 'o', 'rpm', 'plugin_X'), '0.29.22');
+    // A day and a half after the 0.29.23 release day: beyond the grace.
+    const now = Date.parse('2026-10-04T12:00:00Z');
+    const r = collect({ root: PLUGIN_ROOT, claudeDirPath: claude, desktopRoots: [join(fx.dir, 'desktop')], now });
+    const beyond = staleBeyondGrace(r);
+    assert.equal(beyond.length, 1);
+    assert.equal(beyond[0].behindBasis, 'changelog');
+    assert.ok(beyond[0].behindMs > 6 * HOUR);
+    // The same copy on the release day itself: inside the grace (the lower bound is end of day).
+    const early = collect({ root: PLUGIN_ROOT, claudeDirPath: claude, desktopRoots: [join(fx.dir, 'desktop')], now: Date.parse('2026-10-02T20:00:00Z') });
+    assert.deepEqual(staleBeyondGrace(early), []);
+    assert.match(renderText(early), /a newer release is dated 2026-10-02 in the CHANGELOG/);
+  } finally { fx.cleanup(); }
+});
+
+test('a session running an OLD cache folder is judged stale, not reported as current', () => {
+  const fx = makeFixture();
+  try {
+    const m = machine(fx.dir, { cli: '0.29.24', desktop: null });
+    // The folder this session loaded before `claude plugin update`: still on disk, no longer the install.
+    const oldCache = join(m.claude, 'plugins', 'cache', 'agent-templates', 'agent-companion', '0.29.22');
+    writeManifest(oldCache, '0.29.22');
+    const r = collect({ root: oldCache, claudeDirPath: m.claude, desktopRoots: [], now: NOW });
+    assert.equal(r.this.kind, 'cli-cache');
+    assert.equal(r.verdict.ok, false, 'not "all copies current"');
+    assert.match(r.verdict.line, /^STALE: this session's copy \(CLI cache copy\) is 0\.29\.22, latest is 0\.29\.24 \(this session runs the older plugin\) - fix: restart the session/);
+    assert.match(renderText(r), /THIS copy:.*<- STALE/);
+    // It is an old SESSION, not an installed copy: the scout does not raise it.
+    assert.deepEqual(staleBeyondGrace(r), []);
+  } finally { fx.cleanup(); }
+});
+
+test('credentials in a marketplace source url are never carried into the report', () => {
+  const fx = makeFixture();
+  try {
+    const m = machine(fx.dir);
+    const secret = ['hunter2', 'SECRETPASS'].join('-');
+    writeFileSync(join(m.claude, 'plugins', 'known_marketplaces.json'), JSON.stringify({
+      'agent-templates': { source: { source: 'git', url: `https://someone:${secret}@git.example.invalid/o/r.git` }, installLocation: m.marketplacePath },
+    }));
+    const res = run(fx, ['--json']);
+    assert.ok(!res.stdout.includes(secret), 'the password reached the JSON');
+    assert.ok(!run(fx).stdout.includes(secret));
+    assert.equal(res.json.marketplace.sourceUrl, 'https://git.example.invalid/o/r.git');
+    assert.equal(safeUrl('https://u:p@github.com/o/r.git'), 'https://github.com/o/r.git');
+    assert.equal(safeUrl('git@github.com:o/r.git'), 'git@github.com:o/r.git');
+    assert.ok(!safeUrl('not a url://u:p@host/x').includes('u:p@'));
+  } finally { fx.cleanup(); }
+});
+
+test('without --remote the verdict says what it rests on; an installed copy ahead of the clone is called out', () => {
+  const fx = makeFixture();
+  try {
+    const m = machine(fx.dir, { cli: '0.29.25', desktop: '0.29.24', marketplace: '0.29.24' });
+    const r = collect({ root: PLUGIN_ROOT, claudeDirPath: m.claude, desktopRoots: [join(fx.dir, 'desktop')], now: NOW });
+    assert.equal(r.verdict.line, 'all copies current', 'the line itself is unchanged');
+    assert.match(r.verdict.note, /origin\/main was not checked \(add --remote\)/);
+    assert.match(r.verdict.note, /installed copy is newer than the marketplace clone/);
+    assert.match(renderText(r), /Note:\s+latest is the local marketplace clone/);
+  } finally { fx.cleanup(); }
+});
+
+test('remoteInfo through the REAL spawn path: a missing gh binary is a graceful failure, not a throw', () => {
+  const r = remoteInfo({
+    sourceUrl: SRC, timeoutMs: 2000,
+    env: { AGENT_COMPANION_GH_BIN: join(tmpdir(), 'ac-definitely-no-such-gh') },
+    // gh is spawned for real (and is absent); git is not allowed to reach a network.
+    run: (cmd, args, o) => (cmd === 'git' ? { status: 1, stdout: '', stderr: 'offline' } : spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, ...o })),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /gh api could not run \(ENOENT\)/);
 });

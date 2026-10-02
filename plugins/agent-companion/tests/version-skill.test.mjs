@@ -41,7 +41,8 @@ test('the skill runs version.mjs from its own base directory and reports in 3 to
   assert.match(src, /Desktop Code-tab sessions/);
   assert.match(src, /claude plugin marketplace update/);
   assert.match(src, /claude plugin update agent-companion@agent-templates/);
-  assert.match(src, /only partly verified/);
+  assert.match(src, /remove and re-add agent-companion in the desktop plugin manager/);
+  assert.match(src, /not verified/);
 });
 
 test('the path the skill documents resolves: <skill dir>/../../scripts/version.mjs exists and runs', () => {
@@ -58,7 +59,7 @@ test('the path the skill documents resolves: <skill dir>/../../scripts/version.m
 test('the /ac forwarder routes `version` to the skill, with the script as its fallback', () => {
   const shim = read('shims', 'ac', 'SKILL.md');
   assert.ok(frontmatter(shim).description.includes('"/ac version"'));
-  assert.match(shim, /\| `version` \| `agent-companion:version` \| `node "\$AC\/scripts\/version\.mjs" <args>` \|/);
+  assert.match(shim, /\| `version` \| `agent-companion:version` \| `node "\$AC\/scripts\/version\.mjs" <args>` \(reports the marketplace clone as THIS copy/);
 });
 
 test('the setup skill installs that forwarder from shims/ac and lists /ac version', () => {
@@ -80,7 +81,7 @@ test('the scout routine, README and release doc all know about the new pieces', 
   const routine = read('routines', 'calibration-scout-daily.md');
   assert.match(routine, /`plugin_copy_stale`/);
   assert.match(routine, /\| `plugin_copy_stale` \|/, 'a dispatch row for the signal');
-  assert.match(routine, /desktop-plugin-sync/);
+  assert.match(routine, /desktop-plugin-refresh/);
   const readme = read('README.md');
   assert.match(readme, /\| `version` \| `\/ac version` \|/);
   assert.match(readme, /scripts\/version\.mjs/);

@@ -171,6 +171,9 @@ export function marketplaceInfo(claudeDirPath = claudeDir(), marketplace = 'agen
   // directory would answer for whatever repository encloses it.
   const isRepo = existsSync(join(loc, '.git'));
   const commit = isRepo ? gitOut(['rev-parse', 'HEAD'], loc) : null;
+  // A shallow clone (what `claude plugin marketplace add` makes) keeps only the
+  // newest commit, so its history cannot date an older release.
+  const shallow = isRepo && gitOut(['rev-parse', '--is-shallow-repository'], loc) !== 'false';
   let publishedMs = null;
   let publishedFrom = null;
   const relManifest = manifestFile.slice(loc.length + 1).split(sep).join('/');
@@ -187,42 +190,90 @@ export function marketplaceInfo(claudeDirPath = claudeDir(), marketplace = 'agen
     found: true,
     version,
     path: loc,
+    pluginDir,
     manifestRel: relManifest,
     isRepo,
+    shallow,
     commit: commit && /^[0-9a-f]{7,64}$/i.test(commit) ? commit : null,
     publishedAt: isoOrNull(publishedMs),
     publishedFrom,
     lastUpdated: rec && typeof rec.lastUpdated === 'string' ? rec.lastUpdated : null,
-    sourceUrl: rec?.source && typeof rec.source.url === 'string' ? rec.source.url : null,
+    // Credentials a user typed into the source URL are never carried.
+    sourceUrl: rec?.source && typeof rec.source.url === 'string' ? safeUrl(rec.source.url) : null,
   };
 }
 
-// When a copy at `copyVersion` started to lag: the commit date of the OLDEST
-// release in the marketplace clone's history that is newer than it (so a copy
-// stuck on 0.29.22 is measured from 0.29.23, not from the latest). Walks the
-// commits that touched the manifest, newest first, reading the version each
-// one carried; a shallow clone with no older history falls back to `fallbackMs`
-// (the latest release's date). Returns ms or null.
-export function lagStartMs(market, copyVersion, fallbackMs = null) {
-  if (!market?.found || !market.isRepo || !market.manifestRel || !market.version) return fallbackMs;
-  const log = gitOut(['log', '-n', '40', '--format=%H %cI', '--', market.manifestRel], market.path);
-  if (!log) return fallbackMs;
-  let oldestNewer = null;
-  for (const line of log.split(/\r?\n/)) {
-    const [hash, date] = line.trim().split(' ');
-    if (!hash || !date) continue;
-    const raw = gitOut(['show', `${hash}:${market.manifestRel}`], market.path);
-    let v = null;
-    try { v = JSON.parse(raw).version; } catch { /* unreadable at that commit */ }
-    if (!v || compareVersions(v, v) === null) continue;
-    if (compareVersions(v, copyVersion) === 1) {
-      const t = Date.parse(date);
-      if (Number.isFinite(t)) oldestNewer = t;
-    } else {
-      break;
-    }
+// A URL with any userinfo (user:password@) removed.
+export function safeUrl(url) {
+  const s = String(url ?? '');
+  try {
+    const u = new URL(s);
+    u.username = '';
+    u.password = '';
+    return u.toString();
+  } catch {
+    return s.replace(/\/\/[^/@\s]*@/, '//');
   }
-  return oldestNewer ?? fallbackMs;
+}
+
+// Release dates from the plugin's own CHANGELOG ("## 0.29.23 — 2026-10-02"):
+// version -> the END of that UTC day (a day is all the file says, so the lag it
+// implies is a lower bound: "at least this long"). A shallow marketplace clone
+// has this file even though it has no history.
+export function changelogDates(pluginDir) {
+  const out = new Map();
+  let text = '';
+  try { text = readFileSync(join(pluginDir, 'CHANGELOG.md'), 'utf8'); } catch { return out; }
+  const re = /^##\s+v?(\d+\.\d+\.\d+)\s+[—–-]+\s+(\d{4}-\d{2}-\d{2})/gm;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const t = Date.parse(`${m[2]}T23:59:59Z`);
+    if (Number.isFinite(t) && !out.has(m[1])) out.set(m[1], t);
+  }
+  return out;
+}
+
+// When a copy at `copyVersion` started to lag: the publication time of the
+// OLDEST release newer than it (a copy stuck on 0.29.22 lags from 0.29.23, not
+// from the latest). Three sources, best first; each returns { ms, basis }:
+//   release-commit  a clone with full git history: the commit date of the oldest
+//                   release commit newer than the copy (walks the commits that
+//                   touched the manifest, reading the version each carried);
+//   changelog       any clone, shallow or not: the date in the CHANGELOG heading
+//                   of the oldest newer release (end of that UTC day, so a lower
+//                   bound). A shallow clone (what `plugin marketplace add` makes)
+//                   has no older commits, so this is the source that works there;
+//   latest-release  the fallback: when the latest version itself was published.
+// Returns { ms, basis } or null.
+export function lagStart(market, copyVersion, fallbackMs = null) {
+  const fallback = fallbackMs === null ? null : { ms: fallbackMs, basis: 'latest-release' };
+  if (!market?.found || !market.version || !copyVersion) return fallback;
+  if (market.isRepo && !market.shallow && market.manifestRel) {
+    const log = gitOut(['log', '-n', '40', '--format=%H %cI', '--', market.manifestRel], market.path);
+    let oldestNewer = null;
+    for (const line of (log || '').split(/\r?\n/)) {
+      const [hash, date] = line.trim().split(' ');
+      if (!hash || !date) continue;
+      const raw = gitOut(['show', `${hash}:${market.manifestRel}`], market.path);
+      let v = null;
+      try { v = JSON.parse(raw).version; } catch { /* unreadable at that commit */ }
+      if (!v || compareVersions(v, v) === null) continue;
+      if (compareVersions(v, copyVersion) === 1) {
+        const t = Date.parse(date);
+        if (Number.isFinite(t)) oldestNewer = t;
+      } else {
+        break;
+      }
+    }
+    if (oldestNewer !== null) return { ms: oldestNewer, basis: 'release-commit' };
+  }
+  if (market.pluginDir) {
+    let oldest = null;
+    for (const [v, t] of changelogDates(market.pluginDir)) {
+      if (compareVersions(v, copyVersion) === 1 && compareVersions(v, market.version) !== 1 && (oldest === null || t < oldest)) oldest = t;
+    }
+    if (oldest !== null) return { ms: oldest, basis: 'changelog' };
+  }
+  return fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,14 +406,18 @@ export function remoteInfo({
 // ---------------------------------------------------------------------------
 
 const CLI_FIX = 'run `claude plugin marketplace update agent-templates`, then `claude plugin update agent-companion@agent-templates`, then restart the session (or /reload-plugins)';
+const SESSION_FIX = 'this session loaded an older copy than the one now installed: restart the session (or /reload-plugins)';
 // What actually refreshes the desktop copy is only partly known. Established
-// 2026-10-02: the app's RemotePluginManager (a periodic sync, every 20 minutes
-// per the app's own log) fills it from the claude.ai plugin directory, not
-// from the CLI cache, so `claude plugin update` does not touch it; and a
-// remove + re-add in the desktop plugin manager replaced a stuck copy on
-// 2026-09-12. NOT established: how soon claude.ai itself picks up a new
-// release, or whether an app restart alone forces a pull.
-const DESKTOP_FIX = 'the desktop app syncs this copy from claude.ai, not from the CLI cache: press Sync on the agent-templates marketplace in claude.ai, then restart the desktop app; if it is still behind, remove and re-add agent-companion in the desktop plugin manager (what refreshes this copy is not fully verified)';
+// (2026-09-12, 2026-09-24, 2026-10-02): the app's remote-plugin manager (a
+// periodic sync, every 20 minutes per the app's own log) fills the copy from
+// claude.ai, not from the CLI cache, so `claude plugin update` never touches
+// it; a full app restart alone did NOT move a stuck copy (2026-09-12); removing
+// and re-adding the plugin in the desktop plugin manager did, twice. NOT
+// established: how soon claude.ai itself picks up a new release, or whether
+// pressing Sync on the marketplace there makes the app pull it. The order below
+// is therefore: what worked first, the untested idea last and labelled so.
+const DESKTOP_FIX = "the desktop app syncs this copy from claude.ai, not from the CLI cache, so `claude plugin update` does not touch it. What worked before: remove and re-add agent-companion in the DESKTOP plugin manager (not `claude plugin uninstall`, which wipes the plugin options), then /reload-plugins; a full app restart alone did not. Untested: press Sync on the agent-templates marketplace in claude.ai and wait for the app's 20-minute sync. What refreshes this copy is not verified";
+const DESKTOP_FIX_SHORT = 'fix (unverified): remove and re-add agent-companion in the desktop plugin manager, then /reload-plugins';
 const MARKETPLACE_FIX = 'run `claude plugin marketplace update agent-templates`';
 
 const KIND_LABEL = {
@@ -382,7 +437,12 @@ const KIND_FIX = { 'cli-cache': CLI_FIX, 'desktop-rpm': DESKTOP_FIX };
 // The report.
 // ---------------------------------------------------------------------------
 
-const sameDir = (a, b) => !!a && !!b && normalizePath(a) === normalizePath(b);
+// Same directory, by normalised path or by real path (a symlinked cache folder).
+const sameDir = (a, b) => {
+  if (!a || !b) return false;
+  if (normalizePath(a) === normalizePath(b)) return true;
+  try { return normalizePath(realpathSync(a)) === normalizePath(realpathSync(b)); } catch { return false; }
+};
 
 // Gather everything. Options are all seams for tests; the defaults read the
 // machine. `remote` runs the optional network read.
@@ -415,30 +475,52 @@ export function collect({
   consider(market.version, 'marketplace clone');
   consider(remoteInfoResult?.version, 'origin/main');
 
-  // Lag clock: the marketplace version's publication time. Only meaningful
-  // when `latest` came from the marketplace clone.
+  // The lag clock's fallback: when the marketplace's latest version was
+  // published. Only meaningful when `latest` came from the marketplace clone.
   const sinceMs = latestFrom === 'marketplace clone' && market.publishedAt ? Date.parse(market.publishedAt) : null;
 
   const copies = [];
   for (const c of cli) copies.push({ ...c, label: `CLI cache copy (${c.scope} scope)`, sessions: KIND_SESSIONS['cli-cache'], fix: CLI_FIX });
   for (const d of desktop) copies.push({ ...d, label: `desktop copy (${d.id})`, sessions: KIND_SESSIONS['desktop-rpm'], fix: DESKTOP_FIX });
   // THIS copy is one of the above when its path matches; mark it. Otherwise it
-  // is listed on its own (a checkout or --plugin-dir copy is shown, never judged).
+  // is listed on its own: a CLI cache or desktop folder that is not the
+  // installed one is an OLD copy this session loaded before an update, and is
+  // judged (a session that predates `claude plugin update` is exactly the case
+  // where "current" would be a lie); a checkout or --plugin-dir copy is shown,
+  // never judged.
   const match = copies.find((c) => sameDir(c.path, self.path));
   if (match) match.isThis = true;
-  else copies.push({ ...self, label: `this copy (${KIND_LABEL[self.kind] || 'copy'})`, isThis: true, sessions: KIND_SESSIONS[self.kind] || null, fix: KIND_FIX[self.kind] || null, judged: false });
+  else {
+    const judged = self.kind === 'cli-cache' || self.kind === 'desktop-rpm';
+    copies.push({
+      ...self,
+      label: judged ? `this session's copy (${KIND_LABEL[self.kind]})` : `this copy (${KIND_LABEL[self.kind] || 'copy'})`,
+      isThis: true,
+      sessionCopy: judged,
+      judged,
+      sessions: judged ? 'this session' : null,
+      fix: judged ? (self.kind === 'cli-cache' ? SESSION_FIX : DESKTOP_FIX) : null,
+    });
+  }
 
   for (const c of copies) {
     const judge = c.judged !== false && (c.kind === 'cli-cache' || c.kind === 'desktop-rpm');
     c.stale = !!(judge && latest && c.version && versionBelow(c.version, latest));
     if (c.stale && latestFrom === 'marketplace clone') {
-      const start = lagStartMs(market, c.version, sinceMs);
-      if (start !== null) c.behindMs = Math.max(0, now - start);
+      const start = lagStart(market, c.version, sinceMs);
+      if (start) {
+        c.behindMs = Math.max(0, now - start.ms);
+        c.behindSince = isoOrNull(start.ms);
+        c.behindBasis = start.basis;
+      }
     }
   }
 
   const marketBehindRemote = !!(market.found && remoteInfoResult?.ok && remoteInfoResult.version
     && market.version && versionBelow(market.version, remoteInfoResult.version));
+  // An installed copy newer than the marketplace clone: the clone is behind.
+  const copyAhead = !!(market.version && copies.some((c) => c.judged !== false && (c.kind === 'cli-cache' || c.kind === 'desktop-rpm')
+    && c.version && versionBelow(market.version, c.version)));
 
   return {
     schema: 1,
@@ -451,11 +533,11 @@ export function collect({
     latest: latest ? { version: latest, from: latestFrom } : null,
     marketplaceBehindRemote: marketBehindRemote,
     copies,
-    verdict: verdictFor({ copies, latest, latestFrom, market, marketBehindRemote, remoteInfoResult }),
+    verdict: verdictFor({ copies, latest, latestFrom, market, marketBehindRemote, remoteInfoResult, copyAhead }),
   };
 }
 
-export function verdictFor({ copies, latest, latestFrom, market, marketBehindRemote, remoteInfoResult }) {
+export function verdictFor({ copies, latest, market, marketBehindRemote, remoteInfoResult, copyAhead = false }) {
   const stale = copies.filter((c) => c.stale);
   if (!latest) {
     return {
@@ -466,22 +548,33 @@ export function verdictFor({ copies, latest, latestFrom, market, marketBehindRem
         : 'CANNOT JUDGE: no marketplace clone found, so the latest version is unknown (try --remote)',
     };
   }
-  const parts = stale.map((c) => `${c.label} is ${c.version}, latest is ${latest} (${c.sessions ? `${c.sessions} run the older plugin` : 'older'}) - fix: ${c.kind === 'desktop-rpm' ? 'sync the marketplace on claude.ai, then restart the desktop app' : 'run claude plugin update'}`);
+  const clause = (c) => {
+    if (c.kind === 'desktop-rpm') return DESKTOP_FIX_SHORT;
+    return c.sessionCopy ? 'fix: restart the session (or /reload-plugins)' : 'fix: run claude plugin update';
+  };
+  const parts = stale.map((c) => `${c.label} is ${c.version}, latest is ${latest} (${c.sessions ? `${c.sessions} ${c.sessionCopy ? 'runs' : 'run'} the older plugin` : 'older'}) - ${clause(c)}`);
   if (marketBehindRemote) {
     parts.push(`marketplace clone is ${market.version}, origin/main is ${remoteInfoResult.version} - fix: run claude plugin marketplace update agent-templates`);
   }
+  // What the verdict rests on, when that is not the whole story. Kept out of
+  // `line` so the line stays exactly "all copies current" / "STALE: ...".
+  const notes = [];
+  if (!remoteInfoResult) notes.push('latest is the local marketplace clone; origin/main was not checked (add --remote)');
+  if (copyAhead) notes.push('an installed copy is newer than the marketplace clone, so the clone is behind: run claude plugin marketplace update agent-templates');
+  const note = notes.length ? notes.join('; ') : null;
   if (!parts.length) {
-    return { ok: true, stale: [], line: 'all copies current' };
+    return { ok: true, stale: [], line: 'all copies current', ...(note ? { note } : {}) };
   }
-  return { ok: false, stale: stale.map((c) => c.label), line: `STALE: ${parts.join('; ')}` };
+  return { ok: false, stale: stale.map((c) => c.label), line: `STALE: ${parts.join('; ')}`, ...(note ? { note } : {}) };
 }
 
 // The stale CLI/desktop copies that have lagged the marketplace for longer
-// than `graceMs` — the scout signal's set. Needs a lag clock: a stale copy
+// than `graceMs` - the scout signal's set. Needs a lag clock: a stale copy
 // with no known publication time is not returned (the caller cannot say how
-// long it has lagged).
+// long it has lagged). THIS session's own old copy is not an installed copy:
+// that is an old session, which the scout's session_outdated covers.
 export function staleBeyondGrace(report, graceMs = STALE_GRACE_MS) {
-  return report.copies.filter((c) => c.stale && typeof c.behindMs === 'number' && c.behindMs > graceMs);
+  return report.copies.filter((c) => c.stale && !c.sessionCopy && typeof c.behindMs === 'number' && c.behindMs > graceMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -494,10 +587,16 @@ function ago(ms) {
   return h < 48 ? `${h.toFixed(h < 10 ? 1 : 0)} h` : `${Math.round(h / 24)} d`;
 }
 
+const BASIS = {
+  'release-commit': 'by release commit',
+  'latest-release': 'since the latest release',
+};
+
 export function renderText(r) {
   const L = [];
   const flag = (c) => (c.stale ? '  <- STALE' : '');
-  L.push(`THIS copy:      ${r.this.version || '?'}  (${KIND_LABEL[r.this.kind] || r.this.kind})  ${r.this.path}`);
+  const self = r.copies.find((x) => x.isThis);
+  L.push(`THIS copy:      ${r.this.version || '?'}  (${KIND_LABEL[r.this.kind] || r.this.kind})  ${r.this.path}${self ? flag(self) : ''}`);
   if (r.cli.length) {
     for (const c of r.cli) {
       const cp = r.copies.find((x) => x.kind === 'cli-cache' && x.key === c.key && x.path === c.path);
@@ -523,8 +622,12 @@ export function renderText(r) {
   else if (r.remote.version) L.push(`origin/main:    ${r.remote.version}  (via ${r.remote.via})`);
   else L.push(`origin/main:    commit ${r.remote.sha.slice(0, 7)}${r.remote.sameCommitAsMarketplace === true ? ' (same as the marketplace clone)' : r.remote.sameCommitAsMarketplace === false ? ' (differs from the marketplace clone)' : ''}  (via ${r.remote.via}; version not readable)`);
   L.push(`Verdict:        ${r.verdict.line}`);
+  if (r.verdict.note) L.push(`Note:           ${r.verdict.note}`);
   for (const c of r.copies.filter((x) => x.stale)) {
-    L.push(`Fix (${c.kind === 'desktop-rpm' ? 'desktop' : 'CLI'}):    ${c.fix}${typeof c.behindMs === 'number' ? ` [behind for ${ago(c.behindMs)}]` : ''}`);
+    let lag = '';
+    if (c.behindSince && c.behindBasis === 'changelog') lag = ` [a newer release is dated ${c.behindSince.slice(0, 10)} in the CHANGELOG]`;
+    else if (c.behindSince) lag = ` [behind since ${c.behindSince.slice(0, 16).replace('T', ' ')}Z, ${BASIS[c.behindBasis] || c.behindBasis}: ${ago(c.behindMs)}]`;
+    L.push(`Fix (${c.kind === 'desktop-rpm' ? 'desktop' : 'CLI'}):    ${c.fix}${lag}`);
   }
   if (r.marketplaceBehindRemote) L.push(`Fix (marketplace): ${MARKETPLACE_FIX}`);
   return L.join('\n');

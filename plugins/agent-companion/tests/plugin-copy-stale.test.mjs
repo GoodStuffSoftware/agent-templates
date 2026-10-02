@@ -27,12 +27,12 @@ test('a desktop copy two releases behind for more than 6 hours fires, names the 
     const sigs = detect(fx);
     assert.equal(sigs.length, 1, JSON.stringify(sigs));
     const s = sigs[0];
-    assert.equal(s.dispatch, 'desktop-plugin-sync');
+    assert.equal(s.dispatch, 'desktop-plugin-refresh');
     assert.match(s.detail, /desktop copy \(plugin_FIX0\) is 0\.29\.22/);
     assert.match(s.detail, /marketplace has had 0\.29\.24 for 10 h/);
     assert.match(s.detail, /Desktop Code-tab sessions/);
-    assert.match(s.detail, /Sync on the agent-templates marketplace in claude\.ai/);
-    assert.match(s.detail, /restart the desktop app/);
+    assert.match(s.detail, /remove and re-add agent-companion in the DESKTOP plugin manager/);
+    assert.match(s.detail, /Untested: press Sync/);
   } finally { fx.cleanup(); }
 });
 
@@ -54,7 +54,7 @@ test('both a CLI and a desktop copy behind: one signal each', () => {
   try {
     machine(fx.dir, NOW, { cli: '0.29.23', desktop: '0.29.22', marketplace: '0.29.24', publishedMsAgo: 12 * HOUR });
     const sigs = detect(fx);
-    assert.deepEqual(sigs.map((s) => s.dispatch).sort(), ['desktop-plugin-sync', 'plugin-update']);
+    assert.deepEqual(sigs.map((s) => s.dispatch).sort(), ['desktop-plugin-refresh', 'plugin-update']);
   } finally { fx.cleanup(); }
 });
 
