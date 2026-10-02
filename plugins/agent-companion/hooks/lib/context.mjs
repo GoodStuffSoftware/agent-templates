@@ -437,18 +437,21 @@ export function classifyEffort(effort) {
 // changes `retired`.
 export function retirement(alias, now) {
   const spec = (modelTiers().tiers || {})[alias];
-  if (!spec || !spec.retiresAfter) return null;
-  const at = Date.parse(spec.retiresAfter);
-  if (Number.isNaN(at)) return null;
+  // `retired: true` counts on its own: a tier flagged retired with no (or an
+  // unparseable) retiresAfter must still fall back, not be silently ignored.
+  const flagged = !!spec && spec.retired === true;
+  if (!spec || (!spec.retiresAfter && !flagged)) return null;
+  const at = spec.retiresAfter ? Date.parse(spec.retiresAfter) : NaN;
+  if (Number.isNaN(at) && !flagged) return null;
   // Calendar days: past the date from the day AFTER it, whatever the hour.
   const n = clockDate(now);
   const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
-  const daysLeft = Math.round((at - todayUtc) / 86400000);
+  const daysLeft = Number.isNaN(at) ? null : Math.round((at - todayUtc) / 86400000);
   const replacement = spec.replacement && spec.replacement.model ? spec.replacement : null;
   return {
-    alias, retiresAfter: spec.retiresAfter, daysLeft,
-    pastDate: daysLeft < 0,
-    retired: spec.retired === true,
+    alias, retiresAfter: spec.retiresAfter ?? null, daysLeft,
+    pastDate: daysLeft !== null && daysLeft < 0,
+    retired: flagged,
     replacement,
   };
 }
@@ -1068,7 +1071,7 @@ function parityFloors(r, { consequence, writer, now }) {
       return { refusal: `F4: writer model ${wm} is unavailable and has no staged replacement to review on` };
     }
     const to = ret.replacement.model;
-    floorsApplied.push({ floor: 'F4', raised: `model ${model} -> ${to} (${cls.alias} retired after ${ret.retiresAfter}; its staged replacement stands in)` });
+    floorsApplied.push({ floor: 'F4', raised: `model ${model} -> ${to} (${cls.alias} retired${ret.retiresAfter ? ` after ${ret.retiresAfter}` : ''}; its staged replacement stands in)` });
     model = to;
     effort = effortOn(model, effort || ret.replacement.effort || '');
   }

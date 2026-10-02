@@ -1,6 +1,6 @@
 # Model routing table
 
-_Generated from `config/model-tiers.json` v7 (updated 2026-09-28) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
+_Generated from `config/model-tiers.json` v8 (updated 2026-10-02) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
 
 For WHY the table is shaped this way — lowest-sufficient tier, effort as a separate lever, reviewer parity, self-review, the consequence floors, trials and per-user profiles, cost basis, and haiku-as-validator — see [`docs/ROUTING-RATIONALE.md`](./ROUTING-RATIONALE.md), a hand-written companion doc (this file is generated and cannot carry hand-written prose).
 

@@ -156,7 +156,7 @@ function ladderRewriteTarget(sid, rungAgent, cwd, loadedAtMs) {
   return { target: null, def: null, why };
 }
 
-// "explore -> opus/low (agent-companion:ac-opus-low); ..." — the current
+// "explore -> haiku (agent-companion:ac-haiku); ..." — the current
 // routes of a few common task types, read through the same resolver the
 // guard uses (routing profile included), for the deny texts that tell a
 // spawner how to route instead. Read at deny time only, so the advice
@@ -1542,7 +1542,7 @@ try {
       '  - a line of its own in the brief:  TYPE: <task type>\n' +
       `    The guard then sets the routed model${rewritable ? ' and swaps in the ladder rung that pins its effort' : ''}.` +
       (examples ? ` Current routes: ${examples}.` : '') + ' Full list: `node scripts/recommend.mjs --list`.\n' +
-      '  - or spawn a ladder rung that pins both, e.g. subagent_type: "agent-companion:ac-opus-low".\n\n' +
+      '  - or spawn a ladder rung that pins both, e.g. subagent_type: "' + exampleRung + '".\n\n' +
       'Set inherit_guard to "warn" to allow this shape with a note instead.'
     );
   }

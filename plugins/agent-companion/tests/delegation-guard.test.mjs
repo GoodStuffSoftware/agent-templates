@@ -303,17 +303,19 @@ test('the deny names the next step (Agent + a ladder rung + TYPE, backgrounded),
   } finally { h.cleanup(); }
 });
 
-test('the deny example rung is the rung the routing table gives explore (no hard-coded opus/low)', () => {
+test('the deny example rung is the rung the routing table gives subagent-worker (no hard-coded opus/low)', () => {
   const h = harness({ ...BLOCK, CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2' });
   try {
     h.main('Read');
     const reason = h.main('Read').reason;
     const example = /subagent_type: "([^"]+)"/.exec(reason)?.[1];
-    const routed = runScript('scripts/recommend.mjs', ['--type', 'explore', '--json'], { cwd: h.dir });
+    const routed = runScript('scripts/recommend.mjs', ['--type', 'subagent-worker', '--json'], { cwd: h.dir });
     assert.equal(routed.status, 0, routed.stderr);
-    assert.equal(example, routed.json.spawnAgentNamespaced, 'example must be the rung recommend.mjs names for explore');
-    // The base table sends explore to haiku, so the old hard-coded opus/low
-    // rung must not be what the example says.
+    assert.equal(example, routed.json.spawnAgentNamespaced, 'example must be the rung recommend.mjs names for subagent-worker');
+    // The base table sends subagent-worker to sonnet/low, so the old hard-coded
+    // opus/low rung must not be what the example says, and haiku (which
+    // validates, it does not operate) must not be either.
+    assert.notEqual(example, 'agent-companion:ac-haiku');
     assert.notEqual(example, 'agent-companion:ac-opus-low');
     // and each type the message groups sits under its own current rung
     const rungsLine = /Rungs now: (.*?). Other types/s.exec(reason)?.[1] || '';

@@ -57,7 +57,7 @@ const EVENT = eventIdx >= 0 ? argv[eventIdx + 1] : '';
 // fire time, so the advice follows the table.
 const ROUTE_TYPES = ['explore', 'mechanical-edit', 'verify', 'bounded-feature', 'debug-root-cause'];
 // Used only when the routing table cannot be read; the example normally
-// comes from the current route of `explore` (routedRung).
+// comes from the current route of `subagent-worker` (routedRung).
 const FALLBACK_RUNG = 'agent-companion:ac-sonnet-low';
 
 function recommendScript() {
@@ -76,7 +76,9 @@ function rungsByType() {
 }
 
 function instructions({ mode, streak, threshold, tool }) {
-  const example = routedRung('explore')?.type || FALLBACK_RUNG;
+  // subagent-worker, not explore: the calls that trip this guard (Bash, Edit,
+  // Write ...) are execution work, and haiku validates, it does not operate.
+  const example = routedRung('subagent-worker')?.type || FALLBACK_RUNG;
   const rungs = rungsByType();
   const head = mode === 'block'
     ? `Delegation guard (delegation_guard: block): this ${tool} call was NOT run. It is main-thread execution-class ` +

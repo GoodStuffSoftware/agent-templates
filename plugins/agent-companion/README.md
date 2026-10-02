@@ -56,7 +56,7 @@ unexamined defaults, not the model itself.
 `delegation_guard` enforces "the main session delegates" at the tool call rather than in a document. It counts the main thread's execution-class calls (`Bash`, `PowerShell`, `Edit`, `Write`, `NotebookEdit`, `Read`, `Grep`, `Glob`); an `Agent` spawn or a `SendMessage` that actually runs (PostToolUse, so a spawn another guard denied does not count) ends the streak. When a call brings the streak to `delegation_threshold` (default 4, minimum 2) the guard fires and the streak restarts at 0:
 
 - `"warn"` (the shipped default): the guard does not stop the call, and the model receives the instructions as `additionalContext`. The guard decides nothing on the call, so the normal permission prompt still applies.
-- `"block"`: the call is denied with the same instructions. They state the streak and the threshold, and the next step: spawn a ladder rung with the `Agent` tool (`subagent_type: "agent-companion:ac-opus-low"`, or whichever rung the routing table names for the task type, with `run_in_background: true` and `TYPE: <task type>` on its own line in the brief). They warn against a model-less general-purpose, Explore or Plan spawn, which `inherit_guard: block` refuses from a premium lead.
+- `"block"`: the call is denied with the same instructions. They state the streak and the threshold, and the next step: spawn a ladder rung with the `Agent` tool (`subagent_type` set to the rung the routing table names for `subagent-worker`, or whichever rung it names for the task type, with `run_in_background: true` and `TYPE: <task type>` on its own line in the brief). They warn against a model-less general-purpose, Explore or Plan spawn, which `inherit_guard: block` refuses from a premium lead.
 - `"off"` (also spelled `"none"`, `"disabled"`, or the legacy `false`): nothing is counted.
 
 The escape hatch is the restart itself: a lead that genuinely needs one more read on the main thread repeats the denied call, and it runs as call 1 of a new streak. So block is a speed bump every `delegation_threshold` calls, not a wall. Never counted or blocked: any call from inside a subagent, and `Agent`, `SendMessage`, `ToolSearch`, `AskUserQuestion`, `TaskStop`, `TaskOutput` and every `mcp__` tool (an agent bus's messaging and task-board tools included), so a stopped lead can always delegate, message a worker and ask the operator. Every firing increments `fired` in `state/delegation-streak.json`, which makes the [`delegate-reminder`](#delegate-reminder--the-direct-answer-to-my-delegation-rules-stop-being-followed) standing rule due on the next prompt (once per firing), and writes a `denials.jsonl` row (`outcome: "deny"` or `"warn"`).
@@ -653,8 +653,9 @@ whole model generation without anyone noticing.
 Override without waiting for a release by writing a file of the same shape to
 `~/.claude/agent-companion/state/model-tiers.json` (a legacy copy at
 `$CLAUDE_PLUGIN_DATA/model-tiers.json` is still honoured as a fallback, so an
-override written before 0.17.0 keeps working). It merges **by alias**, so
-adding one model needs one entry, not a restatement of the table — a table
+override written before 0.17.0 keeps working). It merges **by alias, then per key within a tier** (one level deep), so
+adding one model needs one entry, and flagging a tier retired needs only
+`{"tiers":{"haiku":{"retired":true}}}` — not a restatement of the table — a table
 you have to retype is a table you will not update:
 
 ```json

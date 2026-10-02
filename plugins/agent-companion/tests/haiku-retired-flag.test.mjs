@@ -67,6 +67,27 @@ test('no fall-back: a haiku writer is reviewed on haiku (not sonnet) after the d
   assert.equal(r.model, 'haiku');
 });
 
+test('retired: true counts even with no retiresAfter (a later release deleting the date must not silently re-route to a retired model)', () => {
+  const haiku = modelTiers().tiers.haiku;
+  const saved = { ...haiku };
+  try {
+    delete haiku.retiresAfter;
+    assert.equal(retirement('haiku', AFTER), null, 'no date and no flag: no retirement record');
+    haiku.retired = true;
+    const r = retirement('haiku', AFTER);
+    assert.equal(r.retired, true);
+    assert.equal(r.retiresAfter, null);
+    assert.equal(r.daysLeft, null);
+    assert.equal(r.pastDate, false);
+    assert.equal(isModelAvailable('haiku', AFTER), false);
+    assert.equal(resolveRoute({ weight: 1, weightExplicit: true, now: AFTER, profile: false }).model, 'sonnet');
+    assert.equal(resolveRoute({ type: 'explore', now: AFTER, profile: false }).model, 'sonnet');
+  } finally {
+    for (const k of Object.keys(haiku)) delete haiku[k];
+    Object.assign(haiku, saved);
+  }
+});
+
 // --- the scout: warnings, never routing --------------------------------------
 
 function detect(fakeNow, override) {

@@ -31,7 +31,7 @@ eval sandbox); use the script for anything that needs `--weight`, `--kind`,
 `--consequence` or `--writer`.
 
 <!-- routing-table:task-types BEGIN (generated from config/model-tiers.json by scripts/routing-table.mjs --sync-skill; do not edit by hand) -->
-Config v7 (updated 2026-09-28). **Premium** = the spawn brief needs a `WARRANT:` line. Fable never appears here: it is a warranted exception, not a route.
+Config v8 (updated 2026-10-02). **Premium** = the spawn brief needs a `WARRANT:` line. Fable never appears here: it is a warranted exception, not a route.
 
 | Task type | Route | Premium | What it is |
 |---|---|---|---|

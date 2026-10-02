@@ -24,6 +24,12 @@ combination, without this file being touched. If a future successor Haiku
 ships, point `tiers.haiku.replacement` at its own rung instead — the switch
 is a data edit to the config, not a change to this file or to the resolver.
 
+`scripts/routing-table.mjs --check-agent-descriptions` regenerates the ladder
+descriptions from the table as the machine sees it, so once the flag is set the
+rung descriptions it expects differ from the committed ones (haiku and
+`ac-sonnet-low` swap their "Currently the default routing for" lists): that is
+expected on the operator's machine, not drift to fix by hand.
+
 Haiku is routed only reads and checks (`explore`, `verify`): it validates, it
 does not operate.
 

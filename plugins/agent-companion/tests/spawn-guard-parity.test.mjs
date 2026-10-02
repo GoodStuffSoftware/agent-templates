@@ -539,7 +539,9 @@ test('(vii) inherit_guard block denies model+effort inherited from an opus lead 
     assert.match(r.reason, /Inherit guard/);
     assert.match(r.reason, /opus\/xhigh/);
     assert.match(r.reason, /TYPE: <task type>/);
-    assert.match(r.reason, /agent-companion:ac-opus-low/);
+    // the example rung is the one the routing gives subagent-worker (sonnet/low), not a hard-coded opus rung
+    assert.match(r.reason, /e.g. subagent_type: "agent-companion:ac-sonnet-low"/);
+    assert.doesNotMatch(r.reason, /agent-companion:ac-opus-low/);
     assert.deepEqual(block.denials(), ['inherit']);
     // Explore names no model either.
     r = block.spawn({ subagent_type: 'Explore', prompt: 'find it' }, { transcript: t });
