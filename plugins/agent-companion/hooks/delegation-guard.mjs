@@ -56,7 +56,9 @@ const EVENT = eventIdx >= 0 ? argv[eventIdx + 1] : '';
 // execution work usually is. Grouped by rung, read from the routing table at
 // fire time, so the advice follows the table.
 const ROUTE_TYPES = ['explore', 'mechanical-edit', 'verify', 'bounded-feature', 'debug-root-cause'];
-const FALLBACK_RUNG = 'agent-companion:ac-opus-low';
+// Used only when the routing table cannot be read; the example normally
+// comes from the current route of `explore` (routedRung).
+const FALLBACK_RUNG = 'agent-companion:ac-sonnet-low';
 
 function recommendScript() {
   try { return join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'recommend.mjs'); } catch { return 'scripts/recommend.mjs'; }

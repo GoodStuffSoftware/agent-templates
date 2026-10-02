@@ -172,7 +172,7 @@ test('a prose "Writer:" line on a review never moves the model: no autofill from
 test('WRITER is read only on a parity-sized TYPE: elsewhere it is ignored in silence, and never routes', () => {
   const h = harness();
   try {
-    let r = h.spawn({ subagent_type: 'agent-companion:ac-opus-low', prompt: 'TYPE: mechanical-edit\nWriter: keep the tone plain\nedit it' });
+    let r = h.spawn({ subagent_type: 'agent-companion:ac-sonnet-low', prompt: 'TYPE: mechanical-edit\nWriter: keep the tone plain\nedit it' });
     assert.equal(r.decision, 'proceed', r.reason);
     assert.doesNotMatch(r.msg, /WRITER/);
     assert.equal(r.row.declared_writer, null);
@@ -453,7 +453,7 @@ test('(v) three general-purpose opus spawns with no TYPE: the third is denied, w
     assert.equal(r.decision, 'deny');
     assert.match(r.reason, /Premium fan-out cap: 2 premium-tier agents/);
     assert.match(r.reason, /TYPE: <task type>/);
-    assert.match(r.reason, /explore -> opus\/low \(agent-companion:ac-opus-low\)/);
+    assert.match(r.reason, /explore -> haiku \(agent-companion:ac-haiku\)/);
     assert.match(r.reason, /debug-root-cause -> opus\/medium/);
     assert.match(r.reason, /agent-companion:ac-opus-medium/);
     assert.match(r.reason, /wait for the in-flight premium agents/);
@@ -596,8 +596,8 @@ test('the missing-model note names the real reason no route set the model', () =
   } finally { off.cleanup(); }
   const noFill = harness({ CLAUDE_PLUGIN_OPTION_FIT_AUTOFILL: 'false' });
   try {
-    const r = noFill.spawn({ subagent_type: 'general-purpose', prompt: 'TYPE: explore\nlook around' });
-    assert.match(r.msg, /the routing table sends this to opus\/low, but fit_autofill is off/);
+    const r = noFill.spawn({ subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature\nlook around' });
+    assert.match(r.msg, /the routing table sends this to opus\/medium, but fit_autofill is off/);
     assert.doesNotMatch(r.msg, /not a (known )?task type|fit_guard/);
   } finally { noFill.cleanup(); }
   const h = harness();
@@ -684,7 +684,7 @@ test('spawn-audit counts reviewer-parity rows apart from weight rows', () => {
   const h = harness();
   try {
     h.spawn({ subagent_type: 'agent-companion:ac-opus-medium', prompt: REVIEW('opus/xhigh') }); // parity, under
-    h.spawn({ subagent_type: 'agent-companion:ac-opus-low', prompt: 'TYPE: explore\nlook' });   // type preset, fit
+    h.spawn({ subagent_type: 'agent-companion:ac-haiku', prompt: 'TYPE: explore\nlook' });   // type preset, fit
     const out = execFileSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'audit.mjs'), '--only', 'spawn-audit', '--json'], {
       windowsHide: true, encoding: 'utf8', cwd: PLUGIN_ROOT, env: { ...process.env, ...h.env }, timeout: 30000,
     });

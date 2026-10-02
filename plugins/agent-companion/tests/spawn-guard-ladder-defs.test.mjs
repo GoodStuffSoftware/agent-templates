@@ -69,11 +69,11 @@ test('agent-companion:ac-haiku with TYPE: novel-design is NOT autofilled to opus
 test('a bare ladder name resolves to the plugin\'s own rung file and is never autofilled', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    const res = guard(dir, 'sess-ns-bare', { subagent_type: 'ac-opus-low', prompt: 'TYPE: novel-design' });
+    const res = guard(dir, 'sess-ns-bare', { subagent_type: 'ac-opus-medium', prompt: 'TYPE: novel-design' });
     assert.equal(updated(res)?.model, undefined);
     const r = rowFor(stateDir, 'sess-ns-bare');
     assert.equal(r.model_definition, 'opus');
-    assert.equal(r.effort_definition, 'low');
+    assert.equal(r.effort_definition, 'medium');
   } finally {
     cleanup();
   }
@@ -102,7 +102,7 @@ test('another plugin\'s <plugin>:<agent> resolves through its installed_plugins.
 test('path-shaped namespaced names resolve to nothing and never break the spawn', () => {
   const { dir, cleanup } = makeFixture();
   try {
-    for (const t of ['agent-companion:../../settings', 'agent-companion:a/b', '..:ac-opus-low']) {
+    for (const t of ['agent-companion:../../settings', 'agent-companion:a/b', '..:ac-opus-medium']) {
       const res = guard(dir, `sess-unsafe-${t.length}`, { subagent_type: t, model: 'sonnet', prompt: 'x' });
       assert.ok(res.json, t);
     }
@@ -117,16 +117,16 @@ test('rewrite path: general-purpose, no model, a ladder agent already started th
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     seedStart(stateDir, 'sess-rewrite', 'agent-companion:ac-sonnet-low');
-    const res = guard(dir, 'sess-rewrite', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
+    const res = guard(dir, 'sess-rewrite', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature' });
     const u = updated(res);
-    assert.equal(u?.subagent_type, 'agent-companion:ac-opus-low');
+    assert.equal(u?.subagent_type, 'agent-companion:ac-opus-medium');
     assert.equal(u?.model, 'opus');
-    assert.match(msgOf(res), /Rewrote subagent_type "general-purpose" -> "agent-companion:ac-opus-low" so effort low is pinned too/);
+    assert.match(msgOf(res), /Rewrote subagent_type "general-purpose" -> "agent-companion:ac-opus-medium" so effort medium is pinned too/);
     assert.doesNotMatch(msgOf(res), /effort not pinned|SPAWNING RULE 1/);
     const r = rowFor(stateDir, 'sess-rewrite');
     assert.equal(r.subagent_type, 'general-purpose');
-    assert.equal(r.subagent_type_rewritten_to, 'agent-companion:ac-opus-low');
-    assert.equal(r.effective_effort, 'low');
+    assert.equal(r.subagent_type_rewritten_to, 'agent-companion:ac-opus-medium');
+    assert.equal(r.effective_effort, 'medium');
   } finally {
     cleanup();
   }
@@ -148,9 +148,9 @@ test('bare rewrite refused: a bare start of another rung and a partial user-leve
   try {
     userAgent(dir, 'ac-sonnet-low');
     seedStart(stateDir, 'sess-bare-partial', 'ac-sonnet-low');
-    const res = guard(dir, 'sess-bare-partial', { prompt: 'TYPE: explore' }); // routes to opus/low
-    assert.equal(updated(res)?.subagent_type, undefined, 'must not rewrite to an unregistered bare ac-opus-low');
-    assert.match(msgOf(res), /only bare ladder names have started in this session, and "ac-opus-low" itself has not started here/);
+    const res = guard(dir, 'sess-bare-partial', { prompt: 'TYPE: bounded-feature' }); // routes to opus/medium
+    assert.equal(updated(res)?.subagent_type, undefined, 'must not rewrite to an unregistered bare ac-opus-medium');
+    assert.match(msgOf(res), /only bare ladder names have started in this session, and "ac-opus-medium" itself has not started here/);
     assert.equal(rowFor(stateDir, 'sess-bare-partial').subagent_type_rewritten_to, null);
   } finally {
     cleanup();
@@ -160,13 +160,13 @@ test('bare rewrite refused: a bare start of another rung and a partial user-leve
 test('bare rewrite allowed only when that exact bare rung has started here and its file is at user or project scope', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    seedStart(stateDir, 'sess-bare-exact', 'ac-opus-low');
+    seedStart(stateDir, 'sess-bare-exact', 'ac-opus-medium');
     // Started, but no user/project file (the plugin's own copy does not register a bare name): refused.
-    const before = guard(dir, 'sess-bare-exact', { prompt: 'TYPE: explore' });
+    const before = guard(dir, 'sess-bare-exact', { prompt: 'TYPE: bounded-feature' });
     assert.equal(updated(before)?.subagent_type, undefined);
-    userAgent(dir, 'ac-opus-low');
-    const res = guard(dir, 'sess-bare-exact', { prompt: 'TYPE: explore' });
-    assert.equal(updated(res)?.subagent_type, 'ac-opus-low');
+    userAgent(dir, 'ac-opus-medium');
+    const res = guard(dir, 'sess-bare-exact', { prompt: 'TYPE: bounded-feature' });
+    assert.equal(updated(res)?.subagent_type, 'ac-opus-medium');
   } finally {
     cleanup();
   }
@@ -175,15 +175,15 @@ test('bare rewrite allowed only when that exact bare rung has started here and i
 test('the namespaced form is preferred: namespaced evidence rewrites to agent-companion:<rung> even with bare evidence present', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    userAgent(dir, 'ac-opus-low');
-    seedStart(stateDir, 'sess-prefer-ns', 'ac-opus-low');
+    userAgent(dir, 'ac-opus-medium');
+    seedStart(stateDir, 'sess-prefer-ns', 'ac-opus-medium');
     seedStart(stateDir, 'sess-prefer-ns', 'agent-companion:ac-sonnet-high');
-    const res = guard(dir, 'sess-prefer-ns', { prompt: 'TYPE: explore' });
-    assert.equal(updated(res)?.subagent_type, 'agent-companion:ac-opus-low');
+    const res = guard(dir, 'sess-prefer-ns', { prompt: 'TYPE: bounded-feature' });
+    assert.equal(updated(res)?.subagent_type, 'agent-companion:ac-opus-medium');
     // R2-9: after a rewrite the row names the rung's own model and effort.
     const r = rowFor(stateDir, 'sess-prefer-ns');
     assert.equal(r.model_definition, 'opus');
-    assert.equal(r.effort_definition, 'low');
+    assert.equal(r.effort_definition, 'medium');
   } finally {
     cleanup();
   }
@@ -202,7 +202,7 @@ test('evidence from before the session last loaded its plugins does not count', 
     writeFileSync(join(stateDir, 'state', 'version-notice-state.json'), JSON.stringify({
       'sess-reloaded': { loadedAt: Date.now() - 3600 * 1000, loadedAtFrom: 'reload', shown: [], at: Date.now() },
     }));
-    const res = guard(dir, 'sess-reloaded', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
+    const res = guard(dir, 'sess-reloaded', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature' });
     assert.equal(updated(res)?.subagent_type, 'general-purpose');
     assert.match(msgOf(res), /no ladder agent has started in this session since it last loaded its plugins/);
     assert.ok(rowFor(stateDir, 'sess-reloaded').loaded_at, 'the row carries the trusted load time');
@@ -238,22 +238,22 @@ test('an ignored rewrite is detected at SubagentStart and turns rewriting off fo
   try {
     seedStart(stateDir, 'sess-ignored', 'agent-companion:ac-sonnet-low');
     seedArmed(stateDir, 'sess-ignored', TEN_MIN);
-    const first = guard(dir, 'sess-ignored', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
-    assert.equal(updated(first)?.subagent_type, 'agent-companion:ac-opus-low');
+    const first = guard(dir, 'sess-ignored', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature' });
+    assert.equal(updated(first)?.subagent_type, 'agent-companion:ac-opus-medium');
     // The harness ran it as general-purpose anyway.
     start(dir, 'sess-ignored', 'general-purpose');
     const last = startsFor(stateDir, 'sess-ignored').pop();
-    assert.equal(last.rewrite_ignored, 'agent-companion:ac-opus-low');
+    assert.equal(last.rewrite_ignored, 'agent-companion:ac-opus-medium');
     // Next spawn: advisory, not another rewrite.
-    const second = guard(dir, 'sess-ignored', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
+    const second = guard(dir, 'sess-ignored', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature' });
     assert.equal(updated(second)?.subagent_type, 'general-purpose');
-    assert.match(msgOf(second), /an earlier rewrite in this session ran as "general-purpose" instead of "agent-companion:ac-opus-low", so the harness did not honour it; rewriting is off for the rest of this session/);
+    assert.match(msgOf(second), /an earlier rewrite in this session ran as "general-purpose" instead of "agent-companion:ac-opus-medium", so the harness did not honour it; rewriting is off for the rest of this session/);
     assert.equal(rowFor(stateDir, 'sess-ignored').subagent_type_rewritten_to, null);
     // Another session is unaffected.
     seedStart(stateDir, 'sess-other-ok', 'agent-companion:ac-sonnet-low');
     seedArmed(stateDir, 'sess-other-ok', TEN_MIN);
-    const other = guard(dir, 'sess-other-ok', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
-    assert.equal(updated(other)?.subagent_type, 'agent-companion:ac-opus-low');
+    const other = guard(dir, 'sess-other-ok', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature' });
+    assert.equal(updated(other)?.subagent_type, 'agent-companion:ac-opus-medium');
   } finally {
     cleanup();
   }
@@ -264,17 +264,17 @@ test('an honoured rewrite, and a plain general-purpose spawn starting first, nev
   try {
     seedStart(stateDir, 'sess-honoured', 'agent-companion:ac-sonnet-low');
     seedArmed(stateDir, 'sess-honoured', TEN_MIN);
-    const a = guard(dir, 'sess-honoured', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
-    assert.equal(updated(a)?.subagent_type, 'agent-companion:ac-opus-low');
+    const a = guard(dir, 'sess-honoured', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature' });
+    assert.equal(updated(a)?.subagent_type, 'agent-companion:ac-opus-medium');
     // A plain general-purpose spawn with an explicit model, made while the rewrite is pending.
     const b = guard(dir, 'sess-honoured', { subagent_type: 'general-purpose', model: 'sonnet', prompt: 'plain work' });
     assert.equal(updated(b)?.subagent_type ?? 'general-purpose', 'general-purpose');
     // Its start arrives first, then the rewritten spawn's, as the rung.
     start(dir, 'sess-honoured', 'general-purpose');
-    start(dir, 'sess-honoured', 'agent-companion:ac-opus-low');
+    start(dir, 'sess-honoured', 'agent-companion:ac-opus-medium');
     assert.ok(startsFor(stateDir, 'sess-honoured').every((r) => !r.rewrite_ignored));
-    const c = guard(dir, 'sess-honoured', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
-    assert.equal(updated(c)?.subagent_type, 'agent-companion:ac-opus-low');
+    const c = guard(dir, 'sess-honoured', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature' });
+    assert.equal(updated(c)?.subagent_type, 'agent-companion:ac-opus-medium');
   } finally {
     cleanup();
   }
@@ -283,7 +283,7 @@ test('an honoured rewrite, and a plain general-purpose spawn starting first, nev
 // Round 4 (R3-2): a rewrite is marked ignored only when the start is
 // positively tied to THAT rewritten spawn.
 const PLAIN_GP = { subagent_type: 'general-purpose', model: 'sonnet', prompt: 'plain work' };
-const AUTOFILL_GP = { subagent_type: 'general-purpose', prompt: 'TYPE: explore' };
+const AUTOFILL_GP = { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature' };
 
 test('a plain spawn made BEFORE the rewrite, in a session not yet armed: its start draws no conclusion', () => {
   const { dir, stateDir, cleanup } = makeFixture();
@@ -292,7 +292,7 @@ test('a plain spawn made BEFORE the rewrite, in a session not yet armed: its sta
     // A: plain general-purpose, before any rewrite, so it was never recorded.
     guard(dir, 'sess-g1', PLAIN_GP);
     // B: rewritten (this arms the session, just now).
-    assert.equal(updated(guard(dir, 'sess-g1', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+    assert.equal(updated(guard(dir, 'sess-g1', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-medium');
     // A's start arrives: it could be B ignored, or A. No conclusion either way.
     start(dir, 'sess-g1', 'general-purpose');
     assert.ok(startsFor(stateDir, 'sess-g1').every((r) => !r.rewrite_ignored));
@@ -304,7 +304,7 @@ test('a plain spawn made BEFORE the rewrite, in a session not yet armed: its sta
     assert.ok(startsFor(stateDir, 'sess-g1').every((r) => !r.rewrite_ignored));
     // So rewriting carries on, and the note never claims the harness ignored it.
     const c = guard(dir, 'sess-g1', AUTOFILL_GP);
-    assert.equal(updated(c)?.subagent_type, 'agent-companion:ac-opus-low');
+    assert.equal(updated(c)?.subagent_type, 'agent-companion:ac-opus-medium');
     assert.doesNotMatch(msgOf(c), /did not honour/);
   } finally {
     cleanup();
@@ -318,19 +318,19 @@ test('a one-message fan-out mixing plain and rewritten spawns: every start match
     seedArmed(stateDir, 'sess-fan', TEN_MIN);
     // One assistant message, four Agent calls: every PreToolUse runs first.
     guard(dir, 'sess-fan', PLAIN_GP);
-    assert.equal(updated(guard(dir, 'sess-fan', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+    assert.equal(updated(guard(dir, 'sess-fan', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-medium');
     guard(dir, 'sess-fan', { subagent_type: 'Explore', model: 'haiku', prompt: 'look around' });
-    assert.equal(updated(guard(dir, 'sess-fan', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+    assert.equal(updated(guard(dir, 'sess-fan', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-medium');
     // Then the starts, in an order unlike the spawn order.
-    start(dir, 'sess-fan', 'agent-companion:ac-opus-low');
+    start(dir, 'sess-fan', 'agent-companion:ac-opus-medium');
     start(dir, 'sess-fan', 'Explore');
     start(dir, 'sess-fan', 'general-purpose');
-    start(dir, 'sess-fan', 'agent-companion:ac-opus-low');
+    start(dir, 'sess-fan', 'agent-companion:ac-opus-medium');
     assert.equal(startsFor(stateDir, 'sess-fan').filter((r) => r.rewrite_ignored).length, 0);
     const st = JSON.parse(readFileSync(join(stateDir, 'state', 'ladder-rewrites.json'), 'utf8'))['sess-fan'];
     assert.equal(st.ignored, null);
     assert.deepEqual(st.pending, []); // each start consumed its own entry
-    assert.equal(updated(guard(dir, 'sess-fan', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+    assert.equal(updated(guard(dir, 'sess-fan', AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-medium');
   } finally {
     cleanup();
   }
@@ -346,11 +346,11 @@ test('the same fan-out where one rewrite really ran as general-purpose: exactly 
     guard(dir, 'sess-fan2', AUTOFILL_GP);
     // Two general-purpose starts (the plain spawn and one ignored rewrite), one rung start.
     start(dir, 'sess-fan2', 'general-purpose');
-    start(dir, 'sess-fan2', 'agent-companion:ac-opus-low');
+    start(dir, 'sess-fan2', 'agent-companion:ac-opus-medium');
     start(dir, 'sess-fan2', 'general-purpose');
     const flagged = startsFor(stateDir, 'sess-fan2').filter((r) => r.rewrite_ignored);
     assert.equal(flagged.length, 1, JSON.stringify(flagged));
-    assert.equal(flagged[0].rewrite_ignored, 'agent-companion:ac-opus-low');
+    assert.equal(flagged[0].rewrite_ignored, 'agent-companion:ac-opus-medium');
     assert.match(msgOf(guard(dir, 'sess-fan2', AUTOFILL_GP)), /did not honour it; rewriting is off/);
   } finally {
     cleanup();
@@ -378,14 +378,14 @@ test('advisory path: no ladder start in this session -> model filled in, subagen
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     // A ladder start in ANOTHER session proves nothing about this one.
-    seedStart(stateDir, 'sess-some-other', 'agent-companion:ac-opus-low');
-    const res = guard(dir, 'sess-advisory', { subagent_type: 'general-purpose', prompt: 'TYPE: explore' });
+    seedStart(stateDir, 'sess-some-other', 'agent-companion:ac-opus-medium');
+    const res = guard(dir, 'sess-advisory', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature' });
     const u = updated(res);
     assert.equal(u?.subagent_type, 'general-purpose');
     assert.equal(u?.model, 'opus');
     const msg = msgOf(res);
     assert.match(msg, /effort not pinned/);
-    assert.match(msg, /Spawn subagent_type "agent-companion:ac-opus-low" to pin opus\/low together/);
+    assert.match(msg, /Spawn subagent_type "agent-companion:ac-opus-medium" to pin opus\/medium together/);
     assert.match(msg, /no ladder agent has started in this session, so the harness has not shown it registered the ladder here/);
     assert.doesNotMatch(msg, /SPAWNING RULE 1/); // the advisory replaces the generic note, not stacked on it
     assert.equal(rowFor(stateDir, 'sess-advisory').subagent_type_rewritten_to, null);
@@ -397,8 +397,8 @@ test('advisory path: no ladder start in this session -> model filled in, subagen
 test('advisory path: a type with its own tools (Explore) is never swapped, even with ladder evidence', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    seedStart(stateDir, 'sess-explore', 'agent-companion:ac-opus-low');
-    const res = guard(dir, 'sess-explore', { subagent_type: 'Explore', prompt: 'TYPE: explore' });
+    seedStart(stateDir, 'sess-explore', 'agent-companion:ac-opus-medium');
+    const res = guard(dir, 'sess-explore', { subagent_type: 'Explore', prompt: 'TYPE: bounded-feature' });
     assert.equal(updated(res)?.subagent_type, 'Explore');
     assert.match(msgOf(res), /"Explore" has its own tools and prompt/);
   } finally {
@@ -409,10 +409,10 @@ test('advisory path: a type with its own tools (Explore) is never swapped, even 
 test('advisory path: fit_autofill_ladder off disables the rewrite', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    seedStart(stateDir, 'sess-opt-off', 'agent-companion:ac-opus-low');
+    seedStart(stateDir, 'sess-opt-off', 'agent-companion:ac-opus-medium');
     const res = runHook('hooks/spawn-guard.mjs', {
       session_id: 'sess-opt-off', agent_type: 'main', cwd: dir,
-      tool_input: { subagent_type: 'general-purpose', prompt: 'TYPE: explore', run_in_background: true, name: 'w' },
+      tool_input: { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature', run_in_background: true, name: 'w' },
     }, { env: { CLAUDE_PLUGIN_OPTION_FIT_AUTOFILL_LADDER: 'false' } });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(updated(res)?.subagent_type, 'general-purpose');
@@ -425,7 +425,7 @@ test('advisory path: fit_autofill_ladder off disables the rewrite', () => {
 test('new_agent_type source: ladder callers (bare and agent-companion:) are known types; another plugin\'s ac-* is not', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    for (const [i, t] of ['agent-companion:ac-opus-high', 'ac-sonnet-low', 'other-plugin:ac-opus-low'].entries()) {
+    for (const [i, t] of ['agent-companion:ac-opus-high', 'ac-sonnet-low', 'other-plugin:ac-opus-medium'].entries()) {
       const res = runHook('hooks/spawn-guard.mjs', {
         session_id: `sess-caller-${i}`, agent_type: t, agent_id: `a${i}`, cwd: dir,
         tool_input: { subagent_type: 'general-purpose', model: 'sonnet', prompt: 'x', run_in_background: true, name: 'w' },
@@ -433,7 +433,7 @@ test('new_agent_type source: ladder callers (bare and agent-companion:) are know
       assert.equal(res.status, 0, res.stderr);
     }
     const seen = readJsonl(join(stateDir, 'telemetry', 'unknown-agent-types.jsonl')).map((r) => r.agent_type);
-    assert.deepEqual(seen, ['other-plugin:ac-opus-low']);
+    assert.deepEqual(seen, ['other-plugin:ac-opus-medium']);
   } finally {
     cleanup();
   }
@@ -466,7 +466,7 @@ test('a continued agent (repeat agent_id) while a rewrite is pending is never an
     ageArming(stateDir, sid, FOUR_MIN);
     // B is rewritten; the lead continues agent-A with SendMessage at the same moment.
     const b = updated(guard(dir, sid, AUTOFILL_GP))?.subagent_type;
-    assert.equal(b, 'agent-companion:ac-opus-low');
+    assert.equal(b, 'agent-companion:ac-opus-medium');
     const before = readFileSync(REWRITES(stateDir), 'utf8');
     startAs(dir, sid, 'general-purpose', 'agent-A');
     assert.equal(readFileSync(REWRITES(stateDir), 'utf8'), before, 'a repeat start writes nothing');
@@ -475,7 +475,7 @@ test('a continued agent (repeat agent_id) while a rewrite is pending is never an
     const st = JSON.parse(readFileSync(REWRITES(stateDir), 'utf8'))[sid];
     assert.equal(st.ignored, null);
     assert.deepEqual(st.pending, []);
-    assert.equal(updated(guard(dir, sid, AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low', 'rewriting carries on');
+    assert.equal(updated(guard(dir, sid, AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-medium', 'rewriting carries on');
   } finally {
     cleanup();
   }
@@ -501,7 +501,7 @@ test('many resumed general-purpose workers around a pending rewrite: none counts
     assert.equal(st.ignored, null);
     assert.equal(st.pending.filter((e) => e.rewrite).length, 2, 'both rewrites still pending: nothing consumed');
     // One rewrite honoured; the other really runs as general-purpose (a NEW agent_id).
-    startAs(dir, sid, 'agent-companion:ac-opus-low', 'agent-R1');
+    startAs(dir, sid, 'agent-companion:ac-opus-medium', 'agent-R1');
     startAs(dir, sid, 'general-purpose', 'agent-R2');
     const flagged = startsFor(stateDir, sid).filter((r) => r.rewrite_ignored);
     assert.deepEqual(flagged.map((r) => r.agent_id), ['agent-R2']);
@@ -509,7 +509,7 @@ test('many resumed general-purpose workers around a pending rewrite: none counts
     startAs(dir, sid, 'general-purpose', 'agent-R2');
     assert.equal(startsFor(stateDir, sid).filter((r) => r.rewrite_ignored).length, 1);
     st = JSON.parse(readFileSync(REWRITES(stateDir), 'utf8'))[sid];
-    assert.equal(st.ignored.wanted, 'agent-companion:ac-opus-low');
+    assert.equal(st.ignored.wanted, 'agent-companion:ac-opus-medium');
   } finally {
     cleanup();
   }
@@ -526,7 +526,7 @@ test('with spawn_telemetry off, an agent started after arming and then continued
     guard(dir, sid, { ...PLAIN_GP, name: 'w1' });
     startAs(dir, sid, 'general-purpose', 'agent-A', env);
     ageArming(stateDir, sid, FOUR_MIN);
-    assert.equal(updated(guard(dir, sid, AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-low');
+    assert.equal(updated(guard(dir, sid, AUTOFILL_GP))?.subagent_type, 'agent-companion:ac-opus-medium');
     startAs(dir, sid, 'general-purpose', 'agent-A', env);
     const st = JSON.parse(readFileSync(REWRITES(stateDir), 'utf8'))[sid];
     assert.equal(st.ignored, null);

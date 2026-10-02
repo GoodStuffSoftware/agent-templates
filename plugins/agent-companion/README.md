@@ -721,8 +721,8 @@ An architect-class writer gets its work reviewed by its own reviewer, spawned
 from inside the writer, instead of handing an unreviewed diff back to the lead
 to review. Which types do this is data: `selfReview` in
 [`config/model-tiers.json`](config/model-tiers.json), next to the task types
-(today `novel-design`, `large-refactor`, `critical-change`,
-`long-autonomous-run`; one fix round; opt-out line `REVIEW: lead`).
+(today `novel-design` and `critical-change`, narrowed on 2026-10-02 from the
+four architect-class types; one fix round; opt-out line `REVIEW: lead`).
 
 **Where the protocol lives.** It is generated from that config into the body
 of every ladder rung that is currently the default for a listed type (today

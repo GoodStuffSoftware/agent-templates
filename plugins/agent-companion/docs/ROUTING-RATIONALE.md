@@ -77,8 +77,9 @@ own warrant rather than inheriting the writer's.
 ## Self-review: an architect-class writer spawns its own parity reviewer
 
 Parity says how big the reviewer is. Self-review says who spawns it. For the
-architect-class types listed in `selfReview` (novel-design, large-refactor,
-critical-change, long-autonomous-run), the writer commits and spawns one
+architect-class types listed in `selfReview` (novel-design and
+critical-change since 2026-10-02; large-refactor and long-autonomous-run were
+listed until then), the writer commits and spawns one
 foreground reviewer on its own rung, runs one fix round, and returns the
 reviewer's verdict line verbatim with the review path, the post-fix sha and
 any findings it disputes. The lead is out of the first review pass, not out
@@ -232,10 +233,8 @@ rather than three days; every other trial row still reviews on 2026-09-30:
 
 - *Opus low is a capability choice, not a price one.* Synthetic tasks had put
   Opus 5.5 low at 0.75-0.9x Sonnet 5's cost; real-world tasks measured
-  1.05-1.53x Sonnet 5 medium at API prices (median 1.28x). The rows that stay
-  on opus/low (`explore`, `mechanical-edit`, `subagent-worker`, `verify`,
-  `operate`) stay there for capability — Artificial Analysis Intelligence
-  Index 42 against 28 for Sonnet 5 medium — not because they are cheaper.
+  1.05-1.53x Sonnet 5 medium at API prices (median 1.28x). (Superseded for the
+  five simple types by the 2026-10-02 correction below.)
 - *`bounded-feature` and `debug-root-cause` move to opus/medium.* Low to
   medium is the largest cheap capability step on Artificial Analysis (+9
   index points; Terminal-Bench 0.31 to 0.53), and on the hard architecture
@@ -243,7 +242,8 @@ rather than three days; every other trial row still reviews on 2026-09-30:
   At about $1.29 per opus/low bounded-feature spawn in live use, the move
   costs about $1 more per spawn; debug-root-cause had no opus/low spawns in
   the study, so its cost change was not measured live.
-- *`large-refactor` and `novel-design` move to opus/xhigh.* On the
+- *`large-refactor` and `novel-design` move to opus/xhigh.* (`large-refactor`
+  moved on to opus/high on 2026-10-02, see the correction below.) On the
   subtle-rule architecture task only xhigh passed 4/4 (high 2/3, medium 2/3,
   low 2/4) and was also perfect on the design judge. In live use, reviews at
   xhigh were clean 26/26 against 18/21 at high (suggestive, p≈0.08), and
@@ -260,6 +260,38 @@ enforces this at spawn time yet (the spawn guard checks only the
 critical-change floor, since a brief names no writer); that is a follow-up.
 Live xhigh reviews cost in line with pre-trial xhigh reviews (about 1.25x,
 a thin sample); what grew was the number of reviews.
+
+**The 2026-10-02 correction (trial v4).** The 2026-09-27 amendment kept
+`explore`, `mechanical-edit`, `subagent-worker`, `verify` and `operate` on
+opus/low on the premise that opus/low costs about the same as Sonnet on the
+plan. That premise was wrong. Cache reads cost the same on both models, so
+opus/low runs about 1.2-1.55x Sonnet 5 *medium*, and the gap against
+sonnet/low and haiku is wider. These five types now route to the cheapest
+tier that does not cause rework, as a new trial (`trialVersion: 4`, since
+2026-10-02, review by 2026-10-16):
+
+- `explore` and `verify` go to haiku. They only read or check and change
+  nothing, so a wrong answer is caught by the next step, not shipped.
+  Haiku validates; it does not operate, so it is limited to these two.
+- `mechanical-edit`, `operate` and `subagent-worker` go to sonnet/low. They
+  change things, and Sonnet 5 passed every synthetic task at every effort.
+- `large-refactor` and `long-autonomous-run` go from opus/xhigh to opus/high
+  (same trial window). Last week's data: xhigh cost 17.7 plan units per spawn
+  with 21% re-spawned, against high at 16.6 with 10% re-spawned.
+  `novel-design` and `critical-change` stay on xhigh (critical-change on xhigh:
+  n=4, no re-spawns).
+- Self-review is narrowed to `novel-design` and `critical-change`: a reviewer
+  cost 9.85 plan units per spawn on xhigh against 3.78 on opus/medium, 172
+  units in the week, so the other two types go back to a lead-routed review.
+- Every other type is unchanged, in particular `bounded-feature`,
+  `integration` and `debug-root-cause`, whose case is capability.
+
+**Haiku retirement is flag-driven.** Anthropic says Haiku 4.5 retires "no
+sooner than" 2026-10-15, so it may stay available longer. `tiers.haiku.retiresAfter`
+therefore drives warnings only (the scout's `model_retirement_approaching`
+signal, daily once the date has passed). The routing table falls back to the
+staged replacement (sonnet/low) only when `tiers.haiku.retired` is `true`,
+which the operator sets after confirming that haiku no longer resolves.
 
 ## Cost basis: dollars, not a price-weighted token count
 

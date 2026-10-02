@@ -1,6 +1,6 @@
 ---
 name: ac-opus-xhigh
-description: "Rung 9/10: deep architecture, novel reasoning, migrations, large-scale refactors. Currently the default routing for: large-refactor, novel-design, critical-change, long-autonomous-run."
+description: "Rung 9/10: deep architecture, novel reasoning, migrations, large-scale refactors. Currently the default routing for: novel-design, critical-change."
 model: opus
 effort: xhigh
 experimental:
@@ -27,7 +27,7 @@ the caller already picked this rung.
 <!-- self-review protocol BEGIN: generated from config/model-tiers.json `selfReview` by scripts/routing-table.mjs --sync-agent-descriptions; do not edit by hand -->
 ## Self-review before you return
 
-This applies only when your brief's `TYPE:` line names one of `novel-design`, `large-refactor`, `critical-change`, `long-autonomous-run`, and the brief has no `REVIEW: lead` line. Otherwise skip this section: the lead reviews your work. If your TYPE is `code-review`, you are the reviewer: never spawn a reviewer (the spawn guard denies it).
+This applies only when your brief's `TYPE:` line names one of `novel-design`, `critical-change`, and the brief has no `REVIEW: lead` line. Otherwise skip this section: the lead reviews your work. If your TYPE is `code-review`, you are the reviewer: never spawn a reviewer (the spawn guard denies it).
 
 When it applies, before you return:
 

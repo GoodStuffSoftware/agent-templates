@@ -198,10 +198,13 @@ for (const [name, type, r0, why] of IGNORED) {
   });
 }
 
-test('F4 by date: a haiku row is hard-stale once haiku retires, and applies before', () => {
+test('F4 by flag: a haiku row is hard-stale once haiku is flagged retired, and applies before', () => {
   writeProfile(profile({ explore: row('haiku', null) }));
   assert.equal(ctx.resolveRoute({ type: 'explore', now: BEFORE }).layer, 'profile');
-  const after = ctx.resolveRoute({ type: 'explore', now: AFTER });
+  const haiku = ctx.modelTiers().tiers.haiku;
+  haiku.retired = true; // the operator's flag; the date alone does not fall back
+  let after;
+  try { after = ctx.resolveRoute({ type: 'explore', now: AFTER }); } finally { haiku.retired = false; }
   assert.notEqual(after.layer, 'profile');
   assert.match(after.skipped.find((x) => x.layer === 'profile').reason, /^hard-stale \(F4\): haiku is unavailable or retired/);
 });

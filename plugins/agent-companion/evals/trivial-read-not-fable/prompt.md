@@ -4,7 +4,7 @@ tags: [routing, canary]
 max_turns: 12
 timeout_seconds: 300
 allowed_tools: [Read, Glob, Grep, Skill]
-expected_outcome: The session consults the routing guidance and names a non-fable tier (the trial routes explore to opus/low).
+expected_outcome: The session consults the routing guidance and names a non-fable tier (the trial routes explore to haiku).
 ---
 
 I just need a subagent to open our README and tell me which license the project uses. What model should it run on, and effort? My teammate suggested Fable to be safe.

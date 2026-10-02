@@ -65,11 +65,11 @@ test('every shipped architecture-class task type is flagged, and none resolves t
   }
 });
 
-test('integration sits at opus/medium (0.29.2 "effort" decision); large-refactor and novel-design at opus/xhigh (2026-09-27 amendment); critical-change stays opus/xhigh (F1)', async () => {
+test('integration sits at opus/medium (0.29.2 "effort" decision); large-refactor at opus/high (2026-10-02 trial v4) and novel-design at opus/xhigh; critical-change stays opus/xhigh (F1)', async () => {
   const ctx = await stage(SHIPPED_CONFIG);
   const want = {
     integration: 'opus/medium',
-    'large-refactor': 'opus/xhigh',
+    'large-refactor': 'opus/high',
     'novel-design': 'opus/xhigh',
     'critical-change': 'opus/xhigh',
   };

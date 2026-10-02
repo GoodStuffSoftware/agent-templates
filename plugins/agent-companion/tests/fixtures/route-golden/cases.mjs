@@ -22,6 +22,16 @@
 
 export const CLOCKS = ['2026-09-24T12:00:00.000Z', '2026-10-20T12:00:00.000Z'];
 
+// The clocks for the LIVE comparisons against the vendored reference. The
+// reference retires haiku BY DATE (its only mechanism); the current resolver
+// retires it only when the operator sets tiers.haiku.retired (0.29.23), so a
+// clock past tiers.haiku.retiresAfter would be a permitted difference of its
+// own. The live gate therefore runs on two clocks BEFORE that date, where the
+// two agree; the flagged fall-back is swept by tests/haiku-retirement-no-spawn
+// .test.mjs and tests/haiku-retired-flag.test.mjs. CLOCKS stays as is: it is
+// the frozen record's pair (expected.json), which only the reference answers.
+export const LIVE_CLOCKS = ['2026-09-24T12:00:00.000Z', '2026-10-01T12:00:00.000Z'];
+
 const NONE = '-';
 
 // `extraWeights` adds explicit weights to the cross (the live gate adds a

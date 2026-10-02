@@ -51,7 +51,7 @@ import {
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, classifyEffort, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
-  claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent,
+  claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent, routedRung,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
@@ -167,7 +167,8 @@ function commonTypeRoutes(names = ['explore', 'bounded-feature', 'debug-root-cau
     try {
       const r = resolveRoute({ type: n });
       if (!r.model) continue;
-      const rung = r.effort ? rungFor(r.model, r.effort) : null;
+      // haiku has no effort: its rung is the one with none (rungFor wants null)
+      const rung = rungFor(r.model, r.effort || null);
       out.push(`${n} -> ${r.model}${r.effort ? '/' + r.effort : ''}${rung ? ` (agent-companion:${rung.agent})` : ''}`);
     } catch { /* skip this type */ }
   }
@@ -1530,6 +1531,7 @@ try {
       (declaredType ? `TYPE ${declaredType} is unknown and no WEIGHT` : 'no TYPE or WEIGHT'));
     const rewritable = !input.subagent_type || input.subagent_type === 'general-purpose';
     const examples = commonTypeRoutes();
+    const exampleRung = routedRung('subagent-worker')?.type || 'agent-companion:ac-sonnet-low';
     deny(
       `Inherit guard: this spawn names no model, and its definition${input.subagent_type ? ` ("${input.subagent_type}")` : ''} ` +
       `states neither model nor effort, so it would run on the lead's own ${leadLabel || callerAlias} — model AND effort ` +

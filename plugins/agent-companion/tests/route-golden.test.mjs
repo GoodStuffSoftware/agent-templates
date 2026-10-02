@@ -31,7 +31,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PLUGIN_ROOT, makeFixture } from './helpers.mjs';
-import { buildCases, CLOCKS } from './fixtures/route-golden/cases.mjs';
+import { buildCases, CLOCKS, LIVE_CLOCKS } from './fixtures/route-golden/cases.mjs';
 import {
   REFERENCE_DIR, REFERENCE_FILES, sha256Text, stageResolver, atClock, compareLive, floorsFor, WAIVED_TRIAL_TYPES,
 } from './fixtures/route-golden/live-gate.mjs';
@@ -129,12 +129,12 @@ function reachableClasses(c) {
   return { restated: trials.length > 0, floorAfterTrial, waivedTrial };
 }
 
-test(`LIVE: resolveRoute matches the frozen reference on the current config, all ${cases.length} cases x ${CLOCKS.length} clocks, differing only by the permitted classes`, async (t) => {
+test(`LIVE: resolveRoute matches the frozen reference on the current config, all ${cases.length} cases x ${LIVE_CLOCKS.length} clocks, differing only by the permitted classes`, async (t) => {
   const ref = await stage(REF_CONTEXT, CUR_CONFIG);
-  const { mismatches, counts } = compareLive({ cur: ctx, ref, cfg, cases, clocks: CLOCKS });
+  const { mismatches, counts } = compareLive({ cur: ctx, ref, cfg, cases, clocks: LIVE_CLOCKS });
   t.diagnostic(`classes: ${JSON.stringify(counts)}`);
   assert.deepEqual(mismatches.slice(0, 20), [], `${mismatches.length} mismatches — a resolver regression, or a shipped trial a floor refuses; report it`);
-  assert.equal(counts.cases, cases.length * CLOCKS.length);
+  assert.equal(counts.cases, cases.length * LIVE_CLOCKS.length);
   // Every class the table makes reachable must be exercised; an empty one
   // would mean the gate stopped reaching it, not that the difference went
   // away. A table with no trials (every trial ended) has neither class.
@@ -152,7 +152,7 @@ test(`LIVE: resolveRoute matches the frozen reference on the current config, all
 async function gateOn(contextSource, configText) {
   const cfgV = JSON.parse(configText);
   const [cur, ref] = [await stage(contextSource, configText), await stage(REF_CONTEXT, configText)];
-  return compareLive({ cur, ref, cfg: cur.modelTiers(), cases: casesFor(cfgV), clocks: CLOCKS });
+  return compareLive({ cur, ref, cfg: cur.modelTiers(), cases: casesFor(cfgV), clocks: LIVE_CLOCKS });
 }
 // The self-tests below need trials to edit and to regress. When the shipped
 // table has none (every trial ended), synthetic ones are added to a copy for
@@ -199,12 +199,13 @@ for (const [name, fn] of Object.entries(TRIAL_EDITS)) {
 // [anchor in hooks/lib/context.mjs, replacement]. Each anchor must exist
 // exactly once, so a refactor that moves one fails loudly here instead of
 // silently mutating nothing.
+// (The old "retirement date ignores the pinned clock" regression is gone: the date no longer
+// retires anything, so no clock can show it. tests/haiku-retired-flag.test.mjs pins that instead.)
 const REGRESSIONS = {
   'a departure no longer skips the trial': ['  if (ov) {\n    if (!asIs) {', '  if (ov) {\n    if (false) {'],
   'floors no longer run after the winning layer': ['  if (cons.effortFloor) {\n    const raised = raiseEffort(', '  if (false) {\n    const raised = raiseEffort('],
   "the grid ignores the kind's effort delta": ['const delta = (cfg.taskKinds || {})[kind]?.effortDelta ?? 0;', 'const delta = 0;'],
   'a preset-equal weight counts as a departure again': ["note('weight', weightExplicit, typeKnown && weight === t.weight);", "note('weight', weightExplicit, false);"],
-  'the retirement date ignores the pinned clock': ['const n = clockDate(now);', 'const n = new Date(Date.parse(\'2026-09-24T12:00:00Z\'));'],
   'a weight with no routing row is a grid "winner" again': ['  if (!won && !grid.model) {', '  if (false) {'],
   'the trial answers with the grid model':['          model: ov.model,\n', '          model: grid.model,\n'],
 };
@@ -226,8 +227,12 @@ test('the golden matrix exercises every layer outcome it should', () => {
   }
   const outcomes = trialTypes(cfg).length ? ['trial', 'grid', null, 'trial-skipped'] : ['grid', null];
   for (const want of outcomes) assert.ok(seen.has(want), `no case reached ${want}`);
-  // And the retirement clock really changes something (weight 1-2 grid rows).
-  const a = ctx.resolveRoute({ weight: 1, weightExplicit: true, now: CLOCKS[0] });
-  const b = ctx.resolveRoute({ weight: 1, weightExplicit: true, now: CLOCKS[1] });
-  assert.notEqual(`${a.model}/${a.effort}`, `${b.model}/${b.effort}`, 'the post-retirement clock no longer exercises the staged replacement');
+  // And the retirement FLAG really changes something (weight 1-2 grid rows):
+  // the date alone no longer does (tests/haiku-retired-flag.test.mjs).
+  const haiku = ctx.modelTiers().tiers.haiku;
+  const a = ctx.resolveRoute({ weight: 1, weightExplicit: true, now: CLOCKS[1] });
+  haiku.retired = true;
+  let b;
+  try { b = ctx.resolveRoute({ weight: 1, weightExplicit: true, now: CLOCKS[1] }); } finally { haiku.retired = false; }
+  assert.notEqual(`${a.model}/${a.effort}`, `${b.model}/${b.effort}`, 'the retired flag no longer exercises the staged replacement');
 });

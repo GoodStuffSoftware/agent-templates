@@ -148,7 +148,8 @@ function spliceSkillBlock(text, block = taskTypeBlock()) {
 // which task types currently default here, computed fresh from
 // resolveRoute(). A rung whose model carries a `retiresAfter` gets its
 // retirement notice generated from that date and the tier's `replacement`
-// as well, so neither can go stale as a hand-typed copy.
+// as well, so neither can go stale as a hand-typed copy. (The date drives
+// warnings; the fall-back to the replacement needs `retired: true`.)
 //
 // A rung's optional `cacheTtl` config field ("1h", or omitted for the
 // subagent 5m default) is covered the same way, into the SAME frontmatter
@@ -274,7 +275,7 @@ function retirementNotice(rung, total) {
     : 'no staged replacement';
   return {
     prefix: `RETIRING (no sooner than ${tier.retiresAfter}): rung ${rung.rung}/${total}`,
-    tail: `After that date the routing table stops naming this rung on its own (config/model-tiers.json tiers.${rung.model}.retiresAfter/replacement) and falls back to ${to}.`,
+    tail: `The date only drives warnings: once the operator sets tiers.${rung.model}.retired to true (after confirming the alias no longer resolves), the routing table stops naming this rung and falls back to ${to} (config/model-tiers.json tiers.${rung.model}.retired/replacement).`,
   };
 }
 
@@ -757,7 +758,7 @@ for (const [alias, t] of tiers) {
   if (t.retiresAfter) {
     L.push(`> ⚠ \`${alias}\` retires no sooner than **${t.retiresAfter}**. ${t.retirementNote || ''}`);
     if (t.replacement && t.replacement.model) {
-      L.push('> Staged replacement: **' + t.replacement.model + (t.replacement.effort ? '/' + t.replacement.effort : '') + '** — routing rows on `' + alias + '` switch to it automatically from ' + t.retiresAfter + '. ' + (t.replacement.note || ''));
+      L.push('> Staged replacement: **' + t.replacement.model + (t.replacement.effort ? '/' + t.replacement.effort : '') + '** — routing rows on `' + alias + '` switch to it only once the operator sets `tiers.' + alias + '.retired` to `true` (after confirming the alias no longer resolves); the date drives warnings only. ' + (t.replacement.note || ''));
     }
     L.push(``);
   }

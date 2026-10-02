@@ -15,13 +15,23 @@ const fx = makeFixture();
 test.after(() => fx.cleanup());
 const ctx = await import('../hooks/lib/context.mjs');
 const BEFORE = '2026-09-24T12:00:00Z';
-const AFTER = '2026-10-20T12:00:00Z'; // haiku's retiresAfter has passed
+const AFTER = '2026-10-20T12:00:00Z';
+// haiku's retiresAfter has passed AND the operator has flagged haiku retired:
+// the date alone no longer falls back (tests/haiku-retired-flag.test.mjs), so
+// a clock at AFTER sets tiers.haiku.retired on the loaded table for the call.
 const label = (r) => `${r.model}${r.effort ? '/' + r.effort : ''}`;
 const writerOf = (s) => { const [model, effort] = s.split('/'); return { model, effort: effort || '' }; };
-const review = (writer, consequence, now = BEFORE) => ctx.resolveRoute({
-  type: 'code-review', writer: writerOf(writer), now,
-  ...(consequence ? { consequence, consequenceExplicit: true } : {}),
-});
+const review = (writer, consequence, now = BEFORE) => {
+  const haiku = ctx.modelTiers().tiers.haiku;
+  const was = haiku.retired;
+  haiku.retired = now === AFTER;
+  try {
+    return ctx.resolveRoute({
+      type: 'code-review', writer: writerOf(writer), now,
+      ...(consequence ? { consequence, consequenceExplicit: true } : {}),
+    });
+  } finally { haiku.retired = was; }
+};
 
 // [writer, consequence, expected reviewer]
 const MATRIX = [

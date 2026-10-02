@@ -29,8 +29,8 @@ $AC = (Get-ChildItem "$env:USERPROFILE/.claude/plugins/marketplaces/*/plugins/ag
 ## Step 1 — state what is actually running
 
 - **model** — from your own system prompt ("You are powered by the model
-  named …"). Give the alias: `fable`, `opus`, `sonnet` (`haiku` retires
-  2026-10-15).
+  named …"). Give the alias: `fable`, `opus`, `sonnet` (`haiku` retires no
+  sooner than 2026-10-15).
 - **effort** — always pass it. The verdict compares actual (model, effort)
   against the routed (model, effort) for the task type, and a right model at
   the wrong effort is still OVER or UNDER. A spawn with no effort set runs at

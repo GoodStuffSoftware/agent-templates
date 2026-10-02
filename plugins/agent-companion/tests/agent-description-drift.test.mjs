@@ -2,7 +2,7 @@
 // from config/model-tiers.json and the current trial table — a hand-written
 // claim like ac-opus-low's old "rare; prefer sonnet unless..." can go stale
 // the moment a routing trial changes what actually routes there (it did:
-// trial v2 makes opus/low the default for explore/verify/operate/etc, which
+// trial v2 made opus/low the default for explore/verify/operate/etc, which
 // directly contradicted "rare"). scripts/routing-table.mjs
 // --check-agent-descriptions / --sync-agent-descriptions is the generator;
 // these tests exercise it against a FIXTURE agents/ dir
@@ -34,7 +34,7 @@ test('--check-agent-descriptions fails and names the file when a description has
   const { dir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    const file = join(agentsDir, 'ac-opus-low.md');
+    const file = join(agentsDir, 'ac-sonnet-low.md');
     let text = readFileSync(file, 'utf8');
     text = text.replace(/^description:.*$/m, 'description: "Rung 6/10: rare; prefer sonnet unless the task genuinely needs opus even for a small step."');
     writeFileSync(file, text);
@@ -43,7 +43,7 @@ test('--check-agent-descriptions fails and names the file when a description has
       env: { AGENT_COMPANION_AGENTS_DIR_OVERRIDE: agentsDir },
     });
     assert.equal(res.status, 1);
-    assert.match(res.stderr, /ac-opus-low/);
+    assert.match(res.stderr, /ac-sonnet-low/);
     assert.match(res.stderr, /Currently the default routing for:/); // the CORRECT, non-stale expected text
     assert.match(res.stderr, /rare; prefer sonnet/); // the stale actual text, named
   } finally {
@@ -55,7 +55,7 @@ test('--sync-agent-descriptions rewrites a drifted description in place, preserv
   const { dir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    const file = join(agentsDir, 'ac-opus-low.md');
+    const file = join(agentsDir, 'ac-sonnet-low.md');
     const before = readFileSync(file, 'utf8');
     const bodyBefore = before.split(/^---\r?\n[\s\S]*?\r?\n---/m)[1];
     writeFileSync(file, before.replace(/^description:.*$/m, 'description: "stale text"'));
@@ -64,7 +64,7 @@ test('--sync-agent-descriptions rewrites a drifted description in place, preserv
       env: { AGENT_COMPANION_AGENTS_DIR_OVERRIDE: agentsDir },
     });
     assert.equal(syncRes.status, 0, syncRes.stderr);
-    assert.match(syncRes.stdout, /ac-opus-low\.md/);
+    assert.match(syncRes.stdout, /ac-sonnet-low\.md/);
 
     const after = readFileSync(file, 'utf8');
     assert.doesNotMatch(after, /stale text/);
@@ -238,13 +238,13 @@ test('mutation: a FALSE "default for <type>" claim in a config role fails the ch
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    // verify routes to opus/low, not sonnet/low.
+    // verify routes to haiku, not sonnet/low.
     writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-sonnet-low' ? { ...r, role: `${r.role}; default for verify` } : r)));
     assert.equal(sync(agentsDir).status, 0);
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
     assert.match(res.stderr, /ac-sonnet-low \[false-claim\]/);
-    assert.match(res.stderr, /"verify" currently routes to opus\/low, not this rung/);
+    assert.match(res.stderr, /"verify" currently routes to haiku, not this rung/);
   } finally {
     cleanup();
   }
@@ -254,7 +254,7 @@ test('a TRUE "default for <type>" claim in a config role passes once synced', ()
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-opus-low' ? { ...r, role: `${r.role}; default for verify` } : r)));
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-haiku' ? { ...r, role: `${r.role}; default for verify` } : r)));
     assert.equal(sync(agentsDir).status, 0);
     const res = check(agentsDir);
     assert.equal(res.status, 0, res.stdout + res.stderr);

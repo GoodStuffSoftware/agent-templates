@@ -28,11 +28,13 @@
         "thinking": "extended (manual budget_tokens, not adaptive)"
       },
       "retiresAfter": "2026-10-15",
-      "retirementNote": "Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. No successor Haiku has been announced (checked live 2026-09-23). Decide the replacement BEFORE the alias resolves to nothing — the scout raises model_retirement_approaching inside the warning window (now 30 days, not just fixed milestones — see scripts/detect.mjs).",
+      "retired": false,
+      "retiredNote": "The date above drives WARNINGS only. Set retired to true (a one-key override in the state dir: {\"tiers\":{\"haiku\":{\"retired\":true}}}) only after confirming haiku no longer resolves; until then nothing falls back to the replacement.",
+      "retirementNote": "Anthropic: Haiku 4.5 retires no sooner than 2026-10-15. The entire weight 1-2 tier rides on this alias. No successor Haiku has been announced (checked live 2026-09-23). The date drives warnings only: the scout raises model_retirement_approaching inside the warning window (30 days, not just fixed milestones, and daily after the date until the flag is set — see scripts/detect.mjs). The fall-back to the replacement happens only when retired is true; set it after confirming haiku no longer resolves.",
       "replacement": {
         "model": "sonnet",
         "effort": "low",
-        "note": "Pre-staged 2026-09-04, re-verified 2026-09-23: still no successor Haiku announced. Sonnet 5 at low effort is the cheapest available tier that takes weight 1-2 work, at roughly 2x Haiku per token (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5). When a new Haiku ships, add its tier and point this at it - the switch is data, not code. This IS the weight 1-2 fallback if haiku disappears before a successor ships."
+        "note": "Pre-staged 2026-09-04, re-verified 2026-09-23: still no successor Haiku announced. Sonnet 5 at low effort is the cheapest available tier that takes weight 1-2 work, at roughly 2x Haiku per token (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5). When a new Haiku ships, add its tier and point this at it - the switch is data, not code. This IS the weight 1-2 fallback once haiku is flagged retired (retired: true) and no successor has shipped."
       }
     },
     "sonnet": {
@@ -373,13 +375,13 @@
       "summary": "read-only search: where is X, what touches Y, does Z exist",
       "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven.",
       "override": {
-        "model": "opus",
-        "effort": "low",
-        "trialVersion": 2,
-        "reason": "ROUTING TRIAL v2 (operator-endorsed, supersedes v1's sonnet/low): The case for Opus 5.5 low here is CAPABILITY, not price (cost claim corrected 2026-09-27). Synthetic benchmark tasks put Opus 5.5 low at 0.75-0.9x Sonnet 5's cost, but real-world tasks measured 1.05-1.53x Sonnet 5 medium at API prices (median 1.28x combined), so in real use it costs more than Sonnet, not less. What it buys is capability: Artificial Analysis Intelligence Index 42 for Opus 5.5 low vs 28 for Sonnet 5 medium, and on the benchmark tasks it was faster, took roughly half the turns, and was equally correct. This plan has no separate Opus weekly window (get_usage shows only 5-hour, weekly all-models, and weekly Fable), so there is no separate-bucket reason to prefer Sonnet here. v1 finding (Sonnet 5 passed every synthetic task at every effort, Haiku cost roughly 2x Sonnet per task and was the only model to fail) still explains why this is not haiku.",
-        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); Artificial Analysis Intelligence Index (capability)", "date": "2026-09-27" },
-        "trialSince": "2026-09-23",
-        "reviewBy": "2026-09-30"
+        "model": "haiku",
+        "effort": "",
+        "trialVersion": 4,
+        "reason": "ROUTING TRIAL v4 (operator-approved, 2026-10-02, supersedes v2's opus/low): Corrected cost (2026-10-02): cache reads cost the same on Opus 5.5 and Sonnet 5, so opus/low is about 1.2-1.55x Sonnet 5 MEDIUM on the plan (real-world tasks, 789 live spawns, 2026-09-21 to 09-27: 1.05-1.53x at API prices, median 1.28x), and the gap against sonnet/low and haiku is wider. v2's premise that opus/low costs about the same as Sonnet on the plan was wrong. This type only reads or checks and changes nothing, so the cheapest tier that does not cause rework is haiku. Haiku validates; it does not operate, which is why it is limited to reads and checks and does not take the other types here. v1 finding still applies: Haiku was the only model to fail a synthetic task, so a failed check is a re-run, not a silent wrong answer. Haiku 4.5 retires no sooner than 2026-10-15: the fall-back to sonnet/low happens only when tiers.haiku.retired is set to true.",
+        "evidence": {"source": "operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); cache-read pricing check, 2026-10-02 (Opus 5.5 and Sonnet 5 cache reads cost the same); operator benchmark v1 finding (Sonnet 5 passed every synthetic task at every effort)", "date": "2026-10-02"},
+        "trialSince": "2026-10-02",
+        "reviewBy": "2026-10-16"
       }
     },
     "mechanical-edit": {
@@ -389,13 +391,13 @@
       "summary": "rename, config edit, reformat, apply a known migration recipe",
       "provenance": "COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate.",
       "override": {
-        "model": "opus",
+        "model": "sonnet",
         "effort": "low",
-        "trialVersion": 2,
-        "reason": "ROUTING TRIAL v2 (operator-endorsed, supersedes v1's sonnet/low): The case for Opus 5.5 low here is CAPABILITY, not price (cost claim corrected 2026-09-27). Synthetic benchmark tasks put Opus 5.5 low at 0.75-0.9x Sonnet 5's cost, but real-world tasks measured 1.05-1.53x Sonnet 5 medium at API prices (median 1.28x combined), so in real use it costs more than Sonnet, not less. What it buys is capability: Artificial Analysis Intelligence Index 42 for Opus 5.5 low vs 28 for Sonnet 5 medium, and on the benchmark tasks it was faster, took roughly half the turns, and was equally correct. This plan has no separate Opus weekly window, so there is no separate-bucket reason to prefer Sonnet here. v1 finding (Sonnet 5 passed every synthetic task at every effort, Haiku cost roughly 2x Sonnet per task and was the only model to fail) still explains why this is not haiku.",
-        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); Artificial Analysis Intelligence Index (capability)", "date": "2026-09-27" },
-        "trialSince": "2026-09-23",
-        "reviewBy": "2026-09-30"
+        "trialVersion": 4,
+        "reason": "ROUTING TRIAL v4 (operator-approved, 2026-10-02, supersedes v2's opus/low): Corrected cost (2026-10-02): cache reads cost the same on Opus 5.5 and Sonnet 5, so opus/low is about 1.2-1.55x Sonnet 5 MEDIUM on the plan (real-world tasks, 789 live spawns, 2026-09-21 to 09-27: 1.05-1.53x at API prices, median 1.28x), and the gap against sonnet/low and haiku is wider. v2's premise that opus/low costs about the same as Sonnet on the plan was wrong. This type changes things but is bounded and well specified, and Sonnet 5 passed every synthetic task at every effort, so sonnet/low is the cheapest tier that does not cause rework. Haiku is not used here because it validates but does not operate. Escalate a piece that turns out not to be bounded to a higher weight, not a higher effort.",
+        "evidence": {"source": "operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); cache-read pricing check, 2026-10-02 (Opus 5.5 and Sonnet 5 cache reads cost the same); operator benchmark v1 finding (Sonnet 5 passed every synthetic task at every effort)", "date": "2026-10-02"},
+        "trialSince": "2026-10-02",
+        "reviewBy": "2026-10-16"
       }
     },
     "bounded-feature": {
@@ -461,12 +463,12 @@
       "operatorNote": "Architecture and deep technical work stay on Opus; Sonnet gets confused on some of the operator's technical/architecture work (operator-observed 2026-09-23). Do not route architecture off Opus on benchmark evidence alone.",
       "override": {
         "model": "opus",
-        "effort": "xhigh",
-        "trialVersion": 3,
-        "reason": "ROUTING TRIAL v3 (operator-approved amendment 2026-09-27, review by 2026-10-04 so the review sees a week of v3 data; supersedes v2's opus/high, and now agrees with the plain grid's opus/xhigh for weight 5, bounded kind): v2 held this at high because effort scaling on architecture work was unmeasured; it is now measured. On the subtle-rule architecture benchmark task only Opus 5.5 xhigh passed the hidden tests 4/4 (high 2/3, medium 2/3, low 2/4), and it was the only effort perfect on BOTH the hidden tests and the blind design judge (4/4 each; medium and high also passed the judge 3/3). In live use, code reviews at xhigh were clean 26/26 vs 18/21 at high (suggestive, p≈0.08), and when the operator raised churning sessions to xhigh by hand, the churn eased in 3 of 6. Cost: about 2x high per spawn. max is not routed: Artificial Analysis gives it +2 Intelligence Index points over xhigh for 1.73x the cost, and +0 on agentic coding. Model stays opus: architecture and deep technical work stay on Opus (operator-observed 2026-09-23) -- do not route architecture off Opus on benchmark evidence alone.",
-        "evidence": { "source": "operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27; operator benchmark, subtle-rule architecture task with hidden tests and a blind design judge (kept outside this repo); Artificial Analysis Intelligence Index; operator first-hand observation on Opus vs Sonnet for architecture work", "date": "2026-09-27" },
-        "trialSince": "2026-09-27",
-        "reviewBy": "2026-10-04"
+        "effort": "high",
+        "trialVersion": 4,
+        "reason": "ROUTING TRIAL v4 (operator-approved, 2026-10-02, supersedes v3's opus/xhigh): on last week's data xhigh cost 17.7 plan units per spawn with 21% re-spawned, against high at 16.6 with 10% re-spawned, so for this type the extra effort bought re-work, not quality. novel-design and critical-change stay on opus/xhigh (critical-change on xhigh: n=4, no re-spawns; novel-design is where the subtle-rule architecture benchmark needed xhigh). opus/high meets the elevated-consequence effort floor (F5), so no waiver is involved. Review by 2026-10-16.",
+        "evidence": {"source": "operator-local plan-usage review, 2026-10-02 (usage-postmortem REPORT.md, Architecture tier): last week's spawns, opus/xhigh 762 plan units at 17.7 per spawn with 21% re-spawned against opus/high 415 units at 16.6 per spawn with 10% re-spawned; critical-change on xhigh n=4 with no re-spawns", "date": "2026-10-02"},
+        "trialSince": "2026-10-02",
+        "reviewBy": "2026-10-16"
       }
     },
     "novel-design": {
@@ -508,7 +510,16 @@
       "kind": "bounded",
       "consequence": "elevated",
       "summary": "an agent session expected to run for hours with minimal supervision",
-      "provenance": "OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged."
+      "provenance": "OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged.",
+      "override": {
+        "model": "opus",
+        "effort": "high",
+        "trialVersion": 4,
+        "reason": "ROUTING TRIAL v4 (operator-approved, 2026-10-02, supersedes the plain grid's opus/xhigh): on last week's data xhigh cost 17.7 plan units per spawn with 21% re-spawned, against high at 16.6 with 10% re-spawned, so for this type the extra effort bought re-work, not quality. novel-design and critical-change stay on opus/xhigh (critical-change on xhigh: n=4, no re-spawns; novel-design is where the subtle-rule architecture benchmark needed xhigh). opus/high meets the elevated-consequence effort floor (F5), so no waiver is involved. Review by 2026-10-16.",
+        "evidence": {"source": "operator-local plan-usage review, 2026-10-02 (usage-postmortem REPORT.md, Architecture tier): last week's spawns, opus/xhigh 762 plan units at 17.7 per spawn with 21% re-spawned against opus/high 415 units at 16.6 per spawn with 10% re-spawned; critical-change on xhigh n=4 with no re-spawns", "date": "2026-10-02"},
+        "trialSince": "2026-10-02",
+        "reviewBy": "2026-10-16"
+      }
     },
     "subagent-worker": {
       "weight": 2,
@@ -517,13 +528,13 @@
       "summary": "a delegated worker doing a bounded, well-specified piece of a larger task",
       "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded.",
       "override": {
-        "model": "opus",
+        "model": "sonnet",
         "effort": "low",
-        "trialVersion": 2,
-        "reason": "ROUTING TRIAL v2 (operator-endorsed, supersedes v1's sonnet/low): The case for Opus 5.5 low here is CAPABILITY, not price (cost claim corrected 2026-09-27). Synthetic benchmark tasks put Opus 5.5 low at 0.75-0.9x Sonnet 5's cost, but real-world tasks measured 1.05-1.53x Sonnet 5 medium at API prices (median 1.28x combined), so in real use it costs more than Sonnet, not less. What it buys is capability: Artificial Analysis Intelligence Index 42 for Opus 5.5 low vs 28 for Sonnet 5 medium, and on the benchmark tasks it was faster, took roughly half the turns, and was equally correct. This plan has no separate Opus weekly window, so there is no separate-bucket reason to prefer Sonnet here. v1 finding (Sonnet 5 passed every synthetic task at every effort, Haiku cost roughly 2x Sonnet per task and was the only model to fail) still explains why this is not haiku.",
-        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); Artificial Analysis Intelligence Index (capability)", "date": "2026-09-27" },
-        "trialSince": "2026-09-23",
-        "reviewBy": "2026-09-30"
+        "trialVersion": 4,
+        "reason": "ROUTING TRIAL v4 (operator-approved, 2026-10-02, supersedes v2's opus/low): Corrected cost (2026-10-02): cache reads cost the same on Opus 5.5 and Sonnet 5, so opus/low is about 1.2-1.55x Sonnet 5 MEDIUM on the plan (real-world tasks, 789 live spawns, 2026-09-21 to 09-27: 1.05-1.53x at API prices, median 1.28x), and the gap against sonnet/low and haiku is wider. v2's premise that opus/low costs about the same as Sonnet on the plan was wrong. This type changes things but is bounded and well specified, and Sonnet 5 passed every synthetic task at every effort, so sonnet/low is the cheapest tier that does not cause rework. Haiku is not used here because it validates but does not operate. Escalate a piece that turns out not to be bounded to a higher weight, not a higher effort.",
+        "evidence": {"source": "operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); cache-read pricing check, 2026-10-02 (Opus 5.5 and Sonnet 5 cache reads cost the same); operator benchmark v1 finding (Sonnet 5 passed every synthetic task at every effort)", "date": "2026-10-02"},
+        "trialSince": "2026-10-02",
+        "reviewBy": "2026-10-16"
       }
     },
     "verify": {
@@ -533,13 +544,13 @@
       "summary": "confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing",
       "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). The defining trait is that nothing changes: the task ends when the answer is read back, not when a step is performed.",
       "override": {
-        "model": "opus",
-        "effort": "low",
-        "trialVersion": 2,
-        "reason": "ROUTING TRIAL v2 (operator-endorsed, supersedes v1's sonnet/low): The case for Opus 5.5 low here is CAPABILITY, not price (cost claim corrected 2026-09-27). Synthetic benchmark tasks put Opus 5.5 low at 0.75-0.9x Sonnet 5's cost, but real-world tasks measured 1.05-1.53x Sonnet 5 medium at API prices (median 1.28x combined), so in real use it costs more than Sonnet, not less. What it buys is capability: Artificial Analysis Intelligence Index 42 for Opus 5.5 low vs 28 for Sonnet 5 medium, and on the benchmark tasks it was faster, took roughly half the turns, and was equally correct. This plan has no separate Opus weekly window, so there is no separate-bucket reason to prefer Sonnet here. v1 finding (Sonnet 5 passed every synthetic task at every effort, Haiku cost roughly 2x Sonnet per task and was the only model to fail) still explains why this is not haiku.",
-        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); Artificial Analysis Intelligence Index (capability)", "date": "2026-09-27" },
-        "trialSince": "2026-09-23",
-        "reviewBy": "2026-09-30"
+        "model": "haiku",
+        "effort": "",
+        "trialVersion": 4,
+        "reason": "ROUTING TRIAL v4 (operator-approved, 2026-10-02, supersedes v2's opus/low): Corrected cost (2026-10-02): cache reads cost the same on Opus 5.5 and Sonnet 5, so opus/low is about 1.2-1.55x Sonnet 5 MEDIUM on the plan (real-world tasks, 789 live spawns, 2026-09-21 to 09-27: 1.05-1.53x at API prices, median 1.28x), and the gap against sonnet/low and haiku is wider. v2's premise that opus/low costs about the same as Sonnet on the plan was wrong. This type only reads or checks and changes nothing, so the cheapest tier that does not cause rework is haiku. Haiku validates; it does not operate, which is why it is limited to reads and checks and does not take the other types here. v1 finding still applies: Haiku was the only model to fail a synthetic task, so a failed check is a re-run, not a silent wrong answer. Haiku 4.5 retires no sooner than 2026-10-15: the fall-back to sonnet/low happens only when tiers.haiku.retired is set to true.",
+        "evidence": {"source": "operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); cache-read pricing check, 2026-10-02 (Opus 5.5 and Sonnet 5 cache reads cost the same); operator benchmark v1 finding (Sonnet 5 passed every synthetic task at every effort)", "date": "2026-10-02"},
+        "trialSince": "2026-10-02",
+        "reviewBy": "2026-10-16"
       }
     },
     "operate": {
@@ -549,22 +560,22 @@
       "summary": "execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation",
       "provenance": "Calibration finding 'haiku validates, it does not OPERATE' (team-orchestration skill; a dated CONTRIBUTIONS_INBOX entry). A sequence of trivial-looking steps against a live system is not a verify task: ordering mistakes, partial failures, and side effects compound in a way a single read-only check cannot, so this floors at sonnet even though no one step looks hard. Raise weight/consequence further when a step is itself destructive, production-facing, or irreversible (critical-change already covers that).",
       "override": {
-        "model": "opus",
+        "model": "sonnet",
         "effort": "low",
-        "trialVersion": 2,
-        "reason": "Was weight 3 sonnet/medium, then v1 sonnet/low. ROUTING TRIAL v2 (operator-endorsed): The case for Opus 5.5 low here is CAPABILITY, not price (cost claim corrected 2026-09-27). Synthetic benchmark tasks put Opus 5.5 low at 0.75-0.9x Sonnet 5's cost, but real-world tasks measured 1.05-1.53x Sonnet 5 medium at API prices (median 1.28x combined), so in real use it costs more than Sonnet, not less. What it buys is capability: Artificial Analysis Intelligence Index 42 for Opus 5.5 low vs 28 for Sonnet 5 medium, and on the benchmark tasks it was faster, took roughly half the turns, and was equally correct. This plan has no separate Opus weekly window, so there is no separate-bucket reason to prefer Sonnet here. v1's own finding still applies: at low effort, quality did not improve over the more expensive sonnet/medium, so no reason to pay for medium.",
-        "evidence": { "source": "operator benchmark, bench/effort-grid results dirs (kept outside this repo); operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); Artificial Analysis Intelligence Index (capability)", "date": "2026-09-27" },
-        "trialSince": "2026-09-23",
-        "reviewBy": "2026-09-30"
+        "trialVersion": 4,
+        "reason": "ROUTING TRIAL v4 (operator-approved, 2026-10-02, supersedes v2's opus/low): Corrected cost (2026-10-02): cache reads cost the same on Opus 5.5 and Sonnet 5, so opus/low is about 1.2-1.55x Sonnet 5 MEDIUM on the plan (real-world tasks, 789 live spawns, 2026-09-21 to 09-27: 1.05-1.53x at API prices, median 1.28x), and the gap against sonnet/low and haiku is wider. v2's premise that opus/low costs about the same as Sonnet on the plan was wrong. This type changes things but is bounded and well specified, and Sonnet 5 passed every synthetic task at every effort, so sonnet/low is the cheapest tier that does not cause rework. Haiku is not used here because it validates but does not operate. Escalate a piece that turns out not to be bounded to a higher weight, not a higher effort.",
+        "evidence": {"source": "operator-local live study, 2026-09-27: 789 real subagent spawns, 2026-09-21 to 09-27 (real-world cost ratio); cache-read pricing check, 2026-10-02 (Opus 5.5 and Sonnet 5 cache reads cost the same); operator benchmark v1 finding (Sonnet 5 passed every synthetic task at every effort)", "date": "2026-10-02"},
+        "trialSince": "2026-10-02",
+        "reviewBy": "2026-10-16"
       }
     }
   },
   "selfReview": {
-    "types": ["novel-design", "large-refactor", "critical-change", "long-autonomous-run"],
+    "types": ["novel-design", "critical-change"],
     "fixRounds": 1,
     "optOut": "REVIEW: lead",
-    "updated": "2026-09-28",
-    "rationale": "Operator request 2026-09-28 (DECISIONS.md): architect-class writers spawn their own reviewer instead of routing the review through the lead. A writer of one of these types, whose brief has no `REVIEW: lead` line, commits, spawns ONE parity reviewer in the foreground on its own rung (TYPE: code-review, WRITER: its own model/effort, the lead's brief verbatim, the diff range, the review file path), runs `fixRounds` fix rounds on blocker and should-fix findings, never re-reviews, and returns the reviewer's verdict line verbatim, the review path, the post-fix sha and any disputed findings. Why: every lead-routed review costs two lead round-trips (spawn reviewer, then resume or re-spawn the writer), each stalling on the lead being free, and the fix round often starts on a cold cache; done by the writer, the fix round runs on its warm 1h cache. Risk: the writer frames its own review; mitigated by the fixed brief the protocol dictates (the lead's brief verbatim, no scoping of the reviewer), the verbatim verdict line, and the lead spot-checking the review file. The lead still lands, merges and settles disputed findings. Not applied to medium-effort writers yet: measure first. The protocol text is GENERATED into the body of every agents/ac-*.md rung that is currently the default route for one of these types (scripts/routing-table.mjs --sync-agent-descriptions; --check-agent-descriptions fails on drift), so a routing-table move carries it along; a listed type spawned on any other ladder rung (a routing profile or local override can put it there) gets the same text, sized to that rung, appended to its brief at spawn. hooks/spawn-guard.mjs denies a code-review spawned by an agent that was itself spawned as a code-review (reviewers never spawn reviewers; positive match only). Reverse: empty `types`, or put `REVIEW: lead` in briefs."
+    "updated": "2026-10-02",
+    "rationale": "Operator request 2026-09-28 (DECISIONS.md): architect-class writers spawn their own reviewer instead of routing the review through the lead. A writer of one of these types, whose brief has no `REVIEW: lead` line, commits, spawns ONE parity reviewer in the foreground on its own rung (TYPE: code-review, WRITER: its own model/effort, the lead's brief verbatim, the diff range, the review file path), runs `fixRounds` fix rounds on blocker and should-fix findings, never re-reviews, and returns the reviewer's verdict line verbatim, the review path, the post-fix sha and any disputed findings. Why: every lead-routed review costs two lead round-trips (spawn reviewer, then resume or re-spawn the writer), each stalling on the lead being free, and the fix round often starts on a cold cache; done by the writer, the fix round runs on its warm 1h cache. Risk: the writer frames its own review; mitigated by the fixed brief the protocol dictates (the lead's brief verbatim, no scoping of the reviewer), the verbatim verdict line, and the lead spot-checking the review file. The lead still lands, merges and settles disputed findings. Narrowed 2026-10-02 to novel-design and critical-change (usage review: a reviewer costs 9.85 plan units per spawn on xhigh against 3.78 on opus/medium, 172 units in the week; large-refactor and long-autonomous-run writers now go back to a lead-routed review, saving about 50-100 units a week). Not applied to medium-effort writers yet: measure first. The protocol text is GENERATED into the body of every agents/ac-*.md rung that is currently the default route for one of these types (scripts/routing-table.mjs --sync-agent-descriptions; --check-agent-descriptions fails on drift), so a routing-table move carries it along; a listed type spawned on any other ladder rung (a routing profile or local override can put it there) gets the same text, sized to that rung, appended to its brief at spawn. hooks/spawn-guard.mjs denies a code-review spawned by an agent that was itself spawned as a code-review (reviewers never spawn reviewers; positive match only). Reverse: empty `types`, or put `REVIEW: lead` in briefs."
   },
   "taskTypesNote": "A task type is a named preset over (weight, kind, consequence). Resolve it through the same grid as everything else; do not special-case it. \"parity\" as a weight means: sized to the writer being reviewed (at least its model and effort, then the floors; see reviewerParity). \"inherit\" as a consequence means: take the consequence of the change under review. Provenance is recorded per entry because these WILL go stale - the scout re-checks the lineup, and a routing review should re-read the sources, not the table. `--type` is now the PREFERRED input over `--weight`/`--kind` alone, because a named type is the only place the measured evidence (`override`, below) attaches — resolving by raw weight/kind bypasses it and falls back to the grid. An entry may carry an `override` block ({model, effort, reason, evidence, trialSince, reviewBy}, plus `overridesKindDelta: true` where it deliberately bypasses the kind's effort delta) recording a ROUTING TRIAL: a benchmark-backed (model, effort) pair that supersedes this entry's own weight/kind/consequence grid resolution for the stated trial window. It applies only when the type is resolved as-is (no explicit --weight/--kind/--consequence that departs from the preset); passing an explicit weight/kind/consequence that DEPARTS from the preset answers a different question and falls back to the plain grid, while one EQUAL to the preset restates the type and keeps the override. The weight/kind/consequence fields on an overridden entry are kept unchanged for provenance and for `--list`/weight-only callers — only the resolved (model, effort) changes. A type with no `override` is UNBENCHMARKED by this trial and keeps its grid-resolved routing unchanged; say so explicitly rather than leaving it ambiguous.",
   "cacheTtl": {

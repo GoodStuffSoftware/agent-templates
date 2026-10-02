@@ -65,9 +65,12 @@ test('F4: a trial whose effort the model does not take is skipped', () => {
   assert.match(r.skipped[0].reason, /^F4: effort 'low' unsupported by haiku/);
 });
 
-test('F4: a trial on a retired alias is skipped from the day after retirement', () => {
+test('F4: a trial on a retired alias is skipped once the alias is flagged retired', () => {
   assert.equal(ctx.resolveRoute({ type: 'x-retired', now: BEFORE }).layer, 'trial');
-  const r = ctx.resolveRoute({ type: 'x-retired', now: AFTER });
+  const haiku = ctx.modelTiers().tiers.haiku;
+  haiku.retired = true; // the operator's flag; the date alone does not fall back
+  let r;
+  try { r = ctx.resolveRoute({ type: 'x-retired', now: AFTER }); } finally { haiku.retired = false; }
   assert.equal(r.layer, 'grid');
   assert.match(r.skipped[0].reason, /^F4: haiku is unavailable or retired/);
 });

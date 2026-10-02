@@ -356,19 +356,25 @@ try {
 // --- 5. Model retirement ------------------------------------------------
 // A tier alias that retires does not error; it resolves to whatever replaces
 // it, or to nothing. Either way the routing table is silently wrong from that
-// day. Beyond 30 days out, warn only at a few fixed milestones — a signal
-// that fires daily for two months trains the reader to ignore it. INSIDE the
-// last 30 days the deadline is close enough to be worth a daily line even
-// when a replacement is staged: a staged replacement still means the alias
-// itself is about to disappear, and "the routing table has a fallback" is not
-// the same fact as "the model is retiring soon" — both are worth surfacing on
-// approach, not just once at the 30-day mark itself.
+// day. But `retiresAfter` is Anthropic's "no sooner than" date, so it drives
+// WARNINGS only: the routing table falls back to the staged replacement only
+// when the tier says `retired: true`, which the operator sets after
+// confirming the alias no longer resolves. Beyond 30 days out, warn only at a
+// few fixed milestones — a signal that fires daily for two months trains the
+// reader to ignore it. INSIDE the last 30 days, and every day after the date
+// until the operator sets `retired: true`, the line fires daily: a staged
+// replacement still means the alias itself is about to disappear, and "the
+// routing table has a fallback" is not the same fact as "the model is
+// retiring soon".
 const RETIRE_MILESTONES = new Set([60, 45]);
 const RETIRE_DAILY_WINDOW = 30;
 try {
   const cfg = modelTiers();
   for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
     if (!spec.retiresAfter) continue;
+    // The operator confirmed the alias is gone and the fallback is live:
+    // nothing left to warn about.
+    if (spec.retired === true) continue;
     // Calendar days, not elapsed hours: "30 days out" must mean the calendar
     // day 30 days before, whatever time of day the scout happens to run.
     const n = nowDate();
@@ -377,19 +383,24 @@ try {
     const staged = !!(spec.replacement && spec.replacement.model);
     // "model (effort x)", not "model/x": the signal scrubber (lib/scrub.mjs)
     // treats a bare a/b pair as a possibly-private owner/repo.
+    const fallback = staged
+      ? `${spec.replacement.model}${spec.replacement.effort ? ` (effort ${spec.replacement.effort})` : ''}`
+      : '';
     const plan = staged
-      ? `replacement staged: ${spec.replacement.model}${spec.replacement.effort ? ` (effort ${spec.replacement.effort})` : ''} takes over automatically from ${spec.retiresAfter}`
-      : 'NO replacement staged — routing rows on this alias resolve to nothing after that date';
-    if (days < 0 && !staged) {
-      // Past the date with nothing staged is the one case that warrants daily noise.
+      ? `replacement staged: ${fallback} takes over only once tiers.${alias}.retired is true — set retired: true once ${alias} stops resolving`
+      : `NO replacement staged — routing rows on this alias resolve to nothing once ${alias} stops resolving`;
+    if (days < 0) {
+      // Past the date, flag still unset: the date is only "no sooner than",
+      // so say what to check rather than claiming the model is gone.
       sig('model_retirement_approaching',
-        `${alias} retired ${Math.abs(days)} day(s) ago (${spec.retiresAfter}); ${plan}`, 'routing-review');
-    } else if (days >= 0 && days <= RETIRE_DAILY_WINDOW) {
+        `${alias} is ${Math.abs(days)} day(s) past its retiresAfter date (${spec.retiresAfter}), which is only a "no sooner than" date; check whether ${alias} still resolves. ${plan}`,
+        staged ? 'manual-check' : 'routing-review');
+    } else if (days <= RETIRE_DAILY_WINDOW) {
       // Inside 30 days: warn every run. A staged replacement lowers the
       // dispatch (nothing new to decide) but does not silence the signal.
       sig('model_retirement_approaching',
         `${alias} retires in ${days} day(s) (${spec.retiresAfter}); ${plan}`, staged ? 'none' : 'routing-review');
-    } else if (days > RETIRE_DAILY_WINDOW && days <= 60 && RETIRE_MILESTONES.has(days)) {
+    } else if (days <= 60 && RETIRE_MILESTONES.has(days)) {
       sig('model_retirement_approaching',
         `${alias} retires in ${days} day(s) (${spec.retiresAfter}); ${plan}`, staged ? 'none' : 'routing-review');
     }

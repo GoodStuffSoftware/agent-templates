@@ -36,7 +36,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { PLUGIN_ROOT, makeFixture } from './helpers.mjs';
-import { buildCases, CLOCKS } from './fixtures/route-golden/cases.mjs';
+import { buildCases, LIVE_CLOCKS } from './fixtures/route-golden/cases.mjs';
 import { stageResolver } from './fixtures/route-golden/live-gate.mjs';
 
 const REFERENCE_DIR = join(PLUGIN_ROOT, 'tests', 'fixtures', 'architecture-floor-diff', 'reference');
@@ -78,7 +78,7 @@ async function differential(configText) {
   });
   const changed = [];
   const violations = [];
-  for (const now of CLOCKS) {
+  for (const now of LIVE_CLOCKS) {
     for (const c of cases) {
       const o = shape(base.resolveRoute({ ...c.args, now }));
       const n = shape(cur.resolveRoute({ ...c.args, now }));

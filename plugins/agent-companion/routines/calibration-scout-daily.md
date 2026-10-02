@@ -250,7 +250,7 @@ Not a summary, not a confirmation. Silence is the success case.
 | `harness_version_changed` | run the canary (below) and report the version delta; matchers may have been renamed |
 | `new_agent_type` | report the type; enforcement fails open on it and is quietly narrower than intended |
 | `zero_denials` | run the canary — zero across real spawn activity means guards may have stopped matching, not that behaviour is perfect |
-| `model_retirement_approaching` | report which alias, in how many days, and which routing rows depend on it; recommend a replacement decision |
+| `model_retirement_approaching` | report which alias, in how many days, and which routing rows depend on it; recommend a replacement decision. The date is a "no sooner than" date: the table falls back to the replacement only when `tiers.<alias>.retired` is `true`, which the operator sets after confirming the alias no longer resolves |
 | `lineup_drift` | report the exact diff against `config/model-tiers.json`, field by field |
 | `inherited_model_spawns` | report the count; spawns with no model inherit the lead's tier — the mechanism behind unexamined premium fan-out |
 | `inherited_effort_spawns` | report the count; spawns in 24h that named no effort (neither the call nor the agent definition, which covers every built-in type) and ran at the lead session's effort — the effort half of inherited_model_spawns, invisible to it. Routing review |

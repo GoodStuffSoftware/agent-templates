@@ -1,19 +1,26 @@
-// Proves the retirement date staged in config/model-tiers.json
-// (tiers.haiku.retiresAfter/replacement) actually stops the routing table
-// from ever naming `ac-haiku` — or the bare `haiku` alias — as a spawn
-// target once the date passes. tests/retirement-window.test.mjs proves the
-// scout's WARNING fires inside the 30-day window; tests/route-parity.test.mjs
-// already covers the single code-review/haiku-writer case as part of its own
-// F1-F5 matrix. This file is the dedicated, exhaustive sweep: every shipped
-// task type resolved as-is, every raw weight x kind combination (bypassing
-// any type/trial), and a code-review writer pinned to haiku — each checked
-// at the day before retiresAfter (still allowed) and the day after (retired).
+// Proves the fall-back staged in config/model-tiers.json
+// (tiers.haiku.replacement) actually stops the routing table from ever naming
+// `ac-haiku` -- or the bare `haiku` alias -- as a spawn target once the
+// operator has flagged haiku retired (`tiers.haiku.retired: true`, written
+// here as a one-key state-dir override, exactly how an operator sets it).
+// The date alone no longer does that: tests/haiku-retired-flag.test.mjs
+// proves the NO-fall-back case (date passed, flag unset). tests/retirement-
+// window.test.mjs proves the scout's WARNING. This file is the dedicated,
+// exhaustive sweep of the flagged case: every shipped task type resolved
+// as-is, every raw weight x kind combination (bypassing any type/trial), and
+// a code-review writer pinned to haiku.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { makeFixture } from './helpers.mjs';
 
 const fx = makeFixture();
 test.after(() => fx.cleanup());
+// The operator's own switch: one key on the haiku tier, merged over the
+// shipped spec (the per-tier merge keeps retiresAfter and replacement).
+mkdirSync(fx.stateDir, { recursive: true });
+writeFileSync(join(fx.stateDir, 'model-tiers.json'), JSON.stringify({ tiers: { haiku: { retired: true } } }));
 const ctx = await import('../hooks/lib/context.mjs');
 const {
   resolveRoute, rungFor, taskTypeNames, modelTiers,
@@ -29,8 +36,9 @@ assert.equal(
   'tiers.haiku.retiresAfter moved in config/model-tiers.json — update BEFORE/AFTER below to match',
 );
 
-const BEFORE = '2026-10-14T12:00:00Z'; // one day before retiresAfter: still allowed
-const AFTER = '2026-10-16T12:00:00Z'; // one full day past retiresAfter: retired
+// The date is irrelevant once the flag is set; any clock gives the same answer.
+const AFTER = '2026-10-16T12:00:00Z';
+const EARLY = '2026-09-01T12:00:00Z'; // long before retiresAfter, flag still set
 
 function assertNeverHaiku(route, label) {
   assert.notEqual(route.model, 'haiku', `${label}: resolved model must not be haiku after retirement`);
@@ -38,23 +46,26 @@ function assertNeverHaiku(route, label) {
   if (rung) assert.notEqual(rung.agent, 'ac-haiku', `${label}: ladder rung must not be ac-haiku after retirement`);
 }
 
-// --- sanity: the fake clock actually matters --------------------------------
-// A raw weight with no named type bypasses every shipped ROUTING TRIAL
-// override and hits the plain grid — the one place haiku is still a live
-// default before retirement (every named weight-1/2 task type currently
-// carries a trial override away from haiku already). Proving BEFORE really
-// does resolve to haiku here means AFTER resolving away from it below is the
-// retirement mechanism doing the work, not an artifact of the trials.
-test('sanity: weight 1/2 with no declared type resolves to haiku before retirement (plain grid)', () => {
+// --- sanity: the flag, not the clock, does the work ------------------------
+test('sanity: with the flag set, retirement() reports retired on any date and the merge kept the staged replacement', () => {
+  for (const now of [EARLY, AFTER]) {
+    const r = ctx.retirement('haiku', now);
+    assert.equal(r.retired, true, now);
+    assert.equal(r.replacement.model, 'sonnet');
+    assert.equal(r.replacement.effort, 'low');
+  }
+  assert.equal(modelTiers().tiers.haiku.retiresAfter, RETIRES_AFTER, 'the override must not have replaced the whole tier');
+});
+
+test('sanity: weight 1/2 with the flag set resolve to the staged replacement even before the date', () => {
   for (const w of [1, 2]) {
-    const r = resolveRoute({
-      weight: w, weightExplicit: true, now: BEFORE, profile: false,
-    });
-    assert.equal(r.model, 'haiku', `weight ${w} before retirement`);
+    const r = resolveRoute({ weight: w, weightExplicit: true, now: EARLY, profile: false });
+    assert.equal(r.model, 'sonnet', `weight ${w}`);
+    assert.equal(r.effort, 'low', `weight ${w}`);
   }
 });
 
-test('sanity: the same raw weights resolve to the staged replacement after retirement', () => {
+test('sanity: the same raw weights resolve to the staged replacement after the date too', () => {
   for (const w of [1, 2]) {
     const r = resolveRoute({
       weight: w, weightExplicit: true, now: AFTER, profile: false,
@@ -94,12 +105,6 @@ for (const w of WEIGHTS) {
 // --- code-review with a writer pinned to haiku ------------------------------
 for (const effort of ['', 'low']) {
   const tag = effort || '(none)';
-  test(`code-review writer=haiku/${tag}: before retirement the writer model passes through unchanged`, () => {
-    const r = resolveRoute({
-      type: 'code-review', writer: { model: 'haiku', effort }, now: BEFORE, profile: false,
-    });
-    assert.equal(r.model, 'haiku');
-  });
   test(`code-review writer=haiku/${tag}: after retirement the reviewer stands in on the staged replacement`, () => {
     const r = resolveRoute({
       type: 'code-review', writer: { model: 'haiku', effort }, now: AFTER, profile: false,

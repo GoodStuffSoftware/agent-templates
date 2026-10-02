@@ -341,7 +341,17 @@ export function modelTiers() {
   if (!over) {
     try { over = JSON.parse(readFileSync(join(dataDir(), 'model-tiers.json'), 'utf8')); } catch { /* no override: expected */ }
   }
-  if (over) cfg = { ...cfg, ...over, tiers: { ...(cfg.tiers || {}), ...(over.tiers || {}) } };
+  if (over) {
+    // Per tier, one level deep: a state file naming only `retired: true` (or
+    // one price) keeps the rest of that tier's shipped spec instead of
+    // replacing the whole tier with one key.
+    const tiers = { ...(cfg.tiers || {}) };
+    const plain = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+    for (const [alias, spec] of Object.entries(over.tiers || {})) {
+      tiers[alias] = plain(spec) && plain(tiers[alias]) ? { ...tiers[alias], ...spec } : spec;
+    }
+    cfg = { ...cfg, ...over, tiers };
+  }
   _tiers = cfg;
   return _tiers;
 }
@@ -411,26 +421,36 @@ export function classifyEffort(effort) {
 
 // Weight (1-5) -> the model and effort that weight routes to. Data, so the
 // routing table can be corrected without shipping code.
-// A tier past its retirement date does not error — the alias resolves to
-// whatever replaces it, or to nothing. The table can carry that decision in
-// advance: `replacement: { model, effort }` on the tier, applied BY DATE, so
-// the switch happens on the day without anyone having to remember it.
+// A retired tier does not error — the alias resolves to whatever replaces it,
+// or to nothing. The table carries that decision in advance:
+// `replacement: { model, effort }` on the tier. It is applied only when the
+// tier says `retired: true`. `retiresAfter` is a WARNING date and nothing
+// more: Anthropic publishes "no sooner than" dates, so the model may keep
+// resolving long after it, and falling back on the date alone would route
+// away from a model that still works. The operator flips `retired` to true
+// after confirming the alias no longer resolves (a one-key edit in
+// <stateRoot>/model-tiers.json: {"tiers":{"haiku":{"retired":true}}}).
 // Returns null for tiers with no retirement date.
 //
 // `now` (optional) pins the calendar for a caller that needs a deterministic
-// answer — resolveRoute()'s golden test in particular, which must not change
-// verdict the day a tier retires. Omitted, it is the real clock, as before.
+// answer for `daysLeft` / `pastDate` (the scout's warnings). It no longer
+// changes `retired`.
 export function retirement(alias, now) {
   const spec = (modelTiers().tiers || {})[alias];
   if (!spec || !spec.retiresAfter) return null;
   const at = Date.parse(spec.retiresAfter);
   if (Number.isNaN(at)) return null;
-  // Calendar days: retired from the day AFTER the date, whatever the hour.
+  // Calendar days: past the date from the day AFTER it, whatever the hour.
   const n = clockDate(now);
   const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
   const daysLeft = Math.round((at - todayUtc) / 86400000);
   const replacement = spec.replacement && spec.replacement.model ? spec.replacement : null;
-  return { alias, retiresAfter: spec.retiresAfter, daysLeft, retired: daysLeft < 0, replacement };
+  return {
+    alias, retiresAfter: spec.retiresAfter, daysLeft,
+    pastDate: daysLeft < 0,
+    retired: spec.retired === true,
+    replacement,
+  };
 }
 
 // A Date for `now` (Date, ISO string or epoch ms); the real clock when absent
@@ -516,8 +536,8 @@ function tierRank(alias) {
 export function effortFor(weight, kind = 'bounded', consequence = 'routine', { now, floors = null } = {}) {
   const cfg = modelTiers();
   // routeForWeight, not the raw row: it applies a staged retirement replacement
-  // by date, so a weight that routes to a retired alias resolves to its
-  // successor here without anyone editing the routing rows on the day.
+  // once the tier is flagged `retired: true`, so a weight that routes to a
+  // retired alias resolves to its successor without editing the routing rows.
   const route = routeForWeight(weight, now);
   if (!route) return { model: '', effort: '', rationale: `no routing row for weight ${weight}` };
 
@@ -1664,7 +1684,9 @@ export function rungFor(model, effort) {
 export function routedRung(type) {
   try {
     const r = resolveRoute({ type });
-    const rung = r.model && r.effort ? rungFor(r.model, r.effort) : null;
+    // haiku routes with no effort: its rung is the one with no effort, so a
+    // route without an effort still names a rung (rungFor wants null, not '').
+    const rung = r.model ? rungFor(r.model, r.effort || null) : null;
     return rung ? { type: `${pluginName()}:${rung.agent}`, model: r.model, effort: r.effort } : null;
   } catch { return null; }
 }

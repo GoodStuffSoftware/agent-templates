@@ -22,24 +22,29 @@
 // and operate move again, from v1's sonnet/low to opus/low. The underlying
 // weights (1 and >=3) and the plain grid resolutions checked below are
 // unchanged by either version — only the resolved model/effort moved.
+//
+// UPDATED 2026-10-02 (v4): the opus/low premise was wrong (cache reads cost
+// the same on both models, so opus/low is about 1.2-1.55x Sonnet 5 medium).
+// verify goes to haiku (it only checks; haiku validates, it does not
+// operate) and operate to sonnet/low. Weights and plain grid unchanged.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runScript } from './helpers.mjs';
 
-test('recommend --type verify routes to opus/low under the routing trial (weight still 1)', () => {
+test('recommend --type verify routes to haiku under the routing trial (weight still 1)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'verify', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(res.json.model, 'opus');
-  assert.equal(res.json.effort, 'low');
+  assert.equal(res.json.model, 'haiku');
+  assert.equal(res.json.effort, '');
   assert.equal(res.json.weight, 1);
   assert.ok(res.json.trial, 'expected trial metadata on an overridden type');
   assert.equal(res.json.trial.gridResolution, 'haiku', 'the plain grid must still resolve verify to haiku');
 });
 
-test('recommend --type operate routes to opus/low under the routing trial (weight still >= 3, never haiku)', () => {
+test('recommend --type operate routes to sonnet/low under the routing trial (weight still >= 3, never haiku)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'operate', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(res.json.model, 'opus');
+  assert.equal(res.json.model, 'sonnet');
   assert.equal(res.json.effort, 'low');
   assert.ok(res.json.weight >= 3, `operate weight ${res.json.weight} must be >= 3`);
   assert.equal(res.json.trial.gridResolution, 'sonnet/medium', 'the plain grid must still resolve operate to sonnet/medium');
@@ -59,7 +64,7 @@ test('an explicit --weight that departs from the preset bypasses the operate/ver
 test('an explicit --weight EQUAL to the preset keeps the verify trial (slice 1b)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'verify', '--weight', '1', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(`${res.json.model}/${res.json.effort}`, 'opus/low');
+  assert.equal(`${res.json.model}/${res.json.effort}`, 'haiku/');
   assert.ok(res.json.trial);
 });
 

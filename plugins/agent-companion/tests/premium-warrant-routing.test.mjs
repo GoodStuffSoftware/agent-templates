@@ -162,8 +162,7 @@ test('(c-bis) fable with a declared TYPE and no warrant is ALSO still blocked �
         model: 'fable',
         run_in_background: true,
         name: 'fable-worker-typed',
-        // long-autonomous-run carries NO routing-trial override — the plain
-        // grid resolves weight 5/bounded/elevated to opus/xhigh, so a fable
+        // long-autonomous-run routes to opus/high (trial v4, 2026-10-02), so a fable
         // request here is a genuine model-tier MISMATCH (fable outranks
         // opus), caught by the best-fit check before the warrant check is
         // even reached. Either way it is denied — fable is never excused.

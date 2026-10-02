@@ -554,8 +554,8 @@ const spawnAudit = {
     const parityRows = declared.filter(isParityRow);
     if (weightRows.length) findings.push(fitLine('fit where a weight or task type was declared', weightRows));
     if (parityRows.length) findings.push(fitLine('fit of reviewers sized to their writer (reviewer parity)', parityRows));
-    // Once haiku is past its staged retirement (config/model-tiers.json
-    // tiers.haiku.retiresAfter), the routing table stops sending anything
+    // Once haiku is flagged retired (config/model-tiers.json
+    // tiers.haiku.retired: true), the routing table stops sending anything
     // there on its own — an empty haiku bucket is then the CORRECT outcome,
     // not a finding. Skip the nag rather than nagging for a tier that is
     // supposed to sit idle.

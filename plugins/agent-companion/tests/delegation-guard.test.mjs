@@ -294,12 +294,37 @@ test('the deny names the next step (Agent + a ladder rung + TYPE, backgrounded),
     assert.match(r.reason, /execution-class call 3 in a row/);
     assert.match(r.reason, /threshold is 3 \(delegation_threshold\)/);
     assert.match(r.reason, /Agent tool/);
-    assert.match(r.reason, /subagent_type: "agent-companion:ac-[a-z]+-[a-z]+"/);
+    assert.match(r.reason, /subagent_type: "agent-companion:ac-[a-z]+(-[a-z]+)?"/);
     assert.match(r.reason, /run_in_background: true/);
     assert.ok(r.reason.includes('prompt: "TYPE: <task type>\\n<brief>"'), r.reason);
-    assert.match(r.reason, /Rungs now: agent-companion:ac-[a-z]+-[a-z]+ for explore/);
+    assert.match(r.reason, /Rungs now: agent-companion:ac-[a-z]+(-[a-z]+)? for explore/);
     assert.match(r.reason, /repeat it\. The count has been reset, so it will run/);
     assert.match(r.reason, /inherit_guard: block refuses/);
+  } finally { h.cleanup(); }
+});
+
+test('the deny example rung is the rung the routing table gives explore (no hard-coded opus/low)', () => {
+  const h = harness({ ...BLOCK, CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2' });
+  try {
+    h.main('Read');
+    const reason = h.main('Read').reason;
+    const example = /subagent_type: "([^"]+)"/.exec(reason)?.[1];
+    const routed = runScript('scripts/recommend.mjs', ['--type', 'explore', '--json'], { cwd: h.dir });
+    assert.equal(routed.status, 0, routed.stderr);
+    assert.equal(example, routed.json.spawnAgentNamespaced, 'example must be the rung recommend.mjs names for explore');
+    // The base table sends explore to haiku, so the old hard-coded opus/low
+    // rung must not be what the example says.
+    assert.notEqual(example, 'agent-companion:ac-opus-low');
+    // and each type the message groups sits under its own current rung
+    const rungsLine = /Rungs now: (.*?). Other types/s.exec(reason)?.[1] || '';
+    const groups = new Map(rungsLine.split('; ').map((g) => {
+      const [rung, types] = g.split(' for ');
+      return [rung, (types || '').split(', ')];
+    }));
+    for (const type of ['explore', 'mechanical-edit', 'verify', 'bounded-feature', 'debug-root-cause']) {
+      const rr = runScript('scripts/recommend.mjs', ['--type', type, '--json'], { cwd: h.dir });
+      assert.ok((groups.get(rr.json.spawnAgentNamespaced) || []).includes(type), `${type} -> ${rr.json.spawnAgentNamespaced} in: ${rungsLine}`);
+    }
   } finally { h.cleanup(); }
 });
 

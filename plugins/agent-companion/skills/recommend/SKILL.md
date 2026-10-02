@@ -35,21 +35,21 @@ Config v7 (updated 2026-09-28). **Premium** = the spawn brief needs a `WARRANT:`
 
 | Task type | Route | Premium | What it is |
 |---|---|---|---|
-| `explore` | `opus/low` (routing trial, review by 2026-09-30) | yes | read-only search: where is X, what touches Y, does Z exist |
-| `mechanical-edit` | `opus/low` (routing trial, review by 2026-09-30) | yes | rename, config edit, reformat, apply a known migration recipe |
+| `explore` | `haiku` (routing trial, review by 2026-10-16) | no | read-only search: where is X, what touches Y, does Z exist |
+| `mechanical-edit` | `sonnet/low` (routing trial, review by 2026-10-16) | no | rename, config edit, reformat, apply a known migration recipe |
 | `bounded-feature` | `opus/medium` (routing trial, review by 2026-10-04) | yes | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | `opus/medium` (routing trial, review by 2026-09-30) | yes | multi-file, cross-referencing, touches shared config or things other agents depend on |
 | `debug-root-cause` | `opus/medium` (routing trial, review by 2026-10-04) | yes | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
-| `large-refactor` | `opus/xhigh` (routing trial, review by 2026-10-04) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
+| `large-refactor` | `opus/high` (routing trial, review by 2026-10-16) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
 | `novel-design` | `opus/xhigh` (routing trial, review by 2026-10-04) | yes | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
 | `critical-change` | `opus/xhigh` | yes | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
 | `code-review` | writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's | as writer (opus if critical or fable) | adversarial review of a diff; sized to the writer it gates |
-| `long-autonomous-run` | `opus/xhigh` | yes | an agent session expected to run for hours with minimal supervision |
-| `subagent-worker` | `opus/low` (routing trial, review by 2026-09-30) | yes | a delegated worker doing a bounded, well-specified piece of a larger task |
-| `verify` | `opus/low` (routing trial, review by 2026-09-30) | yes | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
-| `operate` | `opus/low` (routing trial, review by 2026-09-30) | yes | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
+| `long-autonomous-run` | `opus/high` (routing trial, review by 2026-10-16) | yes | an agent session expected to run for hours with minimal supervision |
+| `subagent-worker` | `sonnet/low` (routing trial, review by 2026-10-16) | no | a delegated worker doing a bounded, well-specified piece of a larger task |
+| `verify` | `haiku` (routing trial, review by 2026-10-16) | no | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
+| `operate` | `sonnet/low` (routing trial, review by 2026-10-16) | no | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
 
-**Self-review:** a writer spawned as `novel-design`, `large-refactor`, `critical-change`, `long-autonomous-run` reviews its own work before it returns (it commits, spawns ONE foreground parity reviewer on its own rung, runs one fix round, and returns the verdict line verbatim), unless its brief carries the line `REVIEW: lead`. The protocol is in the body of `agent-companion:ac-opus-xhigh`; on any other ladder rung (a routing profile or a local copy of the table can put a listed type there) the spawn guard appends the same text to the brief. A built-in or project agent does not self-review unless its own definition says so, and the lead reviews it as before.
+**Self-review:** a writer spawned as `novel-design`, `critical-change` reviews its own work before it returns (it commits, spawns ONE foreground parity reviewer on its own rung, runs one fix round, and returns the verdict line verbatim), unless its brief carries the line `REVIEW: lead`. The protocol is in the body of `agent-companion:ac-opus-xhigh`; on any other ladder rung (a routing profile or a local copy of the table can put a listed type there) the spawn guard appends the same text to the brief. A built-in or project agent does not self-review unless its own definition says so, and the lead reviews it as before.
 <!-- routing-table:task-types END -->
 
 ## Step 1 — classify the task
