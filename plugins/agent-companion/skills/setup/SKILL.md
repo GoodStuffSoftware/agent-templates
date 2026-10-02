@@ -134,7 +134,7 @@ Plugin skills are namespaced by the plugin's name, so the full form is
 `/agent-companion:recommend`. A skill *inside* the plugin cannot escape that.
 The plugin therefore ships a user-level forwarder under `shims/ac/`; install it
 and `/ac recommend …`, `/ac evaluate …`, `/ac routing`, `/ac audit …`,
-`/ac setup`, `/ac scout` all work:
+`/ac version`, `/ac setup`, `/ac scout` all work:
 
 ```bash
 mkdir -p "$HOME/.claude/skills/ac" && cp "$AC/shims/ac/SKILL.md" "$HOME/.claude/skills/ac/SKILL.md"

@@ -1069,9 +1069,9 @@ plugin-registered hook defers to it instead of duplicating the notice — see
 catches most staleness without it, just one `/reload-plugins` (or restart)
 behind.
 
-### Five separate stale-state traps
+### Six separate stale-state traps
 
-Updating this plugin touches five independent caches, and skipping any one
+Updating this plugin touches six independent caches, and skipping any one
 leaves you running old code **with no error at all**:
 
 | # | Step | Symptom if skipped |
@@ -1081,6 +1081,7 @@ leaves you running old code **with no error at all**:
 | 3 | `/reload-plugins`, or a new session | new version installed, old hooks still bound |
 | 4 | check the running session's own age | a session predating the install never had hooks at all |
 | 5 | remove and re-add the marketplace on claude.ai | cloud sessions keep loading the previous version's hooks and skills while every local check — `claude plugin list`, the marketplace cache commit, the manifest check — reports the new version |
+| 6 | check every copy with `node scripts/version.mjs` (`/ac version`) | the CLI cache is current while the desktop app's own copy (`…/local-agent-mode-sessions/<acct>/<org>/rpm/plugin_<id>/`) is still on an older version: desktop Code-tab sessions keep the old hooks and routing, and `installed_plugins.json` looks fine |
 
 Three traps within the traps: `claude plugin update` needs the **fully qualified**
 `plugin@marketplace` — the bare name fails with a misleading *"Plugin not
@@ -1124,6 +1125,7 @@ node "$AC/scripts/audit.mjs" --only guard-canary
 | `audit` | `/ac audit --dir <project>` | the composable hygiene audit; `--fix` for the fixable checks |
 | `brevity` | `/ac brevity` | is the reporting contract on, for whom, and which layer is winning |
 | `standing-rules` | `/ac rules` | which "always do X if Y" rules exist, and whether one would fire on given text |
+| `version` | `/ac version` | which agent-companion is running, and whether every installed copy (CLI cache, desktop app copy, marketplace clone) is current |
 | `setup` | `/ac setup` | the setup steps on a new machine, both scouts included |
 | `calibration-scout` | `/ac scout` | the daily drift scout, run by hand |
 | `model-benchmark` | `/ac benchmark` | re-running the model x effort benchmark: plan, budget, order, fairness, reporting |

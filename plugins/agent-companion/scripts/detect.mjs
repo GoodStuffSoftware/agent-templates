@@ -38,6 +38,7 @@ import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
 import { stateDir as advisorStateDir } from '../hooks/lib/context.mjs';
 import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/ci-status.mjs';
 import { STREAK_FILE, attendedCoverage } from '../hooks/lib/delegation.mjs';
+import { collect as collectCopies, staleBeyondGrace, STALE_GRACE_MS } from './version.mjs';
 
 // The operator's raw OS handle(s), for scrubbing signal text.
 function rawOsHandles() {
@@ -535,6 +536,34 @@ try {
   }
   if (OWN_MANIFEST && OWN_MANIFEST.version) next.pluginVersion = OWN_MANIFEST.version;
 } catch { /* no install record here (a bare checkout): not a signal */ }
+
+// --- 6a. plugin_copy_stale -----------------------------------------------
+// Claude Code keeps more than one copy of this plugin and they drift apart:
+// the CLI cache (installed_plugins.json) and, separately, the desktop app's own
+// per-account copy (…/local-agent-mode-sessions/<acct>/<org>/rpm/plugin_<id>/),
+// which Desktop Code-tab sessions run. On 2026-10-02 the desktop copy was 0.29.22
+// while the CLI copy was 0.29.24 and nothing said so. plugin_version_behind
+// above judges only the install record; this judges every copy version.mjs can
+// find, but only after the marketplace has held the newer version for more than
+// STALE_GRACE_MS (a release needs a few hours to reach each copy). The CLI half
+// repeats plugin_version_behind once the grace has passed and adds the age; the
+// desktop half is the only place the desktop copy is ever checked.
+// The marketplace clone is the reference (no network); version.mjs --remote
+// also reads origin/main when asked by hand. Skipped in the cloud, where the
+// copies on this machine are not the ones sessions run.
+try {
+  if (!process.env.CLAUDE_CODE_REMOTE_SESSION_ID) {
+    const report = collectCopies({ now: nowDate().getTime() });
+    const latest = report.latest && report.latest.version;
+    for (const c of staleBeyondGrace(report, STALE_GRACE_MS)) {
+      const hours = Math.round(c.behindMs / 3600000);
+      sig('plugin_copy_stale',
+        `${c.label} is ${c.version}; the marketplace has had ${latest} for ${hours} h, so ${c.sessions || 'sessions on this copy'} run the older plugin. Fix: ${c.fix}`,
+        c.kind === 'desktop-rpm' ? 'desktop-plugin-sync' : 'plugin-update');
+    }
+    if (report.this && report.this.version) next.thisCopyVersion = report.this.version;
+  }
+} catch { /* version.mjs could not read the installs: not a signal */ }
 
 // --- 6b. Stale copy loaded / session outdated -----------------------------
 // The cross-session half of the version check. spawn-guard.mjs stamps its

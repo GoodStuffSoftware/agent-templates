@@ -144,6 +144,19 @@ Either way: the change isn't "done" until it's scrubbed (leak-check green, local
 
 The same principle governs cutting a versioned release (e.g. the `agent-companion` plugin): landing is gated on CI, not on local runs alone or the [pre-push gate](#local-ci-gate-pre-push) alone. GitHub CI must be green on the release branch before landing, and on main after the push; watch with `gh run watch <id> --exit-status`. Red CI is a failed release step.
 
+**After landing (the agent-companion plugin): check every installed copy.** Landing on `main` does not update any installed copy. Run `claude plugin marketplace update agent-templates`, then `claude plugin update agent-companion@agent-templates`, then check all the copies with the plugin's own script:
+
+```bash
+AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion | head -1)"   # the clone `marketplace update` just refreshed
+node "$AC/scripts/version.mjs" --remote     # or /ac version; add --json for a record
+```
+
+It lists THIS copy, the CLI cache entry (version, `gitCommitSha`, `lastUpdated` from `installed_plugins.json`), every desktop-app copy (`…/local-agent-mode-sessions/<acct>/<org>/rpm/plugin_<id>/`), the marketplace clone, and, with `--remote`, origin/main, and ends with a verdict line (`all copies current`, or `STALE: <copy> is <ver>, latest is <ver>` with the sessions affected and the fix).
+
+- The release has **landed for CLI sessions** when the CLI cache copy shows the new version and the new `gitCommitSha`. That is the release's definition of done.
+- **Record the desktop copy's state separately** in the release note: its version, and that Desktop Code-tab sessions run it. It is refreshed by the desktop app's own sync from claude.ai, not by `claude plugin update`, and normally trails the CLI copy by hours. A desktop copy that is still behind is reported, never papered over; the daily scout raises `plugin_copy_stale` for it after 6 hours.
+- A behaviour change that must reach desktop sessions at once cannot wait for that sync: put it in the operator routing profile, which every copy reads.
+
 ---
 
 ## Provenance anonymization
