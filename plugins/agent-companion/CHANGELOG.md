@@ -2,6 +2,12 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.28 — 2026-10-02
+
+- Fix: the `lead-effort-check` rule's option 1 ("Raise to xhigh (Recommended)") told the lead to load and call `set_session_effort` on its own sessionId, which the desktop app refuses for the calling session (a session must not silently re-price its own turns), so the step always failed. Option 1 now tells the operator to raise it with the app's effort control for this session and wait, and makes no spawn until `get_session` "self" shows xhigh or the operator says to continue. The ToolSearch and `set_session_effort` instructions are removed. Everything else is unchanged (unattended runs do not ask, header "Lead effort", option 2 "Stay at <current>", never max, never lower).
+- Tests: `lead-effort-check.test.mjs` pins the new option-1 wording and asserts the old self-set path is gone.
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.27 — 2026-10-02
 
 - New built-in standing rule `lead-effort-check` (session start), off by default. Turn it on with `{"id":"lead-effort-check","enabled":true}` in `standing-rules.json`; the wording then ships with the plugin instead of living in the operator's file (a full `then` in the file still wins). When the session will orchestrate and its effort is below xhigh, the lead asks the operator with the AskUserQuestion options selector (header "Lead effort"; "Raise to xhigh (Recommended)" or "Stay at <current>") and makes no spawn or other tool call until it is answered. "Raise" loads `set_session_effort` with ToolSearch and sets the session to xhigh; if that tool is missing or fails, the operator is told to use the app's effort control. Unattended sessions (a `scheduledTaskId`, headless or `-p`, no AskUserQuestion) are never asked: they continue and state the effort once. It never raises to max and never lowers. Checked before the first spawn and again after a resume or compaction, as before. This replaces the older prose ask ("say so in one line and ask them to raise it").

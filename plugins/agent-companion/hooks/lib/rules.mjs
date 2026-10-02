@@ -113,7 +113,7 @@ export const LEAD_EFFORT_CHECK_TEXT = [
   'If this session will orchestrate agents (spawning workers or reviewers, several open threads, or releases), check your own effort before the first spawn and again after any resume or compaction: call get_session with session_id "self" and read its effort field. An orchestration lead runs at xhigh.',
   'Unattended (get_session shows a scheduledTaskId, a headless or -p run, or no AskUserQuestion tool): do not ask. Continue at the current effort and state it once in your output.',
   'Interactive and below xhigh: ask with the AskUserQuestion tool (the options selector), not in prose, and make no spawn and no other tool call until it is answered. Header "Lead effort"; the question names the current effort and why this looks like orchestration.',
-  'Option 1 "Raise to xhigh (Recommended)": load mcp__ccd_session_mgmt__set_session_effort with ToolSearch (select:mcp__ccd_session_mgmt__set_session_effort) and set this session to xhigh, using the sessionId from get_session "self". If that tool is unavailable or fails, tell the operator to raise it in the app\'s effort control, and wait.',
+  'Option 1 "Raise to xhigh (Recommended)": tell the operator to raise it with the app\'s effort control for this session, and wait; make no spawn until get_session "self" shows xhigh or the operator says to continue. Do not set it yourself: the app refuses a session changing its own effort.',
   'Option 2 "Stay at <current>": continue, and do not ask again this session.',
   'Never raise to max this way, never lower the effort.',
 ].join(' ');

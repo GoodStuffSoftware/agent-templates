@@ -52,9 +52,12 @@ test('the wording asks with AskUserQuestion, not in prose, and keeps the unatten
   assert.match(t, /names the current effort and why this looks like orchestration/);
   // option 1
   assert.ok(t.includes('Option 1 "Raise to xhigh (Recommended)"'));
-  assert.ok(t.includes('select:mcp__ccd_session_mgmt__set_session_effort'));
-  assert.match(t, /sessionId from get_session "self"/);
-  assert.match(t, /tell the operator to raise it in the app's effort control, and wait/);
+  assert.match(t, /tell the operator to raise it with the app's effort control for this session, and wait/);
+  assert.match(t, /make no spawn until get_session "self" shows xhigh or the operator says to continue/);
+  assert.match(t, /the app refuses a session changing its own effort/);
+  // the self-set path is gone: no ToolSearch load, no set_session_effort call
+  assert.doesNotMatch(t, /set_session_effort/);
+  assert.doesNotMatch(t, /ToolSearch/);
   // option 2
   assert.ok(t.includes('Option 2 "Stay at <current>": continue, and do not ask again this session.'));
   // limits
