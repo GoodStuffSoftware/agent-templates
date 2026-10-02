@@ -41,8 +41,17 @@ test('the skill runs version.mjs from its own base directory and reports in 3 to
   assert.match(src, /Desktop Code-tab sessions/);
   assert.match(src, /claude plugin marketplace update/);
   assert.match(src, /claude plugin update agent-companion@agent-templates/);
-  assert.match(src, /remove and re-add agent-companion in the desktop plugin manager/);
-  assert.match(src, /not verified/);
+  assert.match(src, /disable, then re-enable,\s+agent-companion in the desktop app's plugin manager/);
+  assert.match(src, /not `claude plugin\s+uninstall`/);
+  assert.match(src, /idle desktop sessions pick up the current copy on\s+their next turn/);
+  assert.match(src, /mid-turn\s+picks it up after that turn/);
+  assert.match(src, /[Cc]onfirm\s+with\s+`\/ac version`/);
+  assert.match(src, /runs the CLI cache copy,\s+so a later `claude plugin update` covers it/);
+  assert.match(src, /When the app has none, desktop sessions\s+use the CLI cache copy/);
+  assert.doesNotMatch(src, /not verified|untested/i);
+  assert.match(src, /names an rpm path that version\.mjs does not list/);
+  assert.match(src, /predates the\s+copy's removal/);
+  assert.match(src, /On 2026-10-02 the desktop copy was 0\.29\.22/);
 });
 
 test('the path the skill documents resolves: <skill dir>/../../scripts/version.mjs exists and runs', () => {

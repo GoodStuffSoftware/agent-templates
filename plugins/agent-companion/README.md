@@ -1081,7 +1081,7 @@ leaves you running old code **with no error at all**:
 | 3 | `/reload-plugins`, or a new session | new version installed, old hooks still bound |
 | 4 | check the running session's own age | a session predating the install never had hooks at all |
 | 5 | remove and re-add the marketplace on claude.ai | cloud sessions keep loading the previous version's hooks and skills while every local check — `claude plugin list`, the marketplace cache commit, the manifest check — reports the new version |
-| 6 | check every copy with `node scripts/version.mjs` (`/ac version`) | the CLI cache is current while the desktop app's own copy (`…/local-agent-mode-sessions/<acct>/<org>/rpm/plugin_<id>/`) is still on an older version: desktop Code-tab sessions keep the old hooks and routing, and `installed_plugins.json` looks fine |
+| 6 | check every copy with `node scripts/version.mjs` (`/ac version`) | the CLI cache is current while the desktop app's own copy (`…/local-agent-mode-sessions/<acct>/<org>/rpm/plugin_<id>/`) is still on an older version: desktop Code-tab sessions keep the old hooks and routing, and `installed_plugins.json` looks fine. Fix: disable, then re-enable, agent-companion in the desktop app's plugin manager (not `claude plugin uninstall`), then idle desktop sessions pick up the current copy on their next turn (a session that is mid-turn, after that turn); confirm with `/ac version`. Afterwards the desktop session runs the CLI cache copy, so a later `claude plugin update` covers it. With no desktop copy, desktop sessions already use the CLI cache |
 
 Three traps within the traps: `claude plugin update` needs the **fully qualified**
 `plugin@marketplace` — the bare name fails with a misleading *"Plugin not

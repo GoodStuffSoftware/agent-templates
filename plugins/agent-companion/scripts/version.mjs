@@ -8,6 +8,8 @@
 //     <desktop data>/local-agent-mode-sessions/<acct>/<org>/rpm/plugin_<id>/
 //     (the app's RemotePluginManager syncs it from claude.ai, not from the CLI
 //     cache). Desktop Code-tab sessions run their hooks and skills from it.
+//     When the app has none (e.g. after the plugin was disabled and re-enabled
+//     in its plugin manager), desktop sessions load the CLI cache copy instead.
 //   - the marketplace clone (~/.claude/plugins/marketplaces/<marketplace>/),
 //     which is what `claude plugin update` installs FROM.
 // On 2026-10-02 the desktop copy was 0.29.22 while the CLI copy was 0.29.24:
@@ -407,17 +409,15 @@ export function remoteInfo({
 
 const CLI_FIX = 'run `claude plugin marketplace update agent-templates`, then `claude plugin update agent-companion@agent-templates`, then restart the session (or /reload-plugins)';
 const SESSION_FIX = 'this session loaded an older copy than the one now installed: restart the session (or /reload-plugins)';
-// What actually refreshes the desktop copy is only partly known. Established
-// (2026-09-12, 2026-09-24, 2026-10-02): the app's remote-plugin manager (a
-// periodic sync, every 20 minutes per the app's own log) fills the copy from
-// claude.ai, not from the CLI cache, so `claude plugin update` never touches
-// it; a full app restart alone did NOT move a stuck copy (2026-09-12); removing
-// and re-adding the plugin in the desktop plugin manager did, twice. NOT
-// established: how soon claude.ai itself picks up a new release, or whether
-// pressing Sync on the marketplace there makes the app pull it. The order below
-// is therefore: what worked first, the untested idea last and labelled so.
-const DESKTOP_FIX = "the desktop app syncs this copy from claude.ai, not from the CLI cache, so `claude plugin update` does not touch it. What worked before: remove and re-add agent-companion in the DESKTOP plugin manager (not `claude plugin uninstall`, which wipes the plugin options), then /reload-plugins; a full app restart alone did not. Untested: press Sync on the agent-templates marketplace in claude.ai and wait for the app's 20-minute sync. What refreshes this copy is not verified";
-const DESKTOP_FIX_SHORT = 'fix (unverified): remove and re-add agent-companion in the desktop plugin manager, then /reload-plugins';
+// What refreshes a desktop copy (verified 2026-10-02): the desktop app may keep
+// its own copy, synced from claude.ai, which `claude plugin update` never
+// touches. Disabling and re-enabling the plugin in the DESKTOP plugin manager
+// removed a stuck copy (0.29.22) and desktop Code-tab sessions then loaded the
+// CLI cache copy, so a later `claude plugin update` covers them. `claude plugin
+// uninstall` is not the way: it wipes the plugin options. Earlier incidents
+// (2026-09-12, 2026-09-24) used remove-and-re-add in the same manager.
+const DESKTOP_FIX = "the desktop app keeps its own copy of this plugin and `claude plugin update` does not touch it. Fix (verified 2026-10-02): disable, then re-enable, agent-companion in the DESKTOP plugin manager (not `claude plugin uninstall`, which wipes the plugin options), then idle desktop sessions pick up the current copy on their next turn, and a session that is mid-turn picks it up after that turn; confirm with /ac version. Afterwards the desktop session runs the CLI cache copy, so a later `claude plugin update` covers it";
+const DESKTOP_FIX_SHORT = 'fix: disable, then re-enable, agent-companion in the desktop plugin manager, then idle desktop sessions pick up the current copy on their next turn; confirm with /ac version';
 const MARKETPLACE_FIX = 'run `claude plugin marketplace update agent-templates`';
 
 const KIND_LABEL = {
@@ -443,6 +443,14 @@ const sameDir = (a, b) => {
   if (normalizePath(a) === normalizePath(b)) return true;
   try { return normalizePath(realpathSync(a)) === normalizePath(realpathSync(b)); } catch { return false; }
 };
+
+// Is there a desktop copy of its own? With none (the app never synced the
+// plugin, or its stale copy was removed), desktop Code-tab sessions load the
+// CLI cache copy, so there is nothing separate to go stale.
+export function desktopSummary(desktop) {
+  const present = desktop.length > 0;
+  return { present, count: desktop.length, usesCliCache: !present };
+}
 
 // Gather everything. Options are all seams for tests; the defaults read the
 // machine. `remote` runs the optional network read.
@@ -528,6 +536,7 @@ export function collect({
     this: self,
     cli,
     desktop,
+    desktopCopy: desktopSummary(desktop),
     marketplace: market,
     remote: remoteInfoResult,
     latest: latest ? { version: latest, from: latestFrom } : null,
@@ -611,7 +620,7 @@ export function renderText(r) {
       L.push(`Desktop copy:   ${d.version || '?'}  ${d.id}  modified ${d.mtime || '?'}  ${d.path}${cp ? flag(cp) : ''}`);
     }
   } else {
-    L.push('Desktop copy:   none found (no desktop app data, or the plugin is not synced there)');
+    L.push('Desktop copy:   no separate desktop copy; desktop sessions load the CLI cache copy');
   }
   const m = r.marketplace;
   L.push(m.found

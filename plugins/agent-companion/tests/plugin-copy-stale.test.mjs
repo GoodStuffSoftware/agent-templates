@@ -31,8 +31,9 @@ test('a desktop copy two releases behind for more than 6 hours fires, names the 
     assert.match(s.detail, /desktop copy \(plugin_FIX0\) is 0\.29\.22/);
     assert.match(s.detail, /marketplace has had 0\.29\.24 for 10 h/);
     assert.match(s.detail, /Desktop Code-tab sessions/);
-    assert.match(s.detail, /remove and re-add agent-companion in the DESKTOP plugin manager/);
-    assert.match(s.detail, /Untested: press Sync/);
+    assert.match(s.detail, /disable, then re-enable, agent-companion in the DESKTOP plugin manager/);
+    assert.match(s.detail, /confirm with \/ac version/);
+    assert.doesNotMatch(s.detail, /Untested|not verified/);
   } finally { fx.cleanup(); }
 });
 

@@ -582,7 +582,7 @@ try {
 //         already replaced (`.orphaned_at`, at least LOAD_SETTLE_MS before
 //         L): markers are written when a version stops being installed in
 //         ANY scope, so another scope's update can never make this true.
-//     Remedy: remove the stale entry in the desktop plugin manager.
+//     Remedy: disable, then re-enable, agent-companion in the desktop plugin manager.
 //   session_outdated (low, informational): the session loaded BEFORE the
 //     latest install and still runs what was installed then. That is not a
 //     stale copy, it is an old session, and the remedy is a restart or a
@@ -611,7 +611,7 @@ try {
 // its version is unknown and its rows are never judged; and a stale copy
 // that is one update behind cannot be told from an old session unless the
 // cache still shows its version was replaced before it loaded.
-const STALE_COPY_REMEDY = 'remove the stale agent-companion entry in the desktop plugin manager, then /reload-plugins, ' +
+const STALE_COPY_REMEDY = 'disable, then re-enable, agent-companion in the desktop plugin manager, then /reload-plugins, ' +
   'then verify with a trivial ladder spawn; fresh session if that still fails';
 const SESSION_OUTDATED_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 const SESSION_OUTDATED_MIN_UPDATES = 2;

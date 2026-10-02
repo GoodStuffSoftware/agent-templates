@@ -68,7 +68,7 @@ test('an orphaned cache copy OLDER than the install for this scope warns, naming
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
     assert.match(msg, /older cached copy of the plugin \(0\.29\.0\) than the one installed for it \(0\.29\.1, user scope\)/);
-    assert.match(msg, /remove the stale agent-companion entry in the desktop plugin manager, then \/reload-plugins, then verify with a trivial ladder spawn; start a fresh session if that still fails/);
+    assert.match(msg, /disable, then re-enable, agent-companion in the desktop plugin manager, then \/reload-plugins, then verify with a trivial ladder spawn; start a fresh session if that still fails/);
   } finally {
     cleanup();
   }
@@ -172,7 +172,7 @@ test('a missing ladder agent file is reported, with the reinstall recovery (not 
     const msg = res.json?.systemMessage || '';
     assert.match(msg, /agents\/ac-opus-low\.md has no parseable frontmatter/);
     assert.match(msg, /update or reinstall the plugin/);
-    assert.doesNotMatch(msg, /remove the stale agent-companion entry/);
+    assert.doesNotMatch(msg, /disable, then re-enable, agent-companion/);
   } finally {
     cleanup();
   }
@@ -202,7 +202,7 @@ test('a harness payload that lists registered agents without the ladder is repor
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
     assert.match(msg, /is not in the harness's own registered-agent list/);
-    assert.match(msg, /remove the stale agent-companion entry in the desktop plugin manager/);
+    assert.match(msg, /disable, then re-enable, agent-companion in the desktop plugin manager/);
   } finally {
     cleanup();
   }
@@ -279,7 +279,7 @@ test('a copy loaded from outside the plugin cache (a desktop bundle) older than 
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
     assert.match(msg, /a copy of the plugin from outside the plugin cache \(0\.29\.1; for example a desktop app bundle\) that is older than the one installed for it \(0\.29\.2, user scope\)/);
-    assert.match(msg, /remove the stale agent-companion entry in the desktop plugin manager/);
+    assert.match(msg, /disable, then re-enable, agent-companion in the desktop plugin manager/);
     writeInstalled(dir, [{ scope: 'user', version: '0.29.1', installPath: join(dir, 'elsewhere', '0.29.1'), lastUpdated: iso(2 * HOUR) }]);
     assert.equal(runFrom(bundle, { session_id: 'r3-bundle-eq', cwd: dir, source: 'startup' }).stdout, '');
   } finally {

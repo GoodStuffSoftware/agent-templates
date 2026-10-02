@@ -2,6 +2,11 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.26 — 2026-10-02
+
+- `scripts/version.mjs` no longer says "Desktop copy: none found" when the desktop app has no copy of its own. It now prints "no separate desktop copy; desktop sessions load the CLI cache copy", and `--json` has a new top-level `desktopCopy: { present, count, usesCliCache }` field (`desktop` stays the array it was). The verdict logic is unchanged; a desktop copy that exists and lags is still STALE. Verified 2026-10-02: after the operator disabled and re-enabled agent-companion in the desktop app's plugin manager, the stale 0.29.22 desktop copy was gone and desktop Code-tab sessions loaded the plugin from the CLI cache.
+- The desktop refresh path is now the verified one everywhere it was described: disable, then re-enable, agent-companion in the desktop app's plugin manager (not `claude plugin uninstall`, which wipes the plugin options), then idle desktop sessions pick up the current copy on their next turn (a session that is mid-turn, after that turn); confirm with `/ac version`. Afterwards the desktop session runs the CLI cache copy, so a later `claude plugin update` covers it. Updated in `scripts/version.mjs` (the STALE verdict and fix text), the `version` and `setup` skills, the `plugin_copy_stale` and `stale_copy_loaded` scout signals and routine, the ladder-check recovery message, the README stale-state table and CONTRIBUTING's release gate. The old "unverified" and "Sync on claude.ai is untested" wording is gone.
+
 ## 0.29.25 — 2026-10-02
 
 - New `version` skill (`/ac version`) and `scripts/version.mjs`: say which agent-companion is running and whether every installed copy is current. Claude Code keeps several copies that drift apart: the CLI cache (what `installed_plugins.json` records and CLI sessions run), the desktop app's own copy under `local-agent-mode-sessions/<acct>/<org>/rpm/plugin_<id>/` (what Desktop Code-tab sessions run), and the marketplace clone. On 2026-10-02 the desktop copy was 0.29.22 while the CLI copy was 0.29.24, and desktop sessions kept the old routing with nothing saying so.

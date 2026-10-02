@@ -10,8 +10,10 @@ Claude Code keeps more than one copy of this plugin:
 - **CLI cache** (`~/.claude/plugins/cache/<marketplace>/agent-companion/<ver>/`),
   the copy `installed_plugins.json` records. CLI sessions run it.
 - **Desktop copy** (`%APPDATA%\Claude\local-agent-mode-sessions\<acct>\<org>\rpm\plugin_<id>\`,
-  the equivalent folder on macOS and Linux). Desktop Code-tab sessions run their
-  hooks and skills from it, and it is synced from claude.ai, not from the CLI cache.
+  the equivalent folder on macOS and Linux). The desktop app may keep its own
+  copy, synced from claude.ai, not from the CLI cache; Desktop Code-tab sessions
+  run their hooks and skills from it. When the app has none, desktop sessions
+  use the CLI cache copy, and the script says so.
 - **Marketplace clone** (`~/.claude/plugins/marketplaces/<marketplace>/`), what
   `claude plugin update` installs from.
 
@@ -53,14 +55,21 @@ runs the marketplace clone's script, which finds the same installs.
      agent-templates`, then `claude plugin update agent-companion@agent-templates`,
      then restart the session or `/reload-plugins`.
    - **Desktop copy stale** (Desktop Code-tab sessions): `claude plugin update`
-     does not touch it; the desktop app syncs it from claude.ai. What worked
-     before: remove and re-add agent-companion in the desktop plugin manager (not
-     `claude plugin uninstall`, which wipes the plugin options), then
-     `/reload-plugins`; a full app restart alone did not. Pressing Sync on the
-     agent-templates marketplace in claude.ai is untested. Say plainly that what
-     refreshes this copy is not verified.
+     does not touch it. Verified 2026-10-02: disable, then re-enable,
+     agent-companion in the desktop app's plugin manager (not `claude plugin
+     uninstall`, which wipes the plugin options). That removes the desktop copy.
+     After that, idle desktop sessions pick up the current copy on their next turn; a
+     session that is mid-turn picks it up after that turn. Confirm with
+     `/ac version`. Afterwards the desktop session runs the CLI cache copy,
+     so a later `claude plugin update` covers it.
+   - **No separate desktop copy**: not a fault. The script prints that desktop
+     sessions load the CLI cache copy; report that line as it is.
    - **This session's copy is an older cache folder** than the installed one: the
      session predates an update. Restart the session (or `/reload-plugins`).
+
+If a hook or guard message names an rpm path that version.mjs does not list, check
+whether that directory still exists. If it is gone, the message predates the
+copy's removal; that session runs the current copy from its next turn.
 
 A copy younger than about 6 hours behind is normal after a release; say so rather
 than raising an alarm. Never print tokens or credentials; the script prints none.

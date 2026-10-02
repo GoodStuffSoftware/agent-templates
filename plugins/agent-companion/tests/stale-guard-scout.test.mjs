@@ -84,7 +84,7 @@ const find = (signals, kind) => signals.filter((s) => s.kind === kind);
 const STALE = 'stale_copy_loaded';
 const OUTDATED = 'session_outdated';
 const UNKNOWN = 'session_load_unknown';
-const REMOVE_ENTRY = /remove the stale agent-companion entry in the desktop plugin manager/;
+const REMOVE_ENTRY = /disable, then re-enable, agent-companion in the desktop plugin manager/;
 const versionSignals = (signals) => signals.filter((s) => [STALE, OUTDATED, UNKNOWN].includes(s.kind));
 
 test('after a normal update, nothing is judged stale: pre-update rows, a session open across the update, fresh sessions on the new version', () => {
@@ -163,7 +163,7 @@ test('stale_copy_loaded: a new session loaded after 0.29.3 was installed but run
     assert.match(hits[0].detail, /2 spawn\(s\) in 24h from 1 session/);
     assert.match(hits[0].detail, /guard 0\.29\.2 < 0\.29\.3, installed when it loaded \(user scope\)/);
     assert.match(hits[0].detail, /session 12345678/);
-    assert.match(hits[0].detail, /Remedy: remove the stale agent-companion entry in the desktop plugin manager, then \/reload-plugins, then verify with a trivial ladder spawn; fresh session if that still fails\./);
+    assert.match(hits[0].detail, /Remedy: disable, then re-enable, agent-companion in the desktop plugin manager, then \/reload-plugins, then verify with a trivial ladder spawn; fresh session if that still fails\./);
     assert.equal(hits[0].dispatch, 'plugin-update');
     assert.equal(hits[0].severity, 'high');
     assert.deepEqual(find(signals, OUTDATED), []);

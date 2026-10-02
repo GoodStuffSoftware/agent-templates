@@ -48,12 +48,12 @@ test('a desktop copy behind the CLI copy: STALE, names the desktop sessions and 
     assert.equal(v.ok, false);
     assert.match(v.line, /^STALE: desktop copy \(plugin_FIX0\) is 0\.29\.22, latest is 0\.29\.24/);
     assert.match(v.line, /Desktop Code-tab sessions/);
-    assert.match(v.line, /fix \(unverified\): remove and re-add agent-companion in the desktop plugin manager/);
-    assert.doesNotMatch(v.line, /Sync/, 'an untested step must not lead the one-line verdict');
+    assert.match(v.line, /fix: disable, then re-enable, agent-companion in the desktop plugin manager, then idle desktop sessions pick up the current copy on their next turn; confirm with \/ac version/);
+    assert.doesNotMatch(v.line, /unverified|Sync/, 'the fix is verified; no hedge or untested step in the one-line verdict');
     assert.doesNotMatch(v.line, /CLI cache copy/, 'the CLI copy is current and must not be named');
     const text = run(fx).stdout;
     assert.match(text, /Verdict:\s+STALE: desktop copy/);
-    assert.match(text, /Fix \(desktop\):.*a full app restart alone did not.*Untested: press Sync.*not verified/);
+    assert.match(text, /Fix \(desktop\):.*Fix \(verified 2026-10-02\): disable, then re-enable, agent-companion in the DESKTOP plugin manager \(not `claude plugin uninstall`.*idle desktop sessions pick up the current copy on their next turn.*mid-turn picks it up after that turn; confirm with \/ac version.*runs the CLI cache copy/);
     assert.match(text, /<- STALE/);
   } finally { fx.cleanup(); }
 });
@@ -101,8 +101,24 @@ test('no desktop app data: reported as none, the verdict is still given', () => 
   try {
     machine(fx.dir, { desktop: null });
     const res = run(fx);
-    assert.match(res.stdout, /Desktop copy:\s+none found/);
+    assert.match(res.stdout, /Desktop copy:\s+no separate desktop copy; desktop sessions load the CLI cache copy/);
+    assert.doesNotMatch(res.stdout, /none found/);
     assert.match(res.stdout, /Verdict:\s+all copies current/);
+    const j = run(fx, ['--json']).json;
+    assert.deepEqual(j.desktopCopy, { present: false, count: 0, usesCliCache: true });
+    assert.deepEqual(j.desktop, [], 'the existing desktop array keeps its shape');
+    assert.equal(j.verdict.line, 'all copies current', 'the verdict logic is unchanged');
+  } finally { fx.cleanup(); }
+});
+
+test('a desktop copy exists: the line shows it, and the JSON field says it is present and not on the CLI cache', () => {
+  const fx = makeFixture();
+  try {
+    machine(fx.dir, { desktop: ['0.29.24', '0.29.24'] });
+    const res = run(fx);
+    assert.match(res.stdout, /Desktop copy:\s+0\.29\.24\s+plugin_FIX0/);
+    assert.doesNotMatch(res.stdout, /no separate desktop copy/);
+    assert.deepEqual(run(fx, ['--json']).json.desktopCopy, { present: true, count: 2, usesCliCache: false });
   } finally { fx.cleanup(); }
 });
 

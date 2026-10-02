@@ -162,7 +162,7 @@ inside that session could say so. Two checks cover it:
     install. Proven either by a load at least 5 minutes after its scope's
     latest update, or by the plugin cache showing the guard's own version
     had already been replaced (`.orphaned_at`) before the session loaded.
-    Remedy: remove the stale entry in the desktop plugin manager (below).
+    Remedy: disable, then re-enable, agent-companion in the desktop plugin manager (below).
   - `session_outdated` (low, informational): the session loaded before the
     latest install and still runs what was installed then. That is an old
     session, not a stale copy. Remedy: restart or `/reload-plugins` that
@@ -216,9 +216,10 @@ inside that session could say so. Two checks cover it:
   bundle, and a bundle whose own guard predates the stamp is judged only by
   its version bound (or not at all, if it is 0.29.0 through 0.29.5).
 
-Recovery for a stale copy: remove the stale agent-companion entry in the
-desktop plugin manager, `/reload-plugins`, verify with a trivial ladder spawn,
-and start a fresh session if that still fails.
+Recovery for a stale copy: disable, then re-enable, agent-companion in the
+desktop plugin manager (not `claude plugin uninstall`, which wipes the plugin
+options), `/reload-plugins`, verify with a trivial ladder spawn, and start a
+fresh session if that still fails.
 
 If that still does not register the ladder, `scripts/install-ladder-agents.mjs`
 is the fallback: it copies the ladder's `agents/ac-*.md` files to **user-level**

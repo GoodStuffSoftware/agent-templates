@@ -52,7 +52,7 @@ import {
 
 // The recovery for a stale loaded copy, operator-confirmed on this machine
 // (2026-09-24). Named once so every message quotes it identically.
-const STALE_COPY_RECOVERY = 'remove the stale agent-companion entry in the desktop plugin manager, then ' +
+const STALE_COPY_RECOVERY = 'disable, then re-enable, agent-companion in the desktop plugin manager, then ' +
   '/reload-plugins, then verify with a trivial ladder spawn; start a fresh session if that still fails.';
 // The recovery for missing or broken agent files in the loaded copy: the
 // files themselves are wrong, so the copy needs replacing.
