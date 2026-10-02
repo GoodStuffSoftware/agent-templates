@@ -220,6 +220,17 @@ test('SubagentStop fallback: a worker the mid-run hook never reached is recorded
   } finally { fx.cleanup(); }
 });
 
+test('a workflow agent (subagents/workflows/<id>/agent-<id>.jsonl) is found and gets the notice', () => {
+  const fx = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fx);
+    const wf = join(agentFile, '..', 'workflows', 'wf_1');
+    mkdirSync(wf, { recursive: true });
+    writeFileSync(join(wf, `agent-${AGENT}.jsonl`), user('go') + turn('r1', 350000));
+    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /past 300,000 tokens/);
+  } finally { fx.cleanup(); }
+});
+
 test('SubagentStop reads the transcript from the payload when it is given', () => {
   const fx = makeFixture();
   try {

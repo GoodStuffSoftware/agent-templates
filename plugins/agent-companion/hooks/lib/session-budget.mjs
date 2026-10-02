@@ -32,8 +32,8 @@
 // total it has is a lower bound that only grows.
 //
 // --- Crossing ------------------------------------------------------------------
-// level = floor(total / threshold) * threshold. A notice fires when level is
-// above the level already announced; one notice per call however many
+// level = floor(total / threshold) * threshold. A notice fires, once the scan
+// is complete, when level is above the level already announced; one notice per call however many
 // multiples were skipped, and an exclusive-create claim per level keeps two
 // racing hooks from both announcing it. The notice is QUEUED for the lead
 // (queueNotice in lib/runaway.mjs) and drained by hooks/runaway-notice.mjs on
@@ -53,7 +53,7 @@ import { usageOf, queueNotice, safe } from './runaway.mjs';
 export const SESSION_BUDGET_DEFAULT_UNITS = 350;
 const CHUNK_BYTES = 8 * 1024 * 1024;
 export const BUDGET_DEADLINE_MS = 2500;
-const RECENT_KEYS = 16;
+const RECENT_KEYS = 64;
 const MAX_FILES = 2000;
 const STATE_TTL_MS = 7 * 86400000;
 
@@ -203,9 +203,16 @@ function saveState(sessionId, s) {
 export function pruneBudgetState(now = Date.now()) {
   let names = [];
   try { names = readdirSync(budgetDir()); } catch { return; }
+  const old = (f) => { try { return now - statSync(f).mtimeMs > STATE_TTL_MS; } catch { return false; } };
   for (const n of names) {
     const f = join(budgetDir(), n);
-    try { if (now - statSync(f).mtimeMs > STATE_TTL_MS) rmSync(f, { recursive: true, force: true }); } catch { /* best effort */ }
+    if (n === 'claims') { // claims are files inside a directory whose own mtime tracks the newest one
+      let cs = [];
+      try { cs = readdirSync(f); } catch { /* none */ }
+      for (const c of cs) { try { if (old(join(f, c))) rmSync(join(f, c), { force: true }); } catch { /* best effort */ } }
+    } else {
+      try { if (old(f)) rmSync(f, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
   }
 }
 
@@ -273,7 +280,10 @@ export function checkSessionBudget(p, { threshold, now = Date.now(), deadlineMs 
     const level = Math.floor(r.total / threshold) * threshold;
     const prior = state.level || 0;
     let fired = false;
-    if (level > 0 && level > prior) {
+    // An incomplete scan (deadline hit while catching up on a long history) is a lower
+    // bound: announcing it would understate the total and then announce again once the
+    // scan finishes. Save the progress and announce when it is complete.
+    if (r.complete && level > 0 && level > prior) {
       state.level = level;
       if (claimLevel(p.session_id, level)) {
         fired = true;

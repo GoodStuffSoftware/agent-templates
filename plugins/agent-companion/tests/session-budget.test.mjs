@@ -173,18 +173,22 @@ test('incremental: only appended bytes are read; a request spanning two reads is
   } finally { fx.cleanup(); }
 });
 
-test('a scan that hits its deadline saves progress; the total is a lower bound that catches up', () => {
+test('a scan that hits its deadline saves progress and announces nothing until it is complete (no understated first notice)', () => {
   const fx = makeFixture();
   try {
     const { lead } = layout(fx);
     writeFileSync(lead, req('l1', SONNET, 1000000));
-    const opts = { threshold: 5, notify: () => {} };
+    const seen = [];
+    const opts = { threshold: 5, notify: (s, t) => seen.push(t) };
     const cut = checkSessionBudget({ session_id: SID, transcript_path: lead }, { ...opts, deadlineMs: -1 });
     assert.equal(cut.complete, false);
     assert.equal(cut.total, 0);
+    assert.equal(cut.fired, false);
     const done = checkSessionBudget({ session_id: SID, transcript_path: lead }, opts);
     assert.equal(done.complete, true);
     assert.ok(Math.abs(done.total - 10) < 1e-6);
+    assert.equal(done.fired, true);
+    assert.equal(seen.length, 1);
   } finally { fx.cleanup(); }
 });
 

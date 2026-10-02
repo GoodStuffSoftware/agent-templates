@@ -189,8 +189,17 @@ export function renderNotices(list) {
 const idOk = (s) => /^[A-Za-z0-9_-]+$/.test(String(s || ''));
 export function derivedAgentTranscript(leadTranscript, sessionId, agentId) {
   if (!leadTranscript || !idOk(sessionId) || !idOk(agentId)) return null;
-  const p = join(dirname(String(leadTranscript)), sessionId, 'subagents', `agent-${agentId}.jsonl`);
-  return existsSync(p) ? p : null;
+  const sub = join(dirname(String(leadTranscript)), sessionId, 'subagents');
+  const p = join(sub, `agent-${agentId}.jsonl`);
+  if (existsSync(p)) return p;
+  // A workflow's agents live one level down: subagents/workflows/<workflow id>/agent-<id>.jsonl.
+  try {
+    for (const w of readdirSync(join(sub, 'workflows'))) {
+      const q = join(sub, 'workflows', w, `agent-${agentId}.jsonl`);
+      if (existsSync(q)) return q;
+    }
+  } catch { /* no workflows directory */ }
+  return null;
 }
 
 function transcriptFromStarts(agentId) {
