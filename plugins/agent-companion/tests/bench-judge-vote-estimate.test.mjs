@@ -5,6 +5,7 @@
 // judge (bench/judge.mjs's checkJudgeEligibility()) ever contribute judged
 // answers, matching what a live run would actually judge. No model is ever
 // called here; this is pure plan-building math.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildJudgeVotePlan } from '../scripts/benchmark.mjs';

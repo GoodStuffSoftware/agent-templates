@@ -53,6 +53,7 @@
 //    bench/task-packs/, and bench/runner.mjs (the actual harness code that
 //    spawns `claude`/git/node) are still fully covered.
 
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';

@@ -3,6 +3,7 @@
 // scrubText(). All names are synthetic; leak-shaped strings are assembled at
 // run time (this file is itself leak-checked).
 
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeScrubber } from '../scripts/lib/scrub.mjs';

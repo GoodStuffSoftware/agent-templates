@@ -4,6 +4,7 @@
 // real `gh` binary, per the same convention as repo-discovery.test.mjs's
 // discoverViaGh tests.
 
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { checkRepoCiStatus, streakFromRuns, githubOwnerRepoFromUrl, repoCacheKey } from '../scripts/lib/ci-status.mjs';

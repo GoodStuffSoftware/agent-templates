@@ -7,6 +7,7 @@
 // fixture "tasks" (tests/fixtures/bench-parallel/*.mjs) do real, in-process
 // net.Server binds so the collision behavior proven here (real EADDRINUSE,
 // real concurrent binds on distinct ports) is genuine, not mocked.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';

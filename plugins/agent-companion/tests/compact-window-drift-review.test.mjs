@@ -1,4 +1,5 @@
 // Review findings (drift track): the first three failed on the pre-fix writer tip.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';

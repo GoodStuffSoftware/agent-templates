@@ -9,16 +9,19 @@
 // resolver fails LOUDLY in the test run rather than silently writing into the
 // operator's real data.
 
+// FIRST import, on purpose: it sandboxes the process's state paths and arms the
+// real-home tripwire before any other module reads them (see isolate.mjs).
+import { REAL_CLAUDE, REAL_CLAUDE_DIRS } from './isolate.mjs';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
-import { tmpdir, homedir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+export { REAL_CLAUDE_DIRS };
+
 export const TESTS_DIR = dirname(fileURLToPath(import.meta.url));
 export const PLUGIN_ROOT = join(TESTS_DIR, '..');
-
-const REAL_CLAUDE = join(homedir(), '.claude').replace(/\\/g, '/');
 
 export function assertNotRealHome(p, label) {
   const norm = String(p || '').replace(/\\/g, '/');
@@ -27,24 +30,7 @@ export function assertNotRealHome(p, label) {
   }
 }
 
-// The operator's REAL .claude root(s), captured AT MODULE LOAD — i.e. before
-// makeFixture() deletes CLAUDE_CONFIG_DIR from process.env. context.mjs's
-// claudeDir() resolves CLAUDE_CONFIG_DIR first and only then falls back to
-// <homedir()>/.claude, so a resolver that skipped the override could land under
-// EITHER, and a leak detector has to watch both. assertNotRealHome() above
-// deliberately keeps checking <homedir()>/.claude only, so its behaviour for
-// its existing callers is unchanged.
-// resolve() first: CLAUDE_CONFIG_DIR may be relative, or carry a trailing "/"
-// or "/.". A relative root left as-is would match nearly every fixture path and
-// turn the leak detector into a blanket failure.
-export const REAL_CLAUDE_DIRS = Object.freeze([...new Set([
-  REAL_CLAUDE,
-  ...(process.env.CLAUDE_CONFIG_DIR
-    ? [resolve(process.env.CLAUDE_CONFIG_DIR).replace(/\\/g, '/')]
-    : []),
-].filter(Boolean))]);
-
-const ENV_KEYS = ['AGENT_COMPANION_HOME_OVERRIDE', 'AGENT_COMPANION_STATE_DIR', 'AGENT_COMPANION_VAULT_DIR', 'CLAUDE_PLUGIN_DATA', 'CLAUDE_CONFIG_DIR'];
+const ENV_KEYS = ['AGENT_COMPANION_HOME_OVERRIDE', 'AGENT_COMPANION_STATE_DIR', 'AGENT_COMPANION_DESKTOP_DIR', 'AGENT_COMPANION_VAULT_DIR', 'CLAUDE_PLUGIN_DATA', 'CLAUDE_CONFIG_DIR'];
 
 // Fresh temp dir + the standard env overrides. Returns { dir, stateDir,
 // cleanup() }. Call cleanup() in a `finally` (or node:test's `after`) —
@@ -57,6 +43,7 @@ export function makeFixture() {
   const stateDir = join(dir, '.claude', 'agent-companion');
   process.env.AGENT_COMPANION_HOME_OVERRIDE = dir;
   process.env.AGENT_COMPANION_STATE_DIR = stateDir;
+  process.env.AGENT_COMPANION_DESKTOP_DIR = join(dir, 'desktop');
   delete process.env.CLAUDE_PLUGIN_DATA;
   delete process.env.CLAUDE_CONFIG_DIR;
   // An operator's own vault override must never steer a test's vault.

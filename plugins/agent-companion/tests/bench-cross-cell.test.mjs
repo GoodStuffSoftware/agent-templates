@@ -15,6 +15,7 @@
 // (buildGlobalRunPlan, runGlobalPool, bench/scheduler.mjs's scheduleRuns())
 // with only the leaf "spawn claude and wait" step replaced, the same way
 // every other bench test in this suite avoids a real child process.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';

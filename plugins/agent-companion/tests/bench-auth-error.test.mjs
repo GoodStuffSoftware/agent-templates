@@ -9,6 +9,7 @@
 // checkIsolateHomePreflight(), formatRunLine(), authErrorAbortMessage(), and
 // rebuildSummary()'s exclusion math are all pure/file-local logic, exercised
 // directly or via a hand-written results.jsonl fixture.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';

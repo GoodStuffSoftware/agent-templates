@@ -8,6 +8,7 @@
 // the chosen fix is to REFUSE these args explicitly (not to route them
 // through the scheduler here too), documented in parseArgs()'s own
 // REFUSED_ARGS comment. See docs/BENCHMARK.md "Parallel runs".
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseArgs } from '../bench/runner.mjs';

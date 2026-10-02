@@ -7,6 +7,7 @@
 // hit rate on a benchmark cell is usually the HARNESS breaking caching for
 // that run, not the model or task being unusual. See docs/BENCHMARK.md
 // "Caching" and config/model-tiers.json's costDrivers.planUsageWeighting.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';

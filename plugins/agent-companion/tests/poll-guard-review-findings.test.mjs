@@ -31,6 +31,7 @@
 // with the identical description across a multi-day span (observed gap:
 // days, not minutes) was flagged as a "monitor-rearm-streak" episode
 // (2.5M re-read tokens) by the live hook logic.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluate } from '../hooks/lib/poll-guard.mjs';

@@ -2,6 +2,7 @@
 // gate. Pure math against the shipped seed and hand-written local-history
 // fixtures -- no model call, no real results.jsonl scan of this machine's
 // actual (potentially huge) history.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';

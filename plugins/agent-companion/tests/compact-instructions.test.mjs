@@ -3,6 +3,7 @@
 // passes --target AND a temp HOME/USERPROFILE/CLAUDE_CONFIG_DIR, so the real
 // ~/.claude/CLAUDE.md is never read or written. Only the pure lib is
 // imported; the installer runs as a child process.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, chmodSync, mkdirSync } from 'node:fs';

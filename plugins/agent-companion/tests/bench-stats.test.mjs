@@ -3,6 +3,7 @@
 // task-family, the "n too small to separate" flag, and pass@1 / pass@k
 // labelling. Pure math against hand-written results.jsonl fixtures -- no
 // process spawn, no model call.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';

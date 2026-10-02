@@ -19,6 +19,7 @@
 // is the one that survives, and summary.md calls out the superseded row by
 // name. Fails against the pre-fix rebuildSummary() (n === 2) and passes
 // once it dedupes by run_id.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';

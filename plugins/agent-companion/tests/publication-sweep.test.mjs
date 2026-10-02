@@ -863,9 +863,9 @@ test('leak-scan-core scanRepo: git-sha-like is silent entirely when NOT strict, 
     git(['add', '-A'], base, gitEnv);
     git(['commit', '--quiet', '-m', 'init'], base, gitEnv);
     const { scanRepo } = await import('../scripts/lib/leak-scan-core.mjs');
-    const notStrict = scanRepo({ root: base, devRoots: [], strict: false });
+    const notStrict = scanRepo({ root: base, devRoots: [], claudeProjectsDir: join(base, 'no-projects'), strict: false });
     assert.ok(!notStrict.hits.some((h) => h.label === 'git-sha-like'));
-    const strict = scanRepo({ root: base, devRoots: [], strict: true });
+    const strict = scanRepo({ root: base, devRoots: [], claudeProjectsDir: join(base, 'no-projects'), strict: true });
     assert.ok(strict.hits.some((h) => h.label === 'git-sha-like'));
   } finally { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); }
 });

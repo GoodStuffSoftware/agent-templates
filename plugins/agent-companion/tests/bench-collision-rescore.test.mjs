@@ -29,6 +29,7 @@
 // runClaudeImpl test seam (a stub that never spawns `claude`); rescoreOne()
 // accepts no such parameter at all -- it is structurally impossible for it
 // to call the model.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';

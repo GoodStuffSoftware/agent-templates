@@ -12,6 +12,7 @@
 //
 // NO MODEL IS EVER CALLED. Every runOne() call below is driven through its
 // runClaudeImpl test seam (a stub that never spawns `claude`).
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';

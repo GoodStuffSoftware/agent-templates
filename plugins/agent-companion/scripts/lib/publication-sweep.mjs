@@ -37,6 +37,7 @@ import {
 import { join, dirname, basename } from 'node:path';
 import { tmpdir, homedir, userInfo } from 'node:os';
 import { cleanGitEnv } from './git-env.mjs';
+import { claudeDir } from '../../hooks/lib/context.mjs';
 import { createHmac, randomBytes } from 'node:crypto';
 import {
   scanRepo as coreScanRepo, ownRepoNames as coreOwnRepoNames, mainCheckoutDir as coreMainCheckoutDir,
@@ -357,9 +358,10 @@ function runPluginChecker(cloneDir, repoEntry, {
       root: cloneDir,
       devRoots: devRoots || defaultPluginCheckerDevRoots(),
       tokenFile,
-      // `claudeProjectsDir` / `users`: undefined = the operator's real
-      // ones (scanRepo()'s defaults); tests pass fixtures.
-      claudeProjectsDir,
+      // `claudeProjectsDir` / `users`: undefined = the operator's own
+      // (claudeDir() follows the test home redirect, so a test that passes no
+      // fixture still reads a sandbox, never the real ~/.claude/projects).
+      claudeProjectsDir: claudeProjectsDir || join(claudeDir(), 'projects'),
       users,
       // The clone's OWN name stays on the segment-based ownNames
       // self-exemption — exactly as scripts/leak-check.mjs does
@@ -438,7 +440,7 @@ export async function sweepRepo(repoEntry, {
       mkdirSync(childHome, { recursive: true });
       const leakCheckEnv = {
         LEAK_CHECK_DEV_ROOT: (devRoots || defaultPluginCheckerDevRoots()).join(','),
-        LEAK_CHECK_CLAUDE_PROJECTS: join(homedir(), '.claude', 'projects'),
+        LEAK_CHECK_CLAUDE_PROJECTS: join(claudeDir(), 'projects'),
         LEAK_CHECK_USER: rawOsHandles().join(','),
         // Only LEAK_CHECK_* keys from `env` survive scrubbing (test/canary
         // use this to point at an isolated fixture — never a way to pass

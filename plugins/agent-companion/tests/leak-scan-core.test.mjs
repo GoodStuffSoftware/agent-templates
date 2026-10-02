@@ -7,6 +7,7 @@
 // SHAPED like a leak is assembled from pieces at run time — never written
 // as a contiguous literal that could itself look like a real leak.
 
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';

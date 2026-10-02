@@ -1,6 +1,7 @@
 // Namegate names must match the Agent tool's `name` schema pattern, or the
 // autofilled spawn fails validation (a dotted description like "release
 // 0.29.19" used to leak a '.' into the name).
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';

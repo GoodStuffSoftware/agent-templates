@@ -19,6 +19,7 @@
 //
 // Both tests below fail against the pre-fix commit (exact run_id dedup) and
 // pass once the family grouping lands.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';

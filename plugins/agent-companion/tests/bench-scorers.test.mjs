@@ -16,6 +16,7 @@
 // applied to every task in bench/runner.mjs's TASKS map — a scorer that
 // says "pass" for an untouched sandbox or a wrong answer is exactly the
 // false-positive class the real build's own scorer bugs came from.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';

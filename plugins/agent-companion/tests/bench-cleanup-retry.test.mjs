@@ -19,6 +19,7 @@
 // exercised directly with injected removeImpl/delayImpl seams for the
 // lowest-level retry-loop tests, so nothing here waits on a real timer or
 // touches a real transient OS failure.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

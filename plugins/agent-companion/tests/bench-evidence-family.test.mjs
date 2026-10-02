@@ -3,6 +3,7 @@
 // pre-run estimator, or in a routing/proposal comparison. See
 // docs/BENCHMARK.md "Evidence families" for the full rationale (operator
 // direction, 2026-09-24).
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {

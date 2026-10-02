@@ -6,6 +6,7 @@
 // Sonnet-sized caps — the model was still working when the CLI killed the
 // run for "exceeding" a budget calibrated for a model at a fifth of its
 // price.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CELLS, modelPriceRatioToSonnet, scaledMaxBudgetUsd } from '../bench/runner.mjs';

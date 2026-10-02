@@ -19,6 +19,7 @@
 // child process fails fast with no valid JSON on stdout -- callJudgeViaCli
 // only cares that a real child process ran and exited; it never asserts
 // eligibility, votes, or a verdict here.
+import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
