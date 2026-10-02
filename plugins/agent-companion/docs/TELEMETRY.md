@@ -268,6 +268,48 @@ this check.
 Canary and fixture/verification sessions are excluded the same way as
 `spawns.jsonl` — see Fixtures above.
 
+### `session-budget.jsonl` — one record per session budget notice
+
+Written when the plan units a whole session has used (the lead plus every
+subagent) cross another multiple of `session_budget_units`
+(`hooks/lib/session-budget.mjs`). One row per notice the lead is queued; a
+total that skips several multiples at once still writes one.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when the crossing was seen |
+| `session_id` | string | the lead session |
+| `event` | string | `crossing` |
+| `units` | number | the session's plan units at that moment (tokens at Sonnet 5 rates times the model's plan multiplier) |
+| `level` | number | the multiple of the threshold just passed, in units |
+| `threshold` | number | `session_budget_units` as set |
+| `week_pct` | number | `units` as a percentage of `weeklyPlanUnits` in `config/session-budget.json` |
+| `transcripts` | number | transcripts read: the lead's plus its subagents' |
+| `scan_complete` | boolean | false when the scan stopped at its deadline and `units` is a lower bound |
+| `estimated_turns` | number | requests counted at their own API list price because their tier has no measured plan multiplier (haiku, fable) |
+| `unpriced_turns` | number | requests on a model with no price at all, counted as zero |
+
+### `subagent-context.jsonl` — one record per subagent context notice
+
+Written when a subagent's own context passes `subagent_context_notice_tokens`
+or the subagent has just compacted. Each kind fires once per subagent (a
+compaction once per compaction).
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when it fired |
+| `session_id` | string | the lead session |
+| `agent_id` | string | the subagent |
+| `agent_type` | string \| absent | the subagent's type |
+| `model` | string \| null | the model of its latest request |
+| `kind` | string | `size` (past the threshold) or `compaction` (a `compact_boundary` just behind it) |
+| `phase` | string | `mid-run`: injected into the subagent by the PreToolUse hook. `stop`: the hook never saw it (it crossed on the subagent's last turn, or it made no tool call), found at SubagentStop, so the subagent was not told |
+| `tokens` | number | the subagent's context size at its latest request (input + cache read + cache write) |
+| `threshold` | number | `subagent_context_notice_tokens` as set |
+| `trigger`, `pre_tokens` | string, number; `compaction` only | the boundary's `compactMetadata.trigger` (`auto` or `manual`) and the context it held before compacting |
+
 ### `unknown-agent-types.jsonl` — harness drift signal
 
 | field | type | meaning |

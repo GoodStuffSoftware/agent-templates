@@ -424,6 +424,18 @@
       "title": "Runaway spawn: dollar threshold",
       "description": "A finished subagent whose price-derived cost (list price x tokens, not a bill) exceeds this many US dollars is logged and flagged the same way. 0 turns the dollar check off.",
       "default": 40
+    },
+    "session_budget_units": {
+      "type": "number",
+      "title": "Session budget notice: plan units",
+      "description": "Advisory only. The plan units this whole session has used, the lead plus every subagent (tokens priced at Sonnet 5 rates times the model's plan multiplier, so Opus counts 1.5), are added up on each lead prompt and each foreground Agent return. Each time the total crosses another multiple of this number the lead gets one notice to finish the phase, update SESSION-STATE.md and offer the operator a hand-off to a fresh session. Nothing is ever blocked. 0 turns it off.",
+      "default": 350
+    },
+    "subagent_context_notice_tokens": {
+      "type": "number",
+      "title": "Subagent context notice: tokens",
+      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens, or the subagent has just compacted, the subagent is told once to finish the current step, return its results and say what is left, and the lead is told when it stops. Nothing is ever blocked. 0 turns it off.",
+      "default": 300000
     }
   },
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",

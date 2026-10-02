@@ -52,7 +52,7 @@ export const RUNAWAY_READ_BYTES = 8 * 1024 * 1024;
 export const RUNAWAY_DEFAULT_TURNS = 300;
 export const RUNAWAY_DEFAULT_USD = 40;
 
-function usageOf(u) {
+export function usageOf(u) {
   const x = u || {};
   const w5 = x.cache_creation?.ephemeral_5m_input_tokens ?? 0;
   const w1 = x.cache_creation?.ephemeral_1h_input_tokens ?? 0;
@@ -126,7 +126,7 @@ export function runawayReasons(m, { turns, usd }) {
   return out;
 }
 
-const safe = (s) => String(s || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_');
+export const safe = (s) => String(s || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_');
 function queueDir() { return join(stateDir(), 'runaway-queue'); }
 
 // Once per agent_id: SubagentStop fires again when a stopped worker is

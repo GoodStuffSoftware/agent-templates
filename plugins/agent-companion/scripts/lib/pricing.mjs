@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateRoot } from '../../hooks/lib/context.mjs';
+import { stateRoot, modelTiers, classifyModel } from '../../hooks/lib/context.mjs';
 
 export const PRICE_BASIS = 'price-derived';
 
@@ -76,4 +76,39 @@ export function priceUsage(usage, model, cfg = pricingTable()) {
     + (usage.cacheRead || 0) * cls.readMultiplier * inUsd
     + (usage.output || 0) * outUsd;
   return { usd, alias: cls.alias, basis: PRICE_BASIS };
+}
+
+// Prices in the shape the replay needs, or null for an unpriced model.
+export function priceSpecFor(model, cfg = pricingTable()) {
+  const cls = classifyPricing(model, cfg);
+  if (!cls.known) return null;
+  return {
+    alias: cls.alias,
+    inUsd: cls.in / 1e6,
+    outRatio: cls.out / cls.in,
+    r: cls.readMultiplier,
+    w5: cfg.writeMultiplier5m ?? 1.25,
+    w1: cfg.writeMultiplier1h ?? 2,
+  };
+}
+
+// Plan usage (subscription limits), priced the way bench/runner.mjs prices
+// its plan_usage_index: every model's tokens at the BASELINE tier's price
+// vector (the tier config/model-tiers.json planUsageMultipliers defines as
+// 1.0, i.e. Sonnet), times the model's own tier multiplier from that table
+// (opus 1.5 as of its date). Not a scalar on the model's API price: Opus 5.5
+// input and output cost 2x Sonnet 5 but cache reads cost the same, so the
+// API ratio depends on the token mix and a fixed weight is wrong for every
+// mix but one. null when the model's tier has no measured multiplier (no
+// plan figure, never a guessed 1.0) or the baseline tier is unpriced.
+export function planPriceSpecFor(model, tiersCfg = modelTiers(), pricing = pricingTable()) {
+  const mults = tiersCfg.planUsageMultipliers || {};
+  const alias = classifyModel(model).alias;
+  const own = mults[alias];
+  if (!own || typeof own.multiplier !== 'number') return null;
+  const baseAlias = Object.keys(mults).find((k) => mults[k]?.multiplier === 1);
+  const baseModel = baseAlias && tiersCfg.tiers?.[baseAlias]?.resolvesTo?.modelId;
+  const base = baseModel ? priceSpecFor(baseModel, pricing) : null;
+  if (!base) return null;
+  return { ...base, baseline: baseAlias, multiplier: own.multiplier };
 }

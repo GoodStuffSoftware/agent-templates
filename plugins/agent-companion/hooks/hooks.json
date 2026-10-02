@@ -52,6 +52,18 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/subagent-context.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -137,7 +149,7 @@
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs"
             ],
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }
@@ -236,7 +248,7 @@
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs"
             ],
-            "timeout": 5
+            "timeout": 10
           }
         ]
       },

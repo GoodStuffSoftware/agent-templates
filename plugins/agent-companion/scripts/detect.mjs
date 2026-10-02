@@ -323,6 +323,27 @@ try {
   }
 } catch { /* fail open */ }
 
+// --- 3d. Budget and context notices (24h) -----------------------------------
+// session-budget.jsonl: one row per session_budget_units crossing the lead was
+// told about (hooks/lib/session-budget.mjs). subagent-context.jsonl: one row per
+// subagent told its context passed subagent_context_notice_tokens, or that it
+// compacted (hooks/subagent-context.mjs mid-run; hooks/runaway-check.mjs "stop"
+// for a worker the mid-run hook did not reach). Counts only: both notices are
+// advisory, and a day with none is not a finding.
+try {
+  const inDay = (r) => Date.parse(r.at) > dayAgo;
+  const budget = readJsonl('session-budget.jsonl').filter(inDay);
+  const ctx = readJsonl('subagent-context.jsonl').filter(inDay);
+  if (budget.length || ctx.length) {
+    const n = (k, v) => ctx.filter((r) => r[k] === v).length;
+    const top = budget.reduce((m, r) => Math.max(m, Number(r.units) || 0), 0);
+    sig('budget_notices',
+      `${budget.length} session budget notice(s)${budget.length ? ` (highest ~${Math.round(top)} plan units)` : ''} and ${ctx.length} subagent context notice(s) in 24h`
+      + `${ctx.length ? ` (${n('kind', 'compaction')} compaction, ${n('kind', 'size')} size; ${n('phase', 'mid-run')} mid-run, ${n('phase', 'stop')} only at stop)` : ''}`,
+      'none');
+  }
+} catch { /* fail open */ }
+
 // --- 4. Silent-failure canary -----------------------------------------
 // A guard that stopped matching looks identical to one never tripped.
 // Zero denials across a week of real spawn activity is a signal, not good news.

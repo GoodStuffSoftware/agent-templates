@@ -99,7 +99,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { scanCorpus, gapsOf, spawnBaselineOf, percentile } from './transcripts.mjs';
-import { pricingTable, classifyPricing, priceUsage } from './pricing.mjs';
+import { pricingTable, classifyPricing, priceUsage, priceSpecFor, planPriceSpecFor } from './pricing.mjs';
 import {
   stateRoot, stateDir, claudeDir, dataDir, writeJsonAtomic, modelTiers, classifyModel,
 } from '../../hooks/lib/context.mjs';
@@ -147,40 +147,9 @@ export function windowSpecFor(model, cfg = compactionConfig()) {
   return { alias: '', contextWindow: u.contextWindow, defaultCompactAt: u.defaultCompactAt ?? u.contextWindow - reserve, reserve, known: false };
 }
 
-// Prices in the shape the replay needs, or null for an unpriced model.
-export function priceSpecFor(model, cfg = pricingTable()) {
-  const cls = classifyPricing(model, cfg);
-  if (!cls.known) return null;
-  return {
-    alias: cls.alias,
-    inUsd: cls.in / 1e6,
-    outRatio: cls.out / cls.in,
-    r: cls.readMultiplier,
-    w5: cfg.writeMultiplier5m ?? 1.25,
-    w1: cfg.writeMultiplier1h ?? 2,
-  };
-}
-
-// Plan usage (subscription limits), priced the way bench/runner.mjs prices
-// its plan_usage_index: every model's tokens at the BASELINE tier's price
-// vector (the tier config/model-tiers.json planUsageMultipliers defines as
-// 1.0, i.e. Sonnet), times the model's own tier multiplier from that table
-// (opus 1.5 as of its date). Not a scalar on the model's API price: Opus 5.5
-// input and output cost 2x Sonnet 5 but cache reads cost the same, so the
-// API ratio depends on the token mix and a fixed weight is wrong for every
-// mix but one. null when the model's tier has no measured multiplier (no
-// plan figure, never a guessed 1.0) or the baseline tier is unpriced.
-export function planPriceSpecFor(model, tiersCfg = modelTiers(), pricing = pricingTable()) {
-  const mults = tiersCfg.planUsageMultipliers || {};
-  const alias = classifyModel(model).alias;
-  const own = mults[alias];
-  if (!own || typeof own.multiplier !== 'number') return null;
-  const baseAlias = Object.keys(mults).find((k) => mults[k]?.multiplier === 1);
-  const baseModel = baseAlias && tiersCfg.tiers?.[baseAlias]?.resolvesTo?.modelId;
-  const base = baseModel ? priceSpecFor(baseModel, pricing) : null;
-  if (!base) return null;
-  return { ...base, baseline: baseAlias, multiplier: own.multiplier };
-}
+// priceSpecFor / planPriceSpecFor live in ./pricing.mjs (the session budget hook
+// needs them without loading this module); re-exported so the API is unchanged.
+export { priceSpecFor, planPriceSpecFor };
 
 // --- The window in effect (read-only) ----------------------------------------------
 

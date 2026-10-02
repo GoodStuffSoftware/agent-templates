@@ -2,6 +2,14 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.24 — 2026-10-02
+
+- New advisory: session budget notice. `session_budget_units` (default 350; 0 is off) is checked on each lead prompt and each foreground Agent return. It adds up the plan units the whole session has used, the lead plus every subagent (tokens at Sonnet 5 rates times the model's plan multiplier: the existing `planPriceSpecFor`, now in `scripts/lib/pricing.mjs` and re-exported from the cache advisor), reading only the transcript bytes appended since the last call. Each time the total crosses another multiple of the threshold the lead gets one notice, through the runaway-notice path: finish the phase, update SESSION-STATE.md, offer a hand-off, never mid-release or with agents running. Rows in `session-budget.jsonl`; the percentage uses `weeklyPlanUnits` (1900) in `config/session-budget.json`.
+- New advisory: subagent context notice. `subagent_context_notice_tokens` (default 300000; 0 is off). A PreToolUse hook (`hooks/subagent-context.mjs`) inside each subagent reads the subagent's own context size from its latest request. When it passes the threshold, or the subagent has just compacted (a `compact_boundary` just behind it), the subagent is told once, mid-run, to finish the step, return its results and say what is left. Mid-run injection works: a PreToolUse `additionalContext` reaches a subagent (checked with a headless run on 2026-10-02). SubagentStop adds a line to the lead's notice next to the runaway flag, and catches a worker the hook never reached. Rows in `subagent-context.jsonl`.
+- New scout signal `budget_notices`: counts both notices over 24 hours (dispatch none).
+- Both are advice only: nothing is blocked or denied. `runaway-notice.mjs` hook timeout 5 -> 10 s for the budget scan; one more `node` start per tool call for the subagent hook (the lead's exits at once).
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.23 — 2026-10-02
 
 - Behaviour change (routing trial v4, operator-approved): the base routing table is corrected. The 0.29.18 routing sent `explore`, `verify`, `mechanical-edit`, `operate` and `subagent-worker` to opus/low on the premise that opus/low costs about the same as Sonnet on the plan. That was wrong: cache reads cost the same on Opus 5.5 and Sonnet 5, so opus/low runs about 1.2-1.55x Sonnet 5 medium, and the gap against sonnet/low and haiku is wider.
