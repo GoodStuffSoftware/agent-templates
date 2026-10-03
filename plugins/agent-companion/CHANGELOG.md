@@ -2,6 +2,16 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## Unreleased
+
+Bash output tail. Not yet released: no version bump.
+
+- New PreToolUse hook `hooks/bash-tail.mjs` (matcher `^Bash$`): a known long-running command (test, build, install) has its combined output sent to a file, and only the tail plus the file's path comes back into context. The exit code is preserved exactly; output of 80 lines / 8,000 bytes or less prints whole; piped, redirected, backgrounded, watch-mode, machine-readable-output, compound and git commands are never touched. Applies in `bypassPermissions` only by default, because permission rules are checked against the rewritten command.
+- Options `bash_tail` (default on; opt out with `false` or `CLAUDE_PLUGIN_OPTION_BASH_TAIL=0`) and `bash_tail_permission_modes` (default `bypassPermissions`; `any` lifts the limit).
+- Telemetry stream `telemetry/bash-tail.jsonl` and `scripts/bash-tail-report.mjs` for the routing review: runs wrapped, bytes produced vs characters returned, runners left alone and why.
+- Decision record: `docs/adr/0004-bash-output-tail.md` (repo root), with the alternatives considered (a standing rule, a PostToolUse rewrite, a threshold-only wrapper) and what was verified against the Claude Code docs and the installed 2.1.283 binary.
+- Tests: `tests/bash-tail.test.mjs` (trigger logic, the generated shell run in a real bash for exit-code preservation, the hook).
+
 ## 0.29.30 — 2026-10-03
 
 Subagents are back on the default 5-minute prompt cache. The operator chose this on 2026-10-03.

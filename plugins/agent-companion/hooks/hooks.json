@@ -28,6 +28,19 @@
         ]
       },
       {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/bash-tail.mjs"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "^SendMessage$",
         "hooks": [
           {

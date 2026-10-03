@@ -377,6 +377,18 @@
       "title": "Publication-leak sweep: private token file",
       "description": "Path to a private token file (same format as LEAK_CHECK_TOKEN_FILE: one name per line, `prefix: xyz` for a prefix) fed into EVERY sweep scan — universal, applies regardless of a repo's strict status. Default: ~/.claude/agent-companion/leak-tokens.txt, used automatically IF that file exists; set this only to point elsewhere. The file must live outside any repo the sweep scans (the same rule scripts/leak-check.mjs's own --token-file enforces).",
       "default": ""    },
+    "bash_tail": {
+      "type": "boolean",
+      "title": "Bash output tail",
+      "description": "Rewrite a known long-running Bash command (test, build, install) so its full output goes to a file and only the tail plus that file's path returns to context. Exit code and failures are preserved; short output prints in full; piped, redirected, backgrounded, watch-mode and git commands are never touched. Off = commands run exactly as written. See docs/adr/0004-bash-output-tail.md.",
+      "default": true
+    },
+    "bash_tail_permission_modes": {
+      "type": "string",
+      "title": "Bash output tail: permission modes",
+      "description": "Comma-separated permission modes the rewrite applies in. Default bypassPermissions only, because permission rules (such as Bash(npm test:*)) are checked against the REWRITTEN command and would stop matching in a mode that asks. Set to \"any\" to apply in every mode.",
+      "default": "bypassPermissions"
+    },
     "poll_guard": {
       "type": "boolean",
       "title": "Polling-wake guard",
