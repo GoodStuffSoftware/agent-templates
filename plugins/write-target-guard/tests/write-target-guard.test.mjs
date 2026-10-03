@@ -13,8 +13,14 @@
 //     home holding a fixture config whose primary is the temp repo (os.homedir() honours the
 //     USERPROFILE override on Windows — verified on-box), and CLAUDE_PLUGIN_ROOT stripped.
 // After the 43 come NEW cases for the 2026-10-03 work: P1/P2/P3 alias-hardening, P5 root
-// config files, self-protection of the trust anchor, the loud fail-open / opt-out, and the
-// denial of unresolvable UNC targets (lexically and after realpath).
+// config files, self-protection of the trust anchor, the loud fail-open / opt-out, the
+// denial of unresolvable UNC targets (lexically and after realpath), configured paths
+// canonicalised like targets (8.3 / junction primaries, a missing primary warns), and the
+// loud salvage of malformed config entries.
+//
+// The temp dir is used AS os.tmpdir() spells it (no realpath): on a CI runner whose tmpdir
+// is an 8.3 path (C:\Users\RUNNER~1\...) every fixture primary is then an aliased spelling,
+// which the hook must canonicalise like a target.
 //
 // Windows-only: the fixtures build git worktrees at path.win32 paths and the alias tests use
 // junctions, 8.3 names and drive letters. The whole suite self-skips (with a message) off win32.
@@ -49,6 +55,17 @@ describe('write-target-guard', { skip: WINONLY }, () => {
   const D = (input) => decide(input, { config: FIX, primary });
   const denied = (d) => assert.equal(d.decision, 'deny', JSON.stringify(d));
   const allowed = (d) => assert.equal(d.decision, 'allow', JSON.stringify(d));
+  const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // The ACTUAL 8.3 short name (MYPROJ~1 etc.) of the directory `longBase` inside `dir`, or ''
+  // when the volume has 8dot3 creation disabled (some CI runners). Query a SMALL dir: `dir /x`
+  // on the shared tmpdir can overflow the child stdout buffer (ENOBUFS) and is slow.
+  const shortOf = (dir, longBase) => {
+    const out = execFileSync('cmd', ['/c', 'dir', '/x', '/a:d', dir], { maxBuffer: 1 << 20 }).toString();
+    const re = new RegExp('<DIR>\\s+(\\S+)\\s+' + escRe(longBase) + '\\s*$', 'i');
+    for (const line of out.split(/\r?\n/)) { const m = re.exec(line); if (m && m[1].includes('~')) return m[1]; }
+    return '';
+  };
 
   // Child env for the spawned-hook E2E cases: point os.homedir() at a temp home and strip
   // any inherited CLAUDE_PLUGIN_ROOT (set it explicitly per-test to exercise plugin mode).
@@ -89,7 +106,7 @@ describe('write-target-guard', { skip: WINONLY }, () => {
 
   before(() => {
     if (process.platform !== 'win32') return; // belt-and-suspenders; describe-skip already covers it
-    tmp = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'wtg-test-')));
+    tmp = mkdtempSync(path.join(os.tmpdir(), 'wtg-test-')); // NOT realpath'd: see the header
     repo = path.win32.join(tmp, 'my-project');
     mkdirSync(repo);
     primary = (repo + '\\').toLowerCase();
@@ -614,15 +631,9 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     const longOther = path.win32.join(box, 'unrelated-project-longname');
     mkdirSync(path.win32.join(longRepo, 'src'), { recursive: true });
     mkdirSync(path.win32.join(longOther, 'src'), { recursive: true });
-    const shortOf = (longBase) => {
-      const out = execFileSync('cmd', ['/c', 'dir', '/x', '/a:d', box], { maxBuffer: 1 << 20 }).toString();
-      const re = new RegExp('<DIR>\\s+(\\S+)\\s+' + longBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$', 'i');
-      for (const line of out.split(/\r?\n/)) { const m = re.exec(line); if (m && m[1].includes('~')) return m[1]; }
-      return '';
-    };
     try {
-      const sr = shortOf('my-project-primary-longname');
-      const so = shortOf('unrelated-project-longname');
+      const sr = shortOf(box, 'my-project-primary-longname');
+      const so = shortOf(box, 'unrelated-project-longname');
       if (!sr || !so) { t.skip('8dot3 short-name creation is disabled on this volume'); return; }
       // deny-bypass: the 8.3 spelling of the primary's src still resolves into it.
       denied(decide(write(path.win32.join(box, sr) + '\\src\\a.ts'), { config: FIX, primary: longRepo }));
@@ -720,5 +731,144 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     const r = spawnHook(home, write(path.win32.join(repo, 'src', 'App.vue')));
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout, '{}');
+  });
+
+  // ---------------------------------------------------------------------------
+  // NEW — 2026-10-03 configured paths are canonicalised like targets (P1/P2/P3): an 8.3 or
+  // junction spelling of a primary (or of worktreeMark) in the CONFIG still guards it, and a
+  // configured primary that does not exist warns loudly.
+  // ---------------------------------------------------------------------------
+
+  // A temp home whose config is `cfg` (an object, written as JSON), for the spawned-hook cases.
+  const homeWith = (name, cfg) => {
+    const home = path.win32.join(tmp, 'home-' + name);
+    mkdirSync(path.win32.join(home, '.claude'), { recursive: true });
+    writeFileSync(path.win32.join(home, '.claude', 'write-target-guard.config.json'), JSON.stringify(cfg));
+    return home;
+  };
+  // Spawn the hook on a Write of `target`; exit 0 is required, stdout must be JSON.
+  const runHook = (home, target) => {
+    const r = spawnHook(home, write(target));
+    assert.equal(r.status, 0, r.stderr);
+    return { r, o: JSON.parse(r.stdout) };
+  };
+  const hookDenied = ({ o }) =>
+    assert.equal(o.hookSpecificOutput && o.hookSpecificOutput.permissionDecision, 'deny', JSON.stringify(o));
+  const hookNotDenied = ({ o }) => assert.equal(o.hookSpecificOutput, undefined, JSON.stringify(o));
+  // The config warning reached BOTH channels: a stderr WARNING line and the systemMessage.
+  const loudAbout = ({ r, o }, what) => {
+    assert.match(r.stderr, new RegExp('\\[write-target-guard\\] WARNING: .*' + escRe(what)), r.stderr);
+    assert.match(o.systemMessage || '', new RegExp(escRe(what)), JSON.stringify(o));
+  };
+
+  test('config path: an 8.3 spelling of the primary in the config still guards it -> deny (skips only if 8.3 creation is off)', (t) => {
+    const box = mkdtempSync(path.win32.join(tmp, 'cfg83-'));
+    const longRepo = path.win32.join(box, 'configured-primary-longname');
+    mkdirSync(path.win32.join(longRepo, 'src'), { recursive: true });
+    try {
+      const sr = shortOf(box, 'configured-primary-longname');
+      if (!sr) { t.skip('8dot3 short-name creation is disabled on this volume'); return; }
+      const cfg83 = path.win32.join(box, sr); // ...\cfg83-xxxx\CONFIG~1
+      // decide() with the 8.3 primary: code under the LONG spelling is still the primary's.
+      denied(decide(write(path.win32.join(longRepo, 'src', 'a.ts')), { config: FIX, primary: cfg83 }));
+      denied(decide(write(path.win32.join(longRepo, 'package.json')), { config: FIX, primary: cfg83 + '\\' }));
+      allowed(decide(write(path.win32.join(longRepo, 'docs', 'y.md')), { config: FIX, primary: cfg83 }));
+      allowed(decide(write(longRepo + '-sib\\src\\a.ts'), { config: FIX, primary: cfg83 }));
+      // and through the real hook, with the 8.3 primary in the home config file.
+      const home = homeWith('cfg83', { version: 1, repos: [{ ...FIX.repos[0], primary: cfg83 }] });
+      hookDenied(runHook(home, path.win32.join(longRepo, 'src', 'a.ts')));
+    } finally {
+      try { rmSync(box, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  test('config path: a junction spelling of the primary in the config still guards it -> deny; worktree rules apply through it', (t) => {
+    const jx = path.win32.join(tmp, 'cfg-jx-to-repo');
+    try { symlinkSync(repo, jx, 'junction'); } // a junction needs no privilege (same as mklink /J)
+    catch (e) { t.skip('could not create a junction: ' + (e && e.code)); return; }
+    try {
+      const J = (input) => decide(input, { config: FIX, primary: jx });
+      denied(J(write(path.win32.join(repo, 'src', 'a.ts'))));
+      const d = J(write(path.win32.join(wt('claude-auto'), 'src', 'a.ts')));
+      denied(d);
+      assert.match(d.reason, /branch claude\/some-auto-name/);
+      allowed(J(write(path.win32.join(wt('feat-wt'), 'src', 'a.ts'))));
+      allowed(J(write(path.win32.join(repo, 'docs', 'y.md'))));
+      const home = homeWith('cfg-jx', { version: 1, repos: [{ ...FIX.repos[0], primary: jx }] });
+      hookDenied(runHook(home, path.win32.join(repo, 'src', 'a.ts')));
+    } finally {
+      try { unlinkSync(jx); } catch { /* ignore: removes the junction only */ }
+    }
+  });
+
+  test('config path: an 8.3 spelling of worktreeMark still finds the worktrees -> claude/* code write denied (skips if 8.3 is off)', (t) => {
+    const sw = shortOf(path.win32.join(repo, '.claude'), 'worktrees');
+    if (!sw) { t.skip('8dot3 short-name creation is disabled on this volume'); return; }
+    const cfg = { ...FIX, repos: [{ ...FIX.repos[0], primary, worktreeMark: '.claude\\' + sw + '\\' }] };
+    const d = decide(write(path.win32.join(wt('claude-auto'), 'src', 'a.ts')), { config: cfg });
+    denied(d);
+    assert.match(d.reason, /branch claude\/some-auto-name/);
+    allowed(decide(write(path.win32.join(wt('feat-wt'), 'src', 'a.ts')), { config: cfg }));
+  });
+
+  test('config path: a configured primary that does not exist -> loud WARNING (stderr + systemMessage), exit 0, other entries still enforced', () => {
+    const missing = path.win32.join(tmp, 'no-such-primary');
+    const home = homeWith('missing-primary', { version: 1, repos: [{ ...FIX.repos[0], primary: missing }, FIX.repos[0]] });
+    const a = runHook(home, path.win32.join(repo, 'src', 'a.ts'));
+    hookDenied(a); // the valid second entry is still enforced, and the warning rides on the deny
+    loudAbout(a, 'repos[0].primary');
+    assert.match(a.r.stderr, /does not exist/);
+    assert.match(a.o.systemMessage, /does not exist/);
+    const b = runHook(home, path.win32.join(tmp, 'elsewhere', 'src', 'x.ts'));
+    hookNotDenied(b);
+    loudAbout(b, 'repos[0].primary'); // loud on an allow too, not only on a deny
+  });
+
+  // ---------------------------------------------------------------------------
+  // NEW — 2026-10-03 malformed config entries are dropped LOUDLY, never silently: each invalid
+  // element or entry is dropped with a warning naming the field, every valid rule stays
+  // enforced, and only a config with NO usable repo entry takes the loud fail-open.
+  // ---------------------------------------------------------------------------
+
+  const repoWith = (over) => ({ version: 1, repos: [{ ...FIX.repos[0], ...over }] });
+
+  test('malformed: codeDirs ["src", 1] -> the 1 is dropped loudly; src is still code -> deny', () => {
+    const home = homeWith('bad-codedirs', repoWith({ codeDirs: ['src', 1] }));
+    const a = runHook(home, path.win32.join(repo, 'src', 'a.ts'));
+    hookDenied(a);
+    loudAbout(a, 'repos[0].codeDirs');
+  });
+  test('malformed: scriptExts [null] -> dropped loudly; the other rules still apply (package.json -> deny); the scripts allow is loud', () => {
+    const home = homeWith('bad-scriptexts', repoWith({ scriptExts: [null] }));
+    const a = runHook(home, path.win32.join(repo, 'package.json'));
+    hookDenied(a);
+    loudAbout(a, 'repos[0].scriptExts');
+    const b = runHook(home, path.win32.join(repo, 'scripts', 'b.mjs')); // no valid script extension is left
+    hookNotDenied(b);
+    loudAbout(b, 'repos[0].scriptExts');
+  });
+  test('malformed: rootCodeFiles [{}] -> dropped loudly; the script rule still applies (scripts\\b.mjs -> deny); the package.json allow is loud', () => {
+    const home = homeWith('bad-rootfiles', repoWith({ rootCodeFiles: [{}] }));
+    const a = runHook(home, path.win32.join(repo, 'scripts', 'b.mjs'));
+    hookDenied(a);
+    loudAbout(a, 'repos[0].rootCodeFiles');
+    const b = runHook(home, path.win32.join(repo, 'package.json')); // no valid root file name is left
+    hookNotDenied(b);
+    loudAbout(b, 'repos[0].rootCodeFiles');
+  });
+  test('malformed: primary 42 in the only entry -> no usable entry -> the existing loud fail-open (INACTIVE, malformed)', () => {
+    const home = homeWith('bad-primary', repoWith({ primary: 42 }));
+    const a = runHook(home, path.win32.join(repo, 'src', 'a.ts'));
+    hookNotDenied(a);
+    assert.match(a.o.systemMessage || '', /INACTIVE/, JSON.stringify(a.o));
+    assert.match(a.o.systemMessage, /malformed/);
+    assert.match(a.o.systemMessage, /repos\[0\]\.primary/);
+    assert.match(a.r.stderr, /\[write-target-guard\] INACTIVE: malformed config/);
+  });
+  test('malformed: repos [null, <valid>] -> the null entry is dropped loudly; the valid repo is still guarded -> deny', () => {
+    const home = homeWith('null-repo', { version: 1, repos: [null, FIX.repos[0]] });
+    const a = runHook(home, path.win32.join(repo, 'src', 'a.ts'));
+    hookDenied(a);
+    loudAbout(a, 'repos[0]');
   });
 });

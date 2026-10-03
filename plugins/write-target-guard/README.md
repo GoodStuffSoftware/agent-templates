@@ -138,6 +138,11 @@ spelling cannot dodge the guard:
   realpath **failure is not an unexpected error**: it falls back to the lexical
   path. It does not fail open.
 
+The same pipeline runs on the **configured paths**: each repo's `primary` and its
+worktree prefix (`primary` + `worktreeMark`). An 8.3 or junction spelling in the
+config therefore matches the long, resolved target, just as an aliased target
+matches a long-name config.
+
 > **Known limitation.** A target that is a UNC path P1 cannot fold to a local drive
 > (`\\fileserver\share\…`, `\\localhost\Users\…`), or that realpaths to one (a
 > mapped network drive, a symlink to a share), is **denied for every write**, code
@@ -159,6 +164,16 @@ to the user; plain stdout/stderr reach only the debug log) plus a stderr line:
   remove/disable the plugin …"*
 - **Malformed config:** *"write-target-guard is INACTIVE: config at `<path>` is
   malformed (`<reason>`). Write and Edit are UNGUARDED until it is fixed."*
+
+A **partly** malformed config is salvaged, loudly, never silently. Each invalid
+piece is dropped with one `WARNING` naming the field, on stderr and in the
+`systemMessage`, on every call. That covers a wrong-typed list element
+(`"codeDirs": ["src", 1]`), a wrong-typed field (`"worktreeMark": 5`), a primary
+that is not an absolute path string (`"primary": 42`) and a repo entry that is not
+an object (`"repos": [null, …]`). Everything still valid stays enforced. Only when
+**no usable repo entry** remains does the guard take the malformed fail-open
+above. A configured `primary` that **does not exist** on this machine is kept,
+still guarded as written, and warned about the same way.
 
 There is deliberately **no plugin-mode exemption**. Once this machine runs the
 guard as a plugin, `CLAUDE_PLUGIN_ROOT` is set, and a *deleted* config is exactly

@@ -50,6 +50,12 @@
 //   The same check runs on the realpath result: a mapped drive or a symlink to a share
 //   comes back as \\server\share\... (or \\?\UNC\...). The admin-share forms P1 already
 //   folds (\\localhost\C$ etc.) still become C:\... and get their normal decision.
+// 2026-10-03: configured paths are canonicalised like targets; a missing primary warns.
+//   Each configured primary, and the worktree prefix (primary + worktreeMark), runs through
+//   the same P1/P2/P3 pipeline as a target, so an 8.3 (MYPROJ~1) or junction spelling in the
+//   CONFIG still matches the long, realpath'd target (before, it never matched: allow). A
+//   primary that does not exist on this machine (or is not a directory) is KEPT, still
+//   guarded as written, and warned about LOUDLY on every call (stderr + systemMessage).
 // 2026-10-03 (P5) — root config files (package.json, lockfile, build config, etc.,
 //   from the config's rootCodeFiles) count as CODE when they sit directly at a checkout
 //   root: the primary root, and — when rootCodeFilesAtWorktreeRoots is set — a worktree
@@ -67,6 +73,12 @@
 //   config is the one off-switch we refuse to make silent). The ONLY path to a silent allow
 //   is an EXPLICIT opt-out inside a VALID config: top-level `"enabled": false`, or an empty
 //   `"repos": []`. Everything else (a real config with repos) enforces.
+// 2026-10-03: malformed config entries are dropped loudly; valid entries stay enforced.
+//   A wrong-typed element (codeDirs ["src", 1]), field (worktreeMark 5), primary (42, or a
+//   relative path) or entry (repos [null, ...]) is dropped with one WARNING naming the field
+//   (stderr + systemMessage), and every valid rule and entry is still enforced (before, a
+//   non-string element threw and the outer catch allowed everything silently). Only when NO
+//   usable repo entry remains does the guard take the loud fail-open above (INACTIVE).
 //
 // The decision logic is the exported pure function decide(); main (stdin/stdout) runs
 // when argv[1]'s BASENAME is write-target-guard.mjs — not a full-path compare, because
@@ -206,26 +218,37 @@ const uncDeny = (raw, resolved) => ({
     'would land in. Every write to such a target is refused. Use the local drive path (C:\\...) instead.',
 });
 
-// Resolve a raw file_path for the checks: P1/P2 canonicalise, then P3 realpath. Returns
-// { norm } (a lowercased local drive path) or { deny } (the decision to return). A UNC path
-// P1 cannot fold to a drive is denied twice over: lexically, and again when realpath (a
-// mapped drive, a symlink to a share) lands on one. realpathFn is the test seam; the hook
-// always uses the default.
-export function resolveTarget(rawPath, realpathFn = realpathSync.native) {
+// The one P1/P2/P3 pipeline, shared by targets and configured paths: canonicalise, then
+// realpath the deepest existing ancestor. Returns { norm } (a lowercased local drive path),
+// { device: true } (a namespace P1 refuses to resolve), or { unc: true, norm, resolved? }
+// (a UNC path P1 cannot fold to a drive, lexically or after realpath: a mapped drive or a
+// symlink to a share comes back as one; `resolved` is set in that after-realpath case).
+function resolvePath(raw, realpathFn = realpathSync.native) {
   const hostnames = getHostnames();
-  const canon = canonicalize(rawPath, hostnames);
-  if (canon.unresolvable) return { deny: DEVICE_DENY };
-  if (isUnc(canon.norm)) return { deny: uncDeny(rawPath) };
+  const canon = canonicalize(raw, hostnames);
+  if (canon.unresolvable) return { device: true };
+  if (isUnc(canon.norm)) return { unc: true, norm: canon.norm };
   let norm = realpathAncestor(canon.norm, realpathFn);
   if (isUnc(norm)) {
     // Re-apply the P1 fold: a recognised loopback admin share returns to a drive path.
     const again = canonicalize(norm, hostnames);
-    if (again.unresolvable) return { deny: DEVICE_DENY };
-    if (isUnc(again.norm)) return { deny: uncDeny(rawPath, norm) };
+    if (again.unresolvable) return { device: true };
+    if (isUnc(again.norm)) return { unc: true, norm, resolved: norm };
     norm = realpathAncestor(again.norm, realpathFn);
-    if (isUnc(norm)) return { deny: uncDeny(rawPath, norm) };
+    if (isUnc(norm)) return { unc: true, norm, resolved: norm };
   }
   return { norm };
+}
+
+// Resolve a raw file_path for the checks. Returns { norm } (a lowercased local drive path)
+// or { deny } (the decision to return). A UNC path P1 cannot fold to a drive is denied twice
+// over: lexically, and again when realpath (a mapped drive, a symlink to a share) lands on
+// one. realpathFn is the test seam; the hook always uses the default.
+export function resolveTarget(rawPath, realpathFn = realpathSync.native) {
+  const r = resolvePath(rawPath, realpathFn);
+  if (r.device) return { deny: DEVICE_DENY };
+  if (r.unc) return { deny: uncDeny(rawPath, r.resolved) };
+  return { norm: r.norm };
 }
 
 // Resolve a worktree root's current branch without spawning git.
@@ -261,12 +284,110 @@ function resolveBranch(root) {
   }
 }
 
-const primNorm = (primary) => {
-  let p = path.win32.normalize(String(primary).replace(/\//g, '\\').toLowerCase());
-  if (!p.endsWith('\\')) p += '\\';
-  return p;
-};
 const wtMarkNorm = (m) => String(m == null ? '.claude\\worktrees\\' : m).replace(/\//g, '\\').toLowerCase();
+const withSlash = (p) => (p.endsWith('\\') ? p : p + '\\');
+// Drop trailing separators before resolving (C:\ stays C:\, never the drive-relative C:).
+const trimSep = (p) => { const t = p.replace(/[\\/]+$/, ''); return /^[a-z]:$/i.test(t) ? t + '\\' : t; };
+const showVal = (v) => {
+  let s;
+  try { s = JSON.stringify(v); } catch { /* fall through */ }
+  if (s === undefined) s = String(v);
+  return s.length > 80 ? s.slice(0, 77) + '...' : s;
+};
+
+// Per-entry config fields by expected shape. Only `undefined` counts as absent; anything
+// else of the wrong shape is dropped with a warning naming the field (the default applies).
+const LIST_FIELDS = ['allowedBranchPrefixes', 'codeDirs', 'scriptExts', 'rootCodeFiles', 'exemptDirs', 'exemptExts'];
+const STRING_FIELDS = ['worktreeMark', 'scriptDir', 'coworkAck', 'primaryAck'];
+const BOOL_FIELDS = ['rootCodeFilesAtWorktreeRoots'];
+const HINT_FIELDS = ['primaryLabel', 'siblingSlug', 'worktreeAddExample'];
+const isNonEmptyStr = (v) => typeof v === 'string' && v.trim() !== '';
+
+// Validate and canonicalise the configured repos ONCE per call. Returns
+// { repos: [{ cfg, prim, wtPrefix, wtMark }], warnings: [string] }: `cfg` is the entry with
+// every invalid element/field dropped; `prim` and `wtPrefix` are lowercased canonical
+// prefixes with a trailing backslash, resolved with the SAME pipeline as a target (P1/P2/P3)
+// so an 8.3 or junction spelling in the config still matches. Never throws on any JSON
+// shape; an entry that cannot be used is dropped with a warning, never silently.
+function prepareRepos(rawRepos, realpathFn = realpathSync.native) {
+  const repos = [];
+  const warnings = [];
+  if (!Array.isArray(rawRepos)) return { repos, warnings: ['"repos" is not an array'] };
+  rawRepos.forEach((entry, i) => {
+    const at = `repos[${i}]`;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      warnings.push(`${at} is not an object (got ${showVal(entry)}): entry dropped`);
+      return;
+    }
+    const cfg = { ...entry };
+    for (const f of LIST_FIELDS) {
+      if (cfg[f] === undefined) continue;
+      if (!Array.isArray(cfg[f])) {
+        warnings.push(`${at}.${f} must be a list of non-empty strings (got ${showVal(cfg[f])}): the field is dropped and its default applies`);
+        delete cfg[f];
+        continue;
+      }
+      const bad = cfg[f].filter((x) => !isNonEmptyStr(x));
+      if (bad.length) {
+        warnings.push(`${at}.${f}: dropped ${bad.length} invalid element(s) ${showVal(bad)} (each must be a non-empty string); the valid ones are still enforced`);
+        cfg[f] = cfg[f].filter(isNonEmptyStr);
+      }
+    }
+    for (const f of STRING_FIELDS) {
+      if (cfg[f] !== undefined && !isNonEmptyStr(cfg[f])) {
+        warnings.push(`${at}.${f} must be a non-empty string (got ${showVal(cfg[f])}): the field is dropped and its default applies`);
+        delete cfg[f];
+      }
+    }
+    for (const f of BOOL_FIELDS) {
+      if (cfg[f] !== undefined && typeof cfg[f] !== 'boolean') {
+        warnings.push(`${at}.${f} must be true or false (got ${showVal(cfg[f])}): the field is dropped and its default applies`);
+        delete cfg[f];
+      }
+    }
+    if (cfg.hints !== undefined) {
+      if (!cfg.hints || typeof cfg.hints !== 'object' || Array.isArray(cfg.hints)) {
+        warnings.push(`${at}.hints must be an object (got ${showVal(cfg.hints)}): the field is dropped`);
+        delete cfg.hints;
+      } else {
+        const hints = { ...cfg.hints };
+        for (const h of HINT_FIELDS) {
+          if (hints[h] !== undefined && typeof hints[h] !== 'string') {
+            warnings.push(`${at}.hints.${h} must be a string (got ${showVal(hints[h])}): the field is dropped`);
+            delete hints[h];
+          }
+        }
+        cfg.hints = hints;
+      }
+    }
+
+    // The primary: a non-empty ABSOLUTE path (a relative one would resolve against the
+    // hook's cwd), canonicalised like a target.
+    const rawPrim = cfg.primary;
+    if (!isNonEmptyStr(rawPrim) || !/^([a-z]:[\\/]|[\\/]{2})/i.test(rawPrim.trim())) {
+      warnings.push(`${at}.primary must be a non-empty absolute path string (got ${showVal(rawPrim)}): entry dropped`);
+      return;
+    }
+    const rp = resolvePath(trimSep(rawPrim.trim()), realpathFn);
+    if (rp.device) {
+      warnings.push(`${at}.primary ${rawPrim} uses a device or volume namespace this guard will not resolve: entry dropped`);
+      return;
+    }
+    const prim = withSlash(rp.norm);
+    if (!rp.unc) {
+      let isDir = false;
+      try { isDir = statSync(rp.norm).isDirectory(); } catch { /* missing or unreadable */ }
+      if (!isDir) {
+        warnings.push(`${at}.primary ${rawPrim} does not exist (or is not a directory) on this machine: check the path; writes under it are still guarded as written`);
+      }
+    }
+    const wtMark = wtMarkNorm(cfg.worktreeMark);
+    const rw = resolvePath(trimSep(prim + wtMark), realpathFn);
+    const wtPrefix = (rw.device || !rw.norm) ? prim + wtMark : withSlash(rw.norm);
+    repos.push({ cfg, prim, wtPrefix, wtMark });
+  });
+  return { repos, warnings };
+}
 
 // Is the canonical path directly under `root` (no trailing backslash on root) with a
 // basename in `names`? Used for P5 root-code-file classification.
@@ -302,11 +423,11 @@ function isExempt(norm, repo) {
   return false;
 }
 
-function classifyRepo(norm, content, repo) {
-  const prim = primNorm(repo.primary);
-  if (!norm.startsWith(prim)) return ALLOW; // not this repo's tree
-  const wtMark = wtMarkNorm(repo.worktreeMark);
-  const wtPrefix = prim + wtMark;
+function classifyRepo(norm, content, prepared) {
+  const { cfg: repo, prim, wtPrefix, wtMark } = prepared;
+  // Not this repo's tree. (The worktree prefix is checked on its own: when worktreeMark
+  // resolves through a junction it can land outside the primary.)
+  if (!norm.startsWith(prim) && !norm.startsWith(wtPrefix)) return ALLOW;
 
   const prefixes = (repo.allowedBranchPrefixes && repo.allowedBranchPrefixes.length)
     ? repo.allowedBranchPrefixes
@@ -324,7 +445,7 @@ function classifyRepo(norm, content, repo) {
   if (norm.startsWith(wtPrefix)) {
     isWt = true;
     seg = norm.slice(wtPrefix.length).split('\\')[0];
-    root = prim + wtMark + seg;
+    root = wtPrefix + seg;
   }
 
   // Root config files count as code at a worktree root only when configured to.
@@ -378,25 +499,17 @@ export function decide(hookInput, opts = {}) {
 
   const cfg = opts.config ?? loadHomeConfig().config;
   if (cfg && cfg.enabled === false) return ALLOW; // explicit opt-out honoured by the classifier too
-  let repos;
-  if (opts.primary != null) {
-    const base = (cfg && Array.isArray(cfg.repos) && cfg.repos[0]) ? cfg.repos[0] : {};
-    repos = [{ ...base, primary: opts.primary }];
-  } else {
-    repos = (cfg && Array.isArray(cfg.repos)) ? cfg.repos : [];
-  }
 
   const target = resolveTarget(rawPath);
   if (target.deny) return target.deny;
   const norm = target.norm;
-  const hostnames = getHostnames();
 
   // Self-protection: the guard's own config (the trust anchor), plus the hook file itself.
   const selfTargets = new Set();
   const addSelf = (p) => {
     if (!p) return;
-    const c = canonicalize(p, hostnames);
-    if (!c.unresolvable) selfTargets.add(realpathAncestor(c.norm));
+    const r = resolvePath(p);
+    if (!r.device && r.norm) selfTargets.add(r.norm);
   };
   addSelf(opts.configPath ?? defaultConfigPath());
   for (const sp of (opts.selfPaths || [])) addSelf(sp);
@@ -410,8 +523,21 @@ export function decide(hookInput, opts = {}) {
     };
   }
 
+  // The repos, validated and canonicalised (main passes them prepared, with its warnings
+  // already reported; a direct caller gets them prepared here, warnings unused).
+  let repos = opts.primary == null ? opts.prepared : undefined;
+  if (!repos) {
+    let raw;
+    if (opts.primary != null) {
+      const base = (cfg && Array.isArray(cfg.repos) && cfg.repos[0] && typeof cfg.repos[0] === 'object') ? cfg.repos[0] : {};
+      raw = [{ ...base, primary: opts.primary }];
+    } else {
+      raw = (cfg && Array.isArray(cfg.repos)) ? cfg.repos : [];
+    }
+    repos = prepareRepos(raw).repos;
+  }
+
   for (const repo of repos) {
-    if (!repo || !repo.primary) continue;
     const d = classifyRepo(norm, content, repo);
     if (d && d.decision === 'deny') return d;
   }
@@ -430,7 +556,19 @@ function main() {
       return out({}); // garbage stdin -> fail open, silent
     }
 
-    const loaded = loadHomeConfig();
+    let loaded = loadHomeConfig();
+    let prep = { repos: [], warnings: [] };
+    if (loaded.status === 'ok') {
+      try {
+        prep = prepareRepos(loaded.config.repos);
+      } catch {
+        return out({}); // unexpected error -> fail open
+      }
+      if (!prep.repos.length) {
+        // Nothing usable is left: the existing loud fail-open, naming what was dropped.
+        loaded = { status: 'malformed', path: loaded.path, error: `no usable entry in "repos": ${prep.warnings.join('; ')}` };
+      }
+    }
     if (loaded.status === 'missing') {
       // LOUD in every deployment (plugin or standalone): a deleted config is the one
       // off-switch we refuse to make silent.
@@ -446,16 +584,23 @@ function main() {
       return out({});
     }
 
+    // Salvaged config problems: LOUD on every call (stderr + systemMessage), never silent,
+    // while every valid entry and rule keeps being enforced.
+    for (const w of prep.warnings) process.stderr.write(`[write-target-guard] WARNING: config at ${loaded.path}: ${w}\n`);
+    const sys = prep.warnings.length
+      ? { systemMessage: `write-target-guard WARNING: config at ${loaded.path} has problems: ${prep.warnings.join('; ')}. The guard is ACTIVE and every valid entry is still enforced; fix the config to clear this warning.` }
+      : {};
+
     let d;
     try {
-      d = decide(j, { config: loaded.config, configPath: loaded.path, selfPaths: [process.argv[1]] });
+      d = decide(j, { config: loaded.config, prepared: prep.repos, configPath: loaded.path, selfPaths: [process.argv[1]] });
     } catch {
-      return out({}); // unexpected error -> fail open
+      return out({ ...sys }); // unexpected error -> fail open
     }
     if (d && d.decision === 'deny') {
-      return out({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.reason } });
+      return out({ ...sys, hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.reason } });
     }
-    return out({});
+    return out({ ...sys });
   });
 }
 
