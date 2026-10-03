@@ -34,6 +34,27 @@ hook (originally hard-coded to one repo) and generalised.
   top-level `systemMessage` plus a stderr line, in **every** deployment (plugin or
   single-file). The only silent allow is an explicit valid opt-out
   (`"enabled": false` or empty `"repos": []`).
+- **UNC targets denied.** Any write whose target is a UNC path that cannot be folded
+  to a local drive (`\\server\share\…`, `\\localhost\Users\…`, `\\?\UNC\…`, or a
+  realpath onto a share) is denied, code or not. This closes a bypass where a
+  loopback or LAN-address spelling of a protected file was allowed. A repo whose
+  primary lives on a share or mapped drive gets every write denied.
+- **Configured paths are canonicalised** like targets, so an 8.3 or junction spelling
+  of `primary` or `worktreeMark` in the config still matches. The test tmpdir is no
+  longer pre-resolved, which had masked this on `windows-latest` (8.3 `RUNNER~1`).
+- **Config shape is validated.** A wrong-typed field or list element is dropped with
+  a loud `WARNING` (stderr plus `systemMessage`), the rest stays enforced, and no
+  usable repo entry falls to the loud malformed fail-open. A missing primary is kept
+  and warned about.
+- **Drive-relative and rooted-relative targets denied** (`C:..\src\x.ts`, `\src\x.ts`,
+  `/c/…`), as they resolve against the writer's cwd. `\??\` is handled like `\\?\`.
+  A segment of only dots/spaces no longer lets a following `..` cancel the wrong
+  segment.
+- **`MultiEdit` and `NotebookEdit` are guarded** (matcher now
+  `^(Write|Edit|MultiEdit|NotebookEdit)$`), and the INACTIVE message names all four.
+- **README:** Cutover rewritten (running the plugin and a `settings.json` entry
+  together runs the guard twice; the entry to remove is given) and a Known
+  limitations section added.
 - Windows-only CI workflow (`windows-latest`) and a zero-dependency `node:test`
   suite that self-skips off Windows and on volumes/accounts lacking 8.3 or symlink
   capability.

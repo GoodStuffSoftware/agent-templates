@@ -1,6 +1,6 @@
 # Write-Target Guard
 
-A Claude Code **PreToolUse** hook on `Write` and `Edit` that keeps *code* writes
+A Claude Code **PreToolUse** hook on `Write`, `Edit`, `MultiEdit` and `NotebookEdit` that keeps *code* writes
 out of protected git checkouts:
 
 - a repo's **primary / deploy worktree** (where merges land, but code work should
@@ -37,6 +37,10 @@ The hook registers itself via the plugin's `hooks/hooks.json`, which runs:
 ```
 node ${CLAUDE_PLUGIN_ROOT}/hooks/write-target-guard.mjs
 ```
+
+with the matcher `^(Write|Edit|MultiEdit|NotebookEdit)$`. A `NotebookEdit` is judged by
+its `notebook_path` and a `MultiEdit` by its `file_path`; an acknowledgement token may
+sit in any edit's `new_string` (`MultiEdit`) or in `new_source` (`NotebookEdit`).
 
 The hook is also usable as a **single copied file** (register
 `node <path>\write-target-guard.mjs` directly in `settings.json`). It has **no
@@ -120,7 +124,8 @@ spelling cannot dodge the guard:
 
 - **P1 — device / UNC prefixes.** `\\?\C:\…` and `\\.\C:\…` are stripped to
   `C:\…`; `\\?\UNC\server\share` and `\\.\UNC\…` reduce to `\\server\share`;
-  admin-share UNC onto a loopback or this host (`\\localhost\C$`, `\\127.0.0.1\C$`,
+  the NT-namespace spelling `\??\` is handled the same way; admin-share UNC onto a
+  loopback or this host (`\\localhost\C$`, `\\127.0.0.1\C$`,
   `\\[::1]\C$`, `\\<hostname>\C$`) maps back to the drive letter.
   Forms that **cannot** be resolved to a drive-letter or UNC path —
   `\\?\Volume{GUID}\`, `\\.\GLOBALROOT\…`, raw devices (`PhysicalDrive0`,
@@ -130,7 +135,9 @@ spelling cannot dodge the guard:
 - **P2 — ADS and trailing dot/space.** A trailing NTFS stream
   (`…\App.vue::$DATA`, `:$DATA`, `:stream`) on the final component is dropped, and
   trailing dots/spaces are stripped per segment (Windows opens `App.vue. ` and
-  `src ` as `App.vue` / `src`).
+  `src ` as `App.vue` / `src`). A segment made only of dots and/or spaces (`. .`,
+  `.. `) is skipped like `.`/`..` rather than trimmed to empty, so a following `..`
+  cannot cancel the wrong segment.
 - **P3 — 8.3 / junctions / symlinks / subst.** After lexical normalisation the
   **deepest existing ancestor** is resolved with `fs.realpathSync.native` (which
   folds an 8.3 short name such as `MYPROJ~1` to its long name and resolves
@@ -143,12 +150,17 @@ worktree prefix (`primary` + `worktreeMark`). An 8.3 or junction spelling in the
 config therefore matches the long, resolved target, just as an aliased target
 matches a long-name config.
 
-> **Known limitation.** A target that is a UNC path P1 cannot fold to a local drive
-> (`\\fileserver\share\…`, `\\localhost\Users\…`), or that realpaths to one (a
-> mapped network drive, a symlink to a share), is **denied for every write**, code
-> or not; the message says to use the local drive path. So a repo whose primary
-> lives on a share or a mapped drive gets every write denied. Work from a local
-> clone.
+Two shapes that cannot be judged are **denied for every write**, code or not:
+
+- **Drive-relative and rooted-relative targets.** `C:..\src\x.ts`, `C:src\x.ts`,
+  `\Users\...` and `/c/...` resolve against the *writer's* current directory, which
+  the guard cannot know. The message says to use a fully qualified path. Plain
+  relative paths still resolve against the hook process's working directory,
+  unchanged.
+- **Unresolvable UNC.** A target that is a UNC path P1 cannot fold to a local drive
+  (`\\fileserver\share\…`, `\\localhost\Users\…`), or that realpaths to one (a
+  mapped network drive, a symlink to a share). The message says to use the local
+  drive path. See [Known limitations](#known-limitations).
 
 ---
 
@@ -160,10 +172,10 @@ exit-0 result it emits a top-level `systemMessage` (the channel Claude Code show
 to the user; plain stdout/stderr reach only the debug log) plus a stderr line:
 
 - **Missing config:** *"write-target-guard is INSTALLED but INACTIVE: no config
-  file at `<path>`. Write and Edit are UNGUARDED. Create that file … or
+  file at `<path>`. Write, Edit, MultiEdit and NotebookEdit are UNGUARDED. Create that file … or
   remove/disable the plugin …"*
 - **Malformed config:** *"write-target-guard is INACTIVE: config at `<path>` is
-  malformed (`<reason>`). Write and Edit are UNGUARDED until it is fixed."*
+  malformed (`<reason>`). Write, Edit, MultiEdit and NotebookEdit are UNGUARDED until it is fixed."*
 
 A **partly** malformed config is salvaged, loudly, never silently. Each invalid
 piece is dropped with one `WARNING` naming the field, on stderr and in the
@@ -198,7 +210,7 @@ silence (invisible after cutover).
 
 ### A gap we name honestly
 
-This is a `Write|Edit` hook. It **cannot** stop a Bash `rm` of the config file (a
+This is a `Write|Edit|MultiEdit|NotebookEdit` hook. It **cannot** stop a Bash `rm` of the config file (a
 different tool surface). That gap is covered by (a) the loud warning above — the
 very next `Write`/`Edit` announces the config is gone — and (b) an out-of-band,
 versioned backup of `~/.claude` kept off-machine. Do not treat the guard as
@@ -216,19 +228,54 @@ Normal local paths resolve in well under a millisecond.
 
 ## Cutover (plugin ⇄ single file)
 
-Running the guard both as a plugin **and** via a `settings.json` entry is
-**harmless**: both invoke the identical, deterministic file, and a deny from
-either is a deny. There is no double-penalty and no conflict.
+Do **not** run both. If `~/.claude/settings.json` still registers the copied hook
+while the plugin is enabled, the guard runs **twice** on every write (two processes,
+duplicated denials, and every config warning printed twice). Remove the
+`settings.json` entry in the same step that enables the plugin.
 
-To move the registration from a hand-rolled `settings.json` entry to the plugin:
+The entry to remove is the one hook object that runs the copied file, from the
+`hooks` array of the `PreToolUse` group whose matcher is `Write|Edit`. Leave any
+sibling hooks in that group alone, and drop the whole group only if this was its
+only hook:
 
-1. Add the marketplace and enable the plugin.
-2. Create `~/.claude/write-target-guard.config.json` (copy the example).
-3. Confirm a trivial code write into a protected checkout is denied as expected.
-4. Remove the old `settings.json` `PreToolUse` entry that ran the copied file.
+```json
+{
+  "type": "command",
+  "command": "node",
+  "args": ["C:\\Users\\<you>\\.claude\\hooks\\write-target-guard.mjs"],
+  "timeout": 15,
+  "statusMessage": "Checking write target (worktree discipline)"
+}
+```
 
-Do these in that order; step 3 proves the plugin path works before you drop the
-old one.
+The legacy matcher is `Write|Edit`, so a `settings.json` registration never sees
+`MultiEdit` or `NotebookEdit`. If you keep the single-file deployment instead of
+cutting over, widen that matcher to `Write|Edit|MultiEdit|NotebookEdit`; the
+plugin's `hooks.json` already covers all four.
+
+To move the registration:
+
+1. Create `~/.claude/write-target-guard.config.json` (copy the example).
+2. Add the marketplace, enable the plugin, **and remove the `settings.json` entry
+   above in the same step**.
+3. Restart or reload so the hook registration is re-read.
+4. Confirm a trivial code write into a protected checkout is denied exactly once.
+
+---
+
+## Known limitations
+
+- A primary on a network share or a mapped drive gets **every** write denied,
+  because every UNC target is denied; work from a local clone.
+- WSL (`\\wsl$`, `\\wsl.localhost`) and `\\tsclient` writes are denied, because
+  WSL's `/mnt/c` aliases C: and the guard cannot fold them to a local drive path.
+- A **disconnected** mapped drive is not caught (realpath fails and the lexical
+  drive path is used), though a write to it cannot succeed anyway.
+- Writes through **hard links** are not detected; a hard link to a protected file
+  looks like an ordinary path elsewhere.
+- `/c/…` and `/mnt/c/…` targets are denied as rooted-relative, not mapped to C:.
+- The config is an off-switch: a missing or malformed config is loud and fails
+  open, while `"enabled": false` or no repos is silent by design.
 
 ---
 

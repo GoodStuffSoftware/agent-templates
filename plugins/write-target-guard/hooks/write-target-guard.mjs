@@ -637,11 +637,11 @@ function main() {
       // LOUD in every deployment (plugin or standalone): a deleted config is the one
       // off-switch we refuse to make silent.
       process.stderr.write(`[write-target-guard] INACTIVE: no config at ${loaded.path} — Write/Edit are unguarded.\n`);
-      return out({ systemMessage: `write-target-guard is INSTALLED but INACTIVE: no config file at ${loaded.path}. Write and Edit are UNGUARDED. Create that file (copy the plugin's write-target-guard.config.example.json and edit it for this machine) to activate it, or remove/disable the plugin if you do not want it.` });
+      return out({ systemMessage: `write-target-guard is INSTALLED but INACTIVE: no config file at ${loaded.path}. Write, Edit, MultiEdit and NotebookEdit are UNGUARDED. Create that file (copy the plugin's write-target-guard.config.example.json and edit it for this machine) to activate it, or remove/disable the plugin if you do not want it.` });
     }
     if (loaded.status === 'malformed') {
       process.stderr.write(`[write-target-guard] INACTIVE: malformed config at ${loaded.path}: ${loaded.error}\n`);
-      return out({ systemMessage: `write-target-guard is INACTIVE: config at ${loaded.path} is malformed (${loaded.error}). Write and Edit are UNGUARDED until it is fixed.` });
+      return out({ systemMessage: `write-target-guard is INACTIVE: config at ${loaded.path} is malformed (${loaded.error}). Write, Edit, MultiEdit and NotebookEdit are UNGUARDED until it is fixed.` });
     }
     if (loaded.status === 'disabled') {
       // Explicit, valid opt-out ("enabled": false or an empty "repos"): silent by design.
