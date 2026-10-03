@@ -19,7 +19,7 @@
 // loud salvage of malformed config entries.
 //
 // The temp dir is used AS os.tmpdir() spells it (no realpath): on a CI runner whose tmpdir
-// is an 8.3 path (C:\Users\RUNNER~1\...) every fixture primary is then an aliased spelling,
+// is an 8.3 path (the profile dir shortened to <user>~1) every fixture primary is then an aliased spelling,
 // which the hook must canonicalise like a target.
 //
 // Windows-only: the fixtures build git worktrees at path.win32 paths and the alias tests use

@@ -41,7 +41,7 @@ hook (originally hard-coded to one repo) and generalised.
   primary lives on a share or mapped drive gets every write denied.
 - **Configured paths are canonicalised** like targets, so an 8.3 or junction spelling
   of `primary` or `worktreeMark` in the config still matches. The test tmpdir is no
-  longer pre-resolved, which had masked this on `windows-latest` (8.3 `RUNNER~1`).
+  longer pre-resolved, which had masked this on `windows-latest` (8.3 short profile dir).
 - **Config shape is validated.** A wrong-typed field or list element is dropped with
   a loud `WARNING` (stderr plus `systemMessage`), the rest stays enforced, and no
   usable repo entry falls to the loud malformed fail-open. A missing primary is kept
