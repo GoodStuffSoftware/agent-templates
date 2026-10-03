@@ -1,0 +1,34 @@
+name: write-target-guard-tests
+
+# Runs the write-target-guard plugin's zero-dependency test suite (node:test).
+# The guard is Windows-only (path.win32 rules, git-worktree fixtures, junctions,
+# 8.3 short names, drive letters), so this job runs on windows-latest and the
+# suite self-skips with a message off win32. Each test isolates itself under a
+# fresh mkdtemp dir and builds its own throwaway git repos there, so this never
+# touches anything outside the checkout. Machine-dependent cases (8.3, directory
+# symlinks) self-skip when the volume or the account lacks the capability.
+
+on:
+  push:
+    branches-ignore:
+      - 'wip/**'
+      - 'backup/**'
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # Same entry point a contributor runs locally (by hand, or via
+      # .githooks/pre-push) -- see CONTRIBUTING.md. ci-local.mjs expands the
+      # plugins/write-target-guard/tests/*.test.mjs glob itself.
+      - name: Run write-target-guard test suite
+        run: node scripts/ci-local.mjs --suite write-target-guard-tests
