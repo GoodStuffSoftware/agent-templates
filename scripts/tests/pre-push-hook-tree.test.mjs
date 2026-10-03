@@ -20,12 +20,12 @@ import assert from 'node:assert/strict';
 import {
   mkdtempSync, rmSync, mkdirSync, copyFileSync, writeFileSync, chmodSync, realpathSync,
 } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve, basename, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { cleanGitEnv } from '../../plugins/agent-companion/scripts/lib/git-env.mjs';
-import { hookTreeMismatch } from '../ci-local.mjs';
+import { hookTreeMismatch, workTreeOverrideWarning } from '../ci-local.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(REPO, '.githooks', 'pre-push');
@@ -195,4 +195,34 @@ test('ci-local --pre-push-hook: run from a different tree than its own, it BLOCK
   const out = `${r.stdout}${r.stderr}`;
   assert.equal(r.status, 1, out);
   assert.match(out, /BLOCKED — this ci-local\.mjs belongs to .*but the tree being pushed is/);
+});
+
+
+// An exported GIT_WORK_TREE (what `git --work-tree` sets) is followed, so a
+// stale one would gate another checkout without a word. The REAL ci-local, run
+// from the fixture worktree with GIT_WORK_TREE naming THIS checkout, passes its
+// mismatch guard (the named tree is the one this ci-local belongs to) and must
+// warn on stderr, naming both trees. No refs on stdin, so no suite runs.
+test('ci-local --pre-push-hook: a GIT_WORK_TREE naming another tree than the cwd\'s WARNS, naming both', () => {
+  const { wt } = fixture();
+  const r = spawnSync(process.execPath, [join(REPO, 'scripts', 'ci-local.mjs'), '--pre-push-hook', 'origin', 'url'], {
+    cwd: wt, env: { ...hermeticEnv(), GIT_WORK_TREE: REPO }, input: '', encoding: 'utf8', windowsHide: true,
+  });
+  const out = `${r.stdout}${r.stderr}`;
+  assert.equal(r.status, 0, out);
+  const warnings = r.stderr.split('\n').filter((l) => /WARNING/.test(l));
+  assert.equal(warnings.length, 1, out);
+  const line = warnings[0].toLowerCase().replaceAll('\\', '/');
+  // The fixture root's unique directory name, then `wt`: names the cwd's own tree.
+  assert.ok(line.includes(`${basename(dirname(wt))}/wt`.toLowerCase()), `must name the cwd's own tree (${wt}): ${warnings[0]}`);
+  assert.ok(line.includes(basename(REPO).toLowerCase()), `must name the GIT_WORK_TREE tree (${REPO}): ${warnings[0]}`);
+  assert.match(warnings[0], /gate is testing the GIT_WORK_TREE tree/);
+});
+
+test('workTreeOverrideWarning: silent when the trees match or one is unknown; case-aware on win32', () => {
+  const o = { real: id, platform: 'linux', pathMod: posix };
+  assert.equal(workTreeOverrideWarning('/r/main', '/r/main', o), null);
+  assert.equal(workTreeOverrideWarning('/r/main', null, o), null);
+  assert.equal(workTreeOverrideWarning('C:/Users/X/repo', 'c:\\users\\x\\repo', { real: id, platform: 'win32' }), null);
+  assert.match(workTreeOverrideWarning('/r/main', '/r/wt', o), /WARNING.*\/r\/main.*\/r\/wt.*GIT_WORK_TREE tree/);
 });

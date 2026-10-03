@@ -917,9 +917,9 @@ export function hookTreeMismatch(repoRoot, toplevel, {
 // Same question the hook asks (see .githooks/pre-push): the cwd's work tree,
 // unless the caller named one explicitly with GIT_WORK_TREE (git --work-tree),
 // in which case GIT_DIR and GIT_WORK_TREE are kept so git answers with that tree.
-function pushedTreeToplevel(procEnv = process.env) {
+function pushedTreeToplevel(procEnv = process.env, { honourWorkTree = true } = {}) {
   const env = baseChildEnv();
-  if (procEnv.GIT_WORK_TREE) {
+  if (honourWorkTree && procEnv.GIT_WORK_TREE) {
     for (const k of ['GIT_DIR', 'GIT_WORK_TREE']) if (procEnv[k]) env[k] = procEnv[k];
   }
   const r = spawnSync('git', ['rev-parse', '--show-toplevel'], {
@@ -928,8 +928,26 @@ function pushedTreeToplevel(procEnv = process.env) {
   return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
 }
 
+// An exported GIT_WORK_TREE is indistinguishable from an explicit --work-tree
+// (git exports the same variable), so the gate follows it. When that names a
+// different tree than the cwd's own, say so: a stale export would otherwise
+// gate another checkout without a word. Returns the warning line, or null when
+// there is nothing to say. Reuses hookTreeMismatch, so the comparison is
+// realpath- and (on win32) case-aware.
+export function workTreeOverrideWarning(honoured, own, opts) {
+  if (!honoured || !own || hookTreeMismatch(honoured, own, opts) === null) return null;
+  const pathMod = opts?.pathMod ?? (process.platform === 'win32' ? win32 : posix);
+  const show = (p) => scrubHomeDir(pathMod.resolve(p));
+  return `ci-local pre-push: WARNING — GIT_WORK_TREE names ${show(honoured)}, but this directory's own work tree is ${show(own)}; the gate is testing the GIT_WORK_TREE tree (${show(honoured)}).`;
+}
+
 async function runPrePushHook(remote, url) {
-  const mismatch = hookTreeMismatch(REPO_ROOT, pushedTreeToplevel());
+  const pushedTree = pushedTreeToplevel();
+  if (process.env.GIT_WORK_TREE) {
+    const warning = workTreeOverrideWarning(pushedTree, pushedTreeToplevel(process.env, { honourWorkTree: false }));
+    if (warning) console.error(warning);
+  }
+  const mismatch = hookTreeMismatch(REPO_ROOT, pushedTree);
   if (mismatch) {
     console.error(`ci-local pre-push: BLOCKED — ${mismatch}. The gate only tests the tree being pushed.`);
     console.error('Make core.hooksPath relative (node scripts/setup-hooks.mjs) or update the checkout it points into; see CONTRIBUTING.md.');
