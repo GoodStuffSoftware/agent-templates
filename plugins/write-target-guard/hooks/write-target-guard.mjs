@@ -43,6 +43,13 @@
 //      to fold MYPROJ~1 -> my-project and to fold a junction), then the not-yet-created
 //      tail is re-appended. A realpath FAILURE is NOT an unexpected error: it falls
 //      back to the lexical path (it does not fail open).
+// 2026-10-03: unresolvable UNC targets (any write) are denied, lexically and after realpath.
+//   A UNC path P1 cannot fold to a local drive (\\localhost\Users\..., \\<ip>\C$\...,
+//   \\fileserver\share\...) cannot be matched against the drive-path checkouts, so it is
+//   refused for EVERY Write/Edit, code or not, before self-protection and the repo rules.
+//   The same check runs on the realpath result: a mapped drive or a symlink to a share
+//   comes back as \\server\share\... (or \\?\UNC\...). The admin-share forms P1 already
+//   folds (\\localhost\C$ etc.) still become C:\... and get their normal decision.
 // 2026-10-03 (P5) — root config files (package.json, lockfile, build config, etc.,
 //   from the config's rootCodeFiles) count as CODE when they sit directly at a checkout
 //   root: the primary root, and — when rootCodeFilesAtWorktreeRoots is set — a worktree
@@ -160,13 +167,13 @@ function canonicalize(raw, hostnames) {
 
 // P3: realpath the deepest existing ancestor, re-append the not-yet-created tail.
 // A realpath failure falls back to the lexical path (it does not fail open).
-function realpathAncestor(norm) {
+function realpathAncestor(norm, realpathFn = realpathSync.native) {
   try {
     let cur = norm;
     const tail = [];
     for (;;) {
       try {
-        const real = realpathSync.native(cur).toLowerCase();
+        const real = realpathFn(cur).toLowerCase();
         return tail.length ? path.win32.join(real, ...tail) : real;
       } catch {
         const parent = path.win32.dirname(cur);
@@ -178,6 +185,47 @@ function realpathAncestor(norm) {
   } catch {
     return norm;
   }
+}
+
+const isUnc = (p) => p.startsWith('\\\\');
+
+const DEVICE_DENY = {
+  decision: 'deny',
+  reason:
+    'WRONG WRITE TARGET: the path uses a Windows device or volume namespace ' +
+    '(\\\\.\\ , \\\\?\\Volume{...}, GLOBALROOT, or a raw device) that this guard will not resolve ' +
+    'to a file path — refusing to guess. Use a normal drive-letter path (C:\\...).',
+};
+
+const uncDeny = (raw, resolved) => ({
+  decision: 'deny',
+  reason:
+    `WRONG WRITE TARGET: ${raw} ` +
+    (resolved ? `resolves to the network (UNC) path ${resolved}` : 'is a network (UNC) path') +
+    ' that this guard cannot map to a local drive path, so it cannot tell which checkout the write ' +
+    'would land in. Every write to such a target is refused. Use the local drive path (C:\\...) instead.',
+});
+
+// Resolve a raw file_path for the checks: P1/P2 canonicalise, then P3 realpath. Returns
+// { norm } (a lowercased local drive path) or { deny } (the decision to return). A UNC path
+// P1 cannot fold to a drive is denied twice over: lexically, and again when realpath (a
+// mapped drive, a symlink to a share) lands on one. realpathFn is the test seam; the hook
+// always uses the default.
+export function resolveTarget(rawPath, realpathFn = realpathSync.native) {
+  const hostnames = getHostnames();
+  const canon = canonicalize(rawPath, hostnames);
+  if (canon.unresolvable) return { deny: DEVICE_DENY };
+  if (isUnc(canon.norm)) return { deny: uncDeny(rawPath) };
+  let norm = realpathAncestor(canon.norm, realpathFn);
+  if (isUnc(norm)) {
+    // Re-apply the P1 fold: a recognised loopback admin share returns to a drive path.
+    const again = canonicalize(norm, hostnames);
+    if (again.unresolvable) return { deny: DEVICE_DENY };
+    if (isUnc(again.norm)) return { deny: uncDeny(rawPath, norm) };
+    norm = realpathAncestor(again.norm, realpathFn);
+    if (isUnc(norm)) return { deny: uncDeny(rawPath, norm) };
+  }
+  return { norm };
 }
 
 // Resolve a worktree root's current branch without spawning git.
@@ -338,18 +386,10 @@ export function decide(hookInput, opts = {}) {
     repos = (cfg && Array.isArray(cfg.repos)) ? cfg.repos : [];
   }
 
+  const target = resolveTarget(rawPath);
+  if (target.deny) return target.deny;
+  const norm = target.norm;
   const hostnames = getHostnames();
-  const canon = canonicalize(rawPath, hostnames);
-  if (canon.unresolvable) {
-    return {
-      decision: 'deny',
-      reason:
-        'WRONG WRITE TARGET: the path uses a Windows device or volume namespace ' +
-        '(\\\\.\\ , \\\\?\\Volume{...}, GLOBALROOT, or a raw device) that this guard will not resolve ' +
-        'to a file path — refusing to guess. Use a normal drive-letter path (C:\\...).',
-    };
-  }
-  const norm = realpathAncestor(canon.norm);
 
   // Self-protection: the guard's own config (the trust anchor), plus the hook file itself.
   const selfTargets = new Set();

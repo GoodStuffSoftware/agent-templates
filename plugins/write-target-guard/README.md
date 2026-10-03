@@ -138,6 +138,13 @@ spelling cannot dodge the guard:
   realpath **failure is not an unexpected error**: it falls back to the lexical
   path. It does not fail open.
 
+> **Known limitation.** A target that is a UNC path P1 cannot fold to a local drive
+> (`\\fileserver\share\…`, `\\localhost\Users\…`), or that realpaths to one (a
+> mapped network drive, a symlink to a share), is **denied for every write**, code
+> or not; the message says to use the local drive path. So a repo whose primary
+> lives on a share or a mapped drive gets every write denied. Work from a local
+> clone.
+
 ---
 
 ## Fail-open, loudly
@@ -184,9 +191,10 @@ tamper-proof storage for its own config.
 
 ### A latency note
 
-`realpathSync.native` walks each existing ancestor. On an **unreachable UNC path**
-(`\\someserver\…`) that walk goes over the network and was measured at ~2.7s on a
-dead host — within the hook's 15s timeout, a latency cost, not a correctness one.
+`realpathSync.native` walks each existing ancestor. A UNC target is denied before
+that walk, but a **mapped drive whose share is unreachable** still walks over the
+network; a dead UNC host was measured at ~2.7s — within the hook's 15s timeout, a
+latency cost, not a correctness one.
 Normal local paths resolve in well under a millisecond.
 
 ---

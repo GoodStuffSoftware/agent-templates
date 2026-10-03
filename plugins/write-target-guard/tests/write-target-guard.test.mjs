@@ -13,7 +13,8 @@
 //     home holding a fixture config whose primary is the temp repo (os.homedir() honours the
 //     USERPROFILE override on Windows — verified on-box), and CLAUDE_PLUGIN_ROOT stripped.
 // After the 43 come NEW cases for the 2026-10-03 work: P1/P2/P3 alias-hardening, P5 root
-// config files, self-protection of the trust anchor, and the loud fail-open / opt-out.
+// config files, self-protection of the trust anchor, the loud fail-open / opt-out, and the
+// denial of unresolvable UNC targets (lexically and after realpath).
 //
 // Windows-only: the fixtures build git worktrees at path.win32 paths and the alias tests use
 // junctions, 8.3 names and drive letters. The whole suite self-skips (with a message) off win32.
@@ -25,6 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decide } from '../hooks/write-target-guard.mjs';
+import * as guard from '../hooks/write-target-guard.mjs'; // namespace: a missing seam fails one test, not the file
 
 const HOOK = fileURLToPath(new URL('../hooks/write-target-guard.mjs', import.meta.url));
 const WINONLY = process.platform === 'win32'
@@ -457,12 +459,109 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     denied(inPrimary('\\\\.\\PhysicalDrive0'));
   });
 
-  test('P1: remote UNC share (not loopback/this host) outside the primary -> allow', () => {
-    allowed(inPrimary('\\\\someserver\\share\\src\\a.ts'));
-    allowed(inPrimary('\\\\someserver\\' + drive() + '$\\not-the-repo\\src\\a.ts'));
+  test('P1: remote UNC share (not loopback/this host), even outside the primary -> deny (unresolvable UNC target)', () => {
+    uncDenied(inPrimary('\\\\someserver\\share\\src\\a.ts'));
+    uncDenied(inPrimary('\\\\someserver\\' + drive() + '$\\not-the-repo\\src\\a.ts'));
   });
   test('P1: \\\\?\\ device prefix on a path OUTSIDE the primary -> allow', () => {
     allowed(inPrimary('\\\\?\\' + repo + '-sibling\\src\\a.ts'));
+  });
+
+  // ---------------------------------------------------------------------------
+  // NEW — 2026-10-03 unresolvable UNC targets: ANY write (code or not) whose target is a
+  // UNC path P1 cannot fold to a local drive is DENIED — lexically, and after realpath.
+  // ---------------------------------------------------------------------------
+
+  function uncDenied(d) {
+    denied(d);
+    assert.match(d.reason, /network \(UNC\) path/, d.reason);
+    assert.match(d.reason, /Use the local drive path/, d.reason);
+  }
+  // `p` (a drive path under <drive>:\Users\) spelled through the \\<host>\Users share, or
+  // null when it does not live under \Users\ (then the case skips).
+  const viaUsersShare = (host, p) => {
+    const m = /^[a-z]:\\users\\(.+)$/i.exec(p);
+    return m ? '\\\\' + host + '\\Users\\' + m[1] : null;
+  };
+  const usersAlias = (t, host) => {
+    const p = viaUsersShare(host, repo);
+    if (!p) t.skip(`the test repo is not under <drive>:\\Users\\ (${repo})`);
+    return p && p + '\\src\\a.ts';
+  };
+
+  test('UNC: \\\\localhost\\Users alias of a primary code file -> deny', (t) => {
+    const p = usersAlias(t, 'localhost');
+    if (p) uncDenied(inPrimary(p));
+  });
+  test('UNC: \\\\127.0.0.1\\Users alias of a primary code file -> deny', (t) => {
+    const p = usersAlias(t, '127.0.0.1');
+    if (p) uncDenied(inPrimary(p));
+  });
+  test('UNC: \\\\<this host\'s name>\\Users alias of a primary code file -> deny', (t) => {
+    const p = usersAlias(t, os.hostname());
+    if (p) uncDenied(inPrimary(p));
+  });
+  test('UNC: \\\\?\\UNC\\localhost\\Users alias of a primary code file -> deny', (t) => {
+    const p = usersAlias(t, 'localhost');
+    if (p) uncDenied(inPrimary('\\\\?\\UNC\\' + p.slice(2)));
+  });
+  test('UNC: \\\\0--1.ipv6-literal.net\\C$ (IPv6 loopback literal) alias of a primary code file -> deny', () => {
+    uncDenied(inPrimary('\\\\0--1.ipv6-literal.net\\' + drive() + '$' + tail()));
+  });
+  test('UNC: \\\\<a local IPv4>\\C$ alias of a primary code file -> deny (skips with no non-internal IPv4)', (t) => {
+    const ip = Object.values(os.networkInterfaces()).flat()
+      .find((a) => a && (a.family === 'IPv4' || a.family === 4) && !a.internal);
+    if (!ip) { t.skip('no non-internal IPv4 address on this machine'); return; }
+    uncDenied(inPrimary('\\\\' + ip.address + '\\' + drive() + '$' + tail()));
+  });
+  test('UNC: a remote-looking host, non-code (\\\\fileserver\\share\\x.md) -> deny', () => {
+    uncDenied(D(write('\\\\fileserver\\share\\x.md')));
+  });
+  test('UNC: END-TO-END a non-code \\\\localhost\\Users alias of the guard\'s own config -> deny (no self-protection bypass)', (t) => {
+    const cfgPath = path.win32.join(homeValid, '.claude', 'write-target-guard.config.json');
+    const alias = viaUsersShare('localhost', cfgPath);
+    if (!alias) { t.skip(`the temp home is not under <drive>:\\Users\\ (${cfgPath})`); return; }
+    const r = spawnHook(homeValid, write(alias, JSON.stringify({ version: 1, repos: [] })));
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.hookSpecificOutput && o.hookSpecificOutput.permissionDecision, 'deny', r.stdout);
+    uncDenied({ decision: 'deny', reason: o.hookSpecificOutput.permissionDecisionReason });
+  });
+
+  // The post-realpath case: a mapped drive or a symlink to a share realpaths to
+  // \\server\share\... (or \\?\UNC\...). Creating either needs `net use` or symlink
+  // privilege, so it runs through the hook's resolveTarget(raw, realpathFn) seam with a
+  // fake realpath that maps Z:\mapped\ onto `to`; every other path gets the real realpath.
+  const mappedRealpath = (to) => (p) =>
+    (/^z:\\mapped(\\|$)/i.test(p) ? to + p.slice('z:\\mapped'.length) : realpathSync.native(p));
+
+  test('UNC after realpath: a drive path that realpaths to \\\\server\\share\\... or \\\\?\\UNC\\... -> deny (resolveTarget seam)', () => {
+    assert.equal(typeof guard.resolveTarget, 'function', 'the hook exports no resolveTarget(rawPath, realpathFn) seam');
+    for (const to of ['\\\\fileserver\\share\\proj', '\\\\?\\UNC\\fileserver\\share\\proj']) {
+      for (const target of ['Z:\\mapped\\src\\a.ts', 'Z:\\mapped\\notes.md']) {
+        const r = guard.resolveTarget(target, mappedRealpath(to));
+        assert.ok(r.deny, `${target} via ${to}: ${JSON.stringify(r)}`);
+        uncDenied(r.deny);
+        assert.match(r.deny.reason, /resolves to the network \(UNC\) path .*fileserver/);
+      }
+    }
+  });
+  test('UNC after realpath control: a realpath onto a loopback admin share P1 recognises folds back to the drive', () => {
+    assert.equal(typeof guard.resolveTarget, 'function', 'the hook exports no resolveTarget(rawPath, realpathFn) seam');
+    const r = guard.resolveTarget('Z:\\mapped\\src\\a.ts', mappedRealpath('\\\\localhost\\' + drive() + '$' + repo.slice(2)));
+    assert.equal(r.deny, undefined, JSON.stringify(r));
+    assert.equal(r.norm, realpathSync.native(repo).toLowerCase() + '\\src\\a.ts');
+  });
+
+  test('UNC controls: P1-recognised forms keep their pre-fix decisions', () => {
+    const outside = path.win32.join(tmp, 'elsewhere').slice(2) + '\\src\\a.ts';
+    allowed(inPrimary('\\\\localhost\\' + drive() + '$' + outside)); // admin share, outside the primary
+    allowed(inPrimary('\\\\localhost\\' + drive() + '$' + repo.slice(2) + '\\docs\\y.md')); // admin share, non-code
+    denied(inPrimary('\\\\localhost\\' + drive() + '$' + tail())); // admin share, primary code
+    allowed(inPrimary('\\\\?\\' + repo + '\\docs\\y.md')); // \\?\C:, non-code
+    denied(inPrimary('\\\\?\\' + repo + '\\src\\a.ts')); // \\?\C:, primary code
+    allowed(inPrimary(drive() + ':' + outside)); // plain drive path outside
+    denied(inPrimary(repo + '\\src\\a.ts')); // plain drive path, primary code
   });
 
   // ---------------------------------------------------------------------------
