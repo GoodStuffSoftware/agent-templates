@@ -61,7 +61,7 @@ import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statSync, realpathSync,
 } from 'node:fs';
-import { join, dirname, resolve, relative, delimiter } from 'node:path';
+import { join, dirname, resolve, relative, delimiter, win32, posix } from 'node:path';
 import { tmpdir, availableParallelism, homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -894,25 +894,36 @@ export async function prePushGate(refs, {
 // copy: the suites would then run against the other checkout's files, never
 // the pushed branch's. Returns null when they match, else the reason to block.
 // Pure: `toplevel` is what git said (null if it failed); `real` resolves a
-// path to its canonical spelling (case, 8.3 short names, symlinks).
+// path to its canonical spelling (case, 8.3 short names, symlinks). `platform`
+// and `pathMod` are injectable so the Windows rules (case-insensitive, either
+// separator) are testable on every OS; they default to the real ones.
 export function hookTreeMismatch(repoRoot, toplevel, {
   real = (p) => realpathSync.native(p), platform = process.platform,
+  pathMod = platform === 'win32' ? win32 : posix,
 } = {}) {
   if (!toplevel) {
     return 'could not find the work tree being pushed (git rev-parse --show-toplevel failed)';
   }
   const canon = (p) => {
+    const abs = pathMod.resolve(p);
     let out;
-    try { out = real(resolve(p)); } catch { out = resolve(p); }
-    return platform === 'win32' ? out.toLowerCase() : out;
+    try { out = real(abs); } catch { out = abs; }
+    return platform === 'win32' ? pathMod.resolve(out).toLowerCase() : out;
   };
   if (canon(repoRoot) === canon(toplevel)) return null;
-  return `this ci-local.mjs belongs to ${scrubHomeDir(resolve(repoRoot))}, but the tree being pushed is ${scrubHomeDir(resolve(toplevel))}`;
+  return `this ci-local.mjs belongs to ${scrubHomeDir(pathMod.resolve(repoRoot))}, but the tree being pushed is ${scrubHomeDir(pathMod.resolve(toplevel))}`;
 }
 
-function pushedTreeToplevel() {
+// Same question the hook asks (see .githooks/pre-push): the cwd's work tree,
+// unless the caller named one explicitly with GIT_WORK_TREE (git --work-tree),
+// in which case GIT_DIR and GIT_WORK_TREE are kept so git answers with that tree.
+function pushedTreeToplevel(procEnv = process.env) {
+  const env = baseChildEnv();
+  if (procEnv.GIT_WORK_TREE) {
+    for (const k of ['GIT_DIR', 'GIT_WORK_TREE']) if (procEnv[k]) env[k] = procEnv[k];
+  }
   const r = spawnSync('git', ['rev-parse', '--show-toplevel'], {
-    cwd: process.cwd(), env: baseChildEnv(), encoding: 'utf8', windowsHide: true,
+    cwd: process.cwd(), env, encoding: 'utf8', windowsHide: true,
   });
   return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
 }
@@ -924,7 +935,7 @@ async function runPrePushHook(remote, url) {
     console.error('Make core.hooksPath relative (node scripts/setup-hooks.mjs) or update the checkout it points into; see CONTRIBUTING.md.');
     return 1;
   }
-  console.log(`ci-local pre-push: gating the tree at ${scrubHomeDir(REPO_ROOT)}`);
+  console.log(`ci-local pre-push: tree ${scrubHomeDir(REPO_ROOT)}: normal refs run its suites here; main and release/** test the pushed sha in a temp clone; wip/** and backup/** are scan-only.`);
   let stdin;
   try {
     stdin = readFileSync(0); // raw bytes: ref names are read byte-exact

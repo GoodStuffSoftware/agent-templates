@@ -19,8 +19,17 @@
 # checkout (commonly the main one), $0 then sits in THAT checkout, and a
 # $0-relative root gated every worktree push on the other checkout's code.
 # git's repo-locating variables are cleared for this one question so the
-# answer comes from the hook's working directory alone.
-tree_root=$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_PREFIX; git rev-parse --show-toplevel 2>/dev/null)
+# answer comes from the hook's working directory alone. The one exception is
+# an EXPLICIT GIT_WORK_TREE (git --git-dir=... --work-tree=<wt> push, run from
+# another checkout): git does not chdir into <wt> then, so the cwd names the
+# wrong tree. That caller named the tree, so GIT_DIR and GIT_WORK_TREE are kept
+# and git answers with it. The check below still fails closed on a tree with
+# no scripts/ci-local.mjs.
+if [ -n "${GIT_WORK_TREE:-}" ]; then
+  tree_root=$(unset GIT_COMMON_DIR GIT_INDEX_FILE GIT_PREFIX; git rev-parse --show-toplevel 2>/dev/null)
+else
+  tree_root=$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_PREFIX; git rev-parse --show-toplevel 2>/dev/null)
+fi
 if [ -z "$tree_root" ]; then
   echo "pre-push: cannot find the work tree being pushed (git rev-parse --show-toplevel failed in $(pwd))." >&2
   echo "The gate will not guess which tree to test; see CONTRIBUTING.md." >&2
