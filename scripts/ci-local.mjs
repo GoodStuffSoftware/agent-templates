@@ -59,7 +59,7 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statSync,
+  mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statSync, realpathSync,
 } from 'node:fs';
 import { join, dirname, resolve, relative, delimiter } from 'node:path';
 import { tmpdir, availableParallelism, homedir } from 'node:os';
@@ -886,7 +886,45 @@ export async function prePushGate(refs, {
   return overallStatus;
 }
 
+// The pre-push gate must test the tree being PUSHED. git runs the hook in
+// that work tree's root, so `git rev-parse --show-toplevel` from our cwd
+// names it; REPO_ROOT is wherever THIS copy of ci-local.mjs lives. They
+// differ when core.hooksPath is an absolute path into another checkout and
+// that checkout's hook (or an older one that roots itself on $0) ran this
+// copy: the suites would then run against the other checkout's files, never
+// the pushed branch's. Returns null when they match, else the reason to block.
+// Pure: `toplevel` is what git said (null if it failed); `real` resolves a
+// path to its canonical spelling (case, 8.3 short names, symlinks).
+export function hookTreeMismatch(repoRoot, toplevel, {
+  real = (p) => realpathSync.native(p), platform = process.platform,
+} = {}) {
+  if (!toplevel) {
+    return 'could not find the work tree being pushed (git rev-parse --show-toplevel failed)';
+  }
+  const canon = (p) => {
+    let out;
+    try { out = real(resolve(p)); } catch { out = resolve(p); }
+    return platform === 'win32' ? out.toLowerCase() : out;
+  };
+  if (canon(repoRoot) === canon(toplevel)) return null;
+  return `this ci-local.mjs belongs to ${scrubHomeDir(resolve(repoRoot))}, but the tree being pushed is ${scrubHomeDir(resolve(toplevel))}`;
+}
+
+function pushedTreeToplevel() {
+  const r = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+    cwd: process.cwd(), env: baseChildEnv(), encoding: 'utf8', windowsHide: true,
+  });
+  return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+}
+
 async function runPrePushHook(remote, url) {
+  const mismatch = hookTreeMismatch(REPO_ROOT, pushedTreeToplevel());
+  if (mismatch) {
+    console.error(`ci-local pre-push: BLOCKED — ${mismatch}. The gate only tests the tree being pushed.`);
+    console.error('Make core.hooksPath relative (node scripts/setup-hooks.mjs) or update the checkout it points into; see CONTRIBUTING.md.');
+    return 1;
+  }
+  console.log(`ci-local pre-push: gating the tree at ${scrubHomeDir(REPO_ROOT)}`);
   let stdin;
   try {
     stdin = readFileSync(0); // raw bytes: ref names are read byte-exact

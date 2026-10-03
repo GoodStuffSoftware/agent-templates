@@ -12,8 +12,25 @@
 #
 # Enable with: node scripts/setup-hooks.mjs  (see CONTRIBUTING.md)
 
-hook_dir=$(cd "$(dirname "$0")" && pwd)
-repo_root=$(cd "$hook_dir/.." && pwd)
+# The tree to gate is the one being PUSHED: the work tree git runs this hook
+# in. git starts a client-side hook in the root of the current work tree, so
+# from a linked worktree that is the worktree, not the main checkout. Never
+# derive it from $0: core.hooksPath can be an ABSOLUTE path into another
+# checkout (commonly the main one), $0 then sits in THAT checkout, and a
+# $0-relative root gated every worktree push on the other checkout's code.
+# git's repo-locating variables are cleared for this one question so the
+# answer comes from the hook's working directory alone.
+tree_root=$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_PREFIX; git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$tree_root" ]; then
+  echo "pre-push: cannot find the work tree being pushed (git rev-parse --show-toplevel failed in $(pwd))." >&2
+  echo "The gate will not guess which tree to test; see CONTRIBUTING.md." >&2
+  exit 1
+fi
+if [ ! -f "$tree_root/scripts/ci-local.mjs" ]; then
+  echo "pre-push: $tree_root/scripts/ci-local.mjs not found — the tree being pushed has no CI-local gate." >&2
+  echo "The gate will not fall back to another checkout's copy; see CONTRIBUTING.md." >&2
+  exit 1
+fi
 
 if ! command -v node >/dev/null 2>&1; then
   echo "pre-push: node not found on PATH — cannot run the CI-local gate." >&2
@@ -21,4 +38,4 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-exec node "$repo_root/scripts/ci-local.mjs" --pre-push-hook "$@"
+exec node "$tree_root/scripts/ci-local.mjs" --pre-push-hook "$@"
