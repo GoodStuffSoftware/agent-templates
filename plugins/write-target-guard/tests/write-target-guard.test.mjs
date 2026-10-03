@@ -87,7 +87,7 @@ describe('write-target-guard', { skip: WINONLY }, () => {
 
   before(() => {
     if (process.platform !== 'win32') return; // belt-and-suspenders; describe-skip already covers it
-    tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'wtg-test-')));
+    tmp = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'wtg-test-')));
     repo = path.win32.join(tmp, 'my-project');
     mkdirSync(repo);
     primary = (repo + '\\').toLowerCase();
