@@ -460,29 +460,23 @@ being re-recommended — otherwise a rung that was already switched would show
 up as a fresh suggestion to make the same edit again, forever, as long as its
 measured delta stayed negative (`alreadyOneHourFrom()` in `scripts/lib/cache-ttl.mjs`).
 
-**Which ladder rungs use the 1-hour cache today, and why.** Four of the ten
-generic `ac-*` ladder workers — `ac-opus-medium`, `ac-opus-high`,
-`ac-opus-xhigh`, `ac-opus-max` — carry `experimental: { cacheTtl: "1h" }` in
-their shipped `agents/ac-*.md` frontmatter (`config/model-tiers.json`'s
-`ladder[].cacheTtl`, generated into the file by
-`scripts/routing-table.mjs --sync-agent-descriptions`, decided 2026-09-26).
-This is NOT the "long-lived, gets resumed" pattern the `recommendOneHourFor`
-criterion above targets: a dedicated measurement
-(`~/.claude/tasks/ac-cache-advisor/variants-report.md`) found close to zero
-`via=message` resumes on any ladder rung across 30 days of real traffic — the
-generic workers really are spawned fresh and rarely messaged again. The
-saving instead comes from the ALL-CAUSE view: long tool waits (`Bash`, test
-suites, builds) idling a single task's cache past 5 minutes, which
-`ac-opus-medium` and `ac-opus-xhigh` converted well past the ~38.5–39.5%
-break-even (53.9% and 43.5% of write tokens). `ac-opus-low` measured below
-break-even (10.9%) and stays on the 5m default, along with every non-opus
-rung — see `config/model-tiers.json`'s `ladderCacheTtlNote` and
-`cacheTtl.ladderWorkersExcludedNote` for the full evidence. The resume
-doctrine itself is unchanged: resume a stopped worker only while its cache is
-warm — now up to an hour on these four rungs — otherwise spawn a fresh ladder
-worker from a file handoff (`hooks/resume-guard.mjs`; its
-`cacheTtlFromDefinition()` already reads any agent definition's
-`experimental.cacheTtl`, including these four, generically).
+**Which ladder rungs use the 1-hour cache today: none.** All ten generic
+`ac-*` ladder workers use the default 5-minute subagent cache. Four of them
+(`ac-opus-medium`, `ac-opus-high`, `ac-opus-xhigh`, `ac-opus-max`) carried
+`experimental: { cacheTtl: "1h" }` from 0.29.17 to 0.29.29 and it was removed
+in 0.29.30 (2026-10-03, operator choice). Why: from 2026-10-02T16Z the 1h cache
+writes cost 242 plan units, 23% of the total. These workers run continuously
+and compact often, so the cache is rewritten long before an hour passes; a 1h
+TTL only pays for an agent that sits idle for more than 5 minutes, and every
+rewrite costs 1.6x a 5-minute write (2x base input against 1.25x). The
+mechanism stays: a rung's optional `cacheTtl` field in
+`config/model-tiers.json`'s `ladder` is generated into the file by
+`scripts/routing-table.mjs --sync-agent-descriptions`, so a rung can be put
+back on 1h with a one-line config edit. See `ladderCacheTtlNote` and
+`cacheTtl.ladderWorkersExcludedNote` in that config. The resume doctrine is
+unchanged: resume a stopped worker only while its cache is warm (5 minutes),
+otherwise spawn a fresh ladder worker from a file handoff
+(`hooks/resume-guard.mjs`).
 
 A **compaction** immediately before a request (`isCompactSummary: true` on
 the synthetic user record, or its preceding `compact_boundary` system

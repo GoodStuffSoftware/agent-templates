@@ -3,8 +3,6 @@ name: ac-opus-max
 description: "Rung 10/10: genuinely frontier problems where xhigh was tried and fell short — large cost for a small expected gain. Not the base-table default routing for any listed task type; your routing profile may send some here, see /ac routing. Spawn it directly by name when the work needs it."
 model: opus
 effort: max
-experimental:
-  cacheTtl: "1h"
 ---
 
 Generic routing-ladder worker, rung 10 of 10 (cheapest to dearest:

@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.30 — 2026-10-03
+
+Subagents are back on the default 5-minute prompt cache. The operator chose this on 2026-10-03.
+
+- Removed `experimental: { cacheTtl: "1h" }` from `ac-opus-medium`, `ac-opus-high`, `ac-opus-xhigh` and `ac-opus-max` (added in 0.29.17), and the matching `cacheTtl: "1h"` on rungs 7-10 of `ladder` in `config/model-tiers.json`. All ten ladder workers now use the 5m default. Those four were the only 1h setting in the plugin.
+- Why: from 2026-10-02T16Z to 2026-10-03, 1h cache writes cost 242 plan units, 23% of the total. Agents run continuously and compact often, so the 1h TTL never paid off (it only pays when an agent sits idle for more than 5 minutes), and each rewrite costs 1.6x a 5-minute write.
+- `ladderCacheTtlNote` and `cacheTtl.ladderWorkersExcludedNote` in the config, the ladder section of `docs/ROUTING.md` (regenerated) and the "Which ladder rungs use the 1-hour cache" paragraph of the README now state the 5m policy and the numbers above.
+- Kept on purpose: the optional per-rung `cacheTtl` field and its generator/check (`--sync-agent-descriptions`), the agent-defs advisory, and the cache-ttl verdict's "already on 1h" split. They are config-driven and generic, so a rung can go back to 1h with a one-line config edit. To reverse: re-apply the 0.29.17 change (the agent frontmatter blocks and the four ladder `cacheTtl` fields).
+- Tests: `agent-description-drift` pins that no shipped rung carries a cacheTtl and that a stray 1h block is drift; `cache-ttl-advisory` now expects ac-opus-high at 1h to be flagged (and keeps the config-exception path via a per-machine override); `cache-ttl` and `resume-guard` use fixture definitions instead of the shipped ladder rungs.
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.29 — 2026-10-02
 
 Four "strange messages from gates", from a scan of every hook message since 2026-10-02T21:30Z.

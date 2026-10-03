@@ -38,12 +38,10 @@ The same routing grid's (model, effort) pairs, ordered, each mapped to a spawnab
 | 4 | `sonnet` | `high` | 5m (default) | `agent-companion:ac-sonnet-high` |
 | 5 | `sonnet` | `xhigh` | 5m (default) | `agent-companion:ac-sonnet-xhigh` |
 | 6 | `opus` | `low` | 5m (default) | `agent-companion:ac-opus-low` |
-| 7 | `opus` | `medium` | `1h` | `agent-companion:ac-opus-medium` |
-| 8 | `opus` | `high` | `1h` | `agent-companion:ac-opus-high` |
-| 9 | `opus` | `xhigh` | `1h` | `agent-companion:ac-opus-xhigh` |
-| 10 | `opus` | `max` | `1h` | `agent-companion:ac-opus-max` |
-
-Rungs `ac-opus-medium`, `ac-opus-high`, `ac-opus-xhigh`, `ac-opus-max` carry `experimental: { cacheTtl: "1h" }` in their `agents/ac-*.md` frontmatter — generated from each rung's `cacheTtl` field above by this script (`--sync-agent-descriptions`), never hand-edited. The saving there does not come from being resumed: 30 days of real traffic showed close to zero message-level resumes on any ladder rung. It comes from slow tool waits (long `Bash` calls, test suites, builds) idling the cache past 5 minutes inside a single task — the all-cause measurement captures that, the resume-only measurement does not. `ac-opus-low` and every non-opus rung stay on the 5m default: resume doctrine is unchanged (resume a stopped worker only while its cache is warm — now up to an hour on these four rungs — otherwise spawn a fresh ladder worker from a file handoff; see `hooks/resume-guard.mjs`).
+| 7 | `opus` | `medium` | 5m (default) | `agent-companion:ac-opus-medium` |
+| 8 | `opus` | `high` | 5m (default) | `agent-companion:ac-opus-high` |
+| 9 | `opus` | `xhigh` | 5m (default) | `agent-companion:ac-opus-xhigh` |
+| 10 | `opus` | `max` | 5m (default) | `agent-companion:ac-opus-max` |
 
 ## Reference models (older pinned ids — not routable)
 

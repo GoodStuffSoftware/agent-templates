@@ -269,13 +269,12 @@ const agentDefs = {
         // (30-day measurement, config/model-tiers.json's `cacheTtl` block
         // carries the full figures/citations). The generic ac-* ladder
         // workers are one-shot and excluded from the opus-tier suggestion
-        // even when pinned to opus, per that same block — EXCEPT the four
-        // rungs config's `ladder[].cacheTtl` itself calls out (ac-opus-medium/
-        // high/xhigh/max, decision 2026-09-26: their saving comes from slow
-        // tool waits inside a task, not from being resumed — see
-        // ladderCacheTtlExpectation() above, which reads this live rather
-        // than hardcoding the four names so a future config change is
-        // classified correctly here for free).
+        // even when pinned to opus, per that same block — EXCEPT any rung
+        // config's `ladder[].cacheTtl` itself calls out (none today: the
+        // 2026-09-26 exception for ac-opus-medium/high/xhigh/max was removed
+        // 2026-10-03, see ladderCacheTtlExpectation() above, which reads this
+        // live rather than hardcoding names so a config change is classified
+        // correctly here for free).
         const isLadderWorker = /^ac-/i.test(name);
         const ladderExpectsOneHour = isLadderWorker && ladderCacheTtlExpectation(name) === '1h';
         const modelAlias = fm.model ? classifyModel(fm.model).alias : null;

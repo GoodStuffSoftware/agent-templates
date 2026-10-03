@@ -527,23 +527,45 @@ test('verdict: dead zone with tier disagreement -> per-agent recommendation, bui
 });
 
 // --- Verdict: a rung whose OWN definition already carries the override ----
-// (config/model-tiers.json's `ladder[].cacheTtl`, 2026-09-26) must not be
-// re-recommended forever just because its measured delta stays negative.
+// (a user or project definition with experimental.cacheTtl "1h"; no shipped
+// ladder rung has it since 2026-10-03) must not be re-recommended forever
+// just because its measured delta stays negative.
 
-test('alreadyOneHourFrom: true for a real ladder rung config sets cacheTtl 1h on, false for one it does not', () => {
-  assert.equal(alreadyOneHourFrom('ac-opus-high'), true);
-  assert.equal(alreadyOneHourFrom('agent-companion:ac-opus-high'), true, 'namespaced form resolves to the same file');
-  assert.equal(alreadyOneHourFrom('ac-opus-low'), false);
-  assert.equal(alreadyOneHourFrom('not-a-real-agent-type-xyz'), false, 'unresolvable name never throws');
+function writeUserAgent(dir, name, withOneHour) {
+  const agentsDir = join(dir, '.claude', 'agents');
+  mkdirSync(agentsDir, { recursive: true });
+  writeFileSync(
+    join(agentsDir, `${name}.md`),
+    `---\nname: ${name}\ndescription: long-lived role\nmodel: opus\neffort: high\n${withOneHour ? 'experimental:\n  cacheTtl: "1h"\n' : ''}---\nbody\n`,
+  );
+}
+
+test('alreadyOneHourFrom: true for a definition that sets cacheTtl 1h, false for one that does not and for every shipped ladder rung', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    process.env.CLAUDE_CONFIG_DIR = join(dir, '.claude');
+    writeUserAgent(dir, 'widget-keeper', true);
+    writeUserAgent(dir, 'widget-plain', false);
+    assert.equal(alreadyOneHourFrom('widget-keeper'), true);
+    assert.equal(alreadyOneHourFrom('widget-plain'), false);
+    for (const rung of ['ac-opus-low', 'ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh', 'ac-opus-max']) {
+      assert.equal(alreadyOneHourFrom(rung), false, `${rung} is on the 5m default`);
+      assert.equal(alreadyOneHourFrom(`agent-companion:${rung}`), false, `namespaced ${rung} is on the 5m default`);
+    }
+    assert.equal(alreadyOneHourFrom('not-a-real-agent-type-xyz'), false, 'unresolvable name never throws');
+  } finally { cleanup(); }
 });
 
 test('verdict: an agentType already on cacheTtl 1h is reported as already-set, not re-recommended', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+  process.env.CLAUDE_CONFIG_DIR = join(dir, '.claude');
+  writeUserAgent(dir, 'widget-keeper', true);
   const perModel = [modelRow('opus-5-5', { costToday: 1000, deltaPct: 0.2 })];
   const perAgentModel = [
-    // Real ladder rung, already carrying experimental.cacheTtl: "1h" in its
-    // shipped agents/ac-opus-high.md — must be excluded from the "set
-    // experimental..." list and named as already-set instead.
-    agentRow('ac-opus-high → opus-5-5', { requests: 2000, costToday: 500, deltaPct: -8 }),
+    // A definition already carrying experimental.cacheTtl: "1h" — must be
+    // excluded from the "set experimental..." list and named as already-set.
+    agentRow('widget-keeper → opus-5-5', { requests: 2000, costToday: 500, deltaPct: -8 }),
     // Ordinary named definition with no override yet -> still a fresh candidate.
     agentRow('widget-architect → opus-5-5', { requests: 2000, costToday: 500, deltaPct: -8 }),
   ];
@@ -551,12 +573,13 @@ test('verdict: an agentType already on cacheTtl 1h is reported as already-set, n
     perModel, perAgentModel, totals: { costToday: 1000, deltaPct: 0.2 }, policy: { opusFableOnlyDeltaPct: -1 },
   });
   assert.match(v.text, /already on experimental\.cacheTtl: "1h"/);
-  assert.match(v.text, /ac-opus-high/);
+  assert.match(v.text, /widget-keeper/);
   assert.match(v.text, /set experimental: \{ cacheTtl: "1h" \} on:/);
   assert.match(v.text, /widget-architect/);
   // The already-set row must not appear in the "set ... on:" clause itself.
   const setClause = v.text.split('already on experimental')[0];
-  assert.doesNotMatch(setClause, /ac-opus-high/);
+  assert.doesNotMatch(setClause, /widget-keeper/);
+  } finally { cleanup(); }
 });
 
 test('verdict: dead zone with no qualifying candidate falls back to an explanatory "don\'t set" message', () => {
