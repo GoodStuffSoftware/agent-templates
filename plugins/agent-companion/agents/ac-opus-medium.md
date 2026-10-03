@@ -1,6 +1,6 @@
 ---
 name: ac-opus-medium
-description: "Rung 7/10: opus capability at ordinary depth — Opus 5.5's own default effort. Currently the default routing for: bounded-feature, integration, debug-root-cause."
+description: "Rung 7/10: opus capability at ordinary depth — Opus 5.5's own default effort. Base-table default routing for: bounded-feature, integration, debug-root-cause; your routing profile may route differently, see /ac routing."
 model: opus
 effort: medium
 experimental:

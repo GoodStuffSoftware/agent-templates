@@ -41,7 +41,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  readStdin, isMainThread, noteAgentType, deny, passthrough, recordDenial, routedRung,
+  readStdin, isMainThread, noteAgentType, deny, passthrough, recordDenial, routedRung, routeLayerTag,
 } from './lib/context.mjs';
 import {
   guardSettings, isExecutionTool, isResetTool, recordExecutionCall, resetStreak, EXECUTION_TOOLS,
@@ -64,15 +64,22 @@ function recommendScript() {
   try { return join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'recommend.mjs'); } catch { return 'scripts/recommend.mjs'; }
 }
 
+// Grouped by rung AND the layer that answered, so a type the operator's routing
+// profile moved is listed apart and says so: the agent descriptions show the
+// shipped table, and the two must not read as a contradiction.
 function rungsByType() {
   const by = new Map();
   for (const t of ROUTE_TYPES) {
     const r = routedRung(t);
     if (!r) continue;
-    if (!by.has(r.type)) by.set(r.type, []);
-    by.get(r.type).push(t);
+    const key = `${r.type}|${routeLayerTag(r.layer)}`;
+    if (!by.has(key)) by.set(key, []);
+    by.get(key).push(t);
   }
-  return [...by].map(([rung, types]) => `${rung} for ${types.join(', ')}`).join('; ');
+  return [...by].map(([key, types]) => {
+    const [rung, tag] = key.split('|');
+    return `${rung} for ${types.join(', ')}${tag}`;
+  }).join('; ');
 }
 
 function instructions({ mode, streak, threshold, tool }) {

@@ -27,7 +27,7 @@
 // behaviour), and there is no reason for this feature — built to SAVE
 // tokens — to ever approach that.
 
-import { readStdin, opt, passthrough } from './lib/context.mjs';
+import { readStdin, opt, passthrough, sessionIsSubagent } from './lib/context.mjs';
 import { matchRules, renderRules, readRules } from './lib/rules.mjs';
 
 const HARD_CAP = 4000;
@@ -49,7 +49,10 @@ try {
   const sessionId = p.session_id;
 
   if (event === 'session-start') {
-    const matched = matchRules({ scope: 'session-start', sessionId });
+    // SessionStart also fires inside a subagent that compacts. A worker gets
+    // only the rules that apply to a worker (audience 'all'); the orchestration
+    // rules (spawn, ask the operator, resume, poll) would be noise it cannot act on.
+    const matched = matchRules({ scope: 'session-start', sessionId, subagent: sessionIsSubagent(p) });
     const text = renderRules(matched);
     if (!text) passthrough();
     emit('SessionStart', text);

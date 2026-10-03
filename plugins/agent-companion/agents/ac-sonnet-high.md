@@ -1,6 +1,6 @@
 ---
 name: ac-sonnet-high
-description: "Rung 4/10: multi-file, cross-referencing, integration work, or root-causing a specific failure. Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
+description: "Rung 4/10: multi-file, cross-referencing, integration work, or root-causing a specific failure. Not the base-table default routing for any listed task type; your routing profile may send some here, see /ac routing. Spawn it directly by name when the work needs it."
 model: sonnet
 effort: high
 ---

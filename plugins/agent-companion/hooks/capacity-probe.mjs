@@ -12,11 +12,14 @@
 // A HOOK MUST NEVER BREAK A SESSION. Wrapped end to end; any failure here
 // degrades to passthrough, never a thrown error or a hung hook.
 
-import { readStdin, opt, passthrough } from './lib/context.mjs';
+import { readStdin, opt, passthrough, sessionIsSubagent } from './lib/context.mjs';
 import { buildReport, formatHookLine } from '../scripts/capacity.mjs';
 
 try {
-  readStdin();
+  const p = readStdin();
+  // The line sizes how many Claude Code sessions to run at once: a decision for
+  // the lead. A subagent that compacted has no use for it.
+  if (sessionIsSubagent(p)) passthrough();
   if (!opt('capacity_probe', true)) passthrough();
 
   const report = buildReport({ includeProcessCount: false });

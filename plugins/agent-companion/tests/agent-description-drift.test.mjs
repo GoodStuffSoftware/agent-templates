@@ -44,7 +44,7 @@ test('--check-agent-descriptions fails and names the file when a description has
     });
     assert.equal(res.status, 1);
     assert.match(res.stderr, /ac-sonnet-low/);
-    assert.match(res.stderr, /Currently the default routing for:/); // the CORRECT, non-stale expected text
+    assert.match(res.stderr, /Base-table default routing for:/); // the CORRECT, non-stale expected text
     assert.match(res.stderr, /rare; prefer sonnet/); // the stale actual text, named
   } finally {
     cleanup();
@@ -68,7 +68,7 @@ test('--sync-agent-descriptions rewrites a drifted description in place, preserv
 
     const after = readFileSync(file, 'utf8');
     assert.doesNotMatch(after, /stale text/);
-    assert.match(after, /Currently the default routing for:/);
+    assert.match(after, /Base-table default routing for:/);
     // Body (everything after frontmatter) is untouched.
     assert.equal(after.split(/^---\r?\n[\s\S]*?\r?\n---/m)[1], bodyBefore);
 
@@ -216,7 +216,7 @@ test('mutation: a false claim in a description fails the check, including ac-hai
     const haiku = join(agentsDir, 'ac-haiku.md');
     writeFileSync(haiku, readFileSync(haiku, 'utf8').replace(/^description:.*$/m, 'description: "Rung 1/10: the default routing for every task type."'));
     const med = join(agentsDir, 'ac-sonnet-medium.md');
-    writeFileSync(med, readFileSync(med, 'utf8').replace(/^description:.*$/m, 'description: "Rung 3/10: bounded multi-step work against a clear spec (1-3 files, known shape). Currently the default routing for: explore."'));
+    writeFileSync(med, readFileSync(med, 'utf8').replace(/^description:.*$/m, 'description: "Rung 3/10: bounded multi-step work against a clear spec (1-3 files, known shape). Base-table default routing for: explore; your routing profile may route differently, see /ac routing."'));
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
     assert.match(res.stderr, /ac-haiku \[drift\]/);
@@ -302,7 +302,7 @@ test('ac-haiku: generated from the tier\'s retiresAfter and replacement, keeps R
   assert.doesNotMatch(desc, /verification/);
 });
 
-test('every "Not currently the default" and "Currently the default routing for" claim is true against the live routes', async () => {
+test('every "Not the base-table default" and "Base-table default routing for" claim is true against the shipped routes, and says the profile may differ', async () => {
   const { cleanup } = makeFixture();
   try {
     const { resolveRoute, modelTiers } = await import('../hooks/lib/context.mjs');
@@ -313,15 +313,16 @@ test('every "Not currently the default" and "Currently the default routing for" 
     for (const rung of cfg.ladder) {
       const desc = readFileSync(join(PLUGIN_ROOT, 'agents', `${rung.agent}.md`), 'utf8').match(/^description:\s*"?(.*?)"?$/m)[1];
       const actual = routes.filter(([, r]) => r.model === rung.model && (r.effort || null) === (rung.effort || null)).map(([n]) => n);
-      if (/Not currently the default routing/.test(desc)) {
+      assert.match(desc, /your routing profile may (?:route differently|send some here), see \/ac routing\./, `${rung.agent} points at the routing profile`);
+      if (/Not the base-table default routing/.test(desc)) {
         sawNone = true;
         assert.deepEqual(actual, [], `${rung.agent} says no task type routes to it`);
       } else {
-        const claimed = desc.match(/Currently the default routing for: ([^.]*)\./)[1].split(', ');
+        const claimed = desc.match(/Base-table default routing for: ([^;]*);/)[1].split(', ');
         assert.deepEqual(claimed, actual, rung.agent);
       }
     }
-    assert.ok(sawNone, 'at least one rung carries the "not currently the default" suffix');
+    assert.ok(sawNone, 'at least one rung carries the "not the base-table default" suffix');
   } finally {
     cleanup();
   }

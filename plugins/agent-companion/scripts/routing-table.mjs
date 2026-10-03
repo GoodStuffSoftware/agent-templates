@@ -286,9 +286,13 @@ function generatedAgentDescription(rung) {
   if (!role) return null;
   const total = ladderRungs().length;
   const types = typesForRung(rung);
+  // typesForRung reads the SHIPPED table (profile: false), so these lists are
+  // the base table's. The guards and recommend.mjs resolve through the
+  // operator's routing profile too, and a description cannot see that (it is
+  // generated at build time and committed), so each one says where it stops.
   const suffix = types.length
-    ? `Currently the default routing for: ${types.join(', ')}.`
-    : 'Not currently the default routing for any listed task type — spawn it directly by name when the work needs it.';
+    ? `Base-table default routing for: ${types.join(', ')}; your routing profile may route differently, see /ac routing.`
+    : 'Not the base-table default routing for any listed task type; your routing profile may send some here, see /ac routing. Spawn it directly by name when the work needs it.';
   const tier = (cfg.tiers || {})[rung.model] || {};
   const noEffort = Array.isArray(tier.efforts) && tier.efforts.length === 0
     ? ` ${tier.resolvesTo?.displayName || rung.model} takes no effort parameter.`

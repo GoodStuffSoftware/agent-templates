@@ -132,6 +132,7 @@ function builtinRules() {
     },
     {
       id: 'lead-brevity',
+      audience: 'lead',
       enabled: true,
       builtin: true,
       scope: 'session-start',
@@ -158,6 +159,7 @@ function builtinRules() {
     },
     {
       id: 'delegate-first',
+      audience: 'lead',
       enabled: true,
       builtin: true,
       scope: 'session-start',
@@ -172,6 +174,7 @@ function builtinRules() {
       // standing reminder that applies even where the hook cannot see far
       // enough, e.g. a cross-session peer).
       id: 'resume-doctrine',
+      audience: 'lead',
       enabled: true,
       builtin: true,
       scope: 'session-start',
@@ -207,6 +210,7 @@ function builtinRules() {
       // prose, so the question cannot be missed and the turn stops until it is
       // answered; unattended sessions are never asked.
       id: 'lead-effort-check',
+      audience: 'lead',
       enabled: false,
       builtin: true,
       scope: 'session-start',
@@ -220,6 +224,7 @@ function builtinRules() {
       // enforcement (a per-turn hint on the actual poll) is
       // hooks/poll-guard.mjs on ScheduleWakeup/Monitor, not this rule.
       id: 'poll-guard-doctrine',
+      audience: 'lead',
       enabled: true,
       builtin: true,
       scope: 'session-start',
@@ -266,6 +271,7 @@ function compileRule(rule) {
     builtin: !!rule.builtin,
     gate: rule.gate || null,
     note: rule.note ?? null,
+    audience: rule.audience === 'lead' ? 'lead' : 'all',
   };
 }
 
@@ -343,6 +349,7 @@ export function writeRules(cfg) {
           then: r.then,
           gate: r.gate ?? null,
           note: r.note ?? null,
+          ...(r.audience === 'lead' ? { audience: 'lead' } : {}),
         });
       }
     }
@@ -515,12 +522,17 @@ export function userOwnText(text) {
   return out + s.slice(copied);
 }
 
-export function matchRules({ scope, text, sessionId } = {}) {
+export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
   const { rules } = readRules();
   const subject = scope === 'user-prompt' ? userOwnText(text) : String(text ?? '');
   return rules.filter((r) => {
     if (!r.enabled) return false;
     if (r.scope !== scope) return false;
+    // A worker cannot act on an orchestration rule (it cannot spawn, ask the
+    // operator, or arm a wake), so a rule marked audience 'lead' stays out of a
+    // subagent's session start. Unmarked rules, the operator's own included,
+    // reach everyone.
+    if (subagent && r.audience === 'lead') return false;
     if (!gateSatisfied(r.gate, sessionId)) return false;
     if (scope === 'always' || scope === 'session-start') return true;
     if (typeof r.when !== 'string' || !r.when) return false;

@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.29 — 2026-10-02
+
+Four "strange messages from gates", from a scan of every hook message since 2026-10-02T21:30Z.
+
+- Standing rules, the scout block and the capacity line no longer go to subagents. SessionStart fires inside a worker that compacts, and 23 of 38 injections in the scan went to workers: the whole standing-rules block (including "if this session will orchestrate agents ... ask with AskUserQuestion", which a worker cannot act on), the scout drift block and the capacity line. A worker is recognised the way the other hooks do it (`agent_id`, or a transcript under `.../subagents/`; `sessionIsSubagent` in `hooks/lib/context.mjs`). Rules gain an `audience` field: `lead` keeps a rule out of a worker's SessionStart; the five orchestration built-ins carry it, and an unmarked rule (every operator rule by default) still reaches workers. `scout-surface.mjs` (drift block and main-CI note) and `capacity-probe.mjs` are silent for a worker.
+- One list of rungs, with its source. The ladder agents' descriptions are generated from the shipped table, so `ac-opus-medium` claimed bounded-feature and integration while the delegation guard and `recommend.mjs` (which use your routing profile) sent them to `ac-sonnet-high`. Each description now says "Base-table default routing for: ..." (or "Not the base-table default ...") and "your routing profile may route differently, see /ac routing". The delegation guard's "Rungs now:" list and the spawn guard's "Current routes:" list add "(your routing profile)" to any type your profile moved.
+- The under-provisioned wording for a matching model with a low effort is now "right model, effort too low: medium where the table says high" instead of "right tier; effort medium is below high".
+- `subagent-context.mjs` (a PreToolUse hook on every tool call of every subagent, 5 s limit): it was cancelled at 10-14 s twice at the same instant in two different projects. The code was already tail-bounded (the last 1 MB, widened once to 8 MB) and could not be reproduced as slow: 110-150 ms wall on a 60 MB transcript, about 30 ms over a bare `node` start. The two cancellations were simultaneous, on transcripts of 1.3 and 1.6 MB, so the stall was the host (process start under load), not the read. Added a regression test on a ~64 MB, 300K-token transcript that fails if the read stops being tail-bounded. No behaviour change.
+- Tests: `tests/gate-messages.test.mjs` (the four defects); `agent-description-drift` and `code-review-critical-floor` updated for the new wording.
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.28 — 2026-10-02
 
 - Fix: the `lead-effort-check` rule's option 1 ("Raise to xhigh (Recommended)") told the lead to load and call `set_session_effort` on its own sessionId, which the desktop app refuses for the calling session (a session must not silently re-price its own turns), so the step always failed. Option 1 now tells the operator to raise it with the app's effort control for this session and wait, and makes no spawn until `get_session` "self" shows xhigh or the operator says to continue. The ToolSearch and `set_session_effort` instructions are removed. Everything else is unchanged (unattended runs do not ask, header "Lead effort", option 2 "Stay at <current>", never max, never lower).

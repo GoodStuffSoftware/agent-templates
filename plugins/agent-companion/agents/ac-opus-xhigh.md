@@ -1,6 +1,6 @@
 ---
 name: ac-opus-xhigh
-description: "Rung 9/10: deep architecture, novel reasoning, migrations, large-scale refactors. Currently the default routing for: novel-design, critical-change."
+description: "Rung 9/10: deep architecture, novel reasoning, migrations, large-scale refactors. Base-table default routing for: novel-design, critical-change; your routing profile may route differently, see /ac routing."
 model: opus
 effort: xhigh
 experimental:

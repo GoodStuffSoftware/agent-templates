@@ -1,6 +1,6 @@
 ---
 name: ac-sonnet-low
-description: "Rung 2/10: high-volume/latency-sensitive bounded work that does not need much reasoning depth. Currently the default routing for: mechanical-edit, subagent-worker, operate."
+description: "Rung 2/10: high-volume/latency-sensitive bounded work that does not need much reasoning depth. Base-table default routing for: mechanical-edit, subagent-worker, operate; your routing profile may route differently, see /ac routing."
 model: sonnet
 effort: low
 ---

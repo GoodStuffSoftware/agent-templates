@@ -45,7 +45,7 @@ for (const model of ['sonnet', 'haiku']) {
 test('a critical code review on opus/high (from its definition) is under on effort', () => {
   const r = spawn(`${CRITICAL}\nWARRANT: critical review`, { subagent: 'opus-high' });
   assert.equal(r.decision, 'proceed', r.reason);
-  assert.match(r.msg, /under-provisioned — right tier; effort high is below xhigh/);
+  assert.match(r.msg, /under-provisioned — right model, effort too low: high where the table says xhigh/);
   assert.equal(r.row.fit, 'under');
 });
 

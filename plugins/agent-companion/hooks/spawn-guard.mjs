@@ -51,7 +51,7 @@ import {
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, classifyEffort, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
-  claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent, routedRung,
+  claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent, routedRung, routeLayerTag,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
@@ -169,7 +169,7 @@ function commonTypeRoutes(names = ['explore', 'bounded-feature', 'debug-root-cau
       if (!r.model) continue;
       // haiku has no effort: its rung is the one with none (rungFor wants null)
       const rung = rungFor(r.model, r.effort || null);
-      out.push(`${n} -> ${r.model}${r.effort ? '/' + r.effort : ''}${rung ? ` (agent-companion:${rung.agent})` : ''}`);
+      out.push(`${n} -> ${r.model}${r.effort ? '/' + r.effort : ''}${rung ? ` (agent-companion:${rung.agent})` : ''}${routeLayerTag(r.layer)}`);
     } catch { /* skip this type */ }
   }
   return out.join('; ');

@@ -25,7 +25,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-  readStdin, opt, dataDirs, stateDir, stateFile, passthrough,
+  readStdin, opt, dataDirs, stateDir, stateFile, passthrough, sessionIsSubagent,
 } from './lib/context.mjs';
 import { syncLegacy } from './lib/state-sync.mjs';
 import { normalizeGitUrl } from '../scripts/lib/publication-sweep.mjs';
@@ -114,7 +114,13 @@ function buildCiRedLine() {
 }
 
 try {
-  readStdin();
+  const p = readStdin();
+
+  // Drift signals and the main-CI note are for whoever steers the session. A
+  // subagent that compacted runs the same SessionStart hooks, and has no use
+  // for either (it cannot act on routing drift, and "main is red" is not its
+  // brief), so it gets neither.
+  if (sessionIsSubagent(p)) passthrough();
 
   // Recover any durable history left behind under the (pre-0.17.0) plugin
   // data directory before reading anything. Fully fail-open on its own; a

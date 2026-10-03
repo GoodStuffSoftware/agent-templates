@@ -1690,8 +1690,18 @@ export function routedRung(type) {
     // haiku routes with no effort: its rung is the one with no effort, so a
     // route without an effort still names a rung (rungFor wants null, not '').
     const rung = r.model ? rungFor(r.model, r.effort || null) : null;
-    return rung ? { type: `${pluginName()}:${rung.agent}`, model: r.model, effort: r.effort } : null;
+    return rung ? { type: `${pluginName()}:${rung.agent}`, model: r.model, effort: r.effort, layer: r.layer || null } : null;
   } catch { return null; }
+}
+
+// Where a route came from, as a suffix for the guard and nudge texts that name
+// a rung. The agent descriptions list the SHIPPED table's routes; the guards
+// resolve through the operator's routing profile as well, so without this the
+// two read as contradictory ("ac-opus-medium: bounded-feature" in the agent
+// list, "ac-sonnet-high for bounded-feature" in the guard). '' for the shipped
+// grid and for the shipped trial, which the agent descriptions already include.
+export function routeLayerTag(layer) {
+  return layer === 'profile' ? ' (your routing profile)' : '';
 }
 
 // True when `type` names one of the ladder's own generic worker defs
@@ -2102,6 +2112,18 @@ export function callerIsSubagent(p) {
   return !!(p && typeof p === 'object' && p.agent_id);
 }
 
+// The same test for SessionStart, which fires inside a subagent too (a worker
+// that compacts starts a session of its own, source "compact"). agent_id is the
+// documented marker; a payload without it but whose transcript is a subagent's
+// own file (<project>/<session>/subagents/agent-<id>.jsonl) is the same case.
+// A lead's transcript sits directly in the project directory, so the path
+// segment cannot appear there.
+export function sessionIsSubagent(p) {
+  if (callerIsSubagent(p)) return true;
+  const t = p && typeof p === 'object' ? String(p.transcript_path || '') : '';
+  return /[\\/]subagents[\\/]/.test(t);
+}
+
 // Still positive confirmation: a payload that did not parse (readStdin()
 // returns {}) or carries no session_id is NOT the main thread, so a garbled
 // call is never counted or blocked. Everything else without agent_id is.
@@ -2408,7 +2430,7 @@ export function evaluateFit({ model, effort = '', weight, kind = 'bounded', cons
     verdict = 'under';
     reason = parity
       ? `reviewer effort ${eff} is below the parity route's ${exp.effort}; a reviewer may exceed the route's effort but must not drop below it`
-      : `right tier; effort ${eff} is below ${exp.effort}`;
+      : `right model, effort too low: ${eff} where the table says ${exp.effort}`;
   } else if (effortDelta !== null && effortDelta > 1 && !parity) {
     verdict = 'over'; reason = `right tier; effort ${eff} is ${effortDelta} steps above ${exp.effort}`;
   } else {

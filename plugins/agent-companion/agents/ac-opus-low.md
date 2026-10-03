@@ -1,6 +1,6 @@
 ---
 name: ac-opus-low
-description: "Rung 6/10: opus CAPABILITY needed but the step itself is simple. Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
+description: "Rung 6/10: opus CAPABILITY needed but the step itself is simple. Not the base-table default routing for any listed task type; your routing profile may send some here, see /ac routing. Spawn it directly by name when the work needs it."
 model: opus
 effort: low
 ---

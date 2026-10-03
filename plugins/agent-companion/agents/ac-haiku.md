@@ -1,6 +1,6 @@
 ---
 name: ac-haiku
-description: "RETIRING (no sooner than 2026-10-15): rung 1/10 — reads, searches, single commands. Haiku 4.5 takes no effort parameter. Currently the default routing for: explore, verify. The date only drives warnings: once the operator sets tiers.haiku.retired to true (after confirming the alias no longer resolves), the routing table stops naming this rung and falls back to rung 2, ac-sonnet-low (sonnet/low) (config/model-tiers.json tiers.haiku.retired/replacement)."
+description: "RETIRING (no sooner than 2026-10-15): rung 1/10 — reads, searches, single commands. Haiku 4.5 takes no effort parameter. Base-table default routing for: explore, verify; your routing profile may route differently, see /ac routing. The date only drives warnings: once the operator sets tiers.haiku.retired to true (after confirming the alias no longer resolves), the routing table stops naming this rung and falls back to rung 2, ac-sonnet-low (sonnet/low) (config/model-tiers.json tiers.haiku.retired/replacement)."
 model: haiku
 ---
 

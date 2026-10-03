@@ -121,6 +121,8 @@ Four scopes, each deciding what `when` is tested against and where the directive
 | `session-start` | *(ignored — fires once)* | the main session, at start |
 | `spawn` | the brief of an agent being spawned | that subagent's prompt |
 
+A `session-start` rule also reaches a subagent that compacts, because SessionStart fires inside it. A rule with `"audience": "lead"` stays out of that: five of the built-ins carry it (`lead-brevity`, `delegate-first`, `resume-doctrine`, `poll-guard-doctrine`, `lead-effort-check`), since a worker cannot spawn, resume, arm a wake or ask the operator. A rule with no `audience` (every rule you add, unless you set it) reaches the lead and workers alike. The scout drift block, the main-CI note and the capacity line are lead-only in the same way.
+
 Eight rules ship built in:
 
 | id | scope | fires |

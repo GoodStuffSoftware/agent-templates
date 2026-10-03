@@ -1,6 +1,6 @@
 ---
 name: ac-sonnet-medium
-description: "Rung 3/10: bounded multi-step work against a clear spec (1-3 files, known shape). Not currently the default routing for any listed task type — spawn it directly by name when the work needs it."
+description: "Rung 3/10: bounded multi-step work against a clear spec (1-3 files, known shape). Not the base-table default routing for any listed task type; your routing profile may send some here, see /ac routing. Spawn it directly by name when the work needs it."
 model: sonnet
 effort: medium
 ---
