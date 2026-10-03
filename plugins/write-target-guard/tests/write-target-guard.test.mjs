@@ -871,4 +871,304 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     hookDenied(a);
     loudAbout(a, 'repos[0]');
   });
+
+  // ---------------------------------------------------------------------------
+  // NEW — 2026-10-03 (fix C) drive-relative (C:foo) and rooted-relative (\foo) targets are
+  // DENIED for every write: Windows resolves them against a per-drive current directory the
+  // guard cannot see. Every case also makes a REAL write of the same string (Node, which the
+  // Write/Edit tools use) from a cwd inside the fixture, proving where it would have landed.
+  // ---------------------------------------------------------------------------
+
+  let fixcSeq = 0;
+  const uniq = (ext = 'ts') => `wtg-fixc-${process.pid}-${++fixcSeq}.${ext}`;
+  const fixcDirs = () => {
+    for (const d of ['src', 'docs', 'scripts', path.win32.join('docs', 'src')]) mkdirSync(path.win32.join(repo, d), { recursive: true });
+    mkdirSync(path.win32.join(tmp, 'outside'), { recursive: true });
+  };
+  // A REAL Node write (fs.writeFileSync: what the Write/Edit tools use) of `raw` from `cwd`.
+  const nodeWriteFrom = (cwd, raw) => (spawnSync(process.execPath, ['-e',
+    'try{require("fs").writeFileSync(JSON.parse(process.argv[1]),"probe");console.log("WROTE")}catch(e){console.log("ERR "+e.code)}',
+    JSON.stringify(raw)], { cwd, encoding: 'utf8' }).stdout || '').trim();
+  // A REAL plain Win32 write (Python open(): CreateFileW with Win32 path normalisation, no
+  // \\?\ prefix), or null when python is not on PATH (the Win32 half of a case then skips).
+  let pyOk;
+  const win32WriteFrom = (cwd, raw) => {
+    if (pyOk === undefined) pyOk = (spawnSync('python', ['-c', 'print("ok")'], { encoding: 'utf8' }).stdout || '').trim() === 'ok';
+    if (!pyOk) return null;
+    return (spawnSync('python', ['-c',
+      'import json,sys;f=open(json.loads(sys.argv[1]),"w");f.write("probe");f.close();print("WROTE")',
+      JSON.stringify(raw)], { cwd, encoding: 'utf8' }).stdout || '').trim();
+  };
+  // The write of `raw` from `cwd` lands at `expected` (checked literally, then removed).
+  const landed = (expected) => {
+    const lit = '\\\\?\\' + expected;
+    const ok = existsSync(lit);
+    if (ok) unlinkSync(lit);
+    return ok;
+  };
+  const landsAt = (cwd, raw, expected) => {
+    assert.equal(nodeWriteFrom(cwd, raw), 'WROTE', `a Node write of ${raw} from ${cwd}`);
+    assert.ok(landed(expected), `a Node write of ${raw} from ${cwd} should land at ${expected}`);
+  };
+  const landsAtWin32 = (t, cwd, raw, expected) => {
+    const w = win32WriteFrom(cwd, raw);
+    if (w === null) { t.diagnostic('python not on PATH: the Win32-writer half of this case is not checked'); return; }
+    assert.equal(w, 'WROTE', `a Win32 write of ${raw} from ${cwd}`);
+    assert.ok(landed(expected), `a Win32 write of ${raw} from ${cwd} should land at ${expected}`);
+  };
+  const relDenied = (d) => {
+    denied(d);
+    assert.match(d.reason, /drive-relative .* or rooted-relative/, d.reason);
+    assert.match(d.reason, /fully qualified path/, d.reason);
+  };
+  const dl = () => repo.slice(0, 2); // the fixture's drive, e.g. "C:"
+  const nodrive = (p) => p.slice(2); // "\Users\...\my-project"
+
+  test('fix C: drive-relative C:..\\src\\x.ts (written from <primary>\\docs) -> deny, Write and Edit; it really lands in <primary>\\src', () => {
+    fixcDirs();
+    const f = uniq();
+    const raw = dl() + '..\\src\\' + f;
+    relDenied(D(write(raw)));
+    relDenied(D(edit(raw)));
+    landsAt(path.win32.join(repo, 'docs'), raw, path.win32.join(repo, 'src', f));
+  });
+  test('fix C: drive-relative C:.\\src\\x.ts (written from the primary root) -> deny; it really lands in <primary>\\src', () => {
+    fixcDirs();
+    const f = uniq();
+    const raw = dl() + '.\\src\\' + f;
+    relDenied(D(write(raw)));
+    landsAt(repo, raw, path.win32.join(repo, 'src', f));
+  });
+  test('fix C: drive-relative C:..\\..\\..\\src\\x.ts from a feat/* worktree -> deny; it really lands in <primary>\\src', () => {
+    fixcDirs();
+    const f = uniq();
+    const raw = dl() + '..\\..\\..\\src\\' + f;
+    relDenied(D(write(raw)));
+    landsAt(wt('feat-wt'), raw, path.win32.join(repo, 'src', f));
+  });
+  test('fix C: drive-relative C:src\\x.ts and C:../src/x.ts (forward slashes) -> deny, with the relative-path message', () => {
+    fixcDirs();
+    const f = uniq();
+    relDenied(D(write(dl() + 'src\\' + f)));
+    landsAt(repo, dl() + 'src\\' + f, path.win32.join(repo, 'src', f));
+    const g = uniq();
+    relDenied(D(write(dl() + '../src/' + g)));
+    landsAt(path.win32.join(repo, 'docs'), dl() + '../src/' + g, path.win32.join(repo, 'src', g));
+  });
+  test('fix C: drive-relative targets are denied for EVERY write: non-code (C:x.md) and outside the repo (C:..\\outside\\x.ts)', () => {
+    fixcDirs();
+    const f = uniq('md');
+    relDenied(D(write(dl() + f)));
+    landsAt(path.win32.join(repo, 'docs'), dl() + f, path.win32.join(repo, 'docs', f));
+    const g = uniq();
+    relDenied(D(write(dl() + '..\\outside\\' + g)));
+    landsAt(repo, dl() + '..\\outside\\' + g, path.win32.join(tmp, 'outside', g));
+    relDenied(D(write(dl()))); // a bare drive is drive-relative too
+  });
+  test('fix C: drive-relative behind a device prefix (\\\\?\\C:..\\src, \\??\\C:..\\src) -> deny', () => {
+    denied(D(write('\\\\?\\' + dl() + '..\\src\\a.ts')));
+    denied(D(write('\\??\\' + dl() + '..\\src\\a.ts')));
+  });
+  test('fix C: rooted-relative \\<primary-without-drive>\\src\\x.ts and /<...>/src/x.ts -> deny; they really land in <primary>\\src', () => {
+    fixcDirs();
+    const f = uniq();
+    const raw = nodrive(repo) + '\\src\\' + f;
+    const d = D(write(raw));
+    relDenied(d);
+    assert.ok(d.reason.includes(raw), d.reason);
+    landsAt(tmp, raw, path.win32.join(repo, 'src', f));
+    const g = uniq();
+    const fwd = nodrive(repo).replace(/\\/g, '/') + '/src/' + g;
+    relDenied(D(write(fwd)));
+    landsAt(tmp, fwd, path.win32.join(repo, 'src', g));
+  });
+  test('fix C: rooted-relative targets are denied for EVERY write: non-code outside the repo (\\<tmp>\\outside\\x.md)', () => {
+    fixcDirs();
+    const f = uniq('md');
+    const raw = nodrive(tmp) + '\\outside\\' + f;
+    relDenied(D(write(raw)));
+    landsAt(tmp, raw, path.win32.join(tmp, 'outside', f));
+  });
+  test('fix C END-TO-END: spawned hook, cwd <primary>\\docs, Write C:..\\src\\x.ts -> deny with the relative-path message', () => {
+    fixcDirs();
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify(write(dl() + '..\\src\\' + uniq())),
+      encoding: 'utf8', env: childEnv(homeValid), cwd: path.win32.join(repo, 'docs'),
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.hookSpecificOutput && o.hookSpecificOutput.permissionDecision, 'deny', r.stdout);
+    assert.match(o.hookSpecificOutput.permissionDecisionReason, /fully qualified path/);
+  });
+  test('fix C: a PLAIN relative path is unchanged: it resolves against the hook process cwd (src\\x.ts: deny from the primary, allow from a feat worktree)', () => {
+    fixcDirs();
+    mkdirSync(path.win32.join(wt('feat-wt'), 'src'), { recursive: true });
+    const run = (cwd, raw) => {
+      const r = spawnSync(process.execPath, [HOOK], { input: JSON.stringify(write(raw)), encoding: 'utf8', env: childEnv(homeValid), cwd });
+      assert.equal(r.status, 0, r.stderr);
+      return JSON.parse(r.stdout);
+    };
+    const f = uniq();
+    const a = run(repo, 'src\\' + f);
+    assert.equal(a.hookSpecificOutput && a.hookSpecificOutput.permissionDecision, 'deny', JSON.stringify(a));
+    assert.doesNotMatch(a.hookSpecificOutput.permissionDecisionReason, /fully qualified path/);
+    landsAt(repo, 'src\\' + f, path.win32.join(repo, 'src', f));
+    const g = uniq();
+    const b = run(wt('feat-wt'), 'src\\' + g);
+    assert.equal(b.hookSpecificOutput, undefined, JSON.stringify(b));
+    landsAt(wt('feat-wt'), 'src\\' + g, path.win32.join(wt('feat-wt'), 'src', g));
+  });
+
+  // ---------------------------------------------------------------------------
+  // NEW — 2026-10-03 (fix C) . and .. are never trimmed: a segment made only of dots and/or
+  // spaces (" ", ". .", ".. ", " .", "...") is ONE literal segment to every Windows writer, so
+  // a following ".." cancels IT, not the segment before it. Each case makes real writes.
+  // ---------------------------------------------------------------------------
+
+  for (const seg of [' ', '. .', '.. ', ' .', '...']) {
+    test(`fix C: <primary>\\src\\${JSON.stringify(seg)}\\..\\x.ts -> deny; it really lands in <primary>\\src (Node and Win32)`, (t) => {
+      fixcDirs();
+      const f = uniq();
+      const raw = repo + '\\src\\' + seg + '\\..\\' + f;
+      denied(D(write(raw)));
+      landsAt(tmp, raw, path.win32.join(repo, 'src', f));
+      const g = uniq();
+      landsAtWin32(t, tmp, repo + '\\src\\' + seg + '\\..\\' + g, path.win32.join(repo, 'src', g));
+    });
+  }
+  test('fix C: nested <primary>\\src\\sub\\..\\. .\\..\\x.ts and <primary>\\docs\\ \\..\\..\\src\\x.ts -> deny; both really land in <primary>\\src', (t) => {
+    fixcDirs();
+    for (const mk of [(f) => repo + '\\src\\sub\\..\\. .\\..\\' + f, (f) => repo + '\\docs\\ \\..\\..\\src\\' + f, (f) => repo + '\\docs\\. .\\..\\..\\src\\' + f]) {
+      const f = uniq();
+      denied(D(write(mk(f))));
+      landsAt(tmp, mk(f), path.win32.join(repo, 'src', f));
+      const g = uniq();
+      landsAtWin32(t, tmp, mk(g), path.win32.join(repo, 'src', g));
+    }
+  });
+  test('fix C: <primary>\\docs\\. .\\..\\src\\x.ts -> allow (the ". ." segment is cancelled, not docs); it really lands in <primary>\\docs\\src', (t) => {
+    fixcDirs();
+    const f = uniq();
+    const raw = repo + '\\docs\\. .\\..\\src\\' + f;
+    allowed(D(write(raw)));
+    landsAt(tmp, raw, path.win32.join(repo, 'docs', 'src', f));
+    const g = uniq();
+    landsAtWin32(t, tmp, repo + '\\docs\\. .\\..\\src\\' + g, path.win32.join(repo, 'docs', 'src', g));
+  });
+  test('fix C: <primary>\\docs\\.. \\src\\x.ts and <primary>\\docs\\...\\src\\x.ts -> allow (".. " and "..." are names, not ".."); they really land under docs', (t) => {
+    fixcDirs();
+    const dd = path.win32.join(repo, 'docs') + '\\.. \\src';
+    const d3 = path.win32.join(repo, 'docs') + '\\...\\src';
+    mkdirSync('\\\\?\\' + dd, { recursive: true }); // only creatable through \\?\ (no trimming)
+    mkdirSync('\\\\?\\' + d3, { recursive: true });
+    try {
+      const f = uniq();
+      allowed(D(write(repo + '\\docs\\.. \\src\\' + f)));
+      landsAt(tmp, repo + '\\docs\\.. \\src\\' + f, dd + '\\' + f);
+      const g = uniq();
+      landsAtWin32(t, tmp, repo + '\\docs\\.. \\src\\' + g, dd + '\\' + g);
+      const h = uniq();
+      allowed(D(write(repo + '\\docs\\...\\src\\' + h)));
+      landsAt(tmp, repo + '\\docs\\...\\src\\' + h, d3 + '\\' + h);
+      const k = uniq();
+      landsAtWin32(t, tmp, repo + '\\docs\\...\\src\\' + k, d3 + '\\' + k);
+    } finally {
+      rmSync('\\\\?\\' + path.win32.join(repo, 'docs') + '\\.. ', { recursive: true, force: true });
+      rmSync('\\\\?\\' + path.win32.join(repo, 'docs') + '\\...', { recursive: true, force: true });
+    }
+  });
+  test('fix C: a name with dots/spaces AND other characters is still trimmed (<primary>\\src. \\a.ts -> deny)', () => {
+    denied(D(write(repo + '\\src. \\a.ts')));
+    denied(D(write(repo + '\\src.\\a.ts')));
+  });
+
+  // ---------------------------------------------------------------------------
+  // NEW — 2026-10-03 (fix C) the NT-namespace \??\ prefix is handled like \\?\ (a plain Win32
+  // writer passes it straight through: Python open() lands \??\<P>\src\x.ts in <P>\src).
+  // ---------------------------------------------------------------------------
+
+  test('fix C: \\??\\<primary>\\src\\a.ts -> deny (primary rule, not a device refusal); a Win32 write really lands in <primary>\\src', (t) => {
+    fixcDirs();
+    const d = inPrimary('\\??\\' + repo + '\\src\\a.ts');
+    denied(d);
+    assert.doesNotMatch(d.reason, /device or volume namespace/);
+    denied(inPrimary('/??/' + repo.replace(/\\/g, '/') + '/src/a.ts'));
+    const g = uniq();
+    landsAtWin32(t, tmp, '\\??\\' + repo + '\\src\\' + g, path.win32.join(repo, 'src', g));
+  });
+  test('fix C: \\??\\<primary>\\docs\\x.md and \\??\\<sibling>\\src\\a.ts -> allow; the docs write really lands in <primary>\\docs', (t) => {
+    fixcDirs();
+    const f = uniq('md');
+    allowed(inPrimary('\\??\\' + repo + '\\docs\\' + f));
+    allowed(inPrimary('\\??\\' + repo + '-sibling\\src\\a.ts'));
+    landsAtWin32(t, tmp, '\\??\\' + repo + '\\docs\\' + f, path.win32.join(repo, 'docs', f));
+  });
+  test('fix C: \\??\\UNC\\localhost\\<d>$\\...\\src\\a.ts -> deny (folded to the drive); a Win32 write really lands in <primary>\\src', (t) => {
+    fixcDirs();
+    denied(inPrimary('\\??\\UNC\\localhost\\' + drive() + '$' + tail()));
+    const g = uniq();
+    landsAtWin32(t, tmp, '\\??\\UNC\\localhost\\' + drive() + '$' + nodrive(repo) + '\\src\\' + g, path.win32.join(repo, 'src', g));
+  });
+  test('fix C: \\??\\UNC\\fileserver\\share\\x.md -> deny (unresolvable UNC target); \\??\\Volume{GUID} and \\??\\GLOBALROOT -> deny (device)', () => {
+    uncDenied(inPrimary('\\??\\UNC\\fileserver\\share\\x.md'));
+    const v = inPrimary('\\??\\Volume{00000000-0000-0000-0000-000000000000}\\my-project\\src\\a.ts');
+    denied(v);
+    assert.match(v.reason, /device or volume namespace/);
+    const g = inPrimary('\\??\\GLOBALROOT\\Device\\HarddiskVolume1\\x.md');
+    denied(g);
+    assert.match(g.reason, /device or volume namespace/);
+    denied(inPrimary('\\??\\\\\\?\\' + repo + '\\docs\\x.md')); // a doubled device prefix is not unwrapped twice
+  });
+
+  // ---------------------------------------------------------------------------
+  // NEW — 2026-10-03 (fix C) NotebookEdit (tool_input.notebook_path, new_source) and MultiEdit
+  // (tool_input.file_path, edits[].new_string) are guarded exactly like Write and Edit.
+  // ---------------------------------------------------------------------------
+
+  const nb = (file, src = 'x') => ({ tool_name: 'NotebookEdit', tool_input: { notebook_path: file, new_source: src, cell_type: 'code', edit_mode: 'replace' } });
+  const me = (file, ...news) => ({ tool_name: 'MultiEdit', tool_input: { file_path: file, edits: news.map((n) => ({ old_string: 'a', new_string: n })) } });
+
+  test('fix C: NotebookEdit into the primary src -> deny; with the ack in new_source -> allow', () => {
+    denied(D(nb(path.win32.join(repo, 'src', 'a.ipynb'))));
+    allowed(D(nb(path.win32.join(repo, 'src', 'a.ipynb'), '# guard-ack: primary-worktree')));
+  });
+  test('fix C: NotebookEdit: feat/* worktree -> allow; claude/* worktree -> deny; primary docs -> allow; outside -> allow', () => {
+    allowed(D(nb(path.win32.join(wt('feat-wt'), 'src', 'a.ipynb'))));
+    denied(D(nb(path.win32.join(wt('claude-auto'), 'src', 'a.ipynb'))));
+    allowed(D(nb(path.win32.join(repo, 'docs', 'a.ipynb'))));
+    allowed(D(nb(path.win32.join(tmp, 'elsewhere', 'src', 'a.ipynb'))));
+  });
+  test('fix C: NotebookEdit with a drive-relative notebook_path -> deny; a file_path-only payload is still guarded', () => {
+    relDenied(D(nb(dl() + '..\\src\\a.ipynb')));
+    denied(D({ tool_name: 'NotebookEdit', tool_input: { file_path: path.win32.join(repo, 'src', 'a.ipynb'), new_source: 'x' } }));
+  });
+  test('fix C: MultiEdit into the primary src -> deny; an ack in any edit\'s new_string -> allow; an ack only in old_string -> deny', () => {
+    const f = path.win32.join(repo, 'src', 'a.ts');
+    denied(D(me(f, 'x', 'y')));
+    allowed(D(me(f, 'x', '// guard-ack: primary-worktree')));
+    denied(D({ tool_name: 'MultiEdit', tool_input: { file_path: f, edits: [{ old_string: '// guard-ack: primary-worktree', new_string: 'x' }] } }));
+    denied(D({ tool_name: 'MultiEdit', tool_input: { file_path: f, edits: 'not-a-list' } }));
+    denied(D({ tool_name: 'MultiEdit', tool_input: { file_path: f, edits: [null, 7, { new_string: 'x' }] } }));
+  });
+  test('fix C: MultiEdit: feat/* worktree -> allow; claude/* worktree -> deny; primary docs -> allow; rooted-relative -> deny', () => {
+    allowed(D(me(path.win32.join(wt('feat-wt'), 'src', 'a.ts'), 'x')));
+    denied(D(me(path.win32.join(wt('claude-auto'), 'src', 'a.ts'), 'x')));
+    allowed(D(me(path.win32.join(repo, 'docs', 'a.md'), 'x')));
+    relDenied(D(me(nodrive(repo) + '\\src\\a.ts', 'x')));
+  });
+  test('fix C END-TO-END: spawned hook denies a NotebookEdit and a MultiEdit into the primary src', () => {
+    for (const input of [nb(path.win32.join(repo, 'src', 'a.ipynb')), me(path.win32.join(repo, 'src', 'a.ts'), 'x')]) {
+      const r = spawnHook(homeValid, input);
+      assert.equal(r.status, 0, r.stderr);
+      const o = JSON.parse(r.stdout);
+      assert.equal(o.hookSpecificOutput && o.hookSpecificOutput.permissionDecision, 'deny', r.stdout);
+    }
+  });
+  test('fix C: the plugin hooks.json PreToolUse matcher covers Write, Edit, MultiEdit and NotebookEdit (and not Read/Bash)', () => {
+    const hj = JSON.parse(readFileSync(fileURLToPath(new URL('../hooks/hooks.json', import.meta.url)), 'utf8'));
+    const matchers = hj.hooks.PreToolUse.filter((e) => e.hooks.some((h) => (h.args || []).some((a) => /write-target-guard\.mjs$/.test(a)))).map((e) => new RegExp(e.matcher));
+    assert.equal(matchers.length, 1);
+    for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) assert.ok(matchers[0].test(tool), tool);
+    for (const tool of ['Read', 'Bash', 'NotebookRead', 'WriteX']) assert.ok(!matchers[0].test(tool), tool);
+  });
 });

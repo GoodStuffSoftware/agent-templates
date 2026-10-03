@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// write-target-guard.mjs — PreToolUse hook on Write|Edit.
+// write-target-guard.mjs — PreToolUse hook on Write|Edit|MultiEdit|NotebookEdit.
 //
 // Keeps CODE writes out of protected checkouts: a repo's PRIMARY/deploy worktree
 // (merges land there, code work does not) and its unnamed auto-worktrees (a
@@ -79,6 +79,24 @@
 //   (stderr + systemMessage), and every valid rule and entry is still enforced (before, a
 //   non-string element threw and the outer catch allowed everything silently). Only when NO
 //   usable repo entry remains does the guard take the loud fail-open above (INACTIVE).
+// 2026-10-03: drive-relative and rooted-relative targets are denied; . and .. are never trimmed.
+//   A drive-relative target (C:foo, C:..\x: a drive letter not followed by a separator)
+//   resolves against that drive's current directory, and a rooted-relative one (\foo, /foo:
+//   one leading separator, not UNC or device) against the current drive; the guard cannot
+//   see either, so EVERY write to such a target is refused with a fully-qualified-path hint
+//   (before, P2 trimmed "C:.." to "C:" and C:..\src\x.ts was judged as C:\src\x.ts: allow).
+//   A plain relative path (src\x.ts) is unchanged: it resolves against the hook PROCESS cwd.
+//   P2 never trims a segment made only of dots and/or spaces (" ", ". .", ".. ", "..."):
+//   every Windows writer keeps it as ONE literal segment, so a following ".." cancels it,
+//   not the segment before it (before, <P>\src\. .\..\x.ts was judged as <P>\x.ts: allow).
+// 2026-10-03: \??\ device prefix handled like \\?\.
+//   The NT-namespace prefix \??\ (which a plain Win32 CreateFile passes straight through:
+//   \??\<P>\src\x.ts opens <P>\src\x.ts) is stripped like \\?\, and \??\UNC\ reduces to \\
+//   like \\?\UNC\ (a non-loopback share then gets the unresolvable-UNC deny).
+// 2026-10-03: NotebookEdit and MultiEdit are guarded like Write/Edit.
+//   NotebookEdit's target is tool_input.notebook_path (tool_input.file_path if absent) and
+//   its written content is new_source; MultiEdit's target is tool_input.file_path and its
+//   written content is every edits[].new_string (an ack in any one of them counts).
 //
 // The decision logic is the exported pure function decide(); main (stdin/stdout) runs
 // when argv[1]'s BASENAME is write-target-guard.mjs — not a full-path compare, because
@@ -130,26 +148,35 @@ function getHostnames() {
   return set;
 }
 
+// A device prefix: \\?\ , \\.\ or the NT-namespace \??\ (after / -> \ folding).
+const DEVICE_PREFIX = /^(?:\\\\[?.]\\|\\\?\?\\)/;
+
 // Canonicalise a raw file_path to a comparable lowercased backslash path, folding the
-// alias families above. Returns { norm } or { unresolvable: true } for device/volume
-// namespaces that cannot be mapped to a file path.
+// alias families above. Returns { norm }, { unresolvable: true } for device/volume
+// namespaces that cannot be mapped to a file path, or { relative: true } for a
+// drive-relative (C:foo) or rooted-relative (\foo) path.
 function canonicalize(raw, hostnames) {
   let s = String(raw).replace(/\//g, '\\').toLowerCase();
 
-  // P1: \\?\UNC\server\share and \\.\UNC\server\share -> \\server\share
-  s = s.replace(/^\\\\[?.]\\unc\\/, '\\\\');
-  // P1: strip a \\?\ or \\.\ device prefix (\\?\C:\x -> C:\x)
+  // P1: \\?\UNC\server\share, \\.\UNC\server\share and \??\UNC\server\share -> \\server\share
+  s = s.replace(/^(?:\\\\[?.]\\|\\\?\?\\)unc\\/, '\\\\');
+  // P1: strip a \\?\, \\.\ or \??\ device prefix (\\?\C:\x -> C:\x)
   let deviceStripped = false;
-  if (/^\\\\[?.]\\/.test(s)) {
-    s = s.replace(/^\\\\[?.]\\/, '');
+  if (DEVICE_PREFIX.test(s)) {
+    s = s.replace(DEVICE_PREFIX, '');
     deviceStripped = true;
   }
   // P1: forms that cannot be resolved to a drive/UNC path -> refuse to guess.
-  if (/^(globalroot|volume\{|physicaldrive|harddiskvolume)/.test(s) || /^\\\\[?.]\\/.test(s)) {
+  if (/^(globalroot|volume\{|physicaldrive|harddiskvolume)/.test(s) || DEVICE_PREFIX.test(s)) {
     return { unresolvable: true };
   }
   if (deviceStripped && !/^[a-z]:/.test(s) && !/^\\\\/.test(s)) {
     return { unresolvable: true };
+  }
+  // Drive-relative (C:foo, C:..\x, a bare C:) or rooted-relative (\foo: one leading
+  // separator, not UNC): resolved against a per-drive current directory the guard cannot see.
+  if (/^[a-z]:(?!\\)/.test(s) || /^\\(?!\\)/.test(s)) {
+    return { relative: true };
   }
 
   // P1: admin-share UNC to a loopback / this host -> drive letter.
@@ -167,7 +194,10 @@ function canonicalize(raw, hostnames) {
   }
   for (let i = 0; i < parts.length; i++) {
     const seg = parts[i];
-    if (seg === '' || /^\.+$/.test(seg) || /:$/.test(seg)) continue; // keep empties, . .. and the drive
+    // Keep empties, the drive, and every segment made only of dots and/or spaces: . and ..
+    // navigate, and " ", ". .", ".. ", "..." are ONE literal segment to every Windows writer
+    // (a following .. cancels it), so trimming one to "" would cancel the segment before it.
+    if (seg === '' || /^[ .]+$/.test(seg) || /:$/.test(seg)) continue;
     parts[i] = seg.replace(/[ .]+$/, '');
   }
   s = parts.join('\\');
@@ -209,6 +239,15 @@ const DEVICE_DENY = {
     'to a file path — refusing to guess. Use a normal drive-letter path (C:\\...).',
 };
 
+const relativeDeny = (raw) => ({
+  decision: 'deny',
+  reason:
+    `WRONG WRITE TARGET: ${raw} is a drive-relative (C:foo) or rooted-relative (\\foo) path. ` +
+    'Windows resolves it against a per-drive current directory that this guard cannot see, so it ' +
+    'cannot tell which checkout the write would land in. Every write to such a target is refused. ' +
+    'Use a fully qualified path (C:\\...) instead.',
+});
+
 const uncDeny = (raw, resolved) => ({
   decision: 'deny',
   reason:
@@ -220,19 +259,21 @@ const uncDeny = (raw, resolved) => ({
 
 // The one P1/P2/P3 pipeline, shared by targets and configured paths: canonicalise, then
 // realpath the deepest existing ancestor. Returns { norm } (a lowercased local drive path),
-// { device: true } (a namespace P1 refuses to resolve), or { unc: true, norm, resolved? }
-// (a UNC path P1 cannot fold to a drive, lexically or after realpath: a mapped drive or a
-// symlink to a share comes back as one; `resolved` is set in that after-realpath case).
+// { device: true } (a namespace P1 refuses to resolve), { relative: true } (drive-relative
+// or rooted-relative), or { unc: true, norm, resolved? } (a UNC path P1 cannot fold to a
+// drive, lexically or after realpath: a mapped drive or a symlink to a share comes back as
+// one; `resolved` is set in that after-realpath case).
 function resolvePath(raw, realpathFn = realpathSync.native) {
   const hostnames = getHostnames();
   const canon = canonicalize(raw, hostnames);
   if (canon.unresolvable) return { device: true };
+  if (canon.relative) return { relative: true };
   if (isUnc(canon.norm)) return { unc: true, norm: canon.norm };
   let norm = realpathAncestor(canon.norm, realpathFn);
   if (isUnc(norm)) {
     // Re-apply the P1 fold: a recognised loopback admin share returns to a drive path.
     const again = canonicalize(norm, hostnames);
-    if (again.unresolvable) return { device: true };
+    if (again.unresolvable || again.relative) return { device: true };
     if (isUnc(again.norm)) return { unc: true, norm, resolved: norm };
     norm = realpathAncestor(again.norm, realpathFn);
     if (isUnc(norm)) return { unc: true, norm, resolved: norm };
@@ -241,12 +282,14 @@ function resolvePath(raw, realpathFn = realpathSync.native) {
 }
 
 // Resolve a raw file_path for the checks. Returns { norm } (a lowercased local drive path)
-// or { deny } (the decision to return). A UNC path P1 cannot fold to a drive is denied twice
-// over: lexically, and again when realpath (a mapped drive, a symlink to a share) lands on
-// one. realpathFn is the test seam; the hook always uses the default.
+// or { deny } (the decision to return). A drive-relative or rooted-relative path is denied.
+// A UNC path P1 cannot fold to a drive is denied twice over: lexically, and again when
+// realpath (a mapped drive, a symlink to a share) lands on one. realpathFn is the test seam;
+// the hook always uses the default.
 export function resolveTarget(rawPath, realpathFn = realpathSync.native) {
   const r = resolvePath(rawPath, realpathFn);
   if (r.device) return { deny: DEVICE_DENY };
+  if (r.relative) return { deny: relativeDeny(rawPath) };
   if (r.unc) return { deny: uncDeny(rawPath, r.resolved) };
   return { norm: r.norm };
 }
@@ -364,13 +407,17 @@ function prepareRepos(rawRepos, realpathFn = realpathSync.native) {
     // The primary: a non-empty ABSOLUTE path (a relative one would resolve against the
     // hook's cwd), canonicalised like a target.
     const rawPrim = cfg.primary;
-    if (!isNonEmptyStr(rawPrim) || !/^([a-z]:[\\/]|[\\/]{2})/i.test(rawPrim.trim())) {
+    if (!isNonEmptyStr(rawPrim) || !/^([a-z]:[\\/]|[\\/]{2}|[\\/]\?\?[\\/])/i.test(rawPrim.trim())) {
       warnings.push(`${at}.primary must be a non-empty absolute path string (got ${showVal(rawPrim)}): entry dropped`);
       return;
     }
     const rp = resolvePath(trimSep(rawPrim.trim()), realpathFn);
     if (rp.device) {
       warnings.push(`${at}.primary ${rawPrim} uses a device or volume namespace this guard will not resolve: entry dropped`);
+      return;
+    }
+    if (rp.relative) { // \\?\C:foo or \??\C:foo: absolute-looking, drive-relative underneath
+      warnings.push(`${at}.primary must be a non-empty absolute path string (got ${showVal(rawPrim)}): entry dropped`);
       return;
     }
     const prim = withSlash(rp.norm);
@@ -489,13 +536,30 @@ function classifyRepo(norm, content, prepared) {
   return ALLOW;
 }
 
+// The file-writing tools this guard judges, and for each the content it writes (where an
+// ack must appear): Write content, Edit new_string, NotebookEdit new_source, and every
+// MultiEdit edits[].new_string (an ack in any one of them counts, as in Edit's new_string).
+const GUARDED_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+function writtenContent(tool, ti) {
+  if (tool === 'Write') return String(ti.content ?? '');
+  if (tool === 'NotebookEdit') return String(ti.new_source ?? '');
+  if (tool === 'MultiEdit') {
+    return Array.isArray(ti.edits)
+      ? ti.edits.map((e) => (e && typeof e === 'object' ? String(e.new_string ?? '') : '')).join('\n')
+      : '';
+  }
+  return String(ti.new_string ?? '');
+}
+
 export function decide(hookInput, opts = {}) {
   const j = hookInput || {};
   const tool = j.tool_name;
   const ti = j.tool_input || {};
-  const rawPath = String(ti.file_path || '');
-  if (!rawPath || (tool !== 'Write' && tool !== 'Edit')) return ALLOW;
-  const content = String(tool === 'Write' ? (ti.content ?? '') : (ti.new_string ?? ''));
+  if (!GUARDED_TOOLS.has(tool)) return ALLOW;
+  // NotebookEdit names its target notebook_path (file_path as a fallback); the rest file_path.
+  const rawPath = String((tool === 'NotebookEdit' ? (ti.notebook_path || ti.file_path) : ti.file_path) || '');
+  if (!rawPath) return ALLOW;
+  const content = writtenContent(tool, ti);
 
   const cfg = opts.config ?? loadHomeConfig().config;
   if (cfg && cfg.enabled === false) return ALLOW; // explicit opt-out honoured by the classifier too
