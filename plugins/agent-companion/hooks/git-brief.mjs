@@ -17,16 +17,20 @@
 //
 // Telemetry, telemetry/git-brief.jsonl: one `inject-session` or
 // `inject-subagent` row per run, with the characters injected (0 when there
-// was nothing to say: not a repository, an error), whether a fetch ran, and
-// the duration. The script's own CLI runs write `run` / `landed` rows.
+// was nothing to say: not a repository, an error), whether a fetch ran, the
+// duration, the start-up latency, and `outcome` / `fetch_outcome` /
+// `fetch_age_ms` / `steps_ms` (docs/TELEMETRY.md), so "no line" separates a
+// non-repository from a git error or a timeout. The script's own CLI runs
+// write `run` / `landed` rows.
 //
 // Fails open: any error prints nothing and exits 0.
 
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, opt, passthrough, appendLog } from './lib/context.mjs';
-import { gitBrief } from '../scripts/git-brief.mjs';
+import { gitBrief, briefTelemetry } from '../scripts/git-brief.mjs';
 
+const startMs = Math.round(process.uptime() * 1000);
 const argv = process.argv.slice(2);
 const evIdx = argv.indexOf('--event');
 const EVENT = evIdx >= 0 ? argv[evIdx + 1] : undefined;
@@ -52,6 +56,10 @@ try {
     chars: text.length,
     fetched: res.fetched,
     duration_ms: Date.now() - t0,
+    // Process start to the hook's first line (node start-up and imports): the
+    // part of the start-up cost the duration above does not include.
+    start_ms: startMs,
+    ...briefTelemetry(res),
   });
 
   if (!text) passthrough();

@@ -8,11 +8,11 @@ Token-saving trial: four changes shipped together, each with its own on/off togg
 
 ### Trimmed injected text
 
-Trimmed the text the plugin adds to every session, keeping every requirement. Source: `plugin-overhead-2026-10-04.md` (usage postmortem), trims 1 to 4.
+Trimmed the text the plugin adds to every session. Keeps every rule; shortens rationale (the small requirements and reasons that did go are listed under "Known limits"). Source: `plugin-overhead-2026-10-04.md` (usage postmortem), trims 1 to 4.
 
 - Scout surface (SessionStart): the main session gets a pointer line (signal count, kinds, path to `scout-latest.json`, "mention only if asked") instead of the full signal list; subagents get nothing (the hook already skipped them: `sessionIsSubagent`). The CI-red line is unchanged.
 - Standing rules: subagents get none (every built-in session-start rule is `audience: lead`; no rule that governs a worker's own tool use exists to keep). Main session wording tightened, every rule kept: the delegate-first rationale clause "omitted inherits this tier" is dropped (the instruction to set the model explicitly stays); other rules lose filler words only.
-- Reporting contract (SubagentStart/spawn brief): tightened, every requirement kept (STATUS line, blockers uncompressed, outcome shape, omit list, long output to a file, peer messages one screen).
+- Reporting contract (SubagentStart/spawn brief): tightened, every rule kept (STATUS line, blockers uncompressed, outcome shape, omit list, long output to a file, peer messages one screen); some rationale and emphasis shortened (see "Known limits").
 - Skill descriptions: the 11 plugin skills cut by about a third, trigger phrases kept.
 - Not done: hiding the 10 `ac-*` ladder agents from subagents. Claude Code has no supported mechanism (only a per-agent `tools: Agent(a, b)` allowlist, which would mean editing every other agent).
 - Measured by chars of injected text, via the same scripts' inputs as the report (static run of each hook, clean config dir; scout with a 3-signal result, so the real scout block is larger):
@@ -45,23 +45,46 @@ One call that waits inside a script instead of repeated `gh` and sleep polls.
 
 - New `scripts/pr-wait.mjs`: `pr-wait <pr-number|branch> [--repo owner/repo] [--timeout 20m]` waits until a PR's checks finish or it merges or closes; `--run <run-id|branch>` does the same for a GitHub Actions run. It prints one start line, then one final line (state, checks passed/failed/total, elapsed) and up to nine failed-check lines with log URLs. Exit codes: 0 passed or merged, 1 failed or closed unmerged, 2 timeout, 3 usage or gh error. Polls gh inside the script with backoff (5s to 30s), never prompts, and is safe under `run_in_background`.
 - Bound to the commit, not the branch: PR mode reads the PR's head commit (`headRefOid`) on every poll and counts only the check runs and statuses of that commit, so the previous commit's checks (still reported for a few seconds after a push) never answer for it; a head with no checks yet is waited on. `--run <branch>` takes the newest run whose head SHA equals the branch's current remote tip and keeps waiting within the timeout while there is none; a run id is used as given. Each poll is three `gh` calls, all inside the process.
-- New option `pr_wait` (default on; `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` turns it off) and standing rule `pr-wait-hint`: one session-start line (150 characters or fewer) naming the script. Off hides only that line; the script still runs.
+- New option `pr_wait` (default on; `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` turns it off) and standing rule `pr-wait-hint`: one session-start line naming the script (reworded after review, see "Review fixes"). Off hides only that line; the script still runs.
 - Telemetry stream `telemetry/pr-wait.jsonl`, one row per run: mode, polls, duration, outcome, exit code (`docs/TELEMETRY.md`).
-- Tests: `tests/pr-wait.test.mjs` (gh stubbed, including a previous-commit-green PR and a run list holding only the commit before the push), plus the rule-count updates in `tests/standing-rules.test.mjs`. The standing-rule hint is written in the trimmed style (one line, 150 characters or fewer).
-
+- Tests: `tests/pr-wait.test.mjs` (gh stubbed, including a previous-commit-green PR and a run list holding only the commit before the push), plus the rule-count updates in `tests/standing-rules.test.mjs`.
 ### Injected text with all four changes
 
 Same method as the trim table (static run of every SessionStart and SubagentStart hook, clean config dir, 3-signal scout; chars of `additionalContext`). Main = scout pointer + standing rules + git brief; the machine-specific capacity line (about 120) is left out. Subagent = what SubagentStart injects (reporting contract + git brief); standing rules and scout add nothing for a worker. `read_dedupe` injects nothing at start (it only denies a repeat Read), so its row never moves.
 
 | Toggles | Main session start | Subagent start |
 |---|---|---|
-| all on | 1,354 | 820 |
-| `git_brief` off | 1,007 | 473 |
-| `pr_wait` off | 1,218 | 820 |
-| `read_dedupe` off | 1,354 | 820 |
+| all on | 1,396 | 796 |
+| `git_brief` off | 1,073 | 473 |
+| `pr_wait` off | 1,194 | 796 |
+| `read_dedupe` off | 1,396 | 796 |
 | all three off (the trimmed baseline) | 871 | 473 |
 
-So the three trial features add 483 characters to a main session start (git brief 347, pr-wait hint 136) and 347 to a subagent start (git brief); each is gone with its own switch.
+So the three trial features add 525 characters to a main session start (git brief 323, pr-wait hint 202) and 323 to a subagent start (git brief); each is gone with its own switch. Both depend on the plugin's install path, which these lines print: measured with a typical cache path (`C:/Users/<name>/.claude/plugins/cache/agent-companion/agent-companion/<version>`, 75 characters). The pr-wait hint grew from 136 to 202 after review because it now carries the real script path and `run_in_background`. Before review the table read 1,354 / 820 (git brief 347, hint 136), measured under a longer path for the brief.
+
+### Review fixes (2026-10-04)
+
+An independent review of the four changes returned SHIP-WITH-FIXES (2 high, 4 medium, 11 low). Each finding was reproduced before it was fixed.
+
+- **`landed` answered from a stale fetch (high).** `git-brief.mjs landed` honoured the 5-minute fetch stamp, so a branch merged in that window read as NOT on main. `landed` now always fetches (`--no-fetch` for local refs only); the 5-minute window applies to the injected start line only. A NOT that rests on a failed fetch or no remote carries a note (`fetch failed; origin/main may be stale`, `local origin/main only`). An unknown or deleted ref prints `UNKNOWN (no such ref X)` instead of a NOT, and so does a git timeout.
+- **A timed-out fetch left `git-remote-http` running (high).** The old synchronous kill ended `git` but not its transport child, which kept the connection open (indefinitely on Windows). Fetches now run under a runner that kills the whole process tree on timeout (`taskkill /T /F` on Windows, a process-group kill elsewhere), with `GIT_HTTP_LOW_SPEED_LIMIT`/`TIME` as a second cut, and one run has an overall deadline (fetch cap plus local cap, `AC_GIT_BRIEF_DEADLINE_MS`). Tested: no orphan survives a hung fetch.
+- **pr-wait answered PASS too early (medium).** CI registers checks one after another, so a first poll could see one finished green check and nothing pending. PASS now needs the same check set (head commit, names, verdicts) on two polls at least `PR_WAIT_SETTLE_MS` (default 20 s) apart; a new or changed check restarts the clock; a failure still returns at once. The final line carries the bound head commit (`@sha7`), and `NO-CHECKS` now says "no CI observed (exit 0 = nothing failed)". "not a git repository" is a permanent error (exit 3 at once, not after about 15 s of retries).
+- **The pr-wait hint (medium).** It named release tools a plain repository does not have and gave no path. It now carries the script's real absolute path and says to launch it with `run_in_background` (a foreground call dies at two minutes).
+- **read-dedupe compared only mtime and size (medium).** A same-size edit with the mtime put back (some tools, and `touch -r`) was missed and a stale read denied. The stat tuple now includes ctime, which a user-space call cannot put back.
+- **read-dedupe state contended across agents (medium).** One state file and lock per session made parallel agents queue and fail open on a busy lock. State is now one file per (session, agent), so agents never contend, a held lock on one agent does not touch another, and a lock that cannot be taken writes a `lock-timeout` row instead of vanishing. A whole-session compaction removes every agent's file.
+- **Telemetry for all three streams (`docs/TELEMETRY.md`).** read-dedupe: `allow` rows with `allow_reason` (the denominator of the denial rate), `lock-timeout` rows, `hook_event`, `agent_type`, `tool_use_id`, `est_chars`, `deny_chars`, `age_ms`, `deny_at` (joins a `retry-ran` to its denial), `read_index`, `lock_wait_ms`, `duration_ms`, `transcript_bytes`. git-brief: `outcome`, `fetch_outcome`, `fetch_age_ms`, per-step `steps_ms`, `start_ms`; for `landed`, `answer`, `target_hash`, `stamp_age_ms`, `rechecked_after_NOT`. pr-wait: a `start` row (a killed run now leaves one), `event`, `cycles`, `settle_waits`, `head_sha`, `target_hash`, `repo_hash`, `error_class`; `polls` counts gh calls (a PR poll is three).
+- **Docs.** `standing_rules: false` also removes the pr-wait hint, because the hint is a built-in standing rule (the toggle note says so). The "keeps every requirement" claim for the trims is reworded to "keeps every rule; shortens rationale".
+
+### Known limits
+
+Found by the review and accepted for the trial; none changes a verdict.
+
+- **Parallel starts can fetch together.** The git-brief fetch stamp is written without a lock, so subagents starting in the same instant may each fetch (once per burst rather than once per 5 minutes). Each fetch is capped at 1.5 s; not fixed.
+- **The pr-wait hint is longer than 150 characters.** The earlier 150-character cap cannot hold once the line carries a real absolute path. The wording, path excluded, is at most 125 characters (tested); the whole line is that plus the path length (about 200 under a typical install).
+- **`NO-CHECKS` still exits 0.** A repository whose CI is slow to start or path-filtered reads as exit 0 after the 90 s grace. The line now says no CI was observed; a distinct exit code was not added, because callers key on 0 today.
+- **ctime also moves on attribute changes.** A `chmod`, a rename-over or a hard-link change on an unchanged file forgets the read record, so one repeat read is allowed. The cost is a missed denial, never a wrong one.
+- **The scout block lost its per-signal detail.** The session-start scout block is a pointer (count, kinds, path to `scout-latest.json`); the per-signal detail, the dispatch hint (`-> plugin-update`) and the `audit.mjs --only harness-drift,guard-canary` pointer are one file read away, not in context. Intentional (token saving); the lead is expected to read the file when a signal matters.
+- **Small requirements and reasons the trims dropped** (rules unchanged, emphasis lost): "never the body inline" became "file path plus summary"; "the one thing you need in order to proceed" became "what you need"; "no recap of context they already have" (peer messages) became "a decision or fact, one screen max"; the rationale "an omitted model inherits this session's tier" is gone (the instruction to set the model stays); "instead of resuming it with SendMessage" is gone from the resume rule; "harness-tracked" is gone from the one-completion-wait rule; and a few skill descriptions lost secondary trigger wording (`recommend`, `calibration-scout`, `evaluate`, `memory-search`, `setup`; every quoted trigger phrase survives). If the trial shows spawns without a model, or per-item polling, rising, restore the inherit-tier rationale first.
 
 ## 0.29.32 — 2026-10-04
 

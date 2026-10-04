@@ -44,6 +44,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { configDir, opt, stateFile, readJson } from './context.mjs';
 
 export const RULES_VERSION = 1;
@@ -118,8 +119,17 @@ export const LEAD_EFFORT_CHECK_TEXT = [
   'Never raise to max this way, never lower the effort.',
 ].join(' ');
 
-// The pr-wait discoverability line. At most 150 characters (a test pins it).
-export const PR_WAIT_HINT_TEXT = 'PR/CI wait: one call, no gh/sleep loops: node <plugin>/scripts/pr-wait.mjs <pr|branch>. Release tools: verify_release, merge_to_main.';
+// The pr-wait discoverability line. The path is the REAL one, resolved here
+// (CLAUDE_PLUGIN_ROOT, else this file's own location), exactly as
+// hooks/git-brief.mjs does: an agent cannot expand a `<plugin>` placeholder, and
+// a call that never finds the script falls back to the gh/sleep loops the line
+// exists to prevent. `run_in_background` is in the line because a foreground
+// Bash call is killed at 2 minutes, well short of most CI waits.
+// Size: the wording WITHOUT the path is pinned at 125 characters (a test), so
+// the whole line is that plus the plugin path (~70 in a typical cache install).
+const PLUGIN_ROOT = (process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('../..', import.meta.url))).replace(/\\/g, '/').replace(/\/+$/, '');
+export const PR_WAIT_HINT_WORDING = 'PR/CI wait, one call, no gh/sleep loops: run_in_background (foreground dies at 2m): node "@/scripts/pr-wait.mjs" <pr|branch>';
+export const PR_WAIT_HINT_TEXT = PR_WAIT_HINT_WORDING.replace('@', PLUGIN_ROOT);
 
 function builtinRules() {
   return [

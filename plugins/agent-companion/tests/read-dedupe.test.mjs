@@ -90,6 +90,38 @@ test('decide: a size change with the SAME mtime clears the record, as does an mt
   }
 });
 
+test('decide: a change of ctime alone (same size, same mtime) clears the record', () => {
+  const s = blank();
+  const base = { mtimeMs: 1000, size: 40000, ctimeMs: 500 };
+  unitRead(s, { offset: 1, limit: 400 }, { stat: base });
+  assert.equal(decide(s, { agent: 'main', pk: 'k', input: { offset: 100, limit: 100 }, stat: base, now: 5000 }).value.action, 'deny');
+  const s2 = blank();
+  unitRead(s2, { offset: 1, limit: 400 }, { stat: base });
+  assert.equal(decide(s2, { agent: 'main', pk: 'k', input: { offset: 100, limit: 100 }, stat: { ...base, ctimeMs: 501 }, now: 5000 }).value.action, 'allow');
+  assert.equal(s2.agents.main.files.k, undefined);
+});
+
+test('decide: an allowed repeat-eligible read says why; a first read says nothing; retry carries the deny time and the record age', () => {
+  const s = blank();
+  assert.equal(unitRead(s, { offset: 1, limit: 400 }, { now: 1000 }).why, undefined, 'first read is not repeat-eligible');
+  assert.equal(unitRead(s, { offset: 1, limit: 400 }, { now: 2000 }).why, 'builtin-last');
+  assert.equal(unitRead(s, { offset: 380, limit: 100 }, { now: 3000 }).why, 'uncovered');
+  const d = unitRead(s, { offset: 100, limit: 100 }, { now: 4000 });
+  assert.equal(d.action, 'deny');
+  assert.equal(d.age_ms, 3000, 'time since the original read');
+  const r = decide(s, { agent: 'main', pk: 'k', input: { offset: 100, limit: 100 }, stat: STAT, now: 9000 }).value;
+  assert.equal(r.action, 'retry');
+  assert.equal(r.deny_at, 4000);
+  assert.equal(r.age_ms, 8000);
+  assert.equal(r.idx, 5, 'the fifth Read this agent made');
+  const small = blank();
+  unitRead(small, { offset: 1, limit: 400 }, { now: 1000, response: textResponse(1, 400, 500, 4) });
+  assert.equal(unitRead(small, { offset: 5, limit: 10 }, { now: 1100, response: textResponse(5, 10, 500, 4) }).why, 'small');
+  const aged = blank();
+  unitRead(aged, { offset: 1, limit: 400 }, { now: 1000 });
+  assert.equal(unitRead(aged, { offset: 100, limit: 100 }, { now: 1000 + MAX_AGE_MS + 1 }).why, 'aged');
+});
+
 test('record: a truncated, partial or unusable response is not remembered', () => {
   for (const response of [
     { type: 'file_unchanged' },
@@ -316,6 +348,56 @@ test('hook: it returns a deny or nothing, never an allow or updatedInput', () =>
   assert.equal(out.hookSpecificOutput.updatedInput, undefined);
 }));
 
+test('hook: deny, retry-ran and allow rows carry the documented telemetry fields', () => withFx((fx) => {
+  const f = makeFile(fx, 'big.txt', 500);
+  const sid = session();
+  const transcript = join(fx.dir, 'transcript.jsonl');
+  writeFileSync(transcript, 'x'.repeat(1234));
+  const a = new Agent(fx, sid, 'agent-t');
+  const withExtra = (ev, tool_use_id, offset, limit, extra = {}) => a.run(ev, a.base({
+    hook_event_name: ev === 'pre' ? 'PreToolUse' : 'PostToolUse', tool_name: 'Read', tool_use_id, transcript_path: transcript,
+    tool_input: { file_path: f, offset, limit }, ...extra,
+  }));
+  withExtra('pre', 'tu-1', 1, 400);
+  a.post(f, 1, 400);
+  const d = withExtra('pre', 'tu-2', 120, 61);
+  assert.equal(decisionOf(d.json), 'deny');
+  withExtra('pre', 'tu-3', 120, 61); // the retry
+  withExtra('pre', 'tu-4', 380, 100); // runs past the covered end: allowed, repeat-eligible
+  const rows = readJsonl(LOG(fx));
+  assert.deepEqual(rows.map((r) => r.outcome), ['deny', 'retry-ran', 'allow']);
+  const [deny, retry, allow] = rows;
+  for (const r of rows) {
+    assert.equal(r.agent_type, 'x');
+    assert.equal(r.hook_event, 'pre');
+    assert.equal(r.transcript_bytes, 1234);
+    assert.ok(r.duration_ms >= 0 && Number.isFinite(r.duration_ms));
+    assert.ok(r.lock_wait_ms >= 0 && Number.isFinite(r.lock_wait_ms));
+    assert.ok(r.est_chars > 0);
+    assert.ok(r.age_ms >= 0);
+  }
+  assert.equal(deny.tool_use_id, 'tu-2');
+  assert.equal(deny.deny_chars, denyText(120, 180).length);
+  assert.equal(deny.read_index, 2);
+  assert.equal(retry.tool_use_id, 'tu-3');
+  assert.ok(Number.isFinite(Date.parse(retry.deny_at)), 'when the denial it overrides was issued');
+  assert.ok(Date.parse(retry.deny_at) <= Date.parse(retry.at));
+  assert.equal(retry.est_chars_avoided, 0);
+  assert.equal(allow.allow_reason, 'uncovered');
+  assert.equal(allow.est_chars_avoided, 0);
+  assert.equal(allow.range, '380-479');
+}));
+
+test('hook: a first read, and a read of a changed file, write no row (only repeat-eligible allows are counted)', () => withFx((fx) => {
+  const f = makeFile(fx, 'big.txt', 500);
+  const a = new Agent(fx, session());
+  a.read(f, 1, 400);
+  const t = new Date(Date.now() + 60_000);
+  utimesSync(f, t, t);
+  a.read(f, 120, 61);
+  assert.equal(readJsonl(LOG(fx)).length, 0);
+}));
+
 // --- invalidation ----------------------------------------------------------------
 
 test('invalidation: Edit, Write, NotebookEdit and MultiEdit by the same agent clear the path', () => withFx((fx) => {
@@ -361,6 +443,23 @@ test('invalidation: a change of mtime, with the same size, clears it (a Bash edi
   assert.equal(a.read(f, 120, 61).denied, false);
   // and the fresh read is remembered again
   assert.equal(a.read(f, 130, 40).denied, true);
+}));
+
+test('invalidation: a same-size change with the mtime put back clears it (the ctime still moved)', () => withFx((fx) => {
+  const f = makeFile(fx, 'big.txt', 500);
+  // A whole-millisecond mtime, so it can be put back EXACTLY (as `touch -r`, rsync -t, cp -p do).
+  const pinned = new Date(Math.floor(Date.now() / 1000) * 1000 - 3600_000);
+  utimesSync(f, pinned, pinned);
+  const a = new Agent(fx, session());
+  a.read(f, 1, 400);
+  const st = statSync(f);
+  const text = readFileSync(f, 'utf8');
+  writeFileSync(f, `Z${text.slice(1)}`); // same length, different content
+  utimesSync(f, pinned, pinned); // pin the mtime back
+  const now = statSync(f);
+  assert.equal(now.size, st.size);
+  assert.equal(now.mtimeMs, st.mtimeMs, 'the mtime is pinned');
+  assert.equal(a.read(f, 120, 61).denied, false, 'the old content must not be claimed as "unchanged"');
 }));
 
 test('invalidation: a change of size, with the same mtime, clears it', () => withFx((fx) => {
@@ -564,18 +663,98 @@ test('fail open: a state directory that cannot be used lets every read run', () 
   assert.equal(a.read(f, 120, 61).denied, false);
 }));
 
-test('fail open: a stale lock left by a dead process does not stop a read, and a held live lock times out into "run"', () => withFx((fx) => {
+const shards = (fx) => readdirSync(join(fx.stateDir, 'state', 'read-dedupe')).filter((n) => n.endsWith('.json'));
+const holdLock = (fx, shard) => writeFileSync(join(fx.stateDir, 'state', 'read-dedupe', `${shard}.lock`), JSON.stringify({ pid: process.pid, token: 'held', at: Date.now() }));
+
+test('fail open: a held live lock times out into "run", and says so in a lock-timeout row with the wait', () => withFx((fx) => {
   const f = makeFile(fx, 'big.txt', 500);
-  const sid = session();
-  const a = new Agent(fx, sid);
+  const a = new Agent(fx, session());
   a.read(f, 1, 400);
-  const dir = join(fx.stateDir, 'state', 'read-dedupe');
-  const state = readdirSync(dir).find((n) => n.endsWith('.json'));
+  const [shard] = shards(fx);
   // A lock held by THIS (live) process, fresh: the hook waits, then lets the read run.
-  writeFileSync(join(dir, `${state}.lock`), JSON.stringify({ pid: process.pid, token: 'held', at: Date.now() }));
+  holdLock(fx, shard);
   const r = a.pre(f, 120, 61);
   assert.equal(r.status, 0);
   assert.notEqual(decisionOf(r.json), 'deny');
+  const rows = readJsonl(LOG(fx));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].outcome, 'lock-timeout');
+  assert.equal(rows[0].hook_event, 'pre');
+  assert.ok(rows[0].lock_wait_ms >= 700, `waited ${rows[0].lock_wait_ms} ms`);
+  assert.equal(rows[0].agent_id, 'main');
+  assert.match(rows[0].path_hash, /^[0-9a-f]{12}$/);
+}));
+
+test('fail open: a PostToolUse that cannot lock logs a lock-timeout row (the read went unrecorded)', () => withFx((fx) => {
+  const f = makeFile(fx, 'big.txt', 500);
+  const a = new Agent(fx, session());
+  a.read(f, 1, 100);
+  const [shard] = shards(fx);
+  a.pre(f, 200, 100);
+  holdLock(fx, shard);
+  assert.equal(a.post(f, 200, 100).status, 0);
+  const rows = readJsonl(LOG(fx)).filter((r) => r.outcome === 'lock-timeout');
+  assert.deepEqual(rows.map((r) => [r.outcome, r.hook_event]), [['lock-timeout', 'post']]);
+}));
+
+test('contention: agents of one session keep separate state files, so one agent\'s held lock never stalls another', () => withFx((fx) => {
+  const f = makeFile(fx, 'big.txt', 500);
+  const sid = session();
+  const lead = new Agent(fx, sid);
+  const s1 = new Agent(fx, sid, 'agent-1');
+  const s2 = new Agent(fx, sid, 'agent-2');
+  lead.read(f, 1, 400); s1.read(f, 1, 400); s2.read(f, 1, 400);
+  assert.equal(shards(fx).length, 3, 'one state file per agent');
+  // Hold EVERY shard but s2's.
+  const d = join(fx.stateDir, 'state', 'read-dedupe');
+  const all = shards(fx);
+  const s2shard = all.find((n) => {
+    const st = JSON.parse(readFileSync(join(d, n), 'utf8'));
+    return Object.keys(st.agents).includes('agent-2');
+  });
+  for (const n of all) if (n !== s2shard) holdLock(fx, n);
+  const t0 = Date.now();
+  const r = s2.read(f, 120, 61);
+  assert.equal(r.denied, true, 'agent-2 is judged normally');
+  assert.ok(Date.now() - t0 < 700, 'and does not wait on the others\' locks');
+  assert.equal(readJsonl(LOG(fx)).filter((x) => x.outcome === 'lock-timeout').length, 0);
+}));
+
+test('contention: many agents reading at once all record and are all denied afterwards', () => withFx((fx) => {
+  const f = makeFile(fx, 'big.txt', 500);
+  const sid = session();
+  const agents = Array.from({ length: 6 }, (_, i) => new Agent(fx, sid, `agent-${i}`));
+  // Interleave their PreToolUse and PostToolUse the way parallel agents do.
+  for (const a of agents) a.pre(f, 1, 400);
+  for (const a of agents) a.post(f, 1, 400);
+  for (const a of agents) assert.equal(a.read(f, 120, 61).denied, true, a.agentId);
+  assert.equal(readJsonl(LOG(fx)).filter((x) => x.outcome === 'lock-timeout').length, 0);
+}));
+
+test('reset: a whole-session compaction removes every agent\'s state file, an agent\'s own only that agent\'s', () => withFx((fx) => {
+  const f = makeFile(fx, 'big.txt', 500);
+  const sid = session();
+  const lead = new Agent(fx, sid);
+  const s1 = new Agent(fx, sid, 'agent-1');
+  const s2 = new Agent(fx, sid, 'agent-2');
+  const other = new Agent(fx, session());
+  lead.read(f, 1, 400); s1.read(f, 1, 400); s2.read(f, 1, 400); other.read(f, 1, 400);
+  assert.equal(shards(fx).length, 4);
+  s1.reset('PreCompact');
+  assert.equal(shards(fx).length, 4, 'a subagent reset keeps its (emptied) shard');
+  assert.equal(s1.read(f, 120, 61).denied, false);
+  lead.reset('PreCompact');
+  assert.equal(shards(fx).length, 1, 'only the other session\'s shard is left');
+  assert.equal(other.read(f, 120, 61).denied, true);
+}));
+
+test('fail open: a stale lock left by a dead process does not stop a read', () => withFx((fx) => {
+  const f = makeFile(fx, 'big.txt', 500);
+  const a = new Agent(fx, session());
+  a.read(f, 1, 400);
+  const [shard] = shards(fx);
+  writeFileSync(join(fx.stateDir, 'state', 'read-dedupe', `${shard}.lock`), JSON.stringify({ pid: 2147483646, token: 'dead', at: Date.now() - 60_000 }));
+  assert.equal(a.read(f, 120, 61).denied, true);
 }));
 
 test('fail open: a Read of a missing file is passed through', () => withFx((fx) => {

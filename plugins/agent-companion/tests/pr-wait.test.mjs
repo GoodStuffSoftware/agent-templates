@@ -7,8 +7,11 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { makeFixture, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
-import { defaultRules, matchRules, PR_WAIT_HINT_TEXT } from '../hooks/lib/rules.mjs';
+import { defaultRules, matchRules, PR_WAIT_HINT_TEXT, PR_WAIT_HINT_WORDING } from '../hooks/lib/rules.mjs';
+
+const rulesPath = join(PLUGIN_ROOT, 'hooks', 'lib', 'rules.mjs');
 import { classifyCheck } from '../scripts/pr-wait.mjs';
 
 const SCRIPT = join(PLUGIN_ROOT, 'scripts', 'pr-wait.mjs');
@@ -55,6 +58,7 @@ function setup(scenario, extraEnv = {}) {
     PR_WAIT_POLL_MS: '20',
     PR_WAIT_POLL_MAX_MS: '40',
     PR_WAIT_NO_CHECKS_GRACE_MS: '150',
+    PR_WAIT_SETTLE_MS: '60',
     CLAUDE_SESSION_ID: 'sess-prwait',
     ...extraEnv,
   };
@@ -89,8 +93,8 @@ test('checks pending, then all green: waits inside the script, exit 0, one start
     assert.equal(r.code, 0, r.stdout + r.stderr);
     assert.equal(r.lines.length, 2, `start line plus one final line only:\n${r.stdout}`);
     assert.match(r.start, /^pr-wait: waiting on PR 31 \(o\/r\)/);
-    assert.match(r.final, /^PR 31 OPEN PASS \| checks 2 passed, 0 failed, 2 total \| merge CLEAN \| \d+s$/);
-    assert.equal(t.calls().length, 9, 'three polls of pr view + check-runs + status');
+    assert.match(r.final, /^PR 31 OPEN PASS @sha-1 \| checks 2 passed, 0 failed, 2 total \| merge CLEAN \| \d+s$/);
+    assert.equal(t.calls().length, 12, 'four polls of pr view + check-runs + status: pending, pending, green, green again (settled)');
     assert.ok(t.calls().filter((c) => c.startsWith('pr view')).every((c) => c.startsWith('pr view 31 --repo o/r --json ')), t.calls().join('\n'));
   } finally { t.fx.cleanup(); }
 });
@@ -102,8 +106,9 @@ test('a failed check: exit 1, names and log URLs after the final line, never mor
   try {
     const r = t.run('feature-branch');
     assert.equal(r.code, 1);
-    assert.match(r.final, /^PR 31 OPEN FAIL \| checks 1 passed, 14 failed, 15 total \| \d+s$/);
+    assert.match(r.final, /^PR 31 OPEN FAIL @sha-1 \| checks 1 passed, 14 failed, 15 total \| \d+s$/);
     assert.ok(r.lines.length - 1 <= 10, `final line plus details must be at most 10 lines, got ${r.lines.length - 1}`);
+    assert.equal(t.calls().length, 3, 'a failure is reported at once, with no settle wait');
     assert.match(r.detail[0], /^FAIL job-1 https:\/\/ci\.example\/log\/1$/);
     assert.match(r.detail[r.detail.length - 1], /^FAIL \.\.\. and \d+ more$/);
   } finally { t.fx.cleanup(); }
@@ -114,7 +119,7 @@ test('a PR that merges returns 0 at once, even with checks not finished', () => 
   try {
     const r = t.run('31');
     assert.equal(r.code, 0);
-    assert.match(r.final, /^PR 31 MERGED \|/);
+    assert.match(r.final, /^PR 31 MERGED @sha-1 \|/);
     assert.equal(t.calls().length, 3);
   } finally { t.fx.cleanup(); }
 });
@@ -124,7 +129,7 @@ test('a PR closed unmerged returns 1', () => {
   try {
     const r = t.run('31');
     assert.equal(r.code, 1);
-    assert.match(r.final, /^PR 31 CLOSED unmerged \|/);
+    assert.match(r.final, /^PR 31 CLOSED unmerged @sha-1 \|/);
   } finally { t.fx.cleanup(); }
 });
 
@@ -133,9 +138,9 @@ test('timeout: exit 2, the checks still pending are named', () => {
   try {
     const r = t.run('31', '--timeout', '1s');
     assert.equal(r.code, 2, r.stdout + r.stderr);
-    assert.match(r.final, /^PR 31 OPEN TIMEOUT after 1s \| checks 1 passed, 0 failed, 2 total, 1 pending \|/);
+    assert.match(r.final, /^PR 31 OPEN TIMEOUT @sha-1 after 1s \| checks 1 passed, 0 failed, 2 total, 1 pending \|/);
     assert.deepEqual(r.detail, ['PENDING slow https://ci.example/slow']);
-    assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 3, 'it polled repeatedly while waiting');
+    assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 2, 'it polled repeatedly while waiting');
   } finally { t.fx.cleanup(); }
 });
 
@@ -158,7 +163,7 @@ test('a transient gh failure is retried and the run recovers', () => {
   try {
     const r = t.run('31');
     assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.equal(t.calls().filter((c) => c.startsWith('pr view')).length, 2);
+    assert.equal(t.calls().filter((c) => c.startsWith('pr view')).length, 3, 'the failed call, then a green poll and its settle poll');
   } finally { t.fx.cleanup(); }
 });
 
@@ -197,7 +202,7 @@ test('a PR with no checks reports NO-CHECKS (exit 0) once the grace passes', () 
   try {
     const r = t.run('31');
     assert.equal(r.code, 0);
-    assert.match(r.final, /^PR 31 OPEN NO-CHECKS \|/);
+    assert.match(r.final, /^PR 31 OPEN NO-CHECKS @sha-1 \| no checks reported after .*no CI observed \(exit 0 = nothing failed\)/);
     assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 2, 'it waited out the grace, not just one look');
   } finally { t.fx.cleanup(); }
 });
@@ -227,6 +232,56 @@ test('classifyCheck: skipped and neutral pass, cancelled and timed out fail, que
   assert.equal(classifyCheck(st('x', 'success', 'u')).url, 'u');
 });
 
+// ---- the settle rule: a PASS needs the check set to hold still across two polls
+
+test('a check that registers after the first one finished is not missed: the PASS waits for the set to settle', () => {
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [
+    checks(cr('build', 'completed', 'success')),
+    checks(cr('build', 'completed', 'success'), cr('deploy-preview', 'in_progress')),
+    checks(cr('build', 'completed', 'success'), cr('deploy-preview', 'completed', 'success')),
+  ]));
+  try {
+    const r = t.run('31', '--repo', 'o/r');
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.final, /^PR 31 OPEN PASS @sha-1 \| checks 2 passed, 0 failed, 2 total/, 'the late check is in the verdict');
+    assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 4, 'first green, late check, second green, settled');
+  } finally { t.fx.cleanup(); }
+});
+
+test('a late check that FAILS after the first green still fails the wait', () => {
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [
+    checks(cr('build', 'completed', 'success')),
+    checks(cr('build', 'completed', 'success'), cr('e2e', 'completed', 'failure', 'https://ci.example/e2e')),
+  ]));
+  try {
+    const r = t.run('31');
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.equal(r.detail[0], 'FAIL e2e https://ci.example/e2e');
+  } finally { t.fx.cleanup(); }
+});
+
+test('a green set that never changes passes after exactly two polls (the second one the settle check)', () => {
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [checks(cr('build', 'completed', 'success'))]));
+  try {
+    const r = t.run('31');
+    assert.equal(r.code, 0);
+    assert.equal(t.calls().filter((c) => c.startsWith('pr view')).length, 2);
+    const row = t.rows().find((x) => x.event === 'end');
+    assert.equal(row.cycles, 2);
+    assert.equal(row.settle_waits, 1);
+  } finally { t.fx.cleanup(); }
+});
+
+test('gh outside a git repository is a permanent error: exit 3 on the first call', () => {
+  const t = setup({ pr: [{ err: 'fatal: not a git repository (or any of the parent directories): .git', code: 128 }] });
+  try {
+    const r = t.run('31');
+    assert.equal(r.code, 3);
+    assert.equal(t.calls().length, 1, 'not retried');
+    assert.equal(t.rows().find((x) => x.event === 'end').error_class, 'permanent');
+  } finally { t.fx.cleanup(); }
+});
+
 // ---- stale checks: bound to the PR's current head commit
 
 test('PR mode reads only the head commit: a previous commit green does not answer for a new head with no checks yet', () => {
@@ -240,7 +295,7 @@ test('PR mode reads only the head commit: a previous commit green does not answe
   try {
     const r = t.run('31', '--repo', 'o/r');
     assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.match(r.final, /^PR 31 OPEN PASS \| checks 1 passed, 0 failed, 1 total/);
+    assert.match(r.final, /^PR 31 OPEN PASS @new-sha \| checks 1 passed, 0 failed, 1 total/);
     assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 4, 'it kept waiting through the empty and queued polls');
     assert.ok(t.calls().some((c) => c.includes('commits/new-sha/check-runs')));
     assert.ok(!t.calls().some((c) => c.includes('old-sha')), 'the previous commit is never asked about');
@@ -255,7 +310,7 @@ test("PR mode: a head that never registers checks ends NO-CHECKS, not the old co
   try {
     const r = t.run('31');
     assert.equal(r.code, 0);
-    assert.match(r.final, /^PR 31 OPEN NO-CHECKS \|/);
+    assert.match(r.final, /^PR 31 OPEN NO-CHECKS @new-sha \|/);
     assert.ok(!t.calls().some((c) => c.includes('old-sha')));
   } finally { t.fx.cleanup(); }
 });
@@ -271,7 +326,7 @@ test("PR mode follows a push made while waiting: the new head decides, the old h
   try {
     const r = t.run('31', '--repo', 'o/r');
     assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.match(r.final, /^PR 31 OPEN PASS \| checks 1 passed, 0 failed, 1 total/);
+    assert.match(r.final, /^PR 31 OPEN PASS @sha-2 \| checks 1 passed, 0 failed, 1 total/);
     assert.ok(t.calls().some((c) => c.includes('commits/sha-1/')) && t.calls().some((c) => c.includes('commits/sha-2/')));
   } finally { t.fx.cleanup(); }
 });
@@ -409,10 +464,14 @@ test('telemetry: one row per run with mode, polls, duration, outcome and exit co
     assert.equal(t.run('31').code, 0);
     assert.equal(t.run('--run', '7').code, 1);
     assert.equal(t.run('31', '--timeout', 'soon').code, 3);
-    const rows = t.rows();
+    const all = t.rows();
+    const rows = all.filter((x) => x.event === 'end');
     assert.equal(rows.length, 3);
+    // A start row precedes each run that got as far as polling; a usage error has none.
+    assert.deepEqual(all.filter((x) => x.event === 'start').map((x) => x.mode), ['pr', 'run']);
     const [a, b, c] = rows;
-    assert.deepEqual([a.mode, a.polls, a.outcome, a.exit_code, a.session_id], ['pr', 6, 'passed', 0, 'sess-prwait']);
+    // One PR poll is three gh calls (pr view, check-runs, status): pending, green, green again = 9 calls over 3 cycles.
+    assert.deepEqual([a.mode, a.polls, a.cycles, a.outcome, a.exit_code, a.session_id], ['pr', 9, 3, 'passed', 0, 'sess-prwait']);
     assert.deepEqual([b.mode, b.polls, b.outcome, b.exit_code], ['run', 1, 'failed', 1]);
     assert.deepEqual([c.outcome, c.exit_code], ['usage', 3]);
     for (const r of rows) {
@@ -421,6 +480,33 @@ test('telemetry: one row per run with mode, polls, duration, outcome and exit co
       assert.equal(r.v, 2);
     }
   } finally { t.fx.cleanup(); }
+});
+
+test('telemetry: the start row, the bound head sha, hashes of target and repo (never the names), and the error class', () => {
+  const t = setup({
+    pr: [pr('OPEN', 'abcdefabcd')],
+    checkRuns: { abcdefabcd: [checks(cr('build', 'completed', 'success'))] },
+  });
+  try {
+    assert.equal(t.run('feature/secret-branch', '--repo', 'o/r').code, 0);
+    const all = t.rows();
+    const start = all.find((x) => x.event === 'start');
+    assert.equal(start.mode, 'pr');
+    assert.match(start.target_hash, /^[0-9a-f]{8}$/);
+    assert.match(start.repo_hash, /^[0-9a-f]{8}$/);
+    assert.equal(typeof start.timeout_ms, 'number');
+    const end = all.find((x) => x.event === 'end');
+    assert.equal(end.head_sha, 'abcdefabcd');
+    assert.equal(end.target_hash, start.target_hash);
+    assert.equal(end.repo_hash, start.repo_hash);
+    assert.ok(!JSON.stringify(all).includes('secret-branch'), 'the target is hashed, not logged');
+    assert.ok(!('error_class' in end));
+  } finally { t.fx.cleanup(); }
+  const bad = setup({ pr: [{ err: 'HTTP 502: Bad Gateway', code: 1 }] });
+  try {
+    assert.equal(bad.run('31').code, 3);
+    assert.equal(bad.rows().find((x) => x.event === 'end').error_class, 'transient');
+  } finally { bad.fx.cleanup(); }
 });
 
 test('telemetry: no session id exported means no session_id field', () => {
@@ -435,18 +521,30 @@ test('telemetry: still written with the pr_wait hint option off (it only hides t
   const t = setup({ pr: [pr('MERGED', 'sha-1', { mergedAt: 'x' })], checkRuns: { 'sha-1': [checks()] } }, { CLAUDE_PLUGIN_OPTION_PR_WAIT: '0' });
   try {
     assert.equal(t.run('31').code, 0);
-    assert.equal(t.rows().length, 1);
+    assert.equal(t.rows().length, 2, 'a start row and an end row');
   } finally { t.fx.cleanup(); }
 });
 
 // ---- discoverability line and the pr_wait toggle
 
-test('the hint line is one line of 150 characters or fewer and names the script and the release tools', () => {
-  assert.ok(PR_WAIT_HINT_TEXT.length <= 150, `${PR_WAIT_HINT_TEXT.length} chars`);
+test('the hint line is one line, names the REAL script path and run_in_background, and its wording is bounded', () => {
   assert.ok(!PR_WAIT_HINT_TEXT.includes('\n'));
-  assert.match(PR_WAIT_HINT_TEXT, /scripts\/pr-wait\.mjs/);
-  assert.match(PR_WAIT_HINT_TEXT, /verify_release/);
-  assert.match(PR_WAIT_HINT_TEXT, /merge_to_main/);
+  assert.ok(PR_WAIT_HINT_WORDING.length <= 125, `${PR_WAIT_HINT_WORDING.length} chars of wording, path excluded`);
+  assert.ok(!/<plugin>/.test(PR_WAIT_HINT_TEXT), 'no placeholder an agent cannot expand');
+  assert.match(PR_WAIT_HINT_TEXT, /run_in_background/);
+  assert.match(PR_WAIT_HINT_TEXT, /2m/);
+  const m = PR_WAIT_HINT_TEXT.match(/node "([^"]+)"/);
+  assert.ok(m, 'the command is quoted (paths may hold spaces)');
+  assert.ok(existsSync(m[1]), `the named script exists: ${m[1]}`);
+  assert.ok(m[1].endsWith('/scripts/pr-wait.mjs'));
+});
+
+test('the hint path follows CLAUDE_PLUGIN_ROOT when it is set', () => {
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import('${pathToFileURL(rulesPath).href}').then((m) => process.stdout.write(m.PR_WAIT_HINT_TEXT))`],
+  { encoding: 'utf8', windowsHide: true, env: { ...process.env, CLAUDE_PLUGIN_ROOT: 'C:\\x y\\plug\\' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes('node "C:/x y/plug/scripts/pr-wait.mjs"'), r.stdout);
 });
 
 test('pr-wait-hint is a built-in lead-audience session-start rule, on by default, switched off by CLAUDE_PLUGIN_OPTION_PR_WAIT=0', () => {

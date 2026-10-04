@@ -15,12 +15,15 @@
 //
 // Exit codes: 0 checks passed, or the PR merged; 1 a check failed, or the PR
 // closed unmerged, or the run did not succeed; 2 timeout; 3 usage or gh error.
+// A PR that reports NO checks at all also exits 0, but its line says so
+// ("NO-CHECKS ... no CI observed") and carries the head commit: 0 there means
+// "nothing failed", not "CI passed".
 //
 // Output: one start line, then NOTHING until the end (safe under
 // run_in_background), then one final line and at most 9 detail lines (failed
 // check names with their log URLs; on timeout, the checks still pending).
 //
-//   PR 31 OPEN FAIL | checks 3 passed, 1 failed, 4 total | 4m12s
+//   PR 31 OPEN FAIL @abcdefa | checks 3 passed, 1 failed, 4 total | 4m12s
 //   FAIL build https://github.com/o/r/actions/runs/1/job/2
 //
 // Never prompts. gh is polled with backoff (5s growing to 30s). A transient gh
@@ -33,6 +36,11 @@
 //     checks have not registered yet is waited on, never answered from an
 //     older commit. The head is re-read on every poll, so a later push is
 //     followed.
+//   - A PASS is declared only once the set of checks (names and verdicts of the
+//     head commit) is complete and has stayed the SAME across two polls
+//     PR_WAIT_SETTLE_MS (20 s) apart: a check that registers late (a second
+//     workflow, a deploy check, a status context) is not missed because the
+//     first one finished before it appeared. A failure is reported at once.
 //   - `--run <branch>` takes the newest run whose head SHA equals the branch's
 //     current remote tip, and keeps waiting (within the timeout) while there is
 //     none yet, instead of returning the run before the push. Once a run is
@@ -40,11 +48,15 @@
 //
 // Test seams (not for normal use): PR_WAIT_GH_SCRIPT runs a node script in
 // place of gh; PR_WAIT_POLL_MS / PR_WAIT_POLL_MAX_MS set the backoff;
-// PR_WAIT_NO_CHECKS_GRACE_MS sets the no-checks grace.
+// PR_WAIT_NO_CHECKS_GRACE_MS sets the no-checks grace; PR_WAIT_SETTLE_MS the
+// pass settle window.
 //
-// Telemetry: one row per run to telemetry/pr-wait.jsonl (docs/TELEMETRY.md).
+// Telemetry: a `start` row and an `end` row per run to telemetry/pr-wait.jsonl
+// (docs/TELEMETRY.md). One PR poll is THREE gh calls (pr view, check-runs,
+// status), and `polls` counts gh calls.
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { writeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -59,6 +71,10 @@ const POLL_MAX_MS = envNum('PR_WAIT_POLL_MAX_MS', 30000);
 // A PR with no checks at all is indistinguishable, at first, from one whose
 // checks have not registered yet. Wait this long before calling it "no checks".
 const NO_CHECKS_GRACE_MS = envNum('PR_WAIT_NO_CHECKS_GRACE_MS', 90000);
+// All checks complete and none failed is not yet a PASS: the check set must stay
+// unchanged for this long (two polls this far apart), so a late-registering
+// check is seen before the verdict.
+const SETTLE_MS = envNum('PR_WAIT_SETTLE_MS', 20000);
 
 function envNum(name, dflt) {
   const n = Number(process.env[name]);
@@ -66,9 +82,15 @@ function envNum(name, dflt) {
 }
 
 const startedAt = Date.now();
-let polls = 0;
+let polls = 0; // gh calls (a PR poll is three of them)
+let cycles = 0; // poll rounds
+let settleWaits = 0;
 let mode = 'pr';
 let finished = false;
+// What the end row reports besides the outcome; set as the run learns it.
+const info = { head: '', repo: '', target: '', errClass: '' };
+const hash8 = (v) => (v ? createHash('sha256').update(String(v)).digest('hex').slice(0, 8) : '');
+const sid = () => process.env.CLAUDE_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID;
 
 // ---------------------------------------------------------------- output / exit
 
@@ -85,14 +107,22 @@ function finish(code, outcome, lines) {
   try {
     const row = {
       at: new Date().toISOString(),
+      event: 'end',
       mode,
       polls,
+      cycles,
+      settle_waits: settleWaits,
       duration_ms: Date.now() - startedAt,
       outcome,
       exit_code: code,
     };
-    const sid = process.env.CLAUDE_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID;
-    if (sid) row.session_id = sid;
+    if (info.head) row.head_sha = info.head;
+    if (info.target) row.target_hash = hash8(info.target);
+    if (info.repo) row.repo_hash = hash8(info.repo);
+    // On exit 3: permanent (will not heal) or transient (retries ran out).
+    if (info.errClass) row.error_class = info.errClass;
+    const id = sid();
+    if (id) row.session_id = id;
     appendLog('pr-wait.jsonl', row);
   } catch { /* telemetry is never allowed to change the answer */ }
   process.exit(code);
@@ -161,7 +191,7 @@ function parseArgs(argv) {
 // ---------------------------------------------------------------- gh
 
 // Failures that will not heal by waiting. Anything else is retried.
-const PERMANENT = /could not resolve|no pull requests? found|not found|no workflow runs? found|gh auth login|not logged in|authentication|bad credentials|http 40[134]|invalid|unknown (?:flag|command)|accepts at most|required flag/i;
+const PERMANENT = /could not resolve|no pull requests? found|not found|no workflow runs? found|not a git repository|gh auth login|not logged in|authentication|bad credentials|http 40[134]|invalid|unknown (?:flag|command)|accepts at most|required flag/i;
 
 function ghCall(args, lines = false) {
   const script = process.env.PR_WAIT_GH_SCRIPT;
@@ -203,6 +233,7 @@ async function ghJson(args, backoff, lines = false) {
     await sleep(Math.min(backoff.current(), 5000));
   }
   process.stderr.write(`pr-wait: gh failed: ${last.msg}\n`);
+  info.errClass = last.permanent ? 'permanent' : 'transient';
   finish(3, 'gh-error');
 }
 
@@ -256,6 +287,8 @@ function detailLines(prefix, items, total) {
   return lines;
 }
 
+const sha7 = (sha) => (sha ? ` @${String(sha).slice(0, 7)}` : '');
+
 function countsText(t) {
   return `checks ${t.pass} passed, ${t.fail} failed, ${t.total} total${t.pending ? `, ${t.pending} pending` : ''}`;
 }
@@ -286,46 +319,67 @@ async function waitPr(opts) {
   const backoff = makeBackoff();
   const deadline = startedAt + opts.timeoutMs;
   let noChecksSince = 0;
+  let settle = { sig: '', at: 0 };
   let last = null;
 
   for (;;) {
+    cycles += 1;
     const pr = await ghJson(base, backoff);
     const num = pr.number ?? opts.target;
     const sha = String(pr.headRefOid || '');
     if (!sha) {
       process.stderr.write('pr-wait: gh returned no head commit (headRefOid) for the PR\n');
+      info.errClass = 'permanent';
       finish(3, 'gh-error');
     }
-    const items = await checksOfCommit(repoOf(opts, pr.url), sha, backoff);
+    info.head = sha;
+    const repo = repoOf(opts, pr.url);
+    info.repo = repo;
+    const items = await checksOfCommit(repo, sha, backoff);
     const t = tally(items);
     const state = String(pr.state || '').toUpperCase();
     const elapsed = () => fmtElapsed(Date.now() - startedAt);
-    last = { num, t, state };
+    const at = sha7(sha);
+    last = { num, t, state, at };
 
     if (state === 'MERGED' || pr.mergedAt) {
-      finish(0, 'merged', [`PR ${num} MERGED | ${countsText(t)} | ${elapsed()}`, ...detailLines('FAIL', t.failed)]);
+      finish(0, 'merged', [`PR ${num} MERGED${at} | ${countsText(t)} | ${elapsed()}`, ...detailLines('FAIL', t.failed)]);
     }
     if (state === 'CLOSED') {
-      finish(1, 'closed', [`PR ${num} CLOSED unmerged | ${countsText(t)} | ${elapsed()}`, ...detailLines('FAIL', t.failed)]);
+      finish(1, 'closed', [`PR ${num} CLOSED unmerged${at} | ${countsText(t)} | ${elapsed()}`, ...detailLines('FAIL', t.failed)]);
     }
 
+    let wait = null; // set when this poll wants a specific sleep (the settle window)
     if (t.total === 0) {
+      settle = { sig: '', at: 0 };
       if (!noChecksSince) noChecksSince = Date.now();
       if (Date.now() - noChecksSince >= NO_CHECKS_GRACE_MS) {
-        finish(0, 'no-checks', [`PR ${num} ${state || 'OPEN'} NO-CHECKS | no checks reported after ${fmtElapsed(NO_CHECKS_GRACE_MS)} | ${elapsed()}`]);
+        finish(0, 'no-checks', [`PR ${num} ${state || 'OPEN'} NO-CHECKS${at} | no checks reported after ${fmtElapsed(NO_CHECKS_GRACE_MS)}, no CI observed (exit 0 = nothing failed) | ${elapsed()}`]);
       }
     } else {
       noChecksSince = 0;
-      if (t.pending === 0) {
-        const merge = pr.mergeStateStatus && pr.mergeStateStatus !== 'UNKNOWN' ? ` | merge ${pr.mergeStateStatus}` : '';
-        if (t.fail > 0) {
-          finish(1, 'failed', [`PR ${num} ${state} FAIL | ${countsText(t)} | ${elapsed()}`, ...detailLines('FAIL', t.failed)]);
+      if (t.pending > 0) {
+        settle = { sig: '', at: 0 };
+      } else if (t.fail > 0) {
+        finish(1, 'failed', [`PR ${num} ${state} FAIL${at} | ${countsText(t)} | ${elapsed()}`, ...detailLines('FAIL', t.failed)]);
+      } else {
+        // Complete and green. Declare PASS only once this exact set (head
+        // commit, check names, verdicts) has held for SETTLE_MS; a different
+        // set restarts the clock.
+        const sig = `${sha}|${items.map((c) => `${c.name}:${c.verdict}`).sort().join(',')}`;
+        if (settle.sig !== sig) settle = { sig, at: Date.now(), seen: 1 };
+        else settle.seen += 1;
+        const held = Date.now() - settle.at;
+        if (settle.seen >= 2 && held >= SETTLE_MS) {
+          const merge = pr.mergeStateStatus && pr.mergeStateStatus !== 'UNKNOWN' ? ` | merge ${pr.mergeStateStatus}` : '';
+          finish(0, 'passed', [`PR ${num} ${state} PASS${at} | ${countsText(t)}${merge} | ${elapsed()}`]);
         }
-        finish(0, 'passed', [`PR ${num} ${state} PASS | ${countsText(t)}${merge} | ${elapsed()}`]);
+        wait = Math.max(1, SETTLE_MS - held);
+        settleWaits += 1;
       }
     }
 
-    const wait = backoff.step();
+    if (wait === null) wait = backoff.step();
     if (Date.now() + wait > deadline) {
       const left = deadline - Date.now();
       if (left <= 0) break;
@@ -335,9 +389,9 @@ async function waitPr(opts) {
     }
   }
 
-  const { num, t, state } = last;
+  const { num, t, state, at } = last;
   finish(2, 'timeout', [
-    `PR ${num} ${state || 'OPEN'} TIMEOUT after ${fmtElapsed(opts.timeoutMs)} | ${countsText(t)} | ${fmtElapsed(Date.now() - startedAt)}`,
+    `PR ${num} ${state || 'OPEN'} TIMEOUT${at} after ${fmtElapsed(opts.timeoutMs)} | ${countsText(t)} | ${fmtElapsed(Date.now() - startedAt)}`,
     ...detailLines('FAIL', t.failed),
     ...detailLines('PENDING', t.waiting),
   ].slice(0, MAX_DETAIL_LINES + 1));
@@ -354,8 +408,10 @@ async function waitRun(opts) {
   let runId = /^\d+$/.test(opts.target) ? opts.target : '';
   let tipSha = '';
   let last = null;
+  info.repo = opts.repo;
 
   for (;;) {
+    cycles += 1;
     if (!runId) {
       // The branch's CURRENT remote tip, then the newest run of that exact commit.
       const repo = opts.repo || '{owner}/{repo}';
@@ -363,6 +419,7 @@ async function waitRun(opts) {
       const branch = await ghJson(['api', `repos/${repo}/branches/${ref}`], backoff);
       tipSha = String(branch?.commit?.sha || '');
       if (tipSha) {
+        info.head = tipSha;
         const list = await ghJson(['run', 'list', '--branch', opts.target, '--limit', '30', '--json', 'databaseId,status,headSha,createdAt', ...scope], backoff);
         const mine = (Array.isArray(list) ? list : []).filter((r) => r?.databaseId && r.headSha === tipSha);
         mine.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || Number(b.databaseId) - Number(a.databaseId));
@@ -421,6 +478,14 @@ async function main() {
     process.on(sig, () => finish(130, 'interrupted'));
   }
 
+  info.target = opts.target;
+  info.repo = opts.repo;
+  try {
+    const row = { at: new Date().toISOString(), event: 'start', mode, target_hash: hash8(opts.target), timeout_ms: opts.timeoutMs };
+    if (opts.repo) row.repo_hash = hash8(opts.repo);
+    if (sid()) row.session_id = sid();
+    appendLog('pr-wait.jsonl', row);
+  } catch { /* telemetry is never allowed to change the answer */ }
   out(`pr-wait: waiting on ${opts.run ? 'run' : 'PR'} ${opts.target}${opts.repo ? ` (${opts.repo})` : ''}, timeout ${fmtElapsed(opts.timeoutMs)}\n`);
   if (opts.run) await waitRun(opts);
   else await waitPr(opts);

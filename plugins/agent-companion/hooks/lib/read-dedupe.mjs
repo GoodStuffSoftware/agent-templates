@@ -15,19 +15,20 @@
 // built-in's own case (the exact range just read) to the built-in.
 //
 // Contract, in the order the hook applies it (each is a hard requirement):
-//   1. State is per agent: session_id + agent_id ("main" when absent). A
-//      subagent has its own context; one agent's read never suppresses another's.
+//   1. State is per agent: session_id + agent_id ("main" when absent), one
+//      state file and one lock per agent, so agents never contend. A subagent
+//      has its own context; one agent's read never suppresses another's.
 //   2. A read is recorded only after it succeeds (PostToolUse), from what the
 //      tool actually returned: the line range, the file's line count, and the
-//      mtime and size seen BEFORE the read ran (a file that changed while it
-//      was being read is not recorded).
+//      mtime, size and ctime seen BEFORE the read ran (a file that changed
+//      while it was being read is not recorded).
 //   3. A repeat is denied only when the request is fully inside recorded
-//      ranges, mtime and size are unchanged, the record is younger than
+//      ranges, mtime, size and ctime are unchanged, the record is younger than
 //      MAX_AGE_MS, and the read would cost at least MIN_CHARS.
 //   4. A denied request, repeated, runs (its effective range is remembered in
 //      `denied` until it runs). Never a trap.
-//   5. Records are cleared by an edit of the path by that agent, any mtime or
-//      size change, and compaction (PreCompact / SessionStart compact|clear:
+//   5. Records are cleared by an edit of the path by that agent, any mtime,
+//      size or ctime change, and compaction (PreCompact / SessionStart compact|clear:
 //      the whole session).
 //   6. Any failure allows the read.
 
@@ -146,8 +147,21 @@ function dirOf() {
   return d;
 }
 
-function stateFileFor(sessionId) {
-  return join(dirOf(), `${createHash('sha1').update(String(sessionId)).digest('hex').slice(0, 20)}.json`);
+const sha1 = (v, n) => createHash('sha1').update(String(v)).digest('hex').slice(0, n);
+
+// One state file per (session, agent): `<session>-<agent>.json`. Agents of one
+// session read in parallel (a lead and several subagents), and a single shared
+// file made every one of them queue on one lock (waitMs 800), a timeout letting
+// the read run unrecorded. Nothing in the state crosses agents (every key and
+// record is already per agent), so splitting loses nothing, and only two
+// processes of the SAME agent (its PreToolUse and PostToolUse, one after the
+// other) can ever meet at a lock.
+function sessionPrefix(sessionId) {
+  return sha1(sessionId, 20);
+}
+
+function stateFileFor(sessionId, agent) {
+  return join(dirOf(), `${sessionPrefix(sessionId)}-${sha1(agent || 'main', 12)}.json`);
 }
 
 // Drop sessions' files nobody has touched in days. Cheap (one readdir), and run
@@ -163,15 +177,20 @@ function pruneOldFiles(now) {
   } catch { /* no dir */ }
 }
 
-// Run fn(state) under the session's lock; fn returns { value, dirty }. The
-// state is saved when dirty. Returns { locked, value }; a lock that cannot be
-// taken (or any error) returns { locked: false } and never throws: the caller
-// then allows the read.
-export function withState(sessionId, fn, now = Date.now()) {
+const LOCK_OPTS = { waitMs: 800, staleMs: 3000 };
+
+// Run fn(state) under the agent's lock; fn returns { value, dirty }. The state
+// is saved when dirty. Returns { locked, value, wait_ms }; wait_ms is how long
+// the lock took to get (or to give up on), so contention is measurable. A lock
+// that cannot be taken (or any error) returns { locked: false } and never
+// throws: the caller then allows the read.
+export function withState(sessionId, agent, fn, now = Date.now()) {
+  const t0 = Date.now();
+  let out = { locked: false, value: undefined, wait_ms: 0 };
   try {
-    const file = stateFileFor(sessionId);
-    let out = { locked: false, value: undefined };
+    const file = stateFileFor(sessionId, agent);
     withFileLock(`${file}.lock`, ({ locked }) => {
+      out.wait_ms = Date.now() - t0;
       if (!locked) return;
       const existing = readJson(file, null);
       const state = sanitize(existing);
@@ -180,49 +199,66 @@ export function withState(sessionId, fn, now = Date.now()) {
         if (existing === null) pruneOldFiles(now);
         writeJsonAtomic(file, state);
       }
-      out = { locked: true, value: r.value };
-    }, { waitMs: 800, staleMs: 3000 });
-    return out;
+      out = { locked: true, value: r.value, wait_ms: out.wait_ms };
+    }, LOCK_OPTS);
   } catch {
-    return { locked: false, value: undefined };
+    out = { locked: false, value: undefined, wait_ms: Date.now() - t0 };
   }
+  return out;
 }
 
 // Compaction or /clear. With an agent id, only that agent forgets (another
 // agent's context is not touched by it); without one the payload cannot say
 // whose context shrank, so the whole session forgets. Over-clearing only costs
-// a dedupe, never a wrong denial.
+// a dedupe, never a wrong denial. Returns { locked, wait_ms }.
 export function resetAgent(sessionId, agent) {
   if (!agent || agent === 'main') return clearSession(sessionId);
-  return withState(sessionId, (state) => {
+  return withState(sessionId, agent, (state) => {
     delete state.agents[agent];
     for (const k of Object.keys(state.pending)) if (k.startsWith(`${agent}|`)) delete state.pending[k];
     return { dirty: true };
-  }).locked;
+  });
 }
 
+// Every shard of the session (and a pre-split `<session>.json`), each under its
+// own lock.
 function clearSession(sessionId) {
+  const t0 = Date.now();
+  let all = true;
   try {
-    const file = stateFileFor(sessionId);
-    let ok = false;
-    withFileLock(`${file}.lock`, ({ locked }) => {
-      if (!locked) return;
-      try { unlinkSync(file); } catch { /* none */ }
-      ok = true;
-    }, { waitMs: 800, staleMs: 3000 });
-    return ok;
+    const dir = dirOf();
+    const prefix = sessionPrefix(sessionId);
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.json') || !(name === `${prefix}.json` || name.startsWith(`${prefix}-`))) continue;
+      const file = join(dir, name);
+      let got = false;
+      withFileLock(`${file}.lock`, ({ locked }) => {
+        if (!locked) return;
+        try { unlinkSync(file); } catch { /* gone */ }
+        got = true;
+      }, LOCK_OPTS);
+      if (!got) all = false;
+    }
   } catch {
-    return false;
+    all = false;
   }
+  return { locked: all, wait_ms: Date.now() - t0 };
 }
 
+// mtime AND size AND ctime: a change that keeps the size and restores the mtime
+// (a build tool, `touch -r`, an editor that preserves times) still moves the
+// change time, which no ordinary write can set back.
 export function statOf(file) {
   try {
     const st = statSync(file);
-    return st.isFile() ? { mtimeMs: st.mtimeMs, size: st.size } : null;
+    return st.isFile() ? { mtimeMs: st.mtimeMs, size: st.size, ctimeMs: st.ctimeMs } : null;
   } catch {
     return null;
   }
+}
+
+export function sameStat(a, b) {
+  return !!a && !!b && a.mtimeMs === b.mtimeMs && a.size === b.size && a.ctimeMs === b.ctimeMs;
 }
 
 function pendingKey(agent, pk, raw) {
@@ -252,55 +288,73 @@ function evictOld(files) {
 
 // Decide one Read. Mutates `state` (and says so with `dirty`). Returns
 //   { action: 'allow' }
-//   { action: 'deny',  a, b, est }   the request is covered: deny it
-//   { action: 'retry', a, b, est }   a denied request repeated: it runs
+//   { action: 'allow', why, a, b, est, age_ms }
+//                                    a repeat-eligible read (the file was read
+//                                    before and is unchanged) that ran, and why:
+//                                    'builtin-last' | 'aged' | 'uncovered' | 'small'
+//   { action: 'deny',  a, b, est, age_ms }   the request is covered: deny it
+//   { action: 'retry', a, b, est, age_ms, deny_at }
+//                                    a denied request repeated: it runs
+// Every result past the first guard also carries `idx`, the number of Reads
+// this agent has made (it counts how deep into the session the event is).
+// `age_ms` is the time since the original read of the file was recorded.
 // `stat` is the file's stat now (null when unreadable: allow).
 export function decide(state, { agent, pk, input, stat, now = Date.now() }) {
-  const allow = (dirty = false) => ({ value: { action: 'allow' }, dirty });
   const req = requestOf(input);
-  if (!req || !stat || !pk) return allow();
+  if (!req || !stat || !pk) return { value: { action: 'allow' }, dirty: false };
+  const idx = (state.reads | 0) + 1;
+  state.reads = idx;
+  const allow = (extra = {}) => ({ value: { action: 'allow', idx, ...extra }, dirty: true });
 
   // The stat goes with this call to PostToolUse, which records only a read
   // whose file was unchanged across it. Stored on every allowed read.
   const remember = () => {
-    state.pending[pendingKey(agent, pk, req.raw)] = { at: now, mtimeMs: stat.mtimeMs, size: stat.size };
+    state.pending[pendingKey(agent, pk, req.raw)] = { at: now, mtimeMs: stat.mtimeMs, size: stat.size, ctimeMs: stat.ctimeMs };
     prunePending(state, now);
   };
 
   const files = state.agents[agent]?.files;
   const rec = files?.[pk];
-  if (!rec) { remember(); return allow(true); }
+  if (!rec) { remember(); return allow(); }
 
-  if (rec.mtimeMs !== stat.mtimeMs || rec.size !== stat.size) {
+  if (!sameStat(rec, stat)) {
     delete files[pk]; // changed on disk (Bash, another agent, git): forget it
     remember();
-    return allow(true);
+    return allow();
   }
-  if (!(rec.total >= 1) || req.start > rec.total) { remember(); return allow(true); }
+  if (!(rec.total >= 1) || req.start > rec.total) { remember(); return allow(); }
 
   const a = req.start;
   const b = Math.min(req.end, rec.total);
   const eff = `${a}-${b}`;
   const lines = b - a + 1;
   const est = Math.round(lines * (rec.cpl + LINE_PREFIX_CHARS));
+  const age_ms = now - rec.since;
+  const eligible = (why) => { remember(); return allow({ why, a, b, est, age_ms }); };
 
   // A request that was denied and is repeated runs, whatever else is true.
   const di = Array.isArray(rec.denied) ? rec.denied.indexOf(eff) : -1;
   if (di >= 0) {
     rec.denied.splice(di, 1);
+    const deny_at = rec.deniedAt?.[eff];
+    if (rec.deniedAt) delete rec.deniedAt[eff];
     remember();
-    return { value: { action: 'retry', a, b, est }, dirty: true };
+    return { value: { action: 'retry', idx, a, b, est, age_ms, deny_at }, dirty: true };
   }
 
   // The exact range just read is the built-in's case (it stubs it itself).
-  if (rec.last === req.raw) { remember(); return allow(true); }
+  if (rec.last === req.raw) return eligible('builtin-last');
 
-  if (now - rec.since > MAX_AGE_MS) { remember(); return allow(true); }
-  if (!covers(rec.ranges, a, b)) { remember(); return allow(true); }
-  if (est < MIN_CHARS) { remember(); return allow(true); }
+  if (age_ms > MAX_AGE_MS) return eligible('aged');
+  if (!covers(rec.ranges, a, b)) return eligible('uncovered');
+  if (est < MIN_CHARS) return eligible('small');
 
   rec.denied = [...(rec.denied || []), eff].slice(-MAX_DENIED_PER_FILE);
-  return { value: { action: 'deny', a, b, est }, dirty: true };
+  // When each outstanding denial was issued, so a retry can say how long the
+  // agent took to retry it.
+  rec.deniedAt = { ...(rec.deniedAt || {}), [eff]: now };
+  for (const k of Object.keys(rec.deniedAt)) if (!rec.denied.includes(k)) delete rec.deniedAt[k];
+  return { value: { action: 'deny', idx, a, b, est, age_ms }, dirty: true };
 }
 
 // --- PostToolUse (Read) ------------------------------------------------------
@@ -313,7 +367,7 @@ export function record(state, { agent, pk, input, response, stat, now = Date.now
   const pend = pkey ? state.pending[pkey] : undefined;
   if (pend) delete state.pending[pkey];
   // Only a plain text read whose file did not change while it was read.
-  if (!req || !pend || !stat || pend.mtimeMs !== stat.mtimeMs || pend.size !== stat.size) return { dirty: !!pend };
+  if (!req || !pend || !stat || !sameStat(pend, stat)) return { dirty: !!pend };
   const f = response && typeof response === 'object' && response.type === 'text' ? response.file : null;
   if (!f || typeof f !== 'object') return { dirty: true };
   const { content, numLines, startLine, totalLines } = f;
@@ -325,10 +379,10 @@ export function record(state, { agent, pk, input, response, stat, now = Date.now
   const agentState = state.agents[agent] ?? (state.agents[agent] = { files: {} });
   const files = agentState.files;
   let rec = files[pk];
-  const fresh = !rec || rec.mtimeMs !== stat.mtimeMs || rec.size !== stat.size || now - rec.since > MAX_AGE_MS;
+  const fresh = !rec || !sameStat(rec, stat) || now - rec.since > MAX_AGE_MS;
   const cpl = content.length / numLines;
   if (fresh) {
-    rec = { mtimeMs: stat.mtimeMs, size: stat.size, total: totalLines, since: now, ranges: [], cpl, lines: 0, last: '', denied: [], t: now };
+    rec = { mtimeMs: stat.mtimeMs, size: stat.size, ctimeMs: stat.ctimeMs, total: totalLines, since: now, ranges: [], cpl, lines: 0, last: '', denied: [], t: now };
     files[pk] = rec;
   } else {
     rec.cpl = (rec.cpl * rec.lines + content.length) / (rec.lines + numLines);

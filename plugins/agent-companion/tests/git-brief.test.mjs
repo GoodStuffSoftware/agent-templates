@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
 import { makeFixture, runHook, runScript, readJsonl } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 import { gitBrief, landed, STAMP_FILE, FETCH_FRESH_MS, SQUASH_NOTE } from '../scripts/git-brief.mjs';
@@ -193,10 +194,8 @@ test('landed: NOT on, with how far ahead; an unknown ref says so', () => withRep
   git(work, 'checkout', '-q', '-b', 'feat/y');
   commit(work, 'c.txt', 'one');
   commit(work, 'd.txt', 'two');
-  assert.equal(landed('feat/y', { cwd: work, ...noFetch }).line, `NOT on main (ahead 2; ${SQUASH_NOTE})`);
-  assert.equal(landed('HEAD~1', { cwd: work, ...noFetch }).line, `NOT on main (ahead 1; ${SQUASH_NOTE})`);
-  assert.equal(landed('no-such-branch', { cwd: work, ...noFetch }).line, 'NOT on main (unknown ref no-such-branch)');
-  assert.equal(landed('--upload-pack=x', { cwd: work, ...noFetch }).line, 'NOT on main (unknown ref --upload-pack=x)');
+  assert.equal(landed('feat/y', { cwd: work, ...noFetch }).line, `NOT on main (ahead 2; local origin/main only; ${SQUASH_NOTE})`);
+  assert.equal(landed('HEAD~1', { cwd: work, ...noFetch }).line, `NOT on main (ahead 1; local origin/main only; ${SQUASH_NOTE})`);
 }));
 
 test('landed: a cherry-pick (same patch, new sha) reads as ON (cherry-picked); it needs the fetch to see origin/main', () => withRepos(({ origin, work, fx }) => {
@@ -281,6 +280,88 @@ test('landed: a missing default branch (no origin) prints nothing', () => {
   } finally { fx.cleanup(); }
 });
 
+// --- review fixes: landed always fetches fresh; a timed-out fetch leaves no orphan ---
+
+test('landed: always fetches fresh, even inside the 5-minute window, so a merge made after the last fetch reads ON', () => withRepos(({ origin, work, fx }) => {
+  git(work, 'checkout', '-q', '-b', 'feat/late');
+  const tip = commit(work, 'late.txt', 'late feature');
+  git(work, 'push', '-q', 'origin', 'feat/late');
+  // A start-up fetch stamps "fresh" (and refreshes origin/main) BEFORE the merge happens.
+  assert.equal(gitBrief({ cwd: work }).fetched, true);
+  assert.equal(gitBrief({ cwd: work }).fetched, false, 'the stamp is fresh');
+  const other = join(fx.dir, 'other-late');
+  git(fx.dir, 'clone', '-q', origin, other);
+  git(other, 'fetch', '-q', 'origin', 'feat/late');
+  git(other, 'merge', '-q', '--ff-only', tip);
+  git(other, 'push', '-q', 'origin', 'main');
+  // The question is explicit, so it must not trust the stamp.
+  const r = landed('feat/late', { cwd: work });
+  assert.equal(r.line, `ON main (${tip.slice(0, 7)})`);
+  assert.equal(r.fetched, true, 'landed fetched although the stamp was fresh');
+}));
+
+test('landed: a NOT answer that rests on a skipped or failed fetch says the ref may be stale', () => withRepos(({ work, fx }) => {
+  git(work, 'checkout', '-q', '-b', 'feat/z');
+  commit(work, 'z1.txt', 'z one');
+  const skipped = landed('feat/z', { cwd: work, fetch: false }).line;
+  assert.match(skipped, /^NOT on main \(ahead 1; /);
+  assert.match(skipped, /local origin\/main only/);
+  git(work, 'remote', 'set-url', 'origin', join(fx.dir, 'gone.git'));
+  const failed = landed('feat/z', { cwd: work });
+  assert.match(failed.line, /fetch failed; origin\/main may be stale/);
+  assert.equal(failed.fetch_outcome, 'fail');
+}));
+
+test('landed: an unknown or deleted ref is UNKNOWN, not NOT on', () => withRepos(({ work }) => {
+  assert.equal(landed('--upload-pack=x', { cwd: work, ...noFetch }).line, 'UNKNOWN (no such ref --upload-pack=x)');
+  assert.equal(landed('nope', { cwd: work, ...noFetch }).answer, 'UNKNOWN');
+}));
+
+// A server that accepts and never answers, the way a stalled proxy or a dead
+// Git host does. The test thread blocks inside spawnSync while git runs, so the
+// kernel accepts the connection and Node sees it afterwards: what matters is
+// whether the client end is closed once the call returns.
+async function hangServer() {
+  const sockets = [];
+  const srv = createServer((s) => {
+    const rec = { s, closed: false };
+    sockets.push(rec);
+    s.on('error', () => {});
+    s.on('close', () => { rec.closed = true; });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { port: srv.address().port, sockets, close: () => { for (const x of sockets) x.s.destroy(); srv.close(); } };
+}
+
+test('fetch timeout: the whole git process tree is killed, so no git-remote-http survives holding the connection', async () => {
+  const hs = await hangServer();
+  const fx = makeFixture();
+  const saved = { t: process.env.AC_GIT_BRIEF_FETCH_TIMEOUT_MS, l: process.env.GIT_HTTP_LOW_SPEED_LIMIT, s: process.env.GIT_HTTP_LOW_SPEED_TIME };
+  try {
+    const { work } = makeRepos(fx.dir);
+    git(work, 'remote', 'set-url', 'origin', `http://127.0.0.1:${hs.port}/r.git`);
+    // Disarm git's own low-speed abort so only the tree kill can end the child.
+    process.env.GIT_HTTP_LOW_SPEED_LIMIT = '1';
+    process.env.GIT_HTTP_LOW_SPEED_TIME = '120';
+    process.env.AC_GIT_BRIEF_FETCH_TIMEOUT_MS = '700';
+    const t0 = Date.now();
+    const r = gitBrief({ cwd: work });
+    const took = Date.now() - t0;
+    assert.equal(r.fetched, true);
+    assert.equal(r.fetch_outcome, 'timeout');
+    assert.ok(r.line, 'the line still prints');
+    assert.ok(took < 6000, `returned in ${took} ms`);
+    await new Promise((res) => setTimeout(res, 1500));
+    assert.ok(hs.sockets.length >= 1, 'git did connect to the hang server');
+    assert.ok(hs.sockets.every((x) => x.closed), 'every connection was closed: no orphaned git-remote-http');
+  } finally {
+    for (const [k, v] of [['AC_GIT_BRIEF_FETCH_TIMEOUT_MS', saved.t], ['GIT_HTTP_LOW_SPEED_LIMIT', saved.l], ['GIT_HTTP_LOW_SPEED_TIME', saved.s]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    hs.close(); fx.cleanup();
+  }
+});
+
 // --- the CLI ----------------------------------------------------------------
 
 test('cli: prints the line, exits 0, and logs a run row; outside a repository it prints nothing and still exits 0', () => withRepos(({ work, fx }) => {
@@ -307,6 +388,15 @@ test('cli: prints the line, exits 0, and logs a run row; outside a repository it
   assert.equal(typeof rows[0].duration_ms, 'number');
   assert.equal(rows[2].chars, 0);
   assert.ok(rows.every((x) => typeof x.at === 'string' && x.v));
+  // Outcome separates "nothing to say" from "could not say"; the fetch outcome and per-step ms are logged.
+  assert.deepEqual(rows.map((x) => x.outcome), ['ok', 'ok', 'not-repo']);
+  assert.equal(rows[0].fetch_outcome, 'skipped');
+  assert.equal(typeof rows[0].steps_ms, 'object');
+  assert.ok(rows[0].steps_ms.status >= 0);
+  assert.equal(rows[1].answer, 'ON');
+  assert.match(rows[1].target_hash, /^[0-9a-f]{8}$/);
+  assert.equal(rows[1].rechecked_after_NOT, false);
+  assert.equal(rows[1].target_hash.includes('HEAD'), false, 'the target is hashed, not logged');
 }));
 
 // --- the hook ---------------------------------------------------------------
@@ -339,6 +429,13 @@ test('hook: SessionStart and SubagentStart each inject one additionalContext lin
   assert.equal(rows[1].agent_type, 'agent-companion:ac-sonnet-high');
   assert.equal(rows[1].fetched, false, 'the second start was inside the window');
   assert.equal(typeof rows[1].duration_ms, 'number');
+  assert.equal(rows[0].outcome, 'ok');
+  assert.equal(rows[0].fetch_outcome, 'ok');
+  assert.equal(rows[0].fetch_age_ms, null, 'no earlier stamp');
+  assert.equal(rows[1].fetch_outcome, 'fresh-skip');
+  assert.equal(typeof rows[1].fetch_age_ms, 'number');
+  assert.equal(typeof rows[0].start_ms, 'number', 'hook start latency');
+  assert.ok(rows[0].steps_ms.fetch >= 0 && rows[0].steps_ms.status >= 0, 'time per git step');
 }));
 
 test('hook: git_brief off (env CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0) prints nothing, runs no git, writes no row', () => withRepos(({ work, fx }) => {
@@ -369,6 +466,7 @@ test('hook: outside a repository, with an unknown event, or with a garbled paylo
     assert.equal(c.stdout, '');
     const rows = readJsonl(join(fx.stateDir, 'telemetry', 'git-brief.jsonl'));
     assert.equal(rows[0].chars, 0, 'a run that said nothing is still logged, with chars 0');
+    assert.equal(rows[0].outcome, 'not-repo', 'and says why');
   } finally { rmSync(none, { recursive: true, force: true }); fx.cleanup(); }
 });
 
