@@ -383,6 +383,12 @@
       "description": "Rewrite a known long-running Bash command (test, build, install) so its full output goes to a file and only the tail plus that file's path returns to context. Exit code and failures are preserved; short output prints in full; piped, redirected, backgrounded, watch-mode and git commands are never touched. Off = commands run exactly as written. See docs/adr/0004-bash-output-tail.md.",
       "default": true
     },
+    "pr_wait": {
+      "type": "boolean",
+      "title": "PR/CI wait hint",
+      "description": "Show one standing line (at session start) pointing agents at scripts/pr-wait.mjs, which waits for a PR's checks or a workflow run inside a script and returns one final state, instead of repeated gh calls and sleep loops. Off hides only that line: the script itself still runs, and still writes telemetry/pr-wait.jsonl. Env override: CLAUDE_PLUGIN_OPTION_PR_WAIT=0.",
+      "default": true
+    },
     "bash_tail_permission_modes": {
       "type": "string",
       "title": "Bash output tail: permission modes",

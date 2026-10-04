@@ -46,6 +46,7 @@ It was built after two observed failures:
 | `session_budget_units` | Session budget advisory (default **350**; 0 turns it off). Adds up the plan units this WHOLE session has used, the lead plus every subagent: tokens priced at Sonnet 5 rates times the model's plan multiplier (the same `planPriceSpecFor` the compaction advisor uses, Opus 1.5; a tier with no measured multiplier is counted at its own API list price). It reads only the bytes appended to each transcript since the last call, so it stays cheap. Each time the total crosses another multiple of the threshold, the lead gets ONE notice through the runaway-notice path (its next prompt, or right after a foreground `Agent` returns) saying how many units and what share of a ~1,900-unit week (`config/session-budget.json`), and asking it to finish the phase, update `SESSION-STATE.md` and offer the operator a hand-off to a fresh session, never mid-release or while agents are running. Advisory only: nothing is blocked or denied. A scan that has not yet caught up on a long history (it stops at a 2.5 s deadline and carries on at the next call) announces nothing until it is complete, so the first number is never an understatement. A forked or copied session carries its inherited history in its total, so its first prompt can announce the inherited level. Turns on a tier with no measured plan multiplier (haiku, fable) are counted at their own API list price and reported as `estimated_turns`. One row per crossing in `session-budget.jsonl`. | no |
 | `subagent_context_notice_tokens` | Subagent context notice (default **300000**; 0 turns it off). A PreToolUse hook that runs inside every subagent reads that subagent's own context size from its latest request (input + cache read + cache write). When it passes the threshold, or the subagent has just compacted (a `compact_boundary` in its transcript), the subagent is told ONCE, mid-run, to finish the current step, return its results and say what is left so the lead can split it; a compaction is announced once per compaction. With `autoCompactWindow` at 200000 a worker compacts before it reaches 300000, so the compaction signal is the one that usually fires. At SubagentStop the lead gets a line next to the runaway flag, and a worker the mid-run hook never reached is read once more and recorded as caught only at stop. Rows in `subagent-context.jsonl`; the `budget_notices` scout signal counts both logs over 24 hours. Advisory only. One extra `node` start per tool call (the lead's exits at once). | no |
 | `bash_tail` | Bash output tail (default **on**). A PreToolUse hook rewrites a known long-running Bash command (test, build, install) so its output goes to a file and only a short tail plus the file's path returns to context; the exit code is preserved exactly. See [Bash output tail](#bash-output-tail). `bash_tail_permission_modes` (default `bypassPermissions`; `any` lifts the limit) sets the permission modes it applies in. | no (rewrites the command, never denies it) |
+| `pr_wait` | PR/CI wait hint (default **on**; `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` turns it off). One standing session-start line (the `pr-wait-hint` rule) pointing agents at `scripts/pr-wait.mjs`, see "PR and CI wait" below. Off hides only that line; the script still runs and still logs telemetry. |
 | `brevity` | Appends a short reporting contract to every spawned agent's brief — status line, blockers in full, outcome as facts, no narration — plus a peer-brevity clause on inter-agent messages. | no (an opt-in sub-toggle can block once per agent) |
 | `standing_rules` | Injects operator-authored "always do X if Y" rules at session start, on matching prompts, and into matching spawn briefs. | no |
 | `memory_vault` | Keeps a local git history of the memory corpus in a separate repository, so a rewrite or truncation is no longer unrecoverable. Strictly read-only against the live corpus. **Off by default** — see [Memory vault](#memory-vault). | no |
@@ -82,6 +83,21 @@ Every character a tool returns is re-read from the prompt cache on every later c
 - **PowerShell** is out of scope: different syntax, and the `PowerShell` tool is not matched.
 - **Opt out:** `bash_tail: false` (or `CLAUDE_PLUGIN_OPTION_BASH_TAIL=0`). A command can also opt itself out by piping or redirecting, for instance `npm test 2>&1 | cat`.
 - **Measure it:** `node scripts/bash-tail-report.mjs [--days N] [--json]` reads `telemetry/bash-tail.jsonl` (see `docs/TELEMETRY.md`): runs wrapped, bytes produced vs characters returned, known runners left alone and why.
+
+## PR and CI wait
+
+Agents polling a PR or CI with `gh pr checks`, `gh run watch`, `gh pr view` and sleep loops pay for every poll: each result is re-read from the prompt cache for the rest of the session. `scripts/pr-wait.mjs` does the waiting inside a process, where it costs no tokens, and returns the final state in one call.
+
+```
+node scripts/pr-wait.mjs <pr-number|branch|url> [--repo owner/repo] [--timeout 20m]
+node scripts/pr-wait.mjs --run <run-id|branch>  [--repo owner/repo] [--timeout 20m]
+```
+
+- **Output:** one start line, then nothing until the end, so it is safe to launch with `run_in_background`. The final line gives state, checks passed/failed/total and elapsed time; up to nine more lines name the failed checks with their log URLs (on a timeout, the checks still pending).
+- **Exit codes:** 0 checks passed or PR merged; 1 a check failed, or the PR closed unmerged; 2 timeout (default 20m; `--timeout` takes `90s`, `20m`, `1h`); 3 usage or gh error. It never prompts; gh is polled with backoff (5s growing to 30s), and a transient gh failure is retried before it gives up.
+- **Limits:** right after a push GitHub can still report the previous commit's checks for a few seconds, and `--run <branch>` picks the newest run on the branch, which may be the one before your push (pass the run id when it matters). A PR with no checks at all returns `NO-CHECKS` (exit 0) after 90 seconds.
+- **Discoverability, and the trial toggle:** the plugin adds one standing line at session start (the `pr-wait-hint` rule, 150 characters or fewer, also naming the `verify_release` and `merge_to_main` release tools, where a project has them). `pr_wait: false` or `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` hides that line; the script itself keeps working.
+- **Measure it:** each run appends one row to `telemetry/pr-wait.jsonl` (mode, polls, duration, outcome, exit code; see `docs/TELEMETRY.md`). Compare the `gh` and sleep call counts in transcripts with the line on and off.
 
 ## Brevity — the reporting contract
 
@@ -135,9 +151,9 @@ Four scopes, each deciding what `when` is tested against and where the directive
 | `session-start` | *(ignored — fires once)* | the main session, at start |
 | `spawn` | the brief of an agent being spawned | that subagent's prompt |
 
-A `session-start` rule also reaches a subagent that compacts, because SessionStart fires inside it. A rule with `"audience": "lead"` stays out of that: five of the built-ins carry it (`lead-brevity`, `delegate-first`, `resume-doctrine`, `poll-guard-doctrine`, `lead-effort-check`), since a worker cannot spawn, resume, arm a wake or ask the operator. A rule with no `audience` (every rule you add, unless you set it) reaches the lead and workers alike. The scout drift block, the main-CI note and the capacity line are lead-only in the same way.
+A `session-start` rule also reaches a subagent that compacts, because SessionStart fires inside it. A rule with `"audience": "lead"` stays out of that: six of the built-ins carry it (`lead-brevity`, `delegate-first`, `resume-doctrine`, `poll-guard-doctrine`, `pr-wait-hint`, `lead-effort-check`), since a worker cannot spawn, resume, arm a wake or ask the operator. A rule with no `audience` (every rule you add, unless you set it) reaches the lead and workers alike. The scout drift block, the main-CI note and the capacity line are lead-only in the same way.
 
-Eight rules ship built in:
+Nine rules ship built in:
 
 | id | scope | fires |
 |---|---|---|
@@ -148,6 +164,7 @@ Eight rules ship built in:
 | `delegate-reminder` | `always` | gated — see below |
 | `agent-brevity` | `spawn` | disabled by default; reserved so the `spawn` scope shows up in `rules list` |
 | `poll-guard-doctrine` | `session-start` | every session — cache-advisor guard (b): "one completion wait, never per-item wakes" (see `hooks/poll-guard.mjs`) |
+| `pr-wait-hint` | `session-start` | every session, while `pr_wait` is on — one line pointing at `scripts/pr-wait.mjs` (see "PR and CI wait") |
 | `lead-effort-check` | `session-start` | disabled by default. Turn on with `{"id":"lead-effort-check","enabled":true}`. When the session will orchestrate and its effort is below xhigh, asks the operator with the AskUserQuestion options selector ("Raise to xhigh (Recommended)" or "Stay at <current>"), with no spawn or other tool call until answered; "Raise" tells the operator to use the app's effort control and waits (the app refuses a session changing its own effort, so the lead does not set it itself). Unattended sessions (a `scheduledTaskId`, headless, no AskUserQuestion) are never asked: they continue and state the effort once. Never raises to max, never lowers |
 
 ### `delegate-reminder` — the direct answer to "my delegation rules stop being followed"
