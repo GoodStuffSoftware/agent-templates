@@ -383,6 +383,12 @@
       "description": "Rewrite a known long-running Bash command (test, build, install) so its full output goes to a file and only the tail plus that file's path returns to context. Exit code and failures are preserved; short output prints in full; piped, redirected, backgrounded, watch-mode and git commands are never touched. Off = commands run exactly as written. See docs/adr/0004-bash-output-tail.md.",
       "default": true
     },
+    "git_brief": {
+      "type": "boolean",
+      "title": "Git brief",
+      "description": "Trial. At session start and at every subagent start, add ONE line of git state to the agent context (branch, ahead/behind origin's default branch, uncommitted files, worktree, last commit, unpushed commits) and name the refresh command (scripts/git-brief.mjs, with a landed subcommand), so agents stop running git status/fetch/rev-list by hand. Fetches origin's default branch at most every 5 minutes, 1.5 s cap, never prompts. Off = the hook does nothing and logs nothing; CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0 does the same. Telemetry: telemetry/git-brief.jsonl.",
+      "default": true
+    },
     "bash_tail_permission_modes": {
       "type": "string",
       "title": "Bash output tail: permission modes",
