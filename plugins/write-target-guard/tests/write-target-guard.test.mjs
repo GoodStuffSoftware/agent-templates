@@ -1285,4 +1285,177 @@ describe('write-target-guard', { skip: WINONLY }, () => {
       assert.match(r.stderr, /INACTIVE.*Write, Edit, MultiEdit and NotebookEdit are unguarded/, r.stderr);
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // fix F — 2026-10-03: a long or deep path decides fast (the hook's 15 s timeout is
+  // non-blocking: a timed-out guard lets the write through), control characters are
+  // invalid paths, and --config given more than once is a broken registration.
+  // ---------------------------------------------------------------------------
+  const MAXP = 32767;
+  // pre + unit repeated + post, topped up with 'z' to exactly `total` characters.
+  const padTo = (pre, unit, post, total = MAXP) => {
+    const n = Math.floor((total - pre.length - post.length) / unit.length);
+    const s = pre + unit.repeat(n) + post;
+    return s.length < total ? pre + unit.repeat(n) + 'z'.repeat(total - s.length) + post : s;
+  };
+  // Spawn the real hook with a hard 10 s kill, so a slow (pre-fix) hook fails fast here.
+  const timedHook = (home, inputObj) => {
+    const t0 = process.hrtime.bigint();
+    const r = spawnSync(process.execPath, [HOOK, '--config', cfgOf(home)], {
+      input: JSON.stringify(inputObj), encoding: 'utf8', env: childEnv(home), timeout: 10000,
+    });
+    return { r, ms: Number(process.hrtime.bigint() - t0) / 1e6 };
+  };
+  const decidedDeny = ({ r, ms }, what) => {
+    assert.equal(r.error, undefined, `${what}: ${r.error && r.error.code} after ${ms.toFixed(0)} ms`);
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.hookSpecificOutput?.permissionDecision, 'deny', `${what}: ${r.stdout.slice(0, 300)}`);
+    return o.hookSpecificOutput.permissionDecisionReason;
+  };
+  const within2s = ({ ms }, what) => assert.ok(ms < 2000, `${what} took ${ms.toFixed(0)} ms (limit 2000)`);
+
+  test('fix F (long path) END-TO-END: a 250 KB space run decides within 2 s and is DENIED as too long', () => {
+    const fp = `${repo}\\src\\a${' '.repeat(250000)}b\\..\\x.ts`;
+    const t = timedHook(homeValid, write(fp));
+    const reason = decidedDeny(t, '250 KB space run');
+    within2s(t, '250 KB space run');
+    assert.match(reason, new RegExp(`${fp.length} characters long, more than the Windows maximum of 32767`), reason);
+  });
+  test('fix F (deep path) END-TO-END: a 32,767-character deep path decides within 2 s (code -> deny, non-code -> allow)', () => {
+    const code = padTo(`${repo}\\src\\`, 'a\\', 'x.ts');
+    const notes = padTo(`${repo}\\notes\\`, 'a\\', 'x.txt');
+    assert.equal(code.length, MAXP);
+    assert.equal(notes.length, MAXP);
+    const t = timedHook(homeValid, write(code));
+    decidedDeny(t, '32,767-char deep code path');
+    within2s(t, '32,767-char deep code path');
+    const u = timedHook(homeValid, write(notes));
+    assert.equal(u.r.error, undefined, `deep non-code path: ${u.r.error && u.r.error.code}`);
+    assert.equal(u.r.status, 0, u.r.stderr);
+    assert.notEqual(JSON.parse(u.r.stdout).hookSpecificOutput?.permissionDecision, 'deny', u.r.stdout.slice(0, 300));
+    within2s(u, '32,767-char deep non-code path');
+  });
+  test('fix F (deep path) END-TO-END: a 32,767-character path under a junction loop in the primary -> DENY within 2 s', () => {
+    // lp1 -> lp2 -> lp1: realpath fails ELOOP at every depth below it, so an unbounded walk
+    // probes all 16k ancestors and runs past the time limit (fail open). Bounded, it falls
+    // back to the lexical path, which is under src: code -> deny.
+    const dir = path.win32.join(repo, 'src', 'loopdir');
+    mkdirSync(dir, { recursive: true });
+    const lp1 = path.win32.join(dir, 'lp1');
+    const lp2 = path.win32.join(dir, 'lp2');
+    symlinkSync(lp2, lp1, 'junction');
+    symlinkSync(lp1, lp2, 'junction');
+    try {
+      const t = timedHook(homeValid, write(padTo(lp1 + '\\', 'a\\', 'x.ts')));
+      decidedDeny(t, 'junction-loop deep path');
+      within2s(t, 'junction-loop deep path');
+    } finally {
+      for (const l of [lp1, lp2]) { try { unlinkSync(l); } catch { /* ignore */ } }
+    }
+  });
+  test('fix F (cap): exactly 32,767 characters is judged normally; 32,768 is DENIED as too long (Write and NotebookEdit)', () => {
+    const outside = path.win32.join(tmp, 'fixF-outside') + '\\';
+    allowed(D(write(padTo(outside, 'a\\', 'x.txt'))));
+    allowed(D(write(padTo(outside, 'a', '.txt')))); // one long segment
+    for (const input of [
+      write(padTo(outside, 'a\\', 'x.txt', MAXP + 1)),
+      { tool_name: 'NotebookEdit', tool_input: { notebook_path: padTo(outside, 'a\\', 'x.ipynb', MAXP + 1), new_source: 'x' } },
+    ]) {
+      const d = D(input);
+      denied(d);
+      assert.match(d.reason, /32768 characters long, more than the Windows maximum of 32767/, d.reason);
+    }
+  });
+  test('fix F (cap): a 32,767-character dot or space run is judged (not denied as too long) and decides quickly', () => {
+    for (const unit of [' ', '.']) {
+      const fp = padTo(`${repo}\\src\\a`, unit, 'b\\..\\x.ts');
+      const t0 = process.hrtime.bigint();
+      const d = D(write(fp));
+      const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+      denied(d); // <repo>\src\x.ts: a code path in the primary
+      assert.doesNotMatch(d.reason, /characters long/, d.reason);
+      assert.ok(ms < 2000, `${JSON.stringify(unit)} run took ${ms.toFixed(0)} ms`);
+    }
+  });
+  test('fix F (control chars): NUL in the path -> DENY as an invalid path (decide and END-TO-END)', () => {
+    const fp = `${repo}\\src\\x.ts\0.md`; // judged as markdown before; a native writer stops at the NUL
+    const d = D(write(fp));
+    denied(d);
+    assert.match(d.reason, /control character/, d.reason);
+    const reason = decidedDeny(timedHook(homeValid, write(fp)), 'NUL path');
+    assert.match(reason, /control character/, reason);
+  });
+  test('fix F (control chars): every character 0x00-0x1F is denied, even outside any repo; 0x20 is not', () => {
+    const outside = path.win32.join(tmp, 'fixF-outside');
+    for (let c = 0; c < 0x20; c++) {
+      const r = guard.resolveTarget(`${outside}\\a${String.fromCharCode(c)}b.txt`);
+      assert.ok(r.deny, `0x${c.toString(16)}: ${JSON.stringify(r)}`);
+      assert.match(r.deny.reason, /control character/);
+      denied(D(write(`${outside}\\a${String.fromCharCode(c)}b.md`)));
+    }
+    allowed(D(write(`${outside}\\a b.md`)));
+  });
+  test('fix F (--config twice): two --config flags, either order or the same value -> loud INACTIVE naming --config, fails open', () => {
+    const missing = path.win32.join(tmp, 'home-fixf-missing');
+    mkdirSync(missing, { recursive: true });
+    const valid = cfgOf(homeValid);
+    for (const args of [
+      ['--config', valid, '--config', cfgOf(missing)],
+      ['--config', cfgOf(missing), '--config', valid],
+      ['--config', valid, '--config', valid],
+    ]) {
+      const r = spawnSync(process.execPath, [HOOK, ...args], {
+        input: JSON.stringify(write(path.win32.join(repo, 'src', 'App.vue'))), encoding: 'utf8', env: childEnv(homeValid),
+      });
+      assert.equal(r.status, 0, r.stderr);
+      const o = JSON.parse(r.stdout);
+      const what = `${args.length / 2} flags: ${JSON.stringify(o)}`;
+      assert.match(o.systemMessage || '', /INACTIVE/, what);
+      assert.match(o.systemMessage || '', /--config was given 2 times/, what);
+      assert.match(r.stderr, /INACTIVE/, r.stderr);
+      assert.notEqual(o.hookSpecificOutput?.permissionDecision, 'deny', what); // the documented fail-open
+    }
+  });
+  test('fix F (--config value): an empty, blank or flag-like value -> loud INACTIVE naming --config, fails open', () => {
+    for (const args of [['--config', ''], ['--config', '   '], ['--config', '--verbose'], ['--verbose', '--config']]) {
+      const r = spawnSync(process.execPath, [HOOK, ...args], {
+        input: JSON.stringify(write(path.win32.join(repo, 'src', 'App.vue'))), encoding: 'utf8', env: childEnv(homeValid),
+      });
+      assert.equal(r.status, 0, r.stderr);
+      const o = JSON.parse(r.stdout);
+      assert.match(o.systemMessage || '', /INACTIVE/, `${JSON.stringify(args)}: ${JSON.stringify(o)}`);
+      assert.match(o.systemMessage || '', /--config needs an absolute path/, `${JSON.stringify(args)}: ${JSON.stringify(o)}`);
+      assert.match(r.stderr, /INACTIVE/, r.stderr);
+      assert.notEqual(o.hookSpecificOutput?.permissionDecision, 'deny');
+    }
+  });
+  test('fix F (bounded walk): a tail deeper than 64 segments under a junction still folds into the primary -> deny', () => {
+    const jx = path.win32.join(tmp, 'jx-fixf-deep');
+    symlinkSync(repo, jx, 'junction');
+    try {
+      for (const n of [70, 300, 3000]) denied(D(write(jx + '\\src\\' + 'a\\'.repeat(n) + 'x.ts')));
+      allowed(D(write(jx + '\\notes\\' + 'a\\'.repeat(300) + 'x.ts')));
+    } finally { try { unlinkSync(jx); } catch { /* ignore */ } }
+  });
+  test('fix F (bounded walk, resolveTarget seam): a deep tail under a mapped drive folds; EPERM on an ancestor does not stop the walk', () => {
+    const real = realpathSync.native(repo);
+    const tail = Array.from({ length: 300 }, (_, i) => 'a' + (i % 7)).join('\\') + '\\x.ts';
+    // Z:\mapped -> the repo, realpath'd below it (a subst/mapped drive shape); the root Z:\
+    // itself does not resolve, as on a machine with no Z: drive.
+    const mapped = (p) => (/^z:\\mapped(\\|$)/i.test(p) ? realpathSync.native(real + p.slice('z:\\mapped'.length)) : realpathSync.native(p));
+    const r1 = guard.resolveTarget('Z:\\mapped\\src\\' + tail, mapped);
+    assert.equal(r1.norm, (real + '\\src\\' + tail).toLowerCase(), JSON.stringify(r1).slice(0, 300));
+    // EPERM on the junction itself; its src child still resolves into the primary.
+    const jx = path.win32.join(tmp, 'jx-fixf-eperm');
+    symlinkSync(repo, jx, 'junction');
+    try {
+      const eperm = (p) => {
+        if (p.toLowerCase() === jx.toLowerCase()) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+        return realpathSync.native(p);
+      };
+      const r2 = guard.resolveTarget(jx + '\\src\\' + tail, eperm);
+      assert.equal(r2.norm, (real + '\\src\\' + tail).toLowerCase(), JSON.stringify(r2).slice(0, 300));
+    } finally { try { unlinkSync(jx); } catch { /* ignore */ } }
+  });
 });

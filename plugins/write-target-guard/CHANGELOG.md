@@ -63,6 +63,15 @@ hook (originally hard-coded to one repo) and generalised.
   override.
 - **Plain relative targets resolve against the hook's cwd**, so a relative
   `src\x.ts` from the primary is denied (the pre-alias hook allowed it).
+- **Over-long targets denied, and every path is judged fast.** A target longer than
+  the Windows maximum of 32,767 characters is denied. Below it, a long run of dots or
+  spaces, or a deep not-yet-created tail, decides in well under a second; before, it
+  could outrun the hook's time limit, which lets the write through.
+- **Control characters denied.** A target containing NUL or any other character
+  below 0x20 is denied as an invalid path; a NUL had let `…\src\x.ts\0.md` pass as
+  markdown.
+- **`--config` given twice is a broken registration**: loud INACTIVE, like a
+  malformed config, instead of the first value winning silently.
 - **README:** Cutover rewritten (running the plugin and a `settings.json` entry
   together runs the guard twice; the entry to remove is given) and a Known
   limitations section added.

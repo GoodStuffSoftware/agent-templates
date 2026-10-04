@@ -69,8 +69,9 @@ of any rule. An env-var or in-repo override would be a bypass vector: a repo you
 are editing could point the guard away from itself. The one override is a
 `--config <absolute path>` argument in the hook's **own registration**
 (`hooks.json` / `settings.json`, which already decides whether the hook runs); the
-test suite uses it. A `--config` with no value or a relative path is treated like a
-malformed config (loud, fails open).
+test suite uses it. A `--config` given more than once, with no value or with a
+relative path is treated like a malformed config (loud, fails open); the first
+value never wins silently.
 
 Copy [`write-target-guard.config.example.json`](./write-target-guard.config.example.json)
 to that path and edit it for your machine. Schema:
@@ -159,8 +160,12 @@ worktree prefix (`primary` + `worktreeMark`). An 8.3 or junction spelling in the
 config therefore matches the long, resolved target, just as an aliased target
 matches a long-name config.
 
-Two shapes that cannot be judged are **denied for every write**, code or not:
+These shapes cannot be judged, so they are **denied for every write**, code or not:
 
+- **Over-long or invalid targets.** A target longer than 32,767 characters (the
+  Windows path maximum) or containing a control character (NUL, or any other
+  character below 0x20) names no real file. Both are refused before any other
+  work, so the guard never spends its time limit on them.
 - **Drive-relative and rooted-relative targets.** `C:..\src\x.ts`, `C:src\x.ts`,
   `\Users\...` and `/c/...` resolve against the *writer's* current directory, which
   the guard cannot know. The message says to use a fully qualified path. Plain
@@ -233,7 +238,11 @@ tamper-proof storage for its own config.
 that walk, but a **mapped drive whose share is unreachable** still walks over the
 network; a dead UNC host was measured at ~2.7s — within the hook's 15s timeout, a
 latency cost, not a correctness one.
-Normal local paths resolve in well under a millisecond.
+Normal local paths resolve in well under a millisecond. The walk is bounded: a
+deep not-yet-created tail (up to 16k segments at the 32,767-character maximum) is
+searched in a few dozen probes rather than one per segment, and a chain that fails
+at every depth for a reason other than "not found" (a junction loop) stops after 64
+probes and uses the lexical path. The worst cases measured about 0.1–0.5s per call.
 
 ---
 
@@ -284,6 +293,9 @@ To move the registration:
   drive path is used), though a write to it cannot succeed anyway.
 - Writes through **hard links** are not detected; a hard link to a protected file
   looks like an ordinary path elsewhere.
+- An **alternate data stream on a directory** is judged as the directory's path:
+  `<primary>\src:stream` is allowed (P2 drops the stream). The data lands as a
+  stream on the `src` directory object itself, not as a file inside `src`.
 - `/c/…` and `/mnt/c/…` targets are denied as rooted-relative, not mapped to C:.
 - The config is an off-switch: a missing or malformed config is loud and fails
   open, while `"enabled": false` or no repos is silent by design.

@@ -122,6 +122,25 @@
 //   OS cannot report is the same loud INACTIVE.
 // 2026-10-03: the INACTIVE stderr lines name Write, Edit, MultiEdit and NotebookEdit, like
 //   the systemMessages beside them.
+// 2026-10-03: a target longer than 32,767 characters is denied, and no step is quadratic.
+//   32,767 is the Windows path maximum, so no real file has a longer path; a longer
+//   file_path / notebook_path is refused before any other work. Below the cap every step on
+//   the target is linear: P2's trailing dot/space trim is a plain loop (the old /[ .]+$/
+//   backtracked quadratically on a long dot/space run NOT at the end: a 250 KB run ran past
+//   the 15 s hook timeout, a non-blocking timeout, so the write went through unguarded).
+// 2026-10-03: a target containing a control character (NUL or any of 0x01-0x1F) is denied
+//   as an invalid path. No Windows file name holds one; a NUL made the guard judge the text
+//   after it (<P>\src\x.ts\0.md was allowed as markdown) where a native writer stops at it.
+// 2026-10-03: a --config given more than once is a broken registration: loud INACTIVE, like
+//   a malformed config (before, the first value won silently).
+// 2026-10-03: the P3 realpath walk is bounded. The first 64 probes walk up from the target,
+//   exactly as before. Past that, a binary search finds the deepest depth that is not "not
+//   found" (ENOENT/ENOTDIR: nothing below a missing or non-directory component exists), then
+//   walks up to the first realpath success as before, so the result is the same deepest
+//   existing ancestor; a 16k-segment tail at the 32,767-character maximum went from 16k
+//   probes (3.8 s) to about 80. That walk up is itself capped at 64 probes, after which the
+//   lexical path is used, as on any realpath failure (only a planted chain such as a symlink
+//   loop, failing ELOOP at every depth, gets that far).
 //
 // The decision logic is the exported pure function decide(); main (stdin/stdout) runs
 // when argv[1]'s BASENAME is write-target-guard.mjs — not a full-path compare, because
@@ -151,10 +170,16 @@ const safeDefaultConfigPath = () => { try { return defaultConfigPath(); } catch 
 
 // The config path the hook process was registered with: `--config <absolute path>` in its
 // own argv (hooks.json / settings.json), else null for the default. Never the environment.
-// A --config with no value or a relative value is a broken registration: { error }.
+// A --config given more than once, with no value or with a relative value is a broken
+// registration: { error }. (Never "the first one wins": that would be a silent choice.)
 function configPathFromArgv(argv) {
-  const i = argv.indexOf('--config', 2);
-  if (i < 0) return { path: null };
+  const at = [];
+  for (let k = 2; k < argv.length; k++) if (argv[k] === '--config') at.push(k);
+  if (at.length === 0) return { path: null };
+  if (at.length > 1) {
+    return { error: `--config was given ${at.length} times; give it exactly once, with the absolute path to the config file` };
+  }
+  const i = at[0];
   const v = argv[i + 1];
   if (typeof v !== 'string' || !ABS_PATH_RE.test(v.trim())) {
     return { error: `--config needs an absolute path to the config file (got ${v === undefined ? 'nothing' : JSON.stringify(v)})` };
@@ -207,6 +232,19 @@ function getHostnames() {
 // A device prefix: \\?\ , \\.\ or the NT-namespace \??\ (after / -> \ folding).
 const DEVICE_PREFIX = /^(?:\\\\[?.]\\|\\\?\?\\)/;
 
+// Drop a trailing run of dots and spaces (Windows opens "App.vue. " as "App.vue"). A plain
+// loop, linear in the segment: the regex /[ .]+$/ is not start-anchored, so on a long
+// dot/space run followed by any other character it retries from every position (quadratic).
+function trimDotsSpaces(seg) {
+  let e = seg.length;
+  while (e > 0) {
+    const c = seg.charCodeAt(e - 1);
+    if (c !== 0x20 && c !== 0x2e) break;
+    e--;
+  }
+  return e === seg.length ? seg : seg.slice(0, e);
+}
+
 // Canonicalise a raw file_path to a comparable lowercased backslash path, folding the
 // alias families above. Returns { norm }, { unresolvable: true } for device/volume
 // namespaces that cannot be mapped to a file path, or { relative: true } for a
@@ -253,8 +291,9 @@ function canonicalize(raw, hostnames) {
     // Keep empties, the drive, and every segment made only of dots and/or spaces: . and ..
     // navigate, and " ", ". .", ".. ", "..." are ONE literal segment to every Windows writer
     // (a following .. cancels it), so trimming one to "" would cancel the segment before it.
-    if (seg === '' || /^[ .]+$/.test(seg) || /:$/.test(seg)) continue;
-    parts[i] = seg.replace(/[ .]+$/, '');
+    if (seg === '' || seg.endsWith(':')) continue;
+    const trimmed = trimDotsSpaces(seg);
+    if (trimmed !== '') parts[i] = trimmed;
   }
   s = parts.join('\\');
 
@@ -265,11 +304,15 @@ function canonicalize(raw, hostnames) {
 
 // P3: realpath the deepest existing ancestor, re-append the not-yet-created tail.
 // A realpath failure falls back to the lexical path (it does not fail open).
+// Bounded: the first REALPATH_BOTTOM_UP probes walk up from the path itself, exactly as
+// before (a real write's not-yet-created tail is a few segments). Past that, deepTailAncestor
+// finds the same ancestor in a few probes, not 16k probes of up to 32,767 characters each.
+const REALPATH_BOTTOM_UP = 64;
 function realpathAncestor(norm, realpathFn = realpathSync.native) {
   try {
     let cur = norm;
     const tail = [];
-    for (;;) {
+    for (let probes = 0; probes < REALPATH_BOTTOM_UP; probes++) {
       try {
         const real = realpathFn(cur).toLowerCase();
         return tail.length ? path.win32.join(real, ...tail) : real;
@@ -280,9 +323,59 @@ function realpathAncestor(norm, realpathFn = realpathSync.native) {
         cur = parent;
       }
     }
+    return deepTailAncestor(cur, tail, norm, realpathFn);
   } catch {
     return norm;
   }
+}
+
+// The rest of realpathAncestor's walk, for a tail deeper than REALPATH_BOTTOM_UP: `cur` and
+// its ancestors (none probed yet; every deeper path failed), with `tail` already split off
+// below cur. Depth 0 is the top of the chain (the drive root, or '.' for a relative path:
+// where the bottom-up walk also ends); depth segs.length is cur.
+//
+// A realpath that fails "not found" (ENOENT or ENOTDIR, or a throw with no code at all, which
+// no real fs error is) fails the same way at every deeper path: the lookup walks the
+// components in order. So a binary search finds the deepest depth that is not "not found"
+// (it exists, or it failed some other way, such as EPERM on a protected directory whose
+// children still resolve); nothing deeper can realpath. From there the walk goes up exactly
+// as the bottom-up walk does, to the first realpath success: the same ancestor, in
+// O(log depth) probes. That walk up stops after REALPATH_BOTTOM_UP probes and falls back to
+// the lexical path, like any realpath failure: only a planted structure (a symlink loop, say,
+// which fails ELOOP at every depth below it) gets that far, and probing all of it would run
+// past the hook's time limit, which fails open.
+function deepTailAncestor(cur, tail, norm, realpathFn) {
+  const root = path.win32.parse(cur).root; // 'c:\' for a drive path, '' for a relative one
+  const rest = cur.slice(root.length);
+  const segs = rest ? rest.split('\\') : [];
+  const prefixAt = (d) => (d === 0 ? (root || '.') : root + segs.slice(0, d).join('\\'));
+  const seen = new Map(); // depth -> { real } on success, { notFound } on failure
+  const probe = (d) => {
+    if (!seen.has(d)) {
+      try {
+        seen.set(d, { real: realpathFn(prefixAt(d)).toLowerCase() });
+      } catch (e) {
+        const code = e && e.code;
+        seen.set(d, { notFound: !code || code === 'ENOENT' || code === 'ENOTDIR' });
+      }
+    }
+    return seen.get(d);
+  };
+  let lo = 0; // the floor; every depth above hi is "not found"
+  let hi = segs.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1; // >= 1, so depth 0 is never needed to pass
+    if (probe(mid).notFound) hi = mid - 1;
+    else lo = mid;
+  }
+  for (let d = lo, n = 0; d >= 0 && n < REALPATH_BOTTOM_UP; d--, n++) {
+    const r = probe(d);
+    if (r.real !== undefined) {
+      const below = segs.slice(d).concat(tail);
+      return below.length ? path.win32.join(r.real, ...below) : r.real;
+    }
+  }
+  return norm; // nothing resolved (or the walk-up bound was hit)
 }
 
 const isUnc = (p) => p.startsWith('\\\\');
@@ -337,13 +430,36 @@ function resolvePath(raw, realpathFn = realpathSync.native) {
   return { norm };
 }
 
+// The Windows path maximum (UTF-16 code units, which is what String length counts).
+const MAX_PATH_CHARS = 32767;
+
+const longPathDeny = (len) => ({
+  decision: 'deny',
+  reason:
+    `WRONG WRITE TARGET: the path is ${len} characters long, more than the Windows maximum of ` +
+    `${MAX_PATH_CHARS}. No real file has such a path, so this guard refuses it rather than ` +
+    'spend its time limit judging it. Use the real, fully qualified path (C:\\...).',
+});
+
+const CONTROL_CHAR_DENY = {
+  decision: 'deny',
+  reason:
+    'WRONG WRITE TARGET: the path contains a control character (NUL or another character ' +
+    'below 0x20), which no Windows file name can hold. It is an invalid path, so this guard ' +
+    'refuses it rather than guess which file a writer would open. Use the real, fully qualified path (C:\\...).',
+};
+
 // Resolve a raw file_path for the checks. Returns { norm } (a lowercased local drive path)
-// or { deny } (the decision to return). A drive-relative or rooted-relative path is denied.
-// A UNC path P1 cannot fold to a drive is denied twice over: lexically, and again when
-// realpath (a mapped drive, a symlink to a share) lands on one. realpathFn is the test seam;
-// the hook always uses the default.
+// or { deny } (the decision to return). A path longer than the Windows maximum, or holding
+// a control character, is denied first, before any other work. A drive-relative or
+// rooted-relative path is denied. A UNC path P1 cannot fold to a drive is denied twice over:
+// lexically, and again when realpath (a mapped drive, a symlink to a share) lands on one.
+// realpathFn is the test seam; the hook always uses the default.
 export function resolveTarget(rawPath, realpathFn = realpathSync.native) {
-  const r = resolvePath(rawPath, realpathFn);
+  const raw = String(rawPath);
+  if (raw.length > MAX_PATH_CHARS) return { deny: longPathDeny(raw.length) };
+  if (/[\x00-\x1f]/.test(raw)) return { deny: CONTROL_CHAR_DENY };
+  const r = resolvePath(raw, realpathFn);
   if (r.device) return { deny: DEVICE_DENY };
   if (r.relative) return { deny: relativeDeny(rawPath) };
   if (r.unc) return { deny: uncDeny(rawPath, r.resolved) };
@@ -386,7 +502,13 @@ function resolveBranch(root) {
 const wtMarkNorm = (m) => String(m == null ? '.claude\\worktrees\\' : m).replace(/\//g, '\\').toLowerCase();
 const withSlash = (p) => (p.endsWith('\\') ? p : p + '\\');
 // Drop trailing separators before resolving (C:\ stays C:\, never the drive-relative C:).
-const trimSep = (p) => { const t = p.replace(/[\\/]+$/, ''); return /^[a-z]:$/i.test(t) ? t + '\\' : t; };
+// A loop, not /[\\/]+$/ (quadratic on a long separator run that is not at the end).
+const trimSep = (p) => {
+  let e = p.length;
+  while (e > 0 && (p[e - 1] === '\\' || p[e - 1] === '/')) e--;
+  const t = p.slice(0, e);
+  return /^[a-z]:$/i.test(t) ? t + '\\' : t;
+};
 const showVal = (v) => {
   let s;
   try { s = JSON.stringify(v); } catch { /* fall through */ }
