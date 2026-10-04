@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { makeFixture, runHook, runScript, readJsonl } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
-import { gitBrief, landed, STAMP_FILE, FETCH_FRESH_MS } from '../scripts/git-brief.mjs';
+import { gitBrief, landed, STAMP_FILE, FETCH_FRESH_MS, SQUASH_NOTE } from '../scripts/git-brief.mjs';
 
 const IDENT = {
   GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
@@ -193,13 +193,13 @@ test('landed: NOT on, with how far ahead; an unknown ref says so', () => withRep
   git(work, 'checkout', '-q', '-b', 'feat/y');
   commit(work, 'c.txt', 'one');
   commit(work, 'd.txt', 'two');
-  assert.equal(landed('feat/y', { cwd: work, ...noFetch }).line, 'NOT on main (ahead 2)');
-  assert.equal(landed('HEAD~1', { cwd: work, ...noFetch }).line, 'NOT on main (ahead 1)');
+  assert.equal(landed('feat/y', { cwd: work, ...noFetch }).line, `NOT on main (ahead 2; ${SQUASH_NOTE})`);
+  assert.equal(landed('HEAD~1', { cwd: work, ...noFetch }).line, `NOT on main (ahead 1; ${SQUASH_NOTE})`);
   assert.equal(landed('no-such-branch', { cwd: work, ...noFetch }).line, 'NOT on main (unknown ref no-such-branch)');
   assert.equal(landed('--upload-pack=x', { cwd: work, ...noFetch }).line, 'NOT on main (unknown ref --upload-pack=x)');
 }));
 
-test('landed: a rebase merge (same patches, new shas) reads as ON; it needs the fetch to see origin/main', () => withRepos(({ origin, work, fx }) => {
+test('landed: a cherry-pick (same patch, new sha) reads as ON (cherry-picked); it needs the fetch to see origin/main', () => withRepos(({ origin, work, fx }) => {
   git(work, 'checkout', '-q', '-b', 'feat/r');
   const tip = commit(work, 'feature.txt', 'feature work');
   git(work, 'push', '-q', 'origin', 'feat/r');
@@ -212,7 +212,62 @@ test('landed: a rebase merge (same patches, new shas) reads as ON; it needs the 
   git(other, 'push', '-q', 'origin', 'main');
   // Without a fetch the local origin/main has not moved.
   assert.match(landed('feat/r', { cwd: work, ...noFetch }).line, /^NOT on main/);
-  assert.match(landed('feat/r', { cwd: work }).line, /^ON main \([0-9a-f]{7}, rebased\)$/);
+  assert.equal(landed('feat/r', { cwd: work }).line, 'ON main (cherry-picked)');
+}));
+
+// Lands `shas` on origin's main from a second clone, the way a cherry-pick or a
+// rebase merge would: same patches, new parents, so new shas.
+function landOnMain({ origin, fx }, shas, { unrelatedFirst = true } = {}) {
+  const other = join(fx.dir, `other-${Math.random().toString(36).slice(2, 8)}`);
+  git(fx.dir, 'clone', '-q', origin, other);
+  if (unrelatedFirst) commit(other, `unrelated-${Math.random().toString(36).slice(2, 8)}.txt`, 'unrelated main work');
+  for (const s of shas) git(other, 'cherry-pick', s.slice(0, 7));
+  git(other, 'push', '-q', 'origin', 'main');
+}
+
+test('landed: every commit of a multi-commit branch cherry-picked or rebased onto main reads ON (cherry-picked), and does not say NOT', () => withRepos((ctx) => {
+  const { work } = ctx;
+  git(work, 'checkout', '-q', '-b', 'feat/m');
+  const a = commit(work, 'f1.txt', 'feature one');
+  const b = commit(work, 'f2.txt', 'feature two');
+  const c = commit(work, 'f3.txt', 'feature three');
+  git(work, 'push', '-q', 'origin', 'feat/m');
+  landOnMain(ctx, [a, b, c]);
+  const line = landed('feat/m', { cwd: work }).line;
+  assert.equal(line, 'ON main (cherry-picked)');
+  assert.ok(!/NOT|squash/.test(line));
+  // By sha and by origin/<branch> too.
+  assert.equal(landed(c, { cwd: work, fetch: false }).line, 'ON main (cherry-picked)');
+  assert.equal(landed('origin/feat/m', { cwd: work, fetch: false }).line, 'ON main (cherry-picked)');
+}));
+
+test('landed: only some commits cherry-picked is NOT, counting just the ones main lacks, with the squash note', () => withRepos((ctx) => {
+  const { work } = ctx;
+  git(work, 'checkout', '-q', '-b', 'feat/p');
+  const a = commit(work, 'g1.txt', 'part one');
+  commit(work, 'g2.txt', 'part two');
+  commit(work, 'g3.txt', 'part three');
+  git(work, 'push', '-q', 'origin', 'feat/p');
+  landOnMain(ctx, [a]);
+  assert.equal(landed('feat/p', { cwd: work }).line, `NOT on main (ahead 2; ${SQUASH_NOTE})`);
+}));
+
+test('landed: a squash merge is NOT, and the line says a squash merge would not show; the note appears only with NOT', () => withRepos((ctx) => {
+  const { work, origin, fx } = ctx;
+  git(work, 'checkout', '-q', '-b', 'feat/s');
+  commit(work, 'h1.txt', 'sq one');
+  commit(work, 'h2.txt', 'sq two');
+  git(work, 'push', '-q', 'origin', 'feat/s');
+  const other = join(fx.dir, 'other-squash');
+  git(fx.dir, 'clone', '-q', origin, other);
+  git(other, 'fetch', '-q', 'origin', 'feat/s');
+  git(other, 'merge', '--squash', 'origin/feat/s');
+  git(other, 'commit', '-q', '-m', 'squash of feat/s');
+  git(other, 'push', '-q', 'origin', 'main');
+  const line = landed('feat/s', { cwd: work }).line;
+  assert.equal(line, `NOT on main (ahead 2; ${SQUASH_NOTE})`);
+  assert.equal(landed('main', { cwd: work, fetch: false }).line.includes('squash'), false, 'an ON answer carries no note');
+  assert.equal(landed('nope', { cwd: work, fetch: false }).line.includes('squash'), false, 'an unknown ref carries no note');
 }));
 
 test('landed: a missing default branch (no origin) prints nothing', () => {

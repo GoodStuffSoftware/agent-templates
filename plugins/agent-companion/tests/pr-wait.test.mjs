@@ -22,18 +22,26 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs
 const [dir] = [process.env.PR_WAIT_STUB_DIR];
 const args = process.argv.slice(2);
 appendFileSync(dir + '/calls.log', args.join(' ') + '\\n');
-const key = args[0] === 'pr' ? 'pr' : args[1] === 'list' ? 'list' : 'run';
+let key = args[0] === 'pr' ? 'pr' : args[1] === 'list' ? 'list' : 'run';
+let ndjson = false;
+if (args[0] === 'api') {
+  const m = /commits\\/([^/?]+)\\/(check-runs|status)/.exec(args[1] || '');
+  if (m) { key = (m[2] === 'status' ? 'st:' : 'cr:') + m[1]; ndjson = true; }
+  else if (/\\/branches\\//.test(args[1] || '')) key = 'branch';
+}
 const scenario = JSON.parse(readFileSync(dir + '/scenario.json', 'utf8'));
 const cf = dir + '/counter.json';
 const counter = existsSync(cf) ? JSON.parse(readFileSync(cf, 'utf8')) : {};
 const i = counter[key] || 0;
 counter[key] = i + 1;
 writeFileSync(cf, JSON.stringify(counter));
-const list = scenario[key] || [];
+const list = key.startsWith('cr:') ? (scenario.checkRuns || {})[key.slice(3)] || []
+  : key.startsWith('st:') ? (scenario.statuses || {})[key.slice(3)] || [{ out: [] }]
+  : scenario[key] || [];
 const step = list[Math.min(i, list.length - 1)];
 if (!step) { process.stderr.write('stub: no scenario for ' + key + '\\n'); process.exit(1); }
 if (step.err) { process.stderr.write(step.err + '\\n'); process.exit(step.code || 1); }
-process.stdout.write(JSON.stringify(step.out));
+process.stdout.write(ndjson ? step.out.map((x) => JSON.stringify(x)).join('\\n') : JSON.stringify(step.out));
 `;
 
 function setup(scenario, extraEnv = {}) {
@@ -61,30 +69,36 @@ function setup(scenario, extraEnv = {}) {
   return { fx, run, calls, rows };
 }
 
-const cr = (name, status, conclusion, url) => ({ __typename: 'CheckRun', name, status, conclusion, detailsUrl: url || `https://ci.example/${name}` });
-const pr = (state, checks, extra = {}) => ({ out: { number: 31, state, mergedAt: null, mergeStateStatus: 'CLEAN', statusCheckRollup: checks, url: 'https://github.com/o/r/pull/31', ...extra } });
+// API-shaped check run / status, as `gh api .../commits/<sha>/check-runs` returns them.
+const cr = (name, status, conclusion, url) => ({ name, status: String(status).toLowerCase(), conclusion: String(conclusion || '').toLowerCase() || null, html_url: url || `https://ci.example/${name}` });
+const st = (context, state, url) => ({ context, state, target_url: url });
+const pr = (state, sha, extra = {}) => ({ out: { number: 31, state, mergedAt: null, mergeStateStatus: 'CLEAN', headRefOid: sha, url: 'https://github.com/o/r/pull/31', ...extra } });
+const checks = (...runs) => ({ out: runs });
+// One head commit all along: pr view step i pairs with check-run step i.
+const onSha = (sha, prSteps, runSteps, extra = {}) => ({ pr: prSteps, checkRuns: { [sha]: runSteps }, ...extra });
+const isApi = (c) => c.startsWith('api ');
 
 test('checks pending, then all green: waits inside the script, exit 0, one start line, one final line', () => {
-  const t = setup({ pr: [
-    pr('OPEN', [cr('build', 'IN_PROGRESS', ''), cr('test', 'QUEUED', '')]),
-    pr('OPEN', [cr('build', 'COMPLETED', 'SUCCESS'), cr('test', 'IN_PROGRESS', '')]),
-    pr('OPEN', [cr('build', 'COMPLETED', 'SUCCESS'), cr('test', 'COMPLETED', 'SUCCESS')]),
-  ] });
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [
+    checks(cr('build', 'in_progress'), cr('test', 'queued')),
+    checks(cr('build', 'completed', 'success'), cr('test', 'in_progress')),
+    checks(cr('build', 'completed', 'success'), cr('test', 'completed', 'success')),
+  ]));
   try {
     const r = t.run('31', '--repo', 'o/r');
     assert.equal(r.code, 0, r.stdout + r.stderr);
     assert.equal(r.lines.length, 2, `start line plus one final line only:\n${r.stdout}`);
     assert.match(r.start, /^pr-wait: waiting on PR 31 \(o\/r\)/);
     assert.match(r.final, /^PR 31 OPEN PASS \| checks 2 passed, 0 failed, 2 total \| merge CLEAN \| \d+s$/);
-    assert.equal(t.calls().length, 3);
-    assert.ok(t.calls().every((c) => c.startsWith('pr view 31 --repo o/r --json ')), t.calls().join('\n'));
+    assert.equal(t.calls().length, 9, 'three polls of pr view + check-runs + status');
+    assert.ok(t.calls().filter((c) => c.startsWith('pr view')).every((c) => c.startsWith('pr view 31 --repo o/r --json ')), t.calls().join('\n'));
   } finally { t.fx.cleanup(); }
 });
 
 test('a failed check: exit 1, names and log URLs after the final line, never more than 10 lines', () => {
-  const checks = [cr('build', 'COMPLETED', 'SUCCESS')];
-  for (let i = 1; i <= 14; i += 1) checks.push(cr(`job-${i}`, 'COMPLETED', 'FAILURE', `https://ci.example/log/${i}`));
-  const t = setup({ pr: [pr('OPEN', checks)] });
+  const runs = [cr('build', 'completed', 'success')];
+  for (let i = 1; i <= 14; i += 1) runs.push(cr(`job-${i}`, 'completed', 'failure', `https://ci.example/log/${i}`));
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [checks(...runs)]));
   try {
     const r = t.run('feature-branch');
     assert.equal(r.code, 1);
@@ -96,17 +110,17 @@ test('a failed check: exit 1, names and log URLs after the final line, never mor
 });
 
 test('a PR that merges returns 0 at once, even with checks not finished', () => {
-  const t = setup({ pr: [pr('MERGED', [cr('build', 'IN_PROGRESS', '')], { mergedAt: '2026-10-04T00:00:00Z' })] });
+  const t = setup(onSha('sha-1', [pr('MERGED', 'sha-1', { mergedAt: '2026-10-04T00:00:00Z' })], [checks(cr('build', 'in_progress'))]));
   try {
     const r = t.run('31');
     assert.equal(r.code, 0);
     assert.match(r.final, /^PR 31 MERGED \|/);
-    assert.equal(t.calls().length, 1);
+    assert.equal(t.calls().length, 3);
   } finally { t.fx.cleanup(); }
 });
 
 test('a PR closed unmerged returns 1', () => {
-  const t = setup({ pr: [pr('CLOSED', [cr('build', 'IN_PROGRESS', '')])] });
+  const t = setup(onSha('sha-1', [pr('CLOSED', 'sha-1')], [checks(cr('build', 'in_progress'))]));
   try {
     const r = t.run('31');
     assert.equal(r.code, 1);
@@ -115,13 +129,13 @@ test('a PR closed unmerged returns 1', () => {
 });
 
 test('timeout: exit 2, the checks still pending are named', () => {
-  const t = setup({ pr: [pr('OPEN', [cr('build', 'COMPLETED', 'SUCCESS'), cr('slow', 'IN_PROGRESS', '', 'https://ci.example/slow')])] });
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [checks(cr('build', 'completed', 'success'), cr('slow', 'in_progress', '', 'https://ci.example/slow'))]));
   try {
     const r = t.run('31', '--timeout', '1s');
     assert.equal(r.code, 2, r.stdout + r.stderr);
     assert.match(r.final, /^PR 31 OPEN TIMEOUT after 1s \| checks 1 passed, 0 failed, 2 total, 1 pending \|/);
     assert.deepEqual(r.detail, ['PENDING slow https://ci.example/slow']);
-    assert.ok(t.calls().length >= 3, 'it polled repeatedly while waiting');
+    assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 3, 'it polled repeatedly while waiting');
   } finally { t.fx.cleanup(); }
 });
 
@@ -137,14 +151,14 @@ test('a gh failure that will not heal (no such PR) exits 3 on the first call', (
 });
 
 test('a transient gh failure is retried and the run recovers', () => {
-  const t = setup({ pr: [
-    { err: 'HTTP 502: Bad Gateway', code: 1 },
-    pr('OPEN', [cr('build', 'COMPLETED', 'SUCCESS')]),
-  ] });
+  const t = setup({
+    pr: [{ err: 'HTTP 502: Bad Gateway', code: 1 }, pr('OPEN', 'sha-1')],
+    checkRuns: { 'sha-1': [checks(cr('build', 'completed', 'success'))] },
+  });
   try {
     const r = t.run('31');
     assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.equal(t.calls().length, 2);
+    assert.equal(t.calls().filter((c) => c.startsWith('pr view')).length, 2);
   } finally { t.fx.cleanup(); }
 });
 
@@ -158,7 +172,7 @@ test('gh failing every time gives up with exit 3 after a few tries', () => {
 });
 
 test('usage errors exit 3 and never reach gh', () => {
-  const t = setup({ pr: [pr('OPEN', [])] });
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [checks()]));
   try {
     for (const args of [[], ['31', '--timeout', 'soon'], ['31', '--bogus'], ['1', '2'], ['31', '--repo']]) {
       const r = t.run(...args);
@@ -179,42 +193,114 @@ test('--help exits 0 and prints usage', () => {
 });
 
 test('a PR with no checks reports NO-CHECKS (exit 0) once the grace passes', () => {
-  const t = setup({ pr: [pr('OPEN', [])] });
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [checks()]));
   try {
     const r = t.run('31');
     assert.equal(r.code, 0);
     assert.match(r.final, /^PR 31 OPEN NO-CHECKS \|/);
-    assert.ok(t.calls().length >= 2, 'it waited out the grace, not just one look');
+    assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 2, 'it waited out the grace, not just one look');
   } finally { t.fx.cleanup(); }
 });
 
 test('status contexts count too: a pending one holds the wait, an error fails it', () => {
-  const t = setup({ pr: [
-    pr('OPEN', [cr('build', 'COMPLETED', 'SUCCESS'), { __typename: 'StatusContext', context: 'ci/legacy', state: 'PENDING', targetUrl: 'https://old.example/1' }]),
-    pr('OPEN', [cr('build', 'COMPLETED', 'SUCCESS'), { __typename: 'StatusContext', context: 'ci/legacy', state: 'ERROR', targetUrl: 'https://old.example/1' }]),
-  ] });
+  const t = setup({
+    pr: [pr('OPEN', 'sha-1')],
+    checkRuns: { 'sha-1': [checks(cr('build', 'completed', 'success'))] },
+    statuses: { 'sha-1': [checks(st('ci/legacy', 'pending', 'https://old.example/1')), checks(st('ci/legacy', 'error', 'https://old.example/1'))] },
+  });
   try {
     const r = t.run('31');
     assert.equal(r.code, 1);
     assert.match(r.final, /checks 1 passed, 1 failed, 2 total/);
     assert.equal(r.detail[0], 'FAIL ci/legacy https://old.example/1');
-    assert.equal(t.calls().length, 2);
+    assert.equal(t.calls().filter((c) => c.startsWith('pr view')).length, 2);
   } finally { t.fx.cleanup(); }
 });
 
 test('classifyCheck: skipped and neutral pass, cancelled and timed out fail, queued waits', () => {
-  assert.equal(classifyCheck(cr('a', 'COMPLETED', 'SKIPPED')).verdict, 'pass');
-  assert.equal(classifyCheck(cr('a', 'COMPLETED', 'NEUTRAL')).verdict, 'pass');
-  assert.equal(classifyCheck(cr('a', 'COMPLETED', 'CANCELLED')).verdict, 'fail');
-  assert.equal(classifyCheck(cr('a', 'COMPLETED', 'TIMED_OUT')).verdict, 'fail');
-  assert.equal(classifyCheck(cr('a', 'QUEUED', '')).verdict, 'pending');
-  assert.equal(classifyCheck({ context: 'x', state: 'EXPECTED' }).verdict, 'pending');
+  assert.equal(classifyCheck(cr('a', 'completed', 'skipped')).verdict, 'pass');
+  assert.equal(classifyCheck(cr('a', 'completed', 'neutral')).verdict, 'pass');
+  assert.equal(classifyCheck(cr('a', 'completed', 'cancelled')).verdict, 'fail');
+  assert.equal(classifyCheck(cr('a', 'completed', 'timed_out')).verdict, 'fail');
+  assert.equal(classifyCheck(cr('a', 'queued')).verdict, 'pending');
+  assert.equal(classifyCheck({ context: 'x', state: 'expected' }).verdict, 'pending');
+  assert.equal(classifyCheck(st('x', 'success', 'u')).url, 'u');
+});
+
+// ---- stale checks: bound to the PR's current head commit
+
+test('PR mode reads only the head commit: a previous commit green does not answer for a new head with no checks yet', () => {
+  const t = setup({
+    pr: [pr('OPEN', 'new-sha')],
+    checkRuns: {
+      'old-sha': [checks(cr('build', 'completed', 'success'))],
+      'new-sha': [checks(), checks(cr('build', 'queued')), checks(cr('build', 'in_progress')), checks(cr('build', 'completed', 'success'))],
+    },
+  });
+  try {
+    const r = t.run('31', '--repo', 'o/r');
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.final, /^PR 31 OPEN PASS \| checks 1 passed, 0 failed, 1 total/);
+    assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 4, 'it kept waiting through the empty and queued polls');
+    assert.ok(t.calls().some((c) => c.includes('commits/new-sha/check-runs')));
+    assert.ok(!t.calls().some((c) => c.includes('old-sha')), 'the previous commit is never asked about');
+  } finally { t.fx.cleanup(); }
+});
+
+test("PR mode: a head that never registers checks ends NO-CHECKS, not the old commit's green", () => {
+  const t = setup({
+    pr: [pr('OPEN', 'new-sha')],
+    checkRuns: { 'old-sha': [checks(cr('build', 'completed', 'success'))], 'new-sha': [checks()] },
+  });
+  try {
+    const r = t.run('31');
+    assert.equal(r.code, 0);
+    assert.match(r.final, /^PR 31 OPEN NO-CHECKS \|/);
+    assert.ok(!t.calls().some((c) => c.includes('old-sha')));
+  } finally { t.fx.cleanup(); }
+});
+
+test("PR mode follows a push made while waiting: the new head decides, the old head's pending checks are dropped", () => {
+  const t = setup({
+    pr: [pr('OPEN', 'sha-1'), pr('OPEN', 'sha-2')],
+    checkRuns: {
+      'sha-1': [checks(cr('build', 'in_progress'))],
+      'sha-2': [checks(cr('build', 'completed', 'success'))],
+    },
+  });
+  try {
+    const r = t.run('31', '--repo', 'o/r');
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.final, /^PR 31 OPEN PASS \| checks 1 passed, 0 failed, 1 total/);
+    assert.ok(t.calls().some((c) => c.includes('commits/sha-1/')) && t.calls().some((c) => c.includes('commits/sha-2/')));
+  } finally { t.fx.cleanup(); }
+});
+
+test("PR mode asks for the head commit and uses the PR's own repo for the API calls when --repo is absent", () => {
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [checks(cr('build', 'completed', 'success'))]));
+  try {
+    assert.equal(t.run('31').code, 0);
+    assert.ok(t.calls()[0].includes('headRefOid'), t.calls()[0]);
+    assert.ok(t.calls().filter(isApi).every((c) => c.startsWith('api repos/o/r/commits/sha-1/')), t.calls().join('\n'));
+  } finally { t.fx.cleanup(); }
+});
+
+test('PR mode: a PR answer with no head commit is a gh error (exit 3), never guessed', () => {
+  const t = setup({ pr: [pr('OPEN', '')] });
+  try {
+    const r = t.run('31');
+    assert.equal(r.code, 3);
+    assert.match(r.stderr, /no head commit/);
+  } finally { t.fx.cleanup(); }
 });
 
 // ---- run mode
 
 const job = (name, status, conclusion) => ({ name, status, conclusion, url: `https://github.com/o/r/actions/runs/7/job/${name}` });
 const run = (status, conclusion, jobs) => ({ out: { databaseId: 7, status, conclusion, workflowName: 'CI', url: 'https://github.com/o/r/actions/runs/7', jobs } });
+const branchAt = (sha) => ({ out: { name: 'my-branch', commit: { sha } } });
+const listed = (...rows) => ({ out: rows });
+const lrun = (id, sha, createdAt = '2026-10-04T10:00:00Z') => ({ databaseId: id, status: 'queued', headSha: sha, createdAt });
 
 test('--run <id>: waits for the run, exit 0 on success', () => {
   const t = setup({ run: [
@@ -229,9 +315,10 @@ test('--run <id>: waits for the run, exit 0 on success', () => {
   } finally { t.fx.cleanup(); }
 });
 
-test('--run <branch>: resolves the newest run on the branch first, exit 1 on failure with the failed job', () => {
+test("--run <branch>: resolves the run of the branch's current tip first, exit 1 on failure with the failed job", () => {
   const t = setup({
-    list: [{ out: [] }, { out: [{ databaseId: 7, status: 'queued' }] }],
+    branch: [branchAt('tip-1')],
+    list: [listed(), listed(lrun(7, 'tip-1'))],
     run: [run('completed', 'failure', [job('build', 'completed', 'success'), job('test', 'completed', 'failure')])],
   });
   try {
@@ -239,7 +326,55 @@ test('--run <branch>: resolves the newest run on the branch first, exit 1 on fai
     assert.equal(r.code, 1, r.stdout + r.stderr);
     assert.match(r.final, /^RUN 7 \(CI\) FAIL \(failure\) \| jobs 1 passed, 1 failed, 2 total/);
     assert.equal(r.detail[0], 'FAIL test https://github.com/o/r/actions/runs/7/job/test');
-    assert.ok(t.calls()[0].startsWith('run list --branch my-branch --limit 1'), t.calls().join('\n'));
+    assert.ok(t.calls()[0].startsWith('api repos/'), t.calls().join('\n'));
+    assert.ok(t.calls()[0].includes('/branches/my-branch'), t.calls()[0]);
+    assert.ok(t.calls().some((c) => c.startsWith('run list --branch my-branch')), t.calls().join('\n'));
+  } finally { t.fx.cleanup(); }
+});
+
+test('--run <branch>: a run of the commit before the push is not returned; it waits for the run of the new tip', () => {
+  const t = setup({
+    branch: [branchAt('tip-2')],
+    list: [
+      listed(lrun(5, 'tip-1', '2026-10-04T09:00:00Z')),
+      listed(lrun(5, 'tip-1', '2026-10-04T09:00:00Z')),
+      listed(lrun(9, 'tip-2', '2026-10-04T10:00:00Z'), lrun(5, 'tip-1', '2026-10-04T09:00:00Z')),
+    ],
+    run: [run('completed', 'success', [job('build', 'completed', 'success')])],
+  });
+  try {
+    const r = t.run('--run', 'my-branch');
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.final, /^RUN 9 \(CI\) PASS/);
+    assert.ok(!t.calls().some((c) => c.startsWith('run view 5')), 'the older run is never followed');
+    assert.ok(t.calls().filter((c) => c.startsWith('run list')).length >= 3);
+  } finally { t.fx.cleanup(); }
+});
+
+test("--run <branch>: with only an older run and no run for the tip, it times out (exit 2) rather than answer from the older one", () => {
+  const t = setup({
+    branch: [branchAt('tip-2')],
+    list: [listed(lrun(5, 'tip-1'))],
+    run: [run('completed', 'success', [job('build', 'completed', 'success')])],
+  });
+  try {
+    const r = t.run('--run', 'my-branch', '--timeout', '1s');
+    assert.equal(r.code, 2, r.stdout + r.stderr);
+    assert.match(r.final, /^RUN my-branch TIMEOUT after 1s \| no run found for the branch's current tip tip-2/);
+    assert.ok(!t.calls().some((c) => c.startsWith('run view')));
+  } finally { t.fx.cleanup(); }
+});
+
+test('--run <branch>: several runs of the same tip commit pick the newest', () => {
+  const t = setup({
+    branch: [branchAt('tip-2')],
+    list: [listed(lrun(11, 'tip-2', '2026-10-04T10:00:00Z'), lrun(12, 'tip-2', '2026-10-04T10:05:00Z'), lrun(13, 'tip-1', '2026-10-04T10:09:00Z'))],
+    run: [run('completed', 'success', [job('build', 'completed', 'success')])],
+  });
+  try {
+    const r = t.run('--run', 'my-branch');
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.final, /^RUN 12 /);
   } finally { t.fx.cleanup(); }
 });
 
@@ -265,10 +400,11 @@ test('--run: times out with exit 2 when the run never finishes', () => {
 // ---- telemetry
 
 test('telemetry: one row per run with mode, polls, duration, outcome and exit code', () => {
-  const t = setup({ pr: [
-    pr('OPEN', [cr('build', 'IN_PROGRESS', '')]),
-    pr('OPEN', [cr('build', 'COMPLETED', 'SUCCESS')]),
-  ], run: [run('completed', 'failure', [job('t', 'completed', 'failure')])] });
+  const t = setup({
+    pr: [pr('OPEN', 'sha-1')],
+    checkRuns: { 'sha-1': [checks(cr('build', 'in_progress')), checks(cr('build', 'completed', 'success'))] },
+    run: [run('completed', 'failure', [job('t', 'completed', 'failure')])],
+  });
   try {
     assert.equal(t.run('31').code, 0);
     assert.equal(t.run('--run', '7').code, 1);
@@ -276,7 +412,7 @@ test('telemetry: one row per run with mode, polls, duration, outcome and exit co
     const rows = t.rows();
     assert.equal(rows.length, 3);
     const [a, b, c] = rows;
-    assert.deepEqual([a.mode, a.polls, a.outcome, a.exit_code, a.session_id], ['pr', 2, 'passed', 0, 'sess-prwait']);
+    assert.deepEqual([a.mode, a.polls, a.outcome, a.exit_code, a.session_id], ['pr', 6, 'passed', 0, 'sess-prwait']);
     assert.deepEqual([b.mode, b.polls, b.outcome, b.exit_code], ['run', 1, 'failed', 1]);
     assert.deepEqual([c.outcome, c.exit_code], ['usage', 3]);
     for (const r of rows) {
@@ -288,7 +424,7 @@ test('telemetry: one row per run with mode, polls, duration, outcome and exit co
 });
 
 test('telemetry: no session id exported means no session_id field', () => {
-  const t = setup({ pr: [pr('MERGED', [], { mergedAt: 'x' })] }, { CLAUDE_SESSION_ID: '' });
+  const t = setup({ pr: [pr('MERGED', 'sha-1', { mergedAt: 'x' })], checkRuns: { 'sha-1': [checks()] } }, { CLAUDE_SESSION_ID: '' });
   try {
     assert.equal(t.run('31').code, 0);
     assert.ok(!('session_id' in t.rows()[0]));
@@ -296,7 +432,7 @@ test('telemetry: no session id exported means no session_id field', () => {
 });
 
 test('telemetry: still written with the pr_wait hint option off (it only hides the line)', () => {
-  const t = setup({ pr: [pr('MERGED', [], { mergedAt: 'x' })] }, { CLAUDE_PLUGIN_OPTION_PR_WAIT: '0' });
+  const t = setup({ pr: [pr('MERGED', 'sha-1', { mergedAt: 'x' })], checkRuns: { 'sha-1': [checks()] } }, { CLAUDE_PLUGIN_OPTION_PR_WAIT: '0' });
   try {
     assert.equal(t.run('31').code, 0);
     assert.equal(t.rows().length, 1);

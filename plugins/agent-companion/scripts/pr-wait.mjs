@@ -26,10 +26,17 @@
 // Never prompts. gh is polled with backoff (5s growing to 30s). A transient gh
 // failure is retried; a not-found / not-logged-in failure is not.
 //
-// Known limit: right after a push, GitHub can still report the PREVIOUS
-// commit's checks for a few seconds, and `--run <branch>` resolves the newest
-// run on the branch, which may be the one before your push. Pass the run id
-// when it matters.
+// Bound to the commit, not the branch. Right after a push GitHub can still
+// report the PREVIOUS commit's checks for a few seconds, so:
+//   - PR mode reads the PR's current head commit (headRefOid) and counts only
+//     the check runs and commit statuses of THAT commit; a head commit whose
+//     checks have not registered yet is waited on, never answered from an
+//     older commit. The head is re-read on every poll, so a later push is
+//     followed.
+//   - `--run <branch>` takes the newest run whose head SHA equals the branch's
+//     current remote tip, and keeps waiting (within the timeout) while there is
+//     none yet, instead of returning the run before the push. Once a run is
+//     chosen it is followed to its end. A run id is used as given.
 //
 // Test seams (not for normal use): PR_WAIT_GH_SCRIPT runs a node script in
 // place of gh; PR_WAIT_POLL_MS / PR_WAIT_POLL_MAX_MS set the backoff;
@@ -156,7 +163,7 @@ function parseArgs(argv) {
 // Failures that will not heal by waiting. Anything else is retried.
 const PERMANENT = /could not resolve|no pull requests? found|not found|no workflow runs? found|gh auth login|not logged in|authentication|bad credentials|http 40[134]|invalid|unknown (?:flag|command)|accepts at most|required flag/i;
 
-function ghCall(args) {
+function ghCall(args, lines = false) {
   const script = process.env.PR_WAIT_GH_SCRIPT;
   const cmd = script ? process.execPath : 'gh';
   const full = script ? [script, ...args] : args;
@@ -176,18 +183,20 @@ function ghCall(args) {
     return { ok: false, permanent: PERMANENT.test(msg), msg };
   }
   try {
-    return { ok: true, data: JSON.parse(r.stdout) };
+    // `lines`: newline-delimited JSON, what `gh api --paginate --jq '.x[]'` prints.
+    const data = lines ? String(r.stdout).split(/\r?\n/).filter((l) => l.trim()).map((l) => JSON.parse(l)) : JSON.parse(r.stdout);
+    return { ok: true, data };
   } catch {
     return { ok: false, permanent: false, msg: 'gh returned output that is not JSON' };
   }
 }
 
 // One gh call with transient-failure retries (counted as polls: they are gh calls).
-async function ghJson(args, backoff) {
+async function ghJson(args, backoff, lines = false) {
   let last;
   for (let attempt = 0; attempt < TRANSIENT_RETRIES; attempt += 1) {
     polls += 1;
-    const r = ghCall(args);
+    const r = ghCall(args, lines);
     if (r.ok) return r.data;
     last = r;
     if (r.permanent) break;
@@ -217,7 +226,7 @@ export function classifyCheck(c) {
     const st = up(c.state);
     return {
       name: String(c.context || 'status'),
-      url: c.targetUrl || '',
+      url: c.targetUrl || c.target_url || '',
       verdict: st === 'SUCCESS' ? 'pass' : st === 'FAILURE' || st === 'ERROR' ? 'fail' : 'pending',
     };
   }
@@ -227,7 +236,7 @@ export function classifyCheck(c) {
   if (status === 'COMPLETED') {
     verdict = ['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(conclusion) ? 'pass' : 'fail';
   }
-  return { name: String(c?.name || c?.workflowName || 'check'), url: c?.detailsUrl || c?.url || '', verdict };
+  return { name: String(c?.name || c?.workflowName || 'check'), url: c?.detailsUrl || c?.details_url || c?.html_url || c?.url || '', verdict };
 }
 
 function tally(items) {
@@ -253,7 +262,24 @@ function countsText(t) {
 
 // ---------------------------------------------------------------- PR mode
 
-const PR_FIELDS = 'number,state,mergedAt,mergeStateStatus,statusCheckRollup,url';
+const PR_FIELDS = 'number,state,mergedAt,mergeStateStatus,url,headRefOid';
+
+// owner/repo for the API calls: --repo, else the one in the PR's own URL, else
+// gh's placeholders (the repository gh finds from the current directory).
+function repoOf(opts, prUrl) {
+  if (opts.repo) return opts.repo;
+  const m = /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/pull\//.exec(String(prUrl || ''));
+  return m ? m[1] : '{owner}/{repo}';
+}
+
+// The checks of ONE commit: its check runs (latest attempt of each name) and
+// its legacy commit statuses. Never the PR's rollup, which can still describe
+// the previous head for a few seconds after a push.
+async function checksOfCommit(repo, sha, backoff) {
+  const runs = await ghJson(['api', `repos/${repo}/commits/${sha}/check-runs?per_page=100`, '--paginate', '--jq', '.check_runs[]'], backoff, true);
+  const statuses = await ghJson(['api', `repos/${repo}/commits/${sha}/status?per_page=100`, '--paginate', '--jq', '.statuses[]'], backoff, true);
+  return [...runs, ...statuses].map(classifyCheck);
+}
 
 async function waitPr(opts) {
   const base = ['pr', 'view', opts.target, ...(opts.repo ? ['--repo', opts.repo] : []), '--json', PR_FIELDS];
@@ -265,7 +291,12 @@ async function waitPr(opts) {
   for (;;) {
     const pr = await ghJson(base, backoff);
     const num = pr.number ?? opts.target;
-    const items = (Array.isArray(pr.statusCheckRollup) ? pr.statusCheckRollup : []).map(classifyCheck);
+    const sha = String(pr.headRefOid || '');
+    if (!sha) {
+      process.stderr.write('pr-wait: gh returned no head commit (headRefOid) for the PR\n');
+      finish(3, 'gh-error');
+    }
+    const items = await checksOfCommit(repoOf(opts, pr.url), sha, backoff);
     const t = tally(items);
     const state = String(pr.state || '').toUpperCase();
     const elapsed = () => fmtElapsed(Date.now() - startedAt);
@@ -321,12 +352,22 @@ async function waitRun(opts) {
   const deadline = startedAt + opts.timeoutMs;
   const scope = opts.repo ? ['--repo', opts.repo] : [];
   let runId = /^\d+$/.test(opts.target) ? opts.target : '';
+  let tipSha = '';
   let last = null;
 
   for (;;) {
     if (!runId) {
-      const list = await ghJson(['run', 'list', '--branch', opts.target, '--limit', '1', '--json', 'databaseId,status', ...scope], backoff);
-      if (Array.isArray(list) && list[0]?.databaseId) runId = String(list[0].databaseId);
+      // The branch's CURRENT remote tip, then the newest run of that exact commit.
+      const repo = opts.repo || '{owner}/{repo}';
+      const ref = opts.target.split('/').map(encodeURIComponent).join('/');
+      const branch = await ghJson(['api', `repos/${repo}/branches/${ref}`], backoff);
+      tipSha = String(branch?.commit?.sha || '');
+      if (tipSha) {
+        const list = await ghJson(['run', 'list', '--branch', opts.target, '--limit', '30', '--json', 'databaseId,status,headSha,createdAt', ...scope], backoff);
+        const mine = (Array.isArray(list) ? list : []).filter((r) => r?.databaseId && r.headSha === tipSha);
+        mine.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || Number(b.databaseId) - Number(a.databaseId));
+        if (mine[0]) runId = String(mine[0].databaseId);
+      }
     }
     if (runId) {
       const run = await ghJson(['run', 'view', runId, ...scope, '--json', RUN_FIELDS], backoff);
@@ -360,7 +401,7 @@ async function waitRun(opts) {
   const tail = last
     ? [`${last.label} TIMEOUT after ${fmtElapsed(opts.timeoutMs)} | jobs ${last.t.pass} passed, ${last.t.fail} failed, ${last.t.total} total | ${fmtElapsed(Date.now() - startedAt)}`,
       ...detailLines('FAIL', last.t.failed), ...detailLines('PENDING', last.t.waiting)]
-    : [`RUN ${opts.target} TIMEOUT after ${fmtElapsed(opts.timeoutMs)} | no run found | ${fmtElapsed(Date.now() - startedAt)}`];
+    : [`RUN ${opts.target} TIMEOUT after ${fmtElapsed(opts.timeoutMs)} | no run found for the branch's current tip${tipSha ? ` ${tipSha.slice(0, 7)}` : ''} | ${fmtElapsed(Date.now() - startedAt)}`];
   finish(2, 'timeout', tail.slice(0, MAX_DETAIL_LINES + 1));
 }
 

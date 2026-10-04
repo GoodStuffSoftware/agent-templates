@@ -8,7 +8,9 @@
 //                                       worktree | last commit | unpushed N
 //   node git-brief.mjs landed <sha|branch>
 //                                       one line: ON <default> (sha) |
-//                                       NOT on <default> (ahead N)
+//                                       ON <default> (cherry-picked) |
+//                                       NOT on <default> (ahead N; a squash
+//                                       merge wouldn't show)
 //   --no-fetch                          read local refs only
 //   --fresh                             fetch even if the last fetch was recent
 //   --cwd <dir>                         repo to look at (default: cwd)
@@ -54,6 +56,7 @@ function envMs(name, fallback) {
 const fetchTimeout = () => envMs('AC_GIT_BRIEF_FETCH_TIMEOUT_MS', FETCH_TIMEOUT_MS);
 const localTimeout = () => envMs('AC_GIT_BRIEF_LOCAL_TIMEOUT_MS', LOCAL_TIMEOUT_MS);
 export const SUBJECT_MAX = 60;
+export const SQUASH_NOTE = "a squash merge wouldn't show";
 export const STAMP_FILE = 'ac-git-brief-fetch.json';
 
 function gitEnv() {
@@ -187,8 +190,9 @@ export function gitBrief({ cwd = process.cwd(), fetch = true, force = false, now
 }
 
 // `landed <sha|branch>`. ON: the commit is an ancestor of origin's default
-// branch, or every one of its commits has a patch-equivalent there (a rebase
-// merge). Squash merges are not detected: they read as NOT on.
+// branch, or every one of its commits has a patch-equivalent there, as
+// `git cherry` finds it (a cherry-pick or a rebase merge): `(cherry-picked)`.
+// Squash merges are not detected: they read as NOT on, with a note saying so.
 export function landed(target, { cwd = process.cwd(), fetch = true, force = false, now = Date.now() } = {}) {
   const t0 = Date.now();
   try {
@@ -212,10 +216,21 @@ export function landed(target, { cwd = process.cwd(), fetch = true, force = fals
     const short = sha.slice(0, 7);
     if (git(cwd, ['merge-base', '--is-ancestor', sha, base]).status === 0) return done(`ON ${dflt} (${short})`);
     const n = git(cwd, ['rev-list', '--count', `${base}..${sha}`]);
-    const ahead = n.ok && /^\d+$/.test(n.out) ? Number(n.out) : null;
+    let ahead = n.ok && /^\d+$/.test(n.out) ? Number(n.out) : null;
+    // Patch equivalence, as `git cherry` does it: a commit counts as landed
+    // when the default branch has a commit with the same patch (a cherry-pick
+    // or a rebase merge: new sha, same change). All equivalent: landed. Some
+    // equivalent: only the rest are "ahead".
     const ch = git(cwd, ['cherry', base, sha]);
-    if (ch.ok && ch.out && ch.out.split('\n').every((l) => l.startsWith('-'))) return done(`ON ${dflt} (${short}, rebased)`);
-    return done(ahead === null ? `NOT on ${dflt}` : `NOT on ${dflt} (ahead ${ahead})`);
+    if (ch.ok && ch.out) {
+      const rows = ch.out.split('\n').filter(Boolean);
+      const open = rows.filter((l) => l.startsWith('+')).length;
+      if (open === 0 && rows.every((l) => l.startsWith('-'))) return done(`ON ${dflt} (cherry-picked)`);
+      if (rows.some((l) => l.startsWith('-'))) ahead = open;
+    }
+    // A squash merge has no patch-equivalent commit, so it cannot be told
+    // from unmerged work: say so, but only when the answer is NOT.
+    return done(`NOT on ${dflt} (${ahead === null ? '' : `ahead ${ahead}; `}${SQUASH_NOTE})`);
   } catch {
     return { line: null, fetched: false, ms: Date.now() - t0 };
   }

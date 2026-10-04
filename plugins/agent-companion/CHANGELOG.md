@@ -4,6 +4,10 @@ All notable changes to the `agent-companion` plugin. Dates are UTC.
 
 ## Unreleased
 
+Token-saving trial: four changes shipped together, each with its own on/off toggle and telemetry stream, so the trial can be switched off per feature and measured per feature (injected-text numbers below).
+
+### Trimmed injected text
+
 Trimmed the text the plugin adds to every session, keeping every requirement. Source: `plugin-overhead-2026-10-04.md` (usage postmortem), trims 1 to 4.
 
 - Scout surface (SessionStart): the main session gets a pointer line (signal count, kinds, path to `scout-latest.json`, "mention only if asked") instead of the full signal list; subagents get nothing (the hook already skipped them: `sessionIsSubagent`). The CI-red line is unchanged.
@@ -21,22 +25,43 @@ Trimmed the text the plugin adds to every session, keeping every requirement. So
 
   Per item: scout main 567 -> 290 (report averaged 2,907 on real multi-signal results, and it grows with signals; the pointer does not), subagent 0 -> 0; rules main 932 -> 577, subagent 0 -> 0; contract subagent 758 -> 473. The report's 3,924 (scout) and 2,011 (rules) per-subagent figures predate the subagent skip already in 0.29.29.
 
-Git brief (trial): one line of git state at agent start, and one script instead of a dozen git reads.
+### Git brief (option `git_brief`)
 
-- New `scripts/git-brief.mjs`: prints `branch | ahead/behind origin's default branch | uncommitted N | worktree | last commit | unpushed N`; `landed <sha|branch>` prints `ON main (sha)` / `NOT on main (ahead N)`. Fetches origin's default branch at most every 5 minutes per repository (shared by linked worktrees), 1.5 s cap, never prompts; a failed fetch is not retried for 1 minute. Prints nothing and exits 0 outside a git repository or on any error. Flags `--no-fetch`, `--fresh`, `--cwd`.
+One line of git state at agent start, and one script instead of a dozen git reads.
+
+- New `scripts/git-brief.mjs`: prints `branch | ahead/behind origin's default branch | uncommitted N | worktree | last commit | unpushed N`; `landed <sha|branch>` prints `ON main (sha)` (an ancestor of the default branch), `ON main (cherry-picked)` (every commit is patch-equivalent to one on it, the way `git cherry` decides, so a rebase or cherry-pick merge counts) or `NOT on main (ahead N; a squash merge wouldn't show)` (a squash merge produces a different patch and cannot be detected reliably, so the answer says so instead of claiming the branch is unmerged). Fetches origin's default branch at most every 5 minutes per repository (shared by linked worktrees), 1.5 s cap, never prompts; a failed fetch is not retried for 1 minute. Prints nothing and exits 0 outside a git repository or on any error. Flags `--no-fetch`, `--fresh`, `--cwd`.
 - New hook `hooks/git-brief.mjs` on SessionStart (every source) and SubagentStart: injects that line as `additionalContext`, with the refresh command, so agents stop running `git status` / `git fetch` / `git rev-list`. Motivated by about 5,100 git-read Bash calls (882 of them `git fetch origin`) in a 7-day transcript count.
 - Option `git_brief` (default on for the trial; off with `false` or `CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0`, which makes the hook do nothing at all).
 - Telemetry stream `telemetry/git-brief.jsonl`: one row per injection and per script run (chars injected or returned, whether a fetch ran, duration). Documented in `docs/TELEMETRY.md`.
 - Tests: `tests/git-brief.test.mjs` (real throwaway repositories with a local bare origin).
 
-Read dedupe: a PreToolUse hook that denies a repeat Read of lines the same agent already read, when the file is unchanged and the read would return 2,000 characters or more. Fills the gap Claude Code's own "File unchanged" stub leaves (a range inside an earlier larger read, A-B-A alternation, ranges spanning two earlier reads; 551 of 654 measured repeat reads in 7 days were partial). The denial is one sentence and the identical call, repeated, runs. State is per agent; cleared by an edit, any mtime or size change, `PreCompact` and `SessionStart` `compact`/`clear`; fails open. Option `read_dedupe` (default on; `CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0`); telemetry in `read-dedupe.jsonl`.
+### Read dedupe (option `read_dedupe`)
 
-PR and CI wait: one call that waits inside a script instead of repeated `gh` and sleep polls (trial).
+A PreToolUse hook that denies a repeat Read of lines the same agent already read, when the file is unchanged and the read would return 2,000 characters or more. Fills the gap Claude Code's own "File unchanged" stub leaves (a range inside an earlier larger read, A-B-A alternation, ranges spanning two earlier reads; 551 of 654 measured repeat reads in 7 days were partial). The denial is one sentence and the identical call, repeated, runs. State is per agent; cleared by an edit, any mtime or size change, `PreCompact` and `SessionStart` `compact`/`clear`; fails open. Option `read_dedupe` (default on; `CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0`); telemetry in `read-dedupe.jsonl`.
+
+### PR and CI wait (option `pr_wait`)
+
+One call that waits inside a script instead of repeated `gh` and sleep polls.
 
 - New `scripts/pr-wait.mjs`: `pr-wait <pr-number|branch> [--repo owner/repo] [--timeout 20m]` waits until a PR's checks finish or it merges or closes; `--run <run-id|branch>` does the same for a GitHub Actions run. It prints one start line, then one final line (state, checks passed/failed/total, elapsed) and up to nine failed-check lines with log URLs. Exit codes: 0 passed or merged, 1 failed or closed unmerged, 2 timeout, 3 usage or gh error. Polls gh inside the script with backoff (5s to 30s), never prompts, and is safe under `run_in_background`.
+- Bound to the commit, not the branch: PR mode reads the PR's head commit (`headRefOid`) on every poll and counts only the check runs and statuses of that commit, so the previous commit's checks (still reported for a few seconds after a push) never answer for it; a head with no checks yet is waited on. `--run <branch>` takes the newest run whose head SHA equals the branch's current remote tip and keeps waiting within the timeout while there is none; a run id is used as given. Each poll is three `gh` calls, all inside the process.
 - New option `pr_wait` (default on; `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` turns it off) and standing rule `pr-wait-hint`: one session-start line (150 characters or fewer) naming the script. Off hides only that line; the script still runs.
 - Telemetry stream `telemetry/pr-wait.jsonl`, one row per run: mode, polls, duration, outcome, exit code (`docs/TELEMETRY.md`).
-- Tests: `tests/pr-wait.test.mjs` (gh stubbed), plus the rule-count updates in `tests/standing-rules.test.mjs`.
+- Tests: `tests/pr-wait.test.mjs` (gh stubbed, including a previous-commit-green PR and a run list holding only the commit before the push), plus the rule-count updates in `tests/standing-rules.test.mjs`. The standing-rule hint is written in the trimmed style (one line, 150 characters or fewer).
+
+### Injected text with all four changes
+
+Same method as the trim table (static run of every SessionStart and SubagentStart hook, clean config dir, 3-signal scout; chars of `additionalContext`). Main = scout pointer + standing rules + git brief; the machine-specific capacity line (about 120) is left out. Subagent = what SubagentStart injects (reporting contract + git brief); standing rules and scout add nothing for a worker. `read_dedupe` injects nothing at start (it only denies a repeat Read), so its row never moves.
+
+| Toggles | Main session start | Subagent start |
+|---|---|---|
+| all on | 1,354 | 820 |
+| `git_brief` off | 1,007 | 473 |
+| `pr_wait` off | 1,218 | 820 |
+| `read_dedupe` off | 1,354 | 820 |
+| all three off (the trimmed baseline) | 871 | 473 |
+
+So the three trial features add 483 characters to a main session start (git brief 347, pr-wait hint 136) and 347 to a subagent start (git brief); each is gone with its own switch.
 
 ## 0.29.32 — 2026-10-04
 
