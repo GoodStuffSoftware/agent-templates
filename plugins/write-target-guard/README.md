@@ -202,10 +202,12 @@ to the user; plain stdout/stderr reach only the debug log) plus a stderr line:
   remove/disable the plugin …"*
 - **Malformed config:** *"write-target-guard is INACTIVE: config at `<path>` is
   malformed (`<reason>`). Write, Edit, MultiEdit and NotebookEdit are UNGUARDED until it is fixed."*
-- **Internal failure:** hook input that is not a JSON object (garbage, empty or
-  non-object stdin), or an unexpected exception while reading the config or judging
+- **Internal failure:** an unexpected exception while reading the config or judging
   the call: *"write-target-guard is INACTIVE: `<reason>`. Write, Edit, MultiEdit and
   NotebookEdit are UNGUARDED for this call (the guard failed open)."*
+  Hook input that is not valid JSON (garbage or blank stdin) is the one exception:
+  it still fails open as a silent `{}`, the original contract (empty stdin reads as
+  `{}`, and a non-object input is allowed).
 
 A **partly** malformed config is salvaged, loudly, never silently. Each invalid
 piece is dropped with one `WARNING` naming the field, on stderr and in the
@@ -222,8 +224,9 @@ guard as a plugin, `CLAUDE_PLUGIN_ROOT` is set, and a *deleted* config is exactl
 the case that must stay loud there — a removed config is the one off-switch we
 refuse to make silent.
 
-The **only** path to a *silent* allow is an **explicit opt-out inside a valid
-config**: top-level `"enabled": false`, or an empty `"repos": []`. Everything else
+Apart from unparsable hook input (above), the **only** path to a *silent* allow is
+an **explicit opt-out inside a valid config**: top-level `"enabled": false`, or an
+empty `"repos": []`. Everything else
 (a real config with repos) enforces.
 
 ### Why fail open, not closed?

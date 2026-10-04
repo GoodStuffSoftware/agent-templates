@@ -161,10 +161,12 @@
 //   every call. The decision itself is UNCHANGED: an exact --config pair if present, else
 //   the default config; a DENY stays a DENY and carries the warning alongside. (Before, with
 //   a disabled default config, `--CONFIG <enforcing config>` silently allowed primary code.)
-// 2026-10-03: internal failures fail open LOUDLY, never as a silent {}: unparsable, empty or
-//   non-object stdin, a throw while preparing the config's repos, a throw in decide(), or any
-//   other unexpected throw in main each emit an INACTIVE stderr line and systemMessage, in
-//   the same style as a malformed config. They still fail open (the outer fail-open stays).
+// 2026-10-03: internal failures fail open LOUDLY, never as a silent {}. This covers only a
+//   throw while preparing the config's repos and a throw in decide() (and the outer catch
+//   for any other unexpected throw in main): each emits an INACTIVE stderr line and
+//   systemMessage, in the same style as a malformed config, and still fails open.
+//   Unparsable stdin stays a silent {} to preserve the original test contract ("garbage
+//   stdin fails open -> {}"); all stdin handling is unchanged from before this round.
 // 2026-10-03: the over-long-path deny reason says what to do: the path is longer than the
 //   Windows maximum (32,767 chars), so give the fully qualified, collapsed path. (The old
 //   text said no real file has such a path; a writer that collapses a\..\ can still land one.)
@@ -982,14 +984,13 @@ function main() {
         `Config used for this call: ${used}. Fix the hook command (hooks.json or settings.json) to clear this warning.`;
     }
 
+    // Hook input exactly as before fix I: unparsable stdin stays a silent {} (the original
+    // test contract), empty stdin reads as {}, and a non-object goes on to decide() (allow).
     let j;
     try {
-      j = JSON.parse(input.replace(/^\uFEFF/, ''));
-    } catch (e) {
-      return out(internalInactive(`its input (the tool call, on stdin) is not valid JSON (${errText(e)})`));
-    }
-    if (!j || typeof j !== 'object' || Array.isArray(j)) {
-      return out(internalInactive(`its input (the tool call, on stdin) is not a JSON object (got ${showVal(j)})`));
+      j = JSON.parse((input || '{}').replace(/^\uFEFF/, ''));
+    } catch {
+      return out({}); // garbage stdin -> fail open, silent
     }
 
     let loaded = cp.error ? { status: 'malformed', error: cp.error, path: '(--config argument)' } : loadConfig(cp.path);

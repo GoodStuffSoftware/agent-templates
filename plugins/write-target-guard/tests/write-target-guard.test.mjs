@@ -13,8 +13,6 @@
 //     write-target-guard.config.json`, a fixture config whose primary is the temp repo, and
 //     CLAUDE_PLUGIN_ROOT stripped. (The hook reads its default config from the OS account's
 //     home, os.userInfo().homedir, never USERPROFILE/HOME; see the fix E cases.)
-// One of the 43 changed its expectation on 2026-10-03 (fix I, L2): garbage stdin still fails
-// open, but loudly (an INACTIVE systemMessage), not as a silent {}.
 // After the 43 come NEW cases for the 2026-10-03 work: P1/P2/P3 alias-hardening, P5 root
 // config files, self-protection of the trust anchor, the loud fail-open / opt-out, the
 // denial of unresolvable UNC targets (lexically and after realpath), configured paths
@@ -430,13 +428,10 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     assertMainDenies('\\\\?\\' + HOOK);
   });
 
-  test('END-TO-END: garbage stdin fails open, loudly (INACTIVE systemMessage, no deny)', () => {
+  test('END-TO-END: garbage stdin fails open -> {}', () => {
     const r = spawnHook(homeValid, 'not json');
     assert.equal(r.status, 0);
-    const o = JSON.parse(r.stdout);
-    assert.notEqual(o.hookSpecificOutput?.permissionDecision, 'deny', r.stdout);
-    assert.match(o.systemMessage || '', /INACTIVE/, r.stdout);
-    assert.match(r.stderr, /INACTIVE/, r.stderr);
+    assert.equal(r.stdout, '{}');
   });
 
   // ---------------------------------------------------------------------------
@@ -1772,15 +1767,13 @@ describe('write-target-guard', { skip: WINONLY }, () => {
       assert.doesNotMatch(res.r.stderr, /WARNING/, res.r.stderr);
     }
   });
-  test('fix I (L2): garbage, empty or non-object stdin -> loud INACTIVE naming stdin, never a silent {} and never a deny', () => {
-    for (const s of ['not json', '', '   ', '\uFEFF', 'null', '42', '"str"', 'true', '[]', '[1,2]', '{"tool_name":']) {
+  test('fix I2 (L2 scope): garbage, empty or non-object stdin keeps the original contract -> a silent {}, never INACTIVE, never a deny', () => {
+    for (const s of ['not json', '', '   ', '\uFEFF', 'null', '42', '"str"', 'true', '[]', '[1,2]', '{"tool_name":', '{}']) {
       const r = spawnHook(homeValid, s);
       assert.equal(r.status, 0, r.stderr);
-      inactive({ r, o: JSON.parse(r.stdout) }, /its input \(the tool call, on stdin\) is not (valid JSON|a JSON object)/, JSON.stringify(s));
+      assert.equal(r.stdout, '{}', JSON.stringify(s));
+      assert.doesNotMatch(r.stderr, /INACTIVE/, `${JSON.stringify(s)}: ${r.stderr}`);
     }
-    const ok = spawnHook(homeValid, '{}'); // a valid object that is not a guarded tool call: still the quiet allow
-    assert.equal(ok.status, 0, ok.stderr);
-    assert.equal(ok.stdout, '{}');
   });
   test('fix I (L2): a throw while judging the call -> loud INACTIVE (INACTIVE first, then any config warning), never a deny', () => {
     const tgt = fixiDenyT();

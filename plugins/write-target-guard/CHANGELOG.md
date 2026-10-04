@@ -89,9 +89,9 @@ hook (originally hard-coded to one repo) and generalised.
   `--config` pair (a misspelling such as `--CONFIG`, `-config` or an em dash, or a
   stray flag) is ignored with a warning on every call that names it and the config
   used; the decision is unchanged, and a deny stays a deny.
-- **Internal failures fail open loudly.** Garbage, empty or non-object hook input, or
-  an unexpected error while reading the config or judging a call, now shows the
-  INACTIVE notice instead of allowing silently.
+- **Internal failures fail open loudly.** An unexpected error while reading the
+  config or judging a call now shows the INACTIVE notice instead of allowing
+  silently. Unparsable hook input still fails open silently, as before.
 - **Clearer over-long path message.** The deny for a target past 32,767 characters
   now asks for the fully qualified, collapsed path.
 - **`--config` accepts a `\??\` path**; the prefix is stripped before the file is read.
