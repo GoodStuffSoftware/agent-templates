@@ -1,6 +1,6 @@
 ---
 name: routing-table
-description: Show the current model routing table — tiers, effort levels, the weight × kind decision grid, consequence floors, reviewer parity, named task types, and open calibration questions — rendered live from the plugin's config, and manage the operator's own routing profile (/ac routing set, unset, show, why, rollback). Use when asked to show, print, or explain the routing table, which model handles which weight or task type, what effort a task kind gets, to set or undo a personal routing row ("route integration to sonnet for me"), or why a type routes where it does.
+description: Show the live model routing table (tiers, effort, weight x kind grid, floors, reviewer parity, task types) and manage the personal routing profile (/ac routing set, unset, show, why, rollback). Use to show or explain the table, which model handles which task type, to set or undo a route ("route integration to sonnet for me"), or why a type routes where it does.
 ---
 
 # Show the routing table

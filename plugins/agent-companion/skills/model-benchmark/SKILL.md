@@ -1,6 +1,6 @@
 ---
 name: model-benchmark
-description: Reusable procedure for re-running agent-companion's model x effort benchmark (scripts/benchmark.mjs, bench/) when the lineup, aliases, or plan-usage multipliers change. Use when a new model release ships, an alias is remapped (e.g. `opus` starts resolving to a different model), the calibration scout raises `harness_version_changed` or `routing_trial_review_due`, the operator asks "is model X worth it" or "should this route to a different tier", or a re-measure date recorded in config/model-tiers.json is reached. Not for a one-off "run this one task once" — for that, use scripts/benchmark.mjs directly.
+description: Procedure for re-running the model x effort benchmark (scripts/benchmark.mjs, bench/). Use when a new model ships, an alias is remapped, the scout raises `harness_version_changed` or `routing_trial_review_due`, the operator asks "is model X worth it" or "should this route to a different tier", or a re-measure date in config/model-tiers.json is reached. Not for one-off task runs.
 ---
 
 # Model x effort benchmark

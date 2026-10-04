@@ -1,6 +1,6 @@
 ---
 name: calibration-scout
-description: Daily calibration scout for agent-companion. Runs deterministic drift detectors, then dispatches heavier calibration routines only when a signal fires. Use when running the daily agent-companion calibration, checking for Claude Code harness drift, auditing model routing against the current lineup, or investigating whether guardrails have silently stopped firing.
+description: Daily agent-companion calibration scout - runs drift detectors, dispatches heavier routines only when a signal fires. Use to run the daily calibration, check Claude Code harness drift, audit model routing against the lineup, or see whether guardrails stopped firing.
 ---
 
 # Calibration scout

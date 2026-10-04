@@ -1,6 +1,6 @@
 ---
 name: version
-description: Say which agent-companion version is running, and whether every installed copy is current. Claude Code keeps several copies of the plugin (the CLI plugin cache, the desktop app's own copy, the marketplace clone) and they drift apart. Use when asked "what version", "which agent-companion version", "is the plugin up to date", "is the desktop app on the new version", "why is the old routing still in effect", or "/ac version".
+description: Say which agent-companion version is running and whether every installed copy (CLI cache, desktop app copy, marketplace clone) is current. Use for "what version", "which agent-companion version", "is the plugin up to date", "is the desktop app on the new version", "why is the old routing still in effect", or "/ac version".
 ---
 
 # version — which copy is running, and are they all current

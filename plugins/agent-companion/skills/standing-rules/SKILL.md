@@ -1,6 +1,6 @@
 ---
 name: standing-rules
-description: Add, inspect, test or disable "always do X if Y" rules that a hook re-injects instead of relying on a written rule surviving a long session. Use when asked to make something always happen, add a standing instruction or house rule, "remember to always do this when I say that", make prompts come back copyable, stop a rule being forgotten or ignored, or when a rule in CLAUDE.md keeps getting dropped mid-session.
+description: Add, inspect, test or disable "always do X if Y" rules a hook re-injects, instead of a written rule surviving a long session. Use to make something always happen, add a standing instruction or house rule, "remember to always do this when I say that", make prompts copyable, or when a CLAUDE.md rule keeps getting dropped.
 ---
 
 # standing-rules — conditional instructions a hook keeps re-applying
