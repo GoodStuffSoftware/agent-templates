@@ -67,6 +67,11 @@ hook (originally hard-coded to one repo) and generalised.
   the Windows maximum of 32,767 characters is denied. Below it, a long run of dots or
   spaces, or a deep not-yet-created tail, decides in well under a second; before, it
   could outrun the hook's time limit, which lets the write through.
+- **An alias above a junction loop still folds.** A deep target under a junction loop
+  in a primary, reached through an 8.3 name, junction or `subst` alias of it, is
+  denied whatever error code the loop fails with. Before, the guard fell back to the
+  unfolded path and allowed it (seen on the Windows CI runner, whose temp dir is an
+  8.3 spelling).
 - **Control characters denied.** A target containing NUL or any other character
   below 0x20 is denied as an invalid path; a NUL had let `…\src\x.ts\0.md` pass as
   markdown.

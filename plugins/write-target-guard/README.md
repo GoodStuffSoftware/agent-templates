@@ -242,9 +242,13 @@ network; a dead UNC host was measured at ~2.7s — within the hook's 15s timeout
 latency cost, not a correctness one.
 Normal local paths resolve in well under a millisecond. The walk is bounded: a
 deep not-yet-created tail (up to 16k segments at the 32,767-character maximum) is
-searched in a few dozen probes rather than one per segment, and a chain that fails
-at every depth for a reason other than "not found" (a junction loop) stops after 64
-probes and uses the lexical path. The worst cases measured about 0.1–0.5s per call.
+searched in a few dozen probes rather than one per segment. A chain that fails at
+every depth for a reason other than "not found" (a junction loop), whatever the
+error code, stops walking after 64 probes; a gallop and a binary search then find
+the deepest ancestor above it that does resolve, so an alias above the loop (an 8.3
+name, a junction or `subst` drive into the checkout) still folds. Only when nothing
+resolves is the bare lexical path used. The worst cases measured about 0.1–0.7s per
+call.
 
 ---
 

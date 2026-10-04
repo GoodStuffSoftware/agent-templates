@@ -138,9 +138,14 @@
 //   found" (ENOENT/ENOTDIR: nothing below a missing or non-directory component exists), then
 //   walks up to the first realpath success as before, so the result is the same deepest
 //   existing ancestor; a 16k-segment tail at the 32,767-character maximum went from 16k
-//   probes (3.8 s) to about 80. That walk up is itself capped at 64 probes, after which the
-//   lexical path is used, as on any realpath failure (only a planted chain such as a symlink
-//   loop, failing ELOOP at every depth, gets that far).
+//   probes (3.8 s) to about 80. That walk up is itself capped at 64 probes (only a planted
+//   chain such as a symlink loop, failing ELOOP at every depth, gets that far).
+// 2026-10-03: past that cap, the walk no longer drops to the bare lexical path. It gallops
+//   up and binary-searches for the deepest ancestor that resolves, and re-appends the rest.
+//   The bare lexical path kept every alias ABOVE the loop unfolded: on a CI runner whose
+//   temp dir is spelled with an 8.3 name (<user>~1), a 32,767-character target under a
+//   junction loop in the primary did not match the primary's realpath'd root, so the write
+//   was ALLOWED. A junction or subst alias of the checkout did the same on any machine.
 // 2026-10-03: every file the hook reads is read through a size bound (open, fstat, a capped
 //   read; never readFileSync): 4 KB for the .git file, HEAD and rebase head-name, 64 KiB for
 //   the config. The gitdir: line is parsed in one linear pass with the same result as the
@@ -379,10 +384,11 @@ function realpathAncestor(norm, realpathFn = realpathSync.native) {
 // (it exists, or it failed some other way, such as EPERM on a protected directory whose
 // children still resolve); nothing deeper can realpath. From there the walk goes up exactly
 // as the bottom-up walk does, to the first realpath success: the same ancestor, in
-// O(log depth) probes. That walk up stops after REALPATH_BOTTOM_UP probes and falls back to
-// the lexical path, like any realpath failure: only a planted structure (a symlink loop, say,
-// which fails ELOOP at every depth below it) gets that far, and probing all of it would run
-// past the hook's time limit, which fails open.
+// O(log depth) probes. That walk up stops after REALPATH_BOTTOM_UP probes: only a planted
+// structure (a symlink loop, say, which fails ELOOP at every depth below it) gets that far,
+// and probing all of it would run past the hook's time limit, which fails open. From there a
+// gallop and a binary search find the deepest ancestor above that structure that resolves,
+// so an alias above it still folds; the lexical path is used only when nothing resolves.
 function deepTailAncestor(cur, tail, norm, realpathFn) {
   const root = path.win32.parse(cur).root; // 'c:\' for a drive path, '' for a relative one
   const rest = cur.slice(root.length);
@@ -407,14 +413,38 @@ function deepTailAncestor(cur, tail, norm, realpathFn) {
     if (probe(mid).notFound) hi = mid - 1;
     else lo = mid;
   }
-  for (let d = lo, n = 0; d >= 0 && n < REALPATH_BOTTOM_UP; d--, n++) {
-    const r = probe(d);
-    if (r.real !== undefined) {
-      const below = segs.slice(d).concat(tail);
-      return below.length ? path.win32.join(r.real, ...below) : r.real;
-    }
+  const resolvedAt = (d) => {
+    const below = segs.slice(d).concat(tail);
+    return below.length ? path.win32.join(probe(d).real, ...below) : probe(d).real;
+  };
+  let d = lo;
+  for (let n = 0; d >= 0 && n < REALPATH_BOTTOM_UP; d--, n++) {
+    if (probe(d).real !== undefined) return resolvedAt(d);
   }
-  return norm; // nothing resolved (or the walk-up bound was hit)
+  // Past the walk-up bound: depths lo..d+1 all failed in some way other than "not found",
+  // a planted chain such as a junction loop, which fails at every depth below it (ELOOP
+  // here; whatever code a runner returns, it is the same failure). The lexical path alone
+  // is not enough: an alias ABOVE that chain (an 8.3 short name in the temp or profile
+  // dir, a junction or subst drive into the checkout) never folds, so a target inside a
+  // primary does not match the primary's realpath'd root, and the write was allowed. So
+  // the deepest ancestor that DOES resolve is found: gallop up (1, 2, 4 ... levels) to a
+  // success, then binary-search the boundary. Such a failure fails the same way at every
+  // deeper path, so this is the bottom-up walk's answer in O(log depth) probes. Only when
+  // nothing resolves at all (not even the top of the chain) is the lexical path used.
+  let bad = d + 1; // the shallowest depth known to fail
+  let good = -1; // a depth known to resolve
+  for (let step = 1; bad > 0; step *= 2) {
+    const up = Math.max(0, bad - step);
+    if (probe(up).real !== undefined) { good = up; break; }
+    bad = up;
+  }
+  if (good < 0) return norm; // nothing resolved
+  while (bad - good > 1) {
+    const mid = (good + bad) >> 1;
+    if (probe(mid).real !== undefined) good = mid;
+    else bad = mid;
+  }
+  return resolvedAt(good);
 }
 
 const isUnc = (p) => p.startsWith('\\\\');

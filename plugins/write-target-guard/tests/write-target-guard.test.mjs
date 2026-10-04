@@ -1354,6 +1354,81 @@ describe('write-target-guard', { skip: WINONLY }, () => {
       for (const l of [lp1, lp2]) { try { unlinkSync(l); } catch { /* ignore */ } }
     }
   });
+
+  // fix H — 2026-10-03: past the 64-probe walk-up cap (a junction loop under the target),
+  // the walk used the bare lexical path, so an alias ABOVE the loop never folded. On the
+  // windows-latest runner os.tmpdir() is an 8.3 spelling (<user>~1), so the case above got
+  // {} (allow) there and passed here. Now the deepest ancestor that resolves is still found.
+  const loopUnder = (dir) => {
+    mkdirSync(dir, { recursive: true });
+    const lp1 = path.win32.join(dir, 'lp1');
+    const lp2 = path.win32.join(dir, 'lp2');
+    symlinkSync(lp2, lp1, 'junction');
+    symlinkSync(lp1, lp2, 'junction');
+    return { lp1, drop: () => { for (const l of [lp1, lp2]) { try { unlinkSync(l); } catch { /* ignore */ } } } };
+  };
+  test('fix H (resolveTarget seam): a loop below an 8.3 alias folds the alias, whatever error code the loop fails with', () => {
+    // Q:\PROFIL~1 is the 8.3 spelling of Q:\profile-long-name; every path at or below
+    // ...\loopdir\lp1 fails with `code` (ELOOP on this box; the runner may differ).
+    const head = 'Q:\\PROFIL~1\\repo\\src\\loopdir\\lp1\\';
+    const fp = padTo(head, 'a\\', 'x.ts');
+    const dirs = new Set(['', '\\repo', '\\repo\\src', '\\repo\\src\\loopdir']);
+    const fake = (code) => {
+      const fn = (p) => {
+        fn.calls++;
+        const lower = p.toLowerCase();
+        if (lower === 'q:\\') return 'Q:\\';
+        if (lower.startsWith('q:\\profil~1')) {
+          const rest = lower.slice('q:\\profil~1'.length);
+          if (rest === '\\repo\\src\\loopdir\\lp1' || rest.startsWith('\\repo\\src\\loopdir\\lp1\\')) {
+            throw code === null ? new Error('no code') : Object.assign(new Error(code), { code });
+          }
+          if (dirs.has(rest)) return 'Q:\\profile-long-name' + rest;
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      };
+      fn.calls = 0;
+      return fn;
+    };
+    const want = fp.toLowerCase().replace('q:\\profil~1\\', 'q:\\profile-long-name\\');
+    for (const code of ['ELOOP', 'EINVAL', 'ENAMETOOLONG', 'EPERM', 'EACCES', 'EIO', 'EBUSY', 'UNKNOWN', 'ENOENT', 'ENOTDIR', null]) {
+      const fn = fake(code);
+      const r = guard.resolveTarget(fp, fn);
+      assert.equal(r.deny, undefined, `${code}: ${JSON.stringify(r).slice(0, 300)}`);
+      assert.ok(r.norm === want, `${code}: ${String(r.norm).slice(0, 120)}`);
+      assert.ok(fn.calls < 256, `${code}: ${fn.calls} realpath probes`); // bounded, not one per segment
+    }
+    // Nothing resolves at all (not even the drive root): the bare lexical path, still no throw.
+    const none = (p) => { throw Object.assign(new Error('ELOOP ' + p.length), { code: 'ELOOP' }); };
+    assert.equal(guard.resolveTarget(fp, none).norm, fp.toLowerCase());
+  });
+  test('fix H END-TO-END: a 32,767-character path under a junction loop, reached through a junction alias of the primary -> DENY within 2 s', () => {
+    const loop = loopUnder(path.win32.join(repo, 'src', 'loopdir-h'));
+    const jx = path.win32.join(tmp, 'jx-fixh');
+    symlinkSync(repo, jx, 'junction');
+    try {
+      const t = timedHook(homeValid, write(padTo(path.win32.join(jx, 'src', 'loopdir-h', 'lp1') + '\\', 'a\\', 'x.ts')));
+      decidedDeny(t, 'junction alias + junction loop');
+      within2s(t, 'junction alias + junction loop');
+    } finally {
+      loop.drop();
+      try { unlinkSync(jx); } catch { /* ignore */ }
+    }
+  });
+  test('fix H: a 32,767-character path under a junction loop, reached through an 8.3 name of the primary -> deny (skips only if 8.3 creation is off)', (t) => {
+    const box = mkdtempSync(path.win32.join(tmp, 'fixh83-'));
+    const longRepo = path.win32.join(box, 'my-project-primary-longname');
+    const loop = loopUnder(path.win32.join(longRepo, 'src', 'loopdir'));
+    try {
+      const sr = shortOf(box, 'my-project-primary-longname');
+      if (!sr) { t.skip('8dot3 short-name creation is disabled on this volume'); return; }
+      const fp = padTo(path.win32.join(box, sr, 'src', 'loopdir', 'lp1') + '\\', 'a\\', 'x.ts');
+      denied(decide(write(fp), { config: FIX, primary: longRepo }));
+    } finally {
+      loop.drop();
+      try { rmSync(box, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
   test('fix F (cap): exactly 32,767 characters is judged normally; 32,768 is DENIED as too long (Write and NotebookEdit)', () => {
     const outside = path.win32.join(tmp, 'fixF-outside') + '\\';
     allowed(D(write(padTo(outside, 'a\\', 'x.txt'))));
