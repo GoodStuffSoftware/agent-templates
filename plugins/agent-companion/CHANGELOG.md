@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.29.32 — 2026-10-04
+
+Removed the top-level `$schema` key from `plugin.json`: the Claude desktop app warned that it is an unrecognized key (stripped, the SDK ignores unknown top-level fields).
+
 ## 0.29.31 — 2026-10-04
 
 Bash output tail: the hook that sends a long runner's output to a file and returns its tail.
