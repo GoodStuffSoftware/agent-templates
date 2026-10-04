@@ -11,15 +11,17 @@
 // emails whose causes were each invisible locally until CI ran. This script
 // exists so the same failures show up before a push, not after.
 //
-// Suites (mirror the two workflow files' steps 1:1):
-//   scripts-tests           node --test scripts/tests/*.test.mjs
+// Suites (mirror the workflow files' steps 1:1):
+//   scripts-tests            node --test scripts/tests/*.test.mjs
 //   leak-check               node scripts/leak-check.mjs
 //   agent-companion-tests    node --test plugins/agent-companion/tests/*.test.mjs
+//   write-target-guard-tests node --test plugins/write-target-guard/tests/*.test.mjs
+//                            (Windows-only guard; its tests self-skip off win32)
 //
 // Usage:
-//   node scripts/ci-local.mjs                       run all three suites, in place
+//   node scripts/ci-local.mjs                       run all four suites, in place
 //   node scripts/ci-local.mjs --suite leak-check     run just one suite
-//   node scripts/ci-local.mjs --ci-parity            all three, each from a fresh
+//   node scripts/ci-local.mjs --ci-parity            all four, each from a fresh
 //                                                     shallow clone that mirrors CI
 //   node scripts/ci-local.mjs --ci-parity --suite agent-companion-tests --ref <sha>
 //                                                     one suite, one historical ref
@@ -102,10 +104,19 @@ export const SUITES = {
     workflowFile: '.github/workflows/agent-companion-tests.yml',
     testDir: 'plugins/agent-companion/tests',
   },
+  'write-target-guard-tests': {
+    // Runs from write-target-guard-tests.yml's only step, on windows-latest:
+    // the guard is Windows-only (path.win32 rules, junctions, 8.3 names), so
+    // its tests self-skip on non-win32 — the suite stays green in a Linux
+    // default run but is actually exercised on Windows (CI and the pre-push
+    // gate on a Windows box).
+    workflowFile: '.github/workflows/write-target-guard-tests.yml',
+    testDir: 'plugins/write-target-guard/tests',
+  },
 };
 
 export const SUITE_NAMES = Object.keys(SUITES);
-export const DEFAULT_ORDER = ['scripts-tests', 'leak-check', 'agent-companion-tests'];
+export const DEFAULT_ORDER = ['scripts-tests', 'leak-check', 'agent-companion-tests', 'write-target-guard-tests'];
 
 // ---------------------------------------------------------------------------
 // Argument parsing (exported and unit-tested — see tests/ci-local-args.test.mjs)
@@ -181,7 +192,7 @@ function printHelp() {
   console.log(`ci-local.mjs — shared entry point for this repo's CI suites
 
   --suite <name>       run one suite (repeatable). One of: ${SUITE_NAMES.join(', ')}
-                        default: run all three, in order.
+                        default: run all four, in order.
   --ci-parity           run from a fresh shallow clone that mirrors GitHub
                         Actions: claude hidden from PATH, checkout depth read
                         from the relevant workflow file, LF line endings.

@@ -9,7 +9,13 @@
       "source": "./plugins/agent-companion",
       "version": "0.29.32",
       "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift."
+    },
+    {
+      "name": "write-target-guard",
+      "source": "./plugins/write-target-guard",
+      "version": "0.1.0",
+      "description": "PreToolUse guard on Write|Edit that keeps code writes out of protected worktrees (a primary/deploy checkout and unnamed auto-worktrees). Rules come from a per-machine config file outside any repo, with Windows path-alias hardening (device/UNC prefixes, ADS, 8.3/junctions/symlinks). Fails open and loud if its config is missing or malformed."
     }
   ],
-  "description": "Agent-team templates, tagged lessons, and the agent-companion guardrail plugin."
+  "description": "Agent-team templates, tagged lessons, and the agent-companion and write-target-guard guardrail plugins."
 }

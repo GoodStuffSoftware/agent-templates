@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "write-target-guard",
+  "version": "0.1.0",
+  "description": "PreToolUse guard on Write|Edit that keeps code writes out of protected worktrees (a primary/deploy checkout and unnamed auto-worktrees). Rules come from a per-machine config file that lives outside any repo, so the public plugin ships no project-specific paths. Fails open and loud if its config is missing or malformed.",
+  "displayName": "Write-Target Guard",
+  "keywords": [
+    "guardrails",
+    "worktree",
+    "write-guard",
+    "pretooluse",
+    "hooks"
+  ]
+}
