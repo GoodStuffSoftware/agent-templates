@@ -12,18 +12,30 @@
 // bash_tail (default true) is the opt-out: `false`, or
 // CLAUDE_PLUGIN_OPTION_BASH_TAIL=0 in the environment.
 // bash_tail_permission_modes (default "bypassPermissions"): the permission
-// modes the rewrite applies in; see modeAllowed() for why.
+// modes the rewrite applies in; see modeAllowed() for why. Independently of
+// the mode, a command is left alone when a deny or ask rule from settings
+// (user, project, local, managed) could match the original or a helper command
+// the wrapper adds (readPermissionRules / blockingPermissionRule).
 //
 // Telemetry, telemetry/bash-tail.jsonl: `wrapped` rows (this hook) and
 // `result` rows (written by the wrapper itself when the command finishes:
 // exit code, lines, bytes, characters returned). `skipped` rows only for a
 // command that WAS a known runner and was left alone, with the reason.
 
-import { readStdin, opt, passthrough, noteAgentType, appendLog, telemetryDir, callerIsSubagent, isFixtureSession } from './lib/context.mjs';
+import { readStdin, opt, passthrough, noteAgentType, appendLog, telemetryDir, callerIsSubagent, isFixtureSession, claudeDir, homeRoot } from './lib/context.mjs';
+import { homedir } from 'node:os';
 import { isServedCall } from './lib/delegation.mjs';
 import {
   analyze, wrapCommand, outputTarget, pruneOldOutputs, modeAllowed, shellPath, TELEMETRY_STREAM,
+  readPermissionRules, blockingPermissionRule,
 } from './lib/bash-tail.mjs';
+
+// Enterprise-managed settings, where Claude Code reads them.
+function managedSettingsPaths() {
+  if (process.platform === 'win32') return ['C:/Program Files/ClaudeCode/managed-settings.json'];
+  if (process.platform === 'darwin') return ['/Library/Application Support/ClaudeCode/managed-settings.json'];
+  return ['/etc/claude-code/managed-settings.json'];
+}
 
 function row(p, extra) {
   appendLog(TELEMETRY_STREAM, {
@@ -56,6 +68,24 @@ try {
   }
   if (a.blockers.length) {
     row(p, { event: 'skipped', runner: a.runner, reason: a.blockers.join(',') });
+    passthrough();
+  }
+
+  // Deny and ask rules apply in EVERY mode (bypassPermissions too) and are
+  // matched against the rewritten text, which carries rm, tail, grep, printf
+  // and redirects. If any rule could match the original or a helper, the
+  // command runs as written. The managed-settings file is skipped when the
+  // home directory is redirected (a test fixture) so a real one cannot leak in.
+  const managed = homeRoot() === homedir() ? managedSettingsPaths() : [];
+  const hit = blockingPermissionRule(readPermissionRules({
+    cwd: typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd(),
+    claudeDirPath: claudeDir(),
+    projectDir: process.env.CLAUDE_PROJECT_DIR,
+    managedPaths: managed,
+    stopAt: homeRoot(),
+  }), input.command);
+  if (hit) {
+    row(p, { event: 'skipped', runner: a.runner, reason: `permission-rule:${hit.kind}` });
     passthrough();
   }
 

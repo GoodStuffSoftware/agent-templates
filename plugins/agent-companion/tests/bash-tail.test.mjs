@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { makeFixture, runHook, readJsonl, decisionOf, PLUGIN_ROOT } from './helpers.mjs';
 import {
   analyze, lex, wrapCommand, shellPath, outputTarget, pruneOldOutputs, modeAllowed,
+  readPermissionRules, blockingPermissionRule, WRAPPER_HELPERS,
   FULL_MAX_LINES, TAIL_FAILED_LINES, TAIL_PASSED_LINES, KEEP_FILES_MS,
 } from '../hooks/lib/bash-tail.mjs';
 
@@ -120,6 +121,7 @@ function tempDirForBash() {
 }
 
 function wrapped(command, dirSh, resultLog = '') {
+  mkdirSync(`${dirSh}/out`, { recursive: true }); // the hook creates the directory; the wrapper no longer calls mkdir
   return wrapCommand(command, { file: `${dirSh}/out/run1.log`, dir: `${dirSh}/out`, resultLog, id: 'run1' });
 }
 
@@ -152,7 +154,9 @@ test('wrapper: a failing run shows MORE tail than a passing one and never hides 
     assert.equal(w.status, 1);
     assert.ok(w.stdout.includes('FAIL: 2 tests failed'), 'stderr is merged and its last lines are in the tail');
     const lines = w.stdout.trim().split('\n');
-    assert.equal(lines.length, 1 + TAIL_FAILED_LINES, 'header plus the failed-run tail');
+    // pre-run notice + header + the failed-run tail (no summary lines: nothing earlier matches the pattern)
+    assert.equal(lines.length, 2 + TAIL_FAILED_LINES, 'notice, header and the failed-run tail');
+    assert.ok(lines[0].startsWith('[ac-bash-tail] full output of this run goes to '));
   } finally { t.done(); }
 });
 
@@ -161,8 +165,10 @@ test('wrapper: output within the limit is printed whole, the file is removed, ex
   try {
     const w = runBash(wrapped(`seq 1 ${FULL_MAX_LINES}; (exit 4)`, t.sh));
     assert.equal(w.status, 4);
-    assert.equal(w.stdout.trim().split('\n').length, FULL_MAX_LINES);
-    assert.ok(!w.stdout.includes('[ac-bash-tail]'));
+    const lines = w.stdout.trim().split('\n');
+    assert.equal(lines.length, 1 + FULL_MAX_LINES, 'the pre-run notice plus the whole output');
+    assert.ok(lines[0].startsWith('[ac-bash-tail] full output of this run goes to '));
+    assert.ok(!lines.slice(1).some((l) => l.includes('[ac-bash-tail]')), 'no tail header for a short run');
     assert.ok(!existsSync(join(t.dir, 'out', 'run1.log')), 'no file left for a short run');
   } finally { t.done(); }
 });
@@ -176,13 +182,17 @@ test('wrapper: many bytes in few lines still trips the byte limit', { skip: !HAV
   } finally { t.done(); }
 });
 
-test('wrapper: very long single lines are cut in the tail, the file keeps them whole', { skip: !HAVE_BASH && 'bash unavailable' }, () => {
+test('wrapper: a very long single line keeps its END (the failure text), the total stays bounded, the file keeps it whole', { skip: !HAVE_BASH && 'bash unavailable' }, () => {
   const t = tempDirForBash();
   try {
-    const w = runBash(wrapped(`seq 1 100; printf 'y%.0s' $(seq 1 5000); echo`, t.sh));
-    assert.ok(Math.max(...w.stdout.split('\n').map((l) => l.length)) < 1100);
+    // 100 KB on one line, the interesting part last (minified bundle, JSON blob)
+    const w = runBash(wrapped(`seq 1 100; printf 'y%.0s' $(seq 1 100000); echo ' FINAL-ERROR-TEXT'; (exit 1)`, t.sh));
+    assert.equal(w.status, 1);
+    assert.ok(w.stdout.includes('FINAL-ERROR-TEXT'), 'the end of the huge line survives (the old cut -c1-1000 kept only its start)');
+    assert.ok(w.stdout.includes('tail cut to its last 10000 characters'));
+    assert.ok(w.stdout.length < 11000, `bounded output, got ${w.stdout.length}`);
     const full = readFileSync(join(t.dir, 'out', 'run1.log'), 'utf8');
-    assert.ok(full.includes('y'.repeat(5000)));
+    assert.ok(full.includes('y'.repeat(100000)), 'the file keeps the line whole');
   } finally { t.done(); }
 });
 
@@ -239,6 +249,7 @@ test('wrapper: a path with a space and a quote survives', { skip: !HAVE_BASH && 
   const t = tempDirForBash();
   try {
     const dir = `${t.sh}/it's here`;
+    mkdirSync(dir, { recursive: true });
     const w = runBash(wrapCommand('seq 1 200', { file: `${dir}/r.log`, dir, id: 'q' }));
     assert.equal(w.status, 0);
     assert.ok(existsSync(join(t.dir, "it's here", 'r.log')));
@@ -397,4 +408,240 @@ test('hook: hooks.json registers it on exactly ^Bash$ and plugin.json declares b
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).userConfig;
   assert.equal(cfg.bash_tail.default, true);
   assert.equal(cfg.bash_tail_permission_modes.default, 'bypassPermissions');
+});
+
+// =============================================================================
+// Review round 2 (2026-10-03): findings 1-5, each with a test that runs the
+// generated shell in a real bash or drives the hook.
+// =============================================================================
+
+// --- finding 1: a timeout or kill leaves nothing -> name the file BEFORE the run
+
+test('wrapper: the file path is printed BEFORE the command runs, so a killed run still names its file', { skip: !HAVE_BASH && 'bash unavailable' }, () => {
+  const t = tempDirForBash();
+  try {
+    // kill -9 on the shell stands in for the tool timeout killing the run mid-command
+    const w = runBash(wrapped('echo partial-line; kill -9 $$', t.sh));
+    assert.notEqual(w.status, 0, 'the shell was killed');
+    assert.match(w.stdout, /^\[ac-bash-tail\] full output of this run goes to .*run1\.log/, 'the notice is the first thing printed');
+    assert.ok(!w.stdout.includes('partial-line'), 'the command output went to the file, not the terminal');
+    const full = readFileSync(join(t.dir, 'out', 'run1.log'), 'utf8');
+    assert.ok(full.includes('partial-line'), 'the file the notice named holds the partial output');
+  } finally { t.done(); }
+});
+
+// --- finding 2: set -e must not make all output disappear
+
+test('wrapper: with errexit already on, the original runs as written and nothing is lost (set -e, set -euo pipefail)', { skip: !HAVE_BASH && 'bash unavailable' }, () => {
+  for (const setLine of ['set -e', 'set -euo pipefail', 'set -eu']) {
+    const t = tempDirForBash();
+    try {
+      const w = runBash(`${setLine}\n${wrapped('echo VISIBLE-BEFORE-FAIL; seq 1 200; (exit 3)', t.sh)}\necho NOT-REACHED`);
+      assert.equal(w.status, 3, `${setLine}: the failing exit status is the script's status`);
+      assert.ok(w.stdout.includes('VISIBLE-BEFORE-FAIL'), `${setLine}: output is visible`);
+      assert.ok(w.stdout.includes('\n200\n'), `${setLine}: the whole output is visible (the original ran unwrapped)`);
+      assert.ok(!w.stdout.includes('NOT-REACHED'), `${setLine}: errexit semantics are kept`);
+    } finally { t.done(); }
+  }
+  // control: without errexit the same wrapper does its job
+  const t = tempDirForBash();
+  try {
+    const w = runBash(wrapped('seq 1 200; (exit 3)', t.sh));
+    assert.equal(w.status, 3);
+    assert.match(w.stdout, /\[ac-bash-tail\] exit 3; 200 lines/);
+  } finally { t.done(); }
+});
+
+test('analyze: source and "." are blocked, because they can switch errexit on in the middle of the command', () => {
+  for (const c of ['source env.sh && npm test', '. ./env.sh && npm test', 'npm test && source x.sh', 'set -e; npm test']) {
+    assert.equal(wraps(c), false, `must not wrap: ${c}`);
+  }
+});
+
+// --- finding 3: never-exiting, watch and interactive commands
+
+test('analyze: every dev server, watcher and interactive command from the review passes through', () => {
+  const never = [
+    'npx vite', 'npx vite preview', 'npx vite dev', 'pnpm dlx vite', 'npx next dev', 'npx wrangler dev', 'npx quasar dev',
+    'npx ng serve', 'npx expo start', 'npx webpack serve', 'npx nuxt dev', 'npx astro dev', 'npx turbo dev', 'npx nx serve app',
+    'npx wrangler login', 'npx vitest --ui', 'npx playwright test --ui', 'npx playwright show-report', 'npx playwright codegen',
+    'npx cypress open', 'npm run build:watch', 'npm run test:watch', 'npm run test:e2e:ui', 'npm run dev', 'npm start',
+    'pytest -f', 'pytest --looponfail', 'pytest --pdb', 'tsc -w', 'jest -w', 'mocha -w', 'tsc --watch',
+    'make run', 'make serve', 'make dev', 'gradle bootRun', './gradlew bootRun', 'mvn spring-boot:run', 'gradle build --continuous',
+  ];
+  for (const c of never) assert.equal(wraps(c), false, `must pass through: ${c}`);
+});
+
+test('analyze: a chain passes through when ANY segment is a server, a watcher or not a known runner', () => {
+  for (const c of [
+    'npm install && npm run dev', 'npm run build && npx vite preview', 'cargo build && cargo run', 'make -j8 && ./a.out',
+    'npm ci && npx wrangler dev', 'cd app && npm test && npm run test:watch', 'npm test; node server.mjs',
+  ]) assert.equal(wraps(c), false, `must pass through: ${c}`);
+});
+
+test('analyze: the list is consistent (vite and npx vite agree; bare watcher names never wrap)', () => {
+  assert.equal(wraps('vite'), wraps('npx vite'));
+  assert.equal(wraps('vite preview'), wraps('npx vite preview'));
+  assert.equal(wraps('next dev'), wraps('npx next dev'));
+  assert.equal(wraps('wrangler dev'), wraps('npx wrangler dev'));
+  assert.equal(wraps('pnpm dlx vite'), false);
+  assert.equal(wraps('pnpm exec vite'), false);
+});
+
+test('analyze: one-shot forms of the same tools still wrap', () => {
+  for (const c of [
+    'npx vite build', 'npx vitest run', 'npx playwright test', 'npx wrangler deploy', 'npx next build', 'npx nx build app',
+    'npx turbo build', 'npx ng build', 'npx webpack', 'make test', 'make -j8', 'gradle build', 'mvn test', 'mvn -q package',
+    'pytest -x', 'pytest -q tests/', 'npm run test:unit', 'npm run build && npm test', 'npm ci && npm test', 'cargo build && cargo test',
+  ]) assert.equal(wraps(c), true, `should still wrap: ${c}`);
+});
+
+// --- finding 4: permission rules
+
+test('hook: a deny rule that the wrapper\'s helpers could trip (Bash(rm *)) leaves the command alone, user settings', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(join(fx.dir, '.claude'), { recursive: true });
+    writeFileSync(join(fx.dir, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: ['Bash(rm *)'] } }));
+    const r = runHook('hooks/bash-tail.mjs', payload('npm test'), { env: hookEnv(fx) });
+    assert.equal(r.json, null, 'passes through untouched');
+    const rows = readJsonl(join(fx.stateDir, 'telemetry', 'bash-tail.jsonl'));
+    assert.equal(rows[0].event, 'skipped');
+    assert.equal(rows[0].reason, 'permission-rule:deny');
+  } finally { fx.cleanup(); }
+});
+
+test('hook: an ask rule in project settings.local.json (found from the payload cwd, walking up) also stops the wrap', () => {
+  const fx = makeFixture();
+  try {
+    const proj = join(fx.dir, 'proj');
+    mkdirSync(join(proj, '.claude'), { recursive: true });
+    mkdirSync(join(proj, 'deep', 'er'), { recursive: true });
+    writeFileSync(join(proj, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { ask: ['Bash(tail *)'] } }));
+    const r = runHook('hooks/bash-tail.mjs', payload('npm test', { cwd: join(proj, 'deep', 'er') }), { env: hookEnv(fx) });
+    assert.equal(r.json, null);
+    const rows = readJsonl(join(fx.stateDir, 'telemetry', 'bash-tail.jsonl'));
+    assert.equal(rows[0].reason, 'permission-rule:ask');
+  } finally { fx.cleanup(); }
+});
+
+test('hook: a rule that matches the ORIGINAL command (Bash(npm test:*), Bash(npm *)) stops the wrap too', () => {
+  for (const rule of ['Bash(npm test:*)', 'Bash(npm *)', 'Bash(npm test)']) {
+    const fx = makeFixture();
+    try {
+      mkdirSync(join(fx.dir, '.claude'), { recursive: true });
+      writeFileSync(join(fx.dir, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: [rule] } }));
+      const r = runHook('hooks/bash-tail.mjs', payload('npm test'), { env: hookEnv(fx) });
+      assert.equal(r.json, null, `${rule}: untouched`);
+    } finally { fx.cleanup(); }
+  }
+});
+
+test('hook: rules that cannot match the original or any helper do not stop the wrap; allow rules and non-Bash rules are ignored', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(join(fx.dir, '.claude'), { recursive: true });
+    writeFileSync(join(fx.dir, '.claude', 'settings.json'), JSON.stringify({
+      permissions: {
+        deny: ['Bash(rm -rf /*)', 'Bash(git push *)', 'Bash(curl *)', 'Read(./.env)'],
+        ask: ['Bash(docker run *)'],
+        allow: ['Bash'],
+      },
+    }));
+    const r = runHook('hooks/bash-tail.mjs', payload('npm test'), { env: hookEnv(fx) });
+    assert.ok(r.json?.hookSpecificOutput?.updatedInput?.command, 'still wrapped');
+  } finally { fx.cleanup(); }
+});
+
+test('hook: a bare Bash rule and a redirect rule block the wrap (the wrapper adds a redirect)', () => {
+  for (const rule of ['Bash', 'Bash(*)', 'Bash(* > /tmp/*)']) {
+    const fx = makeFixture();
+    try {
+      mkdirSync(join(fx.dir, '.claude'), { recursive: true });
+      writeFileSync(join(fx.dir, '.claude', 'settings.json'), JSON.stringify({ permissions: { ask: [rule] } }));
+      const r = runHook('hooks/bash-tail.mjs', payload('npm test'), { env: hookEnv(fx) });
+      assert.equal(r.json, null, `${rule}: untouched`);
+    } finally { fx.cleanup(); }
+  }
+});
+
+test('blockingPermissionRule / readPermissionRules: unit behaviour', () => {
+  const mk = (...p) => p.map((pattern) => ({ kind: 'deny', pattern, rule: `Bash(${pattern})`, file: 'x' }));
+  assert.equal(blockingPermissionRule([], 'npm test'), null);
+  assert.equal(blockingPermissionRule(mk('rm -rf /*'), 'npm test'), null);
+  assert.ok(blockingPermissionRule(mk('rm *'), 'npm test'), 'rm is a helper');
+  assert.ok(blockingPermissionRule(mk('grep *'), 'npm test'), 'grep is a helper');
+  assert.ok(blockingPermissionRule(mk('printf *'), 'npm test'), 'printf is a helper');
+  assert.ok(blockingPermissionRule(mk('cargo build'), 'cd x && cargo build'), 'a segment of the original');
+  assert.equal(blockingPermissionRule(mk('cargo build'), 'cd x && cargo test'), null);
+  // reading: scopes, shapes, junk
+  const fx = makeFixture();
+  try {
+    const cd = join(fx.dir, 'cfg'); const proj = join(fx.dir, 'p');
+    mkdirSync(cd, { recursive: true }); mkdirSync(join(proj, '.claude'), { recursive: true });
+    writeFileSync(join(cd, 'settings.json'), JSON.stringify({ permissions: { deny: ['Bash(a *)', 'Edit(x)', 5] } }));
+    writeFileSync(join(cd, 'settings.local.json'), '{ not json');
+    writeFileSync(join(proj, '.claude', 'settings.json'), JSON.stringify({ permissions: { ask: ['Bash'] } }));
+    writeFileSync(join(proj, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { deny: ['Bash(b:*)'] } }));
+    const rules = readPermissionRules({ cwd: join(proj, 'sub'), claudeDirPath: cd, projectDir: proj, stopAt: fx.dir });
+    assert.deepEqual(rules.map((r) => `${r.kind}:${r.pattern}`).sort(), ['ask:', 'deny:a *', 'deny:b:*']);
+    assert.deepEqual(readPermissionRules({ cwd: join(fx.dir, 'nothing'), claudeDirPath: join(fx.dir, 'none'), stopAt: fx.dir }), []);
+  } finally { fx.cleanup(); }
+});
+
+test('wrapper: only the helper commands in WRAPPER_HELPERS are used (no mkdir, tr, cut, cygpath, head, sed, awk)', { skip: !HAVE_BASH && 'bash unavailable' }, () => {
+  const allowed = new Set([...WRAPPER_HELPERS.map((h) => h.split(' ')[0]), 'seq', 'exit', ':', 'case' /* a shell keyword, not a command */]);
+  for (const cmd of ['seq 1 300; (exit 1)', 'seq 1 300', 'seq 1 5']) {
+    const t = tempDirForBash();
+    try {
+      const r = spawnSync(BASH, ['-x', '-c', wrapped(cmd, t.sh)], { encoding: 'utf8', windowsHide: true });
+      const used = new Set();
+      for (const line of r.stderr.split('\n')) {
+        const m = /^\++ (.*)$/.exec(line);
+        if (!m) continue;
+        const first = m[1].split(' ')[0].replace(/['"]/g, '');
+        if (!first || first.includes('=')) continue; // assignments
+        used.add(first);
+      }
+      for (const u of used) assert.ok(allowed.has(u), `wrapper ran ${u}, which WRAPPER_HELPERS does not cover (${cmd})`);
+      for (const bad of ['mkdir', 'tr', 'cut', 'cygpath', 'head', 'sed', 'awk']) assert.ok(!used.has(bad), `wrapper must not use ${bad}`);
+    } finally { t.done(); }
+  }
+});
+
+// --- finding 5: lower-severity items
+
+test('analyze: separate-argument machine-format flags pass through (--reporter json, -f json, --junitxml)', () => {
+  for (const c of [
+    'npm test -- --reporter json', 'npx vitest run --reporter json', 'eslint . -f json', 'eslint . --format json',
+    'pytest --junitxml report.xml', 'pytest --junitxml=report.xml', 'npx jest --coverageReporters=json', 'jest --json',
+    'npx mocha --reporter json', 'cargo test --message-format json',
+  ]) assert.equal(wraps(c), false, `must pass through: ${c}`);
+  assert.equal(wraps('npm test -- --reporter dot'), true, 'a human reporter still wraps');
+});
+
+test('wrapper: a failing run whose summary comes FIRST still shows it (summary-looking lines from earlier in the file)', { skip: !HAVE_BASH && 'bash unavailable' }, () => {
+  const t = tempDirForBash();
+  try {
+    const w = runBash(wrapped('echo "SUMMARY: 3 failing"; for i in 1 2 3 4 5; do echo "failure block $i"; seq 1 40; done; (exit 1)', t.sh));
+    assert.equal(w.status, 1);
+    assert.ok(w.stdout.includes('SUMMARY: 3 failing'), 'the summary line from the top is surfaced');
+    assert.match(w.stdout, /summary-looking lines from earlier in the file/);
+    // a line already inside the tail is not repeated as a "summary" line
+    const w2 = runBash(wrapped('seq 1 200; echo "3 failed, 7 passed"; (exit 1)', t.sh));
+    assert.ok(!/summary-looking lines/.test(w2.stdout), 'nothing earlier than the tail matched');
+    // a passing run does not get the extra block
+    const w3 = runBash(wrapped('echo "SUMMARY: ok"; seq 1 300', t.sh));
+    assert.ok(!/summary-looking lines/.test(w3.stdout));
+  } finally { t.done(); }
+});
+
+test('wrapper: an over-long summary line is cut and the extra block is capped at five lines', { skip: !HAVE_BASH && 'bash unavailable' }, () => {
+  const t = tempDirForBash();
+  try {
+    const w = runBash(wrapped(`printf 'FAIL%.0s' $(seq 1 600); echo; for i in 1 2 3 4 5 6 7 8; do echo "FAIL case $i"; done; seq 1 300; (exit 1)`, t.sh));
+    const block = w.stdout.split('\n').filter((l) => /^\d+:/.test(l));
+    assert.ok(block.length > 0 && block.length <= 5, `1..5 summary lines, got ${block.length}`);
+    assert.ok(block.every((l) => l.length <= 300 + 8), 'each cut to 300 chars (plus the line number)');
+  } finally { t.done(); }
 });

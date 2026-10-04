@@ -327,7 +327,7 @@ ran in a fixture session, whose results are kept out of this file).
 | `session_id`, `agent_type`, `caller_is_subagent` | string, string \| absent, boolean | `wrapped`, `skipped` | who ran it |
 | `runner` | string | `wrapped`, `skipped` | the known runner that matched, e.g. `npm test`, `cargo build` |
 | `command_chars` | number | `wrapped` | length of the original command (the command text is never logged) |
-| `reason` | string | `skipped` | why a known runner was left alone: comma-separated blockers (`pipe`, `redirect`, `background`, `subshell`, `substitution`, `unterminated`, `output-flag`, `compound`, `shell-word:<word>`) or `permission_mode:<mode>` |
+| `reason` | string | `skipped` | why a known runner was left alone: comma-separated blockers (`pipe`, `redirect`, `background`, `subshell`, `substitution`, `unterminated`, `output-flag`, `compound`, `shell-word:<word>`, `never-ends:<what>` for a dev server, watcher or interactive command anywhere in the chain, `other-command:<name>` for a chain segment that is not a known runner) or `permission_mode:<mode>` or `permission-rule:deny` / `permission-rule:ask` (a settings rule could match the original or a helper the wrapper adds) |
 | `rc` | number | `result` | the command's exit status |
 | `lines`, `bytes` | number | `result` | what the command wrote (stdout and stderr merged) |
 | `shown_chars` | number | `result` | characters returned to context: the whole output for a short run, header plus tail otherwise |

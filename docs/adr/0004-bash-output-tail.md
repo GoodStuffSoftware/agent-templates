@@ -69,13 +69,20 @@ file's path. It returns `updatedInput` and never a `permissionDecision`.
 ### The wrapper
 
 ```
-{ <original command>
-} > "$file" 2>&1          # a group, not a subshell: cd and variables persist
-rc=$?                     # captured at once
-... if lines <= 80 and bytes <= 8000: cat the file, delete it
-    else: header "[ac-bash-tail] exit N; L lines, B bytes ...; Full output: <path>"
-          + last 60 lines (failed run) or last 20 (passing run), each cut to 1000 chars
-(exit "$rc")              # re-raises the status without ending the shell
+if errexit is NOT on ($- has no "e") and : > "$file" works; then
+  printf '[ac-bash-tail] full output of this run goes to <path> ...'   # BEFORE the run
+  { <original command>
+  } > "$file" 2>&1        # a group, not a subshell: cd and variables persist
+  rc=$?                   # captured at once
+  ... if lines <= 80 and bytes <= 8000: cat the file, delete it
+      else: header "[ac-bash-tail] exit N; L lines, B bytes ...; Full output: <path>"
+            + (failed run only) up to 5 summary-looking lines from EARLIER in the file
+            + last 60 lines (failed run) or last 20 (passing run), capped at the
+              last 10,000 characters
+  (exit "$rc")            # re-raises the status without ending the shell
+else
+  <original command>      # exactly as written
+fi
 ```
 
 - The threshold is checked **at run time**, on what the command actually wrote.
@@ -83,10 +90,49 @@ rc=$?                     # captured at once
   lines, whole, so nothing is hidden and nothing is saved-and-lost.
 - A failed run keeps 60 lines, a passing run 20: every runner on the list puts
   its failure summary last, and a failure is the case where more context pays.
-- If the output file cannot be created (`mkdir`/`: >` fails), an `else` branch
+- **The path is printed before the command runs** (review round 2, finding 1).
+  The tool's timeout kills the shell, and with it everything after the group,
+  so a post-run header never prints for exactly the runs that hang. The up-front
+  line costs about 30 tokens on every wrapped run and means a killed run still
+  names the file holding its partial output. It says the file is deleted again
+  when the run is short, so a missing file is not a surprise.
+- **errexit** (finding 2). With `set -e` active, a failing command inside the
+  group ends the shell before the code after it prints, and all output
+  disappears. The wrapper checks `$-` at run time and, if it contains `e`, runs
+  the original unwrapped. A `source env.sh` or `. ./env.sh` inside the command
+  can switch errexit on mid-command, where `$-` cannot see it, so `source` and
+  `.` are blockers in the analyzer. Rejected alternative: make the wrapper
+  immune with `set +e`/`trap`. Restoring errexit state correctly across a
+  group, a `||` list and a trap is fragile; "run the original" is simple and
+  loses only the saving.
+- If the output file cannot be created (`: >` fails), the same `else` branch
   runs the original command exactly as written.
-- `cygpath -m` turns the file's path into `C:/...` form on Git Bash so the
-  printed path works with the Read tool; elsewhere the path is printed as is.
+- **Few helper commands** (finding 4). The wrapper uses only `wc`, `cat`, `rm`,
+  `tail`, `grep`, `printf`, `date`, `read` and `[ ]` (the list is
+  `WRAPPER_HELPERS`, and a test runs the wrapper under `bash -x` to check no
+  other command is used). It no longer calls `mkdir` (the hook creates the
+  directory), `tr`, `cut` or `cygpath` (Node's `os.tmpdir()` on Windows already
+  gives a `C:/...` path that the Read tool accepts). The fewer commands the
+  wrapper adds, the fewer user permission rules it can trip.
+- **Tail limits** (finding 5). The tail is the last 60 or 20 lines, capped at
+  the last 10,000 characters. The old per-line `cut -c1-1000` kept the START of
+  each line, so a single minified or JSON line lost the part that mattered;
+  the character cap keeps the END. A failed run also prints up to five lines
+  (`SUMMARY_MAX_LINES`), each cut to 300 characters, that match
+  `FAIL|failed|passing|Tests:|ERR!|SUMMARY|summary...` from EARLIER than the
+  tail, for runners that print the summary first. This is a head-plus-summary
+  heuristic, not a head: the first lines of a log are usually noise.
+- **The output file is not size-capped.** Considered and not done: the Bash
+  tool's own timeout bounds how long a run can write; the files live in the
+  temp directory and are pruned after 3 days (`KEEP_FILES_MS`); the same output
+  would have been returned into context unwrapped, which is far more expensive
+  than a temp file; and the up-front path line tells the agent where the file
+  is. A cap would need a `head -c` or `ulimit -f` helper, which adds a command
+  for the permission-rule problem above and can truncate the failure text. If
+  the measurement shows runaway files, a periodic size check in
+  `pruneOldOutputs` is the place to add it. Not done either: `umask 077` on the
+  file (a test log can hold secrets and the temp directory is per-user on this
+  setup); revisit if the plugin is used on a shared machine.
 - stdout and stderr are merged into one stream, as they are in the Bash tool's
   own result text. A caller that distinguishes them loses that, only for the
   tailed runs.
@@ -97,7 +143,15 @@ rc=$?                     # captured at once
 ### Trigger: an allowlist of runners, with blockers
 
 Wrap only when a **known runner** is present in the command and **no blocker**
-is. The runner list is conservative (package-manager test/build/install/ci
+is. Every segment of a chain must be a known runner or a harmless shell word
+(`cd`, `echo`, `export`, `ls`, `mkdir`, `git`, ...); any other segment, and any
+segment that is a dev server, watcher or interactive tool, blocks the wrap
+(`npm install && npm run dev`, `cargo build && cargo run`, `make -j8 && ./a.out`).
+Dev servers and the like are decided by an allowlist of one-shot subcommands
+per tool (`vite build`, `next build`, `nx build`, `playwright test`, `wrangler
+deploy`, ...) rather than a denylist of servers, so an unlisted verb fails safe.
+The same decision is made with and without `npx`/`pnpm dlx`, so `vite` and
+`npx vite` agree. The runner list is conservative (package-manager test/build/install/ci
 verbs and test-like script names, `vitest`, `jest`, `pytest`, `cargo`, `go`,
 `dotnet`, `make`, `gradle`, `mvn`, `tsc`, `node --test`, `docker build`, and
 similar). Blockers, found with a small quote-aware lexer:
@@ -118,13 +172,36 @@ Everything else passes through with no output at all. A command that pipes
 
 ### Permission modes
 
-Because permission rules are checked against the rewritten command, the
-rewrite applies only when `permission_mode` is `bypassPermissions` by default
-(`bash_tail_permission_modes`; `any` lifts the limit). In that mode no rule is
-consulted, so the rewrite cannot turn an allowed command into a prompt or a
-denial. Outside it the hook logs a `skipped` row with the reason and does
-nothing. This is the conservative default; the setting exists so an operator
-who knows their allow rules can widen it.
+Permission rules are checked against the rewritten command, in every mode.
+Two separate effects follow.
+
+**Allow rules.** A `Bash(npm test:*)` allow rule stops matching a wrapped
+command, which would turn an allowed command into a prompt (or a denial in a
+headless run). In `bypassPermissions` nothing needs allowing, so the rewrite
+applies only in that mode by default (`bash_tail_permission_modes`; `any` lifts
+the limit). Outside it the hook logs a `skipped` row with the reason and does
+nothing. The setting exists so an operator who knows their allow rules can
+widen it.
+
+**Deny and ask rules.** An earlier version of this section said that in
+`bypassPermissions` no rule is consulted. That was wrong: deny and ask rules
+apply in bypassPermissions too, and they match the rewritten text, including
+the helper commands inside `if`/`{ }` bodies. A user's `Bash(rm *)` deny rule
+would block the wrapper's `rm -f`; an ask rule on `tail` or `grep` would
+prompt on every wrapped run; a rule on redirects would match the `> "$file"`.
+Whether a rule written for the ORIGINAL command still sees it inside the `{ }`
+group is not something we verified, and a deny rule that silently stops
+matching is worse than a prompt. So the hook reads `permissions.deny` and
+`permissions.ask` entries (`Bash` and `Bash(...)` forms, including the legacy
+`:*` prefix form) from the user, project and local settings files (walking up
+from the payload `cwd`, plus `CLAUDE_PROJECT_DIR`) and the managed-settings
+file, and does NOT wrap when any rule is a bare `Bash`, mentions a redirect
+(`<` or `>`), or glob-matches the original command (whole or any segment) or any
+of the `WRAPPER_HELPERS` texts. The hook logs `skipped` with
+`permission-rule:deny` or `permission-rule:ask`. The match is deliberately
+over-cautious: leaving a command alone only costs the saving. Not verified
+against a live session: the exact parser behaviour for rules against the
+wrapped text, and the managed-settings paths on each platform.
 
 ### Opt-out and measurement
 
