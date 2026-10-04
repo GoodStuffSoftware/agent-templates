@@ -389,6 +389,12 @@
       "description": "Comma-separated permission modes the rewrite applies in. Default bypassPermissions only, because permission rules (such as Bash(npm test:*)) are checked against the REWRITTEN command and would stop matching in a mode that asks. Set to \"any\" to apply in every mode.",
       "default": "bypassPermissions"
     },
+    "read_dedupe": {
+      "type": "boolean",
+      "title": "Read dedupe",
+      "description": "Deny a Read of lines this agent already read, when the file is unchanged since and the read is at least 2,000 characters. Fills the gap Claude Code's own 'file unchanged' stub leaves: a range inside an earlier larger read, or a repeat of an earlier range after another one. The denial says so in one sentence and the same call, repeated, runs. Per agent; cleared by an edit, any change of the file, and compaction. Off = every Read runs. Also CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0.",
+      "default": true
+    },
     "poll_guard": {
       "type": "boolean",
       "title": "Polling-wake guard",
