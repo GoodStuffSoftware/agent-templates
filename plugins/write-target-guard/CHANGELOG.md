@@ -85,6 +85,16 @@ hook (originally hard-coded to one repo) and generalised.
   malformed instead of being parsed for longer than the hook's time limit.
 - **`--config=<path>` works** like `--config <path>`; the two forms count together, so
   giving both is the "given twice" error.
+- **Unrecognised hook arguments are loud.** Any argument other than an exact
+  `--config` pair (a misspelling such as `--CONFIG`, `-config` or an em dash, or a
+  stray flag) is ignored with a warning on every call that names it and the config
+  used; the decision is unchanged, and a deny stays a deny.
+- **Internal failures fail open loudly.** Garbage, empty or non-object hook input, or
+  an unexpected error while reading the config or judging a call, now shows the
+  INACTIVE notice instead of allowing silently.
+- **Clearer over-long path message.** The deny for a target past 32,767 characters
+  now asks for the fully qualified, collapsed path.
+- **`--config` accepts a `\??\` path**; the prefix is stripped before the file is read.
 - **README:** Cutover rewritten (running the plugin and a `settings.json` entry
   together runs the guard twice; the entry to remove is given) and a Known
   limitations section added.

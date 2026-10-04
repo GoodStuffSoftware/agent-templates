@@ -154,6 +154,23 @@
 //   or head-name is a branch-resolution failure (unknown, so DENY); an oversized config is
 //   a malformed config (loud INACTIVE). `--config=<path>` is the same single occurrence as
 //   `--config <path>`, and the two forms are counted together.
+// 2026-10-03: an argument the hook does not recognise is no longer ignored silently. Any
+//   argv token after the script path that is not part of the one accepted `--config <abs>`
+//   or `--config=<abs>` (a misspelling such as --CONFIG, --Config, -config or an em/en-dash
+//   —config, or any other token) gets a loud WARNING (stderr + systemMessage) naming it, on
+//   every call. The decision itself is UNCHANGED: an exact --config pair if present, else
+//   the default config; a DENY stays a DENY and carries the warning alongside. (Before, with
+//   a disabled default config, `--CONFIG <enforcing config>` silently allowed primary code.)
+// 2026-10-03: internal failures fail open LOUDLY, never as a silent {}: unparsable, empty or
+//   non-object stdin, a throw while preparing the config's repos, a throw in decide(), or any
+//   other unexpected throw in main each emit an INACTIVE stderr line and systemMessage, in
+//   the same style as a malformed config. They still fail open (the outer fail-open stays).
+// 2026-10-03: the over-long-path deny reason says what to do: the path is longer than the
+//   Windows maximum (32,767 chars), so give the fully qualified, collapsed path. (The old
+//   text said no real file has such a path; a writer that collapses a\..\ can still land one.)
+// 2026-10-03: a --config value with the NT-namespace prefix \??\ is read as the path under it
+//   (\??\C:\x -> C:\x, \??\UNC\server\share -> \\server\share), the way \\?\ already opened.
+//   Before, Node read \??\C:\x as a rooted-relative path and reported "no config at \??\...".
 //
 // The decision logic is the exported pure function decide(); main (stdin/stdout) runs
 // when argv[1]'s BASENAME is write-target-guard.mjs — not a full-path compare, because
@@ -186,23 +203,32 @@ const safeDefaultConfigPath = () => { try { return defaultConfigPath(); } catch 
 // A --config given more than once, with no value or with a relative value is a broken
 // registration: { error }. (Never "the first one wins": that would be a silent choice.)
 // `--config=<path>` is the same occurrence as `--config <path>`; both forms count together.
-function configPathFromArgv(argv) {
+// Every other token is returned in `unknown` (a misspelt --CONFIG, -config or —config, or
+// anything else): main warns about them loudly, and the config choice above is unchanged.
+// A token directly after a bare --config is that flag's value, judged here, never unknown.
+// A leading \??\ on the value is stripped (\??\UNC\ -> \\), as canonicalize() does for
+// targets: Node opens \\?\C:\x as is, but reads \??\C:\x as rooted-relative (C:\??\C:\x).
+const NT_PREFIX_RE = /^[\\/]\?\?[\\/](unc[\\/])?/i;
+export function configPathFromArgv(argv) {
   const EQ = '--config=';
   const at = [];
+  const unknown = [];
   for (let k = 2; k < argv.length; k++) {
     const a = argv[k];
     if (a === '--config' || (typeof a === 'string' && a.startsWith(EQ))) at.push(k);
+    else if (!(k > 2 && argv[k - 1] === '--config')) unknown.push(a);
   }
-  if (at.length === 0) return { path: null };
+  if (at.length === 0) return { path: null, unknown };
   if (at.length > 1) {
-    return { error: `--config was given ${at.length} times; give it exactly once, with the absolute path to the config file` };
+    return { error: `--config was given ${at.length} times; give it exactly once, with the absolute path to the config file`, unknown };
   }
   const i = at[0];
   const v = argv[i] === '--config' ? argv[i + 1] : argv[i].slice(EQ.length);
-  if (typeof v !== 'string' || !ABS_PATH_RE.test(v.trim())) {
-    return { error: `--config needs an absolute path to the config file (got ${v === undefined ? 'nothing' : JSON.stringify(v)})` };
+  const p = typeof v === 'string' ? v.trim().replace(NT_PREFIX_RE, (m, unc) => (unc ? '\\\\' : '')) : '';
+  if (typeof v !== 'string' || !ABS_PATH_RE.test(p)) {
+    return { error: `--config needs an absolute path to the config file (got ${v === undefined ? 'nothing' : JSON.stringify(v)})`, unknown };
   }
-  return { path: v.trim() };
+  return { path: p, unknown };
 }
 
 // Bounded file reads. A planted multi-megabyte .git or HEAD must not make the hook outrun
@@ -502,12 +528,14 @@ function resolvePath(raw, realpathFn = realpathSync.native) {
 // The Windows path maximum (UTF-16 code units, which is what String length counts).
 const MAX_PATH_CHARS = 32767;
 
+// The reason says what to do, not that no file can have the path: a writer that collapses
+// a\..\ before the OS sees it can still land a file from a longer spelling.
 const longPathDeny = (len) => ({
   decision: 'deny',
   reason:
-    `WRONG WRITE TARGET: the path is ${len} characters long, more than the Windows maximum of ` +
-    `${MAX_PATH_CHARS}. No real file has such a path, so this guard refuses it rather than ` +
-    'spend its time limit judging it. Use the real, fully qualified path (C:\\...).',
+    `WRONG WRITE TARGET: the path is ${len} characters long, longer than the Windows maximum ` +
+    '(32,767 chars); give the fully qualified, collapsed path (C:\\..., with no . or .. ' +
+    'segments). This guard refuses a longer one rather than spend its time limit judging it.',
 });
 
 const CONTROL_CHAR_DENY = {
@@ -900,26 +928,76 @@ export function decide(hookInput, opts = {}) {
   return ALLOW;
 }
 
+// A thrown value as short text, never itself throwing (a thrown object can have a throwing
+// toString), capped so a systemMessage stays readable.
+const errText = (e) => {
+  let s;
+  try { s = String(e && typeof e === 'object' && 'message' in e ? e.message : e); } catch { s = 'an unprintable error'; }
+  return s.length > 200 ? s.slice(0, 197) + '...' : s;
+};
+
+// The loud fail-open for an INTERNAL failure (bad hook input, a throw): the same shape as a
+// malformed config, a stderr line plus a systemMessage. Never a silent {}.
+const internalInactive = (reason) => {
+  process.stderr.write(`[write-target-guard] INACTIVE: ${reason} — Write, Edit, MultiEdit and NotebookEdit are unguarded.\n`);
+  return { systemMessage: `write-target-guard is INACTIVE: ${reason}. Write, Edit, MultiEdit and NotebookEdit are UNGUARDED for this call (the guard failed open).` };
+};
+
 function main() {
-  const out = (obj) => { process.stdout.write(JSON.stringify(obj)); process.exit(0); };
+  // Set once argv is read: the unrecognised-argument warning, appended to EVERY result below
+  // (a DENY keeps its decision and carries the warning alongside).
+  let argNote = '';
+  const out = (obj) => {
+    let o = obj;
+    if (argNote) {
+      const { systemMessage, ...rest } = obj;
+      o = { systemMessage: systemMessage ? `${systemMessage} ${argNote}` : argNote, ...rest };
+    }
+    process.stdout.write(JSON.stringify(o));
+    process.exit(0);
+  };
   let input = '';
   process.stdin.on('data', (c) => (input += c));
   process.stdin.on('end', () => {
-    let j;
     try {
-      j = JSON.parse((input || '{}').replace(/^\uFEFF/, ''));
-    } catch {
-      return out({}); // garbage stdin -> fail open, silent
+      run();
+    } catch (e) {
+      // The outer fail-open: an unexpected throw anywhere above still allows, but loudly.
+      out(internalInactive(`an internal error stopped it (${errText(e)})`));
+    }
+  });
+
+  function run() {
+    const cp = configPathFromArgv(process.argv);
+    if (cp.unknown.length) {
+      const list = cp.unknown.map((a) => JSON.stringify(a)).join(', ');
+      const dp = cp.error || cp.path ? null : safeDefaultConfigPath();
+      const used = cp.error ? 'none, because --config itself is broken (above)'
+        : cp.path ? `the --config file ${cp.path}`
+        : `the default config${dp ? ` at ${dp}` : ''}`;
+      process.stderr.write(`[write-target-guard] WARNING: unrecognised hook argument(s) ${list} IGNORED; the only accepted argument is --config <absolute path>. Config used: ${used}.\n`);
+      argNote = `write-target-guard WARNING: its hook command passes argument(s) it does not recognise, and it IGNORED them: ${list}. ` +
+        `The only accepted argument is --config <absolute path> (or --config=<absolute path>), given once and spelled exactly so. ` +
+        `Config used for this call: ${used}. Fix the hook command (hooks.json or settings.json) to clear this warning.`;
     }
 
-    const cp = configPathFromArgv(process.argv);
+    let j;
+    try {
+      j = JSON.parse(input.replace(/^\uFEFF/, ''));
+    } catch (e) {
+      return out(internalInactive(`its input (the tool call, on stdin) is not valid JSON (${errText(e)})`));
+    }
+    if (!j || typeof j !== 'object' || Array.isArray(j)) {
+      return out(internalInactive(`its input (the tool call, on stdin) is not a JSON object (got ${showVal(j)})`));
+    }
+
     let loaded = cp.error ? { status: 'malformed', error: cp.error, path: '(--config argument)' } : loadConfig(cp.path);
     let prep = { repos: [], warnings: [] };
     if (loaded.status === 'ok') {
       try {
         prep = prepareRepos(loaded.config.repos);
-      } catch {
-        return out({}); // unexpected error -> fail open
+      } catch (e) {
+        return out(internalInactive(`an internal error stopped it while it read the config at ${loaded.path} (${errText(e)})`));
       }
       if (!prep.repos.length) {
         // Nothing usable is left: the existing loud fail-open, naming what was dropped.
@@ -937,7 +1015,8 @@ function main() {
       return out({ systemMessage: `write-target-guard is INACTIVE: config at ${loaded.path} is malformed (${loaded.error}). Write, Edit, MultiEdit and NotebookEdit are UNGUARDED until it is fixed.` });
     }
     if (loaded.status === 'disabled') {
-      // Explicit, valid opt-out ("enabled": false or an empty "repos"): silent by design.
+      // Explicit, valid opt-out ("enabled": false or an empty "repos"): silent by design
+      // (out still adds the unrecognised-argument warning, if any).
       return out({});
     }
 
@@ -951,14 +1030,16 @@ function main() {
     let d;
     try {
       d = decide(j, { config: loaded.config, prepared: prep.repos, configPath: loaded.path, selfPaths: [process.argv[1]] });
-    } catch {
-      return out({ ...sys }); // unexpected error -> fail open
+    } catch (e) {
+      // Fail open, loudly: the INACTIVE notice first, then any config warning.
+      const { systemMessage } = internalInactive(`an internal error stopped it while it judged this call (${errText(e)})`);
+      return out({ systemMessage: sys.systemMessage ? `${systemMessage} ${sys.systemMessage}` : systemMessage });
     }
     if (d && d.decision === 'deny') {
       return out({ ...sys, hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.reason } });
     }
     return out({ ...sys });
-  });
+  }
 }
 
 // Run main when executed as the hook. Gate on argv[1]'s basename, case-insensitively:

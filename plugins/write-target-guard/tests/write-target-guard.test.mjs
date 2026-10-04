@@ -13,6 +13,8 @@
 //     write-target-guard.config.json`, a fixture config whose primary is the temp repo, and
 //     CLAUDE_PLUGIN_ROOT stripped. (The hook reads its default config from the OS account's
 //     home, os.userInfo().homedir, never USERPROFILE/HOME; see the fix E cases.)
+// One of the 43 changed its expectation on 2026-10-03 (fix I, L2): garbage stdin still fails
+// open, but loudly (an INACTIVE systemMessage), not as a silent {}.
 // After the 43 come NEW cases for the 2026-10-03 work: P1/P2/P3 alias-hardening, P5 root
 // config files, self-protection of the trust anchor, the loud fail-open / opt-out, the
 // denial of unresolvable UNC targets (lexically and after realpath), configured paths
@@ -31,7 +33,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, readFileSync, existsSync, symlinkSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { decide } from '../hooks/write-target-guard.mjs';
 import * as guard from '../hooks/write-target-guard.mjs'; // namespace: a missing seam fails one test, not the file
 
@@ -428,10 +430,13 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     assertMainDenies('\\\\?\\' + HOOK);
   });
 
-  test('END-TO-END: garbage stdin fails open -> {}', () => {
+  test('END-TO-END: garbage stdin fails open, loudly (INACTIVE systemMessage, no deny)', () => {
     const r = spawnHook(homeValid, 'not json');
     assert.equal(r.status, 0);
-    assert.equal(r.stdout, '{}');
+    const o = JSON.parse(r.stdout);
+    assert.notEqual(o.hookSpecificOutput?.permissionDecision, 'deny', r.stdout);
+    assert.match(o.systemMessage || '', /INACTIVE/, r.stdout);
+    assert.match(r.stderr, /INACTIVE/, r.stderr);
   });
 
   // ---------------------------------------------------------------------------
@@ -1320,7 +1325,7 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     const t = timedHook(homeValid, write(fp));
     const reason = decidedDeny(t, '250 KB space run');
     within2s(t, '250 KB space run');
-    assert.match(reason, new RegExp(`${fp.length} characters long, more than the Windows maximum of 32767`), reason);
+    assert.match(reason, new RegExp(`${fp.length} characters long, longer than the Windows maximum \\(32,767 chars\\); give the fully qualified, collapsed path`), reason);
   });
   test('fix F (deep path) END-TO-END: a 32,767-character deep path decides within 2 s (code -> deny, non-code -> allow)', () => {
     const code = padTo(`${repo}\\src\\`, 'a\\', 'x.ts');
@@ -1439,7 +1444,7 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     ]) {
       const d = D(input);
       denied(d);
-      assert.match(d.reason, /32768 characters long, more than the Windows maximum of 32767/, d.reason);
+      assert.match(d.reason, /32768 characters long, longer than the Windows maximum \(32,767 chars\); give the fully qualified, collapsed path/, d.reason);
     }
   });
   test('fix F (cap): a 32,767-character dot or space run is judged (not denied as too long) and decides quickly', () => {
@@ -1655,5 +1660,187 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     const asDir = path.win32.join(dir, 'as-dir.json');
     mkdirSync(asDir, { recursive: true });
     inactive(runArgs(['--config', asDir]), /malformed/, 'config path is a directory');
+  });
+
+  // ---------------------------------------------------------------------------
+  // fix I — 2026-10-03: an unrecognised hook argument is never silent (H1), an internal
+  // failure fails open loudly (L2), and --config takes a \??\ path (N2). The default-config
+  // cases pin os.userInfo().homedir to a temp home with a --import preload, so they never
+  // read this machine's own config.
+  // ---------------------------------------------------------------------------
+  let fixiSeq = 0;
+  const preloadArg = (src) => {
+    const f = path.win32.join(tmp, `fixi-preload-${process.pid}-${++fixiSeq}.mjs`);
+    writeFileSync(f, src);
+    return ['--import', pathToFileURL(f).href];
+  };
+  const homePreload = (home) => preloadArg(
+    "import os from 'node:os';\nconst real = os.userInfo;\n" +
+    `os.userInfo = (...a) => ({ ...real(...a), homedir: ${JSON.stringify(home)} });\n`);
+  const runWith = (pre, args, input) => {
+    const r = spawnSync(process.execPath, [...pre, HOOK, ...args], {
+      input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8', env: childEnv(homeValid), timeout: 10000,
+    });
+    assert.equal(r.error, undefined, `${JSON.stringify(args)}: ${r.error && r.error.code}`);
+    assert.equal(r.status, 0, r.stderr);
+    return { r, o: JSON.parse(r.stdout) };
+  };
+  // The unrecognised-argument warning reached BOTH channels, naming every ignored token and
+  // the config actually used.
+  const warnedArgs = ({ r, o }, tokens, usedRe, what) => {
+    const sm = o.systemMessage || '';
+    assert.match(sm, /write-target-guard WARNING: its hook command passes argument\(s\) it does not recognise, and it IGNORED them: /, `${what}: ${sm}`);
+    for (const a of tokens) assert.ok(sm.includes(JSON.stringify(a)), `${what}: token ${JSON.stringify(a)} not named: ${sm}`);
+    assert.match(sm, usedRe, `${what}: ${sm}`);
+    assert.match(r.stderr, /\[write-target-guard\] WARNING: unrecognised hook argument\(s\) .* IGNORED/, `${what}: ${r.stderr}`);
+  };
+  const usedDefault = (home) => new RegExp('Config used for this call: the default config at ' + escRe(cfgOf(home)));
+  const fixiHomes = () => {
+    const disabled = homeWith('fixi-disabled', { version: 1, enabled: false, repos: FIX.repos });
+    const missing = path.win32.join(tmp, 'home-fixi-missing');
+    mkdirSync(missing, { recursive: true });
+    return { disabled, missing };
+  };
+  const fixiDenyT = () => path.win32.join(repo, 'src', 'App.vue');
+  const fixiAllowT = () => path.win32.join(repo, 'docs', 'fixi.md');
+
+  test('fix I (H1) controls: with the home pinned and no arguments, the default config decides (enforcing deny, disabled {}, missing INACTIVE)', () => {
+    const { disabled, missing } = fixiHomes();
+    denied(D(write(fixiDenyT())));
+    allowed(D(write(fixiAllowT())));
+    const en = runWith(homePreload(homeValid), [], write(fixiDenyT()));
+    hookDenied(en);
+    assert.equal(en.o.systemMessage, undefined, JSON.stringify(en.o).slice(0, 300));
+    const dis = runWith(homePreload(disabled), [], write(fixiDenyT()));
+    assert.equal(dis.r.stdout, '{}');
+    const mi = runWith(homePreload(missing), [], write(fixiDenyT()));
+    inactive(mi, new RegExp('no config file at ' + escRe(cfgOf(missing))), 'missing default');
+  });
+  test('fix I (H1): every misspelt or unknown argument warns loudly; the decision is the default config\'s, a DENY stays a DENY', () => {
+    const { disabled, missing } = fixiHomes();
+    const E = cfgOf(homeValid);
+    const SPELLINGS = [
+      ['--CONFIG', E], ['--Config', E], ['-config', E], ['\u2014config', E], ['\u2013config', E],
+      ['--CONFIG=' + E], ['-config=' + E], ['\u2014config=' + E], ['\u2013config=' + E],
+      ['--verbose'], [''],
+    ];
+    const pre = { enforcing: homePreload(homeValid), disabled: homePreload(disabled), missing: homePreload(missing) };
+    for (const args of SPELLINGS) {
+      const what = JSON.stringify(args);
+      // enforcing default: a DENY stays a DENY (with the warning), an ALLOW carries the warning
+      const d = runWith(pre.enforcing, args, write(fixiDenyT()));
+      hookDenied(d);
+      warnedArgs(d, args, usedDefault(homeValid), `enforcing deny ${what}`);
+      const a = runWith(pre.enforcing, args, write(fixiAllowT()));
+      hookNotDenied(a);
+      warnedArgs(a, args, usedDefault(homeValid), `enforcing allow ${what}`);
+      assert.doesNotMatch(a.o.systemMessage, /INACTIVE/, what);
+      // disabled default: the silent opt-out is no longer silent when an argument is ignored
+      const s = runWith(pre.disabled, args, write(fixiDenyT()));
+      hookNotDenied(s);
+      warnedArgs(s, args, usedDefault(disabled), `disabled ${what}`);
+      assert.doesNotMatch(s.o.systemMessage, /INACTIVE/, what);
+      // missing default: INACTIVE, with the warning alongside
+      const m = runWith(pre.missing, args, write(fixiDenyT()));
+      inactive(m, new RegExp('no config file at ' + escRe(cfgOf(missing))), `missing ${what}`);
+      warnedArgs(m, args, usedDefault(missing), `missing ${what}`);
+    }
+  });
+  test('fix I (H1): an exact --config pair still decides beside a stray token; a broken --config stays INACTIVE; exact pairs alone are quiet', () => {
+    const { missing } = fixiHomes();
+    const E = cfgOf(homeValid);
+    const pre = homePreload(missing); // the default would be INACTIVE, so a deny proves the pair decided
+    for (const [args, stray] of [
+      [['--config', E, '--verbose'], ['--verbose']],
+      [['-v', '--config=' + E], ['-v']],
+      [['--CONFIG', 'C:\\elsewhere.json', '--config', E], ['--CONFIG', 'C:\\elsewhere.json']],
+    ]) {
+      const res = runWith(pre, args, write(fixiDenyT()));
+      hookDenied(res);
+      warnedArgs(res, stray, new RegExp('Config used for this call: the --config file ' + escRe(E)), JSON.stringify(args));
+    }
+    const broken = runWith(pre, ['--CONFIG', 'x', '--config'], write(fixiDenyT()));
+    inactive(broken, /--config needs an absolute path/, 'missing value');
+    warnedArgs(broken, ['--CONFIG', 'x'], /Config used for this call: none, because --config itself is broken/, 'missing value');
+    const twice = runWith(pre, ['--config', E, '--config', E, '--x'], write(fixiDenyT()));
+    inactive(twice, /--config was given 2 times/, 'given twice');
+    warnedArgs(twice, ['--x'], /none, because --config itself is broken/, 'given twice');
+    for (const args of [['--config', E], ['--config=' + E]]) {
+      const res = runWith(pre, args, write(fixiDenyT()));
+      hookDenied(res);
+      assert.equal(res.o.systemMessage, undefined, JSON.stringify(res.o).slice(0, 300));
+      assert.doesNotMatch(res.r.stderr, /WARNING/, res.r.stderr);
+    }
+  });
+  test('fix I (L2): garbage, empty or non-object stdin -> loud INACTIVE naming stdin, never a silent {} and never a deny', () => {
+    for (const s of ['not json', '', '   ', '\uFEFF', 'null', '42', '"str"', 'true', '[]', '[1,2]', '{"tool_name":']) {
+      const r = spawnHook(homeValid, s);
+      assert.equal(r.status, 0, r.stderr);
+      inactive({ r, o: JSON.parse(r.stdout) }, /its input \(the tool call, on stdin\) is not (valid JSON|a JSON object)/, JSON.stringify(s));
+    }
+    const ok = spawnHook(homeValid, '{}'); // a valid object that is not a guarded tool call: still the quiet allow
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(ok.stdout, '{}');
+  });
+  test('fix I (L2): a throw while judging the call -> loud INACTIVE (INACTIVE first, then any config warning), never a deny', () => {
+    const tgt = fixiDenyT();
+    for (const ti of [{ file_path: tgt, content: { toString: 1 } }, { file_path: { toString: 1 }, content: 'x' }]) {
+      const r = spawnHook(homeValid, { tool_name: 'Write', tool_input: ti });
+      assert.equal(r.status, 0, r.stderr);
+      inactive({ r, o: JSON.parse(r.stdout) }, /an internal error stopped it while it judged this call/, JSON.stringify(ti));
+    }
+    const home = homeWith('fixi-warn', { version: 1, repos: [FIX.repos[0], 42] });
+    const r = spawnHook(home, { tool_name: 'Write', tool_input: { file_path: tgt, content: { toString: 1 } } });
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    inactive({ r, o }, /while it judged this call/, 'with config warnings');
+    assert.match(o.systemMessage, /^write-target-guard is INACTIVE: [\s\S]* write-target-guard WARNING: config at [\s\S]* has problems/, o.systemMessage);
+  });
+  test('fix I (L2): a throw while preparing the config, and a throw outside every inner handler -> loud INACTIVE, never a deny', () => {
+    const E = cfgOf(homeValid);
+    const prepThrows = preloadArg(
+      'const real = JSON.parse;\n' +
+      'JSON.parse = function (...a) { const v = real.apply(this, a); ' +
+      "if (v && Array.isArray(v.repos)) Object.defineProperty(v.repos, 'forEach', { value() { throw new Error('planted prepareRepos failure'); } }); " +
+      'return v; };\n');
+    inactive(runWith(prepThrows, ['--config', E], write(fixiDenyT())),
+      new RegExp('an internal error stopped it while it read the config at ' + escRe(E) + ' \\(planted prepareRepos failure\\)'), 'prepareRepos throw');
+    const outerThrows = preloadArg(
+      'const real = String.prototype.startsWith;\n' +
+      "String.prototype.startsWith = function (s, ...r) { if (s === '--config=') throw new Error('planted argv failure'); return real.call(this, s, ...r); };\n");
+    inactive(runWith(outerThrows, ['--config', E], write(fixiDenyT())), /an internal error stopped it \(planted argv failure\)/, 'outer catch');
+  });
+  test('fix I (N2): --config \\??\\<absolute path>, in either form, is read as that path -> enforced, quietly', () => {
+    const E = cfgOf(homeValid);
+    for (const args of [['--config', '\\??\\' + E], ['--config=\\??\\' + E], ['--config', '/??/' + E.replace(/\\/g, '/')]]) {
+      const { r, o } = runArgs(args);
+      assert.equal(o.hookSpecificOutput?.permissionDecision, 'deny', `${JSON.stringify(args)}: ${JSON.stringify(o).slice(0, 300)}`);
+      assert.equal(o.systemMessage, undefined, JSON.stringify(o).slice(0, 300));
+      assert.doesNotMatch(r.stderr, /WARNING|INACTIVE/, r.stderr);
+    }
+    const nope = path.win32.join(tmp, 'fixi-nope', 'c.json');
+    const miss = runArgs(['--config', '\\??\\' + nope]);
+    inactive(miss, new RegExp('no config file at ' + escRe(nope)), 'missing \\??\\ config');
+    assert.ok(!miss.o.systemMessage.includes('\\??\\'), miss.o.systemMessage);
+    inactive(runArgs(['--config', '\\??\\rel\\c.json']), /--config needs an absolute path/, '\\??\\ relative');
+  });
+  test('fix I (N2/H1 seam): configPathFromArgv strips \\??\\ and \\??\\UNC\\, and lists exactly the unrecognised tokens', () => {
+    const f = guard.configPathFromArgv;
+    assert.equal(typeof f, 'function', 'configPathFromArgv is exported');
+    const A = (...a) => f(['node', 'hook.mjs', ...a]);
+    assert.deepEqual(A('--config', '\\??\\C:\\x\\c.json'), { path: 'C:\\x\\c.json', unknown: [] });
+    assert.deepEqual(A('--config=\\??\\UNC\\srv\\share\\c.json'), { path: '\\\\srv\\share\\c.json', unknown: [] });
+    assert.deepEqual(A('--config', '\\??\\unc\\srv\\share\\c.json'), { path: '\\\\srv\\share\\c.json', unknown: [] });
+    assert.deepEqual(A('--config', '/??/C:/x/c.json'), { path: 'C:/x/c.json', unknown: [] });
+    assert.deepEqual(A('--config', 'C:\\x\\c.json'), { path: 'C:\\x\\c.json', unknown: [] });
+    assert.deepEqual(A('--CONFIG', 'C:\\a', '--config', 'C:\\b', '-v'), { path: 'C:\\b', unknown: ['--CONFIG', 'C:\\a', '-v'] });
+    assert.deepEqual(A(), { path: null, unknown: [] });
+    assert.deepEqual(A('--verbose', ''), { path: null, unknown: ['--verbose', ''] });
+    const noVal = A('--config');
+    assert.match(noVal.error, /needs an absolute path/);
+    assert.deepEqual(noVal.unknown, []);
+    assert.match(A('--config', '\\??\\rel').error, /needs an absolute path/);
+    assert.match(A('--config', 'C:\\a', '--config=C:\\b', '-x').error, /given 2 times/);
+    assert.deepEqual(A('--config', 'C:\\a', '--config=C:\\b', '-x').unknown, ['-x']);
   });
 });

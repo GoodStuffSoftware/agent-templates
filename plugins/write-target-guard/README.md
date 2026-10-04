@@ -72,7 +72,13 @@ are editing could point the guard away from itself. The one override is a
 the hook runs); the test suite uses it. A `--config` given more than once (in either
 form), with no value or with a relative path is treated like a malformed config
 (loud, fails open); the first value never wins silently. So is a config file larger
-than 64 KiB.
+than 64 KiB. A leading `\??\` on the value is stripped (`\??\UNC\` becomes `\\`)
+before the file is read. Any **other** argument (a misspelling such as `--CONFIG`,
+`-config` or an em-dash `—config`, or a stray flag) is ignored, and every call warns
+about it, on stderr and in the `systemMessage`, naming each ignored token and the
+config actually used. The warning never changes the decision: the exact `--config`
+pair decides if there is one, otherwise the default config does, and a deny stays a
+deny.
 
 Copy [`write-target-guard.config.example.json`](./write-target-guard.config.example.json)
 to that path and edit it for your machine. Schema:
@@ -184,7 +190,8 @@ These shapes cannot be judged, so they are **denied for every write**, code or n
 
 ## Fail-open, loudly
 
-If the config is **missing** or **malformed**, the guard **fails open** — `Write`
+If the config is **missing** or **malformed**, or the guard itself fails on a call,
+the guard **fails open** — `Write`
 and `Edit` proceed — but **loudly, in every deployment**. On the non-blocking
 exit-0 result it emits a top-level `systemMessage` (the channel Claude Code shows
 to the user; plain stdout/stderr reach only the debug log) plus a stderr line:
@@ -194,6 +201,10 @@ to the user; plain stdout/stderr reach only the debug log) plus a stderr line:
   remove/disable the plugin …"*
 - **Malformed config:** *"write-target-guard is INACTIVE: config at `<path>` is
   malformed (`<reason>`). Write, Edit, MultiEdit and NotebookEdit are UNGUARDED until it is fixed."*
+- **Internal failure:** hook input that is not a JSON object (garbage, empty or
+  non-object stdin), or an unexpected exception while reading the config or judging
+  the call: *"write-target-guard is INACTIVE: `<reason>`. Write, Edit, MultiEdit and
+  NotebookEdit are UNGUARDED for this call (the guard failed open)."*
 
 A **partly** malformed config is salvaged, loudly, never silently. Each invalid
 piece is dropped with one `WARNING` naming the field, on stderr and in the
@@ -219,7 +230,7 @@ config**: top-level `"enabled": false`, or an empty `"repos": []`. Everything el
 This hook runs on **every `Write`/`Edit` on the machine**. Failing *closed* on a
 missing or corrupt config would turn one bad file into a total write outage —
 including the inability to write the config needed to repair it. Fail-open matches
-the guard's existing outer error handling (an unexpected exception also allows),
+the guard's outer error handling (an unexpected exception also allows, as loudly),
 and the per-call `systemMessage` keeps the degraded state visible on every call in
 every deployment, so the trade-off is "unguarded but noisy", never "silently
 off". Rejected alternatives: fail-closed (bricks writes); an env-var or sentinel
@@ -308,6 +319,10 @@ To move the registration:
 - The guard is **branch-keyed**: a nested repo under `.claude\worktrees\<name>`
   that is not a real linked worktree, but whose `.git` names an allowed branch
   (`feat/…`), is allowed like a real worktree.
+- On a **pathologically deep planted structure** (about 16k nested directories, or
+  a planted junction pair) one decision can take several seconds. The verdict stays
+  correct, but if one ever passed the hook's 15 s timeout, Claude Code would let
+  that write through (the harness fails open on a timeout).
 
 ---
 
