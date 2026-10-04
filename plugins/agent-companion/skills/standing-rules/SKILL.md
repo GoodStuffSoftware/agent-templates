@@ -79,6 +79,7 @@ documentation. `--when 'deploy|ship it|push to prod'` beats `--when
 | `delegate-reminder` | `always` | **only once this session has actually drifted** — see below |
 | `agent-brevity` | `spawn` | disabled; it exists so `list` shows you the spawn scope is available |
 | `poll-guard-doctrine` | `session-start` | every session — one completion wait, never per-item wakes (cache-advisor guard b, `hooks/poll-guard.mjs`) |
+| `pr-wait-hint` | `session-start` | every session, while the `pr_wait` option is on — one line pointing at `scripts/pr-wait.mjs` (README "PR and CI wait") |
 | `lead-effort-check` | `session-start` | disabled by default (enable with `{"id":"lead-effort-check","enabled":true}`): an orchestrating interactive session below xhigh is asked, with the AskUserQuestion options selector, to raise to xhigh (the operator does it with the app's effort control; the lead cannot self-set) or stay; unattended sessions are not asked |
 
 Disable any of them by id (`disable copyable-prompt`) — they are never removed,

@@ -31,6 +31,13 @@ Git brief (trial): one line of git state at agent start, and one script instead 
 
 Read dedupe: a PreToolUse hook that denies a repeat Read of lines the same agent already read, when the file is unchanged and the read would return 2,000 characters or more. Fills the gap Claude Code's own "File unchanged" stub leaves (a range inside an earlier larger read, A-B-A alternation, ranges spanning two earlier reads; 551 of 654 measured repeat reads in 7 days were partial). The denial is one sentence and the identical call, repeated, runs. State is per agent; cleared by an edit, any mtime or size change, `PreCompact` and `SessionStart` `compact`/`clear`; fails open. Option `read_dedupe` (default on; `CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0`); telemetry in `read-dedupe.jsonl`.
 
+PR and CI wait: one call that waits inside a script instead of repeated `gh` and sleep polls (trial).
+
+- New `scripts/pr-wait.mjs`: `pr-wait <pr-number|branch> [--repo owner/repo] [--timeout 20m]` waits until a PR's checks finish or it merges or closes; `--run <run-id|branch>` does the same for a GitHub Actions run. It prints one start line, then one final line (state, checks passed/failed/total, elapsed) and up to nine failed-check lines with log URLs. Exit codes: 0 passed or merged, 1 failed or closed unmerged, 2 timeout, 3 usage or gh error. Polls gh inside the script with backoff (5s to 30s), never prompts, and is safe under `run_in_background`.
+- New option `pr_wait` (default on; `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` turns it off) and standing rule `pr-wait-hint`: one session-start line (150 characters or fewer) naming the script. Off hides only that line; the script still runs.
+- Telemetry stream `telemetry/pr-wait.jsonl`, one row per run: mode, polls, duration, outcome, exit code (`docs/TELEMETRY.md`).
+- Tests: `tests/pr-wait.test.mjs` (gh stubbed), plus the rule-count updates in `tests/standing-rules.test.mjs`.
+
 ## 0.29.32 — 2026-10-04
 
 Removed the top-level `$schema` key from `plugin.json`: the Claude desktop app warned that it is an unrecognized key (stripped, the SDK ignores unknown top-level fields).

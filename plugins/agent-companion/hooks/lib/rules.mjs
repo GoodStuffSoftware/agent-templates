@@ -118,6 +118,9 @@ export const LEAD_EFFORT_CHECK_TEXT = [
   'Never raise to max this way, never lower the effort.',
 ].join(' ');
 
+// The pr-wait discoverability line. At most 150 characters (a test pins it).
+export const PR_WAIT_HINT_TEXT = 'PR/CI wait: one call, no gh/sleep loops: node <plugin>/scripts/pr-wait.mjs <pr|branch>. Release tools: verify_release, merge_to_main.';
+
 function builtinRules() {
   return [
     {
@@ -198,6 +201,20 @@ function builtinRules() {
       gate: 'delegation-drift',
       when: null,
       then: 'Delegation reminder: this session has already run execution work on the main thread. Route the next read, search, command, test run or edit to a subagent rather than doing it here.',
+      note: null,
+    },
+    {
+      // The discoverability line for scripts/pr-wait.mjs. Gated on the pr_wait
+      // option so the trial can switch it off and compare. Keep it to one
+      // line: it is paid for in every session.
+      id: 'pr-wait-hint',
+      audience: 'lead',
+      enabled: true,
+      builtin: true,
+      scope: 'session-start',
+      gate: 'pr_wait',
+      when: null,
+      then: PR_WAIT_HINT_TEXT,
       note: null,
     },
     {
@@ -387,6 +404,9 @@ function gateSatisfied(gate, sessionId) {
       return false;
     }
   }
+
+  // gate:'pr_wait' is the pr_wait option (default on; CLAUDE_PLUGIN_OPTION_PR_WAIT=0 turns it off).
+  if (gate === 'pr_wait') return opt('pr_wait', true);
 
   if (gate === 'delegation-drift') {
     if (!sessionId) return false;

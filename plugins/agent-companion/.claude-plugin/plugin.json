@@ -389,6 +389,12 @@
       "description": "Trial. At session start and at every subagent start, add ONE line of git state to the agent context (branch, ahead/behind origin's default branch, uncommitted files, worktree, last commit, unpushed commits) and name the refresh command (scripts/git-brief.mjs, with a landed subcommand), so agents stop running git status/fetch/rev-list by hand. Fetches origin's default branch at most every 5 minutes, 1.5 s cap, never prompts. Off = the hook does nothing and logs nothing; CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0 does the same. Telemetry: telemetry/git-brief.jsonl.",
       "default": true
     },
+    "pr_wait": {
+      "type": "boolean",
+      "title": "PR/CI wait hint",
+      "description": "Show one standing line (at session start) pointing agents at scripts/pr-wait.mjs, which waits for a PR's checks or a workflow run inside a script and returns one final state, instead of repeated gh calls and sleep loops. Off hides only that line: the script itself still runs, and still writes telemetry/pr-wait.jsonl. Env override: CLAUDE_PLUGIN_OPTION_PR_WAIT=0.",
+      "default": true
+    },
     "bash_tail_permission_modes": {
       "type": "string",
       "title": "Bash output tail: permission modes",

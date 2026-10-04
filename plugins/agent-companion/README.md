@@ -48,6 +48,7 @@ It was built after two observed failures:
 | `bash_tail` | Bash output tail (default **on**). A PreToolUse hook rewrites a known long-running Bash command (test, build, install) so its output goes to a file and only a short tail plus the file's path returns to context; the exit code is preserved exactly. See [Bash output tail](#bash-output-tail). `bash_tail_permission_modes` (default `bypassPermissions`; `any` lifts the limit) sets the permission modes it applies in. | no (rewrites the command, never denies it) |
 | `git_brief` | **Trial.** Git brief (default **on**). A SessionStart hook and a SubagentStart hook add ONE line of git state to the agent's context (branch, ahead/behind origin's default branch, uncommitted files, worktree, last commit, unpushed) and name the refresh command, `scripts/git-brief.mjs [landed <sha\|branch>]`, so agents stop running `git status`/`fetch`/`rev-list` by hand. Off with `false` or `CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0`. See [Git brief](#git-brief-trial). | no |
 | `read_dedupe` | Read dedupe (default **on**). A PreToolUse hook denies a Read of lines the SAME agent already read, when the file is unchanged since and the read would return 2,000 characters or more; the denial is one sentence and the identical call, repeated, runs. See [Read dedupe](#read-dedupe). | yes, on a covered repeat (never twice in a row) |
+| `pr_wait` | PR/CI wait hint (default **on**; `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` turns it off). One standing session-start line (the `pr-wait-hint` rule) pointing agents at `scripts/pr-wait.mjs`, see "PR and CI wait" below. Off hides only that line; the script still runs and still logs telemetry. |
 | `brevity` | Appends a short reporting contract to every spawned agent's brief — status line, blockers in full, outcome as facts, no narration — plus a peer-brevity clause on inter-agent messages. | no (an opt-in sub-toggle can block once per agent) |
 | `standing_rules` | Injects operator-authored "always do X if Y" rules at session start, on matching prompts, and into matching spawn briefs. | no |
 | `memory_vault` | Keeps a local git history of the memory corpus in a separate repository, so a rewrite or truncation is no longer unrecoverable. Strictly read-only against the live corpus. **Off by default** — see [Memory vault](#memory-vault). | no |
@@ -111,6 +112,21 @@ Agents re-read unchanged files: a 7-day measurement (2026-10-04) found 654 repea
 - **Opt out:** `read_dedupe: false` (or `CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0` in the environment).
 - **Measure it:** `telemetry/read-dedupe.jsonl` (see `docs/TELEMETRY.md`): one row per denial and one per denied request that was repeated and ran. A high retry share means agents mostly did NOT have the content in context and the threshold or age cap is too loose.
 
+## PR and CI wait
+
+Agents polling a PR or CI with `gh pr checks`, `gh run watch`, `gh pr view` and sleep loops pay for every poll: each result is re-read from the prompt cache for the rest of the session. `scripts/pr-wait.mjs` does the waiting inside a process, where it costs no tokens, and returns the final state in one call.
+
+```
+node scripts/pr-wait.mjs <pr-number|branch|url> [--repo owner/repo] [--timeout 20m]
+node scripts/pr-wait.mjs --run <run-id|branch>  [--repo owner/repo] [--timeout 20m]
+```
+
+- **Output:** one start line, then nothing until the end, so it is safe to launch with `run_in_background`. The final line gives state, checks passed/failed/total and elapsed time; up to nine more lines name the failed checks with their log URLs (on a timeout, the checks still pending).
+- **Exit codes:** 0 checks passed or PR merged; 1 a check failed, or the PR closed unmerged; 2 timeout (default 20m; `--timeout` takes `90s`, `20m`, `1h`); 3 usage or gh error. It never prompts; gh is polled with backoff (5s growing to 30s), and a transient gh failure is retried before it gives up.
+- **Limits:** right after a push GitHub can still report the previous commit's checks for a few seconds, and `--run <branch>` picks the newest run on the branch, which may be the one before your push (pass the run id when it matters). A PR with no checks at all returns `NO-CHECKS` (exit 0) after 90 seconds.
+- **Discoverability, and the trial toggle:** the plugin adds one standing line at session start (the `pr-wait-hint` rule, 150 characters or fewer, also naming the `verify_release` and `merge_to_main` release tools, where a project has them). `pr_wait: false` or `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` hides that line; the script itself keeps working.
+- **Measure it:** each run appends one row to `telemetry/pr-wait.jsonl` (mode, polls, duration, outcome, exit code; see `docs/TELEMETRY.md`). Compare the `gh` and sleep call counts in transcripts with the line on and off.
+
 ## Brevity — the reporting contract
 
 The operator's token spend is dominated by subagents narrating their journey — tool-by-tool recaps, resolved dead ends, restatements of the brief — when the caller wanted a status line, blockers, and an outcome stated as fact. `brevity` appends a short reporting contract to every spawned agent's brief: STATUS (done/blocked/partial), blockers in full and never compressed, then the outcome as facts, with long output moved to a file instead of inlined. A separate peer-brevity clause covers agent-to-agent messages: one screen at most, no recap of context the recipient already has.
@@ -163,9 +179,9 @@ Four scopes, each deciding what `when` is tested against and where the directive
 | `session-start` | *(ignored — fires once)* | the main session, at start |
 | `spawn` | the brief of an agent being spawned | that subagent's prompt |
 
-A `session-start` rule also reaches a subagent that compacts, because SessionStart fires inside it. A rule with `"audience": "lead"` stays out of that: five of the built-ins carry it (`lead-brevity`, `delegate-first`, `resume-doctrine`, `poll-guard-doctrine`, `lead-effort-check`), since a worker cannot spawn, resume, arm a wake or ask the operator. A rule with no `audience` (every rule you add, unless you set it) reaches the lead and workers alike. The scout drift block, the main-CI note and the capacity line are lead-only in the same way.
+A `session-start` rule also reaches a subagent that compacts, because SessionStart fires inside it. A rule with `"audience": "lead"` stays out of that: six of the built-ins carry it (`lead-brevity`, `delegate-first`, `resume-doctrine`, `poll-guard-doctrine`, `pr-wait-hint`, `lead-effort-check`), since a worker cannot spawn, resume, arm a wake or ask the operator. A rule with no `audience` (every rule you add, unless you set it) reaches the lead and workers alike. The scout drift block, the main-CI note and the capacity line are lead-only in the same way.
 
-Eight rules ship built in:
+Nine rules ship built in:
 
 | id | scope | fires |
 |---|---|---|
@@ -176,6 +192,7 @@ Eight rules ship built in:
 | `delegate-reminder` | `always` | gated — see below |
 | `agent-brevity` | `spawn` | disabled by default; reserved so the `spawn` scope shows up in `rules list` |
 | `poll-guard-doctrine` | `session-start` | every session — cache-advisor guard (b): "one completion wait, never per-item wakes" (see `hooks/poll-guard.mjs`) |
+| `pr-wait-hint` | `session-start` | every session, while `pr_wait` is on — one line pointing at `scripts/pr-wait.mjs` (see "PR and CI wait") |
 | `lead-effort-check` | `session-start` | disabled by default. Turn on with `{"id":"lead-effort-check","enabled":true}`. When the session will orchestrate and its effort is below xhigh, asks the operator with the AskUserQuestion options selector ("Raise to xhigh (Recommended)" or "Stay at <current>"), with no spawn or other tool call until answered; "Raise" tells the operator to use the app's effort control and waits (the app refuses a session changing its own effort, so the lead does not set it itself). Unattended sessions (a `scheduledTaskId`, headless, no AskUserQuestion) are never asked: they continue and state the effort once. Never raises to max, never lowers |
 
 ### `delegate-reminder` — the direct answer to "my delegation rules stop being followed"

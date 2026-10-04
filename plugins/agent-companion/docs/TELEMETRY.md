@@ -375,6 +375,23 @@ a ceiling, because a `retry-ran` row means the agent did not have the content
 after all. `retry-ran` / `deny` is the false-denial rate to watch; the toggle is
 `read_dedupe`.
 
+### `pr-wait.jsonl` — the PR and CI wait script
+
+One row per run of `scripts/pr-wait.mjs`, written by the script itself when it exits (a run killed outright, with no chance to exit, writes nothing). Written whether or not the `pr_wait` hint option is on: that option only hides the discoverability line. A fixture session's row goes to `fixtures.jsonl`, as for every stream.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when the run ended |
+| `session_id` | string \| absent | the session, from `CLAUDE_SESSION_ID` or `CLAUDE_CODE_SESSION_ID` when the harness exports one |
+| `mode` | `pr` \| `run` | `--run` selects `run` |
+| `polls` | number | gh calls made while waiting (a retried failure counts) |
+| `duration_ms` | number | wall time from start to exit |
+| `outcome` | string | `passed`, `failed`, `merged`, `closed`, `no-checks`, `timeout`, `gh-error`, `usage`, `interrupted` |
+| `exit_code` | number | 0 passed or merged (or no checks), 1 failed or closed, 2 timeout, 3 usage or gh error, 130 interrupted |
+
+The effect for a review: each row stands for `polls` gh calls that never reached the model, and one tool call in place of the repeated `gh` and sleep calls an agent would otherwise have made. Compare transcript counts of those calls with the hint on and off.
+
 ### `unknown-agent-types.jsonl` — harness drift signal
 
 | field | type | meaning |
