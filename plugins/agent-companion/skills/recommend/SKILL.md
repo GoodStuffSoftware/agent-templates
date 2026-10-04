@@ -1,6 +1,6 @@
 ---
 name: recommend
-description: Recommend which model and effort to use for the task at hand. Classifies the work by task type (or weight, kind, and consequence), resolves it through agent-companion's routing table, and states the model, the effort, whether a premium warrant is required, and the reviewer tier that should gate it. Use when asked "what model should I use for this", "should this be opus or sonnet", "does this need fable", "what effort for this", or before spawning a subagent for anything non-trivial.
+description: Recommend the model and effort for the task - classifies it, resolves the routing table, states model, effort, premium warrant and reviewer tier. Use for "what model should I use for this", "should this be opus or sonnet", "does this need fable", "what effort for this", or before spawning a subagent for non-trivial work.
 ---
 
 # Recommend a model and effort

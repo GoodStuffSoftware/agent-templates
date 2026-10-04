@@ -38,9 +38,10 @@ function buildScoutBlock() {
   if (!opt('scout_surface', true)) return null;
 
   let latest = null;
+  let latestFile = null;
   const primary = join(stateDir(), 'scout-latest.json');
   if (existsSync(primary)) {
-    try { latest = JSON.parse(readFileSync(primary, 'utf8')); } catch { /* fall through */ }
+    try { latest = JSON.parse(readFileSync(primary, 'utf8')); latestFile = primary; } catch { /* fall through */ }
   }
   if (!latest) {
     // Several data dirs can exist (one per marketplace, plus -inline). Take
@@ -50,7 +51,7 @@ function buildScoutBlock() {
       if (!existsSync(f)) continue;
       try {
         const j = JSON.parse(readFileSync(f, 'utf8'));
-        if (!latest || Date.parse(j.checkedAt) > Date.parse(latest.checkedAt)) latest = j;
+        if (!latest || Date.parse(j.checkedAt) > Date.parse(latest.checkedAt)) { latest = j; latestFile = f; }
       } catch { /* unreadable: skip */ }
     }
   }
@@ -59,15 +60,15 @@ function buildScoutBlock() {
   const ageDays = (Date.now() - Date.parse(latest.checkedAt)) / 86400000;
   if (!(ageDays <= MAX_AGE_DAYS)) return null; // stale results are not news
 
-  const lines = latest.signals.map((s) => `- ${s.kind}: ${s.detail}${s.dispatch && s.dispatch !== 'none' ? ` → ${s.dispatch}` : ''}`);
   const when = latest.checkedAt.slice(0, 16).replace('T', ' ');
 
   return {
     summary: `agent-companion scout (${when}): ${latest.signals.length} signal(s) — ${latest.signals.map((s) => s.kind).join(', ')}`,
+    // A pointer, not the signal list: the full text (kind, detail, dispatch per
+    // signal) stays in scout-latest.json, read only if the user asks.
     context:
-      `[agent-companion] The locally scheduled calibration scout last ran ${when} and found:\n${lines.join('\n')}\n` +
-      'These are drift signals, not errors. If the user asks about routing, model changes, guards, or costs, mention them; ' +
-      'otherwise do not act on them unprompted. The audit skill can investigate: node <plugin>/scripts/audit.mjs --only harness-drift,guard-canary',
+      `[agent-companion] Scout ${when}: ${latest.signals.length} drift signal(s) (not errors): ${latest.signals.map((s) => s.kind).join(', ')}. ` +
+      `Details: ${latestFile}. Mention only if asked about routing, models, guards or costs.`,
   };
 }
 

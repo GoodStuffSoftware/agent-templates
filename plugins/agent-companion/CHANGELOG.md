@@ -2,6 +2,25 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## Unreleased
+
+Trimmed the text the plugin adds to every session, keeping every requirement. Source: `plugin-overhead-2026-10-04.md` (usage postmortem), trims 1 to 4.
+
+- Scout surface (SessionStart): the main session gets a pointer line (signal count, kinds, path to `scout-latest.json`, "mention only if asked") instead of the full signal list; subagents get nothing (the hook already skipped them: `sessionIsSubagent`). The CI-red line is unchanged.
+- Standing rules: subagents get none (every built-in session-start rule is `audience: lead`; no rule that governs a worker's own tool use exists to keep). Main session wording tightened, every rule kept: the delegate-first rationale clause "omitted inherits this tier" is dropped (the instruction to set the model explicitly stays); other rules lose filler words only.
+- Reporting contract (SubagentStart/spawn brief): tightened, every requirement kept (STATUS line, blockers uncompressed, outcome shape, omit list, long output to a file, peer messages one screen).
+- Skill descriptions: the 11 plugin skills cut by about a third, trigger phrases kept.
+- Not done: hiding the 10 `ac-*` ladder agents from subagents. Claude Code has no supported mechanism (only a per-agent `tools: Agent(a, b)` allowlist, which would mean editing every other agent).
+- Measured by chars of injected text, via the same scripts' inputs as the report (static run of each hook, clean config dir; scout with a 3-signal result, so the real scout block is larger):
+
+| Item | Before | After |
+|---|---|---|
+| Main session-start text (scout + standing rules) | 1,499 | 867 |
+| Subagent session-start text (scout + rules + contract) | 758 | 473 |
+| Skill descriptions, total (11) | 5,360 | 3,656 |
+
+  Per item: scout main 567 -> 290 (report averaged 2,907 on real multi-signal results, and it grows with signals; the pointer does not), subagent 0 -> 0; rules main 932 -> 577, subagent 0 -> 0; contract subagent 758 -> 473. The report's 3,924 (scout) and 2,011 (rules) per-subagent figures predate the subagent skip already in 0.29.29.
+
 ## 0.29.32 — 2026-10-04
 
 Removed the top-level `$schema` key from `plugin.json`: the Claude desktop app warned that it is an unrecognized key (stripped, the SDK ignores unknown top-level fields).
