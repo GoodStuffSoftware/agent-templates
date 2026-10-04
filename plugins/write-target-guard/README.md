@@ -67,11 +67,12 @@ environment variable could point the guard at a disabled config.
 There is **deliberately no environment-variable override** of the config path or
 of any rule. An env-var or in-repo override would be a bypass vector: a repo you
 are editing could point the guard away from itself. The one override is a
-`--config <absolute path>` argument in the hook's **own registration**
-(`hooks.json` / `settings.json`, which already decides whether the hook runs); the
-test suite uses it. A `--config` given more than once, with no value or with a
-relative path is treated like a malformed config (loud, fails open); the first
-value never wins silently.
+`--config <absolute path>` (or `--config=<absolute path>`) argument in the hook's
+**own registration** (`hooks.json` / `settings.json`, which already decides whether
+the hook runs); the test suite uses it. A `--config` given more than once (in either
+form), with no value or with a relative path is treated like a malformed config
+(loud, fails open); the first value never wins silently. So is a config file larger
+than 64 KiB.
 
 Copy [`write-target-guard.config.example.json`](./write-target-guard.config.example.json)
 to that path and edit it for your machine. Schema:
@@ -122,7 +123,8 @@ A code write is then judged by *where* it lands:
   branch**, read from `.git` with no git process spawned: a named allowed-prefix
   branch is allowed; `claude/*`, other non-matching names, `main`/`master`/
   `staging`, `backup/*`, a detached HEAD, a name containing `..`, and an
-  unreadable/garbled `.git` are denied (unless `guard-ack: <coworkAck>`).
+  unreadable, garbled or oversized `.git`, `HEAD` or rebase `head-name` (over
+  4 KB) are denied (unless `guard-ack: <coworkAck>`).
   **Branch-resolution failure falls back to DENY, never allow.**
 
 Non-code writes, and writes outside every configured repo, are allowed.

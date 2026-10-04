@@ -72,6 +72,14 @@ hook (originally hard-coded to one repo) and generalised.
   markdown.
 - **`--config` given twice is a broken registration**: loud INACTIVE, like a
   malformed config, instead of the first value winning silently.
+- **A planted or oversized `.git` or `HEAD` is denied fast.** The guard reads at most
+  4 KB of the `.git` file, `HEAD` and a rebase `head-name`, and parses the `gitdir:`
+  line in one pass; a larger file is an unreadable branch, so DENY. Before, a 50 KB
+  whitespace run in `.git` took seconds, and a timed-out guard lets the write through.
+- **An oversized config is a loud INACTIVE.** A config file over 64 KiB is treated as
+  malformed instead of being parsed for longer than the hook's time limit.
+- **`--config=<path>` works** like `--config <path>`; the two forms count together, so
+  giving both is the "given twice" error.
 - **README:** Cutover rewritten (running the plugin and a `settings.json` entry
   together runs the guard twice; the entry to remove is given) and a Known
   limitations section added.

@@ -141,13 +141,21 @@
 //   probes (3.8 s) to about 80. That walk up is itself capped at 64 probes, after which the
 //   lexical path is used, as on any realpath failure (only a planted chain such as a symlink
 //   loop, failing ELOOP at every depth, gets that far).
+// 2026-10-03: every file the hook reads is read through a size bound (open, fstat, a capped
+//   read; never readFileSync): 4 KB for the .git file, HEAD and rebase head-name, 64 KiB for
+//   the config. The gitdir: line is parsed in one linear pass with the same result as the
+//   old /^gitdir:\s*(.+?)\s*$/m, which backtracked for 2.4 s on a planted 50 KB whitespace
+//   run (a timed-out guard lets the write through). An oversized or non-regular .git, HEAD
+//   or head-name is a branch-resolution failure (unknown, so DENY); an oversized config is
+//   a malformed config (loud INACTIVE). `--config=<path>` is the same single occurrence as
+//   `--config <path>`, and the two forms are counted together.
 //
 // The decision logic is the exported pure function decide(); main (stdin/stdout) runs
 // when argv[1]'s BASENAME is write-target-guard.mjs — not a full-path compare, because
 // Node realpaths the entry module and a junction/symlink/\\?\ launch would otherwise
 // silently skip main (= allow everything). Importers (the .test.mjs) do not match.
 
-import { readFileSync, statSync, realpathSync } from 'node:fs';
+import { statSync, realpathSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -172,19 +180,49 @@ const safeDefaultConfigPath = () => { try { return defaultConfigPath(); } catch 
 // own argv (hooks.json / settings.json), else null for the default. Never the environment.
 // A --config given more than once, with no value or with a relative value is a broken
 // registration: { error }. (Never "the first one wins": that would be a silent choice.)
+// `--config=<path>` is the same occurrence as `--config <path>`; both forms count together.
 function configPathFromArgv(argv) {
+  const EQ = '--config=';
   const at = [];
-  for (let k = 2; k < argv.length; k++) if (argv[k] === '--config') at.push(k);
+  for (let k = 2; k < argv.length; k++) {
+    const a = argv[k];
+    if (a === '--config' || (typeof a === 'string' && a.startsWith(EQ))) at.push(k);
+  }
   if (at.length === 0) return { path: null };
   if (at.length > 1) {
     return { error: `--config was given ${at.length} times; give it exactly once, with the absolute path to the config file` };
   }
   const i = at[0];
-  const v = argv[i + 1];
+  const v = argv[i] === '--config' ? argv[i + 1] : argv[i].slice(EQ.length);
   if (typeof v !== 'string' || !ABS_PATH_RE.test(v.trim())) {
     return { error: `--config needs an absolute path to the config file (got ${v === undefined ? 'nothing' : JSON.stringify(v)})` };
   }
   return { path: v.trim() };
+}
+
+// Bounded file reads. A planted multi-megabyte .git or HEAD must not make the hook outrun
+// its (non-blocking) timeout, so nothing is read whole: open, fstat (a non-regular file
+// throws before any read), then read at most max + 1 bytes, so a file that grows after the
+// fstat is still caught. Over `max` bytes throws an error with code WTG_TOO_BIG.
+const SMALL_FILE_MAX = 4096; // the .git file, HEAD, rebase head-name
+const CONFIG_MAX = 64 * 1024; // a real config is ~1-2 KB; 64 KiB of tiny repo entries runs ~1.3 s, 1 MiB ~17 s
+const WTG_TOO_BIG = 'WTG_TOO_BIG';
+function readBounded(p, max) {
+  const fd = openSync(p, 'r');
+  try {
+    if (!fstatSync(fd).isFile()) throw Object.assign(new Error(`not a regular file: ${p}`), { code: 'WTG_NOT_FILE' });
+    const buf = Buffer.alloc(max + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+    }
+    if (n > max) throw Object.assign(new Error(`larger than ${max} bytes: ${p}`), { code: WTG_TOO_BIG });
+    return buf.toString('utf8', 0, n);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 const _cfgCache = new Map();
@@ -202,7 +240,7 @@ function loadConfig(p) {
 }
 function readConfig(p) {
   try {
-    const raw = readFileSync(p, 'utf8').replace(/^\uFEFF/, '');
+    const raw = readBounded(p, CONFIG_MAX).replace(/^\uFEFF/, '');
     let parsed;
     try {
       parsed = JSON.parse(raw);
@@ -219,6 +257,7 @@ function readConfig(p) {
     return { status: 'ok', config: parsed, path: p };
   } catch (e) {
     if (e && e.code === 'ENOENT') return { status: 'missing', path: p };
+    if (e && e.code === WTG_TOO_BIG) return { status: 'malformed', error: `the config file is larger than ${CONFIG_MAX} bytes`, path: p };
     return { status: 'malformed', error: e.message, path: p };
   }
 }
@@ -466,8 +505,33 @@ export function resolveTarget(rawPath, realpathFn = realpathSync.native) {
   return { norm: r.norm };
 }
 
+// The value of a .git file's gitdir: line, in one linear pass. Same result as the old
+// /^gitdir:\s*(.+?)\s*$/m (m[1], or null for no match), which backtracked quadratically on
+// a long whitespace run. Only the FIRST `gitdir:` at the start of a line can matter: a later
+// one would follow a non-whitespace character, and then the first already matched.
+const isLineTerm = (c) => c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029';
+function parseGitdirLine(text) {
+  const KEY = 'gitdir:';
+  let at = text.indexOf(KEY);
+  while (at > 0 && !isLineTerm(text[at - 1])) at = text.indexOf(KEY, at + 1);
+  if (at < 0) return null;
+  const rest = text.slice(at + KEY.length);
+  // \s and trim() strip the same characters, line terminators included, as the old \s* did.
+  const t = rest.trimStart();
+  if (t) {
+    let end = 0;
+    while (end < t.length && !isLineTerm(t[end])) end++;
+    return t.slice(0, end).trimEnd();
+  }
+  // Only whitespace is left: the old regex backtracked to capture the last character that is
+  // not a line terminator (a lone space or tab), or found no match at all.
+  for (let k = rest.length - 1; k >= 0; k--) if (!isLineTerm(rest[k])) return rest[k];
+  return null;
+}
+
 // Resolve a worktree root's current branch without spawning git.
 // Returns { kind:'branch', name, rebase? } | { kind:'detached' } | { kind:'unknown' }.
+// Every read is bounded: an oversized .git, HEAD or head-name is unknown (DENY), never slow.
 function resolveBranch(root) {
   try {
     const dotGit = path.win32.join(root, '.git');
@@ -475,19 +539,20 @@ function resolveBranch(root) {
     if (statSync(dotGit).isDirectory()) {
       gitdir = dotGit;
     } else {
-      const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8').replace(/^\uFEFF/, ''));
-      if (!m) return { kind: 'unknown' };
-      gitdir = path.win32.resolve(root, m[1]); // handles absolute and root-relative gitdir
+      const g = parseGitdirLine(readBounded(dotGit, SMALL_FILE_MAX).replace(/^\uFEFF/, ''));
+      if (g == null) return { kind: 'unknown' };
+      gitdir = path.win32.resolve(root, g); // handles absolute and root-relative gitdir
     }
-    const head = readFileSync(path.win32.join(gitdir, 'HEAD'), 'utf8').replace(/^\uFEFF/, '').trim();
+    const head = readBounded(path.win32.join(gitdir, 'HEAD'), SMALL_FILE_MAX).replace(/^\uFEFF/, '').trim();
     if (!head) return { kind: 'unknown' };
     const r = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
     if (r) return { kind: 'branch', name: r[1].trim() };
     for (const dir of ['rebase-merge', 'rebase-apply']) {
       let hn;
       try {
-        hn = readFileSync(path.win32.join(gitdir, dir, 'head-name'), 'utf8').replace(/^\uFEFF/, '').trim();
-      } catch {
+        hn = readBounded(path.win32.join(gitdir, dir, 'head-name'), SMALL_FILE_MAX).replace(/^\uFEFF/, '').trim();
+      } catch (e) {
+        if (e && e.code === WTG_TOO_BIG) return { kind: 'unknown' };
         continue;
       }
       const h = /^refs\/heads\/(.+)$/.exec(hn);

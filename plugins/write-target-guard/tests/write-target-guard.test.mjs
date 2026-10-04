@@ -1458,4 +1458,127 @@ describe('write-target-guard', { skip: WINONLY }, () => {
       assert.equal(r2.norm, (real + '\\src\\' + tail).toLowerCase(), JSON.stringify(r2).slice(0, 300));
     } finally { try { unlinkSync(jx); } catch { /* ignore */ } }
   });
+
+  // ---------------------------------------------------------------------------
+  // fix G — 2026-10-03: the .git file, HEAD and rebase head-name are read through a 4 KB
+  // bound and the gitdir: line is parsed linearly (a planted whitespace run in .git made the
+  // old regex outrun the hook's non-blocking timeout); oversized means unknown means DENY.
+  // The config is read through a 64 KiB bound (oversized: loud INACTIVE), and
+  // --config=<path> is the same occurrence as --config <path>.
+  // ---------------------------------------------------------------------------
+  const SMALL = 4096;
+  // A hand-built worktree under the primary's worktree mark; dotGit(gd) gives the .git text.
+  const fakeWtG = (name, { head = 'ref: refs/heads/feat/x\n', dotGit = (gd) => 'gitdir: ' + gd + '\n' } = {}) => {
+    const gd = path.win32.join(tmp, 'fixg-gitdirs', name);
+    mkdirSync(gd, { recursive: true });
+    writeFileSync(path.join(gd, 'HEAD'), head);
+    mkdirSync(wt(name), { recursive: true });
+    writeFileSync(path.join(wt(name), '.git'), dotGit(gd));
+    return { gd, code: path.win32.join(wt(name), 'src', 'a.ts') };
+  };
+  // `text` padded with `fill` to exactly `bytes` UTF-8 bytes.
+  const padBytes = (text, bytes, fill = ' ') => text + fill.repeat(bytes - Buffer.byteLength(text));
+  const branchUnreadable = (d, what) => {
+    assert.equal(d.decision, 'deny', `${what}: ${JSON.stringify(d).slice(0, 300)}`);
+    assert.match(d.reason, /branch unreadable/, what);
+  };
+  const runArgs = (args, target = path.win32.join(repo, 'src', 'App.vue')) => {
+    const r = spawnSync(process.execPath, [HOOK, ...args], {
+      input: JSON.stringify(write(target)), encoding: 'utf8', env: childEnv(homeValid), timeout: 10000,
+    });
+    assert.equal(r.error, undefined, `${JSON.stringify(args)}: ${r.error && r.error.code}`);
+    assert.equal(r.status, 0, r.stderr);
+    return { r, o: JSON.parse(r.stdout) };
+  };
+  const inactive = ({ r, o }, re, what) => {
+    assert.match(o.systemMessage || '', /INACTIVE/, `${what}: ${JSON.stringify(o).slice(0, 300)}`);
+    assert.match(o.systemMessage || '', re, `${what}: ${JSON.stringify(o).slice(0, 300)}`);
+    assert.match(r.stderr, /INACTIVE/, r.stderr);
+    assert.notEqual(o.hookSpecificOutput?.permissionDecision, 'deny', what); // the documented fail-open
+  };
+
+  test('fix G (planted .git) END-TO-END: a 200 KB whitespace run in .git decides within 2 s and is DENIED', () => {
+    const { code } = fakeWtG('fixg-planted', { dotGit: () => 'gitdir: a' + ' '.repeat(200000) + 'b\n' });
+    const t = timedHook(homeValid, write(code));
+    const reason = decidedDeny(t, '200 KB planted .git');
+    within2s(t, '200 KB planted .git');
+    assert.match(reason, /branch unreadable/);
+    branchUnreadable(D(write(code)), '200 KB planted .git (decide)');
+  });
+  test('fix G (oversized .git): a valid gitdir line padded past 4 KB -> deny; padded to exactly 4 KB -> allow', () => {
+    const over = fakeWtG('fixg-git-over', { dotGit: (gd) => padBytes('gitdir: ' + gd + '\n', SMALL + 1) });
+    branchUnreadable(D(write(over.code)), '.git of 4097 bytes');
+    const at = fakeWtG('fixg-git-at', { dotGit: (gd) => padBytes('gitdir: ' + gd + '\n', SMALL) });
+    allowed(D(write(at.code)));
+  });
+  test('fix G (oversized HEAD): a feat/ ref padded past 4 KB -> deny; padded to exactly 4 KB -> allow; E2E within 2 s', () => {
+    const over = fakeWtG('fixg-head-over', { head: padBytes('ref: refs/heads/feat/x', SMALL + 1) });
+    branchUnreadable(D(write(over.code)), 'HEAD of 4097 bytes');
+    const big = fakeWtG('fixg-head-huge', { head: 'ref: refs/heads/feat/x' + ' '.repeat(5 * 1024 * 1024) + '\n' });
+    const t = timedHook(homeValid, write(big.code));
+    decidedDeny(t, '5 MB HEAD');
+    within2s(t, '5 MB HEAD');
+    const at = fakeWtG('fixg-head-at', { head: padBytes('ref: refs/heads/feat/x', SMALL) });
+    allowed(D(write(at.code)));
+  });
+  test('fix G (oversized head-name): a detached HEAD mid-rebase with a head-name past 4 KB -> deny; a normal one -> allow', () => {
+    const sha = 'a'.repeat(40) + '\n';
+    const over = fakeWtG('fixg-hn-over', { head: sha });
+    mkdirSync(path.join(over.gd, 'rebase-merge'), { recursive: true });
+    writeFileSync(path.join(over.gd, 'rebase-merge', 'head-name'), padBytes('refs/heads/feat/x', SMALL + 1));
+    branchUnreadable(D(write(over.code)), 'head-name of 4097 bytes');
+    const ok = fakeWtG('fixg-hn-ok', { head: sha });
+    mkdirSync(path.join(ok.gd, 'rebase-merge'), { recursive: true });
+    writeFileSync(path.join(ok.gd, 'rebase-merge', 'head-name'), 'refs/heads/feat/x\n');
+    allowed(D(write(ok.code)));
+  });
+  test('fix G (gitdir parse parity): next-line, CRLF, BOM, tabs resolve as before; blank or indented gitdir: stays denied', () => {
+    const allowCases = {
+      'fixg-p-nextline': (gd) => 'gitdir:\n' + gd + '\n',
+      'fixg-p-crlf': (gd) => 'gitdir: ' + gd + '\r\n',
+      'fixg-p-bom': (gd) => '﻿gitdir: ' + gd + '\n',
+      'fixg-p-tabs': (gd) => 'gitdir:\t' + gd + '\t\t\n',
+      'fixg-p-second-line': (gd) => '# note\ngitdir: ' + gd + '\n',
+      'fixg-p-no-eol': (gd) => 'gitdir: ' + gd,
+    };
+    for (const [name, dotGit] of Object.entries(allowCases)) allowed(D(write(fakeWtG(name, { dotGit }).code)));
+    const denyCases = {
+      'fixg-p-blank': () => 'gitdir: \t\n',
+      'fixg-p-indented': (gd) => ' gitdir: ' + gd + '\n',
+      'fixg-p-upper': (gd) => 'GITDIR: ' + gd + '\n',
+      'fixg-p-empty': () => '',
+    };
+    for (const [name, dotGit] of Object.entries(denyCases)) branchUnreadable(D(write(fakeWtG(name, { dotGit }).code)), name);
+  });
+  test('fix G (--config=<path>): the one-argument form is enforced like --config <path>', () => {
+    const { o } = runArgs(['--config=' + cfgOf(homeValid)]);
+    assert.equal(o.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(o).slice(0, 300));
+    assert.equal(o.systemMessage, undefined, JSON.stringify(o).slice(0, 300));
+  });
+  test('fix G (--config= and --config together): counted together -> loud INACTIVE "given 2 times", fails open', () => {
+    const valid = cfgOf(homeValid);
+    for (const args of [['--config=' + valid, '--config', valid], ['--config', valid, '--config=' + valid], ['--config=' + valid, '--config=' + valid]]) {
+      inactive(runArgs(args), /--config was given 2 times/, JSON.stringify(args));
+    }
+  });
+  test('fix G (--config= value): empty, blank or relative -> loud INACTIVE "needs an absolute path", fails open', () => {
+    for (const args of [['--config='], ['--config=   '], ['--config=rel\\x.json'], ['--config=--verbose']]) {
+      inactive(runArgs(args), /--config needs an absolute path/, JSON.stringify(args));
+    }
+  });
+  test('fix G (oversized config): a config over 64 KiB -> loud INACTIVE naming the limit; just under -> enforced; a directory -> INACTIVE', () => {
+    const base = readFileSync(cfgOf(homeValid), 'utf8');
+    const dir = path.win32.join(tmp, 'fixg-config');
+    mkdirSync(dir, { recursive: true });
+    const over = path.win32.join(dir, 'over.json');
+    writeFileSync(over, padBytes(base, 64 * 1024 + 1));
+    inactive(runArgs(['--config', over]), /larger than 65536 bytes/, 'config of 65537 bytes');
+    const under = path.win32.join(dir, 'under.json');
+    writeFileSync(under, padBytes(base, 64 * 1024));
+    const { o } = runArgs(['--config', under]);
+    assert.equal(o.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(o).slice(0, 300));
+    const asDir = path.win32.join(dir, 'as-dir.json');
+    mkdirSync(asDir, { recursive: true });
+    inactive(runArgs(['--config', asDir]), /malformed/, 'config path is a directory');
+  });
 });
