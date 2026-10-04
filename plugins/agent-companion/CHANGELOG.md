@@ -2,16 +2,18 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## Unreleased
+## 0.29.31 — 2026-10-04
 
-Bash output tail. Not yet released: no version bump.
+Bash output tail: the hook that sends a long runner's output to a file and returns its tail.
 
 - New PreToolUse hook `hooks/bash-tail.mjs` (matcher `^Bash$`): a known long-running command (test, build, install) has its combined output sent to a file, and only the tail plus the file's path comes back into context. The exit code is preserved exactly; output of 80 lines / 8,000 bytes or less prints whole; piped, redirected, backgrounded, watch-mode, machine-readable-output, compound and git commands are never touched. Applies in `bypassPermissions` only by default, because allow rules are checked against the rewritten command and stop matching it. Deny and ask rules apply in every mode, `bypassPermissions` included, and match the helper commands the wrapper adds, so the hook also reads `permissions.deny` / `permissions.ask` from user, project, local and managed settings and leaves a command alone when a rule could match the original or a helper.
 - Review fixes: a line naming the output file is printed before the command runs (a run killed by the tool timeout still names its file); with `set -e` active the original command runs unchanged (and `source` / `.` are blockers, since they can switch it on mid-command); dev servers, watchers and interactive tools (`npx vite`, `next dev`, `wrangler dev|login`, `--ui`, `playwright show-report|codegen`, `cypress open`, `-w`, `*:watch` scripts, `pytest -f|--pdb`, `make run|serve|dev`, `bootRun`, `spring-boot:run`) are never wrapped and a chain with any such segment, or any segment that is not a known runner, passes through; separate-argument format flags (`--reporter json`, `-f json`, `--junitxml x`) pass through; a failed run also shows up to five summary-looking lines from earlier in the output; the tail is capped by characters and keeps the END of a long line; the wrapper no longer calls `mkdir`, `tr`, `cut` or `cygpath`.
+- Hardening: with noclobber (`set -C`) on, the original command now runs unwrapped (the wrapped form never ran it: rc=1, no output). The settings reader strips a leading UTF-8 BOM before parsing, so a BOM-prefixed settings file's deny and ask rules are seen; a settings file that still cannot be parsed (JSONC comments, a syntax error, no read access) means the command is not wrapped at all for that call, logged as skipped with reason `permission-rule:unreadable-settings`. The ADR now says the wrapper is bash, not plain POSIX sh.
 - Options `bash_tail` (default on; opt out with `false` or `CLAUDE_PLUGIN_OPTION_BASH_TAIL=0`) and `bash_tail_permission_modes` (default `bypassPermissions`; `any` lifts the limit).
 - Telemetry stream `telemetry/bash-tail.jsonl` and `scripts/bash-tail-report.mjs` for the routing review: runs wrapped, bytes produced vs characters returned, runners left alone and why.
 - Decision record: `docs/adr/0004-bash-output-tail.md` (repo root), with the alternatives considered (a standing rule, a PostToolUse rewrite, a threshold-only wrapper) and what was verified against the Claude Code docs and the installed 2.1.283 binary.
 - Tests: `tests/bash-tail.test.mjs` (trigger logic, the generated shell run in a real bash for exit-code preservation, the hook).
+- Takes effect after the plugin update and a session restart.
 
 ## 0.29.30 — 2026-10-03
 

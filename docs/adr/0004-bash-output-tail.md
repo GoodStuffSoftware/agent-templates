@@ -69,7 +69,7 @@ file's path. It returns `updatedInput` and never a `permissionDecision`.
 ### The wrapper
 
 ```
-if errexit is NOT on ($- has no "e") and : > "$file" works; then
+if errexit and noclobber are NOT on ($- has no "e" or "C") and : > "$file" works; then
   printf '[ac-bash-tail] full output of this run goes to <path> ...'   # BEFORE the run
   { <original command>
   } > "$file" 2>&1        # a group, not a subshell: cd and variables persist
@@ -105,6 +105,18 @@ fi
   immune with `set +e`/`trap`. Restoring errexit state correctly across a
   group, a `||` list and a trap is fragile; "run the original" is simple and
   loses only the saving.
+- **noclobber**. With `set -C` active, the `: > "$file"` probe creates the
+  file and then `{ ... } > "$file" 2>&1` fails with "cannot overwrite existing
+  file", so the wrapped command never ran (rc=1, no output). The same `$-`
+  check now also looks for `C` and runs the original unwrapped.
+- **Unreadable settings.** The permission-rule reader strips a leading UTF-8
+  BOM (Windows PowerShell 5.1 writes one by default) before `JSON.parse`. A
+  settings file that exists but still cannot be parsed (JSONC comments, a
+  syntax error, no read access) is treated as holding a rule that could forbid
+  the wrapper: the command is passed through unwrapped, and telemetry records
+  `skipped` with reason `permission-rule:unreadable-settings`. A missing file
+  and an empty file are not unreadable. Passing through is always safe; the
+  only cost is the saving.
 - If the output file cannot be created (`: >` fails), the same `else` branch
   runs the original command exactly as written.
 - **Few helper commands** (finding 4). The wrapper uses only `wc`, `cat`, `rm`,
@@ -215,7 +227,8 @@ wrapped text, and the managed-settings paths on each platform.
 The `PowerShell` tool has different syntax (no `{ }` group with `$?` the same
 way, different redirection and exit-code rules). The hook's matcher is
 `^Bash$` and it does nothing for PowerShell. Claude Code on this machine uses
-Git Bash for the Bash tool, and the wrapper is plain POSIX sh. A PowerShell
+Git Bash for the Bash tool, and the wrapper is bash (it uses `${var: -N}`, `${var:0:N}` and `<<<`, which
+are not POSIX sh). A PowerShell
 wrapper can be a later ADR if the measurement shows PowerShell runs are a
 meaningful share.
 
@@ -291,7 +304,7 @@ Rejected.
 - The multi-hook `updatedInput` combination rule is not documented; last-wins
   is an assumption.
 - Windows Git Bash and POSIX bash are the shells covered. zsh is expected to
-  work (POSIX constructs only) but is not tested here.
+  work (the wrapper's bash constructs are also zsh constructs) but is not tested here.
 
 ## How to reverse
 

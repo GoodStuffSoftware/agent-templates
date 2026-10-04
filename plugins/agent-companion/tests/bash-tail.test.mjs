@@ -584,7 +584,7 @@ test('blockingPermissionRule / readPermissionRules: unit behaviour', () => {
     writeFileSync(join(proj, '.claude', 'settings.json'), JSON.stringify({ permissions: { ask: ['Bash'] } }));
     writeFileSync(join(proj, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { deny: ['Bash(b:*)'] } }));
     const rules = readPermissionRules({ cwd: join(proj, 'sub'), claudeDirPath: cd, projectDir: proj, stopAt: fx.dir });
-    assert.deepEqual(rules.map((r) => `${r.kind}:${r.pattern}`).sort(), ['ask:', 'deny:a *', 'deny:b:*']);
+    assert.deepEqual(rules.map((r) => `${r.kind}:${r.pattern}`).sort(), ['ask:', 'deny:a *', 'deny:b:*', 'unreadable-settings:']);
     assert.deepEqual(readPermissionRules({ cwd: join(fx.dir, 'nothing'), claudeDirPath: join(fx.dir, 'none'), stopAt: fx.dir }), []);
   } finally { fx.cleanup(); }
 });
@@ -644,4 +644,78 @@ test('wrapper: an over-long summary line is cut and the extra block is capped at
     assert.ok(block.length > 0 && block.length <= 5, `1..5 summary lines, got ${block.length}`);
     assert.ok(block.every((l) => l.length <= 300 + 8), 'each cut to 300 chars (plus the line number)');
   } finally { t.done(); }
+});
+
+// --- round 3: noclobber, BOM, unreadable settings
+
+test('wrapper: with noclobber on (set -C, and bash -C) the original runs as written and its output is visible', { skip: !HAVE_BASH && 'bash unavailable' }, () => {
+  const t = tempDirForBash();
+  try {
+    const script = wrapped('echo RAN-ORIGINAL; seq 1 200; (exit 3)', t.sh);
+    const viaSet = runBash(`set -C\n${script}`);
+    assert.equal(viaSet.status, 3, 'set -C: the original exit status');
+    assert.ok(viaSet.stdout.includes('RAN-ORIGINAL') && viaSet.stdout.includes('\n200\n'), 'set -C: the original ran, whole output visible');
+    assert.ok(!viaSet.stdout.includes('[ac-bash-tail]'), 'set -C: no wrapper output');
+    const viaFlag = spawnSync(BASH, ['-C', '-c', script], { encoding: 'utf8', windowsHide: true });
+    assert.equal(viaFlag.status, 3, 'bash -C: the original exit status');
+    assert.ok(viaFlag.stdout.includes('RAN-ORIGINAL'), 'bash -C: the original ran');
+    // control: no noclobber, the same text is wrapped
+    const plain = runBash(script);
+    assert.equal(plain.status, 3);
+    assert.match(plain.stdout, /\[ac-bash-tail\] exit 3; 201 lines/);
+  } finally { t.done(); }
+});
+
+test('readPermissionRules: a settings file with a UTF-8 BOM is read, so its deny rule is seen', () => {
+  const fx = makeFixture();
+  try {
+    const cd = join(fx.dir, 'cfg');
+    mkdirSync(cd, { recursive: true });
+    writeFileSync(join(cd, 'settings.json'), '\uFEFF' + JSON.stringify({ permissions: { deny: ['Bash(rm *)'] } }));
+    const rules = readPermissionRules({ claudeDirPath: cd });
+    assert.deepEqual(rules.map((r) => `${r.kind}:${r.pattern}`), ['deny:rm *']);
+  } finally { fx.cleanup(); }
+});
+
+test('hook: a BOM-prefixed settings file with a deny rule stops the wrap (rule seen, reason permission-rule:deny)', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(join(fx.dir, '.claude'), { recursive: true });
+    writeFileSync(join(fx.dir, '.claude', 'settings.json'), '\uFEFF' + JSON.stringify({ permissions: { deny: ['Bash(rm *)'] } }));
+    const r = runHook('hooks/bash-tail.mjs', payload('npm test'), { env: hookEnv(fx) });
+    assert.equal(r.json, null, 'passes through untouched');
+    const rows = readJsonl(join(fx.stateDir, 'telemetry', 'bash-tail.jsonl'));
+    assert.equal(rows[0].event, 'skipped');
+    assert.equal(rows[0].reason, 'permission-rule:deny');
+  } finally { fx.cleanup(); }
+});
+
+test('hook: a settings file that still cannot be parsed (JSONC comment, junk) means NO wrap, reason permission-rule:unreadable-settings', () => {
+  for (const [label, body] of [
+    ['JSONC comment', '{\n  // keep rm out\n  "permissions": { "deny": ["Bash(rm *)"] }\n}'],
+    ['BOM plus JSONC', '\uFEFF{ /* c */ "permissions": { "deny": ["Bash(rm *)"] } }'],
+    ['junk', '{ not json'],
+  ]) {
+    const fx = makeFixture();
+    try {
+      mkdirSync(join(fx.dir, '.claude'), { recursive: true });
+      writeFileSync(join(fx.dir, '.claude', 'settings.json'), body);
+      const r = runHook('hooks/bash-tail.mjs', payload('npm test'), { env: hookEnv(fx) });
+      assert.equal(r.json, null, `${label}: passes through untouched`);
+      const rows = readJsonl(join(fx.stateDir, 'telemetry', 'bash-tail.jsonl'));
+      assert.equal(rows[0].event, 'skipped', label);
+      assert.equal(rows[0].reason, 'permission-rule:unreadable-settings', label);
+    } finally { fx.cleanup(); }
+  }
+});
+
+test('hook: a missing or empty settings file is not "unreadable" and the command still wraps', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(join(fx.dir, '.claude'), { recursive: true });
+    writeFileSync(join(fx.dir, '.claude', 'settings.json'), '');
+    writeFileSync(join(fx.dir, '.claude', 'settings.local.json'), '\uFEFF{}');
+    const r = runHook('hooks/bash-tail.mjs', payload('npm test'), { env: hookEnv(fx) });
+    assert.ok(r.json?.hookSpecificOutput?.updatedInput?.command?.includes('[ac-bash-tail]'), 'wrapped');
+  } finally { fx.cleanup(); }
 });

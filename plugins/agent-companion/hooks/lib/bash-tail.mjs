@@ -24,6 +24,8 @@
 //     and variable changes still reach the shell the tool tracks;
 //   - if errexit (`set -e`) is already on, the ORIGINAL command runs as written:
 //     a failing wrapped command would end the shell before it printed anything;
+//     the same when noclobber (`set -C`) is on, where redirecting into the
+//     file the probe just created fails and the command would never run;
 //   - the exit status is captured at once and re-raised with `(exit N)`, so
 //     the tool sees exactly the status the command had;
 //   - output of 80 lines / 8000 bytes or less is printed whole (nothing to
@@ -409,7 +411,9 @@ export function wrapCommand(command, { file, dir, resultLog = '', id = '' }) {
   return [
     `__acf=${f}`,
     // errexit already on: the original runs as written (see the header comment).
-    'if case $- in *e*) false;; *) :;; esac && : > "$__acf" 2>/dev/null; then',
+    // noclobber (`set -C`) already on: the same, because the `: >` probe creates the
+    // file and `{ ... } > "$__acf"` then refuses to overwrite it: the command never runs.
+    'if case $- in *[eC]*) false;; *) :;; esac && : > "$__acf" 2>/dev/null; then',
     // Before the command runs: a run killed by the tool timeout still names its file.
     `printf '[ac-bash-tail] full output of this run goes to %s (deleted again if the run prints ${FULL_MAX_LINES} lines or fewer)\\n' "$__acf"`,
     `{ ${command}`,
@@ -464,6 +468,13 @@ export function wrapCommand(command, { file, dir, resultLog = '', id = '' }) {
 // stopAt: the home directory. The walk up from cwd stops before it, because
 // its .claude/ IS the user scope (claudeDirPath) and a fixture's walk must not
 // reach the real home.
+// A settings file that exists but cannot be parsed (JSONC comments, a syntax
+// error, no read access) may hold a rule that forbids the wrapper, and a
+// command passed through unwrapped is always safe. So it yields this rule,
+// which blockingPermissionRule treats like a bare `Bash` rule: every command.
+// The skip reason in telemetry is `permission-rule:unreadable-settings`.
+const UNREADABLE_RULE = (file) => ({ kind: 'unreadable-settings', pattern: '', rule: '', file });
+
 export function readPermissionRules({ cwd, claudeDirPath, projectDir, managedPaths = [], stopAt } = {}) {
   const files = [];
   if (claudeDirPath) files.push(join(claudeDirPath, 'settings.json'), join(claudeDirPath, 'settings.local.json'));
@@ -484,8 +495,18 @@ export function readPermissionRules({ cwd, claudeDirPath, projectDir, managedPat
   files.push(...managedPaths);
   const rules = [];
   for (const file of new Set(files)) {
+    let text;
+    try { text = readFileSync(file, 'utf8'); } catch (e) {
+      // No such file: nothing to read. Anything else (a directory, no access)
+      // is a file we cannot read, which counts as unreadable below.
+      if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) continue;
+      rules.push(UNREADABLE_RULE(file)); continue;
+    }
+    // Windows PowerShell 5.1 writes a BOM by default; JSON.parse rejects it.
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    if (text.trim() === '') continue; // an empty file holds no rules
     let obj;
-    try { obj = JSON.parse(readFileSync(file, 'utf8')); } catch { continue; }
+    try { obj = JSON.parse(text); } catch { rules.push(UNREADABLE_RULE(file)); continue; }
     for (const kind of ['deny', 'ask']) {
       const list = obj?.permissions?.[kind];
       if (!Array.isArray(list)) continue;
