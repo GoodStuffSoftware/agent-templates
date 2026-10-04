@@ -21,6 +21,14 @@ Trimmed the text the plugin adds to every session, keeping every requirement. So
 
   Per item: scout main 567 -> 290 (report averaged 2,907 on real multi-signal results, and it grows with signals; the pointer does not), subagent 0 -> 0; rules main 932 -> 577, subagent 0 -> 0; contract subagent 758 -> 473. The report's 3,924 (scout) and 2,011 (rules) per-subagent figures predate the subagent skip already in 0.29.29.
 
+Git brief (trial): one line of git state at agent start, and one script instead of a dozen git reads.
+
+- New `scripts/git-brief.mjs`: prints `branch | ahead/behind origin's default branch | uncommitted N | worktree | last commit | unpushed N`; `landed <sha|branch>` prints `ON main (sha)` / `NOT on main (ahead N)`. Fetches origin's default branch at most every 5 minutes per repository (shared by linked worktrees), 1.5 s cap, never prompts; a failed fetch is not retried for 1 minute. Prints nothing and exits 0 outside a git repository or on any error. Flags `--no-fetch`, `--fresh`, `--cwd`.
+- New hook `hooks/git-brief.mjs` on SessionStart (every source) and SubagentStart: injects that line as `additionalContext`, with the refresh command, so agents stop running `git status` / `git fetch` / `git rev-list`. Motivated by about 5,100 git-read Bash calls (882 of them `git fetch origin`) in a 7-day transcript count.
+- Option `git_brief` (default on for the trial; off with `false` or `CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0`, which makes the hook do nothing at all).
+- Telemetry stream `telemetry/git-brief.jsonl`: one row per injection and per script run (chars injected or returned, whether a fetch ran, duration). Documented in `docs/TELEMETRY.md`.
+- Tests: `tests/git-brief.test.mjs` (real throwaway repositories with a local bare origin).
+
 ## 0.29.32 — 2026-10-04
 
 Removed the top-level `$schema` key from `plugin.json`: the Claude desktop app warned that it is an unrecognized key (stripped, the SDK ignores unknown top-level fields).

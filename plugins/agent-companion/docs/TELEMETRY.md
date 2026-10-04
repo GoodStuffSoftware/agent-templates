@@ -336,6 +336,23 @@ ran in a fixture session, whose results are kept out of this file).
 The effect for a review: `sum(bytes) - sum(shown_chars)` is what stayed out of
 context, per wrapped run. Characters, not tokens; convert with a measured ratio.
 
+### `git-brief.jsonl` — the git brief (trial)
+
+One row per hook injection and one per script run (`hooks/git-brief.mjs`, `scripts/git-brief.mjs`). Written through the same `appendLog` as every other stream, so fixture and canary sessions land in `fixtures.jsonl`. With `git_brief` off the hook writes nothing; a script run still logs.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when it was written |
+| `session_id` | string | the session (the hook's payload; for a script run, `CLAUDE_SESSION_ID` when the shell has it, else `""`) |
+| `agent_type` | string \| absent | the subagent's type; absent for the main session and for script runs |
+| `event` | `inject-session` \| `inject-subagent` \| `run` \| `landed` | a SessionStart injection, a SubagentStart injection, a script run with no subcommand, a `landed` run |
+| `chars` | number | characters injected (the whole additionalContext text) or returned (stdout, newline included); 0 when there was nothing to say (not a repository, an error) |
+| `fetched` | boolean | whether this run attempted a fetch (false when one ran inside the 5-minute window, when none is possible, or with `--no-fetch`) |
+| `duration_ms` | number | wall time of the git work |
+
+The review: `sum(chars)` over `inject-*` rows is the context added per session and subagent; a drop in Bash `git status` / `git fetch` / `git rev-list` calls per agent (counted from transcripts) with the switch on, against off, is what it bought. `fetched` over `inject-*` rows shows how often the 5-minute window absorbed the fetch, and `duration_ms` the start-up cost.
+
 ### `unknown-agent-types.jsonl` — harness drift signal
 
 | field | type | meaning |
