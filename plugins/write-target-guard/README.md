@@ -10,8 +10,9 @@ out of protected git checkouts:
 
 Code belongs in a deliberately-named sibling worktree (`feat/…`, `fix/…`, …). The
 guard denies a code write to a protected checkout and tells you where it *should*
-go. Docs, `.claude/` config and markdown are exempt, and a conscious override is
-available per write (see [Acknowledgements](#acknowledgements)).
+go. In the primary, docs, `.claude/` config and markdown are exempt (in a `claude/*`
+auto-worktree the branch rule runs first, so the exemptions do not apply there), and
+a conscious override is available per write (see [Acknowledgements](#acknowledgements)).
 
 The rules are **not** baked into the plugin. They come from a per-machine config
 file that lives in your home directory, outside any repo, so this public plugin
@@ -58,12 +59,18 @@ The guard reads one JSON file, at a **fixed** path in your home directory:
 <home>\.claude\write-target-guard.config.json
 ```
 
-(`os.homedir()\.claude\write-target-guard.config.json` — on Windows,
-`C:\Users\<you>\.claude\write-target-guard.config.json`.)
+(`os.userInfo().homedir\.claude\write-target-guard.config.json` — on Windows,
+`C:\Users\<you>\.claude\write-target-guard.config.json`.) The home directory is
+the OS account's, **not** `USERPROFILE`/`HOME`: `os.homedir()` honours those, so an
+environment variable could point the guard at a disabled config.
 
 There is **deliberately no environment-variable override** of the config path or
 of any rule. An env-var or in-repo override would be a bypass vector: a repo you
-are editing could point the guard away from itself.
+are editing could point the guard away from itself. The one override is a
+`--config <absolute path>` argument in the hook's **own registration**
+(`hooks.json` / `settings.json`, which already decides whether the hook runs); the
+test suite uses it. A `--config` with no value or a relative path is treated like a
+malformed config (loud, fails open).
 
 Copy [`write-target-guard.config.example.json`](./write-target-guard.config.example.json)
 to that path and edit it for your machine. Schema:
@@ -76,11 +83,11 @@ to that path and edit it for your machine. Schema:
 | `repos[].primary` | The primary checkout root. A **trailing backslash** excludes sibling dirs (`…\my-project\` does not match `…\my-project-feat\`). |
 | `repos[].worktreeMark` | The sub-path marking auto-worktrees (default `.claude\worktrees\`). |
 | `repos[].allowedBranchPrefixes` | Branch prefixes that make an auto-worktree writable (default `feat fix docs chore refactor perf test build ci style revert wip`). |
-| `repos[].codeDirs` | Directory names that make a file *code* (e.g. `src`, `e2e`, `functions`). |
-| `repos[].scriptDir` / `scriptExts` | A script directory, and the extensions that count as code inside it. |
+| `repos[].codeDirs` | Directory names that make a file *code* (e.g. `src`, `e2e`, `functions`), matched below the checkout root only. |
+| `repos[].scriptDir` / `scriptExts` | A script directory, and the extensions that count as code anywhere inside it (below the checkout root). |
 | `repos[].rootCodeFiles` | Files that count as code when they sit **at a checkout root** (e.g. `package.json`, a lockfile, build config). |
 | `repos[].rootCodeFilesAtWorktreeRoots` | When `true`, `rootCodeFiles` also count at a worktree root (editing a worktree's build config is code work). |
-| `repos[].exemptDirs` / `exemptExts` | Directories (`.claude`, `docs`, `.husky`) and extensions (`md`) that are never guarded. |
+| `repos[].exemptDirs` / `exemptExts` | Directories (`.claude`, `docs`, `.husky`) and extensions (`md`) exempt **in the primary**, at any depth below its root (a primary that itself sits under a folder named `docs` is not exempted). In a `claude/*` auto-worktree the branch rule runs first and they do not apply. |
 | `repos[].coworkAck` / `primaryAck` | The `guard-ack:` tokens that override the auto-worktree and primary denials. |
 | `repos[].hints` | `primaryLabel`, `siblingSlug`, `worktreeAddExample` — strings quoted back in the denial message to tell you where to go. |
 
@@ -89,18 +96,20 @@ Paths are compared case-insensitively with backslash separators.
 ### Trust anchor
 
 This config file **is the trust anchor**: it defines what the guard protects. The
-guard therefore **denies a `Write`/`Edit` to the config file itself** (and to its
-own hook file) unless the content carries `guard-ack: guard-config`. Keep the file
+guard therefore **denies a `Write`/`Edit` to the config file itself** (the
+`--config` file when one is given, and its own hook file) unless the content carries `guard-ack: guard-config`. Keep the file
 in your home `.claude` directory; never commit a machine's real config to a repo.
 
 ---
 
 ## What counts as a code write
 
-Within a configured repo's tree, a path is *code* if any of:
+Within a configured repo's tree, a path is *code* if any of the following holds.
+Directory names are read only **below the checkout root** (for an auto-worktree,
+from the worktree's own name down), never from the folders the checkout sits in:
 
 - a directory component is in `codeDirs`;
-- it is directly in `scriptDir` with an extension in `scriptExts`;
+- it is anywhere under `scriptDir` with an extension in `scriptExts`;
 - it is a `rootCodeFiles` name directly at the primary root (or, with
   `rootCodeFilesAtWorktreeRoots`, directly at a worktree root). **(P5)**
 
@@ -155,8 +164,10 @@ Two shapes that cannot be judged are **denied for every write**, code or not:
 - **Drive-relative and rooted-relative targets.** `C:..\src\x.ts`, `C:src\x.ts`,
   `\Users\...` and `/c/...` resolve against the *writer's* current directory, which
   the guard cannot know. The message says to use a fully qualified path. Plain
-  relative paths still resolve against the hook process's working directory,
-  unchanged.
+  relative paths (`src\x.ts`) resolve against the hook process's working
+  directory. That is a change: the pre-alias hook never matched a relative path,
+  so a relative `src\x.ts` with the hook's cwd at the primary now **denies**
+  where it used to allow.
 - **Unresolvable UNC.** A target that is a UNC path P1 cannot fold to a local drive
   (`\\fileserver\share\…`, `\\localhost\Users\…`), or that realpaths to one (a
   mapped network drive, a symlink to a share). The message says to use the local
@@ -276,6 +287,9 @@ To move the registration:
 - `/c/…` and `/mnt/c/…` targets are denied as rooted-relative, not mapped to C:.
 - The config is an off-switch: a missing or malformed config is loud and fails
   open, while `"enabled": false` or no repos is silent by design.
+- The guard is **branch-keyed**: a nested repo under `.claude\worktrees\<name>`
+  that is not a real linked worktree, but whose `.git` names an allowed branch
+  (`feat/…`), is allowed like a real worktree.
 
 ---
 

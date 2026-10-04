@@ -9,9 +9,10 @@
 //   • test 31 (bare default): `decide(write('C:\\...\\my-project[-slug]\\...'))`
 //     -> `decide(write(<repo>[-slug]\\...), { config: FIX })` (FIX.repos[0].primary = <repo>).
 //   • the END-TO-END cases spawned the installed hook against a hard-coded my-project path
-//     and the real home config. They now spawn it with USERPROFILE/HOME pointed at a temp
-//     home holding a fixture config whose primary is the temp repo (os.homedir() honours the
-//     USERPROFILE override on Windows — verified on-box), and CLAUDE_PLUGIN_ROOT stripped.
+//     and the real home config. They now spawn it with `--config <temp home>\.claude\
+//     write-target-guard.config.json`, a fixture config whose primary is the temp repo, and
+//     CLAUDE_PLUGIN_ROOT stripped. (The hook reads its default config from the OS account's
+//     home, os.userInfo().homedir, never USERPROFILE/HOME; see the fix E cases.)
 // After the 43 come NEW cases for the 2026-10-03 work: P1/P2/P3 alias-hardening, P5 root
 // config files, self-protection of the trust anchor, the loud fail-open / opt-out, the
 // denial of unresolvable UNC targets (lexically and after realpath), configured paths
@@ -67,15 +68,19 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     return '';
   };
 
-  // Child env for the spawned-hook E2E cases: point os.homedir() at a temp home and strip
-  // any inherited CLAUDE_PLUGIN_ROOT (set it explicitly per-test to exercise plugin mode).
+  // The spawned-hook E2E cases select a temp home's config with the hook's `--config
+  // <absolute path>` argument (the hook ignores USERPROFILE/HOME since fix E). The env still
+  // points USERPROFILE/HOME at the temp home too, so the suite also runs against a pre-fix-E
+  // hook (which ignores --config) and only the fix E cases fail there. CLAUDE_PLUGIN_ROOT is
+  // stripped (set it explicitly per-test to exercise plugin mode).
+  const cfgOf = (home) => path.win32.join(home, '.claude', 'write-target-guard.config.json');
   const childEnv = (home, extra = {}) => {
     const e = { ...process.env, USERPROFILE: home, HOME: home };
     delete e.CLAUDE_PLUGIN_ROOT;
     return { ...e, ...extra };
   };
   const spawnHook = (home, inputObj, extraEnv = {}, entry = HOOK) =>
-    spawnSync(process.execPath, [entry], {
+    spawnSync(process.execPath, [entry, '--config', cfgOf(home)], {
       input: typeof inputObj === 'string' ? inputObj : JSON.stringify(inputObj),
       encoding: 'utf8',
       env: childEnv(home, extraEnv),
@@ -991,7 +996,7 @@ describe('write-target-guard', { skip: WINONLY }, () => {
   });
   test('fix C END-TO-END: spawned hook, cwd <primary>\\docs, Write C:..\\src\\x.ts -> deny with the relative-path message', () => {
     fixcDirs();
-    const r = spawnSync(process.execPath, [HOOK], {
+    const r = spawnSync(process.execPath, [HOOK, '--config', cfgOf(homeValid)], {
       input: JSON.stringify(write(dl() + '..\\src\\' + uniq())),
       encoding: 'utf8', env: childEnv(homeValid), cwd: path.win32.join(repo, 'docs'),
     });
@@ -1000,11 +1005,11 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     assert.equal(o.hookSpecificOutput && o.hookSpecificOutput.permissionDecision, 'deny', r.stdout);
     assert.match(o.hookSpecificOutput.permissionDecisionReason, /fully qualified path/);
   });
-  test('fix C: a PLAIN relative path is unchanged: it resolves against the hook process cwd (src\\x.ts: deny from the primary, allow from a feat worktree)', () => {
+  test('fix C: a PLAIN relative path resolves against the hook process cwd (src\\x.ts: deny from the primary, where the pre-alias hook allowed it; allow from a feat worktree)', () => {
     fixcDirs();
     mkdirSync(path.win32.join(wt('feat-wt'), 'src'), { recursive: true });
     const run = (cwd, raw) => {
-      const r = spawnSync(process.execPath, [HOOK], { input: JSON.stringify(write(raw)), encoding: 'utf8', env: childEnv(homeValid), cwd });
+      const r = spawnSync(process.execPath, [HOOK, '--config', cfgOf(homeValid)], { input: JSON.stringify(write(raw)), encoding: 'utf8', env: childEnv(homeValid), cwd });
       assert.equal(r.status, 0, r.stderr);
       return JSON.parse(r.stdout);
     };
@@ -1170,5 +1175,114 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     assert.equal(matchers.length, 1);
     for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) assert.ok(matchers[0].test(tool), tool);
     for (const tool of ['Read', 'Bash', 'NotebookRead', 'WriteX']) assert.ok(!matchers[0].test(tool), tool);
+  });
+
+  // ---------------------------------------------------------------------------
+  // NEW — fix E (2026-10-03): exemptDirs / codeDirs / scriptDir match only BELOW the checkout
+  // root (F1, F2); the config path ignores USERPROFILE/HOME (F3); the INACTIVE stderr lines
+  // name all four guarded tools (F4).
+  // ---------------------------------------------------------------------------
+
+  // A primary checked out at <tmp>\fixE\<ancestors...>\repo (a plain dir: the primary rules
+  // need no git), and decide() against it with the fixture rules.
+  const fixePrimary = (...ancestors) => {
+    const p = path.win32.join(tmp, 'fixE', ...ancestors, 'repo');
+    mkdirSync(path.win32.join(p, 'src'), { recursive: true });
+    return p;
+  };
+  const DP = (p, input) => decide(input, { config: FIX, primary: p });
+
+  test('fix E (F1): a primary under an ancestor named docs / .claude / .husky still denies code (src\\a.ts, package.json)', () => {
+    for (const anc of ['docs', '.claude', '.husky']) {
+      const p = fixePrimary(anc);
+      denied(DP(p, write(path.win32.join(p, 'src', 'a.ts'))));
+      denied(DP(p, write(path.win32.join(p, 'package.json'))));
+      denied(DP(p, edit(path.win32.join(p, 'scripts', 'b.mjs'))));
+      // ...while its OWN exempt dirs still exempt.
+      allowed(DP(p, write(path.win32.join(p, anc, 'x.ts'))));
+      allowed(DP(p, write(path.win32.join(p, 'docs', 'x.ts'))));
+    }
+  });
+  test('fix E (F1): below the root an exempt dir still exempts at any depth, under a code dir too (src\\docs, src\\.claude, scripts\\docs, docs\\src -> allow)', () => {
+    // Unchanged from the pre-alias hook, whose own test needs <P>\src\.claude\worktrees\... exempt.
+    allowed(D(write(path.win32.join(repo, 'src', 'docs', 'x.ts'))));
+    allowed(D(write(path.win32.join(repo, 'src', '.claude', 'x.ts'))));
+    allowed(D(edit(path.win32.join(repo, 'scripts', 'docs', 'x.mjs'))));
+    allowed(D(write(path.win32.join(repo, 'docs', 'src', 'x.ts'))));
+    allowed(D(write(path.win32.join(repo, 'sub', 'docs', 'x.ts'))));
+    denied(D(write(path.win32.join(repo, 'src', 'docsx', 'x.ts')))); // whole components only
+  });
+  test('fix E (F1) END-TO-END: spawned hook, primary under <tmp>\\fixE\\docs\\repo, Write src\\a.ts -> deny', () => {
+    const p = fixePrimary('docs-e2e', 'docs');
+    const home = homeWith('fixe-docs', { version: 1, repos: [{ ...FIX.repos[0], primary: p }] });
+    hookDenied(runHook(home, path.win32.join(p, 'src', 'a.ts')));
+  });
+  test('fix E (F2): a primary under an ancestor named src / e2e / scripts no longer treats every file as code', () => {
+    for (const anc of ['src', 'e2e']) {
+      const p = fixePrimary(anc);
+      for (const f of ['LICENSE', '.gitignore', 'notes.txt']) allowed(DP(p, write(path.win32.join(p, f))));
+      denied(DP(p, write(path.win32.join(p, 'src', 'a.ts'))));
+      denied(DP(p, write(path.win32.join(p, 'package.json'))));
+    }
+    const s = fixePrimary('scripts');
+    allowed(DP(s, write(path.win32.join(s, 'x.mjs'))));
+    allowed(DP(s, write(path.win32.join(s, 'tools', 'x.mjs'))));
+    denied(DP(s, write(path.win32.join(s, 'scripts', 'x.mjs'))));
+  });
+  test('fix E (F2): a worktree of a primary under an ancestor named src: a root non-code file -> allow; its src\\a.ts -> deny', () => {
+    const p = fixePrimary('src-wt', 'src');
+    const w = path.win32.join(p, '.claude', 'worktrees', 'unreadable'); // no .git: branch unknown
+    mkdirSync(w, { recursive: true });
+    allowed(DP(p, write(path.win32.join(w, 'README.txt'))));
+    denied(DP(p, write(path.win32.join(w, 'src', 'a.ts'))));
+    denied(DP(p, write(path.win32.join(w, 'package.json'))));
+    // The worktree's own NAME still counts as a directory, as before (original-43 parity).
+    denied(DP(p, write(path.win32.join(p, '.claude', 'worktrees', 'src', 'README.txt'))));
+  });
+  test('fix E (F3): decide() takes its config from opts.configPath (the seam), not the home config', () => {
+    denied(decide(write(path.win32.join(repo, 'src', 'a.ts')), { configPath: cfgOf(homeValid) }));
+    allowed(decide(write(path.win32.join(repo, 'docs', 'a.ts')), { configPath: cfgOf(homeValid) }));
+  });
+  test('fix E (F3) END-TO-END: USERPROFILE/HOME pointing at another home does NOT relocate the config', () => {
+    const home = path.win32.join(tmp, 'home-fixe-env');
+    mkdirSync(path.win32.join(home, '.claude'), { recursive: true });
+    writeFileSync(cfgOf(home), '{ not valid json');
+    // No --config: the hook must read <os.userInfo().homedir>\.claude\..., whatever that holds
+    // on this machine (missing on CI, a live config locally), never the env-named home.
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify(write(path.win32.join(tmp, 'fixE-outside', 'x.md'))), encoding: 'utf8', env: childEnv(home),
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    const all = (r.stdout + '\n' + r.stderr).toLowerCase();
+    assert.ok(!all.includes(home.toLowerCase()) && !all.includes(home.toLowerCase().replace(/\\/g, '\\\\')), `the env-named home leaked into the output: ${all}`);
+    const real = cfgOf(os.userInfo().homedir);
+    for (const msg of [o.systemMessage || '', r.stderr]) {
+      if (/config (?:file )?at /.test(msg)) assert.ok(msg.toLowerCase().includes(real.toLowerCase()), `names a config other than ${real}: ${msg}`);
+    }
+  });
+  test('fix E (F3): a --config with no value, or a relative path -> loud INACTIVE naming --config', () => {
+    for (const args of [['--config'], ['--config', 'rel\\write-target-guard.config.json']]) {
+      const r = spawnSync(process.execPath, [HOOK, ...args], {
+        input: JSON.stringify(write(path.win32.join(repo, 'src', 'App.vue'))), encoding: 'utf8', env: childEnv(homeValid),
+      });
+      assert.equal(r.status, 0, r.stderr);
+      const o = JSON.parse(r.stdout);
+      assert.match(o.systemMessage || '', /INACTIVE/, JSON.stringify(o));
+      assert.match(o.systemMessage || '', /--config/, JSON.stringify(o));
+      assert.match(r.stderr, /INACTIVE/);
+    }
+  });
+  test('fix E (F4): the INACTIVE stderr line names Write, Edit, MultiEdit and NotebookEdit (missing and malformed config)', () => {
+    const missing = path.win32.join(tmp, 'home-fixe-missing');
+    mkdirSync(missing, { recursive: true });
+    const bad = path.win32.join(tmp, 'home-fixe-bad');
+    mkdirSync(path.win32.join(bad, '.claude'), { recursive: true });
+    writeFileSync(cfgOf(bad), '{ not valid json');
+    for (const home of [missing, bad]) {
+      const r = spawnHook(home, write(path.win32.join(repo, 'src', 'App.vue')));
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /INACTIVE.*Write, Edit, MultiEdit and NotebookEdit are unguarded/, r.stderr);
+    }
   });
 });

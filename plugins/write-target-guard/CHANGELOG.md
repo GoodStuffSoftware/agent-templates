@@ -51,7 +51,18 @@ hook (originally hard-coded to one repo) and generalised.
   A segment of only dots/spaces no longer lets a following `..` cancel the wrong
   segment.
 - **`MultiEdit` and `NotebookEdit` are guarded** (matcher now
-  `^(Write|Edit|MultiEdit|NotebookEdit)$`), and the INACTIVE message names all four.
+  `^(Write|Edit|MultiEdit|NotebookEdit)$`), and the INACTIVE `systemMessage` and
+  stderr line both name all four.
+- **Folder rules read only below the checkout root.** `exemptDirs`, `codeDirs` and
+  `scriptDir` ignore the folders a checkout sits in: a primary under a `docs` folder
+  no longer exempts its code, and one under a `src` folder no longer treats
+  `LICENSE` or `.gitignore` as code.
+- **Config path pinned to the OS account.** The config is read from
+  `os.userInfo().homedir`, so `USERPROFILE`/`HOME` cannot relocate it; a
+  `--config <absolute path>` argument in the hook's own registration is the only
+  override.
+- **Plain relative targets resolve against the hook's cwd**, so a relative
+  `src\x.ts` from the primary is denied (the pre-alias hook allowed it).
 - **README:** Cutover rewritten (running the plugin and a `settings.json` entry
   together runs the guard twice; the entry to remove is given) and a Known
   limitations section added.
@@ -62,7 +73,10 @@ hook (originally hard-coded to one repo) and generalised.
 ### Notes
 
 - There is deliberately **no environment-variable override** of the config path or
-  of any rule (a bypass vector).
+  of any rule (a bypass vector); that includes `USERPROFILE`/`HOME`.
+- A nested repo under `.claude\worktrees\<name>` that is not a real linked worktree
+  but names an allowed branch is allowed: the guard is branch-keyed (see Known
+  limitations).
 - Branch-resolution failure on an auto-worktree falls back to **deny**.
 - The hook has no sibling imports, so the single-file-copy deployment behaves
   identically to the plugin deployment.

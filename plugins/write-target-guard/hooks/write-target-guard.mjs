@@ -4,15 +4,17 @@
 // Keeps CODE writes out of protected checkouts: a repo's PRIMARY/deploy worktree
 // (merges land there, code work does not) and its unnamed auto-worktrees (a
 // claude/* branch under .claude/worktrees/* never reaches staging). Code work
-// belongs in a deliberately-named sibling worktree. Docs, .claude config and
-// markdown are exempt. A conscious exception is made when the written content
+// belongs in a deliberately-named sibling worktree. In the primary, docs, .claude
+// config and markdown are exempt (in a claude/* auto-worktree the branch rule runs
+// first and exemptions do not apply). A conscious exception is made when the written content
 // carries `guard-ack: primary-worktree` or `guard-ack: cowork-worktree`.
 //
 // Lineage: the original (2026-07-07) hard-coded one project (my-project). This
 // version (2026-10-03) is CONFIG-DRIVEN so it can ship in a public plugin with no
 // project-specific paths: the rules come from ~/.claude/write-target-guard.config.json
 // (see write-target-guard.config.example.json). There is deliberately NO
-// environment-variable override of the config or of any rule (a bypass vector).
+// environment-variable override of the config or of any rule (a bypass vector): the
+// home directory is the OS account's (os.userInfo().homedir), never USERPROFILE/HOME.
 //
 // 2026-10-03 — branch-keyed worktree classification (carried over from the live
 // hook). A worktree under <primary>\.claude\worktrees\<name> is judged by its
@@ -85,7 +87,10 @@
 //   one leading separator, not UNC or device) against the current drive; the guard cannot
 //   see either, so EVERY write to such a target is refused with a fully-qualified-path hint
 //   (before, P2 trimmed "C:.." to "C:" and C:..\src\x.ts was judged as C:\src\x.ts: allow).
-//   A plain relative path (src\x.ts) is unchanged: it resolves against the hook PROCESS cwd.
+//   A plain relative path (src\x.ts) resolves against the hook PROCESS cwd (the P3 realpath
+//   walk does this; decide() never reads the payload's cwd). That is a change from the
+//   pre-alias hook, which prefix-compared the raw relative string and so never matched: a
+//   relative src\x.ts with the hook cwd at the primary now DENIES where it used to allow.
 //   P2 never trims a segment made only of dots and/or spaces (" ", ". .", ".. ", "..."):
 //   every Windows writer keeps it as ONE literal segment, so a following ".." cancels it,
 //   not the segment before it (before, <P>\src\. .\..\x.ts was judged as <P>\x.ts: allow).
@@ -97,6 +102,26 @@
 //   NotebookEdit's target is tool_input.notebook_path (tool_input.file_path if absent) and
 //   its written content is new_source; MultiEdit's target is tool_input.file_path and its
 //   written content is every edits[].new_string (an ack in any one of them counts).
+// 2026-10-03: exemptDirs, codeDirs and scriptDir are matched only BELOW the checkout root.
+//   The directory names are taken from the path RELATIVE to the checkout the write belongs
+//   to, never from the ancestors above it: below the primary root, or for a worktree below
+//   the worktree mark (the worktree's own name still counts, as before: a non-worktree
+//   <P>\.claude\worktrees\scripts\a.mjs is still code). Before, a primary checked out under
+//   any folder named docs / .claude / .husky had EVERY code write exempted, and one under
+//   src / e2e / scripts had every write (LICENSE, .gitignore) treated as code. Below the
+//   root nothing changed: an exempt dir still exempts at any depth, under a code dir too
+//   (<P>\src\docs\x.ts, <P>\src\.claude\x.ts), which the pre-alias hook's own test requires.
+// 2026-10-03: the config path ignores USERPROFILE/HOME.
+//   The default is <os.userInfo().homedir>\.claude\write-target-guard.config.json: the OS
+//   account record, not os.homedir(), which honours USERPROFILE (Windows) / HOME, so an
+//   env var in the hook's environment could point the guard at a disabled config and
+//   silently turn it off. The only override is a `--config <absolute path>` argument in
+//   the hook's OWN registration (hooks.json / settings.json), which already decides whether
+//   the hook runs at all; it is the test seam. A --config with no value or a relative path
+//   is a broken registration: loud INACTIVE, like a malformed config. A home directory the
+//   OS cannot report is the same loud INACTIVE.
+// 2026-10-03: the INACTIVE stderr lines name Write, Edit, MultiEdit and NotebookEdit, like
+//   the systemMessages beside them.
 //
 // The decision logic is the exported pure function decide(); main (stdin/stdout) runs
 // when argv[1]'s BASENAME is write-target-guard.mjs — not a full-path compare, because
@@ -112,33 +137,64 @@ const ALLOW = { decision: 'allow' };
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const ackRe = (ack) => new RegExp('guard-ack:\\s*' + escapeRegex(ack), 'i');
 
+const CONFIG_NAME = 'write-target-guard.config.json';
+// An absolute path: drive-rooted, UNC, or \??\ (the same test the configured primary gets).
+const ABS_PATH_RE = /^([a-z]:[\\/]|[\\/]{2}|[\\/]\?\?[\\/])/i;
+
+// The default config path, from the OS account record. NOT os.homedir(): that honours
+// USERPROFILE (Windows) / HOME, so an environment variable could relocate the trust anchor.
+// Throws if the OS cannot report the account's home directory.
 function defaultConfigPath() {
-  return path.win32.join(os.homedir(), '.claude', 'write-target-guard.config.json');
+  return path.win32.join(os.userInfo().homedir, '.claude', CONFIG_NAME);
+}
+const safeDefaultConfigPath = () => { try { return defaultConfigPath(); } catch { return null; } };
+
+// The config path the hook process was registered with: `--config <absolute path>` in its
+// own argv (hooks.json / settings.json), else null for the default. Never the environment.
+// A --config with no value or a relative value is a broken registration: { error }.
+function configPathFromArgv(argv) {
+  const i = argv.indexOf('--config', 2);
+  if (i < 0) return { path: null };
+  const v = argv[i + 1];
+  if (typeof v !== 'string' || !ABS_PATH_RE.test(v.trim())) {
+    return { error: `--config needs an absolute path to the config file (got ${v === undefined ? 'nothing' : JSON.stringify(v)})` };
+  }
+  return { path: v.trim() };
 }
 
-let _cfgCache;
-function loadHomeConfig() {
-  if (_cfgCache) return _cfgCache;
-  const p = defaultConfigPath();
+const _cfgCache = new Map();
+// Load the config at `p` (the default path when p is null/undefined), cached per path.
+function loadConfig(p) {
+  if (p == null) {
+    try {
+      p = defaultConfigPath();
+    } catch (e) {
+      return { status: 'malformed', error: `the OS did not report this account's home directory (${e && e.message})`, path: path.win32.join('<home>', '.claude', CONFIG_NAME) };
+    }
+  }
+  if (!_cfgCache.has(p)) _cfgCache.set(p, readConfig(p));
+  return _cfgCache.get(p);
+}
+function readConfig(p) {
   try {
     const raw = readFileSync(p, 'utf8').replace(/^\uFEFF/, '');
     let parsed;
     try {
       parsed = JSON.parse(raw);
     } catch (e) {
-      return (_cfgCache = { status: 'malformed', error: e.message, path: p });
+      return { status: 'malformed', error: e.message, path: p };
     }
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.repos)) {
-      return (_cfgCache = { status: 'malformed', error: 'config has no "repos" array', path: p });
+      return { status: 'malformed', error: 'config has no "repos" array', path: p };
     }
     // Explicit, VALID opt-out — the only route to a silent allow.
     if (parsed.enabled === false || parsed.repos.length === 0) {
-      return (_cfgCache = { status: 'disabled', config: parsed, path: p });
+      return { status: 'disabled', config: parsed, path: p };
     }
-    return (_cfgCache = { status: 'ok', config: parsed, path: p });
+    return { status: 'ok', config: parsed, path: p };
   } catch (e) {
-    if (e && e.code === 'ENOENT') return (_cfgCache = { status: 'missing', path: p });
-    return (_cfgCache = { status: 'malformed', error: e.message, path: p });
+    if (e && e.code === 'ENOENT') return { status: 'missing', path: p };
+    return { status: 'malformed', error: e.message, path: p };
   }
 }
 
@@ -407,7 +463,7 @@ function prepareRepos(rawRepos, realpathFn = realpathSync.native) {
     // The primary: a non-empty ABSOLUTE path (a relative one would resolve against the
     // hook's cwd), canonicalised like a target.
     const rawPrim = cfg.primary;
-    if (!isNonEmptyStr(rawPrim) || !/^([a-z]:[\\/]|[\\/]{2}|[\\/]\?\?[\\/])/i.test(rawPrim.trim())) {
+    if (!isNonEmptyStr(rawPrim) || !ABS_PATH_RE.test(rawPrim.trim())) {
       warnings.push(`${at}.primary must be a non-empty absolute path string (got ${showVal(rawPrim)}): entry dropped`);
       return;
     }
@@ -444,9 +500,22 @@ function directChildIn(norm, root, names) {
   return rel.length > 0 && !rel.includes('\\') && names.has(rel);
 }
 
-function isCodePath(norm, root, repo) {
-  const segs = norm.split('\\');
-  const dirSegs = segs.slice(0, -1); // directory components only
+// The path's components BELOW the checkout `root` (no trailing backslash on root): the
+// directories and basename inside the checkout, never the ancestors above it. [] when the
+// path is not strictly inside root.
+function relSegments(norm, root) {
+  const base = root + '\\';
+  if (!norm.startsWith(base)) return [];
+  const rel = norm.slice(base.length);
+  return rel ? rel.split('\\') : [];
+}
+
+// Code: a codeDirs / scriptDir component below `base` (the primary root; for a worktree the
+// worktree mark, so the worktree's own name still counts as before), or a rootCodeFiles
+// basename directly under `root`.
+function isCodePath(norm, root, repo, base = root) {
+  const segs = relSegments(norm, base);
+  const dirSegs = segs.slice(0, -1); // directory components below base only
   const codeDirs = new Set((repo.codeDirs || []).map((d) => d.toLowerCase()));
   if (dirSegs.some((d) => codeDirs.has(d))) return true;
   const scriptDir = (repo.scriptDir || 'scripts').toLowerCase();
@@ -460,9 +529,14 @@ function isCodePath(norm, root, repo) {
   return directChildIn(norm, root, rootFiles);
 }
 
-function isExempt(norm, repo) {
+// Exempt (docs, config, markdown): an exemptDirs entry matched as \<dir>\ anywhere in the
+// path BELOW the checkout root (the same substring rule as before, with the ancestors above
+// the root cut off). Nested under a code dir still counts (src\docs\x.ts is exempt), as the
+// pre-alias hook's own test requires for <P>\src\.claude\worktrees\...
+function isExempt(norm, root, repo) {
+  const rel = norm.startsWith(root + '\\') ? norm.slice(root.length) : ''; // keeps the leading '\'
   for (const d of (repo.exemptDirs || [])) {
-    if (norm.includes('\\' + String(d).toLowerCase() + '\\')) return true;
+    if (rel.includes('\\' + String(d).toLowerCase() + '\\')) return true;
   }
   for (const e of (repo.exemptExts || [])) {
     if (norm.endsWith('.' + String(e).toLowerCase())) return true;
@@ -499,7 +573,7 @@ function classifyRepo(norm, content, prepared) {
   const codeRepo = (isWt && repo.rootCodeFilesAtWorktreeRoots === false)
     ? { ...repo, rootCodeFiles: [] }
     : repo;
-  const isCode = isCodePath(norm, root, codeRepo);
+  const isCode = isCodePath(norm, root, codeRepo, isWt ? wtPrefix.slice(0, -1) : root);
 
   if (isWt) {
     if (!isCode) return ALLOW;
@@ -522,7 +596,7 @@ function classifyRepo(norm, content, prepared) {
     };
   }
 
-  if (isExempt(norm, repo)) return ALLOW;
+  if (isExempt(norm, root, repo)) return ALLOW;
 
   if (isCode && !ackRe(primaryAck).test(content)) {
     return {
@@ -561,7 +635,7 @@ export function decide(hookInput, opts = {}) {
   if (!rawPath) return ALLOW;
   const content = writtenContent(tool, ti);
 
-  const cfg = opts.config ?? loadHomeConfig().config;
+  const cfg = opts.config ?? loadConfig(opts.configPath).config;
   if (cfg && cfg.enabled === false) return ALLOW; // explicit opt-out honoured by the classifier too
 
   const target = resolveTarget(rawPath);
@@ -575,13 +649,14 @@ export function decide(hookInput, opts = {}) {
     const r = resolvePath(p);
     if (!r.device && r.norm) selfTargets.add(r.norm);
   };
-  addSelf(opts.configPath ?? defaultConfigPath());
+  const cfgPath = opts.configPath ?? safeDefaultConfigPath();
+  addSelf(cfgPath);
   for (const sp of (opts.selfPaths || [])) addSelf(sp);
   if (selfTargets.has(norm) && !ackRe('guard-config').test(content)) {
     return {
       decision: 'deny',
       reason:
-        `WRONG WRITE TARGET: ${opts.configPath ?? defaultConfigPath()} and this guard's own files are the ` +
+        `WRONG WRITE TARGET: ${cfgPath || 'the guard config'} and this guard's own files are the ` +
         'write-target-guard trust anchor (they define what the guard protects). Editing one here is blocked. ' +
         'If this change is intended, include `guard-ack: guard-config` in the content.',
     };
@@ -620,7 +695,8 @@ function main() {
       return out({}); // garbage stdin -> fail open, silent
     }
 
-    let loaded = loadHomeConfig();
+    const cp = configPathFromArgv(process.argv);
+    let loaded = cp.error ? { status: 'malformed', error: cp.error, path: '(--config argument)' } : loadConfig(cp.path);
     let prep = { repos: [], warnings: [] };
     if (loaded.status === 'ok') {
       try {
@@ -636,11 +712,11 @@ function main() {
     if (loaded.status === 'missing') {
       // LOUD in every deployment (plugin or standalone): a deleted config is the one
       // off-switch we refuse to make silent.
-      process.stderr.write(`[write-target-guard] INACTIVE: no config at ${loaded.path} — Write/Edit are unguarded.\n`);
+      process.stderr.write(`[write-target-guard] INACTIVE: no config at ${loaded.path} — Write, Edit, MultiEdit and NotebookEdit are unguarded.\n`);
       return out({ systemMessage: `write-target-guard is INSTALLED but INACTIVE: no config file at ${loaded.path}. Write, Edit, MultiEdit and NotebookEdit are UNGUARDED. Create that file (copy the plugin's write-target-guard.config.example.json and edit it for this machine) to activate it, or remove/disable the plugin if you do not want it.` });
     }
     if (loaded.status === 'malformed') {
-      process.stderr.write(`[write-target-guard] INACTIVE: malformed config at ${loaded.path}: ${loaded.error}\n`);
+      process.stderr.write(`[write-target-guard] INACTIVE: malformed config at ${loaded.path}: ${loaded.error} — Write, Edit, MultiEdit and NotebookEdit are unguarded.\n`);
       return out({ systemMessage: `write-target-guard is INACTIVE: config at ${loaded.path} is malformed (${loaded.error}). Write, Edit, MultiEdit and NotebookEdit are UNGUARDED until it is fixed.` });
     }
     if (loaded.status === 'disabled') {
