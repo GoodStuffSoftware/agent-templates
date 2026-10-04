@@ -1,0 +1,26 @@
+{
+  "//": "write-target-guard config. Copy to ~/.claude/write-target-guard.config.json (Windows: C:\\Users\\<you>\\.claude\\write-target-guard.config.json) and edit for your machine. This file is the TRUST ANCHOR: it is read from your home directory, never from a repo, and the guard itself denies edits to it unless the content carries `guard-ack: guard-config`. All paths are matched case-insensitively with backslash separators; a trailing backslash on `primary` excludes sibling directories (primary-foo). If this file is MISSING or MALFORMED the guard fails OPEN but LOUD (a systemMessage warns that Write/Edit are unguarded). To turn the guard OFF deliberately and silently, set \"enabled\": false or use an empty \"repos\": [] — those are the only silent states.",
+  "version": 1,
+  "enabled": true,
+  "repos": [
+    {
+      "primary": "c:\\dev\\my-project\\",
+      "worktreeMark": ".claude\\worktrees\\",
+      "allowedBranchPrefixes": ["feat", "fix", "docs", "chore", "refactor", "perf", "test", "build", "ci", "style", "revert", "wip"],
+      "codeDirs": ["src", "e2e", "functions"],
+      "scriptDir": "scripts",
+      "scriptExts": ["mjs", "cjs", "js", "ts", "ps1", "vbs"],
+      "rootCodeFiles": ["package.json", "package-lock.json", "tsconfig.json", "index.html"],
+      "rootCodeFilesAtWorktreeRoots": true,
+      "exemptDirs": [".claude", "docs", ".husky"],
+      "exemptExts": ["md"],
+      "coworkAck": "cowork-worktree",
+      "primaryAck": "primary-worktree",
+      "hints": {
+        "primaryLabel": "PRIMARY worktree (holds the deployed line; merges land here, code work does not)",
+        "siblingSlug": "my-project-<slug>",
+        "worktreeAddExample": "git -C c:\\dev\\my-project worktree add -b <type>/<scope> c:\\dev\\my-project-<slug> origin/<base-branch>"
+      }
+    }
+  ]
+}

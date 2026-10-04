@@ -22,6 +22,26 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
+### 2026-10-03 — Canonicalise a Windows path before any allow/deny check, or an alias dodges the guard
+
+- **Trigger:** a `Write`/`Edit` PreToolUse guard compared the raw `file_path` against protected directories. On Windows the *same* file has many spellings, so a code write that the guard should block could reach the target under an alias the string compare never saw: a device/UNC prefix (`\\?\C:\…`, `\\.\C:\…`, `\\?\UNC\server\share`), an admin-share UNC onto a loopback or the host's own name (`\\localhost\C$\…`, `\\127.0.0.1\C$\…`, `\\[::1]\C$\…`, `\\<hostname>\C$\…`), an NTFS alternate data stream or trailing dot/space on the final component (`…\App.ext::$DATA`, `…\App.ext. `, `…\dir \file`), or a reparse/short-name alias (an 8.3 name like `LONGNA~1`, a junction, a symlink, a `subst` drive).
+- **Is it generic?** Yes. Stripped: the specific project paths and the guard's own rule set. Reusable kernel: **a path-matching security check must canonicalise the input to one comparable form first** — any tool that takes a Windows path and decides on it (write guards, allowlists, deny-lists, upload sandboxes) faces the same alias families.
+- **Target:** `lessons/` — new tagged lesson file (not scaffolding). Cross-link to the existing `recursive-delete-follows-a-reparse-point` lesson (same reparse-point family, opposite direction: there a delete *follows* the link, here a check must *resolve* it).
+- **Proposed change:**
+
+  Before comparing a Windows `file_path` to any protected location, fold it to one canonical, lowercased, backslash-separated form:
+
+  1. **Device/UNC prefixes (lexical).** Reduce `^\\\\[?.]\\unc\\` to `\\\\`; strip a leading `\\?\` or `\\.\` (`\\?\C:\x` → `C:\x`); map an admin-share UNC whose host is a loopback name or `os.hostname()` back to its drive letter (`\\localhost\C$\x` → `C:\x`).
+  2. **Refuse what you cannot resolve.** Forms with no drive-letter/UNC meaning — `\\?\Volume{GUID}\`, `\\.\GLOBALROOT\`, raw devices (`PhysicalDrive…`, `HarddiskVolume…`), or a leftover device prefix after stripping — should be **denied, not guessed at**. These never appear in a normal write and exist only as a bypass vector; this fail-*closed* is separate from any outer fail-open.
+  3. **ADS + trailing dot/space (lexical).** Drop a trailing `:stream` from the final component, then strip trailing `[ .]+` per segment (Windows opens `App.ext. ` as `App.ext`). Preserve the drive segment and `.`/`..`.
+  4. **Reparse points + 8.3 (filesystem).** `path.win32.normalize`, then resolve the **deepest existing ancestor** with `fs.realpathSync.native` and re-append the not-yet-created tail. `.native` folds an 8.3 short name to its long name and resolves junctions/symlinks. A realpath failure must fall back to the lexical path, **not** fail open.
+
+  Verify on a real box: 8dot3 name creation is per-volume, so a test that reads a short name must create a fixture dir with a **long** name (>8 chars) in its own small parent and read the actual short alias from `dir /x` — a `mkdtemp` dir whose name is already ≤8 chars has no distinct 8.3 alias and will make the test silently skip (false negative). Directory symlinks need admin/Developer-Mode privilege; a **junction** (no privilege needed) exercises the identical `realpath.native` reparse-point fold, so the symlink case may self-skip while the junction case proves the mechanism.
+
+- **Applied?** `no`
+
+---
+
 ### 2026-09-28 — Claude desktop hides sessions per account, but the work files are shared
 
 - **Trigger:** a user weighing a second Claude account asked what would carry over. An on-disk survey found the desktop session index split by account/org UUID, while transcripts and memory are split by project path. No account switch was actually performed.
