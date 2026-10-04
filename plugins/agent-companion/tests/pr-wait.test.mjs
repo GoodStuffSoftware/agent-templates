@@ -547,6 +547,14 @@ test('the hint path follows CLAUDE_PLUGIN_ROOT when it is set', () => {
   assert.ok(r.stdout.includes('node "C:/x y/plug/scripts/pr-wait.mjs"'), r.stdout);
 });
 
+test('a dollar sign in the plugin root is kept literally in the hint (no replace-pattern expansion)', () => {
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import('${pathToFileURL(rulesPath).href}').then((m) => process.stdout.write(m.PR_WAIT_HINT_TEXT))`],
+  { encoding: 'utf8', windowsHide: true, env: { ...process.env, CLAUDE_PLUGIN_ROOT: 'C:/a$&b$`c$$d/plug' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes('node "C:/a$&b$`c$$d/plug/scripts/pr-wait.mjs"'), r.stdout);
+});
+
 test('pr-wait-hint is a built-in lead-audience session-start rule, on by default, switched off by CLAUDE_PLUGIN_OPTION_PR_WAIT=0', () => {
   const fx = makeFixture();
   const saved = process.env.CLAUDE_PLUGIN_OPTION_PR_WAIT;

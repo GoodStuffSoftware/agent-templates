@@ -2,9 +2,11 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## Unreleased
+## 0.30.0 — 2026-10-04
 
 Token-saving trial: four changes shipped together, each with its own on/off toggle and telemetry stream, so the trial can be switched off per feature and measured per feature (injected-text numbers below).
+
+Trial: each feature has its own toggle and its own telemetry stream. It is measured over the first full week against the 2026-09-27..2026-10-04 baseline, net of retries and re-checks (a saving that forces a redo does not count).
 
 ### Trimmed injected text
 
@@ -81,6 +83,8 @@ Found by the review and accepted for the trial; none changes a verdict.
 
 - **Parallel starts can fetch together.** The git-brief fetch stamp is written without a lock, so subagents starting in the same instant may each fetch (once per burst rather than once per 5 minutes). Each fetch is capped at 1.5 s; not fixed.
 - **The pr-wait hint is longer than 150 characters.** The earlier 150-character cap cannot hold once the line carries a real absolute path. The wording, path excluded, is at most 125 characters (tested); the whole line is that plus the path length (about 200 under a typical install).
+- **A check that registers late is still missed.** The pr-wait settle rule needs the same check set on two polls at least 20 s apart; a check that first appears more than 20 s after the others can still be missed by a PASS.
+- **A timed-out fetch costs about 2.1 s on Windows, not 1.5 s.** The 1.5 s cap is when the fetch is killed; reaping its process tree adds about 0.6 s.
 - **`NO-CHECKS` still exits 0.** A repository whose CI is slow to start or path-filtered reads as exit 0 after the 90 s grace. The line now says no CI was observed; a distinct exit code was not added, because callers key on 0 today.
 - **ctime also moves on attribute changes.** A `chmod`, a rename-over or a hard-link change on an unchanged file forgets the read record, so one repeat read is allowed. The cost is a missed denial, never a wrong one.
 - **The scout block lost its per-signal detail.** The session-start scout block is a pointer (count, kinds, path to `scout-latest.json`); the per-signal detail, the dispatch hint (`-> plugin-update`) and the `audit.mjs --only harness-drift,guard-canary` pointer are one file read away, not in context. Intentional (token saving); the lead is expected to read the file when a signal matters.

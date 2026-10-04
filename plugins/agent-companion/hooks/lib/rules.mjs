@@ -129,7 +129,7 @@ export const LEAD_EFFORT_CHECK_TEXT = [
 // the whole line is that plus the plugin path (~70 in a typical cache install).
 const PLUGIN_ROOT = (process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('../..', import.meta.url))).replace(/\\/g, '/').replace(/\/+$/, '');
 export const PR_WAIT_HINT_WORDING = 'PR/CI wait, one call, no gh/sleep loops: run_in_background (foreground dies at 2m): node "@/scripts/pr-wait.mjs" <pr|branch>';
-export const PR_WAIT_HINT_TEXT = PR_WAIT_HINT_WORDING.replace('@', PLUGIN_ROOT);
+export const PR_WAIT_HINT_TEXT = PR_WAIT_HINT_WORDING.replace('@', () => PLUGIN_ROOT); // a function, so a `$` in the path is literal, not a replace pattern
 
 function builtinRules() {
   return [
