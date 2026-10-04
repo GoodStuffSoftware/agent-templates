@@ -353,6 +353,28 @@ One row per hook injection and one per script run (`hooks/git-brief.mjs`, `scrip
 
 The review: `sum(chars)` over `inject-*` rows is the context added per session and subagent; a drop in Bash `git status` / `git fetch` / `git rev-list` calls per agent (counted from transcripts) with the switch on, against off, is what it bought. `fetched` over `inject-*` rows shows how often the 5-minute window absorbed the fetch, and `duration_ms` the start-up cost.
 
+### `read-dedupe.jsonl` — the Read dedupe
+
+Written by the PreToolUse hook (`hooks/read-dedupe.mjs`), one row per denial and
+one per denied request that was repeated and ran. A read that was simply allowed
+writes nothing. The path is never logged, only a hash.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when it was written |
+| `session_id` | string | the session |
+| `agent_id` | string | the agent's id, `main` for the lead thread |
+| `path_hash` | string | first 12 hex characters of the SHA-256 of the normalised absolute path; one file keeps one hash across rows |
+| `range` | string | the lines the request covered, `first-last`, clamped to the file's length |
+| `est_chars_avoided` | number | `deny`: estimated characters the denied read would have returned (lines x (average line length + 7)); `retry-ran`: 0 |
+| `outcome` | `deny` \| `retry-ran` | `deny`: the read was refused. `retry-ran`: the same request came again after a denial and ran |
+
+The effect for a review: `sum(est_chars_avoided)` is what stayed out of context,
+a ceiling, because a `retry-ran` row means the agent did not have the content
+after all. `retry-ran` / `deny` is the false-denial rate to watch; the toggle is
+`read_dedupe`.
+
 ### `unknown-agent-types.jsonl` — harness drift signal
 
 | field | type | meaning |

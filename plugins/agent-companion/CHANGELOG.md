@@ -29,6 +29,8 @@ Git brief (trial): one line of git state at agent start, and one script instead 
 - Telemetry stream `telemetry/git-brief.jsonl`: one row per injection and per script run (chars injected or returned, whether a fetch ran, duration). Documented in `docs/TELEMETRY.md`.
 - Tests: `tests/git-brief.test.mjs` (real throwaway repositories with a local bare origin).
 
+Read dedupe: a PreToolUse hook that denies a repeat Read of lines the same agent already read, when the file is unchanged and the read would return 2,000 characters or more. Fills the gap Claude Code's own "File unchanged" stub leaves (a range inside an earlier larger read, A-B-A alternation, ranges spanning two earlier reads; 551 of 654 measured repeat reads in 7 days were partial). The denial is one sentence and the identical call, repeated, runs. State is per agent; cleared by an edit, any mtime or size change, `PreCompact` and `SessionStart` `compact`/`clear`; fails open. Option `read_dedupe` (default on; `CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0`); telemetry in `read-dedupe.jsonl`.
+
 ## 0.29.32 — 2026-10-04
 
 Removed the top-level `$schema` key from `plugin.json`: the Claude desktop app warned that it is an unrecognized key (stripped, the SDK ignores unknown top-level fields).
