@@ -1761,10 +1761,10 @@ describe('write-target-guard', { skip: WINONLY }, () => {
     }
     const broken = runWith(pre, ['--CONFIG', 'x', '--config'], write(fixiDenyT()));
     inactive(broken, /--config needs an absolute path/, 'missing value');
-    warnedArgs(broken, ['--CONFIG', 'x'], /Config used for this call: none, because --config itself is broken/, 'missing value');
+    warnedArgs(broken, ['--CONFIG', 'x'], /Config used for this call: none, because --config itself is broken \(--config needs an absolute path/, 'missing value');
     const twice = runWith(pre, ['--config', E, '--config', E, '--x'], write(fixiDenyT()));
     inactive(twice, /--config was given 2 times/, 'given twice');
-    warnedArgs(twice, ['--x'], /none, because --config itself is broken/, 'given twice');
+    warnedArgs(twice, ['--x'], /none, because --config itself is broken \(--config was given 2 times/, 'given twice');
     for (const args of [['--config', E], ['--config=' + E]]) {
       const res = runWith(pre, args, write(fixiDenyT()));
       hookDenied(res);

@@ -86,7 +86,7 @@ to that path and edit it for your machine. Schema:
 | Field | Meaning |
 |---|---|
 | `version` | Config schema version (currently `1`). |
-| `enabled` | `false` disables the guard **silently** (a valid opt-out). Omit or `true` to enforce. |
+| `enabled` | `false` disables the guard **silently** (a valid opt-out; an unrecognised hook argument still warns). Omit or `true` to enforce. |
 | `repos[]` | One entry per protected repo. An empty array is also a silent opt-out. |
 | `repos[].primary` | The primary checkout root. A **trailing backslash** excludes sibling dirs (`…\my-project\` does not match `…\my-project-feat\`). |
 | `repos[].worktreeMark` | The sub-path marking auto-worktrees (default `.claude\worktrees\`). |
@@ -171,9 +171,10 @@ matches a long-name config.
 These shapes cannot be judged, so they are **denied for every write**, code or not:
 
 - **Over-long or invalid targets.** A target longer than 32,767 characters (the
-  Windows path maximum) or containing a control character (NUL, or any other
-  character below 0x20) names no real file. Both are refused before any other
-  work, so the guard never spends its time limit on them.
+  Windows path maximum) is refused with a request for the fully qualified, collapsed
+  path (no `.` or `..` segments). A target containing a control character (NUL, or
+  any other character below 0x20) names no real file. Both are refused before any
+  other work, so the guard never spends its time limit on them.
 - **Drive-relative and rooted-relative targets.** `C:..\src\x.ts`, `C:src\x.ts`,
   `\Users\...` and `/c/...` resolve against the *writer's* current directory, which
   the guard cannot know. The message says to use a fully qualified path. Plain

@@ -530,11 +530,12 @@ const MAX_PATH_CHARS = 32767;
 
 // The reason says what to do, not that no file can have the path: a writer that collapses
 // a\..\ before the OS sees it can still land a file from a longer spelling.
+const MAX_PATH_TEXT = String(MAX_PATH_CHARS).replace(/\B(?=(\d{3})+$)/g, ','); // "32,767"
 const longPathDeny = (len) => ({
   decision: 'deny',
   reason:
     `WRONG WRITE TARGET: the path is ${len} characters long, longer than the Windows maximum ` +
-    '(32,767 chars); give the fully qualified, collapsed path (C:\\..., with no . or .. ' +
+    `(${MAX_PATH_TEXT} chars); give the fully qualified, collapsed path (C:\\..., with no . or .. ` +
     'segments). This guard refuses a longer one rather than spend its time limit judging it.',
 });
 
@@ -972,7 +973,7 @@ function main() {
     if (cp.unknown.length) {
       const list = cp.unknown.map((a) => JSON.stringify(a)).join(', ');
       const dp = cp.error || cp.path ? null : safeDefaultConfigPath();
-      const used = cp.error ? 'none, because --config itself is broken (above)'
+      const used = cp.error ? `none, because --config itself is broken (${cp.error})`
         : cp.path ? `the --config file ${cp.path}`
         : `the default config${dp ? ` at ${dp}` : ''}`;
       process.stderr.write(`[write-target-guard] WARNING: unrecognised hook argument(s) ${list} IGNORED; the only accepted argument is --config <absolute path>. Config used: ${used}.\n`);
