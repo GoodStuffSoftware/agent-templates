@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-28
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 When an expensive check writes "this passed" into a cache, and a cheaper gate later spends that cache entry to skip re-running the check, the freshness invariant ("what was tested equals what ships") can only be enforced at the moment the entry is WRITTEN. Checking it again at spend time is a delayed, lossy proxy — the artifact that ships is an immutable commit, and local working-tree state at spend time says nothing about what the tree looked like when the expensive check actually ran.
 
@@ -21,3 +21,10 @@ The incident: an expensive test suite recorded a content-hash pass into a cache;
 - Scope a record-time freshness check to TRACKED, modified content specifically. A persistent untracked file that will never ship should not block banking a pass forever, and untracked content realistically cannot turn a failing tree green the way a locally modified tracked file can.
 - Couple the two check sites explicitly (comments, tests) when you rely on the record-time check to justify a loose or absent spend-time one — removing the spend-time guard is only sound while the record-time one still exists.
 - Related: [[gate-the-write-not-the-aftermath]] (the same "assert before, not after" principle, applied to a single pipeline rather than to a record/spend pair) and [[a-checkout-is-not-the-running-system]] (a working copy describes what could ship, never what shipped).
+
+**The record-time guard itself has three holes.** (a) Re-deriving the sha, tree or branch at write time instead of pinning them at run start: a commit taken mid-run banks the pass for a sha no completed run tested, and the same re-derivation hits any machine-global ledger that escapes the worktree. (b) Sampling dirt only at run START: on a run of 12 to 25 minutes, an edit to a tracked file mid-run is served by hot reload, the suite goes green, and the green banks for the unedited commit. (c) A mid-run COMMIT leaves the tree clean again, so a dirt comparison sees nothing.
+
+- Pin sha, tree and branch together BEFORE the run and pass the pinned values to the writer; never re-derive at write time.
+- Sample the tracked working tree at start AND end, refuse if content differs (naming the paths), and capture the head sha in each sample so a start/end mismatch refuses. Keep the start sample: sampling only at the end refuses on artifacts the run itself created.
+- Refresh the index's cached stat data before the dirt probe so a stale cache cannot fake a change.
+- See [[every-branch-of-a-gate-decision-refuses-unless-it-positively-banks]] for the decision function itself.

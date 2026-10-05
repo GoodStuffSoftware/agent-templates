@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-14
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 A scoping note recorded that five numbered sections of an external partner specification had been "adopted wholesale," and a decision log cited them as settled. Writing design records against those citations, a cheap verification pass found them only partly load-bearing: one section specified a real flow and a service surface but **no field schema and no threshold** for the one parameter the design turned on; another enumerated dependent object types but gave **no traversal mechanism** for reaching them; and a third — credited in the decision log as the source of an entire retention model — contained no such policy at all. The same log stated, three entries later, that the partner "has no retention policy," flatly contradicting its own earlier attribution. Nobody had noticed, because nobody had opened the cited section since writing the citation.
 
@@ -36,3 +36,5 @@ The fix was to split the two claims apart: the verified one keeps the citation, 
 - If a citation only supports some of the claims attributed to it, split the citation: keep it on the claims it actually verifies, and mark the rest as unsupported or sourced elsewhere.
 
 Related: [[review-docs-against-the-code-seam]], [[brief-for-the-decision-not-your-conclusion]], [[a-checkout-is-not-the-running-system]].
+
+**A claim inherited from a brief or a task card is a citation too.** Blockers and "still open" statements are the most perishable: by the time you read the card the thing may have been resolved. Verify the live state before acting on it, and when you cannot, report it as "the brief told me X" rather than as an observed fact.

@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-31
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 Every guard has two independent properties, and reviews reliably check only the first:
 
@@ -25,3 +25,9 @@ The incident, three instances of the same shape in one afternoon. A change added
 - Watch for the tell: **a guard whose scan target defaults to the most COMMON output directory rather than the SHIPPING one.** The default was written for the developer's inner loop; the risk lives in the release artifact.
 - Prefer moving the guard to the single choke point every path crosses over adding it to each path — see [[safeguard-the-operation-not-the-entry-point]]. If no such point exists, that is the finding.
 - Related: [[guard-coverage-enumerate-issuing-surfaces]] (the same coverage gap on the agent-tooling side, where the uncovered surface is configuration rather than a build script), [[assert-the-guard-saw-something]] (the vacuity half), and [[match-instrument-to-failure-class]] (a guard that runs everywhere but is blind to the class).
+
+**A "never inherit for the gate's own files" blocklist must be families by role, not a literal list.** A rule skipped tests for everything under one directory with a blocklist so the gate could not approve changes to itself. The comment claimed it covered "any future sibling"; the pattern was an exact four-name alternation, so the decider, the skip cache, the dispatcher and the merge driver were freely inheritable. A second pass caught the thin CLI wrapper but not the library function that makes the decision, nor the scripts the hook shells out to for a verdict, nor the workflow definitions the verdict is read from; the gate's own tests were covered only where a filename happened to contain a keyword.
+
+- Define the blocklist by role (decides, produces the decision's input, reads the verdict, defines the workflow that produced it) and enumerate the callers of the gate and everything its hook shells out to.
+- Treat a comment that claims a class as a testable claim: add a test that a plausible NEW sibling name is matched.
+- Breadth is justified by cost asymmetry: a false positive costs one real run; a false negative lets the gate approve itself.

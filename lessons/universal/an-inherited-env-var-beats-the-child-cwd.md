@@ -23,3 +23,5 @@ The incident: a regression test built a disposable fixture repository in a temp 
 - Repair wrong metadata with an acceptance test that proves content did not move: require the diff between the old branch tip and the corrected new tip to be completely EMPTY before any force-push that rewrites history, and push a verified backup ref first ([[commit-before-you-mutate-to-test]]).
 - Never run a repository-mutating fixture test inside a tree that is also a live, shared checkout ([[never-test-in-a-live-deployment-tree]]).
 - Closely related but distinct: [[neutralize-ambient-env-in-negative-tests]] covers clearing the ambient environment so a negative test's premise ("no environment is set") actually holds; this lesson covers an inherited variable redirecting a destructive operation onto the real system regardless of what the test intended to prove.
+
+See [[a-leaked-git-env-makes-the-trust-decision-about-another-repo]] for the case where the scrub existed in the caller but not at the boundary of the calls that produced recorded values, and for measuring which variables a given hook runner actually exports.

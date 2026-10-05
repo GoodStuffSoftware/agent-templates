@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-17
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 A validation with an empty input set passes forever and protects nothing. This is worse than omitting it: the green check absorbs the attention that would otherwise have produced a real guard, and the gap now looks covered to everyone who follows.
 
@@ -22,3 +22,5 @@ The incident: an agent added a boot-time assertion meant to prove every known ho
 - Common cause worth knowing: reading a NAMED export as though it were a property of the DEFAULT export (`getThing(id).THING_LIST` where `THING_LIST` is exported separately) yields `undefined`, which most collection code turns into an empty list rather than an error.
 - The aggregate form of the same bug — a suite of checks where the ones that could not run are counted as passes — is [[did-not-run-is-a-third-outcome]]. Related: [[match-instrument-to-failure-class]] (the guard runs, but is blind to the class) and [[green-means-not-broken]].
 - Three sibling failures worth checking in the same pass: the guard runs but never on the shipping artifact ([[a-gate-that-exists-vs-a-gate-that-covers]]); the guard throws and swallows it ([[fail-open-on-the-action-never-on-the-record]]); the guard's matcher quietly stops matching ([[a-silent-guard-needs-a-canary]]).
+
+**Recipe for tests that accompany a guard fix** (recurring over a dozen fixes): (1) a fixture that "reproduces" a shape must assert the shape, or it can pass vacuously; (2) replace an exact count standing in for a contract with the contract; (3) for ordering bugs, add a structural test that walks source lines, which catches additions the behavioural test cannot anticipate; (4) give every "require all" fix a positive twin; (5) demonstrate every fix against the pre-fix module and put that failing output in the commit body. A test that passes against the old code proves nothing.

@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-10
 provenance: [contrib-2]
-corroborated: 3
+corroborated: 2
 ---
 Pipe a long-running command into a consumer that stops reading early, and the command dies of a broken pipe *after* its work looks finished. The console shows a green summary; the effect never happened.
 
@@ -38,3 +38,5 @@ The concrete shape: a push whose pre-push gate runs a full test suite for 12–2
 **Nothing about the remedy changes with the diagnosis, which is why it survived being wrong about the cause at first.** Decouple the slow gate from the push itself: run the gate on its own, backgrounded, with nothing holding a foreground ceiling over it; confirm the tree is clean and sitting on the exact commit that was tested (a short-circuit cache is typically keyed on tree hash, and one stray untracked file or the wrong HEAD silently forces a full, over-long re-run); then push, so the hook short-circuits on the already-recorded pass and the transfer itself is fast enough that neither mechanism has room to bite. That defeats both causes at once without needing to tell them apart in advance — the diagnostic tell above is for understanding what happened after the fact, not for choosing the fix.
 
 **(ii) On Windows, a successful script can crash AFTER printing all its real output.** A Node script doing network I/O can complete its work, print its full successful output, and then crash during event-loop teardown in a race that is specific to how Windows tears down open handles — yielding a garbage or negative exit code that has nothing to do with whether the work succeeded. A caller that gates purely on the exit code treats a genuine success as a hard failure and either retries destructively or reports a false regression. **How to apply:** for scripts with this shape on Windows, parse the verdict out of stdout (a final success marker, a summary line) rather than trusting the process exit code alone; treat a non-zero exit accompanied by a complete, coherent success log as a teardown artifact to investigate, not as proof of failure.
+
+**Second observation, the disputed push (corroborated):** a coordinator doubted a "pushed" claim that had been made after a green gate, with no destination check on record. The claim was settled in one command by comparing the remote head with the local head, and was in fact true. The cheap destination check is also the way to *defend* a true claim; make it before reporting, so a later doubt costs nothing.
