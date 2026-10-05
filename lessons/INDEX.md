@@ -23,6 +23,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-detector-contains-what-it-detects` — A detector contains what it detects — scope the exception to the one file and rule, never disable the check — [universal] — active
 - `a-fact-check-with-zero-tool-uses-is-fabricated` — A fact-check answered with zero tool uses is fabricated — read the usage record before the answer, and demand raw output — [agent-process] — active
 - `a-failed-pre-commit-hook-leaves-the-index-staged` — A failed pre-commit hook leaves the index staged, so the next commit lints a stale copy — reset before re-staging — [universal] — active
+- `a-failing-parallel-spec-may-be-a-victim-of-the-shared-dev-server` — A spec that fails "randomly" in a parallel suite may be a victim of the shared dev server's dependency re-optimization — [universal] — active
 - `a-fresh-grant-403s-during-propagation` — An access error immediately after setup is not proof the setup was wrong — and a name inferred from the wrong identifier 404s like a missing resource — [universal] — active
 - `a-freshness-guard-belongs-at-record-time-not-spend-time` — A freshness guard belongs where the pass is RECORDED, not where it is spent — and strictness should be asymmetric by cost — [universal] — active
 - `a-gate-that-exists-vs-a-gate-that-covers` — Verify a guard's COVERAGE, not just its ability to fail — grep for the underlying command, never the declared script aliases — [universal] — active
