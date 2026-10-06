@@ -63,6 +63,32 @@ export function makeFixture() {
   return { dir, stateDir, cleanup };
 }
 
+// The DEFAULT spawn timeout for runHook/runScript. It is a HANG GUARD, not a
+// performance bound: it exists to stop a child that never exits, and a child
+// it kills is reported as killed (hangGuardNote, below), never as a verdict.
+// It used to be 15 s, and under full-suite load that killed hook children
+// that were correct but CPU-starved (2026-10-06: self-review,
+// spawn-guard-ladder-defs, spawn-type-brief-pins and spawning-rule each saw
+// "expected 0, actual null"). Measured on the Windows dev box, 2026-10-06,
+// for one spawn-guard child:
+//   - alone: about 0.27 s p50 (about 90 ms of it is the hook's own JS);
+//   - pinned to 2 cores beside 4 spinning threads: 5.0 s p50, 10.1 s max,
+//     where a bare `node -e 0` already took 3.5 s p50, so the cost is Node
+//     process startup, not the hook.
+// 60 s is about 6x that worst case and half the 120 s per-test budget
+// (ci-local --test-timeout), so a real hang still fails inside its own
+// test, with the note below. Same reasoning as GIT_CHAIN_TIMEOUT_MS. A test
+// that wants a timeout to fire passes its own `timeout`.
+export const HANG_GUARD_TIMEOUT_MS = 60000;
+
+// When the guard killed the child, stderr says so: tests assert
+// `res.status === 0` with res.stderr as the message, and "actual: null"
+// alone cannot tell a hang from a crash.
+function hangGuardNote(res, relPath, timeout) {
+  if (res.error?.code !== 'ETIMEDOUT') return res.stderr;
+  return `child killed by hang guard after ${timeout} ms: ${relPath}\n${res.stderr || ''}`;
+}
+
 // Run a hook (or any plugin script) as a child process with a JSON payload on
 // stdin — the same shape the real harness uses. `env` is merged OVER the
 // current process.env, so AGENT_COMPANION_* overrides set by makeFixture()
@@ -72,7 +98,7 @@ export function makeFixture() {
 // event take the event name from argv rather than sniffing the payload (see
 // hooks/standing-rules.mjs and hooks/subagent-brevity.mjs), so a test that
 // cannot set argv cannot reach either of their branches.
-export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, args = [] } = {}) {
+export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = HANG_GUARD_TIMEOUT_MS, args = [] } = {}) {
   const script = join(PLUGIN_ROOT, hookRelPath);
   const res = spawnSync(process.execPath, [script, ...args], {
     windowsHide: true,
@@ -85,7 +111,8 @@ export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, 
   const out = (res.stdout || '').trim();
   let json = null;
   if (out) { try { json = JSON.parse(out); } catch { /* not JSON: leave null */ } }
-  return { status: res.status, stdout: res.stdout, stderr: res.stderr, json, error: res.error };
+  const timedOut = res.error?.code === 'ETIMEDOUT';
+  return { status: res.status, stdout: res.stdout, stderr: hangGuardNote(res, hookRelPath, timeout), json, error: res.error, timedOut };
 }
 
 // The runner's own env, minus what Claude Code sets per session: a suite run
@@ -131,7 +158,7 @@ export const GIT_CHAIN_TIMEOUT_MS = 120000;
 // instead of a JSON payload on stdin (e.g. memory-vault.mjs, memory-doctor.mjs).
 // `timedOut` is true when the child was killed by `timeout`: its stdout and
 // exit status are then not the script's answer.
-export function runScript(scriptRelPath, args = [], { env = {}, cwd, timeout = 15000 } = {}) {
+export function runScript(scriptRelPath, args = [], { env = {}, cwd, timeout = HANG_GUARD_TIMEOUT_MS } = {}) {
   const script = join(PLUGIN_ROOT, scriptRelPath);
   const res = spawnSync(process.execPath, [script, ...args], {
     encoding: 'utf8',
@@ -144,7 +171,7 @@ export function runScript(scriptRelPath, args = [], { env = {}, cwd, timeout = 1
   let json = null;
   if (out) { try { json = JSON.parse(out); } catch { /* not JSON: leave null */ } }
   const timedOut = res.error?.code === 'ETIMEDOUT';
-  return { status: res.status, stdout: res.stdout, stderr: res.stderr, json, error: res.error, timedOut };
+  return { status: res.status, stdout: res.stdout, stderr: hangGuardNote(res, scriptRelPath, timeout), json, error: res.error, timedOut };
 }
 
 export function readJsonl(file) {
