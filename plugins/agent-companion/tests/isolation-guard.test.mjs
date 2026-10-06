@@ -14,13 +14,13 @@ import {
   readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, realpathSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import {
   makeFixture, TESTS_DIR, PLUGIN_ROOT, REAL_CLAUDE_DIRS, childEnv,
 } from './helpers.mjs';
 import {
-  SANDBOX_DIR, WATCHED_ROOTS, realHomeViolations, clearRealHomeViolations,
+  SANDBOX_DIR, WATCHED_ROOTS, realHomeViolations, clearRealHomeViolations, childViolations, clearChildViolations,
 } from './isolate.mjs';
 
 const canon = (s) => {
@@ -141,4 +141,68 @@ test('the tripwire leaves temp paths and a relative path alone', () => {
 
 test('watched roots cover the real Claude home', () => {
   for (const r of REAL_CLAUDE_DIRS) assert.ok(WATCHED_ROOTS.includes(r), `${r} is not watched`);
+});
+
+// --- the operator's home directory, in this process and in children ----------
+
+const insideSandbox = (p) => under(p, SANDBOX_DIR);
+const nodeChild = (script, extra = {}) => spawnSync(process.execPath, ['-e', script], {
+  encoding: 'utf8', windowsHide: true, env: childEnv(extra),
+});
+
+test('os.homedir() resolves inside the sandbox, here and in a child', () => {
+  assert.ok(insideSandbox(homedir()), `os.homedir() is ${homedir()}, outside ${SANDBOX_DIR}`);
+  assert.ok(!underRealClaude(join(homedir(), '.claude')), 'the home is not the operator\'s');
+  assert.equal(existsSync(join(homedir(), '.claude')), false, 'the sandbox home starts empty');
+  const res = nodeChild('console.log(JSON.stringify([require("os").homedir(), process.env.HOME, process.env.USERPROFILE, process.env.GIT_CONFIG_GLOBAL]))');
+  assert.equal(res.status, 0, res.stderr);
+  const [home, HOME, USERPROFILE, gitGlobal] = JSON.parse(res.stdout);
+  assert.ok(insideSandbox(home), `a child's os.homedir() is ${home}`);
+  assert.ok(insideSandbox(HOME) && insideSandbox(USERPROFILE), 'HOME and USERPROFILE both point into the sandbox');
+  assert.ok(insideSandbox(gitGlobal), 'git is told its global config lives in the sandbox');
+  assert.notEqual(canon(home), canon(process.env.AGENT_COMPANION_HOME_OVERRIDE), 'the OS home is not the override: a caller that bypasses the override finds nothing');
+});
+
+test('a grandchild (node spawning node) is sandboxed too', () => {
+  const inner = 'console.log(require("os").homedir())';
+  const res = nodeChild(`const r = require("child_process").spawnSync(process.execPath, ["-e", ${JSON.stringify(inner)}], { encoding: "utf8" }); process.stdout.write(r.stdout)`);
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(insideSandbox(res.stdout.trim()), `a grandchild's os.homedir() is ${res.stdout.trim()}`);
+});
+
+test('a child that touches the real Claude home is stopped, and the access is on record even when the child swallows the throw', () => {
+  clearChildViolations();
+  try {
+    const target = join(REAL_CLAUDE_DIRS[0], 'settings.json');
+    // The child catches the throw and exits 0, exactly as fail-open plugin code does.
+    const res = nodeChild(`let threw = false; try { require("fs").readFileSync(${JSON.stringify(target)}); } catch (e) { threw = /REAL Claude home/.test(String(e.message)); } process.exit(threw ? 0 : 3)`);
+    assert.equal(res.status, 0, `the child's read of the real settings.json must throw (exit ${res.status}): ${res.stderr}`);
+    const rows = childViolations();
+    assert.equal(rows.length, 1, `one record in the child log: ${JSON.stringify(rows)}`);
+    assert.match(rows[0], /fs\.readFileSync .*settings\.json/);
+    assert.equal(realHomeViolations().length, 0, 'the parent itself touched nothing');
+  } finally {
+    clearChildViolations(); // the root after() hook would otherwise fail this file
+  }
+});
+
+test('a child process arms nothing when the guard env is absent (the preload is inert on its own)', () => {
+  const env = childEnv();
+  delete env.AC_TEST_GUARD_ROOTS;
+  delete env.AC_TEST_GUARD_LOG;
+  const res = spawnSync(process.execPath, ['-e', 'console.log(String(require("fs").readFileSync.__acGuards))'], { encoding: 'utf8', windowsHide: true, env });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout.trim(), 'undefined');
+});
+
+// Git for Windows and git on POSIX both read ~/.gitconfig and
+// $XDG_CONFIG_HOME/git/config. A test that makes a commit must get its identity
+// from the test, not from whoever runs it.
+const HAVE_GIT = spawnSync('git', ['--version'], { windowsHide: true }).status === 0;
+test('git in a child sees an empty global config, not the operator\'s ~/.gitconfig', { skip: !HAVE_GIT && 'git is not installed' }, () => {
+  const global = spawnSync('git', ['config', '--global', '--list', '--show-origin'], { encoding: 'utf8', windowsHide: true, env: childEnv() });
+  assert.equal((global.stdout || '').trim(), '', `git's global config must be empty, got: ${global.stdout}`);
+  assert.equal(global.status === 0 || global.status === 1, true, `git config --global --list exited ${global.status}: ${global.stderr}`);
+  const ident = spawnSync('git', ['config', '--global', '--get', 'user.email'], { encoding: 'utf8', windowsHide: true, env: childEnv() });
+  assert.equal((ident.stdout || '').trim(), '', 'the operator\'s git identity must not leak in');
 });

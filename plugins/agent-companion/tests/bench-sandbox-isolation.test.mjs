@@ -12,8 +12,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, existsSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { makeFixture, PLUGIN_ROOT } from './helpers.mjs';
+// os.homedir() is the sandbox's empty home in every test process; the OPERATOR'S
+// home, which these assertions must never equal, is what isolate.mjs captured.
+import { REAL_HOME } from './isolate.mjs';
 import { extractFilesAtRef } from '../bench/task-packs/lib.mjs';
 
 // PLUGIN_ROOT is <repoRoot>/plugins/agent-companion; two levels up is the
@@ -47,7 +50,7 @@ test('a fresh fake HOME is never the real HOME/USERPROFILE', () => {
   const fakeHome = mkdtempSync(join(tmpdir(), 'bench-home-test-'));
   try {
     const env = buildIsolatedEnv(fakeHome);
-    const realHome = homedir();
+    const realHome = REAL_HOME;
     assert.notEqual(env.HOME, realHome);
     assert.notEqual(env.USERPROFILE, realHome);
     assert.notEqual(env.HOME, process.env.HOME);
@@ -55,7 +58,7 @@ test('a fresh fake HOME is never the real HOME/USERPROFILE', () => {
     assert.equal(env.CLAUDE_CONFIG_DIR, join(fakeHome, '.claude'));
     if (process.platform === 'win32') {
       assert.equal(env.HOMEDRIVE + env.HOMEPATH, fakeHome);
-      assert.notEqual(env.HOMEDRIVE + env.HOMEPATH, homedir());
+      assert.notEqual(env.HOMEDRIVE + env.HOMEPATH, REAL_HOME);
     }
   } finally {
     rmSync(fakeHome, { recursive: true, force: true });

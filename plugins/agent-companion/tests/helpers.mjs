@@ -63,6 +63,18 @@ export function makeFixture() {
   return { dir, stateDir, cleanup };
 }
 
+// Where a spawned hook runs when the test names no cwd: inside the active
+// sandbox home (the fixture's, or the process sandbox's), never in the checkout.
+// Some hooks walk UP from their cwd looking for .claude/settings*.json
+// (hooks/bash-tail.mjs does, and stops only at the home override). From the
+// checkout, which on a developer machine sits under the operator's real home,
+// that walk reaches ~/.claude/settings.json and the hook's result then depends
+// on the operator's own permission rules; CI, where the checkout is elsewhere,
+// would not. Inside the sandbox the walk ends at the sandbox.
+function hookCwd(env) {
+  return env.AGENT_COMPANION_HOME_OVERRIDE || process.env.AGENT_COMPANION_HOME_OVERRIDE || PLUGIN_ROOT;
+}
+
 // Run a hook (or any plugin script) as a child process with a JSON payload on
 // stdin — the same shape the real harness uses. `env` is merged OVER the
 // current process.env, so AGENT_COMPANION_* overrides set by makeFixture()
@@ -78,7 +90,7 @@ export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, 
     windowsHide: true,
     input: payload === undefined ? '' : JSON.stringify(payload),
     encoding: 'utf8',
-    cwd: cwd || PLUGIN_ROOT,
+    cwd: cwd || hookCwd(env),
     env: childEnv(env),
     timeout,
   });
