@@ -122,8 +122,9 @@ export function scanMarkers(binary, markers = MARKERS, chunkBytes = 8 * 1024 * 1
 }
 
 // Teams created at or after sinceMs that list a member other than the lead:
-// [{ name, members, createdAt }], oldest first. A team with no createdAt falls
-// back to its config file's mtime. Never throws.
+// [{ name, members, createdAt }], oldest first. A team whose createdAt is not
+// a number is skipped (no file-mtime fallback: an edited config must not look
+// new). Never throws.
 export function teamEvidence({ dir, sinceMs }) {
   const out = [];
   let names;
@@ -132,13 +133,19 @@ export function teamEvidence({ dir, sinceMs }) {
     const file = join(dir, 'teams', name, 'config.json');
     try {
       const cfg = JSON.parse(readFileSync(file, 'utf8'));
-      const created = Number.isFinite(cfg.createdAt) ? cfg.createdAt : statSync(file).mtimeMs;
+      if (!Number.isFinite(cfg.createdAt)) continue;
+      const created = cfg.createdAt;
       if (!(created >= sinceMs)) continue;
       const others = (Array.isArray(cfg.members) ? cfg.members : []).filter((m) => m && m.name !== 'team-lead' && m.agentType !== 'team-lead');
       if (others.length) out.push({ name, members: others.length, createdAt: created });
     } catch { /* unreadable or foreign file: not evidence */ }
   }
   return out.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+// The installed build's file mtime (ms), or null. Never throws.
+export function buildMtimeMs(binary) {
+  try { return binary ? statSync(binary).mtimeMs : null; } catch { return null; }
 }
 
 export function versionKey({ cli, desktop }) {
@@ -153,13 +160,15 @@ function markersDiffer(a, b) {
 // The whole decision, pure. `prev` is the stored state (undefined on the first
 // run); `evidenceFor(sinceMs)` reads team evidence lazily.
 // Returns { state, signals: [{ kind, detail, dispatch }] }. State:
-//   { versionKey, markers, changedAt (ms | null), verdict: 'unknown' | 'available',
+//   { versionKey, markers, changedAt (ms | null), floorAt (ms | null: where
+//     "new" starts for evidence: the installed build's mtime when known, else
+//     changedAt - 24h, because the scout runs after the build was installed), verdict: 'unknown' | 'available',
 //     availableAt, checkedAt }
 // First run: record the state and look for evidence since LAST_WORKING_MS (so a
 // machine where teammates already work says so once). A changed version key:
 // restart the watch and suggest the probe once. Until a verdict, every run
 // looks for a teammate created since the change, for WATCH_DAYS.
-export function decide({ prev, key, markers, evidenceFor, nowMs }) {
+export function decide({ prev, key, markers, evidenceFor, nowMs, buildMtimeMs: buildMs = null }) {
   const signals = [];
   const firstRun = !prev || typeof prev !== 'object';
   const changed = !firstRun && prev.versionKey !== key;
@@ -167,7 +176,8 @@ export function decide({ prev, key, markers, evidenceFor, nowMs }) {
   if (firstRun) {
     state = { versionKey: key, markers, changedAt: null, verdict: 'unknown', availableAt: null, checkedAt: nowMs };
   } else if (changed) {
-    state = { versionKey: key, markers, changedAt: nowMs, verdict: 'unknown', availableAt: null, checkedAt: nowMs };
+    const floorAt = Number.isFinite(buildMs) ? buildMs : nowMs - 86400000;
+    state = { versionKey: key, markers, changedAt: nowMs, floorAt, verdict: 'unknown', availableAt: null, checkedAt: nowMs };
     const diff = markersDiffer(prev.markers, markers)
       ? ` The binary's team strings also changed (${MARKERS.map((m) => `${m} ${prev.markers?.[m] ?? '?'}->${markers?.[m] ?? '?'}`).join(', ')}).`
       : ' The binary\'s team strings are unchanged, which proves nothing either way.';
@@ -185,7 +195,7 @@ export function decide({ prev, key, markers, evidenceFor, nowMs }) {
   if (state.verdict !== 'available') {
     const watching = state.changedAt === null || nowMs - state.changedAt <= WATCH_DAYS * 86400000;
     if (watching) {
-      const since = Math.max(LAST_WORKING_MS, state.changedAt || 0);
+      const since = Math.max(LAST_WORKING_MS, state.floorAt ?? state.changedAt ?? 0);
       const ev = evidenceFor(since);
       if (ev.length) {
         const last = ev[ev.length - 1];
@@ -194,7 +204,7 @@ export function decide({ prev, key, markers, evidenceFor, nowMs }) {
         signals.push({
           kind: 'teammates_available',
           detail: `${ev.length} team(s) created since ${new Date(since).toISOString().slice(0, 10)} list a teammate besides the lead ` +
-            `(newest ${new Date(last.createdAt).toISOString().slice(0, 10)}, ${last.members} member(s)); desktop teammates work again on ${key}. ` +
+            `(newest ${new Date(last.createdAt).toISOString().slice(0, 10)}, ${last.members} member(s)); a teammate was created on this machine (CLI or desktop) on ${key}; check whether desktop teammates work again. ` +
             'Worth re-testing before relying on them: team-era workers cost 0.110 plan units per call against 0.056 now.',
           dispatch: 'teammates-confirm',
         });

@@ -10,6 +10,7 @@ import { PLUGIN_ROOT } from './helpers.mjs';
 
 const cfgText = readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8');
 const cfg = JSON.parse(cfgText);
+const advisor = readFileSync(join(PLUGIN_ROOT, 'scripts', 'lib', 'cache-advisor.mjs'), 'utf8');
 const routing = readFileSync(join(PLUGIN_ROOT, 'docs', 'ROUTING.md'), 'utf8');
 
 test('Opus plan weight: per-token 1.5x and per-call about 1.9x Sonnet are stated; "came close to Sonnet" is gone; "introductory" is not a fact', () => {
@@ -22,6 +23,7 @@ test('Opus plan weight: per-token 1.5x and per-call about 1.9x Sonnet are stated
   assert.doesNotMatch(cfg.planUsageMultipliers.opus.source, /may be introductory/);
   assert.doesNotMatch(cfg.planUsageMultipliersNote, /This may be an introductory rate/);
   assert.match(cfg.planUsageMultipliersNote, /no evidence it is introductory/);
+  assert.doesNotMatch(advisor, /may be introductory/, 'cache-advisor plan-usage text');
 });
 
 test('Fable plan weight is marked unverified (about 3x fits, not 5x) wherever its cache economics are stated, and has no multiplier', () => {

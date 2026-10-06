@@ -1337,7 +1337,7 @@ export function formatAdvice(a, { curve = false } = {}) {
     }
     if (g.configured) out.push(`  at your ${K(g.configured.window)}: ${usd(g.configured.usd - g.optimum.usd)} more than the cheapest ${span}`);
     if (g.atDefault) out.push(`  unset (each model's default): ${usd(g.atDefault.usd - g.optimum.usd)} more than the cheapest ${span}`);
-    if (a.globalPlanUsage?.optimum) out.push(`  plan-usage view (tokens at Sonnet prices x plan multipliers as of ${a.globalPlanUsage.asOf}, may be introductory${a.globalPlanUsage.excluded?.length ? `; no plan figure for ${a.globalPlanUsage.excluded.join(', ')}` : ''}): cheapest ${K(a.globalPlanUsage.optimum.window)}, within 5%: ${K(a.globalPlanUsage.band5[0])}-${K(a.globalPlanUsage.band5[1])}`);
+    if (a.globalPlanUsage?.optimum) out.push(`  plan-usage view (tokens at Sonnet prices x plan multipliers as of ${a.globalPlanUsage.asOf}${a.globalPlanUsage.excluded?.length ? `; no plan figure for ${a.globalPlanUsage.excluded.join(', ')}` : ''}): cheapest ${K(a.globalPlanUsage.optimum.window)}, within 5%: ${K(a.globalPlanUsage.band5[0])}-${K(a.globalPlanUsage.band5[1])}`);
   } else {
     out.push('-- one setting for your model mix -- no model had enough data to vote');
   }

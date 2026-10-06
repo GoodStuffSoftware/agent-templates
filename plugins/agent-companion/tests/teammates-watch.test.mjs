@@ -5,7 +5,7 @@
 // AGENT_COMPANION_CLAUDE_CODE_DIRS and the fixture's own claude dir).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript } from './helpers.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
@@ -130,11 +130,40 @@ test('decide: after a change, a teammate created since then raises teammates_ava
   // evidence the reader is asked for starts at the change time, not at LAST_WORKING_MS
   let askedSince = null;
   const day2 = decide({ prev: changed.state, key: keyB, markers: M1, nowMs: NOW + DAY, evidenceFor: (s) => { askedSince = s; return []; } });
-  assert.equal(askedSince, NOW, 'only teammates created after the version change count');
+  assert.equal(askedSince, NOW - DAY, 'floor is changedAt - 24h when the build mtime is unknown');
   assert.deepEqual(day2.signals, []);
   const day3 = decide({ prev: day2.state, key: keyB, markers: M1, evidenceFor: some, nowMs: NOW + 2 * DAY });
   assert.deepEqual(day3.signals.map((s) => s.kind), ['teammates_available']);
   assert.match(day3.signals[0].detail, /desktop teammates work again/);
+});
+
+test('decide: the floor for "new" is the installed build mtime when known', () => {
+  const prev = decide({ prev: undefined, key: keyA, markers: M1, evidenceFor: none, nowMs: NOW - 5 * DAY }).state;
+  const built = NOW - 3 * DAY;
+  const changed = decide({ prev, key: keyB, markers: M1, evidenceFor: none, nowMs: NOW, buildMtimeMs: built });
+  assert.equal(changed.state.floorAt, built);
+  let askedSince = null;
+  decide({ prev: changed.state, key: keyB, markers: M1, nowMs: NOW + DAY, evidenceFor: (s) => { askedSince = s; return []; } });
+  assert.equal(askedSince, built, 'a teammate created on the new build before the scout ran still counts');
+});
+
+test('decide: the teammates_available text does not claim desktop teammates work', () => {
+  const r = decide({ prev: undefined, key: keyA, markers: M1, evidenceFor: some, nowMs: NOW });
+  const d = r.signals[0].detail;
+  assert.match(d, /a teammate was created on this machine \(CLI or desktop\)/);
+  assert.match(d, /check whether desktop teammates work again/);
+  assert.doesNotMatch(d, /desktop teammates work again on/);
+});
+
+test('teamEvidence: a config whose createdAt is not numeric is skipped, not dated by file mtime', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    writeTeam(dir, 'str-created', { createdAt: '2026-10-05T00:00:00Z', members: ['team-lead', 'w1'] });
+    writeTeam(dir, 'no-created', { createdAt: undefined, members: ['team-lead', 'w1'] });
+    writeTeam(dir, 'ok', { createdAt: NOW - DAY, members: ['team-lead', 'w1'] });
+    const ev = teamEvidence({ dir: join(dir, '.claude'), sinceMs: 0 });
+    assert.deepEqual(ev.map((e) => e.name), ['ok']);
+  } finally { cleanup(); }
 });
 
 test('decide: the watch ends WATCH_DAYS after a change with no verdict, and a later change starts it again', () => {
@@ -186,7 +215,8 @@ test('detect.mjs: a changed desktop build suggests the probe; a teammate created
   try {
     writeBuild(join(dir, 'cc'), '2.1.286', 'TeamCreate');
     runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv(dir) });
-    writeBuild(join(dir, 'cc'), '2.1.290', 'TeamCreate TeamCreate TeamCreate');
+    const bin = writeBuild(join(dir, 'cc'), '2.1.290', 'TeamCreate TeamCreate TeamCreate');
+    utimesSync(bin, new Date(NOW - 3600000), new Date(NOW - 3600000)); // the build mtime is the floor for "new"
     const changed = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv(dir) });
     assert.equal(changed.status, 0, changed.stderr);
     const sigs = tmSignals(changed);
