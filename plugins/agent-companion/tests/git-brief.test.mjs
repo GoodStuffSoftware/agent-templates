@@ -362,7 +362,25 @@ test('fetch timeout: the whole git process tree is killed, so no git-remote-http
     assert.equal(r.fetched, true);
     assert.equal(r.fetch_outcome, 'timeout');
     assert.ok(r.line, 'the line still prints');
-    assert.ok(took < 6000, `returned in ${took} ms`);
+    // The guarantee under test is that the FETCH is bounded by the cap (plus the
+    // runner backstop), not by git's own 120 s low-speed abort. So bound the fetch
+    // step, which gitBrief times itself around exactly that call. Timing the whole
+    // gitBrief() call also counts its ~6 local git spawns (repo-facts, symbolic-ref,
+    // remote, status, rev-list, log), each of which pays process start-up on a
+    // CPU-starved machine, and those are not what the cap bounds (the suite raises
+    // the local cap to 60 s). That made this check flake at ~1 in 6 under load.
+    const fetchMs = r.steps_ms.fetch;
+    assert.equal(typeof fetchMs, 'number', 'gitBrief reports the fetch step time');
+    assert.ok(fetchMs < 6000, `fetch step returned in ${fetchMs} ms (steps: ${JSON.stringify(r.steps_ms)})`);
+    // Everything else in the call is bounded too: the whole-call time minus the local git steps
+    // (the only time excluded; each is separately capped by the local timeout) stays under 6 s.
+    for (const k of ['rev-parse', 'remote', 'status']) assert.equal(typeof r.steps_ms[k], 'number', `gitBrief reports the ${k} step time`);
+    // Only these local git subcommands are subtracted; a new key (a network step such as ls-remote) fails here instead of being subtracted silently.
+    const localSteps = ['rev-parse', 'symbolic-ref', 'remote', 'status', 'rev-list', 'log'];
+    const stray = Object.keys(r.steps_ms).filter((k) => k !== 'fetch' && !localSteps.includes(k));
+    assert.deepEqual(stray, [], `steps_ms has keys outside fetch + the known local steps: ${JSON.stringify(r.steps_ms)}`);
+    const localMs = localSteps.reduce((a, k) => { if (k in r.steps_ms) assert.equal(typeof r.steps_ms[k], 'number', `step ${k} is a number`); return a + (r.steps_ms[k] || 0); }, 0);
+    assert.ok(took - localMs < 6000, `call minus local git steps took ${took - localMs} ms (took ${took}, steps: ${JSON.stringify(r.steps_ms)})`);
     // Wait for the close events themselves (bounded), not a fixed sleep.
     for (const until = Date.now() + 5000; Date.now() < until;) {
       if (hs.sockets.length >= 1 && hs.sockets.every((x) => x.closed)) break;

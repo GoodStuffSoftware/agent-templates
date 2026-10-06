@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, cpSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import { spawnSync } from 'node:child_process';
 import { scopeKey } from '../hooks/lib/context.mjs';
 
@@ -75,7 +76,7 @@ function writeLoadState(stateDir, records) {
 }
 
 function runDetect(dir, { script = 'scripts/detect.mjs', env = {} } = {}) {
-  const res = runScript(script, [], { cwd: dir, env, timeout: 60000 });
+  const res = runScript(script, [], { cwd: dir, env: detectEnv({ env }), timeout: 60000 });
   assert.equal(res.status, 0, res.stderr);
   assert.ok(res.json, `detect.mjs printed no JSON: ${res.stdout}`);
   return res.json.signals;
@@ -484,7 +485,7 @@ function writeMarketplaceClone(dir, version) {
 }
 function runDetectFrom(root, dir, env = {}) {
   const res = spawnSync(process.execPath, [join(root, 'scripts', 'detect.mjs')], {
-    windowsHide: true, encoding: 'utf8', cwd: dir, env: { ...process.env, ...env }, timeout: 60000,
+    windowsHide: true, encoding: 'utf8', cwd: dir, env: detectEnv({ env: { ...process.env, ...env } }), timeout: 60000,
   });
   assert.equal(res.status, 0, res.stderr);
   return JSON.parse(res.stdout).signals;

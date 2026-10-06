@@ -4,10 +4,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeFixture, runHook } from './helpers.mjs';
+import { resolveTarget } from '../hooks/lib/resume-guard.mjs';
 import { buildTranscriptReport } from '../scripts/lib/transcript-report.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
 
@@ -100,10 +101,25 @@ test('REVIEW: resolveTarget stays fast with 1000 sidecars in the subagents dir',
       writeFileSync(join(subDir, `agent-id${i}.meta.json`), JSON.stringify({ agentType: 'general-purpose', name: `worker-${i}` }));
     }
     const mainTranscriptPath = join(sessionDir, 'main.jsonl');
+    // Prime the OS file cache, UNTIMED. On Windows, Defender's real-time scan
+    // makes the FIRST read of a freshly written file cost about 2-7 ms (measured
+    // 2026-10-06: 1000 new sidecars, first pass 2.0-7.4 s, second pass 41 ms;
+    // stat() and readdir() do not pay it). That is a property of the machine,
+    // not of resolveTarget, and it swamped the bound under load. The bound below
+    // stays 3000 ms and now covers what it is for: the algorithm's own cost
+    // (a per-sidecar full re-read or an O(n^2) scan would still blow it).
+    for (const f of readdirSync(subDir)) if (f.endsWith('.meta.json')) readFileSync(join(subDir, f), 'utf8');
+    // The measured window is resolveTarget itself, in-process.
     const t0 = Date.now();
+    const target = resolveTarget('worker-999', mainTranscriptPath);
+    const resolveMs = Date.now() - t0;
+    assert.ok(resolveMs < 3000, `resolveTarget over 1000 sidecars took ${resolveMs}ms`);
+    assert.equal(target && target.name, 'worker-999', 'resolveTarget must still find the last-listed sidecar by name');
+    // And the whole hook as a child process (node startup included), same bound.
+    const t1 = Date.now();
     const res = callHook(root, { to: 'worker-999', mainTranscriptPath });
-    const elapsed = Date.now() - t0;
-    assert.ok(elapsed < 3000, `resolveTarget over 1000 sidecars took ${elapsed}ms`);
+    const elapsed = Date.now() - t1;
+    assert.ok(elapsed < 3000, `resume-guard hook over 1000 sidecars took ${elapsed}ms`);
     assert.equal(res.json, null, 'worker-999 has no transcript lines, so no last activity -> passthrough');
   } finally {
     rmSync(root, { recursive: true, force: true });

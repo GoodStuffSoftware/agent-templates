@@ -2,6 +2,20 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.30.3 — 2026-10-06
+
+Test-flake fixes. One product-code change (`pr-wait`), the rest test-only.
+
+- `pr-wait`: no longer reports TIMEOUT after a single poll when that poll overruns the deadline. It always takes a last look that begins at or after the deadline, in both PR mode and `--run` mode. A timeout can now run up to about two polls past the deadline.
+- `detect`: the `homeRoot()` change for the scrubber's home basename is already in 0.30.2; nothing further.
+- Tests: the `runHook`/`runScript` hang guard goes from 15 s to 60 s (`HANG_GUARD_TIMEOUT_MS`), and a child it kills now leaves a "killed by hang guard" note on stderr. The `pr-wait` tests share the same guard.
+- Tests: `publication-sweep` and `detect` test runs put a `claude` stub first on PATH and disable `gh` CI-status lookups.
+- Tests: a shared `tests/detect-env.mjs` `claude` stub (missing or fixed-version) for every test that runs `detect.mjs`, so no test spawns the real CLI.
+- Tests: git-brief's 6000 ms fetch bound applies to the measured fetch step (`steps_ms.fetch`), not the whole call; the rest of the call (whole-call time minus the measured local git steps) keeps its own 6000 ms bound.
+- Tests: `memory-vault-byte-exact` syncs use the file's own git-chain guard (`runVault`).
+- Tests: delegation-guard's stuck-lock test bounds the lock window the hook itself records (streak-file mtime minus the entry's `touched`), not process start-up.
+- Tests: `resume-guard-review`'s 1000-sidecar test primes the fixture with an untimed read before timing, so an antivirus first-read scan is not counted, and it bounds `resolveTarget` and the hook child separately.
+
 ## 0.30.2 — 2026-10-06
 
 Test isolation, round two. The suite no longer reads the operator's real home from a child process, and a violation now fails the file that caused it.

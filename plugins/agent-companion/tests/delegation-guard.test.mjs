@@ -11,10 +11,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT, childEnv, decisionOf } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import {
   EXECUTION_TOOLS, RESET_TOOLS, countCall, delegationMode, delegationThreshold, delegationScope,
   outOfScope, isServedCall, attendedCoverage, LOCK_MAX_AGE_MS,
@@ -496,7 +497,7 @@ test('detect.mjs raises attended_env_missing when a day of counted calls never s
     const f = join(sd, 'delegation-streak.json');
     const now = Date.now();
     const signal = () => {
-      const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+      const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv() });
       assert.equal(res.status, 0, res.stderr);
       return res.json.signals.find((s) => s.kind === 'attended_env_missing');
     };
@@ -557,6 +558,17 @@ test('repro B: a lead spawn the spawn guard DENIES (inherit_guard: block) leaves
 
 // --- a stuck lock ------------------------------------------------------------------
 
+// The window the hook's own lock logic took, from timestamps the CHILD wrote:
+// recordExecutionCall captures `now` (stored as the entry's `touched`) before
+// it asks for the lock, and the streak file's mtime is the moment the write
+// under the lock landed. So the span is lock acquisition + one read and one
+// write, and excludes everything outside the product's lock path: the node
+// process spawn, module loading and stdin that a parent-side stopwatch also
+// counts (and that a CPU-starved runner stretches by seconds).
+function lockWindowMs(h) {
+  return statSync(h.streakFile).mtimeMs - h.streaks()[h.SID].touched;
+}
+
 test('a stuck streak lock (live pid, an hour old) is broken at once, not waited on by every call', () => {
   const h = harness(BLOCK);
   try {
@@ -564,16 +576,16 @@ test('a stuck streak lock (live pid, an hour old) is broken at once, not waited 
     const lock = `${h.streakFile}.lock`;
     // A live pid (this test process), as when a killed hook's pid is reused.
     writeFileSync(lock, JSON.stringify({ pid: process.pid, token: 'stuck-holder', at: Date.now() - 60 * 60 * 1000 }));
-    const t0 = Date.now();
     assert.equal(h.main('Read').raw, '');
-    const ms = Date.now() - t0;
+    const ms = lockWindowMs(h);
     assert.equal(existsSync(lock), false, 'the stuck lock was broken (and the new holder released its own)');
     assert.equal(h.streaks()[h.SID].streak, 1);
     // The old code waited the full 2 s on every call and never cleared it.
-    assert.ok(ms < 2000, `took ${ms} ms`);
-    const t1 = Date.now();
+    assert.ok(ms < 2000, `the lock logic took ${ms} ms`);
     h.main('Read');
-    assert.ok(Date.now() - t1 < 2000, 'the next call does not wait either');
+    const next = lockWindowMs(h);
+    assert.equal(h.streaks()[h.SID].streak, 2);
+    assert.ok(next < 2000, `the next call does not wait either (its lock logic took ${next} ms)`);
   } finally { h.cleanup(); }
 });
 

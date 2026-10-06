@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { makeFixture, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { makeFixture, readJsonl, PLUGIN_ROOT, HANG_GUARD_TIMEOUT_MS } from './helpers.mjs';
 import { defaultRules, matchRules, PR_WAIT_HINT_TEXT, PR_WAIT_HINT_WORDING } from '../hooks/lib/rules.mjs';
 
 const rulesPath = join(PLUGIN_ROOT, 'hooks', 'lib', 'rules.mjs');
@@ -33,6 +33,8 @@ if (args[0] === 'api') {
   else if (/\\/branches\\//.test(args[1] || '')) key = 'branch';
 }
 const scenario = JSON.parse(readFileSync(dir + '/scenario.json', 'utf8'));
+// scenario.delayMs: every gh call takes at least this long (a slow gh / loaded machine).
+if (scenario.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, scenario.delayMs);
 const cf = dir + '/counter.json';
 const counter = existsSync(cf) ? JSON.parse(readFileSync(cf, 'utf8')) : {};
 const i = counter[key] || 0;
@@ -64,7 +66,7 @@ function setup(scenario, extraEnv = {}) {
   };
   delete env.CLAUDE_CODE_SESSION_ID;
   const run = (...args) => {
-    const r = spawnSync(process.execPath, [SCRIPT, ...args], { env, encoding: 'utf8', timeout: 30000, windowsHide: true });
+    const r = spawnSync(process.execPath, [SCRIPT, ...args], { env, encoding: 'utf8', timeout: HANG_GUARD_TIMEOUT_MS, windowsHide: true });
     const lines = r.stdout.split('\n').filter(Boolean);
     return { code: r.status, stdout: r.stdout, stderr: r.stderr, lines, start: lines[0], final: lines[1], detail: lines.slice(2) };
   };
@@ -141,6 +143,20 @@ test('timeout: exit 2, the checks still pending are named', () => {
     assert.match(r.final, /^PR 31 OPEN TIMEOUT @sha-1 after 1s \| checks 1 passed, 0 failed, 2 total, 1 pending \|/);
     assert.deepEqual(r.detail, ['PENDING slow https://ci.example/slow']);
     assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 2, 'it polled repeatedly while waiting');
+  } finally { t.fx.cleanup(); }
+});
+
+test('timeout when one poll alone outlasts the deadline: still one last look at the deadline before TIMEOUT', () => {
+  // 3 gh calls per poll at >= 400 ms each: the first poll ends past the 1 s
+  // deadline. The TIMEOUT must still come from a poll begun at the deadline,
+  // not from the first poll's pre-deadline answer.
+  const t = setup({ ...onSha('sha-1', [pr('OPEN', 'sha-1')], [checks(cr('build', 'completed', 'success'), cr('slow', 'in_progress', '', 'https://ci.example/slow'))]), delayMs: 400 });
+  try {
+    const r = t.run('31', '--timeout', '1s');
+    assert.equal(r.code, 2, r.stdout + r.stderr);
+    assert.match(r.final, /^PR 31 OPEN TIMEOUT @sha-1 after 1s \| checks 1 passed, 0 failed, 2 total, 1 pending \|/);
+    assert.deepEqual(r.detail, ['PENDING slow https://ci.example/slow']);
+    assert.equal(t.calls().filter((c) => c.startsWith('pr view')).length, 2, 'the overrunning poll, then exactly one last look');
   } finally { t.fx.cleanup(); }
 });
 
@@ -449,6 +465,16 @@ test('--run: times out with exit 2 when the run never finishes', () => {
     assert.equal(r.code, 2);
     assert.match(r.final, /^RUN 7 \(CI\) TIMEOUT after 1s/);
     assert.match(r.detail[0], /^PENDING test /);
+  } finally { t.fx.cleanup(); }
+});
+
+test('--run, same timeout rule: a poll that outlasts the deadline is followed by one last look', () => {
+  const t = setup({ run: [run('in_progress', '', [job('test', 'in_progress', '')])], delayMs: 1100 });
+  try {
+    const r = t.run('--run', '7', '--timeout', '1s');
+    assert.equal(r.code, 2, r.stdout + r.stderr);
+    assert.match(r.final, /^RUN 7 \(CI\) TIMEOUT after 1s/);
+    assert.equal(t.calls().length, 2, 'the overrunning poll, then exactly one last look');
   } finally { t.fx.cleanup(); }
 });
 

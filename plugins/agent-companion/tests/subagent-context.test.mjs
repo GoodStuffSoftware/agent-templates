@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import { telemetryDir } from '../hooks/lib/context.mjs';
 import { readContextSignal, subagentNoticeText, BOUNDARY_FRESH_TURNS } from '../hooks/lib/subagent-context.mjs';
 
@@ -267,7 +268,7 @@ test('detect.mjs: budget_notices counts both notices over 24 hours (dispatch non
       { at: at(3000), kind: 'compaction', phase: 'stop' },
       { at: at(5 * 86400000), kind: 'compaction', phase: 'mid-run' },
     ]);
-    const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, timeout: 60000 });
+    const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }), timeout: 60000 });
     assert.equal(d.status, 0, d.stderr);
     const s = d.json.signals.find((x) => x.kind === 'budget_notices');
     assert.ok(s, 'signal present');
@@ -279,7 +280,7 @@ test('detect.mjs: budget_notices counts both notices over 24 hours (dispatch non
 test('detect.mjs: no rows, no signal', () => {
   const fx = makeFixture();
   try {
-    const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, timeout: 60000 });
+    const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }), timeout: 60000 });
     assert.equal(d.status, 0, d.stderr);
     assert.equal(d.json.signals.some((x) => x.kind === 'budget_notices'), false);
   } finally { fx.cleanup(); }
