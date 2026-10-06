@@ -27,7 +27,9 @@
 //   FAIL build https://github.com/o/r/actions/runs/1/job/2
 //
 // Never prompts. gh is polled with backoff (5s growing to 30s). A transient gh
-// failure is retried; a not-found / not-logged-in failure is not.
+// failure is retried; a not-found / not-logged-in failure is not. A TIMEOUT is
+// declared only after one last poll begun at the deadline (makeDeadline), so it
+// can land up to one poll after the --timeout mark.
 //
 // Bound to the commit, not the branch. Right after a push GitHub can still
 // report the PREVIOUS commit's checks for a few seconds, so:
@@ -247,6 +249,30 @@ function makeBackoff() {
   };
 }
 
+// The timeout rule: a TIMEOUT is only declared from a poll that STARTED at or
+// after the deadline, so the pending checks it names are as of the deadline.
+// pace() sleeps the wanted interval, or only up to the deadline and marks the
+// next poll as the last; done() is true after that last poll. Polls are never
+// cut short, so a poll that itself runs past the deadline (slow gh, a loaded
+// machine) is still followed by that last look rather than ending the wait on
+// what it saw before the deadline. Any timeout therefore covers >= 2 polls, and
+// overruns the deadline by at most one poll.
+function makeDeadline(deadline) {
+  let last = false;
+  return {
+    done: () => last,
+    async pace(wait) {
+      const left = deadline - Date.now();
+      if (wait > left) {
+        last = true; // one last look at the deadline, then give up
+        await sleep(Math.max(0, left));
+      } else {
+        await sleep(wait);
+      }
+    },
+  };
+}
+
 // ---------------------------------------------------------------- classification
 
 // Normalise a statusCheckRollup entry (CheckRun or StatusContext) to
@@ -317,7 +343,7 @@ async function checksOfCommit(repo, sha, backoff) {
 async function waitPr(opts) {
   const base = ['pr', 'view', opts.target, ...(opts.repo ? ['--repo', opts.repo] : []), '--json', PR_FIELDS];
   const backoff = makeBackoff();
-  const deadline = startedAt + opts.timeoutMs;
+  const lastLook = makeDeadline(startedAt + opts.timeoutMs);
   let noChecksSince = 0;
   let settle = { sig: '', at: 0 };
   let last = null;
@@ -379,14 +405,9 @@ async function waitPr(opts) {
       }
     }
 
+    if (lastLook.done()) break;
     if (wait === null) wait = backoff.step();
-    if (Date.now() + wait > deadline) {
-      const left = deadline - Date.now();
-      if (left <= 0) break;
-      await sleep(left); // one last look at the deadline, then give up
-    } else {
-      await sleep(wait);
-    }
+    await lastLook.pace(wait);
   }
 
   const { num, t, state, at } = last;
@@ -403,7 +424,7 @@ const RUN_FIELDS = 'databaseId,status,conclusion,jobs,url,workflowName';
 
 async function waitRun(opts) {
   const backoff = makeBackoff();
-  const deadline = startedAt + opts.timeoutMs;
+  const lastLook = makeDeadline(startedAt + opts.timeoutMs);
   const scope = opts.repo ? ['--repo', opts.repo] : [];
   let runId = /^\d+$/.test(opts.target) ? opts.target : '';
   let tipSha = '';
@@ -445,14 +466,8 @@ async function waitRun(opts) {
       }
     }
 
-    const wait = backoff.step();
-    if (Date.now() + wait > deadline) {
-      const left = deadline - Date.now();
-      if (left <= 0) break;
-      await sleep(left); // one last look at the deadline, then give up
-    } else {
-      await sleep(wait);
-    }
+    if (lastLook.done()) break;
+    await lastLook.pace(backoff.step());
   }
 
   const tail = last
