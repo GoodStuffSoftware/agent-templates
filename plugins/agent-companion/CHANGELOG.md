@@ -2,6 +2,15 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.30.3 — 2026-10-06
+
+Test-flake fixes. Two product-code changes, two test-only.
+
+- `pr-wait`: no longer reports TIMEOUT after a single poll when that poll overruns the deadline. It always takes a last look that begins at or after the deadline, in both PR mode and `--run` mode.
+- `detect`: `rawOsHandles` resolves the home directory with `homeRoot()` instead of `os.homedir()`.
+- Tests: the `runHook`/`runScript` hang guard goes from 15 s to 60 s (`HANG_GUARD_TIMEOUT_MS`), and a child it kills now leaves a "killed by hang guard" note on stderr. The `pr-wait` tests share the same guard.
+- Tests: `publication-sweep` and `detect` test runs put a `claude` stub first on PATH and disable `gh` CI-status lookups.
+
 ## 0.30.0 — 2026-10-04
 
 Token-saving trial: four changes shipped together, each with its own on/off toggle and telemetry stream, so the trial can be switched off per feature and measured per feature (injected-text numbers below).
