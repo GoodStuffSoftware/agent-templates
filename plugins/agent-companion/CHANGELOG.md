@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.30.1 — 2026-10-06
+
+Test fix only, no behaviour change. Since 0.30.0 the git-brief fetch-timeout test (`tests/git-brief.test.mjs`) failed on every Linux CI run, even though the process-tree kill worked. The cause was the test's hang server, which never read its sockets. On Linux, SIGKILL closes the connection with a FIN. Node reports end of stream on an undrained socket only after the buffered request has been read, so the socket never closed. On Windows, `taskkill /F` resets the connection, which closes the socket either way. The server now drains its sockets. The assertion is unchanged: a surviving git-remote-http still leaves its socket open and fails the test. The fixed sleep is now a bounded wait for the close events, and a failure lists each socket's events.
+
 ## 0.30.0 — 2026-10-04
 
 Token-saving trial: four changes shipped together, each with its own on/off toggle and telemetry stream, so the trial can be switched off per feature and measured per feature (injected-text numbers below).
