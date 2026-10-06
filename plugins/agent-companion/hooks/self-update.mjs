@@ -56,7 +56,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import {
-  readStdin, opt, passthrough, stateFile, readJson, writeJson, tailRecords, noteProcessLoad,
+  readStdin, opt, passthrough, sessionIsSubagent, stateFile, readJson, writeJson, tailRecords, noteProcessLoad,
 } from './lib/context.mjs';
 
 // Overridable only for tests (the plugin's verification suite needs to point
@@ -270,6 +270,9 @@ function buildMessage(prefix, staleList) {
 
 try {
   const p = readStdin();
+  // SessionStart also fires inside a subagent that compacts (the payload carries agent_id).
+  // This is the lead's own text; a worker neither needs it nor should pay for it again.
+  if (sessionIsSubagent(p)) passthrough();
   if (!opt('version_notice', true)) passthrough();
 
   const sessionId = String(p.session_id || 'unknown');

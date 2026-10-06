@@ -27,7 +27,7 @@
 
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readStdin, opt, passthrough, appendLog } from './lib/context.mjs';
+import { readStdin, opt, passthrough, appendLog, sessionIsSubagent } from './lib/context.mjs';
 import { gitBrief, briefTelemetry } from '../scripts/git-brief.mjs';
 
 const startMs = Math.round(process.uptime() * 1000);
@@ -39,6 +39,9 @@ try {
   if (!opt('git_brief', true)) passthrough();
   if (EVENT !== 'session-start' && EVENT !== 'subagent-start') passthrough();
   const p = readStdin();
+  // SessionStart also fires inside a subagent that compacts; the lead's line is
+  // not re-injected there (the subagent-start event already gave it one).
+  if (EVENT === 'session-start' && sessionIsSubagent(p)) passthrough();
   const t0 = Date.now();
   const cwd = typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd();
   const res = gitBrief({ cwd });

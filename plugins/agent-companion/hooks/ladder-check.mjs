@@ -45,7 +45,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 import {
-  readStdin, opt, passthrough, claudeDir, modelTiers, ladderVariants,
+  readStdin, opt, passthrough, sessionIsSubagent, claudeDir, modelTiers, ladderVariants,
   readInstalledPlugins, pluginEntries, effectiveEntry, pathUnder, versionBelow, copySource,
   noteProcessLoad, noteProcessEnd, LOAD_SETTLE_MS,
 } from './lib/context.mjs';
@@ -216,6 +216,9 @@ function buildStaleCopyMessage(v) {
 
 try {
   const p = readStdin();
+  // A subagent's own compaction is not a load of this process and the notices
+  // are the lead's: skip everything, including the process-load record.
+  if (sessionIsSubagent(p)) passthrough();
   // Recorded before the option check: self-update.mjs and the spawn guard
   // read the same per-process record to tell a fresh resume from an
   // in-process /resume. SessionEnd "resume" is the in-process /resume's own

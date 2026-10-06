@@ -15,7 +15,7 @@
 
 import { readFileSync, existsSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { readStdin, opt, dataDir, claudeDir, passthrough } from './lib/context.mjs';
+import { readStdin, opt, dataDir, claudeDir, passthrough, sessionIsSubagent } from './lib/context.mjs';
 
 const est = (s) => Math.ceil(s.length / 4); // ~4 chars/token; fine for an alarm
 
@@ -59,6 +59,9 @@ function countUnreachable(indexPath) {
 
 try {
   const p = readStdin();
+  // SessionStart also fires inside a subagent that compacts (the payload carries agent_id).
+  // This is the lead's own text; a worker neither needs it nor should pay for it again.
+  if (sessionIsSubagent(p)) passthrough();
   if (!opt('memory_budget', true)) passthrough();
 
   const budget = Math.max(500, opt('memory_budget_tokens', 3000));
