@@ -40,7 +40,7 @@ import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/c
 import { STREAK_FILE, attendedCoverage } from '../hooks/lib/delegation.mjs';
 import { collect as collectCopies, staleBeyondGrace, STALE_GRACE_MS } from './version.mjs';
 import {
-  desktopRoots, newestDesktopBuild, scanMarkers, teamEvidence, versionKey as teammatesKey, decide as decideTeammates,
+  desktopRoots, newestDesktopBuild, buildMtimeMs, scanMarkers, teamEvidence, versionKey as teammatesKey, decide as decideTeammates,
 } from './lib/teammates-watch.mjs';
 
 // The operator's raw OS handle(s), for scrubbing signal text.
@@ -209,6 +209,7 @@ try {
   const markers = needScan ? (build ? scanMarkers(build.binary) : null) : prevTm.markers;
   const r = decideTeammates({
     prev: prevTm, key, markers, nowMs: nowDate().getTime(),
+    buildMtimeMs: build ? buildMtimeMs(build.binary) : null,
     evidenceFor: (sinceMs) => teamEvidence({ dir: claudeDir(), sinceMs }),
   });
   next.teammates = r.state;
