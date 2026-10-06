@@ -3,6 +3,7 @@
 // sub-index is reachable. Fixture memory dirs only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import './isolate.mjs';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
