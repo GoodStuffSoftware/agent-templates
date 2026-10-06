@@ -50,7 +50,7 @@ const CONTRACT_BODY = [
   '- BLOCKERS next, in full: what is blocked, what you tried, what you need.',
   '- Then the outcome: files changed, key commands, results as facts.',
   '- Omit narration, resolved dead ends, tool recaps, brief restatements, what you chose not to do.',
-  '- Long output: file path plus summary.',
+  '- Long detail: write <task>-detail.md (or .json/.csv), put its path in this message; never name a file report/summary/findings/analysis*.md.',
   'To other agents: a decision or fact, one screen max.',
   '[end contract]',
 ].join('\n');
