@@ -1,13 +1,15 @@
-// Self-review: architect-class writers spawn their own reviewer (operator
-// request 2026-09-28; config/model-tiers.json `selfReview`).
+// Self-review: every writer type spawns its own reviewer (operator request
+// 2026-09-28, widened to every writer type 2026-10-06 by the lean worker
+// shape; config/model-tiers.json `selfReview`).
 //
 // Before this, the lead (hub) spawned a writer, waited, spawned a parity
 // reviewer, waited, then resumed or re-spawned the writer for the fix round.
 // Every hop stalled on the lead being free, and the fix round often started on
 // a cold cache. A writer whose TYPE is listed in `selfReview.types` now runs
 // that loop itself: commit, ONE foreground parity reviewer on its own rung,
-// one fix round, return the verdict verbatim. The lead still lands, merges,
-// settles disputed findings and spot-checks the review file.
+// one fix round, land the change, return the verdict verbatim. The writer
+// lands (merge + verify the deploy, release gates intact); the lead settles
+// disputed findings and spot-checks the review file.
 //
 // Three pieces live here, shared by the generator and the spawn guard:
 //   1. The PROTOCOL TEXT. It is generated into the body of every ladder rung
@@ -156,7 +158,7 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
     SELF_REVIEW_BEGIN,
     '## Self-review before you return',
     '',
-    `This applies only when your brief's \`TYPE:\` line names one of ${types}, and the brief has no \`${sr.optOut.line}\` line. Otherwise skip this section: the lead reviews your work. If your TYPE is \`code-review\`, you are the reviewer: never spawn a reviewer (the spawn guard denies it).`,
+    `This applies only when your brief's \`TYPE:\` line names one of ${types}, and the brief has no \`${sr.optOut.line}\` line. Otherwise skip this section (read-only work, or the lead opted out and reviews it). If your TYPE is \`code-review\`, you are the reviewer: never spawn a reviewer (the spawn guard denies it).`,
     '',
     'When it applies, before you return:',
     '',
@@ -174,7 +176,8 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
     '   - where to work: its own checkout of that sha (for example `git worktree add --detach <path> <sha>`, run from your working tree), never your working tree; it makes no commits and no pushes.',
     '   Add nothing that narrows the review: no areas to skip, no findings to expect, no summary of your own that stands in for the diff.',
     `4. ${fix}`,
-    '5. Return: your report, the reviewer\'s verdict line verbatim, the review file path, the post-fix commit sha, and the disputed findings.',
+    '5. Land your own work, but not past an open question: if a blocker is disputed or left unfixed, or a gate is pending, stop before merging and return it for the lead to settle. Otherwise merge the way the repo and the lead\'s brief say, and verify the deploy where the repo deploys on merge. Every release gate stays: a user sign-off step, a production deploy approval, anything the repo\'s CLAUDE.md requires. If neither the brief nor the repo says how to land, push your branch and say so in your report.',
+    '6. Return: your report, the reviewer\'s verdict line verbatim, the review file path, the post-fix commit sha, the merge sha (or the gate you stopped at), and the disputed findings.',
     '',
     'If the reviewer cannot be spawned (no Agent tool here, or the spawn is denied), say so in your report and return: the lead reviews instead.',
     SELF_REVIEW_END,

@@ -1,5 +1,6 @@
-// Self-review (operator request 2026-09-28): architect-class writers spawn
-// their own reviewer. Covers the four pieces:
+// Self-review (operator request 2026-09-28, widened to every writer type
+// 2026-10-06 by the lean worker shape): writers spawn their own reviewer and
+// land their own work. Covers the four pieces:
 //   1. config/model-tiers.json `selfReview` -> the protocol block generated
 //      into the body of every ladder rung that is the current default for a
 //      listed type (scripts/routing-table.mjs --sync/--check-agent-descriptions),
@@ -37,26 +38,35 @@ const check = (agentsDir) => runScript('scripts/routing-table.mjs', ['--check-ag
 const sync = (agentsDir) => runScript('scripts/routing-table.mjs', ['--sync-agent-descriptions'], { env: { AGENT_COMPANION_AGENTS_DIR_OVERRIDE: agentsDir } });
 const blockOf = (file) => readSelfReviewBlock(readFileSync(file, 'utf8')).block;
 
-test('config: selfReview lists the two architect-class types (narrowed 2026-10-02), one fix round, and the REVIEW: lead opt-out', () => {
+const WRITER_TYPES = ['bounded-feature', 'integration', 'debug-root-cause', 'large-refactor', 'novel-design', 'critical-change', 'long-autonomous-run'];
+const SELF_REVIEW_RUNGS = ['ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh'];
+
+test('config: selfReview lists every stand-alone writer type (lean worker shape, 2026-10-06), one fix round, and the REVIEW: lead opt-out', () => {
   const sr = selfReviewConfig(SHIPPED);
-  assert.deepEqual(sr.types, ['novel-design', 'critical-change']);
+  assert.deepEqual(sr.types, WRITER_TYPES);
+  // The edit workers a writer spawns sit under their parent's review; read-only and parity types stay out.
+  for (const t of ['mechanical-edit', 'subagent-worker', 'explore', 'verify', 'operate', 'code-review']) {
+    assert.equal(sr.types.includes(t), false, t);
+  }
   assert.equal(sr.fixRounds, 1);
   assert.equal(sr.optOut.line, 'REVIEW: lead');
-  assert.equal(sr.updated, '2026-10-02');
+  assert.equal(sr.updated, '2026-10-06');
   assert.ok(sr.rationale.length > 100);
   // It sits with the task types, so it moves with the table.
   const keys = Object.keys(SHIPPED);
   assert.equal(keys.indexOf('selfReview'), keys.indexOf('taskTypes') + 1);
 });
 
-test('committed rungs: ac-opus-xhigh (the default for every selfReview type today) carries the block, and no other rung does', () => {
+test('committed rungs: ac-opus-medium, ac-opus-high and ac-opus-xhigh (the defaults for the selfReview types today) carry the block, and no other rung does', () => {
   for (const rung of SHIPPED.ladder) {
     const block = blockOf(join(PLUGIN_ROOT, 'agents', `${rung.agent}.md`));
-    if (rung.agent === 'ac-opus-xhigh') {
-      assert.ok(block, 'ac-opus-xhigh carries the protocol');
-      assert.match(block, /subagent_type: "agent-companion:ac-opus-xhigh"/);
+    if (SELF_REVIEW_RUNGS.includes(rung.agent)) {
+      assert.ok(block, `${rung.agent} carries the protocol`);
+      assert.match(block, new RegExp(`subagent_type: "agent-companion:${rung.agent}"`));
       assert.match(block, /^ {3}TYPE: code-review$/m);
-      assert.match(block, /^ {3}WRITER: opus\/xhigh$/m);
+      assert.match(block, new RegExp(`^ {3}WRITER: ${rung.model}/${rung.effort}$`, 'm'));
+      assert.match(block, /Land your own work/);
+      assert.match(block, /Every release gate stays/);
       assert.match(block, /`REVIEW: lead`/);
       assert.match(block, /Do one fix round/);
       assert.match(block, /Never re-review/);
@@ -71,8 +81,10 @@ test('committed rungs: ac-opus-xhigh (the default for every selfReview type toda
 });
 
 test('the committed block is byte-identical to a fresh generation (and --check passes on the real files)', () => {
-  const rung = SHIPPED.ladder.find((r) => r.agent === 'ac-opus-xhigh');
-  assert.equal(blockOf(join(PLUGIN_ROOT, 'agents', 'ac-opus-xhigh.md')), selfReviewBlock(rung, selfReviewConfig(SHIPPED)));
+  for (const agent of SELF_REVIEW_RUNGS) {
+    const rung = SHIPPED.ladder.find((r) => r.agent === agent);
+    assert.equal(blockOf(join(PLUGIN_ROOT, 'agents', `${agent}.md`)), selfReviewBlock(rung, selfReviewConfig(SHIPPED)), agent);
+  }
   const res = runScript('scripts/routing-table.mjs', ['--check-agent-descriptions']);
   assert.equal(res.status, 0, res.stdout + res.stderr);
 });
@@ -99,7 +111,7 @@ test('drift: a block deleted from its rung, or pasted onto another rung, fails t
   try {
     const agentsDir = fixtureAgentsDir(dir);
     const xhigh = join(agentsDir, 'ac-opus-xhigh.md');
-    const high = join(agentsDir, 'ac-opus-high.md');
+    const high = join(agentsDir, 'ac-sonnet-high.md');
     const xOrig = readFileSync(xhigh, 'utf8');
     const hOrig = readFileSync(high, 'utf8');
     const block = readSelfReviewBlock(xOrig).block;
@@ -108,7 +120,7 @@ test('drift: a block deleted from its rung, or pasted onto another rung, fails t
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
     assert.match(res.stderr, /ac-opus-xhigh \[self-review-drift\][\s\S]*actual:\s+\(absent\)/);
-    assert.match(res.stderr, /ac-opus-high \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
+    assert.match(res.stderr, /ac-sonnet-high \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
     assert.equal(sync(agentsDir).status, 0);
     assert.equal(readFileSync(xhigh, 'utf8'), xOrig);
     assert.equal(readFileSync(high, 'utf8'), hOrig, 'removing the block restores the rung byte for byte');
@@ -131,11 +143,13 @@ test('table move: when the selfReview types route to another rung, --check fails
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
     assert.match(res.stderr, /ac-opus-xhigh \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
+    assert.match(res.stderr, /ac-opus-medium \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
     assert.match(res.stderr, /ac-opus-high \[self-review-drift\][\s\S]*novel-design, large-refactor, long-autonomous-run/);
 
     const syncRes = sync(agentsDir);
     assert.equal(syncRes.status, 0, syncRes.stderr);
     assert.equal(blockOf(join(agentsDir, 'ac-opus-xhigh.md')), null, 'the old rung lost the block');
+    assert.equal(blockOf(join(agentsDir, 'ac-opus-medium.md')), null, 'a rung whose types are no longer listed lost it too');
     const moved = blockOf(join(agentsDir, 'ac-opus-high.md'));
     assert.ok(moved, 'the new rung gained it');
     assert.match(moved, /subagent_type: "agent-companion:ac-opus-high"/);
@@ -477,9 +491,11 @@ test('telemetry: every row carries tool_use_id, parent_agent_id, inferred_writer
     }
     assert.equal(r.row.tool_use_id, 'toolu_E');
     assert.equal(r.row.parent_agent_id, null, 'main thread');
-    assert.equal(r.row.self_review, false);
-    assert.equal(r.row.self_review_expected, null, 'bounded-feature is not a selfReview type');
+    assert.equal(r.row.self_review, false, 'the spawn is not itself a review');
+    assert.equal(r.row.self_review_expected, true, 'bounded-feature is a selfReview type (lean worker shape)');
     assert.equal(r.row.caller_row_found, null);
+    const edit = h.lead(bg({ subagent_type: 'agent-companion:ac-sonnet-low', prompt: 'TYPE: mechanical-edit\nrename it' }));
+    assert.equal(edit.row.self_review_expected, null, 'mechanical-edit is an edit worker under its parent\'s review, not a selfReview type');
     // No payload id: null, never invented.
     const none = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-medium', prompt: 'TYPE: bounded-feature\nfind it' }));
     assert.equal(none.row.tool_use_id, null);
@@ -513,32 +529,33 @@ test('self_review_expected: true on the rung carrying the protocol (nothing appe
 test('a self-reviewing TYPE on a ladder rung WITHOUT the block gets the generated protocol appended to its brief, sized to that rung', () => {
   const h = harness();
   try {
-    const r = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-high', prompt: 'TYPE: novel-design\nWARRANT: weight 5 - test\ndesign it' }));
+    const r = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nWARRANT: weight 5 - test\ndesign it' }));
     assert.equal(r.decision, 'proceed', r.reason);
     assert.equal(r.row.self_review_expected, true);
     assert.equal(r.row.self_review_injected, true);
     assert.match(r.prompt, /^TYPE: novel-design\nWARRANT: weight 5 - test\ndesign it\n\n---\n\(agent-companion: your definition does not carry the self-review protocol/);
     assert.match(r.prompt, /## Self-review before you return/);
-    assert.match(r.prompt, /subagent_type: "agent-companion:ac-opus-high"/);
-    assert.match(r.prompt, /^ {3}WRITER: opus\/high$/m);
+    assert.match(r.prompt, /subagent_type: "agent-companion:ac-opus-max"/);
+    assert.match(r.prompt, /^ {3}WRITER: opus\/max$/m);
+    assert.match(r.prompt, /Land your own work/);
     assert.doesNotMatch(r.prompt, /self-review protocol (BEGIN|END)/, 'file markers stay out of a brief');
     assert.ok(r.prompt.indexOf('Self-review before you return') < r.prompt.indexOf('Put your ENTIRE report') || !r.prompt.includes('Put your ENTIRE report'),
       'task instructions before the reporting contract');
-    assert.match(r.msg, /"agent-companion:ac-opus-high" does not carry the protocol in its definition, so it was appended to the brief/);
+    assert.match(r.msg, /"agent-companion:ac-opus-max" does not carry the protocol in its definition, so it was appended to the brief/);
 
     // The rung that matches what will RUN: a model named on the spawn wins.
-    const s = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-high', model: 'sonnet', prompt: 'TYPE: novel-design\nrefactor it' }));
+    const s = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-low', model: 'sonnet', prompt: 'TYPE: novel-design\nrefactor it' }));
     assert.equal(s.row.self_review_injected, true);
-    assert.match(s.prompt, /subagent_type: "agent-companion:ac-sonnet-high"/);
-    assert.match(s.prompt, /^ {3}WRITER: sonnet\/high$/m);
+    assert.match(s.prompt, /subagent_type: "agent-companion:ac-sonnet-low"/);
+    assert.match(s.prompt, /^ {3}WRITER: sonnet\/low$/m);
 
     // REVIEW: lead: nothing appended.
-    const o = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-high', prompt: 'TYPE: novel-design\nREVIEW: lead\nWARRANT: weight 5 - test\ndesign it' }));
+    const o = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nREVIEW: lead\nWARRANT: weight 5 - test\ndesign it' }));
     assert.equal(o.row.self_review_injected, false);
     assert.doesNotMatch(o.prompt || '', /Self-review before you return/);
 
     // Not a listed type: nothing appended.
-    const b = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-high', prompt: 'TYPE: bounded-feature\nadd it' }));
+    const b = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: mechanical-edit\nWARRANT: weight 2 - test\nrename it' }));
     assert.equal(b.row.self_review_injected, false);
     assert.doesNotMatch(b.prompt || '', /Self-review before you return/);
   } finally { h.cleanup(); }
@@ -634,11 +651,11 @@ test('a self-reviewing writer that names a WRITER below itself gets a note; a cr
     assert.equal(own.row.consequence_from_caller, false);
     assert.equal(own.row.declared_consequence, 'routine');
 
-    // A found writer of a type NOT in selfReview.types: a review by a
-    // subagent, not a self-review.
-    h.lead(bg({ subagent_type: 'agent-companion:ac-opus-medium', prompt: 'TYPE: bounded-feature\nadd it' }), { tool_use_id: 'toolu_B' });
+    // A found writer of a type NOT in selfReview.types (an edit worker): a
+    // review by a subagent, not a self-review.
+    h.lead(bg({ subagent_type: 'agent-companion:ac-sonnet-low', prompt: 'TYPE: mechanical-edit\nrename it' }), { tool_use_id: 'toolu_B' });
     h.sidecar('bf', { toolUseId: 'toolu_B' });
-    const bf = h.sub('bf', 'agent-companion:ac-opus-medium', bg({ subagent_type: 'agent-companion:ac-opus-medium', prompt: REVIEW(null) }));
+    const bf = h.sub('bf', 'agent-companion:ac-sonnet-low', bg({ subagent_type: 'agent-companion:ac-sonnet-low', prompt: REVIEW(null) }));
     assert.equal(bf.row.self_review, false);
     assert.equal(bf.row.review_by_subagent, true);
     assert.equal(bf.row.consequence_from_caller, false);
@@ -663,17 +680,24 @@ test('recommend.mjs says when the writer reviews itself, so the lead does not re
   assert.match(nd.stdout, /unless the brief carries `REVIEW: lead`/);
   const js = JSON.parse(runScript('scripts/recommend.mjs', ['--type', 'novel-design', '--json']).stdout);
   assert.deepEqual(js.selfReview, { protocol: 'rung', fixRounds: 1, optOut: 'REVIEW: lead' });
-  const bf = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature']);
-  assert.doesNotMatch(bf.stdout, /self-review:/);
+  assert.match(nd.stdout, /lands its own work/);
+  const me = runScript('scripts/recommend.mjs', ['--type', 'mechanical-edit']);
+  assert.doesNotMatch(me.stdout, /self-review:/);
 });
 
-test('large-refactor and long-autonomous-run no longer self-review (narrowed 2026-10-02); the lead reviews them', () => {
-  for (const type of ['large-refactor', 'long-autonomous-run']) {
+test('every stand-alone writer type self-reviews (the 2026-10-02 narrowing is reversed); edit workers and read-only types do not', () => {
+  for (const type of WRITER_TYPES) {
+    const r = runScript('scripts/recommend.mjs', ['--type', type]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /self-review:/, type);
+    const js = JSON.parse(runScript('scripts/recommend.mjs', ['--type', type, '--json']).stdout);
+    assert.equal(js.selfReview.fixRounds, 1, type);
+    assert.equal(SHIPPED.selfReview.types.includes(type), true, type);
+  }
+  for (const type of ['mechanical-edit', 'subagent-worker', 'explore', 'verify', 'operate']) {
     const r = runScript('scripts/recommend.mjs', ['--type', type]);
     assert.equal(r.status, 0, r.stderr);
     assert.doesNotMatch(r.stdout, /self-review:/, type);
-    const js = JSON.parse(runScript('scripts/recommend.mjs', ['--type', type, '--json']).stdout);
-    assert.equal(js.selfReview, undefined, type);
     assert.equal(SHIPPED.selfReview.types.includes(type), false, type);
   }
 });
@@ -683,10 +707,10 @@ test('the protocol tells the writer where its reviewer works', () => {
   assert.match(selfReviewBlock(rung, selfReviewConfig(SHIPPED)), /where to work: its own checkout of that sha \(for example `git worktree add --detach <path> <sha>`, run from your working tree\), never your working tree/);
 });
 
-test('no self-review path for a writer type that is not listed; every self-review path either denies or sets no decision (never "allow")', () => {
+test('no self-review path for a type that is not listed (an edit worker); every self-review path either denies or sets no decision (never "allow")', () => {
   const h = harness();
   try {
-    const r = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-medium', prompt: 'TYPE: bounded-feature\nadd the flag' }));
+    const r = h.lead(bg({ subagent_type: 'agent-companion:ac-sonnet-low', prompt: 'TYPE: mechanical-edit\nrename the flag' }));
     assert.equal(r.row.self_review_expected, null);
     assert.doesNotMatch(r.msg, /self-review/i);
 
@@ -698,7 +722,7 @@ test('no self-review path for a writer type that is not listed; every self-revie
     const outs = [
       r, W, R,
       h.lead(bg({ subagent_type: XHIGH, prompt: 'TYPE: novel-design\nREVIEW: lead\nbuild' })),
-      h.lead(bg({ subagent_type: 'agent-companion:ac-opus-high', prompt: 'TYPE: novel-design\nWARRANT: weight 5 - t\nbuild' })),
+      h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nWARRANT: weight 5 - t\nbuild' })),
       h.sub('w', XHIGH, bg({ subagent_type: XHIGH, prompt: REVIEW(null) })), // self-review, inferred
       h.sub('x', 'general-purpose', bg({ subagent_type: XHIGH, prompt: REVIEW(null) })), // inference fails
       h.sub('y', 'proj-architect', bg({ subagent_type: XHIGH, prompt: REVIEW(null) })), // project caller
@@ -707,4 +731,45 @@ test('no self-review path for a writer type that is not listed; every self-revie
     const denied = h.sub('r', XHIGH, bg({ subagent_type: XHIGH, prompt: REVIEW(null) }));
     assert.equal(denied.decision, 'deny');
   } finally { h.cleanup(); }
+});
+
+// --- Lean worker shape (0.31.2): every writer type self-reviews and lands -----
+
+test('a bounded-feature writer reviewing its own work is classified self_review, and the reviewer-spawns-reviewer guard still denies the reviewer', () => {
+  const MED = 'agent-companion:ac-opus-medium';
+  const h = harness();
+  try {
+    const W = h.lead(bg({ subagent_type: MED, prompt: 'TYPE: bounded-feature\nadd the flag' }), { tool_use_id: 'toolu_BF' });
+    assert.equal(W.row.self_review_expected, true);
+    assert.equal(W.row.self_review_injected, false, 'ac-opus-medium carries the protocol in its body');
+    h.sidecar('bfw', { agentType: MED, toolUseId: 'toolu_BF', spawnDepth: 1 });
+    const R = h.sub('bfw', MED, bg({ subagent_type: MED, prompt: REVIEW(null) }), { tool_use_id: 'toolu_BFR' });
+    assert.equal(R.decision, 'proceed', R.reason);
+    assert.equal(R.row.caller_declared_type, 'bounded-feature');
+    assert.equal(R.row.self_review, true);
+    assert.equal(R.row.inferred_writer, 'opus/medium');
+    h.sidecar('bfr', { agentType: MED, toolUseId: 'toolu_BFR', spawnDepth: 2 });
+    const deep = h.sub('bfr', MED, bg({ subagent_type: MED, prompt: REVIEW(null) }));
+    assert.equal(deep.decision, 'deny', 'a reviewer never spawns a reviewer');
+    assert.match(deep.reason, /Reviewers never spawn reviewers/);
+    assert.doesNotMatch(deep.reason, /fixer/);
+  } finally { h.cleanup(); }
+});
+
+test('an edit worker (mechanical-edit) spawned by a writer is not itself a self-reviewing type', () => {
+  const h = harness();
+  try {
+    h.lead(bg({ subagent_type: 'agent-companion:ac-sonnet-low', prompt: 'TYPE: mechanical-edit\nrename it' }), { tool_use_id: 'toolu_ME' });
+    h.sidecar('me', { toolUseId: 'toolu_ME' });
+    const r = h.sub('me', 'agent-companion:ac-sonnet-low', bg({ subagent_type: 'agent-companion:ac-sonnet-low', prompt: REVIEW(null) }));
+    assert.equal(r.row.self_review, false);
+    assert.equal(r.row.review_by_subagent, true);
+  } finally { h.cleanup(); }
+});
+
+test('the generated docs say the writer lands and the lead settles disputes', () => {
+  const routing = readFileSync(join(PLUGIN_ROOT, 'docs', 'ROUTING.md'), 'utf8');
+  assert.match(routing, /The writer lands and verifies its own work/);
+  assert.doesNotMatch(routing, /The lead still lands and merges the work/);
+  assert.match(routing, /## Self-review \(every writer\)/);
 });

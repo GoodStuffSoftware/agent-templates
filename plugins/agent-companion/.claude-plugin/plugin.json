@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.1",
+  "version": "0.31.2",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -147,7 +147,7 @@
     "review_recursion_guard": {
       "type": "boolean",
       "title": "Reviewers never spawn reviewers",
-      "description": "Deny a TYPE: code-review spawned by a subagent that was itself spawned as a TYPE: code-review. Denied only on a positive match: the caller's own spawns.jsonl row, found through the id of the Agent call that started it (the caller's sidecar toolUseId). When that row cannot be found, the spawn is allowed. A writer spawning a review of its own work (the self-review flow) is never denied by this.",
+      "description": "Deny a TYPE: code-review spawned by a subagent that was itself spawned as a TYPE: code-review. Denied only on a positive match: the caller's own spawns.jsonl row, found through the id of the Agent call that started it (the caller's sidecar toolUseId). When that row cannot be found, the spawn is allowed. A writer of any other type spawning a review of its own work (the self-review flow, which every writer type follows) is never denied by this.",
       "default": true
     },
     "fit_autofill": {

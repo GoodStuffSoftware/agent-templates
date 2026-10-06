@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.2 — 2026-10-06
+
+Lean worker shape: every writer type self-reviews and lands its own work. Source: DECISIONS.md "lean worker shape; main session stays unblocked" (operator, 2026-10-06).
+
+- **Self-review for every writer type.** `selfReview.types` in `config/model-tiers.json` was `novel-design` and `critical-change`; it is now `bounded-feature`, `integration`, `debug-root-cause`, `large-refactor`, `novel-design`, `critical-change` and `long-autonomous-run`. Every change gets one separate reviewer at the writer's tier, spawned by the writer, with one fix round. `mechanical-edit` and `subagent-worker` stay out on purpose: they are the edit workers a writer spawns for a 15+ call job, and the parent writer's one review covers them (listing them would give a change two reviews). Read-only types and parity types stay out. `REVIEW: lead` remains the only opt-out.
+- **The writer lands.** The generated protocol (`hooks/lib/self-review.mjs`) gained a step: after the fix round the writer merges and verifies the deploy where the repo deploys on merge, keeps every release gate the repo requires (user sign-off, production deploy approvals, its CLAUDE.md), stops before the merge while a blocker is disputed or left unfixed (the lead settles it first), pushes its branch and says so when neither the brief nor the repo says how to land, and returns the merge sha. The "otherwise skip" clause now reads "read-only work, or the lead opted out and reviews it". The lead settles disputed findings and spot-checks the review file. The protocol block is now generated into `ac-opus-medium` and `ac-opus-high` as well as `ac-opus-xhigh` (the default rungs for the newly listed types); any other rung gets it appended to the brief by the spawn guard, as before.
+- **Guards.** `review_recursion_guard` is unchanged in behaviour (a reviewer still cannot spawn a reviewer; a writer's review of its own work is allowed). Its description now says so explicitly and its deny text drops the "re-tasked as a fixer" example. `selfReviewSpawn` follows the new list with no code change. The delegation guard is unchanged.
+- **Recommender and docs.** `recommend.mjs` says the writer lands its own work. `ROUTING.md` (generated), `ROUTING-RATIONALE.md`, `README.md` and the recommend skill describe the new shape; the `mechanical-edit` and `subagent-worker` task summaries say to spawn them only for a mechanical job of about 15+ calls or parallel work.
+- **Tests.** `tests/self-review.test.mjs` updated for the new list and rung set, plus new cases: a `bounded-feature` writer's review is classified `self_review`, a reviewer is still denied, `mechanical-edit` is not self-reviewing.
+- Reverse: empty `selfReview.types` (or restore the two-type list) and run `node scripts/routing-table.mjs --sync-agent-descriptions`.
+
 ## 0.31.1 — 2026-10-06
 
 Resume doctrine refined with a measurement, a teammates watch, and stale cost facts corrected. A first version of this release made reuse the default; the same-day measurement refuted it and it was reverted before release.

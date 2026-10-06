@@ -36,7 +36,7 @@ Config v8 (updated 2026-10-02). **Premium** = the spawn brief needs a `WARRANT:`
 | Task type | Route | Premium | What it is |
 |---|---|---|---|
 | `explore` | `haiku` (routing trial, review by 2026-10-16) | no | read-only search: where is X, what touches Y, does Z exist |
-| `mechanical-edit` | `sonnet/low` (routing trial, review by 2026-10-16) | no | rename, config edit, reformat, apply a known migration recipe |
+| `mechanical-edit` | `sonnet/low` (routing trial, review by 2026-10-16) | no | rename, config edit, reformat, apply a known migration recipe; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
 | `bounded-feature` | `opus/medium` (routing trial, review by 2026-10-04) | yes | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | `opus/medium` (routing trial, review by 2026-09-30) | yes | multi-file, cross-referencing, touches shared config or things other agents depend on |
 | `debug-root-cause` | `opus/medium` (routing trial, review by 2026-10-04) | yes | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
@@ -45,11 +45,11 @@ Config v8 (updated 2026-10-02). **Premium** = the spawn brief needs a `WARRANT:`
 | `critical-change` | `opus/xhigh` | yes | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
 | `code-review` | writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's | as writer (opus if critical or fable) | adversarial review of a diff; sized to the writer it gates |
 | `long-autonomous-run` | `opus/high` (routing trial, review by 2026-10-16) | yes | an agent session expected to run for hours with minimal supervision |
-| `subagent-worker` | `sonnet/low` (routing trial, review by 2026-10-16) | no | a delegated worker doing a bounded, well-specified piece of a larger task |
+| `subagent-worker` | `sonnet/low` (routing trial, review by 2026-10-16) | no | a delegated worker doing a bounded, well-specified piece of a larger task; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
 | `verify` | `haiku` (routing trial, review by 2026-10-16) | no | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
 | `operate` | `sonnet/low` (routing trial, review by 2026-10-16) | no | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
 
-**Self-review:** a writer spawned as `novel-design`, `critical-change` reviews its own work before it returns (it commits, spawns ONE foreground parity reviewer on its own rung, runs one fix round, and returns the verdict line verbatim), unless its brief carries the line `REVIEW: lead`. The protocol is in the body of `agent-companion:ac-opus-xhigh`; on any other ladder rung (a routing profile or a local copy of the table can put a listed type there) the spawn guard appends the same text to the brief. A built-in or project agent does not self-review unless its own definition says so, and the lead reviews it as before.
+**Self-review:** a writer spawned as `bounded-feature`, `integration`, `debug-root-cause`, `large-refactor`, `novel-design`, `critical-change`, `long-autonomous-run` reviews its own work before it returns (it commits, spawns ONE foreground parity reviewer on its own rung, runs one fix round, and returns the verdict line verbatim), unless its brief carries the line `REVIEW: lead`. The protocol is in the body of `agent-companion:ac-opus-medium`, `agent-companion:ac-opus-high`, `agent-companion:ac-opus-xhigh`; on any other ladder rung (a routing profile or a local copy of the table can put a listed type there) the spawn guard appends the same text to the brief. A built-in or project agent does not self-review unless its own definition says so (give it the protocol and the `Agent` tool); until then the lead reviews it.
 <!-- routing-table:task-types END -->
 
 ## Step 1 — classify the task
@@ -137,9 +137,9 @@ State the recommendation and the rationale it printed. Then:
 - **Self-reviewing types review themselves; `REVIEW: lead` opts out.** A
   writer of a listed type on a ladder rung (see the **Self-review** line
   above; `recommend.mjs` prints a `self-review:` line for these) commits,
-  spawns its own parity reviewer, does one fix round and returns the
-  reviewer's verdict line, so the lead does not spawn the reviewer printed
-  above. Leave that alone unless the lead must review this one itself: then
+  spawns its own parity reviewer, does one fix round, lands its own work and
+  returns the reviewer's verdict line, so the lead does not spawn the reviewer
+  printed above. Leave that alone unless the lead must review this one itself: then
   add a line of its own to the writer's brief —
 
   ```
@@ -147,8 +147,8 @@ State the recommendation and the rationale it printed. Then:
   REVIEW: lead
   ```
 
-  The lead still lands and merges the work, settles the findings the writer
-  disputes, and spot-checks the review: the review file's first line should
+  The writer lands and verifies its own work (the repo's release gates stay);
+  the lead settles the findings the writer disputes and spot-checks the review: the review file's first line should
   be the verdict the writer relayed, and the reviewer's real brief is the
   first user record of its transcript. A reviewer never spawns a reviewer:
   the spawn guard denies it.
