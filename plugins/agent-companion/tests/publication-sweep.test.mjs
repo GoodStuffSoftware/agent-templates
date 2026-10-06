@@ -32,9 +32,12 @@ const REAL_LEAK_CHECK = join(PLUGIN_ROOT, '..', '..', 'scripts', 'leak-check.mjs
 // this way).
 const SYNTHETIC_LEAK_LINE = ['private path: C:', '\\Users\\', 'zzz', 'testuser', '\\dev\\thing'].join('');
 
+// Per-spawn bound: under the 120 s ci-local per-test bound, with headroom for loaded machines.
+const SPAWN_TIMEOUT_MS = 90000;
+
 function git(args, cwd, env) {
   const res = spawnSync('git', args, {
-    cwd, encoding: 'utf8', env: cleanGitEnv(env || process.env), timeout: 30000, windowsHide: true,
+    cwd, encoding: 'utf8', env: cleanGitEnv(env || process.env), timeout: SPAWN_TIMEOUT_MS, windowsHide: true,
   });
   if (res.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
   return res;
@@ -445,12 +448,12 @@ test('detect.mjs: a configured leaky repo fires publication_leak once, then dedu
       AGENT_COMPANION_DISCOVERY_DEV_ROOT: join(dir, 'no-dev-root'),
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: repo.bareDir,
     };
-    const runA = runScript('scripts/detect.mjs', [], { env, timeout: 60000 });
+    const runA = runScript('scripts/detect.mjs', [], { env, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(runA.status, 0, runA.stderr);
     const sigA = runA.json.signals.find((s) => s.kind === 'publication_leak');
     assert.ok(sigA, `expected a publication_leak signal, got: ${JSON.stringify(runA.json.signals)}`);
 
-    const runB = runScript('scripts/detect.mjs', [], { env, timeout: 60000 });
+    const runB = runScript('scripts/detect.mjs', [], { env, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(runB.status, 0, runB.stderr);
     assert.ok(
       !runB.json.signals.some((s) => s.kind === 'publication_leak'),
@@ -470,7 +473,7 @@ test('detect.mjs: an unreachable configured repo reports publication_leak_sweep_
       AGENT_COMPANION_DISCOVERY_DEV_ROOT: join(dir, 'no-dev-root'),
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: join(dir, 'nope', 'does-not-exist.git'),
     };
-    const res = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    const res = runScript('scripts/detect.mjs', [], { env, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(res.status, 0);
     assert.ok(res.json.signals.some((s) => s.kind === 'publication_leak_sweep_error'));
   } finally { cleanup(); }
@@ -609,7 +612,7 @@ test('detect.mjs (cloud): scans the checkout in place, skips a non-matching conf
     };
     // cwd is the "session checkout" — detect.mjs must scan THIS in place and
     // must not attempt to clone otherRepo (which does not even exist).
-    const res = runScript('scripts/detect.mjs', [], { env, cwd: repo.workDir, timeout: 30000 });
+    const res = runScript('scripts/detect.mjs', [], { env, cwd: repo.workDir, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(res.status, 0, res.stderr);
     const leakSig = res.json.signals.find((s) => s.kind === 'publication_leak');
     assert.ok(leakSig, `expected publication_leak, got: ${JSON.stringify(res.json.signals)}`);
@@ -634,7 +637,7 @@ test('detect.mjs: publication_leak_sweep off (default) — the master switch, no
       // publication_leak_sweep left OFF on purpose, even though a repo IS configured.
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: repo.bareDir,
     };
-    const res = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    const res = runScript('scripts/detect.mjs', [], { env, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(res.status, 0);
     assert.ok(!res.json.signals.some((s) => s.kind.startsWith('publication_leak')), 'off is off, regardless of publication_leak_repos');
   } finally { cleanup(); repo.cleanup(); }
@@ -662,13 +665,13 @@ test('detect.mjs: auto-discovery via the dev-root fallback fires publication_rep
       AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY: '1', // every candidate treated as public, no network
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_OWNERS: 'example-org',
     };
-    const runA = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    const runA = runScript('scripts/detect.mjs', [], { env, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(runA.status, 0, runA.stderr);
     const newPub = runA.json.signals.find((s) => s.kind === 'publication_repo_newly_public');
     assert.ok(newPub, `expected publication_repo_newly_public, got: ${JSON.stringify(runA.json.signals)}`);
     assert.match(newPub.detail, /example-org\/auto-discovered-proj/);
 
-    const runB = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    const runB = runScript('scripts/detect.mjs', [], { env, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(runB.status, 0, runB.stderr);
     assert.ok(
       !runB.json.signals.some((s) => s.kind === 'publication_repo_newly_public'),
@@ -699,7 +702,7 @@ test('M5 detect.mjs: unknown visibility fires publication_leak_visibility_unknow
       AGENT_COMPANION_DISCOVERY_MOCK_VISIBILITY: 'unknown',
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_OWNERS: 'example-org',
     };
-    const res = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    const res = runScript('scripts/detect.mjs', [], { env, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(res.status, 0, res.stderr);
     const unk = res.json.signals.find((s) => s.kind === 'publication_leak_visibility_unknown');
     assert.ok(unk, `expected publication_leak_visibility_unknown, got: ${JSON.stringify(res.json.signals)}`);
@@ -733,7 +736,7 @@ test('detect.mjs: publication_leak_repos excludes (!entry) remove a discovered r
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_OWNERS: 'example-org',
       CLAUDE_PLUGIN_OPTION_PUBLICATION_LEAK_REPOS: '!example-org/excluded-proj',
     };
-    const res = runScript('scripts/detect.mjs', [], { env, timeout: 30000 });
+    const res = runScript('scripts/detect.mjs', [], { env, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(res.status, 0, res.stderr);
     assert.ok(
       !res.json.signals.some((s) => s.kind === 'publication_repo_newly_public'),
@@ -921,7 +924,7 @@ test('leak-scan-core scanRepo: the vendor skip is SHA-ONLY and narrow — build/
 test('leak-sweep-canary.mjs: full mode passes', () => {
   const res = spawnSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'leak-sweep-canary.mjs')], {
     windowsHide: true,
-    encoding: 'utf8', timeout: 60000,
+    encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS,
   });
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /OK/);
@@ -930,7 +933,7 @@ test('leak-sweep-canary.mjs: full mode passes', () => {
 test('leak-sweep-canary.mjs: reduced mode passes', () => {
   const res = spawnSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'leak-sweep-canary.mjs'), '--reduced'], {
     windowsHide: true,
-    encoding: 'utf8', timeout: 60000,
+    encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS,
   });
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /OK/);
@@ -965,7 +968,7 @@ test('N1 detect.mjs: a publication_leak alert for a PUBLIC repo keeps repo, file
       GIT_CONFIG_KEY_0: `url.${pathToFileURL(repo.bareDir).href}.insteadOf`,
       GIT_CONFIG_VALUE_0: 'https://github.com/myorg/zbpubrepo',
     };
-    const res = runScript('scripts/detect.mjs', [], { env, timeout: 60000 });
+    const res = runScript('scripts/detect.mjs', [], { env, timeout: SPAWN_TIMEOUT_MS });
     assert.equal(res.status, 0, res.stderr);
     const leak = res.json.signals.find((s) => s.kind === 'publication_leak');
     assert.ok(leak, `expected publication_leak, got: ${JSON.stringify(res.json.signals)}`);
@@ -1144,7 +1147,7 @@ test('note (b): the routine fallback, run for real, never prints a private repo 
       windowsHide: true,
       cwd: home,
       encoding: 'utf8',
-      timeout: 60000,
+      timeout: SPAWN_TIMEOUT_MS,
       env: {
         ...process.env,
         HOME: home, USERPROFILE: home,
