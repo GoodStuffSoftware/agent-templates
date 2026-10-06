@@ -13,6 +13,7 @@ Test-flake fixes. Two product-code changes, the rest test-only.
 - Tests: a shared `tests/detect-env.mjs` `claude` stub (missing or fixed-version) for every test that runs `detect.mjs`, so no test spawns the real CLI.
 - Tests: git-brief's 6000 ms fetch bound applies to the measured fetch step (`steps_ms.fetch`), not the whole call; the rest of the call (whole-call time minus the measured local git steps) keeps its own 6000 ms bound.
 - Tests: `memory-vault-byte-exact` syncs use the file's own git-chain guard (`runVault`).
+- Tests: delegation-guard's stuck-lock test bounds the lock window the hook itself records (streak-file mtime minus the entry's `touched`), not process start-up.
 
 ## 0.30.1 — 2026-10-06
 
