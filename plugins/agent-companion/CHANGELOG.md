@@ -4,16 +4,26 @@ All notable changes to the `agent-companion` plugin. Dates are UTC.
 
 ## 0.30.3 — 2026-10-06
 
-Test-flake fixes. Two product-code changes, the rest test-only.
+Test-flake fixes. One product-code change (`pr-wait`), the rest test-only.
 
 - `pr-wait`: no longer reports TIMEOUT after a single poll when that poll overruns the deadline. It always takes a last look that begins at or after the deadline, in both PR mode and `--run` mode. A timeout can now run up to about two polls past the deadline.
-- `detect`: `rawOsHandles` resolves the home directory with `homeRoot()` instead of `os.homedir()`, so a test's home override is honoured by the scrubber's home basename; production behaviour is unchanged when no override is set.
+- `detect`: the `homeRoot()` change for the scrubber's home basename is already in 0.30.2; nothing further.
 - Tests: the `runHook`/`runScript` hang guard goes from 15 s to 60 s (`HANG_GUARD_TIMEOUT_MS`), and a child it kills now leaves a "killed by hang guard" note on stderr. The `pr-wait` tests share the same guard.
 - Tests: `publication-sweep` and `detect` test runs put a `claude` stub first on PATH and disable `gh` CI-status lookups.
 - Tests: a shared `tests/detect-env.mjs` `claude` stub (missing or fixed-version) for every test that runs `detect.mjs`, so no test spawns the real CLI.
 - Tests: git-brief's 6000 ms fetch bound applies to the measured fetch step (`steps_ms.fetch`), not the whole call; the rest of the call (whole-call time minus the measured local git steps) keeps its own 6000 ms bound.
 - Tests: `memory-vault-byte-exact` syncs use the file's own git-chain guard (`runVault`).
 - Tests: delegation-guard's stuck-lock test bounds the lock window the hook itself records (streak-file mtime minus the entry's `touched`), not process start-up.
+
+## 0.30.2 — 2026-10-06
+
+Test isolation, round two. The suite no longer reads the operator's real home from a child process, and a violation now fails the file that caused it.
+
+- Test fix. The 0.29.25 isolation covered what the plugin resolves through its home override. It left `os.homedir()` and git's `~` pointing at the operator's real home, so any child a test spawned could still read it. Every test process now points `HOME`, `USERPROFILE` and `GIT_CONFIG_GLOBAL` at an empty sandbox directory, and every node child and grandchild arms the same real-`~/.claude` tripwire through a `NODE_OPTIONS` preload (`tests/child-guard.mjs`). A fail-open child that swallows the throw is still recorded.
+- A violation now exits the offending test file non-zero. It used to be reported by a root hook that node:test attributed to `tests/isolate.mjs`, so ci-local's isolated re-run passed and the run counted as flaky (non-blocking outside `--ci-parity`). The file itself now fails, and so does its re-run.
+- `runHook` and `runScript` run from the sandbox instead of the checkout. From the checkout, a hook walking up for `.claude/settings*.json` read the operator's `~/.claude/settings.json` (eight bash-tail tests depended on it), and `detect.mjs` read the operator's real dev folder.
+- Sandbox temp dirs carry the owner pid (`ac-suite-<pid>-*`, `ac-test-<pid>-*`), and a startup sweep removes the ones a killed run left behind: only when the pid is dead, or by age for the old pid-less names. A live run's directory is never touched.
+- Fix (`scripts/detect.mjs`, `scripts/lib/publication-sweep.mjs`). The operator's OS handle used for scrubbing now comes from `homeRoot()`, the plugin's home resolver, instead of `os.homedir()`. With a redirected home the handle was the generic word "home". Behaviour is unchanged when the home is not redirected.
 
 ## 0.30.1 — 2026-10-06
 
