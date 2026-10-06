@@ -29,7 +29,8 @@
 // Never prompts. gh is polled with backoff (5s growing to 30s). A transient gh
 // failure is retried; a not-found / not-logged-in failure is not. A TIMEOUT is
 // declared only after one last poll begun at the deadline (makeDeadline), so it
-// can land up to one poll after the --timeout mark.
+// can land up to about two polls after the --timeout mark (the poll in flight
+// at the deadline, plus the final look).
 //
 // Bound to the commit, not the branch. Right after a push GitHub can still
 // report the PREVIOUS commit's checks for a few seconds, so:
@@ -256,14 +257,15 @@ function makeBackoff() {
 // cut short, so a poll that itself runs past the deadline (slow gh, a loaded
 // machine) is still followed by that last look rather than ending the wait on
 // what it saw before the deadline. Any timeout therefore covers >= 2 polls, and
-// overruns the deadline by at most one poll.
+// overruns the deadline by up to about two polls (the poll in flight at the
+// deadline plus the final look).
 function makeDeadline(deadline) {
   let last = false;
   return {
     done: () => last,
     async pace(wait) {
       const left = deadline - Date.now();
-      if (wait > left) {
+      if (wait >= left) {
         last = true; // one last look at the deadline, then give up
         await sleep(Math.max(0, left));
       } else {
