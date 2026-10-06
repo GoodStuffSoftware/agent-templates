@@ -14,6 +14,7 @@ Test-flake fixes. One product-code change (`pr-wait`), the rest test-only.
 - Tests: git-brief's 6000 ms fetch bound applies to the measured fetch step (`steps_ms.fetch`), not the whole call; the rest of the call (whole-call time minus the measured local git steps) keeps its own 6000 ms bound.
 - Tests: `memory-vault-byte-exact` syncs use the file's own git-chain guard (`runVault`).
 - Tests: delegation-guard's stuck-lock test bounds the lock window the hook itself records (streak-file mtime minus the entry's `touched`), not process start-up.
+- Tests: `resume-guard-review`'s 1000-sidecar test primes the fixture with an untimed read before timing, so an antivirus first-read scan is not counted, and it bounds `resolveTarget` and the hook child separately.
 
 ## 0.30.2 — 2026-10-06
 
