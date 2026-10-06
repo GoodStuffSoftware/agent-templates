@@ -132,6 +132,12 @@
       "description": "The daily scout raises `compact_window_drift` when the cache advisor's newest FULL-read recommended auto-compact window differs from the baseline recommendation by more than this percentage. The baseline is the first full read and moves to the newest one each time the signal fires. Partial (time-budgeted) reads never count. Reads only the advisor's saved numbers-only history, never transcripts. A value that is not a finite number of 0 or more falls back to 20.",
       "default": 20
     },
+    "main_compact_floor_tokens": {
+      "type": "number",
+      "title": "Main-session compaction floor (tokens)",
+      "description": "0 (default) = OFF: nothing changes. A value from 100000 to 1000000 lets the MAIN session auto-compact later than the global auto-compact window: a hooks module vetoes the main session's auto-compaction until its context reaches this many tokens, while subagents keep compacting at the global window (CLAUDE_CODE_AUTO_COMPACT_WINDOW / autoCompactWindow). Manual /compact is never blocked. The enforced floor is min(value, model window - 150000), so a floor near the window cannot wedge the session at the engine's 'Prompt is too long' block (a 200K model, e.g. a --model haiku run, is never vetoed; an unknown window passes). Early precompute is vetoed below the floor too. After /resume or right after a compaction the token count is unknown until the next response, and the module fails open, so one early compaction can happen. The status line and /context still show 'until auto-compact' against the global window. A value outside the range, or any error, fails open (compaction is not vetoed). Needs a Claude Code build that loads plugin hooks modules; elsewhere the option does nothing. Applies when the plugin loads.",
+      "default": 0
+    },
     "fit_guard": {
       "type": "boolean",
       "title": "Best-fit guard",

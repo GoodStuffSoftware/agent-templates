@@ -22,6 +22,22 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
+### 2026-10-06 — Give the main session its own auto-compact point with a plugin hooks module (one global window, two sessions)
+
+- **Trigger:** one global auto-compact window serves the main session and every subagent. A window small enough to keep long-lived subagents cheap makes the main session compact far earlier than it needs to; a window large enough for the main session lets subagents grow past the point where their cache cost pays.
+- **Is it generic?** Yes. Stripped: the operator's chosen numbers and machine paths. Kernel: a plugin hooks module (a function hook named under `modules` in the plugin's `hooks/hooks.json`, which can sit beside classic command hooks) that answers `{ skip: reason }` on `session.compact` for trigger `auto`, no `agentId` (main session only) and context tokens below a floor, and calls `next(e)` for everything else.
+- **Target:** a new tagged file under `lessons/` (gotchas below), plus the shipped opt-in option in the agent-companion plugin README.
+- **Proposed change:** gotchas measured on a 2.1.28x build, each of which cost a failed run:
+  - The skip reason must START with "Compaction blocked by PreCompact hook"; the engine suppresses its "compaction skipped" toast only for that prefix.
+  - `$.env.get` takes a string literal only; `$.clock.now()` is a Promise (an un-awaited call fails silently); `$.fs` has no append, so a log is read-modify-write and must be capped.
+  - The engine scans the module source: a helper that receives `$` must be a top-level function declaration, or `claude plugin validate` refuses it.
+  - `$.session.usage().context.tokens` is the MAIN session's last-response input tokens even inside a subagent's compaction, so it cannot gate subagents; the hook must test `e.agentId` instead. It also lags the engine's own estimate by about one turn.
+  - A veto repeats every turn while below the floor (the hook is called each time), so logging must be one line at the first veto plus one per pass, never per call.
+  - The veto does not trip the engine's circuit breaker, but a separate "rapid-refill" breaker can end a subagent whose window is tiny relative to its reads; test with real windows.
+  - The status line and `/context` keep showing "until auto-compact" against the global window.
+  - Installed plugins' hooks modules are gated by a rollout flag (default on) and an environment override, not by a per-plugin consent prompt; `--bare`, `disableAllHooks` and `allowManagedHooksOnly` switch them off. Fail open so any of those leaves compaction untouched.
+- **Applied?** `no`
+
 ### 2026-10-06 — The harness refuses a subagent's Write to report/summary/findings/analysis*.md — brief long detail as `<task>-detail.md`
 
 - **Trigger:** Claude Code 2.1.286 started refusing subagent writes with "Subagents should return findings as text, not write report files". A worker contract line ("long output: file path plus summary") and older briefs invite exactly the names it blocks.

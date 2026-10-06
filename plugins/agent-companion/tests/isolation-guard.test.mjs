@@ -11,16 +11,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, realpathSync,
+  readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, realpathSync, writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import {
   makeFixture, TESTS_DIR, PLUGIN_ROOT, REAL_CLAUDE_DIRS, childEnv,
 } from './helpers.mjs';
 import {
-  SANDBOX_DIR, WATCHED_ROOTS, realHomeViolations, clearRealHomeViolations,
+  SANDBOX_DIR, WATCHED_ROOTS, realHomeViolations, clearRealHomeViolations, childViolations, clearChildViolations,
 } from './isolate.mjs';
 
 const canon = (s) => {
@@ -141,4 +142,149 @@ test('the tripwire leaves temp paths and a relative path alone', () => {
 
 test('watched roots cover the real Claude home', () => {
   for (const r of REAL_CLAUDE_DIRS) assert.ok(WATCHED_ROOTS.includes(r), `${r} is not watched`);
+});
+
+// --- the operator's home directory, in this process and in children ----------
+
+const insideSandbox = (p) => under(p, SANDBOX_DIR);
+const nodeChild = (script, extra = {}) => spawnSync(process.execPath, ['-e', script], {
+  encoding: 'utf8', windowsHide: true, env: childEnv(extra),
+});
+
+test('os.homedir() resolves inside the sandbox, here and in a child', () => {
+  assert.ok(insideSandbox(homedir()), `os.homedir() is ${homedir()}, outside ${SANDBOX_DIR}`);
+  assert.ok(!underRealClaude(join(homedir(), '.claude')), 'the home is not the operator\'s');
+  assert.equal(existsSync(join(homedir(), '.claude')), false, 'the sandbox home starts empty');
+  const res = nodeChild('console.log(JSON.stringify([require("os").homedir(), process.env.HOME, process.env.USERPROFILE, process.env.GIT_CONFIG_GLOBAL]))');
+  assert.equal(res.status, 0, res.stderr);
+  const [home, HOME, USERPROFILE, gitGlobal] = JSON.parse(res.stdout);
+  assert.ok(insideSandbox(home), `a child's os.homedir() is ${home}`);
+  assert.ok(insideSandbox(HOME) && insideSandbox(USERPROFILE), 'HOME and USERPROFILE both point into the sandbox');
+  assert.ok(insideSandbox(gitGlobal), 'git is told its global config lives in the sandbox');
+  assert.notEqual(canon(home), canon(process.env.AGENT_COMPANION_HOME_OVERRIDE), 'the OS home is not the override: a caller that bypasses the override finds nothing');
+});
+
+test('a grandchild (node spawning node) is sandboxed and guarded too', () => {
+  clearChildViolations();
+  try {
+    const target = join(REAL_CLAUDE_DIRS[0], 'settings.json');
+    // The grandchild reads the real settings.json and swallows the throw, as
+    // fail-open plugin code does; it reports its os.homedir() and whether the
+    // read threw. Only the NODE_OPTIONS preload can make that read throw.
+    const inner = `let threw = false; try { require("fs").readFileSync(${JSON.stringify(target)}); } catch (e) { threw = /REAL Claude home/.test(String(e.message)); } console.log(JSON.stringify([require("os").homedir(), threw]))`;
+    const res = nodeChild(`const r = require("child_process").spawnSync(process.execPath, ["-e", ${JSON.stringify(inner)}], { encoding: "utf8" }); process.stdout.write(r.stdout)`);
+    assert.equal(res.status, 0, res.stderr);
+    const [home, threw] = JSON.parse(res.stdout);
+    assert.ok(insideSandbox(home), `a grandchild's os.homedir() is ${home}`);
+    assert.equal(threw, true, 'the grandchild read of the real settings.json must throw');
+    const rows = childViolations();
+    assert.equal(rows.length, 1, `one record from the grandchild in the log: ${JSON.stringify(rows)}`);
+    assert.match(rows[0], /fs\.readFileSync .*settings\.json/);
+  } finally {
+    clearChildViolations(); // the exit handler would otherwise fail this file
+  }
+});
+
+test('a child that touches the real Claude home is stopped, and the access is on record even when the child swallows the throw', () => {
+  clearChildViolations();
+  try {
+    const target = join(REAL_CLAUDE_DIRS[0], 'settings.json');
+    // The child catches the throw and exits 0, exactly as fail-open plugin code does.
+    const res = nodeChild(`let threw = false; try { require("fs").readFileSync(${JSON.stringify(target)}); } catch (e) { threw = /REAL Claude home/.test(String(e.message)); } process.exit(threw ? 0 : 3)`);
+    assert.equal(res.status, 0, `the child's read of the real settings.json must throw (exit ${res.status}): ${res.stderr}`);
+    const rows = childViolations();
+    assert.equal(rows.length, 1, `one record in the child log: ${JSON.stringify(rows)}`);
+    assert.match(rows[0], /fs\.readFileSync .*settings\.json/);
+    assert.equal(realHomeViolations().length, 0, 'the parent itself touched nothing');
+  } finally {
+    clearChildViolations(); // the exit handler would otherwise fail this file
+  }
+});
+
+test('a child process arms nothing when the guard env is absent (the preload is inert on its own)', () => {
+  const env = childEnv();
+  delete env.AC_TEST_GUARD_ROOTS;
+  delete env.AC_TEST_GUARD_LOG;
+  const res = spawnSync(process.execPath, ['-e', 'console.log(String(require("fs").readFileSync.__acGuards))'], { encoding: 'utf8', windowsHide: true, env });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout.trim(), 'undefined');
+});
+
+// Git for Windows and git on POSIX both read ~/.gitconfig and
+// $XDG_CONFIG_HOME/git/config. A test that makes a commit must get its identity
+// from the test, not from whoever runs it.
+const HAVE_GIT = spawnSync('git', ['--version'], { windowsHide: true }).status === 0;
+test('git in a child sees an empty global config, not the operator\'s ~/.gitconfig', { skip: !HAVE_GIT && 'git is not installed' }, () => {
+  const global = spawnSync('git', ['config', '--global', '--list', '--show-origin'], { encoding: 'utf8', windowsHide: true, env: childEnv() });
+  assert.equal((global.stdout || '').trim(), '', `git's global config must be empty, got: ${global.stdout}`);
+  assert.equal(global.status === 0 || global.status === 1, true, `git config --global --list exited ${global.status}: ${global.stderr}`);
+  const ident = spawnSync('git', ['config', '--global', '--get', 'user.email'], { encoding: 'utf8', windowsHide: true, env: childEnv() });
+  assert.equal((ident.stdout || '').trim(), '', 'the operator\'s git identity must not leak in');
+});
+
+// --- a violation fails the file that caused it ------------------------------
+//
+// A root after() hook was attributed by node:test to tests/isolate.mjs, whose
+// isolated re-run (ci-local re-runs the file a failure names) passes: the run
+// came out FLAKY, which does not block outside --ci-parity. isolate.mjs now
+// fails the importing file's own process instead. These tests run a throwaway
+// test file that swallows a real-home read.
+
+// The throwaway file's "real home" is THIS process's sandbox home: isolate.mjs
+// takes REAL_HOME from os.homedir() at load, which is the HOME this process
+// exported. So nothing here touches the operator's actual home.
+const probeRoot = join(SANDBOX_DIR, 'violation-probe');
+const probeFile = join(probeRoot, 'swallow.test.mjs');
+const probeTarget = join(homedir(), '.claude', 'settings.json');
+function writeProbe() {
+  mkdirSync(probeRoot, { recursive: true });
+  writeFileSync(probeFile, [
+    `import ${JSON.stringify(pathToFileURL(join(TESTS_DIR, 'isolate.mjs')).href)};`,
+    "import test from 'node:test';",
+    "import { statSync } from 'node:fs';",
+    "test('reads the watched path and swallows the throw, like fail-open plugin code', () => {",
+    '  try { statSync(process.env.PROBE_TARGET); } catch { /* swallowed */ }',
+    '});',
+    '',
+  ].join('\n'));
+}
+// Inside a test file node sets NODE_TEST_CONTEXT, and a nested `node --test`
+// then refuses to run files ("run() is being called recursively"): drop it.
+const probeEnv = (target) => {
+  const env = childEnv({ PROBE_TARGET: target });
+  delete env.NODE_TEST_CONTEXT;
+  return env;
+};
+const nodeTest = (target) => spawnSync(process.execPath, ['--test', probeFile], {
+  cwd: probeRoot, encoding: 'utf8', windowsHide: true, timeout: 120000, env: probeEnv(target),
+});
+
+test('a test file whose code swallowed a real-home read exits non-zero, and a re-run of that file fails again', () => {
+  writeProbe();
+  const harmless = nodeTest(join(SANDBOX_DIR, 'not-watched'));
+  assert.equal(harmless.status, 0, `control: the same file without a violation passes: ${harmless.stdout}${harmless.stderr}`);
+  for (const attempt of ['full run', 'isolated re-run']) {
+    const res = nodeTest(probeTarget);
+    assert.notEqual(res.status, 0, `${attempt}: the violation must fail the file: ${res.stdout}${res.stderr}`);
+    assert.match(`${res.stdout}${res.stderr}`, /touched the real Claude home 1 time/, `${attempt}: the message names the access`);
+  }
+});
+
+const CI_LOCAL = resolve(PLUGIN_ROOT, '..', '..', 'scripts', 'ci-local.mjs');
+test('ci-local classifies that file as a FAIL, not as flaky', { skip: !existsSync(CI_LOCAL) && 'scripts/ci-local.mjs is not part of this tree' }, async () => {
+  writeProbe();
+  const { runTestSuite } = await import(pathToFileURL(CI_LOCAL).href);
+  const spawnNode = (args, cwd, env) => {
+    const r = spawnSync(process.execPath, args, { cwd, env, encoding: 'utf8', windowsHide: true, timeout: 120000 });
+    return { status: r.status === null ? 1 : r.status };
+  };
+  const env = probeEnv(probeTarget);
+  const logs = [];
+  const result = runTestSuite({
+    files: [probeFile], cwd: probeRoot, env, ciParity: false, concurrency: 1, log: (m) => logs.push(m), spawnNode,
+  });
+  assert.equal(result.outcome, 'fail', `outcome ${result.outcome}: ${JSON.stringify(result)} ${logs.join(' ')}`);
+  assert.equal(result.status, 1);
+  assert.deepEqual(result.flakyFiles, []);
+  assert.deepEqual(result.failedFiles.map((f) => f.replace(/[\\]/g, '/')), ['swallow.test.mjs']);
 });

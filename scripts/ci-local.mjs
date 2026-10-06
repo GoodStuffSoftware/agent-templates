@@ -80,9 +80,9 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statSync,
+  mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statSync, realpathSync,
 } from 'node:fs';
-import { join, dirname, resolve, relative, delimiter } from 'node:path';
+import { join, dirname, resolve, relative, delimiter, win32, posix } from 'node:path';
 import { tmpdir, availableParallelism, homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -940,7 +940,74 @@ export async function prePushGate(refs, {
   return overallStatus;
 }
 
+// The pre-push gate must test the tree being PUSHED. git runs the hook in
+// that work tree's root, so `git rev-parse --show-toplevel` from our cwd
+// names it; REPO_ROOT is wherever THIS copy of ci-local.mjs lives. They
+// differ when core.hooksPath is an absolute path into another checkout and
+// that checkout's hook (or an older one that roots itself on $0) ran this
+// copy: the suites would then run against the other checkout's files, never
+// the pushed branch's. Returns null when they match, else the reason to block.
+// Pure: `toplevel` is what git said (null if it failed); `real` resolves a
+// path to its canonical spelling (case, 8.3 short names, symlinks). `platform`
+// and `pathMod` are injectable so the Windows rules (case-insensitive, either
+// separator) are testable on every OS; they default to the real ones.
+export function hookTreeMismatch(repoRoot, toplevel, {
+  real = (p) => realpathSync.native(p), platform = process.platform,
+  pathMod = platform === 'win32' ? win32 : posix,
+} = {}) {
+  if (!toplevel) {
+    return 'could not find the work tree being pushed (git rev-parse --show-toplevel failed)';
+  }
+  const canon = (p) => {
+    const abs = pathMod.resolve(p);
+    let out;
+    try { out = real(abs); } catch { out = abs; }
+    return platform === 'win32' ? pathMod.resolve(out).toLowerCase() : out;
+  };
+  if (canon(repoRoot) === canon(toplevel)) return null;
+  return `this ci-local.mjs belongs to ${scrubHomeDir(pathMod.resolve(repoRoot))}, but the tree being pushed is ${scrubHomeDir(pathMod.resolve(toplevel))}`;
+}
+
+// Same question the hook asks (see .githooks/pre-push): the cwd's work tree,
+// unless the caller named one explicitly with GIT_WORK_TREE (git --work-tree),
+// in which case GIT_DIR and GIT_WORK_TREE are kept so git answers with that tree.
+function pushedTreeToplevel(procEnv = process.env, { honourWorkTree = true } = {}) {
+  const env = baseChildEnv();
+  if (honourWorkTree && procEnv.GIT_WORK_TREE) {
+    for (const k of ['GIT_DIR', 'GIT_WORK_TREE']) if (procEnv[k]) env[k] = procEnv[k];
+  }
+  const r = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+    cwd: process.cwd(), env, encoding: 'utf8', windowsHide: true,
+  });
+  return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+}
+
+// An exported GIT_WORK_TREE is indistinguishable from an explicit --work-tree
+// (git exports the same variable), so the gate follows it. When that names a
+// different tree than the cwd's own, say so: a stale export would otherwise
+// gate another checkout without a word. Returns the warning line, or null when
+// there is nothing to say. Reuses hookTreeMismatch, so the comparison is
+// realpath- and (on win32) case-aware.
+export function workTreeOverrideWarning(honoured, own, opts) {
+  if (!honoured || !own || hookTreeMismatch(honoured, own, opts) === null) return null;
+  const pathMod = opts?.pathMod ?? (process.platform === 'win32' ? win32 : posix);
+  const show = (p) => scrubHomeDir(pathMod.resolve(p));
+  return `ci-local pre-push: WARNING — GIT_WORK_TREE names ${show(honoured)}, but this directory's own work tree is ${show(own)}; the gate is testing the GIT_WORK_TREE tree (${show(honoured)}).`;
+}
+
 async function runPrePushHook(remote, url) {
+  const pushedTree = pushedTreeToplevel();
+  if (process.env.GIT_WORK_TREE) {
+    const warning = workTreeOverrideWarning(pushedTree, pushedTreeToplevel(process.env, { honourWorkTree: false }));
+    if (warning) console.error(warning);
+  }
+  const mismatch = hookTreeMismatch(REPO_ROOT, pushedTree);
+  if (mismatch) {
+    console.error(`ci-local pre-push: BLOCKED — ${mismatch}. The gate only tests the tree being pushed.`);
+    console.error('Make core.hooksPath relative (node scripts/setup-hooks.mjs) or update the checkout it points into; see CONTRIBUTING.md.');
+    return 1;
+  }
+  console.log(`ci-local pre-push: tree ${scrubHomeDir(REPO_ROOT)}: normal refs run its suites here; main and release/** test the pushed sha in a temp clone; wip/** and backup/** are scan-only.`);
   let stdin;
   try {
     stdin = readFileSync(0); // raw bytes: ref names are read byte-exact
