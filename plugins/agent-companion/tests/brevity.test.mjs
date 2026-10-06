@@ -16,6 +16,7 @@ import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 import {
   CONTRACT_MARKER, PEER_MARKER,
   readBrevityConfig, writeBrevityConfig, resolveBrevity, buildContract, brevityConfigPath,
+  noteContractAppended, consumeContractAppended, CONTRACT_PENDING_MS,
 } from '../hooks/lib/brevity.mjs';
 import { telemetryDir } from '../hooks/lib/context.mjs';
 
@@ -311,4 +312,81 @@ test('contract: the long-detail example file name does not match the native repo
   }
   assert.match(text, /never name a file report\/summary\/findings\/analysis\*\.md/);
   assert.doesNotMatch(text, /file path plus summary/);
+});
+
+// --- 11. S5: the contract is delivered once, not twice ------------------------
+// The real SubagentStart payload carries no prompt, so the marker check can
+// never see the PreToolUse rewrite. spawn-guard records that it appended the
+// contract; SubagentStart consumes one record per start.
+function startPayload(session, agent) {
+  // No agent_prompt, like the real payload.
+  return { session_id: session, agent_id: agent, agent_type: 'general-purpose' };
+}
+
+test('S5: spawn-guard appends the contract, so the following SubagentStart emits nothing', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const sg = runHook('hooks/spawn-guard.mjs', {
+      session_id: 'sess-once-1',
+      agent_type: 'main',
+      cwd: dir,
+      tool_input: { subagent_type: 'general-purpose', model: 'sonnet', description: 'x', prompt: 'List the files in src.' },
+    });
+    assert.equal(sg.status, 0, sg.stderr);
+    const rewritten = String(sg.json?.hookSpecificOutput?.updatedInput?.prompt || '');
+    assert.ok(rewritten.includes(CONTRACT_MARKER), `spawn-guard must append the contract: ${sg.stdout}`);
+
+    const res = runHook('hooks/subagent-brevity.mjs', startPayload('sess-once-1', 'agent-once-1'), { args: ['--event', 'start'] });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal((res.stdout || '').trim(), '', 'contract already delivered: SubagentStart must add nothing');
+
+    // The record was consumed: a start with no spawn-guard rewrite behind it self-heals.
+    const again = runHook('hooks/subagent-brevity.mjs', startPayload('sess-once-1', 'agent-once-2'), { args: ['--event', 'start'] });
+    assert.ok(again.json?.hookSpecificOutput?.additionalContext?.includes(CONTRACT_MARKER), again.stdout);
+  } finally {
+    cleanup();
+  }
+});
+
+test('S5: a start with no spawn-guard record (lost updatedInput) still reinforces', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const res = runHook('hooks/subagent-brevity.mjs', startPayload('sess-lost', 'agent-lost'), { args: ['--event', 'start'] });
+    assert.ok(res.json?.hookSpecificOutput?.additionalContext?.includes(CONTRACT_MARKER), res.stdout);
+  } finally {
+    cleanup();
+  }
+});
+
+test('S5: a repeat SubagentStart for the same agent_id emits nothing', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const first = runHook('hooks/subagent-brevity.mjs', startPayload('sess-rep', 'agent-rep'), { args: ['--event', 'start'] });
+    assert.ok(first.json?.hookSpecificOutput?.additionalContext, first.stdout);
+    const second = runHook('hooks/subagent-brevity.mjs', startPayload('sess-rep', 'agent-rep'), { args: ['--event', 'start'] });
+    assert.equal((second.stdout || '').trim(), '', 'same agent_id twice must not inject twice');
+  } finally {
+    cleanup();
+  }
+});
+
+test('S5: handoff records are per session, one per spawn, and expire', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const t0 = Date.now();
+    noteContractAppended('s-a', t0);
+    noteContractAppended('s-a', t0 + 1);
+    noteContractAppended('s-b', t0);
+    assert.equal(consumeContractAppended('s-a', t0 + 10), true);
+    assert.equal(consumeContractAppended('s-a', t0 + 10), true);
+    assert.equal(consumeContractAppended('s-a', t0 + 10), false, 'two spawns, two records');
+    assert.equal(consumeContractAppended('s-c', t0 + 10), false, 'another session has none');
+    // A record older than the TTL (a spawn that never started) is dead.
+    assert.equal(consumeContractAppended('s-b', t0 + CONTRACT_PENDING_MS + 1), false);
+    // Garbled state fails open to "reinforce".
+    writeFileSync(join(process.env.AGENT_COMPANION_STATE_DIR, 'contract-pending.json'), '{{{');
+    assert.equal(consumeContractAppended('s-a'), false);
+  } finally {
+    cleanup();
+  }
 });

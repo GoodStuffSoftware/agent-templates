@@ -48,7 +48,9 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, opt, passthrough, appendLog, stateDir } from './lib/context.mjs';
-import { buildContract, resolveBrevity, CONTRACT_MARKER, PEER_MARKER } from './lib/brevity.mjs';
+import {
+  buildContract, resolveBrevity, consumeContractAppended, CONTRACT_MARKER, PEER_MARKER,
+} from './lib/brevity.mjs';
 
 const argv = process.argv.slice(2);
 const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
@@ -79,6 +81,19 @@ function logBrevity(row) {
   appendLog('brevity.jsonl', row);
 }
 
+// Exclusive-create marker, the same atomic pattern as the stop gate below:
+// true only for the first start seen for this agent_id.
+function firstStartFor(agentId) {
+  try {
+    const dir = join(stateDir(), 'brevity-started');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, safeMarkerName(agentId)), '', { flag: 'wx' });
+    return true;
+  } catch (e) {
+    return e?.code !== 'EEXIST'; // any other fs error: fail open, treat as first
+  }
+}
+
 function runStart(p) {
   if (!opt('brevity_reinforce', true)) passthrough();
 
@@ -93,6 +108,13 @@ function runStart(p) {
   // already in the prompt the subagent received. Emit nothing — see the
   // module banner for why this check comes before any telemetry write.
   if (promptSoFar.includes(marker)) passthrough();
+
+  // The real payload carries no prompt (see the handoff note in
+  // lib/brevity.mjs), so the check above only fires for a payload that does.
+  // A repeat start for the same agent_id is skipped (this hook can run more
+  // than once), and so is a start whose spawn-guard rewrite is on record.
+  if (p.agent_id && !firstStartFor(p.agent_id)) passthrough();
+  if (consumeContractAppended(p.session_id)) passthrough();
 
   logBrevity({
     at: new Date().toISOString(),
