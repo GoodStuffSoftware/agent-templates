@@ -40,9 +40,7 @@ import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/c
 import { STREAK_FILE, attendedCoverage } from '../hooks/lib/delegation.mjs';
 import { collect as collectCopies, staleBeyondGrace, STALE_GRACE_MS } from './version.mjs';
 
-// The operator's raw OS handle(s), for scrubbing signal text. The home
-// basename goes through homeRoot() like every other path here, so
-// the test-home env var is honoured (homeRoot() is os.homedir() in production).
+// The operator's raw OS handle(s), for scrubbing signal text.
 function rawOsHandles() {
   const out = [];
   try { out.push(userInfo().username); } catch { /* no passwd entry */ }
