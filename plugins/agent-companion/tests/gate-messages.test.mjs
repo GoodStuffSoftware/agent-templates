@@ -39,7 +39,7 @@ test('standing rules: a compacting subagent gets no orchestration rule, the lead
     const lead = runHook('hooks/standing-rules.mjs', LEAD, { args: SS });
     const leadText = lead.json.hookSpecificOutput.additionalContext;
     assert.match(leadText, /You are an orchestrator/);
-    assert.match(leadText, /Resume only while a worker/);
+    assert.match(leadText, /Reuse workers: send related follow-on work to a stopped worker with SendMessage/);
     assert.match(leadText, /One completion wait/);
 
     const worker = runHook('hooks/standing-rules.mjs', WORKER, { args: SS });

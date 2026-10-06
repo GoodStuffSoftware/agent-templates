@@ -39,6 +39,9 @@ import { stateDir as advisorStateDir } from '../hooks/lib/context.mjs';
 import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/ci-status.mjs';
 import { STREAK_FILE, attendedCoverage } from '../hooks/lib/delegation.mjs';
 import { collect as collectCopies, staleBeyondGrace, STALE_GRACE_MS } from './version.mjs';
+import {
+  desktopRoots, newestDesktopBuild, scanMarkers, teamEvidence, versionKey as teammatesKey, decide as decideTeammates,
+} from './lib/teammates-watch.mjs';
 
 // The operator's raw OS handle(s), for scrubbing signal text.
 function rawOsHandles() {
@@ -187,6 +190,29 @@ try {
   // floor present but running version unreadable this run: section 1 above
   // already raised harness_version_unreadable — nothing further to add here.
 } catch { /* config unreadable: the audit reports that separately */ }
+
+// --- 1d. Teammates watch ------------------------------------------------
+// Desktop teammates (agent teams) have not worked since Claude Code 2.1.178,
+// and reuse of a named worker is now the default WITHOUT them. When the
+// installed Claude Code version changes (the CLI's, or the newest build the
+// desktop app bundles), suggest the manual probe once; until a teammate shows
+// up in a team config created after the change, keep looking for 21 days, and
+// raise teammates_available when one does. The binary's team strings are only
+// a change hint (they exist while teammates do not work). All logic and the
+// evidence rule are in scripts/lib/teammates-watch.mjs.
+try {
+  const build = newestDesktopBuild(desktopRoots());
+  const key = teammatesKey({ cli: next.version, desktop: build && build.version });
+  const prevTm = baseline.teammates;
+  const needScan = !prevTm || prevTm.versionKey !== key || !prevTm.markers;
+  const markers = needScan ? (build ? scanMarkers(build.binary) : null) : prevTm.markers;
+  const r = decideTeammates({
+    prev: prevTm, key, markers, nowMs: nowDate().getTime(),
+    evidenceFor: (sinceMs) => teamEvidence({ dir: claudeDir(), sinceMs }),
+  });
+  next.teammates = r.state;
+  for (const s of r.signals) sig(s.kind, s.detail, s.dispatch);
+} catch { /* teammates watch unreadable: not a signal */ }
 
 // --- 1c. New model in the routing table's lineup ------------------------
 // A model alias can be ADDED to config/model-tiers.json's `tiers` (a new

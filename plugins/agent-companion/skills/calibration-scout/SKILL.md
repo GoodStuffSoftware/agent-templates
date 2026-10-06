@@ -61,6 +61,8 @@ Only for signals that fired:
 | `session_churn` | routing review (from `session-churn.jsonl`; refresh with `transcript-harvest.mjs --churn`). With dispatch `manual-check`: the file is missing or older than 2 days, so the refresh step is not running; report it |
 | `spawn_activity` with `spend-deep-dive` | spend attribution |
 | `harness_version_unreadable` | report to the operator; do not guess |
+| `teammates_probe_suggested` | the installed Claude Code changed: **suggest** `node "$AC/scripts/teammates-probe.mjs"` in one report line; never run a live teammate test yourself. The binary's team strings are a hint only |
+| `teammates_available` | report to the operator: desktop teammates appeared on this build (evidence: a team config listing a teammate). Re-test named teammates against the reuse-by-default rule |
 | `main_ci_red` | report to the operator (repo, workflow, red-since, run URL) — suggestion only, never re-run or fix the workflow yourself |
 | `harness_version_changed`, `lineup_drift`, `model_retirement_approaching`, or any change to `config/model-tiers.json` | **suggest** the routing eval suite (below) in the report; never run it yourself |
 

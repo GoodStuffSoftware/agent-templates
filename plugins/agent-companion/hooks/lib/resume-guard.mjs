@@ -1,5 +1,7 @@
-// Guard (a) mechanics — resuming a stopped worker after its cache has
-// expired (deliverable 6, CACHE-ADVISOR-HANDOFF.md). Kept deliberately
+// Guard (a) mechanics — resuming a stopped worker (deliverable 6,
+// CACHE-ADVISOR-HANDOFF.md; since 0.31.1 reuse is the default and the TTL
+// helpers below are kept for the measurement scripts and tests, not for
+// discouraging a resume). Kept deliberately
 // separate from scripts/lib/transcripts.mjs (the shared reader): hooks must
 // not import scripts/ (see guards-brief.md), so this is a small, self-
 // contained duplicate of exactly the two things the hook needs — resolving a
@@ -167,4 +169,35 @@ export function cacheTtlFromDefinition(agentType, cwd) {
   } catch {
     return null;
   }
+}
+
+// --- 0.31.1: the notes a resume can carry (context size, tier) --------------
+
+const MODEL_RANK = { haiku: 1, sonnet: 2, opus: 3, fable: 4 };
+
+// 'opus' | 'sonnet' | 'haiku' | 'fable' | null from a model id, an alias or a
+// plugin agent name such as "agent-companion:ac-opus-medium".
+function tierFromString(v) {
+  const m = /(haiku|sonnet|opus|fable)/i.exec(String(v || ''));
+  return m ? m[1].toLowerCase() : null;
+}
+
+// The target's model tier: its sidecar's model, else its agent type's name.
+export function modelTierOf(target) {
+  return tierFromString(target && target.model) || tierFromString(target && target.agentType);
+}
+
+export function modelRank(tier) {
+  return MODEL_RANK[tier] || 0;
+}
+
+// The `TYPE: <task-type>` a SendMessage body declares, lower-cased, or null.
+// `message` is a string or an object carrying text; only a line that starts
+// with TYPE: counts, same as a spawn brief.
+export function declaredTypeOf(message) {
+  let text = '';
+  if (typeof message === 'string') text = message;
+  else if (message && typeof message === 'object') text = String(message.text || message.message || message.content || '');
+  const m = /^\s*TYPE:\s*([a-z][a-z0-9-]*)\b/im.exec(text);
+  return m ? m[1].toLowerCase() : null;
 }

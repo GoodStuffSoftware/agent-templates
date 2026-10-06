@@ -213,14 +213,14 @@ Across this machine's real sessions, CACHE READS are the largest cost bucket -- 
 | `opus` | $0.2 |
 | `fable` | $0.25 |
 
-Cache-hit ($/MTok) rate per tier, read from tiers.*.resolvesTo.pricing.cacheHitPerMTok above -- kept here too as a flat lookup for a reader who wants the number without walking the tier objects. Opus 5.5 and Sonnet 5 read at the SAME $0.20/MTok, which is why Opus 5.5 came close to Sonnet on read-heavy real tasks while using roughly 35% fewer turns (fewer re-reads at the same per-read price).
+Cache-hit ($/MTok) rate per tier, read from tiers.*.resolvesTo.pricing.cacheHitPerMTok above -- kept here too as a flat lookup for a reader who wants the number without walking the tier objects. Opus 5.5 and Sonnet 5 read at the SAME $0.20/MTok, so the per-read price is equal. It does NOT make Opus cost the same as Sonnet: measured 2026-10-06, per call at equal context Opus 5.5 is about 1.9x Sonnet (it writes more output), and its plan weight is about 1.5x per token.
 
 **Plan-usage weighting of cache reads: MEASURED-PARTIAL.** How cache reads weigh against the Max plan's usage window is not published anywhere Anthropic states it, unlike the API dollar rate above. Plan metering of cache READS is roughly API-price-proportional: 40.1M Sonnet 5 cache reads moved the 5-hour usage meter ~2 points (~0.05 pts per 1M reads, range 0.025-0.075). ~3.95M cache WRITES moved it ~4 points, so per token, writes cost roughly 20x what reads do -- the same direction and order of magnitude as the API list-price ratio (~12.5x). Conclusion: cache MISSES (re-writes) are the expensive event on this plan, not reads. The Opus 5.5 vs Sonnet 5 per-read plan-usage ratio is UNMEASURED -- the Opus arm of this experiment hit a harness caching anomaly (separate claude -p processes do not reliably share prompt cache even with byte-identical content, including --resume; see docs/BENCHMARK.md "Caching") before a clean reading could be taken. Do not extrapolate an Opus read weight from the Sonnet figure. (experiment: `cache-read-weight-2026-09-23`)
 
 ## What is actually known about `fable`
 
 - OFFICIAL (whats-new-fable-5-1): prefers whole-file rewrites, fewer progress updates, less parallel tool batching. Whole-file rewrites make it a poor fit for scoped or mechanical edits even when a warrant exists.
-- OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost ($0.25/MTok, re-verified live 2026-09-23). A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it.
+- OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost ($0.25/MTok, re-verified live 2026-09-23). A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it. 2026-10-06: Fable's plan weight is UNVERIFIED (the measured data fits about 3x Sonnet, not the 5x its API price ratio suggests); planUsageMultipliers deliberately has no fable entry.
 - COMMUNITY, first-hand (Every.to, TheNeuronDaily): "sticks to what you tell it" is CONTESTED. Reports of overshooting explicit limits (1,000 words -> 1,288; 8-12 quotes -> 43, 5 fabricated) and unprompted style decisions. The friction is over-inference, not literalism. Do not route on an adherence claim.
 - COMMUNITY, first-hand (dev.to): the gap over Opus/Sonnet is procedural discipline, not intelligence - stating a hypothesis before editing, labelling claims VERIFIED/REASONED/ASSUMED. A brief that carries that checklist closes most of the gap on a cheaper tier, which is exactly what the warrant is meant to make you ask.
 
@@ -240,7 +240,7 @@ Real findings not settled enough to encode as rules. Each names the measurement 
 
 **Question:** Does Fable 5.1 cache-read pricing make long stable-prefix sessions competitive with Opus?
 
-**Tension:** Official: cache reads at a quarter of the cost ($0.25/MTok). Our measured cache hit ratio is ~96%. Fable is now 2.5x Opus on sticker price (was 2x, before Opus 5.5 dropped to $4/$20) - the cache discount has a wider gap to close than it did. At max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity.
+**Tension:** Official: cache reads at a quarter of the cost ($0.25/MTok). Our measured cache hit ratio is ~96%. Fable is now 2.5x Opus on sticker price (was 2x, before Opus 5.5 dropped to $4/$20) - the cache discount has a wider gap to close than it did. At max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity. 2026-10-06: Fable's plan weight is unverified (the data fits about 3x Sonnet, not 5x), so no plan-unit saving or cost from this discount is established.
 
 **Measure:** From telemetry: per-session cost by model with cache-read share. Compare fable vs opus on sessions of similar turn count.
 
