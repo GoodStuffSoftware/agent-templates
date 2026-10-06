@@ -45,7 +45,7 @@
 // own `inject-*` rows), with the outcome, the fetch outcome and age, and the
 // time per git step (briefTelemetry). See docs/TELEMETRY.md.
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -151,15 +151,34 @@ function fetchEnv() {
   return env;
 }
 
+// On Windows the orphan kill runs in a detached helper so it never holds the
+// hook (whose own timeout is 5 s): the helper first confirms the pid is still a
+// git process, because by the time the backstop fires every handle to git may be
+// closed (the runner's own taskkill already ran, or git exited and the slow
+// runner had not yet), so Windows may have reused the pid for an unrelated
+// process. The check narrows that window; it cannot close it entirely.
+const ORPHAN_KILLER = `
+const { spawnSync } = require('node:child_process');
+const pid = process.argv[1];
+const r = spawnSync('tasklist', ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true });
+const m = /^"([^"]*)","(\\d+)"/m.exec(r.stdout || '');
+if (m && m[2] === pid && /^git/i.test(m[1])) {
+  spawnSync('taskkill', ['/T', '/F', '/PID', pid], { windowsHide: true, stdio: 'ignore' });
+}
+`;
+
 // The backstop killed the runner, not git: kill the tree the runner reported.
-// Git is still alive or being killed here (a runner whose git exited normally
-// exits at once), so the pid has not been reused.
+// Elsewhere git leads a process group the runner created, so kill(-pid) reaches
+// only that group (a reused pid would also have to lead a group; ESRCH is
+// swallowed). Neither branch waits on the kill.
 function killOrphanedTree(stdout) {
   const pid = Number.parseInt(String(stdout || '').trim().split(/\s+/)[0], 10);
   if (!Number.isInteger(pid) || pid <= 0) return;
   try {
     if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+      spawn(process.execPath, ['-e', ORPHAN_KILLER, String(pid)], {
+        detached: true, stdio: 'ignore', windowsHide: true,
+      }).unref();
     } else {
       process.kill(-pid, 'SIGKILL');
     }
