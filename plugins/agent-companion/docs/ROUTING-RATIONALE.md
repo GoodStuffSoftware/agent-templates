@@ -86,10 +86,10 @@ any findings it disputes. The lead is out of the first review pass, not out
 of the decision.
 
 **Why the writer, not the lead.** A lead-routed review costs two extra lead
-round-trips: spawn the reviewer, then message the writer for the fixes. Each
-waits for the lead to be free. Done by the writer, the fix round needs no
-round-trip and no hand-back (the writer already holds the diff), and the lead
-sees a reviewed diff instead of an unreviewed one. The
+round-trips: spawn the reviewer, then resume or re-spawn the writer for the
+fixes. Each waits for the lead to be free, and the fix round often starts on
+a cold cache. Done by the writer, the fix round runs on the writer's own warm
+cache, and the lead sees a reviewed diff instead of an unreviewed one. The
 cost is the same reviewer either way, because parity sizes it to the writer
 in both cases.
 

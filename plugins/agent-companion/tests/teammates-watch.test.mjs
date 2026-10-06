@@ -245,3 +245,16 @@ test('teammates-probe.mjs: exit 1 with only a lead; exit 0 and a verdict once a 
 
 import { readFileSync } from 'node:fs';
 function readFileSyncSafe(f) { return readFileSync(f, 'utf8'); }
+
+test('docs and signal text carry the measured team-era facts and no reuse-by-default framing', () => {
+  const readme = readFileSyncSafe(new URL('../README.md', import.meta.url));
+  const lib = readFileSyncSafe(new URL('../scripts/lib/teammates-watch.mjs', import.meta.url));
+  const skill = readFileSyncSafe(new URL('../skills/calibration-scout/SKILL.md', import.meta.url));
+  for (const [name, text] of [['README', readme], ['teammates-watch.mjs', lib]]) {
+    assert.match(text, /0\.110/, name + ': team-era cost per call');
+    assert.match(text, /0\.056/, name + ': current cost per call');
+    assert.match(text, /2026-05-13 to 2026-06-20/, name + ': TeamCreate window');
+    assert.match(text, /not in use in the whole-week weeks/i, name + ': whole-week weeks');
+  }
+  assert.doesNotMatch(readme + lib + skill, /reuse-by-default|Reuse workers, don't respawn/);
+});

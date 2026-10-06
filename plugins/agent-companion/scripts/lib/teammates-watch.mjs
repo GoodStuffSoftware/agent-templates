@@ -4,9 +4,13 @@
 // (TeamCreate / agent teams) WORKED in the desktop app through Claude Code
 // 2.1.177 (the last team created that way was 2026-06-21), and have not since.
 // 2.1.178 replaced TeamCreate with one implicit team per session, and the
-// docs list agent teams as a CLI feature. Teammates are what gave the operator
-// cheap reuse of a named worker across rounds, so a Claude Code update that
-// brings them back is worth knowing about the day it happens.
+// docs list agent teams as a CLI feature. Teammates kept a named worker alive
+// across rounds, so a Claude Code update that brings them back is worth
+// knowing about the day it happens. Their economics are NOT a given (measured
+// 2026-10-06): TeamCreate ran only 2026-05-13 to 2026-06-20, and
+// teammates were not in use in the whole-week weeks (August to early September).
+// Team-era workers cost 0.110 plan units per call against 0.056 now, because a kept
+// worker carries its whole earlier context on every call.
 //
 // WHAT CAN AND CANNOT BE TOLD STATICALLY. The names TeamCreate, TeamDelete,
 // teammate_spawned and CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS are all present in
@@ -191,7 +195,7 @@ export function decide({ prev, key, markers, evidenceFor, nowMs }) {
           kind: 'teammates_available',
           detail: `${ev.length} team(s) created since ${new Date(since).toISOString().slice(0, 10)} list a teammate besides the lead ` +
             `(newest ${new Date(last.createdAt).toISOString().slice(0, 10)}, ${last.members} member(s)); desktop teammates work again on ${key}. ` +
-            'Worth re-testing named, reusable teammates against the reuse-by-default rule.',
+            'Worth re-testing before relying on them: team-era workers cost 0.110 plan units per call against 0.056 now.',
           dispatch: 'teammates-confirm',
         });
       }

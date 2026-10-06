@@ -190,7 +190,7 @@ Nine rules ship built in:
 | `copyable-prompt` | `user-prompt` | the user asks for a prompt — puts the whole thing in one fenced block, commentary outside it |
 | `lead-brevity` | `session-start` | every session, while brevity resolves on globally |
 | `delegate-first` | `session-start` | every session — the orchestrator rules, restated where they are actually read |
-| `resume-doctrine` | `session-start` | every session — reuse workers: send related follow-on work to a stopped worker with SendMessage, warm cache or cold; spawn fresh only for unrelated work, a different tier, or a worker whose context is far larger than the task needs (noted by `hooks/resume-guard.mjs`) |
+| `resume-doctrine` | `session-start` | every session — continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer); otherwise spawn fresh with a short handoff, because a continued worker re-reads its whole earlier context on every call (enforced by `hooks/resume-guard.mjs`) |
 | `delegate-reminder` | `always` | gated — see below |
 | `agent-brevity` | `spawn` | disabled by default; reserved so the `spawn` scope shows up in `rules list` |
 | `poll-guard-doctrine` | `session-start` | every session — cache-advisor guard (b): "one completion wait, never per-item wakes" (see `hooks/poll-guard.mjs`) |
@@ -213,15 +213,9 @@ Three checks, warn-only (a false block stops legitimate work more than a bad spa
 2. **Build check before opus/fable-tier work.** If the SESSION's own Claude Code build is below `config/model-tiers.json`'s `aliasResolution.minClaudeCodeVersion`, `hooks/spawn-guard.mjs` warns rather than letting the spawn pin around it. Read from the CALLING session's own transcript (`sessionBuildVersion()` in `hooks/lib/context.mjs`, a bounded tail-read of the `version` field every harness-written record carries) — never from `claude --version` (what the daily scout's `scripts/detect.mjs` check does for the harness-wide signal), because the desktop app bundles its own build separate from the CLI on PATH and a session keeps the build it started with. Falls back to silence, never a guess, when the transcript is unreadable.
 3. **Verify the resolved model.** The model a spawn actually ran on (its subagent transcript's own last `type:"assistant"` record) must match what its definition's alias resolves to on that build. This cannot run at spawn time — the spawned agent's transcript does not exist yet — so it runs from the audit instead: `scripts/lib/model-mismatch.mjs` + the `model-resolution-mismatch` check (`node scripts/audit.mjs --only model-resolution-mismatch`). Correlates `spawns.jsonl` telemetry to subagent transcripts by nearest timestamp within a session (no field links the two directly — no agentId is known at spawn time), matched by closest-pair-first rather than per-row-in-order to avoid mismatching near-simultaneous spawns. Bounded to a fixed 48h window regardless of `--days` — an unbounded transcript walk over every project measured over two minutes.
 
-## Reuse workers, don't respawn them (0.31.1)
+## Teammates watch (0.31.1)
 
-Operator decision 2026-10-06: the earlier assumption that a fresh worker saves tokens was wrong. In the usage study behind it, spawns per day rose from 22 to 237 while calls per spawn fell from 49 to 36, and start-up load rose from 1.2% to 6.8% of the weekly limit per day. A message to a cache-cold stopped worker cost about 0.2 plan units; a fresh spawn's first load cost about 0.6, plus re-reading what the old worker already knew. Subagents compact at about 217K (`autoCompactWindow` 250000), so a reused worker stays bounded.
-
-The rule: keep a few named workers per area and send related follow-on work to them with SendMessage, warm cache or cold. Spawn fresh only when the work is unrelated, the next task needs a different model tier than the worker has (do not reuse an opus worker for sonnet-weight work), or the worker's context is far larger than the next task needs. Never spawn fresh just because a cache expired. File handoffs stay for crashes and for work that outlives the session.
-
-What changed in the plugin: the `resume-doctrine` standing rule states the rule; `hooks/resume-guard.mjs` no longer warns on a cache-cold resume (idle time and the TTL play no part) and adds a note only when the worker holds at least `resume_guard_min_tokens` (default 200000) or runs a higher tier than the `TYPE:` line of the message routes to; the subagent-context notices stop telling a lead to split work rather than resume (a compaction no longer asks the worker to wrap up).
-
-**Teammates watch.** Desktop teammates (agent teams) gave this reuse for free until Claude Code 2.1.177 and have not worked since 2.1.178. The calibration scout watches for them again (`scripts/lib/teammates-watch.mjs`, section 1d of `scripts/detect.mjs`). It can only be told statically that the binary's team strings changed (they are present while teammates do not work), so that is a hint to run the probe, never a verdict. The verdict is evidence: a team config (`<claude dir>/teams/*/config.json`) created after the version changed that lists a member besides the lead. Signals: `teammates_probe_suggested` (the installed Claude Code changed, once; suggestion only) and `teammates_available` (a teammate exists on this build; once per version, watched for 21 days after a change). `node scripts/teammates-probe.mjs [--since <date>] [--json]` is the manual probe and lists the decisive desktop test in its header.
+Desktop teammates (agent teams) kept a named worker alive across rounds until Claude Code 2.1.177 and have not worked since 2.1.178. They are no automatic saving: Measured 2026-10-06 (transcripts since 2026-09-01): TeamCreate ran only 2026-05-13 to 2026-06-20, so teammates were NOT in use in the whole-week weeks (August to early September); team-era workers cost 0.110 plan units per call against 0.056 now (0.070 since 09-01), the same shape of work with large carried context. The numbers come from a transcript study, not from a controlled comparison. The calibration scout watches for them again (`scripts/lib/teammates-watch.mjs`, section 1d of `scripts/detect.mjs`). It can only be told statically that the binary's team strings changed (they are present while teammates do not work), so that is a hint to run the probe, never a verdict. The verdict is evidence: a team config (`<claude dir>/teams/*/config.json`) created after the version changed that lists a member besides the lead. Signals: `teammates_probe_suggested` (the installed Claude Code changed, once; suggestion only) and `teammates_available` (a teammate exists on this build; once per version, watched for 21 days after a change). `node scripts/teammates-probe.mjs [--since <date>] [--json]` is the manual probe and lists the decisive desktop test in its header.
 
 ## Lean ladder workers (0.31.0)
 
@@ -554,9 +548,10 @@ mechanism stays: a rung's optional `cacheTtl` field in
 `config/model-tiers.json`'s `ladder` is generated into the file by
 `scripts/routing-table.mjs --sync-agent-descriptions`, so a rung can be put
 back on 1h with a one-line config edit. See `ladderCacheTtlNote` and
-`cacheTtl.ladderWorkersExcludedNote` in that config. The resume doctrine
-changed in 0.31.1 (see "Reuse workers, don't respawn them" below): reuse a
-stopped worker by default, warm cache or cold.
+`cacheTtl.ladderWorkersExcludedNote` in that config. The resume doctrine is
+unchanged: continue a stopped worker only while its cache is warm (5 minutes)
+and the follow-on is short (about 10 calls or fewer), otherwise spawn a fresh
+ladder worker with a short handoff (`hooks/resume-guard.mjs`).
 
 A **compaction** immediately before a request (`isCompactSummary: true` on
 the synthetic user record, or its preceding `compact_boundary` system

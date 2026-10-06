@@ -182,18 +182,22 @@ function builtinRules() {
       note: null,
     },
     {
-      // Reuse by default (operator decision 2026-10-06; supersedes the earlier
-      // 'resume only while the cache is warm' doctrine). hooks/resume-guard.mjs
-      // adds a note only for a very large worker or a tier above the new task's;
-      // this rule is the standing reminder that applies even where the hook
-      // cannot see far enough, e.g. a cross-session peer.
+      // Guard (a)'s own doctrine (CACHE-ADVISOR-HANDOFF.md deliverable 6;
+      // hooks/resume-guard.mjs is the enforcement — this rule is the
+      // standing reminder that applies even where the hook cannot see far
+      // enough, e.g. a cross-session peer). Refined 2026-10-06 with the
+      // measured numbers (since 2026-09-01 a continued worker cost 0.11-0.16
+      // units per call against 0.06-0.07 for a fresh one, because it carries
+      // 157-326K of earlier context on every call; a cold resume's first call
+      // cost about 8x a fresh spawn's; a warm continuation of a short
+      // follow-on, 10 calls or fewer, is the only case where continuing won).
       id: 'resume-doctrine',
       audience: 'lead',
       enabled: true,
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'Reuse workers: send related follow-on work to a stopped worker with SendMessage, warm cache or cold. Spawn fresh only for unrelated work, a task that needs a different model tier, or a worker whose context is far larger than the task needs. Never spawn fresh just because a cache expired.',
+      then: 'Continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff: a continued worker re-reads its whole earlier context on every call.',
       gate: null,
       note: null,
     },

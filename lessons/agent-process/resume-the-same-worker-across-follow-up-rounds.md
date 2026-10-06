@@ -5,7 +5,6 @@ scope: [agent-process]
 requires: {}
 status: active
 since: 2026-09-28
-updated: 2026-10-06
 provenance: [contrib-2]
 corroborated: 1
 ---
@@ -15,11 +14,9 @@ An orchestrator treated a worker's completion report as the end of the task rath
 
 **How to apply:**
 - Send follow-ups — review findings, scope changes, live-test failures — to the SAME named worker by resuming it, rather than spawning a fresh one. The lead declares completion, not the worker's first report. State this in the brief up front: "your report is a checkpoint — expect follow-ups until I say the task is complete."
-- Reuse a stopped worker whether its cache is warm or cold. Measured 2026-10-06 over a usage study: a message to a cache-cold worker cost about 0.2 plan units; a fresh spawn's first load about 0.6, plus re-reading everything the old worker already knew. Spawns per day had grown from 22 to 237 and start-up load from 1.2% to 6.8% of the weekly limit per day, so the fresh-spawn habit was the cost, not the cold cache. (An earlier version of this lesson said to go fresh once the cache window expired; that was wrong, and is superseded.) Never spawn fresh just because a cache expired.
-- A fresh spawn pays a token floor for its initial system and tool setup (about 61-64K tokens measured), plus the time cost of re-exploring what the previous worker already found; both are avoided by reusing.
-- A reused worker stays bounded: subagents auto-compact (about 217K with a 250K window), so a long-lived worker does not grow without limit.
-- Go fresh only when: the next task is unrelated to the prior one, the next task needs a different model tier than the worker has (do not reuse an opus worker for sonnet-weight work), the worker's context is far larger than the next task needs, or the next step is a review — a reviewer must not be the same agent as the writer it is reviewing.
-- File handoffs are for crashes and for work that outlives the session, not the default way to continue a task.
+- Mind the cache-window cost basis: a resumed worker's own prompt cache window is typically much shorter than the main session's (on the order of minutes, not an hour) unless explicitly extended. Resume inside that window and the transcript re-read lands at cache rate; resume after it has expired and the re-read pays a full cache rewrite — the same as a fresh spawn's initial read. The savings come from skipping re-exploration, not from the cache alone. If follow-ups routinely land after the window closes, extend the window for that worker rather than accepting a full rewrite on every resume.
+- A fresh spawn separately pays a token floor for its initial system/tool setup, plus the time cost of re-exploring what the previous worker already found — both are avoided by resuming.
+- Go fresh when: the worker's cache window has already expired, the next task is unrelated to the prior one, the transcript is near auto-compaction, or the next step is a review — a reviewer must not be the same agent as the writer it is reviewing.
 - Stopped-and-resumed versus kept-idle is a capability choice, not a cost one — neither keeps the prompt cache warm past its window, so the two cost roughly the same. Choose based on capability instead: an idle worker is still a live process (memory matters at fleet scale on small machines), it cannot nest under some spawn modes, and it dies with the lead's own process regardless. Reserve always-alive workers for cases where direct peer-to-peer messaging earns its keep — a writer/reviewer pair working concurrently — not as a default holding pattern between rounds of the same task.
 
 Related: [[team-vs-subagent-gate]], [[shutdown-after-verified-not-after-committed]], [[background-agents-die-with-their-host]].

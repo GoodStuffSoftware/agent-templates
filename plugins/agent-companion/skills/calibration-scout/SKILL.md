@@ -62,7 +62,7 @@ Only for signals that fired:
 | `spawn_activity` with `spend-deep-dive` | spend attribution |
 | `harness_version_unreadable` | report to the operator; do not guess |
 | `teammates_probe_suggested` | the installed Claude Code changed: **suggest** `node "$AC/scripts/teammates-probe.mjs"` in one report line; never run a live teammate test yourself. The binary's team strings are a hint only |
-| `teammates_available` | report to the operator: desktop teammates appeared on this build (evidence: a team config listing a teammate). Re-test named teammates against the reuse-by-default rule |
+| `teammates_available` | report to the operator: desktop teammates appeared on this build (evidence: a team config listing a teammate). Say that team-era workers cost 0.110 plan units per call against 0.056 now, so a teammate is not a saving by itself |
 | `main_ci_red` | report to the operator (repo, workflow, red-since, run URL) — suggestion only, never re-run or fix the workflow yourself |
 | `harness_version_changed`, `lineup_drift`, `model_retirement_approaching`, or any change to `config/model-tiers.json` | **suggest** the routing eval suite (below) in the report; never run it yourself |
 

@@ -62,7 +62,7 @@ test('mid-run: past the threshold, the subagent is told once, with the agent-sid
     const r = runHook('hooks/subagent-context.mjs', pre(lead));
     assert.equal(r.status, 0);
     assert.equal(r.json.hookSpecificOutput.hookEventName, 'PreToolUse');
-    assert.equal(ctxText(r), '[agent-companion] Your context is past 300,000 tokens. Finish the current step, return your results, and if more work remains, say what is left; the lead will send it back to you or to another worker.');
+    assert.equal(ctxText(r), '[agent-companion] Your context is past 300,000 tokens. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.');
     assert.deepEqual(Object.keys(r.json), ['hookSpecificOutput'], 'advice only: no decision of any kind');
     // Once: later tool calls of the same agent, however large the context.
     appendFileSync(agentFile, turn('r3', 380000));
@@ -93,7 +93,7 @@ test('compaction trigger: a compact_boundary just behind the agent says "you jus
     // Context is far below the threshold: with a 200K window this is the usual case.
     writeFileSync(agentFile, user('go') + turn('r1', 195000) + boundary('b-1') + user('summary') + turn('r2', 30000));
     const r = runHook('hooks/subagent-context.mjs', pre(lead));
-    assert.equal(ctxText(r), '[agent-companion] You just compacted. Carry on; your summary may have dropped detail, so re-read a file before relying on a line you only remember.');
+    assert.equal(ctxText(r), '[agent-companion] You just compacted. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.');
     assert.equal(runHook('hooks/subagent-context.mjs', pre(lead)).stdout.trim(), '', 'same boundary: once');
 
     // A second compaction is a second event.
@@ -216,9 +216,7 @@ test('SubagentStop fallback: a worker the mid-run hook never reached is recorded
     assert.equal(logged[0].kind, 'size');
     const text = ctxText(leadDrain(lead));
     assert.match(text, /subagent context: general-purpose \(worker-ctx-t\) passed 300,000 tokens of context \(340,000 at its last call\); it was not reached mid-run\./);
-    assert.match(text, /send the remainder to it with SendMessage/);
-    assert.match(text, /spawn fresh only if that work is unrelated, needs another tier, or needs far less context than it holds/);
-    assert.doesNotMatch(text, /smaller briefs|rather than resuming/);
+    assert.match(text, /split the remainder into smaller briefs/);
   } finally { fx.cleanup(); }
 });
 
