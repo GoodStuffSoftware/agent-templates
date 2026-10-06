@@ -10,15 +10,15 @@
 import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import net from 'node:net';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { scheduleRuns, resourcesConflict, classifyCollision, portBaseForSlot, makeCapacityGate } from '../bench/scheduler.mjs';
 import { runOne, rebuildSummary } from '../bench/runner.mjs';
-import fixedPortTask, { FIXED_PORT } from './fixtures/bench-parallel/fixed-port-task.mjs';
-import portBaseTask from './fixtures/bench-parallel/port-base-task.mjs';
+import { makeFixedPortTask } from './fixtures/bench-parallel/fixed-port-task.mjs';
+import { makePortBaseTask } from './fixtures/bench-parallel/port-base-task.mjs';
+import { listenEphemeral, portOf, freePort } from './fixtures/bench-parallel/ports.mjs';
 
 const CELL = { model: 'claude-sonnet-5', effort: null };
 
@@ -113,11 +113,35 @@ test('makeCapacityGate never throws and returns a boolean even under a broken pr
   assert.equal(typeof gate(1), 'boolean');
 });
 
+// --- scheduleRuns(): an async onEvent is awaited before the next admission -
+
+test('scheduleRuns awaits an async onEvent finish handler before admitting the retry it triggers', async () => {
+  const order = [];
+  await scheduleRuns({
+    runs: [{ id: 'r1', taskId: 't', resources: {} }],
+    concurrency: 2,
+    launch: async (run) => (run.isRetry ? { id: run.id, collision: false } : { id: run.id, collision: true }),
+    onEvent: async (e) => {
+      if (e.type === 'start') order.push(`start:${e.runId}`);
+      if (e.type === 'finish' && e.row.collision) {
+        // Stands in for a test releasing a port it holds -- slow on purpose.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        order.push('finish-handler-done');
+      }
+    },
+  });
+  assert.deepEqual(order, ['start:r1', 'finish-handler-done', 'start:r1::retry'],
+    'the solo retry is admitted only after the finish handler has completed');
+});
+
 // --- scheduleRuns() + runOne(): the fixed-port pack is serialized ----------
 
 test('scheduler serializes two runs of the fixed-port fixture even at concurrency 2', async () => {
   const { outDir, answersDir } = tmpOut();
   try {
+    // An OS-assigned port this test process owns (see ports.mjs), never a
+    // machine-wide constant another concurrent suite run could be holding.
+    const fixedPortTask = makeFixedPortTask(await freePort());
     const tasksMap = { 'fixed-port': fixedPortTask };
     const launch = makeLaunch({ tasksMap, outDir, answersDir });
     let active = 0;
@@ -148,6 +172,17 @@ test('scheduler serializes two runs of the fixed-port fixture even at concurrenc
 test('scheduler runs two BENCH_PORT_BASE fixture runs CONCURRENTLY at concurrency 2', async () => {
   const { outDir, answersDir } = tmpOut();
   try {
+    // Each slot's BENCH_PORT_BASE maps to its own OS-assigned port (see
+    // port-base-task.mjs for why the literal bases are not bound). A base
+    // with no mapping throws, so a run handed an unexpected base fails.
+    const slotPorts = new Map([
+      [portBaseForSlot(0), await freePort()],
+      [portBaseForSlot(1), await freePort()],
+    ]);
+    const portBaseTask = makePortBaseTask((portBase) => {
+      if (!slotPorts.has(portBase)) throw new Error(`unexpected BENCH_PORT_BASE ${portBase}`);
+      return slotPorts.get(portBase);
+    });
     const tasksMap = { 'port-base': portBaseTask };
     const launch = makeLaunch({ tasksMap, outDir, answersDir });
     let active = 0;
@@ -167,6 +202,8 @@ test('scheduler runs two BENCH_PORT_BASE fixture runs CONCURRENTLY at concurrenc
     assert.equal(maxActive, 2, 'both BENCH_PORT_BASE runs were active at the same time');
     assert.equal(rows.length, 2);
     assert.ok(rows.every((r) => r.pass === true), 'both runs bound distinct ports without colliding');
+    const bases = rows.map((r) => r.detail && r.detail.portBase);
+    assert.notEqual(bases[0], bases[1], 'the two runs were handed DIFFERENT BENCH_PORT_BASE values (distinct slots)');
     const ports = rows.map((r) => r.detail && r.detail.boundPort);
     assert.notEqual(ports[0], ports[1], 'the two runs bound DIFFERENT ports (distinct slots -> distinct BENCH_PORT_BASE)');
   } finally {
@@ -178,15 +215,14 @@ test('scheduler runs two BENCH_PORT_BASE fixture runs CONCURRENTLY at concurrenc
 
 test('an induced EADDRINUSE is classified as a collision and automatically retried alone once', async () => {
   const { outDir, answersDir } = tmpOut();
-  const tasksMap = { 'fixed-port': fixedPortTask };
   // Pre-bind the fixture's fixed port from OUTSIDE the scheduler/task, so
   // the fixture's own real net.Server.listen() genuinely throws EADDRINUSE
-  // on the first attempt -- a real collision, not a simulated one.
-  const blocker = net.createServer();
-  await new Promise((resolve, reject) => {
-    blocker.once('error', reject);
-    blocker.listen(FIXED_PORT, '127.0.0.1', resolve);
-  });
+  // on the first attempt -- a real collision, not a simulated one. The
+  // blocker takes an OS-assigned port and the fixture is built on THAT port,
+  // so no other test process on the machine can be holding it.
+  const blocker = await listenEphemeral();
+  const fixedPortTask = makeFixedPortTask(portOf(blocker));
+  const tasksMap = { 'fixed-port': fixedPortTask };
   try {
     const launch = makeLaunch({ tasksMap, outDir, answersDir });
     let releasedBlocker = false;

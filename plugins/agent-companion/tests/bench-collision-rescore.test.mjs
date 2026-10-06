@@ -32,14 +32,14 @@
 import './isolate.mjs'; // sandbox the state paths first (tests/isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import net from 'node:net';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { scheduleRuns } from '../bench/scheduler.mjs';
 import { runOne, rescoreOne, rebuildSummary } from '../bench/runner.mjs';
-import subprocessTask, { SUBPROCESS_FIXED_PORT } from './fixtures/bench-parallel/subprocess-collision-catching-task.mjs';
+import { makeSubprocessCollisionTask } from './fixtures/bench-parallel/subprocess-collision-catching-task.mjs';
+import { listenEphemeral, portOf, closeServer } from './fixtures/bench-parallel/ports.mjs';
 import { PLUGIN_ROOT } from './helpers.mjs';
 
 const CELL = { model: 'claude-sonnet-5', effort: null };
@@ -97,17 +97,15 @@ async function stubClaude() {
   };
 }
 
-function bindHolder(port) {
-  const holder = net.createServer();
-  return new Promise((resolve, reject) => {
-    holder.once('error', reject);
-    holder.listen(port, '127.0.0.1', () => resolve(holder));
-  });
+// The holder squats an OS-assigned port and the subprocess task is built on
+// THAT port (see tests/fixtures/bench-parallel/ports.mjs): a machine-wide
+// constant port collided whenever two suite runs overlapped on one machine.
+async function bindHolderAndTask() {
+  const holder = await listenEphemeral();
+  return { holder, subprocessTask: makeSubprocessCollisionTask(portOf(holder)) };
 }
 
-function closeHolder(holder) {
-  return new Promise((resolve) => holder.close(() => resolve()));
-}
+const closeHolder = closeServer;
 
 // Queue order matters: bench/scheduler.mjs's admission loop snapshots
 // co_scheduled_run_ids at the moment EACH run is picked, one at a time --
@@ -115,7 +113,7 @@ function closeHolder(holder) {
 // `otherTask` first so it is admitted first (co_scheduled_run_ids: []), and
 // the subprocess-collision run second, so IT is the one that gets a
 // non-empty co_scheduled_run_ids (genuinely "co-scheduled").
-function buildRuns() {
+function buildRuns(subprocessTask) {
   return [
     { id: 'other-r1', taskId: OTHER_TASK_ID, rep: 1, resources: otherTask.resources },
     { id: 'sub-r1', taskId: SUB_TASK_ID, rep: 1, resources: subprocessTask.resources },
@@ -126,15 +124,15 @@ function buildRuns() {
 
 test('a subprocess collision under real co-scheduling is re-scored alone and PASSES -- the original failure is superseded, never a model re-run', async () => {
   const { outDir, answersDir } = tmpOut();
+  const { holder, subprocessTask } = await bindHolderAndTask();
   const tasksMap = { [OTHER_TASK_ID]: otherTask, [SUB_TASK_ID]: subprocessTask };
-  const holder = await bindHolder(SUBPROCESS_FIXED_PORT);
   let modelCalls = 0;
   let releasedHolder = false;
   let sandboxExistedAtOriginalFinish = null;
   try {
     const launch = makeLaunch({ tasksMap, outDir, answersDir, runClaudeImpl: stubClaude, onModelCall: () => { modelCalls += 1; } });
     const rows = await scheduleRuns({
-      runs: buildRuns(),
+      runs: buildRuns(subprocessTask),
       concurrency: 2,
       launch,
       onEvent: async (e) => {
@@ -194,14 +192,14 @@ test('a subprocess collision under real co-scheduling is re-scored alone and PAS
 
 test('a subprocess failure that reproduces on its solo re-score is counted as a REAL failure, never lost, and the redundant retry is excluded', async () => {
   const { outDir, answersDir } = tmpOut();
-  const tasksMap = { [OTHER_TASK_ID]: otherTask, [SUB_TASK_ID]: subprocessTask };
   // The holder is NEVER released in this scenario -- the port stays taken
   // for the whole test, so the automatic solo re-score fails exactly the
   // same way the original attempt did.
-  const holder = await bindHolder(SUBPROCESS_FIXED_PORT);
+  const { holder, subprocessTask } = await bindHolderAndTask();
+  const tasksMap = { [OTHER_TASK_ID]: otherTask, [SUB_TASK_ID]: subprocessTask };
   try {
     const launch = makeLaunch({ tasksMap, outDir, answersDir, runClaudeImpl: stubClaude });
-    const rows = await scheduleRuns({ runs: buildRuns(), concurrency: 2, launch });
+    const rows = await scheduleRuns({ runs: buildRuns(subprocessTask), concurrency: 2, launch });
 
     const subOriginal = rows.find((r) => r.task === SUB_TASK_ID && !r.is_rescore_retry);
     const subRescore = rows.find((r) => r.is_rescore_retry);
@@ -241,13 +239,13 @@ test('a subprocess failure that reproduces on its solo re-score is counted as a 
 // `__rescoreState` from the row it builds.
 test('neither the original needs_rescore row nor its ::rescore row ever carries __rescoreState on disk', async () => {
   const { outDir, answersDir } = tmpOut();
+  const { holder, subprocessTask } = await bindHolderAndTask();
   const tasksMap = { [OTHER_TASK_ID]: otherTask, [SUB_TASK_ID]: subprocessTask };
-  const holder = await bindHolder(SUBPROCESS_FIXED_PORT);
   let released = false;
   try {
     const launch = makeLaunch({ tasksMap, outDir, answersDir, runClaudeImpl: stubClaude });
     await scheduleRuns({
-      runs: buildRuns(),
+      runs: buildRuns(subprocessTask),
       concurrency: 2,
       launch,
       onEvent: async (e) => {

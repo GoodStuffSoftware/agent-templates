@@ -27,7 +27,6 @@
 // runClaudeImpl test seam; rescoreOne() accepts no such parameter at all.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import net from 'node:net';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -36,19 +35,24 @@ import { PLUGIN_ROOT } from './helpers.mjs';
 import { loadPack, buildTaskFromPack, encodeRef } from '../bench/task-packs/lib.mjs';
 import { scheduleRuns } from '../bench/scheduler.mjs';
 import { runOne, rescoreOne, rebuildSummary } from '../bench/runner.mjs';
+import { listenEphemeral, portOf, closeServer } from './fixtures/bench-parallel/ports.mjs';
 
 const REPO_ROOT = resolve(PLUGIN_ROOT, '..', '..');
 const CELL = { model: 'claude-sonnet-5', effort: null };
 const PACK_ID = 'bench-real-pack-rescore-fixture';
 const FILLER_TASK_ID = 'unrelated-co-scheduled-filler';
-const REAL_PACK_PORT = 58622;
+// Only DECLARED (never bound) by the loadPack() sanity test below.
+const SANITY_DECLARED_PORT = 58622;
 
-// A hardcoded, non-BENCH_PORT_BASE-derived port -- mirrors
+// A fixed, non-BENCH_PORT_BASE-derived port -- mirrors
 // tests/fixtures/bench-parallel/subprocess-collision-catching-task.mjs's own
 // rationale: the genuine collision this test proves comes from something
 // OUTSIDE the scheduler's own conflict graph (the test's own "holder"
-// socket), not from two runs of this pack colliding with each other.
-function makeRealPackDir() {
+// socket), not from two runs of this pack colliding with each other. The
+// tests that bind it pass the holder's OS-assigned port (see
+// tests/fixtures/bench-parallel/ports.mjs): a machine-wide constant port
+// collided whenever two suite runs overlapped on one machine.
+function makeRealPackDir(port) {
   const packDir = mkdtempSync(join(tmpdir(), 'ac-real-pack-rescore-fixture-'));
   writeFileSync(join(packDir, 'manifest.json'), JSON.stringify({
     id: PACK_ID,
@@ -56,7 +60,7 @@ function makeRealPackDir() {
     fixRefB64: encodeRef('HEAD'),
     files: ['plugins/agent-companion/bench/scheduler.mjs'],
     maxBudgetUsd: 0.05,
-    resources: { fixedPorts: [REAL_PACK_PORT] },
+    resources: { fixedPorts: [port] },
   }));
   writeFileSync(
     join(packDir, 'report.md'),
@@ -64,7 +68,7 @@ function makeRealPackDir() {
   );
   // FORMAT.md's "Hidden test contract" catching style: shell out, never
   // throw, turn a subprocess failure into a plain { pass: false, detail }.
-  // The child script binds REAL_PACK_PORT in an actually separate process
+  // The child script binds `port` in an actually separate process
   // (node -e, port read from an env var to sidestep -e's own argv parsing),
   // so a real OS-level EADDRINUSE is possible -- not a simulated one.
   const childScript = "const net=require('node:net');"
@@ -79,7 +83,7 @@ function makeRealPackDir() {
     '  let output = ""; let status = 0;',
     '  try {',
     '    output = execFileSync(process.execPath, ["-e", CHILD_SCRIPT], {',
-    `      encoding: "utf8", windowsHide: true, env: { ...process.env, AC_TEST_PORT: "${REAL_PACK_PORT}" },`,
+    `      encoding: "utf8", windowsHide: true, env: { ...process.env, AC_TEST_PORT: "${port}" },`,
     '    });',
     '  } catch (e) {',
     '    status = typeof e.status === "number" ? e.status : 1;',
@@ -116,14 +120,7 @@ async function stubClaude() {
   };
 }
 
-function bindHolder(port) {
-  const holder = net.createServer();
-  return new Promise((res, rej) => {
-    holder.once('error', rej);
-    holder.listen(port, '127.0.0.1', () => res(holder));
-  });
-}
-function closeHolder(holder) { return new Promise((res) => holder.close(() => res())); }
+const closeHolder = closeServer;
 
 // Queue order matters (see tests/bench-collision-rescore.test.mjs's own
 // note): put the filler first so it is admitted first (co_scheduled_run_ids
@@ -154,28 +151,28 @@ function makeLaunch({ tasksMap, outDir, answersDir, onModelCall }) {
 }
 
 test('a real git-backed pack\'s resources.fixedPorts survives loadPack() + buildTaskFromPack() intact (sanity)', () => {
-  const packDir = makeRealPackDir();
+  const packDir = makeRealPackDir(SANITY_DECLARED_PORT);
   try {
     const pack = loadPack(packDir);
     assert.equal(pack.id, PACK_ID);
     assert.equal(pack.parentRef, 'HEAD');
     assert.equal(pack.fixRef, 'HEAD');
-    assert.deepEqual(pack.resources, { fixedPorts: [REAL_PACK_PORT] });
+    assert.deepEqual(pack.resources, { fixedPorts: [SANITY_DECLARED_PORT] });
     const task = buildTaskFromPack(pack, { repoPath: REPO_ROOT });
     assert.equal(task.__isPackTask, true);
-    assert.deepEqual(task.resources, { fixedPorts: [REAL_PACK_PORT] });
+    assert.deepEqual(task.resources, { fixedPorts: [SANITY_DECLARED_PORT] });
   } finally {
     rmSync(packDir, { recursive: true, force: true });
   }
 });
 
 test('a REAL git-backed pack, genuinely co-scheduled, gets needs_rescore -> solo re-score -> PASSES (never a model re-run)', async () => {
-  const packDir = makeRealPackDir();
+  const holder = await listenEphemeral();
+  const packDir = makeRealPackDir(portOf(holder));
   const { outDir, answersDir } = tmpOut();
   const pack = loadPack(packDir);
   const packTask = buildTaskFromPack(pack, { repoPath: REPO_ROOT });
   const tasksMap = { [FILLER_TASK_ID]: filler, [PACK_ID]: packTask };
-  const holder = await bindHolder(REAL_PACK_PORT);
   let modelCalls = 0;
   let released = false;
   try {
@@ -220,15 +217,15 @@ test('a REAL git-backed pack, genuinely co-scheduled, gets needs_rescore -> solo
 });
 
 test('a REAL git-backed pack that fails its solo re-score too is counted as a REAL failure, exactly once', async () => {
-  const packDir = makeRealPackDir();
+  // The holder is NEVER released -- the port stays taken for the whole test,
+  // so the automatic solo re-score fails exactly the same way the original
+  // attempt did.
+  const holder = await listenEphemeral();
+  const packDir = makeRealPackDir(portOf(holder));
   const { outDir, answersDir } = tmpOut();
   const pack = loadPack(packDir);
   const packTask = buildTaskFromPack(pack, { repoPath: REPO_ROOT });
   const tasksMap = { [FILLER_TASK_ID]: filler, [PACK_ID]: packTask };
-  // The holder is NEVER released -- the port stays taken for the whole test,
-  // so the automatic solo re-score fails exactly the same way the original
-  // attempt did.
-  const holder = await bindHolder(REAL_PACK_PORT);
   try {
     const launch = makeLaunch({ tasksMap, outDir, answersDir });
     const rows = await scheduleRuns({ runs: buildRuns(packTask), concurrency: 2, launch });
