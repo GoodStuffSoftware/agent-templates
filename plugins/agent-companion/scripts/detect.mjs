@@ -42,7 +42,7 @@ import { collect as collectCopies, staleBeyondGrace, STALE_GRACE_MS } from './ve
 
 // The operator's raw OS handle(s), for scrubbing signal text. The home
 // basename goes through homeRoot() like every other path here, so
-// AGENT_COMPANION_HOME_OVERRIDE is honoured (it is os.homedir() in production).
+// the test-home env var is honoured (homeRoot() is os.homedir() in production).
 function rawOsHandles() {
   const out = [];
   try { out.push(userInfo().username); } catch { /* no passwd entry */ }

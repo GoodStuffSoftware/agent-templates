@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript } from './helpers.mjs';
+import { detectEnv, DEFAULT_STUB_VERSION } from './detect-env.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
 
 function writeBaseline(extra) {
@@ -25,7 +26,7 @@ test('a genuinely NEW model alias in config/model-tiers.json triggers new_model_
         'brand-new-tier': { rank: 5, premium: true, match: 'brand-new-tier', available: true },
       },
     }));
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv() });
     assert.equal(res.status, 0, res.stderr);
     const lineupSig = res.json.signals.find((s) => s.kind === 'new_model_in_lineup');
     assert.ok(lineupSig, `expected new_model_in_lineup; got: ${JSON.stringify(res.json.signals)}`);
@@ -46,7 +47,7 @@ test('no new alias since the last run: no new_model_in_lineup, no benchmark sugg
   try {
     writeBaseline({ knownModelAliases: ['haiku', 'sonnet', 'opus', 'fable', 'mythos'] });
     // Deliberately unchanged from the shipped config's own alias set.
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv() });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.signals.find((s) => s.kind === 'new_model_in_lineup'), undefined);
     void stateDir;
@@ -57,7 +58,7 @@ test('the FIRST ever run (no baseline.knownModelAliases at all) does not fire ne
   const { dir, cleanup } = makeFixture();
   try {
     // No baseline.json at all -- a genuinely fresh install.
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv() });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.signals.find((s) => s.kind === 'new_model_in_lineup'), undefined,
       'a fresh install must not treat every already-shipped alias as "new"');
@@ -69,7 +70,7 @@ test('routing_trial_review_due also fires the benchmark suggestion (reuses the e
   try {
     const res = runScript('scripts/detect.mjs', [], {
       cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00.000Z' },
+      env: detectEnv({ env: { AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00.000Z' } }),
     });
     assert.equal(res.status, 0, res.stderr);
     const trialSigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
@@ -84,7 +85,8 @@ test('harness_version_changed also fires the benchmark suggestion', () => {
   const { dir, cleanup } = makeFixture();
   try {
     writeBaseline({ version: 'v-definitely-not-the-real-one' });
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    // A claude stub that reports a version, so the baseline above really differs from what `claude --version` says.
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv({ version: DEFAULT_STUB_VERSION }) });
     assert.equal(res.status, 0, res.stderr);
     const versionSig = res.json.signals.find((s) => s.kind === 'harness_version_changed');
     if (!versionSig) return; // `claude --version` unreadable in this environment: nothing to assert

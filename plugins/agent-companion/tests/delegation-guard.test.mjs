@@ -15,6 +15,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT, childEnv, decisionOf } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import {
   EXECUTION_TOOLS, RESET_TOOLS, countCall, delegationMode, delegationThreshold, delegationScope,
   outOfScope, isServedCall, attendedCoverage, LOCK_MAX_AGE_MS,
@@ -496,7 +497,7 @@ test('detect.mjs raises attended_env_missing when a day of counted calls never s
     const f = join(sd, 'delegation-streak.json');
     const now = Date.now();
     const signal = () => {
-      const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+      const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv() });
       assert.equal(res.status, 0, res.stderr);
       return res.json.signals.find((s) => s.kind === 'attended_env_missing');
     };

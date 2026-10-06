@@ -9,18 +9,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { execSync } from 'node:child_process';
 import { makeFixture, runScript } from './helpers.mjs';
+import { detectEnv, DEFAULT_STUB_VERSION } from './detect-env.mjs';
 
-// Derive floors relative to the REAL installed `claude --version` on this
-// machine, rather than hardcoding a version, so the test is correct whether
-// this machine is ahead of or behind any particular Claude Code release.
-function runningVersion() {
-  const out = execSync('claude --version', { windowsHide: true, encoding: 'utf8', timeout: 20000 }).trim();
-  const m = out.match(/(\d+)\.(\d+)\.(\d+)/);
-  if (!m) throw new Error(`could not parse \`claude --version\` output: ${out}`);
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
-}
+// Every run here uses a `claude` stub that reports STUB_VERSION (see
+// tests/detect-env.mjs), never the real CLI, so the running version is a known
+// constant and each floor is derived from it: strictly above for the signal
+// case, 0.0.0 for the no-signal case.
+const STUB_VERSION = DEFAULT_STUB_VERSION;
+const runningVersion = () => STUB_VERSION.split('.').map(Number);
 
 function writeOverride(stateDir, minClaudeCodeVersion) {
   mkdirSync(stateDir, { recursive: true });
@@ -30,30 +27,13 @@ function writeOverride(stateDir, minClaudeCodeVersion) {
   }));
 }
 
-// Computed once, up front, at module load — never inside the test body — so
-// the skip decision is made the same way `{ skip }` is documented to work:
-// a CI runner with no `claude` CLI on PATH (exit 127) must SKIP this test
-// with a clear reason, never silently pass it (a skip and a pass read very
-// differently in a report). Only this first test depends on the real
-// installed version; the other two in this file don't call runningVersion()
-// and stay fully active either way.
-let cachedRunningVersion;
-let runningVersionError;
-try {
-  cachedRunningVersion = runningVersion();
-} catch (err) {
-  runningVersionError = err;
-}
-
-test('installed Claude Code below the alias-resolution floor: signal fires, names the floor and the running version', {
-  skip: runningVersionError ? `claude CLI not available to derive a real running version: ${runningVersionError.message}` : false,
-}, () => {
-  const [maj, min, pat] = cachedRunningVersion;
+test('installed Claude Code below the alias-resolution floor: signal fires, names the floor and the running version', () => {
+  const [maj, min, pat] = runningVersion();
   const floorAbove = `${maj}.${min}.${pat + 1}`; // guaranteed strictly above the running version
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeOverride(stateDir, floorAbove);
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv({ version: STUB_VERSION }) });
     assert.equal(res.status, 0, res.stderr);
     const sig = res.json.signals.find((s) => s.kind === 'alias_resolution_below_version_floor');
     assert.ok(sig, `expected alias_resolution_below_version_floor; got: ${JSON.stringify(res.json.signals)}`);
@@ -66,7 +46,7 @@ test('installed Claude Code at or above the alias-resolution floor: no signal', 
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeOverride(stateDir, '0.0.0'); // guaranteed at-or-below any real installed version
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv({ version: STUB_VERSION }) });
     assert.equal(res.status, 0, res.stderr);
     const sig = res.json.signals.find((s) => s.kind === 'alias_resolution_below_version_floor');
     assert.equal(sig, undefined, `expected no signal; got: ${JSON.stringify(res.json.signals)}`);
@@ -83,7 +63,7 @@ test('no aliasResolution.minClaudeCodeVersion in config: no signal, no throw', (
     // the only way to simulate "no floor recorded" through the real
     // override mechanism this plugin ships.
     writeFileSync(join(stateDir, 'model-tiers.json'), JSON.stringify({ aliasResolution: {}, tiers: {} }));
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv({ version: STUB_VERSION }) });
     assert.equal(res.status, 0, res.stderr);
     const sig = res.json.signals.find((s) => s.kind === 'alias_resolution_below_version_floor');
     assert.equal(sig, undefined);

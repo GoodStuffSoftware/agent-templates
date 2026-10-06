@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 
 function isoDaysFromNow(days) {
   const d = new Date();
@@ -31,7 +32,7 @@ test('a staged tier 22 days from retirement is still flagged (inside the 30-day 
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeOverride(stateDir, isoDaysFromNow(22), { staged: true });
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv() });
     assert.equal(res.status, 0, res.stderr);
     const sig = res.json.signals.find((s) => s.kind === 'model_retirement_approaching');
     assert.ok(sig, `expected a model_retirement_approaching signal; got: ${JSON.stringify(res.json.signals)}`);
@@ -45,7 +46,7 @@ test('a tier 45 days out (past the 30-day window, on a fixed milestone) is still
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeOverride(stateDir, isoDaysFromNow(45), { staged: true });
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv() });
     assert.equal(res.status, 0, res.stderr);
     const sig = res.json.signals.find((s) => s.kind === 'model_retirement_approaching');
     assert.ok(sig, `expected a milestone signal at 45 days; got: ${JSON.stringify(res.json.signals)}`);
@@ -58,7 +59,7 @@ test('a tier 50 days out (past the window, off the milestone list) is silent', (
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     writeOverride(stateDir, isoDaysFromNow(50), { staged: true });
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv() });
     assert.equal(res.status, 0, res.stderr);
     const sig = res.json.signals.find((s) => s.kind === 'model_retirement_approaching');
     assert.equal(sig, undefined, `expected no signal at 50 days; got: ${JSON.stringify(res.json.signals)}`);

@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeFixture, runScript } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
@@ -55,7 +56,7 @@ test('ci_status_signal off: no main_ci_red even with a fresh red cache entry', (
     });
     const res = runScript('scripts/detect.mjs', [], {
       cwd: repoDir,
-      env: { CLAUDE_PLUGIN_OPTION_CI_STATUS_SIGNAL: 'false', AGENT_COMPANION_CI_STATUS_NO_GH: '1' },
+      env: detectEnv({ env: { CLAUDE_PLUGIN_OPTION_CI_STATUS_SIGNAL: 'false', AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }),
     });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.signals.find((s) => s.kind === 'main_ci_red'), undefined);
@@ -77,7 +78,7 @@ test('cache HIT: a fresh red cache entry fires main_ci_red WITHOUT a fresh gh ca
     });
     const res = runScript('scripts/detect.mjs', [], {
       cwd: repoDir,
-      env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, // if the cache were ignored, this would force ok:false
+      env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }), // if the cache were ignored, this would force ok:false
     });
     assert.equal(res.status, 0, res.stderr);
     const sigRow = res.json.signals.find((s) => s.kind === 'main_ci_red');
@@ -100,7 +101,7 @@ test('cache MISS (stale entry): a fresh check is attempted and (via NO_GH) fails
     });
     const res = runScript('scripts/detect.mjs', [], {
       cwd: repoDir,
-      env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' },
+      env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }),
     });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.signals.find((s) => s.kind === 'main_ci_red'), undefined,
@@ -122,7 +123,7 @@ test('a private (not known-public) repo name is scrubbed out of the signal text'
         },
       },
     });
-    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } });
+    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }) });
     assert.equal(res.status, 0, res.stderr);
     const sigRow = res.json.signals.find((s) => s.kind === 'main_ci_red');
     assert.ok(sigRow, `expected main_ci_red; got: ${JSON.stringify(res.json.signals)}`);
@@ -145,7 +146,7 @@ test('a repo already known public (from the publication-leak sweep baseline) kee
         },
       },
     });
-    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } });
+    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }) });
     assert.equal(res.status, 0, res.stderr);
     const sigRow = res.json.signals.find((s) => s.kind === 'main_ci_red');
     assert.ok(sigRow, `expected main_ci_red; got: ${JSON.stringify(res.json.signals)}`);
@@ -158,7 +159,7 @@ test('a green cache entry never fires main_ci_red', () => {
   const repoDir = makeRepoDir('git@github.com:someowner/greenrepo.git');
   try {
     writeBaseline({ ciStatusCache: { 'someowner/greenrepo': { checkedAt: FRESH(), ok: true, red: false, workflows: [] } } });
-    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } });
+    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }) });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.signals.find((s) => s.kind === 'main_ci_red'), undefined);
   } finally { cleanup(); rmSync(repoDir, { recursive: true, force: true, maxRetries: 3 }); }
@@ -168,7 +169,7 @@ test('a non-GitHub origin (e.g. gitlab) is silently skipped — no signal, no cr
   const { cleanup } = makeFixture();
   const repoDir = makeRepoDir('git@gitlab.com:someowner/somerepo.git');
   try {
-    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } });
+    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }) });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.signals.find((s) => s.kind === 'main_ci_red'), undefined);
   } finally { cleanup(); rmSync(repoDir, { recursive: true, force: true, maxRetries: 3 }); }
@@ -178,7 +179,7 @@ test('not a git repo at all (no cwd origin) — silent, never throws', () => {
   const { cleanup } = makeFixture();
   const plainDir = mkdtempSync(join(tmpdir(), 'ac-ci-red-noreo-'));
   try {
-    const res = runScript('scripts/detect.mjs', [], { cwd: plainDir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } });
+    const res = runScript('scripts/detect.mjs', [], { cwd: plainDir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }) });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.signals.find((s) => s.kind === 'main_ci_red'), undefined);
   } finally { cleanup(); rmSync(plainDir, { recursive: true, force: true, maxRetries: 3 }); }
@@ -188,7 +189,7 @@ test('gh missing/unauthenticated/offline (AGENT_COMPANION_CI_STATUS_NO_GH, no ca
   const { cleanup } = makeFixture();
   const repoDir = makeRepoDir('git@github.com:someowner/nocachrepo.git');
   try {
-    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } });
+    const res = runScript('scripts/detect.mjs', [], { cwd: repoDir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }) });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.signals.find((s) => s.kind === 'main_ci_red'), undefined);
     assert.equal(res.json.baseline.ciStatusCache['someowner/nocachrepo'].ok, false);

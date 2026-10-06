@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 
 const fx = makeFixture();
 test.after(() => fx.cleanup());
@@ -97,7 +98,7 @@ function detect(fakeNow, override) {
       mkdirSync(f.stateDir, { recursive: true });
       writeFileSync(join(f.stateDir, 'model-tiers.json'), JSON.stringify(override));
     }
-    const res = runScript('scripts/detect.mjs', [], { cwd: f.dir, env: { AGENT_COMPANION_FAKE_NOW: fakeNow } });
+    const res = runScript('scripts/detect.mjs', [], { cwd: f.dir, env: detectEnv({ env: { AGENT_COMPANION_FAKE_NOW: fakeNow } }) });
     assert.equal(res.status, 0, res.stderr);
     return res.json.signals.find((s) => s.kind === 'model_retirement_approaching');
   } finally {

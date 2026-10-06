@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import { resolveRoute } from '../hooks/lib/context.mjs';
 import { projectAgentDrift, driftFindings, parseFrontmatter } from '../scripts/lib/agent-drift.mjs';
 
@@ -138,7 +139,7 @@ test('scout: project_agent_drift fires for a listed project with drift, silent w
       writeFileSync(cj, JSON.stringify({ projects: Object.fromEntries(projects.map((p) => [p, {}])) }));
       return runScript('scripts/detect.mjs', [], {
         cwd: clean,
-        env: { AGENT_COMPANION_DISCOVERY_CLAUDE_JSON: cj, AGENT_COMPANION_CI_STATUS_NO_GH: '1' },
+        env: detectEnv({ env: { AGENT_COMPANION_DISCOVERY_CLAUDE_JSON: cj, AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }),
         timeout: 60000,
       });
     };

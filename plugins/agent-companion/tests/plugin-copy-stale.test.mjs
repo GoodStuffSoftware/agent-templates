@@ -5,6 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeFixture, runScript } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import { HOUR, machine } from './version-fixture.mjs';
 
 const NOW = Date.parse('2026-10-02T20:00:00.000Z');
@@ -12,7 +13,7 @@ const NOW = Date.parse('2026-10-02T20:00:00.000Z');
 function detect(fx, env = {}) {
   const res = runScript('scripts/detect.mjs', [], {
     cwd: fx.dir,
-    env: { AGENT_COMPANION_FAKE_NOW: new Date(NOW).toISOString(), ...env },
+    env: detectEnv({ env: { AGENT_COMPANION_FAKE_NOW: new Date(NOW).toISOString(), ...env } }),
     timeout: 90000,
   });
   assert.equal(res.status, 0, res.stderr);

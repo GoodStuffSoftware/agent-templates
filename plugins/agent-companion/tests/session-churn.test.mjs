@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript, readJsonl } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import { telemetryDir, stateFile } from '../hooks/lib/context.mjs';
 import {
   isCorrection, churnOfTranscript, scanChurn, mergeChurnRows, churnVerdict, churnFreshness, CHURN_THRESHOLDS,
@@ -110,7 +111,7 @@ test('transcript-harvest --churn writes session-churn.jsonl; detect emits sessio
     const rows = readJsonl(join(telemetryDir(), 'session-churn.jsonl'));
     assert.equal(rows.length, 2);
     assert.ok(rows.every((r) => r.corrections === 3));
-    const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, timeout: 60000 });
+    const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }), timeout: 60000 });
     assert.equal(d.status, 0, d.stderr);
     const s = d.json.signals.find((x) => x.kind === 'session_churn');
     assert.ok(s, JSON.stringify(d.json.signals.map((x) => x.kind)));
@@ -122,7 +123,7 @@ function writeSpawns(rows) {
   writeFileSync(join(telemetryDir(), 'spawns.jsonl'), rows.map((r) => JSON.stringify({ at: ts(), session_id: 'sess-s', ...r })).join('\n') + '\n');
 }
 function detect(fx) {
-  const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, timeout: 60000 });
+  const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }), timeout: 60000 });
   assert.equal(d.status, 0, d.stderr);
   return d.json.signals;
 }
@@ -198,7 +199,7 @@ test('session_churn reports a stale or missing aggregate instead of going quiet'
     assert.match(churnFreshness(Date.now() - 3 * 86400000).detail, /stale: last written 3\.0 days ago/);
 
     const run = () => {
-      const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, timeout: 60000 });
+      const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: detectEnv({ env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' } }), timeout: 60000 });
       assert.equal(d.status, 0, d.stderr);
       return d.json.signals.find((x) => x.kind === 'session_churn');
     };

@@ -29,6 +29,7 @@ import { cpSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:f
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PLUGIN_ROOT } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import { staticScan, runtimeReads } from './fixtures/route-readers/scan.mjs';
 import { ANCHOR, MUTANTS } from './fixtures/route-readers/mutants.mjs';
 
@@ -57,7 +58,7 @@ const RUNS = [
   ['scripts/routing-table.mjs', []],
   ['scripts/routing-table.mjs', ['--json']],
   ['scripts/routing-table.mjs', ['--task-type-block']],
-  ['scripts/detect.mjs', ['--json']],
+  ['scripts/detect.mjs', ['--json'], { env: detectEnv() }],
   ['hooks/spawn-guard.mjs', [], { input: HOOK_PAYLOAD('TYPE: explore\ngo', 'opus') }],
   ['hooks/spawn-guard.mjs', [], { input: HOOK_PAYLOAD('TYPE: integration\nWEIGHT: 3\ngo', 'sonnet') }],
 ];

@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync, readFileSync, mkdtempSync, rmSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeFixture, runScript } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 import {
   ADVISOR_HISTORY_FILE, ADVISOR_HISTORY_MAX, appendAdvisorHistory, checkWindowDrift, historyEntryOf,
 } from '../scripts/lib/cache-advisor.mjs';
@@ -100,10 +101,10 @@ test('detect.mjs surfaces compact_window_drift with the value to type; threshold
       entries: [historyEntryOf(summary(100000)), historyEntryOf(summary(130000))],
     }));
     write();
-    const off = runScript('scripts/detect.mjs', [], { cwd: dir, env: { CLAUDE_PLUGIN_OPTION_COMPACT_WINDOW_DRIFT_PCT: '50' } });
+    const off = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv({ env: { CLAUDE_PLUGIN_OPTION_COMPACT_WINDOW_DRIFT_PCT: '50' } }) });
     assert.equal(off.status, 0, off.stderr);
     assert.equal(off.json.signals.find((s) => s.kind === 'compact_window_drift'), undefined);
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir });
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv() });
     assert.equal(res.status, 0, res.stderr);
     const s = res.json.signals.find((x) => x.kind === 'compact_window_drift');
     assert.ok(s, JSON.stringify(res.json.signals));

@@ -55,6 +55,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PLUGIN_ROOT, makeFixture, runScript } from './helpers.mjs';
+import { detectEnv } from './detect-env.mjs';
 
 const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
 
@@ -294,7 +295,7 @@ test('scout raises routing_trial_review_due once reviewBy has passed', () => {
   try {
     const res = runScript('scripts/detect.mjs', [], {
       cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00.000Z' },
+      env: detectEnv({ env: { AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00.000Z' } }),
     });
     assert.equal(res.status, 0, res.stderr);
     const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
@@ -324,7 +325,7 @@ test('scout raises the four v3 rows on their own reviewBy (2026-10-04)', () => {
   try {
     const res = runScript('scripts/detect.mjs', [], {
       cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-10-04T00:00:00.000Z' },
+      env: detectEnv({ env: { AGENT_COMPANION_FAKE_NOW: '2026-10-04T00:00:00.000Z' } }),
     });
     assert.equal(res.status, 0, res.stderr);
     const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
@@ -343,7 +344,7 @@ test('scout raises the five v4 rows on their own reviewBy (2026-10-16)', () => {
   try {
     const res = runScript('scripts/detect.mjs', [], {
       cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-10-16T00:00:00.000Z' },
+      env: detectEnv({ env: { AGENT_COMPANION_FAKE_NOW: '2026-10-16T00:00:00.000Z' } }),
     });
     assert.equal(res.status, 0, res.stderr);
     const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
@@ -362,7 +363,7 @@ test('scout is silent on routing_trial_review_due before reviewBy', () => {
   try {
     const res = runScript('scripts/detect.mjs', [], {
       cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-09-25T00:00:00.000Z' },
+      env: detectEnv({ env: { AGENT_COMPANION_FAKE_NOW: '2026-09-25T00:00:00.000Z' } }),
     });
     assert.equal(res.status, 0, res.stderr);
     const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
@@ -377,7 +378,7 @@ test('scout fires exactly on the reviewBy date itself (not only strictly after)'
   try {
     const res = runScript('scripts/detect.mjs', [], {
       cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-09-30T00:00:00.000Z' },
+      env: detectEnv({ env: { AGENT_COMPANION_FAKE_NOW: '2026-09-30T00:00:00.000Z' } }),
     });
     assert.equal(res.status, 0, res.stderr);
     const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
