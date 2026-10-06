@@ -19,7 +19,7 @@
 //
 // "Points" here means the plan's weekly/5-hour usage-window points, the same
 // currency skills/model-benchmark/SKILL.md's "+10 points" ceiling and
-// team-orchestration's cost table already use -- NOT a percentage, though
+// team-orchestration's cost rules (references/routing-and-review.md) already use -- NOT a percentage, though
 // this file treats 1 point as interchangeable with 1 percentage point of the
 // weekly window for the purpose of projecting "current % + this run's
 // points" into a projected %. That equivalence is an ASSUMPTION (there is no

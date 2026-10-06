@@ -1,5 +1,5 @@
-// Calibration: "haiku validates, it does not OPERATE" (team-orchestration
-// skill; a dated CONTRIBUTIONS_INBOX entry). Two task types encode the distinction
+// Calibration: "haiku validates, it does not OPERATE" (team-orchestration skill, references/routing-and-review.md;
+// a dated CONTRIBUTIONS_INBOX entry). Two task types encode the distinction
 // so recommend.mjs routes them, not taste:
 //   - `verify`  — read/confirm/screenshot, nothing changes -> weight 1
 //   - `operate` — an ordered procedure or a change to a live system, even when
