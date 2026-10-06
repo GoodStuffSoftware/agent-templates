@@ -75,10 +75,11 @@ export function makeFixture() {
 //   - pinned to 2 cores beside 4 spinning threads: 5.0 s p50, 10.1 s max,
 //     where a bare `node -e 0` already took 3.5 s p50, so the cost is Node
 //     process startup, not the hook.
-// 60 s is about 6x that worst case and half the 120 s per-test budget
-// (ci-local --test-timeout), so a real hang still fails inside its own
-// test, with the note below. Same reasoning as GIT_CHAIN_TIMEOUT_MS. A test
-// that wants a timeout to fire passes its own `timeout`.
+// 60 s is about 6x that worst case (10.1 s). Any per-test runner timeout
+// must stay above this guard, so a hung child is reported by the guard's
+// clear message, with the note below. Same reasoning as
+// GIT_CHAIN_TIMEOUT_MS. A test that wants a timeout to fire passes its own
+// `timeout`.
 export const HANG_GUARD_TIMEOUT_MS = 60000;
 
 // When the guard killed the child, stderr says so: tests assert
