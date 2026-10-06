@@ -10,13 +10,13 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readdirSync, mkdirSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 import {
   CONTRACT_MARKER, PEER_MARKER,
   readBrevityConfig, writeBrevityConfig, resolveBrevity, buildContract, brevityConfigPath,
-  noteContractAppended, consumeContractAppended, CONTRACT_PENDING_MS,
+  noteContractAppended, consumeContractAppended, pruneStaleMarkers, CONTRACT_PENDING_MS,
 } from '../hooks/lib/brevity.mjs';
 import { telemetryDir, stateDir } from '../hooks/lib/context.mjs';
 
@@ -305,6 +305,27 @@ test('contract: the long-detail example file name does not match the native repo
     const name = m[1].replace('<task>', task);
     assert.equal(NATIVE_REPORT_FILE_RE.test(name), false, `${name} would be refused by the native write guard`);
   }
+  // A task whose own name is a refused stem ("summary", "findings", ...) would
+  // yield a refused name when substituted literally, so the contract has to
+  // forbid it in words. Every stem the native pattern refuses must be listed
+  // in the contract's "never name a file ..." clause, and every task name that
+  // starts with a stem must be covered by it.
+  const stems = NATIVE_REPORT_FILE_RE.source.match(/\(([A-Z|]+)\)/)[1].split('|').map((x) => x.toLowerCase());
+  assert.deepEqual([...stems].sort(), ['analysis', 'findings', 'report', 'summary'], 'the native pattern changed: update the contract clause');
+  const clause = text.match(/never name a file ([a-z/]+)\*\.md/);
+  assert.ok(clause, `contract must carry the never-name clause: ${text}`);
+  const forbidden = clause[1].split('/');
+  for (const stem of stems) assert.ok(forbidden.includes(stem), `the contract's never-name clause omits "${stem}"`);
+  for (const task of ['summary', 'findings', 'report', 'analysis', 'Summary-final', 'FINDINGS_2', 'analysis-of-x', 'report2']) {
+    const name = m[1].replace('<task>', task);
+    assert.equal(NATIVE_REPORT_FILE_RE.test(name), true, `${name}: a task named like this is refused when substituted, so the clause is what protects it`);
+    assert.ok(forbidden.some((f) => name.toLowerCase().startsWith(f)), `${name} is refused natively but the contract's clause does not cover it`);
+  }
+  // Task names that merely resemble a stem stay clean.
+  for (const task of ['summarise', 'finding', 'analyse', 'reporting-tool']) {
+    const name = m[1].replace('<task>', task);
+    assert.equal(NATIVE_REPORT_FILE_RE.test(name), task === 'reporting-tool', name);
+  }
   // The regex itself still bites the names the contract forbids (guards the
   // test against a typo that makes it pass vacuously).
   for (const bad of ['report.md', 'REPORT.md', 'summary-final.md', 'findings-a.md', 'analysis-2.md']) {
@@ -386,6 +407,142 @@ test('S5: handoff records are per session, one per spawn, and expire', () => {
     // Stray files in the record directory fail open to "reinforce" and never throw.
     writeFileSync(join(stateDir(), 'contract-pending', 'garbage'), '{{{');
     assert.equal(consumeContractAppended('s-a'), false);
+  } finally {
+    cleanup();
+  }
+});
+
+// --- 12. Review fixes: records are typed, pruned on write, and off means off ---
+function pendingFiles() {
+  try { return readdirSync(join(stateDir(), 'contract-pending')).filter((n) => n.endsWith('.pending')); } catch { return []; }
+}
+
+test('S5 fix: a record is written for its agent type; a start of another type (workflow-subagent) never consumes it', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const t0 = Date.now();
+    noteContractAppended('s-t', t0, ['agent-companion:ac-sonnet-high']);
+    assert.equal(consumeContractAppended('s-t', t0 + 1, 'workflow-subagent'), false, 'a workflow-subagent start has no record of its own');
+    assert.equal(pendingFiles().length, 1, 'the ac-* record is still waiting for its own start');
+    assert.equal(consumeContractAppended('s-t', t0 + 2, 'general-purpose'), false);
+    assert.equal(consumeContractAppended('s-t', t0 + 3, 'ac-sonnet-high'), true, 'plugin namespace is ignored when matching');
+    assert.equal(pendingFiles().length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('S5 fix: a ladder rewrite leaves a record that matches the pre-rewrite type too, the primary type first', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const t0 = Date.now();
+    noteContractAppended('s-r', t0, ['agent-companion:ac-opus-medium', 'general-purpose']); // rewritten spawn
+    noteContractAppended('s-r', t0 + 5, ['general-purpose']);                               // a plain spawn
+    // The harness ignored the rewrite and started general-purpose: it takes the plain spawn's record, not the rewritten one's.
+    assert.equal(consumeContractAppended('s-r', t0 + 10, 'general-purpose'), true);
+    assert.equal(consumeContractAppended('s-r', t0 + 11, 'ac-opus-medium'), true, 'the rewritten spawn kept its own record');
+    assert.equal(pendingFiles().length, 0);
+    // With no plain record left, the ignored rewrite is still recognised by its original type.
+    noteContractAppended('s-r', t0 + 20, ['agent-companion:ac-opus-medium', 'general-purpose']);
+    assert.equal(consumeContractAppended('s-r', t0 + 21, 'general-purpose'), true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('S5 fix: a typeless record (older spawn-guard) still matches any start, and no type filter matches all', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const t0 = Date.now();
+    noteContractAppended('s-o', t0);
+    assert.equal(consumeContractAppended('s-o', t0 + 1, 'workflow-subagent'), true);
+    noteContractAppended('s-o', t0 + 2, ['ac-x']);
+    assert.equal(consumeContractAppended('s-o', t0 + 3), true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('S5 fix: spawn of a ladder rung, then a workflow-subagent start, then the rung start: only the rung start is quiet', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const sg = runHook('hooks/spawn-guard.mjs', {
+      session_id: 'sess-typed', agent_type: 'main', cwd: dir,
+      tool_input: { subagent_type: 'agent-companion:ac-sonnet-high', model: 'sonnet', description: 'x', prompt: 'List the files in src.' },
+    });
+    assert.equal(sg.status, 0, sg.stderr);
+    assert.ok(String(sg.json?.hookSpecificOutput?.updatedInput?.prompt || '').includes(CONTRACT_MARKER), sg.stdout);
+
+    const wf = runHook('hooks/subagent-brevity.mjs',
+      { session_id: 'sess-typed', agent_id: 'agent-wf', agent_type: 'workflow-subagent' }, { args: ['--event', 'start'] });
+    assert.ok(wf.json?.hookSpecificOutput?.additionalContext?.includes(CONTRACT_MARKER), `the workflow-subagent start must be reinforced: ${wf.stdout}`);
+    assert.equal(pendingFiles().length, 1, 'the rung spawn record survives the workflow-subagent start');
+
+    const rung = runHook('hooks/subagent-brevity.mjs',
+      { session_id: 'sess-typed', agent_id: 'agent-rung', agent_type: 'agent-companion:ac-sonnet-high' }, { args: ['--event', 'start'] });
+    assert.equal((rung.stdout || '').trim(), '', 'the rung start consumes its own record and adds nothing');
+    assert.equal(pendingFiles().length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('S5 fix: with brevity_reinforce off, spawn-guard writes no handoff record (nothing would consume it)', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const sg = runHook('hooks/spawn-guard.mjs', {
+      session_id: 'sess-noreinforce', agent_type: 'main', cwd: dir,
+      tool_input: { subagent_type: 'general-purpose', model: 'sonnet', description: 'x', prompt: 'List the files in src.' },
+    }, { env: { CLAUDE_PLUGIN_OPTION_BREVITY_REINFORCE: 'false' } });
+    assert.equal(sg.status, 0, sg.stderr);
+    assert.ok(String(sg.json?.hookSpecificOutput?.updatedInput?.prompt || '').includes(CONTRACT_MARKER), 'the contract itself is still appended');
+    assert.deepEqual(pendingFiles(), []);
+    // Control: reinforcement on writes the record.
+    const on = runHook('hooks/spawn-guard.mjs', {
+      session_id: 'sess-reinforce', agent_type: 'main', cwd: dir,
+      tool_input: { subagent_type: 'general-purpose', model: 'sonnet', description: 'x', prompt: 'List the files in src.' },
+    });
+    assert.equal(on.status, 0, on.stderr);
+    assert.equal(pendingFiles().length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('S5 fix: writing a record prunes expired records of every session, so leftovers never accumulate', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const t0 = Date.now();
+    noteContractAppended('s-old-a', t0 - CONTRACT_PENDING_MS - 10, ['general-purpose']);
+    noteContractAppended('s-old-b', t0 - CONTRACT_PENDING_MS - 20);
+    assert.equal(pendingFiles().length, 2, 'both were written at their own (past) time');
+    noteContractAppended('s-new', t0, ['general-purpose']);
+    const left = pendingFiles();
+    assert.equal(left.length, 1, left.join(','));
+    assert.match(left[0], /^s-new\./);
+  } finally {
+    cleanup();
+  }
+});
+
+test('S5 fix: brevity-started markers older than 24h are pruned on a start; fresh ones and the new start stay', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const dir = join(stateDir(), 'brevity-started');
+    mkdirSync(dir, { recursive: true });
+    const old = join(dir, 'agent-old.seen');
+    const fresh = join(dir, 'agent-fresh.seen');
+    writeFileSync(old, ''); writeFileSync(fresh, '');
+    const past = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    utimesSync(old, past, past);
+    const res = runHook('hooks/subagent-brevity.mjs',
+      { session_id: 'sess-prune', agent_id: 'agent-new', agent_type: 'general-purpose' }, { args: ['--event', 'start'] });
+    assert.equal(res.status, 0, res.stderr);
+    assert.deepEqual(readdirSync(dir).sort(), ['agent-fresh.seen', 'agent-new.seen']);
+    // The helper itself: bound and count.
+    writeFileSync(old, ''); utimesSync(old, past, past);
+    assert.equal(pruneStaleMarkers(dir, 24 * 60 * 60 * 1000), 1);
+    assert.equal(pruneStaleMarkers(join(dir, 'missing'), 1), 0, 'a missing directory is fine');
   } finally {
     cleanup();
   }

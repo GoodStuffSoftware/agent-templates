@@ -359,7 +359,7 @@ test('every numbered rung drops Artifact, the desktop-only servers and the brows
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
   for (const r of cfg.ladder) {
     const t = toolsLine(r.agent);
-    for (const must of ['Artifact', 'mcp__visualize', 'mcp__terminal', 'mcp__ccd_session', 'mcp__Claude_Browser', 'mcp__claude-in-chrome', 'mcp__computer-use']) {
+    for (const must of ['Artifact', 'ArtifactComments', 'ArtifactData', 'ArtifactCheck', 'mcp__visualize', 'mcp__terminal', 'mcp__ccd_session', 'mcp__Claude_Browser', 'mcp__claude-in-chrome', 'mcp__computer-use']) {
       assert.ok(t.includes(must), `${r.agent} drops ${must}`);
     }
     // keepOn: ccd_session_mgmt stays on ac-haiku only
@@ -367,7 +367,7 @@ test('every numbered rung drops Artifact, the desktop-only servers and the brows
   }
   for (const v of cfg.ladderVariants) {
     const t = toolsLine(v.agent);
-    assert.ok(t.includes('Artifact'), `${v.agent} drops Artifact`);
+    for (const a of ['Artifact', 'ArtifactComments', 'ArtifactData', 'ArtifactCheck']) assert.ok(t.includes(a), `${v.agent} drops ${a}`);
     for (const keep of ['mcp__Claude_Browser', 'mcp__claude-in-chrome', 'mcp__computer-use']) assert.ok(!t.includes(keep), `${v.agent} keeps ${keep}`);
   }
 });

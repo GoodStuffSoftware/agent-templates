@@ -1771,7 +1771,7 @@ export function ladderToolPolicy() {
   const rawKeep = t.keepOn && typeof t.keepOn === 'object' && !Array.isArray(t.keepOn) ? t.keepOn : {};
   for (const [server, agents] of Object.entries(rawKeep)) keepOn[server] = list(agents, []);
   return {
-    everywhere: list(t.everywhere, ['Artifact', 'mcp__visualize', 'mcp__terminal', 'mcp__ccd_session']),
+    everywhere: list(t.everywhere, ['Artifact', 'ArtifactComments', 'ArtifactData', 'ArtifactCheck', 'mcp__visualize', 'mcp__terminal', 'mcp__ccd_session']),
     browserOnly: list(t.browserOnly, ['mcp__Claude_Browser']),
     keepOn,
   };
@@ -1797,7 +1797,24 @@ export function expectedDisallowedTools(agent) {
 // brief names one is NOT swapped for a ladder rung (it would lose the tool),
 // and a ladder spawn whose brief names one gets a note. Narrow on purpose:
 // tool names and unmistakable phrases only, never a bare "UI".
-const BROWSER_BRIEF = /mcp__Claude_Browser|\bpreview_start\b|\bbrowser (?:pane|tool|tools|automation)\b|\b(?:drive|use|open|screenshot) the (?:browser|app in the browser)\b|\bbrowser[- ]?(?:based )?(?:check|verification|test)s?\b/i;
+// Browser and desktop-UI work: the browser servers (Claude_Browser,
+// claude-in-chrome, computer-use) by name, and the phrases that mean driving a
+// page or a screen. Verb-anchored on purpose ("check the UI in the browser"),
+// never a bare "browser", "UI" or "browse the code".
+const BROWSER_BRIEF = new RegExp([
+  String.raw`mcp__(?:Claude_Browser|claude-in-chrome|computer-use)`,
+  String.raw`\bclaude[- ]in[- ]chrome\b`,
+  String.raw`\bcomputer-use\b|\bcomputer use (?:tool|tools|mcp|server)\b`,
+  String.raw`\bpreview_start\b`,
+  String.raw`\bchrome extension\b`,
+  String.raw`\bbrowser (?:pane|tool|tools|automation)\b`,
+  String.raw`\b(?:drive|use|open|launch|screenshot) the (?:browser|app in the browser)\b`,
+  String.raw`\bbrowser[- ]?(?:based )?(?:check|verification|test)s?\b`,
+  String.raw`\b(?:check|verify|inspect|test|view|see|look at|confirm|open|screenshot) [^\n]{0,60}\b(?:in|on|with|via|through) (?:the |a )?(?:real |live |headed )?browser\b`,
+  String.raw`\bscreenshots? (?:(?:of|from) )?(?:the )?(?:localhost|local(?:host)? (?:app|page|site|server)|dev server|running app|page|app|UI|desktop|screen|window)\b`,
+  String.raw`\bscreenshots?\b[^\n]{0,40}\blocalhost\b`,
+  String.raw`\bdesktop (?:ui|automation)\b`,
+].join('|'), 'i');
 const DROPPED_BRIEF = /mcp__(?:visualize|terminal|ccd_session)(?:__|\b)|\b(?:publish|update|create) (?:an |the )?Artifact\b|\bArtifact tool\b|\bshow_widget\b/i;
 export function briefNeedsDroppedTools(brief) {
   const b = String(brief || '');

@@ -31,7 +31,7 @@
 // safe direction for a feature whose entire purpose is capping what a
 // subagent is allowed to say back to its caller.
 
-import { writeFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { configDir, opt, readJson, stateDir } from './context.mjs';
 
@@ -173,39 +173,91 @@ function safeSid(sessionId) {
   return String(sessionId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
 }
 
-// Record names: <sid>.<ms>.<random>.pending
+// The agent type as spawn-guard and SubagentStart each see it: the part after
+// any plugin namespace, lower-cased, general-purpose when none (the same rule
+// as premiumAgentType in lib/premium-window.mjs, repeated here because that
+// module loads the lock helper and this one must stay light). A start only
+// consumes a record written for its own type, so a workflow-subagent start
+// (which has no spawn-guard record) can never eat an ac-* spawn's record.
+function typeToken(t) {
+  const v = String(t || 'general-purpose').split(':').pop().trim().toLowerCase() || 'general-purpose';
+  return v.replace(/[^a-z0-9_-]/g, '_').slice(0, 60);
+}
+
+// Record names: <sid>.<ms>.<random>[.<type>[+<type>...]].pending
+// The first type is the one the spawn will start as; a later one is the type
+// it was before a ladder rewrite (a harness that ignores the rewrite starts
+// the original type). A record with no type (an older spawn-guard) matches
+// any start.
 function parseRecord(name) {
-  const m = /^(.+)\.(\d+)\.[0-9a-f]+\.pending$/.exec(name);
-  return m ? { sid: m[1], t: Number(m[2]) } : null;
+  const m = /^([^.]+)\.(\d+)\.[0-9a-f]+(?:\.([a-z0-9_+-]+))?\.pending$/.exec(name);
+  return m ? { sid: m[1], t: Number(m[2]), types: m[3] ? m[3].split('+') : null } : null;
+}
+
+// Remove every expired record (any session). Called on write as well as on
+// consume, so records nobody consumes (brevity_reinforce off, a spawn the
+// harness denied) never accumulate.
+function pruneExpiredRecords(dir, now) {
+  try {
+    for (const name of readdirSync(dir)) {
+      const r = parseRecord(name);
+      if (r && !(now - r.t < CONTRACT_PENDING_MS)) { try { unlinkSync(join(dir, name)); } catch { /* raced */ } }
+    }
+  } catch { /* fail open */ }
 }
 
 // spawn-guard: the contract (or the peer line) was appended to this spawn.
-export function noteContractAppended(sessionId, now = Date.now()) {
+// `agentTypes`: the type it will start as, then (after a rewrite) its
+// original type.
+export function noteContractAppended(sessionId, now = Date.now(), agentTypes = null) {
   try {
     const dir = pendingDir();
     mkdirSync(dir, { recursive: true });
+    pruneExpiredRecords(dir, now);
+    const list = (Array.isArray(agentTypes) ? agentTypes : agentTypes ? [agentTypes] : []).map(typeToken);
+    const tag = list.length ? `.${[...new Set(list)].join('+')}` : '';
     const rand = Math.random().toString(16).slice(2, 10);
-    writeFileSync(join(dir, `${safeSid(sessionId)}.${now}.${rand}.pending`), '', { flag: 'wx' });
+    writeFileSync(join(dir, `${safeSid(sessionId)}.${now}.${rand}${tag}.pending`), '', { flag: 'wx' });
   } catch { /* fail open: the worst case is one duplicated contract */ }
 }
 
-// SubagentStart: true when a spawn-guard rewrite for this session is waiting
-// (the oldest live one is consumed), so the hook must not reinforce. Expired
-// records of every session are removed on the way.
-export function consumeContractAppended(sessionId, now = Date.now()) {
+// SubagentStart: true when a spawn-guard rewrite for this session AND this
+// agent type is waiting (the oldest live one is consumed; a record whose
+// primary type matches is taken before one that matches only its pre-rewrite
+// type), so the hook must not reinforce. Expired records of every session are
+// removed on the way. `agentType` null: no type filter.
+export function consumeContractAppended(sessionId, now = Date.now(), agentType = null) {
   try {
     const dir = pendingDir();
+    const want = agentType === null ? null : typeToken(agentType);
     const mine = [];
+    pruneExpiredRecords(dir, now);
     for (const name of readdirSync(dir)) {
       const r = parseRecord(name);
-      if (!r) continue;
-      if (!(now - r.t < CONTRACT_PENDING_MS)) { try { unlinkSync(join(dir, name)); } catch { /* raced */ } continue; }
-      if (r.sid === safeSid(sessionId)) mine.push({ name, t: r.t });
+      if (!r || !(now - r.t < CONTRACT_PENDING_MS) || r.sid !== safeSid(sessionId)) continue;
+      const rank = want === null || !r.types ? 0 : r.types[0] === want ? 0 : r.types.includes(want) ? 1 : -1;
+      if (rank >= 0) mine.push({ name, t: r.t, rank });
     }
-    mine.sort((x, y) => x.t - y.t);
+    mine.sort((x, y) => x.rank - y.rank || x.t - y.t);
     for (const { name } of mine) {
       try { unlinkSync(join(dir, name)); return true; } catch { /* another start took it: try the next */ }
     }
     return false;
   } catch { return false; } // fail open: reinforce rather than lose the contract
+}
+
+// Remove files older than maxAgeMs from a marker directory (the hook's
+// brevity-started/<agent_id> markers: one empty file per agent, never read
+// back, so nothing else removes them). Opportunistic and fail-open.
+export function pruneStaleMarkers(dir, maxAgeMs, now = Date.now()) {
+  let removed = 0;
+  try {
+    for (const name of readdirSync(dir)) {
+      try {
+        const f = join(dir, name);
+        if (now - statSync(f).mtimeMs > maxAgeMs) { unlinkSync(f); removed++; }
+      } catch { /* raced or unreadable: leave it */ }
+    }
+  } catch { /* no dir yet */ }
+  return removed;
 }

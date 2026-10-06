@@ -49,8 +49,12 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, opt, passthrough, appendLog, stateDir } from './lib/context.mjs';
 import {
-  buildContract, resolveBrevity, consumeContractAppended, CONTRACT_MARKER, PEER_MARKER,
+  buildContract, resolveBrevity, consumeContractAppended, pruneStaleMarkers, CONTRACT_MARKER, PEER_MARKER,
 } from './lib/brevity.mjs';
+
+// brevity-started/<agent_id> markers are never read back, only created: drop
+// the ones older than this on each start so the directory stays small.
+const STARTED_MARKER_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 const argv = process.argv.slice(2);
 const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
@@ -87,6 +91,7 @@ function firstStartFor(agentId) {
   try {
     const dir = join(stateDir(), 'brevity-started');
     mkdirSync(dir, { recursive: true });
+    pruneStaleMarkers(dir, STARTED_MARKER_MAX_AGE_MS);
     writeFileSync(join(dir, safeMarkerName(agentId)), '', { flag: 'wx' });
     return true;
   } catch (e) {
@@ -114,7 +119,9 @@ function runStart(p) {
   // A repeat start for the same agent_id is skipped (this hook can run more
   // than once), and so is a start whose spawn-guard rewrite is on record.
   if (p.agent_id && !firstStartFor(p.agent_id)) passthrough();
-  if (consumeContractAppended(p.session_id)) passthrough();
+  // Only a record written for this start's own agent type counts: a start with
+  // no spawn-guard record (a workflow-subagent) must not eat another spawn's.
+  if (consumeContractAppended(p.session_id, Date.now(), p.agent_type || 'general-purpose')) passthrough();
 
   logBrevity({
     at: new Date().toISOString(),

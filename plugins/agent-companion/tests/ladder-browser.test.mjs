@@ -41,6 +41,56 @@ test('briefNeedsDroppedTools: tool names and unmistakable phrases, never a bare 
   assert.equal(briefNeedsDroppedTools('call mcp__ccd_session__mark_chapter').other, true);
 });
 
+test('briefNeedsDroppedTools: the browser servers by name, Chrome extension, in-the-browser checks and localhost screenshots are browser work', () => {
+  for (const brief of [
+    'use claude-in-chrome to log in and read the dashboard',
+    'call mcp__claude-in-chrome__navigate then read_page',
+    'use mcp__computer-use__screenshot to see the window',
+    'drive it with computer-use and click Save',
+    'verify the layout in the browser',
+    'check the UI in the browser at 375px',
+    'open http://127.0.0.1:5173 in the browser and look',
+    'install the Chrome extension and test the popup',
+    'take a screenshot of localhost:3000',
+    'screenshot of the dev server after the change',
+    'desktop UI automation of the settings window',
+  ]) assert.equal(briefNeedsDroppedTools(brief).browser, true, brief);
+});
+
+test('briefNeedsDroppedTools: ordinary words are not browser work', () => {
+  for (const brief of [
+    'browse the code for the handler',
+    'browse the repo and list the entry points',
+    'refactor the browserslist config',
+    'the browser field in package.json points at dist/index.js',
+    'Fix the UI layout bug in Header.vue',
+    'reduce computer use by kids in the survey copy',
+    'write a screenshot-diff script for the CSV report',
+    'run vitest and report the failures',
+  ]) assert.equal(briefNeedsDroppedTools(brief).browser, false, brief);
+});
+
+test('general-purpose + a claude-in-chrome / UI-in-the-browser brief + a started ladder: not swapped, the advisory names the browser variant; a rung is told the same', () => {
+  for (const [n, prompt] of [
+    ['c1', 'TYPE: bounded-feature\nUse claude-in-chrome to log in and read the page.'],
+    ['c2', 'TYPE: bounded-feature\nCheck the UI in the browser after the change.'],
+    ['c3', 'TYPE: bounded-feature\nTake a screenshot of localhost:3000.'],
+    ['c4', 'TYPE: bounded-feature\nUse mcp__computer-use__screenshot on the Settings window.'],
+  ]) {
+    const { dir, stateDir, cleanup } = makeFixture();
+    try {
+      seedStart(stateDir, `sess-${n}`, 'agent-companion:ac-sonnet-low');
+      const res = guard(dir, `sess-${n}`, { subagent_type: 'general-purpose', prompt });
+      assert.equal(updated(res)?.subagent_type, 'general-purpose', `${n}: not swapped to a rung that disallows the browser`);
+      assert.match(msgOf(res), /the brief names the browser/, n);
+      assert.match(msgOf(res), /agent-companion:ac-browser-opus/, n);
+      const rung = guard(dir, `sess-${n}-r`, { subagent_type: 'agent-companion:ac-sonnet-high', model: 'sonnet', prompt });
+      assert.match(msgOf(rung), /names the browser, which the ladder workers drop/, n);
+      assert.match(msgOf(rung), /agent-companion:ac-browser/, n);
+    } finally { cleanup(); }
+  }
+});
+
 test('general-purpose + browser brief + a started ladder: NOT rewritten to a rung (it would lose the browser); the advisory names the browser variant', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {

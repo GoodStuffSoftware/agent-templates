@@ -888,7 +888,16 @@ try {
       suffix += contract;
       // Tell the SubagentStart hook it is already delivered (it cannot see
       // the prompt). Canary runs never start a subagent: no entry to leak.
-      if (contract && !isCanary) noteContractAppended(sid);
+      // Nothing consumes the record when the SubagentStart reinforcement is
+      // off, so none is written then. The record carries the type this spawn
+      // will start as (and its pre-rewrite type, if the harness ignores the
+      // rewrite) so only a start of that type consumes it.
+      if (contract && !isCanary && opt('brevity_reinforce', true)) {
+        noteContractAppended(sid, Date.now(), [
+          ladderRewrite ? ladderRewrite.to : input.subagent_type,
+          ...(ladderRewrite ? [ladderRewrite.from] : []),
+        ]);
+      }
     } catch { /* fail open: no contract, spawn proceeds untouched */ }
 
     // 2. Operator-authored standing rules scoped to spawns, their conditions
