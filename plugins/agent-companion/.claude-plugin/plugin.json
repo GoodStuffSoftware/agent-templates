@@ -132,6 +132,12 @@
       "description": "The daily scout raises `compact_window_drift` when the cache advisor's newest FULL-read recommended auto-compact window differs from the baseline recommendation by more than this percentage. The baseline is the first full read and moves to the newest one each time the signal fires. Partial (time-budgeted) reads never count. Reads only the advisor's saved numbers-only history, never transcripts. A value that is not a finite number of 0 or more falls back to 20.",
       "default": 20
     },
+    "main_compact_floor_tokens": {
+      "type": "number",
+      "title": "Main-session compaction floor (tokens)",
+      "description": "0 (default) = OFF: nothing changes. A value from 100000 to 1000000 lets the MAIN session auto-compact later than the global auto-compact window: a hooks module vetoes the main session's auto-compaction until its context reaches this many tokens, while subagents keep compacting at the global window (CLAUDE_CODE_AUTO_COMPACT_WINDOW / autoCompactWindow). Manual /compact is never blocked. The status line and /context still show 'until auto-compact' against the global window. A value outside the range, or any error, fails open (compaction is not vetoed). Needs a Claude Code build that loads plugin hooks modules; elsewhere the option does nothing. Applies when the plugin loads.",
+      "default": 0
+    },
     "fit_guard": {
       "type": "boolean",
       "title": "Best-fit guard",
