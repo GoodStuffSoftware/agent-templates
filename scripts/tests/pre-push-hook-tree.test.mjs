@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import {
   mkdtempSync, rmSync, mkdirSync, copyFileSync, writeFileSync, chmodSync, realpathSync,
 } from 'node:fs';
-import { join, dirname, resolve, basename, posix } from 'node:path';
+import { join, dirname, resolve, basename, posix, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -40,7 +40,13 @@ function hermeticEnv() {
     emptyConfig = join(d, 'empty.gitconfig');
     writeFileSync(emptyConfig, '');
   }
-  return cleanGitEnv(process.env, { GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_NOSYSTEM: '1' });
+  const env = cleanGitEnv(process.env, { GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_NOSYSTEM: '1' });
+  // The hook refuses to run without `node` on PATH. ci-local --ci-parity hides every PATH dir that holds
+  // a `claude` binary, and on a machine where node and claude share a dir that hides node too. Put the
+  // node running this test first, so the hook finds it however PATH was trimmed.
+  const pathKey = Object.keys(env).find((k) => k.toLowerCase() === 'path') || 'PATH';
+  env[pathKey] = [dirname(process.execPath), env[pathKey]].filter(Boolean).join(delimiter);
+  return env;
 }
 
 // --- hookTreeMismatch (pure) ---------------------------------------------
