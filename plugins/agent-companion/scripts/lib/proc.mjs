@@ -9,8 +9,8 @@
 // rides the SAME spawn that creates it. A flag set on an outer/ancestor
 // process does not propagate through a shell hop or an unflagged child.
 // Measured on this machine ({{PROJECT}}, 2026-09-20) and documented in
-// ~/.claude/skills/team-orchestration/SKILL.md under "A dev server must
-// open NO window".
+// ~/.claude/skills/team-orchestration/references/worktrees-and-processes.md (item 9: "A dev server must
+// open NO window").
 //
 // Several call sites here (`claude --version`, `claude plugin validate`) are
 // STUCK with a shell on Windows regardless, because `claude` is a .cmd shim

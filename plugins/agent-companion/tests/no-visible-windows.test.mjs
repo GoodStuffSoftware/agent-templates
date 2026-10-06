@@ -5,7 +5,7 @@
 // focus-stealing window unless windowsHide rides the SAME child_process call
 // that creates it -- a flag on an outer/ancestor spawn does not propagate.
 // See scripts/lib/proc.mjs's module banner and
-// ~/.claude/skills/team-orchestration/SKILL.md ("A dev server must open NO
+// ~/.claude/skills/team-orchestration/references/worktrees-and-processes.md (item 9, "A dev server must open NO
 // window") for the full mechanism and how it was found ({{PROJECT}},
 // 2026-09-20). bench/ carries the same risk at higher volume: a benchmark
 // batch spawns dozens of `claude` processes (plus git/node helper calls) in
