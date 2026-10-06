@@ -2,6 +2,16 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.30.2 — 2026-10-06
+
+Test isolation, round two. The suite no longer reads the operator's real home from a child process, and a violation now fails the file that caused it.
+
+- Test fix. The 0.29.25 isolation covered what the plugin resolves through its home override. It left `os.homedir()` and git's `~` pointing at the operator's real home, so any child a test spawned could still read it. Every test process now points `HOME`, `USERPROFILE` and `GIT_CONFIG_GLOBAL` at an empty sandbox directory, and every node child and grandchild arms the same real-`~/.claude` tripwire through a `NODE_OPTIONS` preload (`tests/child-guard.mjs`). A fail-open child that swallows the throw is still recorded.
+- A violation now exits the offending test file non-zero. It used to be reported by a root hook that node:test attributed to `tests/isolate.mjs`, so ci-local's isolated re-run passed and the run counted as flaky (non-blocking outside `--ci-parity`). The file itself now fails, and so does its re-run.
+- `runHook` and `runScript` run from the sandbox instead of the checkout. From the checkout, a hook walking up for `.claude/settings*.json` read the operator's `~/.claude/settings.json` (eight bash-tail tests depended on it), and `detect.mjs` read the operator's real dev folder.
+- Sandbox temp dirs carry the owner pid (`ac-suite-<pid>-*`, `ac-test-<pid>-*`), and a startup sweep removes the ones a killed run left behind: only when the pid is dead, or by age for the old pid-less names. A live run's directory is never touched.
+- Fix (`scripts/detect.mjs`, `scripts/lib/publication-sweep.mjs`). The operator's OS handle used for scrubbing now comes from `homeRoot()`, the plugin's home resolver, instead of `os.homedir()`. With a redirected home the handle was the generic word "home". Behaviour is unchanged when the home is not redirected.
+
 ## 0.30.1 — 2026-10-06
 
 A test fix for Linux CI, and a fix for a fetch that could leave git running on a loaded machine.
