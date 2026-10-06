@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { makeFixture, runHook, runScript, readJsonl } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
-import { gitBrief, landed, STAMP_FILE, FETCH_FRESH_MS, SQUASH_NOTE } from '../scripts/git-brief.mjs';
+import { gitBrief, landed, runFetch, STAMP_FILE, FETCH_FRESH_MS, SQUASH_NOTE } from '../scripts/git-brief.mjs';
 
 const IDENT = {
   GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
@@ -321,13 +321,25 @@ test('landed: an unknown or deleted ref is UNKNOWN, not NOT on', () => withRepos
 // Git host does. The test thread blocks inside spawnSync while git runs, so the
 // kernel accepts the connection and Node sees it afterwards: what matters is
 // whether the client end is closed once the call returns.
+//
+// The socket is drained (resume) on purpose. git sends its HTTP request and then
+// waits; a killed process's kernel ends the connection one of two ways. Windows
+// (taskkill /F) resets it, which surfaces as ECONNRESET and closes the socket
+// whether or not it was read. Linux (SIGKILL) closes it gracefully with a FIN,
+// and Node only reports that end of stream once everything before it has been
+// read: an undrained socket holding the request bytes never emits 'end', so
+// never 'close', and a correctly killed tree would read as an orphan. Draining
+// changes nothing for a survivor: a live git-remote-http sends neither FIN nor
+// RST, so its socket still never closes.
 async function hangServer() {
   const sockets = [];
   const srv = createServer((s) => {
-    const rec = { s, closed: false };
+    const rec = { s, closed: false, events: [] };
     sockets.push(rec);
-    s.on('error', () => {});
-    s.on('close', () => { rec.closed = true; });
+    s.resume();
+    s.on('end', () => rec.events.push('end'));
+    s.on('error', (e) => rec.events.push(`error ${e.code}`));
+    s.on('close', () => { rec.closed = true; rec.events.push('close'); });
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   return { port: srv.address().port, sockets, close: () => { for (const x of sockets) x.s.destroy(); srv.close(); } };
@@ -351,11 +363,45 @@ test('fetch timeout: the whole git process tree is killed, so no git-remote-http
     assert.equal(r.fetch_outcome, 'timeout');
     assert.ok(r.line, 'the line still prints');
     assert.ok(took < 6000, `returned in ${took} ms`);
-    await new Promise((res) => setTimeout(res, 1500));
+    // Wait for the close events themselves (bounded), not a fixed sleep.
+    for (const until = Date.now() + 5000; Date.now() < until;) {
+      if (hs.sockets.length >= 1 && hs.sockets.every((x) => x.closed)) break;
+      await new Promise((res) => setTimeout(res, 50));
+    }
     assert.ok(hs.sockets.length >= 1, 'git did connect to the hang server');
-    assert.ok(hs.sockets.every((x) => x.closed), 'every connection was closed: no orphaned git-remote-http');
+    assert.ok(hs.sockets.every((x) => x.closed),
+      `every connection was closed: no orphaned git-remote-http (socket events: ${JSON.stringify(hs.sockets.map((x) => x.events))})`);
   } finally {
     for (const [k, v] of [['AC_GIT_BRIEF_FETCH_TIMEOUT_MS', saved.t], ['GIT_HTTP_LOW_SPEED_LIMIT', saved.l], ['GIT_HTTP_LOW_SPEED_TIME', saved.s]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    hs.close(); fx.cleanup();
+  }
+});
+
+// On a loaded machine the runner can take longer than the cap plus slack (node
+// start-up, then taskkill), so the spawnSync backstop kills the runner before
+// the runner has killed git. Forced here by a backstop shorter than the cap.
+test('fetch backstop: when the runner itself is killed, git\'s tree is still killed, so no git-remote-http survives', async () => {
+  const hs = await hangServer();
+  const fx = makeFixture();
+  const saved = { l: process.env.GIT_HTTP_LOW_SPEED_LIMIT, s: process.env.GIT_HTTP_LOW_SPEED_TIME };
+  try {
+    const { work } = makeRepos(fx.dir);
+    git(work, 'remote', 'set-url', 'origin', `http://127.0.0.1:${hs.port}/r.git`);
+    process.env.GIT_HTTP_LOW_SPEED_LIMIT = '1';
+    process.env.GIT_HTTP_LOW_SPEED_TIME = '120';
+    const outcome = runFetch(work, ['fetch', '--quiet', 'origin', 'main'], 60000, { backstopMs: 5000 });
+    assert.equal(outcome, 'timeout');
+    for (const until = Date.now() + 5000; Date.now() < until;) {
+      if (hs.sockets.length >= 1 && hs.sockets.every((x) => x.closed)) break;
+      await new Promise((res) => setTimeout(res, 50));
+    }
+    assert.ok(hs.sockets.length >= 1, 'git did connect to the hang server');
+    assert.ok(hs.sockets.every((x) => x.closed),
+      `every connection was closed: no orphaned git-remote-http (socket events: ${JSON.stringify(hs.sockets.map((x) => x.events))})`);
+  } finally {
+    for (const [k, v] of [['GIT_HTTP_LOW_SPEED_LIMIT', saved.l], ['GIT_HTTP_LOW_SPEED_TIME', saved.s]]) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
     hs.close(); fx.cleanup();
