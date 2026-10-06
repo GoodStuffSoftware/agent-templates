@@ -166,7 +166,16 @@ export function portBaseForSlot(slot, { base = 20000, rangeSize = 200 } = {}) {
 //   "always affordable" so pure scheduling logic can be tested without the
 //   real machine's memory.
 // onEvent({ type, ... }): optional instrumentation hook for tests/logging --
-//   'start' | 'finish' | 'collision-retry-queued'.
+//   'start' | 'finish' | 'collision-retry-queued' | 'rescore-retry-queued' |
+//   'stopped'. It may be async: every call is AWAITED before the scheduler
+//   moves on, so whatever a 'finish' handler does (a test releasing a port it
+//   was holding, say) has completed before any retry it triggers can be
+//   admitted. Un-awaited, a solo retry could launch while the handler was
+//   still mid-release. A throwing (or rejecting) onEvent is NOT fatal: the
+//   error is written to stderr and scheduling carries on, so a buggy hook
+//   never abandons runs already in flight. An onEvent that itself waits on
+//   later scheduler progress (the next 'start', say) deadlocks, since the
+//   scheduler is waiting on it.
 //
 // Returns the array of every row produced (including collision rows and
 // their retries), in FINISH order -- not necessarily the same order as
@@ -186,6 +195,18 @@ export async function scheduleRuns({
   const active = new Map(); // runId -> { run, promise, slot }
   const usedSlots = new Set();
   const results = [];
+
+  // Every onEvent call goes through here: awaited (ordering, see above) but
+  // never allowed to throw into the scheduling loop.
+  const emit = async (event) => {
+    try {
+      await onEvent(event);
+    } catch (error) {
+      process.stderr.write(`bench/scheduler.mjs: onEvent('${event.type}') threw (ignored, scheduling continues): `
+        + `${(error && error.stack) || error}
+`);
+    }
+  };
 
   const nextFreeSlot = () => {
     for (let s = 0; s < effectiveConcurrency; s += 1) if (!usedSlots.has(s)) return s;
@@ -223,7 +244,7 @@ export async function scheduleRuns({
           slot, concurrency: effectiveConcurrency, coScheduledRunIds,
         }));
         active.set(candidate.id, { run: candidate, promise, slot });
-        onEvent({ type: 'start', runId: candidate.id, slot, coScheduledRunIds, concurrency: effectiveConcurrency });
+        await emit({ type: 'start', runId: candidate.id, slot, coScheduledRunIds, concurrency: effectiveConcurrency });
         admittedThisPass = true;
         break; // restart the scan against the updated active set
       }
@@ -234,7 +255,7 @@ export async function scheduleRuns({
         // An intentional stop (auth_error / JUDGE_REFUSED / batch ceiling)
         // with runs still queued -- not a deadlock. Leave them un-run; the
         // caller reads results.length < runs.length as the stop signal.
-        onEvent({ type: 'stopped', remaining: queue.length });
+        await emit({ type: 'stopped', remaining: queue.length });
         break;
       }
       if (queue.length > 0) {
@@ -266,7 +287,7 @@ export async function scheduleRuns({
       exec_err: String((settled.error && settled.error.stack) || settled.error),
     };
     results.push(row);
-    onEvent({ type: 'finish', runId: settled.id, row });
+    await emit({ type: 'finish', runId: settled.id, row });
 
     if (row.collision && !finishedEntry.run.isRetry) {
       // Legacy full re-run retry -- ONLY reachable now for the pre-model /
@@ -284,7 +305,7 @@ export async function scheduleRuns({
         resources: { ...(finishedEntry.run.resources || {}), exclusive: true },
       };
       queue.push(retryRun);
-      onEvent({ type: 'collision-retry-queued', runId: settled.id, retryId: retryRun.id });
+      await emit({ type: 'collision-retry-queued', runId: settled.id, retryId: retryRun.id });
     } else if (row.needs_rescore && !finishedEntry.run.isRetry) {
       // Round 2 fix: a scoring-phase failure that happened while genuinely
       // co-scheduled. The model's sandbox work is already complete and
@@ -309,7 +330,7 @@ export async function scheduleRuns({
         resources: { ...(finishedEntry.run.resources || {}), exclusive: true },
       };
       queue.push(retryRun);
-      onEvent({ type: 'rescore-retry-queued', runId: settled.id, retryId: retryRun.id });
+      await emit({ type: 'rescore-retry-queued', runId: settled.id, retryId: retryRun.id });
     }
   }
 
