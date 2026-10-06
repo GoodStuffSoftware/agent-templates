@@ -235,7 +235,7 @@ if (out.selfReview) {
   console.log(s.protocol === 'none'
     ? `self-review:    none — no ladder rung for this route carries or can take the protocol; the lead spawns the reviewer above`
     : `self-review:    the writer spawns that reviewer itself (protocol ${s.protocol === 'rung' ? `in ${out.spawnAgentNamespaced}'s body` : 'appended to its brief by the spawn guard'}), ` +
-      `runs ${s.fixRounds === 1 ? 'one fix round' : `${s.fixRounds} fix round(s)`} and returns the verdict; the lead does not spawn a reviewer unless the brief carries \`${s.optOut}\``);
+      `runs ${s.fixRounds === 1 ? 'one fix round' : `${s.fixRounds} fix round(s)`}, returns the verdict and lands its own work; the lead does not spawn a reviewer unless the brief carries \`${s.optOut}\``);
 }
 if (route?.layer === 'profile') console.log(`route layer:    your routing profile (rev ${route.profileRevision}) — /ac routing why ${out.taskType} explains it`);
 if (route?.cacheTtl) console.log(`cache TTL hint: ${route.cacheTtl} (advisory, from your routing profile; no guard enforces it)`);

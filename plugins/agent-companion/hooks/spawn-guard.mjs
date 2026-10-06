@@ -356,7 +356,7 @@ try {
   // --- WRITER inferred from the caller (self-review, 2026-09-28) -----------
   // A parity-sized review spawned by a SUBAGENT with no WRITER line at all is
   // taken to gate that subagent's own work — the self-review shape, where an
-  // architect-class writer spawns its own reviewer (lib/self-review.mjs). Its
+  // writer spawns its own reviewer (lib/self-review.mjs). Its
   // writer is the caller's own agent_type from the subagent hook payload,
   // resolved through agentDefinition() to the model and effort its
   // definition pins (the same place the harness reads them). Never a guess:
@@ -1298,7 +1298,7 @@ try {
   // A parity review spawned by a subagent whose caller is not positively a
   // reviewer (the broad count), and the narrow one the self-review flow is
   // measured on: the caller's own row was FOUND and declares a type listed in
-  // selfReview.types, so this is an architect-class writer reviewing itself.
+  // selfReview.types, so this is a writer reviewing itself.
   const reviewBySubagent = typeIsParity && subagentCaller && !reviewByReviewer;
   const selfReviewSpawn = reviewBySubagent && !!callerDeclaredType && !!srCfg && srCfg.types.includes(callerDeclaredType);
 
@@ -1371,7 +1371,7 @@ try {
             } catch { home = null; }
             selfReviewNote = `agent-companion (self-review): TYPE: ${declaredType} is a self-reviewing type, but ` +
               `"${runningType || 'general-purpose'}" carries no self-review protocol and is no ladder rung it can be added ` +
-              `to, so this writer will not spawn its own reviewer: the lead reviews it` +
+              `to, so this writer will not spawn its own reviewer, and the lead reviews it` +
               `${home ? `. Spawn ${home} (its routed rung) for a self-reviewed result` : ''}; ` +
               `add \`${sr.optOut.line}\` to say the lead reviews it on purpose.`;
           }
@@ -1589,8 +1589,7 @@ try {
       'A review ends with its verdict: return it to the writer that spawned you, who runs the fix round and ' +
       'returns your verdict line verbatim. Whether a change needs a second review is the lead\'s call, not the ' +
       'reviewer\'s.\n\n' +
-      'If this is not a review of a review (you were re-tasked as a fixer, say, or the brief carries a pasted ' +
-      'reviewer header), return to the lead with the work and the reason: the lead can spawn the review itself. ' +
+      'If this is not a review of a review (the brief carries a pasted reviewer header, say), return to the lead with the work and the reason: the lead can spawn the review itself. ' +
       'The operator can turn this deny off with review_recursion_guard: false.'
     );
   }

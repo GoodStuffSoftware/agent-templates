@@ -74,15 +74,20 @@ silently escalated *into* it either — a writer on that tier gets the best
 tier that *is* a routing destination as its reviewer, which still demands its
 own warrant rather than inheriting the writer's.
 
-## Self-review: an architect-class writer spawns its own parity reviewer
+## Self-review: every writer spawns its own parity reviewer
 
-Parity says how big the reviewer is. Self-review says who spawns it. For the
-architect-class types listed in `selfReview` (novel-design and
-critical-change since 2026-10-02; large-refactor and long-autonomous-run were
-listed until then), the writer commits and spawns one
-foreground reviewer on its own rung, runs one fix round, and returns the
-reviewer's verdict line verbatim with the review path, the post-fix sha and
-any findings it disputes. The lead is out of the first review pass, not out
+Parity says how big the reviewer is. Self-review says who spawns it. For every
+writer type listed in `selfReview` (bounded-feature, integration,
+debug-root-cause, large-refactor, novel-design, critical-change and
+long-autonomous-run since 2026-10-06, the lean worker shape; it was
+novel-design and critical-change only from 2026-10-02), the writer commits and
+spawns one foreground reviewer on its own rung, runs one fix round, lands its
+own work (merge, plus the deploy check where the repo deploys on merge; the
+repo's release gates stay) and returns the reviewer's verdict line verbatim
+with the review path, the post-fix sha and any findings it disputes.
+`mechanical-edit` and `subagent-worker` are not listed: they are the edit
+workers a writer spawns for a 15+ call job, and the parent writer's one review
+covers them. The lead is out of the first review pass and the landing, not out
 of the decision.
 
 **Why the writer, not the lead.** A lead-routed review costs two extra lead
@@ -113,8 +118,8 @@ the lead can read:
   `spawns.jsonl` row joins to the writer's (`caller_tool_use_id` = the
   writer row's `tool_use_id`), and the relayed verdict line should match the
   first line of the review file. A writer that returns with no review file
-  skipped its review. The lead also settles disputed findings and lands the
-  work.
+  skipped its review. The lead also settles disputed findings; the writer
+  lands the work.
 
 **Bounded, not recursive.** The protocol says a writer never re-reviews after
 its fix round and a reviewer never spawns a reviewer, so the intended chain is
@@ -138,12 +143,13 @@ ladder rung gets the same generated text appended to its brief at spawn,
 sized to that rung. A built-in type pins no effort, so it gets a note
 instead, and a project agent keeps its own wording.
 
-**Why not medium-effort writers yet.** The saving is lead round-trips, and
-the cost is a parity reviewer spawned on every such task, including ones the
-lead would have waved through. For architect-class work a review is always
-warranted. For bounded work that is not yet shown, so it is measured first
-(`self_review`, `self_review_expected` and `review_by_subagent` in
-`spawns.jsonl`).
+**Medium-effort writers self-review too (2026-10-06).** The cost is a parity
+reviewer spawned on every such task, including ones the lead would have waved
+through; the operator accepted that price and rejected a risk gate ("a reviewer
+only for risky changes"). It is still measured (`self_review`,
+`self_review_expected` and `review_by_subagent` in `spawns.jsonl`), so the cost
+stays visible. The protocol lands the work only after the fix round, and stops
+before any merge while a blocker is disputed or left unfixed.
 
 ## Consequence floors: six things that never depend on difficulty
 
@@ -280,9 +286,13 @@ tier that does not cause rework, as a new trial (`trialVersion: 4`, since
   with 21% re-spawned, against high at 16.6 with 10% re-spawned.
   `novel-design` and `critical-change` stay on xhigh (critical-change on xhigh:
   n=4, no re-spawns).
-- Self-review is narrowed to `novel-design` and `critical-change`: a reviewer
-  cost 9.85 plan units per spawn on xhigh against 3.78 on opus/medium, 172
-  units in the week, so the other two types go back to a lead-routed review.
+- Self-review was narrowed to `novel-design` and `critical-change` on
+  2026-10-02 (a reviewer cost 9.85 plan units per spawn on xhigh against 3.78
+  on opus/medium, 172 units in the week). The 2026-10-06 lean worker shape
+  reverses the narrowing: every change gets one separate reviewer at the
+  writer's tier, spawned by the writer, and the operator rejected "a reviewer
+  only for risky changes". About 3.78 units per opus/medium reviewer spawn is
+  the accepted price.
 - Every other type is unchanged, in particular `bounded-feature`,
   `integration` and `debug-root-cause`, whose case is capability.
 
