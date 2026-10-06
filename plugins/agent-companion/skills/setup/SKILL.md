@@ -1,6 +1,6 @@
 ---
 name: setup
-description: One-time agent-companion setup - verify the install, choose options, schedule the daily calibration scout locally (desktop task) and in the cloud (routine), prove the guards fire. Use when installing on a new machine, "how do I set up agent-companion", "schedule the scout", "is the scout running", or when routing or guards seem unchecked.
+description: One-time agent-companion setup: verify the install, set options, schedule the scout, prove the guards fire. Use on a new machine or for "schedule the scout".
 ---
 
 # Set up agent-companion

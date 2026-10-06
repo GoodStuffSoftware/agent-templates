@@ -1,6 +1,6 @@
 ---
 name: model-benchmark
-description: Procedure for re-running the model x effort benchmark (scripts/benchmark.mjs, bench/). Use when a new model ships, an alias is remapped, the scout raises `harness_version_changed` or `routing_trial_review_due`, the operator asks "is model X worth it" or "should this route to a different tier", or a re-measure date in config/model-tiers.json is reached. Not for one-off task runs.
+description: Re-run the model x effort benchmark (scripts/benchmark.mjs). Use when a model ships, an alias remaps, or the scout flags routing_trial_review_due.
 ---
 
 # Model x effort benchmark

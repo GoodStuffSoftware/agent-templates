@@ -111,12 +111,12 @@ export const COPYABLE_PROMPT_WHEN = [
 // session start and has to survive a long session. Exported so the tests pin
 // the exact injected wording.
 export const LEAD_EFFORT_CHECK_TEXT = [
-  'If this session will orchestrate agents (spawning workers or reviewers, several open threads, or releases), check your own effort before the first spawn and again after any resume or compaction: call get_session with session_id "self" and read its effort field. An orchestration lead runs at xhigh.',
-  'Unattended (get_session shows a scheduledTaskId, a headless or -p run, or no AskUserQuestion tool): do not ask. Continue at the current effort and state it once in your output.',
-  'Interactive and below xhigh: ask with the AskUserQuestion tool (the options selector), not in prose, and make no spawn and no other tool call until it is answered. Header "Lead effort"; the question names the current effort and why this looks like orchestration.',
-  'Option 1 "Raise to xhigh (Recommended)": tell the operator to raise it with the app\'s effort control for this session, and wait; make no spawn until get_session "self" shows xhigh or the operator says to continue. Do not set it yourself: the app refuses a session changing its own effort.',
+  'Orchestrating agents (workers, reviewers, several open threads, releases)? Before the first spawn and again after any resume or compaction, call get_session with session_id "self" and read its effort field; an orchestration lead runs at xhigh.',
+  'Unattended (scheduledTaskId in get_session, a headless or -p run, or no AskUserQuestion tool): do not ask; state the effort once.',
+  'Interactive and below xhigh: ask with the AskUserQuestion tool (the options selector), not in prose; no spawn and no other tool call until it is answered. Header "Lead effort"; name the current effort and why this looks like orchestration.',
+  'Option 1 "Raise to xhigh (Recommended)": the operator raises it with the app\'s effort control (you cannot); wait until get_session "self" shows xhigh or they say continue.',
   'Option 2 "Stay at <current>": continue, and do not ask again this session.',
-  'Never raise to max this way, never lower the effort.',
+  'Never raise to max, never lower.',
 ].join(' ');
 
 // The pr-wait discoverability line. The path is the REAL one, resolved here
