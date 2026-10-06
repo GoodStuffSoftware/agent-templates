@@ -10,6 +10,8 @@ Test-flake fixes. Two product-code changes, two test-only.
 - `detect`: `rawOsHandles` resolves the home directory with `homeRoot()` instead of `os.homedir()`.
 - Tests: the `runHook`/`runScript` hang guard goes from 15 s to 60 s (`HANG_GUARD_TIMEOUT_MS`), and a child it kills now leaves a "killed by hang guard" note on stderr. The `pr-wait` tests share the same guard.
 - Tests: `publication-sweep` and `detect` test runs put a `claude` stub first on PATH and disable `gh` CI-status lookups.
+- Tests: a shared `tests/detect-env.mjs` `claude` stub (missing or fixed-version) for every test that runs `detect.mjs`, so no test spawns the real CLI.
+- Tests: git-brief's 6000 ms fetch bound applies to the measured fetch step (`steps_ms.fetch`), not the whole call.
 
 ## 0.30.1 — 2026-10-06
 
