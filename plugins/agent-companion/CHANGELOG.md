@@ -4,14 +4,14 @@ All notable changes to the `agent-companion` plugin. Dates are UTC.
 
 ## 0.30.3 — 2026-10-06
 
-Test-flake fixes. Two product-code changes, two test-only.
+Test-flake fixes. Two product-code changes, the rest test-only.
 
-- `pr-wait`: no longer reports TIMEOUT after a single poll when that poll overruns the deadline. It always takes a last look that begins at or after the deadline, in both PR mode and `--run` mode.
-- `detect`: `rawOsHandles` resolves the home directory with `homeRoot()` instead of `os.homedir()`.
+- `pr-wait`: no longer reports TIMEOUT after a single poll when that poll overruns the deadline. It always takes a last look that begins at or after the deadline, in both PR mode and `--run` mode. A timeout can now run up to about two polls past the deadline.
+- `detect`: `rawOsHandles` resolves the home directory with `homeRoot()` instead of `os.homedir()`, so a test's home override is honoured by the scrubber's home basename; production behaviour is unchanged when no override is set.
 - Tests: the `runHook`/`runScript` hang guard goes from 15 s to 60 s (`HANG_GUARD_TIMEOUT_MS`), and a child it kills now leaves a "killed by hang guard" note on stderr. The `pr-wait` tests share the same guard.
 - Tests: `publication-sweep` and `detect` test runs put a `claude` stub first on PATH and disable `gh` CI-status lookups.
 - Tests: a shared `tests/detect-env.mjs` `claude` stub (missing or fixed-version) for every test that runs `detect.mjs`, so no test spawns the real CLI.
-- Tests: git-brief's 6000 ms fetch bound applies to the measured fetch step (`steps_ms.fetch`), not the whole call.
+- Tests: git-brief's 6000 ms fetch bound applies to the measured fetch step (`steps_ms.fetch`), not the whole call; the rest of the call (whole-call time minus the measured local git steps) keeps its own 6000 ms bound.
 - Tests: `memory-vault-byte-exact` syncs use the file's own git-chain guard (`runVault`).
 
 ## 0.30.1 — 2026-10-06
