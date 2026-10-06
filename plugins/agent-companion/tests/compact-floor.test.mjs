@@ -10,11 +10,12 @@ import { join } from 'node:path';
 import { PLUGIN_ROOT } from './helpers.mjs';
 import {
   parseFloor, decideCompact, appendBounded, register,
-  MIN_FLOOR, MAX_FLOOR, LOG_MAX_LINES, SKIP_REASON, SKIP_REASON_PREFIX,
+  MIN_FLOOR, MAX_FLOOR, WINDOW_MARGIN, LOG_MAX_LINES, SKIP_REASON, SKIP_REASON_PREFIX,
 } from '../hooks/compact-floor.mjs';
 
 const FLOOR = 367000;
-const decide = (over) => decideCompact({ parsed: parseFloor(FLOOR), trigger: 'auto', agentId: undefined, tokens: 100000, ...over });
+const WINDOW_1M = 1000000;
+const decide = (over) => decideCompact({ parsed: parseFloor(FLOOR), trigger: 'auto', agentId: undefined, tokens: 100000, window: WINDOW_1M, ...over });
 
 test('main session below the floor is skipped', () => {
   assert.equal(decide({ tokens: 366999 }).action, 'skip');
@@ -32,9 +33,50 @@ test('a subagent always passes, whatever its tokens', () => {
   assert.equal(decide({ agentId: 'agent-one', tokens: 1000 }).why, 'subagent');
 });
 
-test('non-auto triggers pass', () => {
-  for (const trigger of ['manual', 'precompute', 'reactive', undefined]) {
+test('manual, plugin and unknown triggers pass', () => {
+  for (const trigger of ['manual', 'plugin', 'reactive', undefined]) {
     assert.equal(decide({ trigger, tokens: 1000 }).action, 'pass', String(trigger));
+  }
+});
+
+test('precompute is held below the floor like auto, and passes at it', () => {
+  assert.equal(decide({ trigger: 'precompute', tokens: 184000 }).action, 'skip');
+  assert.equal(decide({ trigger: 'precompute', tokens: FLOOR }).action, 'pass');
+  assert.equal(decide({ trigger: 'precompute', agentId: 'agent-one', tokens: 1000 }).action, 'pass');
+});
+
+test('window clamp: 200K window + floor 367000 never vetoes', () => {
+  for (const tokens of [60000, 167000, 190000]) {
+    const d = decide({ window: 200000, tokens });
+    assert.equal(d.action, 'pass', String(tokens));
+    assert.equal(d.floor, 200000 - WINDOW_MARGIN);
+    assert.equal(d.clamped, true);
+  }
+  assert.equal(decide({ window: 200000, tokens: 49999 }).action, 'skip', 'below the clamped 50K floor');
+});
+
+test('window clamp: 1M window + floor 367000 vetoes below 367K, unclamped', () => {
+  const d = decide({ tokens: 366999 });
+  assert.equal(d.action, 'skip');
+  assert.equal(d.floor, FLOOR);
+  assert.equal(d.clamped, false);
+});
+
+test('window clamp: 1M window + floor 990000 is held to 850K', () => {
+  const parsed = parseFloor(990000);
+  assert.deepEqual(parsed, { floor: 990000 });
+  const d = decideCompact({ parsed, trigger: 'auto', tokens: 849999, window: WINDOW_1M });
+  assert.equal(d.action, 'skip');
+  assert.equal(d.floor, 850000);
+  assert.equal(d.clamped, true);
+  assert.equal(decideCompact({ parsed, trigger: 'auto', tokens: 850000, window: WINDOW_1M }).action, 'pass');
+});
+
+test('window missing or unusable fails open', () => {
+  for (const window of [undefined, null, NaN, 0, -1, '1000000', Infinity]) {
+    const d = decide({ window, tokens: 1000 });
+    assert.equal(d.action, 'pass', String(window));
+    assert.equal(d.why, 'no-window');
   }
 });
 
@@ -84,14 +126,14 @@ test('appendBounded keeps the last LOG_MAX_LINES lines', () => {
 
 // ---- register() against a fake engine ------------------------------------
 
-function fakeEngine({ options, tokens = 100000, env = { CLAUDE_PLUGIN_DATA: '/data/ac' }, usageThrows = false, writeThrows = false } = {}) {
+function fakeEngine({ options, tokens = 100000, window = WINDOW_1M, env = { CLAUDE_PLUGIN_DATA: '/data/ac' }, usageThrows = false, writeThrows = false } = {}) {
   const files = new Map();
   let usageCalls = 0;
   let clock = Date.parse('2026-10-06T12:00:00Z');
   const $ = {
     env: { get: async (n) => env[n] },
     clock: { now: async () => (clock += 1000) },
-    session: { usage: async () => { usageCalls += 1; if (usageThrows) throw new Error('boom'); return { context: { tokens: typeof tokens === 'function' ? tokens() : tokens } }; } },
+    session: { usage: async () => { usageCalls += 1; if (usageThrows) throw new Error('boom'); return { context: { tokens: typeof tokens === 'function' ? tokens() : tokens, ...(window === null ? {} : { window }) } }; } },
     fs: {
       exists: async (p) => files.has(p),
       read: async (p) => files.get(p),
@@ -133,8 +175,9 @@ test('register: subagent and non-auto pass without reading usage or logging', as
   const t = fakeEngine({ options: { main_compact_floor_tokens: 367000 }, tokens: 1000 });
   await t.fire({ trigger: 'auto', agentId: 'abc', messages: [] });
   await t.fire({ trigger: 'manual', messages: [] });
-  await t.fire({ trigger: 'precompute', messages: [] });
-  assert.equal(t.nexted.length, 3);
+  await t.fire({ trigger: 'plugin', messages: [] });
+  await t.fire({ trigger: 'precompute', agentId: 'abc', messages: [] });
+  assert.equal(t.nexted.length, 4);
   assert.equal(t.usageCalls(), 0);
   assert.equal(t.files.size, 0);
 });
@@ -181,6 +224,64 @@ test('register: AGENT_COMPANION_STATE_DIR wins, then the data dir', async () => 
   const a = fakeEngine({ options: { main_compact_floor_tokens: 367000 }, tokens: 1000, env: { AGENT_COMPANION_STATE_DIR: '/state', CLAUDE_PLUGIN_DATA: '/data/ac' } });
   await a.fire({ trigger: 'auto', messages: [] });
   assert.ok(a.files.has('/state/compact-floor.log'));
+});
+
+test('register: precompute below the floor is skipped silently, at the floor it passes', async () => {
+  let tokens = 184000;
+  const t = fakeEngine({ options: { main_compact_floor_tokens: 367000 }, tokens: () => tokens });
+  for (let i = 0; i < 5; i++) assert.equal((await t.fire({ trigger: 'precompute', messages: [] })).skip, SKIP_REASON);
+  assert.equal(t.nexted.length, 0);
+  assert.equal(t.logLines().length, 0, 'a vetoed precompute neither logs nor sets the first-veto flag');
+  tokens = 367000;
+  assert.deepEqual(await t.fire({ trigger: 'precompute', messages: [] }), { messages: ['compacted'] });
+  assert.equal(t.nexted.length, 1);
+  assert.equal(t.logLines().length, 0, 'a precompute pass is not logged either');
+});
+
+test('register: 200K window + floor 367000 passes, and the clamp is logged once', async () => {
+  const t = fakeEngine({ options: { main_compact_floor_tokens: 367000 }, tokens: 167000, window: 200000 });
+  for (let i = 0; i < 4; i++) assert.deepEqual(await t.fire({ trigger: 'auto', messages: [] }), { messages: ['compacted'] });
+  assert.equal(t.nexted.length, 4);
+  const lines = t.logLines();
+  assert.equal(lines.filter((l) => /clamp: floor 367000 .* window 200000; enforcing 50000/.test(l)).length, 1);
+  assert.ok(lines.some((l) => /pass: .* floor=50000/.test(l)));
+});
+
+test('register: 1M window + floor 367000 vetoes below 367K and passes at it, with no clamp line', async () => {
+  let tokens = 300000;
+  const t = fakeEngine({ options: { main_compact_floor_tokens: 367000 }, tokens: () => tokens });
+  assert.equal((await t.fire({ trigger: 'auto', messages: [] })).skip, SKIP_REASON);
+  tokens = 367000;
+  assert.deepEqual(await t.fire({ trigger: 'auto', messages: [] }), { messages: ['compacted'] });
+  assert.ok(!t.logLines().some((l) => /clamp:/.test(l)));
+});
+
+test('register: 1M window + floor 990000 is clamped to 850K', async () => {
+  let tokens = 849000;
+  const t = fakeEngine({ options: { main_compact_floor_tokens: 990000 }, tokens: () => tokens });
+  assert.equal((await t.fire({ trigger: 'auto', messages: [] })).skip, SKIP_REASON);
+  tokens = 850000;
+  assert.deepEqual(await t.fire({ trigger: 'auto', messages: [] }), { messages: ['compacted'] });
+  assert.ok(t.logLines().some((l) => /clamp: floor 990000 .* enforcing 850000/.test(l)));
+});
+
+test('register: window missing passes and logs once, auto and precompute alike', async () => {
+  const t = fakeEngine({ options: { main_compact_floor_tokens: 367000 }, tokens: 1000, window: null });
+  for (const trigger of ['auto', 'precompute', 'auto']) {
+    assert.deepEqual(await t.fire({ trigger, messages: [] }), { messages: ['compacted'] });
+  }
+  assert.equal(t.nexted.length, 3);
+  assert.equal(t.logLines().length, 1);
+  assert.match(t.logLines()[0], /fail-open: session usage had no context window size/);
+});
+
+test('register: a trailing backslash or slash on the state dir is stripped before the file name', async () => {
+  const BS = String.fromCharCode(92);
+  for (const [dir, expected] of [[`C:${BS}state${BS}`, `C:${BS}state/compact-floor.log`], ['/state//', '/state/compact-floor.log']]) {
+    const t = fakeEngine({ options: { main_compact_floor_tokens: 367000 }, tokens: 1000, env: { AGENT_COMPANION_STATE_DIR: dir } });
+    await t.fire({ trigger: 'auto', messages: [] });
+    assert.ok(t.files.has(expected), `${dir} -> ${[...t.files.keys()]}`);
+  }
 });
 
 // ---- manifest ------------------------------------------------------------

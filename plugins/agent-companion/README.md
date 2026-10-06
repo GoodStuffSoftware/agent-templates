@@ -711,14 +711,14 @@ window.
 
 `hooks/compact-floor.mjs` is a plugin **hooks module** (a function hook, named under
 `modules` in `hooks/hooks.json` next to the classic hooks). On `session.compact` it
-vetoes **automatic** compaction of the **main** session until its context reaches
-`main_compact_floor_tokens`. Subagents, manual `/compact` and every other trigger go
-straight to core. It fails open: a bad option value, a missing token count or any
+vetoes **automatic** compaction of the **main** session (and its early "precompute" of a
+summary) until its context reaches `main_compact_floor_tokens`. Subagents, manual
+`/compact` and the plugin trigger go straight to core. It fails open: a bad option value, a missing token count or any
 exception means compaction is not vetoed.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `main_compact_floor_tokens` | `0` (off) | Main-session floor in tokens, `100000` to `1000000`. `0` or unset: the module passes everything through. Outside the range: fails open and logs once. |
+| `main_compact_floor_tokens` | `0` (off) | Main-session floor in tokens, `100000` to `1000000`. `0` or unset: the module passes everything through. Outside the range: fails open and logs once. The floor actually enforced is `min(floor, model window - 150000)`: see the trade-off. |
 
 ```json
 { "pluginConfigs": { "agent-companion@agent-templates": { "options": { "main_compact_floor_tokens": 367000 } } } }
@@ -730,6 +730,24 @@ instead of several earlier small ones. The floor only matters when it is above t
 global window's trigger point; with a floor at or below it nothing is vetoed. The status
 line and `/context` still show "until auto-compact" against the **global** window, so
 they read as if compaction were imminent while the floor holds it back.
+
+**Wedge guard.** Claude Code blocks the prompt outright ("Prompt is too long") a little
+under the model window (about window minus 23K), and a vetoed compaction never lifts that,
+so an unguarded floor near the window would leave the session with no automatic way out.
+The module therefore enforces `min(floor, model window - 150000)`, reading the window from
+the session (`$.session.usage().context.window`): a 1M model with floor `367000` is held to
+367K, a floor of `990000` is held to 850K, and on a 200K model (for example a `--model haiku`
+run, since plugin options are global) the enforced floor is 50K, which every auto-compaction
+already exceeds, so nothing is vetoed. An unknown window passes and logs once. Early
+"precompute" is vetoed below the floor too: core would otherwise build a summary at the
+early arm point (about 184K on a 250K window), keep it, and apply it at the floor as
+summary-of-the-first-184K plus every raw message since, a compaction that frees about half
+of what a fresh one would.
+
+**One early compaction can still happen.** Right after `/resume` of a large transcript, or
+right after a compaction, the session reports no token count until the next response
+arrives, and the module fails open on an unknown count, so a single compaction may fire
+below the floor in that window.
 
 **Requirements.** A Claude Code build that loads plugin hooks modules (the engine's
 `tengu_plugin_hooks_modules` rollout, on by default in 2.1.286; `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=0`
