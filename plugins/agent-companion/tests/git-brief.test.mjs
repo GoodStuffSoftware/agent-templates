@@ -356,7 +356,9 @@ test('fetch timeout: the whole git process tree is killed, so no git-remote-http
     process.env.GIT_HTTP_LOW_SPEED_LIMIT = '1';
     process.env.GIT_HTTP_LOW_SPEED_TIME = '120';
     process.env.AC_GIT_BRIEF_FETCH_TIMEOUT_MS = '700';
+    const t0 = Date.now();
     const r = gitBrief({ cwd: work });
+    const took = Date.now() - t0;
     assert.equal(r.fetched, true);
     assert.equal(r.fetch_outcome, 'timeout');
     assert.ok(r.line, 'the line still prints');
@@ -370,6 +372,11 @@ test('fetch timeout: the whole git process tree is killed, so no git-remote-http
     const fetchMs = r.steps_ms.fetch;
     assert.equal(typeof fetchMs, 'number', 'gitBrief reports the fetch step time');
     assert.ok(fetchMs < 6000, `fetch step returned in ${fetchMs} ms (steps: ${JSON.stringify(r.steps_ms)})`);
+    // Everything else in the call is bounded too: the whole-call time minus the local git steps
+    // (the only time excluded; each is separately capped by the local timeout) stays under 6 s.
+    for (const k of ['rev-parse', 'remote', 'status']) assert.equal(typeof r.steps_ms[k], 'number', `gitBrief reports the ${k} step time`);
+    const localMs = Object.entries(r.steps_ms).filter(([k]) => k !== 'fetch').reduce((a, [k, v]) => { assert.equal(typeof v, 'number', `step ${k} is a number`); return a + v; }, 0);
+    assert.ok(took - localMs < 6000, `call minus local git steps took ${took - localMs} ms (took ${took}, steps: ${JSON.stringify(r.steps_ms)})`);
     // Wait for the close events themselves (bounded), not a fixed sleep.
     for (const until = Date.now() + 5000; Date.now() < until;) {
       if (hs.sockets.length >= 1 && hs.sockets.every((x) => x.closed)) break;
