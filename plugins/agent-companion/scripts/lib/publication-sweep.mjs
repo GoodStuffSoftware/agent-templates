@@ -37,7 +37,7 @@ import {
 import { join, dirname, basename } from 'node:path';
 import { tmpdir, homedir, userInfo } from 'node:os';
 import { cleanGitEnv } from './git-env.mjs';
-import { claudeDir } from '../../hooks/lib/context.mjs';
+import { claudeDir, homeRoot } from '../../hooks/lib/context.mjs';
 import { createHmac, randomBytes } from 'node:crypto';
 import {
   scanRepo as coreScanRepo, ownRepoNames as coreOwnRepoNames, mainCheckoutDir as coreMainCheckoutDir,
@@ -136,7 +136,7 @@ function rawOsHandles() {
   const out = [];
   try { out.push(userInfo().username); } catch { /* no passwd entry */ }
   for (const k of ['USERNAME', 'USER']) if (process.env[k]) out.push(process.env[k]);
-  out.push(basename(homedir()));
+  out.push(basename(homeRoot()));
   return [...new Set(out.filter(Boolean))];
 }
 
