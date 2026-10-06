@@ -162,10 +162,15 @@ of itself, and it needs no `resources.fixedPorts` declaration at all (declare
 `"resources": {}` to opt out of the same-pack default above). Two worked
 examples, used by `tests/bench-scheduler.test.mjs` to prove the scheduler's
 behavior against real (not mocked) port binds:
-`tests/fixtures/bench-parallel/fixed-port-task.mjs` (hardcoded port,
-`resources.fixedPorts`, always serialized with itself) and
-`tests/fixtures/bench-parallel/port-base-task.mjs` (binds
-`BENCH_PORT_BASE`, `resources: {}`, runs concurrently with itself).
+`tests/fixtures/bench-parallel/fixed-port-task.mjs` (one fixed port for the
+task's whole life, declared in `resources.fixedPorts`, always serialized with
+itself) and `tests/fixtures/bench-parallel/port-base-task.mjs` (keyed by
+`BENCH_PORT_BASE`, `resources: {}`, runs concurrently with itself). In the
+tests neither fixture binds a literal number: the test takes an OS-assigned
+port from `tests/fixtures/bench-parallel/ports.mjs` (`listenEphemeral()` /
+`reservePort()`, which holds the port until the fixture is about to bind it)
+and passes it in, so concurrent suite runs on one machine never share a port.
+`port-base-task.mjs` maps each slot's `BENCH_PORT_BASE` to its own such port.
 
 **Collision, despite a correct declaration.** Two mechanisms, chosen by WHEN
 the collision happened -- full detail and worked examples in

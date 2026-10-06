@@ -45,7 +45,7 @@
 // own `inject-*` rows), with the outcome, the fetch outcome and age, and the
 // time per git step (briefTelemetry). See docs/TELEMETRY.md.
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -116,13 +116,21 @@ function git(cwd, args, timeout = localTimeout()) {
 // direct child, and git has already forked git-remote-http, which would stay
 // alive holding the connection (on Windows indefinitely). taskkill /T /F on
 // Windows; the child is its own process group elsewhere, so kill(-pid).
-// Exit 124 = timed out here.
+// Exit 124 = timed out here. The runner prints git's pid first, so that when
+// the backstop below kills the runner itself (a loaded machine can take longer
+// than the cap plus slack just to start node and run taskkill), the caller can
+// still kill git's tree instead of leaving it orphaned. git is detached on
+// Windows too: a non-detached child sits in node's kill-on-close job, so killing
+// the runner took git and its first child down with it while git-remote-http
+// broke away and survived, parentless, where taskkill /T could no longer reach
+// it. Detached, git outlives the runner and its tree stays walkable.
 const FETCH_RUNNER = `
 const { spawn, spawnSync } = require('node:child_process');
 const ms = Number(process.argv[1]);
 const args = process.argv.slice(2);
 const win = process.platform === 'win32';
-const c = spawn('git', args, { stdio: 'ignore', windowsHide: true, detached: !win });
+const c = spawn('git', args, { stdio: 'ignore', windowsHide: true, detached: true });
+if (c.pid) process.stdout.write(c.pid + '\\n');
 const killTree = () => {
   try {
     if (win) spawnSync('taskkill', ['/T', '/F', '/PID', String(c.pid)], { windowsHide: true, stdio: 'ignore' });
@@ -143,17 +151,53 @@ function fetchEnv() {
   return env;
 }
 
-// -> 'ok' | 'fail' | 'timeout'
-function runFetch(cwd, args, timeoutMs) {
+// On Windows the orphan kill runs in a detached helper so it never holds the
+// hook (whose own timeout is 5 s): the helper first confirms the pid is still a
+// git process, because by the time the backstop fires every handle to git may be
+// closed (the runner's own taskkill already ran, or git exited and the slow
+// runner had not yet), so Windows may have reused the pid for an unrelated
+// process. The check narrows that window; it cannot close it entirely.
+const ORPHAN_KILLER = `
+const { spawnSync } = require('node:child_process');
+const pid = process.argv[1];
+const r = spawnSync('tasklist', ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true });
+const m = /^"([^"]*)","(\\d+)"/m.exec(r.stdout || '');
+if (m && m[2] === pid && /^git/i.test(m[1])) {
+  spawnSync('taskkill', ['/T', '/F', '/PID', pid], { windowsHide: true, stdio: 'ignore' });
+}
+`;
+
+// The backstop killed the runner, not git: kill the tree the runner reported.
+// Elsewhere git leads a process group the runner created, so kill(-pid) reaches
+// only that group (a reused pid would also have to lead a group; ESRCH is
+// swallowed). Neither branch waits on the kill.
+function killOrphanedTree(stdout) {
+  const pid = Number.parseInt(String(stdout || '').trim().split(/\s+/)[0], 10);
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    if (process.platform === 'win32') {
+      spawn(process.execPath, ['-e', ORPHAN_KILLER, String(pid)], {
+        detached: true, stdio: 'ignore', windowsHide: true,
+      }).unref();
+    } else {
+      process.kill(-pid, 'SIGKILL');
+    }
+  } catch {}
+}
+
+// -> 'ok' | 'fail' | 'timeout'. backstopMs is for tests: the default (cap + 2 s)
+// is what production uses.
+export function runFetch(cwd, args, timeoutMs, { backstopMs } = {}) {
   const t0 = Date.now();
   let cap = timeoutMs;
   if (RUN) cap = Math.min(cap, Math.max(1, RUN.deadline - Date.now()));
   const r = spawnSync(process.execPath, ['-e', FETCH_RUNNER, String(cap), ...args], {
-    cwd, env: fetchEnv(), windowsHide: true, stdio: 'ignore',
+    cwd, env: fetchEnv(), windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8',
     // The runner enforces `cap` itself and kills the tree; this is only the
-    // backstop for a runner that is itself stuck.
-    timeout: cap + 2000, killSignal: 'SIGKILL',
+    // backstop for a runner that is itself stuck or slow.
+    timeout: backstopMs ?? cap + 2000, killSignal: 'SIGKILL',
   });
+  if (r.error?.code === 'ETIMEDOUT') killOrphanedTree(r.stdout);
   addStep('fetch', Date.now() - t0);
   if (r.error) return r.error.code === 'ETIMEDOUT' ? 'timeout' : 'fail';
   if (r.status === 124) return 'timeout';

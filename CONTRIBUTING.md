@@ -79,6 +79,10 @@ Run the same checks by hand at any time with `node scripts/ci-local.mjs` (fast, 
 
 **Test concurrency.** ci-local runs at most N test files at once. By default N is half the machine's available CPUs, clamped to 1–8, because node's own default (every core but one) overloads a many-core machine enough to make timing-sensitive tests fail. Set `CI_LOCAL_TEST_CONCURRENCY=<n>` to override it.
 
+**Per-test timeout.** Every `node --test` run ci-local starts, including the isolated re-run, carries `--test-timeout=120000` (two minutes per test). A test that runs longer fails by name with `test timed out after 120000ms`, and its file then goes through the same re-run as any other failure. Before this, the run had no bound, and one pre-push hook sat for about 19 minutes on a file whose tests had all finished. Set `CI_LOCAL_TEST_TIMEOUT_MS=<ms>` to override it. It takes plain decimal digits and refuses `0`, so the bound can't be switched off; a value it refuses prints a warning and the default applies. The slowest test in the agent-companion suite takes about 21 s, so a test that needs more than the default is a test to look at. node applies the timeout to a `describe` block as a whole, and neither suite has one today.
+
+The same runs also pass `--test-force-exit`, which ends the run once every test has finished. node's timeout only bounds a test that is still running. A file whose tests all pass but which leaves a `setInterval`, a listening server or a child process holding the process open would otherwise never exit and the runner would wait on it indefinitely. A test that leaks a handle like that still passes. Close the handle all the same.
+
 **Never use `--no-verify`.** It skips the hook entirely, including the pushed-commit scan, and that scan runs on `wip/**` and `backup/**` pushes too. This repository is public, so a `wip/**` push publishes its commits just as any other push does.
 
 **Post-push:** after any push to a CI-visible branch (i.e. not `wip/**`/`backup/**`), watch the run rather than walking away from it:
