@@ -11,6 +11,7 @@
 // BENCH_PORT_BASE to an OS-assigned port the test process owns (see
 // ports.mjs). Distinct bases still have to map to distinct ports, so a run
 // that got the wrong base still shows up as two runs binding one port.
+// `portForBase` may be async (a test releasing a held reservation first).
 
 import net from "node:net";
 
@@ -44,7 +45,7 @@ export function makePortBaseTask(portForBase) {
     },
     async score(_sandboxDir, _answerText, _meta, ctx) {
       const portBase = (ctx && ctx.portBase) || Number(process.env.BENCH_PORT_BASE);
-      const port = portForBase(portBase);
+      const port = await portForBase(portBase);
       const server = await listenOn(port);
       await new Promise((resolve) => setTimeout(resolve, 30));
       await closeServer(server);

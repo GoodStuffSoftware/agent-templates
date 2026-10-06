@@ -25,14 +25,19 @@ export function closeServer(server) {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-// An OS-assigned port that is free right now, released before returning so
-// the code under test can bind it itself. Unlike a hardcoded number, no
-// other test process is configured to use it; the only exposure is the OS
-// reissuing the same ephemeral port to someone else in the short gap before
-// the caller binds it. Prefer listenEphemeral() when the test can hold it.
-export async function freePort() {
+// An OS-assigned port that stays HELD until the code under test is about to
+// bind it: hand `release` to the fixture to await right before its own
+// listen(), so the only exposure is the microtask gap between the two
+// rather than the whole of a test's setup. `release` is idempotent, so a
+// test can also call it in `finally` to cover the paths where the fixture
+// never binds.
+export async function reservePort() {
   const server = await listenEphemeral();
   const port = portOf(server);
-  await closeServer(server);
-  return port;
+  let released = null;
+  const release = () => {
+    if (!released) released = closeServer(server);
+    return released;
+  };
+  return { port, release };
 }

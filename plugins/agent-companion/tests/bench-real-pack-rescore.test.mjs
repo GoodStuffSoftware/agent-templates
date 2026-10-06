@@ -167,15 +167,23 @@ test('a real git-backed pack\'s resources.fixedPorts survives loadPack() + build
 });
 
 test('a REAL git-backed pack, genuinely co-scheduled, gets needs_rescore -> solo re-score -> PASSES (never a model re-run)', async () => {
+  // Bound first (the pack is built on its port), so EVERYTHING after it --
+  // including setup that can throw (git show inside buildTaskFromPack) --
+  // sits inside the try whose finally closes it. A leaked listener would
+  // hang `node --test` instead of failing it.
   const holder = await listenEphemeral();
-  const packDir = makeRealPackDir(portOf(holder));
-  const { outDir, answersDir } = tmpOut();
-  const pack = loadPack(packDir);
-  const packTask = buildTaskFromPack(pack, { repoPath: REPO_ROOT });
-  const tasksMap = { [FILLER_TASK_ID]: filler, [PACK_ID]: packTask };
+  let packDir = null;
+  let outDir = null;
   let modelCalls = 0;
   let released = false;
   try {
+    packDir = makeRealPackDir(portOf(holder));
+    const out = tmpOut();
+    outDir = out.outDir;
+    const { answersDir } = out;
+    const pack = loadPack(packDir);
+    const packTask = buildTaskFromPack(pack, { repoPath: REPO_ROOT });
+    const tasksMap = { [FILLER_TASK_ID]: filler, [PACK_ID]: packTask };
     const launch = makeLaunch({ tasksMap, outDir, answersDir, onModelCall: () => { modelCalls += 1; } });
     const rows = await scheduleRuns({
       runs: buildRuns(packTask),
@@ -211,8 +219,8 @@ test('a REAL git-backed pack, genuinely co-scheduled, gets needs_rescore -> solo
     assert.equal(row.pass_rate, 1);
   } finally {
     await closeHolder(holder).catch(() => {});
-    rmSync(packDir, { recursive: true, force: true });
-    rmSync(outDir, { recursive: true, force: true });
+    if (packDir) rmSync(packDir, { recursive: true, force: true });
+    if (outDir) rmSync(outDir, { recursive: true, force: true });
   }
 });
 
@@ -220,13 +228,18 @@ test('a REAL git-backed pack that fails its solo re-score too is counted as a RE
   // The holder is NEVER released -- the port stays taken for the whole test,
   // so the automatic solo re-score fails exactly the same way the original
   // attempt did.
+  // Setup sits inside the try so the holder is closed even if it throws.
   const holder = await listenEphemeral();
-  const packDir = makeRealPackDir(portOf(holder));
-  const { outDir, answersDir } = tmpOut();
-  const pack = loadPack(packDir);
-  const packTask = buildTaskFromPack(pack, { repoPath: REPO_ROOT });
-  const tasksMap = { [FILLER_TASK_ID]: filler, [PACK_ID]: packTask };
+  let packDir = null;
+  let outDir = null;
   try {
+    packDir = makeRealPackDir(portOf(holder));
+    const out = tmpOut();
+    outDir = out.outDir;
+    const { answersDir } = out;
+    const pack = loadPack(packDir);
+    const packTask = buildTaskFromPack(pack, { repoPath: REPO_ROOT });
+    const tasksMap = { [FILLER_TASK_ID]: filler, [PACK_ID]: packTask };
     const launch = makeLaunch({ tasksMap, outDir, answersDir });
     const rows = await scheduleRuns({ runs: buildRuns(packTask), concurrency: 2, launch });
 
@@ -247,7 +260,7 @@ test('a REAL git-backed pack that fails its solo re-score too is counted as a RE
     assert.equal(row.pass_rate, 0, 'the real failure is never lost from pass-rate math');
   } finally {
     await closeHolder(holder).catch(() => {});
-    rmSync(packDir, { recursive: true, force: true });
-    rmSync(outDir, { recursive: true, force: true });
+    if (packDir) rmSync(packDir, { recursive: true, force: true });
+    if (outDir) rmSync(outDir, { recursive: true, force: true });
   }
 });

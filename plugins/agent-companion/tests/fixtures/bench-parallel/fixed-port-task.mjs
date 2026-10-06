@@ -11,6 +11,8 @@
 // it is chosen by the calling test from an OS-assigned port (see ports.mjs)
 // rather than baked in here. A baked-in number is shared by every test
 // process on the machine, so concurrent suite runs collided on it.
+// `beforeBind`, if given, is awaited right before each bind -- a test that
+// reserved the port (ports.mjs reservePort) releases it there.
 
 import net from "node:net";
 
@@ -26,7 +28,7 @@ function closeServer(server) {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-export function makeFixedPortTask(port) {
+export function makeFixedPortTask(port, { beforeBind } = {}) {
   return {
     maxBudgetUsd: 0.01,
     family: "fixture",
@@ -46,6 +48,7 @@ export function makeFixedPortTask(port) {
       // holding the port) propagates as a thrown error, which runOne()
       // captures into scoreResult.detail.scorerError -- exactly what
       // bench/scheduler.mjs's classifyCollision() is built to recognize.
+      if (beforeBind) await beforeBind();
       const server = await listenOn(port);
       await new Promise((resolve) => setTimeout(resolve, 30));
       await closeServer(server);

@@ -18,7 +18,7 @@ import { scheduleRuns, resourcesConflict, classifyCollision, portBaseForSlot, ma
 import { runOne, rebuildSummary } from '../bench/runner.mjs';
 import { makeFixedPortTask } from './fixtures/bench-parallel/fixed-port-task.mjs';
 import { makePortBaseTask } from './fixtures/bench-parallel/port-base-task.mjs';
-import { listenEphemeral, portOf, freePort } from './fixtures/bench-parallel/ports.mjs';
+import { listenEphemeral, portOf, reservePort } from './fixtures/bench-parallel/ports.mjs';
 
 const CELL = { model: 'claude-sonnet-5', effort: null };
 
@@ -134,14 +134,45 @@ test('scheduleRuns awaits an async onEvent finish handler before admitting the r
     'the solo retry is admitted only after the finish handler has completed');
 });
 
+test('scheduleRuns(): a throwing onEvent is non-fatal -- in-flight runs are still awaited and every run finishes', async () => {
+  const finished = [];
+  let thrown = 0;
+  const rows = await scheduleRuns({
+    runs: [
+      { id: 'a', taskId: 't', resources: {} },
+      { id: 'b', taskId: 't', resources: {} },
+      { id: 'c', taskId: 't', resources: {} },
+    ],
+    concurrency: 2,
+    launch: async (run) => {
+      await new Promise((resolve) => setTimeout(resolve, run.id === 'a' ? 5 : 40));
+      finished.push(run.id);
+      return { id: run.id, collision: false };
+    },
+    onEvent: async (e) => {
+      // Sync-style throw on 'start', async rejection on 'finish'.
+      if (e.type === 'start') { thrown += 1; throw new Error(`boom-start-${e.runId}`); }
+      if (e.type === 'finish') { thrown += 1; await Promise.reject(new Error(`boom-finish-${e.runId}`)); }
+    },
+  });
+  assert.equal(thrown, 6, 'every event still fired despite the earlier throws');
+  assert.deepEqual(rows.map((r) => r.id).sort(), ['a', 'b', 'c'], 'no run was abandoned');
+  assert.deepEqual([...finished].sort(), ['a', 'b', 'c'], 'every launched run completed before scheduleRuns resolved');
+});
+
 // --- scheduleRuns() + runOne(): the fixed-port pack is serialized ----------
 
 test('scheduler serializes two runs of the fixed-port fixture even at concurrency 2', async () => {
   const { outDir, answersDir } = tmpOut();
+  const after = [];
   try {
     // An OS-assigned port this test process owns (see ports.mjs), never a
     // machine-wide constant another concurrent suite run could be holding.
-    const fixedPortTask = makeFixedPortTask(await freePort());
+    // The reservation stays bound until the fixture is about to bind the
+    // port itself (beforeBind), so no other process can be handed it first.
+    const reservation = await reservePort();
+    after.push(reservation.release);
+    const fixedPortTask = makeFixedPortTask(reservation.port, { beforeBind: reservation.release });
     const tasksMap = { 'fixed-port': fixedPortTask };
     const launch = makeLaunch({ tasksMap, outDir, answersDir });
     let active = 0;
@@ -163,6 +194,7 @@ test('scheduler serializes two runs of the fixed-port fixture even at concurrenc
     assert.ok(rows.every((r) => r.pass === true), 'both runs succeeded once serialized');
     assert.ok(rows.every((r) => r.collision === false), 'no collision when properly serialized');
   } finally {
+    for (const release of after) await release();
     rmSync(outDir, { recursive: true, force: true });
   }
 });
@@ -171,17 +203,22 @@ test('scheduler serializes two runs of the fixed-port fixture even at concurrenc
 
 test('scheduler runs two BENCH_PORT_BASE fixture runs CONCURRENTLY at concurrency 2', async () => {
   const { outDir, answersDir } = tmpOut();
+  const after = [];
   try {
     // Each slot's BENCH_PORT_BASE maps to its own OS-assigned port (see
     // port-base-task.mjs for why the literal bases are not bound). A base
     // with no mapping throws, so a run handed an unexpected base fails.
+    // Each reservation stays bound until its run is about to bind it.
     const slotPorts = new Map([
-      [portBaseForSlot(0), await freePort()],
-      [portBaseForSlot(1), await freePort()],
+      [portBaseForSlot(0), await reservePort()],
+      [portBaseForSlot(1), await reservePort()],
     ]);
-    const portBaseTask = makePortBaseTask((portBase) => {
+    for (const r of slotPorts.values()) after.push(r.release);
+    const portBaseTask = makePortBaseTask(async (portBase) => {
       if (!slotPorts.has(portBase)) throw new Error(`unexpected BENCH_PORT_BASE ${portBase}`);
-      return slotPorts.get(portBase);
+      const reservation = slotPorts.get(portBase);
+      await reservation.release();
+      return reservation.port;
     });
     const tasksMap = { 'port-base': portBaseTask };
     const launch = makeLaunch({ tasksMap, outDir, answersDir });
@@ -207,6 +244,7 @@ test('scheduler runs two BENCH_PORT_BASE fixture runs CONCURRENTLY at concurrenc
     const ports = rows.map((r) => r.detail && r.detail.boundPort);
     assert.notEqual(ports[0], ports[1], 'the two runs bound DIFFERENT ports (distinct slots -> distinct BENCH_PORT_BASE)');
   } finally {
+    for (const release of after) await release();
     rmSync(outDir, { recursive: true, force: true });
   }
 });
