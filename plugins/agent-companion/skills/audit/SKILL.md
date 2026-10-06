@@ -1,6 +1,6 @@
 ---
 name: audit
-description: Composable agent-hygiene audit of a project - memory-index reachability, instruction budget, sub-agent routing, harness drift, guard canary. Use to audit an agent setup, find why rules are not followed, investigate context or token cost, verify guardrails after a Claude Code update, or clean up a memory directory.
+description: Agent-hygiene audit of a project: memory-index reachability, instruction budget, routing, harness drift, guard canary. Use to audit an agent setup.
 ---
 
 # Agent-hygiene audit

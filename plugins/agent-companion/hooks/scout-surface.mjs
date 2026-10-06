@@ -33,7 +33,20 @@ import { githubOwnerRepoFromUrl, repoCacheKey } from '../scripts/lib/ci-status.m
 
 const MAX_AGE_DAYS = 7;
 
-// --- Piece 1: the generic scout-signal list (unchanged behaviour) ---------
+// --- Piece 1: the generic scout-signal list --------------------------------
+// The same kind can fire several times in one scout run (a measured session
+// start named routing_trial_review_due and model_benchmark_suggested four
+// times each in a 15-signal list). The line says each kind once, with a
+// count when it repeats; the full list stays in scout-latest.json.
+function dedupeKinds(signals) {
+  const counts = new Map();
+  for (const sig of Array.isArray(signals) ? signals : []) {
+    const k = String(sig && sig.kind ? sig.kind : 'unknown');
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  return [...counts.entries()].map(([k, n]) => (n > 1 ? `${k} x${n}` : k));
+}
+
 function buildScoutBlock() {
   if (!opt('scout_surface', true)) return null;
 
@@ -63,11 +76,11 @@ function buildScoutBlock() {
   const when = latest.checkedAt.slice(0, 16).replace('T', ' ');
 
   return {
-    summary: `agent-companion scout (${when}): ${latest.signals.length} signal(s) — ${latest.signals.map((s) => s.kind).join(', ')}`,
+    summary: `agent-companion scout (${when}): ${latest.signals.length} signal(s) — ${dedupeKinds(latest.signals).join(', ')}`,
     // A pointer, not the signal list: the full text (kind, detail, dispatch per
     // signal) stays in scout-latest.json, read only if the user asks.
     context:
-      `[agent-companion] Scout ${when}: ${latest.signals.length} drift signal(s) (not errors): ${latest.signals.map((s) => s.kind).join(', ')}. ` +
+      `[agent-companion] Scout ${when}: ${latest.signals.length} drift signal(s) (not errors): ${dedupeKinds(latest.signals).join(', ')}. ` +
       `Details: ${latestFile}. Mention only if asked about routing, models, guards or costs.`,
   };
 }

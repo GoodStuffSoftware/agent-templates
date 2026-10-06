@@ -1,6 +1,6 @@
 ---
 name: brevity
-description: Turn the agent reporting contract on or off, globally or per agent type, and see which layer wins. Use to make agents less verbose, stop agents writing essays, "quiet the agents down", exempt one agent, check whether brevity is on, or find which agent types write long reports.
+description: Turn the agent reporting contract on or off, globally or per agent type. Use to make agents less verbose, or to exempt one agent.
 ---
 
 # brevity — the agent reporting contract

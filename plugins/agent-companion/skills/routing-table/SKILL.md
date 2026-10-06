@@ -1,6 +1,6 @@
 ---
 name: routing-table
-description: Show the live model routing table (tiers, effort, weight x kind grid, floors, reviewer parity, task types) and manage the personal routing profile (/ac routing set, unset, show, why, rollback). Use to show or explain the table, which model handles which task type, to set or undo a route ("route integration to sonnet for me"), or why a type routes where it does.
+description: Show the live model routing table and manage the personal routing profile (/ac routing set, unset, why, rollback).
 ---
 
 # Show the routing table
