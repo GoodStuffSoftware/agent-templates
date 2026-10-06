@@ -356,13 +356,20 @@ test('fetch timeout: the whole git process tree is killed, so no git-remote-http
     process.env.GIT_HTTP_LOW_SPEED_LIMIT = '1';
     process.env.GIT_HTTP_LOW_SPEED_TIME = '120';
     process.env.AC_GIT_BRIEF_FETCH_TIMEOUT_MS = '700';
-    const t0 = Date.now();
     const r = gitBrief({ cwd: work });
-    const took = Date.now() - t0;
     assert.equal(r.fetched, true);
     assert.equal(r.fetch_outcome, 'timeout');
     assert.ok(r.line, 'the line still prints');
-    assert.ok(took < 6000, `returned in ${took} ms`);
+    // The guarantee under test is that the FETCH is bounded by the cap (plus the
+    // runner backstop), not by git's own 120 s low-speed abort. So bound the fetch
+    // step, which gitBrief times itself around exactly that call. Timing the whole
+    // gitBrief() call also counts its ~6 local git spawns (repo-facts, symbolic-ref,
+    // remote, status, rev-list, log), each of which pays process start-up on a
+    // CPU-starved machine, and those are not what the cap bounds (the suite raises
+    // the local cap to 60 s). That made this check flake at ~1 in 6 under load.
+    const fetchMs = r.steps_ms.fetch;
+    assert.equal(typeof fetchMs, 'number', 'gitBrief reports the fetch step time');
+    assert.ok(fetchMs < 6000, `fetch step returned in ${fetchMs} ms (steps: ${JSON.stringify(r.steps_ms)})`);
     // Wait for the close events themselves (bounded), not a fixed sleep.
     for (const until = Date.now() + 5000; Date.now() < until;) {
       if (hs.sockets.length >= 1 && hs.sockets.every((x) => x.closed)) break;
