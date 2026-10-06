@@ -2,6 +2,14 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.30.1 — 2026-10-06
+
+A test fix for Linux CI, and a fix for a fetch that could leave git running on a loaded machine.
+
+- Test fix. Since 0.30.0 the git-brief fetch-timeout test (`tests/git-brief.test.mjs`) failed on every Linux CI run, even though the process-tree kill worked. The cause was the test's hang server, which never read its sockets. On Linux, SIGKILL closes the connection with a FIN. Node reports end of stream on an undrained socket only after the buffered request has been read, so the socket never closed. On Windows, `taskkill /F` resets the connection, which closes the socket either way. The server now drains its sockets. The assertion is unchanged: a surviving git-remote-http still leaves its socket open and fails the test. The fixed sleep is now a bounded wait for the close events, and a failure lists each socket's events.
+- Fetch fix (`scripts/git-brief.mjs`). git-brief's fetch runs under a small runner that kills git's whole process tree at the cap. A backstop kills the runner itself 2 s after the cap. On a loaded machine the runner can take longer than that just to start, so the backstop fired first and left git and git-remote-http running, holding the connection open. This is what failed the fetch-timeout test intermittently on Windows under full-suite load. The runner now prints git's pid, and when the backstop fires the caller kills git's tree itself (`taskkill /T /F` on Windows, the process group elsewhere). git is now started detached on Windows as well as elsewhere. Otherwise killing the runner also killed git and its first child, through node's kill-on-close job, while git-remote-http survived without a parent, out of reach of `taskkill /T`. Detached adds no visible window: git now runs with no console at all, where before it had a hidden one. On Windows the orphan kill first checks that the pid still belongs to a git process, since the pid may have been reused by then, and it runs in a detached helper so it does not hold the hook past its 5 s timeout. A new test forces the backstop path and asserts that no connection survives.
+- Behaviour change on Windows: if the hook process itself is killed from outside (for example by the hook timeout), git and git-remote-http now survive it, as they already did on Linux. A stalled transfer still ends by itself through git's low-speed abort (`GIT_HTTP_LOW_SPEED_LIMIT`/`GIT_HTTP_LOW_SPEED_TIME`, set unless the operator sets them).
+
 ## 0.30.0 — 2026-10-04
 
 Token-saving trial: four changes shipped together, each with its own on/off toggle and telemetry stream, so the trial can be switched off per feature and measured per feature (injected-text numbers below).
