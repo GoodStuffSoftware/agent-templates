@@ -70,7 +70,7 @@ export function appendBounded(prev, line, max = LOG_MAX_LINES) {
 function logLine($, state, text) {
   state.writing = state.writing
     .then(async () => {
-      // The plugin's state-root override (the one the command hooks honour),
+      // The plugin's state-dir env var (the one the command hooks honour),
       // else the plugin data dir when the engine exposes it to modules (2.1.286
       // does not), else the plugin's state root under the Claude config dir.
       // Env names must be string literals ($.env.get is statically scanned).
