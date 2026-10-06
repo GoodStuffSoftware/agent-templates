@@ -22,6 +22,14 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
+### 2026-10-06 — The harness refuses a subagent's Write to report/summary/findings/analysis*.md — brief long detail as `<task>-detail.md`
+
+- **Trigger:** Claude Code 2.1.286 started refusing subagent writes with "Subagents should return findings as text, not write report files". A worker contract line ("long output: file path plus summary") and older briefs invite exactly the names it blocks.
+- **Is it generic?** Yes. Stripped: project and plugin names. Kernel: the native pattern, its narrow scope, and a naming convention that avoids it.
+- **Target:** extend the existing lesson `lessons/vendor/avoid-report-prefixed-filenames.md` (done in the carrying PR) and `lessons/agent-process/teammate-reports-to-files.md` (naming line). Any worker-reporting template that names a file should use the convention.
+- **Proposed change:** the rule, as measured: the Write tool refuses a SUBAGENT write whose basename matches `/^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$/i`. Scope: subagents only (the main session is not blocked), the Write tool only (a shell redirect is not checked), basename prefix only (`build-report.md` passes). Convention for worker briefs and reporting contracts: the final message carries STATUS, blockers and key numbers, kept short; longer detail goes to `<task>-detail.md` (or `.json`/`.csv`) with its path in the final message; never name it report, summary, findings or analysis. Add a unit test that any file name a contract suggests does not match the pattern.
+- **Applied?** `no` (carried by PR on branch `feat/ac-lean-subagents`; remove this entry when that PR merges).
+
 ### 2026-10-05 — A spec that fails "randomly" in a parallel suite may be a victim of the SHARED dev server
 
 - **Status:** carried by PR on branch `lessons/fold-2026-10-05` (new lesson plus an amendment of `widening-a-timing-margin-does-not-remove-a-race`, which it contradicts). Remove this entry when that PR merges.

@@ -287,3 +287,28 @@ test('subagent-brevity fails open when the state dir path is unwritable', () => 
     cleanup();
   }
 });
+
+// --- 10. The contract's file-naming convention vs the native write refusal ----
+// Claude Code 2.1.286 refuses a SUBAGENT Write whose basename matches this
+// pattern ("Subagents should return findings as text, not write report
+// files"). Scope: subagents only, the Write tool only, basename prefix only.
+// The contract tells workers where to put long detail, so the file name it
+// suggests must never be one the harness refuses.
+const NATIVE_REPORT_FILE_RE = /^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$/i;
+
+test('contract: the long-detail example file name does not match the native report-file refusal', () => {
+  const text = buildContract('general-purpose');
+  const m = text.match(/write (<task>-detail\.md)/);
+  assert.ok(m, `contract must name the <task>-detail.md convention: ${text}`);
+  for (const task of ['build', 'lint-run', 'review', 'x']) {
+    const name = m[1].replace('<task>', task);
+    assert.equal(NATIVE_REPORT_FILE_RE.test(name), false, `${name} would be refused by the native write guard`);
+  }
+  // The regex itself still bites the names the contract forbids (guards the
+  // test against a typo that makes it pass vacuously).
+  for (const bad of ['report.md', 'REPORT.md', 'summary-final.md', 'findings-a.md', 'analysis-2.md']) {
+    assert.equal(NATIVE_REPORT_FILE_RE.test(bad), true, bad);
+  }
+  assert.match(text, /never name a file report\/summary\/findings\/analysis\*\.md/);
+  assert.doesNotMatch(text, /file path plus summary/);
+});
