@@ -1,6 +1,6 @@
 ---
 name: standing-rules
-description: Add, inspect, test or disable "always do X if Y" rules that a hook re-injects instead of relying on a written rule surviving a long session. Use when asked to make something always happen, add a standing instruction or house rule, "remember to always do this when I say that", make prompts come back copyable, stop a rule being forgotten or ignored, or when a rule in CLAUDE.md keeps getting dropped mid-session.
+description: Add, inspect, test or disable "always do X if Y" rules a hook re-injects, instead of a written rule surviving a long session. Use to make something always happen, add a standing instruction or house rule, "remember to always do this when I say that", make prompts copyable, or when a CLAUDE.md rule keeps getting dropped.
 ---
 
 # standing-rules — conditional instructions a hook keeps re-applying
@@ -79,6 +79,7 @@ documentation. `--when 'deploy|ship it|push to prod'` beats `--when
 | `delegate-reminder` | `always` | **only once this session has actually drifted** — see below |
 | `agent-brevity` | `spawn` | disabled; it exists so `list` shows you the spawn scope is available |
 | `poll-guard-doctrine` | `session-start` | every session — one completion wait, never per-item wakes (cache-advisor guard b, `hooks/poll-guard.mjs`) |
+| `pr-wait-hint` | `session-start` | every session, while the `pr_wait` option is on — one line pointing at `scripts/pr-wait.mjs` (README "PR and CI wait"); `standing_rules: false` removes it too |
 | `lead-effort-check` | `session-start` | disabled by default (enable with `{"id":"lead-effort-check","enabled":true}`): an orchestrating interactive session below xhigh is asked, with the AskUserQuestion options selector, to raise to xhigh (the operator does it with the app's effort control; the lead cannot self-set) or stay; unattended sessions are not asked |
 
 Disable any of them by id (`disable copyable-prompt`) — they are never removed,

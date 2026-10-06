@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-03
 provenance: [contrib-2]
-corroborated: 4
+corroborated: 5
 ---
 Before generalizing a capability failure, enumerate the delivery paths that capability actually has. An instrument observes only the path it was built for, and a second path that works shows up as SILENCE in the first path's log — which is often the healthy steady state for a pull-based transport.
 
@@ -37,3 +37,5 @@ The split costs one line and preserves the reason to look.
 **A related discipline scopes not the search but the CLAIM: state an isolation or safety property at the strength you can actually prove.** "The agent cannot reach {{RESOURCE}}" was true of the tokens that had been issued, but was not provable about a platform integration that also grants access through a different route entirely. Write the property as it holds — "no issued token grants access" — and name what remains unconfirmed, rather than letting the stronger, unqualified claim stand in a document that a later reader will treat as settled.
 
 A lightweight habit makes this routine: tag each claim in a findings document **MEASURED** / **NOT MEASURED** / **INFERENCE**, and refuse to let a policy decision lean on a claim tagged INFERENCE when a claim with its own primary justification is available to lean on instead. The tag costs a few characters and prevents an inferred claim from quietly doing the work of a measured one.
+
+**Scope a run-history query to the leg it measures.** A history query counting failures across a multi-leg pipeline (build, test, deploy) read as a pipeline failure rate when only one leg had been failing, and it was the leg being fixed. Filter by the leg or step identifier before quoting a rate, and say in the claim which leg the number covers ([[agreement-between-agents-who-share-a-method-is-one-observation]]).

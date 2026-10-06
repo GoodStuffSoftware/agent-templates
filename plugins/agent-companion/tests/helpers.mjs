@@ -36,7 +36,7 @@ const ENV_KEYS = ['AGENT_COMPANION_HOME_OVERRIDE', 'AGENT_COMPANION_STATE_DIR', 
 // cleanup() }. Call cleanup() in a `finally` (or node:test's `after`) —
 // it restores whatever these env vars were before and removes the temp dir.
 export function makeFixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'ac-test-'));
+  const dir = mkdtempSync(join(tmpdir(), `ac-test-${process.pid}-`)); // pid in the name: see sandbox-sweep.mjs
   const saved = {};
   for (const k of ENV_KEYS) saved[k] = process.env[k];
 
@@ -63,6 +63,22 @@ export function makeFixture() {
   return { dir, stateDir, cleanup };
 }
 
+// Where a spawned hook or script runs when the test names no cwd: inside the active
+// sandbox home (the fixture's, or the process sandbox's), never in the checkout.
+// Some hooks walk UP from their cwd looking for .claude/settings*.json
+// (hooks/bash-tail.mjs does, and stops only at the home override). From the
+// checkout, which on a developer machine sits under the operator's real home,
+// that walk reaches ~/.claude/settings.json and the hook's result then depends
+// on the operator's own permission rules; CI, where the checkout is elsewhere,
+// would not. Inside the sandbox the walk ends at the sandbox.
+// Scripts have the same exposure: scripts/detect.mjs derives its dev roots from
+// the cwd (the git main checkout's parent, then ~/dev), so from the checkout it
+// reads the operator's real project folders. A test that needs the plugin root
+// as its cwd says so with an explicit `cwd`.
+function hookCwd(env) {
+  return env.AGENT_COMPANION_HOME_OVERRIDE || process.env.AGENT_COMPANION_HOME_OVERRIDE || PLUGIN_ROOT;
+}
+
 // Run a hook (or any plugin script) as a child process with a JSON payload on
 // stdin — the same shape the real harness uses. `env` is merged OVER the
 // current process.env, so AGENT_COMPANION_* overrides set by makeFixture()
@@ -78,7 +94,7 @@ export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, 
     windowsHide: true,
     input: payload === undefined ? '' : JSON.stringify(payload),
     encoding: 'utf8',
-    cwd: cwd || PLUGIN_ROOT,
+    cwd: cwd || hookCwd(env),
     env: childEnv(env),
     timeout,
   });
@@ -135,7 +151,7 @@ export function runScript(scriptRelPath, args = [], { env = {}, cwd, timeout = 1
   const script = join(PLUGIN_ROOT, scriptRelPath);
   const res = spawnSync(process.execPath, [script, ...args], {
     encoding: 'utf8',
-    cwd: cwd || PLUGIN_ROOT,
+    cwd: cwd || hookCwd(env),
     env: childEnv(env),
     timeout,
     windowsHide: true,

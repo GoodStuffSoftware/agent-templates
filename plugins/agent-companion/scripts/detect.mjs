@@ -13,7 +13,7 @@
 import { execSyncHidden } from './lib/proc.mjs';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, readdirSync, statSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
-import { userInfo, homedir } from 'node:os';
+import { userInfo } from 'node:os';
 import {
   modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
   homeRoot, stateRoot, resolveRoute, isLadderAgentName,
@@ -45,7 +45,7 @@ function rawOsHandles() {
   const out = [];
   try { out.push(userInfo().username); } catch { /* no passwd entry */ }
   for (const k of ['USERNAME', 'USER']) if (process.env[k]) out.push(process.env[k]);
-  out.push(basename(homedir()));
+  out.push(basename(homeRoot()));
   return [...new Set(out.filter(Boolean))];
 }
 

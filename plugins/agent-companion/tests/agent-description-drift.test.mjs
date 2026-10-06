@@ -125,15 +125,27 @@ test('--sync-agent-descriptions adds the experimental.cacheTtl block for a rung 
   }
 });
 
-test('mutation: a rung config REMOVES a cacheTtl:"1h" the file still carries also fails as cache-ttl-drift, and --sync removes the block', () => {
+test('no shipped ladder rung carries experimental.cacheTtl (all ten use the 5m subagent default, 2026-10-03)', () => {
+  for (const r of shippedLadder()) {
+    assert.equal(r.cacheTtl, undefined, `${r.agent}: config ladder must not set cacheTtl`);
+    const text = readFileSync(join(PLUGIN_ROOT, 'agents', `${r.agent}.md`), 'utf8');
+    assert.doesNotMatch(text, /cacheTtl/, `${r.agent}.md must not carry a cacheTtl block`);
+  }
+});
+
+test('mutation: a file that still carries a cacheTtl:"1h" its rung config does not set fails as cache-ttl-drift, and --sync removes the block', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
     const file = join(agentsDir, 'ac-opus-high.md');
-    const original = readFileSync(file, 'utf8'); // shipped file already carries the 1h block
+    // The shipped file has no block (all rungs are on the 5m default); put a
+    // stale 1h block into the fixture copy, as an old install would carry.
+    const shipped = readFileSync(file, 'utf8');
+    const original = shipped.replace(/^(effort: [^\r\n]*)(\r?\n)/m, '$1$2experimental:$2  cacheTtl: "1h"$2');
+    assert.notEqual(original, shipped);
+    writeFileSync(file, original);
     assert.match(original, /cacheTtl: "1h"/);
 
-    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-opus-high' ? { ...r, cacheTtl: undefined } : r)));
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
     assert.match(res.stderr, /ac-opus-high \[cache-ttl-drift\]/);

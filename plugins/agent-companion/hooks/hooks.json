@@ -28,6 +28,34 @@
         ]
       },
       {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/bash-tail.mjs"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^Read$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/read-dedupe.mjs",
+              "--event",
+              "pre"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "^SendMessage$",
         "hooks": [
           {
@@ -67,6 +95,21 @@
       }
     ],
     "SessionStart": [
+      {
+        "matcher": "^(compact|clear)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/read-dedupe.mjs",
+              "--event",
+              "reset"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
       {
         "hooks": [
           {
@@ -118,6 +161,16 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/ladder-check.mjs"
             ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/git-brief.mjs",
+              "--event",
+              "session-start"
+            ],
+            "timeout": 5
           }
         ]
       }
@@ -174,6 +227,16 @@
               "start"
             ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/git-brief.mjs",
+              "--event",
+              "subagent-start"
+            ],
+            "timeout": 5
           }
         ]
       }
@@ -260,6 +323,52 @@
             "command": "node",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/delegation-guard.mjs",
+              "--event",
+              "reset"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^Read$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/read-dedupe.mjs",
+              "--event",
+              "post"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^(Edit|Write|NotebookEdit|MultiEdit)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/read-dedupe.mjs",
+              "--event",
+              "invalidate"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/read-dedupe.mjs",
               "--event",
               "reset"
             ],

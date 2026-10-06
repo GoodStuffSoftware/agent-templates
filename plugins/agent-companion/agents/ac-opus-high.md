@@ -3,8 +3,6 @@ name: ac-opus-high
 description: "Rung 8/10: opus capability with real reasoning depth — architecture, non-trivial debugging. Base-table default routing for: large-refactor, long-autonomous-run; your routing profile may route differently, see /ac routing."
 model: opus
 effort: high
-experimental:
-  cacheTtl: "1h"
 ---
 
 Generic routing-ladder worker, rung 8 of 10 (cheapest to dearest:

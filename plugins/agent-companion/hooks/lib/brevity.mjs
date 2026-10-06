@@ -45,13 +45,13 @@ export const PEER_MARKER = '[agent-companion: peer brevity]';
 // decide whether the PreToolUse rewrite already landed.
 const CONTRACT_BODY = [
   CONTRACT_MARKER,
-  'Your final assistant message is the only thing your caller reads, and it costs them context.',
+  'Your final message is all your caller reads.',
   '- Open with STATUS: done | blocked | partial.',
-  '- BLOCKERS come next and are never compressed: what is blocked, what you already tried, and the one thing you need in order to proceed.',
-  '- Then the outcome: files changed, commands that matter, results stated as facts.',
-  '- Leave out progress narration, dead ends you resolved yourself, tool-by-tool recaps, restatements of this brief, and accounts of what you chose not to do.',
-  '- Long output goes in a file: give the path and a summary, never the body inline.',
-  'Messages to other agents are a decision or a fact — one screen at most, no recap of context they already have.',
+  '- BLOCKERS next, in full: what is blocked, what you tried, what you need.',
+  '- Then the outcome: files changed, key commands, results as facts.',
+  '- Omit narration, resolved dead ends, tool recaps, brief restatements, what you chose not to do.',
+  '- Long output: file path plus summary.',
+  'To other agents: a decision or fact, one screen max.',
   '[end contract]',
 ].join('\n');
 

@@ -45,6 +45,10 @@ It was built after two observed failures:
 | `runaway_turns`, `runaway_usd` | Runaway-spawn flag. When a subagent finishes, its transcript is read (bounded: the last 8 MB, assistant records only) and its API turns counted and priced at list price. Over `runaway_turns` (default 300) or `runaway_usd` (default $40, price-derived, not a bill) it writes one row to `runaway.jsonl` beside `spawns.jsonl` and queues a one-line notice for the lead, delivered once to the lead: on its next prompt, which includes the turn that reports a background worker done, or right after a foreground `Agent` call returns (PostToolUse). A SubagentStop hook's own output is not relied on to reach the lead. Set either to 0 to turn that half off. | no |
 | `session_budget_units` | Session budget advisory (default **350**; 0 turns it off). Adds up the plan units this WHOLE session has used, the lead plus every subagent: tokens priced at Sonnet 5 rates times the model's plan multiplier (the same `planPriceSpecFor` the compaction advisor uses, Opus 1.5; a tier with no measured multiplier is counted at its own API list price). It reads only the bytes appended to each transcript since the last call, so it stays cheap. Each time the total crosses another multiple of the threshold, the lead gets ONE notice through the runaway-notice path (its next prompt, or right after a foreground `Agent` returns) saying how many units and what share of a ~1,900-unit week (`config/session-budget.json`), and asking it to finish the phase, update `SESSION-STATE.md` and offer the operator a hand-off to a fresh session, never mid-release or while agents are running. Advisory only: nothing is blocked or denied. A scan that has not yet caught up on a long history (it stops at a 2.5 s deadline and carries on at the next call) announces nothing until it is complete, so the first number is never an understatement. A forked or copied session carries its inherited history in its total, so its first prompt can announce the inherited level. Turns on a tier with no measured plan multiplier (haiku, fable) are counted at their own API list price and reported as `estimated_turns`. One row per crossing in `session-budget.jsonl`. | no |
 | `subagent_context_notice_tokens` | Subagent context notice (default **300000**; 0 turns it off). A PreToolUse hook that runs inside every subagent reads that subagent's own context size from its latest request (input + cache read + cache write). When it passes the threshold, or the subagent has just compacted (a `compact_boundary` in its transcript), the subagent is told ONCE, mid-run, to finish the current step, return its results and say what is left so the lead can split it; a compaction is announced once per compaction. With `autoCompactWindow` at 200000 a worker compacts before it reaches 300000, so the compaction signal is the one that usually fires. At SubagentStop the lead gets a line next to the runaway flag, and a worker the mid-run hook never reached is read once more and recorded as caught only at stop. Rows in `subagent-context.jsonl`; the `budget_notices` scout signal counts both logs over 24 hours. Advisory only. One extra `node` start per tool call (the lead's exits at once). | no |
+| `bash_tail` | Bash output tail (default **on**). A PreToolUse hook rewrites a known long-running Bash command (test, build, install) so its output goes to a file and only a short tail plus the file's path returns to context; the exit code is preserved exactly. See [Bash output tail](#bash-output-tail). `bash_tail_permission_modes` (default `bypassPermissions`; `any` lifts the limit) sets the permission modes it applies in. | no (rewrites the command, never denies it) |
+| `git_brief` | **Trial.** Git brief (default **on**). A SessionStart hook and a SubagentStart hook add ONE line of git state to the agent's context (branch, ahead/behind origin's default branch, uncommitted files, worktree, last commit, unpushed) and name the refresh command, `scripts/git-brief.mjs [landed <sha\|branch>]`, so agents stop running `git status`/`fetch`/`rev-list` by hand. Off with `false` or `CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0`. See [Git brief](#git-brief-trial). | no |
+| `read_dedupe` | Read dedupe (default **on**). A PreToolUse hook denies a Read of lines the SAME agent already read, when the file is unchanged since and the read would return 2,000 characters or more; the denial is one sentence and the identical call, repeated, runs. See [Read dedupe](#read-dedupe). | yes, on a covered repeat (never twice in a row) |
+| `pr_wait` | PR/CI wait hint (default **on**; `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` turns it off). One standing session-start line (the `pr-wait-hint` rule) pointing agents at `scripts/pr-wait.mjs`, see "PR and CI wait" below. Off hides only that line (as does `standing_rules: false`); the script still runs and still logs telemetry. |
 | `brevity` | Appends a short reporting contract to every spawned agent's brief — status line, blockers in full, outcome as facts, no narration — plus a peer-brevity clause on inter-agent messages. | no (an opt-in sub-toggle can block once per agent) |
 | `standing_rules` | Injects operator-authored "always do X if Y" rules at session start, on matching prompts, and into matching spawn briefs. | no |
 | `memory_vault` | Keeps a local git history of the memory corpus in a separate repository, so a rewrite or truncation is no longer unrecoverable. Strictly read-only against the live corpus. **Off by default** — see [Memory vault](#memory-vault). | no |
@@ -68,6 +72,62 @@ The escape hatch is the restart itself: a lead that genuinely needs one more rea
 Tool calls a remote session has this machine run (hook `session_id` `"served:<caller>"`) are never counted: they are not this machine's lead, and every unknown caller would share one streak.
 
 Until this fix the guard required `agent_type === "main"`, which no real main-thread payload carries, so it never ran outside its own tests. Any mode that acts is therefore new behaviour on every install, which is why the shipped default is `"warn"`.
+
+## Bash output tail
+
+Every character a tool returns is re-read from the prompt cache on every later call of that agent, so a 3,000-line test run is paid for hundreds of times. `hooks/bash-tail.mjs` (PreToolUse on `Bash`, main thread and subagents) rewrites a **known long-runner** so the output goes to a file and only the tail comes back. Rules and the generated shell: `hooks/lib/bash-tail.mjs`. Decision record, with the alternatives it beat: [`docs/adr/0004-bash-output-tail.md`](../../docs/adr/0004-bash-output-tail.md).
+
+- **Wrapped:** `npm`/`pnpm`/`yarn` test, ci, install and build scripts, `vitest`, `jest`, `pytest`, `cargo`, `go`, `dotnet`, `make`, `gradle`, `mvn`, `tsc`, `node --test`, `docker build`, and similar. Never a command the list does not name.
+- **Never touched:** a command with a pipe, a redirect, `&`, a subshell, `$( )`, a compound statement (`if`, `for`, `while`), `source` / `.`, `run_in_background`, a watch flag (`-w`, `--watch`, `--ui`, `--continuous`), a machine-readable-output flag including the separate-argument forms (`--reporter json`, `-f json`, `--junitxml report.xml`), `--help`/`--version`; any `git` command; short commands that are not runners. Dev servers, watchers and interactive tools (`vite`, `next dev`, `wrangler dev|login`, `ng serve`, `playwright show-report|codegen`, `cypress open`, `pytest -f|--pdb`, `*:watch` scripts, `make run|serve|dev`, `bootRun`, `spring-boot:run`, and so on) are never wrapped, and a chain is left alone when ANY segment is one of those or is not a known runner (`npm install && npm run dev`, `cargo build && cargo run`).
+- **What comes back:** before the command runs, one line names the output file (so a run killed by the tool timeout still tells the agent where its output went). Output of 80 lines / 8,000 bytes or less then prints whole (and the file is deleted). Above that: `[ac-bash-tail] exit N; L lines, B bytes of output; last K lines below. Full output (grep or Read it): <path>` and then the last 60 lines of a failed run or the last 20 of a passing one, capped at 10,000 characters (the END is kept, so one huge line shows its tail). A failed run also gets up to five summary-looking lines (`FAIL`, `failed`, `passed`, `Tests:`, `ERR!`, `SUMMARY`) from EARLIER in the file, for runners that print the summary first. stdout and stderr are merged, as they are in the tool's own result. Files live in `<tmp>/ac-bash-tail/` and are pruned after 3 days. The file is not size-capped (see the ADR).
+- **Exit code and failures:** the command runs inside a `{ }` group (so `cd` still sticks) and its status is re-raised with `(exit N)`. If the output file cannot be created, or `set -e` (errexit) is already active in the shell, the original command runs unchanged.
+- **Permission rules:** Claude Code checks permission rules against the REWRITTEN command in every mode. Allow rules (`Bash(npm test:*)`) stop matching it, so the rewrite applies only in `bypassPermissions` unless `bash_tail_permission_modes` says otherwise (`"any"`, or a comma list such as `"bypassPermissions,acceptEdits"`). Deny and ask rules apply even in `bypassPermissions` and match the helper commands the wrapper adds (`rm`, `tail`, `grep`, `printf`, and the redirect), so the hook reads `permissions.deny` and `permissions.ask` from user, project, local and managed settings and leaves the command alone when any rule could match the original or a helper (logged as `permission-rule:deny|ask`).
+- **PowerShell** is out of scope: different syntax, and the `PowerShell` tool is not matched.
+- **Opt out:** `bash_tail: false` (or `CLAUDE_PLUGIN_OPTION_BASH_TAIL=0`). A command can also opt itself out by piping or redirecting, for instance `npm test 2>&1 | cat`.
+- **Measure it:** `node scripts/bash-tail-report.mjs [--days N] [--json]` reads `telemetry/bash-tail.jsonl` (see `docs/TELEMETRY.md`): runs wrapped, bytes produced vs characters returned, known runners left alone and why.
+
+## Git brief (trial)
+
+A 7-day transcript count (2026-09-27 to 10-04) found about 5,100 Bash calls that only READ git state, 882 of them `git fetch origin`, each costing a turn. `scripts/git-brief.mjs` answers them in one call, and a hook puts the answer in front of the agent before it asks.
+
+- **The injected line** (SessionStart for the main session, at every source: startup, resume, clear, compact; SubagentStart for every subagent), about 250-450 characters depending on the path lengths:
+  `Git: feat/x | ahead 2 behind 0 origin/main | uncommitted 3 | worktree C:/repo/wt | last <sha> chore: release 0.29.32 | unpushed 2 | refresh instead of git status/fetch: node "<plugin-root>/scripts/git-brief.mjs" [landed <sha|branch>]`
+  A detached HEAD reads `detached@<sha>`; a repository with no `origin` reads `no origin`; a branch with no upstream reads `unpushed N (no upstream)` (commits no remote has). Outside a git repository, or on any error, nothing is injected and nothing printed.
+- **The script:** `node scripts/git-brief.mjs` prints that line without the hint. `node scripts/git-brief.mjs landed <sha|branch>` prints one line: `ON main (<sha>)` (an ancestor of origin's default branch), `ON main (cherry-picked)` (every commit that is not an ancestor has a patch-equivalent on the default branch, the test `git cherry` applies, so a cherry-pick or a rebase merge counts as landed), `NOT on main (ahead N; a squash merge wouldn't show)` (N counts only the commits with no patch-equivalent there), or `UNKNOWN (no such ref X)` (also `UNKNOWN (git timed out)`: a timeout never turns into a NOT). A squash merge cannot be detected reliably (its one commit has a different patch), so the NOT answer says so. **`landed` always fetches first**: it is an explicit question, and a ref up to five minutes old answers it wrongly for a branch merged in that window. A NOT that rests on a failed fetch, or on no remote, says so in the line (`fetch failed; origin/main may be stale`, `local origin/main only`); an ON never needs the note. Flags: `--no-fetch` (local refs only), `--fresh` (accepted; `landed` fetches regardless), `--cwd <dir>`. The default branch is origin/HEAD, else `main`, else `master`.
+- **Fetch policy:** only origin's default branch is fetched, at most once per **5 minutes** per repository (linked worktrees share the stamp, `<git-dir>/ac-git-brief-fetch.json`, so ten agents starting together cause one fetch), capped at **1.5 s** and killed past it, with no prompt of any kind (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, ssh `BatchMode`). The 5-minute window applies to the injected line only; `landed` ignores it. A timed-out fetch is killed with its whole process tree (on Windows `taskkill /T /F`; git's `git-remote-http` child would otherwise outlive the parent and keep the connection open), and a slow transfer is also cut by `GIT_HTTP_LOW_SPEED_LIMIT`/`TIME` (1000 B/s for 2 s). A failed or timed-out fetch is not retried for 1 minute, so an offline machine pays the cap once. Each local git call is capped at 1 s, and one run has an overall deadline (the two caps summed, `AC_GIT_BRIEF_DEADLINE_MS`); the whole run is about 0.3 s when the fetch is skipped and held near 2.5 s at worst. `AC_GIT_BRIEF_FETCH_TIMEOUT_MS` / `AC_GIT_BRIEF_LOCAL_TIMEOUT_MS` raise the caps on a slow machine.
+- **Switch:** `git_brief` (default **on** for the trial). Off = `git_brief: false` in the plugin options, or `CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0` in the environment: the hook then does nothing, with no git call, no output and no telemetry row. The script itself still works when called by name.
+- **Measure it:** every hook injection and every script run appends a row to `telemetry/git-brief.jsonl` (fields in `docs/TELEMETRY.md`): characters injected or returned, whether a fetch ran and how it ended, the outcome (so "nothing to say" is told from "could not say"), time per git step, and for `landed` the answer and whether a NOT survived a fresh fetch. Compare the count of Bash git-read calls per agent with the switch on and off.
+- **Not a duplicate of the coordination server's `branch_status` MCP tool:** it reports branch state across machines (and is a deferred tool plus a few KB of result). This reads only the repository the agent is in, locally, in about 100 bytes.
+
+## Read dedupe
+
+Agents re-read unchanged files: a 7-day measurement (2026-10-04) found 654 repeat reads of a file the same agent had already read and nothing had touched, 551 of them partial reads (`offset`/`limit`). Each repeat puts the same text in context again, and every later call of that agent re-reads it from the prompt cache. `hooks/read-dedupe.mjs` (PreToolUse on `Read`, main thread and subagents) denies a repeat that is already in the agent's context. Rules, state and the reasoning behind each threshold: `hooks/lib/read-dedupe.mjs`.
+
+- **What Claude Code's own Read already covers:** it keeps ONE `offset`/`limit` pair per path and answers "File unchanged since last read" only when the new request is exactly that pair and the mtime is unchanged. This hook covers the rest: a range inside an earlier, larger read (read 1-400, then 120-180); a repeat of an earlier range after a different one (A, B, A); a range spanning two earlier adjacent reads. The exact repeat of the last read is left to the built-in.
+- **When it denies** (every condition): same agent and same path; the requested lines are fully covered by earlier reads; mtime, size and ctime are unchanged; the earlier read is under 30 minutes old; and the read would return at least **2,000 characters** (estimated from that file's own average line plus the 7-character line prefix). 2,000 characters is about 500 tokens, ten times the denial's own text: below it the denial would cost about what it saves. A repeat read of more than that is paid again on every later turn, so the saving grows with every turn after it.
+- **The denial:** `Unchanged since your earlier read (lines a-b). If that content is no longer in your context, repeat this call and it will run.` The same call, repeated, always runs: a denied request is remembered until it runs, so an agent is never trapped. Claude Code can drop OLD tool results from context without a compaction and without any hook; that sentence is the way out.
+- **State is per agent:** keyed by session id plus agent id (`main` for the lead). A read by one agent never suppresses another's, and each (session, agent) pair has its own state file and lock, so parallel agents never wait on each other. Stored under `state/read-dedupe/`, pruned after 3 days.
+- **What it remembers, and when it forgets:** a read is recorded only after it succeeds (PostToolUse): the lines the tool actually returned, the file's mtime, size and ctime from before the read. Forgotten on an `Edit`, `Write`, `NotebookEdit` or `MultiEdit` of that path by that agent; on any change of the file's mtime, size or ctime (so a Bash edit, a `git checkout` or another agent's edit all count, and so does a same-size edit that put the mtime back; the price is that a chmod or a rename-over also forgets, which only means one allowed read); on `PreCompact` and on `SessionStart` with source `compact` or `clear` (that agent only when the payload names a subagent, the whole session otherwise). A truncated or partial result, a PDF page read and a read of a file that changed while it ran are never recorded.
+- **Fails open:** an unreadable or corrupt state file, a lock that cannot be taken (waits up to 0.8 s; a lock older than 3 s is taken over), a missing file or any error lets the read run. It prints a denial or nothing, never an allow. A lock that could not be taken writes a `lock-timeout` telemetry row, so a miss is counted rather than silent.
+- **Opt out:** `read_dedupe: false` (or `CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0` in the environment).
+- **Measure it:** `telemetry/read-dedupe.jsonl` (see `docs/TELEMETRY.md`): a row per denial, per denied request that was repeated and ran, per repeat-eligible read that was allowed (with the reason, the denominator of the denial rate) and per lock timeout. A high retry share means agents mostly did NOT have the content in context and the threshold or age cap is too loose.
+
+## PR and CI wait
+
+Agents polling a PR or CI with `gh pr checks`, `gh run watch`, `gh pr view` and sleep loops pay for every poll: each result is re-read from the prompt cache for the rest of the session. `scripts/pr-wait.mjs` does the waiting inside a process, where it costs no tokens, and returns the final state in one call.
+
+```
+node scripts/pr-wait.mjs <pr-number|branch|url> [--repo owner/repo] [--timeout 20m]
+node scripts/pr-wait.mjs --run <run-id|branch>  [--repo owner/repo] [--timeout 20m]
+```
+
+- **Output:** one start line, then nothing until the end, so it is safe to launch with `run_in_background`. The final line gives state, checks passed/failed/total and elapsed time; up to nine more lines name the failed checks with their log URLs (on a timeout, the checks still pending).
+- **Exit codes:** 0 checks passed or PR merged; 1 a check failed, or the PR closed unmerged; 2 timeout (default 20m; `--timeout` takes `90s`, `20m`, `1h`); 3 usage or gh error. It never prompts; gh is polled with backoff (5s growing to 30s), and a transient gh failure is retried before it gives up.
+- **Bound to the commit, not the branch:** PR mode reads the PR's current head commit and counts only that commit's check runs and statuses (re-read every poll, so a push made while waiting is followed); a head whose checks have not registered yet is waited on, never answered from the commit before. `--run <branch>` takes the newest run whose head SHA equals the branch's current remote tip and keeps waiting (within the timeout) while there is none, instead of returning the run before your push. A run id is used as given.
+- **A PASS has to hold still (the settle rule):** a green result is not answered on the first poll that shows one. CI registers checks one after another, so a first poll can see only the quick check, finished and green, with the slow one not yet listed. The script reports PASS only when the same check set (head commit, check names and verdicts) is seen on two polls at least 20 s apart (`PR_WAIT_SETTLE_MS`); a check that registers meanwhile restarts the clock, and a failure is reported at once, with no settling. The final line carries the head commit it is bound to (`PASS @abcdefa`), so a PASS can be matched to the commit that was pushed.
+- **Limits:** a PR with no checks at all returns `NO-CHECKS` (exit 0) after 90 seconds (`PR_WAIT_NO_CHECKS_GRACE_MS`); read it as "no CI was observed and nothing failed", not as a pass. Each PR poll is three `gh` calls (PR head, check runs, statuses), all inside the process. `not a git repository` and the other permanent gh errors stop at once (exit 3) instead of retrying.
+- **Discoverability, and the trial toggle:** the plugin adds one standing line at session start, to the lead session (the `pr-wait-hint` rule), with the script's real absolute path and the advice that matters: launch it with `run_in_background`, because a foreground call dies at the two-minute limit. The wording is 125 characters or fewer; the whole line is longer by the length of the plugin path. `pr_wait: false` or `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` hides that line, and so does `standing_rules: false` (the hint is a built-in standing rule, so the master switch removes it too); the script itself keeps working either way.
+- **Measure it:** each run appends a `start` and an `end` row to `telemetry/pr-wait.jsonl` (mode, polls, cycles, settle waits, duration, outcome, exit code, head commit; see `docs/TELEMETRY.md`). A `start` with no `end` is a run the harness cut off. Compare the `gh` and sleep call counts in transcripts with the line on and off.
 
 ## Brevity — the reporting contract
 
@@ -121,9 +181,9 @@ Four scopes, each deciding what `when` is tested against and where the directive
 | `session-start` | *(ignored — fires once)* | the main session, at start |
 | `spawn` | the brief of an agent being spawned | that subagent's prompt |
 
-A `session-start` rule also reaches a subagent that compacts, because SessionStart fires inside it. A rule with `"audience": "lead"` stays out of that: five of the built-ins carry it (`lead-brevity`, `delegate-first`, `resume-doctrine`, `poll-guard-doctrine`, `lead-effort-check`), since a worker cannot spawn, resume, arm a wake or ask the operator. A rule with no `audience` (every rule you add, unless you set it) reaches the lead and workers alike. The scout drift block, the main-CI note and the capacity line are lead-only in the same way.
+A `session-start` rule also reaches a subagent that compacts, because SessionStart fires inside it. A rule with `"audience": "lead"` stays out of that: six of the built-ins carry it (`lead-brevity`, `delegate-first`, `resume-doctrine`, `poll-guard-doctrine`, `pr-wait-hint`, `lead-effort-check`), since a worker cannot spawn, resume, arm a wake or ask the operator. A rule with no `audience` (every rule you add, unless you set it) reaches the lead and workers alike. The scout drift block, the main-CI note and the capacity line are lead-only in the same way.
 
-Eight rules ship built in:
+Nine rules ship built in:
 
 | id | scope | fires |
 |---|---|---|
@@ -134,6 +194,7 @@ Eight rules ship built in:
 | `delegate-reminder` | `always` | gated — see below |
 | `agent-brevity` | `spawn` | disabled by default; reserved so the `spawn` scope shows up in `rules list` |
 | `poll-guard-doctrine` | `session-start` | every session — cache-advisor guard (b): "one completion wait, never per-item wakes" (see `hooks/poll-guard.mjs`) |
+| `pr-wait-hint` | `session-start` | every session, while `pr_wait` is on — one line pointing at `scripts/pr-wait.mjs` (see "PR and CI wait") |
 | `lead-effort-check` | `session-start` | disabled by default. Turn on with `{"id":"lead-effort-check","enabled":true}`. When the session will orchestrate and its effort is below xhigh, asks the operator with the AskUserQuestion options selector ("Raise to xhigh (Recommended)" or "Stay at <current>"), with no spawn or other tool call until answered; "Raise" tells the operator to use the app's effort control and waits (the app refuses a session changing its own effort, so the lead does not set it itself). Unattended sessions (a `scheduledTaskId`, headless, no AskUserQuestion) are never asked: they continue and state the effort once. Never raises to max, never lowers |
 
 ### `delegate-reminder` — the direct answer to "my delegation rules stop being followed"
@@ -460,29 +521,23 @@ being re-recommended — otherwise a rung that was already switched would show
 up as a fresh suggestion to make the same edit again, forever, as long as its
 measured delta stayed negative (`alreadyOneHourFrom()` in `scripts/lib/cache-ttl.mjs`).
 
-**Which ladder rungs use the 1-hour cache today, and why.** Four of the ten
-generic `ac-*` ladder workers — `ac-opus-medium`, `ac-opus-high`,
-`ac-opus-xhigh`, `ac-opus-max` — carry `experimental: { cacheTtl: "1h" }` in
-their shipped `agents/ac-*.md` frontmatter (`config/model-tiers.json`'s
-`ladder[].cacheTtl`, generated into the file by
-`scripts/routing-table.mjs --sync-agent-descriptions`, decided 2026-09-26).
-This is NOT the "long-lived, gets resumed" pattern the `recommendOneHourFor`
-criterion above targets: a dedicated measurement
-(`~/.claude/tasks/ac-cache-advisor/variants-report.md`) found close to zero
-`via=message` resumes on any ladder rung across 30 days of real traffic — the
-generic workers really are spawned fresh and rarely messaged again. The
-saving instead comes from the ALL-CAUSE view: long tool waits (`Bash`, test
-suites, builds) idling a single task's cache past 5 minutes, which
-`ac-opus-medium` and `ac-opus-xhigh` converted well past the ~38.5–39.5%
-break-even (53.9% and 43.5% of write tokens). `ac-opus-low` measured below
-break-even (10.9%) and stays on the 5m default, along with every non-opus
-rung — see `config/model-tiers.json`'s `ladderCacheTtlNote` and
-`cacheTtl.ladderWorkersExcludedNote` for the full evidence. The resume
-doctrine itself is unchanged: resume a stopped worker only while its cache is
-warm — now up to an hour on these four rungs — otherwise spawn a fresh ladder
-worker from a file handoff (`hooks/resume-guard.mjs`; its
-`cacheTtlFromDefinition()` already reads any agent definition's
-`experimental.cacheTtl`, including these four, generically).
+**Which ladder rungs use the 1-hour cache today: none.** All ten generic
+`ac-*` ladder workers use the default 5-minute subagent cache. Four of them
+(`ac-opus-medium`, `ac-opus-high`, `ac-opus-xhigh`, `ac-opus-max`) carried
+`experimental: { cacheTtl: "1h" }` from 0.29.17 to 0.29.29 and it was removed
+in 0.29.30 (2026-10-03, operator choice). Why: from 2026-10-02T16Z the 1h cache
+writes cost 242 plan units, 23% of the total. These workers run continuously
+and compact often, so the cache is rewritten long before an hour passes; a 1h
+TTL only pays for an agent that sits idle for more than 5 minutes, and every
+rewrite costs 1.6x a 5-minute write (2x base input against 1.25x). The
+mechanism stays: a rung's optional `cacheTtl` field in
+`config/model-tiers.json`'s `ladder` is generated into the file by
+`scripts/routing-table.mjs --sync-agent-descriptions`, so a rung can be put
+back on 1h with a one-line config edit. See `ladderCacheTtlNote` and
+`cacheTtl.ladderWorkersExcludedNote` in that config. The resume doctrine is
+unchanged: resume a stopped worker only while its cache is warm (5 minutes),
+otherwise spawn a fresh ladder worker from a file handoff
+(`hooks/resume-guard.mjs`).
 
 A **compaction** immediately before a request (`isCompactSummary: true` on
 the synthetic user record, or its preceding `compact_boundary` system

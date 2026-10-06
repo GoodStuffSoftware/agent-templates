@@ -930,11 +930,18 @@ function sentinel(h) {
 
 // Every route by which a global or system config file reaches git. Windows
 // env names are case-insensitive, so a lower-case spelling is covered too.
+//
+// The HOME and XDG routes unset GIT_CONFIG_GLOBAL in the child. The test
+// harness (tests/isolate.mjs) exports GIT_CONFIG_GLOBAL, an empty file, into
+// every child, and git then ignores ~/.gitconfig and $XDG_CONFIG_HOME/git/config
+// altogether: those two routes would pass even if the product stopped pinning
+// HOME and XDG_CONFIG_HOME. (An undefined value drops the variable from the
+// spawned env.)
 const CONFIG_ROUTES = [
   ['GIT_CONFIG_GLOBAL', (h) => ({ GIT_CONFIG_GLOBAL: h.file })],
   ['GIT_CONFIG_SYSTEM', (h) => ({ GIT_CONFIG_SYSTEM: h.file })],
-  ['HOME (~/.gitconfig)', (h) => ({ HOME: h.home })],
-  ['XDG_CONFIG_HOME (git/config)', (h) => ({ XDG_CONFIG_HOME: h.xdg })],
+  ['HOME (~/.gitconfig)', (h) => ({ HOME: h.home, GIT_CONFIG_GLOBAL: undefined })],
+  ['XDG_CONFIG_HOME (git/config)', (h) => ({ XDG_CONFIG_HOME: h.xdg, GIT_CONFIG_GLOBAL: undefined })],
   ...(process.platform === 'win32' ? [['lower-case git_config_global (Windows)', (h) => ({ git_config_global: h.file })]] : []),
 ];
 

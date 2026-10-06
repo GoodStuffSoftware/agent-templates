@@ -44,6 +44,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { configDir, opt, stateFile, readJson } from './context.mjs';
 
 export const RULES_VERSION = 1;
@@ -118,6 +119,18 @@ export const LEAD_EFFORT_CHECK_TEXT = [
   'Never raise to max this way, never lower the effort.',
 ].join(' ');
 
+// The pr-wait discoverability line. The path is the REAL one, resolved here
+// (CLAUDE_PLUGIN_ROOT, else this file's own location), exactly as
+// hooks/git-brief.mjs does: an agent cannot expand a `<plugin>` placeholder, and
+// a call that never finds the script falls back to the gh/sleep loops the line
+// exists to prevent. `run_in_background` is in the line because a foreground
+// Bash call is killed at 2 minutes, well short of most CI waits.
+// Size: the wording WITHOUT the path is pinned at 125 characters (a test), so
+// the whole line is that plus the plugin path (~70 in a typical cache install).
+const PLUGIN_ROOT = (process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('../..', import.meta.url))).replace(/\\/g, '/').replace(/\/+$/, '');
+export const PR_WAIT_HINT_WORDING = 'PR/CI wait, one call, no gh/sleep loops: run_in_background (foreground dies at 2m): node "@/scripts/pr-wait.mjs" <pr|branch>';
+export const PR_WAIT_HINT_TEXT = PR_WAIT_HINT_WORDING.replace('@', () => PLUGIN_ROOT); // a function, so a `$` in the path is literal, not a replace pattern
+
 function builtinRules() {
   return [
     {
@@ -138,7 +151,7 @@ function builtinRules() {
       scope: 'session-start',
       gate: 'brevity',
       when: null,
-      then: 'Report to the user at outcome level: what happened, what is next, what needs them. State blockers in full. Keep troubleshooting narrative, resolved dead ends and tool-by-tool recaps out of the reply — put detail in a file and link it.',
+      then: 'Report to the user at outcome level: what happened, what is next, what needs them. Blockers in full; detail in a linked file, no narrative or recaps.',
       note: null,
     },
     {
@@ -164,7 +177,7 @@ function builtinRules() {
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'You are an orchestrator. File reads, searches, shell commands, test runs and self-contained edits go to subagents; this session holds planning, interpretation and decisions. Never chain more than three execution-class tool calls here without delegating. Give every spawn an explicit model — an omitted model inherits this session\'s tier and is a decision to pay it.',
+      then: 'You are an orchestrator: reads, searches, shell, tests and self-contained edits go to subagents; you plan and decide. Max three execution calls in a row. Set every spawn\'s model explicitly.',
       gate: null,
       note: null,
     },
@@ -179,7 +192,7 @@ function builtinRules() {
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'Resume only while a worker\'s cache is warm; past its TTL, spawn fresh from a file handoff instead of resuming it with SendMessage.',
+      then: 'Resume only while a worker\'s cache is warm; after its TTL, spawn fresh from a file handoff.',
       gate: null,
       note: null,
     },
@@ -198,6 +211,20 @@ function builtinRules() {
       gate: 'delegation-drift',
       when: null,
       then: 'Delegation reminder: this session has already run execution work on the main thread. Route the next read, search, command, test run or edit to a subagent rather than doing it here.',
+      note: null,
+    },
+    {
+      // The discoverability line for scripts/pr-wait.mjs. Gated on the pr_wait
+      // option so the trial can switch it off and compare. Keep it to one
+      // line: it is paid for in every session.
+      id: 'pr-wait-hint',
+      audience: 'lead',
+      enabled: true,
+      builtin: true,
+      scope: 'session-start',
+      gate: 'pr_wait',
+      when: null,
+      then: PR_WAIT_HINT_TEXT,
       note: null,
     },
     {
@@ -229,7 +256,7 @@ function builtinRules() {
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'One completion wait, never per-item wakes: harness-tracked background work notifies you when it finishes — arm one long fallback, not a short-interval poll.',
+      then: 'One completion wait, never per-item wakes: background work notifies on finish; arm one long fallback.',
       gate: null,
       note: null,
     },
@@ -387,6 +414,9 @@ function gateSatisfied(gate, sessionId) {
       return false;
     }
   }
+
+  // gate:'pr_wait' is the pr_wait option (default on; CLAUDE_PLUGIN_OPTION_PR_WAIT=0 turns it off).
+  if (gate === 'pr_wait') return opt('pr_wait', true);
 
   if (gate === 'delegation-drift') {
     if (!sessionId) return false;

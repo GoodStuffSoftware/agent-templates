@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-28
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 A boundary test was written as `grep -qiF "$needle" file && fail`. On the shell in question, that particular `grep` flag combination aborts (SIGABRT) instead of returning 0 or 1, while `-i` and `-F` each work fine alone. The abort is neither a match (exit 0) nor a non-match (exit 1), so the `&&` never fires and the surrounding harness saw an ordinary non-zero exit — indistinguishable, to anything checking only "did the check step fail," from the needle simply not being present. Every run reported a clean pass, for every needle, because the checker itself was dying.
 
@@ -19,3 +19,9 @@ A boundary test was written as `grep -qiF "$needle" file && fail`. On the shell 
 - When a gate wraps a command in `&&`/`||` or a pipeline, check what a crash or signal does to that specific chain — a non-zero-but-unexpected exit code does not always route where the author assumed.
 
 Related: [[did-not-run-is-a-third-outcome]], [[assert-the-guard-saw-something]], [[exit-code-void-when-output-stream-closes]].
+
+**A type-checker that aborts at startup prints no errors.** A checker invoked with the project config died on a deprecated-option error (two lines, exit 2, zero files checked); an agent grepped the output for its file name, found nothing, and read that as clean. Separately, a project's `lint` script reached exit 0 with real type errors present because no compiler was anywhere in the pipeline, so green lint was zero evidence about types.
+
+- Before trusting "no error mentioning X", re-introduce the old defect (or run on the pre-fix code) and confirm the check reproduces it. A check that cannot fail and a check that passes look identical.
+- Count output volume: a type-check of a real project that emits two lines did not run.
+- Before proposing a new type gate, separate app errors from tooling-config errors in the count; the number decides whether the work is one session or a cleanup.

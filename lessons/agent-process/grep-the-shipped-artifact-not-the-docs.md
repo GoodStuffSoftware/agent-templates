@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-31
 provenance: [contrib-1]
-corroborated: 1
+corroborated: 2
 ---
 When an integration hinges on an exact external identifier — the tool name a lifecycle hook must match, an event name, an environment-variable key, a field in a payload — the **shipped artifact on disk** is the authority. Documentation lags releases, and third-party summaries hallucinate confidently and in detail.
 
@@ -19,3 +19,5 @@ The incident: two research agents returned contradictory answers about which too
 - **Treat two agents disagreeing on a load-bearing fact as a trigger to consult the primary artifact** — never as a tie to be broken by citation quality, seniority, or averaging. The disagreement is information: it says the secondary sources are unreliable here.
 - Prefer identifiers the artifact will reject loudly when wrong. Where the platform offers no such refusal, the canary is the substitute.
 - Related: [[probe-behaviour-not-version-stamps]] (a self-reported version is a claim by the thing you are auditing), [[run-the-formats-own-validator]] (same shape for schema-bound artifacts), and [[tool-listing-is-scope-filtered]] (why an identifier's ABSENCE from a listing proves nothing).
+
+**In a minified bundle, absence of a full path string is not absence of the feature.** An audit concluded two telemetry endpoints were not shipped because a grep for the full path found nothing; they existed as constants concatenated with a slug at call time, and a grep for the distinguishing fragment found them. Search each fragment and the constructor pattern, and record the verdict as one of {not shipped, shipped but never fired, fired}: zero rows cannot distinguish the first two.

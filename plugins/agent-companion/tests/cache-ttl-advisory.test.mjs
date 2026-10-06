@@ -5,7 +5,7 @@
 // recorded in full in config/model-tiers.json's `cacheTtl` block.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { makeFixture, PLUGIN_ROOT } from './helpers.mjs';
@@ -123,10 +123,9 @@ test('ac-* ladder worker set to cacheTtl: 1h is flagged as likely costing more, 
   try {
     const agentsDir = join(dir, '.claude', 'agents');
     mkdirSync(agentsDir, { recursive: true });
-    // ac-opus-low deliberately: same opus tier as the four 2026-09-26
-    // exception rungs (ac-opus-medium/high/xhigh/max), but config/model-tiers.json's
-    // `ladder` gives ac-opus-low no `cacheTtl` override — it stays a
-    // one-shot worker that should NOT be on 1h, so this must still flag.
+    // No shipped rung sets a `cacheTtl` in config/model-tiers.json's `ladder`
+    // (the 2026-09-26 exception for ac-opus-medium/high/xhigh/max was
+    // reverted 2026-10-03), so a ladder worker on 1h must flag.
     writeFileSync(
       join(agentsDir, 'ac-opus-low.md'),
       '---\nname: ac-opus-low\ndescription: generic ladder rung\nmodel: opus\neffort: low\nexperimental:\n  cacheTtl: 1h\n---\nbody\n',
@@ -140,7 +139,7 @@ test('ac-* ladder worker set to cacheTtl: 1h is flagged as likely costing more, 
   } finally { cleanup(); }
 });
 
-test('ac-opus-high (a rung config DOES except, 2026-09-26 decision) with cacheTtl: 1h is NOT flagged as costing more', () => {
+test('ac-opus-high with cacheTtl: 1h IS flagged as costing more (no shipped rung excepts since 2026-10-03)', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const agentsDir = join(dir, '.claude', 'agents');
@@ -152,8 +151,30 @@ test('ac-opus-high (a rung config DOES except, 2026-09-26 decision) with cacheTt
     const result = runAgentDefsAudit(dir, fixtureEnv(dir));
     assert.ok(result, 'agent-defs check did not run');
     assert.ok(
+      result.findings.some((f) => /ac-opus-high/.test(f) && /likely costs MORE/.test(f)),
+      `expected a "costs more" note for ac-opus-high at 1h now that no rung is excepted; got: ${JSON.stringify(result.findings)}`,
+    );
+  } finally { cleanup(); }
+});
+
+test('a rung whose config sets cacheTtl "1h" (per-machine override) is NOT flagged as costing more', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const ladder = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8')).ladder
+      .map((r) => (r.agent === 'ac-opus-high' ? { ...r, cacheTtl: '1h' } : r));
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'model-tiers.json'), JSON.stringify({ ladder }));
+    const agentsDir = join(dir, '.claude', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(
+      join(agentsDir, 'ac-opus-high.md'),
+      '---\nname: ac-opus-high\ndescription: generic ladder rung\nmodel: opus\neffort: high\nexperimental:\n  cacheTtl: 1h\n---\nbody\n',
+    );
+    const result = runAgentDefsAudit(dir, fixtureEnv(dir));
+    assert.ok(result, 'agent-defs check did not run');
+    assert.ok(
       !result.findings.some((f) => /ac-opus-high/.test(f) && /likely costs MORE/.test(f)),
-      `did not expect a "costs more" note for ac-opus-high — config/model-tiers.json's ladder marks it as the deliberate exception; got: ${JSON.stringify(result.findings)}`,
+      `did not expect a "costs more" note for ac-opus-high — the config ladder marks it as the deliberate exception; got: ${JSON.stringify(result.findings)}`,
     );
   } finally { cleanup(); }
 });

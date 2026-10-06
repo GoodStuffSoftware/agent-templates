@@ -1,6 +1,6 @@
 ---
 name: evaluate
-description: Evaluate whether the agent currently running — or one about to be spawned — is provisioned correctly for its task. Verdict is over-provisioned (paying for a tier the work does not need), under-provisioned (the task exceeds the tier), or fit, with the action for each. Use when asked "is this the right model for this", "am I over-provisioned", "should this have been sonnet", "is fable overkill here", when a task turns out heavier or lighter than it was briefed, or before spawning a reviewer to check its parity with the writer.
+description: Judge whether the running (or about-to-spawn) agent is provisioned for its task - over-provisioned, under-provisioned or fit, with the action for each. Use for "is this the right model for this", "am I over-provisioned", "should this have been sonnet", "is fable overkill here", a task heavier or lighter than briefed, or reviewer parity checks.
 ---
 
 # Evaluate the running agent's fit

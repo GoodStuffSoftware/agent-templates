@@ -1,6 +1,6 @@
 ---
 name: setup
-description: One-time setup of agent-companion on a machine or account — verify the install, choose options, schedule the daily calibration scout BOTH locally (desktop scheduled task) and in the cloud (claude.ai routine), and prove the guards fire. Use when installing the plugin on a new machine, when asked "how do I set up agent-companion", "schedule the scout", "is the scout running", or whenever the routing table or guards seem to have stopped being checked.
+description: One-time agent-companion setup - verify the install, choose options, schedule the daily calibration scout locally (desktop task) and in the cloud (routine), prove the guards fire. Use when installing on a new machine, "how do I set up agent-companion", "schedule the scout", "is the scout running", or when routing or guards seem unchecked.
 ---
 
 # Set up agent-companion

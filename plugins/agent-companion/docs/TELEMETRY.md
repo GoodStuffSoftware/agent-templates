@@ -310,6 +310,123 @@ compaction once per compaction).
 | `threshold` | number | `subagent_context_notice_tokens` as set |
 | `trigger`, `pre_tokens` | string, number; `compaction` only | the boundary's `compactMetadata.trigger` (`auto` or `manual`) and the context it held before compacting |
 
+### `bash-tail.jsonl` — the Bash output tail
+
+Three kinds of row, told apart by `event`. Read with `node scripts/bash-tail-report.mjs`.
+`wrapped` and `skipped` are written by the PreToolUse hook (`hooks/bash-tail.mjs`);
+`result` is written by the rewritten command itself, in the shell, when the
+command finishes (so it is absent for a run that is still going, was killed, or
+ran in a fixture session, whose results are kept out of this file).
+
+| field | type | on | meaning |
+|---|---|---|---|
+| `v` | number | all | schema version |
+| `at` | ISO 8601 string | all | when it was written |
+| `event` | `wrapped` \| `skipped` \| `result` | all | |
+| `id` | string | `wrapped`, `result` | the run's id; the output file is `<id>.log`. Joins a `wrapped` row to its `result` |
+| `session_id`, `agent_type`, `caller_is_subagent` | string, string \| absent, boolean | `wrapped`, `skipped` | who ran it |
+| `runner` | string | `wrapped`, `skipped` | the known runner that matched, e.g. `npm test`, `cargo build` |
+| `command_chars` | number | `wrapped` | length of the original command (the command text is never logged) |
+| `reason` | string | `skipped` | why a known runner was left alone: comma-separated blockers (`pipe`, `redirect`, `background`, `subshell`, `substitution`, `unterminated`, `output-flag`, `compound`, `shell-word:<word>`, `never-ends:<what>` for a dev server, watcher or interactive command anywhere in the chain, `other-command:<name>` for a chain segment that is not a known runner) or `permission_mode:<mode>` or `permission-rule:deny` / `permission-rule:ask` (a settings rule could match the original or a helper the wrapper adds) |
+| `rc` | number | `result` | the command's exit status |
+| `lines`, `bytes` | number | `result` | what the command wrote (stdout and stderr merged) |
+| `shown_chars` | number | `result` | characters returned to context: the whole output for a short run, header plus tail otherwise |
+| `truncated` | 0 \| 1 | `result` | 1 when the tail form was returned |
+
+The effect for a review: `sum(bytes) - sum(shown_chars)` is what stayed out of
+context, per wrapped run. Characters, not tokens; convert with a measured ratio.
+
+### `git-brief.jsonl` — the git brief (trial)
+
+One row per hook injection and one per script run (`hooks/git-brief.mjs`, `scripts/git-brief.mjs`). Written through the same `appendLog` as every other stream, so fixture and canary sessions land in `fixtures.jsonl`. With `git_brief` off the hook writes nothing; a script run still logs.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when it was written |
+| `session_id` | string | the session (the hook's payload; for a script run, `CLAUDE_SESSION_ID` when the shell has it, else `""`) |
+| `agent_type` | string \| absent | the subagent's type; absent for the main session and for script runs |
+| `event` | `inject-session` \| `inject-subagent` \| `run` \| `landed` | a SessionStart injection, a SubagentStart injection, a script run with no subcommand, a `landed` run |
+| `chars` | number | characters injected (the whole additionalContext text) or returned (stdout, newline included); 0 when there was nothing to say (not a repository, an error) |
+| `fetched` | boolean | whether this run attempted a fetch (false when one ran inside the 5-minute window, when none is possible, or with `--no-fetch`) |
+| `duration_ms` | number | wall time of the git work |
+| `start_ms` | number \| absent | injection rows only: process start to the hook's first line (node start-up and imports), the part of the start-up cost `duration_ms` leaves out |
+| `outcome` | string | `ok`, `not-repo`, `no-default-branch` (landed only), `no-target` (landed only), `git-error`, `timeout` (the run's deadline or a git step's timeout hit), `error`. Separates "nothing to say" (`chars` 0, `not-repo`) from "could not say" |
+| `fetch_outcome` | string | `ok`, `fail`, `timeout`, `fresh-skip` (a fetch inside the 5-minute window, injection only), `no-remote`, `skipped` (`--no-fetch`, or no fetch was asked for) |
+| `fetch_age_ms` | number \| null | how old the previous fetch stamp was before this run; null when there was none |
+| `steps_ms` | object | wall time per git subcommand (`fetch`, `rev-list`, ...), summed when one ran twice |
+| `answer` | `YES` \| `NOT` \| `UNKNOWN` \| absent | `landed` rows only: the verdict printed |
+| `target_hash` | string \| absent | `landed` rows only: first 8 hex characters of the SHA-256 of the target argument (the argument itself is never logged) |
+| `stamp_age_ms` | number \| null \| absent | `landed` rows only: the age of the last successful fetch as of the answer; 0 right after a fetch that succeeded, null when none did |
+| `rechecked_after_NOT` | boolean \| absent | `landed` rows only: the answer was NOT and a fresh fetch had just succeeded, so the NOT is not a stale one |
+
+The review: `sum(chars)` over `inject-*` rows is the context added per session and subagent; a drop in Bash `git status` / `git fetch` / `git rev-list` calls per agent (counted from transcripts) with the switch on, against off, is what it bought. `fetched` and `fetch_outcome` over `inject-*` rows show how often the 5-minute window absorbed the fetch and how often a fetch failed or timed out, and `duration_ms` plus `start_ms` the start-up cost. A `landed` run always fetches, so `answer` over `landed` rows with `rechecked_after_NOT` true is the rate of a NOT that survived a fresh fetch; with `fetch_outcome` not `ok` the line carries a staleness note.
+
+### `read-dedupe.jsonl` — the Read dedupe
+
+Written by the hook (`hooks/read-dedupe.mjs`): a row per denial, per denied
+request that was repeated and ran, per repeat-eligible read that was allowed
+(the denominator of the denial rate), and per lock that could not be taken. A
+first read, and a read of a changed file, writes nothing. The path is never
+logged, only a hash. State is one file per (session, agent), so agents never
+contend for a lock.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when it was written |
+| `session_id` | string | the session |
+| `agent_id` | string | the agent's id, `main` for the lead thread |
+| `agent_type` | string \| absent | the subagent's type, when the payload names one |
+| `tool_use_id` | string \| absent | the tool call's id, to join with a transcript |
+| `hook_event` | `pre` \| `post` \| `invalidate` \| `reset` | which registration wrote the row; a `lock-timeout` can come from any of them |
+| `path_hash` | string | first 12 hex characters of the SHA-256 of the normalised absolute path; one file keeps one hash across rows; empty for a `reset` |
+| `range` | string | the lines the request covered, `first-last`, clamped to the file's length |
+| `est_chars_avoided` | number | `deny`: estimated characters the denied read would have returned (lines x (average line length + 7)); every other outcome: 0 |
+| `est_chars` | number \| absent | the same estimate, kept on `allow` and `retry-ran` rows too: what that read cost, or would have cost had it been denied |
+| `outcome` | `deny` \| `retry-ran` \| `allow` \| `lock-timeout` | `deny`: the read was refused. `retry-ran`: the same request came again after a denial and ran. `allow`: a repeat-eligible read ran (see `allow_reason`). `lock-timeout`: the state lock was not taken within its wait, the hook failed open (for a `post`, a read went unrecorded) |
+| `deny_chars` | number \| absent | `deny` only: characters of the denial text the model received (the cost side of `est_chars_avoided`) |
+| `age_ms` | number \| absent | `deny`, `allow` (repeat-eligible) and `retry-ran`: the time since the file's original read was recorded |
+| `deny_at` | ISO 8601 string \| absent | `retry-ran` only: when the denial that was retried happened |
+| `allow_reason` | string \| absent | `allow` only: `builtin-last` (the exact repeat of the last read, left to the built-in stub), `aged` (the record outlived the age cap), `uncovered` (the lines were not all in earlier reads), `small` (under the size threshold) |
+| `read_index` | number \| absent | how many Reads this agent had made in the session, counting this one: how deep into its session the event fell (the PreToolUse count, so absent on `post`, `invalidate` and `reset` rows) |
+| `lock_wait_ms` | number | time spent waiting for the state lock |
+| `duration_ms` | number | wall time of the hook, process start to the row |
+| `transcript_bytes` | number \| absent | the size of the agent's transcript file at that moment: how deep into the session the read fell |
+
+The effect for a review: `sum(est_chars_avoided) - sum(deny_chars)` is what stayed
+out of context, a ceiling, because a `retry-ran` row means the agent did not have
+the content after all. `retry-ran` / `deny` is the false-denial rate to watch;
+`deny` / (`deny` + `allow`) is how much of the repeat-eligible reads the rule
+caught, and `allow_reason` says where the rest slipped through. Any `lock-timeout`
+row is a miss to count: with per-agent state files it should be rare. The toggle
+is `read_dedupe`.
+
+### `pr-wait.jsonl` — the PR and CI wait script
+
+Two rows per run of `scripts/pr-wait.mjs`, both written by the script itself: a `start` row as the wait begins and an `end` row when it exits. A `start` with no matching `end` is a run killed outright (a foreground call cut at the harness's two-minute limit, for one): that is the signal that the hint's `run_in_background` advice was not followed. A usage error exits before the wait begins and writes only an `end` row. Written whether or not the `pr_wait` hint option is on: that option only hides the discoverability line. A fixture session's row goes to `fixtures.jsonl`, as for every stream.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when the row was written |
+| `event` | `start` \| `end` | which row |
+| `session_id` | string \| absent | the session, from `CLAUDE_SESSION_ID` or `CLAUDE_CODE_SESSION_ID` when the harness exports one |
+| `mode` | `pr` \| `run` | `--run` selects `run` |
+| `target_hash` | string \| absent | first 8 hex characters of the SHA-256 of the PR or branch argument; absent on a usage error. The argument itself is never logged |
+| `repo_hash` | string \| absent | the same hash of the repository (`owner/name`), once known |
+| `timeout_ms` | number | `start` only: the wait's overall timeout |
+| `polls` | number | `end` only: gh calls made while waiting, a retried failure counting. A PR poll is three calls (`pr view`, check runs, commit status), a `--run` poll one |
+| `cycles` | number | `end` only: rounds of polling. `polls` / `cycles` is the gh cost of one round |
+| `settle_waits` | number | `end` only: rounds spent holding a green result until it was stable, under the settle rule (the same check set on two polls at least `PR_WAIT_SETTLE_MS` apart, default 20000) |
+| `duration_ms` | number | `end` only: wall time from start to exit |
+| `outcome` | string | `end` only: `passed`, `failed`, `merged`, `closed`, `no-checks` (no check appeared within the grace period: nothing was observed, nothing failed), `timeout`, `gh-error`, `usage`, `interrupted`, `help` (`--help`) |
+| `exit_code` | number | `end` only: 0 passed or merged (or no checks), 1 failed or closed, 2 timeout, 3 usage or gh error, 130 interrupted |
+| `head_sha` | string \| absent | `end` only: the head commit the verdict is bound to (a later push restarts the wait) |
+| `error_class` | `permanent` \| `transient` \| absent | `end` only, on exit 3: `permanent` will not heal (no gh, not a repository, no such PR), `transient` is a retry budget used up |
+
+The effect for a review: each `end` row stands for `polls` gh calls that never reached the model, and one tool call in place of the repeated `gh` and sleep calls an agent would otherwise have made. Compare transcript counts of those calls with the hint on and off. A `passed` PR row always has `settle_waits` of at least 1 (the first green round only starts the clock); a high count means the check set kept changing, which is the late-registering check the settle rule exists for. `start` rows with no `end` count the runs the harness cut off.
+
 ### `unknown-agent-types.jsonl` — harness drift signal
 
 | field | type | meaning |

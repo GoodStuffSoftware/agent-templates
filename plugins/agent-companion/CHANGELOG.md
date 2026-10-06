@@ -2,6 +2,140 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.30.2 — 2026-10-06
+
+Test isolation, round two. The suite no longer reads the operator's real home from a child process, and a violation now fails the file that caused it.
+
+- Test fix. The 0.29.25 isolation covered what the plugin resolves through its home override. It left `os.homedir()` and git's `~` pointing at the operator's real home, so any child a test spawned could still read it. Every test process now points `HOME`, `USERPROFILE` and `GIT_CONFIG_GLOBAL` at an empty sandbox directory, and every node child and grandchild arms the same real-`~/.claude` tripwire through a `NODE_OPTIONS` preload (`tests/child-guard.mjs`). A fail-open child that swallows the throw is still recorded.
+- A violation now exits the offending test file non-zero. It used to be reported by a root hook that node:test attributed to `tests/isolate.mjs`, so ci-local's isolated re-run passed and the run counted as flaky (non-blocking outside `--ci-parity`). The file itself now fails, and so does its re-run.
+- `runHook` and `runScript` run from the sandbox instead of the checkout. From the checkout, a hook walking up for `.claude/settings*.json` read the operator's `~/.claude/settings.json` (eight bash-tail tests depended on it), and `detect.mjs` read the operator's real dev folder.
+- Sandbox temp dirs carry the owner pid (`ac-suite-<pid>-*`, `ac-test-<pid>-*`), and a startup sweep removes the ones a killed run left behind: only when the pid is dead, or by age for the old pid-less names. A live run's directory is never touched.
+- Fix (`scripts/detect.mjs`, `scripts/lib/publication-sweep.mjs`). The operator's OS handle used for scrubbing now comes from `homeRoot()`, the plugin's home resolver, instead of `os.homedir()`. With a redirected home the handle was the generic word "home". Behaviour is unchanged when the home is not redirected.
+
+## 0.30.1 — 2026-10-06
+
+A test fix for Linux CI, and a fix for a fetch that could leave git running on a loaded machine.
+
+- Test fix. Since 0.30.0 the git-brief fetch-timeout test (`tests/git-brief.test.mjs`) failed on every Linux CI run, even though the process-tree kill worked. The cause was the test's hang server, which never read its sockets. On Linux, SIGKILL closes the connection with a FIN. Node reports end of stream on an undrained socket only after the buffered request has been read, so the socket never closed. On Windows, `taskkill /F` resets the connection, which closes the socket either way. The server now drains its sockets. The assertion is unchanged: a surviving git-remote-http still leaves its socket open and fails the test. The fixed sleep is now a bounded wait for the close events, and a failure lists each socket's events.
+- Fetch fix (`scripts/git-brief.mjs`). git-brief's fetch runs under a small runner that kills git's whole process tree at the cap. A backstop kills the runner itself 2 s after the cap. On a loaded machine the runner can take longer than that just to start, so the backstop fired first and left git and git-remote-http running, holding the connection open. This is what failed the fetch-timeout test intermittently on Windows under full-suite load. The runner now prints git's pid, and when the backstop fires the caller kills git's tree itself (`taskkill /T /F` on Windows, the process group elsewhere). git is now started detached on Windows as well as elsewhere. Otherwise killing the runner also killed git and its first child, through node's kill-on-close job, while git-remote-http survived without a parent, out of reach of `taskkill /T`. Detached adds no visible window: git now runs with no console at all, where before it had a hidden one. On Windows the orphan kill first checks that the pid still belongs to a git process, since the pid may have been reused by then, and it runs in a detached helper so it does not hold the hook past its 5 s timeout. A new test forces the backstop path and asserts that no connection survives.
+- Behaviour change on Windows: if the hook process itself is killed from outside (for example by the hook timeout), git and git-remote-http now survive it, as they already did on Linux. A stalled transfer still ends by itself through git's low-speed abort (`GIT_HTTP_LOW_SPEED_LIMIT`/`GIT_HTTP_LOW_SPEED_TIME`, set unless the operator sets them).
+
+## 0.30.0 — 2026-10-04
+
+Token-saving trial: four changes shipped together, each with its own on/off toggle and telemetry stream, so the trial can be switched off per feature and measured per feature (injected-text numbers below).
+
+Trial: each feature has its own toggle and its own telemetry stream. It is measured over the first full week against the 2026-09-27..2026-10-04 baseline, net of retries and re-checks (a saving that forces a redo does not count).
+
+### Trimmed injected text
+
+Trimmed the text the plugin adds to every session. Keeps every rule; shortens rationale (the small requirements and reasons that did go are listed under "Known limits"). Source: `plugin-overhead-2026-10-04.md` (usage postmortem), trims 1 to 4.
+
+- Scout surface (SessionStart): the main session gets a pointer line (signal count, kinds, path to `scout-latest.json`, "mention only if asked") instead of the full signal list; subagents get nothing (the hook already skipped them: `sessionIsSubagent`). The CI-red line is unchanged.
+- Standing rules: subagents get none (every built-in session-start rule is `audience: lead`; no rule that governs a worker's own tool use exists to keep). Main session wording tightened, every rule kept: the delegate-first rationale clause "omitted inherits this tier" is dropped (the instruction to set the model explicitly stays); other rules lose filler words only.
+- Reporting contract (SubagentStart/spawn brief): tightened, every rule kept (STATUS line, blockers uncompressed, outcome shape, omit list, long output to a file, peer messages one screen); some rationale and emphasis shortened (see "Known limits").
+- Skill descriptions: the 11 plugin skills cut by about a third, trigger phrases kept.
+- Not done: hiding the 10 `ac-*` ladder agents from subagents. Claude Code has no supported mechanism (only a per-agent `tools: Agent(a, b)` allowlist, which would mean editing every other agent).
+- Measured by chars of injected text, via the same scripts' inputs as the report (static run of each hook, clean config dir; scout with a 3-signal result, so the real scout block is larger):
+
+| Item | Before | After |
+|---|---|---|
+| Main session-start text (scout + standing rules) | 1,499 | 867 |
+| Subagent session-start text (scout + rules + contract) | 758 | 473 |
+| Skill descriptions, total (11) | 5,360 | 3,656 |
+
+  Per item: scout main 567 -> 290 (report averaged 2,907 on real multi-signal results, and it grows with signals; the pointer does not), subagent 0 -> 0; rules main 932 -> 577, subagent 0 -> 0; contract subagent 758 -> 473. The report's 3,924 (scout) and 2,011 (rules) per-subagent figures predate the subagent skip already in 0.29.29.
+
+### Git brief (option `git_brief`)
+
+One line of git state at agent start, and one script instead of a dozen git reads.
+
+- New `scripts/git-brief.mjs`: prints `branch | ahead/behind origin's default branch | uncommitted N | worktree | last commit | unpushed N`; `landed <sha|branch>` prints `ON main (sha)` (an ancestor of the default branch), `ON main (cherry-picked)` (every commit is patch-equivalent to one on it, the way `git cherry` decides, so a rebase or cherry-pick merge counts) or `NOT on main (ahead N; a squash merge wouldn't show)` (a squash merge produces a different patch and cannot be detected reliably, so the answer says so instead of claiming the branch is unmerged). Fetches origin's default branch at most every 5 minutes per repository (shared by linked worktrees), 1.5 s cap, never prompts; a failed fetch is not retried for 1 minute. Prints nothing and exits 0 outside a git repository or on any error. Flags `--no-fetch`, `--fresh`, `--cwd`.
+- New hook `hooks/git-brief.mjs` on SessionStart (every source) and SubagentStart: injects that line as `additionalContext`, with the refresh command, so agents stop running `git status` / `git fetch` / `git rev-list`. Motivated by about 5,100 git-read Bash calls (882 of them `git fetch origin`) in a 7-day transcript count.
+- Option `git_brief` (default on for the trial; off with `false` or `CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0`, which makes the hook do nothing at all).
+- Telemetry stream `telemetry/git-brief.jsonl`: one row per injection and per script run (chars injected or returned, whether a fetch ran, duration). Documented in `docs/TELEMETRY.md`.
+- Tests: `tests/git-brief.test.mjs` (real throwaway repositories with a local bare origin).
+
+### Read dedupe (option `read_dedupe`)
+
+A PreToolUse hook that denies a repeat Read of lines the same agent already read, when the file is unchanged and the read would return 2,000 characters or more. Fills the gap Claude Code's own "File unchanged" stub leaves (a range inside an earlier larger read, A-B-A alternation, ranges spanning two earlier reads; 551 of 654 measured repeat reads in 7 days were partial). The denial is one sentence and the identical call, repeated, runs. State is per agent; cleared by an edit, any mtime or size change, `PreCompact` and `SessionStart` `compact`/`clear`; fails open. Option `read_dedupe` (default on; `CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0`); telemetry in `read-dedupe.jsonl`.
+
+### PR and CI wait (option `pr_wait`)
+
+One call that waits inside a script instead of repeated `gh` and sleep polls.
+
+- New `scripts/pr-wait.mjs`: `pr-wait <pr-number|branch> [--repo owner/repo] [--timeout 20m]` waits until a PR's checks finish or it merges or closes; `--run <run-id|branch>` does the same for a GitHub Actions run. It prints one start line, then one final line (state, checks passed/failed/total, elapsed) and up to nine failed-check lines with log URLs. Exit codes: 0 passed or merged, 1 failed or closed unmerged, 2 timeout, 3 usage or gh error. Polls gh inside the script with backoff (5s to 30s), never prompts, and is safe under `run_in_background`.
+- Bound to the commit, not the branch: PR mode reads the PR's head commit (`headRefOid`) on every poll and counts only the check runs and statuses of that commit, so the previous commit's checks (still reported for a few seconds after a push) never answer for it; a head with no checks yet is waited on. `--run <branch>` takes the newest run whose head SHA equals the branch's current remote tip and keeps waiting within the timeout while there is none; a run id is used as given. Each poll is three `gh` calls, all inside the process.
+- New option `pr_wait` (default on; `CLAUDE_PLUGIN_OPTION_PR_WAIT=0` turns it off) and standing rule `pr-wait-hint`: one session-start line naming the script (reworded after review, see "Review fixes"). Off hides only that line; the script still runs.
+- Telemetry stream `telemetry/pr-wait.jsonl`, one row per run: mode, polls, duration, outcome, exit code (`docs/TELEMETRY.md`).
+- Tests: `tests/pr-wait.test.mjs` (gh stubbed, including a previous-commit-green PR and a run list holding only the commit before the push), plus the rule-count updates in `tests/standing-rules.test.mjs`.
+### Injected text with all four changes
+
+Same method as the trim table (static run of every SessionStart and SubagentStart hook, clean config dir, 3-signal scout; chars of `additionalContext`). Main = scout pointer + standing rules + git brief; the machine-specific capacity line (about 120) is left out. Subagent = what SubagentStart injects (reporting contract + git brief); standing rules and scout add nothing for a worker. `read_dedupe` injects nothing at start (it only denies a repeat Read), so its row never moves.
+
+| Toggles | Main session start | Subagent start |
+|---|---|---|
+| all on | 1,396 | 796 |
+| `git_brief` off | 1,073 | 473 |
+| `pr_wait` off | 1,194 | 796 |
+| `read_dedupe` off | 1,396 | 796 |
+| all three off (the trimmed baseline) | 871 | 473 |
+
+So the three trial features add 525 characters to a main session start (git brief 323, pr-wait hint 202) and 323 to a subagent start (git brief); each is gone with its own switch. Both depend on the plugin's install path, which these lines print: measured with a typical cache path (`C:/Users/<name>/.claude/plugins/cache/agent-companion/agent-companion/<version>`, 75 characters). The pr-wait hint grew from 136 to 202 after review because it now carries the real script path and `run_in_background`. Before review the table read 1,354 / 820 (git brief 347, hint 136), measured under a longer path for the brief.
+
+### Review fixes (2026-10-04)
+
+An independent review of the four changes returned SHIP-WITH-FIXES (2 high, 4 medium, 11 low). Each finding was reproduced before it was fixed.
+
+- **`landed` answered from a stale fetch (high).** `git-brief.mjs landed` honoured the 5-minute fetch stamp, so a branch merged in that window read as NOT on main. `landed` now always fetches (`--no-fetch` for local refs only); the 5-minute window applies to the injected start line only. A NOT that rests on a failed fetch or no remote carries a note (`fetch failed; origin/main may be stale`, `local origin/main only`). An unknown or deleted ref prints `UNKNOWN (no such ref X)` instead of a NOT, and so does a git timeout.
+- **A timed-out fetch left `git-remote-http` running (high).** The old synchronous kill ended `git` but not its transport child, which kept the connection open (indefinitely on Windows). Fetches now run under a runner that kills the whole process tree on timeout (`taskkill /T /F` on Windows, a process-group kill elsewhere), with `GIT_HTTP_LOW_SPEED_LIMIT`/`TIME` as a second cut, and one run has an overall deadline (fetch cap plus local cap, `AC_GIT_BRIEF_DEADLINE_MS`). Tested: no orphan survives a hung fetch.
+- **pr-wait answered PASS too early (medium).** CI registers checks one after another, so a first poll could see one finished green check and nothing pending. PASS now needs the same check set (head commit, names, verdicts) on two polls at least `PR_WAIT_SETTLE_MS` (default 20 s) apart; a new or changed check restarts the clock; a failure still returns at once. The final line carries the bound head commit (`@sha7`), and `NO-CHECKS` now says "no CI observed (exit 0 = nothing failed)". "not a git repository" is a permanent error (exit 3 at once, not after about 15 s of retries).
+- **The pr-wait hint (medium).** It named release tools a plain repository does not have and gave no path. It now carries the script's real absolute path and says to launch it with `run_in_background` (a foreground call dies at two minutes).
+- **read-dedupe compared only mtime and size (medium).** A same-size edit with the mtime put back (some tools, and `touch -r`) was missed and a stale read denied. The stat tuple now includes ctime, which a user-space call cannot put back.
+- **read-dedupe state contended across agents (medium).** One state file and lock per session made parallel agents queue and fail open on a busy lock. State is now one file per (session, agent), so agents never contend, a held lock on one agent does not touch another, and a lock that cannot be taken writes a `lock-timeout` row instead of vanishing. A whole-session compaction removes every agent's file.
+- **Telemetry for all three streams (`docs/TELEMETRY.md`).** read-dedupe: `allow` rows with `allow_reason` (the denominator of the denial rate), `lock-timeout` rows, `hook_event`, `agent_type`, `tool_use_id`, `est_chars`, `deny_chars`, `age_ms`, `deny_at` (joins a `retry-ran` to its denial), `read_index`, `lock_wait_ms`, `duration_ms`, `transcript_bytes`. git-brief: `outcome`, `fetch_outcome`, `fetch_age_ms`, per-step `steps_ms`, `start_ms`; for `landed`, `answer`, `target_hash`, `stamp_age_ms`, `rechecked_after_NOT`. pr-wait: a `start` row (a killed run now leaves one), `event`, `cycles`, `settle_waits`, `head_sha`, `target_hash`, `repo_hash`, `error_class`; `polls` counts gh calls (a PR poll is three).
+- **Docs.** `standing_rules: false` also removes the pr-wait hint, because the hint is a built-in standing rule (the toggle note says so). The "keeps every requirement" claim for the trims is reworded to "keeps every rule; shortens rationale".
+
+### Known limits
+
+Found by the review and accepted for the trial; none changes a verdict.
+
+- **Parallel starts can fetch together.** The git-brief fetch stamp is written without a lock, so subagents starting in the same instant may each fetch (once per burst rather than once per 5 minutes). Each fetch is capped at 1.5 s; not fixed.
+- **The pr-wait hint is longer than 150 characters.** The earlier 150-character cap cannot hold once the line carries a real absolute path. The wording, path excluded, is at most 125 characters (tested); the whole line is that plus the path length (about 200 under a typical install).
+- **A check that registers late is still missed.** The pr-wait settle rule needs the same check set on two polls at least 20 s apart; a check that first appears more than 20 s after the others can still be missed by a PASS.
+- **A timed-out fetch costs about 2.1 s on Windows, not 1.5 s.** The 1.5 s cap is when the fetch is killed; reaping its process tree adds about 0.6 s.
+- **`NO-CHECKS` still exits 0.** A repository whose CI is slow to start or path-filtered reads as exit 0 after the 90 s grace. The line now says no CI was observed; a distinct exit code was not added, because callers key on 0 today.
+- **ctime also moves on attribute changes.** A `chmod`, a rename-over or a hard-link change on an unchanged file forgets the read record, so one repeat read is allowed. The cost is a missed denial, never a wrong one.
+- **The scout block lost its per-signal detail.** The session-start scout block is a pointer (count, kinds, path to `scout-latest.json`); the per-signal detail, the dispatch hint (`-> plugin-update`) and the `audit.mjs --only harness-drift,guard-canary` pointer are one file read away, not in context. Intentional (token saving); the lead is expected to read the file when a signal matters.
+- **Small requirements and reasons the trims dropped** (rules unchanged, emphasis lost): "never the body inline" became "file path plus summary"; "the one thing you need in order to proceed" became "what you need"; "no recap of context they already have" (peer messages) became "a decision or fact, one screen max"; the rationale "an omitted model inherits this session's tier" is gone (the instruction to set the model stays); "instead of resuming it with SendMessage" is gone from the resume rule; "harness-tracked" is gone from the one-completion-wait rule; and a few skill descriptions lost secondary trigger wording (`recommend`, `calibration-scout`, `evaluate`, `memory-search`, `setup`; every quoted trigger phrase survives). If the trial shows spawns without a model, or per-item polling, rising, restore the inherit-tier rationale first.
+
+## 0.29.32 — 2026-10-04
+
+Removed the top-level `$schema` key from `plugin.json`: the Claude desktop app warned that it is an unrecognized key (stripped, the SDK ignores unknown top-level fields).
+
+## 0.29.31 — 2026-10-04
+
+Bash output tail: the hook that sends a long runner's output to a file and returns its tail.
+
+- New PreToolUse hook `hooks/bash-tail.mjs` (matcher `^Bash$`): a known long-running command (test, build, install) has its combined output sent to a file, and only the tail plus the file's path comes back into context. The exit code is preserved exactly; output of 80 lines / 8,000 bytes or less prints whole; piped, redirected, backgrounded, watch-mode, machine-readable-output, compound and git commands are never touched. Applies in `bypassPermissions` only by default, because allow rules are checked against the rewritten command and stop matching it. Deny and ask rules apply in every mode, `bypassPermissions` included, and match the helper commands the wrapper adds, so the hook also reads `permissions.deny` / `permissions.ask` from user, project, local and managed settings and leaves a command alone when a rule could match the original or a helper.
+- Review fixes: a line naming the output file is printed before the command runs (a run killed by the tool timeout still names its file); with `set -e` active the original command runs unchanged (and `source` / `.` are blockers, since they can switch it on mid-command); dev servers, watchers and interactive tools (`npx vite`, `next dev`, `wrangler dev|login`, `--ui`, `playwright show-report|codegen`, `cypress open`, `-w`, `*:watch` scripts, `pytest -f|--pdb`, `make run|serve|dev`, `bootRun`, `spring-boot:run`) are never wrapped and a chain with any such segment, or any segment that is not a known runner, passes through; separate-argument format flags (`--reporter json`, `-f json`, `--junitxml x`) pass through; a failed run also shows up to five summary-looking lines from earlier in the output; the tail is capped by characters and keeps the END of a long line; the wrapper no longer calls `mkdir`, `tr`, `cut` or `cygpath`.
+- Hardening: with noclobber (`set -C`) on, the original command now runs unwrapped (the wrapped form never ran it: rc=1, no output). The settings reader strips a leading UTF-8 BOM before parsing, so a BOM-prefixed settings file's deny and ask rules are seen; a settings file that still cannot be parsed (JSONC comments, a syntax error, no read access) means the command is not wrapped at all for that call, logged as skipped with reason `permission-rule:unreadable-settings`. The ADR now says the wrapper is bash, not plain POSIX sh.
+- Options `bash_tail` (default on; opt out with `false` or `CLAUDE_PLUGIN_OPTION_BASH_TAIL=0`) and `bash_tail_permission_modes` (default `bypassPermissions`; `any` lifts the limit).
+- Telemetry stream `telemetry/bash-tail.jsonl` and `scripts/bash-tail-report.mjs` for the routing review: runs wrapped, bytes produced vs characters returned, runners left alone and why.
+- Decision record: `docs/adr/0004-bash-output-tail.md` (repo root), with the alternatives considered (a standing rule, a PostToolUse rewrite, a threshold-only wrapper) and what was verified against the Claude Code docs and the installed 2.1.283 binary.
+- Tests: `tests/bash-tail.test.mjs` (trigger logic, the generated shell run in a real bash for exit-code preservation, the hook).
+- Takes effect after the plugin update and a session restart.
+
+## 0.29.30 — 2026-10-03
+
+Subagents are back on the default 5-minute prompt cache. The operator chose this on 2026-10-03.
+
+- Removed `experimental: { cacheTtl: "1h" }` from `ac-opus-medium`, `ac-opus-high`, `ac-opus-xhigh` and `ac-opus-max` (added in 0.29.17), and the matching `cacheTtl: "1h"` on rungs 7-10 of `ladder` in `config/model-tiers.json`. All ten ladder workers now use the 5m default. Those four were the only 1h setting in the plugin.
+- Why: from 2026-10-02T16Z to 2026-10-03, 1h cache writes cost 242 plan units, 23% of the total. Agents run continuously and compact often, so the 1h TTL never paid off (it only pays when an agent sits idle for more than 5 minutes), and each rewrite costs 1.6x a 5-minute write.
+- `ladderCacheTtlNote` and `cacheTtl.ladderWorkersExcludedNote` in the config, the ladder section of `docs/ROUTING.md` (regenerated) and the "Which ladder rungs use the 1-hour cache" paragraph of the README now state the 5m policy and the numbers above.
+- Kept on purpose: the optional per-rung `cacheTtl` field and its generator/check (`--sync-agent-descriptions`), the agent-defs advisory, and the cache-ttl verdict's "already on 1h" split. They are config-driven and generic, so a rung can go back to 1h with a one-line config edit. To reverse: re-apply the 0.29.17 change (the agent frontmatter blocks and the four ladder `cacheTtl` fields).
+- Tests: `agent-description-drift` pins that no shipped rung carries a cacheTtl and that a stray 1h block is drift; `cache-ttl-advisory` now expects ac-opus-high at 1h to be flagged (and keeps the config-exception path via a per-machine override); `cache-ttl` and `resume-guard` use fixture definitions instead of the shipped ladder rungs.
+- Takes effect after the plugin update and a session restart.
+
 ## 0.29.29 — 2026-10-02
 
 Four "strange messages from gates", from a scan of every hook message since 2026-10-02T21:30Z.
