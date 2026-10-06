@@ -303,6 +303,16 @@ test('the deny names the next step (Agent + a ladder rung + TYPE, backgrounded),
   } finally { h.cleanup(); }
 });
 
+test('the deny names the browser variants for UI work, since the numbered rungs have no browser', () => {
+  const h = harness({ ...BLOCK, CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2' });
+  try {
+    h.main('Read');
+    const r = h.main('Read');
+    assert.equal(r.decision, 'deny');
+    assert.match(r.reason, /UI or browser work: agent-companion:ac-browser or agent-companion:ac-browser-opus \(the rungs have no browser\)/);
+  } finally { h.cleanup(); }
+});
+
 test('the deny example rung is the rung the routing table gives subagent-worker (no hard-coded opus/low)', () => {
   const h = harness({ ...BLOCK, CLAUDE_PLUGIN_OPTION_DELEGATION_THRESHOLD: '2' });
   try {

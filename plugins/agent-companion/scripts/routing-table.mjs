@@ -18,7 +18,9 @@
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { modelTiers, effortFor, routeForWeight, resolveRoute, rungFor } from '../hooks/lib/context.mjs';
+import {
+  modelTiers, effortFor, routeForWeight, resolveRoute, rungFor, ladderVariants, expectedDisallowedTools, ladderToolPolicy,
+} from '../hooks/lib/context.mjs';
 import {
   selfReviewConfig, selfReviewTypesForRung, selfReviewConfigProblems, selfReviewBlock,
   readSelfReviewBlock, setSelfReviewBlock,
@@ -163,6 +165,47 @@ function ladderRungs() {
   return Array.isArray(cfg.ladder) ? cfg.ladder.filter((r) => r && r.agent) : [];
 }
 
+// Every agents/ac-*.md file the generator owns: the rungs, then the
+// `ladderVariants` (a rung's model and effort with a different tool set; not a
+// rung, so no number, no cache TTL and no self-review block).
+function agentEntries() {
+  return [...ladderRungs(), ...ladderVariants()];
+}
+
+// The `disallowedTools` frontmatter line, GENERATED from config `ladderTools`
+// (hooks/lib/context.mjs expectedDisallowedTools): a comma-separated list on
+// one line, placed after `effort:` (after `model:` for a rung with no effort).
+function expectedToolsLine(entry) {
+  const list = expectedDisallowedTools(entry.agent);
+  return list ? list.join(', ') : null;
+}
+function readToolsLine(fmText) {
+  const v = frontmatterValue(fmText, 'disallowedTools');
+  return v === null ? null : v.split(',').map((x) => x.trim()).filter(Boolean).join(', ');
+}
+// Pure: sets, replaces or removes the one-line `disallowedTools:` entry in a
+// whole file's TEXT. null removes it.
+function setToolsLine(text, line) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return text;
+  let fm = m[1];
+  const nl = fm.includes('\r\n') ? '\r\n' : '\n';
+  const has = /^disallowedTools:.*$/m.test(fm);
+  if (line === null) {
+    if (!has) return text;
+    fm = fm.split(/\r?\n/).filter((l) => !/^disallowedTools:/.test(l)).join(nl);
+  } else if (has) {
+    fm = fm.replace(/^disallowedTools:.*$/m, `disallowedTools: ${line}`);
+  } else if (/^effort:.*$/m.test(fm)) {
+    fm = fm.replace(/^(effort:.*)$/m, `$1${nl}disallowedTools: ${line}`);
+  } else if (/^model:.*$/m.test(fm)) {
+    fm = fm.replace(/^(model:.*)$/m, `$1${nl}disallowedTools: ${line}`);
+  } else {
+    fm = `${fm}${nl}disallowedTools: ${line}`;
+  }
+  return text.slice(0, m.index) + '---' + nl + fm + nl + '---' + text.slice(m.index + m[0].length);
+}
+
 // The self-review protocol (config/model-tiers.json `selfReview`,
 // hooks/lib/self-review.mjs) is covered by the same generator and the same
 // check: every rung that is RIGHT NOW the default route (shipped table,
@@ -275,7 +318,7 @@ function retirementNotice(rung, total) {
     : 'no staged replacement';
   return {
     prefix: `RETIRING (no sooner than ${tier.retiresAfter}): rung ${rung.rung}/${total}`,
-    tail: `The date only drives warnings: once the operator sets tiers.${rung.model}.retired to true (after confirming the alias no longer resolves), the routing table stops naming this rung and falls back to ${to} (config/model-tiers.json tiers.${rung.model}.retired/replacement).`,
+    tail: `Routing falls back to ${fallback ? fallback.agent : 'no staged replacement'} once tiers.${rung.model}.retired is true.`,
   };
 }
 
@@ -285,21 +328,25 @@ function generatedAgentDescription(rung) {
   const role = typeof rung.role === 'string' ? rung.role.trim() : '';
   if (!role) return null;
   const total = ladderRungs().length;
+  // A variant is not a rung: no routing claim to verify, only what it is.
+  if (rung.variant) {
+    return `${role} (${rung.model}${rung.effort ? '/' + rung.effort : ''}). Not a ladder rung: the ac-* agent with browser tools; /ac routing.`;
+  }
   const types = typesForRung(rung);
   // typesForRung reads the SHIPPED table (profile: false), so these lists are
   // the base table's. The guards and recommend.mjs resolve through the
   // operator's routing profile too, and a description cannot see that (it is
   // generated at build time and committed), so each one says where it stops.
+  // Short on purpose: every agent description is paid for at the start of
+  // every session and every subagent.
   const suffix = types.length
-    ? `Base-table default routing for: ${types.join(', ')}; your routing profile may route differently, see /ac routing.`
-    : 'Not the base-table default routing for any listed task type; your routing profile may send some here, see /ac routing. Spawn it directly by name when the work needs it.';
+    ? `Base default for: ${types.join(', ')}; profile may differ (/ac routing).`
+    : 'Not a base default; profile may differ (/ac routing).';
   const tier = (cfg.tiers || {})[rung.model] || {};
-  const noEffort = Array.isArray(tier.efforts) && tier.efforts.length === 0
-    ? ` ${tier.resolvesTo?.displayName || rung.model} takes no effort parameter.`
-    : '';
+  const noEffort = Array.isArray(tier.efforts) && tier.efforts.length === 0 ? ' No effort parameter.' : '';
   const ret = retirementNotice(rung, total);
   if (ret) return `${ret.prefix} — ${role}.${noEffort} ${suffix} ${ret.tail}`;
-  return `Rung ${rung.rung}/${total}: ${role}.${noEffort} ${suffix}`;
+  return `Rung ${rung.rung}/${total}: ${role}. ${suffix}`;
 }
 
 // Overridable only for tests — same pattern as AGENT_COMPANION_HOME_OVERRIDE
@@ -323,14 +370,15 @@ function frontmatterValue(fmText, key) {
 }
 function readDescription(file) {
   let text;
-  try { text = readFileSync(file, 'utf8'); } catch { return { text: null, description: null, name: null, cacheTtl: null }; }
+  try { text = readFileSync(file, 'utf8'); } catch { return { text: null, description: null, name: null, cacheTtl: null, tools: null }; }
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!m) return { text, description: null, name: null, cacheTtl: null };
+  if (!m) return { text, description: null, name: null, cacheTtl: null, tools: null };
   return {
     text,
     description: frontmatterValue(m[1], 'description'),
     name: frontmatterValue(m[1], 'name'),
     cacheTtl: readCacheTtl(m[1]),
+    tools: readToolsLine(m[1]),
   };
 }
 
@@ -385,7 +433,9 @@ function roleClaimProblems(rung) {
 // roleClaimProblems), missing-file, name-mismatch, drift (description
 // differs from the generated one), cache-ttl-drift (the frontmatter's
 // experimental.cacheTtl does not match the rung's config `cacheTtl` field),
-// not-a-rung (an agents/ac-*.md file no rung names), self-review-drift (the
+// tools-drift (the frontmatter's disallowedTools line differs from the one
+// config `ladderTools` generates), variant-base (a ladderVariants entry whose
+// base is no rung), not-a-rung (an agents/ac-*.md file no rung or variant names), self-review-drift (the
 // body's self-review protocol block is missing, stale, or on a rung that is
 // no longer the default for any selfReview type), self-review-malformed
 // (unbalanced or repeated markers: fixed by hand), self-review-config (the
@@ -393,7 +443,7 @@ function roleClaimProblems(rung) {
 // route is no ladder rung).
 function checkAgentDescriptions() {
   const out = [];
-  const rungs = ladderRungs();
+  const rungs = agentEntries();
   for (const problem of selfReviewConfigProblems(selfReview)) {
     out.push({
       agent: 'selfReview', file: 'config/model-tiers.json', problem: 'self-review-config',
@@ -405,7 +455,11 @@ function checkAgentDescriptions() {
     const file = agentFile(rung);
     for (const c of roleClaimProblems(rung)) out.push({ agent: rung.agent, file, ...c });
     const expected = generatedAgentDescription(rung);
-    const { text, description, name, cacheTtl } = readDescription(file);
+    const { text, description, name, cacheTtl, tools } = readDescription(file);
+    if (rung.variant && !rung.model) {
+      out.push({ agent: rung.agent, file, problem: 'variant-base', expected: 'a ladderVariants entry whose base names a ladder rung', actual: String(rung.base) });
+      continue;
+    }
     if (expected === null) {
       out.push({ agent: rung.agent, file, problem: 'no-role', expected: `a "role" for rung ${rung.rung} in config/model-tiers.json ladder`, actual: null });
       continue;
@@ -424,8 +478,16 @@ function checkAgentDescriptions() {
         actual: cacheTtl ? `experimental.cacheTtl: "${cacheTtl}"` : '(absent)',
       });
     }
-    const srTypes = selfReviewTypesForRung(rung, selfReview);
-    const expectedBlock = expectedSelfReviewBlock(rung);
+    const expectedTools = expectedToolsLine(rung);
+    if (tools !== expectedTools) {
+      out.push({
+        agent: rung.agent, file, problem: 'tools-drift',
+        expected: expectedTools === null ? 'no disallowedTools line' : 'disallowedTools: ' + expectedTools,
+        actual: tools === null ? '(absent)' : 'disallowedTools: ' + tools,
+      });
+    }
+    const srTypes = rung.variant ? [] : selfReviewTypesForRung(rung, selfReview);
+    const expectedBlock = rung.variant ? null : expectedSelfReviewBlock(rung);
     const actualBlock = readSelfReviewBlock(text);
     if (actualBlock.malformed) {
       out.push({ agent: rung.agent, file, problem: 'self-review-malformed', expected: 'one BEGIN/END pair of self-review protocol markers, or none', actual: actualBlock.malformed });
@@ -450,20 +512,23 @@ function checkAgentDescriptions() {
 
 function syncAgentDescriptions() {
   const written = [];
-  for (const rung of ladderRungs()) {
+  for (const rung of agentEntries()) {
     const expected = generatedAgentDescription(rung);
     if (expected === null) continue; // no role: only the check can report it
+    if (rung.variant && !rung.model) continue; // base is no rung: only the check can report it
     const file = agentFile(rung);
-    const { text, description, cacheTtl } = readDescription(file);
+    const { text, description, cacheTtl, tools } = readDescription(file);
     if (text === null) continue;
     const expectedTtl = expectedCacheTtl(rung);
     let updated = text;
     let changed = false;
     if (description !== expected) { updated = applyDescription(updated, expected); changed = true; }
     if (cacheTtl !== expectedTtl) { updated = setCacheTtl(updated, expectedTtl); changed = true; }
+    const expectedTools = expectedToolsLine(rung);
+    if (tools !== expectedTools) { updated = setToolsLine(updated, expectedTools); changed = true; }
     // null: malformed markers, left for the check to report (sync never
     // guesses where a block ends).
-    const withBlock = setSelfReviewBlock(updated, expectedSelfReviewBlock(rung));
+    const withBlock = setSelfReviewBlock(updated, rung.variant ? null : expectedSelfReviewBlock(rung));
     if (withBlock !== null && withBlock !== updated) { updated = withBlock; changed = true; }
     if (!changed) continue;
     writeFileSync(file, updated);
@@ -556,6 +621,21 @@ if (Array.isArray(cfg.ladder) && cfg.ladder.length) {
     L.push(`| ${r.rung} | \`${r.model}\` | ${r.effort ? `\`${r.effort}\`` : '_none_'} | ${ttl} | \`agent-companion:${r.agent}\` |`);
   }
   L.push(``);
+  const pol = ladderToolPolicy();
+  L.push(`Every ladder agent's frontmatter carries \`disallowedTools\`, generated from \`ladderTools\` in the config (\`--sync-agent-descriptions\`): ${pol.everywhere.map((t) => `\`${t}\``).join(', ')} everywhere; ${pol.browserOnly.map((t) => `\`${t}\``).join(', ')} on every agent except the browser variants below${Object.keys(pol.keepOn).length ? `; ${Object.entries(pol.keepOn).map(([sv, ag]) => `\`${sv}\` everywhere except ${ag.map((a) => `\`${a}\``).join(', ')}`).join('; ')}` : ''}. They cost tokens at the start of every spawn and were used in few runs. \`general-purpose\` and the lead keep every tool.`);
+  L.push(``);
+  const variants = ladderVariants();
+  if (variants.length) {
+    L.push(`**UI and browser work.** The rungs above have no browser. These variants are not rungs (no number, never an escalation target, never picked by routing); each is one rung's model and effort plus the browser servers. \`recommend.mjs --browser\` names the one for the routed model.`);
+    L.push(``);
+    L.push(`| Variant | Model | Effort | Same as rung | Spawn as |`);
+    L.push(`|---|---|---|---|---|`);
+    for (const v of variants) {
+      const base = cfg.ladder.find((r) => r.agent === v.base);
+      L.push(`| \`${v.agent}\` | \`${v.model}\` | ${v.effort ? `\`${v.effort}\`` : '_none_'} | ${base ? base.rung : '?'} | \`agent-companion:${v.agent}\` |`);
+    }
+    L.push(``);
+  }
   const oneHourRungs = cfg.ladder.filter((r) => r.cacheTtl === '1h');
   if (oneHourRungs.length) {
     L.push(`Rungs ${oneHourRungs.map((r) => `\`${r.agent}\``).join(', ')} carry \`experimental: { cacheTtl: "1h" }\` in their \`agents/ac-*.md\` frontmatter — generated from each rung's \`cacheTtl\` field above by this script (\`--sync-agent-descriptions\`), never hand-edited. The saving there does not come from being resumed: 30 days of real traffic showed close to zero message-level resumes on any ladder rung. It comes from slow tool waits (long \`Bash\` calls, test suites, builds) idling the cache past 5 minutes inside a single task — the all-cause measurement captures that, the resume-only measurement does not. \`ac-opus-low\` and every non-opus rung stay on the 5m default: resume doctrine is unchanged (resume a stopped worker only while its cache is warm — now up to an hour on these four rungs — otherwise spawn a fresh ladder worker from a file handoff; see \`hooks/resume-guard.mjs\`).`);

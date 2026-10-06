@@ -22,7 +22,7 @@
 // --json it adds a `route` block carrying the same facts.
 
 import {
-  modelTiers, resolveRoute, classifyModel, classifyEffort, rungFor, explainRoute, taskTypeDef, taskTypeNames,
+  modelTiers, resolveRoute, classifyModel, classifyEffort, rungFor, explainRoute, taskTypeDef, taskTypeNames, ladderVariants,
 } from '../hooks/lib/context.mjs';
 import { loadAdvisorSummary, windowHintFor } from './lib/cache-advisor.mjs';
 import { selfReviewConfig, readSelfReviewBlock } from '../hooks/lib/self-review.mjs';
@@ -127,6 +127,28 @@ if (rung) {
   out.spawnAgentNamespaced = `agent-companion:${rung.agent}`;
 }
 
+// UI and browser work: the numbered rungs drop the browser servers (config
+// ladderTools), so --browser points at the browser variant instead
+// (config ladderVariants). Routing is unchanged: the route is still the
+// table's; the variant is the nearest agent that has the browser, on the
+// routed model when one exists. A variant's own effort may differ from the
+// route's, and the output says so.
+if (has('--browser') && out.model !== 'fable') {
+  const variants = ladderVariants().filter((v) => v.browser && v.model);
+  const pick = variants.find((v) => v.model === out.model) || null;
+  out.browser = pick
+    ? {
+      agent: pick.agent, spawnAgentNamespaced: `agent-companion:${pick.agent}`, model: pick.model, effort: pick.effort,
+      matchesRoute: pick.model === out.model && (pick.effort || null) === (out.effort || null),
+    }
+    : { agent: null, reason: `no browser variant on ${out.model}` };
+  if (pick) {
+    out.spawnAgent = pick.agent;
+    out.spawnAgentNamespaced = `agent-companion:${pick.agent}`;
+    out.rung = null;
+  }
+}
+
 const cls = classifyModel(out.model);
 out.premium = cls.premium;
 out.warrantRequired = cls.premium;
@@ -193,8 +215,17 @@ console.log(`recommendation: ${out.model}${eff}`);
 if (out.taskType) console.log(`task type:      ${out.taskType}`);
 console.log(`inputs:         weight=${out.weight} kind=${out.kind} consequence=${out.consequence}`);
 console.log(`why:            ${out.rationale}`);
-if (out.spawnAgentNamespaced) {
+if (out.browser) {
+  const b = out.browser;
+  if (b.agent) {
+    console.log(`spawn as:       subagent_type: "${b.spawnAgentNamespaced}"  (browser variant, ${b.model}/${b.effort}; the numbered rungs have no browser)`);
+    if (!b.matchesRoute) console.log(`browser note:   the route is ${out.model}${out.effort ? '/' + out.effort : ''} but ${b.agent} is ${b.model}/${b.effort}: for heavier work put the logic on that rung and the browser check on ${b.agent}, or drive the browser from the lead`);
+  } else {
+    console.log(`spawn as:       no browser variant for this route (${b.reason}) - drive the browser from the lead, or split the work and give the browser check to a variant`);
+  }
+} else if (out.spawnAgentNamespaced) {
   console.log(`spawn as:       subagent_type: "${out.spawnAgentNamespaced}"  (ladder rung ${out.rung}/10)`);
+  console.log('                UI or browser work: add --browser (the numbered rungs have no browser tools)');
 } else if (out.model !== 'fable') {
   console.log(`spawn as:       no ladder rung mapped for ${out.model}${out.effort ? '/' + out.effort : ''} — spawn with model="${out.model}"${out.effort ? ` and an agent definition carrying effort: ${out.effort}` : ''}`);
 }

@@ -45,7 +45,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 import {
-  readStdin, opt, passthrough, claudeDir, modelTiers,
+  readStdin, opt, passthrough, claudeDir, modelTiers, ladderVariants,
   readInstalledPlugins, pluginEntries, effectiveEntry, pathUnder, versionBelow, copySource,
   noteProcessLoad, noteProcessEnd, LOAD_SETTLE_MS,
 } from './lib/context.mjs';
@@ -109,7 +109,7 @@ function checkLadderFiles(root, p) {
   }
   let cfg;
   try { cfg = modelTiers(); } catch (e) { return { ok: false, problems: [`config/model-tiers.json unreadable: ${e.message}`] }; }
-  const ladder = Array.isArray(cfg.ladder) ? cfg.ladder : [];
+  const ladder = [...(Array.isArray(cfg.ladder) ? cfg.ladder : []), ...ladderVariants().map((v) => ({ ...v, rung: "variant" }))];
   let files;
   try { files = new Set(readdirSync(agentsDir)); } catch (e) { return { ok: false, problems: [`agents/ unreadable: ${e.message}`] }; }
 
@@ -118,14 +118,14 @@ function checkLadderFiles(root, p) {
 
   for (const r of ladder) {
     const file = `${r.agent}.md`;
-    if (!files.has(file)) { problems.push(`agents/${file} is missing (rung ${r.rung})`); continue; }
+    if (!files.has(file)) { problems.push(`agents/${file} is missing (${r.rung === "variant" ? "ladder variant" : `rung ${r.rung}`})`); continue; }
     let text;
     try { text = readFileSync(join(agentsDir, file), 'utf8'); } catch (e) { problems.push(`agents/${file} unreadable: ${e.message}`); continue; }
     const fm = parseFrontmatter(text);
     if (!fm) { problems.push(`agents/${file} has no parseable frontmatter`); continue; }
-    if (fm.model !== r.model) problems.push(`agents/${file} frontmatter model "${fm.model || '(none)'}" does not match ladder rung ${r.rung} ("${r.model}")`);
+    if (fm.model !== r.model) problems.push(`agents/${file} frontmatter model "${fm.model || '(none)'}" does not match ladder ${r.rung === "variant" ? "variant" : `rung ${r.rung}`} ("${r.model}")`);
     if ((fm.effort || null) !== (r.effort || null)) {
-      problems.push(`agents/${file} frontmatter effort "${fm.effort || '(none)'}" does not match ladder rung ${r.rung} ("${r.effort || '(none)'}")`);
+      problems.push(`agents/${file} frontmatter effort "${fm.effort || '(none)'}" does not match ladder ${r.rung === "variant" ? "variant" : `rung ${r.rung}`} ("${r.effort || '(none)'}")`);
     }
     if (registered && !registered.has(r.agent) && !registered.has(`agent-companion:${r.agent}`)) {
       problems.push(`${r.agent} is not in the harness's own registered-agent list for this session`);

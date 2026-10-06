@@ -41,7 +41,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  readStdin, isMainThread, noteAgentType, deny, passthrough, recordDenial, routedRung, routeLayerTag,
+  readStdin, isMainThread, noteAgentType, deny, passthrough, recordDenial, routedRung, routeLayerTag, ladderVariants, pluginName,
 } from './lib/context.mjs';
 import {
   guardSettings, isExecutionTool, isResetTool, recordExecutionCall, resetStreak, EXECUTION_TOOLS,
@@ -82,6 +82,15 @@ function rungsByType() {
   }).join('; ');
 }
 
+// The numbered rungs have no browser tools; UI work goes to a browser variant
+// (config ladderVariants), named here so the advice is not a dead end.
+function browserHint() {
+  try {
+    const v = ladderVariants().filter((x) => x.browser);
+    return v.length ? ` UI or browser work: ${v.map((x) => `${pluginName()}:${x.agent}`).join(' or ')} (the rungs have no browser).` : '';
+  } catch { return ''; }
+}
+
 function instructions({ mode, streak, threshold, tool }) {
   // subagent-worker, not explore: the calls that trip this guard (Bash, Edit,
   // Write ...) are execution work, and haiku validates, it does not operate.
@@ -98,7 +107,7 @@ function instructions({ mode, streak, threshold, tool }) {
     'with the task type on its own line in the brief:\n' +
     `  subagent_type: "${example}", run_in_background: true, prompt: "TYPE: <task type>\\n<brief>"\n` +
     (rungs ? `Rungs now: ${rungs}. ` : '') +
-    `Other types: node "${recommendScript()}" --type <task-type>. Do not spawn general-purpose, Explore or Plan ` +
+    `Other types: node "${recommendScript()}" --type <task-type>.${browserHint()} Do not spawn general-purpose, Explore or Plan ` +
     'without a model: it inherits the lead\'s model and effort, and inherit_guard: block refuses that from a premium lead.' +
     // Warn blocks nothing, so it skips the lists that only matter to a lead
     // that has just been stopped (it fires every `threshold` calls on the

@@ -52,6 +52,7 @@ import {
   classifyModel, classifyEffort, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
   claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent, routedRung, routeLayerTag,
+  briefNeedsDroppedTools, ladderVariants, pluginName,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
@@ -562,6 +563,12 @@ try {
   let ladderRewrite = null;     // { from, to } when the spawn was rewritten to a rung
   let autofillAdvisory = null;  // the note when it could not be
   let rewriteState = null;      // lib/ladder-rewrite.mjs record for this session, read once
+  // What the brief names that the ladder workers no longer carry: the browser
+  // servers, or Artifact / a desktop-only server (config ladderTools). The
+  // browser variants (config ladderVariants) are where UI work goes instead.
+  const neededTools = briefNeedsDroppedTools(brief);
+  const browserVariants = ladderVariants().filter((v) => v.browser && v.model);
+  const browserVariantFor = (m) => browserVariants.find((v) => v.model === m) || browserVariants[0] || null;
   const rewriteModule = () => import('./lib/ladder-rewrite.mjs');
   // Read without loading the module: the file is absent until a rewrite happens.
   try {
@@ -575,7 +582,10 @@ try {
     const rung = route.effort ? rungFor(route.model, route.effort) : null;
     if (rung) {
       const origType = input.subagent_type || '';
-      const toolsEquivalent = !origType || origType === 'general-purpose';
+      // A ladder worker no longer carries the full tool set (its frontmatter
+      // disallows Artifact, the desktop-only servers and the browser), so a
+      // brief that names one of those keeps its general-purpose spawn.
+      const toolsEquivalent = (!origType || origType === 'general-purpose') && !neededTools.browser && !neededTools.other;
       const ignored = rewriteState && rewriteState.ignored;
       let pick = null;
       if (toolsEquivalent && opt('fit_autofill_ladder', true) && !ignored) {
@@ -587,7 +597,9 @@ try {
         }
       }
       if (!ladderRewrite) {
-        const why = !toolsEquivalent
+        const why = (neededTools.browser || neededTools.other)
+          ? `the brief names ${neededTools.browser ? 'the browser' : 'Artifact or a desktop-only tool'}, which the ladder workers drop, so the guard does not swap it for a ladder rung`
+          : !toolsEquivalent
           ? `"${origType}" has its own tools and prompt, so the guard does not swap it for a ladder rung`
           : !opt('fit_autofill_ladder', true)
             ? 'the fit_autofill_ladder option is off'
@@ -595,9 +607,14 @@ try {
               ? `an earlier rewrite in this session ran as "${ignored.ranAs}" instead of "${ignored.wanted}", so the ` +
                 'harness did not honour it; rewriting is off for the rest of this session'
               : pick.why;
+        // A browser brief points at the browser variant on the routed model,
+        // not the plain rung (which has no browser).
+        const target = neededTools.browser ? browserVariantFor(route.model) : rung;
         autofillAdvisory = `agent-companion: effort not pinned — the model was filled in as ${route.model}, but ` +
           `effort ${route.effort} was not: this worker inherits the session's effort. Spawn subagent_type ` +
-          `"agent-companion:${rung.agent}" to pin ${route.model}/${route.effort} together (not rewritten here: ${why}).`;
+          (target
+            ? `"agent-companion:${target.agent}" to pin ${target.model}/${target.effort || route.effort} together (not rewritten here: ${why}).`
+            : `"agent-companion:${rung.agent}" to pin ${route.model}/${route.effort} together (not rewritten here: ${why}).`);
       }
     }
   }
@@ -1596,6 +1613,22 @@ try {
   // runs once we are already past the point where isPremiumForSpawn is
   // known true — see the warrant section).
   let warrantSoftNote = null;
+  // A ladder spawn whose brief names a tool the ladder workers drop: say where
+  // to go instead. A browser variant keeps the browser, so it is never told this.
+  const ranAs = ladderRewrite ? ladderRewrite.to : input.subagent_type;
+  const ranBare = ranAs && String(ranAs).startsWith(`${pluginName()}:`) ? String(ranAs).slice(pluginName().length + 1) : ranAs;
+  const ranIsBrowserVariant = browserVariants.some((v) => v.agent === ranBare);
+  let toolNote = null;
+  if (isLadderSpawn && !ranIsBrowserVariant) {
+    if (neededTools.browser) {
+      const v = browserVariantFor(model);
+      toolNote = 'agent-companion: this brief names the browser, which the ladder workers drop (their definitions disallow it). ' +
+        (v ? `Spawn "${pluginName()}:${v.agent}" (${v.model}/${v.effort}) for UI and browser work.` : 'Drive the browser from the lead or a general-purpose spawn.');
+    } else if (neededTools.other) {
+      toolNote = 'agent-companion: this brief names Artifact or a desktop-only tool (visualize, terminal, ccd_session), which the ladder workers drop. ' +
+        'Do that step from the lead, or spawn general-purpose with an explicit model.';
+    }
+  }
   // Every note this spawn carries, in order. The parity notes stand in for
   // the generic ones they would repeat: the inherited-effort parity note for
   // the rule-1 no-effort note, and the missing-model note or the writer-less
@@ -1619,6 +1652,7 @@ try {
     parityInheritedEffort ? null : noEffortStatedNote,
     buildFloorNote,
     warrantSoftNote,
+    toolNote,
   );
 
   if (!isPremiumForSpawn) {

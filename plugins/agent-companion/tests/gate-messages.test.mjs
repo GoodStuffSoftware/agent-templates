@@ -154,8 +154,8 @@ test('every ladder agent description says it lists the base table and that the r
   try {
     for (const f of ['ac-haiku', 'ac-sonnet-low', 'ac-sonnet-medium', 'ac-sonnet-high', 'ac-sonnet-xhigh', 'ac-opus-low', 'ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh', 'ac-opus-max']) {
       const desc = readFileSync(join(PLUGIN_ROOT, 'agents', `${f}.md`), 'utf8').match(/^description:\s*"?(.*?)"?$/m)[1];
-      assert.match(desc, /[Bb]ase-table/, f);
-      assert.match(desc, /your routing profile may (route differently|send some here), see \/ac routing/, f);
+      assert.match(desc, /[Bb]ase default/, f);
+      assert.match(desc, /profile may differ \(\/ac routing\)/, f);
       assert.doesNotMatch(desc, /Currently the default routing/, f);
     }
   } finally { fx.cleanup(); }

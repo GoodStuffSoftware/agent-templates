@@ -1730,10 +1730,78 @@ export function isLadderAgentName(type) {
   }
 }
 
-// Every ladder agent name from config/model-tiers.json's `ladder`, bare.
+// Every ladder agent name from config/model-tiers.json's `ladder`, bare, plus
+// the `ladderVariants` (not rungs, but this plugin's own spawnable workers).
 export function ladderAgentNames() {
   const cfg = modelTiers();
-  return new Set((Array.isArray(cfg.ladder) ? cfg.ladder : []).map((r) => r && r.agent).filter(Boolean));
+  const rungs = (Array.isArray(cfg.ladder) ? cfg.ladder : []).map((r) => r && r.agent).filter(Boolean);
+  return new Set([...rungs, ...ladderVariants().map((v) => v.agent)]);
+}
+
+// config `ladderVariants`: a rung's model and effort with a different tool
+// set (ac-browser: sonnet/medium plus the browser server). Each entry comes
+// back as { agent, base, model, effort, browser, role, rung: null,
+// variant: true } with model and effort read from the base rung; an entry
+// whose base is no rung carries model/effort null (a check reports it).
+export function ladderVariants() {
+  const cfg = modelTiers();
+  const ladder = Array.isArray(cfg.ladder) ? cfg.ladder : [];
+  return (Array.isArray(cfg.ladderVariants) ? cfg.ladderVariants : [])
+    .filter((v) => v && v.agent)
+    .map((v) => {
+      const base = ladder.find((r) => r && r.agent === v.base) || null;
+      return {
+        agent: v.agent, base: v.base || null, browser: v.browser === true, role: v.role,
+        model: base ? base.model : null, effort: base ? (base.effort || null) : null,
+        rung: null, variant: true,
+      };
+    });
+}
+
+// config `ladderTools`: what every ladder worker's frontmatter drops.
+//   everywhere  dropped from every ladder agent (Artifact, desktop-only servers)
+//   browserOnly dropped from every agent except a browser variant
+//   keepOn      { server: [agent...] }: dropped everywhere except those agents
+// Defaults when the config lacks the block (a per-machine file that
+// replaces the whole key is honoured as given).
+export function ladderToolPolicy() {
+  const t = modelTiers().ladderTools || {};
+  const list = (v, d) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x) : d);
+  const keepOn = {};
+  const rawKeep = t.keepOn && typeof t.keepOn === 'object' && !Array.isArray(t.keepOn) ? t.keepOn : {};
+  for (const [server, agents] of Object.entries(rawKeep)) keepOn[server] = list(agents, []);
+  return {
+    everywhere: list(t.everywhere, ['Artifact', 'mcp__visualize', 'mcp__terminal', 'mcp__ccd_session']),
+    browserOnly: list(t.browserOnly, ['mcp__Claude_Browser']),
+    keepOn,
+  };
+}
+
+// The `disallowedTools` list (in file order) a ladder agent's frontmatter
+// must carry, or null when `agent` is no ladder agent. A browser variant
+// keeps the browserOnly servers; a keepOn server stays on its listed agents.
+export function expectedDisallowedTools(agent) {
+  const pol = ladderToolPolicy();
+  const v = ladderVariants().find((x) => x.agent === agent);
+  const cfg = modelTiers();
+  const isRung = (Array.isArray(cfg.ladder) ? cfg.ladder : []).some((r) => r && r.agent === agent);
+  if (!v && !isRung) return null;
+  const out = [...pol.everywhere];
+  if (!(v && v.browser)) out.push(...pol.browserOnly);
+  for (const [server, agents] of Object.entries(pol.keepOn)) if (!agents.includes(agent)) out.push(server);
+  return out;
+}
+
+// What a brief names that the ladder workers no longer carry: the browser
+// server, or Artifact / a desktop-only server. A general-purpose spawn whose
+// brief names one is NOT swapped for a ladder rung (it would lose the tool),
+// and a ladder spawn whose brief names one gets a note. Narrow on purpose:
+// tool names and unmistakable phrases only, never a bare "UI".
+const BROWSER_BRIEF = /mcp__Claude_Browser|\bpreview_start\b|\bbrowser (?:pane|tool|tools|automation)\b|\b(?:drive|use|open|screenshot) the (?:browser|app in the browser)\b|\bbrowser[- ]?(?:based )?(?:check|verification|test)s?\b/i;
+const DROPPED_BRIEF = /mcp__(?:visualize|terminal|ccd_session)(?:__|\b)|\b(?:publish|update|create) (?:an |the )?Artifact\b|\bArtifact tool\b|\bshow_widget\b/i;
+export function briefNeedsDroppedTools(brief) {
+  const b = String(brief || '');
+  return { browser: BROWSER_BRIEF.test(b), other: DROPPED_BRIEF.test(b) };
 }
 
 // This plugin's own agents/ directory — the copy of the plugin this code is
@@ -1975,7 +2043,7 @@ function pluginRootDir() {
 // hardcoding it, so a rename cannot desynchronise the settings lookup from the
 // key Claude Code writes.
 let _pluginName = null;
-function pluginName() {
+export function pluginName() {
   if (_pluginName) return _pluginName;
   let name = 'agent-companion';
   try {
