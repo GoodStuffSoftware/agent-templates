@@ -2,6 +2,28 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.0 — 2026-10-06
+
+Lean subagents: the ten `ac-*` ladder workers carry less on every spawn, the reporting contract is delivered once, and the lead's session-start text stays out of a compacting subagent. Source: the 2026-10-06 context-baseline report, section 4.
+
+### Ladder workers
+
+- **Tools dropped per server (S1/S2).** Each rung gets a generated `disallowedTools` line (config `ladderTools`): `Artifact`, the desktop-only servers (visualize, terminal, ccd_session, ccd_connectors, ccd_directory, ccd_pr, ccd_sidebar, ccd_view, ccd_window) and mcp-registry everywhere; the browser servers (Claude_Browser, claude-in-chrome, computer-use) on every rung; ccd_session_mgmt except on `ac-haiku`. No account-specific ids. Chosen from 30 days of per-server, per-rung usage over 1,175 ladder runs (Claude_Browser 39 runs, claude-in-chrome 4, computer-use 0, ccd_session 17, ccd_session_mgmt 9, Artifact 7, terminal 1, visualize 0, mcp-registry 1); scheduled-tasks, the agent-bus and cloudflare servers stay because they are used. `--sync-agent-descriptions` writes the line and `--check-agent-descriptions` reports drift as `tools-drift`. Whether the harness also drops a dropped server's deferred names and instruction block is checked in a fresh session with `docs/lean-verification/`.
+- **Browser and UI work keeps a routed path.** Two ladder variants beside the ladder, not in it: `ac-browser` (sonnet/high) and `ac-browser-opus` (opus/medium), config `ladderVariants`. Not rungs (no number, never an escalation target, never picked by routing), but every guard counts them as ladder agents (delegation guard, spawn guard, inherit guard, ladder-check, install-ladder-agents). `recommend.mjs --browser` names the variant; the delegation guard's hint names it; the spawn guard no longer swaps a general-purpose spawn whose brief names the browser or Artifact for a rung, and notes a ladder spawn that does.
+- **Smaller definitions (S5).** Rung bodies go from about 880 to about 165 characters (ac-haiku 2,840 to 242, ac-opus-xhigh keeps its self-review block); generated listing descriptions go from 2,759 to 1,473 characters in total (about 100 to 160 each); ladder roles are shortened.
+
+### Hooks
+
+- **Reporting contract delivered once (S5).** The SubagentStart payload carries no prompt, so the hook's marker check never matched and it re-added the contract whenever the spawn guard already had (about 71% of spawns). The spawn guard now records the append (`state/contract-pending.json`, per session, 3-minute expiry, locked) and SubagentStart consumes one record per start; a repeat start for the same agent id is skipped; a start with no record still self-heals.
+- **Long detail files (Claude Code 2.1.286).** The harness refuses a subagent Write to a `report*`, `summary*`, `findings*` or `analysis*` `.md` basename. The contract now says: long detail goes to `<task>-detail.md` (or `.json`/`.csv`) with its path in the final message. A test pins that the example name cannot match the refusal pattern.
+- **No lead text in a compacting subagent (S4b).** memory-budget, self-update, ladder-check and git-brief session-start skip a SessionStart that carries an agent id (462 fires in 280 subagent transcripts, mean 5,138 characters, measured). ladder-check also stops recording the subagent's compaction as a process load.
+- **Shorter session-start text.** The opt-in lead-effort-check rule 1,155 to 893 characters; the scout line names each signal kind once with a count; the listing descriptions of the seven skills with no use in 30 days (setup, standing-rules, model-benchmark, audit, brevity, calibration-scout, routing-table) go from 266-381 to 114-157 characters, triggers kept.
+- **Audit.** The memory-index check follows `index_*.md` files linked from MEMORY.md one level, so a memory directory with a sub-index no longer reports its sub-indexed files as unreachable; `--fix` does not re-link them.
+
+### Not done
+
+- `omitClaudeMd` on the rungs, and the worker-rules paragraph that goes with it. The key works for plugin agents, but a per-project check found rules in six of the operator's projects (a data-boundary rule, secret and port rules, shell and version-bump rules, brand-voice pointers) that no guard enforces and a worker would lose; the saving (about 4-5K tokens of cached context per spawn) does not pay for that. Recorded in the operator's decision log with the reverse path.
+
 ## 0.30.1 — 2026-10-06
 
 A test fix for Linux CI, and a fix for a fetch that could leave git running on a loaded machine.
