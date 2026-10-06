@@ -22,14 +22,6 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
-### 2026-10-06 — Reuse stopped workers by default; a fresh spawn is the expensive path, not the cold cache
-
-- **Trigger:** an orchestration rule said "resume a worker only while its prompt cache is warm; after the cache expires, spawn fresh from a file handoff", and a hook warned on every resume past the cache TTL. A usage study then showed spawn volume had grown about tenfold in a week (calls per spawn fell from 49 to 36) and start-up load had grown from about 1% to about 7% of the weekly limit per day. A message to a cache-cold stopped worker cost about a third of a fresh spawn's first load, and the fresh spawn also re-read everything the old worker already knew.
-- **Is it generic?** Yes. Stripped: the plan, the machine, the project and the tool names. Kernel: for an agent harness where a stopped subagent can be messaged, the cost of "fresh" is the whole start-up prefix plus the lost working context, while the cost of "cold" is one cache re-read of a transcript that auto-compaction keeps bounded; so a cache expiring is not a reason to start over.
-- **Target:** extend the existing lesson `lessons/agent-process/resume-the-same-worker-across-follow-up-rounds.md` (done in the same change) and correct the cache-ttl lesson's claim that a cold resume can cost more than a fresh worker.
-- **Proposed change:** rule text for an orchestrator: keep a few named workers per area; send related follow-on work to them with a message, warm or cold. Go fresh only when the work is unrelated, needs a different model tier than the worker has, or the worker's context is far larger than the next task needs. Never go fresh just because a cache expired. File handoffs are for crashes and for work that outlives the session. A resume guard should note (not discourage) only a very large worker context or a worker whose tier is above the new task's. Also: do not tell a worker to wrap up because it compacted once; compaction is routine for a reused worker.
-- **Applied?** no
-
 ### 2026-10-06 — Give the main session its own auto-compact point with a plugin hooks module (one global window, two sessions)
 
 - **Trigger:** one global auto-compact window serves the main session and every subagent. A window small enough to keep long-lived subagents cheap makes the main session compact far earlier than it needs to; a window large enough for the main session lets subagents grow past the point where their cache cost pays.

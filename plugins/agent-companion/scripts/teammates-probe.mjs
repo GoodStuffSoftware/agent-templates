@@ -11,7 +11,7 @@
 // after the last desktop team that worked). Exit 1: none found.
 //
 // The decisive manual test, in a DESKTOP session of the build under test
-// (the reuse rule depends on it, so it is worth the two minutes):
+// (two minutes; the static check cannot settle it):
 //   1. Spawn a named background worker: Agent { name: "probe-a", run_in_background: true,
 //      subagent_type: "general-purpose", prompt: "Reply OK and stop." }.
 //   2. Read <claude dir>/teams/session-<first 8 chars of the session id>/config.json.

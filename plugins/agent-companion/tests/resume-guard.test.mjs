@@ -6,19 +6,15 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { makeFixture, runHook, decisionOf } from './helpers.mjs';
 import {
   resolveTarget, lastActivityOf, ttlFor, normalizeTo, TTL_MS, cacheTtlFromDefinition,
-  declaredTypeOf, modelTierOf, modelRank,
 } from '../hooks/lib/resume-guard.mjs';
 import { buildTranscriptReport } from '../scripts/lib/transcript-report.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
-
-const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 function assistantLine({ ts, cacheRead = 0, cacheWrite5m = 0, cacheWrite1h = 0, input = 10 }) {
   const cacheWrite = cacheWrite5m + cacheWrite1h;
@@ -148,79 +144,86 @@ function callHook(root, { to = 'worker-x', mainTranscriptPath, env = {} } = {}) 
   }, { env });
 }
 
-// --- Reuse by default (0.31.1): the hook never discourages a cold resume ----
-// Idle time and the cache TTL play no part. A note appears only for a very
-// large worker (resume_guard_min_tokens, default 200000) or a worker whose
-// tier is above the TYPE the message declares.
-
-const idle = (min, extra) => assistantLine({ ts: Date.now() - min * 60 * 1000, ...extra });
-
-function callWith(fixture, { message = 'hi', env = {}, to = 'worker-x' } = {}) {
-  return runHook('hooks/resume-guard.mjs', {
-    session_id: 'sid-1', transcript_path: fixture.mainTranscriptPath, tool_name: 'SendMessage',
-    tool_input: { to, recipient: to, message, type: 'message' },
-  }, { env });
-}
-
-test('hook: a cache-cold worker is never discouraged, however long it has been idle (2m, 12m, 70m, 3 days)', () => {
-  const { cleanup } = makeFixture();
-  try {
-    for (const min of [2, 12, 70, 60 * 72]) {
-      const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
-      try {
-        const fx = makeAgentFixture(root, { lines: [idle(min, { cacheRead: 100000, cacheWrite5m: 5000 })] }); // 105K context
-        const res = callWith(fx);
-        assert.equal(res.status, 0, res.stderr);
-        assert.equal(res.json, null, `idle ${min}m, 105K context: nothing to say, got ${res.stdout}`);
-      } finally { rmSync(root, { recursive: true, force: true }); }
-    }
-  } finally { cleanup(); }
-});
-
-test('hook: the note never tells the lead to spawn fresh or from a file handoff, and never mentions the cache TTL', () => {
+test('hook: resume_guard off -> passthrough, no matter how stale the target', () => {
   const { cleanup } = makeFixture();
   const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
   try {
-    const fx = makeAgentFixture(root, { lines: [idle(30, { cacheRead: 230000, cacheWrite5m: 5000 })] });
-    const res = callWith(fx);
-    assert.ok(res.json, 'a 235K worker gets a note');
-    const text = res.json.systemMessage;
-    assert.match(text, /~235K tokens of context/);
-    assert.match(text, /Reuse is still the default/);
-    assert.doesNotMatch(text, /TTL|cache is warm|file handoff|rewrite/i, text);
-    assert.equal(decisionOf(res.json), 'proceed');
-    assert.equal('permissionDecision' in res.json.hookSpecificOutput, false, 'a note carries no permissionDecision');
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      lines: [assistantLine({ ts: now - 20 * 60 * 1000, cacheRead: 100000, cacheWrite5m: 100000 })],
+    });
+    const res = callHook(root, { mainTranscriptPath, env: { CLAUDE_PLUGIN_OPTION_RESUME_GUARD: 'false' } });
+    assert.equal(res.status, 0);
+    assert.equal(res.json, null, 'no hookSpecificOutput at all when the guard is off');
   } finally {
     cleanup();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('hook: the size floor is resume_guard_min_tokens (default 200000) and is configurable', () => {
-  const { cleanup } = makeFixture();
-  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
-  const root2 = mkdtempSync(join(tmpdir(), 'ac-rg-'));
-  try {
-    const fx = makeAgentFixture(root, { lines: [idle(1, { cacheRead: 150000, cacheWrite5m: 5000 })] }); // 155K
-    assert.equal(callWith(fx).json, null, 'under the 200K default, warm or cold');
-    const lowered = callWith(fx, { env: { CLAUDE_PLUGIN_OPTION_RESUME_GUARD_MIN_TOKENS: '100000' } });
-    assert.ok(lowered.json, 'fires once the floor is lowered under the context');
-    const at = makeAgentFixture(root2, { lines: [idle(1, { cacheRead: 195000, cacheWrite5m: 5000, input: 0 })] }); // exactly 200K
-    assert.ok(callWith(at).json, 'a context at the floor counts as large');
-  } finally {
-    cleanup();
-    rmSync(root, { recursive: true, force: true });
-    rmSync(root2, { recursive: true, force: true });
-  }
-});
-
-test('hook: resume_guard off -> nothing, even for a huge context', () => {
+test('hook: unknown target -> passthrough (out of this session\'s scope)', () => {
   const { cleanup } = makeFixture();
   const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
   try {
-    const fx = makeAgentFixture(root, { lines: [idle(20, { cacheRead: 400000, cacheWrite5m: 1000 })] });
-    const res = callWith(fx, { env: { CLAUDE_PLUGIN_OPTION_RESUME_GUARD: 'false' } });
+    const { mainTranscriptPath } = makeAgentFixture(root, { name: 'someone-else' });
+    const res = callHook(root, { to: 'worker-x', mainTranscriptPath });
+    assert.equal(res.status, 0);
     assert.equal(res.json, null);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hook: still within TTL -> passthrough even with a huge context', () => {
+  const { cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      lines: [assistantLine({ ts: now - 60 * 1000, cacheRead: 200000, cacheWrite5m: 200000 })], // 1m ago, well under 5m TTL
+    });
+    const res = callHook(root, { mainTranscriptPath });
+    assert.equal(res.json, null);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hook: past TTL but context below the size floor -> passthrough', () => {
+  const { cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      lines: [assistantLine({ ts: now - 10 * 60 * 1000, cacheRead: 500, cacheWrite5m: 500 })], // 10m ago, past 5m TTL, tiny context
+    });
+    const res = callHook(root, { mainTranscriptPath });
+    assert.equal(res.json, null);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hook: past 5m TTL with a large context -> fires, names the doctrine and an estimate', () => {
+  const { cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      lines: [assistantLine({ ts: now - 12 * 60 * 1000, cacheRead: 150000, cacheWrite5m: 5000, input: 20 })],
+    });
+    const res = callHook(root, { mainTranscriptPath });
+    assert.ok(res.json, 'expected a hookSpecificOutput');
+    assert.equal(res.json.hookSpecificOutput.hookEventName, 'PreToolUse');
+    assert.equal(decisionOf(res.json), 'proceed');
+    assert.equal('permissionDecision' in res.json.hookSpecificOutput, false,
+      'a hint carries no permissionDecision: "allow" would also skip the permission prompt');
+    assert.ok(res.json.systemMessage.includes('5m cache TTL'), res.json.systemMessage);
+    assert.ok(res.json.systemMessage.includes('fresh ladder worker'));
+    assert.ok(res.json.systemMessage.includes('~155K tokens'), res.json.systemMessage);
   } finally {
     cleanup();
     rmSync(root, { recursive: true, force: true });
@@ -231,92 +234,140 @@ test('hook: matches by raw agent id when no name matches', () => {
   const { cleanup } = makeFixture();
   const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
   try {
-    const fx = makeAgentFixture(root, { id: 'rawid789', name: 'named-thing', lines: [idle(12, { cacheRead: 250000, cacheWrite5m: 5000 })] });
-    assert.ok(callWith(fx, { to: 'rawid789' }).json, 'expected a note when addressed by raw id');
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      id: 'rawid789', name: 'named-thing',
+      lines: [assistantLine({ ts: now - 12 * 60 * 1000, cacheRead: 150000, cacheWrite5m: 5000 })],
+    });
+    const res = callHook(root, { to: 'rawid789', mainTranscriptPath });
+    assert.ok(res.json, 'expected a hookSpecificOutput when addressed by raw id');
   } finally {
     cleanup();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('hook: a worker whose tier is above the message\'s TYPE gets a tier note; an equal or lower tier does not', () => {
+test('hook: a 1h-TTL worker is not flagged at 20m idle, but is past 65m', () => {
   const { cleanup } = makeFixture();
   const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
-  const root2 = mkdtempSync(join(tmpdir(), 'ac-rg-'));
   try {
-    const opusWorker = makeAgentFixture(root, {
-      agentType: 'agent-companion:ac-opus-medium', model: 'claude-opus-5-5',
-      lines: [idle(90, { cacheRead: 40000, cacheWrite5m: 1000 })], // small and cold: only the tier can speak
-    });
-    // mechanical-edit routes to sonnet
-    const down = callWith(opusWorker, { message: 'TYPE: mechanical-edit\nrename the flag in three files' });
-    assert.ok(down.json, 'an opus worker given sonnet-weight work gets a note');
-    assert.match(down.json.systemMessage, /runs opus, and TYPE: mechanical-edit routes to sonnet/);
-    assert.doesNotMatch(down.json.systemMessage, /TTL|cache is warm|file handoff/i);
-    // the same worker, a type that routes to opus, or no TYPE at all, or an unknown one: silent
-    assert.equal(callWith(opusWorker, { message: 'TYPE: novel-design\nredo the design' }).json, null);
-    assert.equal(callWith(opusWorker, { message: 'one more round please' }).json, null);
-    assert.equal(callWith(opusWorker, { message: 'TYPE: not-a-real-type' }).json, null);
-    // a sonnet worker given the same sonnet-weight work: silent
-    const sonnetWorker = makeAgentFixture(root2, {
-      agentType: 'agent-companion:ac-sonnet-high', model: 'sonnet', lines: [idle(90, { cacheRead: 40000, cacheWrite5m: 1000 })],
-    });
-    assert.equal(callWith(sonnetWorker, { message: 'TYPE: mechanical-edit\nx' }).json, null);
-  } finally {
-    cleanup();
-    rmSync(root, { recursive: true, force: true });
-    rmSync(root2, { recursive: true, force: true });
-  }
-});
+    const now = Date.now();
 
-test('hook: size and tier notes combine in one message', () => {
-  const { cleanup } = makeFixture();
-  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
-  try {
-    const fx = makeAgentFixture(root, {
-      agentType: 'agent-companion:ac-opus-high', model: 'opus', lines: [idle(5, { cacheRead: 260000, cacheWrite5m: 1000 })],
+    const under = makeAgentFixture(root, {
+      id: 'h1',
+      lines: [assistantLine({ ts: now - 20 * 60 * 1000, cacheRead: 150000, cacheWrite1h: 5000 })],
     });
-    const res = callWith(fx, { message: { text: 'TYPE: mechanical-edit\nrename it' } });
-    assert.ok(res.json);
-    assert.match(res.json.systemMessage, /~261K tokens/);
-    assert.match(res.json.systemMessage, /routes to sonnet/);
+    const resUnder = callHook(root, { mainTranscriptPath: under.mainTranscriptPath });
+    assert.equal(resUnder.json, null, '20m idle is still within the 1h TTL');
+
+    // Different session dir so the two fixtures don't collide.
+    const root2 = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+    try {
+      const over = makeAgentFixture(root2, {
+        id: 'h2',
+        lines: [assistantLine({ ts: now - 65 * 60 * 1000, cacheRead: 150000, cacheWrite1h: 5000 })],
+      });
+      const resOver = callHook(root2, { mainTranscriptPath: over.mainTranscriptPath });
+      assert.ok(resOver.json, 'expected a hint past the 1h TTL');
+      assert.ok(resOver.json.systemMessage.includes('1h cache TTL'), resOver.json.systemMessage);
+    } finally {
+      rmSync(root2, { recursive: true, force: true });
+    }
   } finally {
     cleanup();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('lib: declaredTypeOf / modelTierOf / modelRank', () => {
-  assert.equal(declaredTypeOf('hi\nTYPE: Bounded-Feature\nmore'), 'bounded-feature');
-  assert.equal(declaredTypeOf('no type here, type: x in prose'), null);
-  assert.equal(declaredTypeOf({ text: 'TYPE: explore' }), 'explore');
-  assert.equal(declaredTypeOf(null), null);
-  assert.equal(modelTierOf({ model: 'claude-opus-5-5', agentType: null }), 'opus');
-  assert.equal(modelTierOf({ model: null, agentType: 'agent-companion:ac-sonnet-low' }), 'sonnet');
-  assert.equal(modelTierOf({ model: null, agentType: 'general-purpose' }), null);
-  assert.ok(modelRank('opus') > modelRank('sonnet') && modelRank('sonnet') > modelRank('haiku') && modelRank(null) === 0);
-});
+// FIX ROUND (guard-a-fix-brief.md item 1): the two cases the review's fix
+// itself was asked for. Both continue a real split write with one or more
+// PURE-READ turns (no new split write at all), which is exactly the shape
+// REVIEW FINDING 1 caught guard-a's original single-last-record logic
+// getting wrong (see guard-a-review.md, resume-guard-review.test.mjs).
 
-test('the standing rule and the hook describe reuse, not fresh spawns (no stale doctrine text)', () => {
-  const rules = readFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', 'rules.mjs'), 'utf8');
-  const rule = /id: 'resume-doctrine'[\s\S]*?then: '((?:[^'\\]|\\.)*)'/.exec(rules);
-  assert.ok(rule, 'rule present');
-  assert.match(rule[1], /Reuse workers/);
-  assert.match(rule[1], /Never spawn fresh just because a cache expired/);
-  assert.doesNotMatch(rule[1], /Resume only while|spawn fresh from a file handoff/);
-  const hookText = readFileSync(join(PLUGIN_ROOT, 'hooks', 'resume-guard.mjs'), 'utf8');
-  assert.doesNotMatch(hookText.replace(/^\/\/.*$/gm, ''), /spawn a fresh|fresh ladder worker|file handoff/);
-});
-
-
-test('hook: unknown target -> passthrough (out of this session\'s scope)', () => {
+test('hook: last write 1h, then pure-read turns, idle 30 min -> no hint (still within the real 1h TTL)', () => {
   const { cleanup } = makeFixture();
   const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
   try {
-    const { mainTranscriptPath } = makeAgentFixture(root, { name: 'someone-else' });
-    const res = callHook(root, { to: 'worker-x', mainTranscriptPath });
-    assert.equal(res.status, 0);
-    assert.equal(res.json, null);
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      id: 'h30', name: 'worker-1h-30',
+      lines: [
+        // A real 1h-bucket write 50 minutes ago...
+        assistantLine({ ts: now - 50 * 60 * 1000, cacheRead: 1000, cacheWrite1h: 150000 }),
+        // ...then two pure-read turns that write nothing split at all, the
+        // most recent one 30 minutes ago. Still comfortably inside the real
+        // 1h TTL measured from THIS record's own timestamp, not the write's.
+        assistantLine({ ts: now - 40 * 60 * 1000, cacheRead: 151000 }),
+        assistantLine({ ts: now - 30 * 60 * 1000, cacheRead: 151000 }),
+      ],
+    });
+    const res = callHook(root, { to: 'worker-1h-30', mainTranscriptPath });
+    assert.equal(res.json, null,
+      `expected passthrough (idle only 30m, well inside a real 1h TTL) but got: ${res.json && res.json.systemMessage}`);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hook: last write 5m, pure-read turn, idle 8 min -> hint (past the real 5m TTL)', () => {
+  const { cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      id: 'm8', name: 'worker-5m-8',
+      lines: [
+        // A real 5m-bucket write 20 minutes ago...
+        assistantLine({ ts: now - 20 * 60 * 1000, cacheRead: 1000, cacheWrite5m: 150000 }),
+        // ...then one pure-read turn 8 minutes ago -- past the real 5m TTL
+        // measured from this record's own timestamp. The pure-read tail must
+        // not accidentally clear the TTL bucket either (0/0 would wrongly
+        // fall through to the agent-definition/default path); it must still
+        // read as 5m and still fire.
+        assistantLine({ ts: now - 8 * 60 * 1000, cacheRead: 151000 }),
+      ],
+    });
+    const res = callHook(root, { to: 'worker-5m-8', mainTranscriptPath });
+    assert.ok(res.json, 'expected a hint (idle 8m is past the real 5m TTL)');
+    assert.ok(res.json.systemMessage.includes('5m cache TTL'), res.json.systemMessage);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hook: no split write anywhere in the tail falls back to the agent definition\'s own experimental.cacheTtl', () => {
+  const { dir, cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    // Bare (non-namespaced) agentType so agentDefinition() resolves it under
+    // <claudeDir()>/agents/<type>.md -- claudeDir() follows
+    // AGENT_COMPANION_HOME_OVERRIDE, which makeFixture() already points at
+    // `dir`, so this never touches the real ~/.claude.
+    const agentsDir = join(dir, '.claude', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(
+      join(agentsDir, 'my-1h-worker.md'),
+      '---\nname: my-1h-worker\ndescription: a long-lived architect\nmodel: opus\neffort: high\nexperimental:\n  cacheTtl: 1h\n---\nbody\n',
+    );
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      id: 'defttl', name: 'worker-def', agentType: 'my-1h-worker',
+      // Every turn is a pure read -- no split write anywhere in the tail --
+      // so lastActivityOf()'s backward walk finds nothing at all (0/0).
+      lines: [
+        assistantLine({ ts: now - 25 * 60 * 1000, cacheRead: 150000 }),
+        assistantLine({ ts: now - 20 * 60 * 1000, cacheRead: 150000 }),
+      ],
+    });
+    const res = callHook(root, { to: 'worker-def', mainTranscriptPath });
+    // Without the definition fallback, ttlFor() would default to 5m and
+    // wrongly fire at 20m idle. With it, the real 1h TTL applies and 20m is
+    // still well within it.
+    assert.equal(res.json, null,
+      `expected passthrough (definition declares 1h, idle only 20m) but got: ${res.json && res.json.systemMessage}`);
   } finally {
     cleanup();
     rmSync(root, { recursive: true, force: true });
@@ -390,6 +441,25 @@ test('report: idleExpiryRewriteTokens/Usd/UnpricedTokens on transcript-report.mj
   } finally { cleanup(); }
 });
 
+test('hook: resume_guard_min_tokens is configurable', () => {
+  const { cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      lines: [assistantLine({ ts: now - 10 * 60 * 1000, cacheRead: 2000, cacheWrite5m: 2000 })], // 4K context: under the 50K default
+    });
+    const resDefault = callHook(root, { mainTranscriptPath });
+    assert.equal(resDefault.json, null, 'under the default floor');
+
+    const resLowered = callHook(root, { mainTranscriptPath, env: { CLAUDE_PLUGIN_OPTION_RESUME_GUARD_MIN_TOKENS: '1000' } });
+    assert.ok(resLowered.json, 'fires once the floor is lowered below this context');
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('hook: malformed / missing payload fields fail open', () => {
   const { cleanup } = makeFixture();
   try {
@@ -405,11 +475,21 @@ test('hook: malformed / missing payload fields fail open', () => {
   }
 });
 
-test('plugin.json: resume_guard options describe reuse notes, default floor 200000, no cache-expiry doctrine', () => {
-  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).userConfig;
-  assert.equal(cfg.resume_guard_min_tokens.default, 200000);
-  assert.equal(cfg.resume_guard.default, true);
-  const text = `${cfg.resume_guard.description} ${cfg.resume_guard_min_tokens.description}`;
-  assert.match(text, /NEVER discourages a cold resume/);
-  assert.doesNotMatch(text, /resume only while the cache is warm|spawn fresh from a file handoff/i);
+test('hook latency: well under its 10s hook timeout on a realistic fixture', () => {
+  const { cleanup } = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  try {
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      lines: [assistantLine({ ts: now - 12 * 60 * 1000, cacheRead: 150000, cacheWrite5m: 5000 })],
+    });
+    const t0 = Date.now();
+    const res = callHook(root, { mainTranscriptPath });
+    const elapsed = Date.now() - t0;
+    assert.ok(res.json, 'sanity: the hook actually fired for this fixture');
+    assert.ok(elapsed < 3000, `resume-guard.mjs took ${elapsed}ms — expected well under the 10s hook timeout`);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

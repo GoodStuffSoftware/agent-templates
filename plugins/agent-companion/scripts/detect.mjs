@@ -193,7 +193,8 @@ try {
 
 // --- 1d. Teammates watch ------------------------------------------------
 // Desktop teammates (agent teams) have not worked since Claude Code 2.1.178,
-// and reuse of a named worker is now the default WITHOUT them. When the
+// and the resume doctrine (continue only while warm and short) does not
+// depend on them. When the
 // installed Claude Code version changes (the CLI's, or the newest build the
 // desktop app bundles), suggest the manual probe once; until a teammate shows
 // up in a team config created after the change, keep looking for 21 days, and
