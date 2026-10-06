@@ -375,7 +375,11 @@ test('fetch timeout: the whole git process tree is killed, so no git-remote-http
     // Everything else in the call is bounded too: the whole-call time minus the local git steps
     // (the only time excluded; each is separately capped by the local timeout) stays under 6 s.
     for (const k of ['rev-parse', 'remote', 'status']) assert.equal(typeof r.steps_ms[k], 'number', `gitBrief reports the ${k} step time`);
-    const localMs = Object.entries(r.steps_ms).filter(([k]) => k !== 'fetch').reduce((a, [k, v]) => { assert.equal(typeof v, 'number', `step ${k} is a number`); return a + v; }, 0);
+    // Only these local git subcommands are subtracted; a new key (a network step such as ls-remote) fails here instead of being subtracted silently.
+    const localSteps = ['rev-parse', 'symbolic-ref', 'remote', 'status', 'rev-list', 'log'];
+    const stray = Object.keys(r.steps_ms).filter((k) => k !== 'fetch' && !localSteps.includes(k));
+    assert.deepEqual(stray, [], `steps_ms has keys outside fetch + the known local steps: ${JSON.stringify(r.steps_ms)}`);
+    const localMs = localSteps.reduce((a, k) => { if (k in r.steps_ms) assert.equal(typeof r.steps_ms[k], 'number', `step ${k} is a number`); return a + (r.steps_ms[k] || 0); }, 0);
     assert.ok(took - localMs < 6000, `call minus local git steps took ${took - localMs} ms (took ${took}, steps: ${JSON.stringify(r.steps_ms)})`);
     // Wait for the close events themselves (bounded), not a fixed sleep.
     for (const until = Date.now() + 5000; Date.now() < until;) {
