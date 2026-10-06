@@ -11,11 +11,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, realpathSync,
+  readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, realpathSync, writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import {
   makeFixture, TESTS_DIR, PLUGIN_ROOT, REAL_CLAUDE_DIRS, childEnv,
 } from './helpers.mjs';
@@ -163,11 +164,25 @@ test('os.homedir() resolves inside the sandbox, here and in a child', () => {
   assert.notEqual(canon(home), canon(process.env.AGENT_COMPANION_HOME_OVERRIDE), 'the OS home is not the override: a caller that bypasses the override finds nothing');
 });
 
-test('a grandchild (node spawning node) is sandboxed too', () => {
-  const inner = 'console.log(require("os").homedir())';
-  const res = nodeChild(`const r = require("child_process").spawnSync(process.execPath, ["-e", ${JSON.stringify(inner)}], { encoding: "utf8" }); process.stdout.write(r.stdout)`);
-  assert.equal(res.status, 0, res.stderr);
-  assert.ok(insideSandbox(res.stdout.trim()), `a grandchild's os.homedir() is ${res.stdout.trim()}`);
+test('a grandchild (node spawning node) is sandboxed and guarded too', () => {
+  clearChildViolations();
+  try {
+    const target = join(REAL_CLAUDE_DIRS[0], 'settings.json');
+    // The grandchild reads the real settings.json and swallows the throw, as
+    // fail-open plugin code does; it reports its os.homedir() and whether the
+    // read threw. Only the NODE_OPTIONS preload can make that read throw.
+    const inner = `let threw = false; try { require("fs").readFileSync(${JSON.stringify(target)}); } catch (e) { threw = /REAL Claude home/.test(String(e.message)); } console.log(JSON.stringify([require("os").homedir(), threw]))`;
+    const res = nodeChild(`const r = require("child_process").spawnSync(process.execPath, ["-e", ${JSON.stringify(inner)}], { encoding: "utf8" }); process.stdout.write(r.stdout)`);
+    assert.equal(res.status, 0, res.stderr);
+    const [home, threw] = JSON.parse(res.stdout);
+    assert.ok(insideSandbox(home), `a grandchild's os.homedir() is ${home}`);
+    assert.equal(threw, true, 'the grandchild read of the real settings.json must throw');
+    const rows = childViolations();
+    assert.equal(rows.length, 1, `one record from the grandchild in the log: ${JSON.stringify(rows)}`);
+    assert.match(rows[0], /fs\.readFileSync .*settings\.json/);
+  } finally {
+    clearChildViolations(); // the exit handler would otherwise fail this file
+  }
 });
 
 test('a child that touches the real Claude home is stopped, and the access is on record even when the child swallows the throw', () => {
@@ -182,7 +197,7 @@ test('a child that touches the real Claude home is stopped, and the access is on
     assert.match(rows[0], /fs\.readFileSync .*settings\.json/);
     assert.equal(realHomeViolations().length, 0, 'the parent itself touched nothing');
   } finally {
-    clearChildViolations(); // the root after() hook would otherwise fail this file
+    clearChildViolations(); // the exit handler would otherwise fail this file
   }
 });
 
@@ -205,4 +220,71 @@ test('git in a child sees an empty global config, not the operator\'s ~/.gitconf
   assert.equal(global.status === 0 || global.status === 1, true, `git config --global --list exited ${global.status}: ${global.stderr}`);
   const ident = spawnSync('git', ['config', '--global', '--get', 'user.email'], { encoding: 'utf8', windowsHide: true, env: childEnv() });
   assert.equal((ident.stdout || '').trim(), '', 'the operator\'s git identity must not leak in');
+});
+
+// --- a violation fails the file that caused it ------------------------------
+//
+// A root after() hook was attributed by node:test to tests/isolate.mjs, whose
+// isolated re-run (ci-local re-runs the file a failure names) passes: the run
+// came out FLAKY, which does not block outside --ci-parity. isolate.mjs now
+// fails the importing file's own process instead. These tests run a throwaway
+// test file that swallows a real-home read.
+
+// The throwaway file's "real home" is THIS process's sandbox home: isolate.mjs
+// takes REAL_HOME from os.homedir() at load, which is the HOME this process
+// exported. So nothing here touches the operator's actual home.
+const probeRoot = join(SANDBOX_DIR, 'violation-probe');
+const probeFile = join(probeRoot, 'swallow.test.mjs');
+const probeTarget = join(homedir(), '.claude', 'settings.json');
+function writeProbe() {
+  mkdirSync(probeRoot, { recursive: true });
+  writeFileSync(probeFile, [
+    `import ${JSON.stringify(pathToFileURL(join(TESTS_DIR, 'isolate.mjs')).href)};`,
+    "import test from 'node:test';",
+    "import { statSync } from 'node:fs';",
+    "test('reads the watched path and swallows the throw, like fail-open plugin code', () => {",
+    '  try { statSync(process.env.PROBE_TARGET); } catch { /* swallowed */ }',
+    '});',
+    '',
+  ].join('\n'));
+}
+// Inside a test file node sets NODE_TEST_CONTEXT, and a nested `node --test`
+// then refuses to run files ("run() is being called recursively"): drop it.
+const probeEnv = (target) => {
+  const env = childEnv({ PROBE_TARGET: target });
+  delete env.NODE_TEST_CONTEXT;
+  return env;
+};
+const nodeTest = (target) => spawnSync(process.execPath, ['--test', probeFile], {
+  cwd: probeRoot, encoding: 'utf8', windowsHide: true, timeout: 120000, env: probeEnv(target),
+});
+
+test('a test file whose code swallowed a real-home read exits non-zero, and a re-run of that file fails again', () => {
+  writeProbe();
+  const harmless = nodeTest(join(SANDBOX_DIR, 'not-watched'));
+  assert.equal(harmless.status, 0, `control: the same file without a violation passes: ${harmless.stdout}${harmless.stderr}`);
+  for (const attempt of ['full run', 'isolated re-run']) {
+    const res = nodeTest(probeTarget);
+    assert.notEqual(res.status, 0, `${attempt}: the violation must fail the file: ${res.stdout}${res.stderr}`);
+    assert.match(`${res.stdout}${res.stderr}`, /touched the real Claude home 1 time/, `${attempt}: the message names the access`);
+  }
+});
+
+const CI_LOCAL = resolve(PLUGIN_ROOT, '..', '..', 'scripts', 'ci-local.mjs');
+test('ci-local classifies that file as a FAIL, not as flaky', { skip: !existsSync(CI_LOCAL) && 'scripts/ci-local.mjs is not part of this tree' }, async () => {
+  writeProbe();
+  const { runTestSuite } = await import(pathToFileURL(CI_LOCAL).href);
+  const spawnNode = (args, cwd, env) => {
+    const r = spawnSync(process.execPath, args, { cwd, env, encoding: 'utf8', windowsHide: true, timeout: 120000 });
+    return { status: r.status === null ? 1 : r.status };
+  };
+  const env = probeEnv(probeTarget);
+  const logs = [];
+  const result = runTestSuite({
+    files: [probeFile], cwd: probeRoot, env, ciParity: false, concurrency: 1, log: (m) => logs.push(m), spawnNode,
+  });
+  assert.equal(result.outcome, 'fail', `outcome ${result.outcome}: ${JSON.stringify(result)} ${logs.join(' ')}`);
+  assert.equal(result.status, 1);
+  assert.deepEqual(result.flakyFiles, []);
+  assert.deepEqual(result.failedFiles.map((f) => f.replace(/[\\]/g, '/')), ['swallow.test.mjs']);
 });

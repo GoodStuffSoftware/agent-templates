@@ -42,13 +42,40 @@
 //   3. Arms a tripwire (tests/tripwire.mjs) on node:fs in this process: any
 //      call whose path resolves under the real Claude config root(s), or the
 //      real ~/.claude.json, THROWS (so the offending test fails at the call) and
-//      is also recorded, and a root-level after() hook fails the file if
+//      is also recorded, and when the process exits it FAILS (exit code 1) if
 //      anything was recorded, even if the plugin code swallowed the throw (most
 //      of it fails open by design).
 //   4. Arms the SAME tripwire in every node child, through NODE_OPTIONS
 //      --import tests/child-guard.mjs. A child's violations go to a log in the
-//      sandbox that the same after() hook reads, so a child that swallowed the
+//      sandbox that the same exit handler reads, so a child that swallowed the
 //      throw still fails the file that spawned it.
+//   5. Removes the sandbox when the process exits, and at startup sweeps the
+//      ones a killed run left behind (tests/sandbox-sweep.mjs).
+//
+// WHY THE FAILURE IS AN EXIT CODE, NOT A TEST HOOK. A root-level after() hook
+// is attributed by node:test to THIS module (tests/isolate.mjs), not to the
+// test file that did the touching. ci-local re-runs the file a failure names,
+// so it re-ran isolate.mjs alone, which has no tests and passes, and classified
+// the run FLAKY: non-blocking outside --ci-parity. A non-zero exit of the
+// importing file's own process is attributed to that file, and the isolated
+// re-run of that file fails again, so the outcome is FAIL in every mode.
+//
+// KNOWN LIMITS (what the child guard cannot see; none is reachable through the
+// shared helpers, which merge over process.env).
+//   - A child spawned with an explicit env that drops NODE_OPTIONS or the
+//     AC_TEST_GUARD_* pair is not guarded. os.homedir() still lands in the
+//     sandbox when HOME/USERPROFILE ride along; only an ABSOLUTE path into the
+//     real home goes unwatched.
+//   - A worker_threads Worker shares the parent's env but not its patched fs.
+//     The plugin spawns none today.
+//   - A non-node child (git, gh, ps, the claude binary, cmd.exe) cannot be
+//     instrumented. git is pinned by HOME and GIT_CONFIG_GLOBAL; the rest are
+//     covered only by the HOME/USERPROFILE pins.
+//   - On POSIX, a child whose env drops HOME falls back to the passwd entry,
+//     which is the real home. (On Windows the child keeps resolving the
+//     parent's live USERPROFILE.) A runner's home is disposable in CI.
+//   - audit-no-real-home.test.mjs replaces NODE_OPTIONS on purpose and brings
+//     its own tracer.
 //
 // tests/audit-no-real-home.test.mjs is an independent tracer (its own preload)
 // for the audit script. tests/isolation-guard.test.mjs asserts all of the above,
@@ -60,8 +87,8 @@ import {
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { after } from 'node:test';
 import { armTripwire, canon } from './tripwire.mjs';
+import { sweepStaleSandboxes } from './sandbox-sweep.mjs';
 
 const win = process.platform === 'win32';
 
@@ -99,7 +126,10 @@ export const WATCHED_ROOTS = Object.freeze([...new Set([...lexicalRoots, ...cano
 
 // --- the sandbox ------------------------------------------------------------
 
-const sandbox = mkdtempSync(join(tmpdir(), 'ac-suite-'));
+// The pid in the name lets a later run tell a live sandbox from one a killed
+// run left behind (tests/sandbox-sweep.mjs).
+sweepStaleSandboxes();
+const sandbox = mkdtempSync(join(tmpdir(), `ac-suite-${process.pid}-`));
 export const SANDBOX_DIR = sandbox;
 process.env.AGENT_COMPANION_HOME_OVERRIDE = sandbox;
 process.env.AGENT_COMPANION_STATE_DIR = join(sandbox, '.claude', 'agent-companion');
@@ -123,10 +153,6 @@ if (win) {
 process.env.GIT_CONFIG_GLOBAL = join(SANDBOX_OS_HOME, '.gitconfig');
 // An empty file, not a missing one: `git config --global --list` exits 128 on a missing file.
 writeFileSync(process.env.GIT_CONFIG_GLOBAL, '');
-
-process.on('exit', () => {
-  try { rmSync(sandbox, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ }
-});
 
 // --- the tripwire, in this process -------------------------------------------
 
@@ -162,12 +188,19 @@ export function clearChildViolations() {
   try { writeFileSync(CHILD_VIOLATION_LOG, ''); } catch { /* best effort */ }
 }
 
-// A file whose test touched the real home fails even if the plugin code
-// caught the throw. Registered at the root of the importing test file.
-after(() => {
-  const fromChildren = childViolations();
-  if (violations.length || fromChildren.length) {
-    const all = [...violations, ...fromChildren.map((l) => `child ${l}`)];
-    throw new Error(`this test file touched the real Claude home ${all.length} time(s) (${violations.length} in-process, ${fromChildren.length} in child processes): ${[...new Set(all)].slice(0, 5).join('; ')}`);
-  }
+// A file whose test touched the real home fails even if the plugin code caught
+// the throw. Runs when THIS process exits (the importing test file's own
+// process), after every test; it reads the child log, then removes the sandbox
+// the log lives in. process.exitCode = 1 is what makes node:test, and ci-local's
+// isolated re-run of the file, report the file itself as failed (see the header).
+process.on('exit', () => {
+  try {
+    const fromChildren = childViolations();
+    if (violations.length || fromChildren.length) {
+      const all = [...violations, ...fromChildren.map((l) => `child ${l}`)];
+      console.error(`this test file touched the real Claude home ${all.length} time(s) (${violations.length} in-process, ${fromChildren.length} in child processes): ${[...new Set(all)].slice(0, 5).join('; ')}`);
+      if (!process.exitCode) process.exitCode = 1;
+    }
+  } catch { /* reporting must not mask the run's own result */ }
+  try { rmSync(sandbox, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ }
 });
