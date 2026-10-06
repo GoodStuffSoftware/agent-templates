@@ -13,7 +13,7 @@
 import { execSyncHidden } from './lib/proc.mjs';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, readdirSync, statSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
-import { userInfo, homedir } from 'node:os';
+import { userInfo } from 'node:os';
 import {
   modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
   homeRoot, stateRoot, resolveRoute, isLadderAgentName,
@@ -40,12 +40,14 @@ import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/c
 import { STREAK_FILE, attendedCoverage } from '../hooks/lib/delegation.mjs';
 import { collect as collectCopies, staleBeyondGrace, STALE_GRACE_MS } from './version.mjs';
 
-// The operator's raw OS handle(s), for scrubbing signal text.
+// The operator's raw OS handle(s), for scrubbing signal text. The home
+// basename goes through homeRoot() like every other path here, so
+// AGENT_COMPANION_HOME_OVERRIDE is honoured (it is os.homedir() in production).
 function rawOsHandles() {
   const out = [];
   try { out.push(userInfo().username); } catch { /* no passwd entry */ }
   for (const k of ['USERNAME', 'USER']) if (process.env[k]) out.push(process.env[k]);
-  out.push(basename(homedir()));
+  out.push(basename(homeRoot()));
   return [...new Set(out.filter(Boolean))];
 }
 
