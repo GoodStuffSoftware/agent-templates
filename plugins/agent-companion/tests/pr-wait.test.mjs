@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { makeFixture, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { makeFixture, readJsonl, PLUGIN_ROOT, HANG_GUARD_TIMEOUT_MS } from './helpers.mjs';
 import { defaultRules, matchRules, PR_WAIT_HINT_TEXT, PR_WAIT_HINT_WORDING } from '../hooks/lib/rules.mjs';
 
 const rulesPath = join(PLUGIN_ROOT, 'hooks', 'lib', 'rules.mjs');
@@ -66,7 +66,7 @@ function setup(scenario, extraEnv = {}) {
   };
   delete env.CLAUDE_CODE_SESSION_ID;
   const run = (...args) => {
-    const r = spawnSync(process.execPath, [SCRIPT, ...args], { env, encoding: 'utf8', timeout: 30000, windowsHide: true });
+    const r = spawnSync(process.execPath, [SCRIPT, ...args], { env, encoding: 'utf8', timeout: HANG_GUARD_TIMEOUT_MS, windowsHide: true });
     const lines = r.stdout.split('\n').filter(Boolean);
     return { code: r.status, stdout: r.stdout, stderr: r.stderr, lines, start: lines[0], final: lines[1], detail: lines.slice(2) };
   };
