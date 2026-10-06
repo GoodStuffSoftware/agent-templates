@@ -52,7 +52,7 @@ import {
 import { createHash } from 'node:crypto';
 import { join, dirname, basename, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { claudeDir, modelTiers } from '../hooks/lib/context.mjs';
+import { claudeDir, modelTiers, ladderVariants } from '../hooks/lib/context.mjs';
 
 // Strict argument parsing: an unknown flag, or an --agents-dir with no value
 // (or with another flag where its value should be), is an error. A loose
@@ -134,7 +134,7 @@ function ladderFiles() {
     console.error(`install-ladder-agents: config/model-tiers.json unreadable: ${e.message}`);
     process.exit(1);
   }
-  return (Array.isArray(cfg.ladder) ? cfg.ladder : []).map((r) => `${r?.agent}.md`).filter(safeManifestName);
+  return [...(Array.isArray(cfg.ladder) ? cfg.ladder : []), ...ladderVariants()].map((r) => `${r?.agent}.md`).filter(safeManifestName);
 }
 
 // One of: 'create' (target absent), 'update' (target present, manifest hash

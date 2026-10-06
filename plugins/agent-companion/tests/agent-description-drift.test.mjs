@@ -44,7 +44,7 @@ test('--check-agent-descriptions fails and names the file when a description has
     });
     assert.equal(res.status, 1);
     assert.match(res.stderr, /ac-sonnet-low/);
-    assert.match(res.stderr, /Base-table default routing for:/); // the CORRECT, non-stale expected text
+    assert.match(res.stderr, /Base default for:/); // the CORRECT, non-stale expected text
     assert.match(res.stderr, /rare; prefer sonnet/); // the stale actual text, named
   } finally {
     cleanup();
@@ -68,7 +68,7 @@ test('--sync-agent-descriptions rewrites a drifted description in place, preserv
 
     const after = readFileSync(file, 'utf8');
     assert.doesNotMatch(after, /stale text/);
-    assert.match(after, /Base-table default routing for:/);
+    assert.match(after, /Base default for:/);
     // Body (everything after frontmatter) is untouched.
     assert.equal(after.split(/^---\r?\n[\s\S]*?\r?\n---/m)[1], bodyBefore);
 
@@ -310,11 +310,11 @@ test('ac-haiku: generated from the tier\'s retiresAfter and replacement, keeps R
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
   const desc = text.match(/^description:\s*"(.*)"$/m)[1];
   assert.match(desc, new RegExp(`^RETIRING \\(no sooner than ${cfg.tiers.haiku.retiresAfter}\\)`));
-  assert.match(desc, new RegExp(`falls back to rung \\d+, ac-${cfg.tiers.haiku.replacement.model}-${cfg.tiers.haiku.replacement.effort}`));
+  assert.match(desc, new RegExp(`falls back to ac-${cfg.tiers.haiku.replacement.model}-${cfg.tiers.haiku.replacement.effort}`));
   assert.doesNotMatch(desc, /verification/);
 });
 
-test('every "Not the base-table default" and "Base-table default routing for" claim is true against the shipped routes, and says the profile may differ', async () => {
+test('every "Base default for" claim is true against the shipped routes, and says the profile may differ', async () => {
   const { cleanup } = makeFixture();
   try {
     const { resolveRoute, modelTiers } = await import('../hooks/lib/context.mjs');
@@ -325,16 +325,118 @@ test('every "Not the base-table default" and "Base-table default routing for" cl
     for (const rung of cfg.ladder) {
       const desc = readFileSync(join(PLUGIN_ROOT, 'agents', `${rung.agent}.md`), 'utf8').match(/^description:\s*"?(.*?)"?$/m)[1];
       const actual = routes.filter(([, r]) => r.model === rung.model && (r.effort || null) === (rung.effort || null)).map(([n]) => n);
-      assert.match(desc, /your routing profile may (?:route differently|send some here), see \/ac routing\./, `${rung.agent} points at the routing profile`);
-      if (/Not the base-table default routing/.test(desc)) {
+      assert.match(desc, /profile may differ \(\/ac routing\)\./, `${rung.agent} points at the routing profile`);
+      if (/Not a base default/.test(desc)) {
         sawNone = true;
         assert.deepEqual(actual, [], `${rung.agent} says no task type routes to it`);
       } else {
-        const claimed = desc.match(/Base-table default routing for: ([^;]*);/)[1].split(', ');
+        const claimed = desc.match(/Base default for: ([^;]*);/)[1].split(', ');
         assert.deepEqual(claimed, actual, rung.agent);
       }
     }
-    assert.ok(sawNone, 'at least one rung carries the "not the base-table default" suffix');
+    assert.ok(sawNone, 'at least one rung carries the "Not a base default" suffix');
+  } finally {
+    cleanup();
+  }
+});
+
+// --- Short descriptions (S5) and generated tool policy (S1/S2) --------------
+
+test('every ac-* description is short: at most 260 chars (the haiku retirement notice), at most 175 for every other agent', () => {
+  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
+  for (const a of [...cfg.ladder, ...cfg.ladderVariants]) {
+    const desc = readFileSync(join(PLUGIN_ROOT, 'agents', `${a.agent}.md`), 'utf8').match(/^description:\s*"?(.*?)"?$/m)[1];
+    assert.ok(desc.length <= (a.agent === 'ac-haiku' ? 260 : 175), `${a.agent}: ${desc.length} chars`);
+  }
+});
+
+function toolsLine(agent) {
+  const m = readFileSync(join(PLUGIN_ROOT, 'agents', `${agent}.md`), 'utf8').match(/^disallowedTools:\s*(.*)$/m);
+  return m ? m[1].split(',').map((x) => x.trim()) : null;
+}
+
+test('every numbered rung drops Artifact, the desktop-only servers and the browser servers; the browser variants keep the browser', () => {
+  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
+  for (const r of cfg.ladder) {
+    const t = toolsLine(r.agent);
+    for (const must of ['Artifact', 'mcp__visualize', 'mcp__terminal', 'mcp__ccd_session', 'mcp__Claude_Browser', 'mcp__claude-in-chrome', 'mcp__computer-use']) {
+      assert.ok(t.includes(must), `${r.agent} drops ${must}`);
+    }
+    // keepOn: ccd_session_mgmt stays on ac-haiku only
+    assert.equal(t.includes('mcp__ccd_session_mgmt'), r.agent !== 'ac-haiku', r.agent);
+  }
+  for (const v of cfg.ladderVariants) {
+    const t = toolsLine(v.agent);
+    assert.ok(t.includes('Artifact'), `${v.agent} drops Artifact`);
+    for (const keep of ['mcp__Claude_Browser', 'mcp__claude-in-chrome', 'mcp__computer-use']) assert.ok(!t.includes(keep), `${v.agent} keeps ${keep}`);
+  }
+});
+
+test('no account-specific connector id is in any ac-* tools line', () => {
+  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
+  for (const a of [...cfg.ladder, ...cfg.ladderVariants]) {
+    assert.doesNotMatch(toolsLine(a.agent).join(','), /[0-9a-f]{8}-[0-9a-f]{4}-/, a.agent);
+  }
+});
+
+test('mutation: a rung whose disallowedTools line was hand-edited fails the check as tools-drift, and --sync restores it', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    const file = join(agentsDir, 'ac-opus-high.md');
+    writeFileSync(file, readFileSync(file, 'utf8').replace(/^disallowedTools:.*$/m, 'disallowedTools: Artifact'));
+    const res = check(agentsDir);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /ac-opus-high \[tools-drift\]/);
+    assert.equal(sync(agentsDir).status, 0);
+    assert.equal(check(agentsDir).status, 0);
+    assert.ok(toolsLine('ac-opus-high').length > 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('mutation: a rung file with no disallowedTools line fails as tools-drift (absent)', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    const file = join(agentsDir, 'ac-sonnet-low.md');
+    writeFileSync(file, readFileSync(file, 'utf8').replace(/^disallowedTools:.*\r?\n/m, ''));
+    const res = check(agentsDir);
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /ac-sonnet-low \[tools-drift\][\s\S]*actual:\s+\(absent\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('mutation: a browser variant that lost the browser, or a variant file with no config entry, fails', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    const file = join(agentsDir, 'ac-browser.md');
+    writeFileSync(file, readFileSync(file, 'utf8').replace(/^disallowedTools:.*$/m, (l) => `${l}, mcp__Claude_Browser`));
+    const res = check(agentsDir);
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /ac-browser \[tools-drift\]/);
+    writeFileSync(join(agentsDir, 'ac-stray.md'), '---\nname: ac-stray\n---\n');
+    assert.match(check(agentsDir).stderr, /ac-stray \[not-a-rung\]/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a variant is not a rung: rungFor never returns it, and the guards count it as a ladder agent', async () => {
+  const { cleanup } = makeFixture();
+  try {
+    const ctx = await import('../hooks/lib/context.mjs');
+    for (const v of ctx.ladderVariants()) {
+      assert.equal(v.rung, null);
+      assert.ok(ctx.isLadderAgentName(v.agent), v.agent);
+      assert.ok(ctx.isLadderAgentName(`agent-companion:${v.agent}`), v.agent);
+      assert.notEqual(ctx.rungFor(v.model, v.effort).agent, v.agent);
+    }
+    assert.ok(ctx.ladderVariants().some((v) => v.agent === 'ac-browser'));
   } finally {
     cleanup();
   }

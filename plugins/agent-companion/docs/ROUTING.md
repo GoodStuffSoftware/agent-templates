@@ -43,6 +43,15 @@ The same routing grid's (model, effort) pairs, ordered, each mapped to a spawnab
 | 9 | `opus` | `xhigh` | 5m (default) | `agent-companion:ac-opus-xhigh` |
 | 10 | `opus` | `max` | 5m (default) | `agent-companion:ac-opus-max` |
 
+Every ladder agent's frontmatter carries `disallowedTools`, generated from `ladderTools` in the config (`--sync-agent-descriptions`): `Artifact`, `mcp__visualize`, `mcp__terminal`, `mcp__ccd_session`, `mcp__ccd_connectors`, `mcp__ccd_directory`, `mcp__ccd_pr`, `mcp__ccd_sidebar`, `mcp__ccd_view`, `mcp__ccd_window`, `mcp__mcp-registry` everywhere; `mcp__Claude_Browser`, `mcp__claude-in-chrome`, `mcp__computer-use` on every agent except the browser variants below; `mcp__ccd_session_mgmt` everywhere except `ac-haiku`. They cost tokens at the start of every spawn and were used in few runs. `general-purpose` and the lead keep every tool.
+
+**UI and browser work.** The rungs above have no browser. These variants are not rungs (no number, never an escalation target, never picked by routing); each is one rung's model and effort plus the browser servers. `recommend.mjs --browser` names the one for the routed model.
+
+| Variant | Model | Effort | Same as rung | Spawn as |
+|---|---|---|---|---|
+| `ac-browser` | `sonnet` | `high` | 4 | `agent-companion:ac-browser` |
+| `ac-browser-opus` | `opus` | `medium` | 7 | `agent-companion:ac-browser-opus` |
+
 ## Reference models (older pinned ids — not routable)
 
 Non-routable entries for OLDER full/dated model ids, kept only so an agent definition pinned to one of these has its effort validated against what THAT version actually supports, not the current alias tier's (possibly wider) list.

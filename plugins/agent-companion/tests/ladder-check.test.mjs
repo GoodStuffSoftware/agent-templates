@@ -13,7 +13,7 @@
 //      checkouts.)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, readFileSync, cpSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, cpSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { makeFixture, runHook, PLUGIN_ROOT } from './helpers.mjs';
@@ -54,6 +54,23 @@ test('quiet when the ladder files are intact and nothing is installed', () => {
     const res = runHook('hooks/ladder-check.mjs', { session_id: 's1', cwd: dir, source: 'startup' });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.stdout.trim(), '');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a ladder variant (ac-browser) is checked like a rung: a missing file, or a model that is not its base rung, is reported', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const root = cacheCopy(dir, REAL_VERSION);
+    // the variant's file names the wrong model
+    writeFileSync(join(root, 'agents', 'ac-browser.md'), readFileSync(join(root, 'agents', 'ac-browser.md'), 'utf8').replace(/^model: sonnet$/m, 'model: opus'));
+    let res = runFrom(root, { session_id: 's-var1', cwd: dir, source: 'startup' });
+    assert.match(res.json?.systemMessage || '', /agents\/ac-browser\.md frontmatter model "opus" does not match ladder variant \("sonnet"\)/);
+    cpSync(join(PLUGIN_ROOT, 'agents', 'ac-browser.md'), join(root, 'agents', 'ac-browser.md'));
+    rmSync(join(root, 'agents', 'ac-browser-opus.md'));
+    res = runFrom(root, { session_id: 's-var2', cwd: dir, source: 'startup' });
+    assert.match(res.json?.systemMessage || '', /agents\/ac-browser-opus\.md is missing \(ladder variant\)/);
   } finally {
     cleanup();
   }

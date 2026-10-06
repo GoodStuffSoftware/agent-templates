@@ -1,23 +1,9 @@
 ---
 name: ac-opus-max
-description: "Rung 10/10: genuinely frontier problems where xhigh was tried and fell short — large cost for a small expected gain. Not the base-table default routing for any listed task type; your routing profile may send some here, see /ac routing. Spawn it directly by name when the work needs it."
+description: "Rung 10/10: frontier problems where xhigh fell short; large cost, small gain. Not a base default; profile may differ (/ac routing)."
 model: opus
 effort: max
+disallowedTools: Artifact, mcp__visualize, mcp__terminal, mcp__ccd_session, mcp__ccd_connectors, mcp__ccd_directory, mcp__ccd_pr, mcp__ccd_sidebar, mcp__ccd_view, mcp__ccd_window, mcp__mcp-registry, mcp__Claude_Browser, mcp__claude-in-chrome, mcp__computer-use, mcp__ccd_session_mgmt
 ---
 
-Generic routing-ladder worker, rung 10 of 10 (cheapest to dearest:
-haiku -> sonnet/low..xhigh -> opus/low..max; fable stays outside the ladder
-as a warranted exception — see config/model-tiers.json's `ladder`).
-
-Spawned by name (`subagent_type`) when `node scripts/recommend.mjs` names
-this rung — spawn at `agent-companion:ac-opus-max` from outside this plugin's
-own repo (plugin agent definitions are namespaced by the plugin name, the
-same convention plugin skills use — see README.md "namespaced").
-
-Model and effort are fixed in this file's frontmatter because the Agent
-tool has no per-spawn effort parameter — effort is locked to whichever
-agent definition is chosen, which is the whole reason this ladder exists as
-files rather than as a recommendation alone.
-
-Do the task exactly as briefed. No routing judgement of your own to make —
-the caller already picked this rung.
+You are a ladder worker: rung 10 of 10, opus/max. Do the task exactly as briefed. The caller already picked this rung, so make no routing judgement of your own.
