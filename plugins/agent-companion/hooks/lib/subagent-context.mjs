@@ -187,5 +187,11 @@ export function subagentNoticeText(kinds, threshold) {
   const what = kinds.includes('compaction')
     ? 'You just compacted'
     : `Your context is past ${fmtTokens(threshold)} tokens`;
-  return `[agent-companion] ${what}. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.`;
+  // A compaction is routine now (subagents compact at about 217K and are reused
+  // across follow-ups): carry on, do not wrap up. Only a context past the
+  // threshold is a reason to hand back.
+  if (kinds.includes('compaction')) {
+    return `[agent-companion] ${what}. Carry on; your summary may have dropped detail, so re-read a file before relying on a line you only remember.`;
+  }
+  return `[agent-companion] ${what}. Finish the current step, return your results, and if more work remains, say what is left; the lead will send it back to you or to another worker.`;
 }

@@ -57,7 +57,9 @@ function callHook(root, { to = 'worker-x', mainTranscriptPath, env = {} } = {}) 
 // default, so a genuinely-warm 1h-TTL worker idle 8 minutes gets flagged as
 // past its cache TTL, and the hint text itself states the wrong TTL ("5m
 // cache TTL") for a worker that is actually still warm under its real 1h TTL.
-test('REVIEW FINDING: a 1h-TTL worker whose LAST turn was a pure cache read (no split write) is wrongly flagged at 8m idle', () => {
+// Since 0.31.1 the TTL plays no part in the hook at all (reuse by default), so
+// this now pins that a 1h-bucket worker with a pure-read last turn gets no note.
+test('REVIEW FINDING: a 1h-TTL worker whose LAST turn was a pure cache read (no split write) gets no note at 8m idle', () => {
   const { cleanup } = makeFixture();
   const root = mkdtempSync(join(tmpdir(), 'ac-rg-f1-'));
   try {

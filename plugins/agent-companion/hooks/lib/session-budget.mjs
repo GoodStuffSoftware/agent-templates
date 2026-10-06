@@ -51,6 +51,9 @@ import { planPriceSpecFor, priceUsage } from '../../scripts/lib/pricing.mjs';
 import { usageOf, queueNotice, safe } from './runaway.mjs';
 
 export const SESSION_BUDGET_DEFAULT_UNITS = 350;
+// Shipped default for the weekly allowance when config/session-budget.json is
+// unreadable (2026-10-06 recalibration: 1% of the weekly limit = 26.8 units).
+export const WEEKLY_PLAN_UNITS_DEFAULT = 2677;
 const CHUNK_BYTES = 8 * 1024 * 1024;
 export const BUDGET_DEADLINE_MS = 2500;
 const RECENT_KEYS = 64;
@@ -60,7 +63,7 @@ const STATE_TTL_MS = 7 * 86400000;
 let _week = null;
 export function weeklyPlanUnits() {
   if (_week) return _week;
-  let n = 1900;
+  let n = WEEKLY_PLAN_UNITS_DEFAULT;
   try {
     const f = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'session-budget.json');
     const v = Number(JSON.parse(readFileSync(f, 'utf8')).weeklyPlanUnits);

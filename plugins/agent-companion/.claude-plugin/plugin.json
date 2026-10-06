@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.0",
+  "version": "0.31.1",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -320,15 +320,15 @@
     },
     "resume_guard": {
       "type": "boolean",
-      "title": "Resume guard (cache-expired resume)",
-      "description": "Advisory only, never blocks: on SendMessage to a background subagent this SESSION spawned, when that agent's own last activity is older than the cache TTL that applied to it (5m default, or 1h when its own writes show it used the 1h bucket) AND its last context was at or above resume_guard_min_tokens, name the doctrine (resume only while the cache is warm; otherwise spawn fresh from a file handoff) and estimate the rewrite size. A currently-running target is not flagged — its own last activity is necessarily recent. Kill switch for this guard; resume_guard_min_tokens is its size floor.",
+      "title": "Resume guard (reuse notes)",
+      "description": "Advisory only, never blocks. Reuse by default: a message to a stopped background subagent costs far less than a fresh spawn, warm cache or cold, so this guard NEVER discourages a cold resume. On SendMessage to a background subagent this SESSION spawned, it adds a note in two cases only: the worker's last context is at or above resume_guard_min_tokens (reuse still wins for related work; an unrelated or much smaller task does better on a fresh worker), or the worker's model tier is above the tier of the `TYPE:` the message declares. Idle time and the cache TTL play no part. Kill switch for these notes.",
       "default": true
     },
     "resume_guard_min_tokens": {
       "type": "number",
-      "title": "Resume guard: minimum context (tokens)",
-      "description": "A resume past the cache TTL is only worth flagging when the context that would be rewritten is at least this large. Default picked well below this operator's own measured idle-expiry-resume average (well over 100K tokens per scripts/transcript-report.mjs's resumeAfterIdle.idleExpiryRewriteTokens) so the guard fires on nearly every real case while staying quiet on a genuinely small worker.",
-      "default": 50000
+      "title": "Resume guard: large-context note (tokens)",
+      "description": "The worker context size at which a resume carries a note (see resume_guard). Default 200000: subagents compact at about 217K (autoCompactWindow 250000), so a worker near that size holds a lot the next task may not need.",
+      "default": 200000
     },
     "capacity_probe": {
       "type": "boolean",

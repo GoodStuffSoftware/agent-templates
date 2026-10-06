@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.1 — 2026-10-06
+
+Reuse by default. Operator decision 2026-10-06: a fresh worker does not save tokens. Measured: spawns per day 22 to 237, calls per spawn 49 to 36, start-up load 1.2% to 6.8% of the weekly limit per day; a message to a cache-cold worker about 0.2 plan units against about 0.6 for a fresh spawn's first load plus re-reading what the old worker knew; subagents compact at about 217K, so reused workers stay bounded.
+
+- Standing rule `resume-doctrine` (id kept): was "resume only while a worker's cache is warm; after its TTL, spawn fresh from a file handoff". Now: send related follow-on work to a stopped worker with SendMessage, warm cache or cold; spawn fresh only for unrelated work, a different model tier, or a worker whose context is far larger than the task needs; never because a cache expired.
+- Resume guard (`hooks/resume-guard.mjs`): no longer warns on a cache-cold resume or says to spawn fresh from a file handoff. It adds a note only when the worker's context is at least `resume_guard_min_tokens` (default 200000, was 50000 and only past the TTL), or the worker's tier is above the tier the message's `TYPE:` routes to. Idle time and the TTL play no part.
+- Subagent-context notices: the lead notice no longer says "split the remainder into smaller briefs rather than resuming it with everything"; it says to send the remainder to the worker with SendMessage and to spawn fresh only for unrelated work, another tier, or far less context. A compaction no longer tells the worker to wrap up (it compacts routinely now): it is told to carry on and re-read before trusting a remembered line.
+- Docs and lessons corrected: README, ROUTING.md and the cache-TTL text no longer say or imply fresh is cheaper; the lessons on resuming a worker and on cache TTL are corrected with a dated note; a CONTRIBUTIONS_INBOX entry records the finding.
+- Teammates watch (calibration scout). New `scripts/lib/teammates-watch.mjs`, section 1d of `scripts/detect.mjs` and `scripts/teammates-probe.mjs`. When the installed Claude Code version changes the scout suggests the probe once (`teammates_probe_suggested`); it raises `teammates_available` when a team config created after the change lists a teammate besides the lead, watching 21 days. The binary's team strings (TeamCreate, TeamDelete, teammate_spawned, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS) are recorded as a change hint only, because they are present in 2.1.286 while teammates do not work.
+- Stale cost facts corrected: the session budget's weekly allowance is 2,677 plan units (1% = 26.8), not 1,900 (every percentage it quoted was about 41% high). Opus 5.5's plan weight is about 1.5x per token and about 1.9x Sonnet per call at equal context; "came close to Sonnet" and "may be introductory" are removed. Fable's plan weight is marked unverified (the data fits about 3x, not 5x).
+
 ## 0.31.0 — 2026-10-06
 
 Lean subagents: the ten `ac-*` ladder workers carry less on every spawn, the reporting contract is delivered once, and the lead's session-start text stays out of a compacting subagent. Source: the 2026-10-06 context-baseline report, section 4. 0.31.0 also ships the opt-in `main_compact_floor_tokens` option (PR 12, merged separately before this release).

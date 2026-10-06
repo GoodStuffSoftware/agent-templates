@@ -86,10 +86,10 @@ any findings it disputes. The lead is out of the first review pass, not out
 of the decision.
 
 **Why the writer, not the lead.** A lead-routed review costs two extra lead
-round-trips: spawn the reviewer, then resume or re-spawn the writer for the
-fixes. Each waits for the lead to be free, and the fix round often starts on
-a cold cache. Done by the writer, the fix round runs on the writer's own warm
-cache, and the lead sees a reviewed diff instead of an unreviewed one. The
+round-trips: spawn the reviewer, then message the writer for the fixes. Each
+waits for the lead to be free. Done by the writer, the fix round needs no
+round-trip and no hand-back (the writer already holds the diff), and the lead
+sees a reviewed diff instead of an unreviewed one. The
 cost is the same reviewer either way, because parity sizes it to the writer
 in both cases.
 
@@ -313,10 +313,11 @@ Operator-observed measurement on one plan found a premium tier consuming its
 usage window at roughly 1.5x a mid tier per unit of cost-weighted work, while
 the same tiers' *API* list prices differ by a larger multiple — meaning a
 plan-usage-aware routing choice can legitimately differ from a pure
-dollar-cost-aware one. That reading is treated as **unconfirmed and possibly
-introductory** (a plan's own metering can change, and observing it once does
-not establish it as permanent), so it informs a routing trial rather than
-becoming a hard-coded assumption in the grid itself. Re-verify before relying
+dollar-cost-aware one. That reading is treated as **a weight to re-verify, not a permanent
+fact** (a plan's own metering can change; 2026-10-06: about 1.45-1.5x per token fits
+the size of the weekly limit, and nothing shows it is introductory), so it
+informs a routing trial rather than becoming a hard-coded assumption in the
+grid itself. Re-verify before relying
 on any specific multiplier for a long-lived decision.
 
 ## Haiku validates; it does not operate

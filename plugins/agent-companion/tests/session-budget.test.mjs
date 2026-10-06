@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
 import { telemetryDir, stateDir } from '../hooks/lib/context.mjs';
 import {
-  planUnitsOf, checkSessionBudget, scanSession, budgetNoticeText, weeklyPlanUnits, SESSION_BUDGET_DEFAULT_UNITS,
+  planUnitsOf, checkSessionBudget, scanSession, budgetNoticeText, weeklyPlanUnits, SESSION_BUDGET_DEFAULT_UNITS, WEEKLY_PLAN_UNITS_DEFAULT,
 } from '../hooks/lib/session-budget.mjs';
 import { usageOf } from '../hooks/lib/runaway.mjs';
 import { planPriceSpecFor } from '../scripts/lib/pricing.mjs';
@@ -63,10 +63,10 @@ test('a tier with no plan multiplier is counted at its own API price and flagged
 
 test('the notice text carries the units, the share of the week and the hand-off advice', () => {
   const t = budgetNoticeText(700);
-  assert.match(t, /This session, including its subagents, has used about 700 plan units \(~37% of a ~1,900-unit week\)\./);
+  assert.match(t, /This session, including its subagents, has used about 700 plan units \(~26% of a ~2,677-unit week\)\./);
   assert.ok(t.includes('At the next phase boundary, finish the phase, update SESSION-STATE.md, and offer the operator a hand-off to a fresh session.'));
   assert.match(t, /Do not hand off mid-release or while agents are running\./);
-  assert.equal(weeklyPlanUnits(), 1900);
+  assert.equal(weeklyPlanUnits(), 2677);
   assert.equal(SESSION_BUDGET_DEFAULT_UNITS, 350);
 });
 
@@ -228,4 +228,17 @@ test('the plugin declares session_budget_units (default 350) and the hook timeou
     const hook = h[ev].flatMap((g) => g.hooks).find((x) => x.args.some((a) => a.endsWith('runaway-notice.mjs')));
     assert.ok(hook.timeout >= 10, `${ev} runaway-notice timeout ${hook.timeout}`);
   }
+});
+
+test('weekly allowance: config and the in-code fallback both carry the 2026-10-06 limit (2,677 units, 1% = 26.8), not the retired 1,900', () => {
+  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'session-budget.json'), 'utf8'));
+  assert.equal(cfg.weeklyPlanUnits, 2677);
+  assert.equal(WEEKLY_PLAN_UNITS_DEFAULT, 2677);
+  assert.equal(cfg.weeklyPlanUnits, WEEKLY_PLAN_UNITS_DEFAULT, 'file and fallback agree');
+  assert.match(cfg.note, /2,677 units \(1% = 26\.8 units\)/);
+  assert.doesNotMatch(cfg.note, /so ~1,900 is the working number/);
+  // 1% of the week is 26.8 units: a 268-unit session is 10%.
+  assert.match(budgetNoticeText(268), /\(~10% of a ~2,677-unit week\)/);
+  const src = readFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', 'session-budget.mjs'), 'utf8');
+  assert.doesNotMatch(src, /let n = 1900/);
 });

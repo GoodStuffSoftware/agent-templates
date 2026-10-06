@@ -182,17 +182,18 @@ function builtinRules() {
       note: null,
     },
     {
-      // Guard (a)'s own doctrine (CACHE-ADVISOR-HANDOFF.md deliverable 6;
-      // hooks/resume-guard.mjs is the enforcement — this rule is the
-      // standing reminder that applies even where the hook cannot see far
-      // enough, e.g. a cross-session peer).
+      // Reuse by default (operator decision 2026-10-06; supersedes the earlier
+      // 'resume only while the cache is warm' doctrine). hooks/resume-guard.mjs
+      // adds a note only for a very large worker or a tier above the new task's;
+      // this rule is the standing reminder that applies even where the hook
+      // cannot see far enough, e.g. a cross-session peer.
       id: 'resume-doctrine',
       audience: 'lead',
       enabled: true,
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'Resume only while a worker\'s cache is warm; after its TTL, spawn fresh from a file handoff.',
+      then: 'Reuse workers: send related follow-on work to a stopped worker with SendMessage, warm cache or cold. Spawn fresh only for unrelated work, a task that needs a different model tier, or a worker whose context is far larger than the task needs. Never spawn fresh just because a cache expired.',
       gate: null,
       note: null,
     },

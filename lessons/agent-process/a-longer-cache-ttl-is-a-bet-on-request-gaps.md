@@ -5,6 +5,7 @@ scope: [agent-process]
 requires: {}
 status: active
 since: 2026-09-28
+updated: 2026-10-06
 provenance: [contrib-2]
 corroborated: 1
 ---
@@ -22,5 +23,5 @@ Extending a prompt cache's time-to-live only pays off on requests that arrive af
 - Don't reason about a ttl change from vendor pricing alone; walk real transcripts, bucket the gaps, and compute the token share before deciding.
 - Set the ttl PER ROLE (per agent definition, not globally): long-lived roles that get resumed within the middle gap band get the longer ttl; short one-shot roles keep the short one.
 - Re-measure after any change to how a role is used (a new "resume within N minutes" policy, a change in how often it's invoked) — the gap distribution the original measurement was based on can shift underneath a setting that was correct when it was set.
-- A resume that lands just past the short ttl's cliff rewrites that worker's entire accumulated transcript at the higher write price — which can cost MORE than simply spawning a fresh worker would have. A "reuse the same worker for follow-ups" policy and a short cache ttl actively work against each other; decide explicitly which one wins for each role, or fund both by lengthening the ttl for the roles that get reused.
+- A resume that lands past the short ttl's cliff rewrites that worker's accumulated transcript at the write price. Correction 2026-10-06: that is still cheaper than the alternative. A fresh worker pays its first load (about 0.6 plan units measured, against about 0.2 for a message to a cache-cold worker) and then re-reads what the old worker already knew, so a cold cache is not a reason to spawn fresh and the ttl is not a reason to stop reusing workers. Reuse wins by default; lengthening the ttl is only a bet on idle gaps inside one task (see the first paragraph), never the price of reuse.
 - Related: [[an-omitted-worker-tier-inherits-the-leads]] (a different cost-defaulting gap in agent routing) and [[budget-fan-out-against-host-memory]] (measure the real resource distribution before setting a routing knob, rather than reasoning about it in the abstract).
