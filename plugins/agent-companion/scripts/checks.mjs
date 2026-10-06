@@ -123,13 +123,29 @@ const memoryIndex = {
     const idx = readFileSync(idxPath, 'utf8');
     const hist = historicalPrefixes();
     const files = readdirSync(dir).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md');
-    // Substring, not regex: a link is literally "(name.md)" and needs no escaping.
-    const orphans = files.filter((f) => !idx.includes(`(${f})`));
+    // A link is literally "(name.md)". MEMORY.md's own links count, and so do
+    // the links inside a topic sub-index: a file in the memory dir named
+    // index_*.md that MEMORY.md links to, followed one level deep. A memory
+    // linked only from a sub-index is reachable (and --fix never re-links it
+    // into MEMORY.md); a sub-index of a sub-index is not followed, and a
+    // linked file not named index_*.md is a memory, not an index.
+    const linksIn = (text) => [...text.matchAll(/\(([^()\r\n]+\.md)\)/g)].map((m) => m[1]);
+    const direct = linksIn(idx);
+    const reached = new Set(direct);
+    const broken = direct.filter((f) => !existsSync(join(dir, f)));
+    for (const sub of new Set(direct)) {
+      // Only a plain index_*.md file in the memory dir; never follow a path out of it.
+      if (!/^index_[^\\/]*\.md$/.test(sub) || !existsSync(join(dir, sub))) continue;
+      let subText;
+      try { subText = readFileSync(join(dir, sub), 'utf8'); } catch { continue; }
+      for (const f of linksIn(subText)) {
+        reached.add(f);
+        if (!existsSync(join(dir, f)) && !broken.includes(f)) broken.push(f);
+      }
+    }
+    const orphans = files.filter((f) => !reached.has(f));
     const ruleOrphans = orphans.filter((f) => !hist.some((p) => f.startsWith(p)));
     const histOrphans = orphans.filter((f) => hist.some((p) => f.startsWith(p)));
-    const broken = [...idx.matchAll(/\(([^()\r\n]+\.md)\)/g)]
-      .map((m) => m[1])
-      .filter((f) => !existsSync(join(dir, f)));
 
     const findings = [];
     for (const f of ruleOrphans) findings.push(`UNREACHABLE RULE: ${f} (on disk, absent from index)`);
