@@ -31,10 +31,9 @@
 // safe direction for a feature whose entire purpose is capping what a
 // subagent is allowed to say back to its caller.
 
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { configDir, opt, readJson, stateFile, writeJsonAtomic } from './context.mjs';
-import { withStateLock } from './premium-window.mjs';
+import { configDir, opt, readJson, stateDir } from './context.mjs';
 
 export const CONTRACT_MARKER = '[agent-companion: reporting contract]';
 export const PEER_MARKER = '[agent-companion: peer brevity]';
@@ -155,54 +154,58 @@ export function buildContract(subagentType) {
 // PreToolUse rewrite already appended the contract: a marker check on
 // agent_prompt never matches, and the contract was delivered twice on every
 // spawn where the rewrite landed (measured 2026-10-06: about 71% of spawns).
-// So spawn-guard records, per session, that it appended one (a timestamp per
-// spawn), and the SubagentStart hook consumes one entry per start. Entries
-// older than CONTRACT_PENDING_MS are dead: a spawn the harness then rejected,
+// So spawn-guard leaves one small file per spawn it appended the contract (or
+// the peer line) to, and the SubagentStart hook removes one file per start for
+// its session. One file per record, never a shared list: creating and
+// unlinking are each atomic, so no lock is needed, which matters because the
+// spawn guard runs on every spawn and must not load the lock helper (the hook
+// path budget, tests/premium-window-lock.test.mjs). A record older than
+// CONTRACT_PENDING_MS is dead and ignored: a spawn the harness then rejected,
 // or whose rewrite another hook overwrote, must not suppress a later spawn's
-// self-heal for long. Both sides lock the file (read-modify-write from two
-// hook processes).
+// self-heal for long.
 export const CONTRACT_PENDING_MS = 3 * 60 * 1000;
 
-function pendingFile() {
-  return stateFile('contract-pending.json');
+function pendingDir() {
+  return join(stateDir(), 'contract-pending');
 }
 
-function livePending(map, now) {
-  const out = {};
-  for (const [sid, list] of Object.entries(map && typeof map === 'object' ? map : {})) {
-    const live = (Array.isArray(list) ? list : []).filter((t) => typeof t === 'number' && now - t < CONTRACT_PENDING_MS);
-    if (live.length) out[sid] = live;
-  }
-  return out;
+function safeSid(sessionId) {
+  return String(sessionId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
+}
+
+// Record names: <sid>.<ms>.<random>.pending
+function parseRecord(name) {
+  const m = /^(.+)\.(\d+)\.[0-9a-f]+\.pending$/.exec(name);
+  return m ? { sid: m[1], t: Number(m[2]) } : null;
 }
 
 // spawn-guard: the contract (or the peer line) was appended to this spawn.
 export function noteContractAppended(sessionId, now = Date.now()) {
   try {
-    const f = pendingFile();
-    withStateLock(f, () => {
-      const map = livePending(readJson(f, {}), now);
-      const key = String(sessionId || 'unknown');
-      map[key] = [...(map[key] || []), now];
-      writeJsonAtomic(f, map);
-    });
+    const dir = pendingDir();
+    mkdirSync(dir, { recursive: true });
+    const rand = Math.random().toString(16).slice(2, 10);
+    writeFileSync(join(dir, `${safeSid(sessionId)}.${now}.${rand}.pending`), '', { flag: 'wx' });
   } catch { /* fail open: the worst case is one duplicated contract */ }
 }
 
 // SubagentStart: true when a spawn-guard rewrite for this session is waiting
-// (the oldest one is consumed), so the hook must not reinforce.
+// (the oldest live one is consumed), so the hook must not reinforce. Expired
+// records of every session are removed on the way.
 export function consumeContractAppended(sessionId, now = Date.now()) {
   try {
-    const f = pendingFile();
-    return withStateLock(f, () => {
-      const map = livePending(readJson(f, {}), now);
-      const key = String(sessionId || 'unknown');
-      const list = map[key];
-      if (!list || !list.length) return false;
-      list.shift();
-      if (!list.length) delete map[key];
-      writeJsonAtomic(f, map);
-      return true;
-    });
+    const dir = pendingDir();
+    const mine = [];
+    for (const name of readdirSync(dir)) {
+      const r = parseRecord(name);
+      if (!r) continue;
+      if (!(now - r.t < CONTRACT_PENDING_MS)) { try { unlinkSync(join(dir, name)); } catch { /* raced */ } continue; }
+      if (r.sid === safeSid(sessionId)) mine.push({ name, t: r.t });
+    }
+    mine.sort((x, y) => x.t - y.t);
+    for (const { name } of mine) {
+      try { unlinkSync(join(dir, name)); return true; } catch { /* another start took it: try the next */ }
+    }
+    return false;
   } catch { return false; } // fail open: reinforce rather than lose the contract
 }

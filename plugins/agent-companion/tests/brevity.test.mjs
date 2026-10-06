@@ -18,7 +18,7 @@ import {
   readBrevityConfig, writeBrevityConfig, resolveBrevity, buildContract, brevityConfigPath,
   noteContractAppended, consumeContractAppended, CONTRACT_PENDING_MS,
 } from '../hooks/lib/brevity.mjs';
-import { telemetryDir } from '../hooks/lib/context.mjs';
+import { telemetryDir, stateDir } from '../hooks/lib/context.mjs';
 
 // Save/restore a set of env vars around a synchronous callback — used for the
 // CLAUDE_PLUGIN_OPTION_* vars that opt() reads directly, so one test's
@@ -383,8 +383,8 @@ test('S5: handoff records are per session, one per spawn, and expire', () => {
     assert.equal(consumeContractAppended('s-c', t0 + 10), false, 'another session has none');
     // A record older than the TTL (a spawn that never started) is dead.
     assert.equal(consumeContractAppended('s-b', t0 + CONTRACT_PENDING_MS + 1), false);
-    // Garbled state fails open to "reinforce".
-    writeFileSync(join(process.env.AGENT_COMPANION_STATE_DIR, 'contract-pending.json'), '{{{');
+    // Stray files in the record directory fail open to "reinforce" and never throw.
+    writeFileSync(join(stateDir(), 'contract-pending', 'garbage'), '{{{');
     assert.equal(consumeContractAppended('s-a'), false);
   } finally {
     cleanup();
