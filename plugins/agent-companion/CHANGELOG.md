@@ -12,6 +12,7 @@ Test-flake fixes. Two product-code changes, two test-only.
 - Tests: `publication-sweep` and `detect` test runs put a `claude` stub first on PATH and disable `gh` CI-status lookups.
 - Tests: a shared `tests/detect-env.mjs` `claude` stub (missing or fixed-version) for every test that runs `detect.mjs`, so no test spawns the real CLI.
 - Tests: git-brief's 6000 ms fetch bound applies to the measured fetch step (`steps_ms.fetch`), not the whole call.
+- Tests: `memory-vault-byte-exact` syncs use the file's own git-chain guard (`runVault`).
 
 ## 0.30.1 — 2026-10-06
 
