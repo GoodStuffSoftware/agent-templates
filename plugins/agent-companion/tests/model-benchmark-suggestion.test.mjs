@@ -89,7 +89,7 @@ test('harness_version_changed also fires the benchmark suggestion', () => {
     const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv({ version: DEFAULT_STUB_VERSION }) });
     assert.equal(res.status, 0, res.stderr);
     const versionSig = res.json.signals.find((s) => s.kind === 'harness_version_changed');
-    if (!versionSig) return; // `claude --version` unreadable in this environment: nothing to assert
+    assert.ok(versionSig, `the claude stub always reports a version, so harness_version_changed must fire; got: ${JSON.stringify(res.json.signals)}`);
     const benchSig = res.json.signals.find((s) => s.kind === 'model_benchmark_suggested' && s.detail.includes('version changed'));
     assert.ok(benchSig, `expected a benchmark suggestion alongside harness_version_changed; got: ${JSON.stringify(res.json.signals)}`);
   } finally { cleanup(); }

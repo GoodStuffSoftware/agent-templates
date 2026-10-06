@@ -45,7 +45,7 @@ test('installed Claude Code below the alias-resolution floor: signal fires, name
 test('installed Claude Code at or above the alias-resolution floor: no signal', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
-    writeOverride(stateDir, '0.0.0'); // guaranteed at-or-below any real installed version
+    writeOverride(stateDir, '0.0.0'); // at-or-below the stub's fixed version (2.1.300)
     const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: detectEnv({ version: STUB_VERSION }) });
     assert.equal(res.status, 0, res.stderr);
     const sig = res.json.signals.find((s) => s.kind === 'alias_resolution_below_version_floor');
