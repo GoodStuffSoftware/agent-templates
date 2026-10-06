@@ -33,7 +33,8 @@
 
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { configDir, opt, readJson } from './context.mjs';
+import { configDir, opt, readJson, stateFile, writeJsonAtomic } from './context.mjs';
+import { withStateLock } from './premium-window.mjs';
 
 export const CONTRACT_MARKER = '[agent-companion: reporting contract]';
 export const PEER_MARKER = '[agent-companion: peer brevity]';
@@ -146,4 +147,62 @@ export function buildContract(subagentType) {
   if (on) return `\n\n${CONTRACT_BODY}`;
   if (opt('brevity_peer', true)) return `\n\n${PEER_LINE}`;
   return '';
+}
+
+// --- spawn-guard -> SubagentStart handoff ------------------------------------
+// The SubagentStart payload carries NO prompt (session fields, agent_id and
+// agent_type only), so subagent-brevity.mjs can never see whether the
+// PreToolUse rewrite already appended the contract: a marker check on
+// agent_prompt never matches, and the contract was delivered twice on every
+// spawn where the rewrite landed (measured 2026-10-06: about 71% of spawns).
+// So spawn-guard records, per session, that it appended one (a timestamp per
+// spawn), and the SubagentStart hook consumes one entry per start. Entries
+// older than CONTRACT_PENDING_MS are dead: a spawn the harness then rejected,
+// or whose rewrite another hook overwrote, must not suppress a later spawn's
+// self-heal for long. Both sides lock the file (read-modify-write from two
+// hook processes).
+export const CONTRACT_PENDING_MS = 3 * 60 * 1000;
+
+function pendingFile() {
+  return stateFile('contract-pending.json');
+}
+
+function livePending(map, now) {
+  const out = {};
+  for (const [sid, list] of Object.entries(map && typeof map === 'object' ? map : {})) {
+    const live = (Array.isArray(list) ? list : []).filter((t) => typeof t === 'number' && now - t < CONTRACT_PENDING_MS);
+    if (live.length) out[sid] = live;
+  }
+  return out;
+}
+
+// spawn-guard: the contract (or the peer line) was appended to this spawn.
+export function noteContractAppended(sessionId, now = Date.now()) {
+  try {
+    const f = pendingFile();
+    withStateLock(f, () => {
+      const map = livePending(readJson(f, {}), now);
+      const key = String(sessionId || 'unknown');
+      map[key] = [...(map[key] || []), now];
+      writeJsonAtomic(f, map);
+    });
+  } catch { /* fail open: the worst case is one duplicated contract */ }
+}
+
+// SubagentStart: true when a spawn-guard rewrite for this session is waiting
+// (the oldest one is consumed), so the hook must not reinforce.
+export function consumeContractAppended(sessionId, now = Date.now()) {
+  try {
+    const f = pendingFile();
+    return withStateLock(f, () => {
+      const map = livePending(readJson(f, {}), now);
+      const key = String(sessionId || 'unknown');
+      const list = map[key];
+      if (!list || !list.length) return false;
+      list.shift();
+      if (!list.length) delete map[key];
+      writeJsonAtomic(f, map);
+      return true;
+    });
+  } catch { return false; } // fail open: reinforce rather than lose the contract
 }

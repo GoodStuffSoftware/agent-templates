@@ -61,7 +61,7 @@ import {
   injectionRung, selfReviewBriefText,
 } from './lib/self-review.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
-import { buildContract } from './lib/brevity.mjs';
+import { buildContract, noteContractAppended } from './lib/brevity.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
 import {
   buildCandidateName, sessionSpawnNames, reserveUniqueName, buildNamegateBrief,
@@ -884,7 +884,11 @@ try {
     //    and a peer-brevity clause that holds even when the contract is off.
     //    See lib/brevity.mjs.
     try {
-      suffix += buildContract(input.subagent_type) || '';
+      const contract = buildContract(input.subagent_type) || '';
+      suffix += contract;
+      // Tell the SubagentStart hook it is already delivered (it cannot see
+      // the prompt). Canary runs never start a subagent: no entry to leak.
+      if (contract && !isCanary) noteContractAppended(sid);
     } catch { /* fail open: no contract, spawn proceeds untouched */ }
 
     // 2. Operator-authored standing rules scoped to spawns, their conditions
