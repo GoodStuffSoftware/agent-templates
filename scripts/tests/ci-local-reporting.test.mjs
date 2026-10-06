@@ -1,6 +1,8 @@
 // Tests for how scripts/ci-local.mjs runs and reports node --test suites:
 // todo wording, the isolated re-run of a failed file ("flaky on isolated
-// re-run", blocking only under --ci-parity), and the concurrency cap.
+// re-run", blocking only under --ci-parity), the concurrency cap, and the
+// per-test timeout (a hung test fails by name; a leaked handle cannot hold the
+// run open).
 //
 // The runTestSuite() tests run REAL nested `node --test` processes over
 // throwaway fixture files, through ci-local's real reporters; only the
@@ -15,6 +17,7 @@ import { spawnSync } from 'node:child_process';
 import {
   runTestSuite, readResults, formatCounts, formatSummaryLine, flakyBanner,
   resolveTestConcurrency, defaultTestConcurrency, CONCURRENCY_ENV, selectStaleTempDirs,
+  resolveTestTimeoutMs, TIMEOUT_ENV, DEFAULT_TEST_TIMEOUT_MS,
 } from '../ci-local.mjs';
 
 const temps = [];
@@ -34,12 +37,14 @@ function childEnv() {
   return env;
 }
 
-function capturingSpawn() {
+// `bound` caps each nested run so a regression that lets a fixture hang fails
+// this test instead of stalling the suite; the real runs are far shorter.
+function capturingSpawn(bound = 120000) {
   const calls = [];
   let out = '';
   const spawnNode = (args, cwd, env) => {
     const r = spawnSync(process.execPath, args, {
-      cwd, env, encoding: 'utf8', windowsHide: true, timeout: 120000,
+      cwd, env, encoding: 'utf8', windowsHide: true, timeout: bound,
     });
     out += `${r.stdout || ''}${r.stderr || ''}`;
     calls.push(args);
@@ -78,6 +83,36 @@ const FLAKY_ONCE = [
 const ALWAYS_FAILS = [
   "import test from 'node:test';",
   "test('broken', () => { throw new Error('always'); });",
+  '',
+].join('\n');
+
+// A test that never settles (the unbounded-wait shape), next to one that passes.
+const NEVER_SETTLES = [
+  "import test from 'node:test';",
+  "test('waits forever', async () => { await new Promise(() => {}); });",
+  "test('sibling passes', () => {});",
+  '',
+].join('\n');
+
+// Hangs the first time it runs (and leaves a marker), passes after: a file that
+// is "flaky on isolated re-run" because of a timeout rather than a throw.
+const HANGS_ONCE = [
+  "import test from 'node:test';",
+  "import { existsSync, writeFileSync } from 'node:fs';",
+  "import { fileURLToPath } from 'node:url';",
+  "const marker = fileURLToPath(new URL('./hang.marker', import.meta.url));",
+  "test('hangs on the first run only', async () => {",
+  '  if (!existsSync(marker)) { writeFileSync(marker, "1"); await new Promise(() => {}); }',
+  '});',
+  '',
+].join('\n');
+
+// Every test passes, then a live setInterval keeps the file's process open:
+// node's own timeout never fires for it (nothing is running), so only
+// --test-force-exit ends the run. This is the 2026-10-04 hook-hang signature.
+const LEAKS_A_HANDLE = [
+  "import test from 'node:test';",
+  "test('body finishes, interval left alive', () => { setInterval(() => {}, 1000); });",
   '',
 ].join('\n');
 
@@ -211,6 +246,100 @@ test('the full run passes --test-concurrency; the isolated re-run uses 1', () =>
   assert.ok(cap.calls[0].includes('--test-concurrency=3'));
   assert.ok(cap.calls[1].includes('--test-concurrency=1'));
   assert.ok(existsSync(join(dir, 'flaky.marker')));
+});
+
+// ---------------------------------------------------------------------------
+// per-test timeout
+// ---------------------------------------------------------------------------
+
+test('every node --test run, full and isolated re-run, carries --test-timeout and --test-force-exit', () => {
+  const dir = fixtureDir({ 'flaky.test.mjs': FLAKY_ONCE });
+  const cap = capturingSpawn();
+  runTestSuite({
+    files: ['flaky.test.mjs'], cwd: dir, env: childEnv(), concurrency: 3, timeoutMs: 45000, spawnNode: cap.spawnNode, log: () => {},
+  });
+  assert.equal(cap.calls.length, 2);
+  for (const args of cap.calls) {
+    assert.ok(args.includes('--test-timeout=45000'), `no --test-timeout=45000 in ${args.join(' ')}`);
+    assert.ok(args.includes('--test-force-exit'));
+  }
+});
+
+test('without an explicit timeoutMs the run gets the resolved default', () => {
+  const seen = [];
+  const r = runTestSuite({
+    files: ['x.test.mjs'], cwd: tmpdir(), env: childEnv(), concurrency: 1, log: () => {},
+    spawnNode: (args) => { seen.push(args); return { status: 0 }; },
+  });
+  assert.equal(r.outcome, 'pass');
+  assert.ok(seen[0].includes(`--test-timeout=${resolveTestTimeoutMs().value}`));
+});
+
+test('resolveTestTimeoutMs: default 120000; the env var overrides; 0, negatives and junk warn and fall back', () => {
+  assert.equal(DEFAULT_TEST_TIMEOUT_MS, 120000);
+  assert.deepEqual(resolveTestTimeoutMs({}), { value: 120000, source: 'default' });
+  assert.deepEqual(resolveTestTimeoutMs({ [TIMEOUT_ENV]: '' }), { value: 120000, source: 'default' });
+  assert.deepEqual(resolveTestTimeoutMs({ [TIMEOUT_ENV]: '5000' }), { value: 5000, source: 'env' });
+  assert.deepEqual(resolveTestTimeoutMs({ [TIMEOUT_ENV]: ' 90000 ' }), { value: 90000, source: 'env' });
+  // 0 would mean "no timeout" to node: the exact thing this exists to prevent.
+  for (const bad of ['0', '-5', '1.5', '1e3', '0x10', 'Infinity', 'soon']) {
+    const r = resolveTestTimeoutMs({ [TIMEOUT_ENV]: bad });
+    assert.equal(r.value, 120000, bad);
+    assert.equal(r.source, 'default', bad);
+    assert.match(r.warning, new RegExp(`ignoring ${TIMEOUT_ENV}`), bad);
+  }
+});
+
+test('a test that never settles fails by name and fast, and its file is re-run once', () => {
+  const dir = fixtureDir({ 'hang.test.mjs': NEVER_SETTLES, 'ok.test.mjs': PASSING });
+  const cap = capturingSpawn(60000);
+  const t0 = Date.now();
+  const r = runTestSuite({
+    files: ['hang.test.mjs', 'ok.test.mjs'], cwd: dir, env: childEnv(), concurrency: 2, timeoutMs: 1500, spawnNode: cap.spawnNode, log: () => {},
+  });
+  assert.ok(Date.now() - t0 < 50000, 'the run returned instead of waiting out the bound');
+  assert.equal(r.outcome, 'fail');
+  assert.equal(r.status, 1);
+  assert.deepEqual(r.failedFiles, ['hang.test.mjs']);
+  assert.equal(cap.calls.length, 2, 'one full run, one isolated re-run');
+  const out = cap.output();
+  assert.match(out, /waits forever/, 'the hung test is named');
+  assert.match(out, /timed out after 1500ms/);
+  assert.match(out, /sibling passes/);
+});
+
+test('a file that times out once and passes on its isolated re-run is FLAKY, not lost', () => {
+  const dir = fixtureDir({ 'hang.test.mjs': HANGS_ONCE });
+  const cap = capturingSpawn(60000);
+  const r = runTestSuite({
+    files: ['hang.test.mjs'], cwd: dir, env: childEnv(), concurrency: 2, timeoutMs: 1500, spawnNode: cap.spawnNode, log: () => {},
+  });
+  assert.equal(r.outcome, 'flaky');
+  assert.equal(r.status, 0, 'a plain run does not block on a flake');
+  assert.deepEqual(r.flakyFiles, ['hang.test.mjs']);
+  assert.equal(cap.calls.length, 2);
+  assert.match(cap.output(), /hangs on the first run only/);
+  assert.match(cap.output(), /timed out after 1500ms/);
+  const parity = runTestSuite({
+    files: ['hang.test.mjs'], cwd: fixtureDir({ 'hang.test.mjs': HANGS_ONCE }), env: childEnv(), ciParity: true, concurrency: 2, timeoutMs: 1500, spawnNode: capturingSpawn(60000).spawnNode, log: () => {},
+  });
+  assert.equal(parity.status, 1, '--ci-parity still blocks on it');
+});
+
+test('a file whose tests pass but leaves a live handle open still ends: --test-force-exit', () => {
+  const dir = fixtureDir({ 'leak.test.mjs': LEAKS_A_HANDLE });
+  // Bound well under any plausible hang: without --test-force-exit this nested
+  // run never exits by itself and spawnSync kills it at the bound, status null.
+  const cap = capturingSpawn(30000);
+  const t0 = Date.now();
+  const r = runTestSuite({
+    files: ['leak.test.mjs'], cwd: dir, env: childEnv(), concurrency: 1, timeoutMs: 1500, spawnNode: cap.spawnNode, log: () => {},
+  });
+  assert.ok(Date.now() - t0 < 25000, 'ended on its own, not by the bound');
+  assert.equal(r.outcome, 'pass');
+  assert.equal(r.status, 0);
+  assert.equal(cap.calls.length, 1, 'a pass is never re-run');
+  assert.match(cap.output(), /body finishes, interval left alive/);
 });
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,27 @@
 // (every core but one) oversubscribes a many-core machine enough to make
 // timing-sensitive tests fail under load.
 //
+// Per-test timeout: every node --test run gets --test-timeout=<ms>, default
+// 120000, overridden by $CI_LOCAL_TEST_TIMEOUT_MS when it is a positive
+// integer (0 and anything else are refused with a warning: a bound of 0 or
+// Infinity is exactly what let a pre-push hook hang ~19 minutes on 2026-10-04
+// on a file whose tests had all finished). A test that exceeds it FAILS BY
+// NAME ("test timed out after <ms>ms" under the test's own title), the file is
+// re-run once like any other failure, and the hook returns. The slowest test
+// in the agent-companion suite took about 21 s in a full run and neither suite
+// has a describe/suite block (node applies the timeout to a suite as a whole),
+// so the default leaves ~6x headroom. A new describe() block must stay inside
+// the bound as a whole, or the run needs CI_LOCAL_TEST_TIMEOUT_MS raised.
+//
+// --test-force-exit is passed with it, and the two belong together: node's
+// timeout bounds a test, but a file whose tests all PASS and which then leaves
+// a live handle behind (a setInterval, a listening server, a child process
+// holding stdio) is never timed out by it — the file's process just never
+// exits and the runner waits on it forever. --test-force-exit makes the
+// runner exit once every known test has finished however the event loop looks.
+// A whole-run spawnSync timeout was rejected as the guard for that case: it
+// kills only `node --test` and orphans the per-file processes it spawned.
+//
 // Pre-push only: before any suite, every commit being pushed — on EVERY ref,
 // wip/** and backup/** included — and every pushed ref name is scanned by
 // scripts/push-scan.mjs (leak-check's classes plus the local private-names
@@ -177,6 +198,31 @@ export function resolveTestConcurrency(env = process.env, cpuCount = availablePa
   };
 }
 
+// ---------------------------------------------------------------------------
+// Per-test timeout (exported and unit-tested)
+// ---------------------------------------------------------------------------
+
+export const TIMEOUT_ENV = 'CI_LOCAL_TEST_TIMEOUT_MS';
+export const DEFAULT_TEST_TIMEOUT_MS = 120000;
+
+// { value, source: 'env' | 'default', warning? }. Same shape and rules as
+// resolveTestConcurrency: an env value that is not a positive integer (0 and
+// Infinity included — an unbounded test is the failure this exists to stop)
+// is ignored with a warning, never half-applied.
+export function resolveTestTimeoutMs(env = process.env) {
+  const raw = env[TIMEOUT_ENV];
+  if (raw === undefined || String(raw).trim() === '') return { value: DEFAULT_TEST_TIMEOUT_MS, source: 'default' };
+  const text = String(raw).trim();
+  const n = Number(text);
+  // Plain decimal digits only: Number() would also take '0x10' and '1e3'.
+  if (/^[0-9]+$/.test(text) && Number.isSafeInteger(n) && n >= 1) return { value: n, source: 'env' };
+  return {
+    value: DEFAULT_TEST_TIMEOUT_MS,
+    source: 'default',
+    warning: `ci-local: ignoring ${TIMEOUT_ENV}=${JSON.stringify(String(raw))} (not a positive integer number of ms); using ${DEFAULT_TEST_TIMEOUT_MS}.`,
+  };
+}
+
 function printHelp() {
   console.log(`ci-local.mjs — shared entry point for this repo's CI suites
 
@@ -198,6 +244,11 @@ function printHelp() {
   env ${CONCURRENCY_ENV}=<n>
                         run at most n test files at once (default: half the
                         available CPUs, clamped to 1..${MAX_DEFAULT_CONCURRENCY}).
+  env ${TIMEOUT_ENV}=<ms>
+                        fail any single test that runs longer than this, by
+                        name (default: ${DEFAULT_TEST_TIMEOUT_MS}). Never 0 or unbounded.
+                        The runner also force-exits once every test has
+                        finished, so a leaked handle cannot hold the run open.
 
   A test file that fails is re-run once on its own. If it then passes it is
   reported as FLAKY ("flaky on isolated re-run"): not blocking by default,
@@ -625,15 +676,17 @@ export function readResults(text) {
 }
 
 // One `node --test` run over `files` (paths relative to cwd, or absolute),
-// with both ci-local reporters and the concurrency cap. Returns
-// { status, counts, failedFiles }.
-function nodeTestOnce(files, cwd, env, concurrency, spawnNode) {
+// with both ci-local reporters, the concurrency cap, the per-test timeout and
+// --test-force-exit (see the header). Returns { status, counts, failedFiles }.
+function nodeTestOnce(files, cwd, env, concurrency, timeoutMs, spawnNode) {
   const dir = trackTempDir(mkdtempSync(join(tmpdir(), `ci-local-results-${process.pid}-`)));
   try {
     const resultsFile = join(dir, 'results.jsonl');
     const args = [
       '--test',
       `--test-concurrency=${concurrency}`,
+      `--test-timeout=${timeoutMs}`,
+      '--test-force-exit',
       `--test-reporter=${HUMAN_REPORTER}`, '--test-reporter-destination=stdout',
       `--test-reporter=${RESULTS_REPORTER}`, `--test-reporter-destination=${resultsFile}`,
       ...files,
@@ -657,9 +710,10 @@ function nodeTestOnce(files, cwd, env, concurrency, spawnNode) {
 export function runTestSuite({
   files, cwd, env = baseChildEnv(), ciParity = false,
   concurrency = resolveTestConcurrency().value,
+  timeoutMs = resolveTestTimeoutMs().value,
   log = (m) => console.log(m), spawnNode = runNode,
 }) {
-  const first = nodeTestOnce(files, cwd, env, concurrency, spawnNode);
+  const first = nodeTestOnce(files, cwd, env, concurrency, timeoutMs, spawnNode);
   const base = { counts: first.counts, flakyFiles: [], failedFiles: [] };
   if (first.status === 0) return { ...base, status: 0, outcome: 'pass' };
   if (first.failedFiles.length === 0) {
@@ -672,7 +726,7 @@ export function runTestSuite({
   for (const file of first.failedFiles) {
     const rel = relative(cwd, file) || file;
     log(`\nci-local: ${rel} failed in the full run — re-running it ONCE on its own.`);
-    const again = nodeTestOnce([file], cwd, env, 1, spawnNode);
+    const again = nodeTestOnce([file], cwd, env, 1, timeoutMs, spawnNode);
     if (again.status === 0) flakyFiles.push(rel);
     else failedFiles.push(rel);
   }
@@ -920,6 +974,8 @@ async function main() {
   cleanupLegacyParityTags(REPO_ROOT);
   const conc = resolveTestConcurrency();
   if (conc.warning) console.error(conc.warning);
+  const tmo = resolveTestTimeoutMs();
+  if (tmo.warning) console.error(tmo.warning);
   if (opts.prePushHook) {
     process.exitCode = await runPrePushHook(opts.pushRemote, opts.pushUrl);
     return;
