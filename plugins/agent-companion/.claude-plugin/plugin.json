@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.2",
+  "version": "0.31.3",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -148,6 +148,12 @@
       "type": "boolean",
       "title": "Reviewers never spawn reviewers",
       "description": "Deny a TYPE: code-review spawned by a subagent that was itself spawned as a TYPE: code-review. Denied only on a positive match: the caller's own spawns.jsonl row, found through the id of the Agent call that started it (the caller's sidecar toolUseId). When that row cannot be found, the spawn is allowed. A writer of any other type spawning a review of its own work (the self-review flow, which every writer type follows) is never denied by this.",
+      "default": true
+    },
+    "role_line_nudge": {
+      "type": "boolean",
+      "title": "Nudge when a brief has no ROLE: line",
+      "description": "A spawn brief should carry a ROLE: line (reviewer, fixer, lander, writer, docs, lookup, operate or other: what its main deliverable is), next to TYPE:. It tags the spawn for usage measurement and changes no routing. When the line is missing or not one of those words, the spawn guard adds one short line of context (never a deny, never a block) saying so. Turn this off to silence the nudge; the line is still read and recorded as declared_role in the spawn telemetry.",
       "default": true
     },
     "fit_autofill": {

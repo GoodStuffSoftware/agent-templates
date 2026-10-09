@@ -26,6 +26,7 @@ import {
 } from '../hooks/lib/context.mjs';
 import { loadAdvisorSummary, windowHintFor } from './lib/cache-advisor.mjs';
 import { selfReviewConfig, readSelfReviewBlock } from '../hooks/lib/self-review.mjs';
+import { BRIEF_ROLES } from '../hooks/lib/brief-directives.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -170,6 +171,12 @@ if (cls.premium) {
 
 if (route?.cacheTtl) out.cacheTtl = route.cacheTtl; // advisory hint; only a profile row carries one
 
+// ROLE: line (0.31.3, measurement only): the role this task type usually has,
+// for the brief's ROLE: line. A suggestion; the spawner changes it when the
+// deliverable is a fix, a landing, docs, a lookup or an operation.
+const TYPE_ROLE = { 'code-review': 'reviewer', explore: 'lookup', verify: 'lookup', operate: 'operate' };
+if (out.taskType) out.role = BRIEF_ROLES.includes(TYPE_ROLE[out.taskType]) ? TYPE_ROLE[out.taskType] : 'writer';
+
 // Self-review (config selfReview): a writer of a listed type reviews its own
 // work, so the lead does not spawn the reviewer printed above unless the brief
 // opts out. `protocol` says where the writer reads it: its rung's own body, or
@@ -213,6 +220,7 @@ if (has('--json')) {
 const eff = out.effort ? `/${out.effort}` : ' (no effort — this model takes none)';
 console.log(`recommendation: ${out.model}${eff}`);
 if (out.taskType) console.log(`task type:      ${out.taskType}`);
+if (out.role) console.log(`brief lines:    TYPE: ${out.taskType} + ROLE: ${out.role} (one of ${BRIEF_ROLES.join('/')}: what the main deliverable is; fixer, lander, docs when it is that. Tags the spawn for usage measurement only)`);
 console.log(`inputs:         weight=${out.weight} kind=${out.kind} consequence=${out.consequence}`);
 console.log(`why:            ${out.rationale}`);
 if (out.browser) {

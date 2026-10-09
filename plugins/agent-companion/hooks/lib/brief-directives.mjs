@@ -1,5 +1,5 @@
 // Brief directives: the "LABEL: value" lines a spawn brief declares
-// (TYPE, WEIGHT, KIND, CONSEQUENCE, WARRANT, WRITER, EFFORT, REVIEW), read by the
+// (TYPE, WEIGHT, KIND, CONSEQUENCE, WARRANT, WRITER, EFFORT, REVIEW, ROLE), read by the
 // spawn guard. WRITER names the writer a review brief gates (`WRITER: opus/xhigh`
 // or `WRITER: <agent-name>`), so a parity-sized review can be sized at spawn
 // time. REVIEW carries the self-review opt-out (`REVIEW: lead`, the line
@@ -44,7 +44,13 @@
 // caller's regex source, applied to what follows the colon exactly as the
 // single-regex form did before.
 
-export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'WRITER', 'EFFORT', 'REVIEW'];
+export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'WRITER', 'EFFORT', 'REVIEW', 'ROLE'];
+
+// ROLE: names what the spawn's main deliverable is, for usage measurement only
+// (0.31.3). It routes nothing and gates nothing; the spawn guard reads it to
+// record declared_role and to nudge when it is missing. The vocabulary is the
+// one the usage study's role classifier uses (spawn-roles-v2.mjs).
+export const BRIEF_ROLES = ['reviewer', 'fixer', 'lander', 'writer', 'docs', 'lookup', 'operate', 'other'];
 
 const BOLD = '(?:\\*\\*|__)?';
 const LINE = new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?${BOLD}(${DIRECTIVE_LABELS.join('|')})${BOLD}[ \\t]*:(.*)$`, 'i');

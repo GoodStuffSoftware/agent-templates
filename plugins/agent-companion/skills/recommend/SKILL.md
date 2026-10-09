@@ -125,6 +125,7 @@ State the recommendation and the rationale it printed. Then:
   ```
   TYPE: code-review
   WRITER: opus/xhigh
+  ROLE: reviewer
   ```
 
   The spawn guard then sizes the reviewer the same way and notes one below,
@@ -134,6 +135,7 @@ State the recommendation and the rationale it printed. Then:
   — unless a subagent is spawning it, when the writer is read from that
   subagent's own definition and a note says so; a line with no effort, or an
   effort it cannot read, is checked on the model alone, and the note says so.
+- **Every brief carries a `ROLE:` line** next to `TYPE:` (the script prints a `brief lines:` suggestion): `ROLE: reviewer|fixer|lander|writer|docs|lookup|operate|other`, the role of the main deliverable. It is a usage-measurement tag and routes nothing; a spawn without it gets one non-blocking line of context from the guard, never a deny.
 - **Self-reviewing types review themselves; `REVIEW: lead` opts out.** A
   writer of a listed type on a ladder rung (see the **Self-review** line
   above; `recommend.mjs` prints a `self-review:` line for these) commits,

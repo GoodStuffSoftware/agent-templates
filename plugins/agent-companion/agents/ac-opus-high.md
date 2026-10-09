@@ -16,10 +16,11 @@ This applies only when your brief's `TYPE:` line names one of `bounded-feature`,
 When it applies, before you return:
 
 1. Commit your work, so the review has a fixed sha.
-2. Spawn exactly ONE reviewer, in the foreground (`run_in_background: false`), with `subagent_type: "agent-companion:ac-opus-high"`: this rung, which matches your own model and effort. Its brief opens with these two lines, as plain text:
+2. Spawn exactly ONE reviewer, in the foreground (`run_in_background: false`), with `subagent_type: "agent-companion:ac-opus-high"`: this rung, which matches your own model and effort. Its brief opens with these three lines, as plain text:
    ```
    TYPE: code-review
    WRITER: opus/high
+   ROLE: reviewer
    ```
 3. The rest of the reviewer's brief must contain:
    - the lead's original brief, verbatim, or the path of a file that holds it verbatim;

@@ -55,7 +55,7 @@ import {
   briefNeedsDroppedTools, ladderVariants, pluginName,
 } from './lib/context.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
-import { briefDeclarations, declarationValue } from './lib/brief-directives.mjs';
+import { briefDeclarations, declarationValue, BRIEF_ROLES } from './lib/brief-directives.mjs';
 import {
   selfReviewConfig, optedOut, isParityType, writerFromCaller, callerSpawnRow, definitionCarriesProtocol,
   injectionRung, selfReviewBriefText,
@@ -78,12 +78,13 @@ import {
 // (verified in the 2.1.280 and 2.1.281 binaries: a hook result carrying
 // updatedInput and no permissionBehavior yields hookUpdatedInput), so the
 // model fill-in does not need one.
-function allowWith(systemMessage, updatedInput) {
+function allowWith(systemMessage, updatedInput, additionalContext) {
   process.stdout.write(JSON.stringify({
     ...(systemMessage ? { systemMessage } : {}),
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       ...(updatedInput ? { updatedInput } : {}),
+      ...(additionalContext ? { additionalContext } : {}),
     },
   }));
   process.exit(0);
@@ -298,6 +299,17 @@ try {
   // (no route from it), and declared_type records exactly that header value.
   const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
   const declaredType = tm ? tm[1].toLowerCase() : null;
+  // ROLE: what the spawn's main deliverable is (reviewer, fixer, lander, writer,
+  // docs, lookup, operate, other). Measurement only (0.31.3): it routes nothing
+  // and gates nothing. Recorded as declared_role; a spawn without a usable
+  // line gets a short non-blocking nudge (role_line_nudge), NEVER a deny.
+  const rm = declarationValue(decls, 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`);
+  const declaredRole = rm ? rm[1].toLowerCase() : null;
+  const roleNudge = !declaredRole && opt('role_line_nudge', true)
+    ? 'agent-companion: this brief has no `ROLE:` line. Add one on its own line next to `TYPE:`: ' +
+      '`ROLE: <reviewer|fixer|lander|writer|docs|lookup|operate|other>`, the role of the main deliverable. ' +
+      'It tags the spawn for usage measurement only and changes no routing. Not blocking.'
+    : null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
@@ -1470,6 +1482,7 @@ try {
       declared_kind: declaredKind,
       declared_consequence: declaredConsequence,
       declared_type: declaredType,       // null when the brief named no TYPE: preset
+      declared_role: declaredRole,       // the brief's ROLE: value (reviewer|fixer|lander|writer|docs|lookup|operate|other); null when absent or not one of those
       fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid
       route_layer: route?.layer || null,  // profile | trial | grid: which resolveRoute() layer answered; null when no route
       route_profile_rev: route?.layer === 'profile' ? (route.profileRevision ?? null) : null, // routing-profile revision behind a profile answer; null for every other layer. The row's content is never logged.
@@ -1680,7 +1693,7 @@ try {
     // task type now routes to opus, so counting routed opus would cap nearly
     // all correctly routed work at 2 per 10 minutes, machine-wide. Keep held.
     await notePending();
-    allowWith(notes(), withAdditions(updatedInput));
+    allowWith(notes(), withAdditions(updatedInput), roleNudge);
   }
 
   // --- Best fit, premium: deny ------------------------------------------
@@ -1860,7 +1873,7 @@ try {
   }
 
   await notePending();
-  allowWith(notes(), withAdditions(updatedInput));
+  allowWith(notes(), withAdditions(updatedInput), roleNudge);
 
   // An allowed spawn joins the session's pending list (lib/ladder-rewrite.mjs)
   // once the session is armed: by this spawn if it is a rewrite or a ladder

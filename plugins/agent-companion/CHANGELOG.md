@@ -2,6 +2,18 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.3 — 2026-10-09
+
+`ROLE:` brief line: spawns are tagged with the role of their main deliverable so the usage study's per-role figures are exact. **Tagging only: no routing, effort, model, review-protocol or guard-decision change, so the test week that started with 0.31.2 (2026-10-09 16:00Z) is the same era for the day-3 and day-6 measurement runs.** Operator approved ("adopt now", 2026-10-09). Source: step 2 of the usage study (`step2-roles-detail.md`, section 8): the role classifier reaches only about 78% on held-out spawns, so role shares are not decision-grade; a stated role is exact.
+
+- **The line.** `ROLE: <reviewer|fixer|lander|writer|docs|lookup|operate|other>`, next to `TYPE:`, naming what the spawn's main deliverable is. `ROLE` joins the directive labels in `hooks/lib/brief-directives.mjs` (same rules as the others: first line-anchored occurrence wins; fenced, quoted, indented and commented lines never declare). `BRIEF_ROLES` is exported there. `ROLE-OF:` is a different, unread line.
+- **Spawn guard.** Records the first valid `ROLE:` value as `declared_role` in the spawn telemetry row (null when missing or not one of the eight words; `docs/TELEMETRY.md`). When it is missing or invalid the guard adds one short line of context to the spawn (`additionalContext`, headed "Not blocking"). It never denies, rewrites or reroutes on the role, and no other note, decision or `updatedInput` changes. New option `role_line_nudge` (default `true`) silences the nudge; the role is still recorded.
+- **Reviewers carry it.** The self-review protocol (`hooks/lib/self-review.mjs`, generated into `ac-opus-medium`, `ac-opus-high` and `ac-opus-xhigh`, and appended by the guard to every other rung) now has the writer open its reviewer's brief with three lines: `TYPE: code-review`, `WRITER: <pair>`, `ROLE: reviewer`. The recommend skill's reviewer example shows it too.
+- **Recommender.** `scripts/recommend.mjs` prints a `brief lines:` line (`TYPE: x + ROLE: y`) and `role` in `--json`: `reviewer` for `code-review`, `lookup` for `explore` and `verify`, `operate` for `operate`, `writer` for the rest. A suggestion; the spawner changes it for a fix, a landing or docs.
+- **Doctrine (outside the repo).** team-orchestration core section 6 and `references/briefing.md` gain the line in the brief checklist and the reviewer brief.
+- **Tests.** New `tests/role-line.test.mjs` (parsing, recorded role, nudge present/absent, invalid value, option off, deny paths unchanged, reviewer lines in the protocol and the three rung bodies, recommend roles).
+- Reverse: set `role_line_nudge` to `false` for silence; revert the commit to remove the label, the protocol line and the recommender line.
+
 ## 0.31.2 — 2026-10-06
 
 Lean worker shape: every writer type self-reviews and lands its own work. Source: DECISIONS.md "lean worker shape; main session stays unblocked" (operator, 2026-10-06).
