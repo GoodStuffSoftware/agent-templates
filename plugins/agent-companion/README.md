@@ -528,6 +528,8 @@ thresholds below account for that by being harder to satisfy in the
 | global delta ≥ `DONT_SET_DELTA_PCT` (+1.0%) **and** the opus/fable-only policy is also non-negative | don't set it, full stop |
 | otherwise — tiers disagree, or the global delta sits inside the ±1% dead zone | don't set it globally; instead list every `agentType × model` row with a delta at or past `-MIN_AGENT_SAVING_PCT` (1.0% — a -0.24% "saving" is noise, not a reason to edit a definition), at least `MIN_REQUESTS_FOR_AGENT_ROW` (500) requests, and a **named, editable** agent definition — excluding harness built-ins (`general-purpose`, `Explore`, `Plan`, ...; reuses `KNOWN_AGENT_TYPES` from `hooks/lib/context.mjs`) and subagents with no sidecar `.meta.json` at all (`(no meta)`), neither of which has any frontmatter to set `experimental: { cacheTtl: "1h" }` on |
 
+Every delta is printed with its direction: negative means 1h is cheaper (`-0.85% (saves with 1h)`), positive means it costs more (`+1.93% (COSTS more with 1h)`). A "don't set globally" line can therefore sit next to a negative delta: the saving is inside the bar, and the line says so.
+
 A candidate that qualifies for the per-agent list above but whose OWN
 definition **already** carries `experimental: { cacheTtl: "1h" }` (read live
 via `agentDefinition()`, not a hardcoded name list) is reported separately as

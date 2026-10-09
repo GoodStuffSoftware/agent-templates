@@ -30,7 +30,7 @@ import {
 import { telemetryCoverage } from './lib/coverage.mjs';
 import { projectAgentDrift, driftFindings, driftCounts } from './lib/agent-drift.mjs';
 import { scanModelMismatches } from './lib/model-mismatch.mjs';
-import { computeCacheTtl, transcriptsRoot as cacheTtlTranscriptsRoot } from './lib/cache-ttl.mjs';
+import { computeCacheTtl, transcriptsRoot as cacheTtlTranscriptsRoot, fmtDelta as cacheTtlFmtDelta, alreadyWriting1hNote } from './lib/cache-ttl.mjs';
 import {
   runCacheAdvisor, saveAdvisorSummary, spanPhrase, ignoredWindowLines,
 } from './lib/cache-advisor.mjs';
@@ -1497,7 +1497,7 @@ const cacheTtlCheck = {
         + `(${result.totals.convOverWritePct.toFixed(1)}% of write) in the 5-60min band `
         + `(${result.totals.band560Requests} requests)`,
       `cost today $${result.totals.costToday.toFixed(2)} -> with 1h $${result.totals.cost1h.toFixed(2)} `
-        + `(${result.totals.deltaPct >= 0 ? '+' : ''}${result.totals.deltaPct.toFixed(2)}%)`,
+        + `delta ${cacheTtlFmtDelta(result.totals.deltaPct)}`,
       // Always shown, regardless of which verdict branch fired: per-tier
       // observed rewrite share vs. the share required to break even.
       `break-even per tier: ${result.breakEvenByTier.map((b) => `${b.alias} obs=${b.observedPct.toFixed(1)}% `
@@ -1517,8 +1517,7 @@ const cacheTtlCheck = {
         + `${result.unknownModels.map((u) => u.model).join(', ')}`);
     }
     if (result.subagentsAlreadyWriting1h) {
-      findings.push(`subagents are already writing some 1h cache (${result.subagentWrite1hMTok.toFixed(3)} MTok) — `
-        + 'the setting may already be partly in effect');
+      findings.push(alreadyWriting1hNote(result.subagentWrite1hMTok));
     }
     if (result.truncated) findings.push('transcript walk was truncated by the file/byte cap — numbers may be undercounted');
     return { status: result.truncated ? 'warn' : 'ok', findings, data: result };

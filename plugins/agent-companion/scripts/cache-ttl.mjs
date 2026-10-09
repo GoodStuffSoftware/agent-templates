@@ -16,7 +16,7 @@
 //
 // Also registered in audit.mjs as `--only cache-ttl` (see scripts/checks.mjs).
 
-import { computeCacheTtl, transcriptsRoot } from './lib/cache-ttl.mjs';
+import { computeCacheTtl, transcriptsRoot, fmtDelta, alreadyWriting1hNote } from './lib/cache-ttl.mjs';
 
 const argv = process.argv.slice(2);
 const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
@@ -35,7 +35,7 @@ if (asJson) {
 }
 
 const fmtUsd = (n) => `$${n.toFixed(2)}`;
-const fmtPct = (n) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+const fmtPct = fmtDelta; // signed delta with the direction spelled out (negative = 1h saves)
 const fmtMTok = (n) => `${n.toFixed(3)} MTok`;
 const fmtMs = (ms) => (ms == null ? 'n/a' : ms < 60000 ? `${(ms / 1000).toFixed(0)}s` : `${(ms / 60000).toFixed(1)}m`);
 
@@ -106,7 +106,7 @@ console.log(`  requests            : ${result.mainSession.requestsScanned}`);
 console.log(`  5m write            : ${fmtMTok(result.mainSession.write5mMTok)}`);
 console.log(`  1h write            : ${fmtMTok(result.mainSession.write1hMTok)}`);
 console.log(`  1h share            : ${result.mainSession.write1hSharePct == null ? 'n/a' : result.mainSession.write1hSharePct.toFixed(1) + '%'}`);
-console.log(`  subagents already writing 1h? : ${result.subagentsAlreadyWriting1h ? `YES (${fmtMTok(result.subagentWrite1hMTok)}) — the setting may already be in effect for some agents` : 'no'}`);
+console.log(`  subagents wrote 1h cache?     : ${result.subagentsAlreadyWriting1h ? `YES — ${alreadyWriting1hNote(result.subagentWrite1hMTok)}` : 'no'}`);
 console.log('');
 
 console.log('-- policy comparison --');

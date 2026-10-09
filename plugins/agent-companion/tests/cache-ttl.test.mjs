@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { makeFixture } from './helpers.mjs';
 import {
   parseFile, computeCacheTtl, classifyPricing, breakEvenSharePct, clamp,
   costToday, costWith1h, pricingTable, computeVerdict, alreadyOneHourFrom,
   SET_GLOBALLY_DELTA_PCT, DONT_SET_DELTA_PCT, MIN_TIER_SPEND_SHARE_PCT, MIN_REQUESTS_FOR_AGENT_ROW,
-  MIN_AGENT_SAVING_PCT, NO_META_AGENT_TYPE,
+  MIN_AGENT_SAVING_PCT, NO_META_AGENT_TYPE, fmtDelta, alreadyWriting1hNote,
 } from '../scripts/lib/cache-ttl.mjs';
 
 // --- fixture builders --------------------------------------------------------
@@ -687,4 +688,115 @@ test('window filtering: requests before the cutoff are excluded, file mtime does
   } finally {
     cleanup();
   }
+});
+
+// --- Sign convention: 1h cheaper vs 1h dearer, global verdict and per-tier line ----
+//
+// deltaPct = (cost with 1h - cost today) / cost today, so NEGATIVE = 1h is
+// cheaper. Every line that prints a delta must say which way it points (a bare
+// "-0.85%" beside "don't set" read as "costs more"). These tests pin the words
+// to the sign for both directions, for the global verdict and a per-tier line.
+
+test('fmtDelta: negative delta says saves with 1h, positive says COSTS more with 1h, zero says no change', () => {
+  assert.equal(fmtDelta(-6.514), '-6.51% (saves with 1h)');
+  assert.equal(fmtDelta(1.926), '+1.93% (COSTS more with 1h)');
+  assert.equal(fmtDelta(0), '0.00% (no change)');
+  assert.equal(fmtDelta(-0.001), '0.00% (no change)', 'a value that rounds to zero is not a saving');
+});
+
+test('global verdict, 1h CHEAPER inside the bar: the line says 1h saves and why it still does not set it globally', () => {
+  // The 2026-10-09 case: -0.85% is a real saving, but not the -1% needed for a global change.
+  const v = computeVerdict({
+    perModel: [modelRow('sonnet-5', { costToday: 1000, deltaPct: -0.85 })],
+    perAgentModel: [],
+    totals: { costToday: 1000, deltaPct: -0.85 },
+    policy: { opusFableOnlyDeltaPct: -1.89 },
+  });
+  assert.match(v.text, /^don't set subagentPromptCacheTtl globally/);
+  assert.match(v.text, /delta -0\.85% \(saves with 1h\)/);
+  assert.match(v.text, /1h is cheaper overall, but by less than the 1\.00% needed for a global change/);
+  assert.doesNotMatch(v.text, /COSTS more|costs more overall/, 'a cheaper 1h must never be described as costing more');
+});
+
+test('global verdict, 1h DEARER inside the bar: the line says 1h costs more', () => {
+  const v = computeVerdict({
+    perModel: [modelRow('sonnet-5', { costToday: 1000, deltaPct: 0.85 })],
+    perAgentModel: [],
+    totals: { costToday: 1000, deltaPct: 0.85 },
+    policy: { opusFableOnlyDeltaPct: 0.5 },
+  });
+  assert.match(v.text, /^don't set subagentPromptCacheTtl globally/);
+  assert.match(v.text, /delta \+0\.85% \(COSTS more with 1h\)/);
+  assert.match(v.text, /1h is not cheaper overall/);
+  assert.doesNotMatch(v.text, /saves with 1h|cheaper overall, but/, 'a dearer 1h must never be described as saving');
+});
+
+test('global verdict, 1h clearly CHEAPER: "set it" names the saving; clearly DEARER: "don\'t set" names the cost', () => {
+  const cheaper = computeVerdict({
+    perModel: [modelRow('sonnet-5', { costToday: 1000, deltaPct: -2 })],
+    perAgentModel: [], totals: { costToday: 1000, deltaPct: -2 }, policy: { opusFableOnlyDeltaPct: -2 },
+  });
+  assert.match(cheaper.text, /^set subagentPromptCacheTtl to "1h" globally — observed delta -2\.00% \(saves with 1h\)/);
+  const dearer = computeVerdict({
+    perModel: [modelRow('sonnet-5', { costToday: 1000, deltaPct: 2 })],
+    perAgentModel: [], totals: { costToday: 1000, deltaPct: 2 }, policy: { opusFableOnlyDeltaPct: 1 },
+  });
+  assert.match(dearer.text, /^don't set subagentPromptCacheTtl — observed delta \+2\.00% \(COSTS more with 1h\)/);
+});
+
+test('global verdict, 1h cheaper overall but a big tier costs more: the veto reason names that tier and its direction', () => {
+  const v = computeVerdict({
+    perModel: [modelRow('sonnet-5', { costToday: 900, deltaPct: 3 }), modelRow('opus-5', { costToday: 100, deltaPct: -30 })],
+    perAgentModel: [], totals: { costToday: 1000, deltaPct: -2 }, policy: { opusFableOnlyDeltaPct: -5 },
+  });
+  assert.match(v.text, /delta -2\.00% \(saves with 1h\); 1h is cheaper overall, but sonnet-5 \(>=5% of spend\) costs more with 1h/);
+});
+
+test('per-tier line (cache-ttl.mjs CLI): a tier where 1h is cheaper prints saves, a tier where it is dearer prints COSTS', () => {
+  // Two models in one fresh transcript tree, timestamps relative to now (the CLI uses the real clock).
+  const { dir, cleanup } = makeFixture();
+  try {
+    const root = join(dir, 'projects');
+    const base = Date.now() - 2 * 86400000;
+    const at = (ms) => new Date(base + ms).toISOString();
+    const sub = join(root, 'proj-sign', 'sess', 'subagents');
+    mkdirSync(sub, { recursive: true });
+    // CHEAPER: opus rewrites a big prefix after a 6 min tool wait (a 1h TTL would have read it).
+    writeLines(join(sub, 'agent-cheap.jsonl'), [
+      userLine(at(0)),
+      assistantLine(at(0), { requestId: 'c1', model: 'claude-opus-5-20260101', input: 10, write5m: 100000, blocks: [{ type: 'tool_use', id: 'tu-1', name: 'Bash', input: {} }] }),
+      userLine(at(6 * 60000), { toolResult: true }),
+      assistantLine(at(6 * 60000), { requestId: 'c2', model: 'claude-opus-5-20260101', input: 10, write5m: 100000, read: 0, output: 5 }),
+    ]);
+    writeFileSync(join(sub, 'agent-cheap.meta.json'), JSON.stringify({ agentType: 'general-purpose', model: 'opus' }));
+    // DEARER: haiku never waits 5-60 min, so 1h only adds the 2x write premium.
+    writeLines(join(sub, 'agent-dear.jsonl'), [
+      userLine(at(0)),
+      assistantLine(at(0), { requestId: 'd1', model: 'claude-haiku-4-5-20260101', input: 10, write5m: 100000 }),
+      userLine(at(30000)),
+      assistantLine(at(30000), { requestId: 'd2', model: 'claude-haiku-4-5-20260101', input: 10, write5m: 1000, read: 100000, output: 5 }),
+    ]);
+    writeFileSync(join(sub, 'agent-dear.meta.json'), JSON.stringify({ agentType: 'general-purpose', model: 'haiku' }));
+
+    const out = spawnSync(process.execPath, [join(import.meta.dirname, '..', 'scripts', 'cache-ttl.mjs'), '--days', '30'], {
+      env: { ...process.env, AGENT_COMPANION_TRANSCRIPTS_ROOT: root }, encoding: 'utf8', windowsHide: true,
+    });
+    assert.equal(out.status, 0, out.stderr);
+    const perModel = out.stdout.split('-- per model --')[1].split('-- per agentType x model --')[0];
+    const opusLine = perModel.split('\n').find((l) => l.includes('opus-5'));
+    const haikuLine = perModel.split('\n').find((l) => l.includes('haiku'));
+    assert.ok(opusLine, perModel);
+    assert.ok(haikuLine, perModel);
+    assert.match(opusLine, /delta=-\d+\.\d\d% \(saves with 1h\)/);
+    assert.match(haikuLine, /delta=\+\d+\.\d\d% \(COSTS more with 1h\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('already-writing-1h note: says it cannot tell past writes from a setting in effect', () => {
+  const note = alreadyWriting1hNote(40.574);
+  assert.match(note, /40\.574 MTok/);
+  assert.match(note, /cannot tell past writes from a setting still in effect/);
+  assert.doesNotMatch(note, /may already be in effect/, 'the old wording implied a current setting');
 });

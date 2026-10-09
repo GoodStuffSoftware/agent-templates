@@ -134,6 +134,28 @@ export function transcriptsRoot(explicit) {
   return sharedTranscriptsRoot(explicit);
 }
 
+// --- Reading a delta: one convention for every line ---------------------------
+//
+// deltaPct = (cost with 1h - cost today) / cost today * 100, so a NEGATIVE
+// delta means 1h is CHEAPER and a POSITIVE one means 1h COSTS MORE. A bare
+// signed number invites the opposite reading next to a "don't set" verdict
+// (-0.85% looks like "costs 0.85% more"), so every line that shows a delta
+// shows it through fmtDelta, which spells the direction out.
+export function fmtDelta(deltaPct) {
+  const rounded = Number(deltaPct.toFixed(2));
+  if (rounded === 0) return '0.00% (no change)';
+  return `${rounded > 0 ? '+' : ''}${rounded.toFixed(2)}% (${rounded < 0 ? 'saves with 1h' : 'COSTS more with 1h'})`;
+}
+
+// The "already writing 1h" line. The transcripts say a subagent request wrote
+// 1h cache; they do not say whether a setting or agent definition produces
+// that NOW or one that has since been removed, so the line says it cannot tell.
+export function alreadyWriting1hNote(mtok) {
+  return `subagent requests in this window wrote ${mtok.toFixed(3)} MTok of 1h cache. This report cannot tell `
+    + 'past writes from a setting still in effect: they may come from an agent definition or setting that has '
+    + 'since been removed. Check settings and agent definitions for cacheTtl to know the current state.';
+}
+
 export function breakEvenSharePct(rm) {
   // 0.75 / (2 - rm), expressed as a percentage of write tokens.
   return (0.75 / (2 - rm)) * 100;
@@ -369,7 +391,7 @@ export function alreadyOneHourFrom(agentType) {
 export function computeVerdict({
   perModel, perAgentModel, totals, policy, excludedAgentTypes = KNOWN_AGENT_TYPES, rungSamples = null,
 }) {
-  const fmtPct = (n) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+  const fmtPct = fmtDelta;
 
   if (!perModel.length) {
     return { text: 'no priced subagent requests in the window — nothing to recommend', breakEvenByTier: [] };
@@ -391,7 +413,7 @@ export function computeVerdict({
   let text;
   if (totals.deltaPct <= SET_GLOBALLY_DELTA_PCT && bigTiersPositive.length === 0) {
     text = `set subagentPromptCacheTtl to "1h" globally — observed delta ${fmtPct(totals.deltaPct)}, `
-      + `no tier at >=${MIN_TIER_SPEND_SHARE_PCT}% of spend shows a positive delta`;
+      + `no tier at >=${MIN_TIER_SPEND_SHARE_PCT}% of spend costs more with 1h`;
   } else if (totals.deltaPct >= DONT_SET_DELTA_PCT && policy.opusFableOnlyDeltaPct >= 0) {
     text = `don't set subagentPromptCacheTtl — observed delta ${fmtPct(totals.deltaPct)}, `
       + `and the opus/fable-only policy is also non-negative (${fmtPct(policy.opusFableOnlyDeltaPct)})`;
@@ -412,10 +434,23 @@ export function computeVerdict({
       return true;
     });
     const thinNote = thin.length ? ` (${TOO_LITTLE_DATA.toLowerCase()} for: ${thin.join('; ')})` : '';
+    // Why a global change is ruled out, in the same direction words as the
+    // delta itself: 1h can be cheaper overall and still not warrant a global
+    // setting (inside the bar, or vetoed by a big tier that costs more).
+    let globalWhy;
+    if (totals.deltaPct <= SET_GLOBALLY_DELTA_PCT) {
+      globalWhy = `1h is cheaper overall, but ${bigTiersPositive.map((r) => r.alias).join(', ')} (>=${MIN_TIER_SPEND_SHARE_PCT}% of spend) costs more with 1h`;
+    } else if (totals.deltaPct < 0) {
+      globalWhy = `1h is cheaper overall, but by less than the ${Math.abs(SET_GLOBALLY_DELTA_PCT).toFixed(2)}% needed for a global change`;
+    } else if (totals.deltaPct < DONT_SET_DELTA_PCT) {
+      globalWhy = '1h is not cheaper overall';
+    } else {
+      globalWhy = `1h costs more overall; only the opus/fable-only policy saves (${fmtPct(policy.opusFableOnlyDeltaPct)})`;
+    }
     const already = eligible.filter((r) => alreadyOneHourFrom(r.label.split(' → ')[0]));
     const candidates = eligible.filter((r) => !already.includes(r));
     if (!candidates.length && !already.length) {
-      text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}) — no named agent definition `
+      text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}; ${globalWhy}) — no named agent definition `
         + `clears ${MIN_REQUESTS_FOR_AGENT_ROW} requests with a negative delta to warrant a per-agent override${thinNote}`;
     } else {
       const parts = [];
@@ -427,7 +462,7 @@ export function computeVerdict({
         parts.push('already on experimental.cacheTtl: "1h" (no action needed): '
           + already.map((r) => `${r.label} (${fmtPct(r.deltaPct)})`).join('; '));
       }
-      text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}) — ${parts.join('; ')}${thinNote}`;
+      text = `don't set subagentPromptCacheTtl globally (delta ${fmtPct(totals.deltaPct)}; ${globalWhy}) — ${parts.join('; ')}${thinNote}`;
     }
   }
   return { text, breakEvenByTier };

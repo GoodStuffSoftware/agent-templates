@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.4 — 2026-10-09
+
+Cache-TTL check output only: every delta now says which way it points, and the "already writing 1h" line says what the report cannot tell. **Audit output only: no routing, effort, model, guard, cost-model or threshold change, so the 0.31.2 test week is the same era.** Source: the 2026-10-09 cache-ttl run, whose verdict read `don't set subagentPromptCacheTtl globally (delta -0.85%)` while 1h was the cheaper policy.
+
+- **No sign was inverted.** `deltaPct` is `(cost with 1h - cost today) / cost today`, negative when 1h is cheaper, and every branch of `computeVerdict` and `rungVerdict` already applied it that way. The defect was presentation: a bare `-0.85%` beside "don't set" read as "costs more", when the decision was "don't" because -0.85% sits inside the existing -1% bar for a global change. The threshold (`SET_GLOBALLY_DELTA_PCT` -1, `DONT_SET_DELTA_PCT` +1) and the cost model are unchanged.
+- **One delta format.** New `fmtDelta()` in `scripts/lib/cache-ttl.mjs` prints `-0.85% (saves with 1h)`, `+1.93% (COSTS more with 1h)`, or `0.00% (no change)`. It is used by the global verdict, the per-model, per-agent, break-even, policy and per-rung lines of `cache-ttl.mjs`, and the `audit.mjs --only cache-ttl` totals line.
+- **The verdict says why.** The "don't set globally" line now states the reason in the same words: `1h is cheaper overall, but by less than the 1.00% needed for a global change`, `1h is not cheaper overall`, `1h is cheaper overall, but <tier> (>=5% of spend) costs more with 1h`, or `1h costs more overall; only the opus/fable-only policy saves (...)`.
+- **"Already writing 1h".** The transcripts show 1h writes in the window, not whether a setting still in effect produces them. The line (`cache-ttl.mjs` and the audit finding) now says it cannot tell past writes from a current setting and points at settings and agent definitions. No new detection.
+- **Tests.** `tests/cache-ttl.test.mjs`: `fmtDelta`; the global verdict with 1h cheaper and 1h dearer inside the bar, clearly cheaper, clearly dearer, and vetoed by a big tier; a per-tier line from the CLI with a tier where 1h is cheaper and one where it is dearer; the already-writing note.
+- Reverse: revert the commit.
+
 ## 0.31.3 — 2026-10-09
 
 `ROLE:` brief line: spawns are tagged with the role of their main deliverable so the usage study's per-role figures are exact. **Tagging only: no routing, effort, model, review-protocol or guard-decision change, so the test week that started with 0.31.2 (2026-10-09 16:00Z) is the same era for the day-3 and day-6 measurement runs.** Operator approved ("adopt now", 2026-10-09). Source: step 2 of the usage study (`step2-roles-detail.md`, section 8): the role classifier reaches only about 78% on held-out spawns, so role shares are not decision-grade; a stated role is exact.
