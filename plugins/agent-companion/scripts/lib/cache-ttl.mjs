@@ -440,7 +440,7 @@ export function computeVerdict({
     let globalWhy;
     if (totals.deltaPct <= SET_GLOBALLY_DELTA_PCT) {
       globalWhy = `1h is cheaper overall, but ${bigTiersPositive.map((r) => r.alias).join(', ')} (>=${MIN_TIER_SPEND_SHARE_PCT}% of spend) costs more with 1h`;
-    } else if (totals.deltaPct < 0) {
+    } else if (Number(totals.deltaPct.toFixed(2)) < 0) { // the rounded value fmtDelta prints, so the reason never contradicts it
       globalWhy = `1h is cheaper overall, but by less than the ${Math.abs(SET_GLOBALLY_DELTA_PCT).toFixed(2)}% needed for a global change`;
     } else if (totals.deltaPct < DONT_SET_DELTA_PCT) {
       globalWhy = '1h is not cheaper overall';

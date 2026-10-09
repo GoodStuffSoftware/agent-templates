@@ -111,8 +111,8 @@ console.log('');
 
 console.log('-- policy comparison --');
 console.log(`  all 5-minute (today)         : ${fmtUsd(result.policy.allFiveMin)}`);
-console.log(`  all 1-hour                   : ${fmtUsd(result.policy.allOneHour)}  (${fmtPct(result.policy.allOneHourDeltaPct)})`);
-console.log(`  1h for opus/fable tier only  : ${fmtUsd(result.policy.oneHourOpusFableOnly)}  (${fmtPct(result.policy.opusFableOnlyDeltaPct)})`);
+console.log(`  all 1-hour                   : ${fmtUsd(result.policy.allOneHour)}  ${fmtPct(result.policy.allOneHourDeltaPct)}`);
+console.log(`  1h for opus/fable tier only  : ${fmtUsd(result.policy.oneHourOpusFableOnly)}  ${fmtPct(result.policy.opusFableOnlyDeltaPct)}`);
 console.log('');
 
 console.log('-- break-even: observed rewrite share vs. required, per tier (always shown) --');

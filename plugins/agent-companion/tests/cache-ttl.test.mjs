@@ -800,3 +800,12 @@ test('already-writing-1h note: says it cannot tell past writes from a setting in
   assert.match(note, /cannot tell past writes from a setting still in effect/);
   assert.doesNotMatch(note, /may already be in effect/, 'the old wording implied a current setting');
 });
+
+test('global verdict: a delta that rounds to zero is not described as cheaper', () => {
+  const v = computeVerdict({
+    perModel: [modelRow('sonnet-5', { costToday: 1000, deltaPct: -0.004 })],
+    perAgentModel: [], totals: { costToday: 1000, deltaPct: -0.004 }, policy: { opusFableOnlyDeltaPct: 0 },
+  });
+  assert.match(v.text, /delta 0\.00% \(no change\); 1h is not cheaper overall/);
+  assert.doesNotMatch(v.text, /1h is cheaper overall/);
+});
