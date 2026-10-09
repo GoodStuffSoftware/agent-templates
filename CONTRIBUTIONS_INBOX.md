@@ -22,6 +22,14 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
+### 2026-10-09 — Size subagents by context, not by task
+
+- **Trigger:** Several analysis workers each bundled a full-history scan, hand-labelling, analysis and a review. All hit the context ceiling, were compacted and told to wrap up, and one returned half-done and needed follow-up workers. Per-call cost roughly doubles near 200K of context versus a fresh worker.
+- **Is it generic?** Yes. Cost growing with context and file handoffs between phases hold in any harness with a context window and subagents; no stack mechanism is needed. The thresholds ({{CONTEXT_CEILING}}, {{TIME_BUDGET}}) are placeholders to tune per setup.
+- **Target:** new lesson `lessons/size-subagents-by-context-not-by-task.md`.
+- **Proposed change:** Lesson body: size a worker to finish within {{TIME_BUDGET}} and under {{CONTEXT_CEILING}}. A build-test-fix-land job is one worker when it fits. A job that will not fit is split by phase (scan, label, analyse, review), each a fresh worker that writes its output to a file the next one reads, and prints only a summary. Run independent phases in parallel. Never continue a cold worker to carry context; pass a file. Prefer a checkpoint at a context ceiling over waiting for compaction, since a post-compaction wrap-up fires after the expensive calls.
+- **Applied?** `no`
+
 ### 2026-10-06 — Give the main session its own auto-compact point with a plugin hooks module (one global window, two sessions)
 
 - **Trigger:** one global auto-compact window serves the main session and every subagent. A window small enough to keep long-lived subagents cheap makes the main session compact far earlier than it needs to; a window large enough for the main session lets subagents grow past the point where their cache cost pays.
