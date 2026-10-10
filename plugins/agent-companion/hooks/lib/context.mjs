@@ -2179,6 +2179,20 @@ export function opt(key, fallback) {
   return raw;
 }
 
+// Scout signal kinds the operator chose not to hear about (option
+// scout_suppress: kinds separated by commas, semicolons or spaces; same layering
+// as every option: environment, then settings.local.json, then settings.json).
+// A suppressed kind is neither emitted by the scout nor counted, and the
+// SessionStart line drops it from results written before the option was set.
+// scout_suppress_reason is free text recording why; nothing reads it.
+export function scoutSuppressed() {
+  try {
+    return new Set(String(opt('scout_suppress', '')).split(/[,;\s]+/).map((k) => k.trim()).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
 // Main thread or subagent: THE one test, for every hook that acts on the lead
 // only (the spawn guard's gates, the runaway notice, the delegation guard).
 //

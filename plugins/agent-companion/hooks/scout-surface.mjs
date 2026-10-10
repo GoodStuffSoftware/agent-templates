@@ -25,13 +25,15 @@ import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-  readStdin, opt, dataDirs, stateDir, stateFile, passthrough, sessionIsSubagent,
+  readStdin, opt, dataDirs, stateDir, stateFile, passthrough, sessionIsSubagent, scoutSuppressed,
 } from './lib/context.mjs';
 import { syncLegacy } from './lib/state-sync.mjs';
 import { normalizeGitUrl } from '../scripts/lib/publication-sweep.mjs';
 import { githubOwnerRepoFromUrl, repoCacheKey } from '../scripts/lib/ci-status.mjs';
+import { readPending, markSeen } from '../scripts/lib/release-watch.mjs';
 
 const MAX_AGE_DAYS = 7;
+const RELEASE_KIND = 'cli_release_available';
 
 // --- Piece 1: the generic scout-signal list --------------------------------
 // The same kind can fire several times in one scout run (a measured session
@@ -68,7 +70,13 @@ function buildScoutBlock() {
       } catch { /* unreadable: skip */ }
     }
   }
-  if (!latest || !Array.isArray(latest.signals) || latest.signals.length === 0) return null;
+  if (!latest || !Array.isArray(latest.signals)) return null;
+  // Drop what the operator suppressed (a result written before the option was
+  // set still carries it) and the release signal, which has its own line below.
+  const hidden = scoutSuppressed();
+  hidden.add(RELEASE_KIND);
+  latest = { ...latest, signals: latest.signals.filter((s) => !hidden.has(String((s && s.kind) || 'unknown'))) };
+  if (latest.signals.length === 0) return null;
 
   const ageDays = (Date.now() - Date.parse(latest.checkedAt)) / 86400000;
   if (!(ageDays <= MAX_AGE_DAYS)) return null; // stale results are not news
@@ -127,6 +135,26 @@ function buildCiRedLine() {
   return `[agent-companion] main CI red since ${first.redSince}, ${first.name} — ${first.latestUrl}${more}`;
 }
 
+// --- Piece 3: a newer Claude Code release the operator has not been told about --
+// The scout (scripts/lib/release-watch.mjs) did the reading; this only looks at
+// its small state file, so there is no network and no child process here. One
+// line, shown once per release: the versions are marked seen as it is built.
+function buildReleaseLine() {
+  if (!opt('release_watch', true)) return null;
+  if (scoutSuppressed().has(RELEASE_KIND)) return null;
+  const stateFilePath = stateFile('release-watch.json');
+  let running = null;
+  try { running = JSON.parse(readFileSync(stateFile('baseline.json'), 'utf8')).version; } catch { /* scout has not run */ }
+  const pending = readPending(stateFilePath, running);
+  if (!pending) return null;
+  markSeen(stateFilePath, pending.versions);
+  const oldest = pending.versions[pending.versions.length - 1];
+  const range = pending.versions.length > 1 ? `${oldest} to ${pending.versions[0]}` : pending.versions[0];
+  return `[agent-companion] Claude Code ${pending.latest} is out (installed ${pending.installed}): ${pending.releases} new release(s) (${range}), `
+    + `${pending.items} changelog item(s) on agents, hooks, cache, compaction, effort, plugins and related. `
+    + `Details: ${stateFile('cli-release-details.md')}`;
+}
+
 try {
   const p = readStdin();
 
@@ -147,10 +175,14 @@ try {
   let scoutBlock = null;
   try { scoutBlock = buildScoutBlock(); } catch { scoutBlock = null; }
 
-  if (!ciLine && !scoutBlock) passthrough();
+  // Last, so a hook that dies before printing has not marked anything seen.
+  let releaseLine = null;
+  try { releaseLine = buildReleaseLine(); } catch { releaseLine = null; }
 
-  const contextParts = [ciLine, scoutBlock?.context].filter(Boolean);
-  const summary = scoutBlock?.summary || ciLine;
+  if (!ciLine && !scoutBlock && !releaseLine) passthrough();
+
+  const contextParts = [ciLine, scoutBlock?.context, releaseLine].filter(Boolean);
+  const summary = scoutBlock?.summary || ciLine || releaseLine;
 
   process.stdout.write(JSON.stringify({
     systemMessage: summary,

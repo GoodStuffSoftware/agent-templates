@@ -18,7 +18,7 @@ import {
   modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
   homeRoot, stateRoot, resolveRoute, isLadderAgentName,
   readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
-  LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES,
+  LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES, scoutSuppressed,
 } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
@@ -32,6 +32,7 @@ import {
 } from './lib/repo-discovery.mjs';
 import { projectAgentDrift, driftCounts } from './lib/agent-drift.mjs';
 import { churnVerdict, churnFreshness } from './lib/session-churn.mjs';
+import { runReleaseWatch } from './lib/release-watch.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
@@ -123,7 +124,11 @@ const next = { checkedAt: now };
 // readable) complete. Applied to EVERY signal, not just publication-leak
 // ones. See lib/scrub.mjs.
 let knownPublicForScrub = [];
+// Kinds the operator suppressed (option scout_suppress) are dropped here, the one
+// place a signal is made: not emitted, not counted.
+const suppressedKinds = scoutSuppressed();
 function sig(kind, detail, dispatch, severity) {
+  if (suppressedKinds.has(kind)) return;
   signals.push({ kind, detail: String(detail ?? ''), dispatch, ...(severity ? { severity } : {}) });
 }
 
@@ -215,6 +220,31 @@ try {
   next.teammates = r.state;
   for (const s of r.signals) sig(s.kind, s.detail, s.dispatch);
 } catch { /* teammates watch unreadable: not a signal */ }
+
+// --- 1e. Claude Code release watch ----------------------------------------
+// Section 1 only notices that the INSTALLED version changed; this reads the
+// public changelog (at most once per 24 hours, a 3 s budget, silent offline,
+// no child process) and keeps the items on what this plugin steers for the
+// releases the operator has not yet been told about. The unseen releases stay
+// in the signal until the SessionStart hook shows its one line and marks them
+// seen. Skipped outright when the option is off or the signal is suppressed.
+// Tests: AGENT_COMPANION_RELEASE_WATCH_NO_NET=1 forbids the request (the suite
+// sets it), AGENT_COMPANION_RELEASE_WATCH_URL points it at a local server, and
+// AGENT_COMPANION_RELEASE_WATCH_INSTALLED stands in for `claude --version`.
+if (opt('release_watch', true) && !suppressedKinds.has('cli_release_available')) {
+  try {
+    const rw = await runReleaseWatch({
+      installed: process.env.AGENT_COMPANION_RELEASE_WATCH_INSTALLED || next.version,
+      stateFilePath: stateFile('release-watch.json'),
+      detailsFilePath: stateFile('cli-release-details.md'),
+      claudeDirPath: claudeDir(),
+      nowMs: nowDate().getTime(),
+      noNet: !!process.env.AGENT_COMPANION_RELEASE_WATCH_NO_NET,
+      url: process.env.AGENT_COMPANION_RELEASE_WATCH_URL || undefined,
+    });
+    if (rw.signal) sig('cli_release_available', rw.signal.detail, 'none');
+  } catch { /* release watch is advisory: never block the scout */ }
+}
 
 // --- 1c. New model in the routing table's lineup ------------------------
 // A model alias can be ADDED to config/model-tiers.json's `tiers` (a new

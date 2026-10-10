@@ -2,6 +2,16 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.5 — 2026-10-09
+
+Scout: Claude Code release watch, and a list of scout signals to suppress. **No routing, effort, model, guard or review-protocol change; no subagent-start token added (subagents get nothing new).** Source: a machine ran 13 releases behind (2.1.283 against 2.1.296) with nobody seeing the new features (Agent `effort` per spawn, a subagent `autoCompactWindow`, resume-cache fixes), because the scout only compared the installed version with its previous run; and `model_benchmark_suggested` repeated 163 times on a machine where the operator rule is no benchmark runs.
+
+- **Release watch** (`scripts/lib/release-watch.mjs`, step 1e of `scripts/detect.mjs`; option `release_watch`, default on). One ranged GET of the head of the public changelog, at most once per 24 hours (success or failure; `state/release-watch.json`), a 3 s budget, no child process (so no console window), silent and non-fatal when offline; the changelog Claude Code caches (`<config dir>/cache/changelog.md`) backs up a failed fetch. For releases newer than the installed version it keeps the items matching agents/subagents, hooks, cache, compaction, effort, SendMessage, worktree, workflow, Monitor, desktop or plugins in `state/cli-release-details.md`, and raises `cli_release_available` with the unseen-release and item counts.
+- **One SessionStart line.** `hooks/scout-surface.mjs` adds a line for the MAIN session only (versions, matching item count, details path) when an unseen newer release exists, then marks those releases seen, so each release is surfaced once. Subagents get nothing. The generic scout block no longer lists `cli_release_available` (the line is its home).
+- **`scout_suppress`** (comma-separated kinds) and **`scout_suppress_reason`** (free text). A suppressed kind is dropped where the scout makes a signal, so it is neither emitted nor counted; the SessionStart block also filters it from an older `scout-latest.json`. Same option layering as every other option (environment, `settings.local.json`, `settings.json`). `release_watch` false, or `cli_release_available` suppressed, means no request.
+- **Tests.** New `tests/release-watch.test.mjs` (21 tests): topic extraction, the 24 h throttle, offline / HTTP error / timeout / oversized body, the local-cache fallback, the details file, the seen-set across two releases, main vs subagent surfacing, a caught-up machine, suppression by environment and by `settings.json`. `tests/isolate.mjs` forbids the request for every other test.
+- Reverse: set `release_watch` to false; revert the commit to remove it.
+
 ## 0.31.4 — 2026-10-09
 
 Cache-TTL check output only: every delta now says which way it points, and the "already writing 1h" line says what the report cannot tell. **Audit output only: no routing, effort, model, guard, cost-model or threshold change, so the 0.31.2 test week is the same era.** Source: the 2026-10-09 cache-ttl run, whose verdict read `don't set subagentPromptCacheTtl globally (delta -0.85%)` while 1h was the cheaper policy.

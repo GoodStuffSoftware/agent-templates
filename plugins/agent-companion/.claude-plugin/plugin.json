@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.4",
+  "version": "0.31.5",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -112,6 +112,24 @@
       "type": "boolean",
       "title": "Scout surface",
       "description": "At session start, surface unresolved signals from the last locally scheduled scout run. Silent when the scout found nothing.",
+      "default": true
+    },
+    "scout_suppress": {
+      "type": "string",
+      "title": "Suppressed scout signals",
+      "description": "Scout signal kinds to drop, separated by commas (for example \"model_benchmark_suggested,cli_release_available\"). A suppressed kind is neither emitted by the daily scout nor counted in its signal total, and the SessionStart line leaves it out. Empty (default) = every signal as before.",
+      "default": ""
+    },
+    "scout_suppress_reason": {
+      "type": "string",
+      "title": "Why those scout signals are suppressed",
+      "description": "Free text recording the reason for scout_suppress (for example the operator rule behind it). Informational: nothing reads it.",
+      "default": ""
+    },
+    "release_watch": {
+      "type": "boolean",
+      "title": "Claude Code release watch",
+      "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on agents, hooks, cache, compaction, effort, SendMessage, worktrees, workflows, Monitor, desktop and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one line naming the versions, the item count and the details path (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
       "default": true
     },
     "ladder_check": {

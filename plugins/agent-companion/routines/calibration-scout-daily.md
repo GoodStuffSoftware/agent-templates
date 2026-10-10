@@ -109,7 +109,7 @@ node "$AC/scripts/detect.mjs"
 
 The churn step reads local lead-session transcripts (counts only; bounded, newest first, about 10 s). In the cloud there are no transcripts, so it writes an empty aggregate and `session_churn` stays quiet: unobservable there, like the other stateful signals.
 
-Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`, `enforcement_silent`, `plugin_version_behind`, `plugin_copy_stale`, `stale_copy_loaded`, `session_outdated`, `session_load_unknown`, `inherited_effort_spawns`, `project_agent_drift`, `session_churn`, `budget_notices`.
+Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`, `enforcement_silent`, `plugin_version_behind`, `plugin_copy_stale`, `stale_copy_loaded`, `session_outdated`, `session_load_unknown`, `inherited_effort_spawns`, `project_agent_drift`, `session_churn`, `budget_notices`, `cli_release_available` (a Claude Code release the operator has not been told about; the details file is named in the signal; informational, no dispatch). Kinds listed in the `scout_suppress` option never appear.
 
 ## STEP 2 — lineup and pricing diff (the one check that needs the web)
 

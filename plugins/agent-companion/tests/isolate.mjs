@@ -137,6 +137,10 @@ process.env.AGENT_COMPANION_DESKTOP_DIR = join(sandbox, 'desktop');
 delete process.env.CLAUDE_PLUGIN_DATA;
 delete process.env.CLAUDE_CONFIG_DIR;
 delete process.env.AGENT_COMPANION_VAULT_DIR;
+// The scout's release watch makes one request to the changelog host; no test may reach
+// the network. A test of the watch points AGENT_COMPANION_RELEASE_WATCH_URL at a local
+// server and clears this.
+process.env.AGENT_COMPANION_RELEASE_WATCH_NO_NET = '1';
 
 // What os.homedir() (and git's "~") resolve to: an empty directory, in this
 // process and in every child.
