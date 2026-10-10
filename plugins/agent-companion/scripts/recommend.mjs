@@ -161,8 +161,9 @@ out.reviewer = {
   effort: out.effort ? `>= ${out.effort}` : '(none)',
   note: 'reviewer parity: at least the writer\'s model and effort (effort may exceed, must not drop), raised to F1 on a critical change and capped by F2 (never fable)',
 };
-// The operator's reviewerEffortCap (config; an exception to effort parity) can
-// size a non-critical review of this route BELOW the writer's effort: say so.
+// The operator's reviewerEffortCap / reviewerEffortFloor (config; exceptions to
+// effort parity) can size a review of this route below or above the writer's
+// effort: say so.
 if (weight !== 'parity' && out.model && out.effort && out.model !== 'fable') {
   try {
     const pr = resolveRoute({
@@ -170,10 +171,12 @@ if (weight !== 'parity' && out.model && out.effort && out.model !== 'fable') {
       writer: { model: out.model, effort: out.effort }, writerType: typeName || null,
     });
     if (pr.model === out.model && pr.effort && pr.effort !== out.effort) {
+      const fa = (pr.floorsApplied || []).map((f) => f.raised || f.capped || '').join(' ');
+      const which = /reviewerEffortFloor/.test(fa) ? 'reviewerEffortFloor' : /reviewerEffortCap/.test(fa) ? 'reviewerEffortCap' : 'reviewer floors';
       out.reviewer = {
         model: pr.model,
         effort: pr.effort,
-        note: `reviewerEffortCap (an exception to effort parity): this ${out.consequence} change's review runs at ${pr.model}/${pr.effort}, below the writer's ${out.effort}`,
+        note: `${which}${which === 'reviewer floors' ? '' : ' (an exception to effort parity)'}: this ${out.consequence} change's review runs at ${pr.model}/${pr.effort}, ${classifyEffort(pr.effort).rank < classifyEffort(out.effort).rank ? 'below' : 'above'} the writer's ${out.effort}`,
       };
     }
   } catch { /* table unreadable: keep the parity note */ }

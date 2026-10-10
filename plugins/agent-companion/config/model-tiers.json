@@ -350,6 +350,8 @@
   },
   "reviewerEffortCap": {},
   "reviewerEffortCapNote": "An operator exception to reviewerParity.effortMayExceed, EMPTY as shipped (parity is unchanged unless a user override file sets it). Shape: { \"<model alias>\": { \"effort\": \"high\", \"activeFrom\": \"<ISO UTC timestamp or a change id in rollout.json>\", \"exceptWriterTypes\": [\"novel-design\"] } }. A NON-critical review on that model runs at most at `effort` even when its writer ran higher (a cap only lowers; it never raises a lower writer's effort); a critical review keeps F1 and full parity; a review of a writer whose declared task type is in exceptWriterTypes keeps full parity. `activeFrom` schedules the cap (see CHANGELOG 0.31.7 and rollout.json in the state root); before it, the cap is off. Set it in ~/.claude/agent-companion/model-tiers.json: the override replaces this key whole.",
+  "reviewerEffortFloor": {},
+  "reviewerEffortFloorNote": "The mirror of reviewerEffortCap, EMPTY as shipped. Shape: { \"<model alias>\": { \"effort\": \"xhigh\", \"activeFrom\": \"<optional: ISO UTC timestamp or a change id in rollout.json>\", \"exceptWriterTypes\": [\"<optional writer task types that keep parity>\"] } }. A NON-critical review on that model runs at LEAST at `effort` even when its writer ran lower (a floor only raises; it never lowers a higher writer's effort); a critical review is sized by F1. Applied after the cap. Example, sonnet reviews always at xhigh: { \"sonnet\": { \"effort\": \"xhigh\" } }. Set it in ~/.claude/agent-companion/model-tiers.json: the override replaces this key whole. The recommender, the spawn guard and the self-review text a spawn appends to a writer's brief (its reviewer rung) all read it.",
   "consequence": {
     "routine": {
       "effortFloor": null,

@@ -1197,10 +1197,10 @@ try {
   const critLabel = critFloor.modelFloor ? `${critFloor.modelFloor}${critFloor.effortFloor ? '/' + critFloor.effortFloor : ''}` : '';
   const parityMovers = parityRoute && !routeIsWriter
     ? [
-      ...[...new Set((route.floorsApplied || []).map((f) => f.floor))].filter((f) => f !== 'F3').map((f) => {
+      ...[...new Set((route.floorsApplied || []).filter((x) => x.floor !== 'F3' || /reviewerEffort/.test(x.raised || x.capped || '')).map((x) => x.floor))].map((f) => {
         if (f === 'F1') return `floor F1: a critical review is at least ${critLabel}`;
         if (f === 'F2') return `floor F2: ${writer.model} is never a routing destination`;
-        const e = route.floorsApplied.find((x) => x.floor === f);
+        const e = route.floorsApplied.find((x) => x.floor === f && (f !== 'F3' || /reviewerEffort/.test(x.raised || x.capped || '')));
         return `floor ${f}${e && (e.raised || e.capped) ? `: ${e.raised || e.capped}` : ''}`;
       }),
       ...(route.layer === 'profile' ? [`routing profile rev ${route.profileRevision}'s minimum effort`] : []),
@@ -1377,7 +1377,9 @@ try {
         if (selfReviewExpected === false) {
           const rung = injectionRung(runningType, def, model);
           if (rung) {
-            selfReviewSuffix = selfReviewBriefText(rung, sr);
+            selfReviewSuffix = selfReviewBriefText(rung, sr, undefined, {
+              writerType: declaredType, consequence: consequenceWasDeclared ? declaredConsequence : null,
+            });
             selfReviewInjected = true;
             selfReviewExpected = true;
           } else if (opt('fit_guard', true)) {

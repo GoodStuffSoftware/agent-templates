@@ -180,7 +180,7 @@ A rule is two independent conditions plus a directive:
 
 The split exists because some rules need to fire on content regardless of history (`copyable-prompt`), and at least one needs to fire on history regardless of content (`delegate-reminder`, below) — a single condition type cannot express both.
 
-A rule (and a routing-profile row, and a `reviewerEffortCap` entry) may also carry `activeFrom`, a zoned UTC timestamp or a change id in `~/.claude/agent-companion/rollout.json` (`{"<change-id>": "<ISO UTC>"}`), with an optional `after` overlay: it switches on by the clock with nobody flipping it, and an unresolvable value counts as not yet reached. Write a scheduled change as the current behaviour plus `after` (a new rule: `"enabled": false` with `"after": {"enabled": true}`) so a copy of the plugin that ignores the keys never starts early. See `skills/standing-rules/SKILL.md`.
+A rule (and a routing-profile row, and a `reviewerEffortCap` or `reviewerEffortFloor` entry) may also carry `activeFrom`, a zoned UTC timestamp or a change id in `~/.claude/agent-companion/rollout.json` (`{"<change-id>": "<ISO UTC>"}`), with an optional `after` overlay: it switches on by the clock with nobody flipping it, and an unresolvable value counts as not yet reached. Write a scheduled change as the current behaviour plus `after` (a new rule: `"enabled": false` with `"after": {"enabled": true}`) so a copy of the plugin that ignores the keys never starts early. See `skills/standing-rules/SKILL.md`.
 
 Four scopes, each deciding what `when` is tested against and where the directive lands:
 

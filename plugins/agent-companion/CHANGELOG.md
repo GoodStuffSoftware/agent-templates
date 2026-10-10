@@ -2,6 +2,14 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.10 — 2026-10-10
+
+- **`reviewerEffortFloor`** (`config/model-tiers.json`, empty as shipped; read from the per-user `model-tiers.json`): `{"sonnet": {"effort": "xhigh"}}`. The mirror of `reviewerEffortCap`: a NON-critical review on that model runs at LEAST at that effort even when its writer ran lower (a floor only raises). Same optional `activeFrom` and `exceptWriterTypes`; applied after the cap; a critical review is still sized by F1. Operator decision 2026-10-09 (5a): sonnet code reviews stay at xhigh, which the 2026-10-10 move of bounded-feature writers to sonnet/medium would otherwise have dropped to medium, because a reviewer follows its writer's effort. With the floor, `recommend.mjs --type code-review --writer sonnet/<any effort>` names `agent-companion:ac-sonnet-xhigh`. Nothing changes at install (the key is empty).
+- **The reviewer rung in the appended protocol agrees.** The self-review text the spawn guard appends to a writer's brief (a ladder rung that does not carry the block, which is every sonnet rung) now names the rung the recommender gives for a review of that pair, when it is on the same model with another effort (`reviewerRungFor` in `hooks/lib/self-review.mjs`); the `WRITER:` line stays the writer's own pair. A critical change, another model or an unrouted pair keeps the writer's own rung, as before. A writer whose effort is not stated (`WRITER: sonnet`) counts as below the floor, so its review is floored too. The rung text generated into `agents/ac-*.md` is unchanged (it never reads a machine's config or the date).
+- **Messages.** The guard's parity note names a cap or floor that moved the reviewer's effort ("floor F3: effort medium -> xhigh (reviewerEffortFloor: a sonnet review runs at least at xhigh, an exception to effort parity)"); `recommend.mjs` says "above" or "below" the writer's effort and which setting did it.
+- **Tests.** New `tests/reviewer-effort-floor.test.mjs`: shipped empty, every sonnet writer effort, opus untouched, critical and elevated, floor with the opus cap before and after the cap date, `activeFrom`/`exceptWriterTypes`/unusable shapes, the recommender CLI, `reviewerRungFor`, and the appended text through the spawn guard.
+- Reverse: remove `reviewerEffortFloor` from the user `model-tiers.json`; revert the commit to remove the support.
+
 ## 0.31.8 — 2026-10-10
 
 - **`rules test` judges a scheduled rule by its state now.** It listed a rule written as `enabled:false` + `activeFrom` + `after:{enabled:true}` as "disabled" even after its date, while `rules list` and the hooks (which inject it) were right. It now uses the same effective state; pinned by `rollout-schedule-edges.test.mjs`.

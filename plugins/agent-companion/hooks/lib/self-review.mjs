@@ -146,9 +146,13 @@ export function selfReviewConfigProblems(sr = selfReviewConfig()) {
 // The protocol block for one rung, markers included, LF line endings, no
 // trailing newline. Names the rung itself as the reviewer's rung, since the
 // reviewer is spawned "on the rung matching your own model and effort".
-export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-companion') {
+export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-companion', reviewerRung = null) {
   const pair = `${rung.model}${rung.effort ? '/' + rung.effort : ''}`;
-  const spawnAs = `${plugin}:${rung.agent}`;
+  // The reviewer's rung: the writer's own unless a runtime caller found the
+  // recommender naming another on the same model (reviewerRungFor).
+  const rv = reviewerRung && reviewerRung.agent && reviewerRung.agent !== rung.agent ? reviewerRung : null;
+  const spawnAs = `${plugin}:${(rv || rung).agent}`;
+  const rvPair = rv ? `${rv.model}${rv.effort ? '/' + rv.effort : ''}` : '';
   const types = sr.types.map((t) => `\`${t}\``).join(', ');
   const n = sr.fixRounds;
   const fix = n === 0
@@ -163,7 +167,7 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
     'When it applies, before you return:',
     '',
     '1. Commit your work, so the review has a fixed sha.',
-    `2. Spawn exactly ONE reviewer, in the foreground (\`run_in_background: false\`), with \`subagent_type: "${spawnAs}"\`: this rung, which matches your own model and effort. Its brief opens with these three lines, as plain text:`,
+    `2. Spawn exactly ONE reviewer, in the foreground (\`run_in_background: false\`), with \`subagent_type: "${spawnAs}"\`: ${rv ? `the rung the routing table names for a review of your pair (${rvPair}, not your own rung: the operator sets reviewer effort per model, and \`/ac recommend --type code-review --writer ${pair}\` says the same)` : 'this rung, which matches your own model and effort'}. Its brief opens with these three lines, as plain text:`,
     '   ```',
     '   TYPE: code-review',
     `   WRITER: ${pair}`,
@@ -323,11 +327,34 @@ export function injectionRung(runningType, def, spawnModel) {
   } catch { return null; }
 }
 
+// The rung a review of `rung`'s writer should run on, when the recommender
+// (resolveRoute, TYPE: code-review, WRITER: this rung's pair) names a
+// different effort on the SAME model: the operator's reviewerEffortFloor or
+// reviewerEffortCap (config), the profile's minimum effort, or an elevated
+// change's floor. null when it names the writer's own pair, another model (a
+// critical change moves to opus; the protocol text keeps the writer's rung
+// there, as before) or a pair that is no rung. Never throws. Runtime only:
+// the generated rung files call selfReviewBlock with no reviewer rung, so
+// committed text never depends on one machine's config or on the date.
+export function reviewerRungFor(rung, { writerType = null, consequence = null, now } = {}) {
+  try {
+    if (!rung || !rung.model) return null;
+    const r = resolveRoute({
+      type: 'code-review', writer: { model: rung.model, effort: rung.effort || '' },
+      writerType: writerType || null, now,
+      ...(consequence ? { consequence, consequenceExplicit: true } : {}),
+    });
+    if (!r || r.model !== rung.model || (r.effort || null) === (rung.effort || null) || !r.effort) return null;
+    const to = rungFor(r.model, r.effort);
+    return to && to.agent !== rung.agent ? to : null;
+  } catch { return null; }
+}
+
 // The protocol as appended to a writer's BRIEF (not its definition): the
 // generated block without its file markers, under a line saying where it
 // came from, so the text a writer reads is the same wherever it lands.
-export function selfReviewBriefText(rung, sr = selfReviewConfig(), plugin = 'agent-companion') {
-  const body = selfReviewBlock(rung, sr, plugin).split('\n')
+export function selfReviewBriefText(rung, sr = selfReviewConfig(), plugin = 'agent-companion', opts = {}) {
+  const body = selfReviewBlock(rung, sr, plugin, reviewerRungFor(rung, opts)).split('\n')
     .filter((l) => l !== SELF_REVIEW_BEGIN && l !== SELF_REVIEW_END).join('\n');
   return '\n\n---\n(agent-companion: your definition does not carry the self-review protocol for this task type, so it is appended here from config/model-tiers.json `selfReview`.)\n\n' + body + '\n';
 }

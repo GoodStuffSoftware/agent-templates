@@ -1162,6 +1162,28 @@ function reviewerEffortCapFor(model, effort, { writerType = null, now } = {}) {
   return { effort: to.level };
 }
 
+// The operator's other exception to effort parity, the mirror of the cap
+// (config `reviewerEffortFloor`, empty as shipped; a user layer file sets it):
+// { "<model alias>": { effort, activeFrom?, exceptWriterTypes? } }. A review
+// on that model, other than a critical one (F1 sizes those), runs at LEAST at
+// `effort` even when its writer ran lower (a floor only raises; it never
+// lowers a higher writer's effort). Same
+// scheduling and writer-type exceptions as the cap. Returns { effort } or null.
+function reviewerEffortFloorFor(model, effort, { writerType = null, now } = {}) {
+  const floors = modelTiers().reviewerEffortFloor;
+  if (!isPlainObj(floors)) return null;
+  const alias = classifyModel(model).alias;
+  const fl = alias && isPlainObj(floors[alias]) ? floors[alias] : null;
+  if (!fl || !rolloutActive(fl.activeFrom, now)) return null;
+  const to = classifyEffort(fl.effort);
+  // A writer whose effort is not stated counts as below the floor (the model
+  // must take the floor's effort, which rules out one that takes none).
+  const cur = effort ? classifyEffort(effort) : { known: true, rank: -1 };
+  if (!to.known || !cur.known || cur.rank >= to.rank || !rankedEffortsFor(model).includes(to.level)) return null;
+  if (writerType && Array.isArray(fl.exceptWriterTypes) && fl.exceptWriterTypes.includes(writerType)) return null;
+  return { effort: to.level };
+}
+
 // Reviewer parity (see the banner): F3, then F4, F2 and F1, in that order.
 // Returns { model, effort, floorsApplied } or { refusal } when no reviewer
 // can be sized.
@@ -1248,6 +1270,20 @@ function parityFloors(r, { consequence, writer, now, writerType = null }) {
     if (cap) {
       floorsApplied.push({ floor: 'F3', capped: `effort ${effort} -> ${cap.effort} (reviewerEffortCap: a non-critical ${classifyModel(model).alias} review runs at most at ${cap.effort}, an exception to effort parity)` });
       effort = cap.effort;
+    }
+  }
+
+  // The operator's reviewer effort floor (config `reviewerEffortFloor`, see
+  // reviewerEffortFloorFor): a review on a floored model runs at least at the
+  // floor even when its writer ran lower. NON-critical only, like the cap: a
+  // critical review is sized by F1 below (opus at its effort floor), which a
+  // floor on a lower model would only restate. Placed after the cap, so a
+  // model named in both ends at the floor. Only a model that has an effort.
+  if (consequence !== 'critical') {
+    const fl = reviewerEffortFloorFor(model, effort, { writerType, now });
+    if (fl) {
+      floorsApplied.push({ floor: 'F3', raised: `effort ${effort || '(none)'} -> ${fl.effort} (reviewerEffortFloor: a ${classifyModel(model).alias} review runs at least at ${fl.effort}, an exception to effort parity)` });
+      effort = fl.effort;
     }
   }
 

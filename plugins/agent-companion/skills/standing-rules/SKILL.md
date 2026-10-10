@@ -115,7 +115,7 @@ the hook that evaluates them has a five-second timeout.
 ## Scheduling a rule or a routing row (`activeFrom`, 0.31.7)
 
 A rule in `standing-rules.json`, a row in the routing profile, or a
-`reviewerEffortCap` entry in the per-user `model-tiers.json` may carry
+`reviewerEffortCap` or `reviewerEffortFloor` entry in the per-user `model-tiers.json` may carry
 `activeFrom`: a zoned UTC timestamp (`"2026-10-12T08:00:00Z"`) or a change id
 looked up in `~/.claude/agent-companion/rollout.json`, one shared schedule of
 the form `{"<change-id>": "<ISO UTC timestamp>"}` (shared with the subagent
