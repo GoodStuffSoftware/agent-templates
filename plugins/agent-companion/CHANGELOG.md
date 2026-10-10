@@ -2,6 +2,19 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.6 — 2026-10-10
+
+Subagent context ceiling: at 150K tokens of context a subagent is nudged to write a checkpoint file and return. Operator approved ("adopt now", 2026-10-10); evidence `tasks/usage-why-2026-10-06/ceiling-detail.md` (C = 150K the best ceiling found; modelled saving about 4.2% of the weekly limit at the 10-02 volume, range 1.2-7.1%, the sign depending on what compaction costs). **Rollout-gated: shipped and installed, but it does nothing until 2026-10-14T08:00Z** (`rollout.json`, change id `context-ceiling`).
+
+- **The nudge.** `hooks/subagent-context.mjs` (PreToolUse, inside the subagent) reuses the context reading it already makes (the tail of the subagent's own transcript, no second read). First time the context is at or past `subagent_ceiling_tokens` (default 150000): one `additionalContext` nudge to stop new work, write a checkpoint file (goal, done, remaining steps, key paths, open findings) and return with the path and a proposed split of the rest. Again once, and only once, if it keeps growing past `subagent_ceiling_repeat_tokens` (175000). First seen past 175K: one nudge. Main sessions are untouched (no `agent_id`). Never blocks, denies or rewrites a call; a missing or corrupt transcript is silent. New `hooks/lib/context-ceiling.mjs`.
+- **Backstop kept.** The at-compaction wrap-up and the `subagent_context_notice_tokens` size notice are unchanged; if both apply, the two texts go out in one message.
+- **Gate.** `<state root>/rollout.json` is `{change-id: activeFrom UTC}`; the nudge is off until `context-ceiling` has passed. A missing file, missing id or unparseable timestamp is off. `AGENT_COMPANION_FAKE_NOW` moves the clock for tests. The quiet period burns no once-claim. A UTF-8 BOM in the file (PowerShell 5.1 writes one) is stripped, and a timestamp with no zone designator is read as UTC. A compaction with no request after it yet is not read as a big context.
+- **Log.** `telemetry/context-ceiling.jsonl`: UTC time, agent type, `agent_id`, context tokens, tier (`docs/TELEMETRY.md`), for the scout's daily count. Scout files untouched.
+- **Options.** `subagent_ceiling_tokens` (0 = off), `subagent_ceiling_repeat_tokens`.
+- **Lead side (outside the repo).** team-orchestration `references/harness-and-spawning.md`: on a checkpoint return, continue with a FRESH worker that reads the checkpoint file; never resume the old one.
+- **Tests.** New `tests/context-ceiling.test.mjs`: below 150K, the crossing, no repeat to 175K, second nudge past 175K, first seen late, main session, missing/corrupt transcript, never a deny, gate closed/open and its failure shapes, options, combination with the existing notice.
+- Reverse: set `subagent_ceiling_tokens` to 0, or remove `context-ceiling` from `rollout.json`; revert the commit to remove it.
+
 ## 0.31.5 — 2026-10-09
 
 Scout: Claude Code release watch, and a list of scout signals to suppress. **No routing, effort, model, guard or review-protocol change; no subagent-start token added (subagents get nothing new).** Source: a machine ran 13 releases behind (2.1.283 against 2.1.296) with nobody seeing the new features (Agent `effort` per spawn, a subagent `autoCompactWindow`, resume-cache fixes), because the scout only compared the installed version with its previous run; and `model_benchmark_suggested` repeated 163 times on a machine where the operator rule is no benchmark runs.

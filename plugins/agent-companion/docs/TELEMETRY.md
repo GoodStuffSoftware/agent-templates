@@ -311,6 +311,22 @@ compaction once per compaction).
 | `threshold` | number | `subagent_context_notice_tokens` as set |
 | `trigger`, `pre_tokens` | string, number; `compaction` only | the boundary's `compactMetadata.trigger` (`auto` or `manual`) and the context it held before compacting |
 
+### `context-ceiling.jsonl` — one record per context-ceiling nudge
+
+Written by `hooks/subagent-context.mjs` each time it tells a subagent to write a checkpoint file and return (`subagent_ceiling_tokens`, default 150000; once more past `subagent_ceiling_repeat_tokens`, default 175000). Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | string | UTC time of the nudge (ISO 8601) |
+| `session_id` | string | the lead's session |
+| `agent_type` | string | the subagent's type |
+| `agent_id` | string | the subagent |
+| `model` | string or null | model of the subagent's latest request |
+| `tokens` | number | the subagent's context size at its latest request (input + cache read + cache write) |
+| `tier` | number | 1 first nudge, 2 the second and last |
+| `ceiling`, `repeat` | number | the two thresholds as set |
+
 ### `bash-tail.jsonl` — the Bash output tail
 
 Three kinds of row, told apart by `event`. Read with `node scripts/bash-tail-report.mjs`.

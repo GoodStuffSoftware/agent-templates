@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.5",
+  "version": "0.31.6",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -496,6 +496,18 @@
       "title": "Subagent context notice: tokens",
       "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens, or the subagent has just compacted, the subagent is told once to finish the current step, return its results and say what is left, and the lead is told when it stops. Nothing is ever blocked. 0 turns it off.",
       "default": 300000
+    },
+    "subagent_ceiling_tokens": {
+      "type": "number",
+      "title": "Subagent context ceiling: tokens",
+      "description": "Advisory only. The first time a subagent's own context reaches this many tokens, the same PreToolUse hook as subagent_context_notice_tokens tells it ONCE to write a checkpoint file (goal, what is done, remaining steps, key paths, open findings) and return, giving the file path and a proposed split of the remaining work in its final message; the lead then continues with a FRESH worker that reads the file. Nothing is ever blocked. It does nothing until the rollout schedule (rollout.json in the agent-companion state dir, id context-ceiling) says it is active. 0 turns it off.",
+      "default": 150000
+    },
+    "subagent_ceiling_repeat_tokens": {
+      "type": "number",
+      "title": "Subagent context ceiling: second notice tokens",
+      "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. 0 turns the second notice off.",
+      "default": 175000
     }
   },
   "displayName": "Agent Companion",

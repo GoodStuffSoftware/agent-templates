@@ -8,6 +8,12 @@
 // callerIsSubagent, lib/context.mjs), so the lead exits at once. Never blocks
 // or denies: the only output is additionalContext.
 //
+// The same hook carries the 150K context CEILING (lib/context-ceiling.mjs): the
+// first time the subagent's context is at or past subagent_ceiling_tokens it is
+// told to write a checkpoint file and return (again once past
+// subagent_ceiling_repeat_tokens). Gated by the rollout schedule; reuses the
+// transcript reading below, so it adds no read. Advice only, never a deny.
+//
 // Each firing writes one row to telemetry subagent-context.jsonl (phase
 // "mid-run") and to the agent's events file, which hooks/runaway-check.mjs
 // reads at SubagentStop to tell the lead.
@@ -17,16 +23,22 @@ import { resolveAgentTranscript } from './lib/runaway.mjs';
 import {
   CONTEXT_DEFAULT_TOKENS, readContextSignal, claimSignals, recordEvent, subagentNoticeText, pruneContextState,
 } from './lib/subagent-context.mjs';
+import {
+  CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
+} from './lib/context-ceiling.mjs';
 
 try {
   const p = readStdin();
   if (!callerIsSubagent(p)) passthrough();
   const threshold = opt('subagent_context_notice_tokens', CONTEXT_DEFAULT_TOKENS);
-  if (!(threshold > 0)) passthrough();
+  const ceiling = opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS);
+  const repeat = opt('subagent_ceiling_repeat_tokens', CEILING_REPEAT_DEFAULT_TOKENS);
+  if (!(threshold > 0) && !(ceiling > 0)) passthrough();
 
   const sig = readContextSignal(resolveAgentTranscript(p));
-  const kinds = claimSignals(p.agent_id, sig, threshold, { fresh: true });
-  if (!kinds.length) passthrough();
+  const kinds = threshold > 0 ? claimSignals(p.agent_id, sig, threshold, { fresh: true }) : [];
+  const nudge = ceilingCheck(p, sig, { ceiling, repeat });
+  if (!kinds.length && !nudge) passthrough();
 
   const at = new Date().toISOString();
   for (const kind of kinds) {
@@ -38,9 +50,11 @@ try {
     appendLog('subagent-context.jsonl', row);
     recordEvent(p.agent_id, row);
   }
+  if (nudge) appendLog(CEILING_LOG, nudge.row);
   pruneContextState();
+  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : ''].filter(Boolean).join('\n');
   process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: subagentNoticeText(kinds, threshold) },
+    hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: text },
   }));
   process.exit(0);
 } catch { /* fail open */ }
