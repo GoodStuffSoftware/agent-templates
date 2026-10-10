@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.8 — 2026-10-10
+
+- **`rules test` judges a scheduled rule by its state now.** It listed a rule written as `enabled:false` + `activeFrom` + `after:{enabled:true}` as "disabled" even after its date, while `rules list` and the hooks (which inject it) were right. It now uses the same effective state; pinned by `rollout-schedule-edges.test.mjs`.
+
 ## 0.31.7 — 2026-10-10
 
 Scheduled config (`activeFrom`), the machinery behind four operator-adopted routing changes that switch on one per day, plus three noisy `PreToolUse:Agent` messages removed. **Nothing changes at install: every new key is empty or unset as shipped. The shipped behaviour changes are message text and one inert wording change in the self-review block (below).**

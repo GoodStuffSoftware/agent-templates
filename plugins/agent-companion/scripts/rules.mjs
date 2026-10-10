@@ -178,7 +178,7 @@ try {
       console.log('(run with no --sessionId flag: a state gate like delegation-drift always reads as not-yet-drifted here — this is deliberate, see hooks/lib/rules.mjs)');
       for (const r of candidates) {
         let verdict;
-        if (!r.enabled) verdict = 'disabled';
+        if (!effectiveRule(r).enabled) verdict = 'disabled'; // as of now: a scheduled rule is judged by its activeFrom/after
         else if (matchedIds.has(r.id)) verdict = 'MATCH';
         else if (r.scope === 'user-prompt' || r.scope === 'spawn') verdict = 'no text match (or gated off)';
         else verdict = 'gated off';

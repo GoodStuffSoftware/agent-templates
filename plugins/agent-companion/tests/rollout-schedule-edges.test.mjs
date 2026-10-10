@@ -5,6 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { makeFixture } from './helpers.mjs';
 
 const fx = makeFixture();
@@ -65,6 +66,21 @@ test('a new rule written as enabled:false + after:{enabled:true} is off before t
   // Without activeFrom/after (an older reader) the stored form is simply off.
   writeFileSync(rules.rulesPath(), JSON.stringify([{ id: 'sched-form', scope: 'session-start', then: 'FORM-TEXT', enabled: false }]));
   assert.ok(!sessionStart().includes('FORM-TEXT'));
+  rmSync(rules.rulesPath(), { force: true });
+});
+
+test('`rules test` judges a scheduled rule by its state now, as `rules list` and the hooks do', () => {
+  const RULE = { id: 'sched-cli', scope: 'spawn', when: 'SCHED-CLI-BRIEF', then: 'CLI-TEXT', enabled: false, activeFrom: 'sched-cli', after: { enabled: true } };
+  writeFileSync(rules.rulesPath(), JSON.stringify([RULE]));
+  const runTest = () => execFileSync(process.execPath, [join(import.meta.dirname, '..', 'scripts', 'rules.mjs'), 'test', 'SCHED-CLI-BRIEF', '--scope', 'spawn'], {
+    env: { ...process.env, AGENT_COMPANION_STATE_DIR: fx.stateDir }, encoding: 'utf8', windowsHide: true,
+  });
+  setRollout({ 'sched-cli': FUTURE });
+  assert.match(runTest(), /disabled\s+sched-cli/);
+  setRollout({ 'sched-cli': PAST });
+  const out = runTest();
+  assert.match(out, /MATCH\s+sched-cli/);
+  assert.ok(out.includes('CLI-TEXT'));
   rmSync(rules.rulesPath(), { force: true });
 });
 
