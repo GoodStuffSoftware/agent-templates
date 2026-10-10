@@ -307,6 +307,9 @@ function compileRule(rule) {
     // Scheduling (see effectiveRule): kept as authored so writeRules can
     // round-trip it; applied at match time, never baked in here.
     activeFrom: typeof rule.activeFrom === 'string' && rule.activeFrom.trim() ? rule.activeFrom.trim() : null,
+    // Present but unusable (a number, "", true, an array): the rule must NOT run
+    // as if unscheduled (effectiveRule keeps it off). null means no schedule.
+    scheduleInvalid: rule.activeFrom !== undefined && rule.activeFrom !== null && !(typeof rule.activeFrom === 'string' && rule.activeFrom.trim()),
     after: rule.after && typeof rule.after === 'object' && !Array.isArray(rule.after) ? rule.after : null,
   };
 }
@@ -322,6 +325,7 @@ function compileRule(rule) {
 // written as the current behaviour plus an `after`. Returns the rule to match
 // on; the input is never mutated.
 export function effectiveRule(r) {
+  if (r && r.scheduleInvalid) return { ...r, enabled: false };
   if (!r || !r.activeFrom) return r;
   const reached = rolloutActive(r.activeFrom);
   if (!r.after) return reached ? r : { ...r, enabled: false };
@@ -392,8 +396,10 @@ export function writeRules(cfg) {
     const DIFF_KEYS = ['enabled', 'scope', 'when', 'then', 'gate', 'note', 'activeFrom', 'after'];
     const out = [];
 
-    for (const r of rules) {
-      if (!r || typeof r !== 'object' || typeof r.id !== 'string' || !r.id) continue;
+    for (const r0 of rules) {
+      if (!r0 || typeof r0 !== 'object' || typeof r0.id !== 'string' || !r0.id) continue;
+      // A rule whose activeFrom was unusable is written OFF, never as if unscheduled.
+      const r = r0.scheduleInvalid ? { ...r0, enabled: false } : r0;
       const base = builtinById.get(r.id);
       if (base) {
         const diff = { id: r.id };

@@ -201,7 +201,7 @@
     "isolation_demotion_notice": {
       "type": "boolean",
       "title": "Isolation demotion notice",
-      "description": "Record gate2_fired in the spawn telemetry row when a spawn passes BOTH name and isolation. Since 0.31.5 this no longer shows the caller a message: the old warning said such a spawn is not addressable by its name, which is wrong on desktop, where every named spawn is a subagent whatever its isolation. Telemetry only, never blocks, effectively free to compute.",
+      "description": "Record gate2_fired in the spawn telemetry row when a spawn passes BOTH name and isolation. Since 0.31.7 this no longer shows the caller a message: the old warning said such a spawn is not addressable by its name, which is wrong on desktop, where every named spawn is a subagent whatever its isolation. Telemetry only, never blocks, effectively free to compute.",
       "default": true
     },
     "shared_tree_notice": {

@@ -1,4 +1,4 @@
-// 0.31.5: three noisy PreToolUse:Agent messages are gone, and the fix changes
+// 0.31.7: three noisy PreToolUse:Agent messages are gone, and the fix changes
 // MESSAGES only, never a deny/ask decision or the text appended to a brief.
 //   1. "agent-companion (self-review): ... does not carry the protocol in its
 //      definition, so it was appended to the brief" -- the append stays.

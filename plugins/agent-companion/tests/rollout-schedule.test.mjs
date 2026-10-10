@@ -1,4 +1,4 @@
-// Scheduled config (0.31.5): a routing-profile row, a standing rule or a
+// Scheduled config (0.31.7): a routing-profile row, a standing rule or a
 // reviewerEffortCap entry may carry `activeFrom` (a zoned UTC timestamp or a
 // change id looked up in <stateRoot>/rollout.json). Until it is reached the
 // config behaves as today; from that moment the change applies, with nobody
@@ -38,15 +38,15 @@ test('rollout helpers: no spec is active; a timestamp and an id resolve; anythin
   assert.equal(ctx.rolloutActive('2026-10-10T08:00:00Z', T0), false);
   assert.equal(ctx.rolloutActive('2026-10-10T08:00:00Z', T1), true);
   assert.equal(ctx.rolloutActive('2026-10-10T10:00:00+02:00', T1), true, 'an offset timestamp is the same instant');
-  // No zone, or not a date: not active.
-  assert.equal(ctx.rolloutActive('2026-10-10T08:00:00', '2030-01-01T00:00:00Z'), false);
-  assert.equal(ctx.rolloutActive('2026-13-45T99:00:00Z', '2030-01-01T00:00:00Z'), false);
+// No zone reads as UTC (the same as the context-ceiling hook's reader of the  // same file); an impossible date or time does not parse and is never active.  assert.equal(ctx.rolloutActive('2026-10-10T08:00:00', T0), false);  assert.equal(ctx.rolloutActive('2026-10-10T08:00:00', T1), true);  assert.equal(ctx.rolloutActive('2026-13-45T99:00:00Z', '2030-01-01T00:00:00Z'), false);  assert.equal(ctx.rolloutActive('2026-02-31T08:00:00Z', '2030-01-01T00:00:00Z'), false, 'Feb 31 does not roll into March');  assert.equal(ctx.rolloutActive('2026-10-10T24:00:00Z', '2030-01-01T00:00:00Z'), false);
   // An id with no file: not active, and no throw.
   assert.equal(ctx.rolloutActive('some-change', '2030-01-01T00:00:00Z'), false);
-  setRollout({ 'some-change': '2026-10-10T08:00:00Z', 'bad-zone': '2026-10-10T08:00:00', 'not-a-string': 5 });
+  setRollout({ 'some-change': '2026-10-10T08:00:00Z', 'zone-less': '2026-10-10T08:00:00', 'bad-day': '2026-02-31T08:00:00Z', 'not-a-string': 5 });
   assert.equal(ctx.rolloutActive('some-change', T0), false);
   assert.equal(ctx.rolloutActive('some-change', T1), true);
-  assert.equal(ctx.rolloutActive('bad-zone', '2030-01-01T00:00:00Z'), false, 'a zone-less entry is ignored');
+  assert.equal(ctx.rolloutActive('zone-less', T0), false);
+  assert.equal(ctx.rolloutActive('zone-less', T1), true, 'a zone-less entry is UTC');
+  assert.equal(ctx.rolloutActive('bad-day', '2030-01-01T00:00:00Z'), false);
   assert.equal(ctx.rolloutActive('not-a-string', '2030-01-01T00:00:00Z'), false);
   assert.equal(ctx.rolloutActive('unlisted', '2030-01-01T00:00:00Z'), false);
   // Garbage file: not active, no throw.
@@ -96,7 +96,11 @@ test('profile row: base until activeFrom, then the `after` overlay (sonnet/high 
 test('profile row: activeFrom/after are accepted by the validator, bad shapes are not', () => {
   setRollout({ x: '2026-10-10T08:00:00Z' });
   writeProfile(profile({ 'bounded-feature': row({ activeFrom: 'x', after: { effort: 'medium' } }) }));
-assert.equal(ctx.resolveRoute({ type: 'bounded-feature', now: T1 }).profileStatus, 'ok');  assert.deepEqual(rp.rowShapeErrors(row({ activeFrom: 'x', after: { effort: 'medium' } })), []);  assert.ok(rp.rowShapeErrors(row({ activeFrom: 5 })).some((e) => /activeFrom/.test(e)));  assert.ok(rp.rowShapeErrors(row({ activeFrom: '  ' })).some((e) => /activeFrom/.test(e)));  assert.ok(rp.rowShapeErrors(row({ activeFrom: 'x', after: 'medium' })).some((e) => /after/.test(e)));
+  assert.equal(ctx.resolveRoute({ type: 'bounded-feature', now: T1 }).profileStatus, 'ok');
+  assert.deepEqual(rp.rowShapeErrors(row({ activeFrom: 'x', after: { effort: 'medium' } })), []);
+  assert.ok(rp.rowShapeErrors(row({ activeFrom: 5 })).some((e) => /activeFrom/.test(e)));
+  assert.ok(rp.rowShapeErrors(row({ activeFrom: '  ' })).some((e) => /activeFrom/.test(e)));
+  assert.ok(rp.rowShapeErrors(row({ activeFrom: 'x', after: 'medium' })).some((e) => /after/.test(e)));
   rp._resetProfileCache();
 });
 

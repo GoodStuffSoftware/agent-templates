@@ -36,7 +36,7 @@
 //         waivesFloor: null | "elevated",  // honoured only when source is operator-observed
 //         note: string | null,             // local free text; never logged, never exported
 //         provenance: object | null,       // as the ADR §1 block; null for operator rows
-//         activeFrom?: string,             // optional (0.31.5): a zoned UTC timestamp or a rollout.json change id
+//         activeFrom?: string,             // optional (0.31.7): a zoned UTC timestamp or a rollout.json change id
 //         after?: object                   // optional: fields (model, effort, cacheTtl) laid over the row once activeFrom is reached
 //     } }
 //   }

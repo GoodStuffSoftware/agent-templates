@@ -19,7 +19,7 @@
 
 import { readFileSync } from 'node:fs';
 import {
-  SCOPES, RULES_VERSION, rulesPath, readRules, writeRules, matchRules, renderRules,
+  SCOPES, RULES_VERSION, rulesPath, readRules, writeRules, matchRules, renderRules, effectiveRule,
 } from '../hooks/lib/rules.mjs';
 
 const argv = process.argv.slice(2);
@@ -66,9 +66,11 @@ try {
       console.log(`Standing rules (${rulesPath()}):`);
       for (const r of rules) {
         const cond = (r.scope === 'always' || r.scope === 'session-start') ? '(unconditional)' : (r.when || '(none)');
+        // The state it has RIGHT NOW: a rule scheduled for later shows off (or
+        // its stored state, with an `after`) until its activeFrom is reached.
         console.log(
-          `  ${r.enabled ? 'on ' : 'off'}  ${r.id.padEnd(24)} scope=${r.scope.padEnd(13)} `
-          + `builtin=${r.builtin ? 'yes' : 'no '} ${r.gate ? `gate=${r.gate} ` : ''}${r.activeFrom ? `activeFrom=${r.activeFrom}${r.after ? '(+after)' : ''} ` : ''}`
+          `  ${effectiveRule(r).enabled ? 'on ' : 'off'}  ${r.id.padEnd(24)} scope=${r.scope.padEnd(13)} `
+          + `builtin=${r.builtin ? 'yes' : 'no '} ${r.gate ? `gate=${r.gate} ` : ''}${r.scheduleInvalid ? 'activeFrom=(unusable value: rule held off) ' : ''}${r.activeFrom ? `activeFrom=${r.activeFrom}${r.after ? '(+after)' : ''} ` : ''}`
           + `when=${truncate(cond, 40)}  then="${truncate(r.then, 60)}"`,
         );
       }

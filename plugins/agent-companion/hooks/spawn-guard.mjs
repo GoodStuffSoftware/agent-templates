@@ -997,7 +997,7 @@ try {
     gate1Action = gate1Mode === 'block' ? (gate1Justified ? 'none' : 'block') : 'warn';
   }
 
-  // Gate 2: telemetry only (0.31.5). It used to tell the caller that a spawn
+  // Gate 2: telemetry only (0.31.7). It used to tell the caller that a spawn
   // passing both a name and isolation is an ordinary subagent, not an
   // addressable teammate. That is wrong on desktop, where every named spawn is
   // a subagent that background peers can still message by name, and this hook
@@ -1676,7 +1676,7 @@ try {
     writerInferNote,
     writerEffortNote,
     selfReviewNote,
-    // (0.31.5) No lead-facing message when the protocol is appended to a brief:
+    // (0.31.7) No lead-facing message when the protocol is appended to a brief:
     // it fired on every writer spawn and the lead can do nothing with it. The
     // append itself (selfReviewInjected, withAdditions) is unchanged.
     writerBelowCallerNote,

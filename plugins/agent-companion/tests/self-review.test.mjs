@@ -542,7 +542,7 @@ test('a self-reviewing TYPE on a ladder rung WITHOUT the block gets the generate
     assert.doesNotMatch(r.prompt, /self-review protocol (BEGIN|END)/, 'file markers stay out of a brief');
     assert.ok(r.prompt.indexOf('Self-review before you return') < r.prompt.indexOf('Put your ENTIRE report') || !r.prompt.includes('Put your ENTIRE report'),
       'task instructions before the reporting contract');
-    // 0.31.5: the lead is not told about the append (the brief still gets it).
+    // 0.31.7: the lead is not told about the append (the brief still gets it).
     assert.doesNotMatch(r.msg || '', /does not carry the protocol in its definition/);
     assert.doesNotMatch(r.msg || '', /self-review\)/);
 

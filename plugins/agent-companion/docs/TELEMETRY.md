@@ -213,7 +213,7 @@ whose.
 | `gate1_applicable` | boolean | true when the caller is the main session (`caller_is_subagent` false) and `run_in_background` is not `true` — the raw population Gate 1 considers, before the exemption |
 | `gate1_exempt` | boolean | applicable, but excused: the resolved `model` (post-autofill) classifies as the plugin's own cheapest known tier (haiku) per `config/model-tiers.json` |
 | `gate1_action` | `none` \| `warn` \| `block` | what THIS spawn actually got, after mode and exemption: `none` when not applicable, exempt, mode is `off`, or a `block`-mode spawn carried a `FOREGROUND:` justification |
-| `gate2_fired` | boolean | `name` and `isolation` were both set. Telemetry only since 0.31.5: the lead-facing notice ("an ordinary subagent, not a teammate") was wrong on desktop and is gone |
+| `gate2_fired` | boolean | `name` and `isolation` were both set. Telemetry only since 0.31.7: the lead-facing notice ("an ordinary subagent, not a teammate") was wrong on desktop and is gone |
 | `gate3_fired` | boolean | neither `name` nor `isolation` was set (after namegate's own autofill, if any — see `gate4_action`) — this spawn shares the lead's own working tree and has no address to re-brief it later |
 | `gate4_applicable` | boolean | main-session caller, `run_in_background` explicitly `true`, no `name`, and `namegate` is on — the population namegate (track "namegate", operator decision 2026-09-25) considers |
 | `gate4_action` | `none` \| `hint` \| `autofill` | what THIS spawn actually got: `none` when not applicable; `hint` when applicable but `namegate_autofill` is off; `autofill` when the guard set `name` via `updatedInput` |

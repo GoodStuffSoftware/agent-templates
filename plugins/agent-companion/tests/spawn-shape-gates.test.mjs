@@ -200,7 +200,7 @@ test('gate1: mode "block" allows a spawn whose brief carries a FOREGROUND justif
   }
 });
 
-test('gate2 (telemetry only since 0.31.5): name+isolation records gate2_fired but sends NO lead-facing message and changes no decision', () => {
+test('gate2 (telemetry only since 0.31.7): name+isolation records gate2_fired but sends NO lead-facing message and changes no decision', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const payload = {

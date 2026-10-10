@@ -721,19 +721,34 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 // or a CHANGE ID looked up in <stateRoot>/rollout.json, one shared schedule
 // whose format is {"<change-id>": "<ISO-8601 UTC timestamp>"}. Several changes
 // then roll out on a staggered schedule that lives in one file the operator
-// (and the scout's daily checkup) can read. A timestamp must carry its zone
-// (Z or an offset); a change id the file does not name, a file that is
+// (and the scout's daily checkup) can read. A timestamp is UTC: "Z", an offset,
+// or no zone at all (read as UTC, the same as the context-ceiling hook's reader
+// of this same file in lib/context-ceiling.mjs); an impossible date such as
+// 2026-02-31 does not parse. A change id the file does not name, a file that is
 // missing or unreadable, or a timestamp that does not parse reads as NOT YET
 // ACTIVE, so a typo or a deleted schedule leaves today's behaviour in place
 // rather than switching a change on early. No `activeFrom` at all means
-// active, so existing config is unchanged.
+// active, so existing config is unchanged. AGENT_COMPANION_FAKE_NOW moves the
+// clock when no `now` is passed (tests and sandbox before/after runs).
 export function rolloutPath() {
   return join(stateRootPath(), 'rollout.json');
 }
-const ZONED_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+const ISO_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i;
+// ms since epoch for a rollout timestamp, or null when it is not one.
+function parseRolloutTime(v) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  const m = ISO_UTC.exec(s);
+  if (!m) return null;
+  const [, Y, Mo, D, h, mi, sec, zone] = m;
+  const day = new Date(Date.UTC(+Y, +Mo - 1, +D));
+  if (day.getUTCFullYear() !== +Y || day.getUTCMonth() !== +Mo - 1 || day.getUTCDate() !== +D) return null;
+  if (+h > 23 || +mi > 59 || (sec !== undefined && +sec > 59)) return null;
+  const ms = Date.parse(zone ? s : `${s}Z`);
+  return Number.isNaN(ms) ? null : ms;
+}
 let _rollout = { key: '', table: {} };
-// The schedule as {id: ISO string}, only entries whose value is a zoned
-// timestamp that parses. Never throws; cached per (mtime, size).
+// The schedule as {id: ms}, only entries whose value is a valid timestamp.
+// Never throws; cached per (mtime, size).
 export function rolloutTable() {
   const file = rolloutPath();
   try {
@@ -744,7 +759,8 @@ export function rolloutTable() {
     const table = {};
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
       for (const [id, v] of Object.entries(raw)) {
-        if (typeof v === 'string' && ZONED_ISO.test(v.trim()) && !Number.isNaN(Date.parse(v.trim()))) table[id] = v.trim();
+        const ms = parseRolloutTime(v);
+        if (ms !== null) table[id] = ms;
       }
     }
     _rollout = { key, table };
@@ -758,17 +774,21 @@ export function rolloutTable() {
 export function rolloutStartMs(spec) {
   if (typeof spec !== 'string' || !spec.trim()) return null;
   const s = spec.trim();
-  const iso = ZONED_ISO.test(s) ? s : rolloutTable()[s];
-  const ms = iso ? Date.parse(iso) : NaN;
-  return Number.isNaN(ms) ? null : ms;
+  const direct = parseRolloutTime(s);
+  if (direct !== null) return direct;
+  if (Object.prototype.hasOwnProperty.call(rolloutTable(), s)) return rolloutTable()[s];
+  return null;
 }
 // True when `spec` has been reached at `now` (Date, ISO string or epoch ms;
-// the real clock when omitted). An absent spec (undefined, null, '') is
-// active; a present one that cannot be resolved is not.
+// the real clock, or AGENT_COMPANION_FAKE_NOW, when omitted). An absent spec
+// (undefined, null, '') is active; a present one that cannot be resolved is not.
 export function rolloutActive(spec, now) {
   if (spec === undefined || spec === null || spec === '') return true;
   const ms = rolloutStartMs(spec);
-  return ms !== null && clockDate(now).getTime() >= ms;
+  if (ms === null) return false;
+  let at = now;
+  if ((at === undefined || at === null) && process.env.AGENT_COMPANION_FAKE_NOW) at = process.env.AGENT_COMPANION_FAKE_NOW;
+  return clockDate(at).getTime() >= ms;
 }
 
 // --- Layer 1: the per-user routing profile --------------------------------
@@ -1003,15 +1023,32 @@ function profileLayer({ type, state, typeDef, consequence, now }) {
   // behaviour until `activeFrom` is reached (see "Rollout schedule"), and
   // `after` is laid over it from then on. An older reader ignores both keys,
   // so it never switches early.
-  const raw = isPlainObj(stored) && stored.activeFrom !== undefined && isPlainObj(stored.after) && rolloutActive(stored.activeFrom, now)
-    ? { ...stored, ...stored.after }
-    : stored;
-  const row = isPlainObj(raw) && typeof raw.effort === 'string' && raw.effort !== raw.effort.toLowerCase()
-    ? { ...raw, effort: raw.effort.toLowerCase() }
-    : raw;
-  if (isPlainObj(row) && row.state === 'retired') return { ...base, row, status: 'retired', note: `row retired (profile rev ${state.revision})` };
-  const refusal = profileRowRefusal(type, row, { typeDef, consequence, now, mode: 'read' });
-  return { ...base, row, status: refusal ? 'refused' : 'eligible', refusal, note: '' };
+  const scheduled = isPlainObj(stored) && stored.activeFrom !== undefined;
+  const reached = scheduled ? rolloutActive(stored.activeFrom, now) : true;
+  // A scheduled row with no `after` is a row that does not exist yet.
+  if (scheduled && !isPlainObj(stored.after) && !reached) {
+    return { ...base, status: 'absent', note: `profile rev ${state.revision} row for ${type} starts at ${stored.activeFrom}; not yet active` };
+  }
+  const lower = (r) => (isPlainObj(r) && typeof r.effort === 'string' && r.effort !== r.effort.toLowerCase()
+    ? { ...r, effort: r.effort.toLowerCase() }
+    : r);
+  const judge = (r) => {
+    if (isPlainObj(r) && r.state === 'retired') return { row: r, status: 'retired', refusal: '', note: `row retired (profile rev ${state.revision})` };
+    const refusal = profileRowRefusal(type, r, { typeDef, consequence, now, mode: 'read' });
+    return { row: r, status: refusal ? 'refused' : 'eligible', refusal, note: '' };
+  };
+  if (scheduled && reached && isPlainObj(stored.after)) {
+    // `activeFrom` and `after` themselves are never overlaid. An overlay that
+    // makes the row unusable (a model the table refuses, a bad effort, a
+    // retired state) is not allowed to swap the route: the stored row stays
+    // and the note says why.
+    const merged = judge(lower({ ...stored, ...stored.after, activeFrom: stored.activeFrom, after: stored.after }));
+    // (A scheduled `state: "retired"` is a deliberate retirement and applies.)
+    if (merged.status !== 'refused') return { ...base, ...merged };
+    const kept = judge(lower(stored));
+    return { ...base, ...kept, note: `scheduled overlay (after) not applied: ${merged.refusal}; the stored row was used` };
+  }
+  return { ...base, ...judge(lower(stored)) };
 }
 
 function routeLabelOf(model, effort) {
@@ -1202,7 +1239,12 @@ function parityFloors(r, { consequence, writer, now, writerType = null }) {
   // the cap even when its writer ran higher. Placed before F1, which then
   // raises a critical review as usual (the cap never applies to one anyway).
   if (consequence !== 'critical') {
-    const cap = reviewerEffortCapFor(model, effort, { writerType, now });
+    let cap = reviewerEffortCapFor(model, effort, { writerType, now });
+    // An elevated change keeps its own effort floor: the cap stops there.
+    const elevFloor = consequence === 'elevated' ? (cfg.consequence || {}).elevated?.effortFloor : null;
+    if (cap && elevFloor && classifyEffort(elevFloor).known && classifyEffort(cap.effort).rank < classifyEffort(elevFloor).rank) {
+      cap = classifyEffort(elevFloor).rank >= classifyEffort(effort).rank ? null : { effort: classifyEffort(elevFloor).level };
+    }
     if (cap) {
       floorsApplied.push({ floor: 'F3', capped: `effort ${effort} -> ${cap.effort} (reviewerEffortCap: a non-critical ${classifyModel(model).alias} review runs at most at ${cap.effort}, an exception to effort parity)` });
       effort = cap.effort;
