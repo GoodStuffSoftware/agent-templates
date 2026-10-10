@@ -318,7 +318,7 @@ function retirementNotice(rung, total) {
     : 'no staged replacement';
   return {
     prefix: `RETIRING (no sooner than ${tier.retiresAfter}): rung ${rung.rung}/${total}`,
-    tail: `Routing falls back to ${fallback ? fallback.agent : 'no staged replacement'} once tiers.${rung.model}.retired is true.`,
+    tail: `Falls back to ${fallback ? fallback.agent : 'no staged replacement'} once retired.`,
   };
 }
 
@@ -330,7 +330,7 @@ function generatedAgentDescription(rung) {
   const total = ladderRungs().length;
   // A variant is not a rung: no routing claim to verify, only what it is.
   if (rung.variant) {
-    return `${role} (${rung.model}${rung.effort ? '/' + rung.effort : ''}). Not a ladder rung: the ac-* agent with browser tools; /ac routing.`;
+    return `${role} (${rung.model}${rung.effort ? '/' + rung.effort : ''}). Not a rung; browser tools.`;
   }
   const types = typesForRung(rung);
   // typesForRung reads the SHIPPED table (profile: false), so these lists are
@@ -338,15 +338,14 @@ function generatedAgentDescription(rung) {
   // operator's routing profile too, and a description cannot see that (it is
   // generated at build time and committed), so each one says where it stops.
   // Short on purpose: every agent description is paid for at the start of
-  // every session and every subagent.
-  const suffix = types.length
-    ? `Base default for: ${types.join(', ')}; profile may differ (/ac routing).`
-    : 'Not a base default; profile may differ (/ac routing).';
+  // every session and every subagent. A rung that is no type's base default
+  // makes no claim, so it carries no suffix and no caveat.
+  const suffix = types.length ? `Base default for: ${types.join(', ')}; profile may differ.` : '';
   const tier = (cfg.tiers || {})[rung.model] || {};
   const noEffort = Array.isArray(tier.efforts) && tier.efforts.length === 0 ? ' No effort parameter.' : '';
   const ret = retirementNotice(rung, total);
-  if (ret) return `${ret.prefix} — ${role}.${noEffort} ${suffix} ${ret.tail}`;
-  return `Rung ${rung.rung}/${total}: ${role}. ${suffix}`;
+  if (ret) return [`${ret.prefix} — ${role}.${noEffort}`, suffix, ret.tail].filter(Boolean).join(' ');
+  return `Rung ${rung.rung}/${total}: ${role}.${suffix ? ' ' + suffix : ''}`;
 }
 
 // Overridable only for tests — same pattern as AGENT_COMPANION_HOME_OVERRIDE

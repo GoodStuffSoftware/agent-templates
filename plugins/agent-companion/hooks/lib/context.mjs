@@ -1993,9 +1993,14 @@ const BROWSER_BRIEF = new RegExp([
   String.raw`\bdesktop (?:ui|automation)\b`,
 ].join('|'), 'i');
 const DROPPED_BRIEF = /mcp__(?:visualize|terminal|ccd_session)(?:__|\b)|\b(?:publish|update|create) (?:an |the )?Artifact\b|\bArtifact tool\b|\bshow_widget\b/i;
+// A brief that asks the worker to load a skill: the ladder workers have no Skill
+// tool (config ladderTools.keepOn.Skill), so the brief must name the SKILL.md
+// path instead. Narrow on purpose: an instruction to use the tool, or "invoke/load/use <name> skill"
+// (name optionally in backticks or quotes); prose that says a worker has no Skill tool does not match.
+const SKILL_BRIEF = /\b(?:use|call|invoke) the Skill tool\b|\bSkill\(|\b(?:invoke|load|use) (?:the )?[`"']?(?!(?:the|a|an|this|that|any|your|each|one|no|its)\b)[\w:.-]+[`"']? skill\b/i;
 export function briefNeedsDroppedTools(brief) {
   const b = String(brief || '');
-  return { browser: BROWSER_BRIEF.test(b), other: DROPPED_BRIEF.test(b) };
+  return { browser: BROWSER_BRIEF.test(b), other: DROPPED_BRIEF.test(b), skill: SKILL_BRIEF.test(b) };
 }
 
 // This plugin's own agents/ directory — the copy of the plugin this code is

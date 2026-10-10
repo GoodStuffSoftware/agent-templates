@@ -44,6 +44,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson,
   writeJsonAtomic,
@@ -54,6 +55,7 @@ import {
   claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent, routedRung, routeLayerTag,
   briefNeedsDroppedTools, ladderVariants, pluginName,
 } from './lib/context.mjs';
+
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue, BRIEF_ROLES } from './lib/brief-directives.mjs';
 import {
@@ -66,6 +68,16 @@ import { matchRules, renderRules } from './lib/rules.mjs';
 import {
   buildCandidateName, sessionSpawnNames, reserveUniqueName, buildNamegateBrief,
 } from './lib/namegate.mjs';
+
+// The recommender and the setup SKILL.md as paths a worker can use from any directory: the guard's
+// messages reach subagents (a worker spawning its reviewer), whose cwd is the
+// project, so a bare `scripts/recommend.mjs` would not resolve.
+const SETUP_SKILL_FILE = (() => {
+  try { return join(dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'setup', 'SKILL.md').replace(/\\/g, '/'); } catch { return 'skills/setup/SKILL.md'; }
+})();
+const RECOMMEND_CMD = (() => {
+  try { return 'node "' + join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'recommend.mjs').replace(/\\/g, '/') + '"'; } catch { return 'node scripts/recommend.mjs'; }
+})();
 
 // Let the spawn through — optionally saying something to the user, and/or
 // rewriting the tool input (`updatedInput` is how a PreToolUse hook fills in a
@@ -607,7 +619,7 @@ try {
       // A ladder worker no longer carries the full tool set (its frontmatter
       // disallows Artifact, the desktop-only servers and the browser), so a
       // brief that names one of those keeps its general-purpose spawn.
-      const toolsEquivalent = (!origType || origType === 'general-purpose') && !neededTools.browser && !neededTools.other;
+      const toolsEquivalent = (!origType || origType === 'general-purpose') && !neededTools.browser && !neededTools.other && !neededTools.skill;
       const ignored = rewriteState && rewriteState.ignored;
       let pick = null;
       if (toolsEquivalent && opt('fit_autofill_ladder', true) && !ignored) {
@@ -619,8 +631,8 @@ try {
         }
       }
       if (!ladderRewrite) {
-        const why = (neededTools.browser || neededTools.other)
-          ? `the brief names ${neededTools.browser ? 'the browser' : 'Artifact or a desktop-only tool'}, which the ladder workers drop, so the guard does not swap it for a ladder rung`
+        const why = (neededTools.browser || neededTools.other || neededTools.skill)
+          ? `the brief names ${neededTools.browser ? 'the browser' : neededTools.other ? 'Artifact or a desktop-only tool' : 'a skill to load'}, which the ladder workers drop, so the guard does not swap it for a ladder rung`
           : !toolsEquivalent
           ? `"${origType}" has its own tools and prompt, so the guard does not swap it for a ladder rung`
           : !opt('fit_autofill_ladder', true)
@@ -687,8 +699,8 @@ try {
         `(agent-companion:ac-*) and names "${declared}" explicitly, which differs from the lead's own model ` +
         `(${callerModel}); with no \`effort:\` in a definition, this worker inherits the session's effort ` +
         `(${callerEffort || "unknown — the lead's own effort could not be read from its transcript either"}). ` +
-        'Spawn the matching ladder agent instead (see `node scripts/recommend.mjs`) to pin model and effort together; ' +
-        'if ladder agents will not spawn in this session, see the setup skill\'s "If ladder agents won\'t spawn" section.'
+        'Spawn the matching ladder agent instead (see `' + RECOMMEND_CMD + '`) to pin model and effort together; ' +
+        'if ladder agents will not spawn in this session, read the "If ladder agents won\'t spawn" section of ' + SETUP_SKILL_FILE + '.'
       : `agent-companion (SPAWNING RULE 1): this spawn resolves to ${classifyModel(model).alias || model} with no ` +
         'effort stated in its agent definition — it will INHERIT the orchestrating session\'s current effort ' +
         'rather than any model default, which couples this subagent\'s depth of thinking to whatever the caller ' +
@@ -750,7 +762,7 @@ try {
         : `Add a \`WRITER: <model>/<effort>\` line so TYPE: ${declaredType} can be sized to its writer, or`;
     }
     return typeWeight === null
-      ? `TYPE: ${declaredType} is not a task type the table knows (see \`node scripts/recommend.mjs --list\`); name a known type, or`
+      ? `TYPE: ${declaredType} is not a task type the table knows (see \`${RECOMMEND_CMD} --list\`); name a known type, or`
       : `TYPE: ${declaredType} did not resolve a route; name another type, or`;
   })();
   const missingModelNote = (trulyInherited && !autofilled)
@@ -1595,7 +1607,7 @@ try {
       'Add ONE of these:\n' +
       '  - a line of its own in the brief:  TYPE: <task type>\n' +
       `    The guard then sets the routed model${rewritable ? ' and swaps in the ladder rung that pins its effort' : ''}.` +
-      (examples ? ` Current routes: ${examples}.` : '') + ' Full list: `node scripts/recommend.mjs --list`.\n' +
+      (examples ? ` Current routes: ${examples}.` : '') + ' Full list: `' + RECOMMEND_CMD + ' --list`.\n' +
       '  - or spawn a ladder rung that pins both, e.g. subagent_type: "' + exampleRung + '".\n\n' +
       'Set inherit_guard to "warn" to allow this shape with a note instead.'
     );
@@ -1663,6 +1675,9 @@ try {
     } else if (neededTools.other) {
       toolNote = 'agent-companion: this brief names Artifact or a desktop-only tool (visualize, terminal, ccd_session), which the ladder workers drop. ' +
         'Do that step from the lead, or spawn general-purpose with an explicit model.';
+    } else if (neededTools.skill) {
+      toolNote = 'agent-companion: this brief asks the worker to load a skill, and the ladder workers have no Skill tool. ' +
+        'Name the skill\'s SKILL.md path in the brief for the worker to Read, or do that step from the lead.';
     }
   }
   // Every note this spawn carries, in order. The parity notes stand in for
@@ -1752,7 +1767,7 @@ try {
           `Add a line to the agent's brief in the form:\n` +
           `  WARRANT: weight <1-5> — <why a cheaper tier cannot do this>\n\n` +
           `If you cannot write that line honestly, the task does not warrant the tier — ` +
-          `re-spawn at a cheaper tier (see \`node scripts/recommend.mjs\`). These warrants are logged ` +
+          `re-spawn at a cheaper tier (see \`${RECOMMEND_CMD}\`). These warrants are logged ` +
           `and audited, so a weak one is worse than a downgrade.`
         );
       } else {
@@ -1778,7 +1793,7 @@ try {
                 (!opt('fit_guard', true)
                   ? 'fit_guard is off, so the guard routes nothing'
                   : typeWeight === null
-                    ? 'not a task type the table knows — see `node scripts/recommend.mjs --list`'
+                    ? 'not a task type the table knows — see `' + RECOMMEND_CMD + ' --list`'
                     : 'the table has no row for it') +
                 '), so the routing table has nothing to check it against. Not blocking. ' +
                 `${!opt('fit_guard', true) ? 'Turn fit_guard on' : 'Name a known TYPE'} so the guard can judge fit, or add ${warrantLine}.`
@@ -1861,7 +1876,7 @@ try {
         const examples = commonTypeRoutes();
         how = 'Route it — a routed spawn is not counted:\n' +
           '  - declare the task type on a line of its own, `TYPE: <task type>`' +
-          (examples ? `; current routes: ${examples}` : '') + ' (full list: `node scripts/recommend.mjs --list`);\n' +
+          (examples ? `; current routes: ${examples}` : '') + ' (full list: `' + RECOMMEND_CMD + ' --list`);\n' +
           '  - or spawn the matching ladder rung by name (e.g. agent-companion:ac-opus-medium), which pins model and ' +
           'effort together;\n' +
           `  - ${wait}`;

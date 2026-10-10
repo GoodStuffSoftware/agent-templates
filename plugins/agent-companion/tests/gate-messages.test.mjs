@@ -149,15 +149,20 @@ test('routeLayerTag names the profile, and nothing for the shipped grid or trial
   assert.equal(routeLayerTag(undefined), '');
 });
 
-test('every ladder agent description says it lists the base table and that the routing profile may differ', () => {
+test('every ladder agent description that claims a base default says the routing profile may differ', () => {
   const fx = makeFixture();
   try {
+    let claims = 0;
     for (const f of ['ac-haiku', 'ac-sonnet-low', 'ac-sonnet-medium', 'ac-sonnet-high', 'ac-sonnet-xhigh', 'ac-opus-low', 'ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh', 'ac-opus-max']) {
       const desc = readFileSync(join(PLUGIN_ROOT, 'agents', `${f}.md`), 'utf8').match(/^description:\s*"?(.*?)"?$/m)[1];
-      assert.match(desc, /[Bb]ase default/, f);
-      assert.match(desc, /profile may differ \(\/ac routing\)/, f);
+      // A rung no task type routes to by default makes no claim and carries no caveat (0.31.9).
+      if (/[Bb]ase default/.test(desc)) {
+        claims += 1;
+        assert.match(desc, /profile may differ/, f);
+      }
       assert.doesNotMatch(desc, /Currently the default routing/, f);
     }
+    assert.ok(claims >= 4, `${claims} rungs claim a base default`);
   } finally { fx.cleanup(); }
 });
 

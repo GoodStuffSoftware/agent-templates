@@ -164,7 +164,7 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
     '',
     `This applies only when your brief's \`TYPE:\` line names one of ${types}, and the brief has no \`${sr.optOut.line}\` line. Otherwise skip this section (read-only work, or the lead opted out and reviews it). If your TYPE is \`code-review\`, you are the reviewer: never spawn a reviewer (the spawn guard denies it).`,
     '',
-    'When it applies, before you return:',
+    'When it applies, before you return (you have no Skill tool: this text is the whole spawn recipe, so do not look for the team-orchestration skill):',
     '',
     '1. Commit your work, so the review has a fixed sha.',
     `2. Spawn exactly ONE reviewer, in the foreground (\`run_in_background: false\`), with \`subagent_type: "${spawnAs}"\`: ${rv ? `the rung the routing table names for a review of your pair (${rvPair}, not your own rung: the operator sets reviewer effort per model, and \`/ac recommend --type code-review --writer ${pair}\` says the same)` : 'this rung, which matches your own model and effort'}. Its brief opens with these three lines, as plain text:`,

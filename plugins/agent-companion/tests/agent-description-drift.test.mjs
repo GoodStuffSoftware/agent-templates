@@ -310,7 +310,7 @@ test('ac-haiku: generated from the tier\'s retiresAfter and replacement, keeps R
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
   const desc = text.match(/^description:\s*"(.*)"$/m)[1];
   assert.match(desc, new RegExp(`^RETIRING \\(no sooner than ${cfg.tiers.haiku.retiresAfter}\\)`));
-  assert.match(desc, new RegExp(`falls back to ac-${cfg.tiers.haiku.replacement.model}-${cfg.tiers.haiku.replacement.effort}`));
+  assert.match(desc, new RegExp(`[Ff]alls back to ac-${cfg.tiers.haiku.replacement.model}-${cfg.tiers.haiku.replacement.effort}`));
   assert.doesNotMatch(desc, /verification/);
 });
 
@@ -325,16 +325,18 @@ test('every "Base default for" claim is true against the shipped routes, and say
     for (const rung of cfg.ladder) {
       const desc = readFileSync(join(PLUGIN_ROOT, 'agents', `${rung.agent}.md`), 'utf8').match(/^description:\s*"?(.*?)"?$/m)[1];
       const actual = routes.filter(([, r]) => r.model === rung.model && (r.effort || null) === (rung.effort || null)).map(([n]) => n);
-      assert.match(desc, /profile may differ \(\/ac routing\)\./, `${rung.agent} points at the routing profile`);
-      if (/Not a base default/.test(desc)) {
+      if (!/Base default for:/.test(desc)) {
+        // A rung that is no type's base default makes no claim (0.31.9), so it carries no suffix.
         sawNone = true;
         assert.deepEqual(actual, [], `${rung.agent} says no task type routes to it`);
       } else {
+        // A claim names where it stops: the routing profile may differ.
+        assert.match(desc, /Base default for: [^;]*; profile may differ\./, `${rung.agent} points at the routing profile`);
         const claimed = desc.match(/Base default for: ([^;]*);/)[1].split(', ');
         assert.deepEqual(claimed, actual, rung.agent);
       }
     }
-    assert.ok(sawNone, 'at least one rung carries the "Not a base default" suffix');
+    assert.ok(sawNone, 'at least one rung carries no "Base default for" claim');
   } finally {
     cleanup();
   }
@@ -359,7 +361,7 @@ test('every numbered rung drops Artifact, the desktop-only servers and the brows
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
   for (const r of cfg.ladder) {
     const t = toolsLine(r.agent);
-    for (const must of ['Artifact', 'ArtifactComments', 'ArtifactData', 'ArtifactCheck', 'mcp__visualize', 'mcp__terminal', 'mcp__ccd_session', 'mcp__Claude_Browser', 'mcp__claude-in-chrome', 'mcp__computer-use']) {
+    for (const must of ['Artifact', 'ArtifactComments', 'ArtifactData', 'ArtifactCheck', 'mcp__visualize', 'mcp__terminal', 'mcp__ccd_session', 'mcp__Claude_Browser', 'mcp__claude-in-chrome', 'mcp__computer-use', 'Skill']) {
       assert.ok(t.includes(must), `${r.agent} drops ${must}`);
     }
     // keepOn: ccd_session_mgmt stays on ac-haiku only
@@ -368,7 +370,7 @@ test('every numbered rung drops Artifact, the desktop-only servers and the brows
   for (const v of cfg.ladderVariants) {
     const t = toolsLine(v.agent);
     for (const a of ['Artifact', 'ArtifactComments', 'ArtifactData', 'ArtifactCheck']) assert.ok(t.includes(a), `${v.agent} drops ${a}`);
-    for (const keep of ['mcp__Claude_Browser', 'mcp__claude-in-chrome', 'mcp__computer-use']) assert.ok(!t.includes(keep), `${v.agent} keeps ${keep}`);
+    for (const keep of ['mcp__Claude_Browser', 'mcp__claude-in-chrome', 'mcp__computer-use', 'Skill']) assert.ok(!t.includes(keep), `${v.agent} keeps ${keep}`);
   }
 });
 

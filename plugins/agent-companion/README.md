@@ -237,6 +237,10 @@ Every spawn pays for the tools, listings and instructions its agent definition l
 
 The same release trims the rung bodies to one sentence and the generated listing descriptions to about 100 to 160 characters, delivers the reporting contract once (spawn guard to SubagentStart handoff: the SubagentStart payload carries no prompt, so the old marker check never matched), names long-detail files `<task>-detail.md` (Claude Code refuses a subagent Write to `report*`, `summary*`, `findings*` and `analysis*` `.md` names), and keeps the lead's SessionStart text out of a compacting subagent. `omitClaudeMd` was evaluated for the rungs and not applied: see `docs/lean-verification/README.txt` for how to verify the tool, deferred-name and instruction-block removal in a fresh session.
 
+### Lean listings (0.31.11)
+
+`Skill` is in every rung's `disallowedTools` (config `ladderTools.keepOn.Skill`; the browser variants keep it), which removes the skill listing from a worker's start and from each compaction. A worker therefore cannot load a skill: a brief that needs one names its `SKILL.md` path for the worker to Read, and the text the plugin hands a worker (the self-review block, the spawn guard's messages) names scripts and files by path. Descriptions in `agents/ac-*.md` are about a third shorter. Connectors that Claude Code names by a per-account id cannot be listed in a shipped file, so their tool names stay in a worker's deferred list; the measured gap is in the 0.31.11 changelog entry. To verify in a fresh session, spawn one `ac-sonnet-low` worker and read its transcript: no `skill_listing` attachment, and a `deferred_tools_delta` list without the dropped names.
+
 ## Memory doctor
 
 The index is the source of truth for what is persisted, so a memory file the
