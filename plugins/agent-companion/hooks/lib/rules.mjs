@@ -45,7 +45,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configDir, opt, stateFile, readJson } from './context.mjs';
+import { configDir, opt, stateFile, readJson, rolloutActive } from './context.mjs';
 
 export const RULES_VERSION = 1;
 export const SCOPES = ['user-prompt', 'always', 'session-start', 'spawn'];
@@ -304,7 +304,39 @@ function compileRule(rule) {
     gate: rule.gate || null,
     note: rule.note ?? null,
     audience: rule.audience === 'lead' ? 'lead' : 'all',
+    // Scheduling (see effectiveRule): kept as authored so writeRules can
+    // round-trip it; applied at match time, never baked in here.
+    activeFrom: typeof rule.activeFrom === 'string' && rule.activeFrom.trim() ? rule.activeFrom.trim() : null,
+    after: rule.after && typeof rule.after === 'object' && !Array.isArray(rule.after) ? rule.after : null,
   };
+}
+
+// A scheduled rule (`activeFrom`, optionally `after`): the timestamp, or the
+// change id looked up in the state root's rollout.json, when it takes effect
+// (context.mjs "Rollout schedule"). Until then the rule is exactly as authored
+// when it has an `after` overlay (the overlay is laid over it from the moment
+// `activeFrom` is reached: `enabled`, `then`, `when`, `gate`), and OFF when it
+// has none (it switches on at that moment). An unresolvable `activeFrom`
+// counts as not reached, so a typo leaves today's behaviour. An older plugin
+// ignores both keys, which is why a change that must not start early is
+// written as the current behaviour plus an `after`. Returns the rule to match
+// on; the input is never mutated.
+export function effectiveRule(r) {
+  if (!r || !r.activeFrom) return r;
+  const reached = rolloutActive(r.activeFrom);
+  if (!r.after) return reached ? r : { ...r, enabled: false };
+  if (!reached) return r;
+  const o = r.after;
+  const out = { ...r };
+  if (typeof o.enabled === 'boolean') out.enabled = o.enabled;
+  if (typeof o.then === 'string' && o.then.trim()) out.then = o.then;
+  if (typeof o.gate === 'string') out.gate = o.gate || null;
+  if (o.when === null || (typeof o.when === 'string' && o.when.length <= WHEN_MAX_CHARS)) {
+    let ok = true;
+    if (typeof o.when === 'string') { try { new RegExp(o.when, 'i'); } catch { ok = false; } }
+    if (ok) out.when = o.when;
+  }
+  return out;
 }
 
 function readUserEntries() {
@@ -357,7 +389,7 @@ export function writeRules(cfg) {
   try {
     const rules = Array.isArray(cfg?.rules) ? cfg.rules : [];
     const builtinById = new Map(defaultRules().map((r) => [r.id, r]));
-    const DIFF_KEYS = ['enabled', 'scope', 'when', 'then', 'gate', 'note'];
+    const DIFF_KEYS = ['enabled', 'scope', 'when', 'then', 'gate', 'note', 'activeFrom', 'after'];
     const out = [];
 
     for (const r of rules) {
@@ -382,6 +414,8 @@ export function writeRules(cfg) {
           gate: r.gate ?? null,
           note: r.note ?? null,
           ...(r.audience === 'lead' ? { audience: 'lead' } : {}),
+          ...(r.activeFrom ? { activeFrom: r.activeFrom } : {}),
+          ...(r.after ? { after: r.after } : {}),
         });
       }
     }
@@ -560,7 +594,7 @@ export function userOwnText(text) {
 export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
   const { rules } = readRules();
   const subject = scope === 'user-prompt' ? userOwnText(text) : String(text ?? '');
-  return rules.filter((r) => {
+  return rules.map(effectiveRule).filter((r) => {
     if (!r.enabled) return false;
     if (r.scope !== scope) return false;
     // A worker cannot act on an orchestration rule (it cannot spawn, ask the

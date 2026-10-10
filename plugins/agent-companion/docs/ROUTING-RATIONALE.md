@@ -122,7 +122,9 @@ the lead can read:
   lands the work.
 
 **Bounded, not recursive.** The protocol says a writer never re-reviews after
-its fix round and a reviewer never spawns a reviewer, so the intended chain is
+its fix round (the one exception is a standing rule appended to its brief that
+asks for one fresh, capped re-check of blocking findings only) and a reviewer
+never spawns a reviewer, so the intended chain is
 writer -> reviewer and a disagreement ends at the lead. The spawn guard
 enforces the second rule only, and only one level up: it denies a
 `TYPE: code-review` spawned by an agent whose own spawn row, found by the id

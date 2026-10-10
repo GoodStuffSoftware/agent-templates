@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.6",
+  "version": "0.31.7",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -201,7 +201,7 @@
     "isolation_demotion_notice": {
       "type": "boolean",
       "title": "Isolation demotion notice",
-      "description": "Tell the caller when a spawn passes BOTH name and isolation: per agent-teams.md, passing isolation on the call makes it an ordinary subagent rather than a teammate even though it is named, so it silently will not be addressable by that name afterward. Pure information, never blocks, effectively free to compute.",
+      "description": "Record gate2_fired in the spawn telemetry row when a spawn passes BOTH name and isolation. Since 0.31.5 this no longer shows the caller a message: the old warning said such a spawn is not addressable by its name, which is wrong on desktop, where every named spawn is a subagent whatever its isolation. Telemetry only, never blocks, effectively free to compute.",
       "default": true
     },
     "shared_tree_notice": {

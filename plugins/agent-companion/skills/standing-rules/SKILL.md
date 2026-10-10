@@ -112,6 +112,25 @@ directive, an uncompilable regex — each entry is dropped and the rest still
 work. Regexes longer than 400 characters are skipped rather than run, because
 the hook that evaluates them has a five-second timeout.
 
+## Scheduling a rule or a routing row (`activeFrom`, 0.31.5)
+
+A rule in `standing-rules.json`, a row in the routing profile, or a
+`reviewerEffortCap` entry in the per-user `model-tiers.json` may carry
+`activeFrom`: a zoned UTC timestamp (`"2026-10-12T08:00:00Z"`) or a change id
+looked up in `~/.claude/agent-companion/rollout.json`, one shared schedule of
+the form `{"<change-id>": "<ISO UTC timestamp>"}`. Nothing needs to flip it:
+the check is made each time the config is read.
+
+- With **`after`**, the config is the current behaviour until the moment, then
+  the `after` fields are laid over it (a rule: `enabled`, `then`, `when`,
+  `gate`; a profile row: `model`, `effort`, `cacheTtl`).
+  Write a scheduled change this way, so an older plugin that ignores both keys
+  keeps today's behaviour instead of switching early.
+- Without `after`, a rule is OFF until the moment and ON from it.
+- An id the schedule does not name, a missing or unreadable `rollout.json`, or a
+  timestamp with no zone counts as not yet reached. No `activeFrom` means active.
+- `rules list` shows `activeFrom=<x>(+after)`.
+
 ## Related
 
 - `/agent-companion:brevity` — the reporting contract on spawned agents, and the

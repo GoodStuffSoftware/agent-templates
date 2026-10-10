@@ -60,6 +60,7 @@ if (weight === 'parity') {
   const route = resolveRoute({
     type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
     weightExplicit, kindExplicit, consequenceExplicit, writer: { model: wm, effort: we || '' },
+    writerType: val('--writer-type') || null,
   });
   if (!route.model) {
     // F4: an unknown (or unavailable, unreplaced) writer model is never

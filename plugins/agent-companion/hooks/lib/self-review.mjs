@@ -153,7 +153,7 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
   const n = sr.fixRounds;
   const fix = n === 0
     ? 'Make no fixes: list every finding for the lead to settle. Never re-review: do not spawn a second reviewer.'
-    : `${n === 1 ? 'Do one fix round' : `Do at most ${n} fix rounds`} on the blocker and should-fix findings. A finding you disagree with stays unfixed and is listed as disputed, with your reason. Never re-review: do not spawn a second reviewer.`;
+    : `${n === 1 ? 'Do one fix round' : `Do at most ${n} fix rounds`} on the blocker and should-fix findings. A finding you disagree with stays unfixed and is listed as disputed, with your reason. Never re-review: do not spawn a second full reviewer. The one exception is a standing rule appended to your brief that asks for a narrow re-check of blocking findings: when the review returned blockers and such a rule is there, follow it (one fresh, capped re-check of those blockers only), and return its verdict line too.`;
   const L = [
     SELF_REVIEW_BEGIN,
     '## Self-review before you return',

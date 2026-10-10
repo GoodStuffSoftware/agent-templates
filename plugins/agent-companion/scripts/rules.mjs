@@ -68,7 +68,7 @@ try {
         const cond = (r.scope === 'always' || r.scope === 'session-start') ? '(unconditional)' : (r.when || '(none)');
         console.log(
           `  ${r.enabled ? 'on ' : 'off'}  ${r.id.padEnd(24)} scope=${r.scope.padEnd(13)} `
-          + `builtin=${r.builtin ? 'yes' : 'no '} ${r.gate ? `gate=${r.gate} ` : ''}`
+          + `builtin=${r.builtin ? 'yes' : 'no '} ${r.gate ? `gate=${r.gate} ` : ''}${r.activeFrom ? `activeFrom=${r.activeFrom}${r.after ? '(+after)' : ''} ` : ''}`
           + `when=${truncate(cond, 40)}  then="${truncate(r.then, 60)}"`,
         );
       }

@@ -177,6 +177,8 @@ A rule is two independent conditions plus a directive:
 
 The split exists because some rules need to fire on content regardless of history (`copyable-prompt`), and at least one needs to fire on history regardless of content (`delegate-reminder`, below) — a single condition type cannot express both.
 
+A rule (and a routing-profile row, and a `reviewerEffortCap` entry) may also carry `activeFrom`, a zoned UTC timestamp or a change id in `~/.claude/agent-companion/rollout.json` (`{"<change-id>": "<ISO UTC>"}`), with an optional `after` overlay: it switches on by the clock with nobody flipping it, and an unresolvable value counts as not yet reached. See `skills/standing-rules/SKILL.md`.
+
 Four scopes, each deciding what `when` is tested against and where the directive lands:
 
 | scope | `when` tested against | injected into |
@@ -899,7 +901,9 @@ spawn guard. The text tells the writer to:
    findings ranked blocker/should-fix/nit with file:line and a repro), the
    review file path (the lead's, else `REVIEW-<name>.md` next to the report),
    and a checkout of its own to work in;
-3. do one fix round, list the findings it disputes, and never re-review;
+3. do one fix round, list the findings it disputes, and never re-review (the one
+   exception: a standing rule in its brief that asks for a narrow re-check of
+   blocking findings);
 4. land its own work (merge, and verify the deploy where the repo deploys on
    merge), keeping every release gate the repo requires;
 5. return the report, the reviewer's verdict line verbatim, the review path,

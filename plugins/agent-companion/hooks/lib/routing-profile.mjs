@@ -35,7 +35,9 @@
 //         since: "YYYY-MM-DD", reviewBy: "YYYY-MM-DD" | null,
 //         waivesFloor: null | "elevated",  // honoured only when source is operator-observed
 //         note: string | null,             // local free text; never logged, never exported
-//         provenance: object | null        // as the ADR §1 block; null for operator rows
+//         provenance: object | null,       // as the ADR §1 block; null for operator rows
+//         activeFrom?: string,             // optional (0.31.5): a zoned UTC timestamp or a rollout.json change id
+//         after?: object                   // optional: fields (model, effort, cacheTtl) laid over the row once activeFrom is reached
 //     } }
 //   }
 // Unknown keys are tolerated and preserved, so a later minor addition within
@@ -125,6 +127,8 @@ export function rowShapeErrors(row) {
   if (!(row.waivesFloor === null || row.waivesFloor === undefined || WAIVABLE_FLOORS.includes(row.waivesFloor))) e.push('waivesFloor may only be null or "elevated"');
   if (!isStrOrNull(row.note)) e.push('note must be a string or null');
   if (!(row.provenance === null || row.provenance === undefined || isObj(row.provenance))) e.push('provenance must be an object or null');
+  if (!(row.activeFrom === undefined || (typeof row.activeFrom === 'string' && row.activeFrom.trim()))) e.push('activeFrom must be a timestamp or a rollout change id');
+  if (!(row.after === undefined || isObj(row.after))) e.push('after must be an object (the fields laid over the row once activeFrom is reached)');
   if (valueDepthExceeds(row, MAX_PROFILE_DEPTH - 3)) e.push(`row nests deeper than ${MAX_PROFILE_DEPTH - 3} levels`);
   return e;
 }

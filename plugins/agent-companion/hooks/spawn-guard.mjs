@@ -79,12 +79,18 @@ import {
 // updatedInput and no permissionBehavior yields hookUpdatedInput), so the
 // model fill-in does not need one.
 function allowWith(systemMessage, updatedInput, additionalContext) {
+  // Text that is empty or only whitespace is no text. When there is nothing at
+  // all to say or change, emit nothing: a bare {hookSpecificOutput:
+  // {hookEventName}} object shows the lead an empty "PreToolUse:Agent says:".
+  const msg = typeof systemMessage === 'string' && systemMessage.trim() ? systemMessage : null;
+  const ctx = typeof additionalContext === 'string' && additionalContext.trim() ? additionalContext : null;
+  if (!msg && !updatedInput && !ctx) process.exit(0);
   process.stdout.write(JSON.stringify({
-    ...(systemMessage ? { systemMessage } : {}),
+    ...(msg ? { systemMessage: msg } : {}),
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       ...(updatedInput ? { updatedInput } : {}),
-      ...(additionalContext ? { additionalContext } : {}),
+      ...(ctx ? { additionalContext: ctx } : {}),
     },
   }));
   process.exit(0);
@@ -443,6 +449,10 @@ try {
         // preset; a WARRANT's incidental weight must not silently discard it.
         weightExplicit: weightLineExplicit, kindExplicit: kindWasDeclared, consequenceExplicit: consequenceWasDeclared,
         writer: typeIsParity && writer ? { model: writer.model, effort: writer.effort } : null,
+        // The writer's declared TYPE, when the caller's own spawn row gave it:
+        // a reviewerEffortCap exception can name writer types (novel-design)
+        // whose reviews keep full effort parity.
+        writerType: typeIsParity ? callerDeclaredType : null,
       });
       if (resolved.model && resolved.weight === 'parity') parityYardstick = resolved;
       if (!fitOn) {
@@ -987,8 +997,12 @@ try {
     gate1Action = gate1Mode === 'block' ? (gate1Justified ? 'none' : 'block') : 'warn';
   }
 
-  // Gate 2: pure information, always cheap to compute, never blocks. Cites
-  // agent-teams.md directly so the claim is checkable, not just asserted.
+  // Gate 2: telemetry only (0.31.5). It used to tell the caller that a spawn
+  // passing both a name and isolation is an ordinary subagent, not an
+  // addressable teammate. That is wrong on desktop, where every named spawn is
+  // a subagent that background peers can still message by name, and this hook
+  // cannot tell a real TeamCreate team session apart. The message is gone;
+  // the fact stays in the spawn row.
   const gate2Fired = opt('isolation_demotion_notice', true) && !!input.name && !!input.isolation;
 
   // --- Gate 4: namegate (track "namegate", operator decision 2026-09-25:
@@ -1070,11 +1084,6 @@ try {
       'ran foreground, and single foreground spawns have locked the operator out for 18-27 minutes). If the result ' +
       'is not needed before the lead can continue, add run_in_background: true.'
     : '';
-  const gate2Msg = gate2Fired
-    ? `agent-companion: this spawn names "${input.name}" AND passes isolation - per agent-teams.md, passing ` +
-      'isolation on the call makes it an ORDINARY SUBAGENT rather than a teammate even though it is named, so it ' +
-      'will not be addressable by that name afterward.'
-    : '';
   const gate3Msg = gate3Fired
     ? 'agent-companion: this spawn has no name and no isolation - it runs in the LEAD\'S OWN working tree (it can ' +
       'commit and move HEAD there) and has no address to re-brief it later. Consider isolation: "worktree" and/or a name.'
@@ -1088,7 +1097,7 @@ try {
         'by SendMessage afterward, and other workers this session won\'t see it in a peer list. Add a name (e.g. ' +
         '"<project>-<type>-<slug>"), or turn on namegate_autofill so the guard assigns one.'
       : '';
-  const gateMessage = [gate1WarnMsg, gate2Msg, gate3Msg, gate4Msg].filter(Boolean).join('\n\n');
+  const gateMessage = [gate1WarnMsg, gate3Msg, gate4Msg].filter(Boolean).join('\n\n');
 
   // With no route, the plain grid is the yardstick only for a weight the
   // brief itself declared. Never for a parity-sized TYPE whose only weight is
@@ -1667,10 +1676,9 @@ try {
     writerInferNote,
     writerEffortNote,
     selfReviewNote,
-    selfReviewInjected && opt('fit_guard', true)
-      ? `agent-companion (self-review): TYPE: ${declaredType} is a self-reviewing type and "${(ladderRewrite ? ladderRewrite.to : input.subagent_type) || 'this rung'}" ` +
-        'does not carry the protocol in its definition, so it was appended to the brief.'
-      : null,
+    // (0.31.5) No lead-facing message when the protocol is appended to a brief:
+    // it fired on every writer spawn and the lead can do nothing with it. The
+    // append itself (selfReviewInjected, withAdditions) is unchanged.
     writerBelowCallerNote,
     gateMessage,
     missingModelNote,

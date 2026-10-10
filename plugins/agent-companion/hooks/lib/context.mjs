@@ -713,6 +713,64 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 // `trial` is the old resolveExpected() trial metadata — non-null exactly when
 // the trial layer won.
 
+// --- Rollout schedule -----------------------------------------------------
+// A change in the operator's own config (a routing-profile row, a standing
+// rule, the reviewer effort cap) can carry `activeFrom`: the moment it takes
+// effect, read at DECISION time, so nothing has to flip it by hand or on a
+// schedule. The value is either an ISO-8601 UTC timestamp ("2026-10-11T08:00:00Z")
+// or a CHANGE ID looked up in <stateRoot>/rollout.json, one shared schedule
+// whose format is {"<change-id>": "<ISO-8601 UTC timestamp>"}. Several changes
+// then roll out on a staggered schedule that lives in one file the operator
+// (and the scout's daily checkup) can read. A timestamp must carry its zone
+// (Z or an offset); a change id the file does not name, a file that is
+// missing or unreadable, or a timestamp that does not parse reads as NOT YET
+// ACTIVE, so a typo or a deleted schedule leaves today's behaviour in place
+// rather than switching a change on early. No `activeFrom` at all means
+// active, so existing config is unchanged.
+export function rolloutPath() {
+  return join(stateRootPath(), 'rollout.json');
+}
+const ZONED_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+let _rollout = { key: '', table: {} };
+// The schedule as {id: ISO string}, only entries whose value is a zoned
+// timestamp that parses. Never throws; cached per (mtime, size).
+export function rolloutTable() {
+  const file = rolloutPath();
+  try {
+    const st = statSync(file);
+    const key = `${file}|${st.mtimeMs}|${st.size}`;
+    if (_rollout.key === key) return _rollout.table;
+    const raw = JSON.parse(readFileSync(file, 'utf8').replace(/^﻿/, ''));
+    const table = {};
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const [id, v] of Object.entries(raw)) {
+        if (typeof v === 'string' && ZONED_ISO.test(v.trim()) && !Number.isNaN(Date.parse(v.trim()))) table[id] = v.trim();
+      }
+    }
+    _rollout = { key, table };
+    return table;
+  } catch {
+    return {};
+  }
+}
+// The moment `spec` (a timestamp or a change id) takes effect, as ms, or null
+// when it cannot be resolved.
+export function rolloutStartMs(spec) {
+  if (typeof spec !== 'string' || !spec.trim()) return null;
+  const s = spec.trim();
+  const iso = ZONED_ISO.test(s) ? s : rolloutTable()[s];
+  const ms = iso ? Date.parse(iso) : NaN;
+  return Number.isNaN(ms) ? null : ms;
+}
+// True when `spec` has been reached at `now` (Date, ISO string or epoch ms;
+// the real clock when omitted). An absent spec (undefined, null, '') is
+// active; a present one that cannot be resolved is not.
+export function rolloutActive(spec, now) {
+  if (spec === undefined || spec === null || spec === '') return true;
+  const ms = rolloutStartMs(spec);
+  return ms !== null && clockDate(now).getTime() >= ms;
+}
+
 // --- Layer 1: the per-user routing profile --------------------------------
 // Paths computed WITHOUT creating directories: this runs on every Agent
 // spawn, and with no profile present the whole cost must stay one stat().
@@ -940,7 +998,14 @@ function profileLayer({ type, state, typeDef, consequence, now }) {
   if (!type || !hasOwn(rows, type)) return { ...base, status: 'absent', note: `profile rev ${state.revision} has no row for ${type || 'this task'}` };
   // A hand-edited effort is matched case-insensitively everywhere, so it is
   // also USED lower-cased ("HIGH" runs as high), never verbatim (S2 review P4).
-  const raw = rows[type];
+  const stored = rows[type];
+  // A scheduled row (`activeFrom` + `after`): the row as stored is the
+  // behaviour until `activeFrom` is reached (see "Rollout schedule"), and
+  // `after` is laid over it from then on. An older reader ignores both keys,
+  // so it never switches early.
+  const raw = isPlainObj(stored) && stored.activeFrom !== undefined && isPlainObj(stored.after) && rolloutActive(stored.activeFrom, now)
+    ? { ...stored, ...stored.after }
+    : stored;
   const row = isPlainObj(raw) && typeof raw.effort === 'string' && raw.effort !== raw.effort.toLowerCase()
     ? { ...raw, effort: raw.effort.toLowerCase() }
     : raw;
@@ -1038,10 +1103,32 @@ function effortOn(model, effort) {
   return ranked.includes(effort) ? effort : ranked[0];
 }
 
+// The operator's exception to "a reviewer's effort may exceed its writer's,
+// never drop" (config `reviewerEffortCap`, empty as shipped; a user layer
+// file sets it): { "<model alias>": { effort, activeFrom?, exceptWriterTypes? } }.
+// A NON-critical review on that model runs at most at `effort` even when its
+// writer ran higher (a cap only lowers; it never raises a lower writer's
+// effort). `activeFrom` schedules it (see "Rollout schedule");
+// `exceptWriterTypes` names writer task types whose reviews keep full parity
+// (novel-design, say), matched against `writerType`, which the caller passes
+// only when it knows the writer's declared type. Returns { effort } or null.
+function reviewerEffortCapFor(model, effort, { writerType = null, now } = {}) {
+  const caps = modelTiers().reviewerEffortCap;
+  if (!isPlainObj(caps) || !effort) return null;
+  const alias = classifyModel(model).alias;
+  const cap = alias && isPlainObj(caps[alias]) ? caps[alias] : null;
+  if (!cap || !rolloutActive(cap.activeFrom, now)) return null;
+  const to = classifyEffort(cap.effort);
+  const cur = classifyEffort(effort);
+  if (!to.known || !cur.known || cur.rank <= to.rank || !rankedEffortsFor(model).includes(to.level)) return null;
+  if (writerType && Array.isArray(cap.exceptWriterTypes) && cap.exceptWriterTypes.includes(writerType)) return null;
+  return { effort: to.level };
+}
+
 // Reviewer parity (see the banner): F3, then F4, F2 and F1, in that order.
 // Returns { model, effort, floorsApplied } or { refusal } when no reviewer
 // can be sized.
-function parityFloors(r, { consequence, writer, now }) {
+function parityFloors(r, { consequence, writer, now, writerType = null }) {
   const cfg = modelTiers();
   const floorsApplied = [];
   const wm = String(writer.model || '');
@@ -1110,6 +1197,18 @@ function parityFloors(r, { consequence, writer, now }) {
     }
   }
 
+  // The operator's exception to effort parity (config `reviewerEffortCap`,
+  // see reviewerEffortCapFor): a NON-critical review on a capped model runs at
+  // the cap even when its writer ran higher. Placed before F1, which then
+  // raises a critical review as usual (the cap never applies to one anyway).
+  if (consequence !== 'critical') {
+    const cap = reviewerEffortCapFor(model, effort, { writerType, now });
+    if (cap) {
+      floorsApplied.push({ floor: 'F3', capped: `effort ${effort} -> ${cap.effort} (reviewerEffortCap: a non-critical ${classifyModel(model).alias} review runs at most at ${cap.effort}, an exception to effort parity)` });
+      effort = cap.effort;
+    }
+  }
+
   // F1: a critical review is at least the critical floor, whatever the writer.
   if (consequence === 'critical') {
     const cons = (cfg.consequence || {}).critical || {};
@@ -1133,12 +1232,12 @@ function parityFloors(r, { consequence, writer, now }) {
   return { model, effort, floorsApplied };
 }
 
-function applyFloors(r, { consequence, parity, writer, waive = null, now, architectureClass = false }) {
+function applyFloors(r, { consequence, parity, writer, waive = null, now, architectureClass = false, writerType = null }) {
   const cfg = modelTiers();
   const floorsApplied = [];
   let { model, effort } = r;
 
-  if (parity) return parityFloors(r, { consequence, writer, now });
+  if (parity) return parityFloors(r, { consequence, writer, now, writerType });
 
   // F2 on the final answer. Layers 1-2 were already filtered; this only fires
   // if a grid row itself named a never-destination tier, which the shipped
@@ -1205,7 +1304,7 @@ function applyFloors(r, { consequence, parity, writer, waive = null, now, archit
 export function resolveRoute({
   type = null, weight, kind, consequence,
   weightExplicit = false, kindExplicit = false, consequenceExplicit = false,
-  writer = null, now, profile = true,
+  writer = null, now, profile = true, writerType = null,
 } = {}) {
   const cfg = modelTiers();
   // Read once per resolution; taskTypeDef() and the profile layer share it.
@@ -1362,7 +1461,7 @@ export function resolveRoute({
         trial: null,
       };
     }
-    const floored = applyFloors({ model: writer.model, effort: writer.effort || '' }, { consequence: c, parity: true, writer, now });
+    const floored = applyFloors({ model: writer.model, effort: writer.effort || '' }, { consequence: c, parity: true, writer, now, writerType });
     if (floored.refusal) {
       // F4: no reviewer can be sized to this writer at all — a profile row's
       // minimum effort has nothing to raise, so the profile layer never gets

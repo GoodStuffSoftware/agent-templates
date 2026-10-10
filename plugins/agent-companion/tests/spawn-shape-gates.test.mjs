@@ -200,7 +200,7 @@ test('gate1: mode "block" allows a spawn whose brief carries a FOREGROUND justif
   }
 });
 
-test('gate2 (isolation demotion notice): fires only when BOTH name and isolation are set, cites agent-teams.md', () => {
+test('gate2 (telemetry only since 0.31.5): name+isolation records gate2_fired but sends NO lead-facing message and changes no decision', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const payload = {
@@ -215,8 +215,11 @@ test('gate2 (isolation demotion notice): fires only when BOTH name and isolation
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0);
-    assert.match(res.json?.systemMessage || '', /ordinary subagent/i);
-    assert.match(res.json?.systemMessage || '', /agent-teams\.md/);
+    // The warning was wrong on desktop (a named spawn is a subagent there
+    // whether or not isolation is passed), so it is gone; the telemetry flag stays.
+    assert.doesNotMatch(res.json?.systemMessage || '', /ordinary subagent|agent-teams\.md|AND passes isolation/i);
+    assert.notEqual(res.json?.hookSpecificOutput?.permissionDecision, 'deny');
+    assert.notEqual(res.json?.hookSpecificOutput?.permissionDecision, 'ask');
 
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.gate2_fired, true);

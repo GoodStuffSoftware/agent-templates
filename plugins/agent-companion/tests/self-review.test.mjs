@@ -70,6 +70,7 @@ test('committed rungs: ac-opus-medium, ac-opus-high and ac-opus-xhigh (the defau
       assert.match(block, /`REVIEW: lead`/);
       assert.match(block, /Do one fix round/);
       assert.match(block, /Never re-review/);
+      assert.match(block, /narrow re-check of blocking findings/);
       assert.match(block, /never spawn a reviewer/);
       assert.match(block, /the lead's original brief, verbatim/);
       assert.match(block, /VERDICT: PASS/);
@@ -541,7 +542,9 @@ test('a self-reviewing TYPE on a ladder rung WITHOUT the block gets the generate
     assert.doesNotMatch(r.prompt, /self-review protocol (BEGIN|END)/, 'file markers stay out of a brief');
     assert.ok(r.prompt.indexOf('Self-review before you return') < r.prompt.indexOf('Put your ENTIRE report') || !r.prompt.includes('Put your ENTIRE report'),
       'task instructions before the reporting contract');
-    assert.match(r.msg, /"agent-companion:ac-opus-max" does not carry the protocol in its definition, so it was appended to the brief/);
+    // 0.31.5: the lead is not told about the append (the brief still gets it).
+    assert.doesNotMatch(r.msg || '', /does not carry the protocol in its definition/);
+    assert.doesNotMatch(r.msg || '', /self-review\)/);
 
     // The rung that matches what will RUN: a model named on the spawn wins.
     const s = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-low', model: 'sonnet', prompt: 'TYPE: novel-design\nrefactor it' }));

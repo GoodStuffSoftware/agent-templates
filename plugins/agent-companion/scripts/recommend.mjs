@@ -13,6 +13,8 @@
 //   node recommend.mjs --type bounded-feature --consequence critical
 //   node recommend.mjs --weight 4 --kind diagnostic
 //   node recommend.mjs --type code-review --writer opus/xhigh
+//   node recommend.mjs --type code-review --writer opus/xhigh --writer-type novel-design
+//     (--writer-type: the writer's task type, only for a reviewerEffortCap exception)
 //   node recommend.mjs --type debug-root-cause --explain
 //   add --json for machine-readable output
 //
@@ -83,6 +85,7 @@ if (weight === 'parity') {
   route = resolveRoute({
     type: typeName, weight: explicitWeight, kind: explicitKind, consequence: explicitConsequence,
     weightExplicit, kindExplicit, consequenceExplicit, writer: { model: wm, effort: we || '' },
+    writerType: val('--writer-type') || null,
   });
   if (!route.model) {
     // F4: an unknown (or unavailable, unreplaced) writer model is never
@@ -158,6 +161,23 @@ out.reviewer = {
   effort: out.effort ? `>= ${out.effort}` : '(none)',
   note: 'reviewer parity: at least the writer\'s model and effort (effort may exceed, must not drop), raised to F1 on a critical change and capped by F2 (never fable)',
 };
+// The operator's reviewerEffortCap (config; an exception to effort parity) can
+// size a non-critical review of this route BELOW the writer's effort: say so.
+if (weight !== 'parity' && out.model && out.effort && out.model !== 'fable') {
+  try {
+    const pr = resolveRoute({
+      type: 'code-review', consequence: out.consequence, consequenceExplicit: true,
+      writer: { model: out.model, effort: out.effort }, writerType: typeName || null,
+    });
+    if (pr.model === out.model && pr.effort && pr.effort !== out.effort) {
+      out.reviewer = {
+        model: pr.model,
+        effort: pr.effort,
+        note: `reviewerEffortCap (an exception to effort parity): this ${out.consequence} change's review runs at ${pr.model}/${pr.effort}, below the writer's ${out.effort}`,
+      };
+    }
+  } catch { /* table unreadable: keep the parity note */ }
+}
 
 // The single most useful nudge on a premium result: per the procedural-
 // discipline finding, a brief that carries the verification checklist often
