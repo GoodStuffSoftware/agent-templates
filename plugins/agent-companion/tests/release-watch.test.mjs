@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { makeFixture, runHook, runScript, childEnv, PLUGIN_ROOT } from './helpers.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
 import {
-  topicsOf, parseChangelog, newerMatching, checkDue, fetchChangelogHead, CHECK_INTERVAL_MS,
+  topicsOf, parseChangelog, newerMatching, checkDue, fetchChangelogHead, CHECK_INTERVAL_MS, runReleaseWatch, markSeen,
 } from '../scripts/lib/release-watch.mjs';
 
 const CHANGELOG = [
@@ -445,4 +445,100 @@ test('the SessionStart block drops a suppressed kind already sitting in scout-la
     });
     assert.equal(quiet.stdout.trim(), '', 'nothing left to say');
   } finally { cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// review fixes (0.31.5)
+// ---------------------------------------------------------------------------
+
+const changelogUpTo = (top) => {
+  const lines = ['# Changelog', ''];
+  for (let v = top; v >= 1; v -= 1) lines.push(`## 9.0.${v}`, '', `- Fixed hooks in release ${v}`, '');
+  return lines.join('\n');
+};
+const stubFetch = (body) => async () => ({ ok: true, status: 200, body: null, text: async () => body });
+
+function rwArgs(dir, extra = {}) {
+  return {
+    installed: '9.0.0',
+    stateFilePath: join(dir, 'state', 'release-watch.json'),
+    detailsFilePath: join(dir, 'state', 'cli-release-details.md'),
+    claudeDirPath: join(dir, '.claude'),
+    ...extra,
+  };
+}
+
+test('the scout signal names the details file without an absolute path (the scrubber would turn it into <path>)', async () => {
+  const { dir, cleanup } = makeFixture();
+  const srv = await okServer();
+  try {
+    const res = await runDetect({ cwd: dir, env: WATCH_ENV(srv.url) });
+    const sig = releaseSig(res);
+    assert.ok(sig);
+    assert.match(sig.detail, /cli-release-details\.md in the scout state dir/);
+    assert.ok(!sig.detail.includes(dir), sig.detail);
+    assert.doesNotMatch(sig.detail, /<path>/);
+  } finally { await srv.close(); cleanup(); }
+});
+
+test('a stale local changelog never removes releases an earlier fetch found', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const t0 = Date.parse('2026-10-09T00:00:00Z');
+    await runReleaseWatch(rwArgs(dir, { nowMs: t0, fetchImpl: stubFetch(changelogUpTo(6)) }));
+    const cache = join(dir, '.claude', 'cache', 'changelog.md');
+    mkdirSync(dirname(cache), { recursive: true });
+    writeFileSync(cache, changelogUpTo(4));
+    const failing = async () => { throw new Error('offline'); };
+    await runReleaseWatch(rwArgs(dir, { nowMs: t0 + 25 * 3600 * 1000, fetchImpl: failing }));
+    const st = JSON.parse(readFileSync(join(dir, 'state', 'release-watch.json'), 'utf8'));
+    assert.equal(st.lastOk, false);
+    assert.equal(st.latest, '9.0.6');
+    assert.deepEqual(st.releases.map((r) => r.version), ['9.0.6', '9.0.5', '9.0.4', '9.0.3', '9.0.2', '9.0.1']);
+    assert.equal(st.source, 'github');
+  } finally { cleanup(); }
+});
+
+test('an HTTP 200 that is not a changelog counts as a failure and the local cache is used', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const cache = join(dir, '.claude', 'cache', 'changelog.md');
+    mkdirSync(dirname(cache), { recursive: true });
+    writeFileSync(cache, changelogUpTo(2));
+    const r = await runReleaseWatch(rwArgs(dir, { nowMs: Date.now(), fetchImpl: stubFetch('<html>please sign in</html>') }));
+    const st = JSON.parse(readFileSync(join(dir, 'state', 'release-watch.json'), 'utf8'));
+    assert.equal(st.lastOk, false);
+    assert.equal(st.lastReason, 'unreadable changelog');
+    assert.equal(st.source, 'local-cache');
+    assert.ok(r.signal);
+  } finally { cleanup(); }
+});
+
+test('a seen-mark written while the request is in flight survives the scout writing its state', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const args = rwArgs(dir);
+    const t0 = Date.parse('2026-10-09T00:00:00Z');
+    await runReleaseWatch({ ...args, nowMs: t0, fetchImpl: stubFetch(changelogUpTo(3)) });
+    const slow = async () => {
+      markSeen(args.stateFilePath, ['9.0.1', '9.0.2', '9.0.3']); // a main session start, mid-request
+      return { ok: true, status: 200, body: null, text: async () => changelogUpTo(3) };
+    };
+    const r = await runReleaseWatch({ ...args, nowMs: t0 + 25 * 3600 * 1000, fetchImpl: slow });
+    assert.equal(r.signal, null, 'seen releases stay seen');
+    assert.deepEqual(JSON.parse(readFileSync(args.stateFilePath, 'utf8')).seen.sort(), ['9.0.1', '9.0.2', '9.0.3']);
+  } finally { cleanup(); }
+});
+
+test('the 3 s budget holds through runReleaseWatch: a host that never answers ends silently, the attempt is recorded', async () => {
+  const { dir, cleanup } = makeFixture();
+  const srv = await serve(() => { /* never respond */ });
+  try {
+    const t0 = Date.now();
+    const r = await runReleaseWatch(rwArgs(dir, { nowMs: Date.now(), url: srv.url, timeoutMs: 300 }));
+    assert.equal(r.signal, null);
+    assert.ok(Date.now() - t0 < 2500);
+    const st = JSON.parse(readFileSync(join(dir, 'state', 'release-watch.json'), 'utf8'));
+    assert.equal(st.lastReason, 'timeout');
+  } finally { await srv.close(); cleanup(); }
 });

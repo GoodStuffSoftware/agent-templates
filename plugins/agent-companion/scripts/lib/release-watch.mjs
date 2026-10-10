@@ -24,7 +24,7 @@
 // (hooks/scout-surface.mjs) calls readPending() and markSeen(). Both fail open.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { compareVersions, parseSemver } from '../../hooks/lib/context.mjs';
 
 export const CHANGELOG_URL = 'https://raw.githubusercontent.com/anthropics/claude-code/refs/heads/main/CHANGELOG.md';
@@ -240,7 +240,15 @@ export async function runReleaseWatch({
         const r = await fetchChangelogHead({ url, timeoutMs, maxBytes, fetchImpl });
         state.lastOk = !!r.ok;
         state.lastReason = r.ok ? null : r.reason;
-        if (r.ok) { parsed = parseChangelog(r.text); source = 'github'; }
+        if (r.ok) {
+          parsed = parseChangelog(r.text);
+          source = 'github';
+          if (!parsed.length) {
+            // A 200 that is not a changelog (a captive portal, an error page) is a failure.
+            state.lastOk = false;
+            state.lastReason = 'unreadable changelog';
+          }
+        }
       }
       if (parsed && parsed.length) {
         state.latest = newestVersion(parsed);
@@ -251,18 +259,30 @@ export async function runReleaseWatch({
       } else if (!state.lastOk) {
         // The fetch failed: fall back to the changelog Claude Code caches. It
         // can be old (the cache is only as fresh as the last time Claude Code
-        // refreshed it), so it only ever adds releases, never removes any.
+        // refreshed it), so it only ever ADDS releases to what an earlier
+        // successful check stored, never removes any.
         const local = readLocalChangelog(claudeDirPath);
         const lp = local ? parseChangelog(local) : [];
         const lnewer = newerMatching(lp, inst);
         if (lnewer.length) {
-          state.latest = newestVersion(lp);
-          state.installedAtCheck = inst;
-          state.source = 'local-cache';
-          state.checkedAt = state.lastAttemptAt;
-          state.releases = lnewer;
+          const byVersion = new Map();
+          for (const r of Array.isArray(state.releases) ? state.releases : []) if (r && r.version) byVersion.set(r.version, r);
+          let added = false;
+          for (const r of lnewer) if (!byVersion.has(r.version)) { byVersion.set(r.version, r); added = true; }
+          if (added || !state.releases) {
+            state.releases = [...byVersion.values()].sort((a, b) => compareVersions(b.version, a.version));
+            const lv = newestVersion(lp);
+            state.latest = state.latest && compareVersions(state.latest, lv) === 1 ? state.latest : lv;
+            state.installedAtCheck = inst;
+            state.source = state.source ? state.source : 'local-cache';
+            state.checkedAt = state.lastAttemptAt;
+          }
         }
       }
+      // The SessionStart hook may have marked releases seen while the request was
+      // in flight; keep its marks rather than overwrite them with the older set.
+      const fresh = readState(stateFilePath);
+      if (Array.isArray(fresh.seen)) state.seen = [...new Set([...(Array.isArray(state.seen) ? state.seen : []), ...fresh.seen])].slice(-MAX_SEEN);
       writeState(stateFilePath, state);
     }
 
@@ -284,7 +304,7 @@ export async function runReleaseWatch({
       checked,
       signal: {
         latest, releases: unseen.length, items,
-        detail: `Claude Code ${latest} is out; installed ${inst}. ${unseen.length} unseen release(s) newer, ${items} changelog item(s) on agents/hooks/cache/compaction/effort/SendMessage/worktree/workflow/Monitor/desktop/plugins. Details: ${detailsFilePath}`,
+        detail: `Claude Code ${latest} is out; installed ${inst}. ${unseen.length} unseen release(s) newer, ${items} changelog item(s) on agents/hooks/cache/compaction/effort/SendMessage/worktree/workflow/Monitor/desktop/plugins. Details: ${basename(detailsFilePath)} in the scout state dir.`,
       },
     };
   } catch {
