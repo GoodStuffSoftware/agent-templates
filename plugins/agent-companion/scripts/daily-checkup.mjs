@@ -12,6 +12,8 @@
 // next caller after a few hours.
 
 import { runCheckup, takeLock, dropLock, nowMs } from './lib/daily-checkup.mjs';
+import { runRegister } from './lib/decision-register.mjs';
+import { opt } from '../hooks/lib/context.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
@@ -24,11 +26,15 @@ if (!takeLock()) {
     const nowArg = arg('now');
     const nowT = nowArg ? Date.parse(nowArg) : nowMs();
     const holdArg = arg('hold-ms');
+    const when = Number.isFinite(nowT) ? nowT : nowMs();
     out = runCheckup({
       root: arg('root') || undefined,
-      nowT: Number.isFinite(nowT) ? nowT : nowMs(),
+      nowT: when,
       ...(holdArg !== undefined && Number.isFinite(Number(holdArg)) ? { holdMs: Number(holdArg) } : {}),
     });
+    // The decision register reads the day records the checkup just wrote. Still inside the
+    // lock; runRegister never throws, and no register means no work.
+    try { if (opt('decision_register', true)) runRegister({ nowT: when }); } catch { /* advisory */ }
   } catch (e) {
     out = { error: String((e && e.message) || e).slice(0, 300) };
   } finally {

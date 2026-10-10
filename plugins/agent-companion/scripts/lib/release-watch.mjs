@@ -14,9 +14,9 @@
 //     window). Offline, a bad status, a timeout: silent, nothing thrown;
 //   - the fallback: the changelog Claude Code itself caches under
 //     <config dir>/cache/changelog.md, read when the fetch failed;
-//   - the filter: only items that mention agents/subagents, hooks, cache,
-//     compaction, effort, SendMessage, worktrees, workflows, Monitor, desktop
-//     or plugins are kept;
+//   - the filter: only items that mention subagents, hooks, cache,
+//     compaction, effort, models, transcripts, SendMessage, worktrees,
+//     workflows or plugins (the narrow patterns in TOPICS) are kept;
 //   - the seen-set: a release is surfaced once. The scout reports unseen
 //     releases; the SessionStart hook marks them seen when it shows the line.
 //
@@ -39,25 +39,35 @@ const MAX_ITEM_CHARS = 400;
 const MAX_SEEN = 200;
 
 // Topic label -> pattern. The label is what the details file and the hook line
-// name. "Monitor" is case-sensitive on purpose: the tool is capitalised, and a
-// lower-case "monitoring" in a telemetry item is not about it.
+// name. The patterns are narrow on purpose: a bare "agents", "plugins", "hooks",
+// "cache" or "compact" matched the `claude agents` view, plugin folder caches
+// and chart labels, so about four items in five did not bear on routing,
+// caching, models, effort, subagents, hooks or transcripts (M, last 12
+// releases at the 0.31.12 measurement).
+//
+// MODS_NOISE names the mods runtime and other plugin-UI items; it suppresses
+// only the plugins, hooks and subagents labels, so an item about the mods
+// runtime stops matching on the word "hook" or "plugin" alone.
+const MODS_NOISE = /\bmods?\b|\$\.[a-z]|plugin hooks worker|\bui\.render|\bplugin panes?\b|\[Claude Tag\]|\bManage plugins\b|\bClaude apps gateway\b|\bplugin (?:validate|test|eval)\b/i;
+const MODS_SUPPRESSED = new Set(['plugins', 'hooks', 'subagents']);
 export const TOPICS = [
-  ['agents', /\b(?:sub-?)?agents?\b/i],
-  ['hooks', /\bhooks?\b/i],
-  ['cache', /\bcach(?:e|es|ed|ing)\b/i],
-  ['compaction', /\bcompact(?:s|ed|ing|ion|ions)?\b/i],
+  ['subagents', /\bsub-?agents?\b|\bAgent tool\b|\bagent[_ ](?:id|type)\b|\bcustom agents?\b|\bagent definitions?\b|\bteammates?\b|\bworkflow agents?\b|\bforked? agents?\b|\bClaude Mods\b/i],
+  ['hooks', /\b(?:Pre|Post)ToolUse\b|\bSessionStart\b|\bSessionEnd\b|\bSubagent(?:Start|Stop)\b|\bStop hooks?\b|\bUserPromptSubmit\b|\bPreCompact\b|\bInstructionsLoaded\b|\bPermissionRequest\b|\bTeammateIdle\b|\bCLAUDE_ENV_FILE\b|\bonFailure\b|\basyncRewake\b|\bhook output\b|\b(?:command|prompt|agent|async) hooks?\b/i],
+  ['cache', /\bprompt[- ]cach(?:e|ing)\b|\bcache (?:reads?|writes?|TTL|clock)\b|\b(?:1-hour|5-minute)\b[^.]*\bcach/i],
+  ['compaction', /\bauto-?compact\w*|\bautoCompactWindow\b|\bcompaction\b|\bcompacted\b|\bcompacting\b|\/compact\b/i],
   ['effort', /\beffort\b/i],
+  ['models', /\bCLAUDE_CODE_[A-Z_]*MODEL\b|\bSonnet 5\.5\b|\bOpus 5\b|\bset_model\b|\bmodel switch\w*|\bfallback model\b/i],
+  ['transcripts', /\bsaved transcripts?\b|\btranscript files?\b|\.jsonl\b|\bCLAUDE_CODE_TRANSCRIPT\w*|\bsubagent transcripts?\b/i],
   ['SendMessage', /\bSendMessage\b/i],
-  ['worktree', /\bworktrees?\b/i],
-  ['workflow', /\bworkflows?\b/i],
-  ['Monitor', /\bMonitors?\b/],
-  ['desktop', /\bdesktop\b/i],
-  ['plugins', /\bplugins?\b/i],
+  ['worktree', /\bworktrees?\b(?=[^.]*\b(?:sub-?agents?|isolation|agents?)\b)|\b(?:sub-?agents?|isolation)\b[^.]*\bworktrees?\b/i],
+  ['workflow', /\bWorkflow (?:tool|subagents?|agents?)\b/i],
+  ['plugins', /\bplugins?\b(?=[^.]*\b(?:hooks?|SessionStart|subagents?|agents?|skills?|reload|hot reload|auto-?update|update|cache|CLAUDE_PLUGIN)\b)|\b(?:hooks?|agents?|skills?)\b[^.]*\bplugins?\b/i],
 ];
 
 export function topicsOf(text) {
   const t = String(text || '');
-  return TOPICS.filter(([, re]) => re.test(t)).map(([label]) => label);
+  const noisy = MODS_NOISE.test(t);
+  return TOPICS.filter(([label, re]) => !(noisy && MODS_SUPPRESSED.has(label)) && re.test(t)).map(([label]) => label);
 }
 
 // "## 2.1.296" headers, "- item" bullets (an indented non-bullet line continues
@@ -205,7 +215,7 @@ export function detailsMarkdown({ installed, latest, releases, seen, checkedAt, 
   const out = [];
   out.push(`# Claude Code releases newer than ${installed}`);
   out.push('');
-  out.push(`Latest known: ${latest}. Checked ${checkedAt} (source: ${source}). Only changelog items that mention agents, hooks, cache, compaction, effort, SendMessage, worktrees, workflows, Monitor, desktop or plugins are listed. Releases marked NEW have not been surfaced before.`);
+  out.push(`Latest known: ${latest}. Checked ${checkedAt} (source: ${source}). Only changelog items that mention subagents, hooks, cache, compaction, effort, models, transcripts, SendMessage, worktrees, workflows or plugins are listed. Releases marked NEW have not been surfaced before.`);
   for (const r of releases) {
     out.push('');
     out.push(`## ${r.version}${seenSet.has(r.version) ? '' : ' (NEW)'}`);
@@ -218,10 +228,18 @@ export function detailsMarkdown({ installed, latest, releases, seen, checkedAt, 
 
 // What the scout calls. Returns { signal, ...} where signal is null or
 // { detail, releases, items, latest }. All I/O failures are swallowed.
+// `onParsed(releases)` is optional: called once with the full parseChangelog() output (every
+// item, not the topic-filtered ones) when the fetch parsed, or when the fetch failed and the
+// local cache parsed; never on a network failure with nothing to parse, and never when the
+// check was not due. A throw from it is swallowed.
 export async function runReleaseWatch({
   installed, stateFilePath, detailsFilePath, claudeDirPath, nowMs = Date.now(), noNet = false,
-  url, timeoutMs, maxBytes, fetchImpl,
+  url, timeoutMs, maxBytes, fetchImpl, onParsed,
 }) {
+  const notify = (releases) => {
+    if (typeof onParsed !== 'function') return;
+    try { onParsed(releases); } catch { /* the consumer's failure is not ours */ }
+  };
   try {
     if (!parseSemver(installed)) return { signal: null, skipped: 'installed version unreadable' };
     const inst = parseSemver(installed).join('.');
@@ -256,6 +274,7 @@ export async function runReleaseWatch({
         state.source = source;
         state.checkedAt = state.lastAttemptAt;
         state.releases = newerMatching(parsed, inst);
+        notify(parsed);
       } else if (!state.lastOk) {
         // The fetch failed: fall back to the changelog Claude Code caches. It
         // can be old (the cache is only as fresh as the last time Claude Code
@@ -263,6 +282,7 @@ export async function runReleaseWatch({
         // successful check stored, never removes any.
         const local = readLocalChangelog(claudeDirPath);
         const lp = local ? parseChangelog(local) : [];
+        if (lp.length) notify(lp);
         const lnewer = newerMatching(lp, inst);
         if (lnewer.length) {
           const byVersion = new Map();
@@ -304,7 +324,7 @@ export async function runReleaseWatch({
       checked,
       signal: {
         latest, releases: unseen.length, items,
-        detail: `Claude Code ${latest} is out; installed ${inst}. ${unseen.length} unseen release(s) newer, ${items} changelog item(s) on agents/hooks/cache/compaction/effort/SendMessage/worktree/workflow/Monitor/desktop/plugins. Details: ${basename(detailsFilePath)} in the scout state dir.`,
+        detail: `Claude Code ${latest} is out; installed ${inst}. ${unseen.length} unseen release(s) newer, ${items} changelog item(s) on subagents/hooks/cache/compaction/effort/models/transcripts/SendMessage/worktree/workflow/plugins. Details: ${basename(detailsFilePath)} in the scout state dir.`,
       },
     };
   } catch {

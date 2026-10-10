@@ -34,6 +34,7 @@ import { projectAgentDrift, driftCounts } from './lib/agent-drift.mjs';
 import { churnVerdict, churnFreshness } from './lib/session-churn.mjs';
 import { runReleaseWatch } from './lib/release-watch.mjs';
 import { launchCheckup } from './lib/daily-checkup.mjs';
+import { loadRegister, readState as readRegisterState, openFlags, scanChangelogToState } from './lib/decision-register.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
@@ -242,6 +243,11 @@ if (opt('release_watch', true) && !suppressedKinds.has('cli_release_available'))
       nowMs: nowDate().getTime(),
       noNet: !!process.env.AGENT_COMPANION_RELEASE_WATCH_NO_NET,
       url: process.env.AGENT_COMPANION_RELEASE_WATCH_URL || undefined,
+      // The decision register tests every item of the newer releases (same fetch, no extra
+      // network). Only when the option is on and the signal is not suppressed.
+      onParsed: opt('decision_register', true) && !suppressedKinds.has('decision_review_due')
+        ? (parsed) => { try { scanChangelogToState(parsed, { nowT: nowDate().getTime() }); } catch { /* advisory */ } }
+        : undefined,
     });
     if (rw.signal) sig('cli_release_available', rw.signal.detail, 'none');
   } catch { /* release watch is advisory: never block the scout */ }
@@ -256,6 +262,24 @@ if (opt('release_watch', true) && !suppressedKinds.has('cli_release_available'))
 // signal: the next main session start shows one line (hooks/scout-surface.mjs).
 // AGENT_COMPANION_DAILY_CHECKUP_NO_LAUNCH=1 forbids the launch (the suite sets it).
 try { launchCheckup({ nowT: nowDate().getTime() }); } catch { /* advisory: never block the scout */ }
+
+// --- 1g. Decision register ------------------------------------------------
+// The operator's register of standing decisions (config/decision-register.json) is
+// evaluated elsewhere (the daily checkup, and the changelog fetch above); this only
+// reads its result: an invalid register, and which decisions are flagged for review.
+// Both go to scout-latest.json; the SessionStart hook filters decision_review_due out
+// of its generic line because piece 5 has a dedicated one. An absent register is silent.
+if (opt('decision_register', true)) {
+  try {
+    const loaded = loadRegister();
+    if (!loaded.ok && !loaded.absent) {
+      sig('decision_register_invalid', `decision register invalid: ${(loaded.errors || []).slice(0, 3).join('; ').slice(0, 300)}. Run node scripts/decision-register.mjs --check`, 'none');
+    } else if (loaded.ok) {
+      const flagged = [...new Set(openFlags(readRegisterState(), loaded.register, nowDate().getTime()).map((f) => f.decision))];
+      if (flagged.length) sig('decision_review_due', `decision review due: ${flagged.join(', ')}`, 'none');
+    }
+  } catch { /* the register is advisory: never block the scout */ }
+}
 
 // --- 1c. New model in the routing table's lineup ------------------------
 // A model alias can be ADDED to config/model-tiers.json's `tiers` (a new

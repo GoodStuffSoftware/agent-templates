@@ -28,7 +28,7 @@ const CHANGELOG = [
   '## 9.0.2',
   '',
   '- Fixed subagent auto-compact window being ignored',
-  '- Improved Monitor output for long-running commands',
+  '- Improved SendMessage delivery to stopped agents',
   '- Fixed monitoring dashboards flickering',
   '',
   '## 9.0.1',
@@ -86,24 +86,39 @@ const releaseSig = (res) => (res.json?.signals || []).find((s) => s.kind === 'cl
 // keyword extraction
 // ---------------------------------------------------------------------------
 
-test('topicsOf: every topic the brief names matches, and unrelated text does not', () => {
+test('topicsOf: every kept topic matches, and unrelated or UI-only text does not', () => {
   const cases = [
-    ['Added a subagent frontmatter field', 'agents'],
-    ['Fixed the Agent tool hanging', 'agents'],
+    ['Added a subagent frontmatter field', 'subagents'],
+    ['Fixed the Agent tool hanging', 'subagents'],
     ['Fixed a SessionStart hook not firing', 'hooks'],
     ['Fixed prompt cache misses after resume', 'cache'],
     ['Fixed auto-compaction running twice', 'compaction'],
+    ['Fixed autoCompactWindow being ignored', 'compaction'],
     ['Added effort levels', 'effort'],
+    ['Fixed CLAUDE_CODE_SUBAGENT_MODEL being ignored', 'models'],
+    ['Fixed the Sonnet 5.5 cache-read price shown in /cost', 'models'],
+    ['Fixed saved transcripts missing the last turn', 'transcripts'],
     ['Fixed SendMessage to a stopped agent', 'SendMessage'],
-    ['Fixed worktree cleanup', 'worktree'],
-    ['Fixed dynamic workflows', 'workflow'],
-    ['Added the Monitor tool', 'Monitor'],
-    ['Fixed the desktop app crashing', 'desktop'],
-    ['Fixed plugin validate output', 'plugins'],
+    ['Fixed worktree cleanup for subagents', 'worktree'],
+    ['Fixed Workflow subagents stalling', 'workflow'],
+    ['Fixed plugin hooks not reloading after an update', 'plugins'],
   ];
   for (const [text, topic] of cases) assert.ok(topicsOf(text).includes(topic), `${text} -> ${topic}; got ${topicsOf(text)}`);
-  assert.deepEqual(topicsOf('Fixed a terminal rendering glitch in the status bar'), []);
-  assert.deepEqual(topicsOf('Fixed monitoring dashboards flickering'), [], 'lower-case monitoring is not the Monitor tool');
+  const dropped = [
+    'Fixed a terminal rendering glitch in the status bar',
+    'Fixed monitoring dashboards flickering',
+    'Fixed the claude agents view losing its selection',
+    'Fixed compact y-axis labels in the usage chart',
+    'Fixed plugin install failing behind a proxy',
+    'Improved syntax highlighting caching',
+    'Added the Monitor tool card in the editor',
+    'Fixed the desktop app crashing',
+  ];
+  for (const text of dropped) assert.deepEqual(topicsOf(text), [], text);
+  // The mods runtime: the plugins/hooks/subagents labels are suppressed, other topics are not.
+  assert.deepEqual(topicsOf('Fixed hooks firing twice in the mods runtime ($.ui.render)'), []);
+  assert.deepEqual(topicsOf('Fixed a mods plugin hooks worker crash'), []);
+  assert.deepEqual(topicsOf('Fixed the mods panel ignoring effort settings'), ['effort']);
 });
 
 test('parseChangelog + newerMatching: only releases newer than installed, only matching items, newest first', () => {
@@ -112,8 +127,8 @@ test('parseChangelog + newerMatching: only releases newer than installed, only m
   const newer = newerMatching(releases, '9.0.1');
   assert.deepEqual(newer.map((r) => r.version), ['9.0.3', '9.0.2']);
   assert.equal(newer[0].items.length, 1, 'the rendering item is dropped');
-  assert.equal(newer[1].items.length, 2, 'subagent + Monitor kept, monitoring dropped');
-  assert.deepEqual(newer[0].items[0].topics.sort(), ['agents', 'effort']);
+  assert.equal(newer[1].items.length, 2, 'subagent + SendMessage kept, monitoring dropped');
+  assert.deepEqual(newer[0].items[0].topics.sort(), ['effort', 'subagents']);
 });
 
 test('parseChangelog joins an indented continuation line to its bullet', () => {
@@ -203,7 +218,7 @@ test('a host that never answers is cut off at the 3 s budget (fetchChangelogHead
 });
 
 test('a server that ignores Range and streams a huge body is cut at maxBytes', async () => {
-  const big = `## 9.9.9\n- Fixed hooks\n${'x'.repeat(5000)}\n## 9.9.8\n- Fixed agents\n${'y'.repeat(200000)}`;
+  const big = `## 9.9.9\n- Fixed SessionStart hooks\n${'x'.repeat(5000)}\n## 9.9.8\n- Fixed subagents\n${'y'.repeat(200000)}`;
   const srv = await okServer(big);
   try {
     const r = await fetchChangelogHead({ url: srv.url, maxBytes: 20000 });
@@ -224,8 +239,8 @@ test('details file: lists every newer release, marks the unseen ones, names the 
     assert.match(md, /# Claude Code releases newer than 9\.0\.1/);
     assert.match(md, /## 9\.0\.3 \(NEW\)/);
     assert.match(md, /## 9\.0\.2 \(NEW\)/);
-    assert.match(md, /\[agents, effort\] Added `effort` to the Agent tool/);
-    assert.match(md, /Monitor output/);
+    assert.match(md, /\[subagents, effort\] Added `effort` to the Agent tool/);
+    assert.match(md, /SendMessage delivery/);
     assert.doesNotMatch(md, /rendering glitch/);
     assert.doesNotMatch(md, /monitoring dashboards/);
     assert.doesNotMatch(md, /## 9\.0\.1/);
@@ -318,7 +333,7 @@ test('seen releases leave the scout signal; a later release surfaces alone', asy
     assert.equal(releaseSig(quiet), undefined, 'seen: the scout stops reporting it');
 
     // A new release lands upstream; the next daily check finds it.
-    const srv2 = await okServer(`## 9.0.4\n\n- Fixed hooks firing twice\n\n${CHANGELOG.replace('# Changelog\n', '')}`);
+    const srv2 = await okServer(`## 9.0.4\n\n- Fixed SessionStart hooks firing twice\n\n${CHANGELOG.replace('# Changelog\n', '')}`);
     try {
       const later = await runDetect({ cwd: dir, env: WATCH_ENV(srv2.url, { AGENT_COMPANION_FAKE_NOW: '2026-10-11T00:00:00.000Z' }) });
       const sig = releaseSig(later);
@@ -453,7 +468,7 @@ test('the SessionStart block drops a suppressed kind already sitting in scout-la
 
 const changelogUpTo = (top) => {
   const lines = ['# Changelog', ''];
-  for (let v = top; v >= 1; v -= 1) lines.push(`## 9.0.${v}`, '', `- Fixed hooks in release ${v}`, '');
+  for (let v = top; v >= 1; v -= 1) lines.push(`## 9.0.${v}`, '', `- Fixed SessionStart hooks in release ${v}`, '');
   return lines.join('\n');
 };
 const stubFetch = (body) => async () => ({ ok: true, status: 200, body: null, text: async () => body });

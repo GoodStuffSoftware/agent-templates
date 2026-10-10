@@ -226,7 +226,7 @@ function loadState(nowT) {
   return freshState(cutoff);
 }
 
-const dayAcc = (state, key) => (state.days[key] ||= { spawns: 0, compactions: 0, type: {}, role: {}, rung: {}, uType: {}, uRole: {}, uRung: {} });
+const dayAcc = (state, key) => (state.days[key] ||= { spawns: 0, compactions: 0, limitHits: 0, firstLimitMs: 0, type: {}, role: {}, rung: {}, uType: {}, uRole: {}, uRung: {} });
 const bump = (o, k, n) => { o[k] = (o[k] || 0) + n; };
 
 function rungOf(agentType) {
@@ -313,6 +313,19 @@ function scanFile(f, fileState, ctx) {
       try { j = JSON.parse(s); } catch { return; }
       const m = j.message;
       const ts = Date.parse(j.timestamp);
+      // A synthetic "hit your ... limit" message is the harness telling the
+      // user a usage limit blocked the request: no billable work, but it is why
+      // a day can show zero units. Counted once per uuid into the day record.
+      if (ts && ts >= cutoffMs && m && m.model === '<synthetic>' && /hit your .*limit/i.test(flattenContent(m.content))) {
+        const key = `l:${j.uuid || `${f.path}@${off}`}`;
+        if (!seen.has(key)) {
+          seen.add(key, ts);
+          const d = dayAcc(state, dayKeyOf(dayStartMs(ts)));
+          d.limitHits = (d.limitHits || 0) + 1;
+          if (!d.firstLimitMs || ts < d.firstLimitMs) d.firstLimitMs = ts;
+        }
+        return;
+      }
       if (!ts || ts < cutoffMs || !m || !m.usage || !m.model || m.model === '<synthetic>') return;
       const id = j.requestId || m.id || j.uuid;
       if (!id) return;
@@ -484,7 +497,7 @@ export function buildDayRecord(state, startMs, { limit = DEFAULT_LIMIT_UNITS, ta
   const week = sumHours(state, wStart, endMs);
   const weekUnits = week.m + week.s;
   const elapsed = (endMs - wStart) / WEEK_MS;
-  const acc = state.days[dayKeyOf(startMs)] || { spawns: 0, compactions: 0, type: {}, role: {}, rung: {}, uType: {}, uRole: {}, uRung: {} };
+  const acc = state.days[dayKeyOf(startMs)] || { spawns: 0, compactions: 0, limitHits: 0, firstLimitMs: 0, type: {}, role: {}, rung: {}, uType: {}, uRole: {}, uRung: {} };
   const rollout = readRollout();
   return {
     v: SCHEMA,
@@ -519,6 +532,7 @@ export function buildDayRecord(state, startMs, { limit = DEFAULT_LIMIT_UNITS, ta
       shareOver150kPct: day.s > 0 ? r1((day.o / day.s) * 100) : null,
     },
     ceilingNudges: countCeilingNudges(startMs, endMs),
+    limit: { hits: acc.limitHits || 0, firstAt: acc.firstLimitMs ? iso(acc.firstLimitMs) : null },
     changes: {
       active: rollout.filter((c) => c.activeFrom < endMs).map((c) => ({ id: c.id, activeFrom: iso(c.activeFrom) })),
       switchedOn: rollout.filter((c) => c.activeFrom >= startMs && c.activeFrom < endMs).map((c) => c.id),
@@ -640,9 +654,11 @@ function fmtPct(x) { return Number.isFinite(x) ? `${r1(x)}%` : 'n/a'; }
 export function formatLine(rec, historyPath) {
   const sw = rec.changes && Array.isArray(rec.changes.switchedOn) && rec.changes.switchedOn.length
     ? `; switched on that day: ${rec.changes.switchedOn.join(', ')}` : '';
+  const lim = rec.limit && rec.limit.hits > 0
+    ? `; usage limit hit that day${rec.limit.firstAt ? ` (first at ${rec.limit.firstAt})` : ''}` : '';
   const delta = rec.vsTargetPct >= 0 ? `+${r1(rec.vsTargetPct)}` : `${r1(rec.vsTargetPct)}`;
   return `[agent-companion] Daily checkup ${rec.day} (08:00Z to 08:00Z): ${fmtPct(rec.pct.total)} of the weekly limit `
-    + `against the ${fmtPct(rec.targetPct)} target (${delta}); week so far ${fmtPct(rec.week.pctSoFar)}, pace at reset ${fmtPct(rec.week.paceAtResetPct)}${sw}. `
+    + `against the ${fmtPct(rec.targetPct)} target (${delta}); week so far ${fmtPct(rec.week.pctSoFar)}, pace at reset ${fmtPct(rec.week.paceAtResetPct)}${sw}${lim}. `
     + `History: ${historyPath}`;
 }
 

@@ -32,9 +32,11 @@ import { normalizeGitUrl } from '../scripts/lib/publication-sweep.mjs';
 import { githubOwnerRepoFromUrl, repoCacheKey } from '../scripts/lib/ci-status.mjs';
 import { readPending, markSeen } from '../scripts/lib/release-watch.mjs';
 import { pendingSurface, markSurfaced, launchCheckup } from '../scripts/lib/daily-checkup.mjs';
+import { pendingLine, markFlagsSurfaced } from '../scripts/lib/decision-register.mjs';
 
 const MAX_AGE_DAYS = 7;
 const RELEASE_KIND = 'cli_release_available';
+const REGISTER_KIND = 'decision_review_due';
 
 // --- Piece 1: the generic scout-signal list --------------------------------
 // The same kind can fire several times in one scout run (a measured session
@@ -73,9 +75,11 @@ function buildScoutBlock() {
   }
   if (!latest || !Array.isArray(latest.signals)) return null;
   // Drop what the operator suppressed (a result written before the option was
-  // set still carries it) and the release signal, which has its own line below.
+  // set still carries it) and the release and decision-review signals, which
+  // have their own lines below.
   const hidden = scoutSuppressed();
   hidden.add(RELEASE_KIND);
+  hidden.add(REGISTER_KIND);
   latest = { ...latest, signals: latest.signals.filter((s) => !hidden.has(String((s && s.kind) || 'unknown'))) };
   if (latest.signals.length === 0) return null;
 
@@ -152,7 +156,7 @@ function buildReleaseLine() {
   const oldest = pending.versions[pending.versions.length - 1];
   const range = pending.versions.length > 1 ? `${oldest} to ${pending.versions[0]}` : pending.versions[0];
   return `[agent-companion] Claude Code ${pending.latest} is out (installed ${pending.installed}): ${pending.releases} new release(s) (${range}), `
-    + `${pending.items} changelog item(s) on agents, hooks, cache, compaction, effort, plugins and related. `
+    + `${pending.items} changelog item(s) on subagents, hooks, cache, compaction, effort, models, transcripts, plugins and related. `
     + `Details: ${stateFile('cli-release-details.md')}`;
 }
 
@@ -168,6 +172,19 @@ function buildCheckupLine() {
   if (!pending) return null;
   markSurfaced(pending.rec.day);
   return pending.line;
+}
+
+// --- Piece 5: a standing decision is due for review -----------------------
+// Reads only the register and its state file (scripts/lib/decision-register.mjs):
+// no scan, no network, no child process, no model. One line per session start,
+// for the first unsurfaced flag younger than 72 hours; the others show on later
+// starts. Subagent sessions never reach here (the passthrough below). The caller
+// marks the shown flag surfaced, last, once the output is certain.
+function buildRegisterPiece() {
+  if (!opt('decision_register', true)) return null;
+  if (scoutSuppressed().has(REGISTER_KIND)) return null;
+  const pending = pendingLine();
+  return pending && pending.line ? pending : null;
 }
 
 try {
@@ -201,10 +218,17 @@ try {
   // idempotent: one attempt per 3 hours, one run at a time). Returns at once.
   try { launchCheckup(); } catch { /* advisory */ }
 
-  if (!ciLine && !scoutBlock && !releaseLine && !checkupLine) passthrough();
+  let registerPiece = null;
+  try { registerPiece = buildRegisterPiece(); } catch { registerPiece = null; }
+  const registerLine = registerPiece ? registerPiece.line : null;
 
-  const contextParts = [ciLine, scoutBlock?.context, releaseLine, checkupLine].filter(Boolean);
-  const summary = scoutBlock?.summary || ciLine || releaseLine || checkupLine;
+  if (!ciLine && !scoutBlock && !releaseLine && !checkupLine && !registerLine) passthrough();
+
+  const contextParts = [ciLine, scoutBlock?.context, releaseLine, checkupLine, registerLine].filter(Boolean);
+  const summary = scoutBlock?.summary || ciLine || releaseLine || checkupLine || registerLine;
+
+  // Last, so a hook that dies before printing has not marked anything surfaced.
+  if (registerPiece) { try { markFlagsSurfaced(registerPiece.keys); } catch { /* advisory */ } }
 
   process.stdout.write(JSON.stringify({
     systemMessage: summary,

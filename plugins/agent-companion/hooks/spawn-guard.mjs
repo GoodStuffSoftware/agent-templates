@@ -1389,8 +1389,15 @@ try {
         if (selfReviewExpected === false) {
           const rung = injectionRung(runningType, def, model);
           if (rung) {
+            // A brief that states no CONSEQUENCE still carries its type's
+            // preset: a critical type's self-review names the critical
+            // review rung. Text only; no guard decision reads this value.
+            let reviewConsequence = consequenceWasDeclared ? declaredConsequence : null;
+            if (!consequenceWasDeclared) {
+              try { if (taskTypeDef(declaredType)?.def?.consequence === 'critical') reviewConsequence = 'critical'; } catch { /* table unreadable */ }
+            }
             selfReviewSuffix = selfReviewBriefText(rung, sr, undefined, {
-              writerType: declaredType, consequence: consequenceWasDeclared ? declaredConsequence : null,
+              writerType: declaredType, consequence: reviewConsequence,
             });
             selfReviewInjected = true;
             selfReviewExpected = true;

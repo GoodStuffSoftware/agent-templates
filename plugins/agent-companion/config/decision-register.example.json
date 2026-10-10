@@ -1,0 +1,43 @@
+{
+  "schema": "agent-companion/decision-register",
+  "version": 1,
+  "decisions": [
+    {
+      "id": "example-decision",
+      "title": "Example: keep the standing choice until a premise breaks",
+      "status": "active",
+      "decided": "2026-01-01",
+      "decision": "One or two sentences saying what is standing, for example: workers of kind X keep setting Y.",
+      "reverse": "How to undo it, for example: remove setting Y from the config file.",
+      "premises": [
+        { "id": "p1", "text": "The claim the decision rests on, stated so a trigger can test it.", "label": "M" },
+        { "id": "p2", "text": "A second claim that is a judgement rather than a measurement.", "label": "E" }
+      ],
+      "evidence": ["docs/example-evidence.md"],
+      "triggers": [
+        {
+          "id": "release-note",
+          "premise": "p1",
+          "kind": "changelog",
+          "sinceVersion": "2.1.0",
+          "flags": "i",
+          "pattern": "\\bexample setting\\b[^.]*\\b(?:default|renamed|removed)\\b",
+          "note": "Tested against every item of releases newer than sinceVersion. A hit flags at once."
+        },
+        {
+          "id": "cost-per-spawn",
+          "premise": "p2",
+          "kind": "metric",
+          "source": "history",
+          "metric": "compactionsPer100Spawns",
+          "params": {},
+          "op": ">",
+          "threshold": 50,
+          "minSample": 20,
+          "minDays": 3,
+          "note": "Flags after 3 consecutive days with at least 20 spawns each where the value is above 50."
+        }
+      ]
+    }
+  ]
+}

@@ -133,8 +133,8 @@ test('reviewerRungFor: the recommender\'s rung on the same model, else null (gen
   assert.equal(sr.reviewerRungFor(rung('sonnet', 'high'), { now: BEFORE }).agent, 'ac-sonnet-xhigh');
   assert.equal(sr.reviewerRungFor(rung('sonnet', 'xhigh'), { now: BEFORE }), null);
   assert.equal(sr.reviewerRungFor(rung('opus', 'xhigh'), { now: BEFORE }), null);
-  // Critical moves to another model: keep the writer's own rung, as before.
-  assert.equal(sr.reviewerRungFor(rung('sonnet', 'high'), { now: BEFORE, consequence: 'critical' }), null);
+  // Critical moves to another model (opus/xhigh): the text names that rung (0.31.12).
+  assert.equal(sr.reviewerRungFor(rung('sonnet', 'high'), { now: BEFORE, consequence: 'critical' }).agent, 'ac-opus-xhigh');
   assert.equal(sr.reviewerRungFor(null), null);
   // The generated block (no reviewer rung) is the same text it always was.
   const r = rung('sonnet', 'high');
@@ -145,6 +145,31 @@ test('reviewerRungFor: the recommender\'s rung on the same model, else null (gen
   assert.match(raised, /subagent_type: "agent-companion:ac-sonnet-xhigh"/);
   assert.match(raised, /^ {3}WRITER: sonnet\/high$/m, 'the WRITER line stays the writer\'s own pair');
   assert.match(raised, /sonnet\/xhigh, not your own rung/);
+  assert.doesNotMatch(raised, /--consequence critical/, 'same-model answer: no consequence flag in the pointer');
+  const crit = sr.selfReviewBlock(r, sr.selfReviewConfig(), 'agent-companion', rung('opus', 'xhigh'));
+  assert.match(crit, /--type code-review --writer sonnet\/high --consequence critical/);
+  // Same model, found for a critical consequence (opus/low writer -> opus/xhigh): the pointer
+  // still carries the flag, or the command it names would answer opus/low.
+  const oc = sr.reviewerRungFor(rung('opus', 'low'), { now: BEFORE, consequence: 'critical' });
+  assert.equal(oc.agent, 'ac-opus-xhigh');
+  assert.match(sr.selfReviewBlock(rung('opus', 'low'), sr.selfReviewConfig(), 'agent-companion', oc),
+    /--type code-review --writer opus\/low --consequence critical/);
+}));
+
+test('parity: the rung the appended text names equals resolveRoute for a critical review, for every sonnet and opus writer rung', () => withTiers({ reviewerEffortFloor: FLOOR }, () => {
+  const writers = ['sonnet/low', 'sonnet/medium', 'sonnet/high', 'sonnet/xhigh', 'opus/low', 'opus/medium', 'opus/high', 'opus/xhigh', 'opus/max'];
+  let checked = 0;
+  for (const w of writers) {
+    const [model, effort] = w.split('/');
+    const rung = ctx.rungFor(model, effort);
+    if (!rung) continue;
+    const want = ctx.resolveRoute({ type: 'code-review', writer: { model, effort }, consequence: 'critical', consequenceExplicit: true, now: BEFORE });
+    const text = sr.selfReviewBriefText(rung, sr.selfReviewConfig(), 'agent-companion', { writerType: 'critical-change', consequence: 'critical', now: BEFORE });
+    const named = /subagent_type: "agent-companion:([a-z0-9-]+)"/.exec(text)[1];
+    assert.equal(named, ctx.rungFor(want.model, want.effort).agent, w);
+    checked += 1;
+  }
+  assert.ok(checked >= 6, `only ${checked} writer rungs checked`);
 }));
 
 test('spawn guard: the self-review text appended to a sonnet writer names the reviewer rung the recommender names', () => {
@@ -183,9 +208,15 @@ test('spawn guard: the self-review text appended to a sonnet writer names the re
     const x = spawn('ac-sonnet-xhigh', brief);
     assert.match(x, /subagent_type: "agent-companion:ac-sonnet-xhigh"/);
     assert.doesNotMatch(x, /not your own rung/);
-    // A critical change keeps the writer's rung in the text (the recommender moves it to opus; unchanged).
-    const c = spawn('ac-sonnet-high', 'TYPE: bounded-feature\nCONSEQUENCE: critical\ndo a thing');
-    assert.match(c, /subagent_type: "agent-companion:ac-sonnet-high"/);
+    // A critical consequence (stated, or implied by TYPE: critical-change) names the opus reviewer the recommender picks.
+    for (const b of ['TYPE: bounded-feature\nCONSEQUENCE: critical\ndo a thing', 'TYPE: critical-change\ndo a thing']) {
+      const c = spawn('ac-sonnet-high', b);
+      assert.match(c, /subagent_type: "agent-companion:ac-opus-xhigh"/, b);
+      assert.match(c, /--consequence critical/);
+      assert.match(c, /^ {3}WRITER: sonnet\/high$/m);
+    }
+    // A routine type is unchanged.
+    assert.match(spawn('ac-sonnet-high', brief), /subagent_type: "agent-companion:ac-sonnet-xhigh"/);
   } finally {
     f.cleanup();
   }

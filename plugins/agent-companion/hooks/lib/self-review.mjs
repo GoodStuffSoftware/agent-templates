@@ -153,6 +153,9 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
   const rv = reviewerRung && reviewerRung.agent && reviewerRung.agent !== rung.agent ? reviewerRung : null;
   const spawnAs = `${plugin}:${(rv || rung).agent}`;
   const rvPair = rv ? `${rv.model}${rv.effort ? '/' + rv.effort : ''}` : '';
+  // Another model, or a rung found for a critical consequence, is only ever named for a critical change, so the pointer
+  // to the recommender carries the consequence that produces that answer.
+  const ptr = rv && (rv.model !== rung.model || rv.critical) ? ' --consequence critical' : '';
   const types = sr.types.map((t) => `\`${t}\``).join(', ');
   const n = sr.fixRounds;
   const fix = n === 0
@@ -167,7 +170,7 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
     'When it applies, before you return (you have no Skill tool: this text is the whole spawn recipe, so do not look for the team-orchestration skill):',
     '',
     '1. Commit your work, so the review has a fixed sha.',
-    `2. Spawn exactly ONE reviewer, in the foreground (\`run_in_background: false\`), with \`subagent_type: "${spawnAs}"\`: ${rv ? `the rung the routing table names for a review of your pair (${rvPair}, not your own rung: the operator sets reviewer effort per model, and \`/ac recommend --type code-review --writer ${pair}\` says the same)` : 'this rung, which matches your own model and effort'}. Its brief opens with these three lines, as plain text:`,
+    `2. Spawn exactly ONE reviewer, in the foreground (\`run_in_background: false\`), with \`subagent_type: "${spawnAs}"\`: ${rv ? `the rung the routing table names for a review of your pair (${rvPair}, not your own rung: the operator sets reviewer effort per model, and \`/ac recommend --type code-review --writer ${pair}${ptr}\` says the same)` : 'this rung, which matches your own model and effort'}. Its brief opens with these three lines, as plain text:`,
     '   ```',
     '   TYPE: code-review',
     `   WRITER: ${pair}`,
@@ -329,11 +332,11 @@ export function injectionRung(runningType, def, spawnModel) {
 
 // The rung a review of `rung`'s writer should run on, when the recommender
 // (resolveRoute, TYPE: code-review, WRITER: this rung's pair) names a
-// different effort on the SAME model: the operator's reviewerEffortFloor or
-// reviewerEffortCap (config), the profile's minimum effort, or an elevated
-// change's floor. null when it names the writer's own pair, another model (a
-// critical change moves to opus; the protocol text keeps the writer's rung
-// there, as before) or a pair that is no rung. Never throws. Runtime only:
+// different rung: another effort on the same model (the operator's
+// reviewerEffortFloor or reviewerEffortCap, the profile's minimum effort, an
+// elevated change's floor) or another model (a critical change reviews on
+// opus). null when it names the writer's own pair or a pair that is no
+// rung. Never throws. Runtime only:
 // the generated rung files call selfReviewBlock with no reviewer rung, so
 // committed text never depends on one machine's config or on the date.
 export function reviewerRungFor(rung, { writerType = null, consequence = null, now } = {}) {
@@ -344,9 +347,10 @@ export function reviewerRungFor(rung, { writerType = null, consequence = null, n
       writerType: writerType || null, now,
       ...(consequence ? { consequence, consequenceExplicit: true } : {}),
     });
-    if (!r || r.model !== rung.model || (r.effort || null) === (rung.effort || null) || !r.effort) return null;
+    if (!r || !r.model || !r.effort) return null;
     const to = rungFor(r.model, r.effort);
-    return to && to.agent !== rung.agent ? to : null;
+    if (!to || to.agent === rung.agent) return null;
+    return consequence === 'critical' ? { ...to, critical: true } : to;
   } catch { return null; }
 }
 

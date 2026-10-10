@@ -31,6 +31,8 @@ ${AGENT_COMPANION_STATE_DIR}                      # override, mostly for tests
     daily-checkup-history.jsonl  # append-only: one line per closed 08:00Z day (plan usage, spawns, nudges, active changes)
     daily-checkup.json           # the checkup's scan state: byte offsets per transcript, hourly unit buckets (rebuilt on loss)
     daily-checkup-seen.bin       # request, compaction and spawn ids already counted (8-byte hash + minute stamp each)
+    decision-register-state.json  # decision register: streaks, frozen baselines, changelog hits, flags, seen and shown keys (derived; schema in README "Decision register")
+    decision-register-details.md  # decision register: one section per open flag, written when a flag appears
     version-notice-state.json    # per-session plugin-staleness notice state, and each session's plugin-load time (loadedAt, loadedAtFrom)
     process-loads/                # one <pid>.json per Claude Code process: when it loaded its plugins, the session it runs now, and a SessionEnd "resume" it just raised
     ladder-rewrites.json          # per session: when the guard began recording every spawn (armedAt), the pending spawns, and whether the harness ignored a rewrite
@@ -518,6 +520,7 @@ Written by `scripts/daily-checkup.mjs` (the scout starts it in the background; s
 | `spawns` | `total`, and `byType`, `byRole`, `byRung`: per class `n` (subagent files whose first prompt is in the day), `units` (consumed in the day) and `unitsPerSpawn`. Type and role come from the prompt's `TYPE:`/`ROLE:` lines (`none` when absent), the rung from the agent type (`sonnet/high`, `opus/medium`, `haiku`, else the type name) |
 | `subagent` | `compactions`, `compactionsPer100Spawns`, `unitsOver150k` and `shareOver150kPct` (of subagent units, requests with more than 150K context) |
 | `ceilingNudges` | rows of `telemetry/context-ceiling.jsonl` in the day (0 when the log is missing) |
+| `limit` | `hits` and `firstAt`: the synthetic "hit your ... limit" messages in the day's transcripts, each counted once (`hits` 0 and `firstAt` null when none). A day with 0 units and `hits` above 0 is a usage lockout, not a scan gap. Records written before 0.31.12 have no `limit` field and are not rewritten |
 | `changes` | `active` (`{id, activeFrom}` for every `rollout.json` entry in force by the end of the day) and `switchedOn` (ids whose time fell inside the day); both empty without a rollout file |
 | `scanFrom` | where the scan began (the first run looks back at most 8 days) |
 

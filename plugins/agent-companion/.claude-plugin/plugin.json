@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.11",
+  "version": "0.31.12",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -129,13 +129,19 @@
     "release_watch": {
       "type": "boolean",
       "title": "Claude Code release watch",
-      "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on agents, hooks, cache, compaction, effort, SendMessage, worktrees, workflows, Monitor, desktop and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one line naming the versions, the item count and the details path (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
+      "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on subagents, hooks, cache, compaction, effort, models, transcripts, SendMessage, worktrees, workflows and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one line naming the versions, the item count and the details path (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
       "default": true
     },
     "daily_checkup": {
       "type": "boolean",
       "title": "Daily checkup of plan usage",
       "description": "Once a day the scout works out the previous 08:00Z to 08:00Z day's plan usage from your local transcripts (main sessions and subagents) with no model call and no network, in a detached hidden background process that reads only the bytes added since its last run. It appends one JSON line per day to daily-checkup-history.jsonl in the scout state dir: the day's share of the weekly limit (main and subagent), the week so far and the pace at reset, spawns by TYPE:/ROLE: brief line and by rung with units per spawn, subagent compactions per 100 spawns and the share of subagent units above 150K context, context-ceiling nudges, and which scheduled changes (rollout.json) were active. The next MAIN session start shows ONE line about the latest day, once per day (subagents get nothing). Off = no scan, no history, no line.",
+      "default": true
+    },
+    "decision_register": {
+      "type": "boolean",
+      "title": "Decision register",
+      "description": "Reads your own register of standing decisions (config/decision-register.json in the agent-companion config dir; absent means nothing happens) and flags a decision for review when its trigger fires: a Claude Code changelog item that matches a pattern you wrote, a plan-usage metric from the daily checkup past a threshold, or a staged change not exercised or exercised wrongly. No model call and no extra network (the changelog scan rides on the release-watch fetch). The next MAIN session start shows ONE line per flag, once, and only while the flag is under 72 hours old (subagents get nothing); the full text goes to decision-register-details.md in the scout state dir. Off = no scan, no line, no signal.",
       "default": true
     },
     "weekly_limit_units": {

@@ -629,3 +629,49 @@ test('losing the state file rebuilds the days; the seen-requests file does not z
     assert.equal(record().units.total, 2, 'the same request is counted again, not skipped as already seen');
   } finally { fx.cleanup(); }
 });
+
+// A synthetic assistant line the harness writes when it refuses a request: model
+// `<synthetic>`, all-zero usage, the notice as text content.
+function synth(uuid, ts, text) {
+  return JSON.stringify({
+    type: 'assistant', timestamp: ts, uuid,
+    message: {
+      id: `msg_${uuid}`, model: '<synthetic>', role: 'assistant',
+      content: [{ type: 'text', text }],
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    },
+  });
+}
+
+test('a usage-limit lockout: the zero day says why (limit.hits, limit.firstAt), once per message, and the line mentions it', () => {
+  const { fx, root } = mk();
+  try {
+    const f = join(root, 'projA', 's1.jsonl');
+    const LIMIT_TEXT = "You've hit your monthly spend limit · raise it at the usage settings";
+    put(f, [
+      asst('a1', '2026-10-07T12:00:00Z', SONNET, TEN_M), // the day before: real work
+      synth('l1', '2026-10-08T10:56:00Z', LIMIT_TEXT), // the lockout day
+      synth('l2', '2026-10-08T12:50:00Z', LIMIT_TEXT),
+      synth('n1', '2026-10-08T13:00:00Z', 'Request interrupted by user'), // synthetic, but not a limit notice
+    ]);
+    run(root, T('2026-10-10T09:00:00Z'));
+    const prev = record('2026-10-07');
+    const d = record('2026-10-08');
+    const next = record('2026-10-09');
+    assert.ok(prev.units.total > 0);
+    assert.deepEqual(prev.limit, { hits: 0, firstAt: null });
+    assert.equal(d.units.total, 0);
+    assert.deepEqual(d.limit, { hits: 2, firstAt: '2026-10-08T10:56:00.000Z' });
+    assert.equal(next.units.total, 0);
+    assert.deepEqual(next.limit, { hits: 0, firstAt: null });
+    assert.match(formatLine(d, '/h'), /; usage limit hit that day \(first at 2026-10-08T10:56:00\.000Z\)\. History: \/h$/);
+    assert.doesNotMatch(formatLine(prev, '/h'), /usage limit/);
+    assert.doesNotMatch(formatLine({ ...prev, limit: undefined }, '/h'), /usage limit/, 'an older record without the field');
+
+    // The same message appearing again (same uuid) is not counted twice.
+    put(f, [synth('l1', '2026-10-08T10:56:00Z', LIMIT_TEXT)], { append: true });
+    run(root, T('2026-10-10T10:00:00Z'));
+    const state = JSON.parse(readFileSync(checkupPaths().state, 'utf8'));
+    assert.equal(state.days['2026-10-08'].limitHits, 2);
+  } finally { fx.cleanup(); }
+});
