@@ -33,6 +33,7 @@ import {
 import { projectAgentDrift, driftCounts } from './lib/agent-drift.mjs';
 import { churnVerdict, churnFreshness } from './lib/session-churn.mjs';
 import { runReleaseWatch } from './lib/release-watch.mjs';
+import { launchCheckup } from './lib/daily-checkup.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
@@ -245,6 +246,16 @@ if (opt('release_watch', true) && !suppressedKinds.has('cli_release_available'))
     if (rw.signal) sig('cli_release_available', rw.signal.detail, 'none');
   } catch { /* release watch is advisory: never block the scout */ }
 }
+
+// --- 1f. Daily checkup ---------------------------------------------------
+// Yesterday's plan usage (08:00Z to 08:00Z), worked out from the local
+// transcripts with no model call: scripts/daily-checkup.mjs appends one line per
+// day to state/daily-checkup-history.jsonl. It runs as a detached, hidden
+// background process, so the scout never waits for it; at most one attempt per
+// 3 hours, and only when the latest closed day is not yet covered. No scout
+// signal: the next main session start shows one line (hooks/scout-surface.mjs).
+// AGENT_COMPANION_DAILY_CHECKUP_NO_LAUNCH=1 forbids the launch (the suite sets it).
+try { launchCheckup({ nowT: nowDate().getTime() }); } catch { /* advisory: never block the scout */ }
 
 // --- 1c. New model in the routing table's lineup ------------------------
 // A model alias can be ADDED to config/model-tiers.json's `tiers` (a new

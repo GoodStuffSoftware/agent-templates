@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.8",
+  "version": "0.31.9",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -131,6 +131,24 @@
       "title": "Claude Code release watch",
       "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on agents, hooks, cache, compaction, effort, SendMessage, worktrees, workflows, Monitor, desktop and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one line naming the versions, the item count and the details path (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
       "default": true
+    },
+    "daily_checkup": {
+      "type": "boolean",
+      "title": "Daily checkup of plan usage",
+      "description": "Once a day the scout works out the previous 08:00Z to 08:00Z day's plan usage from your local transcripts (main sessions and subagents) with no model call and no network, in a detached hidden background process that reads only the bytes added since its last run. It appends one JSON line per day to daily-checkup-history.jsonl in the scout state dir: the day's share of the weekly limit (main and subagent), the week so far and the pace at reset, spawns by TYPE:/ROLE: brief line and by rung with units per spawn, subagent compactions per 100 spawns and the share of subagent units above 150K context, context-ceiling nudges, and which scheduled changes (rollout.json) were active. The next MAIN session start shows ONE line about the latest day, once per day (subagents get nothing). Off = no scan, no history, no line.",
+      "default": true
+    },
+    "weekly_limit_units": {
+      "type": "number",
+      "title": "Daily checkup: weekly limit in plan units",
+      "description": "What 100% of the weekly plan limit is, in the plan units the daily checkup uses (every request priced at the Sonnet price vector, times the model's plan weight: Opus 1.5, Haiku 0.5, Fable 5). Default 2677, so 1% = 26.8 units. Weeks reset Friday 16:00Z.",
+      "default": 2677
+    },
+    "daily_pace_target_pct": {
+      "type": "number",
+      "title": "Daily checkup: pace target (% of the weekly limit per day)",
+      "description": "The daily share of the weekly limit the checkup line compares each day with. Default 14 (seven days at 14% is 98%).",
+      "default": 14
     },
     "ladder_check": {
       "type": "boolean",

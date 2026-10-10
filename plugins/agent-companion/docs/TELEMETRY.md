@@ -28,6 +28,9 @@ ${AGENT_COMPANION_STATE_DIR}                      # override, mostly for tests
     baseline.json                 # last-seen harness version + counters
     scout-latest.json            # most recent calibration-scout result (overwritten each run)
     scout-history.jsonl          # append-only: one line per scout run
+    daily-checkup-history.jsonl  # append-only: one line per closed 08:00Z day (plan usage, spawns, nudges, active changes)
+    daily-checkup.json           # the checkup's scan state: byte offsets per transcript, hourly unit buckets (rebuilt on loss)
+    daily-checkup-seen.bin       # request, compaction and spawn ids already counted (8-byte hash + minute stamp each)
     version-notice-state.json    # per-session plugin-staleness notice state, and each session's plugin-load time (loadedAt, loadedAtFrom)
     process-loads/                # one <pid>.json per Claude Code process: when it loaded its plugins, the session it runs now, and a SessionEnd "resume" it just raised
     ladder-rewrites.json          # per session: when the guard began recording every spawn (armedAt), the pending spawns, and whether the harness ignored a rewrite
@@ -499,6 +502,24 @@ whatever entries it covers.
 One line per `scripts/detect.mjs` run — the same object written to
 `scout-latest.json` at that moment, which is itself overwritten every run and
 keeps no history of its own.
+
+### `daily-checkup-history.jsonl` — append-only, one line per closed day
+
+Written by `scripts/daily-checkup.mjs` (the scout starts it in the background; see the README, Daily checkup). A day runs 08:00Z to 08:00Z and is named by its start date. No model call; the numbers come from the local transcripts. Fields:
+
+| field | meaning |
+|---|---|
+| `v`, `day`, `from`, `to` | schema version, the day's start date, its UTC bounds |
+| `computedAt`, `dataThrough` | when the line was written, and the newest request it saw (a line written before `to` is partial) |
+| `limitUnits`, `targetPct` | the `weekly_limit_units` and `daily_pace_target_pct` used |
+| `units`, `pct` | main, subagent and total: plan units and percent of the weekly limit |
+| `vsTargetPct` | total percent minus the target |
+| `week` | `start` (the Friday 16:00Z reset), `units`, `pctSoFar` at the end of the day, `elapsedPct` of the week, `paceAtResetPct` (so far over the elapsed share), `partial` (the scan began after the week did) |
+| `spawns` | `total`, and `byType`, `byRole`, `byRung`: per class `n` (subagent files whose first prompt is in the day), `units` (consumed in the day) and `unitsPerSpawn`. Type and role come from the prompt's `TYPE:`/`ROLE:` lines (`none` when absent), the rung from the agent type (`sonnet/high`, `opus/medium`, `haiku`, else the type name) |
+| `subagent` | `compactions`, `compactionsPer100Spawns`, `unitsOver150k` and `shareOver150kPct` (of subagent units, requests with more than 150K context) |
+| `ceilingNudges` | rows of `telemetry/context-ceiling.jsonl` in the day (0 when the log is missing) |
+| `changes` | `active` (`{id, activeFrom}` for every `rollout.json` entry in force by the end of the day) and `switchedOn` (ids whose time fell inside the day); both empty without a rollout file |
+| `scanFrom` | where the scan began (the first run looks back at most 8 days) |
 
 ## Spawn nesting depth — NOT logged, and why
 

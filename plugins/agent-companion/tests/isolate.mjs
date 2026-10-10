@@ -141,6 +141,10 @@ delete process.env.AGENT_COMPANION_VAULT_DIR;
 // the network. A test of the watch points AGENT_COMPANION_RELEASE_WATCH_URL at a local
 // server and clears this.
 process.env.AGENT_COMPANION_RELEASE_WATCH_NO_NET = '1';
+// The scout and the main-session SessionStart hook start the daily checkup as a detached
+// background process; no test may start one by accident. The test of the launch itself
+// clears this and passes its own spawn function or state dir.
+process.env.AGENT_COMPANION_DAILY_CHECKUP_NO_LAUNCH = '1';
 
 // What os.homedir() (and git's "~") resolve to: an empty directory, in this
 // process and in every child.

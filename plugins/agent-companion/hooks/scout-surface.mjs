@@ -31,6 +31,7 @@ import { syncLegacy } from './lib/state-sync.mjs';
 import { normalizeGitUrl } from '../scripts/lib/publication-sweep.mjs';
 import { githubOwnerRepoFromUrl, repoCacheKey } from '../scripts/lib/ci-status.mjs';
 import { readPending, markSeen } from '../scripts/lib/release-watch.mjs';
+import { pendingSurface, markSurfaced, launchCheckup } from '../scripts/lib/daily-checkup.mjs';
 
 const MAX_AGE_DAYS = 7;
 const RELEASE_KIND = 'cli_release_available';
@@ -155,6 +156,20 @@ function buildReleaseLine() {
     + `Details: ${stateFile('cli-release-details.md')}`;
 }
 
+// --- Piece 4: yesterday's plan usage, once per day -------------------------
+// The scout started scripts/daily-checkup.mjs in the background (no model call);
+// this only reads the last line of its history file, so there is no scan and no
+// network here. One line, shown once per day: the day's share of the weekly
+// limit against the target, the week so far, and any change switched on that day.
+// The day is marked shown as the line is built (the caller prints it last).
+function buildCheckupLine() {
+  if (!opt('daily_checkup', true)) return null;
+  const pending = pendingSurface();
+  if (!pending) return null;
+  markSurfaced(pending.rec.day);
+  return pending.line;
+}
+
 try {
   const p = readStdin();
 
@@ -179,10 +194,17 @@ try {
   let releaseLine = null;
   try { releaseLine = buildReleaseLine(); } catch { releaseLine = null; }
 
-  if (!ciLine && !scoutBlock && !releaseLine) passthrough();
+  let checkupLine = null;
+  try { checkupLine = buildCheckupLine(); } catch { checkupLine = null; }
 
-  const contextParts = [ciLine, scoutBlock?.context, releaseLine].filter(Boolean);
-  const summary = scoutBlock?.summary || ciLine || releaseLine;
+  // Main sessions also start the background checkup when the scout has not (it is
+  // idempotent: one attempt per 3 hours, one run at a time). Returns at once.
+  try { launchCheckup(); } catch { /* advisory */ }
+
+  if (!ciLine && !scoutBlock && !releaseLine && !checkupLine) passthrough();
+
+  const contextParts = [ciLine, scoutBlock?.context, releaseLine, checkupLine].filter(Boolean);
+  const summary = scoutBlock?.summary || ciLine || releaseLine || checkupLine;
 
   process.stdout.write(JSON.stringify({
     systemMessage: summary,
