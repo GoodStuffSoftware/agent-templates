@@ -519,11 +519,16 @@ test('self_review_expected: true on the rung carrying the protocol (nothing appe
     assert.equal(optOut.row.self_review_expected, false);
     assert.doesNotMatch(optOut.msg, /self-review/i, 'an opt-out is deliberate: no note');
 
-    h.agent('proj-architect', 'model: opus\neffort: xhigh');
-    const proj = h.lead(bg({ subagent_type: 'proj-architect', prompt: 'TYPE: novel-design\ndesign it' }));
-    assert.equal(proj.row.self_review_expected, null, 'a project agent may carry its own wording');
-    assert.equal(proj.row.self_review_injected, false);
-    assert.doesNotMatch(proj.msg, /self-review\)/);
+    // project_pins off (0.31.12 behaviour): a project agent may carry its own wording.
+    // With pins on (default) a pinned writer without the markers gets the protocol: see spawn-guard-project-pins.test.mjs.
+    const off = harness({ CLAUDE_PLUGIN_OPTION_PROJECT_PINS: 'false' });
+    try {
+      off.agent('proj-architect', 'model: opus\neffort: xhigh');
+      const proj = off.lead(bg({ subagent_type: 'proj-architect', prompt: 'TYPE: novel-design\ndesign it' }));
+      assert.equal(proj.row.self_review_expected, null, 'a project agent may carry its own wording');
+      assert.equal(proj.row.self_review_injected, false);
+      assert.doesNotMatch(proj.msg, /self-review\)/);
+    } finally { off.cleanup(); }
   } finally { h.cleanup(); }
 });
 

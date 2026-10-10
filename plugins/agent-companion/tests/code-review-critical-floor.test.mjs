@@ -14,7 +14,7 @@ import { makeFixture, runHook, readJsonl, decisionOf } from './helpers.mjs';
 
 const DEFS = { 'opus-high': 'model: opus\neffort: high', 'opus-xhigh': 'model: opus\neffort: xhigh' };
 
-function spawn(prompt, { model, subagent = 'general-purpose' } = {}) {
+function spawn(prompt, { model, subagent = 'general-purpose', pins = true } = {}) {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
@@ -22,7 +22,7 @@ function spawn(prompt, { model, subagent = 'general-purpose' } = {}) {
     const res = runHook('hooks/spawn-guard.mjs', {
       session_id: 'sess-cr-floor', agent_type: 'main', cwd: dir,
       tool_input: { subagent_type: subagent, ...(model ? { model } : {}), run_in_background: true, name: 'w', isolation: 'worktree', prompt },
-    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
+    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...(pins ? {} : { CLAUDE_PLUGIN_OPTION_PROJECT_PINS: 'false' }) } });
     assert.equal(res.status, 0, res.stderr);
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0] || null;
     return { decision: decisionOf(res.json), reason: res.json?.hookSpecificOutput?.permissionDecisionReason || '', msg: res.json?.systemMessage || '', row };
@@ -42,11 +42,18 @@ for (const model of ['sonnet', 'haiku']) {
   });
 }
 
-test('a critical code review on opus/high (from its definition) is under on effort', () => {
-  const r = spawn(`${CRITICAL}\nWARRANT: critical review`, { subagent: 'opus-high' });
+test('a critical code review on opus/high (from its definition) is under on effort (project_pins off; a pin is not judged)', () => {
+  const r = spawn(`${CRITICAL}\nWARRANT: critical review`, { subagent: 'opus-high', pins: false });
   assert.equal(r.decision, 'proceed', r.reason);
   assert.match(r.msg, /under-provisioned — right model, effort too low: high where the table says xhigh/);
   assert.equal(r.row.fit, 'under');
+});
+
+test('the same opus/high project agent with project_pins on (default) is respected: no weight note, recorded as pinned', () => {
+  const r = spawn(`${CRITICAL}\nWARRANT: critical review`, { subagent: 'opus-high' });
+  assert.equal(r.decision, 'proceed', r.reason);
+  assert.doesNotMatch(r.msg, /under-provisioned/);
+  assert.equal(r.row.project_pinned, true);
 });
 
 test('a critical code review on opus/xhigh meets the floor: no note, no fit verdict', () => {

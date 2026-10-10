@@ -8,8 +8,8 @@ The stored prompt in each scheduler is only this bootstrap (keep them identical)
 
   You are the agent-companion calibration scout, a daily routine. Everything you
   need is in the plugin; this bootstrap only locates it.
-  1. AC="$(pwd)/plugins/agent-companion"; if "$AC/scripts/audit.mjs" is missing,
-     AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion 2>/dev/null | head -1)".
+  1. AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion 2>/dev/null | head -1)";
+     if "$AC/scripts/audit.mjs" is missing, AC="$(pwd)/plugins/agent-companion".
      If still missing: `claude plugin marketplace add {{MARKETPLACE_REPO}}`, then
      `claude plugin marketplace update agent-templates`, and look again once.
      If it is still not found, STOP and report that as the finding.
@@ -26,15 +26,15 @@ You are the **agent-companion calibration scout**, an autonomous DAILY routine. 
 
 ## STEP 0 — locate the plugin's tools
 
-This routine checks out the `agent-templates` repo, and the plugin lives **in** that repo. Prefer the checkout: it needs no install, and it always matches the config it is checking.
+This routine checks out the `agent-templates` repo, and the plugin lives **in** that repo. Prefer the marketplace clone: it is the version the sessions run and it updates itself. The checkout is the fallback (a cloud run has no marketplace folder, where the checkout IS the marketplace repo); a checkout left behind would run an old scout and skip every check added since.
 
 ```bash
-AC="$(pwd)/plugins/agent-companion"
-[ -f "$AC/scripts/audit.mjs" ] || AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion 2>/dev/null | head -1)"
-[ -n "$AC" ] && [ -f "$AC/scripts/audit.mjs" ] && echo "plugin ok: $AC" || echo "PLUGIN NOT FOUND"
+AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion 2>/dev/null | head -1)"
+[ -n "$AC" ] && [ -f "$AC/scripts/audit.mjs" ] || AC="$(pwd)/plugins/agent-companion"
+[ -f "$AC/scripts/audit.mjs" ] && echo "plugin ok: $AC" || echo "PLUGIN NOT FOUND"
 ```
 
-Only if the checkout is somehow absent, fall back to a marketplace install. `{{MARKETPLACE_REPO}}` is the `owner/repo` this plugin ships from — fill it when you instantiate this routine (the shipped copy is a template; the library's leak-check keeps real identifiers out of it):
+Only if both are absent, fall back to a marketplace install. `{{MARKETPLACE_REPO}}` is the `owner/repo` this plugin ships from — fill it when you instantiate this routine (the shipped copy is a template; the library's leak-check keeps real identifiers out of it):
 
 ```bash
 claude plugin marketplace add {{MARKETPLACE_REPO}} 2>/dev/null || true
@@ -109,7 +109,7 @@ node "$AC/scripts/detect.mjs"
 
 The churn step reads local lead-session transcripts (counts only; bounded, newest first, about 10 s). In the cloud there are no transcripts, so it writes an empty aggregate and `session_churn` stays quiet: unobservable there, like the other stateful signals.
 
-Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`, `enforcement_silent`, `plugin_version_behind`, `plugin_copy_stale`, `stale_copy_loaded`, `session_outdated`, `session_load_unknown`, `inherited_effort_spawns`, `project_agent_drift`, `session_churn`, `budget_notices`, `cli_release_available` (a Claude Code release the operator has not been told about; the details file is named in the signal; informational, no dispatch). Kinds listed in the `scout_suppress` option never appear.
+Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`, `enforcement_silent`, `plugin_version_behind`, `plugin_copy_stale`, `stale_copy_loaded`, `session_outdated`, `session_load_unknown`, `inherited_effort_spawns`, `project_agent_drift`, `session_churn`, `budget_notices`, `scout_copy_stale`, `decision_register_invalid`, `decision_review_due`, `alias_resolution_below_version_floor`, `attended_env_missing`, `compact_window_drift`, `main_ci_red`, `model_benchmark_suggested`, `new_model_in_lineup`, `publication_leak_visibility_unknown`, `routing_trial_review_due`, `cli_release_available` (a Claude Code release the operator has not been told about; the details file is named in the signal; informational, no dispatch). Kinds listed in the `scout_suppress` option never appear.
 
 ## STEP 2 — lineup and pricing diff (the one check that needs the web)
 
@@ -260,6 +260,17 @@ Not a summary, not a confirmation. Silence is the success case.
 | `harness_version_unreadable` | report it; do not guess |
 | `plugin_version_behind` | the installed plugin is older than the latest AVAILABLE version (locally the marketplace clone, in the cloud this routine's own checkout of the marketplace repo; never fires for an older or unreleased checkout running this scout). Cloud: the claude.ai plugin directory needs its **Sync** pressed on the marketplace page — cloud sessions are running the old guards until then. Local: `claude plugin update`, restart |
 | `plugin_copy_stale` | an installed copy of the plugin has been behind the marketplace version for more than 6 hours: the CLI cache entry in `installed_plugins.json`, or the desktop app's own copy (`…/local-agent-mode-sessions/<acct>/<org>/rpm/plugin_<id>/`, which Desktop Code-tab sessions run and which `claude plugin update` never touches). Dispatch `plugin-update` for the CLI copy (the same remedy as `plugin_version_behind`, plus the age) and `desktop-plugin-refresh` for the desktop copy. Name the copy and the sessions affected, then give the signal's own fix. For the desktop copy that is: disable, then re-enable, agent-companion in the desktop app's plugin manager (not `claude plugin uninstall`, which wipes the plugin options), then idle desktop sessions pick up the current copy on their next turn (a session that is mid-turn, after that turn); confirm with `/ac version` (verified 2026-10-02: the stale copy was removed and the desktop sessions then ran the CLI cache copy, so a later `claude plugin update` covers them). The lag is counted from the oldest newer release (release commit when the marketplace clone has history, else the CHANGELOG date, which is day-level, so the signal can lag a release by up to a day). `node "$AC/scripts/version.mjs"` (`/ac version`) shows every copy. Not fired in the cloud |
+| `scout_copy_stale` | the scout itself ran from a copy older than the marketplace's (a scheduled task pointed at an old checkout skips every check added since). Report both versions; remedy: update that checkout, or point the scheduled task at the marketplace copy (dispatch plugin-update). Never fires in the cloud |
+| `decision_register_invalid` | the decision register file does not validate (dispatch none). Report the first errors and run `node "$AC/scripts/decision-register.mjs" --check`; do not guess a repair |
+| `decision_review_due` | one or more register decisions are due a review or were flagged by a changelog or release-watch topic (dispatch none, informational). Report the ids; the session start surface shows them to the operator separately |
+| `alias_resolution_below_version_floor` | the running Claude Code is below the version the table's model alias facts assume, so an alias such as `opus` may resolve to an older model than the table says. Report both versions (dispatch routing-review) |
+| `attended_env_missing` | sessions made delegation-guard-counted calls and none saw `CLAUDE_CODE_SESSION_ATTENDED`, so the `attended` scope can no longer exempt headless workers. Report it (dispatch harness-surface-diff) |
+| `compact_window_drift` | the cache advisor's recommended auto-compact window moved. Report from/to and the percentage; the operator re-runs the advisor to confirm (dispatch manual-check) |
+| `main_ci_red` | CI on the default branch of a watched repo is red. Report repo and workflow names (dispatch manual-check) |
+| `model_benchmark_suggested` | advisory only: another signal made a benchmark of the routing table worth considering. Quote it; this scout never runs a benchmark itself |
+| `new_model_in_lineup` | a model alias or tier is new in `config/model-tiers.json` since the last run. Report the names (dispatch routing-review) |
+| `publication_leak_visibility_unknown` | some candidate repos had unknown visibility this run and were not swept; they are retried next run. Report the count (dispatch manual-check) |
+| `routing_trial_review_due` | a routing trial in the table is past its `reviewBy`. Report the type and dates (dispatch routing-review) |
 | `stale_copy_loaded` | severity high. Spawns in the last 24h came from a session that loaded AFTER a version newer than its guard was installed (a load at least 5 min after its scope's latest update, or the plugin cache showing the guard's own version was already replaced before it loaded), yet it runs the older guard: a stale copy was loaded (the 2026-09-24 incident shape). Report both versions and the sessions named. Remedy: remove the stale agent-companion entry in the desktop plugin manager, `/reload-plugins`, verify with a trivial ladder spawn; fresh session if that still fails |
 | `session_outdated` | severity low, informational (dispatch none). A session that loaded BEFORE the latest install still runs the version installed then: an old session, not a stale copy. Fires only for a session loaded 24 h or more (at its latest spawn) that has missed two or more updates. Report it with its own remedy: restart or `/reload-plugins` that session to pick up the installed version. Never give the remove-entry remedy for it |
 | `session_load_unknown` | severity low, informational. A count only: "N sessions with unknown load time" ran a guard older than their install, and could not be judged either way. Report the count; no remedy |

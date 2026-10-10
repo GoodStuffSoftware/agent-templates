@@ -133,9 +133,10 @@ test('1. a staged exercise and a baselined metric validate once the rollout id e
   assert.equal(valid(r, {}).ok, false);
 });
 
-test('1. the metric catalog names are the eight of the spec', () => {
+test('1. the metric catalog names are the eight of the spec plus the five lead-effort metrics', () => {
   assert.deepEqual(Object.keys(METRIC_CATALOG).sort(), [
-    'ceilingNudgesPerDay', 'compactionsPer100Spawns', 'haikuSpawns', 'leadEffortShare', 'mainUnitsPerDay',
+    'ceilingNudgesPerDay', 'compactionsPer100Spawns', 'haikuSpawns', 'leadEffortShare', 'leadRebriefsPer100Spawns', 'leadRoutingDeniesPer100Spawns',
+    'leadUnderProvisionedShare', 'mainUnitsPerDay', 'mainUnitsPerLeadSpawn', 'reviewFixShareByLeadEffort',
     'reviewsPerWriter', 'shareOver150kPct', 'unitsPerSpawn',
   ]);
 });
@@ -591,7 +592,7 @@ test('8. formatRegisterLine stays within LINE_MAX (300) chars even with a very l
 });
 
 test('8. formatRegisterLine keeps the version suffix of a typical changelog summary with a realistic details path', () => {
-  const flag = { title: 'Plan usage multipliers', decision: 'plan-usage-multipliers', premise: 'p1', summary: '"Sonnet cache-read price now one tenth of input" in 2.1.296' };
+  const flag = { title: 'Cost model v1', decision: 'cost-model-v1', premise: 'p1', summary: '"Changed the cache TTL for subagents to one hour" in 2.1.296' };
   const line = formatRegisterLine([flag], 'C:/Users/someone/.claude/agent-companion/state/decision-register-details.md');
   assert.ok(line.length <= LINE_MAX, `line is ${line.length}`);
   assert.ok(line.includes('in 2.1.296'), line);
@@ -734,7 +735,7 @@ test('11. --check exits 0 on a valid register, an invalid one and an absent one,
     writeFileSync(registerPath(), readFileSync(EXAMPLE, 'utf8'));
     const ok = runScript('scripts/decision-register.mjs', ['--check'], { env });
     assert.equal(ok.status, 0);
-    assert.match(ok.stdout, /^OK: .*\(1 decision, 2 triggers\)/);
+    assert.match(ok.stdout, /^OK: .*\(1 decision, 7 triggers\)/);
 
     const bad = register();
     bad.decisions[0].triggers[0].pattern = '(unclosed';
@@ -923,10 +924,10 @@ test('3. a zero-unit history day is a gap for a spawns metric too', () => {
 
 // The pre window of the spec's example: bounded-feature spawns per day and units per spawn.
 const PRE = [
-  ['2026-10-02', 17, 3.73], ['2026-10-03', 58, 2.16], ['2026-10-04', 4, 2.08], ['2026-10-05', 15, 1.35], ['2026-10-06', 22, 4.27],
+  ['2026-10-02', 10, 1], ['2026-10-03', 10, 3], ['2026-10-04', 4, 2], ['2026-10-05', 30, 2], ['2026-10-06', 10, 4],
 ].map(([d, n, ups]) => hday(d, { byType: { 'bounded-feature': { n, units: n * ups } } }));
 const ZERO = (d) => hday(d, { total: 0, main: 0, sub: 0 });
-const POOLED = (17 * 3.73 + 58 * 2.16 + 15 * 1.35 + 22 * 4.27) / (17 + 58 + 15 + 22); // the 4 days with n >= 5
+const POOLED = (10 * 1 + 10 * 3 + 30 * 2 + 10 * 4) / (10 + 10 + 30 + 10); // the 4 days with n >= 5
 const bf = (d, n, units) => hday(d, { byType: { 'bounded-feature': { n, units } } });
 function costTrigger(over = {}) {
   return metricTrigger({
@@ -943,8 +944,8 @@ test('5. the pre window takes the last qualifying days, skips thin and zero days
   const b = out.state.baselines['dec-one/cost-up'];
   assert.deepEqual(b.days, ['2026-10-02', '2026-10-03', '2026-10-05', '2026-10-06'], 'n=4 and n=3 days and the zero days are skipped');
   assert.ok(Math.abs(b.pooled - POOLED) < 1e-9, `pooled ${b.pooled} vs ${POOLED}`);
-  assert.equal(b.n, 112);
-  const mean = (3.73 + 2.16 + 1.35 + 4.27) / 4;
+  assert.equal(b.n, 60);
+  const mean = (1 + 3 + 2 + 4) / 4;
   assert.ok(Math.abs(b.pooled - mean) > 0.1, 'pooled differs from the mean of per-day values');
   assert.equal(out.state.triggers['dec-one/cost-up'].pre, POOLED);
 });
@@ -1167,7 +1168,7 @@ test('6. repeatForSameCaller counts two reviewers for one caller_tool_use_id', (
   assert.deepEqual(drive(reg, { spawnRows: old, nowT, af: OPUS_AF }).newFlags, ['dec-one/repeat@unexercised']);
 });
 
-test('6. subagentTypeStartsWith matches the effective type; medium-not-landing flags a high writer', () => {
+test('6. subagentTypeStartsWith matches the effective type; staged-change flags a high writer', () => {
   const med = { id: 'medium', premise: 'p1', kind: 'exercise', source: 'spawns', afterDays: 3,
     where: { declared_type: 'bounded-feature', subagentTypeStartsWith: 'agent-companion:ac-sonnet' }, expect: { effective_effort: 'medium' } };
   const reg = exReg(med);

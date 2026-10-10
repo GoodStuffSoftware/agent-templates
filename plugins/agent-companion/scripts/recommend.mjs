@@ -24,7 +24,7 @@
 // --json it adds a `route` block carrying the same facts.
 
 import {
-  modelTiers, resolveRoute, classifyModel, classifyEffort, rungFor, explainRoute, taskTypeDef, taskTypeNames, ladderVariants,
+  modelTiers, resolveRoute, classifyModel, classifyEffort, rungFor, explainRoute, taskTypeDef, taskTypeNames, ladderVariants, canonicalTaskType, unknownTypeHint,
 } from '../hooks/lib/context.mjs';
 import { loadAdvisorSummary, windowHintFor } from './lib/cache-advisor.mjs';
 import { selfReviewConfig, readSelfReviewBlock } from '../hooks/lib/self-review.mjs';
@@ -45,15 +45,21 @@ if (has('--list')) {
     console.log(`  ${name.padEnd(22)} w=${String(t.weight).padEnd(7)} ${t.kind.padEnd(13)} ${t.consequence.padEnd(9)} ${origin === 'local' ? '(local) ' : ''}${t.summary || ''}`);
   }
   console.log('\nKinds: ' + Object.keys(cfg.taskKinds || {}).join(', '));
+  const aliasList = Object.keys(cfg.taskTypeAliases || {}).map((a) => [a, canonicalTaskType(a)]).filter(([, c]) => c && c.via === 'alias');
+  if (aliasList.length) console.log('Aliases: ' + aliasList.map(([a, c]) => `${a} -> ${c.name}`).join(', '));
   console.log('Consequence: ' + Object.keys(cfg.consequence || {}).join(', '));
   process.exit(0);
 }
 
 // Shipped types first, then the routing profile's user-local types.
-const typeName = val('--type');
-const t = typeName ? (taskTypeDef(typeName)?.def || null) : null;
-if (typeName && !t) {
-  console.error(`unknown task type "${typeName}" — see --list`);
+// An alias (taskTypeAliases) is another spelling of a type and routes as it.
+const typeNameRaw = val('--type');
+const canon = typeNameRaw ? canonicalTaskType(typeNameRaw) : null;
+const typeName = canon ? canon.name : typeNameRaw;
+const aliasOf = canon && canon.via === 'alias' ? typeNameRaw.toLowerCase() : null;
+const t = canon ? (taskTypeDef(canon.name)?.def || null) : null;
+if (typeNameRaw && !t) {
+  console.error(`unknown task type: ${unknownTypeHint(typeNameRaw)} (--list shows the presets)`);
   process.exit(2);
 }
 
@@ -69,7 +75,7 @@ let kind = kindExplicit ? explicitKind : (t?.kind || 'bounded');
 let consequence = consequenceExplicit ? explicitConsequence : (t?.consequence || 'routine');
 if (consequence === 'inherit') consequence = 'routine';
 
-const out = { taskType: typeName || null, weight, kind, consequence };
+const out = { taskType: typeName || null, ...(aliasOf ? { aliasOf } : {}), weight, kind, consequence };
 let route = null;
 
 // Reviewer parity: a review is sized to the writer it gates.
@@ -243,6 +249,7 @@ if (has('--json')) {
 const eff = out.effort ? `/${out.effort}` : ' (no effort — this model takes none)';
 console.log(`recommendation: ${out.model}${eff}`);
 if (out.taskType) console.log(`task type:      ${out.taskType}`);
+if (out.aliasOf) console.log(`type ${out.aliasOf} is an alias of ${out.taskType}`);
 if (out.role) console.log(`brief lines:    TYPE: ${out.taskType} + ROLE: ${out.role} (one of ${BRIEF_ROLES.join('/')}: what the main deliverable is; fixer, lander, docs when it is that. Tags the spawn for usage measurement only)`);
 console.log(`inputs:         weight=${out.weight} kind=${out.kind} consequence=${out.consequence}`);
 console.log(`why:            ${out.rationale}`);

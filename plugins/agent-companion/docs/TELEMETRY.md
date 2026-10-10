@@ -196,13 +196,20 @@ whose.
 | `self_review` | boolean | a parity-sized review spawned by a subagent whose own spawn row was FOUND and declares a type listed in `selfReview.types`: a writer reviewing its own work, the population the self-review flow is measured on. Absent on rows written before 2026-09-28 |
 | `review_by_subagent` | boolean | the broad count: a parity-sized review spawned by a subagent whose own row is not positively a review (found or not, any writer type). Absent on rows written before 2026-09-28 |
 | `self_review_expected` | boolean \| null | for a spawn whose `TYPE:` is listed in `config/model-tiers.json` `selfReview.types`: true when the spawned definition carries the generated self-review protocol, or the guard appended it to the brief, and the brief has no `REVIEW: lead` line; false when it opted out, or the writer is a built-in type (or a pair no rung matches) that gets no protocol; null for any other type, and for an agent file this plugin does not generate (a project agent may carry its own wording) |
-| `self_review_injected` | boolean | the protocol was appended to this writer's brief: a listed type on a ladder rung whose definition does not carry it, sized to the rung that matches what runs. Absent on rows written before 2026-09-28 |
+| `self_review_injected` | boolean | the protocol was appended to this writer's brief: a listed type on a ladder rung whose definition does not carry it, sized to the rung that matches what runs; since 0.31.13 also a listed type on a project-pinned agent whose file holds no protocol block, sized to the pair its pin runs. Absent on rows written before 2026-09-28 |
+| `project_pinned` | boolean | the spawn is project-pinned and the `project_pins` option is on: `subagent_type` is a bare-named project agent (`<project>/.claude/agents`, the working directory or a parent up to the first `.git`, at most 8 levels) or user agent (`~/.claude/agents`) that is not a built-in type or a ladder rung, and whose definition sets a model the tier table knows and/or an effort level it knows (`model: inherit` does not count). A pinned spawn is not judged by task weight: no best-fit deny, no over/under/parity/WRITER notes, no WARRANT requirement, no model autofill or rung swap. `fit` and `fit_expected` are still recorded for it, so the table-versus-pin comparison stays measurable; the `spawn-audit` check counts these rows apart instead of warning on them. Another plugin's `<plugin>:<agent>` is never pinned. Absent on rows written before 0.31.13 |
+| `pin_scope` | string \| null | `project` or `user`: the agents folder the pinning definition was read from; null when not pinned |
+| `pin_fields` | string \| null | `model`, `effort` or `model+effort`: which fields the definition pins; null when not pinned |
+| `pin_model_overridden` | boolean | the spawn is pinned and its `model` parameter names a different tier alias than the definition's `model:` (the parameter wins in the harness). The guard adds one non-blocking note and rewrites nothing. False when not pinned or when no parameter was passed |
 | `caller_tool_use_id` | string \| null | for a parity-sized review spawned by a subagent: the caller's own Agent call id, from its sidecar. Joins the review's row to its writer's row (that row's `tool_use_id`) from `spawns.jsonl` alone; null when not looked up or the sidecar names none |
 | `consequence_from_caller` | boolean | `declared_consequence` "critical" was taken from the caller's own spawn row (its `TYPE:` preset is critical, e.g. `critical-change`), so F1 floors the review; the brief stated no `CONSEQUENCE:` line. Absent on rows written before 2026-09-28 |
 | `caller_row_found` | boolean \| null | for a parity-sized review spawned by a subagent: whether the caller's own spawn row was found (caller `agent_id` -> sidecar `toolUseId` -> the row with that `tool_use_id` in the same session, rows agreeing on `declared_type`); null when not looked up |
 | `caller_declared_type` | string \| null | that row's `declared_type`, when found. A parity-sized value here is what the `review-recursion` deny fires on |
 | `declared_type` | string or null | the task type named on the brief's `TYPE:` line (a `config/model-tiers.json` `taskTypes` name, or an unknown name exactly as written, lower-cased; with several `TYPE:` lines, only the first counts, known or not); null when the brief names none or its first `TYPE:` value is not a name. Only the name is logged, never brief text. When set, `declared_weight`/`declared_kind`/`declared_consequence` are filled from that type's preset where the brief did not state them |
+| `declared_type_resolved` | string or null | the canonical task type the brief's `TYPE:` alias resolved to (for example `bugfix` -> `debug-root-cause`, see `taskTypeAliases` in `config/model-tiers.json`); null when the raw `declared_type` is already the canonical name or is unknown. `declared_type` itself carries the raw value as written |
 | `declared_role` | string or null | the role named on the brief's first `ROLE:` line: `reviewer`, `fixer`, `lander`, `writer`, `docs`, `lookup`, `operate` or `other` (lower-cased); null when the brief has none or its first `ROLE:` value is not one of those. Measurement only: nothing routes or gates on it. A null here is what `role_line_nudge` reacts to |
+| `lead_effort_live` | string or null | the main session's live effort at this spawn (the hook payload's `effort.level`, lower-cased), recorded only while the `lead-effort-check` rule is enabled and `lead_effort_live_check` is not false; null for a subagent's spawns, canary probes and whenever the check is off. Same value as `caller_effort` where recorded; kept separate so the check can be read on its own. The row is written on every main-session spawn; the once-per-session note (live below target) or operator message (live above) is delivered with the first allowed one only, and neither changes any allow, deny or rewrite |
+| `lead_effort_target` | `xhigh` \| `high` \| null | the lead-effort target the live value was compared with: `xhigh` before the rollout id named by the plugin option `lead_effort_rollout_id` is reached in the state root's `rollout.json` (or when the option is empty or the id is absent), `high` from it; null exactly when `lead_effort_live` is null because the check did not run |
 | `fit_trial` | boolean | true when the fit judgement used a shipped ROUTING TRIAL (`taskTypes.<type>.override`) rather than the plain grid; equivalent to `route_layer == "trial"` |
 | `route_layer` | `profile` \| `trial` \| `grid` \| null | which layer of `resolveRoute()` answered for this spawn (see docs/adr/0003-per-user-routing-profiles.md §2): a per-user routing-profile row, the shipped trial, or the grid (which includes reviewer parity). null when no route was resolved (no TYPE or WEIGHT declared, `fit_guard` off, or a parity type with no usable `WRITER:` line). `profile` means a row of the operator's routing profile won (`routing_profile` on, the row applicable). Only the enum is logged, never a row's content |
 | `route_profile_rev` | number or null | the routing-profile `revision` behind a `profile` answer; null for every other layer (including when a profile exists but its row did not win) |
@@ -233,6 +240,30 @@ report that groups only by resolved model name.
 Canary probes (session ids beginning `canary`) are deliberately **not**
 recorded. Fixture/verification sessions (`verify-`, `test-`, `fixture-`) are
 recorded, but into `telemetry/fixtures.jsonl` instead — see Fixtures above.
+
+### `review-verdicts.jsonl` — one record per reviewer result with a verdict
+
+Written by `hooks/review-verdict.mjs` (PostToolUse on `^Agent$`) when a spawn
+whose brief declares `ROLE: reviewer` or `TYPE: code-review` returns a result
+with a `VERDICT:` line. A foreground spawn only: a background spawn's
+PostToolUse carries the launch acknowledgement, not the result. A result with
+no readable verdict writes no row. The decision register's
+`readSpawnRows()` folds each row into the spawns.jsonl row with the same
+`session_id` and `tool_use_id` as `review_verdict`, the field the metric
+`reviewFixShareByLeadEffort` reads (which counts `declared_type: code-review`
+rows only).
+
+| field | type | meaning |
+|---|---|---|
+| `v`, `at` | number, ISO 8601 | schema version; when the result returned |
+| `session_id` | string | the spawning session |
+| `review_of_tool_use_id` | string \| null | the Agent call that spawned the reviewer; joins to `spawns.jsonl` `tool_use_id` |
+| `name` | string \| null | the reviewer's declared name |
+| `review_verdict` | `PASS` \| `FIX` \| `BLOCK` | normalized; wordings such as `APPROVE WITH FIXES`, `REQUEST CHANGES`, `FAIL` map to `FIX` |
+| `review_verdict_raw` | string | the verdict text as written, first 80 characters |
+| `declared_type`, `declared_role` | string \| null | the brief's `TYPE:` and `ROLE:` |
+| `caller_effort`, `caller_is_subagent`, `caller_tool_use_id` | copied | from the reviewer's own spawns.jsonl row; null when that row was not found |
+| `spawn_row_found` | boolean | whether that row was found |
 
 ### `subagent-starts.jsonl` — one record per subagent actually starting
 

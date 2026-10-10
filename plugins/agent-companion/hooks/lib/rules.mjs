@@ -110,14 +110,34 @@ export const COPYABLE_PROMPT_WHEN = [
 // The lead-effort-check directive. Plain and short on purpose: it is read at
 // session start and has to survive a long session. Exported so the tests pin
 // the exact injected wording.
-export const LEAD_EFFORT_CHECK_TEXT = [
-  'Orchestrating agents (workers, reviewers, several open threads, releases)? Before the first spawn and again after any resume or compaction, call get_session with session_id "self" and read its effort field; an orchestration lead runs at xhigh.',
-  'Unattended (scheduledTaskId in get_session, a headless or -p run, or no AskUserQuestion tool): do not ask; state the effort once.',
-  'Interactive and below xhigh: ask with the AskUserQuestion tool (the options selector), not in prose; no spawn and no other tool call until it is answered. Header "Lead effort"; name the current effort and why this looks like orchestration.',
-  'Option 1 "Raise to xhigh (Recommended)": the operator raises it with the app\'s effort control (you cannot); wait until get_session "self" shows xhigh or they say continue.',
-  'Option 2 "Stay at <current>": continue, and do not ask again this session.',
-  'Never raise to max, never lower.',
-].join(' ');
+//
+// The target depends on the rollout: LEAD_EFFORT_CHECK_TEXT (xhigh) is the
+// wording until the rollout id named by the option lead_effort_rollout_id is
+// reached in the state root's rollout.json (an empty option: always xhigh), LEAD_EFFORT_CHECK_TEXT_HIGH from then on (the built-in
+// rule below carries it as its `after` overlay). One template, so the two
+// cannot drift apart. At or above the target the lead says nothing and asks
+// nothing; the text never raises to max and never suggests lowering.
+// The rollout id comes from the plugin option lead_effort_rollout_id (string,
+// default empty = no switch, the target stays xhigh). Never hard-coded here.
+export function leadEffortRolloutId() {
+  try { return String(opt('lead_effort_rollout_id', '')).trim(); } catch { return ''; }
+}
+export function leadEffortCheckText(level) {
+  return [
+    `Orchestrating agents (workers, reviewers, several open threads, releases)? Before the first spawn and again after any resume or compaction, call get_session with session_id "self" and read its effort field (get_session can show the effort the session started with: if the operator says it has already been raised, continue); an orchestration lead runs at ${level}.`,
+    `Unattended (scheduledTaskId in get_session, a headless or -p run, or no AskUserQuestion tool): do not ask; state the effort once only if it is below ${level}.`,
+    `Interactive and below ${level}: ask with the AskUserQuestion tool (the options selector), not in prose; no spawn and no other tool call until it is answered. Header "Lead effort"; name the current effort and why this looks like orchestration.`,
+    `Option 1 "Raise to ${level} (Recommended)": the operator raises it with the app's effort control (you cannot); wait until get_session "self" shows ${level} or they say continue.`,
+    'Option 2 "Stay at <current>": continue, and do not ask again this session.',
+    `At ${level} or above: say nothing and do not ask.`,
+    'Never raise to max, never lower, never suggest lowering.',
+  ].join(' ');
+}
+export const LEAD_EFFORT_CHECK_TEXT = leadEffortCheckText('xhigh');
+export const LEAD_EFFORT_CHECK_TEXT_HIGH = leadEffortCheckText('high');
+// One shared object, so writeRules() sees an untouched built-in's `after` as
+// unchanged (it compares by reference).
+const LEAD_EFFORT_AFTER = Object.freeze({ then: LEAD_EFFORT_CHECK_TEXT_HIGH });
 
 // The pr-wait discoverability line. The path is the REAL one, resolved here
 // (CLAUDE_PLUGIN_ROOT, else this file's own location), exactly as
@@ -250,6 +270,11 @@ function builtinRules() {
       then: LEAD_EFFORT_CHECK_TEXT,
       gate: null,
       note: null,
+      // xhigh wording until the rollout id is reached, the high wording from it
+      // (effectiveRule lays `after` over the rule). An id absent from
+      // rollout.json counts as not reached, so the xhigh wording stays.
+      activeFrom: leadEffortRolloutId() || null,
+      after: leadEffortRolloutId() ? LEAD_EFFORT_AFTER : null,
     },
     {
       // Cache-advisor guard (b), deliverable 7. Doctrine-only text; the

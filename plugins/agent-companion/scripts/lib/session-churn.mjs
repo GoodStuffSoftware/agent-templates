@@ -206,7 +206,7 @@ export async function scanChurn({
   }
   const sinceDay = new Date(sinceMs).toISOString().slice(0, 10);
   for (const s of spawnRows) {
-    if (!s || !s.session_id || typeof s.at !== 'string' || !isParityType(s.declared_type)) continue;
+    if (!s || !s.session_id || typeof s.at !== 'string' || !isParityType(s.declared_type_resolved ?? s.declared_type)) continue;
     const day = s.at.slice(0, 10);
     if (day < sinceDay) continue;
     const k = `${s.session_id}|${day}`;

@@ -554,7 +554,12 @@ const spawnAudit = {
       findings.push(`${inherited.length}/${rows.length} spawns specified NO model (inherited the lead's tier)`);
     }
     findings.push(`mix: ${Object.entries(byModel).map(([m, n]) => `${m}=${n}`).join(', ')}`);
-    const declared = rows.filter((r) => r.fit);
+    // Project-pinned spawns (a project or user agent that pins its own model and/or
+    // effort) are the operator's tier choice and the guard no longer judges them by
+    // weight, so they are counted apart: their over/under against the table is
+    // information, not a warning.
+    const pinnedRows = rows.filter((r) => r.project_pinned === true);
+    const declared = rows.filter((r) => r.fit && r.project_pinned !== true);
     // Two yardsticks, counted apart: a weight's row (a WEIGHT line, a
     // WARRANT's weight, or a TYPE's preset weight) and reviewer parity (a
     // review sized to its WRITER, or held to the F1 floor with none), whose
@@ -569,6 +574,10 @@ const spawnAudit = {
     const parityRows = declared.filter(isParityRow);
     if (weightRows.length) findings.push(fitLine('fit where a weight or task type was declared', weightRows));
     if (parityRows.length) findings.push(fitLine('fit of reviewers sized to their writer (reviewer parity)', parityRows));
+    if (pinnedRows.length) {
+      const pn = (v) => pinnedRows.filter((r) => r.fit === v).length;
+      findings.push(`pinned by project definitions: ${pinnedRows.length} spawns, of which over=${pn('over')} under=${pn('under')} fit=${pn('fit')} against the table (not judged)`);
+    }
     // Once haiku is flagged retired (config/model-tiers.json
     // tiers.haiku.retired: true), the routing table stops sending anything
     // there on its own — an empty haiku bucket is then the CORRECT outcome,
@@ -596,7 +605,7 @@ const spawnAudit = {
       );
     }
     return {
-      status: (inherited.length || rows.some((r) => r.fit === 'under')) ? 'warn' : 'ok',
+      status: (inherited.length || rows.some((r) => r.fit === 'under' && r.project_pinned !== true)) ? 'warn' : 'ok',
       findings,
       data: { total: rows.length, premium: premium.length },
     };

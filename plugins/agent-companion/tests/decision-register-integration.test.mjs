@@ -19,7 +19,7 @@ const T = (s) => Date.parse(s);
 const HOUR = 3600000;
 const FLAG_AT = T('2026-10-12T10:00:00Z');
 
-const ITEM = 'Updated `/cost`, the status line, `--max-budget-usd` and the SDK cost figures to price Sonnet 5.5 cache reads at $0.10 per million tokens (was $0.20)';
+const ITEM = 'Updated the cost figures to price cache reads at $0.50 per million tokens (was $1.00)';
 const RELEASES = [{ version: '2.1.300', items: ['Fixed a typo in the help text', ITEM] }, { version: '2.1.299', items: ['Nothing relevant'] }];
 
 function register(over = {}) {
@@ -27,9 +27,9 @@ function register(over = {}) {
     schema: 'agent-companion/decision-register',
     version: 1,
     decisions: [{
-      id: 'cache-price', title: 'Plan usage multipliers', status: 'active', decided: '2026-10-01',
-      decision: 'Sonnet-priced tokens carry a plan multiplier.', reverse: 'Remove the multiplier.',
-      premises: [{ id: 'p1', text: 'Cache reads cost $0.20 per million.', label: 'M' }],
+      id: 'cache-price', title: 'Cost model v1', status: 'active', decided: '2026-10-01',
+      decision: 'Priced tokens carry a cost multiplier.', reverse: 'Remove the multiplier.',
+      premises: [{ id: 'p1', text: 'Cache reads cost $1.00 per million.', label: 'M' }],
       triggers: [{ id: 'price-change', premise: 'p1', kind: 'changelog', sinceVersion: '2.1.295', flags: 'i', pattern: 'cache reads? at \\$[0-9.]+' }],
       ...over,
     }],
@@ -67,7 +67,7 @@ test('8. the hook prints one line with the title, premise and details path; the 
     assert.equal(first.status, 0);
     const ctx = first.json.hookSpecificOutput.additionalContext;
     assert.equal(ctx.split('\n').length, 1, 'one line');
-    assert.match(ctx, /Decision review due: Plan usage multipliers \(cache-price\), premise p1 hit: /);
+    assert.match(ctx, /Decision review due: Cost model v1 \(cache-price\), premise p1 hit: /);
     assert.ok(ctx.includes(detailPath()), 'names the details path');
     assert.ok(ctx.length <= LINE_MAX, `line is ${ctx.length} chars`);
     assert.deepEqual(readState().surfaced, ['cache-price/price-change@2.1.300'], 'marked as shown');
@@ -91,20 +91,20 @@ test('8. the changelog line quotes the clause around the match, not the first 60
     // The line is cut from the right when the path is long, so the version may not fit.
     const quoted = ctx.match(/hit: "(.*?)(?:" in 2\.1\.300|\.\.\.\. Details:)/);
     assert.ok(quoted, ctx);
-    assert.match(quoted[1], /cache reads at \$0\.10/, 'the matched text is in the line');
+    assert.match(quoted[1], /cache reads at \$0\.50/, 'the matched text is in the line');
     assert.ok(!quoted[1].startsWith('Updated `/cost`, the status line'), 'not the item head');
   } finally { fx.cleanup(); }
 });
 
 test('8. clauseAround: short items whole, long items cut at word boundaries around the match', () => {
   const re = compilePattern('cache reads? at \\$[0-9.]+', 'i');
-  assert.equal(clauseAround('Short item about cache reads at $0.10 only', re), 'Short item about cache reads at $0.10 only');
-  const long = `${'word '.repeat(40)}cache reads at $0.10 per million${' tail'.repeat(40)}`;
+  assert.equal(clauseAround('Short item about cache reads at $0.50 only', re), 'Short item about cache reads at $0.50 only');
+  const long = `${'word '.repeat(40)}cache reads at $0.50 per million${' tail'.repeat(40)}`;
   const c = clauseAround(long, re);
   assert.ok(c.length <= 78, `${c.length}`);
   assert.match(c, /^\.\.\./);
   assert.match(c, /\.\.\.$/);
-  assert.match(c, /cache reads at \$0\.10/);
+  assert.match(c, /cache reads at \$0\.50/);
   assert.ok(!/\bwor\b|\bta\b/.test(c), 'no word is cut in half');
   assert.equal(clauseAround('no match here at all', re), 'no match here at all');
 });
@@ -167,7 +167,7 @@ test('8. decision_review_due stays out of the generic scout line', () => {
     }));
     const ctx = go(fx, {}).json.hookSpecificOutput.additionalContext;
     assert.doesNotMatch(ctx, /Scout 2026/, 'no scout block for that kind alone');
-    assert.match(ctx, /Decision review due: Plan usage multipliers/);
+    assert.match(ctx, /Decision review due: Cost model v1/);
   } finally { fx.cleanup(); }
 });
 
@@ -315,7 +315,7 @@ test('12. onParsed feeding the register stores the changelog hit and the details
     assert.ok(hit, JSON.stringify(Object.keys(state.changelogHits)));
     assert.equal(hit.count, 1);
     assert.ok(existsSync(detailPath()));
-    assert.match(readFileSync(detailPath(), 'utf8'), /cache reads at \$0\.10/);
+    assert.match(readFileSync(detailPath(), 'utf8'), /cache reads at \$0\.50/);
     // The same fetch again adds nothing.
     assert.deepEqual(scanChangelogToState(parseChangelog(CHANGELOG_TEXT), { nowT: t }).newFlags, []);
     // No register: a quiet no-op.
@@ -371,6 +371,6 @@ test('12. the plugin option and the version are declared', () => {
   assert.equal(plugin.userConfig.decision_register.default, true);
   const market = JSON.parse(readFileSync(join(PLUGIN_ROOT, '..', '..', '.claude-plugin', 'marketplace.json'), 'utf8'));
   const entry = market.plugins.find((p) => p.name === 'agent-companion');
-  assert.equal(plugin.version, '0.31.12');
+  assert.equal(plugin.version, '0.31.13');
   assert.equal(entry.version, plugin.version);
 });

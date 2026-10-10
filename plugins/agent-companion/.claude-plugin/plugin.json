@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.12",
+  "version": "0.31.13",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -197,6 +197,30 @@
       "title": "Nudge when a brief has no ROLE: line",
       "description": "A spawn brief should carry a ROLE: line (reviewer, fixer, lander, writer, docs, lookup, operate or other: what its main deliverable is), next to TYPE:. It tags the spawn for usage measurement and changes no routing. When the line is missing or not one of those words, the spawn guard adds one short line of context (never a deny, never a block) saying so. Turn this off to silence the nudge; the line is still read and recorded as declared_role in the spawn telemetry.",
       "default": true
+    },
+    "type_line_nudge": {
+      "type": "boolean",
+      "title": "Nudge when a brief's TYPE: line is not a task type",
+      "description": "A brief's TYPE: value must be a task type or one of its aliases (see the routing table). When it is neither, the spawn guard adds one short line of context naming the valid types (never a deny, never a block), because an unknown TYPE routes and measures nothing. Turn this off to silence the nudge; the raw value is still recorded as declared_type in the spawn telemetry.",
+      "default": true
+    },
+    "project_pins": {
+      "type": "boolean",
+      "title": "Respect project-pinned agents",
+      "description": "A project agent (<project>/.claude/agents) or user agent (~/.claude/agents) whose definition sets its own model and/or effort is the operator's own tier choice. With this on, the spawn guard does not deny, nag or rewrite such a spawn over task weight: no best-fit deny, no over/under/parity/WRITER notes, no WARRANT requirement, no model autofill or rung swap. Role rules still apply (reporting contract, FIRST ACTION, review framing, shared-box, ROLE nudge), a pinned writer gets the self-review protocol when its file carries none, and a `model` parameter that replaces the pinned model gets one non-blocking note. The premium cap is unchanged. Turn this off to judge pinned agents by weight like any other spawn.",
+      "default": true
+    },
+    "lead_effort_live_check": {
+      "type": "boolean",
+      "title": "Check the lead's live effort at its first spawn",
+      "description": "While the lead-effort-check standing rule is enabled, the first Agent spawn of a main session compares the live effort in the hook payload (get_session shows only the effort the session was created at) with the lead target. Below the target: one non-blocking note to the lead. Above it: one informational message to the operator, asking the lead for nothing. Equal: nothing. Once per session, never a deny, never a rewrite. Recorded as lead_effort_live and lead_effort_target in the spawn telemetry. Turn this off to skip the check.",
+      "default": true
+    },
+    "lead_effort_rollout_id": {
+      "type": "string",
+      "title": "Rollout id that moves the lead-effort target to high",
+      "description": "Empty (the default): no switch, the built-in lead-effort target stays xhigh. A value names the id in the state root's rollout.json whose switch-on moves the target to high, in both the lead-effort-check wording and the live check. Never lowers.",
+      "default": ""
     },
     "fit_autofill": {
       "type": "boolean",
@@ -459,6 +483,12 @@
       "type": "boolean",
       "title": "Read dedupe",
       "description": "Deny a Read of lines this agent already read, when the file is unchanged since and the read is at least 2,000 characters. Fills the gap Claude Code's own 'file unchanged' stub leaves: a range inside an earlier larger read, or a repeat of an earlier range after another one. The denial says so in one sentence and the same call, repeated, runs. Per agent; cleared by an edit, any change of the file, and compaction. Off = every Read runs. Also CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0.",
+      "default": true
+    },
+    "routine_placement_note": {
+      "type": "boolean",
+      "title": "Routine placement note",
+      "description": "On the desktop scheduled-task create/update tools, add a short note on the folder effort pin, the start effort and the /ac recommend placement rule. Advisory only; never blocks.",
       "default": true
     },
     "poll_guard": {

@@ -45,7 +45,7 @@ test('the wording asks with AskUserQuestion, not in prose, and keeps the unatten
   assert.match(t, /Before the first spawn and again after any resume or compaction/);
   assert.match(t, /get_session with session_id "self" and read its effort field/);
   assert.match(t, /orchestration lead runs at xhigh/);
-  assert.ok(t.length < 950, `the rule is paid for at every session start: ${t.length} chars`);
+  assert.ok(t.length < 1200, `the rule is paid for at every session start: ${t.length} chars`);
   // interactive: the options selector, stop until answered
   assert.match(t, /AskUserQuestion tool \(the options selector\), not in prose/);
   assert.match(t, /no spawn and no other tool call until it is answered/);
@@ -65,7 +65,9 @@ test('the wording asks with AskUserQuestion, not in prose, and keeps the unatten
   assert.match(t, /Never raise to max, never lower/);
   // unattended: never asked
   assert.match(t, /Unattended \(scheduledTaskId in get_session, a headless or -p run, or no AskUserQuestion tool\): do not ask/);
-  assert.match(t, /state the effort once/);
+  assert.match(t, /state the effort once only if it is below xhigh/);
+  assert.match(t, /At xhigh or above: say nothing and do not ask./);
+  assert.match(t, /never suggest lowering/);
   // the old prose-ask wording is gone
   assert.doesNotMatch(t, /ask them to raise it/);
   assert.doesNotMatch(t, /say so to the user in one line/);

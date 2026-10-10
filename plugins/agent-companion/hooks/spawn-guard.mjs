@@ -51,20 +51,21 @@ import {
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
   effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, classifyEffort, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
-  taskTypeDef, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
+  taskTypeDef, canonicalTaskType, unknownTypeHint, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
   claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent, routedRung, routeLayerTag,
-  briefNeedsDroppedTools, ladderVariants, pluginName,
+  briefNeedsDroppedTools, ladderVariants, pluginName, projectAgentRoots,
 } from './lib/context.mjs';
 
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue, BRIEF_ROLES } from './lib/brief-directives.mjs';
 import {
   selfReviewConfig, optedOut, isParityType, writerFromCaller, callerSpawnRow, definitionCarriesProtocol,
-  injectionRung, selfReviewBriefText,
+  injectionRung, pinnedInjectionRung, selfReviewBriefText,
 } from './lib/self-review.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract, noteContractAppended } from './lib/brevity.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
+import { leadEffortLive, mergeLeadEffort } from './lib/lead-effort-live.mjs';
 import {
   buildCandidateName, sessionSpawnNames, reserveUniqueName, buildNamegateBrief,
 } from './lib/namegate.mjs';
@@ -91,6 +92,7 @@ const RECOMMEND_CMD = (() => {
 // updatedInput and no permissionBehavior yields hookUpdatedInput), so the
 // model fill-in does not need one.
 function allowWith(systemMessage, updatedInput, additionalContext) {
+  ({ systemMessage, additionalContext } = mergeLeadEffort(systemMessage, additionalContext)); // lead-effort live check (text only)
   // Text that is empty or only whitespace is no text. When there is nothing at
   // all to say or change, emit nothing: a bare {hookSpecificOutput:
   // {hookEventName}} object shows the lead an empty "PreToolUse:Agent says:".
@@ -224,7 +226,40 @@ function definitionPinExempt(type, def, cwd) {
   const is = (d) => { try { return !!d && norm(d) === from; } catch { return false; } };
   if (is(ownAgentsDir())) return isLadderAgentName(bare);
   if (namespaced) return false;
-  return is(cwd && join(cwd, '.claude', 'agents')) || is(join(claudeDir(), 'agents'));
+  return projectAgentRoots(cwd).some(is);
+}
+
+// Whether a spawn is PROJECT-PINNED: a bare-named project or user agent (not a
+// built-in type, not a ladder rung, not another plugin's `<plugin>:<agent>`)
+// whose definition file sets a model the tier table knows and/or an effort
+// level it knows. The operator chose that tier for that agent, so the guard
+// does not judge it by task weight (see `pinned` in the main body). The scope
+// is the folder the definition was read from: a project agents folder (the
+// cwd's or a parent's up to the project root) or the user's.
+// { pinned, scope: 'project' | 'user' | null, fields: 'model' | 'effort' | 'model+effort' | null }
+function pinInfo(type, def, cwd) {
+  const none = { pinned: false, scope: null, fields: null };
+  try {
+    if (!def || !def.file || !type) return none;
+    const t = String(type);
+    if (t.includes(':') || BUILTIN_AGENT_NAMES.has(t.toLowerCase()) || isLadderAgentName(t)) return none;
+    const norm = (d) => {
+      const r = resolve(d);
+      return process.platform === 'win32' ? r.toLowerCase() : r;
+    };
+    const from = norm(dirname(def.file));
+    const roots = projectAgentRoots(cwd);
+    // roots: the cwd's own folder first (project), its parents (project), the
+    // user's last. A cwd that is the user's own folder reads as project.
+    const at = roots.findIndex((r) => norm(r) === from);
+    if (at < 0) return none;
+    const scope = (at === roots.length - 1 && !(at === 0 && cwd)) ? 'user' : 'project';
+    const model = String(def.model || '').trim();
+    const hasModel = !!model && !/^inherit$/i.test(model) && classifyModel(model).known;
+    const hasEffort = !!def.effort && classifyEffort(def.effort).known;
+    if (!hasModel && !hasEffort) return none;
+    return { pinned: true, scope, fields: hasModel && hasEffort ? 'model+effort' : hasModel ? 'model' : 'effort' };
+  } catch { return none; }
 }
 
 try {
@@ -249,6 +284,22 @@ try {
   const fromDef = def?.model || '';
   let model = declared || fromDef;              // what will actually run, when knowable
   const trulyInherited = !declared && !fromDef; // nobody chose: the real hazard
+  // Project-pinned (project_pins, default on): a project or user agent whose own
+  // definition pins model and/or effort. The operator chose that tier, so the
+  // guard neither judges it by task weight (best fit, weight notes, warrant)
+  // nor rewrites it (autofill); every role rule and the cap still apply.
+  const pin = pinInfo(input.subagent_type, def, p.cwd);
+  const pinned = pin.pinned && opt('project_pins', true);
+  // The one note a pin does get: the call's `model` parameter names a different
+  // model than the definition pins. The parameter wins in the harness, so the
+  // spawn runs on the parameter's model; the guard says so and rewrites nothing.
+  const pinModelOverridden = pinned && pin.fields !== 'effort' && !!declared && !!fromDef
+    && classifyModel(declared).alias !== classifyModel(fromDef).alias;
+  const pinReplacedNote = pinModelOverridden
+    ? `agent-companion: ${input.subagent_type} is pinned by its ${pin.scope} definition to ${fromDef}/${def?.effort || 'inherited'}, ` +
+      `and this spawn passes model \`${declared}\`, which replaces the pinned model. The pin is deliberate: ` +
+      'drop the model parameter to respect it. Not blocking.'
+    : null;
 
   // No delegation-streak write here: the streak ends only when a main-thread
   // Agent spawn actually RUNS (delegation-guard.mjs --event reset, PostToolUse).
@@ -316,18 +367,28 @@ try {
   // as there. Only the first TYPE line counts: an unknown one stays unknown
   // (no route from it), and declared_type records exactly that header value.
   const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
-  const declaredType = tm ? tm[1].toLowerCase() : null;
+  // An alias (config taskTypeAliases) is another spelling of a type: routing,
+  // self-review and the rules text all see the canonical name; telemetry keeps
+  // the raw header value as declared_type. Same resolver as recommend.mjs.
+  const declaredTypeRaw = tm ? tm[1].toLowerCase() : null;
+  const declaredType = declaredTypeRaw ? (canonicalTaskType(declaredTypeRaw)?.name || declaredTypeRaw) : null;
   // ROLE: what the spawn's main deliverable is (reviewer, fixer, lander, writer,
   // docs, lookup, operate, other). Measurement only (0.31.3): it routes nothing
   // and gates nothing. Recorded as declared_role; a spawn without a usable
   // line gets a short non-blocking nudge (role_line_nudge), NEVER a deny.
   const rm = declarationValue(decls, 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`);
   const declaredRole = rm ? rm[1].toLowerCase() : null;
-  const roleNudge = !declaredRole && opt('role_line_nudge', true)
+  const roleLineNudge = !declaredRole && opt('role_line_nudge', true)
     ? 'agent-companion: this brief has no `ROLE:` line. Add one on its own line next to `TYPE:`: ' +
       '`ROLE: <reviewer|fixer|lander|writer|docs|lookup|operate|other>`, the role of the main deliverable. ' +
       'It tags the spawn for usage measurement only and changes no routing. Not blocking.'
     : null;
+  // A TYPE: line that is no type (and no alias) routes and measures nothing:
+  // say so once, naming the valid ones (type_line_nudge). Never a deny.
+  const typeNudge = declaredTypeRaw && !canonicalTaskType(declaredTypeRaw) && opt('type_line_nudge', true)
+    ? `agent-companion: TYPE: ${declaredTypeRaw} is not a task type, so it routes and measures nothing. ${unknownTypeHint(declaredTypeRaw).replace(/^"[^"]*" is not a task type\. /, '')} Not blocking.`
+    : null;
+  const roleNudge = [roleLineNudge, typeNudge].filter(Boolean).join('\n') || null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
@@ -405,6 +466,7 @@ try {
   const callerMeta = callerTranscript ? lastAssistantMeta(callerTranscript) : null;
   const callerModel = (callerMeta && callerMeta.model) || null;
   const callerEffort = p.effort?.level || (callerMeta && callerMeta.effort) || null;
+  const leadLive = leadEffortLive({ sid, subagentCaller, callerEffort, isCanary }); // telemetry fields; text goes out via allowWith
   let writerInferred = null;     // the caller-derived writer, while it is the one in use
   let writerInferProblem = null; // why inference was tried and yielded no writer
   // What the calling subagent was seen running, for inference: its model only
@@ -429,7 +491,7 @@ try {
     try { callerRow = callerSpawnRow(p); } catch { callerRow = { state: 'unknown', why: 'the lookup failed' }; }
   }
   const callerDeclaredType = callerRow && callerRow.state === 'found'
-    ? (typeof callerRow.row.declared_type === 'string' ? callerRow.row.declared_type : null)
+    ? (typeof callerRow.row.declared_type === 'string' ? (canonicalTaskType(callerRow.row.declared_type)?.name || callerRow.row.declared_type) : null)
     : null;
   // A review of a critical change is a critical review (F1), whoever spawns
   // it: when the brief states no CONSEQUENCE and the caller's own row
@@ -609,7 +671,7 @@ try {
     const all = readJson(stateFile('ladder-rewrites.json'), null);
     if (all && all[sid]) rewriteState = (await rewriteModule()).rewriteState(sid);
   } catch { rewriteState = null; }
-  if (fitOn && trulyInherited && route?.model && opt('fit_autofill', true) && !isLadderSpawn && !writerPartial) {
+  if (fitOn && trulyInherited && route?.model && opt('fit_autofill', true) && !isLadderSpawn && !writerPartial && !pinned) {
     model = route.model;
     autofilled = true;
     updatedInput = { ...input, model };
@@ -762,7 +824,7 @@ try {
         : `Add a \`WRITER: <model>/<effort>\` line so TYPE: ${declaredType} can be sized to its writer, or`;
     }
     return typeWeight === null
-      ? `TYPE: ${declaredType} is not a task type the table knows (see \`${RECOMMEND_CMD} --list\`); name a known type, or`
+      ? `TYPE: ${declaredType} is not a task type the table knows. ${unknownTypeHint(declaredType).replace(/^"[^"]*" is not a task type\. /, '')} Name a known type, or`
       : `TYPE: ${declaredType} did not resolve a route; name another type, or`;
   })();
   const missingModelNote = (trulyInherited && !autofilled)
@@ -938,7 +1000,11 @@ try {
     //    matched against this brief's own text. See lib/rules.mjs.
     try {
       if (opt('standing_rules', true)) {
-        const hits = matchRules({ scope: 'spawn', text: brief, sessionId: sid });
+        // Rules list canonical type names: match a copy whose TYPE value is the canonical one.
+        const ruleText = declaredTypeRaw && declaredType !== declaredTypeRaw && decls.TYPE
+          ? brief.replace(new RegExp(`(\\bTYPE\\b[^\\n]{0,12}?)\\b${declaredTypeRaw}\\b`, 'i'), (_m, pre) => pre + declaredType)
+          : brief;
+        const hits = matchRules({ scope: 'spawn', text: ruleText, sessionId: sid });
         suffix += renderRules(hits, { maxChars: opt('standing_rules_max_chars', 3000) }) || '';
       }
     } catch { /* fail open */ }
@@ -1229,7 +1295,7 @@ try {
   const instead = parityRungName ? `spawn ${parityRungName} (${routeLabel}) instead` : `re-spawn at ${routeLabel}`;
   let parityNote = null;
   let parityInheritedEffort = false;
-  if (parityRoute && fit && !autofilled) {
+  if (parityRoute && fit && !autofilled && !pinned) {
     const head = `agent-companion (reviewer parity): ${input.subagent_type || 'this reviewer'} reviews at ${reviewerLabel}` +
       ` for a writer at ${writer.label}${writer.agent ? ` ("${writer.agent}")` : ''}; the parity route is ${routeLabel}${parityFloorsText}.`;
     if (fit.verdict === 'under') {
@@ -1253,7 +1319,7 @@ try {
   }
   // WRITER notes: parity-sized types only (the line is not read on any other
   // brief), and only while fit_guard is on (they are fit notes).
-  const writerNotesOn = typeIsParity && opt('fit_guard', true);
+  const writerNotesOn = typeIsParity && opt('fit_guard', true) && !pinned;
   // A declared WRITER line that could not be used at all.
   const writerNote = writerNotesOn && writerProblem
     ? `agent-companion: the WRITER line${writerRaw ? ` ("${writerRaw}")` : ''} was ignored — ${writerProblem}. Write it as \`WRITER: <model>/<effort>\` ` +
@@ -1303,7 +1369,7 @@ try {
   // this spawn at all. Said once here; the warrant soft note below reuses
   // it instead of claiming no TYPE was declared.
   const parityNoWriter = typeIsParity && !route && opt('fit_guard', true);
-  const parityNoWriterNote = parityNoWriter && !fit?.parityFloor
+  const parityNoWriterNote = parityNoWriter && !fit?.parityFloor && !pinned
     ? `agent-companion: TYPE: ${declaredType} is sized from its writer, and this brief names no usable writer, so ` +
       'the routing table cannot size this reviewer. Add a line `WRITER: <model>/<effort>` (e.g. `WRITER: opus/xhigh`) ' +
       'or `WRITER: <agent-name>` (e.g. `WRITER: ac-opus-xhigh`) naming the writer this review gates.'
@@ -1386,8 +1452,15 @@ try {
       } else {
         const runningType = ladderRewrite ? ladderRewrite.to : input.subagent_type;
         selfReviewExpected = definitionCarriesProtocol(runningType, def);
-        if (selfReviewExpected === false) {
-          const rung = injectionRung(runningType, def, model);
+        // A project-pinned writer whose file holds no protocol block (null: it
+        // may word one itself, but carries none of ours) gets the same text as
+        // a ladder rung without it, sized to the pair its pin runs; the lead
+        // opts out per spawn with the same `REVIEW: lead` line.
+        const pinnedNoBlock = pinned && selfReviewExpected === null;
+        if (selfReviewExpected === false || pinnedNoBlock) {
+          const rung = pinnedNoBlock
+            ? pinnedInjectionRung(def, model, callerEffort)
+            : injectionRung(runningType, def, model);
           if (rung) {
             // A brief that states no CONSEQUENCE still carries its type's
             // preset: a critical type's self-review names the critical
@@ -1405,7 +1478,9 @@ try {
             // Name a rung only when its INSTALLED file carries the block: a
             // local copy of the table moves the route but not the installed files.
             let home = null;
-            try {
+            // A pinned agent is never pointed at another rung: its pin is the choice.
+            if (pinnedNoBlock) selfReviewExpected = false;
+            else try {
               const r = resolveRoute({ type: declaredType });
               const hr = r.model && r.effort ? rungFor(r.model, r.effort) : null;
               const hdef = hr ? agentDefinition(`agent-companion:${hr.agent}`, p.cwd) : null;
@@ -1478,6 +1553,7 @@ try {
     appendLog('spawns.jsonl', {
       at: new Date().toISOString(),
       session_id: sid,
+      ...leadLive,
       // Which copy of the guard wrote this row (plugin version, cache,
       // checkout or bundle, install scope key) and when this session last
       // loaded its plugins. The daily scout reads these across sessions to
@@ -1511,7 +1587,8 @@ try {
       declared_weight: declaredWeight,   // null when the brief did not say (may be filled from declared_type's own preset)
       declared_kind: declaredKind,
       declared_consequence: declaredConsequence,
-      declared_type: declaredType,       // null when the brief named no TYPE: preset
+      declared_type: declaredTypeRaw,    // the brief's TYPE: value as written (null when none); an alias stays as written
+      declared_type_resolved: declaredTypeRaw && declaredType !== declaredTypeRaw ? declaredType : null, // the canonical type an alias resolved to
       declared_role: declaredRole,       // the brief's ROLE: value (reviewer|fixer|lander|writer|docs|lookup|operate|other); null when absent or not one of those
       fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid
       route_layer: route?.layer || null,  // profile | trial | grid: which resolveRoute() layer answered; null when no route
@@ -1540,6 +1617,11 @@ try {
       review_by_subagent: reviewBySubagent, // the broad count: a parity review by a subagent whose row is not positively a review
       self_review_expected: selfReviewExpected, // for a selfReview TYPE: will this writer review itself? null for other types
       self_review_injected: selfReviewInjected, // the protocol was appended to this writer's brief (a ladder rung without it)
+      // --- Project pins (0.31.13) --------------------------------------------
+      project_pinned: pinned,            // a project or user agent whose own definition pins model and/or effort (and project_pins is on): not judged by weight, never rewritten
+      pin_scope: pinned ? pin.scope : null,   // project | user
+      pin_fields: pinned ? pin.fields : null, // model | effort | model+effort
+      pin_model_overridden: pinModelOverridden, // pinned, and the call's `model` names a different alias than the definition's
       caller_row_found: callerRow ? callerRow.state === 'found' : null, // the caller's own spawn row was found by tool_use_id; null when not looked up
       caller_declared_type: callerDeclaredType, // that row's declared_type; null when not found or none declared
       // The caller's own Agent call id, from its sidecar: joins this review's
@@ -1609,7 +1691,7 @@ try {
       `Inherit guard: this spawn names no model, and its definition${input.subagent_type ? ` ("${input.subagent_type}")` : ''} ` +
       `states neither model nor effort, so it would run on the lead's own ${leadLabel || callerAlias} — model AND effort ` +
       'inherited, chosen by nobody' +
-      (declaredType ? ` (TYPE: ${declaredType} is not a task type the table knows, so it routes nothing)` : '') +
+      (declaredType ? ` (TYPE: ${declaredType} is not a task type the table knows, so it routes nothing. ${unknownTypeHint(declaredType).replace(/^"[^"]*" is not a task type\. /, '')})` : '') +
       '. (inherit_guard is "block".)\n\n' +
       'Add ONE of these:\n' +
       '  - a line of its own in the brief:  TYPE: <task type>\n' +
@@ -1662,6 +1744,9 @@ try {
   } else if (fit?.verdict === 'over' && !isPremiumForSpawn) {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}${routeLayerNote}. Re-spawn there unless the weight is understated.`;
   }
+  // A pinned spawn is the operator's own tier choice: no weight or parity note.
+  // (The fit value is still computed and recorded, so table-vs-pin stays measurable.)
+  if (pinned) note = null;
   // Set only in the warrant section below (routing-can't-be-inferred case);
   // declared here so it is defined for the early-exit combineNotes() call
   // too, even though that branch can never actually populate it (it only
@@ -1710,6 +1795,7 @@ try {
     buildFloorNote,
     warrantSoftNote,
     toolNote,
+    pinReplacedNote,
   );
 
   if (!isPremiumForSpawn) {
@@ -1735,7 +1821,7 @@ try {
   // parity route: reviewer parity is a note in this release (a mis-read
   // WRITER line must not block a review), so a reviewer above its writer is
   // said out loud by the parity note instead.
-  if (fit?.verdict === 'over' && !parityRoute) {
+  if (fit?.verdict === 'over' && !parityRoute && !pinned) {
     recordDenial('fit', p, `${model} requested for declared weight ${declaredWeight}; table says ${routeLabel}`);
     deny(
       `Best fit: this spawn requests "${model}" but declares weight ${declaredWeight}` +
@@ -1763,7 +1849,8 @@ try {
   // nothing here can confirm the premium tier either way.
   // A parity route is "known" but never denies here either (see the fit deny
   // above): a premium reviewer its route does not name gets the soft note.
-  if (opt('warrant_required', true)) {
+  // A pinned spawn needs none: the pin is the operator's own warrant.
+  if (opt('warrant_required', true) && !pinned) {
     if (!warrantDeclared) {
       if (spawnAlias === 'fable' || (routingKnown && !parityRoute)) {
         recordDenial('warrant', p, `premium tier ${model} requested with no warrant`);
@@ -1800,7 +1887,7 @@ try {
                 (!opt('fit_guard', true)
                   ? 'fit_guard is off, so the guard routes nothing'
                   : typeWeight === null
-                    ? 'not a task type the table knows — see `' + RECOMMEND_CMD + ' --list`'
+                    ? 'not a task type the table knows. ' + unknownTypeHint(declaredType).replace(/^"[^"]*" is not a task type\. /, '')
                     : 'the table has no row for it') +
                 '), so the routing table has nothing to check it against. Not blocking. ' +
                 `${!opt('fit_guard', true) ? 'Turn fit_guard on' : 'Name a known TYPE'} so the guard can judge fit, or add ${warrantLine}.`

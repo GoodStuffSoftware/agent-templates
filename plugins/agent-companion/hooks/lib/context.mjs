@@ -915,6 +915,43 @@ export function taskTypeNames({ profile = true, state } = {}) {
   return names;
 }
 
+// The alias table (config taskTypeAliases): alias -> type, valid entries only.
+// An alias whose target is not a known type, or whose name is itself a shipped
+// or local type, is ignored: an alias is another spelling, never a new route.
+function validAliases({ profile = true, state } = {}) {
+  const cfg = modelTiers();
+  const raw = cfg.taskTypeAliases;
+  if (!isPlainObj(raw)) return {};
+  const known = new Set(taskTypeNames({ profile, state }));
+  const out = {};
+  for (const [a, target] of Object.entries(raw)) {
+    if (typeof target === 'string' && known.has(target) && !known.has(a)) out[a] = target;
+  }
+  return out;
+}
+
+// `TYPE: <name>` canonical form, shared by recommend.mjs and the spawn
+// guard. Returns { name, via } with via 'shipped' | 'local' | 'alias', or null
+// when the name is no type and no alias. Order: a shipped type wins, then a
+// valid local type, then an alias.
+export function canonicalTaskType(name, { profile = true, state } = {}) {
+  if (!name || typeof name !== 'string') return null;
+  const n = name.toLowerCase();
+  const def = taskTypeDef(n, { profile, state });
+  if (def) return { name: n, via: def.origin };
+  const al = validAliases({ profile, state });
+  if (hasOwn(al, n)) return { name: al[n], via: 'alias' };
+  return null;
+}
+
+// The one sentence every unknown-TYPE message uses.
+export function unknownTypeHint(name, { profile = true, state } = {}) {
+  const al = Object.entries(validAliases({ profile, state })).map(([a, t]) => `${a} -> ${t}`);
+  return `"${name}" is not a task type. Valid types: ${taskTypeNames({ profile, state }).join(', ')}.` +
+    (al.length ? ` Aliases: ${al.join(', ')}.` : '') +
+    ' TYPE is the task kind, ROLE is the deliverable.';
+}
+
 // THE row check, shared by the writer (mode 'write': refuse) and the
 // resolver (mode 'read': ignore). Returns '' when the row can run as
 // written, else the reason. `typeDef` is the resolved preset (shipped or
@@ -2451,6 +2488,45 @@ function pluginAgentsDirFor(plugin, cwd) {
   }
 }
 const UNSAFE_AGENT_NAME = /[\\/]|\.\./;
+
+// The agent folders a BARE agent name is looked up in, in order: the working
+// directory's own `.claude/agents`, then each parent's up to and including the
+// first directory that holds a `.git` (file or folder), at most 8 levels, then
+// the user's. A lead whose cwd is a subfolder of a project still finds the
+// project's agents, as the harness does (E: the harness resolves project agents
+// from the project root). With no `.git` within 8 levels only the cwd's own
+// folder is used, exactly as before, so an unrelated parent is never searched.
+// A parent whose agents folder IS the user's (cwd under the home folder) is
+// skipped here: it comes last, as the user scope.
+export function projectAgentRoots(cwd) {
+  const userAgents = join(claudeDir(), 'agents');
+  const same = (a, b) => {
+    const x = resolve(a), y = resolve(b);
+    return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y;
+  };
+  const out = [];
+  if (cwd) {
+    out.push(join(cwd, '.claude', 'agents'));
+    let chain = null;
+    try {
+      let d = resolve(String(cwd));
+      const walked = [];
+      for (let i = 0; i < 8; i++) {
+        walked.push(d);
+        if (existsSync(join(d, '.git'))) { chain = walked; break; }
+        const up = dirname(d);
+        if (up === d) break;
+        d = up;
+      }
+    } catch { chain = null; }
+    for (const d of (chain || []).slice(1)) {
+      const a = join(d, '.claude', 'agents');
+      if (!same(a, userAgents) && !out.some((o) => same(o, a))) out.push(a);
+    }
+  }
+  if (!out.some((o) => same(o, userAgents))) out.push(userAgents);
+  return out;
+}
 export function agentDefinition(type, cwd) {
   if (!type) return null;
   const t = String(type);
@@ -2463,10 +2539,7 @@ export function agentDefinition(type, cwd) {
     return dir ? readAgentDefFile(join(dir, `${name}.md`)) : null;
   }
   if (UNSAFE_AGENT_NAME.test(t)) return null;
-  const roots = [
-    cwd && join(cwd, '.claude', 'agents'),
-    join(claudeDir(), 'agents'),
-  ].filter(Boolean);
+  const roots = projectAgentRoots(cwd);
   for (const root of roots) {
     const d = readAgentDefFile(join(root, `${t}.md`));
     if (d) return d;
@@ -2653,24 +2726,29 @@ function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no wait: retry at once */ }
 }
 
-// writeJson through a temp file renamed over the target, so a reader never
+// Write text through a temp file renamed over the target, so a reader never
 // sees a half-written file. On Windows a reader holding the target open for
 // the instant of its read makes the replace fail with EPERM/EBUSY, so the
-// rename is retried briefly, then falls back to a direct write. Never throws.
-export function writeJsonAtomic(file, value) {
-  const text = JSON.stringify(value);
+// rename is retried briefly, then falls back to a direct write. Never throws;
+// returns whether the file now holds `text`.
+export function writeTextAtomic(file, text) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(16).slice(2, 10)}.tmp`;
   try {
     writeFileSync(tmp, text);
     for (let i = 0; ; i += 1) {
-      try { renameSync(tmp, file); return; } catch (e) {
+      try { renameSync(tmp, file); return true; } catch (e) {
         if (i >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes(e?.code)) break;
         sleepSync(10);
       }
     }
   } catch { /* temp write failed: fall through to the direct write */ }
   try { unlinkSync(tmp); } catch { /* already renamed or never written */ }
-  writeJson(file, value);
+  try { writeFileSync(file, text); return true; } catch { return false; }
+}
+
+// writeJson through writeTextAtomic. Never throws.
+export function writeJsonAtomic(file, value) {
+  writeTextAtomic(file, JSON.stringify(value));
 }
 
 // Emitted telemetry is a PUBLIC CONTRACT, not an internal detail — other tools

@@ -28,10 +28,10 @@
 //
 // Fail open everywhere: nothing here throws to a caller.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, unlinkSync, openSync, readSync, closeSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
-import { configDir, stateFile as stateFilePath, telemetryDir, rolloutTable, rolloutStartMs, compareVersions } from '../../hooks/lib/context.mjs';
+import { configDir, stateFile as stateFilePath, telemetryDir, rolloutTable, rolloutStartMs, compareVersions, writeTextAtomic } from '../../hooks/lib/context.mjs';
 import { readHistory, checkupPaths, nowMs, SURFACE_MAX_AGE_MS, DAY_MS, DAY_OFFSET_MS, dayStartMs, dayKeyOf } from './daily-checkup.mjs';
 
 // --- 1. constants and paths ------------------------------------------------------
@@ -61,7 +61,15 @@ export const METRIC_CATALOG = {
   leadEffortShare: 'spawns',
   reviewsPerWriter: 'spawns',
   haikuSpawns: 'spawns',
+  // Lead-effort metrics (decision leads-at-high). Zero token: local telemetry only.
+  leadRebriefsPer100Spawns: 'spawns',
+  reviewFixShareByLeadEffort: 'spawns',
+  leadRoutingDeniesPer100Spawns: 'spawns', // also reads denials.jsonl
+  leadUnderProvisionedShare: 'spawns',
+  mainUnitsPerLeadSpawn: 'history',
 };
+// The lead-effort metrics that need params.levels (the lead efforts counted).
+const LEAD_LEVEL_METRICS = new Set(['leadRebriefsPer100Spawns', 'reviewFixShareByLeadEffort', 'leadRoutingDeniesPer100Spawns', 'leadUnderProvisionedShare']);
 // Evaluator-defined predicates on an exercise `where` (everything else is a raw row field).
 const WHERE_PREDICATES = {
   declaredWriterModel: 'string',
@@ -76,6 +84,7 @@ export function registerPath() { return join(configDir(), 'decision-register.jso
 export function statePath() { return stateFilePath('decision-register-state.json'); }
 export function detailPath() { return stateFilePath('decision-register-details.md'); }
 export function spawnsPath() { return join(telemetryDir(), 'spawns.jsonl'); }
+export function denialsPath() { return join(telemetryDir(), 'denials.jsonl'); }
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const isStr = (x) => typeof x === 'string' && x.trim().length > 0;
@@ -127,6 +136,8 @@ function validateTrigger(t, where, decision, rollout, errors, premiseIds) {
       const p = isObj(t.params) ? t.params : {};
       if (t.metric === 'unitsPerSpawn' && !(isStr(p.type) || isStr(p.rung))) err('unitsPerSpawn needs params.type or params.rung');
       if (t.metric === 'leadEffortShare' && !(Array.isArray(p.levels) && p.levels.length && p.levels.every(isStr))) err('leadEffortShare needs params.levels (non-empty list of effort names)');
+      if (LEAD_LEVEL_METRICS.has(t.metric) && !(Array.isArray(p.levels) && p.levels.length && p.levels.every(isStr))) err(`${t.metric} needs params.levels (non-empty list of effort names)`);
+      if (t.metric === 'mainUnitsPerLeadSpawn' && p.levels !== undefined) err('mainUnitsPerLeadSpawn cannot split by effort: the checkup history keeps no effort per session (compare across the rollout instant instead)');
       if (t.metric === 'reviewsPerWriter' && !isStr(p.writerType)) err('reviewsPerWriter needs params.writerType');
       if (t.baseline !== undefined) {
         const b = t.baseline;
@@ -136,6 +147,7 @@ function validateTrigger(t, where, decision, rollout, errors, premiseIds) {
           if (typeof b.ratio !== 'boolean') err('baseline.ratio must be true or false');
           if (b.preDays !== undefined && !(isInt(b.preDays) && b.preDays >= 1)) err('baseline.preDays must be an integer >= 1');
           if (!(Number.isFinite(b.minPerDay) && b.minPerDay >= 0)) err('baseline.minPerDay must be a finite number >= 0');
+          if (b.levels !== undefined && !(LEAD_LEVEL_METRICS.has(t.metric) && Array.isArray(b.levels) && b.levels.length && b.levels.every(isStr))) err('baseline.levels must be a non-empty list of effort names, on a lead-effort metric that takes params.levels');
         }
         needsRollout('a baseline');
       }
@@ -266,16 +278,17 @@ export function emptyState() {
   };
 }
 
+// The task type a spawn row routed as: the canonical type when the brief used an alias
+// (declared_type_resolved), else the header value as written.
+const typeOf = (r) => r.declared_type_resolved ?? r.declared_type;
+
+// Temp file + rename with the bounded retry and direct-write fallback of
+// context.mjs writeTextAtomic (a Windows reader holding the file would
+// otherwise make the rename fail and the write be lost). Throws when the file
+// could not be written at all, so callers keep their boolean/null results.
 function atomicWrite(file, data) {
   mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, data);
-    renameSync(tmp, file);
-  } catch (e) {
-    try { unlinkSync(tmp); } catch { /* nothing to remove */ }
-    throw e;
-  }
+  if (!writeTextAtomic(file, data)) throw new Error(`could not write ${file}`);
 }
 
 // A missing, corrupt or wrong-shaped file reads as an empty state; fields of the wrong type
@@ -399,7 +412,9 @@ function addFlag(state, key, info, nowT) {
 // of the item's first characters, so it says what changed.
 export const CLAUSE_CHARS = 72;
 export function clauseAround(item, re) {
-  const text = String(item).replace(/\s+/g, ' ').trim();
+  // Fetched text reaches model context through the SessionStart line: no control characters
+  // (newlines included) and no backticks, so a hostile item cannot break out of the quoted clause.
+  const text = String(item).replace(/[\u0000-\u001f\u007f`]/g, ' ').replace(/\s+/g, ' ').trim();
   let m = null;
   try { m = re.exec(text); } catch { m = null; }
   if (!m || text.length <= CLAUSE_CHARS) return text.slice(0, CLAUSE_CHARS);
@@ -487,11 +502,86 @@ function rowsByDay(spawnRows) {
   return by;
 }
 
+// --- lead-effort metric helpers (decision leads-at-high) ----------------------------------
+const REBRIEF_WINDOW_MS = 6 * 3600 * 1000;
+const DENY_GUARDS = new Set(['fit', 'warrant', 'premium-cap', 'inherit']); // routing-guard denials
+const isLeadRow = (r) => r && r.caller_is_subagent === false && nonEmpty(r.caller_effort) !== null;
+const tsOf = (r) => (r && typeof r.at === 'string' ? Date.parse(r.at) : NaN);
+
+// Base name of a spawn: the name with trailing -N / -fix / -review / -retry / -rerun removed, so
+// "scout-copy-fix" and "scout-copy-fix-2" both give "scout-copy".
+function baseName(n) {
+  let s = String(n || '').toLowerCase();
+  for (let i = 0; i < 4; i++) {
+    const m = s.replace(/-(?:\d+|fix|review|retry|rerun)$/, '');
+    if (m === s) break;
+    s = m;
+  }
+  return s;
+}
+
+// Index over ALL spawn rows (a re-brief can cross a day boundary): lead rows per session sorted
+// by time, the set of rows that are re-briefs, and tool_use_id -> row for the review join. Built
+// once per evaluation, only by the metrics that need it.
+//   Re-brief: the same heuristic as the 2026-10-10 lead-effort evidence (section 1, "re-brief
+//   heuristic"): a lead spawn row whose session spawned from the main thread, within the 6 h
+//   before it, the same description hash (desc_sha) or the same base name. That heuristic is
+//   unvalidated (E): it also catches planned fix-then-review chains, so read the rate as a figure
+//   to compare across lead efforts, not as a count of mistakes. A row with the `redone` flag
+//   set (the evidence's redo flag; no current telemetry writes it) counts too.
+function buildLeadIndex(all) {
+  const list0 = Array.isArray(all) ? all : [];
+  const rows = list0.filter((r) => isLeadRow(r) && Number.isFinite(tsOf(r)));
+  const bySession = new Map();
+  const byToolUse = new Map();
+  for (const r of list0) if (r && nonEmpty(r.tool_use_id)) byToolUse.set(r.tool_use_id, r);
+  for (const r of rows) {
+    const k = nonEmpty(r.session_id);
+    if (k === null) continue;
+    if (!bySession.has(k)) bySession.set(k, []);
+    bySession.get(k).push(r);
+  }
+  const rebrief = new Set();
+  for (const list of bySession.values()) {
+    list.sort((a, b) => tsOf(a) - tsOf(b));
+    const lastSha = new Map(); const lastBase = new Map();
+    for (const r of list) {
+      const t = tsOf(r);
+      const sha = nonEmpty(r.desc_sha);
+      const base = baseName(r.name_effective || r.name) || null;
+      const near = (m, key) => key !== null && m.has(key) && t - m.get(key) <= REBRIEF_WINDOW_MS;
+      if (near(lastSha, sha) || near(lastBase, base) || r.redone === true) rebrief.add(r);
+      if (sha !== null) lastSha.set(sha, t);
+      if (base !== null) lastBase.set(base, t);
+    }
+  }
+  return { bySession, rebrief, byToolUse };
+}
+
+// The lead effort a routing denial belongs to: the caller_effort of the session's first lead spawn
+// row at or after the denial, else its last one before (denials carry no effort themselves).
+function denialEffort(idx, d) {
+  const list = idx.bySession.get(nonEmpty(d && d.session_id));
+  const t = tsOf(d);
+  if (!list || !list.length || !Number.isFinite(t)) return null;
+  const next = list.find((r) => tsOf(r) >= t);
+  return (next || list[list.length - 1]).caller_effort;
+}
+
+// A reviewer row's verdict, from the optional `review_verdict` field: 'fix' (FIX or BLOCK),
+// 'pass', or null (absent or unreadable).
+const verdictOf = (r) => {
+  const v = typeof r.review_verdict === 'string' ? r.review_verdict.toUpperCase() : '';
+  if (/\b(FIX|BLOCK)/.test(v)) return 'fix';
+  if (/\bPASS/.test(v)) return 'pass';
+  return null;
+};
+
 // One checkup day of one metric: { num, den, scale, sample } (value = num/den*scale; sample =
 // the day's n for minSample) or { gap:true }. A zero-unit day (usage lockout) is a gap, and so
 // is a limit-hit day (history `limit.hits > 0`) for the per-day total metrics; ratio metrics
 // keep a limit-hit day when it meets the sample.
-function metricDayStat(t, rec, rows) {
+function metricDayStat(t, rec, rows, x = {}) {
   const p = isObj(t.params) ? t.params : {};
   if (rec) {
     const total = rec.units ? finite(rec.units.total) : null;
@@ -538,13 +628,53 @@ function metricDayStat(t, rec, rows) {
       return { num: hit, den: lead.length, scale: 1, sample: lead.length };
     }
     case 'reviewsPerWriter': {
-      const reviews = (rows || []).filter((r) => r.declared_type === 'code-review' && nonEmpty(r.caller_tool_use_id)).length;
-      const writers = (rows || []).filter((r) => r.declared_type === p.writerType).length;
+      const reviews = (rows || []).filter((r) => typeOf(r) === 'code-review' && nonEmpty(r.caller_tool_use_id)).length;
+      const writers = (rows || []).filter((r) => typeOf(r) === p.writerType).length;
       return { num: reviews, den: writers, scale: 1, sample: writers };
     }
     case 'haikuSpawns': {
       const all = rows || [];
       return { num: all.filter((r) => r.model === 'haiku').length, den: 1, scale: 1, sample: all.length };
+    }
+    case 'mainUnitsPerLeadSpawn': {
+      const main = rec && rec.units ? finite(rec.units.main) : null;
+      const sp = rec && rec.spawns ? finite(rec.spawns.total) : null;
+      if (main === null || sp === null || sp <= 0) return { gap: true };
+      return { num: main, den: sp, scale: 1, sample: sp };
+    }
+    case 'leadRebriefsPer100Spawns': {
+      const levels = Array.isArray(p.levels) ? p.levels : [];
+      const lead = (rows || []).filter((r) => isLeadRow(r) && levels.includes(r.caller_effort));
+      const idx = x.idx && x.idx();
+      return { num: idx ? lead.filter((r) => idx.rebrief.has(r)).length : 0, den: lead.length, scale: 100, sample: lead.length };
+    }
+    case 'reviewFixShareByLeadEffort': {
+      const levels = Array.isArray(p.levels) ? p.levels : [];
+      const idx = x.idx && x.idx();
+      let fix = 0; let all = 0;
+      for (const r of rows || []) {
+        if (typeOf(r) !== 'code-review') continue;
+        const v = verdictOf(r);
+        if (v === null) continue; // no verdict in telemetry: not a sample
+        // The writer that spawned the reviewer; a reviewer a lead spawned itself counts for that lead.
+        const w = idx && nonEmpty(r.caller_tool_use_id) ? idx.byToolUse.get(r.caller_tool_use_id) : null;
+        const lr = w ? (isLeadRow(w) ? w : null) : (isLeadRow(r) ? r : null);
+        if (!lr || !levels.includes(lr.caller_effort)) continue;
+        all += 1; if (v === 'fix') fix += 1;
+      }
+      return { num: fix, den: all, scale: 100, sample: all };
+    }
+    case 'leadRoutingDeniesPer100Spawns': {
+      const levels = Array.isArray(p.levels) ? p.levels : [];
+      const lead = (rows || []).filter((r) => isLeadRow(r) && levels.includes(r.caller_effort));
+      const idx = x.idx && x.idx();
+      const n = (x.denials || []).filter((d) => d && d.outcome === 'deny' && DENY_GUARDS.has(d.guard) && idx && levels.includes(denialEffort(idx, d))).length;
+      return { num: n, den: lead.length, scale: 100, sample: lead.length };
+    }
+    case 'leadUnderProvisionedShare': {
+      const levels = Array.isArray(p.levels) ? p.levels : [];
+      const scored = (rows || []).filter((r) => isLeadRow(r) && levels.includes(r.caller_effort) && nonEmpty(r.declared_type) !== null && ['fit', 'over', 'under'].includes(r.fit));
+      return { num: scored.filter((r) => r.fit === 'under').length, den: scored.length, scale: 100, sample: scored.length };
     }
     default: return { gap: true };
   }
@@ -579,8 +709,21 @@ export function evalMetric(ctx) {
     const rows = t.source === 'spawns' ? rowsByDay(ctx.spawnRows) : new Map();
     const keys = new Set(recs.keys());
     if (t.source === 'spawns') for (const k of rows.keys()) if (dayStartOfKey(k) + DAY_MS <= nowT) keys.add(k);
-    const stat = new Map();
-    for (const k of [...keys].sort()) stat.set(k, metricDayStat(t, recs.get(k) || null, rows.get(k)));
+    let idxMemo = null;
+    const denByDay = t.metric === 'leadRoutingDeniesPer100Spawns' ? rowsByDay(ctx.denialRows) : new Map();
+    const buildStat = (tr) => {
+      const m = new Map();
+      for (const k of [...keys].sort()) {
+        const x = { idx: () => (idxMemo ||= buildLeadIndex(ctx.spawnRows)), denials: denByDay.get(k) || [] };
+        m.set(k, metricDayStat(tr, recs.get(k) || null, rows.get(k), x));
+      }
+      return m;
+    };
+    const stat = buildStat(t);
+    // baseline.levels (lead-effort metrics): the pre-switch window counts these lead efforts (the
+    // old effort) while the post window counts params.levels (the new one).
+    const preLevels = isObj(t.baseline) && Array.isArray(t.baseline.levels) && t.baseline.levels.length ? t.baseline.levels : null;
+    const preStat = preLevels && LEAD_LEVEL_METRICS.has(t.metric) ? buildStat({ ...t, params: { ...(isObj(t.params) ? t.params : {}), levels: preLevels } }) : stat;
 
     const minSample = finite(t.minSample) ?? 0;
     const b = isObj(t.baseline) ? t.baseline : null;
@@ -610,13 +753,13 @@ export function evalMetric(ctx) {
     let base = state && state.baselines ? state.baselines[key] : null;
     if (!isObj(base)) {
       const s0 = dayStartMs(af);
-      const cand = [...stat.keys()].filter((k) => {
+      const cand = [...preStat.keys()].filter((k) => {
         const s = dayStartOfKey(k);
         return s >= s0 - PRE_LOOKBACK_DAYS * DAY_MS && s + DAY_MS <= af;
-      }).filter((k) => qualifying(stat.get(k), minPer));
+      }).filter((k) => qualifying(preStat.get(k), minPer));
       const pick = cand.slice(-(isInt(b.preDays) && b.preDays >= 1 ? b.preDays : 5));
       let sn = 0; let sd = 0; let ss = 0; let scale = 1;
-      for (const k of pick) { const ds = stat.get(k); sn += ds.num; sd += ds.den; ss += ds.sample; scale = ds.scale; }
+      for (const k of pick) { const ds = preStat.get(k); sn += ds.num; sd += ds.den; ss += ds.sample; scale = ds.scale; }
       const pooled = sd > 0 ? (sn / sd) * scale : null;
       if (pick.length < PRE_MIN_DAYS || pooled === null || (b.ratio && !(pooled > 0))) {
         if (trec) trec.baselineStatus = 'insufficient';
@@ -670,7 +813,7 @@ export function matchesWhere(row, where, ctx = {}) {
       }
       case 'repeatForSameCaller': {
         const id = nonEmpty(row.caller_tool_use_id);
-        const rep = row.declared_type === 'code-review' && id !== null && (ctx.reviewCounts?.get(id) || 0) >= 2;
+        const rep = typeOf(row) === 'code-review' && id !== null && (ctx.reviewCounts?.get(id) || 0) >= 2;
         if (rep !== v) return false;
         break;
       }
@@ -692,7 +835,7 @@ export function evalExercise(ctx) {
     });
     const reviewCounts = new Map();
     for (const r of after) {
-      const id = r.declared_type === 'code-review' ? nonEmpty(r.caller_tool_use_id) : null;
+      const id = typeOf(r) === 'code-review' ? nonEmpty(r.caller_tool_use_id) : null;
       if (id) reviewCounts.set(id, (reviewCounts.get(id) || 0) + 1);
     }
     const hits = after.filter((r) => matchesWhere(r, t.where, { reviewCounts }));
@@ -751,7 +894,7 @@ function metricSummary(t, rec) {
 
 // Run every active trigger's evaluator and fold the verdicts into `state`. Pure over its
 // inputs (no I/O). Returns { newFlags: [key, ...] }.
-export function evaluateTriggers({ register, history = [], spawnRows = [], nowT = nowMs(), state, evaluators = EVALUATORS }) {
+export function evaluateTriggers({ register, history = [], spawnRows = [], denialRows = [], nowT = nowMs(), state, evaluators = EVALUATORS }) {
   const newFlags = [];
   syncState(state, register);
   for (const d of activeDecisions(register)) {
@@ -763,7 +906,7 @@ export function evaluateTriggers({ register, history = [], spawnRows = [], nowT 
         const tkey = tkeyOf(d.id, t.id);
         const rec = state.triggers[tkey];
         const ms = d.rolloutId ? rolloutStartMs(d.rolloutId) : null;
-        const v = fn({ decision: d, trigger: t, key: tkey, history, spawnRows, nowT, state, activeFromMs: Number.isFinite(ms) ? ms : null });
+        const v = fn({ decision: d, trigger: t, key: tkey, history, spawnRows, denialRows, nowT, state, activeFromMs: Number.isFinite(ms) ? ms : null });
         if (!isObj(v)) continue;
         if (Array.isArray(v.days)) {
           const reset = foldDays(rec, v.days);
@@ -944,8 +1087,32 @@ export function readSpawnRows(file = spawnsPath()) {
       if (!line.trim()) continue;
       try { const j = JSON.parse(line); if (isObj(j)) rows.push(j); } catch { /* corrupt row: skipped */ }
     }
-    return rows;
+    return withReviewVerdicts(rows, file);
   } catch { return []; }
+}
+
+// Fold telemetry/review-verdicts.jsonl (hooks/lib/review-verdict.mjs, beside the spawns file)
+// into the reviewer rows as `review_verdict`, matched on session_id + the row's tool_use_id.
+// A row that already carries the field keeps it. Fail open: unreadable verdicts change nothing.
+function withReviewVerdicts(rows, file) {
+  try {
+    const vf = join(dirname(file), 'review-verdicts.jsonl');
+    if (!existsSync(vf)) return rows;
+    const by = new Map();
+    for (const line of readFileSync(vf, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const j = JSON.parse(line);
+        if (isObj(j) && nonEmpty(j.review_of_tool_use_id) && typeof j.review_verdict === 'string') by.set(`${j.session_id}|${j.review_of_tool_use_id}`, j.review_verdict);
+      } catch { /* corrupt row: skipped */ }
+    }
+    if (!by.size) return rows;
+    return rows.map((r) => {
+      if (r.review_verdict !== undefined || !nonEmpty(r.tool_use_id)) return r;
+      const v = by.get(`${r.session_id}|${r.tool_use_id}`);
+      return v === undefined ? r : { ...r, review_verdict: v };
+    });
+  } catch { return rows; }
 }
 
 // The scout's changelog hook (release-watch `onParsed`): scan a freshly parsed changelog and
@@ -986,7 +1153,8 @@ export function runRegister({
     if (!force && !parsed && lastDay === state.lastEvalDay && regRev === state.registerRev) return { ok: true, skipped: 'nothing new' };
     const fresh = parsed ? scanChangelog(parsed, register, state, { nowT }) : [];
     const spawnRows = readSpawnRows(spawnsFile || spawnsPath());
-    const { newFlags } = evaluateTriggers({ register, history, spawnRows, nowT, state, evaluators });
+    const denialRows = readSpawnRows(denialsPath());
+    const { newFlags } = evaluateTriggers({ register, history, spawnRows, denialRows, nowT, state, evaluators });
     state.lastEvalDay = lastDay;
     state.lastEvalAt = new Date(nowT).toISOString();
     state.registerRev = regRev;

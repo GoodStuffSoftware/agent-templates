@@ -330,6 +330,30 @@ export function injectionRung(runningType, def, spawnModel) {
   } catch { return null; }
 }
 
+// The rung whose protocol text a PROJECT-PINNED writer should get appended to
+// its brief: a project or user agent whose definition pins a model and/or an
+// effort and carries no protocol block of its own. The pair is the one that
+// will actually run: the spawn's `model` parameter wins over the definition's
+// (as in injectionRung); the effort is the definition's, else, for a model that
+// takes one, the caller's (the effort the spawn inherits). null when that pair
+// is no rung (an effort-less pin on a model that takes effort, for example).
+// The generated text is sized to the rung only; nothing here judges weight.
+export function pinnedInjectionRung(def, spawnModel, callerEffort) {
+  try {
+    if (!def) return null;
+    const alias = classifyModel(spawnModel || def.model).alias || '';
+    if (!alias) return null;
+    const takesEffort = ((((modelTiers().tiers || {})[alias]) || {}).efforts || []).length > 0;
+    let effort = null;
+    if (takesEffort) {
+      const own = def.effort ? classifyEffort(def.effort) : null;
+      const from = own && own.known ? own : (callerEffort ? classifyEffort(callerEffort) : null);
+      effort = from && from.known ? from.level : null;
+    }
+    return rungFor(alias, effort);
+  } catch { return null; }
+}
+
 // The rung a review of `rung`'s writer should run on, when the recommender
 // (resolveRoute, TYPE: code-review, WRITER: this rung's pair) names a
 // different rung: another effort on the same model (the operator's

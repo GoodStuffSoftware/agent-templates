@@ -22,6 +22,14 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
+### 2026-10-10 — Scheduled routines inherit the global default effort: pin a routine's start effort per folder, and run dispatch-only parents low
+
+- **Trigger:** Scheduled runs started at the user-level default effort, so a routine that only spawns one worker and relays its result ran at the same expensive level as the heaviest routine.
+- **Is it generic?** Yes. Stripped: product, plugin and folder names. Kernel: a scheduled run reads the settings of the folder it was created in, so a per-folder local settings file sets its starting effort, and a parent's weight is set by what it does, not by what its worker does.
+- **Target:** new tagged lesson under `lessons/` (agent-process), plus a one-line pointer from any scheduling template.
+- **Proposed change:** Lesson body: (1) a scheduled routine does not choose its own effort; it inherits the global default unless the folder it was created from carries `{{FOLDER}}/.claude/settings.local.json` with `{"modelSettings":{"{{MODEL_ID}}":{"effortLevel":"{{LEVEL}}"}}}`. (2) Keep one pinned folder per level and create the task from a session opened in the folder with the level the routine needs; the scheduler tools take no folder, model or effort argument, and editing the scheduler's task store while its app runs is overwritten from memory. (3) Rate the routine's parent and its worker separately: a parent that only dispatches one worker and relays the result is light work and runs low; name the worker's tier in the prompt. (4) A pre-tool hook on the scheduler's create/update tools can add a short advisory note (current folder, its pin, the start effort, the rule) without blocking; fail open, and make it switchable.
+- **Applied?** `no`
+
 ### 2026-10-09 — Size subagents by context, not by task
 
 - **Trigger:** Several analysis workers each bundled a full-history scan, hand-labelling, analysis and a review. All hit the context ceiling, were compacted and told to wrap up, and one returned half-done and needed follow-up workers. Per-call cost roughly doubles near 200K of context versus a fresh worker.

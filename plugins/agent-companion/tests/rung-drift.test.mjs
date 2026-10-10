@@ -18,7 +18,7 @@ test('a sonnet/medium spawn declaring weight 4 (table says sonnet/high) is flagg
     const res = runHook('hooks/spawn-guard.mjs', {
       session_id: 'sess-rung-drift', agent_type: 'main', cwd: dir,
       tool_input: { subagent_type: 'underfforted', prompt: 'WEIGHT: 4 — integration work' },
-    }, { env: { CLAUDE_PLUGIN_DATA: pluginData } });
+    }, { env: { CLAUDE_PLUGIN_DATA: pluginData, CLAUDE_PLUGIN_OPTION_PROJECT_PINS: 'false' } });
     assert.equal(res.status, 0, res.stderr);
 
     const auditScript = join(PLUGIN_ROOT, 'scripts', 'audit.mjs');

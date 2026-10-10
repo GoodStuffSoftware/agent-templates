@@ -151,11 +151,17 @@ function suggestModelBenchmark(reason) {
     'model-benchmark');
 }
 
+// The current directory's origin URL, '' outside a checkout or without an origin.
+// stdio keeps git's stderr ("fatal: not a git repository") off the scout's own.
+const originUrlHere = () => {
+  try { return execSyncHidden('git remote get-url origin', { cwd: process.cwd(), encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return ''; }
+};
+
 // --- 1. Harness version ------------------------------------------------
 // The highest-value check. A renamed matcher or a new hook event does not
 // error — the guards just stop firing, silently.
 try {
-  const v = execSyncHidden('claude --version', { encoding: 'utf8', timeout: 20000 }).trim();
+  const v = execSyncHidden('claude --version', { encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   next.version = v;
   if (baseline.version && baseline.version !== v) {
     sig('harness_version_changed', `${baseline.version} -> ${v}`,
@@ -628,6 +634,26 @@ try {
       'plugin-update');
   }
   if (OWN_MANIFEST && OWN_MANIFEST.version) next.pluginVersion = OWN_MANIFEST.version;
+  // scout_copy_stale: the copy of this scout that is RUNNING is older than the
+  // marketplace's. A scheduled task pointed at an old checkout never runs the
+  // checks added since, and nothing else says so. Directional (a dev checkout
+  // ahead of the marketplace stays silent), local-only (the cloud has no
+  // marketplace folder, where the checkout is the marketplace), advisory.
+  if (!cloud && OWN_MANIFEST && OWN_MANIFEST.version) {
+    try {
+      let top = null;
+      for (const e of entries) {
+        const v = marketplaceVersion(e.key.split('@')[1], PLUGIN_NAME);
+        if (v && (!top || versionBelow(top, v))) top = v;
+      }
+      if (top && versionBelow(OWN_MANIFEST.version, top)) {
+        sig('scout_copy_stale',
+          `this scout ran ${PLUGIN_NAME} ${OWN_MANIFEST.version}; the marketplace has ${top}, so every check added since ${OWN_MANIFEST.version} did not run. ` +
+          'Update the checkout it runs from, or point the scheduled task at the marketplace copy.',
+          'plugin-update');
+      }
+    } catch { /* advisory: an unreadable marketplace is not a signal */ }
+  }
 } catch { /* no install record here (a bare checkout): not a signal */ }
 
 // --- 6a. plugin_copy_stale -----------------------------------------------
@@ -996,7 +1022,7 @@ if (publicationSweepOn && cloud) {
   // origin is right there. Never defaults to sweeping a private repo.
   if (publicationRepos.length === 0) {
     try {
-      const originUrl = execSyncHidden('git remote get-url origin', { cwd: process.cwd(), encoding: 'utf8', timeout: 15000 }).trim();
+      const originUrl = originUrlHere();
       const norm = normalizeGitUrl(originUrl); // "github.com/owner/repo"
       const m = /^github\.com\/([^/]+)\/([^/]+)$/.exec(norm);
       if (m) {
@@ -1283,7 +1309,7 @@ if (ciStatusOn) {
 
     const currentProjectUrls = [];
     try {
-      const originUrl = execSyncHidden('git remote get-url origin', { cwd: process.cwd(), encoding: 'utf8', timeout: 15000 }).trim();
+      const originUrl = originUrlHere();
       if (originUrl) currentProjectUrls.push(originUrl);
     } catch { /* not a repo / no origin here: nothing to add */ }
     const knownPublicUrls = baseline.publicationKnownPublicRepos || [];

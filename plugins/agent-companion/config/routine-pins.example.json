@@ -1,0 +1,7 @@
+{
+  "folders": {
+    "low": "{{ABS_PATH_TO_FOLDER_PINNED_LOW}}",
+    "medium": "{{ABS_PATH_TO_FOLDER_PINNED_MEDIUM}}",
+    "high": "{{ABS_PATH_TO_FOLDER_PINNED_HIGH}}"
+  }
+}

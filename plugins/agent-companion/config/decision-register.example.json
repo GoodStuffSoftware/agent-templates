@@ -10,10 +10,20 @@
       "decision": "One or two sentences saying what is standing, for example: workers of kind X keep setting Y.",
       "reverse": "How to undo it, for example: remove setting Y from the config file.",
       "premises": [
-        { "id": "p1", "text": "The claim the decision rests on, stated so a trigger can test it.", "label": "M" },
-        { "id": "p2", "text": "A second claim that is a judgement rather than a measurement.", "label": "E" }
+        {
+          "id": "p1",
+          "text": "The claim the decision rests on, stated so a trigger can test it.",
+          "label": "M"
+        },
+        {
+          "id": "p2",
+          "text": "A second claim that is a judgement rather than a measurement.",
+          "label": "E"
+        }
       ],
-      "evidence": ["docs/example-evidence.md"],
+      "evidence": [
+        "docs/example-evidence.md"
+      ],
       "triggers": [
         {
           "id": "release-note",
@@ -36,6 +46,87 @@
           "minSample": 20,
           "minDays": 3,
           "note": "Flags after 3 consecutive days with at least 20 spawns each where the value is above 50."
+        },
+        {
+          "id": "lead-rebriefs",
+          "premise": "p2",
+          "kind": "metric",
+          "source": "spawns",
+          "op": ">",
+          "minSample": 20,
+          "minDays": 3,
+          "metric": "leadRebriefsPer100Spawns",
+          "params": {
+            "levels": [
+              "high"
+            ]
+          },
+          "threshold": 12,
+          "note": "Per 100 spawns from a lead at the listed effort: spawns that repeat an earlier description or base name of the same session within 6 hours (a heuristic). To compare against the window before a scheduled switch instead, give the decision a rolloutId and add \"baseline\": { \"mode\": \"pre-window\", \"ratio\": true, \"minPerDay\": 20 } with a ratio threshold such as 1.5 and \"post\": { \"minDays\": 3 }."
+        },
+        {
+          "id": "lead-review-fixes",
+          "premise": "p2",
+          "kind": "metric",
+          "source": "spawns",
+          "op": ">",
+          "minSample": 10,
+          "minDays": 3,
+          "metric": "reviewFixShareByLeadEffort",
+          "params": {
+            "levels": [
+              "high"
+            ]
+          },
+          "threshold": 40,
+          "note": "Percent of reviewer verdicts FIX or BLOCK on writers a lead at the listed effort spawned. Needs a review_verdict field on reviewer spawn rows; without it the day is skipped. To compare against the window before a scheduled switch instead, give the decision a rolloutId and add \"baseline\": { \"mode\": \"pre-window\", \"ratio\": true, \"minPerDay\": 20 } with a ratio threshold such as 1.5 and \"post\": { \"minDays\": 3 }."
+        },
+        {
+          "id": "lead-routing-denies",
+          "premise": "p2",
+          "kind": "metric",
+          "source": "spawns",
+          "op": ">",
+          "minSample": 20,
+          "minDays": 3,
+          "metric": "leadRoutingDeniesPer100Spawns",
+          "params": {
+            "levels": [
+              "high"
+            ]
+          },
+          "threshold": 8,
+          "note": "Routing-guard denials (fit, warrant, premium-cap, inherit) per 100 spawns from a lead at the listed effort. To compare against the window before a scheduled switch instead, give the decision a rolloutId and add \"baseline\": { \"mode\": \"pre-window\", \"ratio\": true, \"minPerDay\": 20 } with a ratio threshold such as 1.5 and \"post\": { \"minDays\": 3 }."
+        },
+        {
+          "id": "lead-under-provisioned",
+          "premise": "p2",
+          "kind": "metric",
+          "source": "spawns",
+          "op": ">",
+          "minSample": 15,
+          "minDays": 3,
+          "metric": "leadUnderProvisionedShare",
+          "params": {
+            "levels": [
+              "high"
+            ]
+          },
+          "threshold": 20,
+          "note": "Percent of declared lead spawns scored \"under\" by the fit table. To compare against the window before a scheduled switch instead, give the decision a rolloutId and add \"baseline\": { \"mode\": \"pre-window\", \"ratio\": true, \"minPerDay\": 20 } with a ratio threshold such as 1.5 and \"post\": { \"minDays\": 3 }."
+        },
+        {
+          "id": "main-units-per-spawn",
+          "premise": "p2",
+          "kind": "metric",
+          "source": "history",
+          "metric": "mainUnitsPerLeadSpawn",
+          "params": {},
+          "op": ">",
+          "threshold": 1,
+          "minSample": 20,
+          "minDays": 3,
+          "note": "Main-thread plan units per spawn on a checkup day. The history keeps no effort per session, so this cannot be split by lead effort; staged against the switch instant it is the cost half of the comparison. To compare against the window before a scheduled switch instead, give the decision a rolloutId and add \"baseline\": { \"mode\": \"pre-window\", \"ratio\": true, \"minPerDay\": 20 } with a ratio threshold such as 1.5 and \"post\": { \"minDays\": 3 }."
         }
       ]
     }
