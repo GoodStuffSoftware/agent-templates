@@ -52,7 +52,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateFile, telemetryDir, stateRootPath, modelTiers, opt } from '../../hooks/lib/context.mjs';
+import { stateFile, telemetryDir, stateRootPath, modelTiers, opt, rolloutTable } from '../../hooks/lib/context.mjs';
 import { briefDeclarations, declarationValue, BRIEF_ROLES } from '../../hooks/lib/brief-directives.mjs';
 import {
   discoverTranscripts, transcriptsRoot, usageOf, contextTokensOf, isCompactBoundary, flattenContent,
@@ -203,8 +203,15 @@ function readJsonSafe(file, fallback = null) {
 
 // --- Scan state ------------------------------------------------------------------
 
+// States built from scratch (first run, or a lost/unreadable state file). Their
+// seen-requests file is stale by definition (it outlives the state and would make
+// the rebuilt scan see every request as already counted), so it is not loaded.
+const FRESH_STATES = new WeakSet();
+
 function freshState(cutoffMs) {
-  return { v: SCHEMA, scanFromMs: cutoffMs, files: {}, hours: {}, days: {}, dataThroughMs: 0, lastScanMs: 0 };
+  const s = { v: SCHEMA, scanFromMs: cutoffMs, files: {}, hours: {}, days: {}, dataThroughMs: 0, lastScanMs: 0 };
+  FRESH_STATES.add(s);
+  return s;
 }
 
 function loadState(nowT) {
@@ -388,9 +395,9 @@ function scanFile(f, fileState, ctx) {
 export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), holdMs = HOLD_RECENT_MS, state = null, seen = null } = {}) {
   const p = checkupPaths();
   const st = state || loadState(nowT);
-  const sn = seen || new SeenStore(p.seen).load();
+  const sn = seen || (FRESH_STATES.has(st) ? new SeenStore(p.seen) : new SeenStore(p.seen).load());
   const ctx = { state: st, seen: sn, cutoffMs: st.scanFromMs, holdMs };
-  const found = discoverTranscripts(root, { sinceMs: st.scanFromMs, main: true, subagents: true, workflows: true, meta: false });
+  const found = discoverTranscripts(root, { sinceMs: Math.max(st.scanFromMs, nowT - KEEP_DAYS * DAY_MS), main: true, subagents: true, workflows: true, meta: false });
   let read = 0;
   let bytes = 0;
   for (const f of found.files) {
@@ -420,15 +427,10 @@ export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), hold
 // --- Rollout schedule and nudge log (read-only here) ---------------------------------
 
 export function readRollout() {
-  const j = readJsonSafe(join(stateRootPath(), 'rollout.json'));
-  if (!j || typeof j !== 'object' || Array.isArray(j)) return [];
-  const out = [];
-  for (const [id, v] of Object.entries(j)) {
-    if (typeof v !== 'string') continue;
-    const t = Date.parse(/^\d{4}-\d\d-\d\dT[\d:.]+$/.test(v.trim()) ? `${v.trim()}Z` : v);
-    if (Number.isFinite(t)) out.push({ id, activeFrom: t });
-  }
-  return out.sort((a, b) => a.activeFrom - b.activeFrom || a.id.localeCompare(b.id));
+  // The same reading as the config gate (hooks/lib/context.mjs rolloutTable), so
+  // a record never lists a change as active that the gate treats as off.
+  return Object.entries(rolloutTable()).map(([id, activeFrom]) => ({ id, activeFrom }))
+    .sort((x, y) => x.activeFrom - y.activeFrom || x.id.localeCompare(y.id));
 }
 
 // Rows of context-ceiling.jsonl (UTC `at`) inside [fromMs, toMs). A missing or

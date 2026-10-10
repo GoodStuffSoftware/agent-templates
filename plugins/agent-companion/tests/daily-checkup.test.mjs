@@ -5,7 +5,7 @@
 import './isolate.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, statSync, utimesSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { makeFixture, runHook, runScript } from './helpers.mjs';
 import {
@@ -596,5 +596,36 @@ test('pendingSurface / markSurfaced / formatLine in-process', () => {
     assert.equal(pendingSurface({ nowT: NOW }), null);
     assert.equal(formatLine(recFor(DAY, 5), '/h').endsWith('History: /h'), true);
     assert.equal(dayKeyOf(dayStartMs(NOW)), '2026-10-10');
+  } finally { fx.cleanup(); }
+});
+
+test('a transcript older than the 16-day keep window is not re-read on every later run', () => {
+  const { fx, root } = mk();
+  try {
+    const f = join(root, 'projA', 's1.jsonl');
+    put(f, [asst('a1', '2026-10-09T12:00:00Z', SONNET, TEN_M)]);
+    utimesSync(f, new Date(T('2026-10-09T13:00:00Z')), new Date(T('2026-10-09T13:00:00Z')));
+    const first = run(root, T('2026-10-10T09:00:00Z'));
+    assert.equal(first.filesRead, 1);
+    // 20 days on the file is past the keep window: forgotten, and not rediscovered
+    for (const day of ['2026-10-30', '2026-10-31', '2026-11-05']) {
+      const later = run(root, T(`${day}T09:00:00Z`));
+      assert.equal(later.filesRead, 0, `${day}: an unchanged old file is never read again`);
+      assert.equal(later.bytesRead, 0);
+    }
+  } finally { fx.cleanup(); }
+});
+
+test('losing the state file rebuilds the days; the seen-requests file does not zero them', () => {
+  const { fx, root } = mk();
+  try {
+    put(join(root, 'projA', 's1.jsonl'), [asst('a1', '2026-10-09T12:00:00Z', SONNET, TEN_M)]);
+    run(root);
+    assert.equal(record().units.total, 2);
+    assert.ok(existsSync(checkupPaths().seen), 'the seen file exists after a run');
+    rmSync(checkupPaths().state);
+    rmSync(checkupPaths().history);
+    run(root);
+    assert.equal(record().units.total, 2, 'the same request is counted again, not skipped as already seen');
   } finally { fx.cleanup(); }
 });
