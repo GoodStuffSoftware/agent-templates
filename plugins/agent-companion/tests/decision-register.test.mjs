@@ -14,7 +14,7 @@ import {
   validateRegister, loadRegister, registerPath, statePath, detailPath, scanChangelog, evaluateTriggers,
   readState, writeState, emptyState, runRegister, markSeen, SEEN_CAP, pendingFlags, pendingLine,
   markFlagsSurfaced, snapshotState, writeStateMerged, scanChangelogToState, formatRegisterLine, writeDetail, detailMarkdown, triggerRev, foldDays, freezeBaseline,
-  EVALUATORS, METRIC_CATALOG, LINE_MAX, evalMetric, evalExercise, matchesWhere,
+  EVALUATORS, METRIC_CATALOG, LINE_MAX, evalMetric, evalExercise, matchesWhere, readSpawnRows, verdictReadStats,
 } from '../scripts/lib/decision-register.mjs';
 
 const T = (s) => Date.parse(s);
@@ -627,6 +627,35 @@ test('3. a write that read the state before another writer added a flag and a su
     delete c.flags[key];
     writeStateMerged(c, snapC);
     assert.equal(readState().flags[key], undefined);
+  } finally { fx.cleanup(); }
+});
+
+test('review-verdicts.jsonl is read once per evaluation, and only the spawn rows get the fold', () => {
+  const fx = makeFixture();
+  try {
+    const reg = register([decision({ triggers: [metricTrigger({ minDays: 1 })] })]);
+    mkdirSync(join(fx.stateDir, 'config'), { recursive: true });
+    writeFileSync(registerPath(), JSON.stringify(reg));
+    const historyFile = join(fx.dir, 'history.jsonl');
+    writeFileSync(historyFile, `${JSON.stringify({ day: '2026-10-11' })}
+`);
+    const spawnsFile = join(fx.dir, 'spawns.jsonl');
+    writeFileSync(spawnsFile, `${JSON.stringify({ session_id: 's1', tool_use_id: 't1' })}
+`);
+    writeFileSync(join(fx.dir, 'review-verdicts.jsonl'), `${JSON.stringify({ session_id: 's1', review_of_tool_use_id: 't1', review_verdict: 'FIX' })}
+`);
+    let seen = null;
+    const evaluators = {
+      changelog: () => null, exercise: () => null,
+      metric: (ctx) => { seen = ctx.spawnRows; return { days: [day('2026-10-11', true)] }; },
+    };
+    verdictReadStats.reads = 0;
+    runRegister({ nowT: NOW, historyFile, spawnsFile, evaluators });
+    assert.equal(verdictReadStats.reads, 1, 'verdicts file parsed once for one evaluation');
+    assert.equal(seen[0].review_verdict, 'FIX', 'the spawn rows still carry the folded verdict');
+    verdictReadStats.reads = 0;
+    readSpawnRows(spawnsFile, { foldVerdicts: false });
+    assert.equal(verdictReadStats.reads, 0, 'foldVerdicts:false skips the verdict file');
   } finally { fx.cleanup(); }
 });
 

@@ -243,11 +243,26 @@ recorded, but into `telemetry/fixtures.jsonl` instead — see Fixtures above.
 
 ### `review-verdicts.jsonl` — one record per reviewer result with a verdict
 
-Written by `hooks/review-verdict.mjs` (PostToolUse on `^Agent$`) when a spawn
-whose brief declares `ROLE: reviewer` or `TYPE: code-review` returns a result
-with a `VERDICT:` line. A foreground spawn only: a background spawn's
-PostToolUse carries the launch acknowledgement, not the result. A result with
-no readable verdict writes no row. The decision register's
+Written by `hooks/review-verdict.mjs` when a spawn whose brief declares
+`ROLE: reviewer` or `TYPE: code-review` returns a result with a `VERDICT:`
+line. Two paths, one row format:
+
+- Foreground (PostToolUse on `^Agent$`): the result comes back with the call.
+- Background (0.31.14): a background spawn's PostToolUse carries the launch
+  acknowledgement (`tool_response` with `isAsync`, `status: "async_launched"`,
+  `agentId`), not the result. For a reviewer spawn the hook remembers the
+  launch in `state/review-agents/<agent_id>.json` (session, spawn
+  `tool_use_id`, name, declared type and role; files older than 7 days are
+  pruned). The `SubagentStop` event (same hook, `--event stop`) carries
+  `agent_id` and `last_assistant_message`, and `agent_transcript_path` as a
+  fallback (its last assistant message is read when the payload message has no
+  verdict). Only agents with a remembered reviewer launch are read; every other
+  stop is ignored.
+
+A spawn gets at most one row, whichever path records it first. A result with
+no readable verdict writes no row (a later stop of the same agent, after a
+continuation, can still record one). Both paths respect `spawn_telemetry`,
+run no child process and never write to stdout. The decision register's
 `readSpawnRows()` folds each row into the spawns.jsonl row with the same
 `session_id` and `tool_use_id` as `review_verdict`, the field the metric
 `reviewFixShareByLeadEffort` reads (which counts `declared_type: code-review`
@@ -264,6 +279,8 @@ rows only).
 | `declared_type`, `declared_role` | string \| null | the brief's `TYPE:` and `ROLE:` |
 | `caller_effort`, `caller_is_subagent`, `caller_tool_use_id` | copied | from the reviewer's own spawns.jsonl row; null when that row was not found |
 | `spawn_row_found` | boolean | whether that row was found |
+| `source` | `post-tool-use` \| `subagent-stop` | which path recorded it: foreground result or background SubagentStop (0.31.14; absent on rows written by 0.31.13, which are all `post-tool-use`) |
+| `agent_id` | string \| null | the background reviewer's agent id; null on the foreground path (0.31.14; absent on older rows) |
 
 ### `subagent-starts.jsonl` — one record per subagent actually starting
 

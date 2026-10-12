@@ -12,13 +12,25 @@
 //   declared_type, declared_role   what the brief declared
 //   caller_effort, caller_is_subagent, caller_tool_use_id   copied from the reviewer's own spawns.jsonl row (null when not found)
 //   at                       when the result returned
+//   source                   'post-tool-use' (foreground: the result came back with the Agent call)
+//                            | 'subagent-stop' (background: the result came with the SubagentStop event)
+//   agent_id                 background only: the reviewer's agent id (null on the foreground path)
 // readSpawnRows() in the register folds each row into its spawns.jsonl row as
 // `review_verdict`, which is the field the metric reads.
+//
+// Background reviewers (0.31.14): a background spawn's PostToolUse carries the launch
+// acknowledgement (tool_response: isAsync, status "async_launched", agentId, outputFile ...),
+// not the result. The launch is remembered in state/review-agents/<agent_id>.json (session,
+// spawn tool_use_id, name, declared type and role); the later SubagentStop event (agent_id,
+// last_assistant_message, agent_transcript_path) is parsed with the same parser and written
+// in the same row format. A spawn gets at most one row, whichever path records it first.
 // Nothing here throws, writes to stdout, or changes the Agent result.
 
 import { join } from 'node:path';
-import { telemetryDir, tailRecords, appendLog, isFixtureSession, canonicalTaskType } from './context.mjs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from 'node:fs';
+import { telemetryDir, stateDir, tailRecords, appendLog, isFixtureSession, canonicalTaskType } from './context.mjs';
 import { briefDeclarations, declarationValue } from './brief-directives.mjs';
+import { resolveAgentTranscript } from './runaway.mjs';
 
 // The brief's reviewer declaration: { type, role } or null when it is no reviewer.
 export function reviewerOf(prompt) {
@@ -67,41 +79,154 @@ export function parseVerdict(text) {
   return null;
 }
 
+// --- Background reviewers -----------------------------------------------------
+
+// An async launch acknowledgement -> { agentId } (agentId may be null), else null.
+export function asyncLaunch(resp) {
+  try {
+    if (resp && typeof resp === 'object' && !Array.isArray(resp)
+      && (resp.status === 'async_launched' || resp.isAsync === true)) {
+      let id = typeof resp.agentId === 'string' ? resp.agentId : null;
+      if (!id) { const m = /\bagentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(resp)); id = m ? m[1] : null; }
+      return { agentId: id };
+    }
+  } catch { /* not a launch */ }
+  return null;
+}
+
+const AGENT_TTL_MS = 7 * 86400000;
+const idOk = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(s);
+const agentsDir = () => join(stateDir(), 'review-agents');
+
+function pruneAgents(now = Date.now()) {
+  try {
+    const dir = agentsDir();
+    for (const n of readdirSync(dir)) {
+      const f = join(dir, n);
+      try { if (now - statSync(f).mtimeMs > AGENT_TTL_MS) rmSync(f, { force: true }); } catch { /* best effort */ }
+    }
+  } catch { /* none yet */ }
+}
+
+function rememberLaunch(agentId, rec) {
+  try {
+    if (!idOk(agentId)) return;
+    mkdirSync(agentsDir(), { recursive: true });
+    writeFileSync(join(agentsDir(), `${agentId}.json`), JSON.stringify(rec));
+    pruneAgents();
+  } catch { /* fail open */ }
+}
+
+function recallLaunch(agentId) {
+  try {
+    if (!idOk(agentId)) return null;
+    const rec = JSON.parse(readFileSync(join(agentsDir(), `${agentId}.json`), 'utf8'));
+    return rec && typeof rec === 'object' ? rec : null;
+  } catch { return null; }
+}
+
+// --- Row writing --------------------------------------------------------------
+
+const streamFile = (sid, name) => join(telemetryDir(), isFixtureSession(sid) ? 'fixtures.jsonl' : name);
+const inStream = (sid, r, name) => !isFixtureSession(sid) || r.stream === name;
+
+// The reviewer's own spawns.jsonl row, or null.
+function spawnRowOf(sid, tu) {
+  if (!tu) return null;
+  const needle = JSON.stringify(tu);
+  const rows = tailRecords(streamFile(sid, 'spawns.jsonl'), { bytes: 4 * 1024 * 1024, filter: (l) => l.includes(needle) })
+    .filter((r) => r && r.tool_use_id === tu && r.session_id === sid && inStream(sid, r, 'spawns.jsonl'));
+  return rows.length ? rows[rows.length - 1] : null;
+}
+
+// Has a verdict row for this spawn been written already (by either path)?
+function alreadyRecorded(sid, tu) {
+  if (!tu) return false;
+  const needle = JSON.stringify(tu);
+  return tailRecords(streamFile(sid, 'review-verdicts.jsonl'), { bytes: 4 * 1024 * 1024, filter: (l) => l.includes(needle) })
+    .some((r) => r && r.review_of_tool_use_id === tu && r.session_id === sid && inStream(sid, r, 'review-verdicts.jsonl'));
+}
+
+function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId }) {
+  if (alreadyRecorded(sid, tu)) return null;
+  const orig = spawnRowOf(sid, tu);
+  const row = {
+    at: new Date().toISOString(),
+    session_id: sid,
+    review_of_tool_use_id: tu,
+    name: typeof name === 'string' ? name : null,
+    review_verdict: pv.verdict,
+    review_verdict_raw: pv.raw,
+    declared_type: rv.type,
+    declared_role: rv.role,
+    caller_effort: orig ? orig.caller_effort ?? null : null,
+    caller_is_subagent: orig ? orig.caller_is_subagent ?? null : null,
+    caller_tool_use_id: orig ? orig.caller_tool_use_id ?? null : null,
+    spawn_row_found: !!orig,
+    source,
+    agent_id: agentId || null,
+  };
+  appendLog('review-verdicts.jsonl', row);
+  return row;
+}
+
 // Handle one Agent PostToolUse payload. Returns the row written, or null.
+// A foreground reviewer's result is parsed here; a background reviewer's launch is remembered
+// for recordBackgroundVerdict().
 export function recordReviewVerdict(p) {
   try {
     if (!p || p.tool_name !== 'Agent') return null;
     const input = p.tool_input || {};
     const rv = reviewerOf(input.prompt);
     if (!rv) return null;
-    const pv = parseVerdict(resultText(p.tool_response));
-    if (!pv) return null;
     const sid = String(p.session_id || '');
     const tu = typeof p.tool_use_id === 'string' ? p.tool_use_id : null;
-    let orig = null;
-    if (tu) {
-      const fixture = isFixtureSession(sid);
-      const file = join(telemetryDir(), fixture ? 'fixtures.jsonl' : 'spawns.jsonl');
-      const needle = JSON.stringify(tu);
-      const rows = tailRecords(file, { bytes: 4 * 1024 * 1024, filter: (l) => l.includes(needle) })
-        .filter((r) => r && r.tool_use_id === tu && r.session_id === sid && (!fixture || r.stream === 'spawns.jsonl'));
-      orig = rows.length ? rows[rows.length - 1] : null;
+    const launch = asyncLaunch(p.tool_response);
+    if (launch) {
+      if (launch.agentId && tu) {
+        rememberLaunch(launch.agentId, {
+          at: new Date().toISOString(), session_id: sid, tool_use_id: tu,
+          name: typeof input.name === 'string' ? input.name : null, type: rv.type, role: rv.role,
+        });
+      }
+      return null;
     }
-    const row = {
-      at: new Date().toISOString(),
-      session_id: sid,
-      review_of_tool_use_id: tu,
-      name: typeof input.name === 'string' ? input.name : null,
-      review_verdict: pv.verdict,
-      review_verdict_raw: pv.raw,
-      declared_type: rv.type,
-      declared_role: rv.role,
-      caller_effort: orig ? orig.caller_effort ?? null : null,
-      caller_is_subagent: orig ? orig.caller_is_subagent ?? null : null,
-      caller_tool_use_id: orig ? orig.caller_tool_use_id ?? null : null,
-      spawn_row_found: !!orig,
-    };
-    appendLog('review-verdicts.jsonl', row);
-    return row;
+    const pv = parseVerdict(resultText(p.tool_response));
+    if (!pv) return null;
+    return writeVerdictRow({ sid, tu, name: input.name, rv, pv, source: 'post-tool-use', agentId: null });
+  } catch { return null; }
+}
+
+// The last assistant message of an agent transcript (bounded tail read), '' when unreadable.
+function lastAssistantText(path) {
+  try {
+    if (!path) return '';
+    const recs = tailRecords(path, { bytes: 512 * 1024, filter: (l) => l.includes('"assistant"') });
+    for (let i = recs.length - 1; i >= 0; i -= 1) {
+      const m = recs[i] && recs[i].message;
+      if (recs[i].type !== 'assistant' || !m) continue;
+      const t = resultText({ content: m.content });
+      if (t.trim()) return t;
+    }
+  } catch { /* unreadable */ }
+  return '';
+}
+
+// Handle one SubagentStop payload. Returns the row written, or null. Only an agent whose
+// launch was remembered as a reviewer is read; every other stop returns null untouched.
+export function recordBackgroundVerdict(p) {
+  try {
+    if (!p || !idOk(p.agent_id)) return null;
+    const rec = recallLaunch(p.agent_id);
+    if (!rec || !rec.tool_use_id) return null;
+    const sid = String(rec.session_id || p.session_id || '');
+    if (alreadyRecorded(sid, rec.tool_use_id)) return null;
+    let pv = parseVerdict(typeof p.last_assistant_message === 'string' ? p.last_assistant_message : '');
+    if (!pv) pv = parseVerdict(lastAssistantText(resolveAgentTranscript(p)));
+    if (!pv) return null;
+    return writeVerdictRow({
+      sid, tu: rec.tool_use_id, name: rec.name, rv: { type: rec.type ?? null, role: rec.role ?? null },
+      pv, source: 'subagent-stop', agentId: p.agent_id,
+    });
   } catch { return null; }
 }

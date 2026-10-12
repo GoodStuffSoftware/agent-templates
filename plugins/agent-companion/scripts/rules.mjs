@@ -19,7 +19,7 @@
 
 import { readFileSync } from 'node:fs';
 import {
-  SCOPES, RULES_VERSION, rulesPath, readRules, writeRules, matchRules, renderRules, effectiveRule,
+  SCOPES, RULES_VERSION, rulesPath, readRules, appendUserRule, hasRawRuleEntry, setRuleEnabled, removeRuleEntry, matchRules, renderRules, effectiveRule,
 } from '../hooks/lib/rules.mjs';
 
 const argv = process.argv.slice(2);
@@ -46,10 +46,11 @@ function findRule(rules, id) {
   return rules.find((r) => r.id === id) || null;
 }
 
-function persist(rules, label) {
-  const ok = writeRules({ version: RULES_VERSION, rules });
+// Every write goes through the raw-file editors in hooks/lib/rules.mjs, which touch only
+// the one rule being added/changed/removed and carry everything else over as authored.
+function persist(ok, label) {
   if (!ok) {
-    console.error(`rules ${label}: failed to write ${rulesPath()}`);
+    console.error(`rules ${label}: not changed. Could not write ${rulesPath()}: the existing file must be valid JSON with a top-level "rules" array (no BOM), or be empty or missing. It was left untouched; fix or remove it, then retry. (Otherwise check that the folder is writable.)`);
     process.exit(1);
   }
 }
@@ -111,6 +112,7 @@ try {
 
       const { rules } = readRules();
       if (findRule(rules, id)) usageError(`id "${id}" already exists — use enable/disable, or edit ${rulesPath()} directly to override a built-in`);
+      if (hasRawRuleEntry(id)) usageError(`${rulesPath()} already holds an entry with id "${id}" that rules ignores (malformed); fix or remove that entry first`);
 
       if ((scope === 'user-prompt' || scope === 'spawn') && !when) {
         usageError(`scope "${scope}" requires --when (use --when '.' to mean "every time")`);
@@ -123,10 +125,9 @@ try {
         console.error('rules add: WARNING — scope "always" is injected on every single UserPromptSubmit turn. That is paid for constantly; add a gate or use a narrower scope if you can.');
       }
 
-      const next = [...rules, {
-        id, enabled: true, scope, when: when ?? null, then: thenText.trim(), gate: null, note: note ?? null, builtin: false,
-      }];
-      persist(next, 'add');
+      persist(appendUserRule({
+        id, enabled: true, scope, when: when ?? null, then: thenText.trim(), gate: null, note: note ?? null,
+      }), 'add');
       console.log(`rules add: added "${id}" (${scope}).`);
       break;
     }
@@ -138,8 +139,7 @@ try {
       const { rules } = readRules();
       const r = findRule(rules, id);
       if (!r) { console.error(`rules ${cmd}: no rule "${id}"`); process.exit(1); }
-      const next = rules.map((x) => (x.id === id ? { ...x, enabled: cmd === 'enable' } : x));
-      persist(next, cmd);
+      persist(setRuleEnabled(id, cmd === 'enable'), cmd);
       console.log(`rules ${cmd}: "${id}" is now ${cmd === 'enable' ? 'enabled' : 'disabled'}.`);
       break;
     }
@@ -154,8 +154,7 @@ try {
         console.error(`rules remove: "${id}" is a built-in; use "disable ${id}" instead.`);
         process.exit(1);
       }
-      const next = rules.filter((x) => x.id !== id);
-      persist(next, 'remove');
+      persist(removeRuleEntry(id), 'remove');
       console.log(`rules remove: removed "${id}".`);
       break;
     }

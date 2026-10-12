@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.14 — 2026-10-12
+
+Standing-rules writes keep fields the CLI does not own, background reviewer verdicts, and two review nits. Labels: M measured, E estimated.
+
+- **Standing-rules CLI edits the file in place.** `scripts/rules.mjs` add, enable, disable and remove now read the file as authored and change only the named entry (new `editRulesFile`, `setRuleEnabled`, `appendUserRule`, `removeRuleEntry` in `hooks/lib/rules.mjs`); top-level keys and every other field of every entry (`activeFrom`, `after.then`, a top-level `then`, unknown keys) pass through, and the write is atomic. Before, the CLI rebuilt the file from compiled rules: on the operator's real file it dropped the `activeFrom` and top-level `then` of the `lead-effort-check` override and rewrote every entry (M, 0.31.13 CLI on a copy), and in the new round-trip test it lost a top-level key and an unknown entry key (M; the test fails on 0.31.13 source). Behaviour change: an existing file that is not valid JSON with a top-level `rules` array (or a bare array; a BOM-prefixed file is refused because the reader ignores it) now makes the write fail with an error that says so and names the file, instead of being replaced; an empty file counts as no rules and a write starts it afresh. A bare array is converted to `{version, rules}` on its first write. `add` also refuses an id the file already holds as a malformed entry. An entry written by `add` carries id, enabled, scope, when, then, gate, note and no `builtin`. `writeRules` is unchanged and no longer used by the CLI.
+- **Background reviewer verdicts.** The review-verdict hook now also runs on SubagentStop (`hooks.json`, `--event stop`). At launch (PostToolUse) a background reviewer's agent id is remembered in `state/review-agents/<agent_id>.json` (7-day prune on write); at stop the verdict is read from `last_assistant_message`, falling back to the last assistant text in the agent transcript (512 KB tail), and appended to `review-verdicts.jsonl` with two new fields, `source` (`post-tool-use` or `subagent-stop`) and `agent_id` (docs/TELEMETRY.md). One row per spawn: both paths check for an existing row first; a stop with no mapping is ignored, a stop with no verdict leaves the mapping for a later stop. `spawn_telemetry` off skips both paths. Limits: reviewers launched before this version is installed are not recovered, and the SubagentStop path is unproven until the first real background review (no live payload with a reviewer message was captured; E).
+- **Register reads verdicts once.** `readSpawnRows(file, {foldVerdicts})`: the denials read passes false, so `review-verdicts.jsonl` is parsed once per register evaluation (a test counts 1 read; M).
+- **README.** `project_pins` row: a project's `.claude/agents` folder is repository content. The review-verdicts row describes the background path.
+- **Tests.** New: `rules-roundtrip` (5), `review-verdict-background` (13), a read-once case in `decision-register`; version test bumped.
+- **Takes effect** in a new session (the SubagentStop registration is read at session start). Reverse: revert the commit; no option.
+
 ## 0.31.13 — 2026-10-10
 
 Task type aliases and a TYPE nudge, scout copy staleness, project pins, a live lead-effort check, lead-effort metrics for the decision register, reviewer-verdict telemetry and a scheduled-task placement note. Labels: M measured, E estimated.

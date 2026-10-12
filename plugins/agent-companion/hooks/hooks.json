@@ -313,6 +313,20 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/review-verdict.mjs",
+              "--event",
+              "stop"
+            ],
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [

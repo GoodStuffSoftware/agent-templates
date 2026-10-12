@@ -45,7 +45,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configDir, opt, stateFile, readJson, rolloutActive } from './context.mjs';
+import { configDir, opt, stateFile, readJson, rolloutActive, writeTextAtomic } from './context.mjs';
 
 export const RULES_VERSION = 1;
 export const SCOPES = ['user-prompt', 'always', 'session-start', 'spawn'];
@@ -456,6 +456,76 @@ export function writeRules(cfg) {
   } catch {
     return false;
   }
+}
+
+// The raw operator file, untouched by compileRule(): { top, rules } where `top` is the
+// whole parsed object (every top-level key, known or not) and `rules` its entry array.
+// A missing file is an empty document; an unparseable or oddly shaped one is a failure
+// (ok:false), so a write never replaces a file this code cannot faithfully carry over.
+function readRawRulesDoc() {
+  let text;
+  try { text = readFileSync(rulesPath(), 'utf8'); } catch (e) {
+    if (e && e.code === 'ENOENT') return { ok: true, top: { version: RULES_VERSION, rules: [] } };
+    return { ok: false };
+  }
+  // An empty file reads as "no user rules" (readUserEntries), so a write may start it afresh.
+  // A BOM is not stripped: the reader does not strip it either, so a BOM file is refused here
+  // rather than silently made live by a write.
+  if (!text.trim()) return { ok: true, top: { version: RULES_VERSION, rules: [] } };
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return { ok: false }; }
+  if (Array.isArray(parsed)) return { ok: true, top: { version: RULES_VERSION, rules: parsed } };
+  if (parsed && typeof parsed === 'object' && Array.isArray(parsed.rules)) return { ok: true, top: parsed };
+  return { ok: false };
+}
+
+// The CLI's write path: edit the operator's file as authored. `mutate(entries)` returns the
+// new entry array (it may edit entries in place); every field it does not touch (activeFrom,
+// after, then, any unknown key, on every rule and at top level) is written back exactly as it
+// was read. Written atomically. Returns true on success.
+export function editRulesFile(mutate) {
+  try {
+    const doc = readRawRulesDoc();
+    if (!doc.ok) return false;
+    const next = mutate(doc.top.rules);
+    if (!Array.isArray(next)) return false;
+    const top = { ...doc.top, rules: next };
+    if (top.version === undefined) top.version = RULES_VERSION;
+    return writeTextAtomic(rulesPath(), `${JSON.stringify(top, null, 2)}\n`) === true;
+  } catch {
+    return false;
+  }
+}
+
+// True when the raw file already holds an entry with this id, whether or not compileRule()
+// would keep it (a malformed entry is dropped from readRules() but still sits in the file).
+export function hasRawRuleEntry(id) {
+  const doc = readRawRulesDoc();
+  return doc.ok && doc.top.rules.some((e) => e && typeof e === 'object' && !Array.isArray(e) && e.id === id);
+}
+
+// Set `enabled` on one rule, touching nothing else. An untouched built-in has no entry yet:
+// it gets the minimal entry {id, enabled}.
+export function setRuleEnabled(id, enabled) {
+  return editRulesFile((entries) => {
+    let hit = false;
+    const out = entries.map((e) => {
+      if (e && typeof e === 'object' && !Array.isArray(e) && e.id === id) { hit = true; return { ...e, enabled }; }
+      return e;
+    });
+    if (!hit) out.push({ id, enabled });
+    return out;
+  });
+}
+
+// Append one new user rule (already shaped by the caller).
+export function appendUserRule(rule) {
+  return editRulesFile((entries) => [...entries, rule]);
+}
+
+// Drop every entry with this id.
+export function removeRuleEntry(id) {
+  return editRulesFile((entries) => entries.filter((e) => !(e && typeof e === 'object' && e.id === id)));
 }
 
 // gate:'brevity' asks whether the brevity feature resolves ON GLOBALLY —

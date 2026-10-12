@@ -1069,7 +1069,7 @@ export function markFlagsSurfaced(keys, stateFile = statePath()) {
 
 // Rows of spawns.jsonl; corrupt lines are skipped; a file over SPAWNS_MAX_BYTES is read from
 // its tail.
-export function readSpawnRows(file = spawnsPath()) {
+export function readSpawnRows(file = spawnsPath(), { foldVerdicts = true } = {}) {
   try {
     const size = statSync(file).size;
     let text;
@@ -1087,18 +1087,21 @@ export function readSpawnRows(file = spawnsPath()) {
       if (!line.trim()) continue;
       try { const j = JSON.parse(line); if (isObj(j)) rows.push(j); } catch { /* corrupt row: skipped */ }
     }
-    return withReviewVerdicts(rows, file);
+    return foldVerdicts ? withReviewVerdicts(rows, file) : rows;
   } catch { return []; }
 }
 
 // Fold telemetry/review-verdicts.jsonl (hooks/lib/review-verdict.mjs, beside the spawns file)
 // into the reviewer rows as `review_verdict`, matched on session_id + the row's tool_use_id.
 // A row that already carries the field keeps it. Fail open: unreadable verdicts change nothing.
+// Counts file reads of review-verdicts.jsonl (a test asserts one read per evaluation).
+export const verdictReadStats = { reads: 0 };
 function withReviewVerdicts(rows, file) {
   try {
     const vf = join(dirname(file), 'review-verdicts.jsonl');
     if (!existsSync(vf)) return rows;
     const by = new Map();
+    verdictReadStats.reads += 1;
     for (const line of readFileSync(vf, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       try {
@@ -1153,7 +1156,7 @@ export function runRegister({
     if (!force && !parsed && lastDay === state.lastEvalDay && regRev === state.registerRev) return { ok: true, skipped: 'nothing new' };
     const fresh = parsed ? scanChangelog(parsed, register, state, { nowT }) : [];
     const spawnRows = readSpawnRows(spawnsFile || spawnsPath());
-    const denialRows = readSpawnRows(denialsPath());
+    const denialRows = readSpawnRows(denialsPath(), { foldVerdicts: false }); // denial rows carry no tool_use_id: the verdict file is read once, for the spawn rows
     const { newFlags } = evaluateTriggers({ register, history, spawnRows, denialRows, nowT, state, evaluators });
     state.lastEvalDay = lastDay;
     state.lastEvalAt = new Date(nowT).toISOString();

@@ -107,6 +107,11 @@ deliberately separate from the plugin's derived `state/` and `telemetry/`
 directories, which are safe to delete. Only your additions and overrides are
 written; built-ins stay in code.
 
+The CLI edits the file in place and keeps every field it does not own; if the
+existing file is not valid JSON with a top-level `rules` array, add, enable,
+disable and remove refuse to write and leave it untouched (fix or remove it,
+then retry).
+
 A malformed file never breaks a turn: bad JSON, an unknown scope, a missing
 directive, an uncompilable regex — each entry is dropped and the rest still
 work. Regexes longer than 400 characters are skipped rather than run, because
