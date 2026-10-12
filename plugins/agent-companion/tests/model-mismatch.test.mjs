@@ -166,7 +166,7 @@ test('near-simultaneous spawns in one session are matched by closest global pair
     // only thing left once A is correctly claimed by row2.
     subagentTranscript(dir, 'sess-batch', 'agent-b.jsonl', {
       headTs: '2026-09-23T12:06:40.000Z', version: '2.1.290',
-      tailTs: '2026-09-23T12:06:42.000Z', model: 'claude-sonnet-5',
+      tailTs: '2026-09-23T12:06:42.000Z', model: 'claude-sonnet-5-5',
     });
     const result = await scanModelMismatches({ now, transcriptsRoot: join(dir, 'proj') });
     assert.equal(result.matched, 2);

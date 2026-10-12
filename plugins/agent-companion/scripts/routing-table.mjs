@@ -681,6 +681,8 @@ for (const [k, s] of Object.entries(cfg.taskKinds || {})) {
   L.push(`| \`${k}\` | ${d} | ${(s.examples || []).join(', ')} |`);
 }
 L.push(``);
+const minEfforts = Object.entries(cfg.tiers || {}).filter(([, t]) => t && t.minEffort);
+for (const [a, t] of minEfforts) L.push(`A tier effort floor applies after the kind delta: \`${a}\` never resolves below \`${t.minEffort}\` in the grid (a lower cell is raised to it).`, ``);
 
 if (cfg.consequence) {
   L.push(`## Consequence floors (applied after kind; cannot be undercut)`);

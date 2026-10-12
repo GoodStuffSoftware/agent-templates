@@ -42,6 +42,15 @@
 //     tests/architecture-floor-diff.test.mjs for the differential proof that
 //     no other route moved when this was introduced.
 //
+//   tier effort floor  (0.31.16, operator-approved 2026-10-12): a tier may carry
+//     `minEffort` (haiku: medium; Anthropic advises against low on Haiku 5.5 for agent
+//     work). The reference grid knows nothing of it. When the reference's GRID answer (no
+//     trial) is on a tier whose minEffort is above the answer's effort, the answer must be
+//     the same model at exactly minEffort, the grid still the winning layer, no lift
+//     recorded outside the grid, and the rationale the reference's with its closing
+//     "-> model/effort" replaced by "; <model> never runs below <min> -> <model>/<min>".
+//     Computed here from the config alone. Nothing else may differ.
+//
 // Anything else is a mismatch. A trial the new resolver refuses (F2 fable, F4
 // retired or unsupported effort) is a mismatch too: the shipped table should
 // never carry one, so it is reported rather than permitted.
@@ -161,15 +170,29 @@ export const liftsOf = (route) => (route.floorsApplied || []).filter((f) => f.wi
 // each class; the caller asserts.
 export function compareLive({ cur, ref, cfg, cases, clocks }) {
   const mismatches = [];
-  const counts = { cases: 0, identical: 0, restated: 0, floorAfterTrial: 0, waivedTrial: 0 };
+  const counts = { cases: 0, identical: 0, restated: 0, floorAfterTrial: 0, waivedTrial: 0, tierEffortFloor: 0 };
   for (const clock of clocks) {
     for (const c of cases) {
       counts.cases += 1;
       const tag = `${clock.slice(0, 10)} ${c.key}`;
       const rArgs = restatedArgs(cfg, c.args);
       const asGiven = plain(atClock(clock, () => ref.resolveExpected(c.args)));
-      const want = rArgs === c.args ? asGiven : plain(atClock(clock, () => ref.resolveExpected(rArgs)));
+      let want = rArgs === c.args ? asGiven : plain(atClock(clock, () => ref.resolveExpected(rArgs)));
       const restated = JSON.stringify(want) !== JSON.stringify(asGiven);
+      const effRank = (e) => (cfg.efforts || {})[e]?.rank ?? -1;
+      // tier effort floor, annotation half: a trial answer carries the GRID's answer as text
+      // (`trial.gridResolution` and "Grid would otherwise resolve to X/Y" in the rationale).
+      // The trial's own model and effort do not move; only that annotation is raised.
+      const gm = want.trial && typeof want.trial.gridResolution === 'string' ? /^([\w-]+)\/([\w-]+)$/.exec(want.trial.gridResolution) : null;
+      const gMin = gm ? (cfg.tiers || {})[gm[1]]?.minEffort : null;
+      if (gMin && effRank(gm[2]) < effRank(gMin)) {
+        want = {
+          ...want,
+          rationale: String(want.rationale).replace(`Grid would otherwise resolve to ${gm[1]}/${gm[2]}`, `Grid would otherwise resolve to ${gm[1]}/${gMin}`),
+          trial: { ...want.trial, gridResolution: `${gm[1]}/${gMin}` },
+        };
+        counts.tierEffortFloor += 1;
+      }
 
       let route;
       let wrapped;
@@ -205,6 +228,23 @@ export function compareLive({ cur, ref, cfg, cases, clocks }) {
         if (!(typeof wr === 'string' && wr.startsWith(rr) && /; floors: F5 waived: /.test(wr))) problems.push(`wrapper rationale ${JSON.stringify(wr)}`);
         if (problems.length) mismatches.push(`${tag}: waived-trial: ${problems.join('; ')}`);
         else counts.waivedTrial += 1;
+        if (restated) counts.restated += 1;
+        continue;
+      }
+
+      // tier effort floor: a reference GRID answer below its tier's minEffort.
+      const tierMin = !want.trial && want.model ? (cfg.tiers || {})[want.model]?.minEffort : null;
+      if (tierMin && effRank(want.effort) < effRank(tierMin)) {
+        const problems = [];
+        if (route.layer !== 'grid') problems.push(`layer ${route.layer}, want grid`);
+        if (route.model !== want.model || route.effort !== tierMin) problems.push(`${route.model}/${route.effort}, want exactly ${want.model}/${tierMin}`);
+        if (lifts.length) problems.push(`lifts outside the grid ${JSON.stringify(lifts)}`);
+        const wantRationale = String(want.rationale).replace(/ -> [^ ]+$/, `; ${want.model} never runs below ${tierMin} -> ${want.model}/${tierMin}`);
+        try { assertSame(wrapped, { ...want, effort: tierMin, rationale: wantRationale }); } catch {
+          problems.push(`wrapper ${JSON.stringify(wrapped)}, want rationale ${JSON.stringify(wantRationale)}`);
+        }
+        if (problems.length) mismatches.push(`${tag}: tier-effort-floor: ${problems.join('; ')}`);
+        else counts.tierEffortFloor += 1;
         if (restated) counts.restated += 1;
         continue;
       }

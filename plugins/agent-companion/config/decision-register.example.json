@@ -35,6 +35,13 @@
           "note": "Tested against every item of releases newer than sinceVersion. A hit flags at once."
         },
         {
+          "id": "model-pin-or-tier-move",
+          "premise": "p1",
+          "kind": "signal",
+          "signalKinds": ["pinned_model_id", "model_tier_data_changed"],
+          "note": "Reads the daily scout's own signals, so a model release that landed between two CLI versions still reaches this decision. Add an optional pattern (tested against the signal text) to narrow it, for example a model alias."
+        },
+        {
           "id": "cost-per-spawn",
           "premise": "p2",
           "kind": "metric",

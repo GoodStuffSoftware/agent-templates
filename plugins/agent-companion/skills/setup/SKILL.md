@@ -99,9 +99,13 @@ Use the Claude Code `schedule` skill, which calls `RemoteTrigger`:
 - `session_context.model`: take it from the route, not from this page. The
   scout runs deterministic scripts and reads their output, which is an
   `operate` task, so run `node "$AC/scripts/recommend.mjs" --type operate`:
-  it prints a (model, effort) pair, and the model's full id is that tier's
-  `resolvesTo.modelId` in `config/model-tiers.json`. Name BOTH halves to the
-  user. If the routine API has no effort field, the routine runs at the
+  it prints a (model, effort) pair. Write the model as its ALIAS (`sonnet`,
+  `opus`, `haiku`), exactly as `recommend.mjs` prints it, never as a full id
+  such as that tier's `resolvesTo.modelId` in `config/model-tiers.json`: an
+  alias follows the next release, a pinned id does not (a routine pinned to
+  `claude-sonnet-5` kept running Sonnet 5 after Sonnet 5.5 shipped; the routine
+  API accepts the alias, measured 2026-10-12). Name the resolved model to the
+  user for information. Name BOTH halves to the user. If the routine API has no effort field, the routine runs at the
   model's own default effort (the same tier's `resolvesTo.defaultEffort`),
   so tell the user that effort, not the route's
 - `session_context.sources`: the marketplace repo (the plugin lives in it)

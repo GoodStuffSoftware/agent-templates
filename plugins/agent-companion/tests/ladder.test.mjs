@@ -12,7 +12,7 @@ const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.jso
 
 test('ladder is ordered cheapest to dearest: haiku, sonnet low..xhigh, opus low..max', () => {
   const expected = [
-    ['haiku', null], ['sonnet', 'low'], ['sonnet', 'medium'], ['sonnet', 'high'], ['sonnet', 'xhigh'],
+    ['haiku', 'medium'], ['sonnet', 'low'], ['sonnet', 'medium'], ['sonnet', 'high'], ['sonnet', 'xhigh'],
     ['opus', 'low'], ['opus', 'medium'], ['opus', 'high'], ['opus', 'xhigh'], ['opus', 'max'],
   ];
   assert.equal(cfg.ladder.length, expected.length);

@@ -1199,7 +1199,7 @@ const brevityCanary = {
       session_id: 'canary-brevity-spawn',
       agent_type: 'main',
       tool_input: {
-        model: 'claude-haiku-4-5',
+        model: 'haiku',
         subagent_type: 'general-purpose',
         prompt: 'canary probe for the reporting contract - deliberately unremarkable content',
       },

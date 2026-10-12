@@ -37,7 +37,7 @@ When the arguments start with one of these subcommands, run
 `scripts/routing-profile.mjs` with them unchanged:
 
 ```bash
-node "$AC/scripts/routing-profile.mjs" set <type> --model <alias> --effort <effort> [--because "<what you observed>"] [--waive-floor elevated]
+node "$AC/scripts/routing-profile.mjs" set <type> --model <alias> --effort <effort> [--because "<what you observed>"] [--waive-floor elevated] [--review-by YYYY-MM-DD | --settled]
 node "$AC/scripts/routing-profile.mjs" set code-review --effort <effort>   # review rows: a minimum effort only
 node "$AC/scripts/routing-profile.mjs" unset <type>
 node "$AC/scripts/routing-profile.mjs" show
@@ -47,7 +47,9 @@ node "$AC/scripts/routing-profile.mjs" rollback --to <revision>
 ```
 
 - `set` writes an `operator-observed` row in state `trial`, review date 90
-  days out. Ask for `--because` when the operator gives a reason; it is kept
+  days out; `--review-by YYYY-MM-DD` sets another date (not in the past).
+  `--settled` writes a decided choice instead (state `adopted`, no review
+  date, never flagged as a trial due). Ask for `--because` when the operator gives a reason; it is kept
   locally and never logged.
 - A refusal (exit 1) names the floor it breaks. Relay it; do not look for a
   way around it. F1-F4 cannot be waived. F5 (the elevated effort floor) can be

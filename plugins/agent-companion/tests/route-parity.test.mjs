@@ -9,10 +9,19 @@
 //   no route. F5 (elevated) is not applied to parity: the rule names F1 only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { makeFixture, runScript } from './helpers.mjs';
 
 const fx = makeFixture();
 test.after(() => fx.cleanup());
+// Haiku 5.5 takes an effort and is not retiring. The F4 paths below are about a tier that
+// takes none and one that retires with a staged successor (any tier can be either), so the
+// override stages haiku in that shape for this process and for the CLI runs below.
+mkdirSync(fx.stateDir, { recursive: true });
+writeFileSync(join(fx.stateDir, 'model-tiers.json'), JSON.stringify({
+  tiers: { haiku: { efforts: [], retiresAfter: '2026-10-15', retired: false, replacement: { model: 'sonnet', effort: 'low' } } },
+}));
 const ctx = await import('../hooks/lib/context.mjs');
 const BEFORE = '2026-09-24T12:00:00Z';
 const AFTER = '2026-10-20T12:00:00Z';

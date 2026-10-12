@@ -590,14 +590,22 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
     const floorIdx = ranked.indexOf(cons.effortFloor);
     if (floorIdx > finalIdx) finalIdx = floorIdx;
   }
+  // Tier effort floor (`tiers.<alias>.minEffort`, haiku: medium). Applied last so the
+  // kind delta cannot undercut it: Anthropic advises against low on Haiku 5.5 for agent
+  // work. Grid only; an explicit trial or profile row names its own effort.
+  let tierFloorRaised = false;
+  if (tier.minEffort) {
+    const tierFloorIdx = ranked.indexOf(tier.minEffort);
+    if (tierFloorIdx > finalIdx) { finalIdx = tierFloorIdx; tierFloorRaised = true; }
+  }
   const effortFinal = ranked[finalIdx];
-  if (finalIdx > idx && floors) floors.push({ floor: floorLabel, raised: `effort ${ranked[idx]} -> ${effortFinal}`, within: 'grid' });
+  if (finalIdx > idx && floors) floors.push({ floor: tierFloorRaised ? `${model}-min-effort` : floorLabel, raised: `effort ${ranked[idx]} -> ${effortFinal}`, within: 'grid' });
 
   const moved = idx - baseIdx;
   const why = moved === 0
     ? `${kind} work needs no adjustment`
     : `${kind} work shifts effort ${moved > 0 ? 'up' : 'down'} ${Math.abs(moved)}`;
-  const floored = finalIdx > idx ? `; ${consequence} consequence raises the floor to ${effortFinal}` : '';
+  const floored = finalIdx > idx ? (tierFloorRaised ? `; ${model} never runs below ${effortFinal}` : `; ${consequence} consequence raises the floor to ${effortFinal}`) : '';
   return {
     model,
     effort: effortFinal,

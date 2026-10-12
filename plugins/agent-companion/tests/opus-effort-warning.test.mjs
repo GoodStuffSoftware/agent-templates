@@ -127,7 +127,7 @@ test('a sonnet spawn with no effort anywhere ALSO gets the warning — the hazar
   }
 });
 
-test('a haiku spawn never gets the no-effort-stated warning — it takes no effort parameter', () => {
+test('a haiku spawn gets the no-effort-stated warning like any model with an effort parameter (Haiku 5.5 takes one)', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const payload = {
@@ -141,7 +141,7 @@ test('a haiku spawn never gets the no-effort-stated warning — it takes no effo
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
-    assert.doesNotMatch(msg, /no effort stated/);
+    assert.match(msg, /resolves to haiku with no effort stated/);
   } finally {
     cleanup();
   }

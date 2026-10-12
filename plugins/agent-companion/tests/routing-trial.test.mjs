@@ -62,8 +62,8 @@ const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.jso
 // cost the same on Opus 5.5 and Sonnet 5, so opus/low is about 1.2-1.55x
 // Sonnet 5 medium; reads and checks go to haiku, the rest to sonnet/low.
 const CHANGED = [
-  ['explore', 'haiku', ''],
-  ['verify', 'haiku', ''],
+  ['explore', 'haiku', 'medium'],
+  ['verify', 'haiku', 'medium'],
   ['mechanical-edit', 'sonnet', 'low'],
   ['subagent-worker', 'sonnet', 'low'],
   ['operate', 'sonnet', 'low'],

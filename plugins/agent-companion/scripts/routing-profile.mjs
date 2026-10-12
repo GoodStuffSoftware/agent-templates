@@ -2,6 +2,8 @@
 // /ac routing — the per-user routing profile (ADR 0003 slice 2).
 //
 //   node routing-profile.mjs set <type> --model M --effort E [--because "..."] [--waive-floor elevated]
+//                            [--review-by YYYY-MM-DD]   (trial review date; default 90 days)
+//                            [--settled]                (decided: state adopted, no review date)
 //   node routing-profile.mjs set code-review --effort E        (a parity type: minimum effort only)
 //   node routing-profile.mjs unset <type>
 //   node routing-profile.mjs show [--json]
@@ -35,7 +37,7 @@ const val = (n) => { const i = rest.indexOf(n); return i >= 0 ? rest[i + 1] : un
 const positional = () => {
   const out = [];
   for (let i = 0; i < rest.length; i += 1) {
-    if (rest[i].startsWith('--')) { if (!['--json'].includes(rest[i])) i += 1; continue; }
+    if (rest[i].startsWith('--')) { if (!['--json', '--settled'].includes(rest[i])) i += 1; continue; }
     out.push(rest[i]);
   }
   return out;
@@ -43,7 +45,7 @@ const positional = () => {
 
 const USAGE = [
   'usage: routing-profile.mjs <command>',
-  '  set <type> --model M --effort E [--because "..."] [--waive-floor elevated]',
+  '  set <type> --model M --effort E [--because "..."] [--waive-floor elevated] [--review-by YYYY-MM-DD | --settled]',
   '  set code-review --effort E          (parity type: a minimum effort, never a model)',
   '  unset <type>',
   '  show [--json]',
@@ -208,7 +210,10 @@ try {
       if (!type) usage('set needs a task type');
       const waive = val('--waive-floor');
       if (waive !== undefined && waive !== 'elevated') usage('--waive-floor takes only "elevated" (F5); F1-F4 cannot be waived');
-      const res = setRow(type, { model: val('--model'), effort: val('--effort'), because: val('--because'), waiveFloor: waive || null });
+      const settled = has('--settled');
+      const reviewByArg = val('--review-by');
+      if (has('--review-by') && (reviewByArg === undefined || reviewByArg.startsWith('--'))) usage('--review-by needs a date (YYYY-MM-DD)');
+      const res = setRow(type, { model: val('--model'), effort: val('--effort'), because: val('--because'), waiveFloor: waive || null, reviewBy: has('--review-by') ? reviewByArg : null, settled });
       report(res, `set ${type}`);
       break;
     }

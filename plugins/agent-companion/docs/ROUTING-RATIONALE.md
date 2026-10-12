@@ -298,12 +298,16 @@ tier that does not cause rework, as a new trial (`trialVersion: 4`, since
 - Every other type is unchanged, in particular `bounded-feature`,
   `integration` and `debug-root-cause`, whose case is capability.
 
-**Haiku retirement is flag-driven.** Anthropic says Haiku 4.5 retires "no
-sooner than" 2026-10-15, so it may stay available longer. `tiers.haiku.retiresAfter`
-therefore drives warnings only (the scout's `model_retirement_approaching`
-signal, daily once the date has passed). The routing table falls back to the
-staged replacement (sonnet/low) only when `tiers.haiku.retired` is `true`,
-which the operator sets after confirming that haiku no longer resolves.
+**Haiku retirement is flag-driven, and the planned one was cancelled.** Haiku 4.5
+was listed for retirement no sooner than 2026-10-15. Haiku 5.5 (released
+2026-10-07) is its successor and the `haiku` alias now resolves to it;
+Anthropic lists no retirement for it before 2027-10-07. The mechanism is
+unchanged: `tiers.<alias>.retiresAfter` drives warnings only (the scout's
+`model_retirement_approaching` signal), and the table falls back to a staged
+replacement only when a tier carries one and `tiers.<alias>.retired` is `true`.
+Haiku 5.5 takes effort (default medium; low stops early in long agent prompts),
+so the haiku rows and rung 1 name medium explicitly. Haiku 4.5 is kept in
+`referenceModels` as a non-routable legacy id.
 
 ## Cost basis: dollars, not a price-weighted token count
 

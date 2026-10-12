@@ -8,7 +8,8 @@
 //   2. validateRegister / loadRegister          (schema, every rule, never throws)
 //   3. state file: read, atomic write, rev sync, seen-set, flags
 //   4. changelog triggers: scanChangelog        (kind 'changelog', complete here)
-//   5. EVALUATORS: dispatch by trigger kind     (changelog, metric catalog, exercise)
+//   4b. signal triggers: scanSignals            (kind 'signal', the scout's own signals, complete here)
+//   5. EVALUATORS: dispatch by trigger kind     (changelog, metric catalog, exercise, date, signal)
 //   6. evaluateTriggers: folds evaluator verdicts into streaks, flags, seen-set
 //   7. detail file writer
 //   8. what the SessionStart hook calls: pendingFlags, pendingLine, markFlagsSurfaced
@@ -49,7 +50,7 @@ export const DETAIL_ROWS = 5;
 export const SPAWNS_MAX_BYTES = 32 * 1024 * 1024;
 export { SURFACE_MAX_AGE_MS, nowMs };
 
-export const TRIGGER_KINDS = ['changelog', 'metric', 'exercise'];
+export const TRIGGER_KINDS = ['changelog', 'metric', 'exercise', 'signal', 'date'];
 export const OPS = ['>', '<', '>=', '<='];
 // The metric catalog: name -> the source it reads. Section 1.3 of the build spec.
 export const METRIC_CATALOG = {
@@ -126,6 +127,17 @@ function validateTrigger(t, where, decision, rollout, errors, premiseIds) {
       if (t.minHits !== undefined && !(isInt(t.minHits) && t.minHits >= 1)) err('minHits must be an integer >= 1');
       break;
     }
+    case 'signal': {
+      if (!(Array.isArray(t.signalKinds) && t.signalKinds.length && t.signalKinds.every((k) => isStr(k) && /^[a-z0-9_]+$/.test(k)))) err('signalKinds must be a non-empty list of scout signal kinds such as pinned_model_id');
+      if (t.pattern !== undefined) {
+        if (!isStr(t.pattern)) err('pattern must be a non-empty string');
+        else {
+          try { compilePattern(t.pattern, t.flags); } catch (e) { err(`pattern does not compile: ${String((e && e.message) || e).slice(0, 120)}`); }
+        }
+      }
+      if (t.flags !== undefined && typeof t.flags !== 'string') err('flags must be a string');
+      break;
+    }
     case 'metric': {
       if (!Object.prototype.hasOwnProperty.call(METRIC_CATALOG, t.metric)) err(`unknown metric ${JSON.stringify(t.metric)} (catalog: ${Object.keys(METRIC_CATALOG).join(', ')})`);
       else if (t.source !== METRIC_CATALOG[t.metric]) err(`metric ${t.metric} reads source "${METRIC_CATALOG[t.metric]}", not ${JSON.stringify(t.source)}`);
@@ -173,6 +185,12 @@ function validateTrigger(t, where, decision, rollout, errors, premiseIds) {
       if (!isObj(t.expect)) err('expect must be an object (may be empty)');
       else for (const [k, v] of Object.entries(t.expect)) if (!['string', 'number', 'boolean'].includes(typeof v)) err(`expect.${k} must be a string, number or boolean`);
       needsRollout('an exercise trigger');
+      break;
+    }
+    case 'date': {
+      const s = typeof t.due === 'string' ? t.due : '';
+      const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00Z`) : null;
+      if (!d || Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) err('due must be a real date as YYYY-MM-DD');
       break;
     }
     default:
@@ -463,6 +481,63 @@ export function scanChangelog(parsed, register, state, { nowT = nowMs() } = {}) 
     }
   } catch { /* fail open */ }
   return fresh;
+}
+
+// --- 4b. signal triggers (kind 'signal') -------------------------------------------------
+// The daily scout raises signals (a pinned model id, a model id that moved in the tier data).
+// A signal trigger lists the signal kinds it listens to, with an optional pattern tested
+// against the signal's detail text, and flags at once when one is raised: once per distinct
+// signal text. This is how a model release the scout sees reaches a decision whose changelog
+// window starts after the release. `signals` is the scout's signal list ({ kind, detail }).
+// Returns the new flag keys.
+export function scanSignals(signals, register, state, { nowT = nowMs() } = {}) {
+  const fresh = [];
+  try {
+    syncState(state, register);
+    const list = Array.isArray(signals) ? signals.filter((x) => isObj(x) && isStr(x.kind)) : [];
+    if (!list.length) return fresh;
+    for (const d of activeDecisions(register)) {
+      for (const t of Array.isArray(d.triggers) ? d.triggers : []) {
+        if (!t || t.kind !== 'signal' || !Array.isArray(t.signalKinds)) continue;
+        let re = null;
+        if (isStr(t.pattern)) { try { re = compilePattern(t.pattern, t.flags); } catch { continue; } }
+        const tkey = tkeyOf(d.id, t.id);
+        for (const sg of list) {
+          if (!t.signalKinds.includes(sg.kind)) continue;
+          const text = String(sg.detail ?? '');
+          if (re && !re.test(text)) continue;
+          const key = `${tkey}@${sg.kind}:${createHash('sha1').update(text).digest('hex').slice(0, 10)}`;
+          if (state.changelogHits[key] || state.seen.includes(key)) continue;
+          const item = text.slice(0, ITEM_CHARS);
+          state.changelogHits[key] = { signal: sg.kind, item, count: 1, firstSeen: new Date(nowT).toISOString(), flagged: isoDay(nowT) };
+          const made = addFlag(state, key, {
+            decision: d.id, title: d.title, trigger: t.id, premise: t.premise, kind: 'signal', severity: 'signal',
+            summary: `scout ${sg.kind}: "${clauseAround(text, re || /./)}"`, detail: { signal: sg.kind, item },
+          }, nowT);
+          if (made) fresh.push(key);
+        }
+      }
+    }
+  } catch { /* fail open */ }
+  return fresh;
+}
+
+// The scout's hook (scripts/detect.mjs): scan this run's signals and record the hits, writing
+// the state and the detail file only when a new flag appeared. Never throws.
+export function scanSignalsToState(signals, { nowT = nowMs(), registerFile, stateFile, detailFile } = {}) {
+  try {
+    const loaded = loadRegister(registerFile || registerPath());
+    if (!loaded.ok) return { ok: false, newFlags: [] };
+    const sFile = stateFile || statePath();
+    const state = readState(sFile);
+    const snap = snapshotState(state);
+    const fresh = scanSignals(signals, loaded.register, state, { nowT });
+    if (fresh.length) {
+      writeStateMerged(state, snap, sFile);
+      writeDetail(state, loaded.register, detailFile || detailPath(), nowT);
+    }
+    return { ok: true, newFlags: fresh };
+  } catch { return { ok: false, newFlags: [] }; }
 }
 
 // --- 5. evaluators (dispatch by trigger kind) ------------------------------------------
@@ -862,7 +937,20 @@ export function evalExercise(ctx) {
   } catch { return null; }
 }
 
-export const EVALUATORS = { changelog: evalChangelog, metric: evalMetric, exercise: evalExercise };
+// Date triggers: a fact, not a measurement. Once the due day (UTC) has begun, one flag per
+// (trigger, due date). The flag stops counting once the decision leaves "active" (the
+// loops here only visit active decisions, and openFlags drops the rest).
+export function evalDate(ctx) {
+  try {
+    const t = ctx && ctx.trigger;
+    if (!isObj(t) || t.kind !== 'date' || typeof t.due !== 'string') return null;
+    const dueMs = Date.parse(`${t.due}T00:00:00Z`);
+    if (!Number.isFinite(dueMs) || !(ctx.nowT >= dueMs)) return { events: [] };
+    return { events: [{ suffix: t.due, severity: 'due', summary: `review date ${t.due} has passed` }] };
+  } catch { return null; }
+}
+
+export const EVALUATORS = { changelog: evalChangelog, metric: evalMetric, exercise: evalExercise, date: evalDate };
 
 // --- 6. folding verdicts into streaks, flags and the seen-set -----------------------------
 
@@ -931,9 +1019,9 @@ export function evaluateTriggers({ register, history = [], spawnRows = [], denia
             const key = `${tkey}@${e.suffix}`;
             const made = addFlag(state, key, {
               decision: d.id, title: d.title, trigger: t.id, premise: t.premise, kind: t.kind,
-              severity: e.severity === 'wrong' ? 'wrong' : 'unexercised',
+              severity: e.severity === 'wrong' ? 'wrong' : (e.severity === 'due' ? 'due' : 'unexercised'),
               summary: String(e.summary || e.suffix).slice(0, 200),
-              detail: { afterDays: t.afterDays, rows: Array.isArray(e.rows) ? e.rows.slice(0, DETAIL_ROWS) : [] },
+              detail: { afterDays: t.afterDays, ...(t.kind === 'date' ? { due: t.due } : {}), rows: Array.isArray(e.rows) ? e.rows.slice(0, DETAIL_ROWS) : [] },
             }, nowT);
             if (made) { rec.flagged = isoDay(nowT); rec.flagKey = key; newFlags.push(key); }
           }
@@ -950,6 +1038,8 @@ const TRIGGER_DESC = (t) => {
   if (!t) return '(trigger no longer in the register)';
   if (t.kind === 'changelog') return `changelog, pattern /${t.pattern}/${t.flags || ''}, newer than ${t.sinceVersion}`;
   if (t.kind === 'metric') return `metric ${t.metric} ${t.op} ${t.threshold} (minSample ${t.minSample}, minDays ${t.minDays || 2})`;
+  if (t.kind === 'signal') return `scout signal ${(t.signalKinds || []).join(' or ')}${t.pattern ? `, pattern /${t.pattern}/${t.flags || ''}` : ''}`;
+  if (t.kind === 'date') return `date, due ${t.due}`;
   return `exercise, after ${t.afterDays} days, where ${JSON.stringify(t.where)}, expect ${JSON.stringify(t.expect)}`;
 };
 
@@ -981,6 +1071,7 @@ export function detailMarkdown(state, register, nowT = nowMs()) {
       out.push(`- Trigger: ${TRIGGER_DESC(t)}`, `- What happened: ${f.summary}`);
       const x = f.detail || {};
       if (f.kind === 'changelog') out.push(`- Matched changelog item (${x.version}, ${x.count} matching item(s)): ${x.item}`);
+      if (f.kind === 'signal') out.push(`- Scout signal ${x.signal}: ${x.item}`);
       if (f.kind === 'metric') out.push(`- Value ${fmt(x.value)}, pre pool ${fmt(x.pre)}, sample n=${x.n === null || x.n === undefined ? 'n/a' : fmt(x.n)}, ${x.days} qualifying day(s) since ${x.episodeStart}`);
       if (Array.isArray(x.rows) && x.rows.length) {
         out.push('- Offending spawn rows (up to 5):');
@@ -1008,7 +1099,7 @@ export function writeDetail(state, register, file = detailPath(), nowT = nowMs()
 
 // --- 8. what the SessionStart hook calls -------------------------------------------------
 
-const SEVERITY_RANK = { wrong: 0, metric: 1, changelog: 2, unexercised: 3 };
+const SEVERITY_RANK = { wrong: 0, metric: 1, changelog: 2, signal: 2, due: 3, unexercised: 4 };
 
 // Unsurfaced open flags, fresh within 72 h, ordered: wrong > metric > changelog > unexercised,
 // then by decision order in the register.
@@ -1134,6 +1225,25 @@ export function scanChangelogToState(parsed, { nowT = nowMs(), registerFile, sta
       writeDetail(state, loaded.register, detailFile || detailPath(), nowT);
     }
     return { ok: true, newFlags: fresh };
+  } catch { return { ok: false }; }
+}
+
+// The scout's date check: evaluate only the date triggers (no history or spawns read) so a
+// review date that passed between checkups still flags. Writes state and the detail file only
+// when a new flag appeared. Never throws.
+export function scanDatesToState({ nowT = nowMs(), registerFile, stateFile, detailFile } = {}) {
+  try {
+    const loaded = loadRegister(registerFile || registerPath());
+    if (!loaded.ok) return { ok: false };
+    const sFile = stateFile || statePath();
+    const state = readState(sFile);
+    const snap = snapshotState(state);
+    const { newFlags } = evaluateTriggers({ register: loaded.register, nowT, state, evaluators: { date: evalDate } });
+    if (newFlags.length) {
+      writeStateMerged(state, snap, sFile);
+      writeDetail(state, loaded.register, detailFile || detailPath(), nowT);
+    }
+    return { ok: true, newFlags };
   } catch { return { ok: false }; }
 }
 

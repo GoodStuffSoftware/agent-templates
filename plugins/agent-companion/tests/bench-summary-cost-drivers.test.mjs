@@ -18,14 +18,14 @@ import { rebuildSummary } from '../bench/runner.mjs';
 test('rebuildSummary computes median_context_rereads and read_share_of_cost for a measured tier (sonnet)', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'ac-bench-summary-cost-'));
   try {
-    // sonnet's cacheHitPerMTok is 0.20 (config/model-tiers.json). One row:
+    // sonnet's cacheHitPerMTok is 0.10 (Sonnet 5.5, config/model-tiers.json). One row:
     // 1,000,000 cache-read tokens over 10 turns -> 100,000 context_rereads.
-    // Cache-read dollar cost = 1e6 * 0.20 / 1e6 = $0.20 of a $1.00 total ->
-    // read_share_of_cost = 0.20.
+    // Cache-read dollar cost = 1e6 * 0.10 / 1e6 = $0.10 of a $1.00 total ->
+    // read_share_of_cost = 0.10.
     const rows = [
       {
         cell: 'sonnet-medium', task: 'lookup', rep: 1, pass: true, is_error: false, auth_error: false,
-        requested_model: 'claude-sonnet-5',
+        requested_model: 'claude-sonnet-5-5',
         cost_usd: 1.00, num_turns: 10, cache_read_tokens: 1000000, output_tokens: 500, input_tokens: 100,
       },
     ];
@@ -36,7 +36,7 @@ test('rebuildSummary computes median_context_rereads and read_share_of_cost for 
     const summary = JSON.parse(readFileSync(join(outDir, 'summary.json'), 'utf8'));
     assert.equal(summary.length, 1);
     assert.equal(summary[0].median_context_rereads, 100000);
-    assert.equal(summary[0].read_share_of_cost, 0.20);
+    assert.equal(summary[0].read_share_of_cost, 0.10);
     assert.equal(summary[0].median_cache_read_tokens, 1000000);
     assert.equal(summary[0].median_num_turns, 10);
 
@@ -60,7 +60,7 @@ test('rebuildSummary computes median_context_rereads and read_share_of_cost for 
     assert.ok(idxHitRate > idxCacheRead, 'hit_rate sits next to cache reads, per the brief');
     // 1,000,000 reads over a 1,000,100-token denominator (100 uncached input,
     // 0 writes) rounds to 100%.
-    assert.match(md, /1000000 \| 100% \| 10 \| 100000 \| 20%/);
+    assert.match(md, /1000000 \| 100% \| 10 \| 100000 \| 10%/);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

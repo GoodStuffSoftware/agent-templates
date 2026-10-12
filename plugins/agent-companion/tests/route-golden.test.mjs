@@ -142,6 +142,8 @@ test(`LIVE: resolveRoute matches the frozen reference on the current config, all
   if (reach.restated) assert.ok(counts.restated > 0, JSON.stringify(counts));
   if (reach.floorAfterTrial) assert.ok(counts.floorAfterTrial > 0, JSON.stringify(counts));
   if (reach.waivedTrial) assert.ok(counts.waivedTrial > 0, JSON.stringify(counts));
+  // 0.31.16 tier effort floor: reachable while any tier carries minEffort (haiku: medium).
+  if (Object.values(cfg.tiers || {}).some((tr) => tr && tr.minEffort)) assert.ok(counts.tierEffortFloor > 0, JSON.stringify(counts));
 });
 
 // --- The gate is not vacuous -------------------------------------------------
@@ -207,6 +209,7 @@ const REGRESSIONS = {
   "the grid ignores the kind's effort delta": ['const delta = (cfg.taskKinds || {})[kind]?.effortDelta ?? 0;', 'const delta = 0;'],
   'a preset-equal weight counts as a departure again': ["note('weight', weightExplicit, typeKnown && weight === t.weight);", "note('weight', weightExplicit, false);"],
   'a weight with no routing row is a grid "winner" again': ['  if (!won && !grid.model) {', '  if (false) {'],
+  'the tier effort floor is dropped': ['  if (tier.minEffort) {', '  if (false) {'],
   'the trial answers with the grid model':['          model: ov.model,\n', '          model: grid.model,\n'],
 };
 for (const [name, [anchor, repl]] of Object.entries(REGRESSIONS)) {
@@ -231,8 +234,16 @@ test('the golden matrix exercises every layer outcome it should', () => {
   // the date alone no longer does (tests/haiku-retired-flag.test.mjs).
   const haiku = ctx.modelTiers().tiers.haiku;
   const a = ctx.resolveRoute({ weight: 1, weightExplicit: true, now: CLOCKS[1] });
+  // The shipped haiku (Haiku 5.5) is not retiring and names no replacement, so stage one.
+  const savedReplacement = haiku.replacement;
   haiku.retired = true;
+  haiku.replacement = { model: 'sonnet', effort: 'low' };
   let b;
-  try { b = ctx.resolveRoute({ weight: 1, weightExplicit: true, now: CLOCKS[1] }); } finally { haiku.retired = false; }
+  try {
+    b = ctx.resolveRoute({ weight: 1, weightExplicit: true, now: CLOCKS[1] });
+  } finally {
+    haiku.retired = false;
+    if (savedReplacement === undefined) delete haiku.replacement; else haiku.replacement = savedReplacement;
+  }
   assert.notEqual(`${a.model}/${a.effort}`, `${b.model}/${b.effort}`, 'the retired flag no longer exercises the staged replacement');
 });

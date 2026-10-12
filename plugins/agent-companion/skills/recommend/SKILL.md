@@ -31,11 +31,11 @@ eval sandbox); use the script for anything that needs `--weight`, `--kind`,
 `--consequence` or `--writer`.
 
 <!-- routing-table:task-types BEGIN (generated from config/model-tiers.json by scripts/routing-table.mjs --sync-skill; do not edit by hand) -->
-Config v8 (updated 2026-10-02). **Premium** = the spawn brief needs a `WARRANT:` line. Fable never appears here: it is a warranted exception, not a route.
+Config v8 (updated 2026-10-12). **Premium** = the spawn brief needs a `WARRANT:` line. Fable never appears here: it is a warranted exception, not a route.
 
 | Task type | Route | Premium | What it is |
 |---|---|---|---|
-| `explore` | `haiku` (routing trial, review by 2026-10-16) | no | read-only search: where is X, what touches Y, does Z exist |
+| `explore` | `haiku/medium` (routing trial, review by 2026-10-16) | no | read-only search: where is X, what touches Y, does Z exist |
 | `mechanical-edit` | `sonnet/low` (routing trial, review by 2026-10-16) | no | rename, config edit, reformat, apply a known migration recipe; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
 | `bounded-feature` | `opus/medium` (routing trial, review by 2026-10-04) | yes | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | `opus/medium` (routing trial, review by 2026-09-30) | yes | multi-file, cross-referencing, touches shared config or things other agents depend on |
@@ -46,7 +46,7 @@ Config v8 (updated 2026-10-02). **Premium** = the spawn brief needs a `WARRANT:`
 | `code-review` | writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's | as writer (opus if critical or fable) | adversarial review of a diff; sized to the writer it gates |
 | `long-autonomous-run` | `opus/high` (routing trial, review by 2026-10-16) | yes | an agent session expected to run for hours with minimal supervision |
 | `subagent-worker` | `sonnet/low` (routing trial, review by 2026-10-16) | no | a delegated worker doing a bounded, well-specified piece of a larger task; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
-| `verify` | `haiku` (routing trial, review by 2026-10-16) | no | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
+| `verify` | `haiku/medium` (routing trial, review by 2026-10-16) | no | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
 | `operate` | `sonnet/low` (routing trial, review by 2026-10-16) | no | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
 
 **Self-review:** a writer spawned as `bounded-feature`, `integration`, `debug-root-cause`, `large-refactor`, `novel-design`, `critical-change`, `long-autonomous-run` reviews its own work before it returns (it commits, spawns ONE foreground parity reviewer on its own rung, or the rung the table names for a review of its pair when the operator has set a reviewer effort cap or floor, runs one fix round, and returns the verdict line verbatim), unless its brief carries the line `REVIEW: lead`. The protocol is in the body of `agent-companion:ac-opus-medium`, `agent-companion:ac-opus-high`, `agent-companion:ac-opus-xhigh`; on any other ladder rung (a routing profile or a local copy of the table can put a listed type there) the spawn guard appends the same text to the brief. A built-in or project agent does not self-review unless its own definition says so (give it the protocol and the `Agent` tool); until then the lead reviews it.

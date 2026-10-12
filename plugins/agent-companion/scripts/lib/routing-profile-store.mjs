@@ -347,12 +347,26 @@ const rowOf = (p, type) => (Object.prototype.hasOwnProperty.call(p.rows || {}, t
 // `set <type> --model M --effort E [--because "..."] [--waive-floor elevated]`:
 // an operator-observed trial row, reviewBy 90 days out (soft: nothing expires
 // it). A parity-sized type (code-review) takes --effort only: a minimum.
-export function setRow(type, { model = null, effort = null, because = null, waiveFloor = null, by = 'operator', now } = {}) {
+//
+// reviewBy (--review-by YYYY-MM-DD) sets the trial's review date (default 90
+// days out; it must parse and not be in the past). settled (--settled) writes
+// a decided choice instead: state "adopted", no review date, so the
+// trial-review signals never fire for it. The two do not combine.
+export function setRow(type, { model = null, effort = null, because = null, waiveFloor = null, reviewBy: reviewByArg = null, settled = false, by = 'operator', now } = {}) {
   const clock = now ? new Date(now) : nowDate();
   const since = ymd(clock);
-  const reviewBy = ymd(new Date(clock.getTime() + DEFAULT_REVIEW_DAYS * 86400000));
+  let reviewBy = ymd(new Date(clock.getTime() + DEFAULT_REVIEW_DAYS * 86400000));
+  if (reviewByArg !== null && reviewByArg !== undefined) {
+    if (settled) throw new ProfileWriteError('usage', '--settled writes a row with no review date; it cannot be combined with --review-by');
+    const s = String(reviewByArg);
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00Z`) : null;
+    if (!d || Number.isNaN(d.getTime()) || ymd(d) !== s) throw new ProfileWriteError('usage', `--review-by needs a real date as YYYY-MM-DD, got ${JSON.stringify(s)}`);
+    if (s < since) throw new ProfileWriteError('usage', `--review-by ${s} is in the past (today is ${since})`);
+    reviewBy = s;
+  }
+  if (settled) reviewBy = null;
   const row = {
-    state: 'trial',
+    state: settled ? 'adopted' : 'trial',
     model: model ? String(model).toLowerCase() : null,
     effort: effort ? String(effort).toLowerCase() : null,
     cacheTtl: null,

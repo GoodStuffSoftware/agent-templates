@@ -35,10 +35,10 @@ test('recommend --type verify routes to haiku under the routing trial (weight st
   const res = runScript('scripts/recommend.mjs', ['--type', 'verify', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.model, 'haiku');
-  assert.equal(res.json.effort, '');
+  assert.equal(res.json.effort, 'medium');
   assert.equal(res.json.weight, 1);
   assert.ok(res.json.trial, 'expected trial metadata on an overridden type');
-  assert.equal(res.json.trial.gridResolution, 'haiku', 'the plain grid must still resolve verify to haiku');
+  assert.equal(res.json.trial.gridResolution, 'haiku/medium', 'the plain grid must still resolve verify to haiku');
 });
 
 test('recommend --type operate routes to sonnet/low under the routing trial (weight still >= 3, never haiku)', () => {
@@ -64,7 +64,7 @@ test('an explicit --weight that departs from the preset bypasses the operate/ver
 test('an explicit --weight EQUAL to the preset keeps the verify trial (slice 1b)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'verify', '--weight', '1', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(`${res.json.model}/${res.json.effort}`, 'haiku/');
+  assert.equal(`${res.json.model}/${res.json.effort}`, 'haiku/medium');
   assert.ok(res.json.trial);
 });
 

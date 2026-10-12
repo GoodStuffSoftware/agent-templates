@@ -101,7 +101,7 @@ test('WRITER forms: space, "at", "@" and a version all read the effort; the mode
     assert.equal(turbo.effortIssue, 'not-understood');
     assert.equal(turbo.effortToken, 'turbo');
     assert.equal(read('opus').effortIssue, 'none');
-    assert.equal(read('haiku').effortIssue, null, 'haiku takes no effort, so none is missing');
+    assert.equal(read('haiku').effortIssue, 'none', 'Haiku 5.5 takes an effort, so a writer line without one is missing it');
     // Substring is not a match: my-opus-helper is an agent name, and when it
     // exists it is read through its own definition, never as opus.
     h.agent('my-opus-helper', 'model: sonnet\neffort: high');
@@ -453,7 +453,7 @@ test('(v) three general-purpose opus spawns with no TYPE: the third is denied, w
     assert.equal(r.decision, 'deny');
     assert.match(r.reason, /Premium fan-out cap: 2 premium-tier agents/);
     assert.match(r.reason, /TYPE: <task type>/);
-    assert.match(r.reason, /explore -> haiku \(agent-companion:ac-haiku\)/);
+    assert.match(r.reason, /explore -> haiku\/medium \(agent-companion:ac-haiku\)/);
     assert.match(r.reason, /debug-root-cause -> opus\/medium/);
     assert.match(r.reason, /agent-companion:ac-opus-medium/);
     assert.match(r.reason, /wait for the in-flight premium agents/);

@@ -101,13 +101,26 @@ export function priceSpecFor(model, cfg = pricingTable()) {
 // API ratio depends on the token mix and a fixed weight is wrong for every
 // mix but one. null when the model's tier has no measured multiplier (no
 // plan figure, never a guessed 1.0) or the baseline tier is unpriced.
+export function planBaselineModel(tiersCfg = modelTiers()) {
+  const mults = tiersCfg.planUsageMultipliers || {};
+  const baseAlias = Object.keys(mults).find((k) => mults[k]?.multiplier === 1);
+  if (!baseAlias) return null;
+  // The plan-unit model was calibrated on one concrete price vector. A tier's
+  // resolvesTo.modelId moves with every release (and so does that model's
+  // cache-read price), so the baseline may name its own pinned vector; without
+  // one it follows the tier's current model.
+  const pinned = mults[baseAlias]?.priceVectorModel;
+  if (typeof pinned === 'string' && pinned) return pinned;
+  return tiersCfg.tiers?.[baseAlias]?.resolvesTo?.modelId || null;
+}
+
 export function planPriceSpecFor(model, tiersCfg = modelTiers(), pricing = pricingTable()) {
   const mults = tiersCfg.planUsageMultipliers || {};
   const alias = classifyModel(model).alias;
   const own = mults[alias];
   if (!own || typeof own.multiplier !== 'number') return null;
   const baseAlias = Object.keys(mults).find((k) => mults[k]?.multiplier === 1);
-  const baseModel = baseAlias && tiersCfg.tiers?.[baseAlias]?.resolvesTo?.modelId;
+  const baseModel = planBaselineModel(tiersCfg);
   const base = baseModel ? priceSpecFor(baseModel, pricing) : null;
   if (!base) return null;
   return { ...base, baseline: baseAlias, multiplier: own.multiplier };

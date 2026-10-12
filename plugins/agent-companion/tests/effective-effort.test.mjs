@@ -55,11 +55,29 @@ test('opus spawn with no effort anywhere and no readable caller transcript: effe
   } finally { cleanup(); }
 });
 
-test('haiku spawn: effective_effort is null (model takes no effort parameter)', () => {
+test('haiku spawn with no effort anywhere: effective_effort is inherited(unknown) (Haiku 5.5 takes an effort)', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const res = runHook('hooks/spawn-guard.mjs', {
       session_id: 'sess-eff-haiku', agent_type: 'main', cwd: dir,
+      tool_input: { subagent_type: 'general-purpose', model: 'haiku', prompt: 'a quick read' },
+    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
+    assert.equal(res.status, 0, res.stderr);
+    const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
+    assert.equal(row.effective_effort, 'inherited(unknown)');
+  } finally { cleanup(); }
+});
+
+// The effortless-model arm of the guard (hooks/spawn-guard.mjs noEffortModel) is reachable
+// for any tier whose efforts list is empty. Haiku 5.5 takes an effort, so stage haiku as
+// effortless through the state-dir override (as route-floors.test.mjs does).
+test('a model whose tier takes no effort parameter: effective_effort is null', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'model-tiers.json'), JSON.stringify({ tiers: { haiku: { efforts: [] } } }));
+    const res = runHook('hooks/spawn-guard.mjs', {
+      session_id: 'sess-eff-none', agent_type: 'main', cwd: dir,
       tool_input: { subagent_type: 'general-purpose', model: 'haiku', prompt: 'a quick read' },
     }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
     assert.equal(res.status, 0, res.stderr);

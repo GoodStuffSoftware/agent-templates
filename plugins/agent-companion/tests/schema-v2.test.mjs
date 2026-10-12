@@ -120,7 +120,7 @@ test('spawn_effort_source: definition | inherited | none', () => {
     const cases = [
       { sid: 'sess-v2-def', subagent_type: 'definer', expectSource: 'definition', expectEffort: 'high' },
       { sid: 'sess-v2-inh', subagent_type: 'inheritor', expectSource: 'inherited', expectEffort: 'medium' },
-      { sid: 'sess-v2-haiku', subagent_type: 'haiku-runner', expectSource: 'none', expectEffort: null },
+      { sid: 'sess-v2-haiku', subagent_type: 'haiku-runner', expectSource: 'inherited', expectEffort: 'medium' },
     ];
 
     for (const c of cases) {
@@ -144,6 +144,34 @@ test('spawn_effort_source: definition | inherited | none', () => {
       assert.equal(row.spawn_effort_source, c.expectSource, `${c.sid}: spawn_effort_source`);
       assert.equal(row.spawn_effort, c.expectEffort, `${c.sid}: spawn_effort`);
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test('spawn_effort_source is none and spawn_effort null for a tier that takes no effort parameter', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    // Haiku 5.5 takes an effort; stage haiku as effortless through the state-dir override.
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'model-tiers.json'), JSON.stringify({ tiers: { haiku: { efforts: [] } } }));
+    const transcriptPath = join(dir, 'transcript.jsonl');
+    fakeTranscript(transcriptPath, { model: 'claude-sonnet-4-6', effort: 'medium' });
+    const agentsDir = join(dir, '.claude', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, 'haiku-runner.md'), '---\nname: haiku-runner\nmodel: haiku\n---\nbody\n');
+    const res = runHook('hooks/spawn-guard.mjs', {
+      session_id: 'sess-v2-none',
+      agent_type: 'main',
+      cwd: dir,
+      transcript_path: transcriptPath,
+      tool_input: { subagent_type: 'haiku-runner', prompt: 'do the thing' },
+    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
+    assert.equal(res.status, 0, `spawn-guard exited ${res.status}: ${res.stderr}`);
+    const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl')).find((r) => r.session_id === 'sess-v2-none');
+    assert.ok(row, 'no row');
+    assert.equal(row.spawn_effort_source, 'none');
+    assert.equal(row.spawn_effort, null);
   } finally {
     cleanup();
   }

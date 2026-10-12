@@ -10,8 +10,10 @@
     "opus-4-7": { "match": "opus-4-7", "contextWindow": 1000000, "defaultCompactAt": 967000 },
     "fable-5-1": { "match": "fable-5-1", "contextWindow": 1000000, "defaultCompactAt": 967000 },
     "fable-5": { "match": "fable-5(?!-1)", "contextWindow": 1000000, "defaultCompactAt": 967000 },
-    "sonnet-5": { "match": "sonnet-5", "contextWindow": 1000000, "defaultCompactAt": 967000 },
+    "sonnet-5-5": { "match": "sonnet-5-5", "contextWindow": 1000000, "defaultCompactAt": 967000 },
+    "sonnet-5": { "match": "sonnet-5(?!-5)", "contextWindow": 1000000, "defaultCompactAt": 967000 },
     "sonnet-4-6": { "match": "sonnet-4-6", "contextWindow": 200000, "defaultCompactAt": 167000 },
+    "haiku-5-5": { "match": "haiku-5-5", "contextWindow": 1000000, "defaultCompactAt": 967000 },
     "haiku-4-5": { "match": "haiku-4-5", "contextWindow": 200000, "defaultCompactAt": 167000 }
   },
   "defaultsNote": "defaultCompactAt is where a model compacts with no window set: its context window minus the reserve below, so about 967K on native-1M models (the documented 'about 967K tokens') and about 167K on 200K models (measured auto-compactions on 200K models land at 167K-174K, not at the 200K boundary). A model matching no entry is treated as a 200K model.",

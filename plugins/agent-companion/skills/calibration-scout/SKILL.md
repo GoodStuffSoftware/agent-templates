@@ -58,6 +58,8 @@ Only for signals that fired:
 | `inherited_model_spawns` | routing review |
 | `inherited_effort_spawns` | routing review (spawns that ran at the lead's effort) |
 | `project_agent_drift` | routing review (a project's `routingType:` agents off the table, or a writer with no parity reviewer) |
+| `pinned_model_id` | report each place that pins a full model id and the alias (`sonnet`, `opus`, `haiku`) to use; a pin never follows the next release. Suggest the change, never edit another project's files. For claude.ai cloud routines, which no script can list, list them with RemoteTrigger when the session has it and report any pinned `model`; otherwise say the check was skipped |
+| `model_tier_data_changed` | informational: the model an alias resolves to moved in `config/model-tiers.json`. Report alias, old id, new id. It also feeds the decision register's `signal` triggers |
 | `session_churn` | routing review (from `session-churn.jsonl`; refresh with `transcript-harvest.mjs --churn`). With dispatch `manual-check`: the file is missing or older than 2 days, so the refresh step is not running; report it |
 | `spawn_activity` with `spend-deep-dive` | spend attribution |
 | `harness_version_unreadable` | report to the operator; do not guess |
@@ -77,7 +79,7 @@ trivial read, and a warrant for any fable request. Each run is a real model call
 
 ```bash
 cd "$AC" && claude plugin eval . --trust-plugin --json results.json --threshold 0.8 \
-  --model claude-sonnet-5 --no-publish --max-cost-usd 3
+  --model sonnet --no-publish --max-cost-usd 3
 ```
 
 Exit 1 means a canary fell below threshold (routing guidance no longer
@@ -144,7 +146,7 @@ It will report, in rough order of how much they cost you:
 
 - a reviewer sized **below** the writer it gates, in model or in effort
 - an agent with **no model**, silently inheriting the lead's tier
-- an effort a model **does not accept** (haiku takes none at all)
+- an effort a model **does not accept** (checked against that tier's `efforts` list in `config/model-tiers.json`)
 - a model the tier table **does not recognise** — treated as premium, and a sign
   the table needs an entry rather than that the agent is wrong
 - a pin to a model marked **unavailable** on this account

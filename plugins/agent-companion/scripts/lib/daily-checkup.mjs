@@ -52,12 +52,12 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateFile, telemetryDir, stateRootPath, modelTiers, opt, rolloutTable } from '../../hooks/lib/context.mjs';
+import { stateFile, telemetryDir, stateRootPath, opt, rolloutTable } from '../../hooks/lib/context.mjs';
 import { briefDeclarations, declarationValue, BRIEF_ROLES } from '../../hooks/lib/brief-directives.mjs';
 import {
   discoverTranscripts, transcriptsRoot, usageOf, contextTokensOf, isCompactBoundary, flattenContent,
 } from './transcripts.mjs';
-import { planPriceSpecFor } from './pricing.mjs';
+import { planPriceSpecFor, planBaselineModel } from './pricing.mjs';
 
 export const HOUR_MS = 3600000;
 export const DAY_MS = 24 * HOUR_MS;
@@ -136,7 +136,7 @@ function unitSpecFor(model) {
     if (own) {
       spec = { inUsd: own.inUsd, outRatio: own.outRatio, r: own.r, w5: own.w5, w1: own.w1, mult: own.multiplier };
     } else {
-      const baseModel = modelTiers().tiers?.sonnet?.resolvesTo?.modelId;
+      const baseModel = planBaselineModel();
       const base = baseModel ? planPriceSpecFor(baseModel) : null;
       if (base) {
         const fam = family(key);

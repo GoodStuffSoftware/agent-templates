@@ -14,7 +14,10 @@ const fx = makeFixture();
 test.after(() => fx.cleanup());
 const trial = (model, effort) => ({ model, effort, reason: 'synthetic', evidence: { source: 'test', date: '2026-09-24' }, trialSince: '2026-09-24', reviewBy: '2026-10-01' });
 mkdirSync(fx.stateDir, { recursive: true });
+// Haiku 5.5 takes an effort. The F4/F5 paths below are about a tier that takes none (any
+// tier can be that), so the override stages haiku as effortless for this process.
 writeFileSync(join(fx.stateDir, 'model-tiers.json'), JSON.stringify({
+  tiers: { haiku: { efforts: [] } },
   taskTypes: {
     'x-fable': { weight: 3, kind: 'bounded', consequence: 'routine', override: trial('fable', 'high') },
     'x-mythos': { weight: 3, kind: 'bounded', consequence: 'routine', override: trial('mythos', 'high') },

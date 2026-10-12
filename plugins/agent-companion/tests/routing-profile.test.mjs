@@ -7,12 +7,20 @@
 // home; the shipped table is used as-is (no per-machine override file).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync, readdirSync, renameSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
 
 const fx = makeFixture();
 test.after(() => fx.cleanup());
+// Haiku 5.5 takes an effort and is not retiring. The F4/F5 rows below exercise the generic
+// paths for a tier that takes no effort parameter and one that retires, so the override file
+// stages haiku in that shape for this process (and the CLI runs): efforts empty, a retirement
+// date past BEFORE, and a staged replacement.
+mkdirSync(fx.stateDir, { recursive: true });
+writeFileSync(join(fx.stateDir, 'model-tiers.json'), JSON.stringify({
+  tiers: { haiku: { efforts: [], retiresAfter: '2026-10-15', retired: false, replacement: { model: 'sonnet', effort: 'low' } } },
+}));
 const ctx = await import('../hooks/lib/context.mjs');
 const rp = await import('../hooks/lib/routing-profile.mjs');
 
@@ -586,7 +594,12 @@ test('recommend --list and --type see local types; routing-table stays shipped u
   assert.match(list.stdout, /git-plumbing .*\(local\) git plumbing/);
   const rec = runScript('scripts/recommend.mjs', ['--type', 'git-plumbing', '--json']);
   assert.equal(rec.status, 0, rec.stderr);
-  const doc = runScript('scripts/routing-table.mjs', []);
+  // The committed doc is the SHIPPED table: set the staged haiku override aside for this run.
+  const overrideFile = join(fx.stateDir, 'model-tiers.json');
+  const aside = `${overrideFile}.aside`;
+  renameSync(overrideFile, aside);
+  let doc;
+  try { doc = runScript('scripts/routing-table.mjs', []); } finally { renameSync(aside, overrideFile); }
   assert.equal(doc.stdout.replace(/\r\n/g, '\n'), readFileSync(join(PLUGIN_ROOT, 'docs', 'ROUTING.md'), 'utf8').replace(/\r\n/g, '\n'),
     'the default table (committed as docs/ROUTING.md) never includes a profile');
   const mine = runScript('scripts/routing-table.mjs', ['--profile']);

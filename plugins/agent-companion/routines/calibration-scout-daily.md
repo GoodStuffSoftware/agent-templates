@@ -109,7 +109,7 @@ node "$AC/scripts/detect.mjs"
 
 The churn step reads local lead-session transcripts (counts only; bounded, newest first, about 10 s). In the cloud there are no transcripts, so it writes an empty aggregate and `session_churn` stays quiet: unobservable there, like the other stateful signals.
 
-Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`, `enforcement_silent`, `plugin_version_behind`, `plugin_copy_stale`, `stale_copy_loaded`, `session_outdated`, `session_load_unknown`, `inherited_effort_spawns`, `project_agent_drift`, `session_churn`, `budget_notices`, `scout_copy_stale`, `decision_register_invalid`, `decision_review_due`, `alias_resolution_below_version_floor`, `attended_env_missing`, `compact_window_drift`, `main_ci_red`, `model_benchmark_suggested`, `new_model_in_lineup`, `publication_leak_visibility_unknown`, `routing_trial_review_due`, `cli_release_available` (a Claude Code release the operator has not been told about; the details file is named in the signal; informational, no dispatch). Kinds listed in the `scout_suppress` option never appear.
+Returns `{ changed, signals[], baseline }`. Each signal names its own `dispatch`. Signals you may see: `harness_version_changed`, `new_agent_type`, `zero_denials`, `inherited_model_spawns`, `spawn_activity`, `model_retirement_approaching`, `harness_version_unreadable`, `enforcement_silent`, `plugin_version_behind`, `plugin_copy_stale`, `stale_copy_loaded`, `session_outdated`, `session_load_unknown`, `inherited_effort_spawns`, `project_agent_drift`, `session_churn`, `budget_notices`, `scout_copy_stale`, `decision_register_invalid`, `decision_review_due`, `alias_resolution_below_version_floor`, `attended_env_missing`, `compact_window_drift`, `main_ci_red`, `model_benchmark_suggested`, `new_model_in_lineup`, `model_tier_data_changed`, `pinned_model_id`, `publication_leak_visibility_unknown`, `routing_trial_review_due`, `cli_release_available` (a Claude Code release the operator has not been told about; the details file is named in the signal; informational, no dispatch). Kinds listed in the `scout_suppress` option never appear.
 
 ## STEP 2 — lineup and pricing diff (the one check that needs the web)
 
@@ -239,9 +239,17 @@ and say so — do not claim dedupe you didn't run. This is a stopgap only
 until the installed plugin catches up; prefer the STEP 1 path whenever `$AC`
 supports it.
 
+## STEP 2.7 — cloud routines pinned to a model id
+
+`detect.mjs` cannot see claude.ai cloud routines (no script can list them), and a routine created with a pinned id such as `claude-sonnet-5` keeps running that model after the alias moves on. This step covers them. It reads only; it never updates a routine.
+
+If this session has the **RemoteTrigger** tool, call it with `action: "list"` and look at each routine's `model` field. Report every routine whose `model` is a full id (`claude-` followed by a family and a version) rather than an alias, as one `pinned_model_id` finding: the routine's name, the id it pins, and the alias to set (`sonnet`, `opus` or `haiku`; the cloud routine API accepts the alias, measured 2026-10-12 on an update of the scout routine). An alias, or no `model` field, is not a finding.
+
+If the session does **not** have RemoteTrigger, say in one line that the cloud-routine pin check was skipped and why. A skipped check is not a clean one: never report cloud routines as free of pins.
+
 ## STEP 3 — if `changed` is false AND lineup matches: stop. Emit nothing.
 
-Not a summary, not a confirmation. Silence is the success case.
+Not a summary, not a confirmation. Silence is the success case. (A STEP 2.7 finding counts as a change; the skipped-check line does not, so on an otherwise quiet day print nothing for it.)
 
 ## STEP 4 — dispatch, only for signals that fired
 
@@ -269,6 +277,8 @@ Not a summary, not a confirmation. Silence is the success case.
 | `main_ci_red` | CI on the default branch of a watched repo is red. Report repo and workflow names (dispatch manual-check) |
 | `model_benchmark_suggested` | advisory only: another signal made a benchmark of the routing table worth considering. Quote it; this scout never runs a benchmark itself |
 | `new_model_in_lineup` | a model alias or tier is new in `config/model-tiers.json` since the last run. Report the names (dispatch routing-review) |
+| `model_tier_data_changed` | the model an alias resolves to moved in `config/model-tiers.json` since the last run (a new release became the alias's target), or, on the first run after the scout learned this signal, the ids the tier data names now (dispatch none, informational). Report the alias and the old and new ids. It also feeds the decision register's `signal` triggers, so a standing decision that rests on that model can be flagged even when no CLI changelog item mentions it |
+| `pinned_model_id` | a full model id is pinned where the alias (`sonnet`, `opus`, `haiku`) would do, in the plugin's tier data, a scheduled task, a settings file's model field, or an agent definition's `model:` line (dispatch manual-check). A pin never follows the next release; the alias does. Report each place and the alias to use; never edit another project's files or the operator's settings from the routine. Claude.ai cloud routines are checked by STEP 2.7, not by this signal |
 | `publication_leak_visibility_unknown` | some candidate repos had unknown visibility this run and were not swept; they are retried next run. Report the count (dispatch manual-check) |
 | `routing_trial_review_due` | a routing trial in the table is past its `reviewBy`. Report the type and dates (dispatch routing-review) |
 | `stale_copy_loaded` | severity high. Spawns in the last 24h came from a session that loaded AFTER a version newer than its guard was installed (a load at least 5 min after its scope's latest update, or the plugin cache showing the guard's own version was already replaced before it loaded), yet it runs the older guard: a stale copy was loaded (the 2026-09-24 incident shape). Report both versions and the sessions named. Remedy: remove the stale agent-companion entry in the desktop plugin manager, `/reload-plugins`, verify with a trivial ladder spawn; fresh session if that still fails |
@@ -290,7 +300,7 @@ node "$AC/scripts/audit.mjs" --only guard-canary,harness-drift,routing-doc
 `harness_version_changed`, `lineup_drift` or `model_retirement_approaching`
 fired, add one line to the report suggesting the operator run the routing
 canaries (`evals/`, a real-model `claude plugin eval` suite, about $2-3):
-`cd "$AC" && claude plugin eval . --trust-plugin --json results.json --threshold 0.8 --model claude-sonnet-5 --no-publish --max-cost-usd 3`.
+`cd "$AC" && claude plugin eval . --trust-plugin --json results.json --threshold 0.8 --model sonnet --no-publish --max-cost-usd 3`.
 Details are in docs/BENCHMARK.md "Routing eval suite". Do not execute it:
 it spends real model budget, and this routine is deterministic by design.
 

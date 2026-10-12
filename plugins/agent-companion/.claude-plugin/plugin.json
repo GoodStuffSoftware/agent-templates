@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.15",
+  "version": "0.31.16",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -130,6 +130,12 @@
       "type": "boolean",
       "title": "Claude Code release watch",
       "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on subagents, hooks, cache, compaction, effort, models, transcripts, SendMessage, worktrees, workflows and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one line naming the versions, the item count and the details path (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
+      "default": true
+    },
+    "pinned_model_check": {
+      "type": "boolean",
+      "title": "Pinned model id check",
+      "description": "The daily scout looks for a full model id (for example claude-sonnet-5-5) pinned where the alias (sonnet, opus, haiku) would do, because a pinned id never follows the next release while the alias does. It reads the plugin's tier data, your scheduled tasks, the model fields in your settings files, and the model line of agent definitions in your user and known project .claude directories. A `pinned_model_id` scout signal names each new pin once. Cloud routines on claude.ai cannot be listed by a script: the scout routine checks them when the session has the RemoteTrigger tool. Reads local files only, no network, no model call. Off = no scan, no signal.",
       "default": true
     },
     "daily_checkup": {

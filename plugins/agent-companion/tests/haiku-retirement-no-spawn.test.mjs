@@ -1,8 +1,10 @@
-// Proves the fall-back staged in config/model-tiers.json
-// (tiers.haiku.replacement) actually stops the routing table from ever naming
-// `ac-haiku` -- or the bare `haiku` alias -- as a spawn target once the
-// operator has flagged haiku retired (`tiers.haiku.retired: true`, written
-// here as a one-key state-dir override, exactly how an operator sets it).
+// Proves the fall-back mechanism (a tier's `replacement`) actually stops the
+// routing table from ever naming `ac-haiku` -- or the bare `haiku` alias -- as a
+// spawn target once a tier is flagged retired (`tiers.haiku.retired: true`).
+// The shipped haiku tier (Haiku 5.5) carries no retirement state, since the
+// planned Haiku 4.5 retirement was cancelled, so this file stages the whole
+// shape as a state-dir override (retiresAfter, retired, replacement), the way
+// the table looked while the retirement was planned.
 // The date alone no longer does that: tests/haiku-retired-flag.test.mjs
 // proves the NO-fall-back case (date passed, flag unset). tests/retirement-
 // window.test.mjs proves the scout's WARNING. This file is the dedicated,
@@ -17,24 +19,17 @@ import { makeFixture } from './helpers.mjs';
 
 const fx = makeFixture();
 test.after(() => fx.cleanup());
-// The operator's own switch: one key on the haiku tier, merged over the
-// shipped spec (the per-tier merge keeps retiresAfter and replacement).
+// The staged retirement, merged over the shipped haiku tier (the per-tier merge
+// keeps every other key).
+const RETIRES_AFTER = '2026-10-15';
 mkdirSync(fx.stateDir, { recursive: true });
-writeFileSync(join(fx.stateDir, 'model-tiers.json'), JSON.stringify({ tiers: { haiku: { retired: true } } }));
+writeFileSync(join(fx.stateDir, 'model-tiers.json'), JSON.stringify({
+  tiers: { haiku: { retiresAfter: RETIRES_AFTER, retired: true, replacement: { model: 'sonnet', effort: 'low' } } },
+}));
 const ctx = await import('../hooks/lib/context.mjs');
 const {
   resolveRoute, rungFor, taskTypeNames, modelTiers,
 } = ctx;
-
-// Pin this file to the retirement date actually in the shipped config, so a
-// future change to that date fails loudly here instead of this test quietly
-// checking the wrong two days.
-const RETIRES_AFTER = modelTiers().tiers.haiku.retiresAfter;
-assert.equal(
-  RETIRES_AFTER,
-  '2026-10-15',
-  'tiers.haiku.retiresAfter moved in config/model-tiers.json — update BEFORE/AFTER below to match',
-);
 
 // The date is irrelevant once the flag is set; any clock gives the same answer.
 const AFTER = '2026-10-16T12:00:00Z';
@@ -54,7 +49,8 @@ test('sanity: with the flag set, retirement() reports retired on any date and th
     assert.equal(r.replacement.model, 'sonnet');
     assert.equal(r.replacement.effort, 'low');
   }
-  assert.equal(modelTiers().tiers.haiku.retiresAfter, RETIRES_AFTER, 'the override must not have replaced the whole tier');
+  assert.equal(modelTiers().tiers.haiku.retiresAfter, RETIRES_AFTER);
+  assert.equal(modelTiers().tiers.haiku.resolvesTo.modelId, 'claude-haiku-5-5', 'the override must not have replaced the whole tier');
 });
 
 test('sanity: weight 1/2 with the flag set resolve to the staged replacement even before the date', () => {
@@ -103,7 +99,7 @@ for (const w of WEIGHTS) {
 }
 
 // --- code-review with a writer pinned to haiku ------------------------------
-for (const effort of ['', 'low']) {
+for (const effort of ['', 'low', 'medium']) {
   const tag = effort || '(none)';
   test(`code-review writer=haiku/${tag}: after retirement the reviewer stands in on the staged replacement`, () => {
     const r = resolveRoute({

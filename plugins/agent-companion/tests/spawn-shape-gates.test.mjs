@@ -60,7 +60,8 @@ test('gate1: resolved haiku-tier model is exempt (cheapest known tier)', () => {
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0);
     assert.equal(decisionOf(res.json), 'proceed');
-    assert.equal(res.json?.systemMessage, undefined, 'an exempt haiku-tier spawn must add no gate1 message');
+    // Haiku 5.5 takes an effort, so an unstated effort draws the rule-1 note; the exemption is about the FOREGROUND gate only.
+    assert.doesNotMatch(res.json?.systemMessage || '', /FOREGROUND|not Anthropic guidance/i, 'an exempt haiku-tier spawn must add no gate1 message');
 
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.gate1_applicable, true);

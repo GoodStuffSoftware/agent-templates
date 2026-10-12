@@ -16,7 +16,7 @@ import { join, basename, dirname } from 'node:path';
 import { userInfo } from 'node:os';
 import {
   modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
-  homeRoot, stateRoot, resolveRoute, isLadderAgentName,
+  homeRoot, stateRoot, resolveRoute, isLadderAgentName, routingProfileState,
   readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
   LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES, scoutSuppressed,
 } from '../hooks/lib/context.mjs';
@@ -34,7 +34,8 @@ import { projectAgentDrift, driftCounts } from './lib/agent-drift.mjs';
 import { churnVerdict, churnFreshness } from './lib/session-churn.mjs';
 import { runReleaseWatch } from './lib/release-watch.mjs';
 import { launchCheckup } from './lib/daily-checkup.mjs';
-import { loadRegister, readState as readRegisterState, openFlags, scanChangelogToState } from './lib/decision-register.mjs';
+import { loadRegister, readState as readRegisterState, openFlags, scanChangelogToState, scanSignalsToState, scanDatesToState } from './lib/decision-register.mjs';
+import { scanPinnedModels, findingKey } from './lib/pinned-model.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
@@ -281,6 +282,7 @@ if (opt('decision_register', true)) {
     if (!loaded.ok && !loaded.absent) {
       sig('decision_register_invalid', `decision register invalid: ${(loaded.errors || []).slice(0, 3).join('; ').slice(0, 300)}. Run node scripts/decision-register.mjs --check`, 'none');
     } else if (loaded.ok) {
+      scanDatesToState({ nowT: nowDate().getTime() });
       const flagged = [...new Set(openFlags(readRegisterState(), loaded.register, nowDate().getTime()).map((f) => f.decision))];
       if (flagged.length) sig('decision_review_due', `decision review due: ${flagged.join(', ')}`, 'none');
     }
@@ -313,6 +315,63 @@ try {
     suggestModelBenchmark(`new model alias/tier in the lineup: ${freshAliases.join(', ')}`);
   }
 } catch { /* config unreadable: the audit reports that separately */ }
+
+// --- 1c2. A tier's model id moved in the tier data ----------------------
+// config/model-tiers.json names the model each alias resolves to. When a release
+// moves one (haiku 4.5 -> 5.5, sonnet 5 -> 5.5) nothing else in the scout notices:
+// 1c only sees a new alias, and the decision register's changelog windows start at
+// a CLI version, so a model release between two CLI versions slips past both.
+// This signal records the ids and fires when one differs from the last run. A
+// baseline from before this signal existed (it has knownModelAliases but no
+// knownTierModelIds) fires once, naming the current ids, because the earlier ones
+// were never recorded. No baseline at all (a fresh install) is silent. The signal
+// has no dispatch of its own: its job is to reach the decision register's `signal`
+// triggers (scripts/lib/decision-register.mjs) and the operator's own review.
+try {
+  const cfg = modelTiers();
+  const cur = {};
+  for (const [alias, spec] of Object.entries(cfg.tiers || {})) {
+    const id = spec?.resolvesTo?.modelId;
+    if (typeof id === 'string' && id) cur[alias] = id;
+  }
+  next.knownTierModelIds = cur;
+  const prev = baseline.knownTierModelIds;
+  if (prev && typeof prev === 'object') {
+    const moved = Object.keys(cur).filter((a) => prev[a] && prev[a] !== cur[a]).map((a) => `${a} ${prev[a]} -> ${cur[a]}`);
+    if (moved.length) sig('model_tier_data_changed', `tier data moved: ${moved.join('; ')}. The alias now resolves to the newer model; a pinned id would not follow.`, 'none');
+  } else if (baseline.knownModelAliases && Object.keys(cur).length) {
+    sig('model_tier_data_changed', `tier data now names: ${Object.entries(cur).map(([a, id]) => `${a} ${id}`).join('; ')} (first record; earlier ids were not kept)`, 'none');
+  }
+} catch { /* config unreadable: the audit reports that separately */ }
+
+// --- 1c3. Pinned full model ids -----------------------------------------
+// A full model id pinned where the alias (sonnet, opus, haiku) would do never
+// follows a release: the alias moves when Anthropic ships a new model, the id does
+// not. A cloud routine pinned to claude-sonnet-5 kept running Sonnet 5 after
+// Sonnet 5.5 shipped. Looks at the plugin's tier data, ~/.claude/scheduled-tasks,
+// the settings files' model fields and agent definitions' `model:` (user level, and
+// each known project's .claude). Cloud routines on claude.ai cannot be listed by a
+// script: routines/calibration-scout-daily.md checks those. Advisory; reports only
+// pins not seen on an earlier run. Option pinned_model_check (default true) turns it off.
+if (opt('pinned_model_check', true) && !suppressedKinds.has('pinned_model_id')) {
+  try {
+    const claudeJsonPath = process.env.AGENT_COMPANION_DISCOVERY_CLAUDE_JSON || join(homeRoot(), '.claude.json');
+    const listed = readClaudeJsonProjectPaths({ claudeJsonPath }) || [];
+    const projects = [...new Set([process.cwd(), ...listed])]
+      .filter((p) => existsSync(join(p, '.claude')))
+      .slice(0, 200);
+    const found = scanPinnedModels({ claudeDirPath: claudeDir(), projects, cfg: modelTiers() });
+    const keys = found.map(findingKey);
+    const known = new Set(baseline.knownPinnedModelIds || []);
+    const fresh = found.filter((f) => !known.has(findingKey(f)));
+    next.knownPinnedModelIds = keys;
+    if (fresh.length) {
+      sig('pinned_model_id',
+        `${fresh.length} pinned model id(s): ${fresh.slice(0, 6).map((f) => f.text).join('; ')}${fresh.length > 6 ? '; ...' : ''}. An alias would do, and a pinned id never follows the next release.`,
+        'manual-check');
+    }
+  } catch { /* fail open: a pin scan never blocks the scout */ }
+}
 
 // --- 2. Unknown agent types -------------------------------------------
 // Enforcement fails open on these by design; detection must not.
@@ -576,6 +635,26 @@ try {
     }
   }
 } catch { /* config unreadable: the audit reports that separately */ }
+
+// The operator's own profile rows (/ac routing set) are trials too: a row in
+// state "trial" whose reviewBy has passed raises the same signal. A settled
+// row (state adopted, no reviewBy) and a retired row never do.
+try {
+  const ps = routingProfileState();
+  const n = nowDate();
+  const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+  if (ps.status === 'ok') {
+    for (const [name, row] of Object.entries(ps.profile.rows || {})) {
+      if (!row || row.state !== 'trial' || !row.reviewBy) continue;
+      const reviewUtc = Date.parse(row.reviewBy);
+      if (Number.isNaN(reviewUtc) || todayUtc < reviewUtc) continue;
+      sig('routing_trial_review_due',
+        `${name} routing trial due for review: compare spawn telemetry outcomes and escalation rates since ${row.since || 'trial start'} (profile row, reviewBy ${row.reviewBy} has passed)`,
+        'routing-review');
+      suggestModelBenchmark(`${name}'s routing profile trial reviewBy (${row.reviewBy}) has passed`);
+    }
+  }
+} catch { /* profile unreadable: the profile reader reports that separately */ }
 
 // --- 6. Plugin version behind ------------------------------------------
 // The copy that is INSTALLED is not always the copy that is CURRENT. Locally
@@ -1387,6 +1466,25 @@ if (ciStatusOn) {
     scrub = makeScrubber({ users: rawOsHandles(), publicUrls: knownPublicForScrub });
   }
   for (const s of signals) s.detail = scrub(s.detail);
+}
+
+// Hand this run's (scrubbed) signals to the decision register's `signal` triggers, so a
+// model release the scout saw can flag a decision whose changelog window starts later.
+// A new flag adds (or refreshes) the decision_review_due signal.
+if (opt('decision_register', true) && !suppressedKinds.has('decision_review_due')) {
+  try {
+    const nowT = nowDate().getTime();
+    const hit = scanSignalsToState(signals, { nowT });
+    if (hit.newFlags.length) {
+      const loaded = loadRegister();
+      if (loaded.ok) {
+        const flagged = [...new Set(openFlags(readRegisterState(), loaded.register, nowT).map((f) => f.decision))];
+        const at = signals.findIndex((s) => s.kind === 'decision_review_due');
+        if (at >= 0) signals.splice(at, 1);
+        if (flagged.length) signals.push({ kind: 'decision_review_due', detail: `decision review due: ${flagged.join(', ')}`, dispatch: 'none' });
+      }
+    }
+  } catch { /* the register is advisory: never block the scout */ }
 }
 
 writeFileSync(baselineFile, JSON.stringify({ ...baseline, ...next }, null, 2));

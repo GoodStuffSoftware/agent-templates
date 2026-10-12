@@ -362,10 +362,13 @@ test('a stale lock left by a crashed writer is broken; no lock or temp file surv
 
 test('F5 at write: a haiku row on an elevated type needs --waive-floor elevated (P2)', () => {
   freshRoot('haiku-f5');
-  expectCode(() => store.setRow('large-refactor', { model: 'haiku', now: NOW }), 'refused');
-  assert.throws(() => store.setRow('large-refactor', { model: 'haiku', now: NOW }), /F5: haiku takes no effort parameter, so it cannot meet the elevated floor \(high\); pass --waive-floor elevated/);
-  assert.equal(store.setRow('large-refactor', { model: 'haiku', waiveFloor: 'elevated', now: NOW }).revision, 1);
-  assert.equal(store.setRow('verify', { model: 'haiku', now: NOW }).revision, 2, 'a routine type needs no waiver');
+  // Haiku 5.5 takes an effort, so a haiku row on an elevated type is judged like any other
+  // model's: below the elevated floor (high) it needs the waiver.
+  expectCode(() => store.setRow('large-refactor', { model: 'haiku', effort: 'medium', now: NOW }), 'refused');
+  assert.throws(() => store.setRow('large-refactor', { model: 'haiku', effort: 'medium', now: NOW }), /F5: effort 'medium' is below the elevated floor \(high\); pass --waive-floor elevated/);
+  assert.throws(() => store.setRow('large-refactor', { model: 'haiku', now: NOW }), /haiku takes an effort parameter/);
+  assert.equal(store.setRow('large-refactor', { model: 'haiku', effort: 'medium', waiveFloor: 'elevated', now: NOW }).revision, 1);
+  assert.equal(store.setRow('verify', { model: 'haiku', effort: 'medium', now: NOW }).revision, 2, 'a routine type needs no waiver');
 });
 
 // S2 review P1/P8: the writer's lock is the shared helper (lib/file-lock.mjs).
@@ -492,7 +495,7 @@ test('CLI: set/why/unset/rollback/show end to end, with F1-F5 refusals at write'
       [['set', 'code-review', '--model', 'opus', '--effort', 'high'], /F3: a code-review row may set only a minimum effort, never a model/],
       [['set', 'bounded-feature', '--model', 'gpt-x', '--effort', 'high'], /'gpt-x' is not a tier alias/],
       [['set', 'bounded-feature', '--model', 'opus'], /opus takes an effort parameter/],
-      [['set', 'explore', '--model', 'haiku', '--effort', 'low'], /effort 'low' unsupported by haiku/],
+      [['set', 'explore', '--model', 'haiku', '--effort', 'turbo'], /effort 'turbo' unsupported by haiku/],
       [['set', 'no-such-type', '--model', 'sonnet', '--effort', 'low'], /exists in neither the shipped table nor the profile's types/],
       [['set', 'bounded-feature', '--model', 'sonnet', '--effort', 'low', '--waive-floor', 'elevated'], /F5: nothing to waive/],
     ];

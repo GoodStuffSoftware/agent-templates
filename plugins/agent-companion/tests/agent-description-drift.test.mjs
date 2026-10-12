@@ -250,13 +250,13 @@ test('mutation: a FALSE "default for <type>" claim in a config role fails the ch
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    // verify routes to haiku, not sonnet/low.
+    // verify routes to haiku/medium, not sonnet/low.
     writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-sonnet-low' ? { ...r, role: `${r.role}; default for verify` } : r)));
     assert.equal(sync(agentsDir).status, 0);
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
     assert.match(res.stderr, /ac-sonnet-low \[false-claim\]/);
-    assert.match(res.stderr, /"verify" currently routes to haiku, not this rung/);
+    assert.match(res.stderr, /"verify" currently routes to haiku\/medium, not this rung/);
   } finally {
     cleanup();
   }
@@ -305,13 +305,32 @@ test('mutation: a file whose name: is not its rung fails the check', () => {
   }
 });
 
-test('ac-haiku: generated from the tier\'s retiresAfter and replacement, keeps RETIRING, and no longer claims "verification"', () => {
+test('ac-haiku: plain rung description (Haiku 5.5 is not retiring), carries medium effort, no stale claims', () => {
   const text = readFileSync(join(PLUGIN_ROOT, 'agents', 'ac-haiku.md'), 'utf8');
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
   const desc = text.match(/^description:\s*"(.*)"$/m)[1];
-  assert.match(desc, new RegExp(`^RETIRING \\(no sooner than ${cfg.tiers.haiku.retiresAfter}\\)`));
-  assert.match(desc, new RegExp(`[Ff]alls back to ac-${cfg.tiers.haiku.replacement.model}-${cfg.tiers.haiku.replacement.effort}`));
-  assert.doesNotMatch(desc, /verification/);
+  assert.match(desc, /^Rung 1\/10: reads, searches, single commands\./);
+  assert.doesNotMatch(desc, /RETIRING|retire|Falls back|No effort parameter|verification/i);
+  assert.match(text, /^effort: medium$/m);
+  assert.doesNotMatch(text, /takes no effort parameter/);
+  assert.equal(cfg.ladder[0].effort, 'medium');
+  assert.equal(cfg.ladder[0].agent, 'ac-haiku');
+});
+
+test('a tier that DOES carry a staged retirement still gets the RETIRING description (generator unchanged)', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const agentsDir = fixtureAgentsDir(dir);
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'model-tiers.json'), JSON.stringify({ tiers: { haiku: { retiresAfter: '2030-01-01', retired: false, replacement: { model: 'sonnet', effort: 'low' } } } }));
+    assert.equal(sync(agentsDir).status, 0);
+    const desc = readFileSync(join(agentsDir, 'ac-haiku.md'), 'utf8').match(/^description:\s*"(.*)"$/m)[1];
+    assert.match(desc, /^RETIRING \(no sooner than 2030-01-01\)/);
+    assert.match(desc, /Falls back to ac-sonnet-low/);
+    assert.equal(check(agentsDir).status, 0);
+  } finally {
+    cleanup();
+  }
 });
 
 test('every "Base default for" claim is true against the shipped routes, and says the profile may differ', async () => {

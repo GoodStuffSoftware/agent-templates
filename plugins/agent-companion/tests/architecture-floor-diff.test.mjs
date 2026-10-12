@@ -65,6 +65,17 @@ async function stage(contextSource, configText) {
 const label = (r) => `${r.model}${r.effort ? '/' + r.effort : ''}`;
 const shape = (r) => ({ model: r.model, effort: r.effort || '', layer: r.layer });
 
+// 0.31.16 second permitted class: the grid's tier effort floor (`tiers.<alias>.minEffort`,
+// haiku: medium). A grid answer (both sides) on a tier with a minEffort whose old effort is
+// below it must come back as the SAME model at exactly minEffort. Nothing else qualifies.
+function isTierEffortFloorLift(cfg, o, n) {
+  if (o.layer !== 'grid' || n.layer !== 'grid' || !o.model || n.model !== o.model) return false;
+  const min = (cfg.tiers || {})[o.model]?.minEffort;
+  if (!min) return false;
+  const rank = (e) => (cfg.efforts || {})[e]?.rank ?? -1;
+  return rank(o.effort) < rank(min) && n.effort === min;
+}
+
 // The differential over one config text: base and current resolver, same
 // config. Returns every differing case and the ones outside the invariant.
 async function differential(configText) {
@@ -77,6 +88,7 @@ async function differential(configText) {
     consequences: Object.keys(cfg.consequence || {}),
   });
   const changed = [];
+  const tierLifts = [];
   const violations = [];
   for (const now of LIVE_CLOCKS) {
     for (const c of cases) {
@@ -84,13 +96,14 @@ async function differential(configText) {
       const n = shape(cur.resolveRoute({ ...c.args, now }));
       if (JSON.stringify(o) === JSON.stringify(n)) continue;
       const tag = `${now.slice(0, 10)} ${c.key}: ${label(o)}@${o.layer} -> ${label(n)}@${n.layer}`;
+      if (isTierEffortFloorLift(cfg, o, n)) { tierLifts.push(tag); continue; }
       changed.push(tag);
       const ok = c.args.type === 'integration' && o.layer === 'trial' && n.layer === 'trial'
         && n.model === INTEGRATION_WANT.model && n.effort === INTEGRATION_WANT.effort;
       if (!ok) violations.push(tag);
     }
   }
-  return { changed, violations };
+  return { changed, violations, tierLifts };
 }
 
 function assertInvariant({ changed, violations }) {
@@ -104,6 +117,17 @@ test('the vendored reference is the pinned baseline resolver, byte for byte', ()
     assert.match(want, /^[0-9a-f]{64}$/, `baseline sha256 for ${rel}`);
     assert.equal(sha256Text(join(REFERENCE_DIR, rel)), want, `reference/${rel} is not the baseline file — it must never be edited`);
   }
+});
+
+test('the tier effort floor moves only grid answers on a tier with minEffort, each to exactly minEffort', async () => {
+  const { tierLifts, violations } = await differential(CUR_CONFIG);
+  assert.ok(tierLifts.length > 0, 'the haiku minEffort floor lifts at least one grid case (mechanical weight 1-2)');
+  assert.ok(tierLifts.every((t) => /haiku\/low@grid -> haiku\/medium@grid$/.test(t)), tierLifts.filter((t) => !/haiku\/low@grid -> haiku\/medium@grid$/.test(t)).slice(0, 5).join(', '));
+  assert.deepEqual(violations, []);
+  // Without the floor in the config, the same logic moves nothing: the lift is the config's, not a hidden rule.
+  const noFloor = JSON.parse(CUR_CONFIG);
+  delete noFloor.tiers.haiku.minEffort;
+  assert.equal((await differential(JSON.stringify(noFloor))).tierLifts.length, 0);
 });
 
 test('the base resolver predates trial waivers: on the current config it lifts integration\'s trial to the elevated floor', async () => {
