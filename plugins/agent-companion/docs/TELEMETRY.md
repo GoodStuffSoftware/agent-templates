@@ -23,6 +23,7 @@ ${AGENT_COMPANION_STATE_DIR}                      # override, mostly for tests
     subagent-starts.jsonl        # one record per subagent actually starting
     denials.jsonl                 # one record per guard firing
     unknown-agent-types.jsonl    # harness drift signal
+    struggle.jsonl               # one row per scored operator prompt (scores only; struggle detector)
     fixtures.jsonl                # every row from a test/verify session (see Fixtures below)
   state/
     baseline.json                 # last-seen harness version + counters
@@ -471,6 +472,23 @@ the content after all. `retry-ran` / `deny` is the false-denial rate to watch;
 caught, and `allow_reason` says where the rest slipped through. Any `lock-timeout`
 row is a miss to count: with per-agent state files it should be rare. The toggle
 is `read_dedupe`.
+
+### `struggle.jsonl` — the struggle detector
+
+Written by `hooks/struggle-detector.mjs` through the shared log writer: one row per operator prompt that was scored (a task notification, a pasted block and a message from another session are not scored and write nothing). Scores only; no prompt text is stored here or in the detector state (`state/struggle/<hash of session>.json` keeps scores, fire positions and hashed sentence stems).
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `ts` | ISO 8601 string | when it was written |
+| `session_id` | string | the session |
+| `n` | number | how many operator prompts the detector has counted in the session, counting this one |
+| `score` | number | this prompt's score (strong +2, weak +1, repeat +2, correction after a lead question +1) |
+| `flagged` | number | how many of the last 6 counted prompts scored 2 or more |
+| `fired` | boolean | whether the detector spoke (false for an unattended run, which is scored and logged only) |
+| `effort` | string | null | the lead's effort when it fired, else null |
+
+The toggle is `struggle_detector`.
 
 ### `pr-wait.jsonl` — the PR and CI wait script
 

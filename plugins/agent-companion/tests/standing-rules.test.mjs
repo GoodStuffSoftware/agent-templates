@@ -679,3 +679,28 @@ test('wrapper stripping is linear: 1 MB of nested, unclosed and mixed wrappers f
     cleanup();
   }
 });
+
+test('renderRules names the rules it dropped over the cap (first six, then an ellipsis)', () => {
+  const rules = [{ id: 'keep', then: 'k'.repeat(10) }];
+  for (let i = 1; i <= 8; i += 1) rules.push({ id: `big-${i}`, then: 'b'.repeat(50) });
+  const kept = renderRules(rules.slice(0, 1), { maxChars: 100000 });
+  const out = renderRules(rules, { maxChars: kept.length + 10 });
+  assert.match(out, /\(8 more rules dropped: over the \d+-char limit: big-1, big-2, big-3, big-4, big-5, big-6, \.\.\.\)/);
+  const one = renderRules(rules.slice(0, 2), { maxChars: kept.length });
+  assert.match(one, /\(1 more rule dropped: over the \d+-char limit: big-1\)/);
+  assert.equal(renderRules(rules.slice(0, 1), { maxChars: kept.length }), kept, 'nothing dropped: no extra line');
+});
+
+test('the built-in lead session-start rules, effort check on, stay lean enough to leave room under the default cap', () => {
+  const { cleanup } = makeFixture();
+  try {
+    writeFileSync(rulesPath(), JSON.stringify([{ id: 'lead-effort-check', enabled: true }]));
+    const lines = matchRules({ scope: 'session-start', sessionId: 'lean-1' })
+      .filter((r) => r.id !== 'pr-wait-hint') // its length depends on the install path
+      .map((r) => `\n- ${r.then.trim()}`.length);
+    const total = lines.reduce((a, b) => a + b, 0);
+    assert.ok(total <= 1650, `built-in lead rules (without pr-wait-hint) take ${total} chars; the operator's own rules share the 3000-char cap`);
+  } finally {
+    cleanup();
+  }
+});

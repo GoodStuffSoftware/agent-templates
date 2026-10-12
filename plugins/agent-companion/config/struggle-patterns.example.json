@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to <state root>/config/struggle-patterns.json to add your own phrases. Each entry is a JavaScript regular expression source, matched case-insensitively. strong = +2, weak = +1. Placeholders only below; replace them.",
+  "strong": [
+    "\\b{{YOUR_STRONG_CORRECTION_PHRASE}}\\b"
+  ],
+  "weak": [
+    "\\b{{YOUR_WEAK_CORRECTION_PHRASE}}\\b"
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.14",
+  "version": "0.31.15",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -485,10 +485,76 @@
       "description": "Deny a Read of lines this agent already read, when the file is unchanged since and the read is at least 2,000 characters. Fills the gap Claude Code's own 'file unchanged' stub leaves: a range inside an earlier larger read, or a repeat of an earlier range after another one. The denial says so in one sentence and the same call, repeated, runs. Per agent; cleared by an edit, any change of the file, and compaction. Off = every Read runs. Also CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0.",
       "default": true
     },
+    "catchup_note": {
+      "type": "boolean",
+      "title": "Catch-up note",
+      "description": "Once per item per session, add a short note listing what arrived after the session started: new standing rules, new MEMORY.md index lines, new CLAUDE.md lines, and always/never instructions the operator typed in another session in the last 24 hours. Advisory only; silent when nothing is new.",
+      "default": true
+    },
     "routine_placement_note": {
       "type": "boolean",
       "title": "Routine placement note",
       "description": "On the desktop scheduled-task create/update tools, add a short note on the folder effort pin, the start effort and the /ac recommend placement rule. Advisory only; never blocks.",
+      "default": true
+    },
+    "publish_check": {
+      "type": "boolean",
+      "title": "UI sign-off check",
+      "description": "Before an Artifact call, or a question asking the operator to approve UI work, add one short note: capture a narrow-width screenshot, try each input once, attach a screenshot or dev URL to the sign-off. Advisory only; never blocks.",
+      "default": true
+    },
+    "window_check": {
+      "type": "boolean",
+      "title": "windowsHide check",
+      "description": "When a Write or Edit of a JS or TS file adds a child_process spawn, exec, execFile or fork call without windowsHide in that call, add one short note. Advisory only; never blocks.",
+      "default": true
+    },
+    "chip_check": {
+      "type": "boolean",
+      "title": "Chip check",
+      "description": "Before the desktop spawn_task (chip) tool, add one short note: an idle lead that holds the context should do the follow-up itself. Advisory only; never blocks.",
+      "default": true
+    },
+    "live_sessions": {
+      "type": "boolean",
+      "title": "Live sessions note",
+      "description": "Advisory only, never blocks: at session start, and again on a prompt when the set changed, list other sessions in this repo (and the repos named by related_repos) that were active in the last 2 hours, so the lead knows who to tell before changing shared work. Zero tokens when none are live.",
+      "default": true
+    },
+    "related_repos": {
+      "type": "string",
+      "title": "Live sessions: related repos",
+      "description": "JSON map of repo name to the repo names whose live sessions it should also list, for example {\"app-a\":[\"app-b\"],\"app-b\":[\"app-a\"]}. Empty lists the same repo only.",
+      "default": ""
+    },
+    "peer_message_warning": {
+      "type": "boolean",
+      "title": "Peer message warning",
+      "description": "Advisory only, never blocks: before SendMessage to a target that is not one of this session's own subagents (and not main) while this session has subagents still running, say the message goes to another session and name the running subagents. Once per target per session.",
+      "default": true
+    },
+    "known_peers": {
+      "type": "string",
+      "title": "Peer message warning: known peers",
+      "description": "JSON array of session names that SendMessage may address without the peer message warning, for example [\"coordinator\"]. A session that has already sent this session a cross-session message is known automatically. Empty warns for every non-worker target.",
+      "default": ""
+    },
+    "overdue_worker_warning": {
+      "type": "boolean",
+      "title": "Overdue worker notice",
+      "description": "Advisory only, never blocks: tell the lead, at its next tool call or prompt, when one of its background workers has run longer than overdue_worker_minutes. Once per worker.",
+      "default": true
+    },
+    "overdue_worker_minutes": {
+      "type": "number",
+      "title": "Overdue worker notice: minutes",
+      "description": "Minutes a background worker may run before the overdue notice (1.5 x the 15-minute worker size). 0 turns the notice off.",
+      "default": 22
+    },
+    "struggle_detector": {
+      "type": "boolean",
+      "title": "Struggle detector",
+      "description": "On each operator prompt, score it for corrections and repeats; when 2 of the last 6 prompts score 2 or more, tell the operator and give the lead one line. Zero tokens otherwise; at most 2 per session.",
       "default": true
     },
     "poll_guard": {

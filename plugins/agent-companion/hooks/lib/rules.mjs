@@ -124,12 +124,11 @@ export function leadEffortRolloutId() {
 }
 export function leadEffortCheckText(level) {
   return [
-    `Orchestrating agents (workers, reviewers, several open threads, releases)? Before the first spawn and again after any resume or compaction, call get_session with session_id "self" and read its effort field (get_session can show the effort the session started with: if the operator says it has already been raised, continue); an orchestration lead runs at ${level}.`,
-    `Unattended (scheduledTaskId in get_session, a headless or -p run, or no AskUserQuestion tool): do not ask; state the effort once only if it is below ${level}.`,
-    `Interactive and below ${level}: ask with the AskUserQuestion tool (the options selector), not in prose; no spawn and no other tool call until it is answered. Header "Lead effort"; name the current effort and why this looks like orchestration.`,
-    `Option 1 "Raise to ${level} (Recommended)": the operator raises it with the app's effort control (you cannot); wait until get_session "self" shows ${level} or they say continue.`,
-    'Option 2 "Stay at <current>": continue, and do not ask again this session.',
-    `At ${level} or above: say nothing and do not ask.`,
+    `Orchestrating (workers, reviewers, several threads, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (it may show the starting effort: if the operator says it was raised, continue). A lead runs at ${level}; at ${level} or above, say nothing and do not ask.`,
+    `Unattended (scheduledTaskId in get_session, headless or -p run, no AskUserQuestion tool): do not ask; state the effort once, only if below ${level}.`,
+    `Interactive and below ${level}: ask with AskUserQuestion (options selector), not prose; no spawn or other tool call until answered. Header "Lead effort"; name the current effort and why this is orchestration.`,
+    `Option 1 "Raise to ${level} (Recommended)": the operator raises it in the app (you cannot); wait until get_session shows ${level} or they say continue.`,
+    'Option 2 "Stay at <current>": continue; do not ask again this session.',
     'Never raise to max, never lower, never suggest lowering.',
   ].join(' ');
 }
@@ -148,7 +147,7 @@ const LEAD_EFFORT_AFTER = Object.freeze({ then: LEAD_EFFORT_CHECK_TEXT_HIGH });
 // Size: the wording WITHOUT the path is pinned at 125 characters (a test), so
 // the whole line is that plus the plugin path (~70 in a typical cache install).
 const PLUGIN_ROOT = (process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('../..', import.meta.url))).replace(/\\/g, '/').replace(/\/+$/, '');
-export const PR_WAIT_HINT_WORDING = 'PR/CI wait, one call, no gh/sleep loops: run_in_background (foreground dies at 2m): node "@/scripts/pr-wait.mjs" <pr|branch>';
+export const PR_WAIT_HINT_WORDING = 'PR/CI wait: run_in_background (foreground dies at 2m), no gh/sleep loops: node "@/scripts/pr-wait.mjs" <pr|branch>';
 export const PR_WAIT_HINT_TEXT = PR_WAIT_HINT_WORDING.replace('@', () => PLUGIN_ROOT); // a function, so a `$` in the path is literal, not a replace pattern
 
 function builtinRules() {
@@ -171,7 +170,7 @@ function builtinRules() {
       scope: 'session-start',
       gate: 'brevity',
       when: null,
-      then: 'Report to the user at outcome level: what happened, what is next, what needs them. Blockers in full; detail in a linked file, no narrative or recaps.',
+      then: 'Report at outcome level: what happened, what is next, what needs the user. Blockers in full; detail in a linked file, no narrative or recaps.',
       note: null,
     },
     {
@@ -197,7 +196,7 @@ function builtinRules() {
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'You are an orchestrator: reads, searches, shell, tests and self-contained edits go to subagents; you plan and decide. Max three execution calls in a row. Set every spawn\'s model explicitly.',
+      then: 'You are an orchestrator: reads, searches, shell, tests and self-contained edits go to subagents; you plan and decide. Max three execution calls in a row. Set each spawn\'s model.',
       gate: null,
       note: null,
     },
@@ -217,7 +216,7 @@ function builtinRules() {
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'Continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff: a continued worker re-reads its whole earlier context on every call.',
+      then: 'Continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff: continuing re-reads all context each call.',
       gate: null,
       note: null,
     },
@@ -714,9 +713,9 @@ export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
 
 // '' for an empty list — silence is the default state throughout this
 // plugin. Otherwise a small header plus one bullet per rule's `then`,
-// stopping once maxChars would be exceeded and naming how many were left
-// out, so an operator who set the cap too low sees that instead of quietly
-// losing rules with no trace.
+// skipping any rule that would push past maxChars, then one closing line that
+// counts the rules left out and names them (first six ids), so an operator
+// whose rules outgrew the cap sees which ones instead of quietly losing them.
 export function renderRules(rules, { maxChars } = {}) {
   const list = Array.isArray(rules) ? rules : [];
   if (list.length === 0) return '';
@@ -725,18 +724,20 @@ export function renderRules(rules, { maxChars } = {}) {
   const header = '\n\n[agent-companion: standing rules]';
   let body = '';
   let used = header.length;
-  let dropped = 0;
+  const dropped = [];
 
   for (const r of list) {
     const line = `\n- ${String((r && r.then) || '').trim()}`;
-    if (used + line.length > cap) { dropped += 1; continue; }
+    if (used + line.length > cap) { dropped.push(r && typeof r.id === 'string' && r.id ? r.id : '(no id)'); continue; }
     body += line;
     used += line.length;
   }
 
   let out = header + body;
-  if (dropped > 0) {
-    out += `\n- (${dropped} more rule${dropped === 1 ? '' : 's'} dropped: over the ${cap}-char limit)`;
+  if (dropped.length > 0) {
+    const n = dropped.length;
+    const named = dropped.slice(0, 6).join(', ') + (n > 6 ? ', ...' : '');
+    out += `\n- (${n} more rule${n === 1 ? '' : 's'} dropped: over the ${cap}-char limit: ${named})`;
   }
   return out;
 }

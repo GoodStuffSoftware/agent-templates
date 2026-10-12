@@ -126,7 +126,7 @@ try {
       }
 
       persist(appendUserRule({
-        id, enabled: true, scope, when: when ?? null, then: thenText.trim(), gate: null, note: note ?? null,
+        id, enabled: true, scope, when: when ?? null, then: thenText.trim(), gate: null, note: note ?? null, added: new Date().toISOString(),
       }), 'add');
       console.log(`rules add: added "${id}" (${scope}).`);
       break;

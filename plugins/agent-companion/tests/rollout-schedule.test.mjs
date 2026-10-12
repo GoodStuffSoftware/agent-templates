@@ -255,9 +255,9 @@ test('SessionStart hook: the lead rule says xhigh before leads-high and high aft
       return res.stdout;
     };
     const early = run('2999-01-01T00:00:00Z');
-    assert.match(early, /an orchestration lead runs at xhigh/);
+    assert.match(early, /A lead runs at xhigh/);
     const late = run('2000-01-01T00:00:00Z');
-    assert.match(late, /an orchestration lead runs at high\b/);
+    assert.match(late, /A lead runs at high\b/);
     assert.doesNotMatch(late, /runs at xhigh/);
   } finally {
     f.cleanup();

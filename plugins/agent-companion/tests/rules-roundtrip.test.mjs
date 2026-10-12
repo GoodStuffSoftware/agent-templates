@@ -35,7 +35,8 @@ test('add, disable, enable, remove of another rule leave every field they do not
 
     cli('add', '--id', 'brand-new', '--scope', 'session-start', '--then', 'Added text.');
     const expected = operator();
-    expected.rules.push({ id: 'brand-new', enabled: true, scope: 'session-start', when: null, then: 'Added text.', gate: null, note: null });
+    const added = readBack().rules[2].added; // stamped at add time; pinned in its own test below
+    expected.rules.push({ id: 'brand-new', enabled: true, scope: 'session-start', when: null, then: 'Added text.', gate: null, note: null, added });
     assert.deepEqual(readBack(), expected, 'add changed only the new entry');
 
     cli('disable', 'plain-rule');
@@ -115,5 +116,21 @@ test('add refuses an id that the file already holds as a malformed entry', () =>
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /already holds an entry with id "foo"/);
     assert.equal(readFileSync(rulesPath(), 'utf8'), text);
+  } finally { fx.cleanup(); }
+});
+
+test('add stamps added: <ISO now> on the new entry only; existing entries are untouched', () => {
+  const fx = makeFixture();
+  try {
+    seed(JSON.stringify(operator(), null, 2));
+    const before = Date.now();
+    cli('add', '--id', 'stamped', '--scope', 'session-start', '--then', 'T');
+    const after = Date.now();
+    const doc = readBack();
+    const entry = doc.rules.find((r) => r.id === 'stamped');
+    assert.match(entry.added, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.ok(Date.parse(entry.added) >= before - 1000 && Date.parse(entry.added) <= after + 1000);
+    assert.deepEqual(doc.rules.slice(0, 2), operator().rules, 'existing entries carry no added key');
+    assert.equal(doc.ownerNote, 'keep me');
   } finally { fx.cleanup(); }
 });

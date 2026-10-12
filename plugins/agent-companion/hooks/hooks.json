@@ -1,5 +1,7 @@
 {
-  "modules": ["./compact-floor.mjs"],
+  "modules": [
+    "./compact-floor.mjs"
+  ],
   "hooks": {
     "PreToolUse": [
       {
@@ -83,6 +85,45 @@
         ]
       },
       {
+        "matcher": "^(Artifact|AskUserQuestion)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/publish-check.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^(Write|Edit)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/window-check.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^mcp__.*spawn_task$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/chip-check.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "^(ScheduleWakeup|Monitor)$",
         "hooks": [
           {
@@ -106,9 +147,38 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "^SendMessage$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
+              "--event",
+              "send"
+            ],
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/session-delta.mjs",
+              "--event",
+              "snapshot"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
       {
         "matcher": "^(compact|clear)$",
         "hooks": [
@@ -187,6 +257,20 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
+              "--event",
+              "session-start"
+            ],
+            "timeout": 5
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -214,9 +298,41 @@
             "type": "command",
             "command": "node",
             "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/session-delta.mjs",
+              "--event",
+              "diff"
+            ],
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs"
             ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/struggle-detector.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
+              "--event",
+              "user-prompt"
+            ],
+            "timeout": 5
           }
         ]
       }
@@ -249,6 +365,20 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/git-brief.mjs",
               "--event",
               "subagent-start"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
+              "--event",
+              "worker-start"
             ],
             "timeout": 5
           }
@@ -327,6 +457,20 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
+              "--event",
+              "worker-stop"
+            ],
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -398,6 +542,20 @@
               "invalidate"
             ],
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
+              "--event",
+              "tick"
+            ],
+            "timeout": 5
           }
         ]
       }

@@ -42,31 +42,31 @@ test('the minimal enable override turns it on and keeps the shipped wording', ()
 test('the wording asks with AskUserQuestion, not in prose, and keeps the unattended carve-out', () => {
   const t = LEAD_EFFORT_CHECK_TEXT;
   // when to check
-  assert.match(t, /Before the first spawn and again after any resume or compaction/);
-  assert.match(t, /get_session with session_id "self" and read its effort field/);
-  assert.match(t, /orchestration lead runs at xhigh/);
-  assert.ok(t.length < 1200, `the rule is paid for at every session start: ${t.length} chars`);
+  assert.match(t, /Before the first spawn and after any resume or compaction/);
+  assert.match(t, /get_session with session_id "self" and read its effort/);
+  assert.match(t, /A lead runs at xhigh/);
+  assert.ok(t.length < 1000, `the rule is paid for at every session start: ${t.length} chars`);
   // interactive: the options selector, stop until answered
-  assert.match(t, /AskUserQuestion tool \(the options selector\), not in prose/);
-  assert.match(t, /no spawn and no other tool call until it is answered/);
+  assert.match(t, /AskUserQuestion \(options selector\), not prose/);
+  assert.match(t, /no spawn or other tool call until answered/);
   assert.match(t, /Header "Lead effort"/);
-  assert.match(t, /name the current effort and why this looks like orchestration/);
+  assert.match(t, /name the current effort and why this is orchestration/);
   // option 1
   assert.ok(t.includes('Option 1 "Raise to xhigh (Recommended)"'));
-  assert.match(t, /the operator raises it with the app's effort control \(you cannot\)/);
-  assert.match(t, /wait until get_session "self" shows xhigh or they say continue/);
+  assert.match(t, /the operator raises it in the app \(you cannot\)/);
+  assert.match(t, /wait until get_session shows xhigh or they say continue/);
   assert.match(t, /you cannot/);
   // the self-set path is gone: no ToolSearch load, no set_session_effort call
   assert.doesNotMatch(t, /set_session_effort/);
   assert.doesNotMatch(t, /ToolSearch/);
   // option 2
-  assert.ok(t.includes('Option 2 "Stay at <current>": continue, and do not ask again this session.'));
+  assert.ok(t.includes('Option 2 "Stay at <current>": continue; do not ask again this session.'));
   // limits
   assert.match(t, /Never raise to max, never lower/);
   // unattended: never asked
-  assert.match(t, /Unattended \(scheduledTaskId in get_session, a headless or -p run, or no AskUserQuestion tool\): do not ask/);
-  assert.match(t, /state the effort once only if it is below xhigh/);
-  assert.match(t, /At xhigh or above: say nothing and do not ask./);
+  assert.match(t, /Unattended \(scheduledTaskId in get_session, headless or -p run, no AskUserQuestion tool\): do not ask/);
+  assert.match(t, /state the effort once, only if below xhigh/);
+  assert.match(t, /at xhigh or above, say nothing and do not ask/);
   assert.match(t, /never suggest lowering/);
   // the old prose-ask wording is gone
   assert.doesNotMatch(t, /ask them to raise it/);

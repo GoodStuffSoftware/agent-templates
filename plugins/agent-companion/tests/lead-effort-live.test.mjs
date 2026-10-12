@@ -59,15 +59,15 @@ test('wording: one template, xhigh and high variants, no max raise, no lowering'
   assert.equal(LEAD_EFFORT_CHECK_TEXT, leadEffortCheckText('xhigh'));
   assert.equal(LEAD_EFFORT_CHECK_TEXT_HIGH, leadEffortCheckText('high'));
   for (const [text, lv] of [[LEAD_EFFORT_CHECK_TEXT, 'xhigh'], [LEAD_EFFORT_CHECK_TEXT_HIGH, 'high']]) {
-    assert.ok(text.includes(`an orchestration lead runs at ${lv}.`));
+    assert.ok(text.includes(`A lead runs at ${lv};`));
     assert.ok(text.includes(`Option 1 "Raise to ${lv} (Recommended)"`));
-    assert.ok(text.includes('Option 2 "Stay at <current>": continue, and do not ask again this session.'));
-    assert.ok(text.includes(`Interactive and below ${lv}: ask with the AskUserQuestion tool`));
-    assert.ok(text.includes(`state the effort once only if it is below ${lv}.`));
-    assert.ok(text.includes(`At ${lv} or above: say nothing and do not ask.`));
+    assert.ok(text.includes('Option 2 "Stay at <current>": continue; do not ask again this session.'));
+    assert.ok(text.includes(`Interactive and below ${lv}: ask with AskUserQuestion`));
+    assert.ok(text.includes(`state the effort once, only if below ${lv}.`));
+    assert.ok(text.includes(`at ${lv} or above, say nothing and do not ask.`));
     assert.ok(text.endsWith('Never raise to max, never lower, never suggest lowering.'));
     assert.doesNotMatch(text, /Raise to max|set_session_effort/);
-    assert.ok(text.length < 1200, `${text.length}`);
+    assert.ok(text.length < 1000, `${text.length}`);
   }
   assert.ok(!LEAD_EFFORT_CHECK_TEXT_HIGH.includes('xhigh'), 'the high wording never names xhigh');
 });
@@ -75,12 +75,12 @@ test('wording: one template, xhigh and high variants, no max raise, no lowering'
 test('wording: the high text is exactly the operator-facing wording (pinned)', () => {
   assert.equal(
     LEAD_EFFORT_CHECK_TEXT_HIGH,
-    'Orchestrating agents (workers, reviewers, several open threads, releases)? Before the first spawn and again after any resume or compaction, call get_session with session_id "self" and read its effort field (get_session can show the effort the session started with: if the operator says it has already been raised, continue); an orchestration lead runs at high. ' +
-    'Unattended (scheduledTaskId in get_session, a headless or -p run, or no AskUserQuestion tool): do not ask; state the effort once only if it is below high. ' +
-    'Interactive and below high: ask with the AskUserQuestion tool (the options selector), not in prose; no spawn and no other tool call until it is answered. Header "Lead effort"; name the current effort and why this looks like orchestration. ' +
-    'Option 1 "Raise to high (Recommended)": the operator raises it with the app\'s effort control (you cannot); wait until get_session "self" shows high or they say continue. ' +
-    'Option 2 "Stay at <current>": continue, and do not ask again this session. ' +
-    'At high or above: say nothing and do not ask. Never raise to max, never lower, never suggest lowering.',
+    'Orchestrating (workers, reviewers, several threads, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (it may show the starting effort: if the operator says it was raised, continue). A lead runs at high; at high or above, say nothing and do not ask. ' +
+    'Unattended (scheduledTaskId in get_session, headless or -p run, no AskUserQuestion tool): do not ask; state the effort once, only if below high. ' +
+    'Interactive and below high: ask with AskUserQuestion (options selector), not prose; no spawn or other tool call until answered. Header "Lead effort"; name the current effort and why this is orchestration. ' +
+    'Option 1 "Raise to high (Recommended)": the operator raises it in the app (you cannot); wait until get_session shows high or they say continue. ' +
+    'Option 2 "Stay at <current>": continue; do not ask again this session. ' +
+    'Never raise to max, never lower, never suggest lowering.',
   );
 });
 
