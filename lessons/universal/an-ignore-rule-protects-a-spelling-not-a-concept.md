@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-10-05
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 A deny-list is a list of strings, not a statement of intent, but it reads to a later reviewer as one. A plausible-looking entry actively suppresses the question "what else belongs here?" The failure is not an empty list (that gets noticed); it is a list with one or two reasonable entries, which reads as proof the category was handled.
 
@@ -26,3 +26,5 @@ In both, the covered spelling came from the *documentation* and the exposed one 
 Applies to `.gitignore`, deploy/upload ignore lists, bundler excludes, log redaction rules, secret scanners and lint ignores alike.
 
 Related: [[a-gate-that-exists-vs-a-gate-that-covers]], [[guard-coverage-enumerate-issuing-surfaces]], [[content-guard-honors-gitignore]].
+
+**Third instance: a command guard.** A destructive-git deny rule matched the literal `git push`, so global options between `git` and the subcommand (`-C`, `-c`, `--git-dir`), `git.exe`, an upper-case `GIT`, short flag clusters (`-f`, `-uf`), `-d`, a `+refspec`, `--mirror`, and branch deletion with force in any spelling all slipped through. Each was proven allowed on the live version before the fix. Audit a guard like an ignore list: write the spelling matrix of the intent, run every row against the rule, and fix by adding patterns ([[change-a-guard-against-a-recorded-corpus]]).

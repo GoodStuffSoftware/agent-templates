@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-21
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 On Windows, a "hide the window" option only covers the process a supervisor launches directly. If that process itself shells out one or more times before the real program runs, whichever descendant first needs a console allocates one — and that flag never rode along.
 
@@ -27,3 +27,8 @@ The incident: a background dev server run under a process supervisor kept openin
 - Distinguish "window came back because the app un-hid it" from "window came back because the supervisor restarted a killed process" before writing up a fix.
 
 Related: [[track-the-generator-ignore-the-output]], [[assert-the-resolved-value-not-the-declaration]], [[a-silent-guard-needs-a-canary]].
+
+**Launch shapes that always allocate a visible console (the rule, not only the diagnosis).** Nothing an agent launches may open a window on the operator's desktop. Three recurring shapes: a session-start hook spawning a `detached` worker without `windowsHide`; `cmd /c start ...` without `/b` (used to pin CPU affinity); and a driver whose child processes each got their own console.
+- Default to the POSIX shell tool; use `cmd.exe` only when a task needs it, hidden. Where a `start` feature (affinity, priority) is needed, use `start /b`; from an MSYS shell double the slashes (`cmd //c start //b ...`) because single-slash flags are path-rewritten. `Start-Process` only with `-WindowStyle Hidden`.
+- Every Node `spawn`/`exec`/`fork` sets `windowsHide: true`, mandatory with `detached: true`. A repo-wide sweep of scripts and tests is cheap and was done in one review-gated change. Long-lived listeners launch through a hidden wrapper or a process manager, never as a bare runtime exe.
+- To diagnose, enumerate VISIBLE console-class windows and walk the owner's parent chain; do not count console-host processes, most of which are hidden. Three unrelated sessions hit this on one day.

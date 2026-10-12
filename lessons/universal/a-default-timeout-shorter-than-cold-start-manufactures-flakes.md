@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-14
 provenance: [contrib-2]
-corroborated: 3
+corroborated: 4
 ---
 A recurring gate failure was blamed, across three separate incidents and several months, on orphaned processes, then on memory exhaustion, then on the diff under test. It was none of those. The runner's **default per-test timeout had never been set**, so a five-second budget applied repo-wide — including to tests that spawn real operating-system subprocesses or use dynamic imports, whose cold start alone can approach that budget under any contention.
 
@@ -23,3 +23,7 @@ The reproduction that settled it: the full suite run five times **sequentially**
 - Never respond to this class by bypassing the gate. The gate is reporting real contention, and the fix is the budget or the load ([[measure-gates-under-normal-load]]).
 - Capture full output before investigating, because the failing set is non-deterministic and a truncated log cannot be re-derived ([[capture-gate-output-in-full]]).
 - The same arithmetic applies outside tests: never time-box a provisioning step below its real cost ([[heartbeat-over-time-box]]).
+
+**Two more cold-start shapes (fixed in one test file each).**
+- A test that re-imports its subject after a module-registry reset in every test pays the one-off transform of a large dependency graph inside test 1's budget. The reset clears the registry, not the bundler's transform cache, so import once in a `beforeAll` with its own larger budget; each test's import then only re-evaluates.
+- A test that times out keeps running its body. File-wide spies and fake objects then fire into the NEXT test and fail it for an unrelated reason. Stamp fake objects with a test generation and make them inert once a newer test starts, and abort a stale body at its next await. Verify with a throwaway probe (tiny budget on test 1, test 2 held open) before and after.

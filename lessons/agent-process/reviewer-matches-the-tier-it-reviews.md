@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-28
 provenance: [contrib-1]
-corroborated: 2
+corroborated: 3
 ---
 Size a reviewer to the **writer it gates**, never below it. Whatever tier the task's type and weight justified for the architect or builder, the reviewer gets the same model. Task type and weight set the tier once; both roles inherit it. Effort may go **higher** for the reviewer — refutation is a search problem, and a reviewer that must find a subtle flaw benefits from more thinking than the writer needed to produce it.
 
@@ -23,3 +23,5 @@ The failure is invisible in the usual metrics. A cheap reviewer approves faster 
 - Audit rosters for this directly: any agent whose name marks it a reviewer, pinned below the highest-tier writer in the same roster, is a finding. It is mechanical to check and easy to let drift, because nothing about a cheap reviewer looks wrong until it misses something.
 - **Mid-flight, escalating only the REVIEWER is the defensible half of the escalation.** When a task widens under a writer that has already proven an assumption false by experiment, read every seam involved, and written a plan whose hardening conditions you can state precisely, re-briefing a higher tier from scratch discards that context and costs more than it buys. The rule this lesson states is that the reviewer never drops *below* the writer — a reviewer **above** the writer is always permitted. Take that option only with the guard rails named in advance: enumerated hardening conditions, adversarial tests named before the work, and a written commitment for what happens if the review blocks. Then **log the deviation** with that commitment ([[no-stall-decision-protocol]]), because the next round is where it quietly becomes a habit — in the case that bought this, the review did block, the deviation was extended one more round on explicitly bounded grounds, and only the ledger entry kept that visible.
 - Audit the OMISSIONS in the same pass. A reviewer with no tier set is not "matched by default" â€” it inherits the orchestrator's, which is a different rule that happens to agree sometimes ([[an-omitted-worker-tier-inherits-the-leads]]).
+
+- **A reviewer's effort follows its writer's effort unless you pin it.** Lowering a writer's effort (to save cost) silently lowers its review. Blind-graded on the same writers, 19 of 26 reviews at the top effort found a real defect against 13 of 33 at one step lower (1.23 against 0.67 real defects per review). Keep an explicit per-model reviewer-effort FLOOR (the mirror of a cap), applied to non-critical reviews, and let critical changes keep their own rung. Re-grade before moving it.

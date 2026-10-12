@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-07
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 `page.goto()` resolves on the document's `load` event. For a single-page app that is *early*: the bundle may have loaded, but the app has not necessarily booted and its router's **initial navigation has not finalized**. A second navigation issued inside that window — one that only changes the fragment, so it is a same-document navigation — can be dropped on the floor. The URL updates, the first page stays rendered, and the second route's lazy chunk is never even requested.
 
@@ -20,3 +20,5 @@ The incident: a test seeded a history entry with `page.goto('/#/first')` and imm
 - The same hazard applies to any driver whose navigate call resolves on `load`, and to app-code that pushes history immediately after boot. It is not specific to one router; check when yours starts listening.
 - Seeding history for a back-button test is the usual reason two navigations end up adjacent. Treat "navigate, navigate" as a code smell and put a render assertion between them by default.
 - Related: [[e2e-spec-registration-required]] and [[green-means-not-broken]] — a retry that passes is not evidence about the cause.
+
+**Post-reload variant.** A test reloaded, then went straight to another route. Its "state-based wait" checked only things true BEFORE the app mounts (no sign-out button; storage seeded by an init script), so the navigation could land while the router's first navigation to the boot route was still resolving. That navigation finalizes by replacing the history entry with the boot route, which overwrote the test's route; the target page was never requested. Poll the live app's `router.isReady()` after the reload (it resolves only once the first navigation finalizes) rather than waiting on state that was already true.

@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-21
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 "I have rules all over and they stop being followed" is a structural complaint, not a discipline one. A standing instruction in an always-loaded file is read at position zero and then competes with every token that follows it; by mid-session it has lost. The fix is not a louder rule or a third copy — it is re-injection at the moment the rule is relevant, from a hook that runs every turn. Anything that must hold for a whole session and cannot survive on attention alone belongs in the harness, not in prose.
 
@@ -22,3 +22,5 @@ The incident: a project kept restating the same handful of standing rules across
 - **An audit across many sessions confirms the read-once failure at scale, independently of the incident above.** A sweep of one operator's multi-agent sessions found 10 of 17 spawning leads never loaded a standing orchestration rule at all — in one of them the trigger text was present in context five times and the operator asked for it directly, and it still went unloaded. Moving the doctrine to a different document, or restating it a third time, would not have changed either outcome; only an enforcement point outside the read-once document (a spawn-time hook, a scope budget, a review-churn gate — see [[gate-review-rounds-on-blocking-findings-not-round-count]]) can. The same audit found routing (model/effort tier) was not the failure — every spawn ran at its declared tier — so don't let a single-shot, no-lead benchmark stand in for auditing whether the doctrine that governs a multi-agent session actually loaded.
 
 Related: [[slim-always-loaded-instructions]], [[knowledge-routing-ladder]], [[adjust-a-shared-accumulator-by-delta]], [[guard-hooks-deny-teach-ack]], [[gate-review-rounds-on-blocking-findings-not-round-count]].
+
+**Scope an injection hook to the audience that needs it.** Hooks fire in subagents too. A compaction-time hook that re-injects session state ran 376 times in one week, 271 of them inside subagents (about 0.15% of the weekly limit) that never needed it. Skip when the payload carries an agent id OR the transcript path contains a `subagents` directory (either slash style); leave the main session unchanged.
