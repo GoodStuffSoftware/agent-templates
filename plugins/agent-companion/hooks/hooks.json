@@ -558,6 +558,21 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "^TaskStop$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
+              "--event",
+              "task-stop"
+            ],
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PreCompact": [
