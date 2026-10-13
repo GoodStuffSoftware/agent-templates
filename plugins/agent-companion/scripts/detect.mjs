@@ -36,6 +36,7 @@ import { runReleaseWatch } from './lib/release-watch.mjs';
 import { launchCheckup } from './lib/daily-checkup.mjs';
 import { loadRegister, readState as readRegisterState, openFlags, scanChangelogToState, scanSignalsToState, scanDatesToState } from './lib/decision-register.mjs';
 import { scanPinnedModels, findingKey } from './lib/pinned-model.mjs';
+import { routineModelDrift, sessionRecordRoot } from './lib/routine-model-drift.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
@@ -372,6 +373,34 @@ if (opt('pinned_model_check', true) && !suppressedKinds.has('pinned_model_id')) 
         'manual-check');
     }
   } catch { /* fail open: a pin scan never blocks the scout */ }
+}
+
+// --- 1c4. Scheduled-run model and effort drift --------------------------
+// The desktop app starts a scheduled run on the task's SKILL.md `model:` line, else on the
+// composer's last-selected model; a folder effort pin is keyed to one model id and does
+// nothing on another. Compares the last 48 h of scheduled-run session records with each
+// task's model: line and the run folder's pin, and lists tasks that ran with no model: line
+// (reported when that set changes). Reads only, starts no session, fails open.
+if (!suppressedKinds.has('routine_model_drift')) {
+  try {
+    const res = routineModelDrift({
+      sessionsRoot: sessionRecordRoot({ home: homeRoot() }),
+      claudeDirPath: claudeDir(),
+      nowMs: nowDate().getTime(),
+    });
+    if (res.drift.length) {
+      sig('routine_model_drift',
+        `${res.drift.length} scheduled run(s) in 48h differ from their pins: ${res.drift.slice(0, 4).join(' | ')}${res.drift.length > 4 ? ' | ...' : ''}. Fix: set a model: line (an alias) in the task's SKILL.md frontmatter.`,
+        'manual-check', 'high');
+    }
+    const knownU = new Set(baseline.knownUnpinnedRoutines || []);
+    next.knownUnpinnedRoutines = res.unpinned;
+    if (res.unpinned.some((t) => !knownU.has(t))) {
+      sig('routine_model_drift',
+        `${res.unpinned.length} scheduled task(s) with no model: line start on the composer's last-selected model, so their effort pin may not apply: ${res.unpinned.slice(0, 8).join(', ')}${res.unpinned.length > 8 ? ', ...' : ''}. Add a model: alias line to each SKILL.md frontmatter (opus for the scout).`,
+        'manual-check');
+    }
+  } catch { /* fail open */ }
 }
 
 // --- 2. Unknown agent types -------------------------------------------

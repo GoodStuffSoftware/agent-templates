@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const NOTE_MAX = 700;
+export const NOTE_MAX = 1000;
 export const REGISTER_ID = 'routine-effort-pins';
 
 function readJson(file) {
@@ -25,6 +25,35 @@ export function effortFromSettings(obj) {
 }
 
 export const folderPin = (cwd) => (cwd ? effortFromSettings(readJson(join(cwd, '.claude', 'settings.local.json'))) : null);
+// The folder pin with the model(s) it is keyed to, for the note: "low, for claude-opus-5-5",
+// or "claude-opus-5-5=low, claude-fable-5-1=high" when levels differ; null when none.
+// `start` is the bare level a new task starts at (null when the pin differs by model).
+export function folderPinInfo(cwd) {
+  const obj = cwd ? readJson(join(cwd, '.claude', 'settings.local.json')) : null;
+  const ms = obj && typeof obj === 'object' ? obj.modelSettings : null;
+  if (!ms || typeof ms !== 'object' || Array.isArray(ms)) return null;
+  const pairs = Object.entries(ms)
+    .map(([m, v]) => [m, v && typeof v === 'object' ? v.effortLevel : null])
+    .filter(([, l]) => typeof l === 'string' && l);
+  if (!pairs.length) return null;
+  const levels = [...new Set(pairs.map((p) => p[1]))];
+  if (levels.length === 1) return { text: `${levels[0]}, for ${pairs.map((p) => p[0]).join(', ')}`, start: levels[0] };
+  return { text: pairs.map((p) => `${p[0]}=${p[1]}`).join(', '), start: null };
+}
+
+// The `model:` line of a scheduled task's SKILL.md frontmatter: { found, model }.
+// found=false when the file cannot be read (a create call has no file yet).
+export function taskModelLine(claudeDirPath, taskId) {
+  if (!taskId || typeof taskId !== 'string' || /[\\/]|\.\./.test(taskId)) return { found: false, model: null };
+  try {
+    const text = readFileSync(join(claudeDirPath, 'scheduled-tasks', taskId, 'SKILL.md'), 'utf8').replace(/^﻿/, '');
+    const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+    const line = fm ? /^model:[ \t]*(.+?)[ \t]*$/m.exec(fm[1]) : null;
+    const v = line ? line[1].replace(/^["'`]|["'`]$/g, '').trim() : '';
+    return { found: true, model: v && !/^(default|inherit)$/i.test(v) ? v : null };
+  } catch { return { found: false, model: null }; }
+}
+
 export const userDefault = (claudeDirPath) => effortFromSettings(readJson(join(claudeDirPath, 'settings.json')));
 
 export function readFolderMap(configDirPath) {
@@ -51,12 +80,15 @@ export function applies(toolName, input) {
 
 const clip = (s, n) => (s.length > n ? `...${s.slice(s.length - n + 3)}` : s);
 
-export function buildNote({ cwd, pin, userDef, map, why }) {
-  const start = pin || userDef || 'the app default';
+export function buildNote({ cwd, pin, pinStart, userDef, map, why, taskModel }) {
+  const start = (pin ? (pinStart !== undefined ? pinStart : pin) : null) || userDef || 'the app default';
   const head = `Routine placement: this session is in ${clip(String(cwd || 'an unknown folder'), 60)}; folder effort pin: ${pin || 'none'}; a task created here starts at ${start}. `
     + 'Rule: run /ac recommend for the routine\'s parent and its worker (a parent that only spawns one worker and relays the result is weight 1, low) and name the worker\'s rung in the prompt. '
     + 'If the parent\'s level differs from this folder\'s pin, create the task from a session opened in the folder pinned to that level';
-  const tail = ' and do not edit the app\'s task store while the app runs.';
+  const modelNote = taskModel && taskModel.model
+    ? ` The task's SKILL.md says model: ${taskModel.model}.`
+    : ' The task\'s SKILL.md has no model: line, so it starts on the composer\'s last-selected model; add `model: <alias>` to its frontmatter.';
+  const tail = ' and do not edit the app\'s task store while the app runs.' + (pin ? ' A pin applies only on the model it is keyed to.' : '') + modelNote;
   const whyLine = why ? ` Why: decision \`${REGISTER_ID}\` in the decision register.` : '';
   const build = (mapText) => `${head}${mapText}${tail}${whyLine}`;
   if (!map) return build('');
