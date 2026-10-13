@@ -111,7 +111,10 @@ export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, 
 export function childEnv(env = {}) {
   const base = { ...process.env };
   delete base.CLAUDE_CODE_SESSION_ATTENDED;
-  return { ...base, ...env };
+  // type_line_required defaults to deny in the plugin; most spawn-guard tests
+  // spawn ladder rungs without a TYPE: line and are not about that rule, so
+  // children run with it off unless a test sets it (tests/type-required.test.mjs).
+  return { CLAUDE_PLUGIN_OPTION_TYPE_LINE_REQUIRED: 'off', ...base, ...env };
 }
 
 // What a PreToolUse hook's stdout decided: its permissionDecision ('deny',
