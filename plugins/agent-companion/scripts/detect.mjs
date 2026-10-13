@@ -15,7 +15,7 @@ import { readFileSync, existsSync, writeFileSync, appendFileSync, readdirSync, s
 import { join, basename, dirname } from 'node:path';
 import { userInfo } from 'node:os';
 import {
-  modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
+  modelTiers, tierEffortProblems, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
   homeRoot, stateRoot, resolveRoute, isLadderAgentName, routingProfileState,
   readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
   LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES, scoutSuppressed,
@@ -585,6 +585,13 @@ try {
         `${alias} retires in ${days} day(s) (${spec.retiresAfter}); ${plan}`, staged ? 'none' : 'routing-review');
     }
   }
+} catch { /* config unreadable: the audit reports that separately */ }
+
+// --- 5-min. A tier minEffort the tier does not list -----------------------
+// A mistyped `tiers.<alias>.minEffort` fails open (the floor is skipped, routes do not
+// change), so nothing else would ever show it. One signal per bad tier, every run.
+try {
+  for (const t of tierEffortProblems(modelTiers())) sig('tier_min_effort_invalid', t.problem, 'manual-check');
 } catch { /* config unreadable: the audit reports that separately */ }
 
 // --- 5a. Recommended auto-compact window drift ---------------------------

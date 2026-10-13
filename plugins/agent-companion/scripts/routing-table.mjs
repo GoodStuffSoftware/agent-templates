@@ -19,7 +19,7 @@ import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  modelTiers, effortFor, routeForWeight, resolveRoute, rungFor, ladderVariants, expectedDisallowedTools, ladderToolPolicy,
+  modelTiers, tierEffortProblems, effortFor, routeForWeight, resolveRoute, rungFor, ladderVariants, expectedDisallowedTools, ladderToolPolicy,
 } from '../hooks/lib/context.mjs';
 import {
   selfReviewConfig, selfReviewTypesForRung, selfReviewConfigProblems, selfReviewBlock,
@@ -443,6 +443,9 @@ function roleClaimProblems(rung) {
 function checkAgentDescriptions() {
   const out = [];
   const rungs = agentEntries();
+  for (const t of tierEffortProblems(cfg)) {
+    out.push({ agent: t.alias, file: 'config/model-tiers.json', problem: 'tier-min-effort', expected: "minEffort names one of the tier's efforts (a mistyped floor is ignored)", actual: t.problem });
+  }
   for (const problem of selfReviewConfigProblems(selfReview)) {
     out.push({
       agent: 'selfReview', file: 'config/model-tiers.json', problem: 'self-review-config',
