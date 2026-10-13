@@ -15,6 +15,10 @@
 //   reviewed_model, reviewed_effort   the writer under review, parsed from the brief's WRITER: line the way
 //                            spawn-guard parses it (null when absent or unusable; effort null for a no-effort model) (0.31.17)
 //                            Older rows carry none of these four; every reader treats a missing field as unknown.
+//   reviewed_branch          the first feat|fix|chore|docs|refactor|release|wip/<name> token in the brief (null when none) (0.31.17)
+//   post_pass_defect         always null on the row itself (unknown); append-only rows are never rewritten. A later FIX or BLOCK on
+//                            the same branch after a PASS appends an outcome row to telemetry/review-outcomes.jsonl instead, and
+//                            the register folds it back as post_pass_defect:true (an upper bound, see docs/TELEMETRY.md) (0.31.17)
 //   at                       when the result returned
 //   source                   'post-tool-use' (foreground: the result came back with the Agent call)
 //                            | 'subagent-stop' (background: the result came with the SubagentStop event)
@@ -58,6 +62,14 @@ export function writerOf(prompt, cwd) {
     if (!w || !w.ok) return { model: null, effort: null };
     return { model: w.model || null, effort: w.effort || null };
   } catch { return { model: null, effort: null }; }
+}
+
+// The branch a reviewer's brief names: the first token shaped like a conventional branch, else null.
+export function branchOf(prompt) {
+  try {
+    const m = /(?<![A-Za-z0-9._/-])((?:feat|fix|chore|docs|refactor|release|wip)\/[A-Za-z0-9._/-]+)/.exec(String(prompt || ''));
+    return m ? m[1].replace(/[._/-]+$/, '') : null;
+  } catch { return null; }
 }
 
 // The result text of an Agent PostToolUse payload (string, content blocks, or a result field).
@@ -162,7 +174,44 @@ function alreadyRecorded(sid, tu) {
     .some((r) => r && r.review_of_tool_use_id === tu && r.session_id === sid && inStream(sid, r, 'review-verdicts.jsonl'));
 }
 
-function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId, writer }) {
+const OUTCOME_WINDOW_MS = 7 * 86400000;
+const nonEmptyStr = (x) => typeof x === 'string' && x.length > 0;
+
+// After a FIX or BLOCK row on a branch: find the most recent earlier PASS row on that branch (within
+// 7 days, any session) that has no outcome row yet, and append one marking a defect found after PASS.
+// No git, no child process; bounded tail reads. Fails open.
+function recordPostPassDefect(fixRow) {
+  try {
+    if (!fixRow.reviewed_branch || (fixRow.review_verdict !== 'FIX' && fixRow.review_verdict !== 'BLOCK')) return null;
+    const sid = fixRow.session_id;
+    const now = Date.parse(fixRow.at);
+    const needle = JSON.stringify(fixRow.reviewed_branch);
+    const verdicts = tailRecords(streamFile(sid, 'review-verdicts.jsonl'), { bytes: 4 * 1024 * 1024, filter: (l) => l.includes(needle) })
+      .filter((r) => r && r.reviewed_branch === fixRow.reviewed_branch && inStream(sid, r, 'review-verdicts.jsonl')
+        && !(r.session_id === sid && r.review_of_tool_use_id === fixRow.review_of_tool_use_id));
+    const passes = verdicts.filter((r) => r.review_verdict === 'PASS' && nonEmptyStr(r.review_of_tool_use_id)
+      && Number.isFinite(Date.parse(r.at)) && Date.parse(r.at) <= now && now - Date.parse(r.at) <= OUTCOME_WINDOW_MS);
+    if (!passes.length) return null;
+    const outcomes = tailRecords(streamFile(sid, 'review-outcomes.jsonl'), { bytes: 4 * 1024 * 1024, filter: (l) => l.includes(needle) })
+      .filter((r) => r && inStream(sid, r, 'review-outcomes.jsonl'));
+    const done = new Set(outcomes.map((r) => r.session_id + '|' + r.review_of_tool_use_id));
+    const pass = passes[passes.length - 1];
+    if (done.has(pass.session_id + '|' + pass.review_of_tool_use_id)) return null;
+    const row = {
+      at: fixRow.at,
+      session_id: pass.session_id,
+      review_of_tool_use_id: pass.review_of_tool_use_id,
+      reviewed_branch: fixRow.reviewed_branch,
+      post_pass_defect: true,
+      evidence: 'later-fix-verdict',
+      evidence_ref: fixRow.review_of_tool_use_id,
+    };
+    appendLog('review-outcomes.jsonl', row);
+    return row;
+  } catch { return null; }
+}
+
+function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId, writer, branch }) {
   if (alreadyRecorded(sid, tu)) return null;
   const orig = spawnRowOf(sid, tu);
   const row = {
@@ -181,11 +230,14 @@ function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId, writer }) {
     reviewer_effort: orig ? orig.spawn_effort ?? orig.effective_effort ?? null : null,
     reviewed_model: writer?.model ?? null,
     reviewed_effort: writer?.effort ?? null,
+    reviewed_branch: typeof branch === 'string' && branch ? branch : null,
+    post_pass_defect: null,
     spawn_row_found: !!orig,
     source,
     agent_id: agentId || null,
   };
   appendLog('review-verdicts.jsonl', row);
+  recordPostPassDefect(row);
   return row;
 }
 
@@ -206,14 +258,14 @@ export function recordReviewVerdict(p) {
         rememberLaunch(launch.agentId, {
           at: new Date().toISOString(), session_id: sid, tool_use_id: tu,
           name: typeof input.name === 'string' ? input.name : null, type: rv.type, role: rv.role,
-          writer: writerOf(input.prompt, p.cwd),
+          writer: writerOf(input.prompt, p.cwd), branch: branchOf(input.prompt),
         });
       }
       return null;
     }
     const pv = parseVerdict(resultText(p.tool_response));
     if (!pv) return null;
-    return writeVerdictRow({ sid, tu, name: input.name, rv, pv, source: 'post-tool-use', agentId: null, writer: writerOf(input.prompt, p.cwd) });
+    return writeVerdictRow({ sid, tu, name: input.name, rv, pv, source: 'post-tool-use', agentId: null, writer: writerOf(input.prompt, p.cwd), branch: branchOf(input.prompt) });
   } catch { return null; }
 }
 
@@ -248,6 +300,7 @@ export function recordBackgroundVerdict(p) {
       sid, tu: rec.tool_use_id, name: rec.name, rv: { type: rec.type ?? null, role: rec.role ?? null },
       pv, source: 'subagent-stop', agentId: p.agent_id,
       writer: rec.writer && typeof rec.writer === 'object' ? { model: rec.writer.model ?? null, effort: rec.writer.effort ?? null } : null,
+      branch: typeof rec.branch === 'string' ? rec.branch : null,
     });
   } catch { return null; }
 }

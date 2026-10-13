@@ -279,11 +279,34 @@ rows only).
 | `review_verdict_raw` | string | the verdict text as written, first 80 characters |
 | `reviewed_model`, `reviewed_effort` | string | null | the writer under review, parsed from the brief's `WRITER:` line as spawn-guard does (0.31.17); null when absent or unusable. Rows before 0.31.17 carry none |
 | `reviewer_model`, `reviewer_effort` | string | null | the reviewer's own model and effort from its spawns row (0.31.17); null when the row was not found |
+| `reviewed_branch` | string \| null | the first `feat\|fix\|chore\|docs\|refactor\|release\|wip/<name>` token in the reviewer's brief (0.31.17); null when the brief names none. Background reviewers carry it from the launch record. Rows before 0.31.17 carry none |
+| `post_pass_defect` | null | always null on the row itself (unknown); rows are append-only and never rewritten. The signal lives in `review-outcomes.jsonl` (below) and is folded in at read time (0.31.17) |
 | `declared_type`, `declared_role` | string \| null | the brief's `TYPE:` and `ROLE:` |
 | `caller_effort`, `caller_is_subagent`, `caller_tool_use_id` | copied | from the reviewer's own spawns.jsonl row; null when that row was not found |
 | `spawn_row_found` | boolean | whether that row was found |
 | `source` | `post-tool-use` \| `subagent-stop` | which path recorded it: foreground result or background SubagentStop (0.31.14; absent on rows written by 0.31.13, which are all `post-tool-use`) |
 | `agent_id` | string \| null | the background reviewer's agent id; null on the foreground path (0.31.14; absent on older rows) |
+
+### `review-outcomes.jsonl` — a defect found after a PASS (0.31.17)
+
+Written by the same hook, in the same call, with no git and no child process. When a new verdict row is
+`FIX` or `BLOCK` and has a `reviewed_branch`, a bounded tail read of `review-verdicts.jsonl` (across
+sessions, 7 days) finds the most recent earlier `PASS` row on that branch that has no outcome row yet;
+if one exists, one row is appended here. At most one outcome row per PASS.
+
+| field | type | meaning |
+|---|---|---|
+| `v`, `at` | number, ISO 8601 | schema version; when the later FIX/BLOCK returned |
+| `session_id`, `review_of_tool_use_id` | string | the PASS row's keys (joins to `spawns.jsonl` and `review-verdicts.jsonl`) |
+| `reviewed_branch` | string | the branch |
+| `post_pass_defect` | `true` | a defect was found after the PASS |
+| `evidence` | `later-fix-verdict` | the only source today (a fix-commit source is a possible follow-on, kept out of hooks because it needs git) |
+| `evidence_ref` | string | `review_of_tool_use_id` of the FIX/BLOCK row |
+
+The decision register's `readSpawnRows()` reads this file once per evaluation and sets
+`post_pass_defect: true` on the PASS reviewer's spawn row; absent means unknown, not clean. The signal is
+an upper bound, not a verdict-quality judgement: it also fires for a re-review after unrelated edits to
+the branch, and it misses briefs that name no branch.
 
 ### `subagent-starts.jsonl` — one record per subagent actually starting
 

@@ -1200,25 +1200,43 @@ export function readSpawnRows(file = spawnsPath(), { foldVerdicts = true } = {})
 // into the reviewer rows as `review_verdict`, matched on session_id + the row's tool_use_id.
 // A row that already carries the field keeps it. Fail open: unreadable verdicts change nothing.
 // Counts file reads of review-verdicts.jsonl (a test asserts one read per evaluation).
-export const verdictReadStats = { reads: 0 };
+export const verdictReadStats = { reads: 0, outcomeReads: 0 };
 function withReviewVerdicts(rows, file) {
   try {
     const vf = join(dirname(file), 'review-verdicts.jsonl');
-    if (!existsSync(vf)) return rows;
     const by = new Map();
-    verdictReadStats.reads += 1;
-    for (const line of readFileSync(vf, 'utf8').split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        const j = JSON.parse(line);
-        if (isObj(j) && nonEmpty(j.review_of_tool_use_id) && typeof j.review_verdict === 'string') by.set(`${j.session_id}|${j.review_of_tool_use_id}`, j.review_verdict);
-      } catch { /* corrupt row: skipped */ }
+    if (existsSync(vf)) {
+      verdictReadStats.reads += 1;
+      for (const line of readFileSync(vf, 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const j = JSON.parse(line);
+          if (isObj(j) && nonEmpty(j.review_of_tool_use_id) && typeof j.review_verdict === 'string') by.set(`${j.session_id}|${j.review_of_tool_use_id}`, j.review_verdict);
+        } catch { /* corrupt row: skipped */ }
+      }
     }
-    if (!by.size) return rows;
+    // telemetry/review-outcomes.jsonl (0.31.17): PASS verdicts later followed by a FIX/BLOCK on the same
+    // branch, folded as post_pass_defect:true (absent = unknown). One read per evaluation.
+    const defects = new Set();
+    const of = join(dirname(file), 'review-outcomes.jsonl');
+    if (existsSync(of)) {
+      verdictReadStats.outcomeReads += 1;
+      for (const line of readFileSync(of, 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const j = JSON.parse(line);
+          if (isObj(j) && nonEmpty(j.review_of_tool_use_id) && j.post_pass_defect === true) defects.add(`${j.session_id}|${j.review_of_tool_use_id}`);
+        } catch { /* corrupt row: skipped */ }
+      }
+    }
+    if (!by.size && !defects.size) return rows;
     return rows.map((r) => {
-      if (r.review_verdict !== undefined || !nonEmpty(r.tool_use_id)) return r;
-      const v = by.get(`${r.session_id}|${r.tool_use_id}`);
-      return v === undefined ? r : { ...r, review_verdict: v };
+      if (!nonEmpty(r.tool_use_id)) return r;
+      const key = `${r.session_id}|${r.tool_use_id}`;
+      let out = r;
+      if (r.review_verdict === undefined && by.has(key)) out = { ...out, review_verdict: by.get(key) };
+      if (r.post_pass_defect === undefined && defects.has(key)) out = { ...out, post_pass_defect: true };
+      return out;
     });
   } catch { return rows; }
 }
