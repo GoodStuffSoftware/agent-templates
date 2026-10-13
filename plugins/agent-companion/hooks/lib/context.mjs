@@ -429,7 +429,8 @@ export function classifyEffort(effort) {
 // resolving long after it, and falling back on the date alone would route
 // away from a model that still works. The operator flips `retired` to true
 // after confirming the alias no longer resolves (a one-key edit in
-// <stateRoot>/model-tiers.json: {"tiers":{"sonnet":{"note":"my local note"}}}).
+// <stateRoot>/model-tiers.json: {"tiers":{"sonnet":{"retired":true}}} once sonnet stops resolving;
+// any other single tier field, e.g. `match`, merges the same way).
 // Returns null for tiers with no retirement date.
 //
 // `now` (optional) pins the calendar for a caller that needs a deterministic

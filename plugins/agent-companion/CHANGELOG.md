@@ -2,6 +2,18 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.17 — 2026-10-13
+
+Review nits from 0.31.16, a stricter decision-register check, a mistyped-floor report, a fix for the "Other live sessions" list, a ledger that sees stopped workers, and hygiene fixes.
+
+- **Register checks.** `decision-register --check` now rejects control characters (U+0000-U+001F, U+007F) in trigger `pattern` and `flags`, naming the decision, trigger and code point; state writes keep triggers and baselines a concurrent writer added. `routing-profile.mjs set` refusing a model row with no effort is now covered by a test.
+- **Tier floor typo.** A mistyped `tiers.<alias>.minEffort` (not one of the tier's efforts) still fails open, but is now reported by the scout as `tier_min_effort_invalid` and by `routing-table.mjs --check-agent-descriptions`; the haiku effortsNote now says the grid enforces medium; the override example in the retirement comment no longer uses haiku.
+- **Review nits from 0.31.16.** The legacy `claude-haiku-4-5` pin no longer draws the rule-1 "set effort" note (reference models are checked before the alias), `scout_suppress: decision_review_due` now also stops the date-trigger scan, one unbounded regex group removed from the pinned-model scan, stale haiku comments and a dead doc pointer fixed, tests tightened.
+- **Hygiene.** Advisory claim files older than 14 days are pruned; `struggle-patterns.json` entries with nested quantifiers are skipped (ReDoS guard); the "state keeps no prompt text" test now stores real sentences; the README states `known_peers` / `related_repos` must be JSON strings, the 256 KB catch-up tail limit, and a neutral tier-override example.
+- **Live sessions.** "Other live sessions" now requires the newest timestamped record (not just the file mtime) to be within 2 h, so idle transcripts touched by the desktop app or orphaned CLIs are no longer listed; age and order use the record time. Tests added for subagent tick silence and subagent transcripts in the catch-up scan.
+- **Worker ledger.** A worker stopped with TaskStop now gets a stop row (new PostToolUse `^TaskStop$` hook); a start with no stop counts as running only while its subagent transcript was written in the last 15 min (6 h age cap when no transcript is found), which ends zombies from crashes, resumes and operator-rejected prompts; state pruning also runs on stop and session start (hourly); the overdue-worker telemetry read is 256 KB and skipped with no running worker; repeated SendMessage to a known or already-warned peer no longer rescans the transcript. A worker blocked more than 15 min on one tool call is hidden from the overdue notice until it writes again.
+- **Takes effect** in a new session.
+
 ## 0.31.16 — 2026-10-12
 
 Sonnet 5.5 and Haiku 5.5 in the tier data, alias-only routines, a drift signal for pinned model ids, routing review dates, and `date` and `signal` triggers for the decision register. Labels: M measured, E estimated.
