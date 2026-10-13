@@ -277,6 +277,8 @@ rows only).
 | `name` | string \| null | the reviewer's declared name |
 | `review_verdict` | `PASS` \| `FIX` \| `BLOCK` | normalized; wordings such as `APPROVE WITH FIXES`, `REQUEST CHANGES`, `FAIL` map to `FIX` |
 | `review_verdict_raw` | string | the verdict text as written, first 80 characters |
+| `reviewed_model`, `reviewed_effort` | string | null | the writer under review, parsed from the brief's `WRITER:` line as spawn-guard does (0.31.17); null when absent or unusable. Rows before 0.31.17 carry none |
+| `reviewer_model`, `reviewer_effort` | string | null | the reviewer's own model and effort from its spawns row (0.31.17); null when the row was not found |
 | `declared_type`, `declared_role` | string \| null | the brief's `TYPE:` and `ROLE:` |
 | `caller_effort`, `caller_is_subagent`, `caller_tool_use_id` | copied | from the reviewer's own spawns.jsonl row; null when that row was not found |
 | `spawn_row_found` | boolean | whether that row was found |

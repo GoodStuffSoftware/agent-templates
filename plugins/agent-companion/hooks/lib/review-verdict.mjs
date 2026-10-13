@@ -11,6 +11,10 @@
 //   review_verdict_raw       the verdict text as written (first 80 chars)
 //   declared_type, declared_role   what the brief declared
 //   caller_effort, caller_is_subagent, caller_tool_use_id   copied from the reviewer's own spawns.jsonl row (null when not found)
+//   reviewer_model, reviewer_effort   the reviewer's own model and effort, from its spawns.jsonl row (null when not found) (0.31.17)
+//   reviewed_model, reviewed_effort   the writer under review, parsed from the brief's WRITER: line the way
+//                            spawn-guard parses it (null when absent or unusable; effort null for a no-effort model) (0.31.17)
+//                            Older rows carry none of these four; every reader treats a missing field as unknown.
 //   at                       when the result returned
 //   source                   'post-tool-use' (foreground: the result came back with the Agent call)
 //                            | 'subagent-stop' (background: the result came with the SubagentStop event)
@@ -28,7 +32,7 @@
 
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from 'node:fs';
-import { telemetryDir, stateDir, tailRecords, appendLog, isFixtureSession, canonicalTaskType } from './context.mjs';
+import { telemetryDir, stateDir, tailRecords, appendLog, isFixtureSession, canonicalTaskType, writerFromDeclaration } from './context.mjs';
 import { briefDeclarations, declarationValue } from './brief-directives.mjs';
 import { resolveAgentTranscript } from './runaway.mjs';
 
@@ -43,6 +47,17 @@ export function reviewerOf(prompt) {
     const canon = type ? (canonicalTaskType(type)?.name || type) : null;
     return canon === 'code-review' || role === 'reviewer' ? { type, role } : null;
   } catch { return null; }
+}
+
+// The writer under review from the brief's WRITER: line -> { model, effort } (nulls when absent or unusable).
+export function writerOf(prompt, cwd) {
+  try {
+    const decls = briefDeclarations(String(prompt || ''));
+    if (!decls.WRITER) return { model: null, effort: null };
+    const w = writerFromDeclaration(decls.WRITER.rest, cwd);
+    if (!w || !w.ok) return { model: null, effort: null };
+    return { model: w.model || null, effort: w.effort || null };
+  } catch { return { model: null, effort: null }; }
 }
 
 // The result text of an Agent PostToolUse payload (string, content blocks, or a result field).
@@ -147,7 +162,7 @@ function alreadyRecorded(sid, tu) {
     .some((r) => r && r.review_of_tool_use_id === tu && r.session_id === sid && inStream(sid, r, 'review-verdicts.jsonl'));
 }
 
-function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId }) {
+function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId, writer }) {
   if (alreadyRecorded(sid, tu)) return null;
   const orig = spawnRowOf(sid, tu);
   const row = {
@@ -162,6 +177,10 @@ function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId }) {
     caller_effort: orig ? orig.caller_effort ?? null : null,
     caller_is_subagent: orig ? orig.caller_is_subagent ?? null : null,
     caller_tool_use_id: orig ? orig.caller_tool_use_id ?? null : null,
+    reviewer_model: orig && typeof orig.model === 'string' ? orig.model : null,
+    reviewer_effort: orig ? orig.spawn_effort ?? orig.effective_effort ?? null : null,
+    reviewed_model: writer?.model ?? null,
+    reviewed_effort: writer?.effort ?? null,
     spawn_row_found: !!orig,
     source,
     agent_id: agentId || null,
@@ -187,13 +206,14 @@ export function recordReviewVerdict(p) {
         rememberLaunch(launch.agentId, {
           at: new Date().toISOString(), session_id: sid, tool_use_id: tu,
           name: typeof input.name === 'string' ? input.name : null, type: rv.type, role: rv.role,
+          writer: writerOf(input.prompt, p.cwd),
         });
       }
       return null;
     }
     const pv = parseVerdict(resultText(p.tool_response));
     if (!pv) return null;
-    return writeVerdictRow({ sid, tu, name: input.name, rv, pv, source: 'post-tool-use', agentId: null });
+    return writeVerdictRow({ sid, tu, name: input.name, rv, pv, source: 'post-tool-use', agentId: null, writer: writerOf(input.prompt, p.cwd) });
   } catch { return null; }
 }
 
@@ -227,6 +247,7 @@ export function recordBackgroundVerdict(p) {
     return writeVerdictRow({
       sid, tu: rec.tool_use_id, name: rec.name, rv: { type: rec.type ?? null, role: rec.role ?? null },
       pv, source: 'subagent-stop', agentId: p.agent_id,
+      writer: rec.writer && typeof rec.writer === 'object' ? { model: rec.writer.model ?? null, effort: rec.writer.effort ?? null } : null,
     });
   } catch { return null; }
 }
