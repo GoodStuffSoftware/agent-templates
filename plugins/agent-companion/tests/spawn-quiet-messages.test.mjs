@@ -24,7 +24,7 @@ test('a spawn with nothing to say prints nothing at all (no empty "PreToolUse:Ag
     const res = spawn(dir, {
       subagent_type: 'agent-companion:ac-sonnet-low', model: 'sonnet', name: 'quiet-one', run_in_background: true,
       isolation: 'worktree', prompt: 'TYPE: mechanical-edit\nROLE: writer\nrename the variable',
-    }, { CLAUDE_PLUGIN_OPTION_BREVITY: 'false', CLAUDE_PLUGIN_OPTION_BREVITY_PEER: 'false' });
+    }, { CLAUDE_PLUGIN_OPTION_BREVITY: 'false', CLAUDE_PLUGIN_OPTION_BREVITY_PEER: 'false', CLAUDE_PLUGIN_OPTION_WORKER_WAIT_ADVISORY: 'false' });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.stdout.trim(), '', 'no output object when there is no text and no change');
     assert.equal(decisionOf(res.json), null);
