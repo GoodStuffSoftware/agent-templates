@@ -71,6 +71,17 @@
 // A whole-run spawnSync timeout was rejected as the guard for that case: it
 // kills only `node --test` and orphans the per-file processes it spawned.
 //
+// Machine-wide lock (scripts/ci-lock.mjs): at most ONE suite run at a time per
+// machine, across every worktree, for the hook and by-hand runs alike. It is
+// taken just before the first suite (the pre-push scan runs unlocked). A
+// second run prints one line naming the holder (pid, worktree, start time) and
+// polls every 5 s. A lock whose pid is dead, or older than 45 min, is taken
+// over. Released on exit, error and SIGINT. Knobs:
+//   CI_LOCAL_MAX_PARALLEL=<n>   allow n concurrent runs (default 1)
+//   CI_LOCAL_LOCK=0             bypass the lock entirely
+//   CI_LOCAL_LOCK_POLL_MS / CI_LOCAL_LOCK_MAX_AGE_MS / CI_LOCAL_LOCK_DIR
+//                               poll interval, stale cap, lock dir (tests)
+//
 // Pre-push only: before any suite, every commit being pushed — on EVERY ref,
 // wip/** and backup/** included — and every pushed ref name is scanned by
 // scripts/push-scan.mjs (leak-check's classes plus the local private-names
@@ -85,6 +96,7 @@ import {
 import { join, dirname, resolve, relative, delimiter, win32, posix } from 'node:path';
 import { tmpdir, availableParallelism, homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { ensureRunLock } from './ci-lock.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..');
@@ -777,6 +789,7 @@ function runSuiteParity(name, ref) {
 }
 
 function runSuite(name, ciParity, ref) {
+  ensureRunLock({ worktree: REPO_ROOT }); // machine-wide: one full run at a time
   return ciParity ? runSuiteParity(name, ref) : runSuiteLocal(name);
 }
 
