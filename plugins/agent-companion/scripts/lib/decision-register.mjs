@@ -97,6 +97,13 @@ const tkeyOf = (decisionId, triggerId) => `${decisionId}/${triggerId}`;
 
 // --- 2. validation -----------------------------------------------------------------
 
+// First control character (U+0000-U+001F, U+007F) in a string, as 'U+0008', else ''. A `\b`
+// typed as a literal backspace compiles fine and never matches what the author meant.
+export function controlCharIn(str) {
+  const m = /[\u0000-\u001f\u007f]/.exec(String(str ?? ''));
+  return m ? `U+${m[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}` : '';
+}
+
 // Compile a changelog pattern for .test(): g and y are dropped so lastIndex never leaks
 // between items.
 export function compilePattern(pattern, flags) {
@@ -116,6 +123,12 @@ function validateTrigger(t, where, decision, rollout, errors, premiseIds) {
     if (!isStr(decision.rolloutId)) err(`${why} requires the decision to name a rolloutId`);
     else if (!Object.prototype.hasOwnProperty.call(rollout, decision.rolloutId)) err(`rolloutId "${decision.rolloutId}" is not in the rollout table (${why})`);
   };
+  if (t.kind === 'changelog' || t.kind === 'signal') {
+    for (const f of ['pattern', 'flags']) {
+      const cp = typeof t[f] === 'string' ? controlCharIn(t[f]) : '';
+      if (cp) err(`${f} contains the control character ${cp} (a regex escape such as word-boundary must be typed as backslash then letter, not a literal control character)`);
+    }
+  }
   switch (t.kind) {
     case 'changelog': {
       if (!isStr(t.pattern)) err('pattern is required');
@@ -336,7 +349,7 @@ export function writeState(state, file = statePath()) {
 // pruned flag, a cleared trigger) were in the snapshot, so they are not carried back.
 export function snapshotState(state) {
   return {
-    flags: new Set(Object.keys(state.flags)), changelogHits: new Set(Object.keys(state.changelogHits)),
+    flags: new Set(Object.keys(state.flags)), triggers: new Set(Object.keys(state.triggers)), baselines: new Set(Object.keys(state.baselines)), changelogHits: new Set(Object.keys(state.changelogHits)),
     seen: new Set(state.seen), surfaced: new Set(state.surfaced),
   };
 }
@@ -344,7 +357,8 @@ export function snapshotState(state) {
 export function writeStateMerged(state, snap, file = statePath()) {
   try {
     const disk = readState(file);
-    for (const k of ['flags', 'changelogHits']) {
+    for (const k of ['flags', 'changelogHits', 'triggers', 'baselines']) {
+      if (!snap[k]) continue;
       for (const key of Object.keys(disk[k])) if (!snap[k].has(key) && !(key in state[k])) state[k][key] = disk[k][key];
     }
     for (const k of ['seen', 'surfaced']) {
