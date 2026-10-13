@@ -137,7 +137,7 @@
         ]
       },
       {
-        "matcher": "^(ScheduleWakeup|Monitor)$",
+        "matcher": "^(ScheduleWakeup|Monitor|Bash|PowerShell)$",
         "hooks": [
           {
             "type": "command",
