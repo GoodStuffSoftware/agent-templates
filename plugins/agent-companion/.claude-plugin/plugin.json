@@ -632,14 +632,14 @@
     "subagent_ceiling_tokens": {
       "type": "number",
       "title": "Subagent context ceiling: tokens",
-      "description": "Advisory only. The first time a subagent's own context reaches this many tokens, the same PreToolUse hook as subagent_context_notice_tokens tells it ONCE to write a checkpoint file (goal, what is done, remaining steps, key paths, open findings) and return, giving the file path and a proposed split of the remaining work in its final message; the lead then continues with a FRESH worker that reads the file. Nothing is ever blocked. It does nothing until the rollout schedule (rollout.json in the agent-companion state dir, id context-ceiling) says it is active. 0 turns it off.",
+      "description": "Advisory only. The first time a subagent's own context reaches this many tokens, the same PreToolUse hook as subagent_context_notice_tokens tells it ONCE to write a handoff file (state, files touched, next step, open questions) and return, giving the file path and STATUS: partial in its final message; the lead then starts a FRESH worker on the same rung that reads the file. Applies only to sonnet/high, sonnet/xhigh and every opus rung (never haiku, sonnet/low or sonnet/medium; the set is read from config/model-tiers.json). Nothing is ever blocked. It does nothing until the rollout schedule (rollout.json in the agent-companion state dir, id context-ceiling) says it is active. 0 turns it off.",
       "default": 150000
     },
     "subagent_ceiling_repeat_tokens": {
       "type": "number",
       "title": "Subagent context ceiling: second notice tokens",
-      "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. 0 turns the second notice off.",
-      "default": 175000
+      "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. Default 0 = off (the handoff nudge fires once per worker); set 175000 to restore the second notice.",
+      "default": 0
     }
   },
   "displayName": "Agent Companion",
