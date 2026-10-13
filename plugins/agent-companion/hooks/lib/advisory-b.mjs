@@ -17,6 +17,8 @@ import {
 import { join, dirname, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, telemetryDir, claudeDir, tailRecords } from './context.mjs';
+import { resolveAgentTranscript } from './runaway.mjs';
+import { parseStatus, lastAssistantText } from './status-line.mjs';
 import { crossSessionSenders, startsWithCrossSessionMessage, TAGS } from './cross-session.mjs';
 
 export const LIVE_WINDOW_MS = 2 * 3600 * 1000;
@@ -78,12 +80,21 @@ export function ledgerFile(sessionId) {
   return join(sub('worker-ledger'), `${safe(sessionId)}.jsonl`);
 }
 
-export function ledgerWrite(sessionId, ev, p, now = Date.now()) {
+export function ledgerWrite(sessionId, ev, p, now = Date.now(), extra = {}) {
   if (!sessionId || !p || !p.agent_id) return;
   appendFileSync(ledgerFile(sessionId), `${JSON.stringify({
-    at: new Date(now).toISOString(), ev, agent_id: String(p.agent_id), agent_type: p.agent_type || null,
+    at: new Date(now).toISOString(), ev, agent_id: String(p.agent_id), agent_type: p.agent_type || null, ...extra,
   })}\n`);
   pruneState(now);
+}
+
+// A stopped worker's final STATUS word (done | blocked | partial), or null when its last
+// message has no STATUS line. Payload text first, else a bounded tail read of the agent
+// transcript. Only the three-word status is stored, never message text.
+export function workerStatus(p) {
+  let text = p && typeof p.last_assistant_message === 'string' ? p.last_assistant_message : '';
+  if (!text.trim()) { try { text = lastAssistantText(resolveAgentTranscript(p)); } catch { text = ''; } }
+  return parseStatus(text);
 }
 
 // Drop state files older than a week. Runs from any ledger event and from

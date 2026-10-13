@@ -439,3 +439,56 @@ test('pruning runs from a stop event and session start, not only from SubagentSt
     assert.equal(existsSync(d), false, 'session-start pruned');
   } finally { fx.cleanup(); }
 });
+
+// ---- worker ledger: STATUS on stop rows (0.31.17) ----
+const stopMsg = (id, msg, extra = {}, env) => run('worker-stop', { session_id: SID, agent_id: id, agent_type: 'general-purpose', last_assistant_message: msg, ...extra }, env);
+
+test('stop row carries the STATUS word; start rows and readWorkers are unchanged', () => {
+  const fx = makeFixture();
+  try {
+    layout(fx);
+    start('a1');
+    stopMsg('a1', 'STATUS: partial\nBLOCKERS: none\nthe rest');
+    start('a2');
+    stopMsg('a2', 'Some preamble\n\n**STATUS:** done\nfiles changed');
+    start('a3');
+    stopMsg('a3', 'I finished without the contract line.');
+    start('a4');
+    stopMsg('a4', `${'x\n'.repeat(19)}STATUS: done`);
+    const rows = ledgerRows(fx);
+    assert.equal('status' in rows[0], false, 'start row has no status field');
+    const stops = rows.filter((r) => r.ev === 'stop');
+    assert.deepEqual(stops.map((r) => r.status), ['partial', 'done', null, null]);
+    assert.equal(JSON.stringify(rows).includes('BLOCKERS'), false, 'no message text stored');
+    assert.equal(ctx(run('send', { session_id: SID, tool_input: { to: 'peer-q' } })), '', 'stopped workers not counted as running');
+  } finally { fx.cleanup(); }
+});
+
+test('stop row without payload text reads the agent transcript tail; huge text is fine', () => {
+  const fx = makeFixture();
+  try {
+    const { subDir } = layout(fx);
+    start('a1');
+    const tp = join(subDir, 'agent-a1.jsonl');
+    const asst = (text) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+    writeFileSync(tp, [asst('STATUS: done\nold'), asst('x'.repeat(2000000)), asst('> **STATUS: blocked**\nneed a credential')].join('\n') + '\n');
+    run('worker-stop', { session_id: SID, agent_id: 'a1', agent_type: 'general-purpose', agent_transcript_path: tp });
+    start('a2');
+    const t0 = Date.now();
+    stopMsg('a2', `STATUS: done\n${'y'.repeat(5000000)}`);
+    assert.ok(Date.now() - t0 < 5000);
+    const stops = ledgerRows(fx).filter((r) => r.ev === 'stop');
+    assert.equal(stops[0].status, 'blocked');
+    assert.equal(stops[1].status, 'done');
+  } finally { fx.cleanup(); }
+});
+
+test('worker ledger writes nothing when both options are off', () => {
+  const fx = makeFixture();
+  try {
+    layout(fx);
+    const env = { CLAUDE_PLUGIN_OPTION_OVERDUE_WORKER_WARNING: 'false', CLAUDE_PLUGIN_OPTION_PEER_MESSAGE_WARNING: 'false' };
+    stopMsg('a1', 'STATUS: done', {}, env);
+    assert.equal(existsSync(join(fx.stateDir, 'state', 'worker-ledger', `${SID}.jsonl`)), false);
+  } finally { fx.cleanup(); }
+});

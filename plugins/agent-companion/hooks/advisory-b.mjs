@@ -10,7 +10,7 @@
 
 import { readStdin, opt, passthrough, callerIsSubagent, sessionIsSubagent } from './lib/context.mjs';
 import {
-  ledgerWrite, taskStopWrite, pruneState, overdueNotices, peerMessageNote, parseKnownPeers, liveSessionsNote, parseRelated, OVERDUE_DEFAULT_MINUTES,
+  ledgerWrite, workerStatus, taskStopWrite, pruneState, overdueNotices, peerMessageNote, parseKnownPeers, liveSessionsNote, parseRelated, OVERDUE_DEFAULT_MINUTES,
 } from './lib/advisory-b.mjs';
 
 const i = process.argv.indexOf('--event');
@@ -28,7 +28,10 @@ try {
   const wantF9 = opt('live_sessions', true);
 
   if (EVENT === 'worker-start' || EVENT === 'worker-stop') {
-    if (wantF14 || wantF10) ledgerWrite(p.session_id, EVENT === 'worker-start' ? 'start' : 'stop', p);
+    if (wantF14 || wantF10) {
+      if (EVENT === 'worker-start') ledgerWrite(p.session_id, 'start', p);
+      else ledgerWrite(p.session_id, 'stop', p, Date.now(), { status: workerStatus(p) });
+    }
     passthrough();
   }
   if (EVENT === 'task-stop') {
