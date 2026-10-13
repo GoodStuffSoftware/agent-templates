@@ -334,7 +334,7 @@ with no corresponding start was denied or failed.
 | `session_id` | string | session it fired in |
 | `agent_type` | string \| absent | the payload's `agent_type`; absent on a main-thread call, which carries none |
 | `tool_name` | string \| null | the tool the call was for (`Agent`, `Bash`, …) |
-| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, `inherit` (`inherit_guard: block`), or `review-recursion` (a reviewer spawning a reviewer, `review_recursion_guard`) |
+| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, `inherit` (`inherit_guard: block`), `review-recursion` (a reviewer spawning a reviewer, `review_recursion_guard`), or `type-required` (a ladder-rung spawn with no `TYPE:`, `WEIGHT:` or `KIND:` line, `type_line_required`) |
 | `outcome` | string | `deny`, or `warn` for a `delegation_guard: warn` firing (the guard matched and did not stop the call). A consumer counting blocked calls filters on `deny`; any row proves the guard still fires |
 | `detail` | string | short reason, truncated to 300 chars. A `delegation` row ends with the scope and what the call's env said for `CLAUDE_CODE_SESSION_ATTENDED` (`scope attended, attended 1`) |
 

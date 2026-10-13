@@ -36,6 +36,12 @@
       "default": 2,
       "description": "How many premium-tier subagents may run at once before further spawns are denied."
     },
+    "type_line_required": {
+      "type": "string",
+      "title": "Require a TYPE line on ladder spawns",
+      "description": "A spawn of a ladder rung (agent-companion:ac-haiku ... ac-opus-max) whose brief has no TYPE: line, and no WEIGHT:, KIND: or weighted WARRANT: line standing in for it, records nothing about the work and checks no fit. \"deny\" (default): refuse it; the message gives the line to add and the nearest types (lookup, survey, bounded-feature ...). \"warn\": allow it with a note. \"off\": silent. Built-in, project and browser agents are never affected. A worker spawning its own sub-worker follows the same rule.",
+      "default": "deny"
+    },
     "inherit_guard": {
       "type": "string",
       "title": "Inherited model and effort",

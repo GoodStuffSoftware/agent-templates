@@ -388,7 +388,20 @@ try {
   const typeNudge = declaredTypeRaw && !canonicalTaskType(declaredTypeRaw) && opt('type_line_nudge', true)
     ? `agent-companion: TYPE: ${declaredTypeRaw} is not a task type, so it routes and measures nothing. ${unknownTypeHint(declaredTypeRaw).replace(/^"[^"]*" is not a task type\. /, '')} Not blocking.`
     : null;
-  const roleNudge = [roleLineNudge, typeNudge].filter(Boolean).join('\n') || null;
+  // type_line_required (0.31.17; deny | warn | off, default deny): a ladder-rung spawn
+  // needs a TYPE: line or a line that stands in for it (WEIGHT:, KIND:, or a WARRANT:
+  // carrying a weight; CONSEQUENCE: alone routes nothing). Enforced in Gate 5 below.
+  const typeReqRaw = String(opt('type_line_required', 'deny')).toLowerCase();
+  const typeRequiredMode = ['deny', 'warn', 'off'].includes(typeReqRaw) ? typeReqRaw : 'deny';
+  const hasTypeStandIn = !!(decls.TYPE || decls.WEIGHT || decls.KIND || warrantWeightMatch);
+  // Rungs proper only: ladderVariants (ac-browser, ac-browser-opus) are "not a rung".
+  const typeReqBare = String(input.subagent_type || '').replace(`${pluginName()}:`, '');
+  const typeReqIsRung = isLadderSpawn && !ladderVariants().some((v) => v.agent === typeReqBare);
+  const typeRequiredMissing = typeReqIsRung && !hasTypeStandIn && typeRequiredMode !== 'off';
+  const typeRequiredWarn = typeRequiredMissing && typeRequiredMode === 'warn'
+    ? 'agent-companion: this ladder-rung brief has no `TYPE:` line (and no WEIGHT: or KIND: line that stands in for it). Add `TYPE: <task type>` on its own line; with type_line_required on its default (deny) this spawn would be refused.'
+    : null;
+  const roleNudge = [roleLineNudge, typeNudge, typeRequiredWarn].filter(Boolean).join('\n') || null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
@@ -1679,6 +1692,29 @@ try {
       'Either add run_in_background: true, or add a line to the brief:\n' +
       '  FOREGROUND: <why this result is needed before the lead can continue>\n\n' +
       'If you cannot write that line honestly, background it.'
+    );
+  }
+
+  // --- Gate 5: ladder rung needs a TYPE (type_line_required: deny) ---------
+  // A rung spawn with no TYPE: (nor WEIGHT:, KIND:, a weighted WARRANT:) records
+  // nothing about what the work was and checks no fit. Non-rung agents are never
+  // gated. A worker spawning its own sub-worker gets the same rule.
+  if (typeRequiredMissing && typeRequiredMode === 'deny') {
+    recordDenial('type-required', p, `${input.subagent_type} brief has no TYPE:, WEIGHT: or KIND: line${subagentCaller ? ' (spawned by a subagent)' : ''}`);
+    const trExamples = commonTypeRoutes();
+    deny(
+      `Type guard: this spawn ${subagentCaller ? '(made by a worker, for its own sub-worker) ' : ''}names ladder rung "${input.subagent_type}" ` +
+      'but the brief has no TYPE: line (and no WEIGHT: or KIND: line that stands in for it), so nothing records what the work was ' +
+      'or checks that the rung fits.\n' + '\n' +
+      'Add a line of its own to the brief:\n' +
+      '  TYPE: <task type>\n' +
+      (trExamples ? `Current routes: ${trExamples}. ` : '') +
+      'Nearest types: lookup (find or read something and report), survey (sweep many files for a conclusion), ' +
+      'bounded-feature, mechanical-edit, code-review. Full list: `' + RECOMMEND_CMD + ' --list`.\n' +
+      'Add ROLE: <reviewer|fixer|lander|writer|docs|lookup|operate|other> beside it. ' +
+      'WEIGHT: or KIND: lines are still accepted when no type fits.' +
+      (subagentCaller ? '\n\nYou are a worker spawning a worker: put the TYPE: line in the sub-worker brief yourself; the lead TYPE does not carry over.' : '') +
+      '\n\nSet type_line_required to "warn" to downgrade this to a note.'
     );
   }
 
