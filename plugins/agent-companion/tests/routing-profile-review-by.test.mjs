@@ -101,3 +101,17 @@ test('scout: a settled row and a retired row never raise the trial-review signal
     assert.equal(dueSignals(fx, '2030-01-01T00:00:00.000Z').length, 0);
   } finally { fx.cleanup(); }
 });
+
+// 0.31.17: `set` refuses a model row with no effort (the F4 hard-stale reason); a parity row
+// takes an effort only and a model row that names its effort is unaffected.
+test('set refuses a model row with no effort using the F4 reason, and writes nothing; parity rows and full rows still set', () => {
+  const fx = makeFixture();
+  try {
+    const bad = rp(fx, ['set', 'verify', '--model', 'sonnet']);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /hard-stale \(F4\): sonnet takes an effort parameter; none is named/);
+    assert.equal(showJson(fx).status, 'absent', 'no profile file was written');
+    assert.equal(rp(fx, ['set', 'code-review', '--effort', 'high']).status, 0);
+    assert.equal(rp(fx, SET).status, 0);
+  } finally { fx.cleanup(); }
+});
