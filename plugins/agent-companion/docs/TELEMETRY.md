@@ -383,6 +383,26 @@ Written by `hooks/subagent-context.mjs` each time it tells a subagent to write a
 | `tier` | number | 1 first nudge, 2 the second and last |
 | `ceiling`, `repeat` | number | the two thresholds as set |
 
+### `bash-exit.jsonl` — Bash exit status
+
+One row per Bash call, written by `hooks/bash-exit.mjs` (record only; nothing is printed or blocked).
+Registered on `PostToolUse` (success: `exit` 0) and `PostToolUseFailure` (the `error` string begins
+`Exit code N`), both `^Bash$`. Source: the Claude Code hooks documentation (PostToolUse fires only on
+success; PostToolUseFailure carries `error` and `is_interrupt`); not confirmed by a live run, so a
+PostToolUse payload with an error or a non-zero exit field is also read as a failure. Option
+`bash_exit_telemetry`, off too when `spawn_telemetry` is off.
+
+| field | type | meaning |
+|---|---|---|
+| `v`, `at` | number, ISO 8601 | schema version, when written |
+| `session_id`, `agent_id`, `agent_type` | string, string \| null, string \| null | who ran it |
+| `caller_is_subagent` | boolean | |
+| `runner` | string \| null | known long-runner named by `hooks/lib/bash-tail.mjs` `analyze` |
+| `cmd_key` | string | first 12 hex of sha1 of the normalised command (whitespace collapsed, leading `cd <path> &&`, trailing `2>&1` and `\| tail`/`\| head` dropped; a bash-tail rewrite is unwrapped first). No command text is stored. Count "same gate failed N times in a row" by grouping on `session_id` + `cmd_key` |
+| `exit` | number \| null | exit code; null for an interrupt or an unparseable failure |
+| `failed` | boolean | `exit` is non-zero, or the failure had no parseable code |
+| `interrupted` | true \| absent | the call was aborted |
+
 ### `bash-tail.jsonl` — the Bash output tail
 
 Three kinds of row, told apart by `event`. Read with `node scripts/bash-tail-report.mjs`.
