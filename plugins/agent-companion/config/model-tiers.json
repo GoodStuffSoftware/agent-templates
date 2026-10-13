@@ -375,7 +375,7 @@
     "note": "A reviewer is sized to the writer it gates, never below it. Its MODEL is at least the writer's: a weaker reviewer catches the errors it would itself have avoided and waves through the ones it would itself have made, which is the novel-error class a stronger writer produces. Its EFFORT may go higher and must not go lower — refutation is a search problem and can need more thinking than generation did. The floors then apply as on any route: F1 raises a critical review to at least the critical floor (opus/xhigh) whatever the writer; F2 caps a fable writer's reviewer to the best tier that is a routing destination (opus, which still demands a WARRANT); F4 refuses a writer the table cannot size (a model outside the tier table, one unavailable with no staged replacement, or an effort that is no effort level) and fits the effort to what the reviewer's model accepts (none on haiku). modelMustMatch means the reviewer starts at the writer's model."
   },
   "taskTypeAliases": {
-    "analysis": "explore", "lookup": "explore",
+    "analysis": "explore",
     "bugfix": "debug-root-cause",
     "bounded-fix": "bounded-feature", "bounded": "bounded-feature",
     "mechanical": "mechanical-edit", "one-line": "mechanical-edit", "docs": "mechanical-edit",
@@ -425,7 +425,7 @@
       "weight": 1,
       "kind": "mechanical",
       "consequence": "routine",
-      "summary": "read-only search: where is X, what touches Y, does Z exist; excludes multi-hop research (that is the research type)",
+      "summary": "legacy bimodal type (excludes multi-hop research, that is the research type); prefer lookup for a single fact or list, survey for multi-source reading. Its Haiku trial row and register decision are reviewed 2026-10-19",
       "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven.",
       "override": {
         "model": "haiku",
@@ -443,6 +443,27 @@
       "consequence": "routine",
       "summary": "multi-source investigation: read, cross-reference and synthesise across files or sources; more than locate-and-report",
       "provenance": "Operator decision 2026-10-13: research was an alias of explore and so landed on the Haiku trial row; leads overrode it to Sonnet, counted as a trial leak. Own route, grid weight 3 (sonnet/medium), no trial override."
+    },
+    "lookup": {
+      "weight": 1,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "a single fact or list: where is X, does Z exist; about 12 requests or fewer, no judgement",
+      "provenance": "Operator decision 2026-10-13 (granularity review): explore was bimodal. Own route, grid weight 1 (haiku/medium), no trial override. explore stays a real type until its 2026-10-19 review."
+    },
+    "survey": {
+      "weight": 3,
+      "kind": "bounded",
+      "consequence": "routine",
+      "summary": "multi-source read and synthesis, roughly 25-60 requests, one summary back; promote to sonnet/high on a snag",
+      "provenance": "Operator decision 2026-10-13 (granularity review). Own route, grid weight 3 (sonnet/medium), no trial override."
+    },
+    "bounded-feature-small": {
+      "weight": 3,
+      "kind": "bounded",
+      "consequence": "routine",
+      "summary": "a feature against a clear spec, 1-2 files, about 25 requests or fewer; if it grows past that, return and re-spawn as bounded-feature",
+      "provenance": "Operator decision 2026-10-13 (granularity review). Own route, grid weight 3 (sonnet/medium), no trial override; a separate type so small and ordinary work can be measured apart."
     },
     "mechanical-edit": {
       "weight": 2,

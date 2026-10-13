@@ -43,7 +43,7 @@ import {
 } from '../../hooks/lib/context.mjs';
 
 // Types whose agents do not write the change a reviewer gates.
-export const READ_ONLY_TYPES = new Set(['explore', 'verify', 'debug-root-cause', 'operate', 'code-review']);
+export const READ_ONLY_TYPES = new Set(['explore', 'lookup', 'survey', 'verify', 'debug-root-cause', 'operate', 'code-review']);
 
 export function parseFrontmatter(text) {
   const m = String(text).match(/^---\r?\n([\s\S]*?)\r?\n---/);

@@ -146,8 +146,11 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 
 | Task type | Weight | Kind | Consequence | Resolves to | What it is |
 |---|---|---|---|---|---|
-| `explore` | 1 | `mechanical` | `routine` | `haiku/medium` _(trial override)_ | read-only search: where is X, what touches Y, does Z exist; excludes multi-hop research (that is the research type) |
+| `explore` | 1 | `mechanical` | `routine` | `haiku/medium` _(trial override)_ | legacy bimodal type (excludes multi-hop research, that is the research type); prefer lookup for a single fact or list, survey for multi-source reading. Its Haiku trial row and register decision are reviewed 2026-10-19 |
 | `research` | 3 | `bounded` | `routine` | `sonnet/medium` | multi-source investigation: read, cross-reference and synthesise across files or sources; more than locate-and-report |
+| `lookup` | 1 | `mechanical` | `routine` | `haiku/medium` | a single fact or list: where is X, does Z exist; about 12 requests or fewer, no judgement |
+| `survey` | 3 | `bounded` | `routine` | `sonnet/medium` | multi-source read and synthesis, roughly 25-60 requests, one summary back; promote to sonnet/high on a snag |
+| `bounded-feature-small` | 3 | `bounded` | `routine` | `sonnet/medium` | a feature against a clear spec, 1-2 files, about 25 requests or fewer; if it grows past that, return and re-spawn as bounded-feature |
 | `mechanical-edit` | 2 | `mechanical` | `routine` | `sonnet/low` _(trial override)_ | rename, config edit, reformat, apply a known migration recipe; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
 | `bounded-feature` | 3 | `bounded` | `routine` | `opus/medium` _(trial override)_ | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | 4 | `bounded` | `elevated` | `opus/medium` _(trial override)_ | multi-file, cross-referencing, touches shared config or things other agents depend on |
@@ -165,6 +168,9 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 
 - **`explore`** — OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven.
 - **`research`** — Operator decision 2026-10-13: research was an alias of explore and so landed on the Haiku trial row; leads overrode it to Sonnet, counted as a trial leak. Own route, grid weight 3 (sonnet/medium), no trial override.
+- **`lookup`** — Operator decision 2026-10-13 (granularity review): explore was bimodal. Own route, grid weight 1 (haiku/medium), no trial override. explore stays a real type until its 2026-10-19 review.
+- **`survey`** — Operator decision 2026-10-13 (granularity review). Own route, grid weight 3 (sonnet/medium), no trial override.
+- **`bounded-feature-small`** — Operator decision 2026-10-13 (granularity review). Own route, grid weight 3 (sonnet/medium), no trial override; a separate type so small and ordinary work can be measured apart.
 - **`mechanical-edit`** — COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate.
 - **`bounded-feature`** — OFFICIAL choosing-a-model: Sonnet for everyday code generation and agentic tool use. COMMUNITY: Sonnet 5 delivers near-Opus coding at Sonnet price; escalate to Opus when the spec is incomplete or moves mid-run.
 - **`integration`** — Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself, but see operatorNote and the ROUTING TRIAL v3 override below.

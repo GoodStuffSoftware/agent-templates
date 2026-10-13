@@ -281,6 +281,14 @@ tier that does not cause rework, as a new trial (`trialVersion: 4`, since
 - `explore` and `verify` go to haiku. They only read or check and change
   nothing, so a wrong answer is caught by the next step, not shipped.
   Haiku validates; it does not operate, so it is limited to these two.
+
+  Granularity split (operator-approved 2026-10-13, 0.31.17): `explore` was
+  bimodal (a one-fact lookup and a 60-request read-and-synthesise). `lookup`
+  (haiku/medium, about 12 requests or fewer, no judgement) and `survey`
+  (sonnet/medium, about 25-60 requests) are now real types with no trial
+  override, and `bounded-feature-small` (sonnet/medium, 1-2 files, about 25
+  requests or fewer) splits small work from `bounded-feature`. `explore` stays
+  a real type, with its Haiku trial row, until the 2026-10-19 review.
 - `mechanical-edit`, `operate` and `subagent-worker` go to sonnet/low. They
   change things, and Sonnet 5 passed every synthetic task at every effort.
 - `large-refactor` and `long-autonomous-run` go from opus/xhigh to opus/high

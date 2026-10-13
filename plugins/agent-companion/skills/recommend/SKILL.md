@@ -35,8 +35,11 @@ Config v8 (updated 2026-10-12). **Premium** = the spawn brief needs a `WARRANT:`
 
 | Task type | Route | Premium | What it is |
 |---|---|---|---|
-| `explore` | `haiku/medium` (routing trial, review by 2026-10-16) | no | read-only search: where is X, what touches Y, does Z exist; excludes multi-hop research (that is the research type) |
+| `explore` | `haiku/medium` (routing trial, review by 2026-10-16) | no | legacy bimodal type (excludes multi-hop research, that is the research type); prefer lookup for a single fact or list, survey for multi-source reading. Its Haiku trial row and register decision are reviewed 2026-10-19 |
 | `research` | `sonnet/medium` | no | multi-source investigation: read, cross-reference and synthesise across files or sources; more than locate-and-report |
+| `lookup` | `haiku/medium` | no | a single fact or list: where is X, does Z exist; about 12 requests or fewer, no judgement |
+| `survey` | `sonnet/medium` | no | multi-source read and synthesis, roughly 25-60 requests, one summary back; promote to sonnet/high on a snag |
+| `bounded-feature-small` | `sonnet/medium` | no | a feature against a clear spec, 1-2 files, about 25 requests or fewer; if it grows past that, return and re-spawn as bounded-feature |
 | `mechanical-edit` | `sonnet/low` (routing trial, review by 2026-10-16) | no | rename, config edit, reformat, apply a known migration recipe; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
 | `bounded-feature` | `opus/medium` (routing trial, review by 2026-10-04) | yes | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | `opus/medium` (routing trial, review by 2026-09-30) | yes | multi-file, cross-referencing, touches shared config or things other agents depend on |
