@@ -1332,6 +1332,18 @@ function parityFloors(r, { consequence, writer, now, writerType = null }) {
     }
   }
 
+  // Tier effort floor (`tiers.<alias>.minEffort`, haiku: medium), the same floor the
+  // plain grid applies: a haiku reviewer never runs below it, even when its writer
+  // ran lower. Raises only. After the cap and the reviewer floor, before F1.
+  {
+    const tierMin = (classifyModel(model).alias && (cfg.tiers || {})[classifyModel(model).alias] || {}).minEffort;
+    const rk = rankedEffortsFor(model);
+    if (tierMin && rk.includes(tierMin) && rk.indexOf(tierMin) > (effort ? rk.indexOf(effort) : -1)) {
+      floorsApplied.push({ floor: `${model}-min-effort`, raised: `effort ${effort || '(none)'} -> ${tierMin}; ${model} never runs below ${tierMin}` });
+      effort = tierMin;
+    }
+  }
+
   // F1: a critical review is at least the critical floor, whatever the writer.
   if (consequence === 'critical') {
     const cons = (cfg.consequence || {}).critical || {};
