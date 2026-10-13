@@ -1,10 +1,16 @@
-// Subagent context ceiling: a checkpoint nudge at 150K tokens.
+// Subagent context ceiling: a handoff nudge at 150K tokens, for sonnet/high and above.
 //
 // Why. A subagent that keeps working past ~150K tokens of context pays more
 // per call and ends up compacting at ~217K. The operator-approved alternative
 // (2026-10-10, evidence: tasks/usage-why-2026-10-06/ceiling-detail.md, best
 // ceiling C = 150K) is to have the worker write a checkpoint file and return,
 // so the lead continues with a FRESH worker that reads it.
+//
+// Which rungs (operator, 2026-10-13). Only sonnet/high, sonnet/xhigh and every
+// opus rung are nudged (ceilingRung). Haiku, sonnet/low and sonnet/medium keep
+// their current behaviour (the 300K kind=size notice only). The set is read
+// from config/model-tiers.json (ladder + ladderVariants), not hard-coded. The
+// nudge fires ONCE per worker (the repeat line defaults to 0 = off).
 //
 // What. hooks/subagent-context.mjs (PreToolUse, inside the subagent) already
 // reads the subagent's own context size from the tail of its transcript; the
@@ -28,13 +34,37 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { stateRootPath } from './context.mjs';
+import { stateRootPath, modelTiers, ladderVariants } from './context.mjs';
 import { claimOnce, fmtTokens } from './subagent-context.mjs';
 
 export const CEILING_CHANGE_ID = 'context-ceiling';
 export const CEILING_DEFAULT_TOKENS = 150000;
-export const CEILING_REPEAT_DEFAULT_TOKENS = 175000;
+export const CEILING_REPEAT_DEFAULT_TOKENS = 0; // once per worker; set 175000 to restore a second notice
 export const CEILING_LOG = 'context-ceiling.jsonl';
+
+const EFFORT_RANK = { low: 1, medium: 2, high: 3, xhigh: 4, max: 5 };
+
+// Does the handoff nudge apply to this worker? Ladder agents (and the browser
+// variants) are judged by their model + effort in config/model-tiers.json:
+// opus at any effort, or sonnet at high and above. Any other agent type is
+// judged by the transcript's model id: opus yes, anything else silent (its
+// effort is unknown). Returns 'opus' | 'sonnet-high+' | null.
+export function ceilingRung(agentType, model) {
+  const bare = String(agentType || '').replace(/^[^:]*:/, '');
+  let spec = null;
+  try {
+    const cfg = modelTiers();
+    const ladder = Array.isArray(cfg.ladder) ? cfg.ladder : [];
+    spec = [...ladder, ...ladderVariants()].find((r) => r && r.agent === bare) || null;
+  } catch { spec = null; }
+  if (spec) {
+    if (spec.model === 'opus') return 'opus';
+    if (spec.model === 'sonnet' && (EFFORT_RANK[spec.effort] || 0) >= EFFORT_RANK.high) return 'sonnet-high+';
+    return null;
+  }
+  if (/^ac-/.test(bare)) return null; // an ac- name the table does not know: stay silent
+  return /opus/i.test(String(model || '')) ? 'opus' : null;
+}
 
 export function rolloutFile() { return join(stateRootPath(), 'rollout.json'); }
 
@@ -75,14 +105,14 @@ export function claimCeilingTier(agentId, ctx, ceiling, repeat) {
 export function ceilingNoticeText(tier, ctx, ceiling, repeat) {
   const n = fmtTokens(ctx);
   if (tier === 2) {
-    return `[agent-companion] Context checkpoint, second and last notice: your context is about ${n} tokens and still growing past ${fmtTokens(repeat)}. `
-      + 'Do not start another step. Write the checkpoint file now and return.';
+    return `[agent-companion] Handoff checkpoint, second and last notice: your context is about ${n} tokens and still growing past ${fmtTokens(repeat)}. `
+      + 'Do not start another step. Write the handoff file now and return.';
   }
-  return `[agent-companion] Context checkpoint: your context is about ${n} tokens, past the ${fmtTokens(ceiling)}-token ceiling for subagents. `
-    + 'Stop starting new work. Write a checkpoint file (name it <task>-checkpoint.md, in the directory your brief names for outputs; not REPORT/SUMMARY/FINDINGS/ANALYSIS) '
-    + 'holding: the goal, what is done, the remaining steps, key paths, and open findings. Then return. '
-    + 'Your final message gives the checkpoint file path and a proposed split of the remaining work, so the lead can continue with a fresh worker that reads the file. '
-    + 'If you cannot write files, put the checkpoint in your final message instead.';
+  return `[agent-companion] Handoff checkpoint: your context is about ${n} tokens, past the ${fmtTokens(ceiling)}-token line for this rung. `
+    + 'Stop starting new work. Write a handoff file (<task>-handoff.md, in the directory your brief names for outputs; not REPORT/SUMMARY/FINDINGS/ANALYSIS) '
+    + 'with: state (what is done and what is verified), files touched, next step, open questions. Then return. '
+    + 'Your final message gives the handoff path and STATUS: partial, so the lead starts a fresh worker on the same rung that reads it. '
+    + 'If you cannot write files, put the handoff in your final message instead.';
 }
 
 // The whole check. Returns { tier, text, row } or null. Cheap exits first: the
@@ -91,6 +121,8 @@ export function ceilingCheck(p, sig, { ceiling, repeat }) {
   if (!sig || !(ceiling > 0) || typeof sig.ctx !== 'number' || sig.ctx < ceiling) return null;
   // A compaction with no request after it yet: ctx is still the pre-compaction size.
   if (sig.boundary && sig.turnsAfterBoundary === 0) return null;
+  const rungClass = ceilingRung(p.agent_type, sig.model);
+  if (!rungClass) return null; // no claim, no log
   if (!rolloutActive()) return null;
   const tier = claimCeilingTier(p.agent_id, sig.ctx, ceiling, repeat);
   if (!tier) return null;
@@ -99,7 +131,7 @@ export function ceilingCheck(p, sig, { ceiling, repeat }) {
     text: ceilingNoticeText(tier, sig.ctx, ceiling, repeat),
     row: {
       at: new Date().toISOString(), session_id: p.session_id, agent_type: p.agent_type, agent_id: p.agent_id,
-      model: sig.model || null, tokens: sig.ctx, tier, ceiling, repeat,
+      model: sig.model || null, tokens: sig.ctx, tier, rung_class: rungClass, ceiling, repeat,
     },
   };
 }

@@ -369,7 +369,7 @@ compaction once per compaction).
 
 ### `context-ceiling.jsonl` — one record per context-ceiling nudge
 
-Written by `hooks/subagent-context.mjs` each time it tells a subagent to write a checkpoint file and return (`subagent_ceiling_tokens`, default 150000; once more past `subagent_ceiling_repeat_tokens`, default 175000). Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
+Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-above or opus subagent to write a handoff file and return (`subagent_ceiling_tokens`, default 150000), once per worker (a second row only if `subagent_ceiling_repeat_tokens` is set; default 0 = off). Haiku, sonnet/low and sonnet/medium are never nudged and write no row. Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
 
 | field | type | meaning |
 |---|---|---|
@@ -380,7 +380,8 @@ Written by `hooks/subagent-context.mjs` each time it tells a subagent to write a
 | `agent_id` | string | the subagent |
 | `model` | string or null | model of the subagent's latest request |
 | `tokens` | number | the subagent's context size at its latest request (input + cache read + cache write) |
-| `tier` | number | 1 first nudge, 2 the second and last |
+| `tier` | number | 1 first nudge, 2 the second and last (only when the repeat option is set) |
+| `rung_class` | string | `sonnet-high+` or `opus` |
 | `ceiling`, `repeat` | number | the two thresholds as set |
 
 ### `bash-tail.jsonl` — the Bash output tail
