@@ -84,10 +84,11 @@ export function frontmatterModel(text) {
   if (!m) return null;
   const line = /^model:[ \t]*(.+?)[ \t]*$/m.exec(m[1]);
   if (!line) return null;
-  const v = line[1].replace(/^["'`]|["'`]$/g, '').trim();
+  const v = line[1].replace(/\s+#.*$/, '').replace(/^["'`]|["'`]$/g, '').trim();
   return !v || /^(default|inherit)$/i.test(v) ? null : v;
 }
 
+const NOT_COMPARABLE = new Set(['best', 'opusplan', 'sonnetplan']);
 const norm = (s) => String(s || '').toLowerCase().replace(/\[[^\]]*\]$/, '').trim();
 
 // Does the recorded model id satisfy the expected value (an alias such as `opus`, or a full id)?
@@ -95,6 +96,9 @@ export function modelMatches(expected, recorded) {
   const e = norm(expected); const r = norm(recorded);
   if (!e || !r) return false;
   if (r === e) return true;
+  // Aliases that resolve per mode or to "the most capable model": no single recorded id satisfies or
+  // contradicts them, so they are not comparable and never count as drift.
+  if (NOT_COMPARABLE.has(e)) return true;
   if (/^claude-/.test(e)) return r.startsWith(e) || e.startsWith(r);
   return new RegExp(`(^|[-.:/])${e.replace(/[^a-z0-9]/g, '')}([-.:/]|$)`).test(r);
 }
@@ -125,6 +129,9 @@ export function readTaskModels(claudeDirPath) {
   return out;
 }
 
+const fileMtime = (f) => { try { return f ? statSync(f).mtimeMs : 0; } catch { return 0; } };
+const taskMtime = (claudeDirPath, task) => fileMtime(join(claudeDirPath, 'scheduled-tasks', task, 'SKILL.md'));
+
 // -> { drift: [text], unpinned: [task name] }
 // drift: runs created in the last `windowMs` whose recorded model or effort differs from what the
 // task's SKILL.md and the run folder's pin say. unpinned: tasks with a SKILL.md and no model: line that
@@ -135,10 +142,14 @@ export function routineModelDrift({ sessionsRoot, claudeDirPath, nowMs, windowMs
   const tasks = readTaskModels(claudeDirPath);
   const recent = scheduledRuns(sessionsRoot, nowMs, activeMs);
   for (const r of recent.filter((x) => nowMs - x.createdAt <= windowMs)) {
-    const expectModel = tasks.has(r.task) ? tasks.get(r.task) : null;
+    // A run cannot be judged against a pin that did not exist yet: skip a run created before the
+    // task's SKILL.md (model half) or the run folder's settings.local.json (effort half) was last modified.
+    const skillAt = taskMtime(claudeDirPath, r.task);
+    const settingsAt = fileMtime(r.cwd ? join(r.cwd, '.claude', 'settings.local.json') : '');
+    const expectModel = tasks.has(r.task) && !(skillAt && r.createdAt < skillAt) ? tasks.get(r.task) : null;
     const bits = [];
     if (expectModel && !modelMatches(expectModel, r.model)) bits.push(`model ${r.model || 'unrecorded'} but the task's model: line says ${expectModel}`);
-    const pin = folderEffortFor(r.cwd, r.model);
+    const pin = settingsAt && r.createdAt < settingsAt ? null : folderEffortFor(r.cwd, r.model);
     if (pin) {
       if (pin.level && r.effort && pin.level !== r.effort) bits.push(`effort ${r.effort} but the folder pin for this model says ${pin.level}`);
       if (!pin.level) bits.push(`the folder effort pin is keyed to ${pin.keys.join(', ')}, not ${r.model || 'this model'}, so it did not apply (effort ${r.effort || 'unrecorded'})`);

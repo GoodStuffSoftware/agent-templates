@@ -3,7 +3,7 @@
 import './isolate.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 
@@ -16,11 +16,19 @@ function run(dir, sessions, env = {}) {
   assert.ok(res.json, 'detect prints JSON');
   return res;
 }
-const task = (dir, name, model) => write(join(dir, '.claude', 'scheduled-tasks', name, 'SKILL.md'),
-  `---\nname: ${name}\ndescription: d\n${model ? `model: ${model}\n` : ''}---\nBody\n`);
+// Pins are backdated 2 h so the default run (1 h old) was created after them; a run that predates
+// a pin is not judged against it (see release-0-31-17-rest.test.mjs, F4).
+const backdate = (file) => { const t = new Date(Date.now() - 2 * 3600 * 1000); utimesSync(file, t, t); };
+const task = (dir, name, model) => {
+  const f = join(dir, '.claude', 'scheduled-tasks', name, 'SKILL.md');
+  write(f, `---\nname: ${name}\ndescription: d\n${model ? `model: ${model}\n` : ''}---\nBody\n`);
+  backdate(f);
+};
 const pinFolder = (dir, name, map) => {
   const f = join(dir, name);
-  write(join(f, '.claude', 'settings.local.json'), JSON.stringify({ modelSettings: Object.fromEntries(Object.entries(map).map(([m, l]) => [m, { effortLevel: l }])) }));
+  const s = join(f, '.claude', 'settings.local.json');
+  write(s, JSON.stringify({ modelSettings: Object.fromEntries(Object.entries(map).map(([m, l]) => [m, { effortLevel: l }])) }));
+  backdate(s);
   return f;
 };
 let n = 0;

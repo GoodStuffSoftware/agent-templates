@@ -277,8 +277,8 @@ rows only).
 | `name` | string \| null | the reviewer's declared name |
 | `review_verdict` | `PASS` \| `FIX` \| `BLOCK` | normalized; wordings such as `APPROVE WITH FIXES`, `REQUEST CHANGES`, `FAIL` map to `FIX` |
 | `review_verdict_raw` | string | the verdict text as written, first 80 characters |
-| `reviewed_model`, `reviewed_effort` | string | null | the writer under review, parsed from the brief's `WRITER:` line as spawn-guard does (0.31.17); null when absent or unusable. Rows before 0.31.17 carry none |
-| `reviewer_model`, `reviewer_effort` | string | null | the reviewer's own model and effort from its spawns row (0.31.17); null when the row was not found |
+| `reviewed_model`, `reviewed_effort` | string \| null | the writer under review, parsed from the brief's `WRITER:` line as spawn-guard does (0.31.17); null when absent or unusable. Rows before 0.31.17 carry none |
+| `reviewer_model`, `reviewer_effort` | string \| null | the reviewer's own model and effort from its spawns row (0.31.17); null when the row was not found |
 | `reviewed_branch` | string \| null | the first `feat\|fix\|chore\|docs\|refactor\|release\|wip/<name>` token in the reviewer's brief (0.31.17); null when the brief names none. Background reviewers carry it from the launch record. Rows before 0.31.17 carry none |
 | `post_pass_defect` | null | always null on the row itself (unknown); rows are append-only and never rewritten. The signal lives in `review-outcomes.jsonl` (below) and is folded in at read time (0.31.17) |
 | `declared_type`, `declared_role` | string \| null | the brief's `TYPE:` and `ROLE:` |
