@@ -136,9 +136,9 @@ test('a PR closed unmerged returns 1', () => {
 test('timeout: exit 2, the checks still pending are named', () => {
   const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [checks(cr('build', 'completed', 'success'), cr('slow', 'in_progress', '', 'https://ci.example/slow'))]));
   try {
-    const r = t.run('31', '--timeout', '1s');
+    const r = t.run('31', '--timeout', '4s'); // wide: a loaded machine can spend >1s on one stub spawn, leaving a single poll
     assert.equal(r.code, 2, r.stdout + r.stderr);
-    assert.match(r.final, /^PR 31 OPEN TIMEOUT @sha-1 after 1s \| checks 1 passed, 0 failed, 2 total, 1 pending \|/);
+    assert.match(r.final, /^PR 31 OPEN TIMEOUT @sha-1 after 4s \| checks 1 passed, 0 failed, 2 total, 1 pending \|/);
     assert.deepEqual(r.detail, ['PENDING slow https://ci.example/slow']);
     assert.ok(t.calls().filter((c) => c.startsWith('pr view')).length >= 2, 'it polled repeatedly while waiting');
   } finally { t.fx.cleanup(); }

@@ -15,8 +15,8 @@ const rec = (...args) => runScript('scripts/recommend.mjs', args);
 test('data: every alias target is a shipped type and no alias shadows a type', () => {
   const cfg = modelTiers();
   const names = Object.keys(cfg.taskTypes);
-  assert.equal(names.length, 13);
-  assert.ok(Object.keys(aliases()).length >= 10);
+  assert.equal(names.length, 17);
+  assert.ok(Object.keys(aliases()).length >= 8);
   for (const [a, target] of Object.entries(aliases())) {
     assert.ok(names.includes(target), `${a} -> ${target} must be a shipped type`);
     assert.ok(!names.includes(a), `${a} must not shadow a shipped type`);
@@ -61,7 +61,7 @@ test('recommend answers every alias except review (which needs a writer)', () =>
   }
 });
 
-test('recommend --type frobnicate exits 2 and names all 13 types and the aliases', () => {
+test('recommend --type frobnicate exits 2 and names all 17 types and the aliases', () => {
   const r = rec('--type', 'frobnicate');
   assert.equal(r.status, 2);
   for (const n of Object.keys(modelTiers().taskTypes)) assert.ok(r.stderr.includes(n), n);

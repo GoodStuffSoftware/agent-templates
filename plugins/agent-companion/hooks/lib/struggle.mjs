@@ -58,11 +58,15 @@ export const USER_PATTERN_FILE = 'struggle-patterns.json';
 const MAX_USER_PATTERNS = 40;
 const MAX_PATTERN_LEN = 200;
 
+// Cheap ReDoS guard: skip a pattern with a quantified group that itself holds a
+// quantifier, such as (a+)+ or (.*)* or (a|b*){2,}. The scored text is already
+// capped at 1500 characters.
+export const NESTED_QUANT = /\([^()]*[+*}][^()]*\)\s*[+*{]|\([^()]*\([^()]*[+*}][^()]*\)[^()]*\)\s*[+*{]/;
 function compileList(list) {
   const out = [];
   if (!Array.isArray(list)) return out;
   for (const src of list.slice(0, MAX_USER_PATTERNS)) {
-    if (typeof src !== 'string' || !src || src.length > MAX_PATTERN_LEN) continue;
+    if (typeof src !== 'string' || !src || src.length > MAX_PATTERN_LEN || NESTED_QUANT.test(src)) continue;
     try { out.push(new RegExp(src, 'i')); } catch { /* bad pattern: skip it */ }
   }
   return out;

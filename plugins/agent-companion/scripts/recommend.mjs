@@ -203,7 +203,7 @@ if (route?.cacheTtl) out.cacheTtl = route.cacheTtl; // advisory hint; only a pro
 // ROLE: line (0.31.3, measurement only): the role this task type usually has,
 // for the brief's ROLE: line. A suggestion; the spawner changes it when the
 // deliverable is a fix, a landing, docs, a lookup or an operation.
-const TYPE_ROLE = { 'code-review': 'reviewer', explore: 'lookup', verify: 'lookup', operate: 'operate' };
+const TYPE_ROLE = { 'code-review': 'reviewer', explore: 'lookup', lookup: 'lookup', verify: 'lookup', operate: 'operate' };
 if (out.taskType) out.role = BRIEF_ROLES.includes(TYPE_ROLE[out.taskType]) ? TYPE_ROLE[out.taskType] : 'writer';
 
 // Self-review (config selfReview): a writer of a listed type reviews its own

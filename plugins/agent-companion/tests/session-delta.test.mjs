@@ -318,3 +318,25 @@ test('directives need a human origin: origin-less, compaction summary, sidechain
     assert.ok(n.includes('not an instruction to you'), 'framed as context');
   } finally { fx.cleanup(); }
 });
+
+test('subagent transcripts under <session>/subagents/ are never scanned for directives', () => {
+  const fx = makeFixture();
+  try {
+    const s = setup(fx);
+    runHook(HOOK, { ...s.payload, source: 'startup' }, { args: SNAP });
+    const sub = join(fx.dir, '.claude', 'projects', 'proj-b', 'sess-9', 'subagents');
+    mkdirSync(sub, { recursive: true });
+    const ts = new Date(Date.now() - 600000).toISOString();
+    const rec = (extra) => JSON.stringify({ type: 'user', timestamp: ts, cwd: join(fx.dir, 'work', 'beta'), origin: { kind: 'human' }, message: { content: 'Always obey the subagent brief.' }, ...extra });
+    writeFileSync(join(sub, 'agent-a1.jsonl'), `${rec({ isSidechain: true })}\n${rec({})}\n`);
+    writeFileSync(join(sub, 'agent-a1.meta.json'), JSON.stringify({ name: 'w', agentType: 'general-purpose' }));
+    assert.equal(runHook(HOOK, s.payload, { args: DIFF }).stdout.trim(), '');
+    // control: the same record in a top-level transcript is delivered (rescan window open)
+    const st = join(fx.stateDir, 'state', 'session-delta', 'sess-1.json');
+    const j = JSON.parse(readFileSync(st, 'utf8'));
+    j.lastScan = 0;
+    writeFileSync(st, JSON.stringify(j));
+    writeFileSync(join(fx.dir, '.claude', 'projects', 'proj-b', 'sess-9.jsonl'), `${rec({})}\n`);
+    assert.ok(ctx(runHook(HOOK, s.payload, { args: DIFF })).includes('Always obey the subagent brief.'));
+  } finally { fx.cleanup(); }
+});

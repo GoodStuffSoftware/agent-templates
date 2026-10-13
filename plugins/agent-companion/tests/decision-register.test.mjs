@@ -630,6 +630,30 @@ test('3. a write that read the state before another writer added a flag and a su
   } finally { fx.cleanup(); }
 });
 
+test('3b. writeStateMerged keeps a trigger and a baseline another writer added, and never resurrects one this writer deleted', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(join(fx.stateDir, 'config'), { recursive: true });
+    const a = readState();
+    const snap = snapshotState(a);
+    const b = readState();
+    b.baselines['dec-one/new'] = { days: [], pooled: 1, n: 3, frozenAt: '2026-10-12T00:00:00.000Z' };
+    b.triggers['dec-one/new'] = { rev: 'r', streak: 2 };
+    writeState(b);
+    a.lastEvalDay = '2026-10-12';
+    assert.equal(writeStateMerged(a, snap), true);
+    const after = readState();
+    assert.equal(after.baselines['dec-one/new'].n, 3, 'the baseline B froze survives A\'s write');
+    assert.equal(after.triggers['dec-one/new'].streak, 2);
+    // A key this writer deleted on purpose (it was in its snapshot) is not carried back.
+    const c = readState();
+    const snapC = snapshotState(c);
+    delete c.baselines['dec-one/new'];
+    writeStateMerged(c, snapC);
+    assert.equal(readState().baselines['dec-one/new'], undefined);
+  } finally { fx.cleanup(); }
+});
+
 test('review-verdicts.jsonl is read once per evaluation, and only the spawn rows get the fold', () => {
   const fx = makeFixture();
   try {

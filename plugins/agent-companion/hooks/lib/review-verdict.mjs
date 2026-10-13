@@ -11,6 +11,14 @@
 //   review_verdict_raw       the verdict text as written (first 80 chars)
 //   declared_type, declared_role   what the brief declared
 //   caller_effort, caller_is_subagent, caller_tool_use_id   copied from the reviewer's own spawns.jsonl row (null when not found)
+//   reviewer_model, reviewer_effort   the reviewer's own model and effort, from its spawns.jsonl row (null when not found) (0.31.17)
+//   reviewed_model, reviewed_effort   the writer under review, parsed from the brief's WRITER: line the way
+//                            spawn-guard parses it (null when absent or unusable; effort null for a no-effort model) (0.31.17)
+//                            Older rows carry none of these four; every reader treats a missing field as unknown.
+//   reviewed_branch          the first feat|fix|chore|docs|refactor|release|wip/<name> token in the brief (null when none) (0.31.17)
+//   post_pass_defect         always null on the row itself (unknown); append-only rows are never rewritten. A later FIX or BLOCK on
+//                            the same branch after a PASS appends an outcome row to telemetry/review-outcomes.jsonl instead, and
+//                            the register folds it back as post_pass_defect:true (an upper bound, see docs/TELEMETRY.md) (0.31.17)
 //   at                       when the result returned
 //   source                   'post-tool-use' (foreground: the result came back with the Agent call)
 //                            | 'subagent-stop' (background: the result came with the SubagentStop event)
@@ -28,7 +36,7 @@
 
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from 'node:fs';
-import { telemetryDir, stateDir, tailRecords, appendLog, isFixtureSession, canonicalTaskType } from './context.mjs';
+import { telemetryDir, stateDir, tailRecords, appendLog, isFixtureSession, canonicalTaskType, writerFromDeclaration } from './context.mjs';
 import { briefDeclarations, declarationValue } from './brief-directives.mjs';
 import { resolveAgentTranscript } from './runaway.mjs';
 
@@ -42,6 +50,44 @@ export function reviewerOf(prompt) {
     const role = rm ? rm[1].toLowerCase() : null;
     const canon = type ? (canonicalTaskType(type)?.name || type) : null;
     return canon === 'code-review' || role === 'reviewer' ? { type, role } : null;
+  } catch { return null; }
+}
+
+// The writer under review from the brief's WRITER: line -> { model, effort } (nulls when absent or unusable).
+export function writerOf(prompt, cwd) {
+  try {
+    const decls = briefDeclarations(String(prompt || ''));
+    if (!decls.WRITER) return { model: null, effort: null };
+    const w = writerFromDeclaration(decls.WRITER.rest, cwd);
+    if (!w || !w.ok) return { model: null, effort: null };
+    return { model: w.model || null, effort: w.effort || null };
+  } catch { return { model: null, effort: null }; }
+}
+
+// The branch a reviewer's brief names, else null. Candidates are conventional branch tokens
+// (feat|fix|chore|docs|refactor|release|wip/<name>). A token with a file extension (docs/TELEMETRY.md)
+// is not a branch; a range a..b or a...b keys on its head side b. Preference: an explicit BRANCH: line,
+// the token right after review/Review/reviewing, a range head, then the first remaining token (0.31.17).
+const BR_TOKEN = String.raw`(?:feat|fix|chore|docs|refactor|release|wip)\/[A-Za-z0-9._/-]+`;
+const BR_LOOKBEHIND = String.raw`(?<![A-Za-z0-9_/-]|[^.]\.)`;
+function branchKey(tok) {
+  const parts = String(tok).split(/\.{2,3}/);
+  const head = parts[parts.length - 1].replace(/[._/-]+$/, '');
+  if (!new RegExp('^' + BR_TOKEN + '$').test(head)) return null;
+  if (/\.[A-Za-z][A-Za-z0-9]{0,4}$/.test(head)) return null;
+  return head;
+}
+export function branchOf(prompt) {
+  try {
+    const text = String(prompt || '');
+    const explicit = new RegExp('^[\\s>*_-]*BRANCH\\s*[:=][\\s*_`\'"]*(' + BR_TOKEN + ')', 'im').exec(text);
+    if (explicit) { const k = branchKey(explicit[1]); if (k) return k; }
+    const target = new RegExp('\\breview(?:ing)?\\b[\\s:]*(?:of\\s+)?(?:the\\s+)?(?:branch\\s+)?[`\'"]?' + BR_LOOKBEHIND + '(' + BR_TOKEN + ')', 'i').exec(text);
+    if (target) { const k = branchKey(target[1]); if (k) return k; }
+    const all = [...text.matchAll(new RegExp(BR_LOOKBEHIND + '(' + BR_TOKEN + ')', 'g'))].map((m) => m[1]);
+    for (const t of all) if (/\.{2,3}/.test(t)) { const k = branchKey(t); if (k) return k; }
+    for (const t of all) { const k = branchKey(t); if (k) return k; }
+    return null;
   } catch { return null; }
 }
 
@@ -147,7 +193,44 @@ function alreadyRecorded(sid, tu) {
     .some((r) => r && r.review_of_tool_use_id === tu && r.session_id === sid && inStream(sid, r, 'review-verdicts.jsonl'));
 }
 
-function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId }) {
+const OUTCOME_WINDOW_MS = 7 * 86400000;
+const nonEmptyStr = (x) => typeof x === 'string' && x.length > 0;
+
+// After a FIX or BLOCK row on a branch: find the most recent earlier PASS row on that branch (within
+// 7 days, any session) that has no outcome row yet, and append one marking a defect found after PASS.
+// No git, no child process; bounded tail reads. Fails open.
+function recordPostPassDefect(fixRow) {
+  try {
+    if (!fixRow.reviewed_branch || (fixRow.review_verdict !== 'FIX' && fixRow.review_verdict !== 'BLOCK')) return null;
+    const sid = fixRow.session_id;
+    const now = Date.parse(fixRow.at);
+    const needle = JSON.stringify(fixRow.reviewed_branch);
+    const verdicts = tailRecords(streamFile(sid, 'review-verdicts.jsonl'), { bytes: 4 * 1024 * 1024, filter: (l) => l.includes(needle) })
+      .filter((r) => r && r.reviewed_branch === fixRow.reviewed_branch && inStream(sid, r, 'review-verdicts.jsonl')
+        && !(r.session_id === sid && r.review_of_tool_use_id === fixRow.review_of_tool_use_id));
+    const passes = verdicts.filter((r) => r.review_verdict === 'PASS' && nonEmptyStr(r.review_of_tool_use_id)
+      && Number.isFinite(Date.parse(r.at)) && Date.parse(r.at) <= now && now - Date.parse(r.at) <= OUTCOME_WINDOW_MS);
+    if (!passes.length) return null;
+    const outcomes = tailRecords(streamFile(sid, 'review-outcomes.jsonl'), { bytes: 4 * 1024 * 1024, filter: (l) => l.includes(needle) })
+      .filter((r) => r && inStream(sid, r, 'review-outcomes.jsonl'));
+    const done = new Set(outcomes.map((r) => r.session_id + '|' + r.review_of_tool_use_id));
+    const pass = passes[passes.length - 1];
+    if (done.has(pass.session_id + '|' + pass.review_of_tool_use_id)) return null;
+    const row = {
+      at: fixRow.at,
+      session_id: pass.session_id,
+      review_of_tool_use_id: pass.review_of_tool_use_id,
+      reviewed_branch: fixRow.reviewed_branch,
+      post_pass_defect: true,
+      evidence: 'later-fix-verdict',
+      evidence_ref: fixRow.review_of_tool_use_id,
+    };
+    appendLog('review-outcomes.jsonl', row);
+    return row;
+  } catch { return null; }
+}
+
+function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId, writer, branch }) {
   if (alreadyRecorded(sid, tu)) return null;
   const orig = spawnRowOf(sid, tu);
   const row = {
@@ -162,11 +245,18 @@ function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId }) {
     caller_effort: orig ? orig.caller_effort ?? null : null,
     caller_is_subagent: orig ? orig.caller_is_subagent ?? null : null,
     caller_tool_use_id: orig ? orig.caller_tool_use_id ?? null : null,
+    reviewer_model: orig && typeof orig.model === 'string' ? orig.model : null,
+    reviewer_effort: orig ? orig.spawn_effort ?? orig.effective_effort ?? null : null,
+    reviewed_model: writer?.model ?? null,
+    reviewed_effort: writer?.effort ?? null,
+    reviewed_branch: typeof branch === 'string' && branch ? branch : null,
+    post_pass_defect: null,
     spawn_row_found: !!orig,
     source,
     agent_id: agentId || null,
   };
   appendLog('review-verdicts.jsonl', row);
+  recordPostPassDefect(row);
   return row;
 }
 
@@ -187,13 +277,14 @@ export function recordReviewVerdict(p) {
         rememberLaunch(launch.agentId, {
           at: new Date().toISOString(), session_id: sid, tool_use_id: tu,
           name: typeof input.name === 'string' ? input.name : null, type: rv.type, role: rv.role,
+          writer: writerOf(input.prompt, p.cwd), branch: branchOf(input.prompt),
         });
       }
       return null;
     }
     const pv = parseVerdict(resultText(p.tool_response));
     if (!pv) return null;
-    return writeVerdictRow({ sid, tu, name: input.name, rv, pv, source: 'post-tool-use', agentId: null });
+    return writeVerdictRow({ sid, tu, name: input.name, rv, pv, source: 'post-tool-use', agentId: null, writer: writerOf(input.prompt, p.cwd), branch: branchOf(input.prompt) });
   } catch { return null; }
 }
 
@@ -227,6 +318,8 @@ export function recordBackgroundVerdict(p) {
     return writeVerdictRow({
       sid, tu: rec.tool_use_id, name: rec.name, rv: { type: rec.type ?? null, role: rec.role ?? null },
       pv, source: 'subagent-stop', agentId: p.agent_id,
+      writer: rec.writer && typeof rec.writer === 'object' ? { model: rec.writer.model ?? null, effort: rec.writer.effort ?? null } : null,
+      branch: typeof rec.branch === 'string' ? rec.branch : null,
     });
   } catch { return null; }
 }

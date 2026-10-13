@@ -19,7 +19,7 @@ import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  modelTiers, effortFor, routeForWeight, resolveRoute, rungFor, ladderVariants, expectedDisallowedTools, ladderToolPolicy,
+  modelTiers, tierEffortProblems, effortFor, routeForWeight, resolveRoute, rungFor, ladderVariants, expectedDisallowedTools, ladderToolPolicy,
 } from '../hooks/lib/context.mjs';
 import {
   selfReviewConfig, selfReviewTypesForRung, selfReviewConfigProblems, selfReviewBlock,
@@ -443,6 +443,9 @@ function roleClaimProblems(rung) {
 function checkAgentDescriptions() {
   const out = [];
   const rungs = agentEntries();
+  for (const t of tierEffortProblems(cfg)) {
+    out.push({ agent: t.alias, file: 'config/model-tiers.json', problem: 'tier-min-effort', expected: "minEffort names one of the tier's efforts (a mistyped floor is ignored)", actual: t.problem });
+  }
   for (const problem of selfReviewConfigProblems(selfReview)) {
     out.push({
       agent: 'selfReview', file: 'config/model-tiers.json', problem: 'self-review-config',
@@ -682,7 +685,12 @@ for (const [k, s] of Object.entries(cfg.taskKinds || {})) {
 }
 L.push(``);
 const minEfforts = Object.entries(cfg.tiers || {}).filter(([, t]) => t && t.minEffort);
-for (const [a, t] of minEfforts) L.push(`A tier effort floor applies after the kind delta: \`${a}\` never resolves below \`${t.minEffort}\` in the grid (a lower cell is raised to it).`, ``);
+for (const [a, t] of minEfforts) {
+  const effs = Array.isArray(t.efforts) ? t.efforts : [];
+  const below = effs.slice(0, Math.max(0, effs.indexOf(t.minEffort)))[0];
+  const eg = below ? ` (a \`${a}/${below}\` writer gets a \`${a}/${t.minEffort}\` reviewer)` : '';
+  L.push(`A tier effort floor applies after the kind delta: \`${a}\` never resolves below \`${t.minEffort}\` in the grid (a lower cell is raised to it), and the same floor applies to a reviewer sized to that tier's writer${eg}.`, ``);
+}
 
 if (cfg.consequence) {
   L.push(`## Consequence floors (applied after kind; cannot be undercut)`);

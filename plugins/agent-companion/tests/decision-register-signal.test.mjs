@@ -133,6 +133,27 @@ test('the shipped example register validates and carries a signal trigger', () =
   assert.ok(kinds.includes('signal'));
 });
 
+// 0.31.17: a `\b` typed as a literal backspace compiles, so --check used to say OK.
+test('the validator rejects a control character in a changelog or signal pattern or flags, naming decision, trigger and code point', () => {
+  const changelog = (over) => ({ id: 'cl', premise: 'p1', kind: 'changelog', sinceVersion: '2.1.296', pattern: 'cache ttl', ...over });
+  for (const [trig, field, cp] of [
+    [changelog({ pattern: '\u0008cache ttl\u0008' }), 'pattern', 'U+0008'],
+    [changelog({ flags: 'i\u007f' }), 'flags', 'U+007F'],
+    [signalTrigger({ pattern: 'haiku\u0000' }), 'pattern', 'U+0000'],
+    [signalTrigger({ pattern: 'a\tb' }), 'pattern', 'U+0009'],
+  ]) {
+    const v = valid(register([trig]));
+    assert.equal(v.ok, false, JSON.stringify(trig));
+    const msg = v.errors.find((e) => e.includes(`${field} contains the control character ${cp}`));
+    assert.ok(msg, v.errors.join(' | '));
+    assert.match(msg, /dec-one/);
+    assert.ok(msg.includes(`"${trig.id}"`), msg);
+  }
+  // an escaped \b (backslash, letter) still validates, in both kinds
+  assert.equal(valid(register([changelog({ pattern: '\\bcache ttl\\b', flags: 'i' })])).ok, true);
+  assert.equal(valid(register([signalTrigger({ pattern: '\\bhaiku\\b', flags: 'i' })])).ok, true);
+});
+
 test('the README documents the signal trigger and the pinned_model_check option', () => {
   const readme = readFileSync(join(PLUGIN_ROOT, 'README.md'), 'utf8');
   assert.match(readme, /`signal`: `signalKinds`/);

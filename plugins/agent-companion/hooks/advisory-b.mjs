@@ -6,10 +6,11 @@
 //   --event tick            F14 (PostToolUse, any tool)
 //   --event send            F10 (PreToolUse SendMessage)
 //   --event worker-start | worker-stop   ledger (SubagentStart / SubagentStop)
+//   --event task-stop       ledger stop row (PostToolUse TaskStop)
 
 import { readStdin, opt, passthrough, callerIsSubagent, sessionIsSubagent } from './lib/context.mjs';
 import {
-  ledgerWrite, overdueNotices, peerMessageNote, parseKnownPeers, liveSessionsNote, parseRelated, OVERDUE_DEFAULT_MINUTES,
+  ledgerWrite, workerStatus, taskStopWrite, pruneState, overdueNotices, peerMessageNote, parseKnownPeers, liveSessionsNote, parseRelated, OVERDUE_DEFAULT_MINUTES,
 } from './lib/advisory-b.mjs';
 
 const i = process.argv.indexOf('--event');
@@ -27,7 +28,14 @@ try {
   const wantF9 = opt('live_sessions', true);
 
   if (EVENT === 'worker-start' || EVENT === 'worker-stop') {
-    if (wantF14 || wantF10) ledgerWrite(p.session_id, EVENT === 'worker-start' ? 'start' : 'stop', p);
+    if (wantF14 || wantF10) {
+      if (EVENT === 'worker-start') ledgerWrite(p.session_id, 'start', p);
+      else ledgerWrite(p.session_id, 'stop', p, Date.now(), { status: workerStatus(p) });
+    }
+    passthrough();
+  }
+  if (EVENT === 'task-stop') {
+    if (wantF14 || wantF10) taskStopWrite(p);
     passthrough();
   }
   if (callerIsSubagent(p)) passthrough();
@@ -39,6 +47,7 @@ try {
     passthrough();
   }
   if (EVENT === 'tick' || EVENT === 'user-prompt' || EVENT === 'session-start') {
+    if (EVENT === 'session-start') pruneState();
     const parts = [];
     if (EVENT !== 'tick' && wantF9 && !sessionIsSubagent(p)) {
       try {

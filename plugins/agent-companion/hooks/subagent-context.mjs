@@ -9,9 +9,11 @@
 // or denies: the only output is additionalContext.
 //
 // The same hook carries the 150K context CEILING (lib/context-ceiling.mjs): the
-// first time the subagent's context is at or past subagent_ceiling_tokens it is
-// told to write a checkpoint file and return (again once past
-// subagent_ceiling_repeat_tokens). Gated by the rollout schedule; reuses the
+// first time the context of a sonnet/high-or-above or opus subagent (never
+// haiku, sonnet/low or sonnet/medium) is at or past subagent_ceiling_tokens it
+// is told ONCE to write a handoff file and return, so the lead starts a fresh
+// worker on the same rung (a second notice only if subagent_ceiling_repeat_tokens
+// is set). Gated by the rollout schedule; reuses the
 // transcript reading below, so it adds no read. Advice only, never a deny.
 //
 // Each firing writes one row to telemetry subagent-context.jsonl (phase

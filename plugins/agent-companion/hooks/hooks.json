@@ -85,6 +85,19 @@
         ]
       },
       {
+        "matcher": "^RemoteTrigger$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/cloud-routine-pin.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "^(Artifact|AskUserQuestion)$",
         "hooks": [
           {
@@ -124,7 +137,7 @@
         ]
       },
       {
-        "matcher": "^(ScheduleWakeup|Monitor)$",
+        "matcher": "^(ScheduleWakeup|Monitor|Bash|PowerShell)$",
         "hooks": [
           {
             "type": "command",
@@ -554,6 +567,62 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
               "--event",
               "tick"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^mcp__scheduled-tasks__create_scheduled_task$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/routine-pin-check.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^TaskStop$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
+              "--event",
+              "task-stop"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/bash-exit.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/bash-exit.mjs"
             ],
             "timeout": 5
           }

@@ -17,12 +17,24 @@ import {
 import { join, dirname, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, telemetryDir, claudeDir, tailRecords } from './context.mjs';
+import { resolveAgentTranscript } from './runaway.mjs';
+import { parseStatus, lastAssistantText } from './status-line.mjs';
 import { crossSessionSenders, startsWithCrossSessionMessage, TAGS } from './cross-session.mjs';
 
 export const LIVE_WINDOW_MS = 2 * 3600 * 1000;
 export const MAX_LISTED = 6;
 export const OVERDUE_DEFAULT_MINUTES = 22;
 const STATE_TTL_MS = 7 * 86400000;
+// A start with no stop is a zombie once its subagent transcript has been idle
+// this long (a crash, a resume, an interrupt at a permission prompt), or, when
+// no transcript can be found, once it is this old.
+export const WORKER_IDLE_MS = 15 * 60000;
+export const WORKER_MAX_AGE_MS = 6 * 3600000;
+// A worker whose last record is a tool_use with no result yet is blocked in one tool
+// call (a test gate, a foreground Agent), not dead: it stays live up to this cap.
+export const WORKER_OPEN_CALL_MS = 90 * 60000;
+const PRUNE_EVERY_MS = 3600000;
+const TELEMETRY_TAIL_BYTES = 256 * 1024;
 
 const safe = (s) => String(s || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_');
 const slugify = (p) => String(p || '').replace(/[^A-Za-z0-9]/g, '-');
@@ -33,13 +45,22 @@ function sub(name) {
   return d;
 }
 
+function markerPath(dirName, sessionId, key) {
+  const dir = join(sub(dirName), safe(sessionId));
+  const h = createHash('sha1').update(String(key)).digest('hex').slice(0, 16);
+  return { dir, file: join(dir, `${safe(key).slice(0, 40)}-${h}.seen`) };
+}
+
+export function hasClaim(dirName, sessionId, key) {
+  try { return existsSync(markerPath(dirName, sessionId, key).file); } catch { return false; }
+}
+
 // Exclusive create: true for the one process that creates the marker.
 export function claimOnce(dirName, sessionId, key) {
   try {
-    const dir = join(sub(dirName), safe(sessionId));
+    const { dir, file } = markerPath(dirName, sessionId, key);
     mkdirSync(dir, { recursive: true });
-    const h = createHash('sha1').update(String(key)).digest('hex').slice(0, 16);
-    writeFileSync(join(dir, `${safe(key).slice(0, 40)}-${h}.seen`), '', { flag: 'wx' });
+    writeFileSync(file, '', { flag: 'wx' });
     return true;
   } catch {
     return false;
@@ -62,16 +83,76 @@ export function ledgerFile(sessionId) {
   return join(sub('worker-ledger'), `${safe(sessionId)}.jsonl`);
 }
 
-export function ledgerWrite(sessionId, ev, p, now = Date.now()) {
+export function ledgerWrite(sessionId, ev, p, now = Date.now(), extra = {}) {
   if (!sessionId || !p || !p.agent_id) return;
   appendFileSync(ledgerFile(sessionId), `${JSON.stringify({
-    at: new Date(now).toISOString(), ev, agent_id: String(p.agent_id), agent_type: p.agent_type || null,
+    at: new Date(now).toISOString(), ev, agent_id: String(p.agent_id), agent_type: p.agent_type || null, ...extra,
   })}\n`);
-  if (ev === 'start') { pruneOld('worker-ledger'); pruneOld('peer-warned'); pruneOld('overdue-flagged'); pruneOld('live-sessions'); }
+  pruneState(now);
+}
+
+// A stopped worker's final STATUS word (done | blocked | partial), or null when its last
+// message has no STATUS line. Payload text first, else a bounded tail read of the agent
+// transcript. Only the three-word status is stored, never message text.
+export function workerStatus(p) {
+  let text = p && typeof p.last_assistant_message === 'string' ? p.last_assistant_message : '';
+  if (!text.trim()) { try { text = lastAssistantText(resolveAgentTranscript(p)); } catch { text = ''; } }
+  return parseStatus(text);
+}
+
+// Drop state files older than a week. Runs from any ledger event and from
+// session start, at most once an hour (a stamp file's mtime is the throttle).
+export function pruneState(now = Date.now()) {
+  try {
+    const gate = join(stateDir(), 'advisory-prune.stamp');
+    try { if (now - statSync(gate).mtimeMs < PRUNE_EVERY_MS) return; } catch { /* first run */ }
+    writeFileSync(gate, String(now));
+    for (const d of ['worker-ledger', 'peer-warned', 'peer-known', 'overdue-flagged', 'live-sessions']) pruneOld(d);
+  } catch { /* best effort */ }
+}
+
+// PostToolUse TaskStop: tool_input.task_id is the agent id of a background
+// subagent (verified against live transcripts: the id equals the subagent
+// transcript file name and the ledger agent_id; shell tasks also use TaskStop
+// with ids that are not in the ledger and are ignored here). SubagentStop does
+// not reliably follow a TaskStop, so write the stop row here.
+export function taskStopWrite(p, now = Date.now()) {
+  if (!p || !p.session_id) return false;
+  const resp = (p.tool_response && typeof p.tool_response === 'object') ? p.tool_response : {};
+  if (resp.success === false || resp.error) return false;
+  // TaskStop takes a worker's name or its agent id; the result carries the agent id.
+  // Try the result id, the input as an id, then the input as a name (sidecar names).
+  const workers = readWorkers(p.session_id, { now: 0 });
+  const given = String((p.tool_input || {}).task_id || '').trim();
+  const cands = [String(resp.task_id || '').trim(), given].filter(Boolean);
+  if (given && p.transcript_path) {
+    try { for (const [aid, nm] of agentNames(p.transcript_path, p.session_id)) if (nm === given) cands.push(aid); } catch { /* best effort */ }
+  }
+  const id = cands.find((c) => workers.has(c) && workers.get(c).running);
+  if (!id) return false;
+  const w = workers.get(id);
+  ledgerWrite(p.session_id, 'stop', { agent_id: id, agent_type: w.agent_type }, now);
+  return true;
+}
+
+// The subagent transcript of a worker, in the real layout or the test fixture
+// layout. Null when there is none.
+function subagentTranscript(transcriptPath, sessionId, id) {
+  if (!transcriptPath) return null;
+  const base = dirname(String(transcriptPath));
+  for (const dir of [join(base, safe(sessionId), 'subagents'), join(base, 'subagents')]) {
+    const f = join(dir, `agent-${safe(id)}.jsonl`);
+    if (existsSync(f)) return f;
+  }
+  return null;
 }
 
 // Last event per agent id: Map agent_id -> { running, startedAt (ms), agent_type }.
-export function readWorkers(sessionId) {
+// A start with no stop stays running only while it looks alive: its subagent
+// transcript was written within WORKER_IDLE_MS, or, with no transcript found,
+// it started within WORKER_MAX_AGE_MS. Crashes, resumes and interrupts at a
+// permission prompt never write a stop row, so this is what ends them.
+export function readWorkers(sessionId, { transcriptPath = null, now = Date.now() } = {}) {
   const out = new Map();
   if (!sessionId) return out;
   const f = join(stateDir(), 'worker-ledger', `${safe(sessionId)}.jsonl`);
@@ -89,6 +170,22 @@ export function readWorkers(sessionId) {
       out.set(r.agent_id, { ...(prev || { startedAt: t, agent_type: r.agent_type || null }), running: false });
     }
   }
+  for (const [id, w] of out) {
+    if (!w.running) continue;
+    const tf = subagentTranscript(transcriptPath, sessionId, id);
+    let alive;
+    if (tf) {
+      // Liveness from the newest record, not the mtime (the desktop app touches idle files).
+      try {
+        const info = lastRecordInfo(tf);
+        const last = info.ms !== null ? info.ms : statSync(tf).mtimeMs;
+        const idle = now - last;
+        alive = idle <= WORKER_IDLE_MS || (info.openCall && idle <= WORKER_OPEN_CALL_MS);
+      } catch { alive = true; }
+    }
+    else alive = !Number.isFinite(w.startedAt) || now - w.startedAt <= WORKER_MAX_AGE_MS;
+    if (!alive) out.set(id, { ...w, running: false });
+  }
   return out;
 }
 
@@ -98,7 +195,7 @@ function telemetryStarts(sessionId) {
   try {
     const sid = JSON.stringify(String(sessionId));
     const rows = tailRecords(join(telemetryDir(), 'subagent-starts.jsonl'), {
-      bytes: 1024 * 1024, filter: (l) => l.includes(sid),
+      bytes: TELEMETRY_TAIL_BYTES, filter: (l) => l.includes(sid),
     });
     for (const r of rows) {
       if (r.session_id !== sessionId || !r.agent_id) continue;
@@ -134,8 +231,8 @@ export function agentNames(transcriptPath, sessionId) {
 // --- F14 ---------------------------------------------------------------------
 export function overdueNotices(p, { minutes = OVERDUE_DEFAULT_MINUTES, now = Date.now() } = {}) {
   if (!(minutes > 0)) return [];
-  const workers = readWorkers(p.session_id);
-  if (!workers.size) return [];
+  const workers = readWorkers(p.session_id, { transcriptPath: p.transcript_path, now });
+  if (![...workers.values()].some((w) => w.running)) return [];
   const tel = telemetryStarts(p.session_id);
   let names = null;
   const out = [];
@@ -196,7 +293,7 @@ export function peerMessageNote(p, { knownPeers = [] } = {}) {
   const to = stripRef((p.tool_input || {}).to || (p.tool_input || {}).recipient);
   if (!to || to === '*' || to.toLowerCase() === 'main') return null;
   if (knownPeers.includes(norm(to))) return null; // (b) listed in known_peers
-  const workers = readWorkers(p.session_id);
+  const workers = readWorkers(p.session_id, { transcriptPath: p.transcript_path });
   const running = [...workers].filter(([, w]) => w.running).map(([id]) => id);
   if (!running.length) return null;
   const names = agentNames(p.transcript_path, p.session_id);
@@ -204,7 +301,9 @@ export function peerMessageNote(p, { knownPeers = [] } = {}) {
   for (const id of workers.keys()) if (id === to || names.get(id) === to) return null;
   for (const n of names.values()) if (n === to) return null;
   // (a) the target wrote to this session: sending to it is a reply.
-  if (p.transcript_path && receivedPeers(p.transcript_path).has(norm(to))) return null;
+  // Already warned, or already known as a sender: skip the transcript scan.
+  if (hasClaim('peer-warned', p.session_id, to) || hasClaim('peer-known', p.session_id, to)) return null;
+  if (p.transcript_path && receivedPeers(p.transcript_path).has(norm(to))) { claimOnce('peer-known', p.session_id, to); return null; }
   if (!claimOnce('peer-warned', p.session_id, to)) return null;
   const list = running.map((id) => names.get(id) || workers.get(id).agent_type || id);
   return `This message goes to another session ("${to}"), not your own workers (${[...new Set(list)].join(', ')}). Fine if it is meant for a peer or coordinator; to reach a worker, use its name.`;
@@ -263,6 +362,41 @@ export function titleOf(file) {
   return null;
 }
 
+// Newest record timestamp in the file tail, ms; null if none found. The mtime alone
+// is not proof of life: the desktop app and orphaned CLIs touch idle transcripts.
+export function lastRecordMs(file) {
+  for (const len of [65536, 1048576]) { // second pass for a giant last record
+    const lines = readChunk(file, -len, len).split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = /"timestamp":"([^"]+)"/.exec(lines[i]);
+      if (m) { const t = Date.parse(m[1]); if (Number.isFinite(t)) return t; }
+    }
+  }
+  return null;
+}
+
+// Newest record's time (ms, or null) and whether that record is an assistant tool_use
+// that has no result yet (the worker is blocked inside a tool call).
+export function lastRecordInfo(file) {
+  const ms = lastRecordMs(file);
+  let openCall = false;
+  for (const len of [65536, 1048576]) {
+    const lines = readChunk(file, -len, len).split(String.fromCharCode(10));
+    let found = false;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const l = lines[i].trim();
+      if (!l) continue;
+      let r; try { r = JSON.parse(l); } catch { continue; }
+      found = true;
+      const c = r && r.message && r.message.content;
+      openCall = !!(r && r.type === 'assistant' && Array.isArray(c) && c.some((b) => b && b.type === 'tool_use'));
+      break;
+    }
+    if (found) break;
+  }
+  return { ms, openCall };
+}
+
 function ageOf(ms) {
   const m = Math.max(0, Math.round(ms / 60000));
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ''}`;
@@ -291,7 +425,10 @@ export function liveSessions({ sessionId, cwd, related = {}, now = Date.now() })
       if (id === sessionId) continue;
       const file = join(projects, d, f);
       let m; try { m = statSync(file).mtimeMs; } catch { continue; }
-      if (now - m <= LIVE_WINDOW_MS) found.push({ id, file, repo: label, mtime: m });
+      if (now - m > LIVE_WINDOW_MS) continue; // cheap pre-filter
+      const last = lastRecordMs(file);
+      if (last === null || now - last > LIVE_WINDOW_MS) continue;
+      found.push({ id, file, repo: label, mtime: last }); // mtime field = last record time
     }
   }
   return found.sort((a, b) => b.mtime - a.mtime);

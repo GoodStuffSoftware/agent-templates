@@ -77,6 +77,35 @@ with `create_scheduled_task`:
 - `prompt`: the body of `routines/calibration-scout-daily.md` from the plugin,
   with `{{MARKETPLACE_REPO}}` replaced by the `owner/repo` the plugin ships from
 
+**Routine pin rule: all routines are evaluated and pinned.** Every local task and
+every cloud routine names an evaluated model (an alias from `/ac recommend`) in its
+own definition, and its effort wherever the platform allows. Local: `model:` in
+`SKILL.md`, effort from the task folder's pin. Cloud: `job_config.ccr.session_context.model`
+(an alias; cloud routines have no effort field). The plugin enforces it through
+`routine_pin_rule` (a deny on a cloud create/update without a model) and the
+routine placement note. Full text: the plugin README, "Routine pin rule".
+
+**Pin the task's model (required follow-up).** `create_scheduled_task` takes no
+model, and a scheduled run whose `SKILL.md` has no `model:` line starts on the
+composer's last-selected model in the desktop app (the scout once ran on Fable at
+high that way, because an interactive session had last used Fable). After the
+task exists, tell the user to add one line to its frontmatter, right after
+`description:`, in `~/.claude/scheduled-tasks/agent-companion-scout/SKILL.md`:
+
+```
+model: opus
+```
+
+Use the alias, never a full model id (`pinned_model_id` flags a pinned id, and an
+alias follows the next release). The app reads the line at every run and keeps it
+through `update_scheduled_task` prompt edits. The alias comes from
+`node "$AC/scripts/recommend.mjs" --type operate`'s parent route, or `opus` for the
+shipped scout. The effort pin of the task's folder is keyed to one model id, so it
+only applies when the run is on that model: the `routine_model_drift` scout signal
+compares each run's recorded model and effort with this line and the pin, and lists
+tasks that have no `model:` line. Never edit the task file yourself on the user's
+behalf without asking; this is a setup step for the user or an explicit request.
+
 Two facts to tell the user: the task runs **only while the desktop app is
 open** (a missed run fires on next launch), and its last result is surfaced at
 the start of the next interactive session by the `scout-surface` hook, so a

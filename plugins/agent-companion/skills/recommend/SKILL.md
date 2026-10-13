@@ -31,11 +31,15 @@ eval sandbox); use the script for anything that needs `--weight`, `--kind`,
 `--consequence` or `--writer`.
 
 <!-- routing-table:task-types BEGIN (generated from config/model-tiers.json by scripts/routing-table.mjs --sync-skill; do not edit by hand) -->
-Config v8 (updated 2026-10-12). **Premium** = the spawn brief needs a `WARRANT:` line. Fable never appears here: it is a warranted exception, not a route.
+Config v8 (updated 2026-10-13). **Premium** = the spawn brief needs a `WARRANT:` line. Fable never appears here: it is a warranted exception, not a route.
 
 | Task type | Route | Premium | What it is |
 |---|---|---|---|
-| `explore` | `haiku/medium` (routing trial, review by 2026-10-16) | no | read-only search: where is X, what touches Y, does Z exist |
+| `explore` | `haiku/medium` (routing trial, review by 2026-10-16) | no | legacy bimodal type (excludes multi-hop research, that is the research type); prefer lookup for a single fact or list, survey for multi-source reading. Its Haiku trial row and register decision are reviewed 2026-10-19 |
+| `research` | `sonnet/medium` | no | multi-source investigation: read, cross-reference and synthesise across files or sources; more than locate-and-report |
+| `lookup` | `haiku/medium` | no | a single fact or list: where is X, does Z exist; about 12 requests or fewer, no judgement |
+| `survey` | `sonnet/medium` | no | multi-source read and synthesis, roughly 25-60 requests, one summary back; promote to sonnet/high on a snag |
+| `bounded-feature-small` | `sonnet/medium` | no | a feature against a clear spec, 1-2 files, about 25 requests or fewer; if it grows past that, return and re-spawn as bounded-feature |
 | `mechanical-edit` | `sonnet/low` (routing trial, review by 2026-10-16) | no | rename, config edit, reformat, apply a known migration recipe; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
 | `bounded-feature` | `opus/medium` (routing trial, review by 2026-10-04) | yes | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | `opus/medium` (routing trial, review by 2026-09-30) | yes | multi-file, cross-referencing, touches shared config or things other agents depend on |
@@ -135,6 +139,7 @@ State the recommendation and the rationale it printed. Then:
   — unless a subagent is spawning it, when the writer is read from that
   subagent's own definition and a note says so; a line with no effort, or an
   effort it cannot read, is checked on the model alone, and the note says so.
+- **A `TYPE:` line is now required on ladder-rung spawns** (`agent-companion:ac-*`): a rung brief with no `TYPE:`, `WEIGHT:`, `KIND:` or weighted `WARRANT:` line is denied (`type_line_required`, `warn` to downgrade). Built-in, project and browser agents are unaffected.
 - **Every brief carries a `ROLE:` line** next to `TYPE:` (the script prints a `brief lines:` suggestion): `ROLE: reviewer|fixer|lander|writer|docs|lookup|operate|other`, the role of the main deliverable. It is a usage-measurement tag and routes nothing; a spawn without it gets one non-blocking line of context from the guard, never a deny.
 - **Self-reviewing types review themselves; `REVIEW: lead` opts out.** A
   writer of a listed type on a ladder rung (see the **Self-review** line

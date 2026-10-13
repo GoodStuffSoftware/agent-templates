@@ -429,7 +429,8 @@ export function classifyEffort(effort) {
 // resolving long after it, and falling back on the date alone would route
 // away from a model that still works. The operator flips `retired` to true
 // after confirming the alias no longer resolves (a one-key edit in
-// <stateRoot>/model-tiers.json: {"tiers":{"haiku":{"retired":true}}}).
+// <stateRoot>/model-tiers.json: {"tiers":{"sonnet":{"retired":true}}} once sonnet stops resolving;
+// any other single tier field, e.g. `match`, merges the same way).
 // Returns null for tiers with no retirement date.
 //
 // `now` (optional) pins the calendar for a caller that needs a deterministic
@@ -534,6 +535,25 @@ export function effortSupported(model, effort) {
 function tierRank(alias) {
   const cfg = modelTiers();
   return (cfg.tiers || {})[alias]?.rank ?? 0;
+}
+
+// Tier config problems that fail open at route time but should be seen by the operator.
+// A `minEffort` that the tier's `efforts` does not list (a typo such as "medim", a
+// number, or a level the tier lacks) makes the grid skip the floor silently, so routes
+// stay as they were. Returns [{ alias, minEffort, problem }]; the router never throws on
+// it. Surfaced by the scout (detect.mjs) and `routing-table.mjs --check-agent-descriptions`.
+export function tierEffortProblems(cfg = modelTiers()) {
+  const out = [];
+  for (const [alias, t] of Object.entries((cfg && cfg.tiers) || {})) {
+    if (!t || t.minEffort === undefined || t.minEffort === null || t.minEffort === '') continue;
+    const efforts = Array.isArray(t.efforts) ? t.efforts : [];
+    if (typeof t.minEffort === 'string' && efforts.includes(t.minEffort)) continue;
+    out.push({
+      alias, minEffort: t.minEffort,
+      problem: `tiers.${alias}.minEffort is ${JSON.stringify(t.minEffort)}, which is not one of its efforts (${efforts.length ? efforts.join(', ') : 'none'}); the floor is ignored and routes are unchanged`,
+    });
+  }
+  return out;
 }
 
 export function effortFor(weight, kind = 'bounded', consequence = 'routine', { now, floors = null } = {}) {
@@ -1329,6 +1349,21 @@ function parityFloors(r, { consequence, writer, now, writerType = null }) {
     if (fl) {
       floorsApplied.push({ floor: 'F3', raised: `effort ${effort || '(none)'} -> ${fl.effort} (reviewerEffortFloor: a ${classifyModel(model).alias} review runs at least at ${fl.effort}, an exception to effort parity)` });
       effort = fl.effort;
+    }
+  }
+
+  // Tier effort floor (`tiers.<alias>.minEffort`, haiku: medium), the same floor the
+  // plain grid applies: a haiku reviewer never runs below it, even when its writer
+  // ran lower. Raises only. After the cap and the reviewer floor, before F1.
+  {
+    const tierMin = (classifyModel(model).alias && (cfg.tiers || {})[classifyModel(model).alias] || {}).minEffort;
+    const rk = rankedEffortsFor(model);
+    // A legacy id (claude-haiku-4-5) classifies as the haiku tier but takes no effort.
+    const refEntry = classifyReferenceModel(model);
+    const takesEffort = !refEntry || (Array.isArray(refEntry.efforts) && refEntry.efforts.length > 0);
+    if (tierMin && takesEffort && rk.includes(tierMin) && rk.indexOf(tierMin) > (effort ? rk.indexOf(effort) : -1)) {
+      floorsApplied.push({ floor: `${model}-min-effort`, raised: `effort ${effort || '(none)'} -> ${tierMin}; ${model} never runs below ${tierMin}` });
+      effort = tierMin;
     }
   }
 

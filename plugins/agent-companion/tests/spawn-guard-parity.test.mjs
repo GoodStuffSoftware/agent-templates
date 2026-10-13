@@ -453,7 +453,7 @@ test('(v) three general-purpose opus spawns with no TYPE: the third is denied, w
     assert.equal(r.decision, 'deny');
     assert.match(r.reason, /Premium fan-out cap: 2 premium-tier agents/);
     assert.match(r.reason, /TYPE: <task type>/);
-    assert.match(r.reason, /explore -> haiku\/medium \(agent-companion:ac-haiku\)/);
+    assert.match(r.reason, /lookup -> haiku\/medium \(agent-companion:ac-haiku\)/);
     assert.match(r.reason, /debug-root-cause -> opus\/medium/);
     assert.match(r.reason, /agent-companion:ac-opus-medium/);
     assert.match(r.reason, /wait for the in-flight premium agents/);

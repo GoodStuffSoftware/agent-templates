@@ -224,6 +224,7 @@ function buildThrowawayRepo() {
     '',
   ].join('\n'));
   writeFileSync(join(repo, 'scripts', 'ci-local.mjs'), readFileText(SCRIPT));
+  writeFileSync(join(repo, 'scripts', 'ci-lock.mjs'), readFileText(join(dirname(SCRIPT), 'ci-lock.mjs'))); // ci-local imports it
   // ci-local runs node --test suites through its own reporters, resolved
   // next to itself; without them the suite would fail at once and the kill
   // below would land on an already-finished run.
@@ -277,7 +278,7 @@ test('a --ci-parity run killed mid-run leaves no ref in the source repo, and its
 
   const child = spawn(process.execPath, [join(repo, 'scripts', 'ci-local.mjs'), '--ci-parity', '--suite', 'scripts-tests'], {
     cwd: repo,
-    env: process.env,
+    env: { ...process.env, CI_LOCAL_LOCK: '0' }, // the copied ci-local must not wait on a real machine-wide run
     stdio: ['ignore', 'ignore', 'ignore'],
     windowsHide: true,
   });

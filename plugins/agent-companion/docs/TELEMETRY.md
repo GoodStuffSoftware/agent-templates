@@ -277,11 +277,36 @@ rows only).
 | `name` | string \| null | the reviewer's declared name |
 | `review_verdict` | `PASS` \| `FIX` \| `BLOCK` | normalized; wordings such as `APPROVE WITH FIXES`, `REQUEST CHANGES`, `FAIL` map to `FIX` |
 | `review_verdict_raw` | string | the verdict text as written, first 80 characters |
+| `reviewed_model`, `reviewed_effort` | string \| null | the writer under review, parsed from the brief's `WRITER:` line as spawn-guard does (0.31.17); null when absent or unusable. Rows before 0.31.17 carry none |
+| `reviewer_model`, `reviewer_effort` | string \| null | the reviewer's own model and effort from its spawns row (0.31.17); null when the row was not found |
+| `reviewed_branch` | string \| null | the first `feat\|fix\|chore\|docs\|refactor\|release\|wip/<name>` token in the reviewer's brief (0.31.17); null when the brief names none. Background reviewers carry it from the launch record. Rows before 0.31.17 carry none |
+| `post_pass_defect` | null | always null on the row itself (unknown); rows are append-only and never rewritten. The signal lives in `review-outcomes.jsonl` (below) and is folded in at read time (0.31.17) |
 | `declared_type`, `declared_role` | string \| null | the brief's `TYPE:` and `ROLE:` |
 | `caller_effort`, `caller_is_subagent`, `caller_tool_use_id` | copied | from the reviewer's own spawns.jsonl row; null when that row was not found |
 | `spawn_row_found` | boolean | whether that row was found |
 | `source` | `post-tool-use` \| `subagent-stop` | which path recorded it: foreground result or background SubagentStop (0.31.14; absent on rows written by 0.31.13, which are all `post-tool-use`) |
 | `agent_id` | string \| null | the background reviewer's agent id; null on the foreground path (0.31.14; absent on older rows) |
+
+### `review-outcomes.jsonl` — a defect found after a PASS (0.31.17)
+
+Written by the same hook, in the same call, with no git and no child process. When a new verdict row is
+`FIX` or `BLOCK` and has a `reviewed_branch`, a bounded tail read of `review-verdicts.jsonl` (across
+sessions, 7 days) finds the most recent earlier `PASS` row on that branch that has no outcome row yet;
+if one exists, one row is appended here. At most one outcome row per PASS.
+
+| field | type | meaning |
+|---|---|---|
+| `v`, `at` | number, ISO 8601 | schema version; when the later FIX/BLOCK returned |
+| `session_id`, `review_of_tool_use_id` | string | the PASS row's keys (joins to `spawns.jsonl` and `review-verdicts.jsonl`) |
+| `reviewed_branch` | string | the branch |
+| `post_pass_defect` | `true` | a defect was found after the PASS |
+| `evidence` | `later-fix-verdict` | the only source today (a fix-commit source is a possible follow-on, kept out of hooks because it needs git) |
+| `evidence_ref` | string | `review_of_tool_use_id` of the FIX/BLOCK row |
+
+The decision register's `readSpawnRows()` reads this file once per evaluation and sets
+`post_pass_defect: true` on the PASS reviewer's spawn row; absent means unknown, not clean. The signal is
+an upper bound, not a verdict-quality judgement: it also fires for a re-review after unrelated edits to
+the branch, and it misses briefs that name no branch.
 
 ### `subagent-starts.jsonl` — one record per subagent actually starting
 
@@ -309,7 +334,7 @@ with no corresponding start was denied or failed.
 | `session_id` | string | session it fired in |
 | `agent_type` | string \| absent | the payload's `agent_type`; absent on a main-thread call, which carries none |
 | `tool_name` | string \| null | the tool the call was for (`Agent`, `Bash`, …) |
-| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, `inherit` (`inherit_guard: block`), or `review-recursion` (a reviewer spawning a reviewer, `review_recursion_guard`) |
+| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, `inherit` (`inherit_guard: block`), `review-recursion` (a reviewer spawning a reviewer, `review_recursion_guard`), or `type-required` (a ladder-rung spawn with no `TYPE:`, `WEIGHT:` or `KIND:` line, `type_line_required`) |
 | `outcome` | string | `deny`, or `warn` for a `delegation_guard: warn` firing (the guard matched and did not stop the call). A consumer counting blocked calls filters on `deny`; any row proves the guard still fires |
 | `detail` | string | short reason, truncated to 300 chars. A `delegation` row ends with the scope and what the call's env said for `CLAUDE_CODE_SESSION_ATTENDED` (`scope attended, attended 1`) |
 
@@ -367,7 +392,7 @@ compaction once per compaction).
 
 ### `context-ceiling.jsonl` — one record per context-ceiling nudge
 
-Written by `hooks/subagent-context.mjs` each time it tells a subagent to write a checkpoint file and return (`subagent_ceiling_tokens`, default 150000; once more past `subagent_ceiling_repeat_tokens`, default 175000). Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
+Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-above or opus subagent to write a handoff file and return (`subagent_ceiling_tokens`, default 150000), once per worker (a second row only if `subagent_ceiling_repeat_tokens` is set; default 0 = off). Haiku, sonnet/low and sonnet/medium are never nudged and write no row. Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
 
 | field | type | meaning |
 |---|---|---|
@@ -378,8 +403,29 @@ Written by `hooks/subagent-context.mjs` each time it tells a subagent to write a
 | `agent_id` | string | the subagent |
 | `model` | string or null | model of the subagent's latest request |
 | `tokens` | number | the subagent's context size at its latest request (input + cache read + cache write) |
-| `tier` | number | 1 first nudge, 2 the second and last |
+| `tier` | number | 1 first nudge, 2 the second and last (only when the repeat option is set) |
+| `rung_class` | string | `sonnet-high+` or `opus` |
 | `ceiling`, `repeat` | number | the two thresholds as set |
+
+### `bash-exit.jsonl` — Bash exit status
+
+One row per Bash call, written by `hooks/bash-exit.mjs` (record only; nothing is printed or blocked).
+Registered on `PostToolUse` (success: `exit` 0) and `PostToolUseFailure` (the `error` string begins
+`Exit code N`), both `^Bash$`. Source: the Claude Code hooks documentation (PostToolUse fires only on
+success; PostToolUseFailure carries `error` and `is_interrupt`); not confirmed by a live run, so a
+PostToolUse payload with an error or a non-zero exit field is also read as a failure. Option
+`bash_exit_telemetry`, off too when `spawn_telemetry` is off.
+
+| field | type | meaning |
+|---|---|---|
+| `v`, `at` | number, ISO 8601 | schema version, when written |
+| `session_id`, `agent_id`, `agent_type` | string, string \| null, string \| null | who ran it |
+| `caller_is_subagent` | boolean | |
+| `runner` | string \| null | known long-runner named by `hooks/lib/bash-tail.mjs` `analyze` |
+| `cmd_key` | string | first 12 hex of sha1 of the normalised command (whitespace collapsed, leading `cd <path> &&`, trailing `2>&1` and `\| tail`/`\| head` dropped; a bash-tail rewrite is unwrapped first). No command text is stored. Count "same gate failed N times in a row" by grouping on `session_id` + `cmd_key` |
+| `exit` | number \| null | exit code; null for an interrupt or an unparseable failure |
+| `failed` | boolean | `exit` is non-zero, or the failure had no parseable code |
+| `interrupted` | true \| absent | the call was aborted |
 
 ### `bash-tail.jsonl` — the Bash output tail
 
@@ -514,6 +560,23 @@ Two rows per run of `scripts/pr-wait.mjs`, both written by the script itself: a 
 | `error_class` | `permanent` \| `transient` \| absent | `end` only, on exit 3: `permanent` will not heal (no gh, not a repository, no such PR), `transient` is a retry budget used up |
 
 The effect for a review: each `end` row stands for `polls` gh calls that never reached the model, and one tool call in place of the repeated `gh` and sleep calls an agent would otherwise have made. Compare transcript counts of those calls with the hint on and off. A `passed` PR row always has `settle_waits` of at least 1 (the first green round only starts the clock); a high count means the check set kept changing, which is the late-registering check the settle rule exists for. `start` rows with no `end` count the runs the harness cut off.
+
+### `worker-wait.jsonl` — the worker one-wait rule
+
+Written by `hooks/poll-guard.mjs` on a subagent's Bash or PowerShell call that looks like a wait loop (`gh pr checks`, `gh run watch`, a `sleep` of 5 s or more, a `while`/`until` loop that sleeps or polls). One row per match, not only the first; the command text is not stored. The lead's own calls write nothing. Toggle: `worker_wait_advisory`.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `ts` | ISO 8601 string | when it was written |
+| `session_id` | string | null | the session |
+| `agent_id` | string | the worker |
+| `agent_type` | string | null | the worker's agent type |
+| `tool` | string | `Bash` or `PowerShell` |
+| `kind` | string | `loop`, `gh-check` or `sleep` |
+| `first` | boolean | whether this match produced the hint (once per worker) |
+
+Count matches per week against the 1,145 worker poll requests that cost 2.6% of the weekly limit in one measured week.
 
 ### `unknown-agent-types.jsonl` — harness drift signal
 

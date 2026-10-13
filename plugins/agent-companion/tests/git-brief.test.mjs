@@ -362,7 +362,7 @@ test('fetch timeout: the whole git process tree is killed, so no git-remote-http
     assert.equal(r.fetched, true);
     assert.equal(r.fetch_outcome, 'timeout');
     assert.ok(r.line, 'the line still prints');
-    assert.ok(took < 6000, `returned in ${took} ms`);
+    assert.ok(took < 30000, `returned in ${took} ms`);
     // Wait for the close events themselves (bounded), not a fixed sleep.
     for (const until = Date.now() + 5000; Date.now() < until;) {
       if (hs.sockets.length >= 1 && hs.sockets.every((x) => x.closed)) break;

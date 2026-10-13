@@ -49,7 +49,7 @@ import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson,
   writeJsonAtomic,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
-  effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
+  effortSupported, referenceEffortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, classifyEffort, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, canonicalTaskType, unknownTypeHint, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
   claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent, routedRung, routeLayerTag,
@@ -183,7 +183,7 @@ function ladderRewriteTarget(sid, rungAgent, cwd, loadedAtMs) {
 // guard uses (routing profile included), for the deny texts that tell a
 // spawner how to route instead. Read at deny time only, so the advice
 // follows the table. '' when the table cannot be read.
-function commonTypeRoutes(names = ['explore', 'bounded-feature', 'debug-root-cause', 'novel-design']) {
+function commonTypeRoutes(names = ['lookup', 'bounded-feature', 'debug-root-cause', 'novel-design']) {
   const out = [];
   for (const n of names) {
     try {
@@ -388,7 +388,20 @@ try {
   const typeNudge = declaredTypeRaw && !canonicalTaskType(declaredTypeRaw) && opt('type_line_nudge', true)
     ? `agent-companion: TYPE: ${declaredTypeRaw} is not a task type, so it routes and measures nothing. ${unknownTypeHint(declaredTypeRaw).replace(/^"[^"]*" is not a task type\. /, '')} Not blocking.`
     : null;
-  const roleNudge = [roleLineNudge, typeNudge].filter(Boolean).join('\n') || null;
+  // type_line_required (0.31.17; deny | warn | off, default deny): a ladder-rung spawn
+  // needs a TYPE: line or a line that stands in for it (WEIGHT:, KIND:, or a WARRANT:
+  // carrying a weight; CONSEQUENCE: alone routes nothing). Enforced in Gate 5 below.
+  const typeReqRaw = String(opt('type_line_required', 'deny')).toLowerCase();
+  const typeRequiredMode = ['deny', 'warn', 'off'].includes(typeReqRaw) ? typeReqRaw : 'deny';
+  const hasTypeStandIn = !!(decls.TYPE || decls.WEIGHT || decls.KIND || warrantWeightMatch);
+  // Rungs proper only: ladderVariants (ac-browser, ac-browser-opus) are "not a rung".
+  const typeReqBare = String(input.subagent_type || '').replace(`${pluginName()}:`, '');
+  const typeReqIsRung = isLadderSpawn && !ladderVariants().some((v) => v.agent === typeReqBare);
+  const typeRequiredMissing = typeReqIsRung && !hasTypeStandIn && typeRequiredMode !== 'off';
+  const typeRequiredWarn = typeRequiredMissing && typeRequiredMode === 'warn'
+    ? 'agent-companion: this ladder-rung brief has no `TYPE:` line (and no WEIGHT: or KIND: line that stands in for it). Add `TYPE: <task type>` on its own line; with type_line_required on its default (deny) this spawn would be refused.'
+    : null;
+  const roleNudge = [roleLineNudge, typeNudge, typeRequiredWarn].filter(Boolean).join('\n') || null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
@@ -732,9 +745,13 @@ try {
   // cannot set it (see the note above declaredWeight/declaredKind/
   // declaredConsequence). Read AFTER autofill so an autofilled model (e.g.
   // weight 5, no model named) is covered too, not just an explicitly-named
-  // one. Haiku is excluded — it takes no effort parameter, so there is
-  // nothing to inherit.
-  const modelTakesEffort = !!model && effortSupported(model, 'high').ok;
+  // one. A model takes an effort only if its tier lists efforts, so a model
+  // with an empty list has nothing to inherit. A pinned id that matches a
+  // reference entry (e.g. the legacy claude-haiku-4-5, no effort parameter) is
+  // judged by that entry, checked BEFORE the alias tier (which would call it
+  // the current haiku and say it takes an effort).
+  const refEffort = model ? referenceEffortSupported(model, 'high') : null;
+  const modelTakesEffort = !!model && (refEffort ? refEffort.ok : effortSupported(model, 'high').ok);
   const effortStatedSomewhere = !!def?.effort;
 
   // (callerTranscript/callerMeta/callerModel/callerEffort: read once, above
@@ -1509,9 +1526,9 @@ try {
     const descLen = description ? description.length : null;
 
     // spawn_effort: the SPAWN's own effort, not the caller's. The agent's own
-    // frontmatter wins when it declares one. A model with an empty `efforts`
-    // list in the tier table (haiku) takes no effort parameter at all, so
-    // there is nothing to inherit. Otherwise built-in types run at whatever
+    // frontmatter wins when it declares one. A model whose tier lists no
+    // `efforts` takes no effort parameter at all, so there is nothing to
+    // inherit (no current tier has an empty list). Otherwise built-in types run at whatever
     // effort the caller itself is running (measured 285 of 285 in practice).
     const noEffortModel = !!model && (() => {
       const sup = effortSupported(model, 'high');
@@ -1678,6 +1695,29 @@ try {
     );
   }
 
+  // --- Gate 5: ladder rung needs a TYPE (type_line_required: deny) ---------
+  // A rung spawn with no TYPE: (nor WEIGHT:, KIND:, a weighted WARRANT:) records
+  // nothing about what the work was and checks no fit. Non-rung agents are never
+  // gated. A worker spawning its own sub-worker gets the same rule.
+  if (typeRequiredMissing && typeRequiredMode === 'deny') {
+    recordDenial('type-required', p, `${input.subagent_type} brief has no TYPE:, WEIGHT: or KIND: line${subagentCaller ? ' (spawned by a subagent)' : ''}`);
+    const trExamples = commonTypeRoutes();
+    deny(
+      `Type guard: this spawn ${subagentCaller ? '(made by a worker, for its own sub-worker) ' : ''}names ladder rung "${input.subagent_type}" ` +
+      'but the brief has no TYPE: line (and no WEIGHT: or KIND: line that stands in for it), so nothing records what the work was ' +
+      'or checks that the rung fits.\n' + '\n' +
+      'Add a line of its own to the brief:\n' +
+      '  TYPE: <task type>\n' +
+      (trExamples ? `Current routes: ${trExamples}. ` : '') +
+      'Nearest types: lookup (find or read something and report), survey (sweep many files for a conclusion), ' +
+      'bounded-feature, mechanical-edit, code-review. Full list: `' + RECOMMEND_CMD + ' --list`.\n' +
+      'Add ROLE: <reviewer|fixer|lander|writer|docs|lookup|operate|other> beside it. ' +
+      'WEIGHT: or KIND: lines are still accepted when no type fits.' +
+      (subagentCaller ? '\n\nYou are a worker spawning a worker: put the TYPE: line in the sub-worker brief yourself; the lead TYPE does not carry over.' : '') +
+      '\n\nSet type_line_required to "warn" to downgrade this to a note.'
+    );
+  }
+
   // --- Inherit guard, block mode (inherit_guard: "block") -----------------
   // Before the early allow below, like Gate 1: an inherited spawn names no
   // model, so it is never premium for this spawn and would otherwise pass.
@@ -1744,6 +1784,16 @@ try {
   } else if (fit?.verdict === 'over' && !isPremiumForSpawn) {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}${routeLayerNote}. Re-spawn there unless the weight is understated.`;
   }
+  // Haiku-trial leak, advisory only (0.31.17, operator 2026-10-13): the resolved route
+  // (the same route/fit the fit judgement above used, recorded as fit_expected) is a
+  // Haiku rung but the spawn asks for another model. Counted by the haiku_fit_leak scout
+  // signal. Never denies; silent with a REASON: or WARRANT: line, on a pinned spawn, or
+  // when the route is not haiku.
+  const haikuLeakNote = (fit && !autofilled && !pinned && !(decls.REASON && String(decls.REASON.rest || '').replace(/[\s*_`]/g, '')) && !decls.WARRANT
+    && /^haiku\b/i.test(routeLabel) && model && spawnAlias !== 'haiku')
+    ? `agent-companion: TYPE ${declaredType || 'this spawn'} routes to ${routeLabel} (Haiku trial, review 2026-10-19) but this spawn asks for ${model}. ` +
+      'That counts as a trial leak (the haiku_fit_leak scout signal reports these). Add a one-line `REASON: <why Haiku cannot do this>` to the brief, or spawn the Haiku rung.'
+    : null;
   // A pinned spawn is the operator's own tier choice: no weight or parity note.
   // (The fit value is still computed and recorded, so table-vs-pin stays measurable.)
   if (pinned) note = null;
@@ -1794,6 +1844,7 @@ try {
     parityInheritedEffort ? null : noEffortStatedNote,
     buildFloorNote,
     warrantSoftNote,
+    haikuLeakNote,
     toolNote,
     pinReplacedNote,
   );

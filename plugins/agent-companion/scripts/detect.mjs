@@ -15,7 +15,7 @@ import { readFileSync, existsSync, writeFileSync, appendFileSync, readdirSync, s
 import { join, basename, dirname } from 'node:path';
 import { userInfo } from 'node:os';
 import {
-  modelTiers, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
+  modelTiers, tierEffortProblems, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
   homeRoot, stateRoot, resolveRoute, isLadderAgentName, routingProfileState,
   readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
   LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES, scoutSuppressed,
@@ -36,6 +36,7 @@ import { runReleaseWatch } from './lib/release-watch.mjs';
 import { launchCheckup } from './lib/daily-checkup.mjs';
 import { loadRegister, readState as readRegisterState, openFlags, scanChangelogToState, scanSignalsToState, scanDatesToState } from './lib/decision-register.mjs';
 import { scanPinnedModels, findingKey } from './lib/pinned-model.mjs';
+import { routineModelDrift, sessionRecordRoot } from './lib/routine-model-drift.mjs';
 import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
@@ -282,7 +283,8 @@ if (opt('decision_register', true)) {
     if (!loaded.ok && !loaded.absent) {
       sig('decision_register_invalid', `decision register invalid: ${(loaded.errors || []).slice(0, 3).join('; ').slice(0, 300)}. Run node scripts/decision-register.mjs --check`, 'none');
     } else if (loaded.ok) {
-      scanDatesToState({ nowT: nowDate().getTime() });
+      // Same off switch as the signal path below: a suppressed decision_review_due writes no date flags either.
+      if (!suppressedKinds.has('decision_review_due')) scanDatesToState({ nowT: nowDate().getTime() });
       const flagged = [...new Set(openFlags(readRegisterState(), loaded.register, nowDate().getTime()).map((f) => f.decision))];
       if (flagged.length) sig('decision_review_due', `decision review due: ${flagged.join(', ')}`, 'none');
     }
@@ -371,6 +373,34 @@ if (opt('pinned_model_check', true) && !suppressedKinds.has('pinned_model_id')) 
         'manual-check');
     }
   } catch { /* fail open: a pin scan never blocks the scout */ }
+}
+
+// --- 1c4. Scheduled-run model and effort drift --------------------------
+// The desktop app starts a scheduled run on the task's SKILL.md `model:` line, else on the
+// composer's last-selected model; a folder effort pin is keyed to one model id and does
+// nothing on another. Compares the last 48 h of scheduled-run session records with each
+// task's model: line and the run folder's pin, and lists tasks that ran with no model: line
+// (reported when that set changes). Reads only, starts no session, fails open.
+if (!suppressedKinds.has('routine_model_drift')) {
+  try {
+    const res = routineModelDrift({
+      sessionsRoot: sessionRecordRoot({ home: homeRoot() }),
+      claudeDirPath: claudeDir(),
+      nowMs: nowDate().getTime(),
+    });
+    if (res.drift.length) {
+      sig('routine_model_drift',
+        `${res.drift.length} scheduled run(s) in 48h differ from their pins: ${res.drift.slice(0, 4).join(' | ')}${res.drift.length > 4 ? ' | ...' : ''}. Fix: set a model: line (an alias) in the task's SKILL.md frontmatter.`,
+        'manual-check', 'high');
+    }
+    const knownU = new Set(baseline.knownUnpinnedRoutines || []);
+    next.knownUnpinnedRoutines = res.unpinned;
+    if (res.unpinned.some((t) => !knownU.has(t))) {
+      sig('routine_model_drift',
+        `${res.unpinned.length} scheduled task(s) with no model: line start on the composer's last-selected model, so their effort pin may not apply: ${res.unpinned.slice(0, 8).join(', ')}${res.unpinned.length > 8 ? ', ...' : ''}. Add a model: alias line to each SKILL.md frontmatter (opus for the scout).`,
+        'manual-check');
+    }
+  } catch { /* fail open */ }
 }
 
 // --- 2. Unknown agent types -------------------------------------------
@@ -462,6 +492,43 @@ try {
       'routing-review');
   }
 } catch { /* fail open: a drift read never blocks the scout */ }
+
+// --- 3b2. Haiku fit leak -----------------------------------------------------
+// Spawns in the last 7 days whose recorded route (fit_expected, e.g. "haiku/medium") named a
+// haiku rung but whose effective model was something else (a lead model change, a pinned project
+// agent, an inherited model). spawns.jsonl carries no plan units per row, so the count and the
+// top agent types are what is reported. Fail open.
+function haikuFitLeak(rows, nowT) {
+  const since = nowT - 7 * 86400000;
+  const leaked = rows.filter((s) => {
+    if (!s || typeof s !== 'object') return false;
+    const t = Date.parse(s.at);
+    if (!(t > since)) return false;
+    if (!/^haiku\b/i.test(String(s.fit_expected || ''))) return false;
+    return !/haiku/i.test(String(s.model || ''));
+  });
+  if (!leaked.length) return null;
+  const by = new Map();
+  for (const s of leaked) {
+    const k = String(s.subagent_type || s.spawned_by_agent_type || '(unknown)').slice(0, 60);
+    const e = by.get(k) || { n: 0, models: new Set(), pinned: 0 };
+    e.n += 1;
+    e.models.add(String(s.model || '(inherited)'));
+    if (s.project_pinned) e.pinned += 1;
+    by.set(k, e);
+  }
+  const top = [...by.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 5)
+    .map(([k, e]) => `${k} x${e.n} on ${[...e.models].join('/')}${e.pinned ? ` (${e.pinned} project-pinned)` : ''}`);
+  return { count: leaked.length, top };
+}
+try {
+  const leak = haikuFitLeak(spawns, nowDate().getTime());
+  if (leak) {
+    sig('haiku_fit_leak',
+      `${leak.count} spawn(s) in 7 days routed to haiku ran on another model; top agent types: ${leak.top.join('; ')}. Plan units per spawn are not in spawns.jsonl; fix pinned agents (add effort: medium, drop the sonnet pin) or the lead model choice`,
+      'routing-review');
+  }
+} catch { /* fail open */ }
 
 // --- 3c. Session churn (offline aggregate) ---------------------------------
 // session-churn.jsonl is written by `transcript-harvest.mjs --churn`
@@ -585,6 +652,13 @@ try {
         `${alias} retires in ${days} day(s) (${spec.retiresAfter}); ${plan}`, staged ? 'none' : 'routing-review');
     }
   }
+} catch { /* config unreadable: the audit reports that separately */ }
+
+// --- 5-min. A tier minEffort the tier does not list -----------------------
+// A mistyped `tiers.<alias>.minEffort` fails open (the floor is skipped, routes do not
+// change), so nothing else would ever show it. One signal per bad tier, every run.
+try {
+  for (const t of tierEffortProblems(modelTiers())) sig('tier_min_effort_invalid', t.problem, 'manual-check');
 } catch { /* config unreadable: the audit reports that separately */ }
 
 // --- 5a. Recommended auto-compact window drift ---------------------------

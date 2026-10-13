@@ -1,6 +1,6 @@
 {
   "version": 8,
-  "updated": "2026-10-12",
+  "updated": "2026-10-13",
   "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to ~/.claude/agent-companion/state/model-tiers.json (a legacy copy at $CLAUDE_PLUGIN_DATA/model-tiers.json is still honoured as a fallback); it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
   "aliasResolution": {
     "asOf": "2026-09-23",
@@ -21,7 +21,7 @@
         "max"
       ],
       "minEffort": "medium",
-      "effortsNote": "Haiku 5.5 takes effort (adaptive thinking, default medium). Anthropic's guidance at the 2026-10-07 launch is that low skips searches and stops early in long agent prompts, so reads and checks belong at medium or above. An agent definition with no effort line does not get the model default: it inherits the lead session's effort, so state one.",
+      "effortsNote": "Haiku 5.5 takes effort (adaptive thinking, default medium). Anthropic's guidance at the 2026-10-07 launch is that low skips searches and stops early in long agent prompts, so reads and checks belong at medium or above. The routing grid enforces this with the tier field minEffort (medium): a lower cell is raised to it, while an explicit trial or profile row names its own effort. An agent definition with no effort line does not get the model default: it inherits the lead session's effort, so state one.",
       "note": "reads, searches, single commands",
       "resolvesTo": {
         "modelId": "claude-haiku-5-5",
@@ -375,7 +375,7 @@
     "note": "A reviewer is sized to the writer it gates, never below it. Its MODEL is at least the writer's: a weaker reviewer catches the errors it would itself have avoided and waves through the ones it would itself have made, which is the novel-error class a stronger writer produces. Its EFFORT may go higher and must not go lower — refutation is a search problem and can need more thinking than generation did. The floors then apply as on any route: F1 raises a critical review to at least the critical floor (opus/xhigh) whatever the writer; F2 caps a fable writer's reviewer to the best tier that is a routing destination (opus, which still demands a WARRANT); F4 refuses a writer the table cannot size (a model outside the tier table, one unavailable with no staged replacement, or an effort that is no effort level) and fits the effort to what the reviewer's model accepts (none on haiku). modelMustMatch means the reviewer starts at the writer's model."
   },
   "taskTypeAliases": {
-    "research": "explore", "analysis": "explore", "lookup": "explore",
+    "analysis": "explore",
     "bugfix": "debug-root-cause",
     "bounded-fix": "bounded-feature", "bounded": "bounded-feature",
     "mechanical": "mechanical-edit", "one-line": "mechanical-edit", "docs": "mechanical-edit",
@@ -425,7 +425,7 @@
       "weight": 1,
       "kind": "mechanical",
       "consequence": "routine",
-      "summary": "read-only search: where is X, what touches Y, does Z exist",
+      "summary": "legacy bimodal type (excludes multi-hop research, that is the research type); prefer lookup for a single fact or list, survey for multi-source reading. Its Haiku trial row and register decision are reviewed 2026-10-19",
       "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven.",
       "override": {
         "model": "haiku",
@@ -436,6 +436,34 @@
         "trialSince": "2026-10-02",
         "reviewBy": "2026-10-16"
       }
+    },
+    "research": {
+      "weight": 3,
+      "kind": "bounded",
+      "consequence": "routine",
+      "summary": "multi-source investigation: read, cross-reference and synthesise across files or sources; more than locate-and-report",
+      "provenance": "Operator decision 2026-10-13: research was an alias of explore and so landed on the Haiku trial row; leads overrode it to Sonnet, counted as a trial leak. Own route, grid weight 3 (sonnet/medium), no trial override."
+    },
+    "lookup": {
+      "weight": 1,
+      "kind": "mechanical",
+      "consequence": "routine",
+      "summary": "a single fact or list: where is X, does Z exist; about 12 requests or fewer, no judgement",
+      "provenance": "Operator decision 2026-10-13 (granularity review): explore was bimodal. Own route, grid weight 1 (haiku/medium), no trial override. explore stays a real type until its 2026-10-19 review."
+    },
+    "survey": {
+      "weight": 3,
+      "kind": "bounded",
+      "consequence": "routine",
+      "summary": "multi-source read and synthesis, roughly 25-60 requests, one summary back; promote to sonnet/high on a snag",
+      "provenance": "Operator decision 2026-10-13 (granularity review). Own route, grid weight 3 (sonnet/medium), no trial override."
+    },
+    "bounded-feature-small": {
+      "weight": 3,
+      "kind": "bounded",
+      "consequence": "routine",
+      "summary": "a feature against a clear spec, 1-2 files, about 25 requests or fewer; if it grows past that, return and re-spawn as bounded-feature",
+      "provenance": "Operator decision 2026-10-13 (granularity review). Own route, grid weight 3 (sonnet/medium), no trial override; a separate type so small and ordinary work can be measured apart."
     },
     "mechanical-edit": {
       "weight": 2,

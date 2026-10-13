@@ -287,3 +287,91 @@ export function evaluate({ toolName, input, records, opts = {} }) {
   }
   return null;
 }
+
+// --- Worker one-wait rule ------------------------------------------------------
+//
+// Workers get the lead's one-wait rule: one blocking call or one background
+// command with a single completion check, never a sleep, poll or watch loop.
+// workerWaitPattern() is a conservative, fail-open regex read of ONE Bash or
+// PowerShell command string; it returns { kind } or null and never throws.
+// Kinds: 'loop' (while/until body that sleeps or polls), 'gh-check' (a gh
+// status read), 'sleep' (a sleep of 5 s or more, or `watch`).
+
+// Quoted strings are removed first so `echo "sleep 5"` never matches. Two exceptions: the quoted
+// body of a shell wrapper (`bash -c '...'`, `powershell -Command "..."`, an ssh remote command)
+// is a command and is scanned too; heredoc bodies are file text and are dropped.
+function stripQuoted(s) {
+  return s.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '""');
+}
+function stripHeredocs(s) {
+  return s.replace(/(<<-?[ \t]*(["']?)([A-Za-z_]\w*)\2[^\n]*)\n[\s\S]*?(?:\n[ \t]*\3[ \t]*(?=\n|$)|$)/g, '$1');
+}
+const Q = String.raw`("(?:\\.|[^"\\])*"|'[^']*')`;
+const WRAPPER_RES = [
+  new RegExp(String.raw`\b(?:bash|sh|zsh|dash)(?:\.exe)?\s+(?:-\w+\s+)*?-\w*c\s+` + Q, 'gi'),
+  new RegExp(String.raw`\b(?:powershell|pwsh)(?:\.exe)?\s+(?:-\w+\s+)*?-(?:c|command)\s+` + Q, 'gi'),
+  new RegExp(String.raw`\bssh\s+(?:-\S+\s+(?:[^\s'"-]\S*\s+)?)*?[^\s-]\S*\s+` + Q, 'gi'),
+];
+// Command text with heredoc bodies and quoted strings removed, plus the (recursively reduced)
+// bodies of any shell wrappers appended as extra lines.
+function scanText(raw, depth = 0) {
+  const noDoc = stripHeredocs(raw);
+  const parts = [stripQuoted(noDoc)];
+  if (depth < 3) {
+    for (const re of WRAPPER_RES) {
+      for (const m of noDoc.matchAll(re)) {
+        parts.push(scanText(m[1].slice(1, -1).replace(/\\(["\\])/g, '$1'), depth + 1));
+      }
+    }
+  }
+  return parts.join('\n');
+}
+const CMD_POS = String.raw`(?:^|[;&|(\n{])\s*`;
+const SLEEP_RE = new RegExp(`${CMD_POS}(?:sleep\\s+(\\d+(?:\\.\\d+)?)([smhd])?(?![\\w.])|start-sleep\\s+(?:-s(?:econds)?\\s+)?(\\d+(?:\\.\\d+)?)|watch\\s)`, 'i');
+const UNIT_SECONDS = { s: 1, m: 60, h: 3600, d: 86400 };
+const LOOP_RE = new RegExp(`${CMD_POS}(?:while|until)\\b([\\s\\S]*?)\\bdo\\b([\\s\\S]*)`, 'i');
+const LOOP_BODY_RE = /\b(?:sleep|start-sleep|gh|curl)\b|(?:^|[;&|\s])(?:test|\[)\s/i;
+const READ_LOOP_RE = /^\s*(?:IFS=\S*\s+)?read\b/;
+const SLEEP_WORD_RE = /\b(?:sleep|start-sleep)\b/i;
+const GH_CHECK_RES = [
+  /\bgh\s+pr\s+checks\b/i,
+  /\bgh\s+run\s+watch\b/i,
+  /\bgh\s+run\s+view\b[^\n;&|]*--exit-status/i,
+  /\bgh\s+pr\s+view\b[^\n;&|]*statusCheckRollup/i,
+  /\bgh\s+api\b[^\n;&|]*\/(?:check-runs|status)\b/i,
+];
+
+export function workerWaitPattern(command, { background = false } = {}) {
+  try {
+    if (background === true) return null; // a background wait is the sanctioned one-wait
+    const raw = String(command || '');
+    if (!raw || /pr-wait\.mjs/.test(raw)) return null;
+    const s = scanText(raw);
+    const loop = LOOP_RE.exec(s);
+    if (loop) {
+      // `while read ...; do ...; done < file` is a batch loop: a wait only if it sleeps or polls a status.
+      const wait = READ_LOOP_RE.test(loop[1])
+        ? SLEEP_WORD_RE.test(loop[2]) || GH_CHECK_RES.some((re) => re.test(loop[2]))
+        : LOOP_BODY_RE.test(loop[2]);
+      if (wait) return { kind: 'loop' };
+    }
+    if (GH_CHECK_RES.some((re) => re.test(s))) return { kind: 'gh-check' };
+    const sl = SLEEP_RE.exec(s);
+    if (sl) {
+      if (sl[1] !== undefined) {
+        if (Number(sl[1]) * UNIT_SECONDS[(sl[2] || 's').toLowerCase()] >= 5) return { kind: 'sleep' };
+      } else if (sl[3] === undefined || Number(sl[3]) >= 5) return { kind: 'sleep' };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function workerWaitHint(pluginRoot) {
+  const root = String(pluginRoot || '<plugin>').replace(/\\/g, '/').replace(/\/+$/, '');
+  return '[agent-companion] One-wait rule for workers: one blocking call or one background command, no sleep, ' +
+    'poll or watch loops. For a PR or CI wait run node "' + root + '/scripts/pr-wait.mjs" <pr|branch> with ' +
+    'run_in_background and wait for its completion notice. If you cannot wait, return STATUS: partial naming ' +
+    'what to re-check; the lead waits.';
+}

@@ -68,6 +68,12 @@ export function rulesPath() {
   return join(configDir(), 'standing-rules.json');
 }
 
+// A brief's own TYPE: operate line (line start, optional list/quote marks). worker-one-wait
+// skips such a brief; worker-one-wait-operate takes it (0.31.17).
+const OPERATE_DECL = String.raw`(?:^|\n)[ \t>*_-]*TYPE[ \t]*:[ \t*_]*operate(?![A-Za-z0-9_-])`;
+const OPERATE_DECLARED_WHEN = OPERATE_DECL;
+const OPERATE_NOT_DECLARED_WHEN = String.raw`^(?![\s\S]*${OPERATE_DECL})`;
+
 // copyable-prompt's `when`: a REQUEST for a prompt, not any mention of one.
 // A bare \bprompts?\b fired on "the prompt field is empty" and "why do
 // prompts time out?". Three shapes count:
@@ -274,6 +280,35 @@ function builtinRules() {
       // rollout.json counts as not reached, so the xhigh wording stays.
       activeFrom: leadEffortRolloutId() || null,
       after: leadEffortRolloutId() ? LEAD_EFFORT_AFTER : null,
+    },
+    {
+      // The worker one-wait rule, appended to every spawn brief. The Bash-side
+      // detector (hooks/poll-guard.mjs) is the enforcement; this is the up-front
+      // statement, about 76 tokens per spawn (measured: line chars / 2.4 tokens).
+      // No path here (it would add ~70 characters); the hook's message carries
+      // the real pr-wait.mjs path. A brief declaring TYPE: operate gets the
+      // variant below instead: an operate worker's job is the long operation, so
+      // handing the wait back to the lead would move it to the expensive party.
+      id: 'worker-one-wait',
+      enabled: true,
+      builtin: true,
+      scope: 'spawn',
+      gate: 'worker_wait',
+      when: OPERATE_NOT_DECLARED_WHEN,
+      then: 'One-wait rule: one blocking call or one background command (run_in_background), no sleep, poll or watch loops. PR/CI wait: pr-wait.mjs. Cannot wait: STATUS: partial, the lead waits.',
+      note: null,
+    },
+    {
+      // The operate variant of worker-one-wait (0.31.17): same ban on sleep and poll
+      // loops, but the worker does the wait itself in one foreground pr-wait call.
+      id: 'worker-one-wait-operate',
+      enabled: true,
+      builtin: true,
+      scope: 'spawn',
+      gate: 'worker_wait',
+      when: OPERATE_DECLARED_WHEN,
+      then: 'One-wait rule: no sleep, poll or watch loops. PR/CI wait: you wait, in one foreground pr-wait.mjs call. Other long waits: one blocking call or one background command (run_in_background).',
+      note: null,
     },
     {
       // Cache-advisor guard (b), deliverable 7. Doctrine-only text; the
@@ -556,6 +591,9 @@ function gateSatisfied(gate, sessionId) {
 
   // gate:'pr_wait' is the pr_wait option (default on; CLAUDE_PLUGIN_OPTION_PR_WAIT=0 turns it off).
   if (gate === 'pr_wait') return opt('pr_wait', true);
+
+  // gate:'worker_wait' is the worker_wait_advisory option (default on): the same switch as the Bash hook.
+  if (gate === 'worker_wait') return opt('worker_wait_advisory', true);
 
   if (gate === 'delegation-drift') {
     if (!sessionId) return false;

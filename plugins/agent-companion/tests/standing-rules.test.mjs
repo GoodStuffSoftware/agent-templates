@@ -29,10 +29,10 @@ test('readRules() with no file returns the built-ins, agent-brevity disabled', (
     const { rules } = readRules();
     const ids = rules.map((r) => r.id).sort();
     assert.deepEqual(ids, [
-      'agent-brevity', 'copyable-prompt', 'delegate-first', 'delegate-reminder', 'lead-brevity', 'lead-effort-check', 'poll-guard-doctrine', 'pr-wait-hint', 'resume-doctrine',
+      'agent-brevity', 'copyable-prompt', 'delegate-first', 'delegate-reminder', 'lead-brevity', 'lead-effort-check', 'poll-guard-doctrine', 'pr-wait-hint', 'resume-doctrine', 'worker-one-wait', 'worker-one-wait-operate',
     ].sort());
     assert.equal(rules.find((r) => r.id === 'agent-brevity').enabled, false);
-    for (const id of ['copyable-prompt', 'delegate-first', 'delegate-reminder', 'lead-brevity', 'poll-guard-doctrine', 'resume-doctrine']) {
+    for (const id of ['copyable-prompt', 'delegate-first', 'delegate-reminder', 'lead-brevity', 'poll-guard-doctrine', 'resume-doctrine', 'worker-one-wait', 'worker-one-wait-operate']) {
       assert.equal(rules.find((r) => r.id === id).enabled, true, `${id} should default to enabled`);
     }
     assert.deepEqual(defaultRules().length, rules.length);

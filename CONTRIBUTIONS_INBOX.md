@@ -22,6 +22,14 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
+### 2026-10-13 — A sanity check of the agent CLI through a terminal tab must not leave an interactive session alive
+
+- **Trigger:** a session-listing feature showed "live" sessions that nobody was using. Two interactive agent-CLI processes, started on 10-10 and 10-12 by workers running a quick "does the CLI start" check through a terminal tab (`run_in_terminal`) without the non-interactive flag, were still waiting for input. Each one kept touching its transcript, so a listing keyed on file modification time counted them as live.
+- **Is it generic?** Yes. Stripped: the project name and the feature. Kernel: starting the real interactive CLI from a tool that keeps the terminal open leaves a resident session, and that session looks like a human one to anything that reads transcripts.
+- **Target:** new tagged file under `lessons/agent-process/` (or an extension of an existing lesson about leaked child processes, if one fits).
+- **Proposed change:** A sanity check of the agent CLI must use the non-interactive form (`claude -p "<prompt>"`), which exits when it answers, or must not run the real CLI at all (test the wrapper, the flag parsing or the config instead). Never start the bare command in a terminal tab: the tab stays open, the interactive session stays alive, writes transcripts and shows up as a live peer. After any such check, list the processes and terminal tabs and close what you started. Code that lists live sessions should judge liveness by the newest timestamped record in the transcript, not by file modification time.
+- **Applied?** `no`
+
 ### 2026-10-05 — A spec that fails "randomly" in a parallel suite may be a victim of the SHARED dev server
 
 - **Status:** carried by PR on branch `lessons/fold-2026-10-05` (new lesson plus an amendment of `widening-a-timing-margin-does-not-remove-a-race`, which it contradicts). Remove this entry when that PR merges.
