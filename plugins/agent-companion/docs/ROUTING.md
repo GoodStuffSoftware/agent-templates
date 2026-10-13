@@ -146,7 +146,8 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 
 | Task type | Weight | Kind | Consequence | Resolves to | What it is |
 |---|---|---|---|---|---|
-| `explore` | 1 | `mechanical` | `routine` | `haiku/medium` _(trial override)_ | read-only search: where is X, what touches Y, does Z exist |
+| `explore` | 1 | `mechanical` | `routine` | `haiku/medium` _(trial override)_ | read-only search: where is X, what touches Y, does Z exist; excludes multi-hop research (that is the research type) |
+| `research` | 3 | `bounded` | `routine` | `sonnet/medium` | multi-source investigation: read, cross-reference and synthesise across files or sources; more than locate-and-report |
 | `mechanical-edit` | 2 | `mechanical` | `routine` | `sonnet/low` _(trial override)_ | rename, config edit, reformat, apply a known migration recipe; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
 | `bounded-feature` | 3 | `bounded` | `routine` | `opus/medium` _(trial override)_ | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | 4 | `bounded` | `elevated` | `opus/medium` _(trial override)_ | multi-file, cross-referencing, touches shared config or things other agents depend on |
@@ -163,6 +164,7 @@ Each named task type is a preset over (weight, kind, consequence) and resolves t
 <details><summary>Provenance per task type</summary>
 
 - **`explore`** — OFFICIAL choosing-a-model: Haiku for subagent tasks. COMMUNITY consensus: haiku, cost-driven.
+- **`research`** — Operator decision 2026-10-13: research was an alias of explore and so landed on the Haiku trial row; leads overrode it to Sonnet, counted as a trial leak. Own route, grid weight 3 (sonnet/medium), no trial override.
 - **`mechanical-edit`** — COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate.
 - **`bounded-feature`** — OFFICIAL choosing-a-model: Sonnet for everyday code generation and agentic tool use. COMMUNITY: Sonnet 5 delivers near-Opus coding at Sonnet price; escalate to Opus when the spec is incomplete or moves mid-run.
 - **`integration`** — Our weight scale. Consequence elevated because shared surfaces are where a mistake costs other people time. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself, but see operatorNote and the ROUTING TRIAL v3 override below.
