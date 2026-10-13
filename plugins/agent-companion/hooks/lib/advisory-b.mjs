@@ -263,6 +263,19 @@ export function titleOf(file) {
   return null;
 }
 
+// Newest record timestamp in the file tail, ms; null if none found. The mtime alone
+// is not proof of life: the desktop app and orphaned CLIs touch idle transcripts.
+export function lastRecordMs(file) {
+  for (const len of [65536, 1048576]) { // second pass for a giant last record
+    const lines = readChunk(file, -len, len).split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = /"timestamp":"([^"]+)"/.exec(lines[i]);
+      if (m) { const t = Date.parse(m[1]); if (Number.isFinite(t)) return t; }
+    }
+  }
+  return null;
+}
+
 function ageOf(ms) {
   const m = Math.max(0, Math.round(ms / 60000));
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ''}`;
@@ -291,7 +304,10 @@ export function liveSessions({ sessionId, cwd, related = {}, now = Date.now() })
       if (id === sessionId) continue;
       const file = join(projects, d, f);
       let m; try { m = statSync(file).mtimeMs; } catch { continue; }
-      if (now - m <= LIVE_WINDOW_MS) found.push({ id, file, repo: label, mtime: m });
+      if (now - m > LIVE_WINDOW_MS) continue; // cheap pre-filter
+      const last = lastRecordMs(file);
+      if (last === null || now - last > LIVE_WINDOW_MS) continue;
+      found.push({ id, file, repo: label, mtime: last }); // mtime field = last record time
     }
   }
   return found.sort((a, b) => b.mtime - a.mtime);

@@ -1,7 +1,7 @@
 // Advisory hooks F9 (live sessions), F10 (peer message), F14 (overdue worker).
 // Synthetic fixtures only: a throwaway home under the test sandbox.
 
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, utimesSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -127,11 +127,12 @@ test('F14: without a telemetry row the ledger start time is used', () => {
 });
 
 // ---- F9 ----
-function session(fx, dir, id, { title, ageMin = 10 }) {
+function session(fx, dir, id, { title, ageMin = 10, recordAgeMin = ageMin }) {
   const d = join(fx.dir, '.claude', 'projects', dir);
   mkdirSync(d, { recursive: true });
   const f = join(d, `${id}.jsonl`);
-  const lines = [JSON.stringify({ type: 'user', message: { role: 'user', content: 'first prompt text' } })];
+  const at = new Date(Date.now() - recordAgeMin * 60000).toISOString();
+  const lines = [JSON.stringify({ type: 'user', timestamp: at, message: { role: 'user', content: 'first prompt text' } })];
   if (title) lines.push(JSON.stringify({ type: 'custom-title', customTitle: title, sessionId: id }));
   writeFileSync(f, `${lines.join('\n')}\n`);
   const t = new Date(Date.now() - ageMin * 60000);
@@ -176,6 +177,56 @@ test('F9: same repo only without related_repos; option off and subagent are sile
     assert.match(ctx(run('session-start', { session_id: SID, cwd })), /"Peer"/);
     assert.equal(ctx(run('session-start', { session_id: SID, cwd }, { CLAUDE_PLUGIN_OPTION_LIVE_SESSIONS: 'false' })), '');
     assert.equal(ctx(run('session-start', { session_id: SID, cwd, agent_id: 'z' })), '');
+  } finally { fx.cleanup(); }
+});
+
+describe('F9 liveness comes from the last record, not the mtime', () => {
+  const slug = (s) => s.replace(/[^A-Za-z0-9]/g, '-');
+  const note = (fx, cwd) => ctx(run('session-start', { session_id: SID, cwd }));
+
+  test('mtime now but last record 3 h old: not listed', () => {
+    const fx = makeFixture();
+    try {
+      const cwd = join(fx.dir, 'dev', 'app-a');
+      session(fx, slug(cwd), 'idle-1', { title: 'Idle', ageMin: 1, recordAgeMin: 180 });
+      // untimestamped metadata after the last real record must not count
+      const f = join(fx.dir, '.claude', 'projects', slug(cwd), 'idle-1.jsonl');
+      writeFileSync(f, `${readFileSync(f, 'utf8')}${JSON.stringify({ type: 'last-prompt', lastPrompt: 'x' })}\n${JSON.stringify({ type: 'ai-title', aiTitle: 'y' })}\n`);
+      assert.equal(note(fx, cwd), '');
+    } finally { fx.cleanup(); }
+  });
+
+  test('last record 10 min old: listed, age from the record not the mtime', () => {
+    const fx = makeFixture();
+    try {
+      const cwd = join(fx.dir, 'dev', 'app-a');
+      session(fx, slug(cwd), 'live-1', { title: 'Working', ageMin: 1, recordAgeMin: 10 });
+      assert.match(note(fx, cwd), /"Working" \(app-a, 10m\)/);
+    } finally { fx.cleanup(); }
+  });
+
+  test('no timestamped record: not listed', () => {
+    const fx = makeFixture();
+    try {
+      const cwd = join(fx.dir, 'dev', 'app-a');
+      const d = join(fx.dir, '.claude', 'projects', slug(cwd));
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, 'bare-1.jsonl'), `${JSON.stringify({ type: 'custom-title', customTitle: 'Bare' })}\n`);
+      assert.equal(note(fx, cwd), '');
+    } finally { fx.cleanup(); }
+  });
+});
+
+test('tick stays silent in a subagent even with an overdue worker', () => {
+  const fx = makeFixture();
+  try {
+    const { transcript } = layout(fx);
+    start('a1');
+    const f = join(fx.stateDir, 'state', 'worker-ledger', `${SID}.jsonl`);
+    const old = new Date(Date.now() - 25 * 60000).toISOString();
+    writeFileSync(f, `${JSON.stringify({ at: old, ev: 'start', agent_id: 'a1', agent_type: 'general-purpose' })}\n`);
+    assert.equal(ctx(run('tick', { session_id: SID, transcript_path: transcript, agent_id: 'sub-z' })), '');
+    assert.match(ctx(run('tick', { session_id: SID, transcript_path: transcript })), /has run 2\d min/, 'control: the lead is told');
   } finally { fx.cleanup(); }
 });
 
