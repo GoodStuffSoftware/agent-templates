@@ -464,6 +464,43 @@ try {
   }
 } catch { /* fail open: a drift read never blocks the scout */ }
 
+// --- 3b2. Haiku fit leak -----------------------------------------------------
+// Spawns in the last 7 days whose recorded route (fit_expected, e.g. "haiku/medium") named a
+// haiku rung but whose effective model was something else (a lead model change, a pinned project
+// agent, an inherited model). spawns.jsonl carries no plan units per row, so the count and the
+// top agent types are what is reported. Fail open.
+function haikuFitLeak(rows, nowT) {
+  const since = nowT - 7 * 86400000;
+  const leaked = rows.filter((s) => {
+    if (!s || typeof s !== 'object') return false;
+    const t = Date.parse(s.at);
+    if (!(t > since)) return false;
+    if (!/^haiku\b/i.test(String(s.fit_expected || ''))) return false;
+    return !/haiku/i.test(String(s.model || ''));
+  });
+  if (!leaked.length) return null;
+  const by = new Map();
+  for (const s of leaked) {
+    const k = String(s.subagent_type || s.spawned_by_agent_type || '(unknown)').slice(0, 60);
+    const e = by.get(k) || { n: 0, models: new Set(), pinned: 0 };
+    e.n += 1;
+    e.models.add(String(s.model || '(inherited)'));
+    if (s.project_pinned) e.pinned += 1;
+    by.set(k, e);
+  }
+  const top = [...by.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 5)
+    .map(([k, e]) => `${k} x${e.n} on ${[...e.models].join('/')}${e.pinned ? ` (${e.pinned} project-pinned)` : ''}`);
+  return { count: leaked.length, top };
+}
+try {
+  const leak = haikuFitLeak(spawns, nowDate().getTime());
+  if (leak) {
+    sig('haiku_fit_leak',
+      `${leak.count} spawn(s) in 7 days routed to haiku ran on another model; top agent types: ${leak.top.join('; ')}. Plan units per spawn are not in spawns.jsonl; fix pinned agents (add effort: medium, drop the sonnet pin) or the lead model choice`,
+      'routing-review');
+  }
+} catch { /* fail open */ }
+
 // --- 3c. Session churn (offline aggregate) ---------------------------------
 // session-churn.jsonl is written by `transcript-harvest.mjs --churn`
 // (lib/session-churn.mjs, where the thresholds are defined and explained).
