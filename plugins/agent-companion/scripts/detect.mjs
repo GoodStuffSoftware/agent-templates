@@ -282,7 +282,8 @@ if (opt('decision_register', true)) {
     if (!loaded.ok && !loaded.absent) {
       sig('decision_register_invalid', `decision register invalid: ${(loaded.errors || []).slice(0, 3).join('; ').slice(0, 300)}. Run node scripts/decision-register.mjs --check`, 'none');
     } else if (loaded.ok) {
-      scanDatesToState({ nowT: nowDate().getTime() });
+      // Same off switch as the signal path below: a suppressed decision_review_due writes no date flags either.
+      if (!suppressedKinds.has('decision_review_due')) scanDatesToState({ nowT: nowDate().getTime() });
       const flagged = [...new Set(openFlags(readRegisterState(), loaded.register, nowDate().getTime()).map((f) => f.decision))];
       if (flagged.length) sig('decision_review_due', `decision review due: ${flagged.join(', ')}`, 'none');
     }

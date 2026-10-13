@@ -31,7 +31,7 @@ const ID_RE = new RegExp(`(?:^|[^a-z0-9-])(${ID})`, 'i');
 const ALIAS_RE = new RegExp(`^(?:${FAMILIES}|best|default|inherit|opusplan|sonnetplan)(?:\\[[a-z0-9]+\\])?$`, 'i');
 // A line where the word "model" introduces the id: `model: id`, `model="id"`,
 // `"model": "id"`, `model set to id`.
-const MODEL_LINE_RE = new RegExp(`\\bmodel\\b(?:\\s+(?:set to|is|as|to)|["'\`]?\\s*[:=])?\\s*[\`"'(\\[]*\\s*(${ID})`, 'i');
+const MODEL_LINE_RE = new RegExp(`\\bmodel\\b(?:\\s+(?:set to|is|as|to)|["'\`]?\\s*[:=])?[\`"'(\\[\\s]*(${ID})`, 'i');
 
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_TASKS = 400;
