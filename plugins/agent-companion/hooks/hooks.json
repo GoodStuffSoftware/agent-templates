@@ -85,6 +85,19 @@
         ]
       },
       {
+        "matcher": "^RemoteTrigger$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/cloud-routine-pin.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "^(Artifact|AskUserQuestion)$",
         "hooks": [
           {
@@ -554,6 +567,19 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/advisory-b.mjs",
               "--event",
               "tick"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^mcp__scheduled-tasks__create_scheduled_task$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/routine-pin-check.mjs"
             ],
             "timeout": 5
           }

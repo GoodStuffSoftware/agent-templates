@@ -503,6 +503,12 @@
       "description": "On the desktop scheduled-task create/update tools, add a short note on the folder effort pin, the start effort and the /ac recommend placement rule. Advisory only; never blocks.",
       "default": true
     },
+    "routine_pin_rule": {
+      "type": "boolean",
+      "title": "Routine pin rule",
+      "description": "Every routine names an evaluated model. Denies a RemoteTrigger create/update whose job_config has no model, and after a local scheduled task is created, says so when its SKILL.md has no model: line. Default on; off = neither check.",
+      "default": true
+    },
     "publish_check": {
       "type": "boolean",
       "title": "UI sign-off check",
