@@ -77,6 +77,14 @@ with `create_scheduled_task`:
 - `prompt`: the body of `routines/calibration-scout-daily.md` from the plugin,
   with `{{MARKETPLACE_REPO}}` replaced by the `owner/repo` the plugin ships from
 
+**Routine pin rule: all routines are evaluated and pinned.** Every local task and
+every cloud routine names an evaluated model (an alias from `/ac recommend`) in its
+own definition, and its effort wherever the platform allows. Local: `model:` in
+`SKILL.md`, effort from the task folder's pin. Cloud: `job_config.ccr.session_context.model`
+(an alias; cloud routines have no effort field). The plugin enforces it through
+`routine_pin_rule` (a deny on a cloud create/update without a model) and the
+routine placement note. Full text: the plugin README, "Routine pin rule".
+
 **Pin the task's model (required follow-up).** `create_scheduled_task` takes no
 model, and a scheduled run whose `SKILL.md` has no `model:` line starts on the
 composer's last-selected model in the desktop app (the scout once ran on Fable at

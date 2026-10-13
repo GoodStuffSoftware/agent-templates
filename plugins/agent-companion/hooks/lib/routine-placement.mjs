@@ -2,8 +2,9 @@
 // returns null on any problem.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { modelTiers, classifyModel } from './context.mjs';
 
-export const NOTE_MAX = 1000;
+export const NOTE_MAX = 2000;
 export const REGISTER_ID = 'routine-effort-pins';
 
 function readJson(file) {
@@ -54,6 +55,61 @@ export function taskModelLine(claudeDirPath, taskId) {
   } catch { return { found: false, model: null }; }
 }
 
+// Does the cwd folder pin apply to a task on `model` (alias or id; null when not known yet, as at
+// create)? { state: 'top' | 'model' | 'maybe' | 'none', level, keys }.
+//   top    a top-level effortLevel: applies to every model
+//   model  a modelSettings key resolves to the task's model
+//   maybe  model unknown and the folder only has per-model keys
+//   none   nothing applies (no file, no keys, or the keys are for another model)
+export function pinApplicability(cwd, model) {
+  const obj = cwd ? readJson(join(cwd, '.claude', 'settings.local.json')) : null;
+  if (!obj || typeof obj !== 'object') return { state: 'none' };
+  if (typeof obj.effortLevel === 'string' && obj.effortLevel) return { state: 'top', level: obj.effortLevel };
+  const ms = obj.modelSettings;
+  const pairs = ms && typeof ms === 'object' && !Array.isArray(ms)
+    ? Object.entries(ms).filter(([, v]) => v && typeof v === 'object' && typeof v.effortLevel === 'string' && v.effortLevel)
+    : [];
+  if (!pairs.length) return { state: 'none' };
+  const keys = pairs.map(([k]) => k);
+  if (!model) return { state: 'maybe', keys };
+  const m = String(model).replace(/\[[a-z0-9]+\]$/i, '').toLowerCase();
+  let resolved = '';
+  try {
+    const t = (modelTiers().tiers || {})[m];
+    if (t) resolved = String(t.resolvesTo?.modelId || '').toLowerCase();
+  } catch { /* plain id compare */ }
+  const target = resolved || m;
+  const hit = pairs.find(([k]) => {
+    const key = k.toLowerCase();
+    return key === target || key === m || (resolved && (key.startsWith(resolved) || resolved.startsWith(key)));
+  });
+  return hit ? { state: 'model', level: hit[1].effortLevel, keys } : { state: 'none', keys };
+}
+
+// The path of a task's SKILL.md (forward slashes), for the notes.
+export function skillPath(claudeDirPath, taskId) {
+  return `${String(claudeDirPath).replace(/\\/g, '/').replace(/\/$/, '')}/scheduled-tasks/${taskId || '<taskId>'}/SKILL.md`;
+}
+
+// The task id for a create call: the tool input first, then a SKILL.md path or taskId in the result.
+export function taskIdFrom(input, response) {
+  const id = input && typeof input === 'object' && typeof input.taskId === 'string' ? input.taskId : '';
+  if (id && !/[\\/]|\.\./.test(id)) return id;
+  let text = '';
+  try { text = typeof response === 'string' ? response : JSON.stringify(response); } catch { return ''; }
+  const m = /scheduled-tasks(?:\\\\|\\|\/)+([A-Za-z0-9._-]+)(?:\\\\|\\|\/)+SKILL[.]md/.exec(text || '')
+    || /task_?[iI]d\\?"?\s*[:=]\s*\\?"([A-Za-z0-9._-]+)/.exec(text || '');
+  return m && !m[1].includes('..') ? m[1] : '';
+}
+
+function pinSentence(app, map) {
+  if (app.state === 'top') return `this folder's pin applies (top-level effortLevel ${app.level}, any model)`;
+  if (app.state === 'model') return `this folder's pin applies (${app.level} for the task's model)`;
+  if (app.state === 'maybe') return `this folder's pin is keyed to ${app.keys.join(', ')} and applies only if the task's model resolves to one of them`;
+  const folders = map ? map.map(([k, v]) => `${k}=${clip(v, 45)}`).join('; ') : 'none listed in routine-pins.json';
+  return `no pin applies in this folder${app.keys ? ` (keyed to ${app.keys.join(', ')}, not the task's model)` : ''}, so the run would use the global default effort; create it from a pin folder (${folders})`;
+}
+
 export const userDefault = (claudeDirPath) => effortFromSettings(readJson(join(claudeDirPath, 'settings.json')));
 
 export function readFolderMap(configDirPath) {
@@ -78,9 +134,9 @@ export function applies(toolName, input) {
   return false;
 }
 
-const clip = (s, n) => (s.length > n ? `...${s.slice(s.length - n + 3)}` : s);
+function clip(s, n) { return s.length > n ? `...${s.slice(s.length - n + 3)}` : s; }
 
-export function buildNote({ cwd, pin, pinStart, userDef, map, why, taskModel }) {
+export function buildNote({ cwd, pin, pinStart, userDef, map, why, taskModel, applic, skill }) {
   const start = (pin ? (pinStart !== undefined ? pinStart : pin) : null) || userDef || 'the app default';
   const head = `Routine placement: this session is in ${clip(String(cwd || 'an unknown folder'), 60)}; folder effort pin: ${pin || 'none'}; a task created here starts at ${start}. `
     + 'Rule: run /ac recommend for the routine\'s parent and its worker (a parent that only spawns one worker and relays the result is weight 1, low) and name the worker\'s rung in the prompt. '
@@ -89,8 +145,11 @@ export function buildNote({ cwd, pin, pinStart, userDef, map, why, taskModel }) 
     ? ` The task's SKILL.md says model: ${taskModel.model}.`
     : ' The task\'s SKILL.md has no model: line, so it starts on the composer\'s last-selected model; add `model: <alias>` to its frontmatter.';
   const tail = ' and do not edit the app\'s task store while the app runs.' + (pin ? ' A pin applies only on the model it is keyed to.' : '') + modelNote;
+  const pinRule = applic
+    ? ` Pin rule (all routines are evaluated and pinned): evaluate the job with /ac recommend; after creating, add \`model: <alias>\` on the line right after \`description:\` in ${skill || 'the task\'s SKILL.md'}. Effort comes only from the cwd folder pin: ${pinSentence(applic, map)}.`
+    : '';
   const whyLine = why ? ` Why: decision \`${REGISTER_ID}\` in the decision register.` : '';
-  const build = (mapText) => `${head}${mapText}${tail}${whyLine}`;
+  const build = (mapText) => `${head}${mapText}${tail}${pinRule}${whyLine}`;
   if (!map) return build('');
   const full = build(` (map: ${map.map(([k, v]) => `${k}=${clip(v, 45)}`).join('; ')})`);
   if (full.length <= NOTE_MAX) return full;

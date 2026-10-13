@@ -5,7 +5,7 @@
 import { join } from 'node:path';
 import { readStdin, opt, passthrough, claudeDir, configDir } from './lib/context.mjs';
 import {
-  applies, buildNote, folderPinInfo, userDefault, readFolderMap, registerHasId, taskModelLine,
+  applies, buildNote, folderPinInfo, userDefault, readFolderMap, registerHasId, taskModelLine, pinApplicability, skillPath,
 } from './lib/routine-placement.mjs';
 
 try {
@@ -15,11 +15,15 @@ try {
   const cwd = p.cwd || process.cwd();
   const cfg = configDir();
   const info = folderPinInfo(cwd);
+  const taskId = p.tool_input && typeof p.tool_input.taskId === 'string' ? p.tool_input.taskId : '';
+  const taskModel = taskModelLine(claudeDir(), taskId);
   const note = buildNote({
     cwd,
     pin: info ? info.text : null,
     pinStart: info ? info.start : null,
-    taskModel: taskModelLine(claudeDir(), p.tool_input && p.tool_input.taskId),
+    taskModel,
+    applic: pinApplicability(cwd, taskModel.model),
+    skill: skillPath(claudeDir(), taskId),
     userDef: userDefault(claudeDir()),
     map: readFolderMap(cfg),
     why: registerHasId(join(cfg, 'decision-register.json')),
