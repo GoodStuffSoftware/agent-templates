@@ -352,9 +352,8 @@ live system floors at a heavier tier than a single read does, specifically
 because ordering mistakes and partial failures are the risk, not the
 difficulty of any one step.
 
-This distinction matters more, not less, once a tier the table used to route
-this validator work to retires — see the retirement note on that tier in
-`docs/ROUTING.md` for the mechanics of the staged replacement. The
+This distinction matters more, not less, if a tier the table routes this
+validator work to is ever retired and staged out through a replacement. The
 *replacement* tier inherits the same "validator, not operator" framing; a
 successor is not exempt from it just because it is a different model.
 

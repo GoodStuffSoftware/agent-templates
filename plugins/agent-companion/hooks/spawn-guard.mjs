@@ -49,7 +49,7 @@ import {
   readStdin, noteAgentType, isPremium, opt, stateFile, readJson,
   writeJsonAtomic,
   appendLog, deny, passthrough, recordDenial, agentDefinition, evaluateFit, resolveRoute,
-  effortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
+  effortSupported, referenceEffortSupported, dataDir, callerTranscriptPath, lastAssistantMeta,
   classifyModel, classifyEffort, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, canonicalTaskType, unknownTypeHint, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
   claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent, routedRung, routeLayerTag,
@@ -732,9 +732,13 @@ try {
   // cannot set it (see the note above declaredWeight/declaredKind/
   // declaredConsequence). Read AFTER autofill so an autofilled model (e.g.
   // weight 5, no model named) is covered too, not just an explicitly-named
-  // one. Haiku is excluded — it takes no effort parameter, so there is
-  // nothing to inherit.
-  const modelTakesEffort = !!model && effortSupported(model, 'high').ok;
+  // one. A model takes an effort only if its tier lists efforts, so a model
+  // with an empty list has nothing to inherit. A pinned id that matches a
+  // reference entry (e.g. the legacy claude-haiku-4-5, no effort parameter) is
+  // judged by that entry, checked BEFORE the alias tier (which would call it
+  // the current haiku and say it takes an effort).
+  const refEffort = model ? referenceEffortSupported(model, 'high') : null;
+  const modelTakesEffort = !!model && (refEffort ? refEffort.ok : effortSupported(model, 'high').ok);
   const effortStatedSomewhere = !!def?.effort;
 
   // (callerTranscript/callerMeta/callerModel/callerEffort: read once, above
@@ -1509,9 +1513,9 @@ try {
     const descLen = description ? description.length : null;
 
     // spawn_effort: the SPAWN's own effort, not the caller's. The agent's own
-    // frontmatter wins when it declares one. A model with an empty `efforts`
-    // list in the tier table (haiku) takes no effort parameter at all, so
-    // there is nothing to inherit. Otherwise built-in types run at whatever
+    // frontmatter wins when it declares one. A model whose tier lists no
+    // `efforts` takes no effort parameter at all, so there is nothing to
+    // inherit (no current tier has an empty list). Otherwise built-in types run at whatever
     // effort the caller itself is running (measured 285 of 285 in practice).
     const noEffortModel = !!model && (() => {
       const sup = effortSupported(model, 'high');

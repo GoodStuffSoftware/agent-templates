@@ -60,8 +60,8 @@ test('gate1: resolved haiku-tier model is exempt (cheapest known tier)', () => {
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0);
     assert.equal(decisionOf(res.json), 'proceed');
-    // Haiku 5.5 takes an effort, so an unstated effort draws the rule-1 note; the exemption is about the FOREGROUND gate only.
-    assert.doesNotMatch(res.json?.systemMessage || '', /FOREGROUND|not Anthropic guidance/i, 'an exempt haiku-tier spawn must add no gate1 message');
+    // The legacy claude-haiku-4-5 id takes no effort parameter (reference entry), so there is no rule-1 note either; the exemption is about the FOREGROUND gate.
+    assert.equal(res.json?.systemMessage, undefined, 'an exempt haiku-tier spawn must add no gate1 message');
 
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.gate1_applicable, true);
@@ -70,6 +70,22 @@ test('gate1: resolved haiku-tier model is exempt (cheapest known tier)', () => {
   } finally {
     cleanup();
   }
+});
+
+test('rule 1 effort note: the haiku alias draws it, the legacy claude-haiku-4-5 id (no effort parameter) does not', () => {
+  const noteFor = (model, sid) => {
+    const { dir, cleanup } = makeFixture();
+    try {
+      const res = runHook('hooks/spawn-guard.mjs', {
+        session_id: sid, agent_type: 'main', cwd: dir,
+        tool_input: { subagent_type: 'general-purpose', model, name: 'isolate-from-gate3', prompt: 'quick lookup' },
+      }, { env: baseEnv(dir) });
+      assert.equal(res.status, 0);
+      return res.json?.systemMessage || '';
+    } finally { cleanup(); }
+  };
+  assert.match(noteFor('haiku', 'sess-n2-alias'), /SPAWNING RULE 1/);
+  assert.doesNotMatch(noteFor('claude-haiku-4-5', 'sess-n2-legacy'), /SPAWNING RULE 1|effort/i);
 });
 
 test('gate1: run_in_background true is not applicable', () => {
