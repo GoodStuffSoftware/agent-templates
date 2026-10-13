@@ -1,6 +1,7 @@
 // parseStatus: pure edge cases. Synthetic strings only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import './isolate.mjs';
 import { parseStatus } from '../hooks/lib/status-line.mjs';
 
 test('plain, case-insensitive, and the three words', () => {
