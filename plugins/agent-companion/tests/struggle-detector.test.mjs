@@ -78,6 +78,23 @@ test('user patterns add to the default set; bad entries are ignored', () => {
   } finally { fx.cleanup(); }
 });
 
+test('user patterns with nested quantifiers are skipped (ReDoS guard)', () => {
+  const fx = makeFixture();
+  try {
+    const dir = join(fx.stateDir, 'config');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'struggle-patterns.json'), JSON.stringify({
+      strong: ['(a+)+$', '(.*)*x', '(a|b*){2,}c', '\bzorp phrase\b'], weak: ['^(\w+\s?)*$', '\bblarg\b'],
+    }));
+    const user = loadUserPatterns(dir);
+    assert.equal(user.strong.length, 1);
+    assert.equal(user.weak.length, 1);
+    const t0 = Date.now();
+    scorePrompt('a'.repeat(1400) + '!', { user });
+    assert.ok(Date.now() - t0 < 1000);
+  } finally { fx.cleanup(); }
+});
+
 test('the shipped example file holds placeholders only and parses', () => {
   const j = JSON.parse(readFileSync(new URL('../config/struggle-patterns.example.json', import.meta.url), 'utf8'));
   for (const s of [...j.strong, ...j.weak]) assert.match(s, /\{\{[A-Z_]+\}\}/);
@@ -225,12 +242,14 @@ test('hook: at most 2 fires per session, state keeps no prompt text', () => {
   const fx = makeFixture();
   try {
     let fired = 0;
-    for (let i = 0; i < 20; i++) if (send('That is not true, secretword' + i + '.').stdout.trim()) fired++;
+    for (let i = 0; i < 20; i++) if (send('That is not true, rotate the secretword' + i + ' database password tonight please.').stdout.trim()) fired++;
     assert.equal(fired, 2);
     const dir = join(fx.stateDir, 'state', 'struggle');
     const files = readdirSync(dir);
     assert.equal(files.length, 1);
-    assert.ok(!readFileSync(join(dir, files[0]), 'utf8').includes('secretword'));
+    const saved = readFileSync(join(dir, files[0]), 'utf8');
+    assert.ok(JSON.parse(saved).sentences.length > 0, 'sentences were stored, so the check below is not vacuous');
+    assert.ok(!saved.includes('secretword') && !saved.includes('secre') && !saved.includes('datab'));
     const tel = readFileSync(join(fx.stateDir, 'telemetry', 'struggle.jsonl'), 'utf8');
     assert.ok(!tel.includes('secretword'));
     assert.equal(tel.trim().split('\n').length, 20);

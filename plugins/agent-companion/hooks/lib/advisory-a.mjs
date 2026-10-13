@@ -1,7 +1,7 @@
 // Three advisory PreToolUse notes: UI sign-off check, windowsHide check, chip
 // check. Pure matchers plus a tiny once-per-key state file. Never blocks.
 import { join } from 'node:path';
-import { readFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { stateDir, writeTextAtomic } from './context.mjs';
 
 export const PUBLISH_NOTE = 'Publish check: before this goes to the operator, (1) capture it at a narrow width (about 360 px) and look for overflow; (2) exercise every input and button once; (3) for a sign-off, attach the screenshot or the dev URL, not a description.';
@@ -19,6 +19,22 @@ function readMap(file) {
     return j && typeof j === 'object' && !Array.isArray(j) ? j : {};
   } catch { return {}; }
 }
+// Per-session claim files older than this are dropped. 14 days: far longer than
+// any live session, so claim-once holds in practice (a session idle that long
+// would see each note once more, which is harmless), and it matches the
+// struggle-detector state retention.
+export const CLAIM_KEEP_MS = 14 * 24 * 60 * 60 * 1000;
+export function pruneClaims(dirPath, { now = Date.now(), keepMs = CLAIM_KEEP_MS, keep = '' } = {}) {
+  try {
+    for (const f of readdirSync(dirPath)) {
+      if (!f.endsWith('.json') || f === keep) continue;
+      try {
+        const p = join(dirPath, f);
+        if (now - statSync(p).mtimeMs > keepMs) unlinkSync(p);
+      } catch { /* ignore */ }
+    }
+  } catch { /* fail open */ }
+}
 // True when `key` was not seen within windowMs (Infinity = ever); records it.
 export function claim(dir, sid, key, { now = Date.now(), windowMs = Infinity } = {}) {
   const file = stateFilePath(dir, sid);
@@ -28,6 +44,7 @@ export function claim(dir, sid, key, { now = Date.now(), windowMs = Infinity } =
   map[key] = now;
   try { mkdirSync(join(stateDir(), dir), { recursive: true }); } catch { /* fail open */ }
   writeTextAtomic(file, JSON.stringify(map));
+  pruneClaims(join(stateDir(), dir), { now, keep: `${safeSid(sid)}.json` });
   return true;
 }
 

@@ -2,11 +2,11 @@
 // every state file lands in a temp home.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, PLUGIN_ROOT } from './helpers.mjs';
 import {
-  PUBLISH_NOTE, WINDOW_NOTE, CHIP_NOTE, addsUnhiddenSpawn, signoffQuestion, isSpawnTask,
+  PUBLISH_NOTE, WINDOW_NOTE, CHIP_NOTE, claim, stateFilePath, CLAIM_KEEP_MS, addsUnhiddenSpawn, signoffQuestion, isSpawnTask,
 } from '../hooks/lib/advisory-a.mjs';
 
 const note = (r) => r.json && r.json.hookSpecificOutput && r.json.hookSpecificOutput.additionalContext;
@@ -156,4 +156,20 @@ test('hooks import no child_process', () => {
     assert.ok(!/from 'node:child_process'|require\('child_process'\)/.test(src));
   }
   assert.ok(!/from 'node:child_process'|require\('child_process'\)/.test(readFileSync(join(PLUGIN_ROOT, 'hooks/lib/advisory-a.mjs'), 'utf8')));
+});
+
+test('claim: old per-session files are pruned, fresh ones and claim-once stay', () => {
+  const fx = makeFixture();
+  try {
+    assert.equal(claim('chip-check', 'old', 'chip'), true);
+    assert.equal(claim('chip-check', 'recent', 'chip'), true);
+    const old = stateFilePath('chip-check', 'old');
+    const t = (Date.now() - CLAIM_KEEP_MS - 60000) / 1000;
+    utimesSync(old, t, t);
+    assert.equal(claim('chip-check', 'cur', 'chip'), true);
+    assert.equal(claim('chip-check', 'cur', 'chip'), false);
+    assert.equal(existsSync(old), false);
+    assert.equal(existsSync(stateFilePath('chip-check', 'recent')), true);
+    assert.equal(claim('chip-check', 'recent', 'chip'), false);
+  } finally { fx.cleanup(); }
 });
