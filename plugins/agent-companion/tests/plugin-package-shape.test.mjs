@@ -20,6 +20,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { PLUGIN_ROOT } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
 
@@ -56,4 +58,19 @@ test('the only .claude-plugin/ entry in the plugin is its root plugin.json', () 
 test('the plugin has no top-level bin', () => {
   const bin = pluginFiles().filter((f) => /^bin(\/|$)/i.test(f));
   assert.deepEqual(bin, [], 'claude.ai refuses a plugin with a top-level bin/ directory');
+});
+
+// bash-exit ships as hooks/bash-exit.mjs + hooks/lib/bash-exit.mjs, wired on both the
+// success and the failure event, and declared as an option.
+test('bash-exit hook files ship and are wired on PostToolUse and PostToolUseFailure', () => {
+  const files = pluginFiles();
+  for (const f of ['hooks/bash-exit.mjs', 'hooks/lib/bash-exit.mjs']) assert.ok(files.includes(f), `${f} must ship`);
+  const hooks = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
+  for (const ev of ['PostToolUse', 'PostToolUseFailure']) {
+    const hits = (hooks[ev] || []).filter((e) => e.matcher === '^Bash$'
+      && e.hooks.some((h) => h.args.some((a) => a.endsWith('/hooks/bash-exit.mjs'))));
+    assert.equal(hits.length, 1, `${ev} must register bash-exit once on ^Bash$`);
+  }
+  const manifest = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
+  assert.equal(manifest.userConfig?.bash_exit_telemetry?.default ?? manifest.options?.bash_exit_telemetry?.default, true);
 });
