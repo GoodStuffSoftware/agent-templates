@@ -183,7 +183,7 @@ function ladderRewriteTarget(sid, rungAgent, cwd, loadedAtMs) {
 // guard uses (routing profile included), for the deny texts that tell a
 // spawner how to route instead. Read at deny time only, so the advice
 // follows the table. '' when the table cannot be read.
-function commonTypeRoutes(names = ['explore', 'bounded-feature', 'debug-root-cause', 'novel-design']) {
+function commonTypeRoutes(names = ['lookup', 'bounded-feature', 'debug-root-cause', 'novel-design']) {
   const out = [];
   for (const n of names) {
     try {
