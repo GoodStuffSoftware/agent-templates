@@ -61,3 +61,40 @@ test('recommend --weight 1 --kind mechanical names haiku with medium', () => {
   assert.match(flat, /"effort":"medium"/);
   assert.doesNotMatch(flat, /haiku\/low/);
 });
+
+// 0.31.17: a mistyped minEffort still fails open (no route change) but is now reported.
+test('a mistyped minEffort leaves the route unchanged and is reported by tierEffortProblems', () => {
+  assert.deepEqual(ctx.tierEffortProblems(), [], 'shipped config is clean');
+  const t = ctx.modelTiers().tiers.haiku;
+  const saved = t.minEffort;
+  try {
+    const before = label(ctx.effortFor(1, 'bounded', 'routine'));
+    t.minEffort = 'medim';
+    assert.equal(label(ctx.effortFor(1, 'mechanical', 'routine')), 'haiku/low', 'floor skipped, as before');
+    assert.equal(label(ctx.effortFor(1, 'bounded', 'routine')), before);
+    const problems = ctx.tierEffortProblems();
+    assert.equal(problems.length, 1);
+    assert.equal(problems[0].alias, 'haiku');
+    assert.match(problems[0].problem, /tiers\.haiku\.minEffort is "medim".*routes are unchanged/);
+    t.minEffort = 3;
+    assert.equal(ctx.tierEffortProblems().length, 1, 'a number is reported too');
+  } finally { t.minEffort = saved; }
+});
+
+test('the scout and --check-agent-descriptions report a mistyped minEffort; the shipped config is silent', () => {
+  const scout = () => {
+    const r = runScript('scripts/detect.mjs', [], { cwd: fx.dir, timeout: 60000 });
+    assert.equal(r.status, 0, r.stderr);
+    return r.json.signals.filter((s) => s.kind === 'tier_min_effort_invalid');
+  };
+  assert.equal(scout().length, 0);
+  mkdirSync(fx.stateDir, { recursive: true });
+  writeFileSync(join(fx.stateDir, 'model-tiers.json'), JSON.stringify({ tiers: { haiku: { minEffort: 'medim' } } }));
+  const hit = scout();
+  assert.equal(hit.length, 1);
+  assert.match(hit[0].detail, /minEffort is "medim"/);
+  assert.equal(hit[0].dispatch, 'manual-check');
+  const chk = runScript('scripts/routing-table.mjs', ['--check-agent-descriptions'], { cwd: fx.dir });
+  assert.notEqual(chk.status, 0);
+  assert.match(chk.stderr, /tier-min-effort/);
+});
