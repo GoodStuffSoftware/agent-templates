@@ -96,7 +96,7 @@ Weight picks the **model** (capability needed). Kind adjusts the **effort** (how
 | `diagnostic` | +1 | root-causing a failure, a flaky test, an unexplained regression, an adversarial review |
 | `novel-design` | +2 | a message bus, a protocol, concurrency or sync/merge logic, a data migration, a security boundary |
 
-A tier effort floor applies after the kind delta: `haiku` never resolves below `medium` in the grid (a lower cell is raised to it).
+A tier effort floor applies after the kind delta: `haiku` never resolves below `medium` in the grid (a lower cell is raised to it), and the same floor applies to a reviewer sized to that tier's writer (a `haiku/low` writer gets a `haiku/medium` reviewer).
 
 ## Consequence floors (applied after kind; cannot be undercut)
 
