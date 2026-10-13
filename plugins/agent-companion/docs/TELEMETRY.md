@@ -541,6 +541,23 @@ Two rows per run of `scripts/pr-wait.mjs`, both written by the script itself: a 
 
 The effect for a review: each `end` row stands for `polls` gh calls that never reached the model, and one tool call in place of the repeated `gh` and sleep calls an agent would otherwise have made. Compare transcript counts of those calls with the hint on and off. A `passed` PR row always has `settle_waits` of at least 1 (the first green round only starts the clock); a high count means the check set kept changing, which is the late-registering check the settle rule exists for. `start` rows with no `end` count the runs the harness cut off.
 
+### `worker-wait.jsonl` — the worker one-wait rule
+
+Written by `hooks/poll-guard.mjs` on a subagent's Bash or PowerShell call that looks like a wait loop (`gh pr checks`, `gh run watch`, a `sleep` of 5 s or more, a `while`/`until` loop that sleeps or polls). One row per match, not only the first; the command text is not stored. The lead's own calls write nothing. Toggle: `worker_wait_advisory`.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `ts` | ISO 8601 string | when it was written |
+| `session_id` | string | null | the session |
+| `agent_id` | string | the worker |
+| `agent_type` | string | null | the worker's agent type |
+| `tool` | string | `Bash` or `PowerShell` |
+| `kind` | string | `loop`, `gh-check` or `sleep` |
+| `first` | boolean | whether this match produced the hint (once per worker) |
+
+Count matches per week against the 1,145 worker poll requests that cost 2.6% of the weekly limit in one measured week.
+
 ### `unknown-agent-types.jsonl` — harness drift signal
 
 | field | type | meaning |

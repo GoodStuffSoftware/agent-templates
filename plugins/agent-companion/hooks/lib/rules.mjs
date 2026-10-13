@@ -276,6 +276,20 @@ function builtinRules() {
       after: leadEffortRolloutId() ? LEAD_EFFORT_AFTER : null,
     },
     {
+      // The worker one-wait rule, appended to every spawn brief. The Bash-side
+      // detector (hooks/poll-guard.mjs) is the enforcement; this is the up-front
+      // statement, about 50 tokens per spawn. No path here (it would add ~70
+      // characters); the hook's message carries the real pr-wait.mjs path.
+      id: 'worker-one-wait',
+      enabled: true,
+      builtin: true,
+      scope: 'spawn',
+      gate: 'worker_wait',
+      when: '.',
+      then: 'One-wait rule: one blocking call or one background command (run_in_background), no sleep, poll or watch loops. PR/CI wait: pr-wait.mjs. Cannot wait: STATUS: partial, the lead waits.',
+      note: null,
+    },
+    {
       // Cache-advisor guard (b), deliverable 7. Doctrine-only text; the
       // enforcement (a per-turn hint on the actual poll) is
       // hooks/poll-guard.mjs on ScheduleWakeup/Monitor, not this rule.
@@ -556,6 +570,9 @@ function gateSatisfied(gate, sessionId) {
 
   // gate:'pr_wait' is the pr_wait option (default on; CLAUDE_PLUGIN_OPTION_PR_WAIT=0 turns it off).
   if (gate === 'pr_wait') return opt('pr_wait', true);
+
+  // gate:'worker_wait' is the worker_wait_advisory option (default on): the same switch as the Bash hook.
+  if (gate === 'worker_wait') return opt('worker_wait_advisory', true);
 
   if (gate === 'delegation-drift') {
     if (!sessionId) return false;

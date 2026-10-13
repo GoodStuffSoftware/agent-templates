@@ -575,6 +575,12 @@
       "description": "Hint on ScheduleWakeup/Monitor when recent wakes are a short-interval poll producing no new work (cache-advisor guard b). Advisory only — never blocks.",
       "default": true
     },
+    "worker_wait_advisory": {
+      "type": "boolean",
+      "title": "Worker one-wait rule",
+      "description": "Workers get the lead's one-wait rule: a spawn-brief line, plus a one-time hint (and a telemetry row per match) when a subagent runs a sleep, poll or watch loop in Bash or PowerShell. Advisory only. Off removes both.",
+      "default": true
+    },
     "poll_guard_noop_streak": {
       "type": "number",
       "title": "Poll guard: no-op streak",

@@ -287,3 +287,56 @@ export function evaluate({ toolName, input, records, opts = {} }) {
   }
   return null;
 }
+
+// --- Worker one-wait rule ------------------------------------------------------
+//
+// Workers get the lead's one-wait rule: one blocking call or one background
+// command with a single completion check, never a sleep, poll or watch loop.
+// workerWaitPattern() is a conservative, fail-open regex read of ONE Bash or
+// PowerShell command string; it returns { kind } or null and never throws.
+// Kinds: 'loop' (while/until body that sleeps or polls), 'gh-check' (a gh
+// status read), 'sleep' (a sleep of 5 s or more, or `watch`).
+
+// Quoted strings are removed first so `echo "sleep 5"` never matches.
+function stripQuoted(s) {
+  return s.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '""');
+}
+const CMD_POS = String.raw`(?:^|[;&|(\n{])\s*`;
+const SLEEP_RE = new RegExp(`${CMD_POS}(?:sleep\\s+(\\d+(?:\\.\\d+)?)|start-sleep\\s+(?:-s(?:econds)?\\s+)?(\\d+(?:\\.\\d+)?)|watch\\s)`, 'i');
+const LOOP_RE = new RegExp(`${CMD_POS}(?:while|until)\\b[\\s\\S]*?\\bdo\\b([\\s\\S]*)`, 'i');
+const LOOP_BODY_RE = /\b(?:sleep|start-sleep|gh|curl)\b|(?:^|[;&|\s])(?:test|\[)\s/i;
+const GH_CHECK_RES = [
+  /\bgh\s+pr\s+checks\b/i,
+  /\bgh\s+run\s+watch\b/i,
+  /\bgh\s+run\s+view\b[^\n;&|]*--exit-status/i,
+  /\bgh\s+pr\s+view\b[^\n;&|]*statusCheckRollup/i,
+  /\bgh\s+api\b[^\n;&|]*\/(?:check-runs|status)\b/i,
+];
+
+export function workerWaitPattern(command, { background = false } = {}) {
+  try {
+    if (background === true) return null; // a background wait is the sanctioned one-wait
+    const raw = String(command || '');
+    if (!raw || /pr-wait\.mjs/.test(raw)) return null;
+    const s = stripQuoted(raw);
+    const loop = LOOP_RE.exec(s);
+    if (loop && LOOP_BODY_RE.test(loop[1])) return { kind: 'loop' };
+    if (GH_CHECK_RES.some((re) => re.test(s))) return { kind: 'gh-check' };
+    const sl = SLEEP_RE.exec(s);
+    if (sl) {
+      const n = sl[1] ?? sl[2];
+      if (n === undefined || Number(n) >= 5) return { kind: 'sleep' };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function workerWaitHint(pluginRoot) {
+  const root = String(pluginRoot || '<plugin>').replace(/\\/g, '/').replace(/\/+$/, '');
+  return '[agent-companion] One-wait rule for workers: one blocking call or one background command, no sleep, ' +
+    'poll or watch loops. For a PR or CI wait run node "' + root + '/scripts/pr-wait.mjs" <pr|branch> with ' +
+    'run_in_background and wait for its completion notice. If you cannot wait, return STATUS: partial naming ' +
+    'what to re-check; the lead waits.';
+}
