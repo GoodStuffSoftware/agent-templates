@@ -3,7 +3,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, utimesSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, utimesSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, PLUGIN_ROOT } from './helpers.mjs';
 
@@ -200,6 +200,7 @@ test('registration: hooks.json wires the events and plugin.json declares the opt
   assert.ok(has('PostToolUse', '', 'tick'));
   assert.ok(has('SubagentStart', '', 'worker-start'));
   assert.ok(has('SubagentStop', '', 'worker-stop'));
+  assert.ok(has('PostToolUse', '^TaskStop$', 'task-stop'));
   const o = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).userConfig
     || JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).options;
   for (const k of ['live_sessions', 'peer_message_warning', 'overdue_worker_warning']) assert.equal(o[k].default, true, k);
@@ -274,5 +275,116 @@ test('F10: replies to the three real sender forms raise no note', () => {
     assert.equal(send('local_7a1'), '');
     assert.equal(send('deployer-2'), '');
     assert.match(send('not-a-sender'), /another session/);
+  } finally { fx.cleanup(); }
+});
+
+// ---- worker ledger: TaskStop, interrupted spawns, zombies, pruning (0.31.17) ----
+const ledgerRows = (fx) => readFileSync(join(fx.stateDir, 'state', 'worker-ledger', `${SID}.jsonl`), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+function agentTranscript(subDir, id, ageMin) {
+  const f = join(subDir, `agent-${id}.jsonl`);
+  writeFileSync(f, '{}\n');
+  const t = new Date(Date.now() - ageMin * 60000);
+  utimesSync(f, t, t);
+}
+
+test('TaskStop writes a stop row for a ledger worker; F14 and F10 stop counting it', () => {
+  const fx = makeFixture();
+  try {
+    const { transcript } = layout(fx);
+    start('a1');
+    startRow(fx, 'a1', 40);
+    const p = { session_id: SID, transcript_path: transcript };
+    const ts = (id, resp) => run('task-stop', { ...p, tool_name: 'TaskStop', tool_input: { task_id: id }, tool_response: resp });
+    // real shape: tool_input.task_id equals the agent id; the response carries task_id and task_type
+    ts('shell-task-1', { task_id: 'shell-task-1', task_type: 'local_bash' });
+    assert.equal(ledgerRows(fx).length, 1, 'ids not in the ledger are ignored');
+    ts('a1', { message: 'Successfully stopped task: a1 (x)', task_id: 'a1', task_type: 'local_agent' });
+    const rows = ledgerRows(fx);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1].ev, 'stop');
+    assert.equal(rows[1].agent_id, 'a1');
+    assert.equal(rows[1].agent_type, 'general-purpose');
+    assert.equal(ctx(run('tick', p)), '', 'no overdue note for a stopped worker');
+    assert.equal(ctx(run('send', { ...p, tool_input: { to: 'peer-q' } })), '', 'not counted as running');
+  } finally { fx.cleanup(); }
+});
+
+test('TaskStop: a failed stop and a malformed payload write nothing', () => {
+  const fx = makeFixture();
+  try {
+    layout(fx);
+    start('a1');
+    run('task-stop', { session_id: SID, tool_input: { task_id: 'a1' }, tool_response: { error: 'No task found' } });
+    run('task-stop', { session_id: SID, tool_input: {} });
+    assert.equal(run('task-stop', undefined).status, 0);
+    assert.equal(ledgerRows(fx).length, 1);
+  } finally { fx.cleanup(); }
+});
+
+test('an interrupted spawn (start row, no stop, idle subagent transcript) is not running', () => {
+  const fx = makeFixture();
+  try {
+    const { transcript, subDir } = layout(fx);
+    name(subDir, 'a1', 'find-pilot-env-id');
+    start('a1');
+    startRow(fx, 'a1', 24);
+    const p = { session_id: SID, transcript_path: transcript };
+    agentTranscript(subDir, 'a1', 21); // last written 21 min ago: the operator rejected its tool prompt
+    assert.equal(ctx(run('tick', p)), '', 'no "has run 24 min" note');
+    assert.equal(ctx(run('send', { ...p, tool_input: { to: 'peer-q' } })), '', 'F10 does not count it');
+  } finally { fx.cleanup(); }
+});
+
+test('a start whose subagent transcript is still being written stays running and overdue', () => {
+  const fx = makeFixture();
+  try {
+    const { transcript, subDir } = layout(fx);
+    name(subDir, 'a1', 'slow-writer');
+    start('a1');
+    startRow(fx, 'a1', 30);
+    agentTranscript(subDir, 'a1', 2);
+    assert.match(ctx(run('tick', { session_id: SID, transcript_path: transcript })), /^slow-writer has run 3\d min/);
+  } finally { fx.cleanup(); }
+});
+
+test('zombie bound: with no transcript, a start older than 6 h is not running', () => {
+  const fx = makeFixture();
+  try {
+    const { transcript } = layout(fx);
+    start('a1');
+    const f = join(fx.stateDir, 'state', 'worker-ledger', `${SID}.jsonl`);
+    const old = new Date(Date.now() - 7 * 3600000).toISOString();
+    writeFileSync(f, `${JSON.stringify({ at: old, ev: 'start', agent_id: 'a1', agent_type: 'general-purpose' })}\n`);
+    const p = { session_id: SID, transcript_path: transcript };
+    assert.equal(ctx(run('tick', p)), '');
+    assert.equal(ctx(run('send', { ...p, tool_input: { to: 'peer-q' } })), '');
+  } finally { fx.cleanup(); }
+});
+
+test('pruning runs from a stop event and session start, not only from SubagentStart', () => {
+  const fx = makeFixture();
+  try {
+    const st = join(fx.stateDir, 'state');
+    const old = new Date(Date.now() - 9 * 86400000);
+    const seed = (dir, file) => {
+      mkdirSync(join(st, dir), { recursive: true });
+      const f = join(st, dir, file);
+      writeFileSync(f, 'x');
+      utimesSync(f, old, old);
+      return f;
+    };
+    const a = seed('live-sessions', 'dead.sig');
+    const b = seed('worker-ledger', 'dead.jsonl');
+    const c = seed('peer-warned', 'dead.seen');
+    stop('a1');
+    assert.equal(existsSync(a) || existsSync(b) || existsSync(c), false, 'stop event pruned');
+    // throttled: a fresh stale file survives a second run within the hour, then session-start after the stamp ages out
+    const d = seed('live-sessions', 'dead2.sig');
+    stop('a1');
+    assert.equal(existsSync(d), true, 'throttled to once an hour');
+    const stamp = join(st, 'advisory-prune.stamp');
+    utimesSync(stamp, old, old);
+    run('session-start', { session_id: SID, cwd: fx.dir });
+    assert.equal(existsSync(d), false, 'session-start pruned');
   } finally { fx.cleanup(); }
 });
