@@ -30,6 +30,9 @@ const STATE_TTL_MS = 7 * 86400000;
 // no transcript can be found, once it is this old.
 export const WORKER_IDLE_MS = 15 * 60000;
 export const WORKER_MAX_AGE_MS = 6 * 3600000;
+// A worker whose last record is a tool_use with no result yet is blocked in one tool
+// call (a test gate, a foreground Agent), not dead: it stays live up to this cap.
+export const WORKER_OPEN_CALL_MS = 90 * 60000;
 const PRUNE_EVERY_MS = 3600000;
 const TELEMETRY_TAIL_BYTES = 256 * 1024;
 
@@ -116,10 +119,18 @@ export function pruneState(now = Date.now()) {
 export function taskStopWrite(p, now = Date.now()) {
   if (!p || !p.session_id) return false;
   const resp = (p.tool_response && typeof p.tool_response === 'object') ? p.tool_response : {};
-  const id = String((p.tool_input || {}).task_id || resp.task_id || '').trim();
-  if (!id || resp.success === false || resp.error) return false;
-  const w = readWorkers(p.session_id, { now: 0 }).get(id);
-  if (!w || !w.running) return false;
+  if (resp.success === false || resp.error) return false;
+  // TaskStop takes a worker's name or its agent id; the result carries the agent id.
+  // Try the result id, the input as an id, then the input as a name (sidecar names).
+  const workers = readWorkers(p.session_id, { now: 0 });
+  const given = String((p.tool_input || {}).task_id || '').trim();
+  const cands = [String(resp.task_id || '').trim(), given].filter(Boolean);
+  if (given && p.transcript_path) {
+    try { for (const [aid, nm] of agentNames(p.transcript_path, p.session_id)) if (nm === given) cands.push(aid); } catch { /* best effort */ }
+  }
+  const id = cands.find((c) => workers.has(c) && workers.get(c).running);
+  if (!id) return false;
+  const w = workers.get(id);
   ledgerWrite(p.session_id, 'stop', { agent_id: id, agent_type: w.agent_type }, now);
   return true;
 }
@@ -163,7 +174,15 @@ export function readWorkers(sessionId, { transcriptPath = null, now = Date.now()
     if (!w.running) continue;
     const tf = subagentTranscript(transcriptPath, sessionId, id);
     let alive;
-    if (tf) { try { alive = now - statSync(tf).mtimeMs <= WORKER_IDLE_MS; } catch { alive = true; } }
+    if (tf) {
+      // Liveness from the newest record, not the mtime (the desktop app touches idle files).
+      try {
+        const info = lastRecordInfo(tf);
+        const last = info.ms !== null ? info.ms : statSync(tf).mtimeMs;
+        const idle = now - last;
+        alive = idle <= WORKER_IDLE_MS || (info.openCall && idle <= WORKER_OPEN_CALL_MS);
+      } catch { alive = true; }
+    }
     else alive = !Number.isFinite(w.startedAt) || now - w.startedAt <= WORKER_MAX_AGE_MS;
     if (!alive) out.set(id, { ...w, running: false });
   }
@@ -354,6 +373,28 @@ export function lastRecordMs(file) {
     }
   }
   return null;
+}
+
+// Newest record's time (ms, or null) and whether that record is an assistant tool_use
+// that has no result yet (the worker is blocked inside a tool call).
+export function lastRecordInfo(file) {
+  const ms = lastRecordMs(file);
+  let openCall = false;
+  for (const len of [65536, 1048576]) {
+    const lines = readChunk(file, -len, len).split(String.fromCharCode(10));
+    let found = false;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const l = lines[i].trim();
+      if (!l) continue;
+      let r; try { r = JSON.parse(l); } catch { continue; }
+      found = true;
+      const c = r && r.message && r.message.content;
+      openCall = !!(r && r.type === 'assistant' && Array.isArray(c) && c.some((b) => b && b.type === 'tool_use'));
+      break;
+    }
+    if (found) break;
+  }
+  return { ms, openCall };
 }
 
 function ageOf(ms) {

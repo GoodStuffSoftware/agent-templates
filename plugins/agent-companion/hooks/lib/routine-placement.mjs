@@ -31,6 +31,9 @@ export const folderPin = (cwd) => (cwd ? effortFromSettings(readJson(join(cwd, '
 // `start` is the bare level a new task starts at (null when the pin differs by model).
 export function folderPinInfo(cwd) {
   const obj = cwd ? readJson(join(cwd, '.claude', 'settings.local.json')) : null;
+  if (obj && typeof obj === 'object' && typeof obj.effortLevel === 'string' && obj.effortLevel) {
+    return { text: `${obj.effortLevel}, for every model`, start: obj.effortLevel }; // same precedence as pinApplicability
+  }
   const ms = obj && typeof obj === 'object' ? obj.modelSettings : null;
   if (!ms || typeof ms !== 'object' || Array.isArray(ms)) return null;
   const pairs = Object.entries(ms)
@@ -94,12 +97,13 @@ export function skillPath(claudeDirPath, taskId) {
 // The task id for a create call: the tool input first, then a SKILL.md path or taskId in the result.
 export function taskIdFrom(input, response) {
   const id = input && typeof input === 'object' && typeof input.taskId === 'string' ? input.taskId : '';
-  if (id && !/[\\/]|\.\./.test(id)) return id;
+  const inputId = id && !/[\\/]|\.\./.test(id) ? id : '';
   let text = '';
-  try { text = typeof response === 'string' ? response : JSON.stringify(response); } catch { return ''; }
+  try { text = typeof response === 'string' ? response : JSON.stringify(response); } catch { return inputId; }
   const m = /scheduled-tasks(?:\\\\|\\|\/)+([A-Za-z0-9._-]+)(?:\\\\|\\|\/)+SKILL[.]md/.exec(text || '')
     || /task_?[iI]d\\?"?\s*[:=]\s*\\?"([A-Za-z0-9._-]+)/.exec(text || '');
-  return m && !m[1].includes('..') ? m[1] : '';
+  // The result path is where the app actually wrote the file; it wins over the input id.
+  return m && !m[1].includes('..') ? m[1] : inputId;
 }
 
 function pinSentence(app, map) {

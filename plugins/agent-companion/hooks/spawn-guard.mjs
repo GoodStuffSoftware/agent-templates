@@ -1753,7 +1753,7 @@ try {
   // Haiku rung but the spawn asks for another model. Counted by the haiku_fit_leak scout
   // signal. Never denies; silent with a REASON: or WARRANT: line, on a pinned spawn, or
   // when the route is not haiku.
-  const haikuLeakNote = (fit && !autofilled && !pinned && !decls.REASON && !decls.WARRANT
+  const haikuLeakNote = (fit && !autofilled && !pinned && !(decls.REASON && String(decls.REASON.rest || '').replace(/[\s*_`]/g, '')) && !decls.WARRANT
     && /^haiku\b/i.test(routeLabel) && model && spawnAlias !== 'haiku')
     ? `agent-companion: TYPE ${declaredType || 'this spawn'} routes to ${routeLabel} (Haiku trial, review 2026-10-19) but this spawn asks for ${model}. ` +
       'That counts as a trial leak (the haiku_fit_leak scout signal reports these). Add a one-line `REASON: <why Haiku cannot do this>` to the brief, or spawn the Haiku rung.'

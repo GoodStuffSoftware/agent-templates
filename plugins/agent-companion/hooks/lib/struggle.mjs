@@ -61,7 +61,7 @@ const MAX_PATTERN_LEN = 200;
 // Cheap ReDoS guard: skip a pattern with a quantified group that itself holds a
 // quantifier, such as (a+)+ or (.*)* or (a|b*){2,}. The scored text is already
 // capped at 1500 characters.
-export const NESTED_QUANT = /\([^()]*[+*}][^()]*\)\s*[+*{]/;
+export const NESTED_QUANT = /\([^()]*[+*}][^()]*\)\s*[+*{]|\([^()]*\([^()]*[+*}][^()]*\)[^()]*\)\s*[+*{]/;
 function compileList(list) {
   const out = [];
   if (!Array.isArray(list)) return out;

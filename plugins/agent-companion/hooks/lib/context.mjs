@@ -1358,7 +1358,10 @@ function parityFloors(r, { consequence, writer, now, writerType = null }) {
   {
     const tierMin = (classifyModel(model).alias && (cfg.tiers || {})[classifyModel(model).alias] || {}).minEffort;
     const rk = rankedEffortsFor(model);
-    if (tierMin && rk.includes(tierMin) && rk.indexOf(tierMin) > (effort ? rk.indexOf(effort) : -1)) {
+    // A legacy id (claude-haiku-4-5) classifies as the haiku tier but takes no effort.
+    const refEntry = classifyReferenceModel(model);
+    const takesEffort = !refEntry || (Array.isArray(refEntry.efforts) && refEntry.efforts.length > 0);
+    if (tierMin && takesEffort && rk.includes(tierMin) && rk.indexOf(tierMin) > (effort ? rk.indexOf(effort) : -1)) {
       floorsApplied.push({ floor: `${model}-min-effort`, raised: `effort ${effort || '(none)'} -> ${tierMin}; ${model} never runs below ${tierMin}` });
       effort = tierMin;
     }
