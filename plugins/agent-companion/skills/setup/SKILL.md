@@ -23,7 +23,7 @@ node "$AC/scripts/audit.mjs" --only plugin-manifest,guard-canary
 
 `guard-canary` must PASS. If it SKIPs, the hooks are not wired — usually a
 stale marketplace cache. The fix, in order, is `claude plugin marketplace update
-<marketplace>`, then `claude plugin update agent-companion@<marketplace>`, then
+<marketplace>`, then `claude plugin update agent-companion@<marketplace> --scope user`, then
 `/reload-plugins` — verified 2026-09-18 to load an updated version (hooks,
 skills, and config) into a RUNNING session on both desktop and CLI, no restart,
 as long as Claude Code is >= 2.1.260; a restart is the fallback where the
@@ -33,6 +33,12 @@ uninstall-and-reinstall: a CLI `claude plugin uninstall` wipes this plugin's
 plugin is also used from claude.ai, its marketplace cache is separate and has
 to be removed and re-added there — the local update sequence above does not
 reach it. The README's "five stale-state traps" section covers the variants.
+
+The plugin belongs at **user scope only**, one install per machine. If the
+current project's `.claude/settings.json` or `settings.local.json` has an
+`enabledPlugins` line for `agent-companion@<marketplace>`, tell the user to
+remove that line (their user settings already enable the plugin); see "One
+install per machine: user scope only" under "Staying current".
 
 ## 1. Choose options
 
@@ -310,9 +316,29 @@ notice (`version_notice`, default on): at session start, and again on the
 first prompt after, it says when ANY installed plugin — not just this one —
 was updated after this session last loaded its plugins, because "installed"
 and "loaded" differ by a `/reload-plugins` (or restart) nobody is reminded to
-run — and a stale parent session's sub-agents inherit its stale hooks too. A
-second install of the same plugin at project scope shadows the user-scope one
-and never updates; `claude plugin list` shows both if so.
+run — and a stale parent session's sub-agents inherit its stale hooks too.
+
+### One install per machine: user scope only
+
+Install at user scope (`claude plugin install agent-companion@<marketplace> --scope user`,
+which is also the default) and nowhere else. Never install at project or local
+scope, and never suggest it. A project copy freezes at the version it got and
+shadows the user-scope one for sessions in that project.
+
+Project copies appear by themselves when a project's tracked
+`.claude/settings.json` (or `settings.local.json`) sets
+`enabledPlugins."agent-companion@<marketplace>": true`: Claude Code then records
+a project-scope install for that repo root and one for every worktree. During
+setup, look for that line in the current project's settings files. If it is
+there, tell the user to remove it: their user settings already enable the
+plugin, so nothing is lost. Then the stray record goes: `node
+"$AC/scripts/version.mjs"` lists every project or local record as "should not
+exist (user scope only)" with its project path and the settings file to fix,
+and the daily scout raises `plugin_project_copy` for the same records. Remove
+the `enabledPlugins` line first, then the record from
+`~/.claude/plugins/installed_plugins.json` (edit the file; not `claude plugin
+uninstall`, which wipes the plugin options). Updating is `claude plugin update
+agent-companion@<marketplace> --scope user`; never update a project copy.
 
 ### Install the global hook — makes the checker itself un-stale-able
 

@@ -1,0 +1,800 @@
+{
+  "schema": "agent-companion/usage-analysis",
+  "schemaVersion": 1,
+  "revision": 1,
+  "$comment": "Shipped global scenarios only. Anything that depends on one machine (windows, exclusions, plan size, experiments) belongs in the user layer: see usage-analysis.example.json.",
+  "defaults": {
+    "threshold": {
+      "relPct": 25,
+      "minSample": 15,
+      "minDays": 1
+    }
+  },
+  "scenarios": [
+    {
+      "id": "day.units",
+      "title": "Plan units per day",
+      "metric": "day.units",
+      "compare": [
+        "prior-day",
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "day.byClass",
+      "title": "Units by session class",
+      "metric": "day.byClass",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "day.byProject",
+      "title": "Units by project",
+      "metric": "day.byProject",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "day.byModel",
+      "title": "Units by model",
+      "metric": "day.byModel",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "week.pace",
+      "title": "Week-to-date pace",
+      "metric": "week.pace",
+      "compare": [
+        "prior-day"
+      ],
+      "threshold": {
+        "direction": "up-is-worse",
+        "relPct": 10,
+        "minSample": 1
+      },
+      "severity": "alert",
+      "cadence": "daily"
+    },
+    {
+      "id": "meter.reconcile",
+      "title": "Local use against the plan meter",
+      "metric": "meter.reconcile",
+      "compare": [
+        "prior-day"
+      ],
+      "threshold": {
+        "direction": "up-is-worse",
+        "relPct": 10,
+        "minSample": 1
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "day.limitHits",
+      "title": "Limit-hit events",
+      "metric": "day.limitHits",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse",
+        "abs": 1,
+        "minSample": 1
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "day.hours",
+      "title": "Units by hour and share over 150K",
+      "metric": "day.hours",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "day.excludedShare",
+      "title": "Units removed by each exclusion",
+      "metric": "day.excludedShare",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "lead.unitsPerPrompt",
+      "title": "Lead units per operator prompt",
+      "metric": "lead.unitsPerPrompt",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse",
+        "relPct": 25,
+        "minSample": 15,
+        "interval": "bootstrap-sessions"
+      },
+      "severity": "alert",
+      "cadence": "daily",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      }
+    },
+    {
+      "id": "lead.threadShare",
+      "title": "Lead own-thread share of its tree",
+      "metric": "lead.threadShare",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      }
+    },
+    {
+      "id": "lead.threadUnitsPerPrompt",
+      "title": "Lead own-thread units per operator prompt",
+      "metric": "lead.threadUnitsPerPrompt",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      },
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "lead.unitsPerTask",
+      "title": "Lead units per task (prompts of 60 characters or more)",
+      "metric": "lead.unitsPerTask",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      },
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "lead.workersPerTask",
+      "title": "Workers per task",
+      "metric": "lead.workersPerTask",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      },
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "lead.workersPerPrompt",
+      "title": "Workers per operator prompt",
+      "metric": "lead.workersPerPrompt",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      }
+    },
+    {
+      "id": "lead.modelMix",
+      "title": "Lead trees: share of units on Opus",
+      "metric": "lead.modelMix",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      }
+    },
+    {
+      "id": "lead.modelMixSonnet",
+      "title": "Lead trees: share of units on Sonnet",
+      "metric": "lead.modelMix",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      },
+      "params": {
+        "family": "sonnet"
+      },
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "lead.unitsPerCommitCall",
+      "title": "Lead units per git commit call",
+      "metric": "lead.unitsPerCommitCall",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      },
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "lead.unitsPerPromptByEffort",
+      "title": "Lead units per prompt by observed effort (needs desktop session records)",
+      "metric": "lead.unitsPerPrompt",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      },
+      "groupBy": "effortObserved",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "lead.rework",
+      "title": "Units of re-spawns and fixer workers",
+      "metric": "lead.rework",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      }
+    },
+    {
+      "id": "lead.correctionFlags",
+      "title": "Lead correction-flagged prompts per 100",
+      "metric": "lead.correctionFlags",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse",
+        "minSample": 30
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "cohort": {
+        "class": [
+          "lead"
+        ]
+      }
+    },
+    {
+      "id": "spawn.unitsPerSpawn",
+      "title": "Units per spawn",
+      "metric": "unitsPerSpawn",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse",
+        "relPct": 30,
+        "minSample": 20,
+        "interval": "bootstrap-sessions"
+      },
+      "severity": "alert",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.unitsSonnetHigh",
+      "title": "Units per spawn on sonnet/high",
+      "metric": "unitsPerSpawn",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "cohort": {
+        "rung": [
+          "sonnet/high"
+        ]
+      }
+    },
+    {
+      "id": "spawn.rungLadder",
+      "title": "Units per spawn by rung, 6-15 request spawns",
+      "metric": "spawn.rungLadder",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "groupBy": "rung",
+      "params": {
+        "bucket": "6-15"
+      }
+    },
+    {
+      "id": "haiku.likeForLike",
+      "title": "Explore spawns of 6-15 requests: units by rung",
+      "metric": "haiku.likeForLike",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "groupBy": "rung",
+      "params": {
+        "type": "explore",
+        "bucket": "6-15"
+      }
+    },
+    {
+      "id": "spawn.startupUnits",
+      "title": "Units of a spawn first request",
+      "metric": "spawn.startupUnits",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.categoryMix",
+      "title": "Request category mix",
+      "metric": "spawn.categoryMix",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.pollWaste",
+      "title": "Wait requests and their units",
+      "metric": "spawn.pollWaste",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.gateAt100k",
+      "title": "Test and gate requests at 100K or more",
+      "metric": "spawn.gateAt100k",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.outcomeByRung",
+      "title": "Status outcomes by rung",
+      "metric": "spawn.outcomeByRung",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "down-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "groupBy": "rung"
+    },
+    {
+      "id": "spawn.compactions",
+      "title": "Compactions per 100 spawns",
+      "metric": "compactionsPer100Spawns",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.escalations",
+      "title": "Re-spawns at a higher rung",
+      "metric": "spawn.escalations",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.extraTurns",
+      "title": "Continued-worker turns",
+      "metric": "spawn.extraTurns",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.typeMix",
+      "title": "Distribution of declared types",
+      "metric": "spawn.typeMix",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.fitOverShare",
+      "title": "Share of spawns with fit over",
+      "metric": "spawn.fitOverShare",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.untypedShare",
+      "title": "Share of spawns with no type",
+      "metric": "spawn.untypedShare",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.exploreShape",
+      "title": "Requests per explore spawn",
+      "metric": "spawn.exploreShape",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.respawnRate",
+      "title": "Re-spawn rate",
+      "metric": "spawn.respawnRate",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.outputPerRequest",
+      "title": "Output tokens per request by model",
+      "metric": "spawn.outputPerRequest",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily",
+      "groupBy": "model"
+    },
+    {
+      "id": "spawn.pinDeparture",
+      "title": "Share of spawns departing from the pinned model",
+      "metric": "spawn.pinDeparture",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "spawn.simpleRuns",
+      "title": "Runs of simple steps and the modelled saving",
+      "metric": "spawn.simpleRuns",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "weekly"
+    },
+    {
+      "id": "spawn.declaredVsActual",
+      "title": "Read-only spawns that edited or wrote",
+      "metric": "spawn.declaredVsActual",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "review.fixShare",
+      "title": "FIX share of review verdicts",
+      "metric": "review.fixShare",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "review.size",
+      "title": "Reviewer requests and units",
+      "metric": "review.size",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "ctx.over150kShare",
+      "title": "Share of worker units over 150K context",
+      "metric": "shareOver150kPct",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "ctx.ceilingNudges",
+      "title": "Context ceiling nudges per day",
+      "metric": "ceilingNudgesPerDay",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "haiku.spawnsUnits",
+      "title": "Haiku spawns and their units",
+      "metric": "haiku.spawnsUnits",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "haiku.complianceLeak",
+      "title": "Haiku-default types spawned at a higher rung",
+      "metric": "haiku.complianceLeak",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "snag.precisionRecall",
+      "title": "Struggle flags against bad outcomes",
+      "metric": "snag.precisionRecall",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "down-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "routine.modelDrift",
+      "title": "Routine fires against their pinned model",
+      "metric": "routine.modelDrift",
+      "compare": [
+        "level"
+      ],
+      "threshold": {
+        "direction": "up-is-worse",
+        "minSample": 1
+      },
+      "severity": "alert",
+      "cadence": "daily"
+    },
+    {
+      "id": "routine.costPerRun",
+      "title": "Units per routine fire",
+      "metric": "routine.costPerRun",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
+      "id": "routine.missedRuns",
+      "title": "Expected fires against observed fires",
+      "metric": "routine.missedRuns",
+      "compare": [
+        "level"
+      ],
+      "threshold": {
+        "direction": "up-is-worse",
+        "minSample": 1
+      },
+      "severity": "alert",
+      "cadence": "daily"
+    },
+    {
+      "id": "plugin.versionEvents",
+      "title": "First sighting of each plugin release",
+      "metric": "plugin.versionEvents",
+      "compare": [
+        "prior-day"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    }
+  ]
+}

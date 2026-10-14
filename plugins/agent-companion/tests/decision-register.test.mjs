@@ -788,7 +788,7 @@ test('11. --check exits 0 on a valid register, an invalid one and an absent one,
     writeFileSync(registerPath(), readFileSync(EXAMPLE, 'utf8'));
     const ok = runScript('scripts/decision-register.mjs', ['--check'], { env });
     assert.equal(ok.status, 0);
-    assert.match(ok.stdout, /^OK: .*\(1 decision, 8 triggers\)/);
+    assert.match(ok.stdout, /^OK: .*\(1 decision, 9 triggers\)/);
 
     const bad = register();
     bad.decisions[0].triggers[0].pattern = '(unclosed';

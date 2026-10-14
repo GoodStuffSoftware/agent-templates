@@ -228,6 +228,37 @@ export const ALLOWED = {
   "scripts/transcript-harvest.mjs": [
     "// AGENT_COMPANION_MEMORY_ROOT override, for the same reason: tests need a",
   ],
+  // 0.31.18 usage-analysis config loader: "override" here is one config layer (user > project > shipped)
+  // overriding another scenario field by field. Unrelated to taskTypes.<type>.override.
+  "scripts/lib/usage/config.mjs": [
+    "// through `overrides`, field by field.",
+    "// exclusions, disable and overrides, every one scoped to the",
+    "// can never collide with, shadow or override another layer.",
+    "// layer, an invalid scenario/window/exclusion/override is dropped and",
+    "const OVERRIDE_FIELDS = ['title', 'params', 'cohort', 'excludeSets', 'compare', 'groupBy', 'threshold', 'severity', 'cadence'];",
+    "// Validate scenario (or override) fields. `ctx.names` carries the project's",
+    "user: ['schema', 'schemaVersion', 'revision', 'environment', 'defaults', 'windows', 'exclusions', 'scenarios', 'metrics', 'disable', 'overrides'],",
+    "project: ['schema', 'schemaVersion', 'revision', 'windows', 'exclusions', 'scenarios', 'disable', 'overrides'],",
+    "return { layer, status: 'absent', path: null, label: null, errors: [], refusals: [], unknown: {}, scenarios: [], windows: {}, exclusions: {}, overrides: {}, disable: [], metrics: {}, environment: null, defaults: null, ...extra };",
+    "if (layer === 'user' && !sc.id.startsWith('u.')) return bad(`user scenario ids must start with \"u.\" (use overrides to change \"${sc.id}\")`);",
+    "if (raw.overrides !== undefined && allowedTop.includes('overrides')) {",
+    "if (!isObj(raw.overrides)) rec.errors.push({ path: 'overrides', message: 'must be an object' });",
+    "else for (const [id, ov] of Object.entries(raw.overrides)) {",
+    "const p = `overrides.${id}`;",
+    "if (!ownIds.has(id)) { rec.refusals.push({ path: p, id, message: `\"${id}\" is not a scenario of this project file (a project may override only its own)` }); continue; }",
+    "const fields = validateScenarioFields(ov, layer, { label, names, metricInfo: null }, s, p, OVERRIDE_FIELDS);",
+    "rec.overrides[targetId] = fields;",
+    "* Precedence per field: user overrides > project (its own ids only) > shipped.",
+    "const applyOverride = (id, ov, source) => {",
+    "for (const rec of P) for (const [id, ov] of Object.entries(rec.overrides)) if (!applyOverride(id, ov, `${layerName(rec)} overrides`)) missing.push({ id, layer: layerName(rec) });",
+    "for (const [id, ov] of Object.entries(U.overrides)) if (!applyOverride(id, ov, 'user overrides')) missing.push({ id, layer: 'user' });",
+    "for (const m of missing) warnings.push(`${m.layer} overrides name unknown scenario \"${m.id}\"`);",
+  ],
+  // multOverride is a caller-supplied plan multiplier. Unrelated to taskTypes.<type>.override.
+  "scripts/lib/usage/facts.mjs": [
+    "export function unitsFromTokens(t, spec, multOverride) {",
+    "return usd * (multOverride ?? spec.mult);",
+  ],
   "shims/global-hooks/agent-companion-staleness.mjs": [
     "// Same override convention as hooks/self-update.mjs, so a test fixture can",
     "return process.env.AGENT_COMPANION_HOME_OVERRIDE || homedir();",

@@ -134,6 +134,16 @@
           "minSample": 20,
           "minDays": 3,
           "note": "Main-thread plan units per spawn on a checkup day. The history keeps no effort per session, so this cannot be split by lead effort; staged against the switch instant it is the cost half of the comparison. To compare against the window before a scheduled switch instead, give the decision a rolloutId and add \"baseline\": { \"mode\": \"pre-window\", \"ratio\": true, \"minPerDay\": 20 } with a ratio threshold such as 1.5 and \"post\": { \"minDays\": 3 }."
+        },
+        {
+          "id": "lead-units-per-prompt",
+          "premise": "p2",
+          "kind": "scenario",
+          "scenario": "lead.unitsPerPrompt",
+          "comparison": "trailing-7",
+          "on": "regression",
+          "minDays": 2,
+          "note": "Reads the daily usage analysis (state/usage-analysis/<day>.json), never recomputes it. Flags after 2 qualifying result days in a row where the scenario regressed against the trailing 7 days. A day with no result, a deferred day or an unusable comparison is a gap (no flag, no reset). The scenario id must exist in the usage-analysis config and compare the same way; comparison is prior-day, trailing-7, same-weekday-4 or window:<id>; on is regression, improvement or any."
         }
       ]
     }

@@ -1,0 +1,77 @@
+{
+  "$comment": "Example user layer. Copy to <state root>/config/usage-analysis.json and edit. This file holds one operator's own experiments, exclusions and plan size, as an illustration: every value here is machine-specific, which is why none of it ships in usage-analysis.defaults.json. Precedence: user > project > shipped. New scenario ids must start with u.; change a shipped scenario through overrides.",
+  "schema": "agent-companion/usage-analysis",
+  "schemaVersion": 1,
+  "revision": 1,
+  "environment": {
+    "plan": { "weeklyLimitUnits": 2677 },
+    "day": { "boundaryUtcHour": 8 },
+    "week": { "resetUtc": "Fri 16:00" },
+    "projects": {
+      "autoload": true,
+      "my-repo": { "paths": ["C:/Users/me/dev/my-repo"] }
+    },
+    "routines": {
+      "watch": ["agent-companion-scout", "usage-analysis-daily"],
+      "cron": { "usage-analysis-daily": "0 4 * * *" }
+    },
+    "classes": { "storm": { "minSpawnsPerHour": 20 } },
+    "vocabulary": { "correction": ["no,", "wrong", "that's not", "i said", "again", "stop"] },
+    "llm": {
+      "enabled": false,
+      "cadence": "weekly",
+      "maxItemsPerRun": 40,
+      "maxUnitsPerRun": 5.0,
+      "rater": { "model": "opus", "effort": "medium" }
+    },
+    "report": { "summaryLines": 3, "keepDays": 180 }
+  },
+  "defaults": { "threshold": { "relPct": 25, "minSample": 15, "minDays": 1 } },
+  "windows": {
+    "leads-high": { "from": "2026-10-10T20:03Z", "to": "rollout:leads-xhigh", "label": "E", "why": "lead effort set to high" },
+    "leads-xhigh": { "from": "rollout:leads-xhigh" },
+    "haiku-trial": { "from": "decision:haiku-5-5-trial" }
+  },
+  "exclusions": {
+    "fable-tree": {
+      "model": ["claude-fable-*"],
+      "scope": "tree",
+      "why": "design sessions on a heavier model; the weight is an estimate"
+    },
+    "coordination-session": {
+      "sessionId": ["ab12cd"],
+      "scope": "tree",
+      "why": "coordination session, not lead work"
+    },
+    "stray-tests": { "rule": "noDesktopRecordAndPromptsAtMost1" }
+  },
+  "metrics": {
+    "u.testsPerEdit": { "ratio": ["count.request.test", "count.request.edit"], "scale": 1, "label": "M" }
+  },
+  "scenarios": [
+    {
+      "id": "u.leadsXhighVsHigh",
+      "title": "Lead units per prompt, xhigh against high",
+      "metric": "lead.unitsPerPrompt",
+      "cohort": { "class": ["lead"] },
+      "excludeSets": ["fable-tree", "coordination-session", "stray-tests"],
+      "compare": [{ "window": "leads-xhigh", "vs": "leads-high" }],
+      "groupBy": "effortObserved",
+      "threshold": { "direction": "up-is-worse", "relPct": 20, "abs": 1.0, "minSample": 25, "interval": "bootstrap-sessions" },
+      "severity": "alert",
+      "cadence": "daily"
+    },
+    {
+      "id": "u.haikuTrialSpawns",
+      "title": "Haiku trial: units per spawn before and after",
+      "metric": "spawn.unitsPerSpawn",
+      "cohort": { "modelFamily": ["haiku"] },
+      "compare": [{ "window": "haiku-trial", "vs": "pre-window" }],
+      "severity": "info"
+    }
+  ],
+  "disable": ["spawn.simpleRuns"],
+  "overrides": {
+    "lead.unitsPerPrompt": { "threshold": { "relPct": 30 } }
+  }
+}

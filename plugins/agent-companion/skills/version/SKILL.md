@@ -17,6 +17,11 @@ Claude Code keeps more than one copy of this plugin:
 - **Marketplace clone** (`~/.claude/plugins/marketplaces/<marketplace>/`), what
   `claude plugin update` installs from.
 
+Only the **user-scope** record in `installed_plugins.json` is a valid install: the
+plugin runs from ONE install per machine. Any project- or local-scope record is
+not judged for staleness; the script reports it as "should not exist (user scope
+only)".
+
 They update separately. On 2026-10-02 the desktop copy was 0.29.22 while the CLI
 copy was 0.29.24, so desktop sessions kept the old routing and nothing said so.
 
@@ -49,11 +54,21 @@ runs the marketplace clone's script, which finds the same installs.
 2. **The other copies:** each one's version (CLI cache, each desktop copy).
 3. **Latest:** the marketplace version (and origin/main, if `--remote` was used).
 4. **The verdict line** from the script, as it is: `all copies current`, or
-   `STALE: <copy> is <ver>, latest is <ver>`.
-5. **The fix**, only when something is stale, naming which sessions are affected:
+   `STALE: <copy> is <ver>, latest is <ver>`, either followed by `N project- or
+   local-scope records should not exist (user scope only)` when stray records
+   exist (with no user-scope install it opens `no user-scope install;`: install
+   at user scope first).
+5. **The fix**, only when something is stale or a project/local record exists, naming which sessions are affected:
    - **CLI cache stale** (CLI sessions): `claude plugin marketplace update
-     agent-templates`, then `claude plugin update agent-companion@agent-templates`,
-     then restart the session or `/reload-plugins`.
+     agent-templates`, then `claude plugin update agent-companion@agent-templates
+     --scope user`, then restart the session or `/reload-plugins`.
+   - **Project or local record** ("should not exist (user scope only)"): never
+     update it. Per record, the script gives the project path, the settings file
+     that recreates it (`enabledPlugins` in `.claude/settings.json` or
+     `settings.local.json`), and the fix: remove that line (the user settings
+     already enable the plugin), then remove the record from
+     `installed_plugins.json` (edit the file; not `claude plugin uninstall`,
+     which wipes the plugin options).
    - **Desktop copy stale** (Desktop Code-tab sessions): `claude plugin update`
      does not touch it. Verified 2026-10-02: disable, then re-enable,
      agent-companion in the desktop app's plugin manager (not `claude plugin

@@ -71,16 +71,30 @@
 // A whole-run spawnSync timeout was rejected as the guard for that case: it
 // kills only `node --test` and orphans the per-file processes it spawned.
 //
-// Machine-wide lock (scripts/ci-lock.mjs): at most ONE suite run at a time per
-// machine, across every worktree, for the hook and by-hand runs alike. It is
-// taken just before the first suite (the pre-push scan runs unlocked). A
-// second run prints one line naming the holder (pid, worktree, start time) and
-// polls every 5 s. A lock whose pid is dead, or older than 45 min, is taken
-// over. Released on exit, error and SIGINT. Knobs:
-//   CI_LOCAL_MAX_PARALLEL=<n>   allow n concurrent runs (default 1)
-//   CI_LOCAL_LOCK=0             bypass the lock entirely
-//   CI_LOCAL_LOCK_POLL_MS / CI_LOCAL_LOCK_MAX_AGE_MS / CI_LOCAL_LOCK_DIR
-//                               poll interval, stale cap, lock dir (tests)
+// Shared CI budget (scripts/ci-budget.mjs; protocol in CONTRIBUTING.md, "Shared
+// CI budget"): the TOTAL number of test workers across every ci-local run on the
+// machine, plus load from outside our runs, stays under one budget (default half
+// the logical cores). A run takes a 'full' lease just before its first suite (the
+// pre-push scan runs without one): it asks for the concurrency above, gets what
+// is free (at least 1), and passes the grant to node as --test-concurrency. A
+// busy box means fewer workers or a fair wait, never a failure. The lease is
+// resized between phases and released on exit, error and signals. Knobs:
+//   CI_LOCAL_BUDGET=<n>         total units (default half the logical cores)
+//   CI_LOCAL_MAX_PARALLEL=<n>   cap concurrent full runs (default: the budget decides)
+//   CI_LOCAL_HEAVY_MAX / CI_LOCAL_HEAVY_COST   the heavy lane, below
+//   CI_LOCAL_LOCK=0             bypass the budget entirely
+//
+// Heavy lane: the test files in HEAVY_TEST_FILES (below) spawn git or sh many
+// times, so process-spawn cost, not CPU, is what limits them. Each testDir
+// suite runs them in a second pass of their own, under heavy leases: at most
+// CI_LOCAL_HEAVY_MAX such workers machine-wide, each charged CI_LOCAL_HEAVY_COST
+// units. The pass waits for a slot rather than failing, holding nothing while it
+// waits; after CI_LOCAL_HEAVY_MAX_WAIT_MS (default 10 minutes) it runs with one
+// heavy worker anyway and says so.
+//
+// A run whose suites are all single scripts (`--suite leak-check` alone) is a
+// 'targeted' run: one worker, an express lease that never queues. There is no
+// per-file mode; --suite picks whole suites.
 //
 // Pre-push only: before any suite, every commit being pushed — on EVERY ref,
 // wip/** and backup/** included — and every pushed ref name is scanned by
@@ -96,7 +110,7 @@ import {
 import { join, dirname, resolve, relative, delimiter, win32, posix } from 'node:path';
 import { tmpdir, availableParallelism, homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ensureRunLock } from './ci-lock.mjs';
+import { acquire, resolveBudgetConfig } from './ci-budget.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..');
@@ -256,6 +270,13 @@ function printHelp() {
   env ${CONCURRENCY_ENV}=<n>
                         run at most n test files at once (default: half the
                         available CPUs, clamped to 1..${MAX_DEFAULT_CONCURRENCY}).
+  env CI_LOCAL_BUDGET=<n>
+                        total test workers for ALL ci-local runs on this machine
+                        (default: half the logical cores). A busy machine means
+                        fewer workers or a wait, never a failure; see
+                        "node scripts/ci-budget.mjs status". CI_LOCAL_LOCK=0
+                        skips the budget. Git/sh-heavy test files run in a
+                        pass of their own (CI_LOCAL_HEAVY_MAX, CI_LOCAL_HEAVY_COST).
   env ${TIMEOUT_ENV}=<ms>
                         fail any single test that runs longer than this, by
                         name (default: ${DEFAULT_TEST_TIMEOUT_MS}). Never 0 or unbounded.
@@ -746,13 +767,161 @@ export function runTestSuite({
   return { ...base, status: ciParity ? 1 : 0, outcome: 'flaky', flakyFiles, failedFiles };
 }
 
+// ---------------------------------------------------------------------------
+// Heavy lane and the shared budget (scripts/ci-budget.mjs)
+// ---------------------------------------------------------------------------
+
+// The ONE list of git/sh-spawn-heavy test files: each runs in the heavy pass of
+// its suite, under heavy leases (see the header). A pattern matches a test
+// file's name without `.test.mjs`; `*` matches any run of characters. Add a
+// file when its tests spawn git or sh dozens of times. Measured 2026-10-13 by
+// counting spawn and exec call sites, helper calls included: a file at 15 or more
+// git/sh sites is on the list.
+export const HEAVY_TEST_FILES = [
+  'memory-vault*', // memory-vault, -byte-exact (73 sites), -git-env (49), -refusal-advice (34), -safe-directory (16), ...
+  'git-brief*', // git-brief (50)
+  'ci-local-parity', // 21
+  'push-scan', // 77
+  'publication-sweep', // 62
+  'pre-push-hook-tree', // 18
+];
+
+function globToRegExp(glob) {
+  return new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+}
+
+export function isHeavyTestFile(file, patterns = HEAVY_TEST_FILES) {
+  const base = String(file).split(/[\\/]/).pop().replace(/\.test\.mjs$/, '');
+  return patterns.some((p) => globToRegExp(p).test(base));
+}
+
+// { normal, heavy }, both in the input order.
+export function splitHeavy(files, patterns = HEAVY_TEST_FILES) {
+  const normal = [];
+  const heavy = [];
+  for (const f of files) (isHeavyTestFile(f, patterns) ? heavy : normal).push(f);
+  return { normal, heavy };
+}
+
+// A run of only single scripts (`--suite leak-check`) is a targeted run: one
+// worker, an express lease that never queues. Anything with a node --test suite
+// is a full run. ci-local has no per-file mode.
+export function leaseKindFor(suiteNames) {
+  const names = suiteNames?.length ? suiteNames : DEFAULT_ORDER;
+  return names.every((n) => !SUITES[n]?.testDir) ? 'targeted' : 'full';
+}
+
+// One run's budget lease, resized between phases. `acquireLease` and `cfg` are
+// seams for tests. plain(desired) and heavy(want) return the --test-concurrency
+// to pass to node; release() gives the lease back (idempotent).
+export function createBudgetSession({
+  kind = 'full', acquireLease = acquire, cfg = resolveBudgetConfig(),
+  log = (m) => console.log(m), label = 'ci-local', worktree = REPO_ROOT,
+} = {}) {
+  let lease = null;
+  const open = (desired) => {
+    lease = acquireLease(kind === 'targeted'
+      ? { kind: 'targeted', label, worktree }
+      : { kind: 'full', desired, label, worktree });
+  };
+  return {
+    kind,
+    get lease() { return lease; },
+    heavyMax: cfg.heavyMax,
+    plain(desired) {
+      const fresh = !lease;
+      if (fresh) open(desired);
+      else if (kind !== 'targeted') lease.resize({ units: desired, heavy: 0 });
+      const got = Math.max(1, lease.units);
+      if (!fresh && kind !== 'targeted' && got < desired) log(`ci-local: the CI budget is busy: running with ${got} of ${desired} test workers.`);
+      return got;
+    },
+    heavy(want) {
+      if (!lease) open(1);
+      if (kind === 'targeted') return 1;
+      lease.resize({ units: 0, heavy: want }, { wait: true });
+      return Math.max(1, lease.heavy);
+    },
+    // Back to one plain worker, so a lease does not sit on a big grant between phases.
+    settle() {
+      if (lease && kind !== 'targeted') lease.resize({ units: 1, heavy: 0 });
+    },
+    release() {
+      if (lease) lease.release();
+      lease = null;
+    },
+  };
+}
+
+let budgetSession = null;
+let budgetKind = 'full';
+
+export function setBudgetKind(kind) {
+  budgetKind = kind === 'targeted' ? 'targeted' : 'full';
+  if (budgetSession && budgetSession.kind !== budgetKind) { budgetSession.release(); budgetSession = null; }
+}
+
+function getBudgetSession() {
+  budgetSession ??= createBudgetSession({ kind: budgetKind });
+  return budgetSession;
+}
+
+export function releaseBudget() {
+  if (budgetSession) budgetSession.release();
+  budgetSession = null;
+}
+
+// Fold the passes of one suite into one result (counts added, files joined,
+// the worst outcome wins).
+export function mergeSuiteResults(parts) {
+  if (parts.length === 1) return parts[0];
+  const counts = parts.some((p) => p.counts)
+    ? parts.reduce((acc, p) => {
+      for (const [k, v] of Object.entries(p.counts || {})) acc[k] = (acc[k] ?? 0) + (Number(v) || 0);
+      return acc;
+    }, {})
+    : null;
+  const outcome = parts.some((p) => p.outcome === 'fail') ? 'fail' : parts.some((p) => p.outcome === 'flaky') ? 'flaky' : 'pass';
+  return {
+    status: parts.some((p) => p.status !== 0) ? 1 : 0,
+    outcome,
+    counts,
+    flakyFiles: parts.flatMap((p) => p.flakyFiles || []),
+    failedFiles: parts.flatMap((p) => p.failedFiles || []),
+  };
+}
+
+// A node --test suite under the budget: the regular files first, with the
+// workers the lease granted, then the heavy files in a pass of their own.
+export function runBudgetedTests({
+  files, cwd, env, ciParity, budget, concurrency = resolveTestConcurrency().value,
+  run = runTestSuite, log = (m) => console.log(m),
+}) {
+  const { normal, heavy } = splitHeavy(files, budget.heavyMax > 0 && budget.kind !== 'targeted' ? HEAVY_TEST_FILES : []);
+  const parts = [];
+  if (normal.length) {
+    const n = budget.plain(concurrency);
+    parts.push(run({ files: normal, cwd, env, ciParity, concurrency: n }));
+  }
+  if (heavy.length) {
+    const want = Math.max(1, Math.min(budget.heavyMax, heavy.length, concurrency));
+    const n = budget.heavy(want);
+    log(`\nci-local: heavy lane: ${heavy.length} git/sh-heavy test file(s), ${n} at a time.`);
+    parts.push(run({ files: heavy, cwd, env, ciParity, concurrency: n }));
+    budget.settle();
+  }
+  return parts.length ? mergeSuiteResults(parts) : run({ files: [], cwd, env, ciParity, concurrency: 1 });
+}
+
 function runSuiteIn(name, cwd, env, ciParity) {
   const suite = SUITES[name];
+  const budget = getBudgetSession();
   if (suite.testDir) {
-    return runTestSuite({
-      files: testFiles(cwd, suite.testDir), cwd, env, ciParity,
+    return runBudgetedTests({
+      files: testFiles(cwd, suite.testDir), cwd, env, ciParity, budget,
     });
   }
+  budget.plain(1); // one script, one worker
   const res = runNode(suite.command(cwd), cwd, env);
   return { ...res, outcome: res.status === 0 ? 'pass' : 'fail' };
 }
@@ -789,7 +958,10 @@ function runSuiteParity(name, ref) {
 }
 
 function runSuite(name, ciParity, ref) {
-  ensureRunLock({ worktree: REPO_ROOT }); // machine-wide: one full run at a time
+  // Take the lease before the first suite (before a parity clone too), so many
+  // worktrees' hooks share the budget instead of piling up.
+  const budget = getBudgetSession();
+  if (!budget.lease) budget.plain(SUITES[name].testDir ? resolveTestConcurrency().value : 1);
   return ciParity ? runSuiteParity(name, ref) : runSuiteLocal(name);
 }
 
@@ -1056,19 +1228,24 @@ async function main() {
   if (conc.warning) console.error(conc.warning);
   const tmo = resolveTestTimeoutMs();
   if (tmo.warning) console.error(tmo.warning);
-  if (opts.prePushHook) {
-    process.exitCode = await runPrePushHook(opts.pushRemote, opts.pushUrl);
-    return;
+  try {
+    if (opts.prePushHook) {
+      process.exitCode = await runPrePushHook(opts.pushRemote, opts.pushUrl);
+      return;
+    }
+    setBudgetKind(leaseKindFor(opts.suites));
+    const results = opts.suites.map((name) => ({
+      name,
+      ...(() => {
+        console.log(`\n=== ci-local: ${name}${opts.ciParity ? ' (--ci-parity)' : ''} ===`);
+        return runSuite(name, opts.ciParity, opts.ref);
+      })(),
+    }));
+    printSummary(results, opts.ciParity);
+    process.exitCode = results.some((r) => r.status !== 0) ? 1 : 0;
+  } finally {
+    releaseBudget(); // also released on exit and on signals by ci-budget itself
   }
-  const results = opts.suites.map((name) => ({
-    name,
-    ...(() => {
-      console.log(`\n=== ci-local: ${name}${opts.ciParity ? ' (--ci-parity)' : ''} ===`);
-      return runSuite(name, opts.ciParity, opts.ref);
-    })(),
-  }));
-  printSummary(results, opts.ciParity);
-  process.exitCode = results.some((r) => r.status !== 0) ? 1 : 0;
 }
 
 const isMain = (() => {

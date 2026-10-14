@@ -1,0 +1,1425 @@
+{
+ "unitsPerSpawn": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": true,
+     "value": 2.4,
+     "n": 5
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": true,
+     "value": 2.3333333333333335,
+     "n": 6
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": true,
+     "hit": true,
+     "value": 2.25,
+     "n": 8
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": true,
+     "hit": true,
+     "value": 2.2222222222222223,
+     "n": 9
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 2.2,
+     "n": 10
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 2.1818181818181817,
+     "n": 11
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 2.1666666666666665,
+     "n": 12
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 2.1538461538461537,
+     "n": 13
+    }
+   ],
+   "ready": true,
+   "value": 2.1538461538461537,
+   "n": 13
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.9625000000000001,
+     "n": 10
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.9583333333333335,
+     "n": 21
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.9545454545454545,
+     "n": 33
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.9510869565217391,
+     "n": 46
+    }
+   ],
+   "ready": true,
+   "pre": 2.2857142857142856,
+   "n": 46,
+   "value": 0.9510869565217391
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08",
+    "2026-10-09"
+   ],
+   "pooled": 2.2857142857142856,
+   "n": 28
+  }
+ },
+ "mainUnitsPerDay": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": true,
+     "value": 40,
+     "n": 100
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": true,
+     "value": 43,
+     "n": 107
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": true,
+     "hit": true,
+     "value": 52,
+     "n": 128
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 55,
+     "n": 135
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 58,
+     "n": 142
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 61,
+     "n": 149
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 64,
+     "n": 156
+    }
+   ],
+   "ready": true,
+   "value": 64,
+   "n": 156
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.2222222222222223,
+     "n": 135
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.2555555555555555,
+     "n": 277
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.288888888888889,
+     "n": 426
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.3222222222222222,
+     "n": 582
+    }
+   ],
+   "ready": true,
+   "pre": 45,
+   "n": 582,
+   "value": 1.3222222222222222
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-09"
+   ],
+   "pooled": 45,
+   "n": 335
+  }
+ },
+ "shareOver150kPct": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": true,
+     "value": 16.666666666666664,
+     "n": 60
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": true,
+     "value": 17.1875,
+     "n": 64
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": true,
+     "hit": true,
+     "value": 18.055555555555554,
+     "n": 72
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 18.75,
+     "n": 80
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 19.047619047619047,
+     "n": 84
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 19.318181818181817,
+     "n": 88
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 19.565217391304348,
+     "n": 92
+    }
+   ],
+   "ready": true,
+   "value": 19.565217391304348,
+   "n": 92
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.0808823529411764,
+     "n": 80
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.0896700143472022,
+     "n": 164
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.0980392156862746,
+     "n": 252
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.1060191518467852,
+     "n": 344
+    }
+   ],
+   "ready": true,
+   "pre": 17.346938775510203,
+   "n": 344,
+   "value": 1.1060191518467852
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08"
+   ],
+   "pooled": 17.346938775510203,
+   "n": 196
+  }
+ },
+ "compactionsPer100Spawns": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": false,
+     "value": 0,
+     "n": 20
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": true,
+     "value": 4.545454545454546,
+     "n": 22
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": true,
+     "hit": true,
+     "value": 11.538461538461538,
+     "n": 26
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 3.3333333333333335,
+     "n": 30
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 6.25,
+     "n": 32
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 8.823529411764707,
+     "n": 34
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": false,
+     "value": 0,
+     "n": 36
+    }
+   ],
+   "ready": true,
+   "value": 0,
+   "n": 36
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.5666666666666668,
+     "n": 30
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.8225806451612904,
+     "n": 62
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.0625,
+     "n": 96
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.7727272727272728,
+     "n": 132
+    }
+   ],
+   "ready": true,
+   "pre": 5.88235294117647,
+   "n": 132,
+   "value": 0.7727272727272728
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08"
+   ],
+   "pooled": 5.88235294117647,
+   "n": 68
+  }
+ },
+ "ceilingNudgesPerDay": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": false,
+     "value": 0,
+     "n": 20
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 22
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 28
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 30
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": false,
+     "value": 0,
+     "n": 32
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 34
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 36
+    }
+   ],
+   "ready": true,
+   "value": 2,
+   "n": 36
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 3,
+     "n": 30
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.5,
+     "n": 62
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.5,
+     "n": 96
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.875,
+     "n": 132
+    }
+   ],
+   "ready": true,
+   "pre": 0.6666666666666666,
+   "n": 132,
+   "value": 1.875
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-09"
+   ],
+   "pooled": 0.6666666666666666,
+   "n": 70
+  }
+ },
+ "leadEffortShare": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": false,
+     "value": 0,
+     "n": 14
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": false,
+     "value": 0,
+     "n": 14
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": true,
+     "hit": false,
+     "value": 0,
+     "n": 14
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": true,
+     "hit": false,
+     "value": 0,
+     "n": 14
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 14
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 14
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 14
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 14
+    }
+   ],
+   "ready": true,
+   "value": 1,
+   "n": 14
+  },
+  "staged": {
+   "days": [],
+   "ready": false
+  },
+  "baseline": null
+ },
+ "reviewsPerWriter": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.3333333333333333,
+     "n": 9
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.3333333333333333,
+     "n": 9
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.3333333333333333,
+     "n": 9
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.3333333333333333,
+     "n": 9
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.3333333333333333,
+     "n": 9
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.3333333333333333,
+     "n": 9
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.3333333333333333,
+     "n": 9
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.3333333333333333,
+     "n": 9
+    }
+   ],
+   "ready": true,
+   "value": 0.3333333333333333,
+   "n": 9
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 9
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 18
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 27
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 36
+    }
+   ],
+   "ready": true,
+   "pre": 0.3333333333333333,
+   "n": 36,
+   "value": 1
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08",
+    "2026-10-09"
+   ],
+   "pooled": 0.3333333333333333,
+   "n": 36
+  }
+ },
+ "haikuSpawns": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 16
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 16
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 16
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 16
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 16
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 16
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 16
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 16
+    }
+   ],
+   "ready": true,
+   "value": 2,
+   "n": 16
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 16
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 32
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 48
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 64
+    }
+   ],
+   "ready": true,
+   "pre": 2,
+   "n": 64,
+   "value": 1
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08",
+    "2026-10-09"
+   ],
+   "pooled": 2,
+   "n": 64
+  }
+ },
+ "leadRebriefsPer100Spawns": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 92.85714285714286,
+     "n": 14
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 92.85714285714286,
+     "n": 14
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 92.85714285714286,
+     "n": 14
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 92.85714285714286,
+     "n": 14
+    }
+   ],
+   "ready": true,
+   "value": 92.85714285714286,
+   "n": 14
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 14
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 28
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 42
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 56
+    }
+   ],
+   "ready": true,
+   "pre": 92.85714285714286,
+   "n": 56,
+   "value": 1
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08",
+    "2026-10-09"
+   ],
+   "pooled": 92.85714285714286,
+   "n": 56
+  }
+ },
+ "reviewFixShareByLeadEffort": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 66.66666666666666,
+     "n": 3
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 66.66666666666666,
+     "n": 3
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 66.66666666666666,
+     "n": 3
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 66.66666666666666,
+     "n": 3
+    }
+   ],
+   "ready": true,
+   "value": 66.66666666666666,
+   "n": 3
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 3
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 6
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 9
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 12
+    }
+   ],
+   "ready": true,
+   "pre": 66.66666666666666,
+   "n": 12,
+   "value": 1
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08",
+    "2026-10-09"
+   ],
+   "pooled": 66.66666666666666,
+   "n": 12
+  }
+ },
+ "leadRoutingDeniesPer100Spawns": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 28.57142857142857,
+     "n": 14
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 14.285714285714285,
+     "n": 14
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 21.428571428571427,
+     "n": 14
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 28.57142857142857,
+     "n": 14
+    }
+   ],
+   "ready": true,
+   "value": 28.57142857142857,
+   "n": 14
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.5999999999999999,
+     "n": 14
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.2,
+     "n": 28
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.2,
+     "n": 42
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.3,
+     "n": 56
+    }
+   ],
+   "ready": true,
+   "pre": 17.857142857142858,
+   "n": 56,
+   "value": 1.3
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08",
+    "2026-10-09"
+   ],
+   "pooled": 17.857142857142858,
+   "n": 56
+  }
+ },
+ "leadUnderProvisionedShare": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 28.57142857142857,
+     "n": 14
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 28.57142857142857,
+     "n": 14
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 28.57142857142857,
+     "n": 14
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 28.57142857142857,
+     "n": 14
+    }
+   ],
+   "ready": true,
+   "value": 28.57142857142857,
+   "n": 14
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 14
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 28
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 42
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1,
+     "n": 56
+    }
+   ],
+   "ready": true,
+   "pre": 28.57142857142857,
+   "n": 56,
+   "value": 1
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08",
+    "2026-10-09"
+   ],
+   "pooled": 28.57142857142857,
+   "n": 56
+  }
+ },
+ "mainUnitsPerLeadSpawn": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": true,
+     "value": 2,
+     "n": 20
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.9545454545454546,
+     "n": 22
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.8846153846153846,
+     "n": 26
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.8571428571428572,
+     "n": 28
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.8333333333333333,
+     "n": 30
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.8125,
+     "n": 32
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.7941176470588236,
+     "n": 34
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.7777777777777777,
+     "n": 36
+    }
+   ],
+   "ready": true,
+   "value": 1.7777777777777777,
+   "n": 36
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.9565217391304347,
+     "n": 30
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.9509116409537166,
+     "n": 62
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.9456521739130435,
+     "n": 96
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 0.9407114624505928,
+     "n": 132
+    }
+   ],
+   "ready": true,
+   "pre": 1.9166666666666667,
+   "n": 132,
+   "value": 0.9407114624505928
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08",
+    "2026-10-09"
+   ],
+   "pooled": 1.9166666666666667,
+   "n": 96
+  }
+ }
+}

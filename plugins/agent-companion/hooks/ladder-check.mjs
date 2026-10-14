@@ -56,7 +56,7 @@ const STALE_COPY_RECOVERY = 'disable, then re-enable, agent-companion in the des
   '/reload-plugins, then verify with a trivial ladder spawn; start a fresh session if that still fails.';
 // The recovery for missing or broken agent files in the loaded copy: the
 // files themselves are wrong, so the copy needs replacing.
-const BROKEN_FILES_RECOVERY = 'update or reinstall the plugin (claude plugin update agent-companion, or remove ' +
+const BROKEN_FILES_RECOVERY = 'update or reinstall the plugin (claude plugin update agent-companion --scope user, or remove ' +
   'and re-add it), then /reload-plugins, then verify with a trivial ladder spawn; start a fresh session if that ' +
   'still fails.';
 

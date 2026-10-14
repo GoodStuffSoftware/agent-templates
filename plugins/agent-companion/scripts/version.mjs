@@ -22,6 +22,12 @@
 //                                 git ls-remote for the commit); optional, time-boxed
 //   node version.mjs --timeout N  per-network-call limit in ms (default 8000)
 //
+// agent-companion runs from ONE install per machine: the user-scope record.
+// Only that record is judged. Every project- or local-scope record is reported
+// as "should not exist (user scope only)" with its project path, the settings
+// file that recreates it (enabledPlugins in .claude/settings.json or
+// settings.local.json), and the fix; never as STALE.
+//
 // Exits 0 whatever the verdict (it is a report, not a gate); 2 on a bad flag.
 // The functions are exported: scripts/detect.mjs reuses them for the scout's
 // `plugin_copy_stale` signal. Nothing here prints a token or a credential:
@@ -33,6 +39,7 @@ import { join, resolve, dirname, sep } from 'node:path';
 import { homedir } from 'node:os';
 import {
   claudeDir, homeRoot, readInstalledPlugins, pluginEntries, compareVersions, versionBelow, normalizePath,
+  isStrayScopeEntry,
 } from '../hooks/lib/context.mjs';
 import { spawnSyncHidden, execFileSyncHidden } from './lib/proc.mjs';
 import { cleanGitEnv } from './lib/git-env.mjs';
@@ -127,8 +134,11 @@ export function thisCopy(root = ownRoot(), claudeDirPath = claudeDir()) {
 // The CLI copy (installed_plugins.json) and the marketplace clone.
 // ---------------------------------------------------------------------------
 
+// The install records that count: the user-scope one. agent-companion runs from
+// ONE install per machine; a project- or local-scope record is not an install,
+// it is a stray copy (see strayCopies) and is never judged here.
 export function cliCopies(claudeDirPath = claudeDir(), name = PLUGIN_NAME) {
-  const entries = pluginEntries(readInstalledPlugins(claudeDirPath), name);
+  const entries = pluginEntries(readInstalledPlugins(claudeDirPath), name).filter((e) => !isStrayScopeEntry(e));
   return entries.map((e) => ({
     kind: 'cli-cache',
     key: e.key,
@@ -139,6 +149,69 @@ export function cliCopies(claudeDirPath = claudeDir(), name = PLUGIN_NAME) {
     lastUpdated: typeof e.lastUpdated === 'string' ? e.lastUpdated : null,
     ...(e.projectPath ? { projectScoped: true } : {}),
   }));
+}
+
+// Project settings files that enable the plugin: <projectPath>/.claude/settings.json
+// and settings.local.json whose enabledPlugins turns agent-companion on. That
+// line is what makes Claude Code create (and keep) a project-scope record.
+// Returns [{ file, key }]; an unreadable or absent file is skipped.
+export const PROJECT_SETTINGS_FILES = ['settings.json', 'settings.local.json'];
+export function enablingSettingsFiles(projectPath, name = PLUGIN_NAME) {
+  const out = [];
+  if (typeof projectPath !== 'string' || !projectPath) return out;
+  for (const f of PROJECT_SETTINGS_FILES) {
+    const file = join(projectPath, '.claude', f);
+    const j = readJson(file);
+    const ep = j && typeof j === 'object' && j.enabledPlugins && typeof j.enabledPlugins === 'object' ? j.enabledPlugins : null;
+    if (!ep || Array.isArray(ep)) continue;
+    for (const key of Object.keys(ep)) {
+      if (key.split('@')[0] === name && ep[key]) out.push({ file, key });
+    }
+  }
+  return out;
+}
+
+export const STRAY_RULE = 'should not exist (user scope only)';
+
+function strayFix(key, settingsFiles, { userInstalled = true, projectPathExists = true } = {}) {
+  const record = 'then remove this record from installed_plugins.json (edit the file; not `claude plugin uninstall`, which wipes the plugin options)';
+  // With no user-scope install, removing the stray record would leave NO
+  // install: the user-scope one comes first.
+  const first = userInstalled ? '' : `there is no user-scope install yet: run \`claude plugin install ${key} --scope user\` first, then `;
+  if (!projectPathExists) {
+    return `${first}that project folder no longer exists (a removed worktree): remove this record from installed_plugins.json (edit the file; not \`claude plugin uninstall\`, which wipes the plugin options)`;
+  }
+  if (!settingsFiles.length) {
+    return `${first}no settings file in that project enables the plugin now: ${record}`;
+  }
+  const where = settingsFiles.map((x) => x.file).join(' and ');
+  return `${first}remove the \`${key}\` line from enabledPlugins in ${where} (your user settings ${userInstalled ? 'already enable it' : 'will enable it once it is installed'}), ${record}`;
+}
+
+// Every project- or local-scope record of the plugin: each one should not
+// exist (user scope only). Carries the project path, the settings file(s) that
+// recreate it when found, and the fix.
+export function strayCopies(claudeDirPath = claudeDir(), name = PLUGIN_NAME) {
+  const all = pluginEntries(readInstalledPlugins(claudeDirPath), name);
+  const userInstalled = all.some((e) => !isStrayScopeEntry(e));
+  return all.filter(isStrayScopeEntry).map((e) => {
+    const projectPath = typeof e.projectPath === 'string' && e.projectPath ? e.projectPath : null;
+    const settingsFiles = projectPath ? enablingSettingsFiles(projectPath, name) : [];
+    const projectPathExists = projectPath ? existsSync(projectPath) : false;
+    return {
+      kind: 'project-record',
+      key: e.key,
+      scope: e.scope || 'project',
+      version: e.version,
+      projectPath,
+      path: typeof e.installPath === 'string' ? e.installPath : null,
+      lastUpdated: typeof e.lastUpdated === 'string' ? e.lastUpdated : null,
+      projectPathExists,
+      userInstalled,
+      settingsFiles: settingsFiles.map((x) => x.file),
+      fix: strayFix(e.key, settingsFiles, { userInstalled, projectPathExists }),
+    };
+  });
 }
 
 function gitOut(args, cwd, timeout = 5000) {
@@ -407,7 +480,7 @@ export function remoteInfo({
 // The fix, per kind of copy.
 // ---------------------------------------------------------------------------
 
-const CLI_FIX = 'run `claude plugin marketplace update agent-templates`, then `claude plugin update agent-companion@agent-templates`, then restart the session (or /reload-plugins)';
+const CLI_FIX = 'run `claude plugin marketplace update agent-templates`, then `claude plugin update agent-companion@agent-templates --scope user`, then restart the session (or /reload-plugins)';
 const SESSION_FIX = 'this session loaded an older copy than the one now installed: restart the session (or /reload-plugins)';
 // What refreshes a desktop copy (verified 2026-10-02): the desktop app may keep
 // its own copy, synced from claude.ai, which `claude plugin update` never
@@ -464,7 +537,8 @@ export function collect({
   now = Date.now(),
 } = {}) {
   const cli = cliCopies(claudeDirPath);
-  const marketplaceName = (cli[0]?.key.split('@')[1]) || 'agent-templates';
+  const stray = strayCopies(claudeDirPath);
+  const marketplaceName = ((cli[0] || stray[0])?.key.split('@')[1]) || 'agent-templates';
   const market = marketplaceInfo(claudeDirPath, marketplaceName);
   const desktop = desktopCopies(desktopRoots);
   const self = thisCopy(root, claudeDirPath);
@@ -497,8 +571,21 @@ export function collect({
   // where "current" would be a lie); a checkout or --plugin-dir copy is shown,
   // never judged.
   const match = copies.find((c) => sameDir(c.path, self.path));
+  // A session that runs a project- or local-scope record's copy is not stale in
+  // the "restart" sense (a restart reloads the same frozen copy); the record
+  // itself is what should not exist, and it is reported as such.
+  const strayMatch = !match && stray.find((p) => sameDir(p.path, self.path));
   if (match) match.isThis = true;
-  else {
+  else if (strayMatch) {
+    copies.push({
+      ...self,
+      label: `this session's copy (${strayMatch.scope}-scope record, ${STRAY_RULE})`,
+      isThis: true,
+      judged: false,
+      sessions: null,
+      fix: strayMatch.fix,
+    });
+  } else {
     const judged = self.kind === 'cli-cache' || self.kind === 'desktop-rpm';
     copies.push({
       ...self,
@@ -535,6 +622,7 @@ export function collect({
     checkedAt: new Date(now).toISOString(),
     this: self,
     cli,
+    projectCopies: stray,
     desktop,
     desktopCopy: desktopSummary(desktop),
     marketplace: market,
@@ -542,24 +630,33 @@ export function collect({
     latest: latest ? { version: latest, from: latestFrom } : null,
     marketplaceBehindRemote: marketBehindRemote,
     copies,
-    verdict: verdictFor({ copies, latest, latestFrom, market, marketBehindRemote, remoteInfoResult, copyAhead }),
+    verdict: verdictFor({ copies, latest, latestFrom, market, marketBehindRemote, remoteInfoResult, copyAhead, stray, userInstalled: cli.length > 0 }),
   };
 }
 
-export function verdictFor({ copies, latest, market, marketBehindRemote, remoteInfoResult, copyAhead = false }) {
+export function verdictFor({ copies, latest, market, marketBehindRemote, remoteInfoResult, copyAhead = false, stray = [], userInstalled = true }) {
   const stale = copies.filter((c) => c.stale);
+  // Project- and local-scope records are not judged for staleness: they should
+  // not exist at all. They are reported on their own, never as STALE. With no
+  // user-scope install the clause says so: removing the records alone would
+  // leave nothing installed.
+  const strayClause = stray.length
+    ? `${userInstalled ? '' : 'no user-scope install; '}${stray.length} project- or local-scope record${stray.length === 1 ? '' : 's'} ${STRAY_RULE}`
+    : null;
   if (!latest) {
+    const cannot = market.found
+      ? 'CANNOT JUDGE: the marketplace clone lists no readable plugin version'
+      : 'CANNOT JUDGE: no marketplace clone found, so the latest version is unknown (try --remote)';
     return {
       ok: null,
       stale: [],
-      line: market.found
-        ? 'CANNOT JUDGE: the marketplace clone lists no readable plugin version'
-        : 'CANNOT JUDGE: no marketplace clone found, so the latest version is unknown (try --remote)',
+      ...(strayClause ? { strayCopies: stray.length } : {}),
+      line: strayClause ? `${cannot}; ${strayClause}` : cannot,
     };
   }
   const clause = (c) => {
     if (c.kind === 'desktop-rpm') return DESKTOP_FIX_SHORT;
-    return c.sessionCopy ? 'fix: restart the session (or /reload-plugins)' : 'fix: run claude plugin update';
+    return c.sessionCopy ? 'fix: restart the session (or /reload-plugins)' : 'fix: run claude plugin update --scope user';
   };
   const parts = stale.map((c) => `${c.label} is ${c.version}, latest is ${latest} (${c.sessions ? `${c.sessions} ${c.sessionCopy ? 'runs' : 'run'} the older plugin` : 'older'}) - ${clause(c)}`);
   if (marketBehindRemote) {
@@ -572,9 +669,18 @@ export function verdictFor({ copies, latest, market, marketBehindRemote, remoteI
   if (copyAhead) notes.push('an installed copy is newer than the marketplace clone, so the clone is behind: run claude plugin marketplace update agent-templates');
   const note = notes.length ? notes.join('; ') : null;
   if (!parts.length) {
+    if (strayClause) {
+      return { ok: false, stale: [], strayCopies: stray.length, line: userInstalled ? `all copies current; ${strayClause}` : strayClause, ...(note ? { note } : {}) };
+    }
     return { ok: true, stale: [], line: 'all copies current', ...(note ? { note } : {}) };
   }
-  return { ok: false, stale: stale.map((c) => c.label), line: `STALE: ${parts.join('; ')}`, ...(note ? { note } : {}) };
+  return {
+    ok: false,
+    stale: stale.map((c) => c.label),
+    ...(strayClause ? { strayCopies: stray.length } : {}),
+    line: `STALE: ${parts.join('; ')}${strayClause ? `; ${strayClause}` : ''}`,
+    ...(note ? { note } : {}),
+  };
 }
 
 // The stale CLI/desktop copies that have lagged the marketplace for longer
@@ -612,7 +718,11 @@ export function renderText(r) {
       L.push(`CLI cache:      ${c.version}  ${c.scope} scope  updated ${c.lastUpdated || '?'}  commit ${c.gitCommitSha ? c.gitCommitSha.slice(0, 7) : '?'}  ${c.path || ''}${cp ? flag(cp) : ''}`);
     }
   } else {
-    L.push('CLI cache:      no agent-companion entry in installed_plugins.json');
+    L.push('CLI cache:      no user-scope agent-companion entry in installed_plugins.json');
+  }
+  for (const p of r.projectCopies || []) {
+    L.push(`Project record: ${p.version}  ${p.scope} scope  ${p.projectPath || '?'}  ${STRAY_RULE}`);
+    for (const f of p.settingsFiles) L.push(`                enabled by ${f}`);
   }
   if (r.desktop.length) {
     for (const d of r.desktop) {
@@ -639,6 +749,7 @@ export function renderText(r) {
     L.push(`Fix (${c.kind === 'desktop-rpm' ? 'desktop' : 'CLI'}):    ${c.fix}${lag}`);
   }
   if (r.marketplaceBehindRemote) L.push(`Fix (marketplace): ${MARKETPLACE_FIX}`);
+  for (const p of r.projectCopies || []) L.push(`Fix (project record ${p.projectPath || '?'}): ${p.fix}`);
   return L.join('\n');
 }
 

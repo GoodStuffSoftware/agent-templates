@@ -1,6 +1,6 @@
 ---
 name: ac
-description: Short entry point for the agent-companion plugin — "/ac recommend …", "/ac evaluate …", "/ac routing", "/ac audit …", "/ac brevity …", "/ac rules …", "/ac version", "/ac setup", "/ac scout". Forwards to the matching agent-companion skill and passes the arguments through. Installed at user level (~/.claude/skills/ac) by the plugin's setup skill, because a skill inside a plugin is always namespaced by the plugin's name.
+description: Short entry point for the agent-companion plugin — "/ac recommend …", "/ac evaluate …", "/ac routing", "/ac audit …", "/ac brevity …", "/ac rules …", "/ac version", "/ac setup", "/ac scout", "/ac usage …". Forwards to the matching agent-companion skill and passes the arguments through. Installed at user level (~/.claude/skills/ac) by the plugin's setup skill, because a skill inside a plugin is always namespaced by the plugin's name.
 ---
 
 # ac — agent-companion, short form
@@ -28,6 +28,7 @@ through unchanged.
 | `setup` | `agent-companion:setup` | — |
 | `scout` | `agent-companion:calibration-scout` | — |
 | `benchmark <args>` | `agent-companion:model-benchmark` | `node "$AC/scripts/benchmark.mjs" <args>` |
+| `usage <args>` | `agent-companion:usage-analysis` | `node "$AC/scripts/usage-analysis.mjs" <args>` |
 | *(nothing)* | print this table | — |
 
 Invoke the plugin skill with the Skill tool when it is loaded in this session.

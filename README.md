@@ -83,8 +83,10 @@ claude plugin marketplace add GoodStuffSoftware/agent-templates
 ```
 
 ```bash
-claude plugin install agent-companion@agent-templates
+claude plugin install agent-companion@agent-templates --scope user
 ```
+
+Install at user scope only, one install per machine; never at project scope.
 
 It ships hooks that guard the main thread's tool use and premium-model fan-out,
 an `audit` skill that runs a composable set of checks over any project, and a

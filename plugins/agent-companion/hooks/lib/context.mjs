@@ -77,6 +77,17 @@ export function pluginEntries(installedJson, baseName) {
   return out;
 }
 
+// agent-companion is meant to run from ONE install per machine: the user-scope
+// record. A record with a project or local scope (or any projectPath) is a
+// stray copy: it freezes at the version it got and is never updated with the
+// user-scope one. The version checks read the user-scope records only.
+export function isUserScopeEntry(e) {
+  return !!e && (e.scope === 'user' || (!e.scope && !e.projectPath));
+}
+export function isStrayScopeEntry(e) {
+  return !!e && !isUserScopeEntry(e) && (e.scope === 'project' || e.scope === 'local' || !!e.projectPath);
+}
+
 // The entry that applies to a session in `cwd`: the most specific project
 // (or local) scope entry whose projectPath covers cwd, else the user entry.
 // Same load order self-update.mjs documents (project shadows user).

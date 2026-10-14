@@ -18,7 +18,7 @@ import {
   modelTiers, tierEffortProblems, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
   homeRoot, stateRoot, resolveRoute, isLadderAgentName, routingProfileState,
   readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
-  LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES, scoutSuppressed,
+  LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES, scoutSuppressed, isStrayScopeEntry,
 } from '../hooks/lib/context.mjs';
 import { syncLegacy } from '../hooks/lib/state-sync.mjs';
 import { telemetryCoverage } from './lib/coverage.mjs';
@@ -34,6 +34,7 @@ import { projectAgentDrift, driftCounts } from './lib/agent-drift.mjs';
 import { churnVerdict, churnFreshness } from './lib/session-churn.mjs';
 import { runReleaseWatch } from './lib/release-watch.mjs';
 import { launchCheckup } from './lib/daily-checkup.mjs';
+import { usageSignals } from './lib/usage/signals.mjs';
 import { loadRegister, readState as readRegisterState, openFlags, scanChangelogToState, scanSignalsToState, scanDatesToState } from './lib/decision-register.mjs';
 import { scanPinnedModels, findingKey } from './lib/pinned-model.mjs';
 import { routineModelDrift, sessionRecordRoot } from './lib/routine-model-drift.mjs';
@@ -43,7 +44,7 @@ import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
 import { stateDir as advisorStateDir } from '../hooks/lib/context.mjs';
 import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/ci-status.mjs';
 import { STREAK_FILE, attendedCoverage } from '../hooks/lib/delegation.mjs';
-import { collect as collectCopies, staleBeyondGrace, STALE_GRACE_MS } from './version.mjs';
+import { collect as collectCopies, staleBeyondGrace, STALE_GRACE_MS, strayCopies, STRAY_RULE } from './version.mjs';
 import {
   desktopRoots, newestDesktopBuild, buildMtimeMs, scanMarkers, teamEvidence, versionKey as teammatesKey, decide as decideTeammates,
 } from './lib/teammates-watch.mjs';
@@ -79,6 +80,23 @@ const daysArg = (() => {
   const i = argv.indexOf('--days');
   return i >= 0 ? Number(argv[i + 1]) : 7;
 })();
+
+// --print-option <name>: print one plugin option's effective value (env, then settings, then the
+// default below) and exit, so the scout routine can gate a step on it without a signal run.
+// Only options listed here are answerable; any other name exits 2.
+{
+  const i = argv.indexOf('--print-option');
+  if (i >= 0) {
+    const PRINTABLE = { scout_plugin_update: true };
+    const name = argv[i + 1];
+    if (!name || !Object.hasOwn(PRINTABLE, name)) {
+      process.stderr.write(`detect --print-option: unknown option${name ? ` ${name}` : ''}. Known: ${Object.keys(PRINTABLE).join(', ')}\n`);
+      process.exit(2);
+    }
+    process.stdout.write(`${opt(name, PRINTABLE[name])}\n`);
+    process.exit(0);
+  }
+}
 
 // Recover any durable history left in the legacy plugin data directory FIRST.
 // Fails open on its own (locked / errored -> {skipped}); the scout still runs
@@ -402,6 +420,16 @@ if (!suppressedKinds.has('routine_model_drift')) {
     }
   } catch { /* fail open */ }
 }
+
+// --- 1c5. Daily usage analysis ------------------------------------------
+// Reads what scripts/usage-analysis.mjs left under the state root (latest summary, status, config
+// marker). Zero tokens, writes nothing; emits only on a change, so a quiet day emits nothing.
+// TODO(0.31.19): usage_llm_over_budget, with the opt-in LLM rater.
+try {
+  const u = usageSignals({ root: stateRoot(), nowMs: nowDate().getTime(), baseline });
+  for (const s of u.signals) sig(s.kind, s.detail, s.dispatch, s.severity);
+  Object.assign(next, u.next);
+} catch { /* fail open */ }
 
 // --- 2. Unknown agent types -------------------------------------------
 // Enforcement fails open on these by design; detection must not.
@@ -774,7 +802,10 @@ function marketplaceVersion(marketplace, name) {
 try {
   // claudeDir() honours the test home redirect like every other path in this
   // plugin, so a test never reads the real installed_plugins.json.
-  const entries = pluginEntries(readInstalledPlugins(claudeDir()), PLUGIN_NAME);
+  // Only the user-scope record is an install: the plugin runs from ONE install
+  // per machine. Project- and local-scope records are a separate signal
+  // (plugin_project_copy, 6a) and never count as "behind" or "stale".
+  const entries = pluginEntries(readInstalledPlugins(claudeDir()), PLUGIN_NAME).filter((e) => !isStrayScopeEntry(e));
   const cloud = !!process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
   for (const e of entries) {
     const latest = cloud ? (OWN_MANIFEST && OWN_MANIFEST.version) : marketplaceVersion(e.key.split('@')[1], PLUGIN_NAME);
@@ -783,7 +814,7 @@ try {
       `${e.key} (${e.scope || 'user'} scope) is installed at ${e.version}; the latest available is ${latest}` +
       (cloud
         ? ' — in the cloud this means the claude.ai plugin directory has not been synced since the marketplace was added (Sync button on the marketplace page)'
-        : ' (the marketplace clone) — run claude plugin update, then restart'),
+        : ' (the marketplace clone) — run claude plugin update --scope user, then restart'),
       'plugin-update');
   }
   if (OWN_MANIFEST && OWN_MANIFEST.version) next.pluginVersion = OWN_MANIFEST.version;
@@ -835,6 +866,37 @@ try {
     }
   }
 } catch { /* version.mjs could not read the installs: not a signal */ }
+
+// plugin_project_copy: agent-companion runs from ONE install per machine, the
+// user-scope record. A project- or local-scope record (made when a project's
+// tracked .claude/settings.json enables the plugin; one per repo root and per
+// worktree) freezes at the version it got and is never updated with the user
+// install. ONE signal lists every such record with its project path and the
+// settings file that recreates it, when found. Local only: the cloud has no
+// installed_plugins.json of its own to judge.
+try {
+  if (!process.env.CLAUDE_CODE_REMOTE_SESSION_ID) {
+    const stray = strayCopies(claudeDir(), PLUGIN_NAME);
+    if (stray.length) {
+      // The scout scrubs every absolute path out of a signal (the text leaves the
+      // machine), so each record is named by its project folder and the settings
+      // file by its name inside it; `version.mjs` prints the full paths locally.
+      const leaf = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '(no project path)';
+      const list = stray.map((p) => `${leaf(p.projectPath)} (${p.scope} scope, ${p.version}` +
+        `${p.settingsFiles.length ? `; recreated by ${p.settingsFiles.map((f) => `.claude/${leaf(f)}`).join(' and ')}` : '; no enabling settings file found'})`);
+      sig('plugin_project_copy',
+        `${stray.length} project- or local-scope ${PLUGIN_NAME} record${stray.length === 1 ? '' : 's'} ${STRAY_RULE}: ${list.join('; ')}. ` +
+        'Full paths: run /ac version. ' +
+        (stray.some((p) => !p.userInstalled)
+          ? 'There is NO user-scope install: run claude plugin install agent-companion@agent-templates --scope user first. '
+          : '') +
+        'Fix, per project: remove the agent-companion line from enabledPlugins in the settings file named (the user settings already enable it), ' +
+        'then remove the record from installed_plugins.json (edit the file; not `claude plugin uninstall`, which wipes the plugin options). ' +
+        'Do not update a project-scope copy: it keeps the stray record alive.',
+        'plugin-project-copy');
+    }
+  }
+} catch { /* no readable install record: not a signal */ }
 
 // --- 6b. Stale copy loaded / session outdated -----------------------------
 // The cross-session half of the version check. spawn-guard.mjs stamps its

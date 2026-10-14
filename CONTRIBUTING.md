@@ -83,7 +83,11 @@ Run the same checks by hand at any time with `node scripts/ci-local.mjs` (fast, 
 - If it fails again, the suite is **FAIL**.
 - If it passes, the suite is **FLAKY** and the file is named as "flaky on isolated re-run", with a loud `!!!` notice. FLAKY does not block a plain run or a push of an ordinary branch. Under `--ci-parity`, and so for pushes to `main` and `release/**`, it counts as a failure.
 
-**One run at a time per machine.** ci-local takes a machine-wide lock (`scripts/ci-lock.mjs`, files under the OS temp dir, not the worktree) just before its first suite, so the pre-push hooks of many worktrees queue instead of piling up (on 2026-10-13, 11 to 23 concurrent runs pegged the CPU and made timing tests flake). A second run prints one line naming the holder (pid, worktree, start time) and polls every 5 seconds. A lock whose holder process is gone, or that is older than 45 minutes, is taken over. The lock is released on exit, on error and on Ctrl-C. `CI_LOCAL_MAX_PARALLEL=<n>` allows n concurrent runs (default 1). `CI_LOCAL_LOCK=0` skips the lock for one run. The push scan runs before the lock, so scan-only refs never wait.
+**Full suites go through the shared budget.** ci-local takes a lease from a machine-wide worker budget (`scripts/ci-budget.mjs`, files in a repo-neutral ledger directory outside any worktree; protocol in [Shared CI budget](#shared-ci-budget-lease-protocol) below) just before its first suite, so the pre-push hooks of many worktrees share the machine instead of piling up (on 2026-10-13, 11 to 23 concurrent runs pegged the CPU and made timing tests flake). The total of test workers across every run, plus load from outside our runs, stays under one budget (default half the logical cores, `CI_LOCAL_BUDGET`). A run asks for the concurrency below, gets what is free (at least one worker) and passes it to node as `--test-concurrency`; on a busy box it starts with fewer workers or waits in a fair queue, and it never fails. It resizes the lease between phases and releases it on exit, on error and on Ctrl-C or SIGTERM; a killed run is reclaimed at once (its pid is gone); the 90 s figure is for a run whose pid still exists but whose heartbeat went silent. `node scripts/ci-budget.mjs status` shows who holds the budget (add `--json` for scripts, `--no-sample` to skip the 300 ms CPU sample): the budget, what is held and free, outside load, every lease (kind, repo, worktree, pid, workers, age, heartbeat) and the queue. `CI_LOCAL_LOCK=0` skips the budget for one run. The push scan runs before the lease, so scan-only refs never wait.
+
+**Heavy lane.** Test files whose tests spawn git or sh dozens of times are limited by process-spawn cost, not CPU. They are named in one list, `HEAVY_TEST_FILES` in `scripts/ci-local.mjs` (`memory-vault*`, `git-brief*`, `ci-local-parity`, `push-scan`, `publication-sweep`, `pre-push-hook-tree`; a file with 15 or more git or sh spawn and exec call sites, helper calls included, belongs on it). Each suite runs them in a second pass of its own under heavy leases: at most `CI_LOCAL_HEAVY_MAX` (default 2) heavy workers machine-wide, each charged `CI_LOCAL_HEAVY_COST` (default 3) units. The pass waits for a slot, holding nothing while it waits, and after `CI_LOCAL_HEAVY_MAX_WAIT_MS` (default 10 minutes) it runs with one heavy worker anyway and prints one line saying so, so a hook never hangs on a hung holder. A run of only single scripts (`--suite leak-check`) takes a 1-unit `targeted` express lease that never queues; ci-local has no per-file mode.
+
+**Moving from the old lock.** Before 0.31.18 ci-local took a one-run mutex, `scripts/ci-lock.mjs` (removed). A worktree that has not been rebased yet still takes it and never asks the budget, so a new run counts each live holder of that mutex as one full run at the default concurrency (half the cores, at most 8) until it ends. `node scripts/ci-budget.mjs status` lists them. Rebase onto a branch with the budget to stop using it.
 
 **Test concurrency.** ci-local runs at most N test files at once. By default N is half the machine's available CPUs, clamped to 1–8, because node's own default (every core but one) overloads a many-core machine enough to make timing-sensitive tests fail. Set `CI_LOCAL_TEST_CONCURRENCY=<n>` to override it.
 
@@ -102,6 +106,60 @@ gh run watch <run-id> --exit-status
 Treat red as a failed step, not noise — read the log, fix it, and push a fix commit. Never push again to a branch CI is currently red on without first fixing what made it red. If CI is red and you didn't expect that, check **main's own latest run first** — if main is already red, fix the baseline before spending time blaming your diff for it.
 
 See **[Release gate](#release-gate)** below: cutting a versioned release is gated on CI the same way, cross-referenced here rather than restated.
+
+### Shared CI budget (lease protocol)
+
+`scripts/ci-budget.mjs` replaces the one-run mutex with a shared worker budget: several runs may go at once, and the total of test workers across every run on the machine, plus load from outside our runs, stays under one budget. A new run starts with fewer workers when the box is busy, or waits in a fair queue; it never fails. `scripts/ci-local.mjs` takes its leases from it (see "Full suites go through the shared budget" above). This section is the one spec of the format. The code links here, and another repo can take leases from the same budget by following it.
+
+**Knobs.**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CI_LOCAL_BUDGET` | `max(2, floor(cores * 0.5))` (16 on 32 logical cores) | total units |
+| `CI_LOCAL_HEAVY_COST` | `3` (clamped to the budget) | units one heavy worker costs |
+| `CI_LOCAL_HEAVY_MAX` | `2` | heavy workers machine-wide |
+| `CI_LOCAL_EXPRESS` | `2` | extra units a targeted run may use past the budget |
+| `CI_LOCAL_MAX_PARALLEL` | unlimited | caps concurrent *full* runs only (the budget governs otherwise; before 0.31.18 it was the old lock's slot count, default 1) |
+| `CI_LOCAL_LOCK=0` | off | bypass: a no-op lease, no files written |
+| `CI_LOCAL_BUDGET_POLL_MS` / `CI_LOCAL_BUDGET_STALE_MS` | `1500` / `90000` | queue poll interval, heartbeat stale age |
+| `CI_BUDGET_DIR` | see below | ledger directory |
+| `CI_LOCAL_HEAVY_MAX_WAIT_MS` | `600000` (10 min) | longest a heavy pass waits for a slot before it runs with one heavy worker |
+| `CI_LOCAL_QUEUE_MAX_WAIT_MS` | `1800000` (30 min) | longest a full run waits in the queue; then it starts with 1 worker, over budget, and logs one line |
+| `CI_LOCAL_EXPRESS_MAX_WAIT_MS` | `300000` (5 min) | longest a targeted run waits at the express headroom; then it starts over budget and logs one line |
+| `CI_BUDGET_REPO` | basename of the git top-level directory above the worktree (walk up for `.git`, no process spawned), else the worktree basename | `repo` label written into leases |
+
+**Ledger directory.** Machine-wide and named after no repo: `CI_BUDGET_DIR` if set, else `%LOCALAPPDATA%\ci-budget` on Windows (fallback `os.tmpdir()/ci-budget`), else `$XDG_RUNTIME_DIR/ci-budget` (fallback `os.tmpdir()/ci-budget`).
+
+**Files** (ids are 12 hex chars):
+
+- `lease-<id>.json`: one per holder, `{ id, pid, startedAt, heartbeatAt, repo, worktree, kind, units, heavy, heavyCost, label }`. Times are epoch ms. `kind` is `full` or `targeted`. `repo` is a label, `worktree` a path, both for display only.
+- `lease-<id>.hb`: a heartbeat sidecar holding one epoch-ms number.
+- `ticket-<id>.json`: one per queued full run, `{ id, pid, createdAt, heartbeatAt, repo, worktree, kind: "full", desired }`.
+- `admit.lock`: a short mutex, `{ pid, at, token }`, held only while a process reads the ledger and writes a lease.
+
+**Units.** A lease holds `units` plain workers and `heavy` heavy workers (test files that spawn many git or shell processes, so spawn cost, not CPU, is what limits them). It is charged `units + heavy * heavyCost`. `held` is the sum of live charges. A lease never holds fewer than one worker, except while a heavy pass waits: a waiter holds nothing, so that several waiters on a small budget cannot starve each other (each keeping one unit would leave the others too little room for a heavy worker, and none would ever be granted).
+
+**Atomic rules.** Create a file with an exclusive open (`wx`). Update by writing a temp file in the same directory and renaming it over the target (retry a few times on `EPERM`/`EBUSY`, which Windows raises while a reader has the target open). Only the owner updates its lease or ticket. A lease is created and resized while holding `admit.lock`; the heartbeat put-back below is the one exception. The `.hb` sidecar is the one file rewritten in place (a single number; a reader ignores a torn read). Remove a stale file by renaming it aside first, so that of several reclaimers only one wins. `admit.lock` is created with `wx`, removed after use, and broken when its pid is dead or it is over 10 s old.
+
+**Stale rules.** A lease or ticket is stale when its pid is not alive, or its heartbeat is older than 90 s. The heartbeat is the newest of `heartbeatAt`, the sidecar value, and the start time. Whoever notices removes it. A reclaiming read also deletes crash debris, `*.tmp-*` and `*.stale-*` files over about 10 minutes old. There is no age cap: a heartbeat is the proof of life, and it also covers Windows pid reuse. The owner refreshes it every 20 s from a worker thread, not a main-thread timer, because ci-local blocks its main thread in `spawnSync` for minutes. A long suspend (a laptop sleep) can make a live lease look stale before its next tick. The heartbeat thread then puts the lease back from the record the main thread last sent it, on its next tick (within 20 s) and without taking `admit.lock`, so a few units can briefly be over-admitted. A reader normalizes a lease it does not fully understand (a missing `kind` counts as `full`, a bad `heavyCost` as the local default) instead of failing.
+
+**Admission, full run.** The run writes a ticket, then loops: drop stale entries; only the head ticket, ordered by `(createdAt, pid)`, may be admitted. The head samples outside load, takes `admit.lock`, re-reads the ledger and computes `free = budget - held - external`. It admits only if `free >= 1` and fewer than `CI_LOCAL_MAX_PARALLEL` full leases are live: `grant = min(desired, free)` plain units, ticket removed, lease created. A head that finds no live lease may always start with one unit, so outside load alone never starves it. Once the head is admitted the next ticket is evaluated against what is left. The wait is bounded: after `CI_LOCAL_QUEUE_MAX_WAIT_MS` (default 30 minutes), head or not, the run drops its ticket, takes a 1-unit lease whatever `free` is (so a hung but alive holder cannot stall it forever) and prints one line saying it ran over budget after the wait. A waiter polls the directory every 1.5 s with fs calls only (the head also reads `os.cpus()` for the outside-load sample) and prints one `waiting` line at the start and one every 60 s.
+
+**Outside load.** Two `os.cpus()` reads about 300 ms apart give `busy = sum over cores of (1 - idleDelta / totalDelta)` cores. `external = max(0, round(busy - held))`: the busy cores our held units do not explain. The sampler is injectable, nothing is spawned.
+
+**Admission, targeted run (express).** A single-file run takes a 1-unit `targeted` lease with no ticket, at once, while `held + 1 <= budget + CI_LOCAL_EXPRESS`; past that it polls without queueing. It never waits behind a full suite. Its wait is bounded too: after `CI_LOCAL_EXPRESS_MAX_WAIT_MS` (default 5 minutes) it takes its 1-unit lease anyway, over budget, and prints one line saying so.
+
+**Heavy lane.** `lease.resize({ units, heavy })` changes a lease between phases. A shrink applies at once. A grow goes through admission against `free` (outside load counted), and each heavy worker also needs `heavyMax - heavyHeld >= 1` and `free >= heavyCost`. A run alone on the box (nothing else held) always gets one heavy worker whatever the outside load, as a full run always gets one unit. Without `{ wait: true }` it takes what it can get; with it, it polls until every requested lane has a worker, holding nothing meanwhile, and after `CI_LOCAL_HEAVY_MAX_WAIT_MS` it takes one heavy worker regardless of `free` and the cap and logs one line.
+
+**Fail open.** Any ledger error (a directory that exists but is read-only, `EPERM`, `EACCES`, a disk error) or a throwing cpu sampler makes the run go on without the budget: `acquire` returns a no-op lease, a failure during `resize` turns the lease into one, and either way one line says so. The budget never crashes ci-local or blocks a push.
+
+**Known limits (accepted).** A stale `admit.lock` can be broken twice by two simultaneous contenders, so two runs may be inside the admission section for a few ms and over-admit a few units once; it takes a crash inside that ms-wide section plus two contenders. The `.hb` sidecar is rewritten in place, so a reader can see it empty (about one read in a million); the reader then falls back to the lease's own `heartbeatAt`, and the heartbeat thread puts a falsely reclaimed lease back on its next tick.
+
+**Lifecycle.** The module releases its leases on process `exit`, `SIGINT` and `SIGTERM` (the signal handler exits 130 or 143 itself when nothing else listens). A killed process is reclaimed by the stale rules. Release wins over the heartbeat: `release()` first tells the heartbeat thread to stop, through a shared flag, and waits out a tick that is already under way (a few ms), and only then removes the lease files, so a released lease is never put back.
+
+**Old lock holders.** While worktrees on 0.31.17 or earlier still take the pre-budget mutex, a reader counts each live holder of its slot files (`slot-<n>.lock` under `os.tmpdir()/agent-templates-ci-local`, or `$CI_LOCAL_LOCK_DIR`; pid alive and under 45 minutes old) as one full run at the default concurrency, `min(8, max(1, floor(cores / 2)))` units. It only reads that directory.
+
+**Status.** `node scripts/ci-budget.mjs status [--json] [--no-sample]` prints budget, held, free, the outside-load estimate, each lease (kind, repo, worktree, pid, workers, heavy, age, heartbeat age) of every repo, and the queue. It reads only and removes nothing.
 
 ---
 
@@ -156,7 +214,7 @@ Either way: the change isn't "done" until it's scrubbed (leak-check green, local
 
 The same principle governs cutting a versioned release (e.g. the `agent-companion` plugin): landing is gated on CI, not on local runs alone or the [pre-push gate](#local-ci-gate-pre-push) alone. GitHub CI must be green on the release branch before landing, and on main after the push; watch with `gh run watch <id> --exit-status`. Red CI is a failed release step.
 
-**After landing (the agent-companion plugin): check every installed copy.** Landing on `main` does not update any installed copy. Run `claude plugin marketplace update agent-templates`, then `claude plugin update agent-companion@agent-templates`, then check all the copies with the plugin's own script:
+**After landing (the agent-companion plugin): check every installed copy.** Landing on `main` does not update any installed copy. Run `claude plugin marketplace update agent-templates`, then `claude plugin update agent-companion@agent-templates --scope user`, then check all the copies with the plugin's own script:
 
 ```bash
 AC="$(ls -d "$HOME"/.claude/plugins/marketplaces/*/plugins/agent-companion | head -1)"   # the clone `marketplace update` just refreshed

@@ -52,6 +52,13 @@ const REPO_REF_RE = new RegExp([
 //   * a rate like "spawns/24h" / "runs/7d" (right side a number + short unit).
 const BARE_PAIR_RE = /(?<![\w.@/\\:%<>-])([A-Za-z0-9][\w-]*)\/([\w-]+(?:\.[\w-]+)*)(?![\w/\\-]|\.\w|:\d)/g;
 const RATE_RE = /^\d+[a-z]{0,3}$/i;
+// A rung label `<model>/<effort>` (the routing table and the usage analysis write it that way: `sonnet/high`,
+// `opus/xhigh`). The pair is the plugin's own vocabulary, not an owner/repo: kept readable. Exactly the known
+// model families (optionally with a version suffix like `-5-5`) and the known efforts, lower case, nothing else:
+// every other word/word pair is still treated as a possible private owner/repo.
+const RUNG_MODEL_RE = /^(?:haiku|sonnet|opus|fable)(?:-\d[\w.-]*)?$/;
+const RUNG_EFFORT_RE = /^(?:low|medium|high|xhigh|max)$/;
+const isRung = (owner, repo) => RUNG_MODEL_RE.test(owner) && RUNG_EFFORT_RE.test(repo);
 
 // A bare GitHub token anywhere in the text (classic ghp_/gho_/ghu_/ghs_/ghr_
 // and fine-grained github_pat_), wherever it stands. Runs right AFTER the
@@ -121,7 +128,7 @@ export function makeScrubber({ users = [], names = [], joined = [], publicUrls =
     s = s.replace(REPO_REF_RE, repoRef);
     s = s.replace(GH_TOKEN_RE, '<token>');
     for (const [re, mark] of PATH_RES) s = s.replace(re, mark);
-    s = s.replace(BARE_PAIR_RE, (m, owner, repo) => (RATE_RE.test(repo) || isPublic('github.com', `${owner}/${repo}`) ? m : '<repo>'));
+    s = s.replace(BARE_PAIR_RE, (m, owner, repo) => (RATE_RE.test(repo) || isRung(owner, repo) || isPublic('github.com', `${owner}/${repo}`) ? m : '<repo>'));
     for (const re of userRes) s = s.replace(re, '<user>');
     for (const re of nameRes) s = s.replace(re, '<name>');
     return s;

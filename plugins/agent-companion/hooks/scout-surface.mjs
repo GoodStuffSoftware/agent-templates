@@ -25,7 +25,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-  readStdin, opt, dataDirs, stateDir, stateFile, passthrough, sessionIsSubagent, scoutSuppressed,
+  readStdin, opt, dataDirs, stateDir, stateFile, passthrough, sessionIsSubagent, scoutSuppressed, stateRootPath,
 } from './lib/context.mjs';
 import { syncLegacy } from './lib/state-sync.mjs';
 import { normalizeGitUrl } from '../scripts/lib/publication-sweep.mjs';
@@ -33,6 +33,7 @@ import { githubOwnerRepoFromUrl, repoCacheKey } from '../scripts/lib/ci-status.m
 import { readPending, markSeen } from '../scripts/lib/release-watch.mjs';
 import { pendingSurface, markSurfaced, launchCheckup } from '../scripts/lib/daily-checkup.mjs';
 import { pendingLine, markFlagsSurfaced } from '../scripts/lib/decision-register.mjs';
+import { pendingUsageSummary, markUsageSurfaced, unattendedReason } from '../scripts/lib/usage/surface.mjs';
 
 const MAX_AGE_DAYS = 7;
 const RELEASE_KIND = 'cli_release_available';
@@ -144,7 +145,7 @@ function buildCiRedLine() {
 // The scout (scripts/lib/release-watch.mjs) did the reading; this only looks at
 // its small state file, so there is no network and no child process here. One
 // line, shown once per release: the versions are marked seen as it is built.
-function buildReleaseLine() {
+function buildReleaseLine(unattended) {
   if (!opt('release_watch', true)) return null;
   if (scoutSuppressed().has(RELEASE_KIND)) return null;
   const stateFilePath = stateFile('release-watch.json');
@@ -152,6 +153,7 @@ function buildReleaseLine() {
   try { running = JSON.parse(readFileSync(stateFile('baseline.json'), 'utf8')).version; } catch { /* scout has not run */ }
   const pending = readPending(stateFilePath, running);
   if (!pending) return null;
+  if (unattended()) return null; // unattended: not shown and not marked seen
   markSeen(stateFilePath, pending.versions);
   const oldest = pending.versions[pending.versions.length - 1];
   const range = pending.versions.length > 1 ? `${oldest} to ${pending.versions[0]}` : pending.versions[0];
@@ -166,12 +168,30 @@ function buildReleaseLine() {
 // network here. One line, shown once per day: the day's share of the weekly
 // limit against the target, the week so far, and any change switched on that day.
 // The day is marked shown as the line is built (the caller prints it last).
-function buildCheckupLine() {
+// Unattended sessions (the 04:10 scout, a routine) are never shown it and never mark it shown.
+// The same guard covers the release line (Piece 3) and the decision-register flag line (Piece 5).
+// `unattended()` is asked only once something is pending, because its last check reads the
+// desktop app's session records.
+function buildCheckupLine(unattended) {
   if (!opt('daily_checkup', true)) return null;
   const pending = pendingSurface();
   if (!pending) return null;
+  if (unattended()) return null;
   markSurfaced(pending.rec.day);
   return pending.line;
+}
+
+// --- Piece 6: the daily usage analysis summary (3 lines) --------------------
+// Written by scripts/usage-analysis.mjs and the checkup pipeline into
+// state/usage-analysis-latest.json; this only reads it. Shown once, and again only when the SET of
+// regression ids changes. Unattended sessions never see it and never mark it. The caller marks the
+// key shown, last, once the output is certain.
+function buildUsagePiece(unattended) {
+  if (!opt('usage_analysis', true)) return null;
+  const pending = pendingUsageSummary({ root: stateRootPath() });
+  if (!pending) return null;
+  if (unattended()) return null;
+  return pending;
 }
 
 // --- Piece 5: a standing decision is due for review -----------------------
@@ -180,11 +200,13 @@ function buildCheckupLine() {
 // for the first unsurfaced flag younger than 72 hours; the others show on later
 // starts. Subagent sessions never reach here (the passthrough below). The caller
 // marks the shown flag surfaced, last, once the output is certain.
-function buildRegisterPiece() {
+function buildRegisterPiece(unattended) {
   if (!opt('decision_register', true)) return null;
   if (scoutSuppressed().has(REGISTER_KIND)) return null;
   const pending = pendingLine();
-  return pending && pending.line ? pending : null;
+  if (!pending || !pending.line) return null;
+  if (unattended()) return null; // unattended: not shown and not marked surfaced
+  return pending;
 }
 
 try {
@@ -207,28 +229,39 @@ try {
   let scoutBlock = null;
   try { scoutBlock = buildScoutBlock(); } catch { scoutBlock = null; }
 
+  let unattendedWhy;
+  const unattended = () => {
+    if (unattendedWhy === undefined) unattendedWhy = unattendedReason({ payload: p, root: stateRootPath() });
+    return unattendedWhy !== null;
+  };
+
   // Last, so a hook that dies before printing has not marked anything seen.
   let releaseLine = null;
-  try { releaseLine = buildReleaseLine(); } catch { releaseLine = null; }
+  try { releaseLine = buildReleaseLine(unattended); } catch { releaseLine = null; }
 
   let checkupLine = null;
-  try { checkupLine = buildCheckupLine(); } catch { checkupLine = null; }
+  try { checkupLine = buildCheckupLine(unattended); } catch { checkupLine = null; }
+
+  let usagePiece = null;
+  try { usagePiece = buildUsagePiece(unattended); } catch { usagePiece = null; }
+  const usageLine = usagePiece ? usagePiece.lines.join('\n') : null;
 
   // Main sessions also start the background checkup when the scout has not (it is
   // idempotent: one attempt per 3 hours, one run at a time). Returns at once.
   try { launchCheckup(); } catch { /* advisory */ }
 
   let registerPiece = null;
-  try { registerPiece = buildRegisterPiece(); } catch { registerPiece = null; }
+  try { registerPiece = buildRegisterPiece(unattended); } catch { registerPiece = null; }
   const registerLine = registerPiece ? registerPiece.line : null;
 
-  if (!ciLine && !scoutBlock && !releaseLine && !checkupLine && !registerLine) passthrough();
+  if (!ciLine && !scoutBlock && !releaseLine && !checkupLine && !registerLine && !usageLine) passthrough();
 
-  const contextParts = [ciLine, scoutBlock?.context, releaseLine, checkupLine, registerLine].filter(Boolean);
-  const summary = scoutBlock?.summary || ciLine || releaseLine || checkupLine || registerLine;
+  const contextParts = [ciLine, scoutBlock?.context, releaseLine, checkupLine, usageLine, registerLine].filter(Boolean);
+  const summary = scoutBlock?.summary || ciLine || releaseLine || checkupLine || usagePiece?.lines[0] || registerLine;
 
   // Last, so a hook that dies before printing has not marked anything surfaced.
   if (registerPiece) { try { markFlagsSurfaced(registerPiece.keys); } catch { /* advisory */ } }
+  if (usagePiece) { try { markUsageSurfaced(stateRootPath(), usagePiece); } catch { /* advisory */ } }
 
   process.stdout.write(JSON.stringify({
     systemMessage: summary,

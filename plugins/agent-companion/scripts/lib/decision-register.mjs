@@ -9,7 +9,7 @@
 //   3. state file: read, atomic write, rev sync, seen-set, flags
 //   4. changelog triggers: scanChangelog        (kind 'changelog', complete here)
 //   4b. signal triggers: scanSignals            (kind 'signal', the scout's own signals, complete here)
-//   5. EVALUATORS: dispatch by trigger kind     (changelog, metric catalog, exercise, date, signal)
+//   5. EVALUATORS: dispatch by trigger kind     (changelog, metric catalog, exercise, date, scenario)
 //   6. evaluateTriggers: folds evaluator verdicts into streaks, flags, seen-set
 //   7. detail file writer
 //   8. what the SessionStart hook calls: pendingFlags, pendingLine, markFlagsSurfaced
@@ -29,10 +29,12 @@
 //
 // Fail open everywhere: nothing here throws to a caller.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, unlinkSync, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, unlinkSync, openSync, readSync, closeSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
-import { configDir, stateFile as stateFilePath, telemetryDir, rolloutTable, rolloutStartMs, compareVersions, writeTextAtomic } from '../../hooks/lib/context.mjs';
+import { configDir, stateFile as stateFilePath, telemetryDir, stateRootPath, rolloutTable, rolloutStartMs, compareVersions, writeTextAtomic } from '../../hooks/lib/context.mjs';
+import { METRIC_CATALOG, LEAD_LEVEL_METRICS, metricDayStat, buildLeadIndex } from './usage/metrics/index.mjs';
+import { createRequire } from 'node:module';
 import { readHistory, checkupPaths, nowMs, SURFACE_MAX_AGE_MS, DAY_MS, DAY_OFFSET_MS, dayStartMs, dayKeyOf } from './daily-checkup.mjs';
 
 // --- 1. constants and paths ------------------------------------------------------
@@ -50,27 +52,14 @@ export const DETAIL_ROWS = 5;
 export const SPAWNS_MAX_BYTES = 32 * 1024 * 1024;
 export { SURFACE_MAX_AGE_MS, nowMs };
 
-export const TRIGGER_KINDS = ['changelog', 'metric', 'exercise', 'signal', 'date'];
+export const TRIGGER_KINDS = ['changelog', 'metric', 'exercise', 'signal', 'date', 'scenario'];
+export const SCENARIO_ON = ['regression', 'improvement', 'any'];
+export const SCENARIO_COMPARISONS = ['prior-day', 'trailing-7', 'same-weekday-4'];
+export const SCENARIO_LOOKBACK_DAYS = 60; // result days an evaluation reads (the runner keeps 180)
 export const OPS = ['>', '<', '>=', '<='];
-// The metric catalog: name -> the source it reads. Section 1.3 of the build spec.
-export const METRIC_CATALOG = {
-  unitsPerSpawn: 'history',
-  mainUnitsPerDay: 'history',
-  shareOver150kPct: 'history',
-  compactionsPer100Spawns: 'history',
-  ceilingNudgesPerDay: 'history',
-  leadEffortShare: 'spawns',
-  reviewsPerWriter: 'spawns',
-  haikuSpawns: 'spawns',
-  // Lead-effort metrics (decision leads-at-high). Zero token: local telemetry only.
-  leadRebriefsPer100Spawns: 'spawns',
-  reviewFixShareByLeadEffort: 'spawns',
-  leadRoutingDeniesPer100Spawns: 'spawns', // also reads denials.jsonl
-  leadUnderProvisionedShare: 'spawns',
-  mainUnitsPerLeadSpawn: 'history',
-};
-// The lead-effort metrics that need params.levels (the lead efforts counted).
-const LEAD_LEVEL_METRICS = new Set(['leadRebriefsPer100Spawns', 'reviewFixShareByLeadEffort', 'leadRoutingDeniesPer100Spawns', 'leadUnderProvisionedShare']);
+// The metric catalog (name -> the source it reads) is a projection of the usage metric registry,
+// scripts/lib/usage/metrics/. The 13 ids are frozen; see FROZEN_REGISTER_IDS there.
+export { METRIC_CATALOG };
 // Evaluator-defined predicates on an exercise `where` (everything else is a raw row field).
 const WHERE_PREDICATES = {
   declaredWriterModel: 'string',
@@ -111,7 +100,31 @@ export function compilePattern(pattern, flags) {
   return new RegExp(pattern, f);
 }
 
-function validateTrigger(t, where, decision, rollout, errors, premiseIds) {
+// The scenario ids (and each one's comparisons) of the usage-analysis config, loaded once and only
+// when a scenario trigger is validated. `given` (a list or Set of ids, tests and callers that already
+// hold the config) skips the load. Unreadable config -> null: the id check is skipped, shape checks stay.
+function usageIdsProvider(given) {
+  let memo; let done = false;
+  return {
+    get() {
+      if (done) return memo;
+      done = true; memo = null;
+      try {
+        if (given) { memo = { scenarios: new Map([...given].map((id) => [id, null])) }; return memo; }
+        // Lazy: the usage config module is loaded here, on first use, never at import (a hook that imports
+        // the register must not pay for it). require(esm) is synchronous on the supported Node LTS.
+        const req = createRequire(import.meta.url);
+        const cfg = req('./usage/config.mjs').loadConfig({ root: stateRootPath(), writeSignal: false, metrics: req('./usage/metrics/index.mjs').configMetricRegistry() });
+        const m = new Map();
+        for (const s of cfg.resolved.scenarios.values()) m.set(s.id, (s.def && Array.isArray(s.def.compare)) ? s.def.compare : []);
+        if (m.size) memo = { scenarios: m };
+      } catch { memo = null; }
+      return memo;
+    },
+  };
+}
+
+function validateTrigger(t, where, decision, rollout, errors, premiseIds, usage) {
   const err = (m) => errors.push(`${where}: ${m}`);
   if (!isObj(t)) { err('trigger must be an object'); return; }
   if (!isStr(t.id) || !KEBAB.test(t.id)) err(`trigger id must be kebab-case (got ${JSON.stringify(t.id)})`);
@@ -200,6 +213,21 @@ function validateTrigger(t, where, decision, rollout, errors, premiseIds) {
       needsRollout('an exercise trigger');
       break;
     }
+    case 'scenario': {
+      const known = usage.get();
+      const sc = isStr(t.scenario) ? t.scenario : null;
+      if (!sc) err('scenario is required (a scenario id of the usage-analysis config)');
+      else if (known && !known.scenarios.has(sc)) err(`scenario "${sc}" is not in the usage-analysis config (known: ${[...known.scenarios.keys()].slice(0, 8).join(', ')}${known.scenarios.size > 8 ? ', ...' : ''})`);
+      if (t.on !== undefined && !SCENARIO_ON.includes(t.on)) err(`on must be one of ${SCENARIO_ON.join(', ')}`);
+      const cmpSpec = t.comparison === undefined ? 'trailing-7' : t.comparison;
+      const win = typeof cmpSpec === 'string' ? /^window:(.+)$/.exec(cmpSpec) : null;
+      if (typeof cmpSpec !== 'string' || !(SCENARIO_COMPARISONS.includes(cmpSpec) || win)) err(`comparison must be one of ${SCENARIO_COMPARISONS.join(', ')} or window:<id>`);
+      else if (known && sc && Array.isArray(known.scenarios.get(sc))) {
+        const list = known.scenarios.get(sc);
+        if (win ? !list.some((c) => isObj(c) && c.window === win[1]) : !list.includes(cmpSpec)) err(`scenario "${sc}" does not compare ${cmpSpec} (its comparisons: ${list.map((c) => (typeof c === 'string' ? c : `window:${c && c.window}`)).join(', ') || 'none'}), so this trigger could never fire`);
+      }
+      break;
+    }
     case 'date': {
       const s = typeof t.due === 'string' ? t.due : '';
       const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00Z`) : null;
@@ -213,8 +241,9 @@ function validateTrigger(t, where, decision, rollout, errors, premiseIds) {
 
 // { ok, errors[] }. Never throws. `rollout` is the id -> instant table (default: the live
 // rolloutTable(); tests inject one).
-export function validateRegister(obj, { rollout } = {}) {
+export function validateRegister(obj, { rollout, scenarioIds } = {}) {
   const errors = [];
+  const usage = usageIdsProvider(scenarioIds);
   try {
     let table = rollout;
     if (!isObj(table)) { try { table = rolloutTable(); } catch { table = {}; } }
@@ -259,7 +288,7 @@ export function validateRegister(obj, { rollout } = {}) {
             if (tids.has(t.id)) errors.push(`${where}: duplicate trigger id within the decision`);
             tids.add(t.id);
           }
-          validateTrigger(t, where, d, table, errors, premiseIds);
+          validateTrigger(t, where, d, table, errors, premiseIds, usage);
         });
       }
     });
@@ -331,7 +360,7 @@ export function readState(file = statePath()) {
     if (!isObj(j) || j.v !== STATE_VERSION) return base;
     for (const k of ['triggers', 'baselines', 'changelogHits', 'flags']) if (isObj(j[k])) base[k] = j[k];
     for (const k of ['seen', 'surfaced']) if (Array.isArray(j[k])) base[k] = j[k].filter((x) => typeof x === 'string');
-    for (const k of ['lastEvalDay', 'lastEvalAt', 'registerRev']) if (typeof j[k] === 'string') base[k] = j[k];
+    for (const k of ['lastEvalDay', 'lastEvalAt', 'registerRev', 'scenarioRev']) if (typeof j[k] === 'string') base[k] = j[k];
   } catch { /* absent or corrupt: fresh state */ }
   return base;
 }
@@ -566,7 +595,6 @@ const nonEmpty = (x) => (typeof x === 'string' && x.trim() !== '' ? x : null);
 const dayStartOfKey = (day) => Date.parse(`${day}T00:00:00Z`) + DAY_OFFSET_MS; // a checkup day starts at 08:00Z
 const PRE_LOOKBACK_DAYS = 8; // closed days looked at before the switch (spec 1.4)
 const PRE_MIN_DAYS = 3; // a baseline needs at least this many qualifying pre days
-const PER_DAY_TOTALS = new Set(['mainUnitsPerDay', 'ceilingNudgesPerDay']); // a limit-hit day is a gap for these
 
 function cmp(v, op, thr) {
   switch (op) {
@@ -589,184 +617,6 @@ function rowsByDay(spawnRows) {
     by.get(k).push(r);
   }
   return by;
-}
-
-// --- lead-effort metric helpers (decision leads-at-high) ----------------------------------
-const REBRIEF_WINDOW_MS = 6 * 3600 * 1000;
-const DENY_GUARDS = new Set(['fit', 'warrant', 'premium-cap', 'inherit']); // routing-guard denials
-const isLeadRow = (r) => r && r.caller_is_subagent === false && nonEmpty(r.caller_effort) !== null;
-const tsOf = (r) => (r && typeof r.at === 'string' ? Date.parse(r.at) : NaN);
-
-// Base name of a spawn: the name with trailing -N / -fix / -review / -retry / -rerun removed, so
-// "scout-copy-fix" and "scout-copy-fix-2" both give "scout-copy".
-function baseName(n) {
-  let s = String(n || '').toLowerCase();
-  for (let i = 0; i < 4; i++) {
-    const m = s.replace(/-(?:\d+|fix|review|retry|rerun)$/, '');
-    if (m === s) break;
-    s = m;
-  }
-  return s;
-}
-
-// Index over ALL spawn rows (a re-brief can cross a day boundary): lead rows per session sorted
-// by time, the set of rows that are re-briefs, and tool_use_id -> row for the review join. Built
-// once per evaluation, only by the metrics that need it.
-//   Re-brief: the same heuristic as the 2026-10-10 lead-effort evidence (section 1, "re-brief
-//   heuristic"): a lead spawn row whose session spawned from the main thread, within the 6 h
-//   before it, the same description hash (desc_sha) or the same base name. That heuristic is
-//   unvalidated (E): it also catches planned fix-then-review chains, so read the rate as a figure
-//   to compare across lead efforts, not as a count of mistakes. A row with the `redone` flag
-//   set (the evidence's redo flag; no current telemetry writes it) counts too.
-function buildLeadIndex(all) {
-  const list0 = Array.isArray(all) ? all : [];
-  const rows = list0.filter((r) => isLeadRow(r) && Number.isFinite(tsOf(r)));
-  const bySession = new Map();
-  const byToolUse = new Map();
-  for (const r of list0) if (r && nonEmpty(r.tool_use_id)) byToolUse.set(r.tool_use_id, r);
-  for (const r of rows) {
-    const k = nonEmpty(r.session_id);
-    if (k === null) continue;
-    if (!bySession.has(k)) bySession.set(k, []);
-    bySession.get(k).push(r);
-  }
-  const rebrief = new Set();
-  for (const list of bySession.values()) {
-    list.sort((a, b) => tsOf(a) - tsOf(b));
-    const lastSha = new Map(); const lastBase = new Map();
-    for (const r of list) {
-      const t = tsOf(r);
-      const sha = nonEmpty(r.desc_sha);
-      const base = baseName(r.name_effective || r.name) || null;
-      const near = (m, key) => key !== null && m.has(key) && t - m.get(key) <= REBRIEF_WINDOW_MS;
-      if (near(lastSha, sha) || near(lastBase, base) || r.redone === true) rebrief.add(r);
-      if (sha !== null) lastSha.set(sha, t);
-      if (base !== null) lastBase.set(base, t);
-    }
-  }
-  return { bySession, rebrief, byToolUse };
-}
-
-// The lead effort a routing denial belongs to: the caller_effort of the session's first lead spawn
-// row at or after the denial, else its last one before (denials carry no effort themselves).
-function denialEffort(idx, d) {
-  const list = idx.bySession.get(nonEmpty(d && d.session_id));
-  const t = tsOf(d);
-  if (!list || !list.length || !Number.isFinite(t)) return null;
-  const next = list.find((r) => tsOf(r) >= t);
-  return (next || list[list.length - 1]).caller_effort;
-}
-
-// A reviewer row's verdict, from the optional `review_verdict` field: 'fix' (FIX or BLOCK),
-// 'pass', or null (absent or unreadable).
-const verdictOf = (r) => {
-  const v = typeof r.review_verdict === 'string' ? r.review_verdict.toUpperCase() : '';
-  if (/\b(FIX|BLOCK)/.test(v)) return 'fix';
-  if (/\bPASS/.test(v)) return 'pass';
-  return null;
-};
-
-// One checkup day of one metric: { num, den, scale, sample } (value = num/den*scale; sample =
-// the day's n for minSample) or { gap:true }. A zero-unit day (usage lockout) is a gap, and so
-// is a limit-hit day (history `limit.hits > 0`) for the per-day total metrics; ratio metrics
-// keep a limit-hit day when it meets the sample.
-function metricDayStat(t, rec, rows, x = {}) {
-  const p = isObj(t.params) ? t.params : {};
-  if (rec) {
-    const total = rec.units ? finite(rec.units.total) : null;
-    if (total === 0) return { gap: true };
-    if (PER_DAY_TOTALS.has(t.metric) && rec.limit && finite(rec.limit.hits) > 0) return { gap: true };
-  }
-  switch (t.metric) {
-    case 'unitsPerSpawn': {
-      if (!rec || !rec.spawns) return { gap: true };
-      const cls = nonEmpty(p.type) ? (rec.spawns.byType || {})[p.type] : (rec.spawns.byRung || {})[p.rung];
-      const units = cls ? finite(cls.units) : null;
-      const n = cls ? finite(cls.n) : null;
-      if (units === null || n === null || n <= 0) return { gap: true };
-      return { num: units, den: n, scale: 1, sample: n };
-    }
-    case 'mainUnitsPerDay': {
-      const main = rec && rec.units ? finite(rec.units.main) : null;
-      const total = rec && rec.units ? finite(rec.units.total) : null;
-      if (main === null || total === null) return { gap: true };
-      return { num: main, den: 1, scale: 1, sample: total };
-    }
-    case 'shareOver150kPct': {
-      const over = rec && rec.subagent ? finite(rec.subagent.unitsOver150k) : null;
-      const sub = rec && rec.units ? finite(rec.units.subagent) : null;
-      if (over === null || sub === null || sub <= 0) return { gap: true };
-      return { num: over, den: sub, scale: 100, sample: sub };
-    }
-    case 'compactionsPer100Spawns': {
-      const comp = rec && rec.subagent ? finite(rec.subagent.compactions) : null;
-      const sp = rec && rec.spawns ? finite(rec.spawns.total) : null;
-      if (comp === null || sp === null || sp <= 0) return { gap: true };
-      return { num: comp, den: sp, scale: 100, sample: sp };
-    }
-    case 'ceilingNudgesPerDay': {
-      const nud = rec ? finite(rec.ceilingNudges) : null;
-      const sp = rec && rec.spawns ? finite(rec.spawns.total) : null;
-      if (nud === null || sp === null) return { gap: true };
-      return { num: nud, den: 1, scale: 1, sample: sp };
-    }
-    case 'leadEffortShare': {
-      const lead = (rows || []).filter((r) => r.caller_is_subagent === false && nonEmpty(r.caller_effort));
-      const levels = Array.isArray(p.levels) ? p.levels : [];
-      const hit = lead.filter((r) => levels.includes(r.caller_effort)).length;
-      return { num: hit, den: lead.length, scale: 1, sample: lead.length };
-    }
-    case 'reviewsPerWriter': {
-      const reviews = (rows || []).filter((r) => typeOf(r) === 'code-review' && nonEmpty(r.caller_tool_use_id)).length;
-      const writers = (rows || []).filter((r) => typeOf(r) === p.writerType).length;
-      return { num: reviews, den: writers, scale: 1, sample: writers };
-    }
-    case 'haikuSpawns': {
-      const all = rows || [];
-      return { num: all.filter((r) => r.model === 'haiku').length, den: 1, scale: 1, sample: all.length };
-    }
-    case 'mainUnitsPerLeadSpawn': {
-      const main = rec && rec.units ? finite(rec.units.main) : null;
-      const sp = rec && rec.spawns ? finite(rec.spawns.total) : null;
-      if (main === null || sp === null || sp <= 0) return { gap: true };
-      return { num: main, den: sp, scale: 1, sample: sp };
-    }
-    case 'leadRebriefsPer100Spawns': {
-      const levels = Array.isArray(p.levels) ? p.levels : [];
-      const lead = (rows || []).filter((r) => isLeadRow(r) && levels.includes(r.caller_effort));
-      const idx = x.idx && x.idx();
-      return { num: idx ? lead.filter((r) => idx.rebrief.has(r)).length : 0, den: lead.length, scale: 100, sample: lead.length };
-    }
-    case 'reviewFixShareByLeadEffort': {
-      const levels = Array.isArray(p.levels) ? p.levels : [];
-      const idx = x.idx && x.idx();
-      let fix = 0; let all = 0;
-      for (const r of rows || []) {
-        if (typeOf(r) !== 'code-review') continue;
-        const v = verdictOf(r);
-        if (v === null) continue; // no verdict in telemetry: not a sample
-        // The writer that spawned the reviewer; a reviewer a lead spawned itself counts for that lead.
-        const w = idx && nonEmpty(r.caller_tool_use_id) ? idx.byToolUse.get(r.caller_tool_use_id) : null;
-        const lr = w ? (isLeadRow(w) ? w : null) : (isLeadRow(r) ? r : null);
-        if (!lr || !levels.includes(lr.caller_effort)) continue;
-        all += 1; if (v === 'fix') fix += 1;
-      }
-      return { num: fix, den: all, scale: 100, sample: all };
-    }
-    case 'leadRoutingDeniesPer100Spawns': {
-      const levels = Array.isArray(p.levels) ? p.levels : [];
-      const lead = (rows || []).filter((r) => isLeadRow(r) && levels.includes(r.caller_effort));
-      const idx = x.idx && x.idx();
-      const n = (x.denials || []).filter((d) => d && d.outcome === 'deny' && DENY_GUARDS.has(d.guard) && idx && levels.includes(denialEffort(idx, d))).length;
-      return { num: n, den: lead.length, scale: 100, sample: lead.length };
-    }
-    case 'leadUnderProvisionedShare': {
-      const levels = Array.isArray(p.levels) ? p.levels : [];
-      const scored = (rows || []).filter((r) => isLeadRow(r) && levels.includes(r.caller_effort) && nonEmpty(r.declared_type) !== null && ['fit', 'over', 'under'].includes(r.fit));
-      return { num: scored.filter((r) => r.fit === 'under').length, den: scored.length, scale: 100, sample: scored.length };
-    }
-    default: return { gap: true };
-  }
 }
 
 const qualifying = (ds, min) => !ds.gap && ds.den > 0 && ds.sample >= min;
@@ -964,7 +814,88 @@ export function evalDate(ctx) {
   } catch { return null; }
 }
 
-export const EVALUATORS = { changelog: evalChangelog, metric: evalMetric, exercise: evalExercise, date: evalDate };
+// Light readers for the runner's files (same paths and schema as scripts/lib/usage/runner.mjs, which
+// is not imported here so the register stays cheap to load; usage-register-lazy.test.mjs pins it).
+const USAGE_RESULT_SCHEMA = 'agent-companion/usage-analysis-result';
+const usageResultsDir = (root) => join(root, 'state', 'usage-analysis');
+function readUsageJson(p) { try { return JSON.parse(readFileSync(p, 'utf8').replace(/^﻿/, '')); } catch { return null; } }
+const readStatus = (root) => readUsageJson(join(root, 'state', 'usage-analysis-status.json'));
+function readResult(root, day) {
+  const j = readUsageJson(join(usageResultsDir(root), `${day}.json`));
+  return isObj(j) && j.schema === USAGE_RESULT_SCHEMA ? j : null;
+}
+
+// Scenario triggers (batch 8): the usage analysis runner's results, read through the days contract.
+// The runner (scripts/usage-analysis.mjs) writes state/usage-analysis/<day>.json; this reads those
+// files and recomputes nothing. One entry per checkup day, ascending, from the union of the checkup
+// history's days and the result files' days (last SCENARIO_LOOKBACK_DAYS):
+//   qualifies  the day has a result, is not deferred in the runner's status file, and the scenario has
+//              a usable verdict for the comparison (regression, improvement, ok or unconfirmed)
+//   hit        the verdict is the one `on` asks for (default regression; 'any' = regression or improvement)
+// A missing result file, a deferred day, a skipped scenario or an unusable comparison (gap,
+// insufficient, low-sample, ...) does not qualify: a gap, never a fire and never a streak reset.
+// `ready` is false until one day qualified, and the trigger record says so (scenarioStatus).
+const SCENARIO_USABLE = new Set(['regression', 'improvement', 'ok', 'unconfirmed']);
+
+export function scenarioComparisonMatches(compare, spec) {
+  const name = typeof compare === 'string' ? compare : '';
+  const w = /^window:(.+)$/.exec(spec);
+  return w ? name.startsWith(`${w[1]} vs `) : name === spec;
+}
+
+function scenarioDayVerdict(result, t) {
+  const spec = t.comparison || 'trailing-7';
+  const want = t.on || 'regression';
+  const sc = result && Array.isArray(result.scenarios) ? result.scenarios.find((e) => isObj(e) && e.id === t.scenario) : null;
+  if (!sc) return { qualifies: false, why: 'scenario not in the result' };
+  if (sc.skipped) return { qualifies: false, why: `scenario skipped: ${sc.skipped}` };
+  const cmps = [...(Array.isArray(sc.comparisons) ? sc.comparisons : []), ...(Array.isArray(sc.groups) ? sc.groups.flatMap((g) => (isObj(g) && Array.isArray(g.comparisons) ? g.comparisons : [])) : [])]
+    .filter((c) => isObj(c) && scenarioComparisonMatches(c.compare, spec));
+  const usable = cmps.filter((c) => SCENARIO_USABLE.has(c.status));
+  if (!usable.length) return { qualifies: false, why: cmps.length ? `comparison ${spec}: ${cmps[0].status}` : `no ${spec} comparison in the result` };
+  const hits = usable.filter((c) => (want === 'any' ? c.status === 'regression' || c.status === 'improvement' : c.status === want));
+  const pick = hits[0] || usable[0];
+  const cur = isObj(pick.current) ? pick.current : {};
+  return { qualifies: true, hit: hits.length > 0, value: finite(cur.value) ?? undefined, n: finite(cur.sample) ?? undefined };
+}
+
+export function evalScenario(ctx) {
+  try {
+    const t = ctx && ctx.trigger;
+    if (!isObj(t) || t.kind !== 'scenario' || !isStr(t.scenario)) return null;
+    const root = stateRootPath();
+    const resultsDir = usageResultsDir(root);
+    const af = Number.isFinite(ctx.activeFromMs) ? ctx.activeFromMs : null;
+    const decidedMs = af === null && ctx.decision && typeof ctx.decision.decided === 'string' ? Date.parse(`${ctx.decision.decided}T00:00:00Z`) : NaN;
+    const keys = new Set();
+    for (const r of Array.isArray(ctx.history) ? ctx.history : []) if (r && typeof r.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.day)) keys.add(r.day);
+    try { for (const n of readdirSync(resultsDir)) if (/^\d{4}-\d{2}-\d{2}\.json$/.test(n)) keys.add(n.slice(0, 10)); } catch { /* no results yet */ }
+    const status = readStatus(root);
+    const dayState = status && isObj(status.days) ? status.days : {};
+    const days = [];
+    let why = null;
+    for (const k of [...keys].sort().slice(-SCENARIO_LOOKBACK_DAYS)) {
+      if (af !== null && dayStartOfKey(k) < af) continue;
+      if (Number.isFinite(decidedMs) && dayStartOfKey(k) < decidedMs) continue;
+      const deferred = isObj(dayState[k]) && dayState[k].state === 'deferred';
+      const res = deferred ? null : readResult(root, k);
+      const v = res ? scenarioDayVerdict(res, t) : { qualifies: false, why: deferred ? 'day deferred by the runner' : 'no result for the day' };
+      if (!v.qualifies) { days.push({ day: k, qualifies: false, hit: false }); why = v.why; continue; }
+      days.push({ day: k, qualifies: true, hit: v.hit, ...(v.value !== undefined ? { value: v.value } : {}), ...(v.n !== undefined ? { n: v.n } : {}) });
+    }
+    const q = days.filter((d) => d.qualifies);
+    const rec = ctx.state && ctx.state.triggers ? ctx.state.triggers[ctx.key] : null;
+    if (rec) {
+      if (q.length) delete rec.scenarioStatus;
+      else rec.scenarioStatus = `insufficient: ${why || 'no result days yet'}`.slice(0, 160);
+    }
+    const out = { days, ready: q.length > 0 };
+    if (q.length) { const last = q[q.length - 1]; if (last.value !== undefined) out.value = last.value; if (last.n !== undefined) out.n = last.n; }
+    return out;
+  } catch { return null; }
+}
+
+export const EVALUATORS = { changelog: evalChangelog, metric: evalMetric, exercise: evalExercise, date: evalDate, scenario: evalScenario };
 
 // --- 6. folding verdicts into streaks, flags and the seen-set -----------------------------
 
@@ -988,6 +919,10 @@ export function foldDays(rec, days) {
     }
   }
   return reset;
+}
+
+function scenarioSummary(t, rec) {
+  return `scenario ${t.scenario} ${t.on || 'regression'} vs ${t.comparison || 'trailing-7'} over ${rec.streak} days${Number.isFinite(rec.value) ? ` (value ${fmt(rec.value)})` : ''}`;
 }
 
 function metricSummary(t, rec) {
@@ -1021,8 +956,10 @@ export function evaluateTriggers({ register, history = [], spawnRows = [], denia
             const key = `${tkey}@${rec.episodeStart}`;
             const made = addFlag(state, key, {
               decision: d.id, title: d.title, trigger: t.id, premise: t.premise, kind: t.kind, severity: 'metric',
-              summary: metricSummary(t, rec),
-              detail: { metric: t.metric, op: t.op, threshold: t.threshold, value: rec.value, pre: rec.pre, n: rec.n, days: rec.streak, episodeStart: rec.episodeStart },
+              summary: t.kind === 'scenario' ? scenarioSummary(t, rec) : metricSummary(t, rec),
+              detail: t.kind === 'scenario'
+                ? { scenario: t.scenario, on: t.on || 'regression', comparison: t.comparison || 'trailing-7', value: rec.value, n: rec.n, days: rec.streak, episodeStart: rec.episodeStart }
+                : { metric: t.metric, op: t.op, threshold: t.threshold, value: rec.value, pre: rec.pre, n: rec.n, days: rec.streak, episodeStart: rec.episodeStart },
             }, nowT);
             if (made) { rec.flagged = isoDay(nowT); rec.flagKey = key; newFlags.push(key); }
           }
@@ -1054,6 +991,7 @@ const TRIGGER_DESC = (t) => {
   if (t.kind === 'metric') return `metric ${t.metric} ${t.op} ${t.threshold} (minSample ${t.minSample}, minDays ${t.minDays || 2})`;
   if (t.kind === 'signal') return `scout signal ${(t.signalKinds || []).join(' or ')}${t.pattern ? `, pattern /${t.pattern}/${t.flags || ''}` : ''}`;
   if (t.kind === 'date') return `date, due ${t.due}`;
+  if (t.kind === 'scenario') return `usage scenario ${t.scenario}, ${t.on || 'regression'} against ${t.comparison || 'trailing-7'} (minDays ${t.minDays || 2})`;
   return `exercise, after ${t.afterDays} days, where ${JSON.stringify(t.where)}, expect ${JSON.stringify(t.expect)}`;
 };
 
@@ -1086,6 +1024,7 @@ export function detailMarkdown(state, register, nowT = nowMs()) {
       const x = f.detail || {};
       if (f.kind === 'changelog') out.push(`- Matched changelog item (${x.version}, ${x.count} matching item(s)): ${x.item}`);
       if (f.kind === 'signal') out.push(`- Scout signal ${x.signal}: ${x.item}`);
+      if (f.kind === 'scenario') out.push(`- Scenario ${x.scenario}: ${x.on} against ${x.comparison}, value ${fmt(x.value)}, sample n=${x.n === null || x.n === undefined ? 'n/a' : fmt(x.n)}, ${x.days} qualifying day(s) since ${x.episodeStart}`);
       if (f.kind === 'metric') out.push(`- Value ${fmt(x.value)}, pre pool ${fmt(x.pre)}, sample n=${x.n === null || x.n === undefined ? 'n/a' : fmt(x.n)}, ${x.days} qualifying day(s) since ${x.episodeStart}`);
       if (Array.isArray(x.rows) && x.rows.length) {
         out.push('- Offending spawn rows (up to 5):');
@@ -1098,6 +1037,8 @@ export function detailMarkdown(state, register, nowT = nowMs()) {
   }
   const thin = Object.entries(state.triggers || {}).filter(([k, r]) => r && r.baselineStatus === 'insufficient' && order.has(k.split('/')[0])).map(([k]) => k);
   if (thin.length) out.push('Baselines not usable yet (fewer than 3 qualifying pre-switch days, so these triggers stay silent): ' + thin.join(', '), '');
+  const waiting = Object.entries(state.triggers || {}).filter(([k, r]) => r && r.scenarioStatus && order.has(k.split('/')[0])).map(([k, r]) => `${k} (${r.scenarioStatus})`);
+  if (waiting.length) out.push('Scenario triggers without usable results yet (they stay silent until a result day qualifies): ' + waiting.join('; '), '');
   return out.join('\n');
 }
 
@@ -1279,6 +1220,19 @@ export function scanDatesToState({ nowT = nowMs(), registerFile, stateFile, deta
   } catch { return { ok: false }; }
 }
 
+// A short hash of the usage-analysis result files (names, sizes, mtimes), only when the register
+// holds an active scenario trigger, else null. A result the runner computed or revised after the last
+// evaluation changes it, so the "nothing new" skip cannot hide a fresh result day.
+function scenarioResultsRev(register) {
+  try {
+    if (!activeDecisions(register).some((d) => Array.isArray(d.triggers) && d.triggers.some((t) => t && t.kind === 'scenario'))) return null;
+    const dir = usageResultsDir(stateRootPath());
+    const parts = [];
+    for (const n of readdirSync(dir).sort()) { if (!n.endsWith('.json')) continue; const st = statSync(join(dir, n)); parts.push(`${n}:${st.size}:${Math.floor(st.mtimeMs)}`); }
+    return createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 12);
+  } catch { return null; }
+}
+
 // Loads the register, evaluates, writes the state and the detail file. Never throws.
 // Skips when nothing is new: same latest history day, same register, no fresh changelog
 // (`parsed`) and no `force`. Returns a small summary.
@@ -1295,7 +1249,8 @@ export function runRegister({
     const history = readHistory(historyFile || checkupPaths().history);
     const lastDay = history.length ? history[history.length - 1].day : null;
     const regRev = createHash('sha1').update(stableJson(register)).digest('hex').slice(0, 12);
-    if (!force && !parsed && lastDay === state.lastEvalDay && regRev === state.registerRev) return { ok: true, skipped: 'nothing new' };
+    const scenRev = scenarioResultsRev(register);
+    if (!force && !parsed && lastDay === state.lastEvalDay && regRev === state.registerRev && scenRev === (state.scenarioRev ?? null)) return { ok: true, skipped: 'nothing new' };
     const fresh = parsed ? scanChangelog(parsed, register, state, { nowT }) : [];
     const spawnRows = readSpawnRows(spawnsFile || spawnsPath());
     const denialRows = readSpawnRows(denialsPath(), { foldVerdicts: false }); // denial rows carry no tool_use_id: the verdict file is read once, for the spawn rows
@@ -1303,6 +1258,7 @@ export function runRegister({
     state.lastEvalDay = lastDay;
     state.lastEvalAt = new Date(nowT).toISOString();
     state.registerRev = regRev;
+    state.scenarioRev = scenRev;
     writeStateMerged(state, snap, sFile);
     const detail = writeDetail(state, register, detailFile || detailPath(), nowT);
     return { ok: true, evaluated: true, newFlags: [...fresh, ...newFlags], open: openFlags(state, register, nowT).length, detail };

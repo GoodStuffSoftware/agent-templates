@@ -52,12 +52,18 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateFile, telemetryDir, stateRootPath, opt, rolloutTable } from '../../hooks/lib/context.mjs';
+import { stateFile, telemetryDir, stateRootPath, opt, rolloutTable, canonicalTaskType } from '../../hooks/lib/context.mjs';
 import { briefDeclarations, declarationValue, BRIEF_ROLES } from '../../hooks/lib/brief-directives.mjs';
 import {
   discoverTranscripts, transcriptsRoot, usageOf, contextTokensOf, isCompactBoundary, flattenContent,
 } from './transcripts.mjs';
 import { planPriceSpecFor, planBaselineModel } from './pricing.mjs';
+import {
+  newFacts, addRequest, addPrompt, pruneFacts, operatorPromptText, toolKindsOf, buildFactsFile, SETTLE_MS,
+} from './usage/facts.mjs';
+import {
+  classToolsOf, assistantText, statusOf, respawnKey, newSpawn, addSpawnRequest, noteCompaction, isOpen, spawnRecord,
+} from './usage/spawns.mjs';
 
 export const HOUR_MS = 3600000;
 export const DAY_MS = 24 * HOUR_MS;
@@ -72,6 +78,7 @@ export const DEFAULT_PACE_PCT = 14;
 export const HOLD_RECENT_MS = 2 * 60 * 1000;
 export const LOCK_STALE_MS = 30 * 60 * 1000;
 export const RETRY_MS = 3 * HOUR_MS;
+export const ANALYSIS_BUDGET_SECONDS = 20; // the usage-analysis stage of a background checkup stops starting new days after this; the rest resumes next run
 export const SURFACE_MAX_AGE_MS = 72 * HOUR_MS;
 export const SCHEMA = 1;
 
@@ -146,6 +153,19 @@ function unitSpecFor(model) {
   } catch { spec = null; }
   _unitSpec.set(key, spec);
   return spec;
+}
+
+// The plan weight and price vector for one model, with where the weight comes from:
+// 'model-tiers' (M: the config's own entry) or 'study-constant' (E: Haiku, Fable or an unplaced model).
+export function weightInfoFor(model) {
+  const s = unitSpecFor(model);
+  if (!s) return { family: family(model), mult: 0, source: 'unpriced', label: 'E', inUsd: 0, outRatio: 0, r: 0, w5: 0, w1: 0 };
+  let own = null;
+  try { own = planPriceSpecFor(String(model || '')); } catch { own = null; }
+  return {
+    family: family(model), mult: s.mult, source: own ? 'model-tiers' : 'study-constant', label: own ? 'M' : 'E',
+    inUsd: s.inUsd, outRatio: s.outRatio, r: s.r, w5: s.w5, w1: s.w1,
+  };
 }
 
 // usage in transcripts.mjs's shape (usageOf). A cache write that carries a
@@ -241,12 +261,22 @@ function readMetaType(path) {
   try { return JSON.parse(readFileSync(path.replace(/\.jsonl$/i, '.meta.json'), 'utf8')).agentType || ''; } catch { return ''; }
 }
 
+function readMetaFull(path) {
+  try { return JSON.parse(readFileSync(path.replace(/\.jsonl$/i, '.meta.json'), 'utf8')) || {}; } catch { return {}; }
+}
+
 function classOfPrompt(text, rung) {
   const decls = briefDeclarations(text);
   const tm = declarationValue(decls, 'TYPE', '([a-z][a-z0-9-]{0,39})\\b');
   const rm = declarationValue(decls, 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`);
   const type = tm ? tm[1].toLowerCase() : 'none';
   return { t: type, r: rm ? rm[1].toLowerCase() : 'none', g: rung };
+}
+
+// The brief's TYPE token when it is a known task-type name (or alias, resolved), else null. Only this token is kept, never brief text.
+function knownTaskType(t) {
+  if (!t || t === 'none') return null;
+  try { const c = canonicalTaskType(t); return c ? c.name : null; } catch { return null; }
 }
 
 // --- One file, from its cursor ---------------------------------------------------
@@ -291,13 +321,54 @@ function eachLine(path, start, size, onLine) {
   }
 }
 
+// The tool_use ids in one parent-transcript tool_result line whose result is a background LAUNCH ACK
+// (the harness's "Async agent launched" line, or the structured toolUseResult equivalent). Only the
+// ack shape counts: a foreground reply that merely quotes those words is a completion.
+const ACK_WORDS = /async_launched|Async agent launched/i;
+const ACK_TEXT = /^\s*Async agent launched/i;
+export function launchAckIds(line) {
+  const out = new Set();
+  if (!ACK_WORDS.test(line)) return out; // the common case: no parse
+  let j;
+  try { j = JSON.parse(line); } catch { for (const mm of line.matchAll(/"tool_use_id":"([^"]+)"/g)) out.add(mm[1]); return out; } // unreadable: stay conservative, treat as an ack
+  const tr = j && j.toolUseResult;
+  const structured = !!tr && typeof tr === 'object' && (tr.isAsync === true || tr.status === 'async_launched');
+  const blocks = (j && j.message && Array.isArray(j.message.content) ? j.message.content : []).filter((b) => b && b.type === 'tool_result' && typeof b.tool_use_id === 'string');
+  for (const b of blocks) {
+    if (structured && blocks.length === 1) out.add(b.tool_use_id);
+    else if (ACK_TEXT.test(flattenContent(b.content))) out.add(b.tool_use_id);
+  }
+  return out;
+}
+
+// A spawn is complete by signal when the parent transcript holds its tool_result AND no human turn
+// continued the worker after that result (a continued worker is running again).
+export const completedOf = (facts, a) => !!(a.tu && facts.done && facts.done[a.tu] > (a.cont || 0));
+
 function scanFile(f, fileState, ctx) {
-  const { state, seen, cutoffMs } = ctx;
+  const { state, seen, cutoffMs, facts } = ctx;
   const isSub = f.kind === 'subagent';
   const pending = new Map(); // request id -> { off, ts, model, usage }
   let trailStart = -1; // offset of the first line of the trailing run of assistant lines
   let cls = fileState.c || null;
   let rung = null;
+  // The spawn accumulator of this file (subagent files only, when the fact sink is on).
+  const spawnKey = `${f.sessionId || 'unknown'}:${f.agentId || f.path}`;
+  const spawnAcc = () => {
+    if (!facts || !isSub || facts.landed[spawnKey]) return { status: null }; // a scratch object nobody reads
+    let a = facts.spawns[spawnKey];
+    if (!a) {
+      const meta = readMetaFull(f.path);
+      a = facts.spawns[spawnKey] = newSpawn({
+        key: spawnKey, sid: f.sessionId || 'unknown', aid: f.agentId || null, proj: f.project || null,
+        tu: typeof meta.toolUseId === 'string' ? meta.toolUseId : null,
+        rung: rungOf(meta.agentType),
+        rk: respawnKey({ description: meta.description, name: meta.name, brief: '' }),
+        partial: (fileState.o || 0) > 0, // created after the file's start was already read: the start is unknown
+      });
+    }
+    return a;
+  };
 
   const end = eachLine(f.path, fileState.o || 0, f.size, (off, buf) => {
     const s = buf.toString('utf8');
@@ -331,7 +402,26 @@ function scanFile(f, fileState, ctx) {
       if (!id) return;
       const u = usageOf(m.usage);
       const cur = pending.get(id);
-      if (!cur) { pending.set(id, { off, ts, model: m.model, usage: u }); return; }
+      const tools = facts ? toolKindsOf(m.content) : null;
+      const cats = facts && isSub ? classToolsOf(m.content) : null;
+      if (facts) {
+        // Agent/Task calls are remembered so the matching tool_result in the parent transcript can close the spawn.
+        if (tools) for (const [k, v] of tools) if (v === 'ag' && ts) facts.agentIds[k] = ts;
+        if (isSub) {
+          // The worker's own last message: a final end_turn with no pending tool call means it is finished.
+          const pendingTool = Array.isArray(m.content) && m.content.some((b) => b && b.type === 'tool_use');
+          spawnAcc().done = m.stop_reason === 'end_turn' && !pendingTool;
+        }
+      }
+      if (facts && isSub) {
+        // The final message's STATUS word: the latest assistant record that carries text decides.
+        const txt = assistantText(m.content);
+        if (txt.trim() && ts >= cutoffMs) spawnAcc().status = statusOf(txt);
+      }
+      if (!cur) { pending.set(id, { off, ts, model: m.model, usage: u, tools, cats, cwd: j.cwd || null }); return; }
+      if (tools) { if (cur.tools) for (const [k, v] of tools) cur.tools.set(k, v); else cur.tools = tools; }
+      if (cats) { if (cur.cats) for (const [k, v] of cats) cur.cats.set(k, v); else cur.cats = cats; }
+      if (!cur.cwd && j.cwd) cur.cwd = j.cwd;
       cur.ts = Math.min(cur.ts, ts);
       for (const k of Object.keys(u)) cur.usage[k] = Math.max(cur.usage[k], u[k]);
       return;
@@ -347,6 +437,46 @@ function scanFile(f, fileState, ctx) {
       if (seen.has(key)) return;
       seen.add(key, ts);
       dayAcc(state, dayKeyOf(dayStartMs(ts))).compactions += 1;
+      if (facts) { const a = spawnAcc(); if (a.key) noteCompaction(a, ts); }
+      return;
+    }
+
+    if (facts && s.includes('"tool_result"') && s.includes('"type":"user"')) {
+      // A finished Agent/Task call: its tool_result in the parent transcript (a background launch ack is not one).
+      const ts0 = Date.parse((TS_RE.exec(s) || [])[1]);
+      const acked = launchAckIds(s);
+      for (const mm of s.matchAll(/"tool_use_id":"([^"]+)"/g)) if (facts.agentIds[mm[1]] && !acked.has(mm[1])) facts.done[mm[1]] = ts0 || 1;
+    }
+
+    if (facts && !isSub && s.includes('"type":"user"') && !s.includes('"tool_result"')) {
+      let j;
+      try { j = JSON.parse(s); } catch { return; }
+      const text = operatorPromptText(j);
+      const ts = Date.parse(j.timestamp);
+      if (text && ts && ts >= cutoffMs) {
+        const key = `p:${j.uuid || `${f.path}@${off}`}`;
+        if (!seen.has(key)) {
+          seen.add(key, ts);
+          addPrompt(facts, { tsMs: ts, sid: f.sessionId || 'unknown', proj: f.project || null, cwd: j.cwd || null, text });
+        }
+      }
+      return;
+    }
+
+    if (facts && isSub && cls && s.includes('"type":"user"') && !s.includes('"tool_result"')) {
+      // A later human-origin message to a worker that already has its brief: a continued-worker turn.
+      let j;
+      try { j = JSON.parse(s); } catch { return; }
+      if (j.type === 'user' && !j.isMeta) {
+        const t = flattenContent(j.message && j.message.content).replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+        const ts = Date.parse(j.timestamp);
+        if (t && ts && ts >= cutoffMs) {
+          const a = spawnAcc();
+          // The worker is running again: it is no longer closed by its earlier end_turn, nor by a parent
+          // tool_result older than this turn (see completedOf).
+          if (a.key) { a.extra += 1; a.done = false; a.cont = Math.max(a.cont || 0, ts); }
+        }
+      }
       return;
     }
 
@@ -359,6 +489,14 @@ function scanFile(f, fileState, ctx) {
       rung = rung || rungOf(readMetaType(f.path));
       cls = classOfPrompt(text, rung);
       const ts = Date.parse(j.timestamp);
+      if (facts) {
+        const a = spawnAcc();
+        if (a.key) {
+          if (ts) { a.start = ts; a.partial = false; }
+          const meta = readMetaFull(f.path);
+          a.rk = respawnKey({ description: meta.description, name: meta.name, brief: text });
+        }
+      }
       if (ts && ts >= cutoffMs) {
         const key = `u:${j.uuid || `${f.path}@${off}`}`;
         if (!seen.has(key)) {
@@ -381,13 +519,21 @@ function scanFile(f, fileState, ctx) {
   }
 
   if (isSub && !cls) cls = { t: 'none', r: 'none', g: rung || rungOf(readMetaType(f.path)) };
+  if (facts && isSub && facts.spawns[spawnKey]) { facts.spawns[spawnKey].type = knownTaskType(cls.t); facts.spawns[spawnKey].role = cls.r; }
 
-  for (const [id, r] of pending) {
+  const ordered = [...pending.entries()];
+  if (facts && isSub) ordered.sort((a, b) => a[1].ts - b[1].ts);
+  for (const [id, r] of ordered) {
     if (seen.has(`r:${id}`)) continue;
     seen.add(`r:${id}`, r.ts);
     const units = unitsOf(r.usage, r.model);
     if (!(units > 0)) continue;
     const h = Math.floor(r.ts / HOUR_MS);
+    if (facts) addRequest(facts, { tsMs: r.ts, sid: f.sessionId || 'unknown', proj: f.project || null, cwd: r.cwd, model: r.model, sub: isSub, usage: r.usage, tools: r.tools });
+    if (facts && isSub) {
+      const a = spawnAcc();
+      if (a.key) addSpawnRequest(a, { ts: r.ts, model: r.model, usage: r.usage, ctx: contextTokensOf(r.usage), cats: r.cats });
+    }
     const b = (state.hours[h] ||= [0, 0, 0]);
     if (r.ts > state.dataThroughMs) state.dataThroughMs = r.ts;
     if (!isSub) { b[0] += units; continue; }
@@ -409,7 +555,15 @@ export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), hold
   const p = checkupPaths();
   const st = state || loadState(nowT);
   const sn = seen || (FRESH_STATES.has(st) ? new SeenStore(p.seen) : new SeenStore(p.seen).load());
-  const ctx = { state: st, seen: sn, cutoffMs: st.scanFromMs, holdMs };
+  // Facts accumulate beside the hourly buckets. A state written before the sink
+  // existed already scanned its bytes without it, so its facts start at the next
+  // whole day (the rebuild path covers older days while transcripts still exist).
+  if (!st.facts) st.facts = newFacts(FRESH_STATES.has(st) ? st.scanFromMs : dayStartMs(nowT) + DAY_MS);
+  st.facts.spawns ||= {}; // a facts window written by 2a carries no spawn store
+  st.facts.landed ||= {};
+  st.facts.agentIds ||= {}; // Agent/Task tool_use ids seen -> time
+  st.facts.done ||= {}; // ... whose tool_result came back -> time
+  const ctx = { state: st, seen: sn, cutoffMs: st.scanFromMs, holdMs, facts: st.facts };
   const found = discoverTranscripts(root, { sinceMs: Math.max(st.scanFromMs, nowT - KEEP_DAYS * DAY_MS), main: true, subagents: true, workflows: true, meta: false });
   let read = 0;
   let bytes = 0;
@@ -427,6 +581,10 @@ export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), hold
   // Forget what can no longer matter.
   const keepFrom = nowT - KEEP_DAYS * DAY_MS;
   for (const h of Object.keys(st.hours)) if (Number(h) * HOUR_MS < keepFrom) delete st.hours[h];
+  pruneFacts(st.facts, keepFrom);
+  for (const [k, a] of Object.entries(st.facts.spawns)) if ((a.start || a.t0 || 0) < keepFrom) delete st.facts.spawns[k];
+  for (const m of [st.facts.agentIds, st.facts.done]) for (const [k, t] of Object.entries(m)) if (t < keepFrom) delete m[k];
+  for (const k of Object.keys(st.facts.landed)) if (!st.facts.landed[k] || Date.parse(`${st.facts.landed[k]}T08:00:00Z`) < keepFrom) delete st.facts.landed[k];
   for (const d of Object.keys(st.days)) if (Date.parse(`${d}T08:00:00Z`) < keepFrom) delete st.days[d];
   for (const [rel, v] of Object.entries(st.files)) {
     try {
@@ -563,6 +721,81 @@ export function checkupOptions() {
   };
 }
 
+export function factsDir() { return stateFile('usage-facts'); }
+
+// The fit verdict the spawn guard logged for each Agent call (spawns.jsonl, by tool_use_id). Fail-open: {} when unreadable.
+export function fitIndex() { return spawnRowIndex().fit; }
+
+// The same read, with the declared task type each spawn row logged (declared_type_resolved, else declared_type): { fit, type } by tool_use_id.
+export function spawnRowIndex() {
+  const out = { fit: {}, type: {} };
+  try {
+    const file = join(telemetryDir(), 'spawns.jsonl');
+    if (statSync(file).size > 64 * 1024 * 1024) return out;
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+      if (!line.includes('"tool_use_id"') || !(line.includes('"fit"') || line.includes('"declared_type'))) continue;
+      try {
+        const r = JSON.parse(line);
+        if (!r || typeof r.tool_use_id !== 'string') continue;
+        if (typeof r.fit === 'string') out.fit[r.tool_use_id] = r.fit;
+        const dt = [r.declared_type_resolved, r.declared_type].find((v) => typeof v === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(v));
+        if (dt) out.type[r.tool_use_id] = dt;
+      } catch { /* a torn line */ }
+    }
+  } catch { /* no log */ }
+  return out;
+}
+
+// Spawns not yet landed in a day file that are still being worked (carry-over across the day boundary).
+// The accumulators themselves live in the scan state (written with the scan cursors, so the two never
+// disagree); open.json is their readable mirror, rewritten every run.
+export function writeOpenFile(state, nowT) {
+  const facts = state.facts;
+  if (!facts || !facts.spawns) return false;
+  const open = Object.values(facts.spawns).filter((a) => a.n > 0 && isOpen(a, nowT, completedOf(facts, a))).sort((a, b) => (a.start || 0) - (b.start || 0));
+  const file = join(factsDir(), 'open.json');
+  if (!open.length && !existsSync(file)) return false;
+  atomicWrite(file, JSON.stringify({
+    schema: 'agent-companion/usage-facts-open', asOf: iso(nowT), spawns: open.map((a) => ({ ...spawnRecord(a), startDay: dayKeyOf(dayStartMs(a.start || a.t0)) })),
+  }));
+  return true;
+}
+
+// The facts file of every closed day that is settled (close + SETTLE_MS), whole
+// (inside the facts window) and not yet written. A day file is never rewritten.
+export function writeFactsFiles(state, nowT) {
+  const facts = state.facts;
+  if (!facts) return [];
+  const out = [];
+  let firstHour = 0;
+  for (const r of Object.values(facts.rows)) if (!firstHour || r.hour < firstHour) firstHour = r.hour;
+  const lastClosedStart = dayStartMs(nowT) - DAY_MS;
+  for (let s = dayStartMs(Math.max(state.scanFromMs, facts.fromMs)); s <= lastClosedStart; s += DAY_MS) {
+    if (s < state.scanFromMs || s < facts.fromMs) continue;
+    if (nowT < s + DAY_MS + SETTLE_MS) continue;
+    // A day wholly before the first row is "no data", not "no usage": no file.
+    if (!firstHour || s + DAY_MS <= firstHour * HOUR_MS) continue;
+    const day = dayKeyOf(s);
+    const file = join(factsDir(), `${day}.json`);
+    if (existsSync(file)) continue;
+    // Spawn records land on their start day. A day file is written once, so it waits for its
+    // still-open spawns (closed: idle 30 min, or 48 h after the start).
+    const mine = Object.values(facts.spawns || {}).filter((a) => a.n > 0 && (a.start || a.t0) >= s && (a.start || a.t0) < s + DAY_MS);
+    if (mine.some((a) => isOpen(a, nowT, completedOf(facts, a)))) continue;
+    const idx = mine.length ? spawnRowIndex() : { fit: {}, type: {} };
+    const spawns = mine
+      .map((a) => spawnRecord(a, { fit: (a.tu && idx.fit[a.tu]) || null, type: (a.tu && idx.type[a.tu]) || null }))
+      .sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    atomicWrite(file, JSON.stringify(buildFactsFile(facts, {
+      day, startMs: s, endMs: s + DAY_MS, weightsFor: weightInfoFor,
+      dataThroughMs: state.dataThroughMs, scanFromMs: state.scanFromMs, computedAtMs: nowT, spawns,
+    })));
+    for (const a of mine) { delete facts.spawns[a.key]; facts.landed[a.key] = day; }
+    out.push(day);
+  }
+  return out;
+}
+
 // The whole run: scan, then append a record for every closed day not yet in the
 // history. Returns what it did.
 export function runCheckup({ root = transcriptsRoot(), nowT = nowMs(), holdMs = HOLD_RECENT_MS } = {}) {
@@ -580,6 +813,10 @@ export function runCheckup({ root = transcriptsRoot(), nowT = nowMs(), holdMs = 
     appendFileSync(p.history, `${JSON.stringify(rec)}\n`);
     written.push(rec.day);
   }
+  // Facts: one file per closed, settled day, written once. Fail-open; the history line above is the contract.
+  let factsWritten = [];
+  try { factsWritten = writeFactsFiles(state, nowT); } catch { /* facts are additive: never fail the checkup */ }
+  try { writeOpenFile(state, nowT); } catch { /* the mirror is informational */ }
   // Write the cursor and the seen set together, after the history line: a crash
   // before this point re-reads the same bytes and the history guard stops a duplicate line.
   seen.save(nowT - KEEP_DAYS * DAY_MS);
@@ -587,7 +824,7 @@ export function runCheckup({ root = transcriptsRoot(), nowT = nowMs(), holdMs = 
   atomicWrite(p.status, JSON.stringify({
     lastRunMs: nowT, lastAttemptMs: nowT, lastDay: dayKeyOf(lastClosedStart), written,
   }));
-  return { written, filesRead: scan.filesRead, bytesRead: scan.bytesRead, filesSeen: scan.filesSeen, dataThrough: state.dataThroughMs ? iso(state.dataThroughMs) : null };
+  return { written, factsWritten, filesRead: scan.filesRead, bytesRead: scan.bytesRead, filesSeen: scan.filesSeen, dataThrough: state.dataThroughMs ? iso(state.dataThroughMs) : null };
 }
 
 // --- Lock, launch ----------------------------------------------------------------------
@@ -637,7 +874,7 @@ export function launchCheckup({ nowT = nowMs(), spawnFn = spawn } = {}) {
   const prev = readJsonSafe(p.status, {}) || {};
   try { atomicWrite(p.status, JSON.stringify({ ...prev, lastAttemptMs: nowT })); } catch { return { launched: false, reason: 'state-unwritable' }; }
   try {
-    const child = spawnFn(process.execPath, [checkupScriptPath()], {
+    const child = spawnFn(process.execPath, [checkupScriptPath(), '--max-seconds', String(ANALYSIS_BUDGET_SECONDS)], {
       detached: true, stdio: 'ignore', windowsHide: true, env: process.env,
     });
     if (child && typeof child.unref === 'function') child.unref();

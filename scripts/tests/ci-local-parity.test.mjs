@@ -224,7 +224,7 @@ function buildThrowawayRepo() {
     '',
   ].join('\n'));
   writeFileSync(join(repo, 'scripts', 'ci-local.mjs'), readFileText(SCRIPT));
-  writeFileSync(join(repo, 'scripts', 'ci-lock.mjs'), readFileText(join(dirname(SCRIPT), 'ci-lock.mjs'))); // ci-local imports it
+  writeFileSync(join(repo, 'scripts', 'ci-budget.mjs'), readFileText(join(dirname(SCRIPT), 'ci-budget.mjs'))); // ci-local imports it
   // ci-local runs node --test suites through its own reporters, resolved
   // next to itself; without them the suite would fail at once and the kill
   // below would land on an already-finished run.

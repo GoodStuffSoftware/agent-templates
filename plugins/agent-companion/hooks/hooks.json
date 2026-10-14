@@ -189,6 +189,14 @@
               "snapshot"
             ],
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/settings-journal.mjs"
+            ],
+            "timeout": 5
           }
         ]
       },
