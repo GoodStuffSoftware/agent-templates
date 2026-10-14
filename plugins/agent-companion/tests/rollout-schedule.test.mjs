@@ -5,7 +5,7 @@
 // flipping anything. An unresolvable `activeFrom` counts as NOT yet reached.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, runScript } from './helpers.mjs';
 
@@ -25,8 +25,15 @@ const T1 = '2026-10-10T08:00:00Z'; // the moment it takes effect
 function setRollout(obj) {
   mkdirSync(fx.stateDir, { recursive: true });
   if (obj === null) rmSync(ROLLOUT, { force: true });
-  else writeFileSync(ROLLOUT, typeof obj === 'string' ? obj : JSON.stringify(obj));
+  else {
+    writeFileSync(ROLLOUT, typeof obj === 'string' ? obj : JSON.stringify(obj));
+    // The reader caches per (mtime, size). Two same-size writes inside one mtime tick look unchanged
+    // under load (a flake in the full run), so each write gets its own mtime.
+    rolloutStamp += 1;
+    utimesSync(ROLLOUT, rolloutStamp, rolloutStamp);
+  }
 }
+let rolloutStamp = Math.floor(Date.now() / 1000) - 100000;
 
 test('rollout helpers: no spec is active; a timestamp and an id resolve; anything unresolvable is not yet active', () => {
   setRollout(null);

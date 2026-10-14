@@ -549,16 +549,73 @@ function scanFile(f, fileState, ctx) {
   if (cls) fileState.c = cls;
 }
 
+// --- Facts backfill (an upgraded state) ------------------------------------------------
+// The design's "first install backfills 8 days". A state whose cursors were
+// advanced before the fact sink existed has no facts for the bytes behind those
+// cursors. Rebuild the facts accumulator once: re-read every transcript from its
+// start up to the state's own cursor (exactly the bytes the scan has already
+// counted), into a fresh accumulator with its own in-memory seen set; the normal
+// scan then continues from the cursor. Bytes before the cursor and bytes after
+// it are disjoint, so nothing is counted twice and the result equals a full scan.
+// What the old accumulator held is dropped (its spawn records began mid-file and
+// were partial); day files already written are never rewritten. The window starts
+// at the first day boundary inside the last LOOKBACK_DAYS, never before the scan's
+// own start. Runs once: `bf` marks the accumulator.
+export const FACTS_BACKFILL_VERSION = 1;
+
+export function factsBackfillFrom(state, nowT) {
+  const lookback = nowT - LOOKBACK_DAYS * DAY_MS;
+  let from = dayStartMs(lookback);
+  if (from < lookback) from += DAY_MS;
+  let scanFrom = dayStartMs(state.scanFromMs);
+  if (scanFrom < state.scanFromMs) scanFrom += DAY_MS;
+  return Math.max(from, scanFrom);
+}
+
+function backfillFacts(st, root, nowT, mainSeen) {
+  const old = st.facts;
+  if (old && old.bf) return false;
+  const from = factsBackfillFrom(st, nowT);
+  if (old && Number.isFinite(old.fromMs) && old.fromMs <= from) { old.bf = FACTS_BACKFILL_VERSION; return false; }
+  const facts = newFacts(from);
+  facts.agentIds = {};
+  facts.done = {};
+  if (old && old.landed) facts.landed = { ...old.landed };
+  const scratch = { v: SCHEMA, scanFromMs: from, files: {}, hours: {}, days: {}, dataThroughMs: 0, lastScanMs: 0 };
+  const seen = new SeenStore(null);
+  const ctx = { state: scratch, seen, cutoffMs: from, holdMs: 0, facts };
+  const found = discoverTranscripts(root, { sinceMs: from, main: true, subagents: true, workflows: true, meta: false });
+  for (const f of found.files) {
+    const rel = relative(root, f.path).split('\\').join('/');
+    const cur = st.files[rel] ? st.files[rel].o || 0 : 0;
+    // Nothing counted yet, or the file shrank (the scan restarts it from 0 with the sink on): the scan covers it.
+    if (!(cur > 0) || cur > f.size) continue;
+    try { scanFile({ ...f, size: cur }, { o: 0 }, ctx); } catch { /* one unreadable file never stops the backfill */ }
+  }
+  // spawns of landed keys stay landed
+  for (const k of Object.keys(facts.landed)) delete facts.spawns[k];
+  // The saved seen set holds the request keys of these bytes but no prompt keys (an older scan recorded
+  // prompts only with the sink on): merge the backfill's keys in, so a prompt copied into a later file
+  // (resume, fork) is not counted a second time.
+  if (mainSeen) for (const [h, m] of seen.map) if (!mainSeen.map.has(h)) mainSeen.map.set(h, m);
+  facts.bf = FACTS_BACKFILL_VERSION;
+  st.facts = facts;
+  return true;
+}
+
 // --- The scan ------------------------------------------------------------------------
 
 export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), holdMs = HOLD_RECENT_MS, state = null, seen = null } = {}) {
   const p = checkupPaths();
   const st = state || loadState(nowT);
   const sn = seen || (FRESH_STATES.has(st) ? new SeenStore(p.seen) : new SeenStore(p.seen).load());
-  // Facts accumulate beside the hourly buckets. A state written before the sink
-  // existed already scanned its bytes without it, so its facts start at the next
-  // whole day (the rebuild path covers older days while transcripts still exist).
+  // Facts accumulate beside the hourly buckets. A fresh state starts them with
+  // the scan. A state written before the sink existed (or by 0.31.18, which
+  // started such a state's facts at the next whole day and so had no closed day
+  // to analyse for up to two days) is backfilled once: see backfillFacts.
   if (!st.facts) st.facts = newFacts(FRESH_STATES.has(st) ? st.scanFromMs : dayStartMs(nowT) + DAY_MS);
+  if (!FRESH_STATES.has(st)) backfillFacts(st, root, nowT, sn);
+  else st.facts.bf ||= FACTS_BACKFILL_VERSION;
   st.facts.spawns ||= {}; // a facts window written by 2a carries no spawn store
   st.facts.landed ||= {};
   st.facts.agentIds ||= {}; // Agent/Task tool_use ids seen -> time

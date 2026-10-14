@@ -244,7 +244,7 @@ test('a day file is written once, only after close plus settle, and never rewrit
   } finally { fx.cleanup(); }
 });
 
-test('a state written before the sink existed starts facts at the next whole day', () => {
+test('a state written before the sink existed is backfilled from the transcripts (0.31.19; 0.31.18 started at the next whole day)', () => {
   const { fx, root } = mk();
   try {
     resetUnitCache();
@@ -260,12 +260,12 @@ test('a state written before the sink existed starts facts at the next whole day
       asst('a2', '2026-10-10T12:00:00Z', SONNET, { cr: 1_000_000 }),
       asst('a3', '2026-10-11T12:00:00Z', SONNET, { cr: 1_000_000 }),
     ], { append: true });
-    // the upgrade run happens during day 10-10: its facts start at 10-11
-    runCheckup({ root, nowT: NOW, holdMs: 0 });
+    // the upgrade run happens during day 10-10: the bytes behind the cursors are re-read for facts
+    const up = runCheckup({ root, nowT: NOW, holdMs: 0 });
+    assert.deepEqual(up.factsWritten, [DAY], 'the closed day scanned before the sink gets facts');
+    assert.equal(readFacts().rows.reduce((n, x) => n + x.tok[SONNET].m[5], 0), 1, 'counted once');
     const r = runCheckup({ root, nowT: T('2026-10-12T09:00:00Z'), holdMs: 0 });
-    assert.ok(!existsSync(factsFile(DAY)), 'bytes scanned before the sink are not claimed as facts');
-    assert.ok(!existsSync(factsFile('2026-10-10')), 'the day that was open at the upgrade is partial: no file');
-    assert.deepEqual(r.factsWritten, ['2026-10-11'], 'the first whole day after the upgrade has facts');
+    assert.deepEqual(r.factsWritten, ['2026-10-10', '2026-10-11'], 'the day open at the upgrade is whole too');
     assert.equal(dayStartMs(NOW) + DAY_MS, T('2026-10-11T08:00:00Z'));
   } finally { fx.cleanup(); }
 });

@@ -63,7 +63,7 @@ if [ -n "$CLAUDE_CODE_REMOTE_SESSION_ID" ]; then echo "PLATFORM=cloud"; else ech
 
 Report within your scope, and name the platform in the first line of any output.
 
-**Local only — FIRST: the daily usage analysis (zero tokens).** Before anything else, including the update below, run the analysis stage. It scans the transcripts incrementally, computes every settled day not yet computed, and writes the results, the dated report and the summary that STEP 1 reads (`usage_regression`, `usage_analysis_stale`, `usage_analysis_config_invalid`). It calls no model and prints one JSON line; a second run, or a checkup already holding the lock, exits 0 having done nothing. Never wait on it and never retry it:
+**Local only — FIRST: the daily usage analysis (zero tokens).** Before anything else, including the update below, run the analysis stage. It scans the transcripts incrementally, computes every settled day not yet computed, and writes the results, the dated report and the summary that STEP 1 reads (`usage_regression`, `usage_analysis_stale`, `usage_analysis_config_invalid`). It calls no model and prints one JSON line; a second run, or a checkup already holding the lock, exits 0 having done nothing. Never wait on it and never retry it. Give this one Bash call a 10-minute timeout (600000 ms): the first run after an upgrade rebuilds a week of facts from the transcripts and can take a few minutes; later runs take seconds:
 
 ```bash
 node "$AC/scripts/usage-analysis.mjs" --scheduled

@@ -2,6 +2,13 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.19 — 2026-10-14
+
+Hotfix: the daily usage analysis computed no day on an upgraded install.
+
+- **Usage facts backfill.** A checkup state written before the fact sink existed (every install upgraded from 0.31.17 or earlier) started its facts at the next whole day, so `usage-analysis.mjs --scheduled` found no facts day and printed `computed: []` for up to two days. The scan now rebuilds the facts once, as the design's first-install backfill: each transcript is re-read from its start up to the scan's own cursor, for the closed days in the last 8 (never before the scan began), into a fresh accumulator; the scan then goes on from the cursor, so nothing is counted twice and the facts equal a full scan. A state 0.31.18 already upgraded is rebuilt the same way (its partial spawn records are replaced). Runs once per state; a fresh install is unchanged. A day with a spawn still open stays deferred until it closes or 48 h pass, as before.
+- **Scout step timeout.** The scout gives its `usage-analysis.mjs --scheduled` call a 10-minute timeout, since the one-time rebuild can take a few minutes.
+
 ## 0.31.18 — 2026-10-13
 
 The daily usage analysis (facts, config, comparison library, runner, scenarios, skill and docs, scout signals, register scenario trigger), a shared machine-wide CI worker budget, one install per machine at user scope, and a `python_stdin_guard`; plus the review fixes for each of those.
