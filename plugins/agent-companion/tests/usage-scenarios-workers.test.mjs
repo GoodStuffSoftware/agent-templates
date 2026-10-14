@@ -476,7 +476,12 @@ test('a run never calls claude and writes only under the state root; the fixture
     for (const p of Object.keys(before)) if (/^(sessions|cdir|routine-folder)\//.test(p)) assert.equal(after[p], before[p], `${p} is only read`);
     // the fixture source: no username, machine path, 7-12 hex id (sess-* ids only) or internal service name
     const src = readFileSync(new URL('./usage-scenarios-workers.test.mjs', import.meta.url), 'utf8');
-    assert.ok(!src.includes(userInfo().username), 'no username');
+    // A hosted CI or container account ("runner", "root") is an ordinary word this file uses in prose
+    // ("the runner", "the state root"), so it is checked only as a path segment, as scripts/leak-check.mjs does.
+    const user = userInfo().username.toLowerCase();
+    const serviceAccount = ['runner', 'runneradmin', 'root', 'user', 'node', 'ubuntu', 'vsts', 'vscode', 'codespace'].includes(user);
+    const lower = src.toLowerCase();
+    assert.ok(serviceAccount ? !lower.includes(`/${user}/`) && !lower.includes(`\\${user}\\`) : !lower.includes(user), 'no username');
     assert.ok(!/[A-Za-z]:[\\/]+(Users|Windows)|\/home\/\w|\/Users\/\w/.test(src), 'no machine path');
     assert.ok(!/\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,12}\b/.test(src), 'no 7-12 hex id');
     assert.ok(!new RegExp(['deck' + 'hand', 'wheel' + 'house'].join('|'), 'i').test(src), 'no internal service name');

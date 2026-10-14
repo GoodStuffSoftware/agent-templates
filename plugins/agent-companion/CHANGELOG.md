@@ -2,6 +2,12 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.20 — 2026-10-14
+
+Hotfix: CI on Linux was red since 0.31.18; no behavior change.
+
+- **Fixture username check.** The usage-scenarios test refused its own source when it contained the OS account name anywhere. On a GitHub-hosted runner that account is `runner`, a word the file uses in prose ("through the runner"), so the check failed there and passed on Windows. A hosted CI or container account (`runner`, `root` and a few others) is now checked only as a path segment, as `scripts/leak-check.mjs` treats a generic handle; any other account name is still refused anywhere in the file, now case-insensitively.
+
 ## 0.31.19 — 2026-10-14
 
 Hotfix: the daily usage analysis computed no day on an upgraded install.
