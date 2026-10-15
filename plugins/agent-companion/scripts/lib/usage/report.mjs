@@ -24,10 +24,10 @@ const mmdd = (day) => String(day).slice(5);
 // ------------------------------------------------------------- regressions --
 
 /** The alert scenarios (or groups) that regressed on the day: [{ id, group?, compare, value, baseline, relPct, n, label, interval }]. */
-export function regressionsOf(scenarios) {
+export function regressionsOf(scenarios, severity = 'alert') {
   const out = [];
   for (const sc of scenarios || []) {
-    if (!isObj(sc) || sc.severity !== 'alert') continue;
+    if (!isObj(sc) || sc.severity !== severity) continue;
     const take = (cmps, group) => {
       for (const c of cmps || []) {
         if (!isObj(c) || c.status !== 'regression') continue;
@@ -50,6 +50,9 @@ export function regressionsOf(scenarios) {
   return out;
 }
 
+/** Info-severity scenarios with a comparison at status regression: named in the summary and the report, never paged (no scout signal). */
+export const infoRegressionsOf = (scenarios) => regressionsOf(scenarios, 'info');
+
 export const regressionIdsOf = (regs) => [...new Set(regs.map((r) => r.id))].sort();
 
 // ----------------------------------------------------------------- summary --
@@ -69,6 +72,12 @@ export function summaryLines(res) {
   const line1 = `[agent-companion] usage ${mmdd(res.day)}: ${parts.join(' | ')}`;
 
   const regs = res.regressions || [];
+  // One rule: a comparison at status "regression" is counted. Alert-severity ones page (regressionIds); info-severity
+  // ones are counted separately here and in the report, so the line never says "none" while one exists.
+  const infoIds = regressionIdsOf(infoRegressionsOf(res.scenarios));
+  const infoNote = infoIds.length
+    ? `${infoIds.length} info-severity (not paged): ${infoIds.slice(0, 3).join(', ')}${infoIds.length > 3 ? `, +${infoIds.length - 3} more` : ''}`
+    : '';
   let line2;
   if (!regs.length) {
     // "none" is only an answer when something was evaluated: a day on which every scenario was a gap says so instead.
@@ -78,13 +87,14 @@ export function summaryLines(res) {
     const evalN = scs.filter((s) => !s.skipped && !isGap(s)).length;
     const gapNote = `${gapN} gap${gapN === 1 ? '' : 's'}`;
     if (evalN === 0) line2 = `regressions: n/a (0 scenarios evaluated${scs.length ? `, ${gapNote}` : ''})`;
+    else if (infoNote) line2 = `regressions: none at alert severity; ${infoNote} (${evalN} scenario${evalN === 1 ? '' : 's'} evaluated, ${gapNote})`;
     else line2 = `regressions: none (${evalN} scenario${evalN === 1 ? '' : 's'} evaluated, ${gapNote})`;
   } else {
     const items = regs.slice(0, 3).map((r) => {
       const who = r.group !== undefined ? `${r.id}[${r.group}]` : r.id;
       return `${who} ${fmt(r.value)} vs ${fmt(r.baseline)} ${r.compare} (${signed(r.relPct, 0)}%, n=${fmt(r.n, 0)}, ${r.label}${r.interval !== 'none' ? '-int' : ''})`;
     });
-    line2 = `regressions: ${items.join(' ; ')}${regs.length > 3 ? ` ; +${regs.length - 3} more` : ''}`;
+    line2 = `regressions: ${items.join(' ; ')}${regs.length > 3 ? ` ; +${regs.length - 3} more` : ''}${infoNote ? ` ; also ${infoNote}` : ''}`;
   }
   return [line1, line2];
 }
@@ -149,11 +159,19 @@ export function renderReport(res) {
   L.push('');
   L.push('## Regressions');
   L.push('');
-  if (!(res.regressions || []).length) L.push('None.');
-  else {
+  const tbl = (rows) => {
     L.push('| scenario | group | comparison | value | baseline | change % | n | interval | label |');
     L.push('|---|---|---|---|---|---|---|---|---|');
-    for (const r of res.regressions) L.push(`| ${cell(r.id)} | ${cell(r.group ?? '')} | ${cell(r.compare)} | ${fmt(r.value)} | ${fmt(r.baseline)} | ${signed(r.relPct, 1)} | ${fmt(r.n, 0)} | ${r.interval} | ${r.label} |`);
+    for (const r of rows) L.push(`| ${cell(r.id)} | ${cell(r.group ?? '')} | ${cell(r.compare)} | ${fmt(r.value)} | ${fmt(r.baseline)} | ${signed(r.relPct, 1)} | ${fmt(r.n, 0)} | ${r.interval} | ${r.label} |`);
+  };
+  const infoRegs = infoRegressionsOf(res.scenarios);
+  if (!(res.regressions || []).length) L.push(infoRegs.length ? 'None at alert severity.' : 'None.');
+  else tbl(res.regressions);
+  if (infoRegs.length) {
+    L.push('');
+    L.push('Info-severity scenarios at status regression (reported, not paged):');
+    L.push('');
+    tbl(infoRegs);
   }
   L.push('');
   L.push('## Scenarios');

@@ -879,10 +879,23 @@ try {
     const stray = strayCopies(claudeDir(), PLUGIN_NAME);
     if (stray.length) {
       // The scout scrubs every absolute path out of a signal (the text leaves the
-      // machine), so each record is named by its project folder and the settings
-      // file by its name inside it; `version.mjs` prints the full paths locally.
+      // machine), so a record is named by a folder name that survives that scrub.
+      // A worktree record (.claude/worktrees/<tree>) is named by its tree, a
+      // throwaway name. A repo-root record's folder is the project's own name, which
+      // the scrub replaces with a bare placeholder, so a root is shown as "repo root"
+      // (numbered when there are several, in list order); the settings file is named
+      // by its name inside the project. `version.mjs` prints the full paths locally.
       const leaf = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '(no project path)';
-      const list = stray.map((p) => `${leaf(p.projectPath)} (${p.scope} scope, ${p.version}` +
+      const isTree = (p) => /[\\/]\.claude[\\/]worktrees[\\/][^\\/]+[\\/]*$/.test(String(p || ''));
+      const rootCount = stray.filter((p) => p.projectPath && !isTree(p.projectPath)).length;
+      let rootN = 0;
+      const nameOf = (p) => {
+        if (!p.projectPath) return '(no project path)';
+        if (isTree(p.projectPath)) return leaf(p.projectPath);
+        rootN += 1;
+        return rootCount > 1 ? `repo root ${rootN}` : 'repo root';
+      };
+      const list = stray.map((p) => `${nameOf(p)} (${p.scope} scope, ${p.version}` +
         `${p.settingsFiles.length ? `; recreated by ${p.settingsFiles.map((f) => `.claude/${leaf(f)}`).join(' and ')}` : '; no enabling settings file found'})`);
       sig('plugin_project_copy',
         `${stray.length} project- or local-scope ${PLUGIN_NAME} record${stray.length === 1 ? '' : 's'} ${STRAY_RULE}: ${list.join('; ')}. ` +

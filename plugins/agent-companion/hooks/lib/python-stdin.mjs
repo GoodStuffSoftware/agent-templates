@@ -15,9 +15,14 @@
 // A bare subshell or brace group is followed: `(python3 -)` and `{ python3 -; }` hang unless the group is
 // piped into or has a stdin redirect of its own (`echo x | (python3 -)`, `{ python3 -; } < f`).
 //
-// Accepted gaps (still allowed): a python call inside `for ...; do python3 -; done` (a loop counts
-// as a group whose own redirect is not followed), inside a function body, `timeout N python3 -`,
-// `env -u X python3 -`, and `"$(python3 -)"` (a substitution inside double quotes is read as data).
+// Wrapped forms (0.31.21) are judged exactly as the plain call is: a loop body counts as a group (fed by a pipe into the
+// loop or a stdin redirect on `done`), a function body is judged at its call sites (never called in this command:
+// allowed; called with nothing on stdin: denied), `timeout [opts] N` and `env [-u X | -C D | -i | NAME=v]` are looked
+// through, and a substitution inside double quotes (`"$(python3 -)"`) is parsed like an unquoted one. Quoted
+// substitutions are followed to PY_MAX_DEPTH levels, deeper text is data. The judging pass has a step budget; running
+// out of it, like any exception, allows.
+
+import { recordDenial } from './context.mjs';
 
 export const PY_ACK = /guard-ack:\s*python-stdin/i;
 
@@ -36,6 +41,10 @@ const PY_PREFIX = new Set(['exec', 'command', 'builtin', 'nohup', 'time', '!', '
 const PY_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const PY_NUL = /^(?:\/dev\/null|nul:?)$/i;
 const PY_FD = /\d+(?=[<>])/y;
+const PY_LEAD = new Set(['then', 'else', 'elif', 'if', '!', 'time']); // words that may precede a command's own first word
+const PY_LOOPS = new Set(['for', 'while', 'until', 'select']);
+const PY_MAX_DEPTH = 8;      // nested double-quoted substitutions followed
+const PY_BUDGET = 3000000;   // steps the judging pass may take before it gives up (allow)
 
 /**
  * Decide on one Bash command. Returns null (allow) or { message }.
@@ -76,17 +85,79 @@ function pyReadsStdin(args) {
   return true;                                         // no program argument: stdin
 }
 
+// env: skip its options and NAME=value words; returns the index of the command it runs (k is just past `env`).
+function skipEnv(w, k) {
+  while (k < w.length) {
+    const a = w[k];
+    if (a === '--') return k + 1;
+    if (PY_ASSIGN.test(a)) { k++; continue; }
+    if (a === '-') { k++; continue; } // legacy -i
+    if (a.length === 1 || a[0] !== '-') return k;
+    if (a[1] === '-') { // long option; these take a value in the next word when written without '='
+      k += /^--(?:unset|chdir|split-string|argv0|block-signal|default-signal|ignore-signal)$/.test(a) ? 2 : 1;
+      continue;
+    }
+    k++;
+    for (let c = 1; c < a.length; c++) { // short cluster: u, C, S, a take a value; attached or in the next word
+      if ('uCSa'.includes(a[c])) { if (c === a.length - 1) k++; break; }
+    }
+  }
+  return k;
+}
+
+// timeout: skip its options and the DURATION; returns the index of the command it runs (k is just past `timeout`).
+function skipTimeout(w, k) {
+  while (k < w.length) {
+    const a = w[k];
+    if (a === '--') { k++; break; }
+    if (a.length < 2 || a[0] !== '-') break;
+    if (a[1] === '-') { k += /^--(?:signal|kill-after)$/.test(a) ? 2 : 1; continue; }
+    k++;
+    for (let c = 1; c < a.length; c++) {
+      if (a[c] === 's' || a[c] === 'k') { if (c === a.length - 1) k++; break; }
+    }
+  }
+  return k < w.length ? k + 1 : k;
+}
+
+// Index of the program word in a simple command: past prefix words, NAME=value, env and timeout, in any order.
+function progIndex(w) {
+  let k = 0;
+  while (k < w.length) {
+    const a = w[k];
+    if (PY_PREFIX.has(a) || PY_ASSIGN.test(a)) k++;
+    else if (a === 'env') k = skipEnv(w, k + 1);
+    else if (a === 'timeout') k = skipTimeout(w, k + 1);
+    else break;
+  }
+  return k;
+}
+
 function pyStdinHang(cmd) {
   if (!/py/i.test(cmd)) return null;
+  const ctx = { done: [], fns: [] };
+  scan(cmd, 0, null, 0, null, ctx);
+  return judge(ctx);
+}
+
+// One linear pass over cmd[i0..]. base: the frame the text runs inside (null at the top). term: ')' or '`' when this is
+// the body of a substitution inside double quotes (the scan stops after its closing character). Simple commands go to
+// ctx.done; function-body frames to ctx.fns. Returns the index to continue from.
+function scan(cmd, i0, base, depth, term, ctx) {
   const n = cmd.length;
   const ws = (c) => c === ' ' || c === '\t' || c === '\r';
   const stop = (c) => ws(c) || c === '\n' || c === ';' || c === '&' || c === '|' || c === '<' || c === '>' || c === '(' || c === ')' || c === '`';
   const stack = [];      // {kind: 'group'|'loop'|'case'|'subst'|'bt', saved}
-  const done = [];
+  const done = ctx.done;
   const pending = [];    // heredocs whose body starts at the next newline
-  let i = 0, cur = null, gtop = null; // gtop: the innermost open ( ) / { } / do..done frame (each frame points at its parent)
-  const start = (piped) => { cur = { words: [], redirs: [], piped, frame: gtop, afterGroup: null, fnDef: false }; };
-  const open = (kind, piped, extra) => { const fr = { kind, parentG: gtop, piped, redirs: [], res: undefined, ...extra }; stack.push(fr); gtop = fr; };
+  const hdr = [];        // for/while/until headers seen, each holding whether its input is piped; popped by the matching `do`
+  let i = i0, cur = null, gtop = base; // gtop: the innermost open ( ) / { } / do..done frame (each frame points at its parent)
+  const start = (piped) => { cur = { words: [], redirs: [], piped, frame: gtop, afterGroup: null, fnDef: false, fnName: null, lead: true }; };
+  const open = (kind, piped, extra) => {
+    const fr = { kind, parentG: gtop, piped, redirs: [], res: undefined, ...extra };
+    stack.push(fr); gtop = fr;
+    if (fr.fn) ctx.fns.push(fr);
+  };
   const pop = () => { const t = stack.pop(); if (t && (t.kind === 'group' || t.kind === 'loop')) gtop = t.parentG; return t; };
   const skipArith = (p) => { // p is just past an opening ((; returns the index past the matching ))
     let d = 2;
@@ -100,7 +171,19 @@ function pyStdinHang(cmd) {
       const c = cmd[i];
       if (stop(c) || (c === '$' && cmd[i + 1] === '(')) break;
       if (c === "'") { const j = cmd.indexOf("'", i + 1); if (j < 0) { o += cmd.slice(i + 1); i = n; break; } o += cmd.slice(i + 1, j); i = j + 1; continue; }
-      if (c === '"') { i++; while (i < n && cmd[i] !== '"') { if (cmd[i] === '\\' && i + 1 < n && '$`"\\\n'.includes(cmd[i + 1])) { o += cmd[i + 1]; i += 2; } else o += cmd[i++]; } i++; continue; }
+      if (c === '"') {
+        i++;
+        while (i < n && cmd[i] !== '"') {
+          const d = cmd[i];
+          if (d === '\\' && i + 1 < n && '$`"\\\n'.includes(cmd[i + 1])) { o += cmd[i + 1]; i += 2; }
+          else if (depth < PY_MAX_DEPTH && (d === '`' || (d === '$' && cmd[i + 1] === '(' && cmd[i + 2] !== '('))) {
+            // a substitution inside double quotes runs like an unquoted one: scan its body in place
+            o += '\0';
+            i = scan(cmd, i + (d === '`' ? 1 : 2), gtop, depth + 1, d === '`' ? '`' : ')', ctx);
+          } else o += cmd[i++];
+        }
+        i++; continue;
+      }
       if (c === '\\') { if (cmd[i + 1] !== '\n' && i + 1 < n) o += cmd[i + 1]; i += 2; continue; }
       if (c === '$' && cmd[i + 1] === '{') { const j = cmd.indexOf('}', i + 2); const e = j < 0 ? n : j + 1; o += cmd.slice(i, e); i = e; continue; }
       if (c === '$' && cmd[i + 1] === "'") { i++; continue; }
@@ -133,7 +216,12 @@ function pyStdinHang(cmd) {
     if (ws(c)) { i++; continue; }
     if (c === '\\' && cmd[i + 1] === '\n') { i += 2; continue; }
     if (c === '#') { while (i < n && cmd[i] !== '\n') i++; continue; }
-    if (c === '\n') { finish(); if (pending.length) readBodies(); else i++; start(false); continue; }
+    if (c === '\n') {
+      const fnHead = cur.fnDef && !cur.words.length && !cur.redirs.length ? cur.fnName : null; // `f()` then `{` on the next line
+      finish(); if (pending.length) readBodies(); else i++; start(false);
+      if (fnHead) { cur.fnDef = true; cur.fnName = fnHead; }
+      continue;
+    }
     if (c === ';') {
       finish();
       const t = stack[stack.length - 1];
@@ -160,11 +248,15 @@ function pyStdinHang(cmd) {
     if (c === '(') {
       let j = i + 1;
       while (j < n && ws(cmd[j])) j++;
-      if (cmd[j] === ')' && cur.words.length === 1) { i = j + 1; start(false); cur.fnDef = true; continue; } // name() function definition
+      if (cmd[j] === ')' && (cur.words.length === 1 || (cur.words.length === 2 && cur.words[0] === 'function'))) { // name() or function name()
+        const nm = cur.words[cur.words.length - 1];
+        i = j + 1; start(false); cur.fnDef = true; cur.fnName = nm; continue;
+      }
       const pp = cur.piped; finish(); open('group', pp); i++; start(false); continue;
     }
     if (c === ')') {
       const t = stack[stack.length - 1];
+      if (!t && term === ')') { finish(); return i + 1; } // the end of a substitution inside double quotes
       if (!t || t.kind === 'case') { if (t) t.pat = false; i++; start(false); continue; } // a case pattern: its words are not a command
       finish(); i++;
       const top = pop();
@@ -175,6 +267,7 @@ function pyStdinHang(cmd) {
     if (c === '`') {
       i++;
       const top = stack[stack.length - 1];
+      if (!top && term === '`') { finish(); return i; } // the end of a backtick substitution inside double quotes (i is past it)
       if (top && top.kind === 'bt') { finish(); pop(); cur = top.saved; } else { cur.words.push('\0'); stack.push({ kind: 'bt', saved: cur }); start(false); }
       continue;
     }
@@ -204,16 +297,22 @@ function pyStdinHang(cmd) {
     const w = readWord();
     if (!w && i < n && !stop(cmd[i])) { i++; continue; } // never stall
     if (cur.words.length === 0) {
-      if (w === '{') { open('group', cur.piped, { fn: cur.fnDef }); start(false); continue; }
-      if (w === 'do') { open('loop', cur.piped); start(false); continue; }
+      if (w === '{') { open('group', cur.piped, cur.fnDef ? { fn: true, name: cur.fnName } : undefined); start(false); continue; }
+      if (w === 'do') { open('loop', hdr.length ? hdr.pop() : cur.piped); start(false); continue; }
       if (w === 'case') stack.push({ kind: 'case', pat: false });
       if (w === 'esac') { finish(); const t = stack[stack.length - 1]; if (t && t.kind === 'case') pop(); start(false); continue; }
       if (w === '}' || w === 'done') {
         finish(); const t = stack[stack.length - 1]; const closes = t && (t.kind === 'group' || t.kind === 'loop');
         if (closes) pop();
-        start(false); if (closes && t.kind === 'group') cur.afterGroup = t;
+        start(false); if (closes) cur.afterGroup = t;
         continue;
       }
+    } else if (w === '{' && cur.words.length === 2 && cur.words[0] === 'function') { // function name { ... }
+      open('group', false, { fn: true, name: cur.words[1] }); start(false); continue;
+    }
+    if (cur.lead) { // the first word of the command proper (past then/else/!/...)
+      if (PY_LOOPS.has(w)) hdr.push(cur.piped);
+      if (!PY_LEAD.has(w)) cur.lead = false;
     }
     cur.afterGroup = null;
     cur.words.push(w);
@@ -221,35 +320,94 @@ function pyStdinHang(cmd) {
   }
   finish();
   for (const h of pending) h.r.bodyEmpty = true; // heredoc with no body before the end
-  // Does stdin reach the commands of a group frame from outside? True when the group is piped into or has a stdin redirect that is
-  // not NUL or an empty heredoc, or an enclosing group does. A loop or a function body is an accepted gap (counts as fed).
-  // Memoized up the parent chain, so the cost stays linear.
-  const ownFed = (fr) => fr.kind === 'loop' || fr.fn === true || fr.piped === true || fr.redirs.some((r) => r.fd === '0' && r.op[0] === '<'
-    && !((r.op === '<<' || r.op === '<<-') ? r.bodyEmpty !== false : (r.op === '<' && PY_NUL.test(r.target))));
+  return i < n ? i : n;
+}
+
+// A stdin redirect (fd 0, '<' family) leaves the command fed unless it is NUL or an empty heredoc.
+const redirFed = (r) => ((r.op === '<<' || r.op === '<<-') ? r.bodyEmpty === false : !(r.op === '<' && PY_NUL.test(r.target)));
+const stdinRedir = (r) => r.fd === '0' && r.op[0] === '<';
+
+// Decide on the commands scan() found. Returns PY_MSG for the first python that reads stdin with nothing feeding it.
+function judge(ctx) {
+  const { done, fns } = ctx;
+  let steps = 0;
+  const tick = () => { if (++steps > PY_BUDGET) throw new Error('step budget'); };
+  // Function bodies are judged at their call sites in this command: calls[name] lists the commands that run the function.
+  const fnNames = new Set();
+  for (const f of fns) fnNames.add(f.name);
+  const calls = new Map();
+  for (const c of done) {
+    c.k = progIndex(c.words);
+    if (fnNames.size && c.k < c.words.length && fnNames.has(c.words[c.k])) {
+      const l = calls.get(c.words[c.k]);
+      if (l) l.push(c); else calls.set(c.words[c.k], [c]);
+    }
+  }
+  // Does stdin reach a group, loop or function frame from outside? True when it is piped into or has a stdin redirect that is
+  // not NUL or an empty heredoc, or an enclosing frame does. A function frame without a redirect of its own is fed when every
+  // call to it is (no call in this command: it only defines the function, so nothing runs). Memoized up the parent chain, so
+  // the cost stays linear; a result that leaned on a function still being evaluated (recursion) is not memoized.
+  let hits = new Set();            // names of functions met while still being evaluated, in the current evaluation
+  const fnRes = new Map();         // name -> true | false | 'busy'
+  const ownFed = (fr) => fr.piped === true || fr.redirs.some((r) => stdinRedir(r) && redirFed(r));
+  const fnFed = (fr) => {
+    const st = fnRes.get(fr.name);
+    if (st === true || st === false) return st;
+    if (st === 'busy') { hits.add(fr.name); return true; } // a call inside the function itself adds no new source
+    fnRes.set(fr.name, 'busy');
+    const saved = hits; hits = new Set();
+    let fed = true;
+    const list = calls.get(fr.name);
+    if (list) for (const c of list) { tick(); if (!cmdFed(c)) { fed = false; break; } }
+    hits.delete(fr.name);
+    if (hits.size) { fnRes.delete(fr.name); for (const h of hits) saved.add(h); } else fnRes.set(fr.name, fed);
+    hits = saved;
+    return fed;
+  };
   const frameFed = (fr) => {
+    const saved = hits; hits = new Set();
     const chain = [];
     let res = false;
     for (let x = fr; x; x = x.parentG) {
+      tick();
       if (x.res !== undefined) { res = x.res; break; }
       chain.push(x);
       if (ownFed(x)) { res = true; break; }
+      if (x.fn) { res = fnFed(x); break; }
     }
-    for (const x of chain) x.res = res;
+    if (hits.size === 0) for (const x of chain) x.res = res;
+    for (const h of hits) saved.add(h);
+    hits = saved;
     return res;
   };
+  // Is stdin supplied to this simple command by something other than NUL / an empty heredoc?
+  const cmdFed = (c) => {
+    let sin = null;
+    for (const r of c.redirs) if (stdinRedir(r)) sin = r;
+    if (sin) return redirFed(sin);
+    return c.piped || (c.frame ? frameFed(c.frame) : false);
+  };
   for (const c of done) {
-    const w = c.words;
-    let k = 0;
-    while (k < w.length && (PY_PREFIX.has(w[k]) || PY_ASSIGN.test(w[k]))) k++;
-    if (w[k] === 'env') { k++; while (k < w.length && (w[k].startsWith('-') || PY_ASSIGN.test(w[k]))) k++; }
+    tick();
+    const w = c.words, k = c.k;
     if (k >= w.length) continue;
     if (!PY_LAUNCHER.test(w[k].split(/[\\/]/).pop())) continue;
     if (!pyReadsStdin(w.slice(k + 1))) continue;
-    let sin = null;
-    for (const r of c.redirs) if (r.fd === '0' && r.op[0] === '<') sin = r;
-    if (!sin) { if (c.piped || (c.frame && frameFed(c.frame))) continue; return PY_MSG; }
-    if (sin.op === '<<' || sin.op === '<<-') { if (sin.bodyEmpty !== false) return PY_MSG; continue; }
-    if (sin.op === '<' && PY_NUL.test(sin.target)) return PY_MSG;
+    if (!cmdFed(c)) return PY_MSG;
   }
   return null;
+}
+
+/**
+ * The hook entry: pythonStdinCheck on a Bash payload, plus one denials.jsonl record per firing
+ * (guard 'python-stdin', outcome 'deny', or 'warn' in warn mode; an allow writes nothing). The command text rides in
+ * `detail`, which recordDenial truncates to 300 characters, as it does for every guard.
+ */
+export function pythonStdinGuard(payload, opts = {}) {
+  const command = ((payload || {}).tool_input || {}).command;
+  const r = pythonStdinCheck(command, opts);
+  if (r) {
+    try { recordDenial('python-stdin', payload, `python reading its program from stdin: ${String(command)}`, r.mode === 'warn' ? 'warn' : 'deny'); } catch { /* telemetry never blocks */ }
+  }
+  return r;
 }

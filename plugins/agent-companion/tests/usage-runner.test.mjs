@@ -6,7 +6,7 @@ import { makeFixture, runScript } from './helpers.mjs'; // sandboxes state paths
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, unlinkSync, appendFileSync,
+  mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, unlinkSync, appendFileSync, utimesSync,
 } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { addDays, dayRange } from '../scripts/lib/usage/days.mjs';
@@ -16,6 +16,7 @@ import {
 } from '../scripts/lib/usage/runner.mjs';
 import { renderReport, summaryLines } from '../scripts/lib/usage/report.mjs';
 import { takeLock, dropLock, factsDir } from '../scripts/lib/daily-checkup.mjs';
+import { main as usageMain } from '../scripts/usage-analysis.mjs';
 
 // ---------------------------------------------------------------- fixtures --
 
@@ -337,9 +338,15 @@ test('the shared lock blocks a second run cleanly (exit 0, nothing written)', ()
     seedDays(root);
     const args = ['--scheduled', '--root', root, '--no-scan', '--now', new Date(NOW).toISOString()];
     assert.ok(takeLock(), 'this process holds the checkup lock');
-    const blocked = runScript('scripts/usage-analysis.mjs', args);
-    assert.equal(blocked.status, 0);
-    assert.equal(blocked.json.skipped, 'another run holds the lock');
+    // a hand-typed run skips at once, exit 0 (unchanged behaviour)
+    const hand = runScript('scripts/usage-analysis.mjs', ['--root', root, '--no-scan', '--json', '--now', new Date(NOW).toISOString()]);
+    assert.equal(hand.status, 0);
+    assert.equal(hand.json.skipped, 'another run holds the lock');
+    // a scheduled run waits for the holder; with no wait budget it gives up with the distinct exit 3
+    const blocked = runScript('scripts/usage-analysis.mjs', [...args, '--lock-wait-seconds', '0']);
+    assert.equal(blocked.status, 3);
+    assert.equal(blocked.json.skipped, 'lock still held after the wait');
+    assert.equal(blocked.json.lockTimeout, true);
     assert.ok(!existsSync(usagePaths(root).status), 'a blocked run writes no status');
     assert.ok(!existsSync(usagePaths(root).resultsDir), 'a blocked run writes no result');
     dropLock();
@@ -350,6 +357,74 @@ test('the shared lock blocks a second run cleanly (exit 0, nothing written)', ()
     const st = readStatus(root);
     assert.equal(st.lastRun.scheduled, true);
     assert.equal(st.lastRun.scanned, false);
+  } finally { dropLock(); fx.cleanup(); }
+});
+
+const schedArgs = (root, ...more) => ['--scheduled', '--root', root, '--no-scan', '--no-register', '--now', new Date(NOW).toISOString(), ...more];
+const lockFile = (root) => join(root, 'state', 'daily-checkup.lock');
+
+test('--scheduled waits for a lock released mid-wait, then runs and records itself', async () => {
+  const fx = makeFixture();
+  try {
+    const root = fx.stateDir;
+    seedDays(root);
+    const first = runScript('scripts/usage-analysis.mjs', schedArgs(root));
+    assert.equal(first.json.computed.length, 10);
+    assert.ok(takeLock(), 'a detached checkup run holds the lock');
+    setTimeout(() => dropLock(), 600);
+    const lines = [];
+    const t0 = Date.now();
+    const code = await usageMain(schedArgs(root, '--lock-wait-seconds', '20', '--lock-poll-ms', '100'), { out: (s) => lines.push(s) });
+    const took = Date.now() - t0;
+    assert.equal(code, 0);
+    assert.ok(took >= 500 && took < 15000, `waited for the holder, not for the bound (${took} ms)`);
+    const j = JSON.parse(lines.join(''));
+    assert.equal(j.skipped, undefined);
+    assert.deepEqual(j.computed, []);
+    assert.ok(j.unchanged.length > 0 && j.unchanged.includes('2026-10-10'), 'the day the holder computed is found unchanged');
+    assert.deepEqual(j.deferred, []);
+    const st = readStatus(root);
+    assert.equal(st.lastRun.scheduled, true, 'the scheduled run left its record');
+    assert.ok(!existsSync(lockFile(root)), 'the lock is released');
+  } finally { dropLock(); fx.cleanup(); }
+});
+
+test('--scheduled gives up with exit 3 when the lock is still held past the wait bound', async () => {
+  const fx = makeFixture();
+  try {
+    const root = fx.stateDir;
+    seedDays(root);
+    assert.ok(takeLock());
+    const lines = [];
+    const t0 = Date.now();
+    const code = await usageMain(schedArgs(root, '--lock-wait-seconds', '1', '--lock-poll-ms', '100'), { out: (s) => lines.push(s) });
+    assert.ok(Date.now() - t0 >= 900, 'it waited the bound');
+    assert.equal(code, 3);
+    const j = JSON.parse(lines.join(''));
+    assert.equal(j.skipped, 'lock still held after the wait');
+    assert.equal(j.lockTimeout, true);
+    assert.deepEqual(j.computed, []);
+    assert.ok(existsSync(lockFile(root)), "the holder's lock is left alone");
+    assert.ok(!existsSync(usagePaths(root).status), 'a timed-out run writes no status');
+  } finally { dropLock(); fx.cleanup(); }
+});
+
+test('--scheduled takes a stale lock at once without waiting', async () => {
+  const fx = makeFixture();
+  try {
+    const root = fx.stateDir;
+    seedDays(root);
+    mkdirSync(join(root, 'state'), { recursive: true });
+    writeFileSync(lockFile(root), '99999');
+    const old = new Date(Date.now() - 2 * 3600 * 1000);
+    utimesSync(lockFile(root), old, old);
+    const lines = [];
+    const t0 = Date.now();
+    const code = await usageMain(schedArgs(root, '--lock-wait-seconds', '20'), { out: (s) => lines.push(s) });
+    assert.equal(code, 0);
+    assert.ok(Date.now() - t0 < 10000, 'no wait for a stale lock');
+    assert.equal(JSON.parse(lines.join('')).computed.length, 10);
+    assert.ok(!existsSync(lockFile(root)));
   } finally { dropLock(); fx.cleanup(); }
 });
 
@@ -523,14 +598,16 @@ test('the CLI scans, analyses and registers on fixture transcripts; no claude ca
   } finally { fx.cleanup(); }
 });
 
-test('the runner never waits and every child process it could start hides its window', () => {
+test('the runner waits only for a held lock and every child process it could start hides its window', () => {
   for (const rel of ['scripts/lib/usage/runner.mjs', 'scripts/lib/usage/report.mjs', 'scripts/usage-analysis.mjs']) {
     const src = readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
     for (const m of src.matchAll(/(?<![.\w])(?:spawn|spawnSync|exec|execFile|execFileSync|fork|spawnFn)\(/g)) {
       assert.match(src.slice(m.index, m.index + 400), /windowsHide:\s*true/, `${rel}: a child process without windowsHide at ${m.index}`);
     }
     assert.ok(!/child_process/.test(src), `${rel} starts no process of its own`);
-    assert.ok(!/setTimeout|setInterval|Atomics\.wait|sleep\(/.test(src), `${rel} never waits`);
+    // The one sanctioned wait: the --scheduled lock wait in usage-analysis.mjs, a single bounded setTimeout (never a spin).
+    const waits = (src.match(/setTimeout|setInterval|Atomics\.wait|sleep\(/g) || []).length;
+    assert.equal(waits, rel === 'scripts/usage-analysis.mjs' ? 1 : 0, `${rel} waits only in the scheduled lock wait`);
     assert.ok(!/['"`]claude['"`]|claude -p|api\.anthropic/.test(src), `${rel} makes no model call`);
   }
 });

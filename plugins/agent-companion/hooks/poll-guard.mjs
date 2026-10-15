@@ -19,7 +19,7 @@
 import {
   readStdin, opt, passthrough, deny, callerTranscriptPath, tailRecords, callerIsSubagent, appendLog,
 } from './lib/context.mjs';
-import { pythonStdinCheck } from './lib/python-stdin.mjs';
+import { pythonStdinGuard } from './lib/python-stdin.mjs';
 import { claimOnce } from './lib/subagent-context.mjs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -50,7 +50,7 @@ try {
     if (toolName === 'Bash') {
       try {
         const mode = String(opt('python_stdin_guard', 'deny')).toLowerCase();
-        const py = pythonStdinCheck((p.tool_input || {}).command, { mode });
+        const py = pythonStdinGuard(p, { mode });
         if (py && py.mode === 'deny') deny(py.message);
         if (py) pyNote = py.message;
       } catch { /* fail open */ }

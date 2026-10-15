@@ -9,7 +9,7 @@
 //                                                                 <root>/config/usage-analysis.json is absent, otherwise a diff is printed
 //
 // Flags (run):
-//   --scheduled          unattended: no prompts, never waits or sleeps, a day that is not settled is
+//   --scheduled          unattended: no prompts; it waits (sleeping, up to --lock-wait-seconds, default 100) only for a lock another run holds; a day that is not settled is
 //                        recorded "deferred" in the status file and picked up by the next run; exit 0.
 //                        Bounded by default: --max-seconds 120 and --max-days 14 unless you pass your own.
 //                        Honours the plugin option usage_analysis: when it is off, prints one line and exits 0.
@@ -32,17 +32,21 @@
 //   --json               machine output     --quiet   print nothing
 //
 // The run holds the checkup's lock (state/daily-checkup.lock) for the scan and the analysis, so it never
-// overlaps a checkup; a second run finds the lock taken, prints { skipped }, and exits 0. No model call, no
-// network, no child process of its own. Exit 0 whatever happens when --scheduled; otherwise 1 on an error, 2 on bad usage.
+// overlaps a checkup; a hand-typed run that finds the lock taken prints { skipped } and exits 0; a --scheduled run waits for it (see above) and, if it is still held at the bound, prints { skipped, lockTimeout: true } and exits 3. No model call, no
+// network, no child process of its own. Exit 0 whatever happens when --scheduled (except 3, lock still held after the wait); otherwise 1 on an error, 2 on bad usage.
 
 import { isMain } from './lib/is-main.mjs';
 import { runAnalysis, writeStatus, readStatus, readLatest, rerenderReport, usagePaths } from './lib/usage/runner.mjs';
 import { isDayKey } from './lib/usage/days.mjs';
 
-const VALUE_FLAGS = new Set(['root', 'transcripts', 'now', 'hold-ms', 'max-seconds', 'max-days', 'day', 'from', 'to', 'scenario', 'report-dir', 'register']);
+const VALUE_FLAGS = new Set(['root', 'transcripts', 'now', 'hold-ms', 'max-seconds', 'max-days', 'day', 'from', 'to', 'scenario', 'report-dir', 'register', 'lock-wait-seconds', 'lock-poll-ms']);
 // The scout calls `--scheduled` in a foreground step, so the run is bounded unless the caller says otherwise.
 export const SCHEDULED_MAX_SECONDS = 120;
 export const SCHEDULED_MAX_DAYS = 14;
+// A --scheduled run that meets a live lock waits this long for the holder (inside the ~120 s budget), then gives up with exit 3.
+export const SCHEDULED_LOCK_WAIT_SECONDS = 100;
+export const SCHEDULED_LOCK_POLL_MS = 1000;
+export const EXIT_LOCK_TIMEOUT = 3;
 
 const BOOL_FLAGS = new Set(['scheduled', 'force', 'dry-run', 'no-scan', 'no-register', 'json', 'quiet', 'from-register']);
 
@@ -139,9 +143,23 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`) }
   let code = 0;
   // A dry run reads only: it takes no lock, because it writes nothing under the root.
   const dry = !!f['dry-run'];
-  const locked = dry ? true : dc.takeLock();
+  let locked = dry ? true : dc.takeLock();
+  // A --scheduled run waits for a live holder (the session-start checkup's detached run, say), sleeping between checks and
+  // bounded by the lock-wait budget, then runs: the holder's day is found already computed and recorded as unchanged.
+  // A stale lock never reaches this loop (takeLock removes it). A run typed by hand keeps the old skip-at-once behaviour.
+  let lockTimeout = false;
+  if (!locked && scheduled) {
+    const waitS = f['lock-wait-seconds'] !== undefined && Number(f['lock-wait-seconds']) >= 0 ? Number(f['lock-wait-seconds']) : SCHEDULED_LOCK_WAIT_SECONDS;
+    const pollMs = f['lock-poll-ms'] !== undefined && Number(f['lock-poll-ms']) > 0 ? Number(f['lock-poll-ms']) : SCHEDULED_LOCK_POLL_MS;
+    const until = Date.now() + waitS * 1000;
+    while (!locked && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(1, until - Date.now()))));
+      locked = dc.takeLock();
+    }
+    lockTimeout = !locked;
+  }
   if (!locked) {
-    Object.assign(result, { skipped: 'another run holds the lock', computed: [], deferred: [] });
+    Object.assign(result, { skipped: lockTimeout ? 'lock still held after the wait' : 'another run holds the lock', computed: [], deferred: [], ...(lockTimeout ? { lockTimeout: true } : {}) });
   } else {
     const errors = [];
     try {
@@ -189,13 +207,14 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`) }
     }
   }
   if (!f.quiet) {
-    if (f.json || scheduled) out(JSON.stringify({ computed: result.computed, unchanged: result.unchanged || [], deferred: result.deferred, remaining: result.remaining || 0, skipped: result.skipped, error: result.error, errors: result.errors }));
+    if (f.json || scheduled) out(JSON.stringify({ computed: result.computed, unchanged: result.unchanged || [], deferred: result.deferred, remaining: result.remaining || 0, skipped: result.skipped, lockTimeout: result.lockTimeout, error: result.error, errors: result.errors }));
     else {
       const latest = readLatest(stateRoot);
       for (const l of human({ ...result, skipped: result.skipped }, latest, run)) out(l);
     }
   }
-  return scheduled ? 0 : code;
+  if (scheduled) return result.lockTimeout ? EXIT_LOCK_TIMEOUT : 0;
+  return code;
 }
 
 if (isMain(import.meta.url)) {

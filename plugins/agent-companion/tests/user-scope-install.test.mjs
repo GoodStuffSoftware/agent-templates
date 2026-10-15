@@ -142,12 +142,12 @@ test('scout: no plugin_version_behind and no plugin_copy_stale from project reco
     assert.equal(hits[0].dispatch, 'plugin-project-copy');
     assert.match(hits[0].detail, /^5 project- or local-scope agent-companion records should not exist \(user scope only\)/);
     // The scout scrubs absolute paths out of every signal, so each record is
-    // named by its project folder and the settings file by its name inside it.
-    assert.match(hits[0].detail, /proj1 \(project scope, 0\.30\.0; recreated by \.claude\/settings\.json\)/);
-    assert.match(hits[0].detail, /proj2 \(local scope, 0\.30\.0; recreated by \.claude\/settings\.local\.json\)/);
-    assert.match(hits[0].detail, /proj3 \(project scope, 0\.31\.13; no enabling settings file found\)/);
-    assert.match(hits[0].detail, /proj4 \(project scope, 0\.31\.13; no enabling settings file found\)/);
-    assert.match(hits[0].detail, /proj5 \(project scope, 0\.30\.0; no enabling settings file found\)/);
+    // named by "repo root N" (or its worktree name) and the settings file by its name inside it.
+    assert.match(hits[0].detail, /repo root 1 \(project scope, 0\.30\.0; recreated by \.claude\/settings\.json\)/);
+    assert.match(hits[0].detail, /repo root 2 \(local scope, 0\.30\.0; recreated by \.claude\/settings\.local\.json\)/);
+    assert.match(hits[0].detail, /repo root 3 \(project scope, 0\.31\.13; no enabling settings file found\)/);
+    assert.match(hits[0].detail, /repo root 4 \(project scope, 0\.31\.13; no enabling settings file found\)/);
+    assert.match(hits[0].detail, /repo root 5 \(project scope, 0\.30\.0; no enabling settings file found\)/);
     assert.match(hits[0].detail, /Full paths: run \/ac version\./);
     assert.equal((hits[0].detail.match(/no enabling settings file found/g) || []).length, 3);
     assert.match(hits[0].detail, /remove the agent-companion line from enabledPlugins/);

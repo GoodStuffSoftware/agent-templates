@@ -2,6 +2,15 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.21 — 2026-10-15
+
+The usage summary names info-severity regressions, the scheduled analysis waits on a held lock, and the python-stdin guard covers wrapped forms and logs each deny.
+
+- **Info-severity regressions.** The usage summary counted only alert-severity scenarios at status regression, and nearly all shipped scenarios are info, so it read "regressions: none" while info scenarios had regressed. Info-severity regressions are now counted and named (`summary.infoRegressionIds`): "none at alert severity; N info-severity (not paged): ids". Alert paging (`regressionIds`, the scout `usage_regression` signal) is unchanged.
+- **Scheduled run waits on the lock.** `usage-analysis.mjs --scheduled` waits (bounded, 100 s, polling every second; `--lock-wait-seconds`, `--lock-poll-ms`) for a held lock, then runs and records itself. Still held after the wait: exit 3 with `lockTimeout`, and the scout routine re-runs once. A hand-typed run is unchanged (skip, exit 0); a stale lock is removed with no wait.
+- **Repo-root names.** `plugin_project_copy` names repo-root records "repo root" (numbered "repo root N" when several) instead of the project name, which the scout scrubbed to `<name>`. Worktrees keep their tree name.
+- **python_stdin_guard coverage.** The guard now judges python-reads-stdin inside for/while/until bodies, shell function bodies (at their call sites), behind `timeout N` and `env -u VAR`, and inside quoted `"$(...)"` substitutions, exactly as the plain call. Each deny is logged to `denials.jsonl` (guard `python-stdin`; outcome `warn` in warn mode). The judging pass has a 3M-step budget; running out fails open (allow).
+
 ## 0.31.20 — 2026-10-14
 
 Hotfix: CI on Linux was red since 0.31.18; no behavior change.

@@ -46,7 +46,7 @@ import { makeRoutineSource } from './routines.mjs';
 import { sessionRecordRoot } from '../routine-model-drift.mjs';
 import { homeRoot, claudeDir } from '../../../hooks/lib/context.mjs';
 import {
-  renderReport, summaryLines, regressionsOf, regressionIdsOf, r4,
+  renderReport, summaryLines, regressionsOf, regressionIdsOf, infoRegressionsOf, r4,
 } from './report.mjs';
 
 export const RUNNER_VERSION = 3; // 3: worker/routine metrics (batch 6b): richer spawn records, slash rung labels, telemetry and routine records; 2: day records, byModel, spawn start and re-spawn keys
@@ -659,7 +659,7 @@ function computeDay(ctx, day, parts, prior, force) {
     regressions,
   };
   const lines = summaryLines(res);
-  res.summary = { lines, regressionIds: regressionIdsOf(regressions) };
+  res.summary = { lines, regressionIds: regressionIdsOf(regressions), infoRegressionIds: regressionIdsOf(infoRegressionsOf(scenarios)) };
   return res;
 }
 

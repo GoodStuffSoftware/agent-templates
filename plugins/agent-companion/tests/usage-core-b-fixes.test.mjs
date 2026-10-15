@@ -13,7 +13,7 @@ import { join, dirname } from 'node:path';
 import { addDays, dayRange } from '../scripts/lib/usage/days.mjs';
 import { applyExclusions, makeFactsLoader, factsFilePath } from '../scripts/lib/usage/cohort.mjs';
 import { runAnalysis, readResult, reportPathFor, makeHooks } from '../scripts/lib/usage/runner.mjs';
-import { renderReport, summaryLines } from '../scripts/lib/usage/report.mjs';
+import { renderReport, summaryLines, regressionsOf, regressionIdsOf, infoRegressionsOf } from '../scripts/lib/usage/report.mjs';
 
 const SPEC = { inUsd: 1, outRatio: 5, r: 0.1, w5: 1.25, w1: 2, mult: 1 };
 const SONNET = 'claude-sonnet-5-5';
@@ -120,6 +120,30 @@ test('summary never says "regressions: none" when no scenario was evaluated; it 
 
   const some = summaryLines({ day: '2026-10-10', regressions: [], scenarios: [{ id: 'a', status: 'ok' }, { id: 'b', status: 'ok' }, { id: 'c', skipped: 'gap' }, { id: 'd', status: 'gap' }] })[1];
   assert.match(some, /^regressions: none \(2 scenarios evaluated, 2 gaps\)$/);
+});
+
+test('summary and comparison statuses follow one rule: an info-severity regression is named, never "none"', () => {
+  const cmp = (status) => ({ compare: 'trailing-7', status, current: { value: 12, sample: 40 }, baseline: { value: 8 }, relPct: 50, label: 'M', interval: { applied: false } });
+  const scenarios = [
+    { id: 'x.info', severity: 'info', status: 'regression', comparisons: [cmp('regression')] },
+    { id: 'x.info2', severity: 'info', status: 'regression', groups: [{ key: 'g', comparisons: [cmp('regression')] }] },
+    { id: 'x.fine', severity: 'info', status: 'ok', comparisons: [cmp('ok')] },
+  ];
+  const l2 = summaryLines({ day: '2026-10-10', regressions: [], scenarios })[1];
+  assert.ok(!/regressions: none \(/.test(l2), l2);
+  assert.match(l2, /^regressions: none at alert severity; 2 info-severity \(not paged\): x\.info, x\.info2 /);
+  assert.deepEqual(regressionIdsOf(regressionsOf(scenarios)), [], 'info scenarios never page');
+  assert.deepEqual(regressionIdsOf(infoRegressionsOf(scenarios)), ['x.info', 'x.info2']);
+  // with an alert regression too, the alert is listed and the info ones are counted after it
+  const alert = { id: 'x.alert', severity: 'alert', status: 'regression', comparisons: [cmp('regression')] };
+  const both = [alert, ...scenarios];
+  const l2b = summaryLines({ day: '2026-10-10', regressions: regressionsOf(both), scenarios: both })[1];
+  assert.match(l2b, /^regressions: x\.alert .* ; also 2 info-severity \(not paged\): x\.info, x\.info2$/);
+  // the report names them too
+  assert.match(renderReport({ day: '2026-10-10', summary: { lines: [] }, revision: 1, facts: { from: 'a', to: 'b' }, inputs: {}, windows: {}, gaps: [], exclusions: { rows: [], unobservable: {}, undefinedRules: [] }, regressions: [], scenarios, weights: {} }), /Info-severity scenarios at status regression/);
+  // a fixture with none still says none
+  const quiet = summaryLines({ day: '2026-10-10', regressions: [], scenarios: [scenarios[2]] })[1];
+  assert.match(quiet, /^regressions: none \(1 scenario evaluated, 0 gaps\)$/);
 });
 
 test('through the runner: a day on which every scenario is a gap reads "n/a", not "none"', () => {
