@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.21",
+  "version": "0.31.22",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -82,6 +82,12 @@
       "type": "boolean",
       "title": "Bash exit telemetry",
       "description": "Record each Bash call's exit status and a hash of the normalised command (never the command text) in telemetry/bash-exit.jsonl, so repeated failures of the same gate can be counted later. Record only: no note, no deny. Also off when spawn_telemetry is off.",
+      "default": true
+    },
+    "hook_timing_telemetry": {
+      "type": "boolean",
+      "title": "Hook timing telemetry",
+      "description": "Record, for every hook process this plugin starts, the hook, event, tool, tool-call id, session, the process's own CPU time and its wall time from process start to exit (Node startup included) in telemetry/hook-timing.jsonl, so the cost of one process per registered hook can be measured from normal use. Passive: never changes a hook's decision, output or exit code; any failure is silent. The file is capped at 8 MB and rotated once (about 16 MB at most). Read it with `node scripts/hook-timing.mjs`. Independent of spawn_telemetry.",
       "default": true
     },
     "memory_doctor": {

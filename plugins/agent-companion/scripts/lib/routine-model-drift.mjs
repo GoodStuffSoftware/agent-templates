@@ -129,18 +129,44 @@ export function readTaskModels(claudeDirPath) {
   return out;
 }
 
+// Ids of finished one-off tasks. The app's task store (<root>/<account>/<org>/scheduled-tasks.json)
+// holds the enabled flag, a cron expression for recurring tasks and a fireAt time for one-time ones.
+// A task that is disabled, has no cron and whose fireAt has passed will not run again, so a missing
+// model: line on it is not worth a signal. Fails open (unreadable store = empty set).
+export function finishedOneShots(root, nowMs) {
+  const out = new Set();
+  try {
+    for (const a of readdirSync(root)) {
+      let bs = [];
+      try { bs = readdirSync(join(root, a)); } catch { continue; }
+      for (const b of bs) {
+        const j = readJson(join(root, a, b, 'scheduled-tasks.json'));
+        const list = j && Array.isArray(j.scheduledTasks) ? j.scheduledTasks : [];
+        for (const t of list) {
+          if (!t || typeof t !== 'object' || typeof t.id !== 'string') continue;
+          if (t.enabled !== false || t.cronExpression) continue;
+          const at = typeof t.fireAt === 'number' ? t.fireAt : Date.parse(t.fireAt);
+          if (Number.isFinite(at) && at <= nowMs) out.add(t.id);
+        }
+      }
+    }
+  } catch { /* missing store */ }
+  return out;
+}
+
 const fileMtime = (f) => { try { return f ? statSync(f).mtimeMs : 0; } catch { return 0; } };
 const taskMtime = (claudeDirPath, task) => fileMtime(join(claudeDirPath, 'scheduled-tasks', task, 'SKILL.md'));
 
 // -> { drift: [text], unpinned: [task name] }
 // drift: runs created in the last `windowMs` whose recorded model or effort differs from what the
 // task's SKILL.md and the run folder's pin say. unpinned: tasks with a SKILL.md and no model: line that
-// ran in the last `activeMs` (the app's task store, which holds the enabled flag, is not readable
-// by a script, so a run is the evidence that a task is enabled).
+// ran in the last `activeMs` (an enabled flag is not read here, so a run is the evidence that a task is enabled;
+// finished one-off tasks are dropped separately, from the app's task store, which fails quiet when it is missing).
 export function routineModelDrift({ sessionsRoot, claudeDirPath, nowMs, windowMs = 2 * DAY, activeMs = 14 * DAY }) {
   const drift = [];
   const tasks = readTaskModels(claudeDirPath);
-  const recent = scheduledRuns(sessionsRoot, nowMs, activeMs);
+  const done = finishedOneShots(sessionsRoot, nowMs);
+  const recent = scheduledRuns(sessionsRoot, nowMs, activeMs).filter((x) => !done.has(x.task));
   for (const r of recent.filter((x) => nowMs - x.createdAt <= windowMs)) {
     // A run cannot be judged against a pin that did not exist yet: skip a run created before the
     // task's SKILL.md (model half) or the run folder's settings.local.json (effort half) was last modified.

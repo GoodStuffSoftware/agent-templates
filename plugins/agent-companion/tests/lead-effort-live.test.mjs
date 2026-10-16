@@ -60,11 +60,9 @@ test('wording: one template, xhigh and high variants, no max raise, no lowering'
   assert.equal(LEAD_EFFORT_CHECK_TEXT_HIGH, leadEffortCheckText('high'));
   for (const [text, lv] of [[LEAD_EFFORT_CHECK_TEXT, 'xhigh'], [LEAD_EFFORT_CHECK_TEXT_HIGH, 'high']]) {
     assert.ok(text.includes(`A lead runs at ${lv};`));
-    assert.ok(text.includes(`Option 1 "Raise to ${lv} (Recommended)"`));
-    assert.ok(text.includes('Option 2 "Stay at <current>": continue; do not ask again this session.'));
-    assert.ok(text.includes(`Interactive and below ${lv}: ask with AskUserQuestion`));
+    assert.ok(text.includes(`Interactive and below ${lv}: state once, in your first report, the effort you run at and that orchestration is tuned for ${lv}.`));
     assert.ok(text.includes(`state the effort once, only if below ${lv}.`));
-    assert.ok(text.includes(`at ${lv} or above, say nothing and do not ask.`));
+    assert.ok(text.includes(`at ${lv} or above, say nothing about effort.`));
     assert.ok(text.endsWith('Never raise to max, never lower, never suggest lowering.'));
     assert.doesNotMatch(text, /Raise to max|set_session_effort/);
     assert.ok(text.length < 1000, `${text.length}`);
@@ -75,11 +73,9 @@ test('wording: one template, xhigh and high variants, no max raise, no lowering'
 test('wording: the high text is exactly the operator-facing wording (pinned)', () => {
   assert.equal(
     LEAD_EFFORT_CHECK_TEXT_HIGH,
-    'Orchestrating (workers, reviewers, several threads, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (it may show the starting effort: if the operator says it was raised, continue). A lead runs at high; at high or above, say nothing and do not ask. ' +
-    'Unattended (scheduledTaskId in get_session, headless or -p run, no AskUserQuestion tool): do not ask; state the effort once, only if below high. ' +
-    'Interactive and below high: ask with AskUserQuestion (options selector), not prose; no spawn or other tool call until answered. Header "Lead effort"; name the current effort and why this is orchestration. ' +
-    'Option 1 "Raise to high (Recommended)": the operator raises it in the app (you cannot); wait until get_session shows high or they say continue. ' +
-    'Option 2 "Stay at <current>": continue; do not ask again this session. ' +
+    'Orchestrating (workers, reviewers, several threads, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (it may show the starting effort: if the operator says it was raised, continue). A lead runs at high; at high or above, say nothing about effort. ' +
+    'Unattended (scheduledTaskId in get_session, headless or -p run): state the effort once, only if below high. ' +
+    'Interactive and below high: state once, in your first report, the effort you run at and that orchestration is tuned for high. This is information only: nothing is asked, nothing waits, no spawn or tool call is held. You cannot change your own effort; the operator can with the app\x27s effort control. Then continue normally and say nothing more about effort this session. ' +
     'Never raise to max, never lower, never suggest lowering.',
   );
 });

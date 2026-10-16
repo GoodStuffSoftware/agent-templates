@@ -54,7 +54,7 @@ test('standing rules: a compacting subagent gets no orchestration rule, the lead
   } finally { fx.cleanup(); }
 });
 
-test('standing rules: the lead-effort-check ask (AskUserQuestion) never reaches a worker, even enabled; an operator rule does', () => {
+test('standing rules: the lead-effort-check note never reaches a worker, even enabled; an operator rule does', () => {
   const fx = makeFixture();
   try {
     writeFileSync(rulesPath(), JSON.stringify([
@@ -63,7 +63,7 @@ test('standing rules: the lead-effort-check ask (AskUserQuestion) never reaches 
       { id: 'lead-only-house', scope: 'session-start', audience: 'lead', then: 'Orchestrators only.' },
     ]));
     const lead = runHook('hooks/standing-rules.mjs', LEAD, { args: SS }).json.hookSpecificOutput.additionalContext;
-    assert.match(lead, /AskUserQuestion/);
+    assert.match(lead, /Interactive and below xhigh: state once/);
     assert.match(lead, /Write no emojis\./);
     assert.match(lead, /Orchestrators only\./);
 

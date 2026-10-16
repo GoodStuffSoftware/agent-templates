@@ -202,6 +202,9 @@ whose.
 | `pin_scope` | string \| null | `project` or `user`: the agents folder the pinning definition was read from; null when not pinned |
 | `pin_fields` | string \| null | `model`, `effort` or `model+effort`: which fields the definition pins; null when not pinned |
 | `pin_model_overridden` | boolean | the spawn is pinned and its `model` parameter names a different tier alias than the definition's `model:` (the parameter wins in the harness). The guard adds one non-blocking note and rewrites nothing. False when not pinned or when no parameter was passed |
+| `cwd` | string \| null | the spawner's working directory when the hook ran, as a path key (`path:` and 12 hex of a hash of the normalised path; the row never carries the path itself). Equal keys mean the same folder. The lead's shell may have moved away from the project; a subagent's cwd is its own. Absent on rows written before 0.31.22 |
+| `project_root` | string \| null | path key of the nearest folder at or above `cwd` (at most 8 levels) holding a `.git`, else of the session's project folder (`project_dir_env`), else null |
+| `project_dir_env` | string \| null | path key of `CLAUDE_PROJECT_DIR` as the harness gave it to the hook, else null. Its `.claude/agents` is searched after the cwd chain and before the user folder (it fills a miss; a project the cwd chain finds wins), so a lead whose cwd moved to a folder with no `.git` still resolves the session project's agents. `project_root` differing from `project_dir_env` shows a moved cwd |
 | `caller_tool_use_id` | string \| null | for a parity-sized review spawned by a subagent: the caller's own Agent call id, from its sidecar. Joins the review's row to its writer's row (that row's `tool_use_id`) from `spawns.jsonl` alone; null when not looked up or the sidecar names none |
 | `consequence_from_caller` | boolean | `declared_consequence` "critical" was taken from the caller's own spawn row (its `TYPE:` preset is critical, e.g. `critical-change`), so F1 floors the review; the brief stated no `CONSEQUENCE:` line. Absent on rows written before 2026-09-28 |
 | `caller_row_found` | boolean \| null | for a parity-sized review spawned by a subagent: whether the caller's own spawn row was found (caller `agent_id` -> sidecar `toolUseId` -> the row with that `tool_use_id` in the same session, rows agreeing on `declared_type`); null when not looked up |
@@ -426,6 +429,28 @@ PostToolUse payload with an error or a non-zero exit field is also read as a fai
 | `exit` | number \| null | exit code; null for an interrupt or an unparseable failure |
 | `failed` | boolean | `exit` is non-zero, or the failure had no parseable code |
 | `interrupted` | true \| absent | the call was aborted |
+
+### `hook-timing.jsonl` — hook process timing
+
+One row per hook process, appended by the process itself as it exits (the exit listener in
+`hooks/lib/context.mjs`; no extra process, nothing printed, no effect on the hook's decision, output
+or exit code, every failure silent). Option `hook_timing_telemetry` (default on). Fixture and canary
+sessions are not recorded. Bounded: at 8 MB the file is renamed over `hook-timing.1.jsonl`, so at
+most about 16 MB is kept. Read with `node scripts/hook-timing.mjs`.
+
+| field | type | meaning |
+|---|---|---|
+| `v`, `at` | number, ISO 8601 | schema version, when the process exited |
+| `hook` | string | the hook script's name, without `.mjs` |
+| `event` | string \| null | `hook_event_name` from the hook input; null for a hook that read no input |
+| `tool` | string \| null | `tool_name` from the input; null for events that have none |
+| `call` | string \| null | `tool_use_id` from the input; the key that groups the processes of one tool call (Pre and Post share it); null when the input has none |
+| `session_id` | string | the session |
+| `cpu_ms` | number | the process's own CPU time, user plus system, from `process.cpuUsage()`; Node's startup is in it |
+| `wall_ms` | number | process start to exit (`performance.now()` since Node's time origin); the OS creating the process is not in it |
+| `t0`, `t1` | number | start and exit as epoch milliseconds; the report reads them to tell parallel from sequential |
+
+The row is written after both clocks are read, so the write is not in the figures.
 
 ### `bash-tail.jsonl` — the Bash output tail
 

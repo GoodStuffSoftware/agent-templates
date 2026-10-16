@@ -499,20 +499,39 @@ const PROJECT_DRIFT_MAX = 200;
 try {
   const claudeJsonPath = process.env.AGENT_COMPANION_DISCOVERY_CLAUDE_JSON || join(homeRoot(), '.claude.json');
   const listed = readClaudeJsonProjectPaths({ claudeJsonPath }) || [];
-  const candidates = [...new Set([process.cwd(), ...listed])]
+  // One project is often listed in both slash forms (and again by this run's cwd): fold to one.
+  const seenProj = new Set();
+  const candidates = [process.cwd(), ...listed]
+    .filter((p) => {
+      const key = String(p).replace(/\\/g, '/').replace(/\/+$/, '');
+      const k = process.platform === 'win32' ? key.toLowerCase() : key;
+      if (seenProj.has(k)) return false;
+      seenProj.add(k);
+      return true;
+    })
     .filter((p) => existsSync(join(p, '.claude', 'agents')))
     .slice(0, PROJECT_DRIFT_MAX);
   const drifted = [];
+  // The scout scrubs absolute paths and project names out of a signal, so a repo-root project shows
+  // as a bare placeholder. Name a root "repo root" (numbered when several), a worktree by its tree.
+  const isTree = (p) => /[\\/]\.claude[\\/]worktrees[\\/][^\\/]+[\\/]*$/.test(String(p));
+  const found = [];
   for (const p of candidates) {
     const c = driftCounts(projectAgentDrift(p));
     const bad = c.below + c.above + c.inherits + c.unknownType + c.parityGaps + c.parityUnverifiable;
     if (bad) {
-      drifted.push(`${basename(p)}: ${[
+      found.push({ tree: isTree(p), name: basename(p), text: [
         c.below && `${c.below} below`, c.above && `${c.above} above`, c.inherits && `${c.inherits} inherit effort`,
         c.unknownType && `${c.unknownType} unknown routingType`, c.parityGaps && `${c.parityGaps} writer(s) without a parity reviewer`,
         c.parityUnverifiable && `${c.parityUnverifiable} writer(s) with unverifiable parity`,
-      ].filter(Boolean).join(', ')}`);
+      ].filter(Boolean).join(', ') });
     }
+  }
+  const rootCount = found.filter((x) => !x.tree).length;
+  let rootN = 0;
+  for (const x of found) {
+    const label = x.tree ? x.name : (rootN += 1, rootCount > 1 ? `repo root ${rootN}` : 'repo root');
+    drifted.push(`${label}: ${x.text}`);
   }
   if (drifted.length) {
     sig('project_agent_drift',

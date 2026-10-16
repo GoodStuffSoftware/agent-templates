@@ -8,7 +8,7 @@
 
 import {
   readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync,
-  openSync, fstatSync, readSync, closeSync, unlinkSync, renameSync,
+  openSync, fstatSync, readSync, closeSync, unlinkSync, renameSync, appendFileSync,
 } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -114,6 +114,15 @@ export function scopeKey(entry) {
   if (scope === 'user' || !entry.projectPath) return scope;
   const h = createHash('sha256').update(normalizePath(entry.projectPath)).digest('hex').slice(0, 12);
   return `${scope}:${h}`;
+}
+
+// A folder as a telemetry row may carry it: "path:" plus a short hash of the
+// normalised path, never the path itself (rows are path-free by design, and the
+// opt-in upload sends them as written). Equal keys mean the same folder, which
+// is all the spawn row's cwd / project_root / project_dir_env comparison needs.
+export function pathKey(p) {
+  if (typeof p !== 'string' || !p.trim()) return null;
+  return `path:${createHash('sha256').update(normalizePath(resolve(p))).digest('hex').slice(0, 12)}`;
 }
 
 export function parseVersion(v) {
@@ -2144,7 +2153,9 @@ export function readStdin() {
     // found". Documented in the library as powershell-pipe-bom-breaks-json.
     if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
     raw = raw.trim();
-    return raw ? JSON.parse(raw) : {};
+    const parsed = raw ? JSON.parse(raw) : {};
+    hookTimingSeen(parsed);
+    return parsed;
   } catch {
     return {};
   }
@@ -2543,6 +2554,30 @@ function pluginAgentsDirFor(plugin, cwd) {
 }
 const UNSAFE_AGENT_NAME = /[\\/]|\.\./;
 
+// CLAUDE_PROJECT_DIR as the harness gave it to this hook (the session's own
+// project folder), else null. Searched by projectAgentRoots below.
+export function claudeProjectDir(env = process.env) {
+  const v = env && typeof env.CLAUDE_PROJECT_DIR === 'string' ? env.CLAUDE_PROJECT_DIR.trim() : '';
+  return v || null;
+}
+// The project root a spawn row records: the nearest folder at or above `cwd`
+// (at most 8 levels) holding a `.git`, else the session's project folder, else null.
+export function resolvedProjectRoot(cwd) {
+  try {
+    if (cwd) {
+      let d = resolve(String(cwd));
+      for (let i = 0; i < 8; i++) {
+        if (existsSync(join(d, '.git'))) return d;
+        const up = dirname(d);
+        if (up === d) break;
+        d = up;
+      }
+    }
+  } catch { /* fall through */ }
+  const pd = claudeProjectDir();
+  return pd ? resolve(pd) : null;
+}
+
 // The agent folders a BARE agent name is looked up in, in order: the working
 // directory's own `.claude/agents`, then each parent's up to and including the
 // first directory that holds a `.git` (file or folder), at most 8 levels, then
@@ -2552,6 +2587,14 @@ const UNSAFE_AGENT_NAME = /[\\/]|\.\./;
 // folder is used, exactly as before, so an unrelated parent is never searched.
 // A parent whose agents folder IS the user's (cwd under the home folder) is
 // skipped here: it comes last, as the user scope.
+//
+// The session's own project folder (CLAUDE_PROJECT_DIR, set by the harness for
+// hooks) is searched after the cwd chain and before the user's folder, so it
+// only fills a miss: when the cwd chain finds the name, the cwd's project wins
+// even if CLAUDE_PROJECT_DIR names another project (E: the harness's own order
+// is not verified). It exists for a lead whose cwd drifted to a folder with no
+// `.git` (the config folder, 2026-10-15), which otherwise missed every project
+// agent and recorded its spawns as unpinned.
 export function projectAgentRoots(cwd) {
   const userAgents = join(claudeDir(), 'agents');
   const same = (a, b) => {
@@ -2577,6 +2620,11 @@ export function projectAgentRoots(cwd) {
       const a = join(d, '.claude', 'agents');
       if (!same(a, userAgents) && !out.some((o) => same(o, a))) out.push(a);
     }
+  }
+  const pd = claudeProjectDir();
+  if (pd) {
+    const a = join(resolve(pd), '.claude', 'agents');
+    if (!same(a, userAgents) && !out.some((o) => same(o, a))) out.push(a);
   }
   if (!out.some((o) => same(o, userAgents))) out.push(userAgents);
   return out;
@@ -3021,3 +3069,77 @@ export function deny(reason) {
 
 // Exit silently without a decision — the call proceeds normally.
 export function passthrough() { process.exit(0); }
+
+// ---------------------------------------------------------------------------
+// Hook-process timing (option hook_timing_telemetry, default on). Passive: one
+// row per hook PROCESS, appended to telemetry/hook-timing.jsonl as the process
+// exits, so the cost of "one Node process per registered hook" can be read off
+// real use before anyone decides on a dispatcher. Read with
+// `node scripts/hook-timing.mjs`; fields in docs/TELEMETRY.md.
+//
+// Lives in this file, not a module of its own, because every hook loads
+// context.mjs and each extra module file costs every hook load. It arms itself
+// only when the running script is a file directly under a `hooks/` directory
+// (a hook process); a test, a CLI or an importer of this module is untouched.
+//
+// Never changes a hook: the exit listener reads two clocks, writes one line and
+// returns; it sets no exit code, prints nothing, and every failure is swallowed.
+// CPU is process.cpuUsage() (user+system since the process began, so Node's own
+// startup is in it). Wall is performance.now() since performance.timeOrigin,
+// which Node takes at the start of its own bootstrap: the OS creating the
+// process and loading node.exe come before it and are not counted.
+// The listener's own work (the write) is not part of the measurement.
+export const HOOK_TIMING_FILE = 'hook-timing.jsonl';
+export const HOOK_TIMING_ROTATED = 'hook-timing.1.jsonl';
+// Growth bound: when the live file reaches this size it is renamed over the
+// rotated file, so at most two files, about twice this, are ever kept.
+export const HOOK_TIMING_MAX_BYTES = 8 * 1024 * 1024;
+
+let hookTimingPayload = null;
+// readStdin() reports each non-empty hook input here; the first one wins.
+function hookTimingSeen(p) {
+  if (hookTimingPayload === null && p && typeof p === 'object' && !Array.isArray(p) && Object.keys(p).length) hookTimingPayload = p;
+}
+
+function isHookProcess() {
+  const script = process.argv[1];
+  return !!script && /\.mjs$/i.test(script) && basename(dirname(resolve(script))) === 'hooks';
+}
+
+function writeHookTiming(cpuMicros, startMs, wallMs) {
+  if (!opt('hook_timing_telemetry', true)) return;
+  const p = hookTimingPayload || {};
+  const sid = String(p.session_id ?? '');
+  if (isFixtureSession(sid)) return; // verification and canary runs never reach the production stream
+  const dir = telemetryDir();
+  const file = join(dir, HOOK_TIMING_FILE);
+  try {
+    if (statSync(file).size >= HOOK_TIMING_MAX_BYTES) renameSync(file, join(dir, HOOK_TIMING_ROTATED));
+  } catch { /* no file yet, or a racing process already rotated it */ }
+  const t0 = Math.round(startMs);
+  const row = {
+    v: TELEMETRY_SCHEMA,
+    at: new Date(t0 + Math.round(wallMs)).toISOString(),
+    hook: basename(process.argv[1]).replace(/\.mjs$/i, ''),
+    event: typeof p.hook_event_name === 'string' ? p.hook_event_name : null,
+    tool: typeof p.tool_name === 'string' ? p.tool_name : null,
+    call: typeof p.tool_use_id === 'string' && p.tool_use_id ? p.tool_use_id : null,
+    session_id: sid,
+    cpu_ms: Math.round(cpuMicros / 100) / 10,
+    wall_ms: Math.round(wallMs * 10) / 10,
+    t0,
+    t1: t0 + Math.round(wallMs),
+  };
+  appendFileSync(file, JSON.stringify(row) + '\n');
+}
+
+if (isHookProcess()) {
+  process.on('exit', () => {
+    try {
+      // Both clocks first: nothing below is counted in the row.
+      const wallMs = performance.now();
+      const cpu = process.cpuUsage();
+      writeHookTiming(cpu.user + cpu.system, performance.timeOrigin, wallMs);
+    } catch { /* fail open: a timing row is never worth a hook's exit */ }
+  });
+}

@@ -80,7 +80,7 @@ documentation. `--when 'deploy|ship it|push to prod'` beats `--when
 | `agent-brevity` | `spawn` | disabled; it exists so `list` shows you the spawn scope is available |
 | `poll-guard-doctrine` | `session-start` | every session — one completion wait, never per-item wakes (cache-advisor guard b, `hooks/poll-guard.mjs`) |
 | `pr-wait-hint` | `session-start` | every session, while the `pr_wait` option is on — one line pointing at `scripts/pr-wait.mjs` (README "PR and CI wait"); `standing_rules: false` removes it too |
-| `lead-effort-check` | `session-start` | disabled by default (enable with `{"id":"lead-effort-check","enabled":true}`): an orchestrating interactive session below xhigh is asked, with the AskUserQuestion options selector, to raise to xhigh (the operator does it with the app's effort control; the lead cannot self-set) or stay; unattended sessions are not asked |
+| `lead-effort-check` | `session-start` | disabled by default (enable with `{"id":"lead-effort-check","enabled":true}`): an orchestrating session below xhigh states its effort once in its first report and that orchestration is tuned for xhigh, then continues; it never asks and never waits (the lead cannot self-set; the operator uses the app's effort control); silent at xhigh or above |
 
 Disable any of them by id (`disable copyable-prompt`) — they are never removed,
 so a plugin update can still improve their wording while your choice stands.

@@ -53,7 +53,7 @@ import {
   classifyModel, classifyEffort, modelTiers, sessionBuildVersion, parseSemver, semverBelow,
   taskTypeDef, canonicalTaskType, unknownTypeHint, isLadderAgentName, rungFor, runningCopyStamp, tailRecords, telemetryDir,
   claudeDir, sessionLoadedAt, writerFromDeclaration, ownAgentsDir, callerIsSubagent, routedRung, routeLayerTag,
-  briefNeedsDroppedTools, ladderVariants, pluginName, projectAgentRoots,
+  briefNeedsDroppedTools, ladderVariants, pluginName, projectAgentRoots, resolvedProjectRoot, claudeProjectDir, pathKey,
 } from './lib/context.mjs';
 
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
@@ -1639,6 +1639,11 @@ try {
       pin_scope: pinned ? pin.scope : null,   // project | user
       pin_fields: pinned ? pin.fields : null, // model | effort | model+effort
       pin_model_overridden: pinModelOverridden, // pinned, and the call's `model` names a different alias than the definition's
+      // --- Where the definition was looked up (0.31.22) -------------------------
+      // Folders are recorded as path keys ("path:" + 12 hex of a hash), never as paths: rows are path-free and the opt-in upload sends them as written.
+      cwd: pathKey(p.cwd),                                // the spawner's working directory when the hook ran
+      project_root: pathKey(resolvedProjectRoot(p.cwd)),  // nearest .git folder at or above it (8 levels), else the session's project folder, else null
+      project_dir_env: pathKey(claudeProjectDir()),       // CLAUDE_PROJECT_DIR as the harness gave it to the hook, else null
       caller_row_found: callerRow ? callerRow.state === 'found' : null, // the caller's own spawn row was found by tool_use_id; null when not looked up
       caller_declared_type: callerDeclaredType, // that row's declared_type; null when not found or none declared
       // The caller's own Agent call id, from its sidecar: joins this review's

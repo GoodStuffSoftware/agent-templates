@@ -14,6 +14,6 @@ Lead-sizing rules usually name the MODEL ("use the strong model for multi-agent 
 
 **How to apply:**
 - **Treat lead effort as a checked setting, not an assumed one.** At session start, and again after any resume or compaction, have the lead read its own session metadata and compare the effort to the doctrine. For an orchestration lead that is the high end of the scale.
-- **If it is lower, the lead says so in one line and asks the operator to raise it.** It must not change the setting itself and must not carry on silently at the lower level. In an unattended run there is nobody to ask: continue, and state the effort once in the output.
+- **If it is lower, the lead says so once, in one line, in its first report, and carries on.** It does not ask and does not wait: a session cannot raise its own effort, and a question that blocks the work costs the operator more than it buys. It must not change the setting itself and must not carry on silently at the lower level. An unattended run states the effort once in the output.
 - **Enforce this as a session-start injected rule**, not a line in a long guide: a document rule is read once and forgotten ([[re-inject-a-standing-rule-from-a-hook]]).
 - Sibling of [[an-omitted-worker-tier-inherits-the-leads]]: that lesson audits the defaults workers inherit from the lead; this one audits the lead's own configuration.

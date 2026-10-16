@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.22 — 2026-10-16
+
+Hook-process timing telemetry, a lead-effort rule that informs instead of asking, spawn rows that carry the working folder with a project-dir agent lookup, and the scout's naming and finished-task fixes.
+
+- **Hook timing (`hook_timing_telemetry`, default on).** Each hook process appends its CPU and wall time (Node startup included) to `telemetry/hook-timing.jsonl` as it exits (8 MB cap, one rotation). Fixture and canary sessions are not recorded. `node scripts/hook-timing.mjs` reports processes per call by tool, CPU and wall per call (median, p90), per-day totals, parallel vs sequential per event, and an estimate (E) of one process per event.
+- **Lead-effort rule informs.** The rule now informs once, in the lead's first report, when the lead runs below xhigh. It no longer asks the operator, waits, or blocks a spawn; other behavior is unchanged.
+- **Spawn rows and agent lookup.** `spawns.jsonl` rows gain `cwd`, `project_root` and `project_dir_env`, each as a path key (`path:` and a short hash, never the path, since rows are path-free). Project agents are also looked up under `CLAUDE_PROJECT_DIR/.claude/agents` (after the cwd chain, before the user's folder), fixing unpinned spawns when the lead's cwd had moved out of the project.
+- **Scout naming.** `project_agent_drift` names repo roots "repo root N" and worktrees by tree, and lists a root once however its path is spelled.
+- **Finished one-off tasks.** `routine_model_drift` skips disabled one-time tasks whose fire time has passed, so the routine-effort-pins/t-model-drift flag no longer fires for them.
+- **Pricing check.** The Sonnet 5.5 cache-read price was verified at $0.10/MTok against the pricing page; the table was already correct, no change.
+
 ## 0.31.21 — 2026-10-15
 
 The usage summary names info-severity regressions, the scheduled analysis waits on a held lock, and the python-stdin guard covers wrapped forms and logs each deny.

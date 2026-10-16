@@ -121,8 +121,8 @@ export const COPYABLE_PROMPT_WHEN = [
 // wording until the rollout id named by the option lead_effort_rollout_id is
 // reached in the state root's rollout.json (an empty option: always xhigh), LEAD_EFFORT_CHECK_TEXT_HIGH from then on (the built-in
 // rule below carries it as its `after` overlay). One template, so the two
-// cannot drift apart. At or above the target the lead says nothing and asks
-// nothing; the text never raises to max and never suggests lowering.
+// cannot drift apart. At or above the target the lead says nothing; below it
+// it states the effort once and asks nothing; the text never raises to max and never suggests lowering.
 // The rollout id comes from the plugin option lead_effort_rollout_id (string,
 // default empty = no switch, the target stays xhigh). Never hard-coded here.
 export function leadEffortRolloutId() {
@@ -130,11 +130,9 @@ export function leadEffortRolloutId() {
 }
 export function leadEffortCheckText(level) {
   return [
-    `Orchestrating (workers, reviewers, several threads, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (it may show the starting effort: if the operator says it was raised, continue). A lead runs at ${level}; at ${level} or above, say nothing and do not ask.`,
-    `Unattended (scheduledTaskId in get_session, headless or -p run, no AskUserQuestion tool): do not ask; state the effort once, only if below ${level}.`,
-    `Interactive and below ${level}: ask with AskUserQuestion (options selector), not prose; no spawn or other tool call until answered. Header "Lead effort"; name the current effort and why this is orchestration.`,
-    `Option 1 "Raise to ${level} (Recommended)": the operator raises it in the app (you cannot); wait until get_session shows ${level} or they say continue.`,
-    'Option 2 "Stay at <current>": continue; do not ask again this session.',
+    `Orchestrating (workers, reviewers, several threads, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (it may show the starting effort: if the operator says it was raised, continue). A lead runs at ${level}; at ${level} or above, say nothing about effort.`,
+    `Unattended (scheduledTaskId in get_session, headless or -p run): state the effort once, only if below ${level}.`,
+    `Interactive and below ${level}: state once, in your first report, the effort you run at and that orchestration is tuned for ${level}. This is information only: nothing is asked, nothing waits, no spawn or tool call is held. You cannot change your own effort; the operator can with the app's effort control. Then continue normally and say nothing more about effort this session.`,
     'Never raise to max, never lower, never suggest lowering.',
   ].join(' ');
 }
@@ -263,9 +261,9 @@ function builtinRules() {
       // publicly. An operator who wants it turns it on with
       // {"id":"lead-effort-check","enabled":true} in standing-rules.json, which
       // keeps the wording shipping from here rather than from their file.
-      // Interactive sessions get an options-selector ASK (AskUserQuestion), not
-      // prose, so the question cannot be missed and the turn stops until it is
-      // answered; unattended sessions are never asked.
+      // The lead only informs: below the target it states its effort once in
+      // its first report and carries on. It never asks and never waits, because
+      // a session cannot raise its own effort.
       id: 'lead-effort-check',
       audience: 'lead',
       enabled: false,
