@@ -83,6 +83,15 @@
 //   CI_LOCAL_MAX_PARALLEL=<n>   cap concurrent full runs (default: the budget decides)
 //   CI_LOCAL_HEAVY_MAX / CI_LOCAL_HEAVY_COST   the heavy lane, below
 //   CI_LOCAL_LOCK=0             bypass the budget entirely
+//   CI_LOCAL_RESERVE / CI_LOCAL_LOAD_PCT / CI_LOCAL_SLICE   headroom, below
+//
+// Headroom for hooks and interactive work. This process lowers its own priority to
+// below normal at the entry point (children inherit it), so a test run yields the
+// cpu to a hook. The budget keeps CI_LOCAL_RESERVE cores idle (default an eighth of
+// the machine, at least 1) and admits new workers slowly (one per lane) while the
+// machine is over that or over CI_LOCAL_LOAD_PCT percent busy. To follow the load
+// through a long pass, the regular files run in slices of CI_LOCAL_SLICE files per
+// worker (default 6; 0 = one run), and each slice re-samples the machine.
 //
 // Heavy lane: the test files in HEAVY_TEST_FILES (below) spawn git or sh many
 // times, so process-spawn cost, not CPU, is what limits them. Each testDir
@@ -110,7 +119,7 @@ import {
 import { join, dirname, resolve, relative, delimiter, win32, posix } from 'node:path';
 import { tmpdir, availableParallelism, homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { acquire, resolveBudgetConfig } from './ci-budget.mjs';
+import { acquire, resolveBudgetConfig, lowerOwnPriority } from './ci-budget.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..');
@@ -819,6 +828,7 @@ export function createBudgetSession({
   log = (m) => console.log(m), label = 'ci-local', worktree = REPO_ROOT,
 } = {}) {
   let lease = null;
+  let lastLogged = 0;
   const open = (desired) => {
     lease = acquireLease(kind === 'targeted'
       ? { kind: 'targeted', label, worktree }
@@ -828,12 +838,20 @@ export function createBudgetSession({
     kind,
     get lease() { return lease; },
     heavyMax: cfg.heavyMax,
+    // Test files per worker in one slice of a long pass (0: the whole pass at once).
+    sliceFactor: kind === 'targeted' ? 0 : (cfg.sliceFactor ?? 0),
+    // Workers for the next stretch of work. Every call after the first re-samples the
+    // machine (a loaded machine admits one worker), so a long pass, run in slices,
+    // sees the load as it is now and not as it was at admission.
     plain(desired) {
       const fresh = !lease;
       if (fresh) open(desired);
-      else if (kind !== 'targeted') lease.resize({ units: desired, heavy: 0 });
+      else if (kind !== 'targeted') lease.resize({ units: desired, heavy: 0 }, { resample: true });
       const got = Math.max(1, lease.units);
-      if (!fresh && kind !== 'targeted' && got < desired) log(`ci-local: the CI budget is busy: running with ${got} of ${desired} test workers.`);
+      if (!fresh && kind !== 'targeted' && got < desired && got !== lastLogged) {
+        lastLogged = got;
+        log(`ci-local: the CI budget is busy: running with ${got} of ${desired} test workers.`);
+      }
       return got;
     },
     heavy(want) {
@@ -899,9 +917,18 @@ export function runBudgetedTests({
 }) {
   const { normal, heavy } = splitHeavy(files, budget.heavyMax > 0 && budget.kind !== 'targeted' ? HEAVY_TEST_FILES : []);
   const parts = [];
-  if (normal.length) {
+  // The regular files run in slices of `sliceFactor` files per worker, and each slice
+  // asks the budget again for its workers, which re-samples the machine: a long pass
+  // follows the load instead of holding the grant it won at admission. A pass of
+  // up to one slice, or sliceFactor 0, is a single run.
+  const factor = Math.max(0, Math.trunc(budget.sliceFactor || 0));
+  let rest = normal;
+  while (rest.length) {
     const n = budget.plain(concurrency);
-    parts.push(run({ files: normal, cwd, env, ciParity, concurrency: n }));
+    const size = factor > 0 ? Math.max(1, n * factor) : rest.length;
+    const slice = rest.length > size ? rest.slice(0, size) : rest;
+    rest = rest.slice(slice.length);
+    parts.push(run({ files: slice, cwd, env, ciParity, concurrency: n }));
   }
   if (heavy.length) {
     const want = Math.max(1, Math.min(budget.heavyMax, heavy.length, concurrency));
@@ -1221,6 +1248,10 @@ async function main() {
     process.exitCode = 0;
     return;
   }
+  // Below-normal priority for this process and, by inheritance, every suite, lane
+  // and git/sh child below it (the pre-push gate runs through here too), so hooks
+  // and interactive work win the cpu. Hooks are a separate path and keep theirs.
+  lowerOwnPriority();
   registerSignalHandlers();
   sweepStaleTempDirs();
   cleanupLegacyParityTags(REPO_ROOT);

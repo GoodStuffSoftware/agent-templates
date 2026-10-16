@@ -88,7 +88,7 @@ test('a full session: acquire once with the wanted workers, resize between phase
   assert.deepEqual(b.events[0], ['acquire', { kind: 'full', desired: 8, label: 'x', worktree: 'wt' }]);
   assert.deepEqual(logs, [], 'the first grant is announced by ci-budget itself, not twice');
   assert.equal(s.plain(8), 3);
-  assert.deepEqual(b.events[1], ['resize', { units: 8, heavy: 0 }, {}]);
+  assert.deepEqual(b.events[1], ['resize', { units: 8, heavy: 0 }, { resample: true }]);
   assert.match(logs.join('\n'), /running with 3 of 8 test workers/);
   assert.equal(s.heavy(2), 2);
   assert.deepEqual(b.events[2], ['resize', { units: 0, heavy: 2 }, { wait: true }], 'the heavy lane waits for a slot');
@@ -221,6 +221,8 @@ test('a real run: the regular pass holds plain workers, the heavy pass holds hea
           CI_LOCAL_LOCK_DIR: oldLocks,
           CI_LOCAL_OBSERVE: observe,
           CI_LOCAL_LOCK: '',
+          CI_LOCAL_RESERVE: '0', // a busy test machine must not throttle the probe
+          CI_LOCAL_LOAD_PCT: '100',
         },
       });
       let out = '';

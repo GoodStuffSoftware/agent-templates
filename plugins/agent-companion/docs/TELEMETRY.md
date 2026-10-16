@@ -337,7 +337,7 @@ with no corresponding start was denied or failed.
 | `session_id` | string | session it fired in |
 | `agent_type` | string \| absent | the payload's `agent_type`; absent on a main-thread call, which carries none |
 | `tool_name` | string \| null | the tool the call was for (`Agent`, `Bash`, …) |
-| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, `inherit` (`inherit_guard: block`), `review-recursion` (a reviewer spawning a reviewer, `review_recursion_guard`), `type-required` (a ladder-rung spawn with no `TYPE:`, `WEIGHT:` or `KIND:` line, `type_line_required`), or `python-stdin` (a Bash call that would start Python reading its program from a NUL stdin, `python_stdin_guard`; `outcome: "warn"` in warn mode; `detail` is the command text, cut with the rest at 300 chars) |
+| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, `inherit` (`inherit_guard: block`), `review-recursion` (a reviewer spawning a reviewer, `review_recursion_guard`), `type-required` (a ladder-rung spawn with no `TYPE:`, `WEIGHT:` or `KIND:` line, `type_line_required`), or `python-stdin` (a Bash call that would start Python reading its program from a NUL stdin, `python_stdin_guard`; `outcome: "warn"` in warn mode; `detail` is the command text, cut with the rest at 300 chars), or `worker-wait` (a subagent's repeat sleep, poll or watch loop within `worker_wait_repeat_window_minutes` of its previous match, `worker_wait_guard: deny-repeat`; `detail` names the match kind and the window, not the command) |
 | `outcome` | string | `deny`, or `warn` for a `delegation_guard: warn` firing (the guard matched and did not stop the call). A consumer counting blocked calls filters on `deny`; any row proves the guard still fires |
 | `detail` | string | short reason, truncated to 300 chars. A `delegation` row ends with the scope and what the call's env said for `CLAUDE_CODE_SESSION_ATTENDED` (`scope attended, attended 1`) |
 
@@ -395,7 +395,7 @@ compaction once per compaction).
 
 ### `context-ceiling.jsonl` — one record per context-ceiling nudge
 
-Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-above or opus subagent to write a handoff file and return (`subagent_ceiling_tokens`, default 150000), once per worker (a second row only if `subagent_ceiling_repeat_tokens` is set; default 0 = off). Haiku, sonnet/low and sonnet/medium are never nudged and write no row. Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
+Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-above or opus subagent to write a handoff file and return (`subagent_ceiling_tokens`, default 175000), once per worker (a second row only if `subagent_ceiling_repeat_tokens` is set; default 0 = off). Haiku, sonnet/low and sonnet/medium are never nudged and write no row. Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
 
 | field | type | meaning |
 |---|---|---|
@@ -588,7 +588,7 @@ The effect for a review: each `end` row stands for `polls` gh calls that never r
 
 ### `worker-wait.jsonl` — the worker one-wait rule
 
-Written by `hooks/poll-guard.mjs` on a subagent's Bash or PowerShell call that looks like a wait loop (`gh pr checks`, `gh run watch`, a `sleep` of 5 s or more, a `while`/`until` loop that sleeps or polls). One row per match, not only the first; the command text is not stored. The lead's own calls write nothing. Toggle: `worker_wait_advisory`.
+Written by `hooks/poll-guard.mjs` on a subagent's Bash or PowerShell call that looks like a wait loop (`gh pr checks`, `gh run watch`, a `sleep` of 5 s or more, a `while`/`until` loop that sleeps or polls). One row per match, not only the first; the command text is not stored. The lead's own calls write nothing. Toggles: `worker_wait_advisory` (all of it) and `worker_wait_guard` (`hint`, `deny-repeat` default, `off`); under `deny-repeat` a repeat by the same agent in the same session within `worker_wait_repeat_window_minutes` (default 15) of its previous match is refused and also written to `denials.jsonl` (guard `worker-wait`).
 
 | field | type | meaning |
 |---|---|---|
@@ -599,7 +599,8 @@ Written by `hooks/poll-guard.mjs` on a subagent's Bash or PowerShell call that l
 | `agent_type` | string | null | the worker's agent type |
 | `tool` | string | `Bash` or `PowerShell` |
 | `kind` | string | `loop`, `gh-check` or `sleep` |
-| `first` | boolean | whether this match produced the hint (once per worker) |
+| `first` | boolean | whether this was the worker's first match (the first hint) |
+| `action` | string | `hint` (the notice was given), `deny` (the call was refused) or `silent` (`worker_wait_guard: hint`, a repeat after the first hint). Absent on rows written before 0.31.23 |
 
 Count matches per week against the 1,145 worker poll requests that cost 2.6% of the weekly limit in one measured week.
 

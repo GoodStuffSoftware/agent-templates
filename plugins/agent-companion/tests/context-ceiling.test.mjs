@@ -1,6 +1,6 @@
 // Subagent context ceiling: hooks/subagent-context.mjs also nudges a sonnet/high-or-above
 // or opus subagent to write a HANDOFF file and return when its context reaches
-// subagent_ceiling_tokens (150K), once per worker (a second notice only if
+// subagent_ceiling_tokens (175K), once per worker (a second notice only if
 // subagent_ceiling_repeat_tokens is set; default 0). Never haiku, sonnet/low or
 // sonnet/medium. Gated by the rollout schedule
 // <state root>/rollout.json ("context-ceiling": activeFrom). Advice only: never a
@@ -10,9 +10,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook, readJsonl } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
 import { telemetryDir } from '../hooks/lib/context.mjs';
-import { rolloutActive, ceilingNoticeText, ceilingRung } from '../hooks/lib/context-ceiling.mjs';
+import { rolloutActive, ceilingNoticeText, ceilingRung, CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS } from '../hooks/lib/context-ceiling.mjs';
 
 const SID = 'sess-ceil';
 const AGENT = 'worker-ceil-test-1';
@@ -46,11 +46,11 @@ const ctxText = (r) => r.json?.hookSpecificOutput?.additionalContext || '';
 const logged0 = () => rows()[0];
 const rows = () => readJsonl(join(telemetryDir(), 'context-ceiling.jsonl'));
 
-test('below 150K: silent, nothing logged', () => {
+test('below 175K: silent, nothing logged', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
-    writeFileSync(agentFile, user('go') + turn('r1', 120000) + turn('r2', 149999));
+    writeFileSync(agentFile, user('go') + turn('r1', 120000) + turn('r2', 174999));
     const r = run(lead);
     assert.equal(r.status, 0);
     assert.equal(r.stdout.trim(), '');
@@ -62,14 +62,14 @@ test('the crossing: exactly one nudge, advice only, one log row', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
-    writeFileSync(agentFile, user('go') + turn('r1', 120000) + turn('r2', 155000));
+    writeFileSync(agentFile, user('go') + turn('r1', 120000) + turn('r2', 180000));
     const r = run(lead);
     assert.equal(r.status, 0);
     assert.deepEqual(Object.keys(r.json), ['hookSpecificOutput']);
     assert.equal(r.json.hookSpecificOutput.hookEventName, 'PreToolUse');
     assert.deepEqual(Object.keys(r.json.hookSpecificOutput).sort(), ['additionalContext', 'hookEventName']);
     const t = ctxText(r);
-    assert.match(t, /Handoff checkpoint: your context is about 155,000 tokens/);
+    assert.match(t, /Handoff checkpoint: your context is about 180,000 tokens/);
     assert.match(t, /handoff file/);
     assert.match(t, /state \(what is done and what is verified\), files touched, next step, open questions/);
     assert.match(t, /fresh worker on the same rung/);
@@ -78,63 +78,64 @@ test('the crossing: exactly one nudge, advice only, one log row', () => {
     assert.equal(logged.length, 1);
     assert.equal(logged[0].agent_id, AGENT);
     assert.equal(logged[0].agent_type, 'ac-sonnet-high');
-    assert.equal(logged[0].tokens, 155000);
+    assert.equal(logged[0].tokens, 180000);
     assert.equal(logged[0].tier, 1);
     assert.match(logged[0].at, /^\d{4}-\d\d-\d\dT[\d:.]+Z$/);
   } finally { fx.cleanup(); }
 });
 
-test('between 150K and 175K: no repeat, however many calls', () => {
+test('between 175K and 200K: no repeat, however many calls', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
-    writeFileSync(agentFile, user('go') + turn('r1', 151000));
+    writeFileSync(agentFile, user('go') + turn('r1', 176000));
     assert.match(ctxText(run(lead)), /Handoff checkpoint/);
-    appendFileSync(agentFile, turn('r2', 160000));
+    appendFileSync(agentFile, turn('r2', 190000));
     assert.equal(run(lead).stdout.trim(), '');
-    appendFileSync(agentFile, turn('r3', 174999));
+    appendFileSync(agentFile, turn('r3', 199999));
     assert.equal(run(lead).stdout.trim(), '');
     assert.equal(rows().length, 1);
   } finally { fx.cleanup(); }
 });
 
-test('past 175K: still only one nudge (the repeat line defaults to off)', () => {
+test('past 200K: still only one nudge (the repeat line defaults to off)', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
-    writeFileSync(agentFile, user('go') + turn('r1', 152000));
+    writeFileSync(agentFile, user('go') + turn('r1', 177000));
     assert.match(ctxText(run(lead)), /^\[agent-companion\] Handoff checkpoint: /);
-    appendFileSync(agentFile, turn('r2', 176000));
+    appendFileSync(agentFile, turn('r2', 201000));
     assert.equal(run(lead).stdout.trim(), '');
-    appendFileSync(agentFile, turn('r3', 180000));
-    assert.equal(run(lead).stdout.trim(), '', 'exactly one nudge at 180K');
-    assert.deepEqual(rows().map((x) => [x.tier, x.tokens]), [[1, 152000]]);
+    appendFileSync(agentFile, turn('r3', 210000));
+    assert.equal(run(lead).stdout.trim(), '', 'exactly one nudge at 210K');
+    assert.deepEqual(rows().map((x) => [x.tier, x.tokens]), [[1, 177000]]);
   } finally { fx.cleanup(); }
 });
 
-test('repeat option set to 175000: a second and last nudge', () => {
+test('repeat option set to 200000: a second and last nudge', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
-    const env = { ...ON, CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_REPEAT_TOKENS: '175000' };
-    writeFileSync(agentFile, user('go') + turn('r1', 152000));
+    const env = { ...ON, CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_REPEAT_TOKENS: '200000' };
+    writeFileSync(agentFile, user('go') + turn('r1', 177000));
     assert.match(ctxText(run(lead, env)), /^\[agent-companion\] Handoff checkpoint: /);
-    appendFileSync(agentFile, turn('r2', 176000));
+    appendFileSync(agentFile, turn('r2', 201000));
     const second = ctxText(run(lead, env));
     assert.match(second, /second and last notice/);
-    appendFileSync(agentFile, turn('r3', 200000));
+    appendFileSync(agentFile, turn('r3', 230000));
     assert.equal(run(lead, env).stdout.trim(), '', 'never a third');
-    assert.deepEqual(rows().map((x) => [x.tier, x.tokens]), [[1, 152000], [2, 176000]]);
+    assert.deepEqual(rows().map((x) => [x.tier, x.tokens]), [[1, 177000], [2, 201000]]);
   } finally { fx.cleanup(); }
 });
 
-test('first seen already past 175K: one nudge, not two', () => {
+test('first seen already past the repeat line: one nudge, not two', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
-    writeFileSync(agentFile, user('go') + turn('r1', 180000));
-    assert.match(ctxText(run(lead)), /Handoff checkpoint: your context is about 180,000/);
-    assert.equal(run(lead).stdout.trim(), '');
+    const env = { ...ON, CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_REPEAT_TOKENS: '200000' };
+    writeFileSync(agentFile, user('go') + turn('r1', 210000));
+    assert.match(ctxText(run(lead, env)), /Handoff checkpoint: your context is about 210,000/);
+    assert.equal(run(lead, env).stdout.trim(), '');
     assert.equal(rows().length, 1);
   } finally { fx.cleanup(); }
 });
@@ -179,10 +180,10 @@ test('never a deny: no decision field on any path, at any size', () => {
   try {
     const { lead, agentFile } = layout(fx);
     let nudged = 0;
-    for (const ctx of [90000, 150000, 160000, 180000, 500000]) {
+    for (const ctx of [90000, 175000, 185000, 210000, 500000]) {
       writeFileSync(agentFile.replace(AGENT, `${AGENT}-${ctx}`), user('go') + turn(`r${ctx}`, ctx));
       const r = run(lead, ON, { agent_id: `${AGENT}-${ctx}` });
-      // each agent id is a fresh agent, so every size >= 150K nudges
+      // each agent id is a fresh agent, so every size >= 175K nudges
       const out = r.stdout.trim();
       if (out) {
         nudged += 1;
@@ -192,7 +193,7 @@ test('never a deny: no decision field on any path, at any size', () => {
       }
       assert.equal(r.status, 0);
     }
-    assert.equal(nudged, 4, 'every size from 150K up nudged, none denied');
+    assert.equal(nudged, 4, 'every size from 175K up nudged, none denied');
   } finally { fx.cleanup(); }
 });
 
@@ -288,14 +289,14 @@ test('the existing compaction/size notice is unchanged and combines with the cei
 });
 
 test('notice wording', () => {
-  assert.match(ceilingNoticeText(1, 152345, 150000, 0), /about 152,345 tokens, past the 150,000-token line for this rung/);
-  assert.match(ceilingNoticeText(2, 180000, 150000, 175000), /still growing past 175,000/);
-  const t = ceilingNoticeText(1, 152345, 150000, 0);
+  assert.match(ceilingNoticeText(1, 177345, 175000, 0), /about 177,345 tokens, past the 175,000-token line for this rung/);
+  assert.match(ceilingNoticeText(2, 205000, 175000, 200000), /still growing past 200,000/);
+  const t = ceilingNoticeText(1, 177345, 175000, 0);
   for (const w of ['handoff', 'state', 'files touched', 'next step', 'open questions', 'same rung']) assert.match(t, new RegExp(w));
   assert.doesNotMatch(t, /permissionDecision|deny/);
 });
 
-const nudged = (agentType, { ctx = 150000, model, env = ON, id = AGENT } = {}) => {
+const nudged = (agentType, { ctx = 175000, model, env = ON, id = AGENT } = {}) => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
@@ -309,17 +310,17 @@ const nudged = (agentType, { ctx = 150000, model, env = ON, id = AGENT } = {}) =
   } finally { fx.cleanup(); }
 };
 
-test('low rungs are silent at 160K: haiku, sonnet/low, sonnet/medium, bare and prefixed; no log row', () => {
+test('low rungs are silent at 180K: haiku, sonnet/low, sonnet/medium, bare and prefixed; no log row', () => {
   for (const base of ['ac-haiku', 'ac-sonnet-low', 'ac-sonnet-medium']) {
     for (const t of [base, `agent-companion:${base}`]) {
-      const r = nudged(t, { ctx: 160000 });
+      const r = nudged(t, { ctx: 180000 });
       assert.equal(r.out, '', t);
       assert.equal(r.rows, 0, t);
     }
   }
 });
 
-test('sonnet/high and above and every opus rung fire at 150K, bare and prefixed', () => {
+test('sonnet/high and above and every opus rung fire at 175K, bare and prefixed', () => {
   for (const base of ['ac-sonnet-high', 'ac-sonnet-xhigh', 'ac-opus-low', 'ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh', 'ac-opus-max', 'ac-browser', 'ac-browser-opus']) {
     for (const t of [base, `agent-companion:${base}`]) {
       const r = nudged(t);
@@ -346,7 +347,7 @@ test('the rung set is table-driven: sonnet/medium edited to effort high now fire
   try {
     const { lead, agentFile } = layout(fx);
     writeFileSync(join(fx.stateDir, 'model-tiers.json'), JSON.stringify({ ladder }));
-    writeFileSync(agentFile, user('go') + turn('r1', 155000));
+    writeFileSync(agentFile, user('go') + turn('r1', 180000));
     assert.match(ctxText(run(lead, ON, { agent_type: 'ac-sonnet-medium' })), /Handoff checkpoint/);
   } finally { fx.cleanup(); }
 });
@@ -360,4 +361,15 @@ test('the 300K size notice still fires for a low rung, unchanged', () => {
     assert.equal(out, '[agent-companion] Your context is past 300,000 tokens. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.');
     assert.equal(existsSync(join(telemetryDir(), 'context-ceiling.jsonl')), false);
   } finally { fx.cleanup(); }
+});
+
+test('the shipped default is 175K: plugin.json and the library agree; 174,999 is silent, 175,000 fires', () => {
+  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
+  const props = cfg.userConfig || cfg.options || {};
+  assert.equal(props.subagent_ceiling_tokens.default, 175000);
+  assert.equal(props.subagent_ceiling_repeat_tokens.default, 0);
+  assert.equal(CEILING_DEFAULT_TOKENS, 175000);
+  assert.equal(CEILING_REPEAT_DEFAULT_TOKENS, 0);
+  assert.equal(nudged('ac-sonnet-high', { ctx: 174999 }).out, '');
+  assert.match(nudged('ac-sonnet-high', { ctx: 175000 }).out, /past the 175,000-token line/);
 });

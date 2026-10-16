@@ -368,10 +368,51 @@ export function workerWaitPattern(command, { background = false } = {}) {
   }
 }
 
-export function workerWaitHint(pluginRoot) {
+// The sanctioned wait, named in both the hint and the deny: one run_in_background command that
+// notifies on finish. pr-wait.mjs covers a PR (or, with --run, a run id or branch); for a
+// main-branch run a background `gh run watch` does the same job.
+function sanctionedWait(pluginRoot) {
   const root = String(pluginRoot || '<plugin>').replace(/\\/g, '/').replace(/\/+$/, '');
+  return 'Run the wait as ONE command with run_in_background (it notifies when it finishes), then wait for ' +
+    'that completion notice: for a PR or CI run, node "' + root + '/scripts/pr-wait.mjs" <pr|branch> ' +
+    '(or --run <run-id|branch>); for a main-branch run, gh run watch <run-id> in the background.';
+}
+
+export function workerWaitHint(pluginRoot, { denyRepeat = false, windowMinutes = WORKER_WAIT_WINDOW_MINUTES } = {}) {
   return '[agent-companion] One-wait rule for workers: one blocking call or one background command, no sleep, ' +
-    'poll or watch loops. For a PR or CI wait run node "' + root + '/scripts/pr-wait.mjs" <pr|branch> with ' +
-    'run_in_background and wait for its completion notice. If you cannot wait, return STATUS: partial naming ' +
-    'what to re-check; the lead waits.';
+    'poll or watch loops. ' + sanctionedWait(pluginRoot) +
+    (denyRepeat ? ' Another sleep, poll or watch loop within ' + windowMinutes + ' minutes of this notice is refused.' : '');
+}
+
+export function workerWaitDenyText(pluginRoot, windowMinutes = WORKER_WAIT_WINDOW_MINUTES) {
+  return '[agent-companion] Refused: a second sleep, poll or watch loop within ' + windowMinutes +
+    ' minutes of the one-wait notice. Every loop re-reads your whole context each call. ' + sanctionedWait(pluginRoot);
+}
+
+// Worker one-wait guard (0.31.23). Mode (option worker_wait_guard):
+//   'hint'        the one-time hint only (the pre-0.31.23 behaviour; repeats are silent, logged)
+//   'deny-repeat' the first match gets the hint; a later match by the SAME agent in the SAME session
+//                 within the window of its previous match is refused; after the window it gets the hint
+//                 again. Every match, hinted or refused, restarts the window.
+//   'off'         the hook does nothing for workers (no hint, no deny, no row)
+// Window default 15 minutes, sized from 87 gaps between consecutive matches by one worker in
+// telemetry/worker-wait.jsonl (10-13 to 10-16): 59% fell within 10 minutes, 82% within 15, 86%
+// within 20. Anything longer than 20 minutes is mostly a later, separate wait.
+export const WORKER_WAIT_WINDOW_MINUTES = 15;
+export const WORKER_WAIT_MODES = ['hint', 'deny-repeat', 'off'];
+
+export function workerWaitMode(raw) {
+  const m = String(raw ?? '').trim().toLowerCase();
+  return WORKER_WAIT_MODES.includes(m) ? m : 'deny-repeat';
+}
+
+// Pure. prev = the stored { s: session id, t: ms of the agent's last match } or null.
+// Returns { action: 'hint' | 'deny' | 'silent', first }.
+export function workerWaitDecision({ mode, prev, sessionId, nowMs, windowMs, firstClaim }) {
+  if (mode === 'hint') return { action: firstClaim ? 'hint' : 'silent', first: !!firstClaim };
+  const sameSession = prev && String(prev.s ?? '') === String(sessionId ?? '') && Number.isFinite(prev.t);
+  if (!sameSession) return { action: 'hint', first: !!firstClaim };
+  const age = nowMs - prev.t;
+  if (age >= 0 && age <= windowMs) return { action: 'deny', first: false };
+  return { action: 'hint', first: false };
 }

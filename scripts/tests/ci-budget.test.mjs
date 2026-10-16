@@ -44,7 +44,7 @@ function world(dir, over = {}) {
     now: () => w.t,
     sleep: (ms) => { w.t += ms; w.sleeps += 1; if (w.onSleep) w.onSleep(w.sleeps); },
     isAlive: (pid) => !w.dead.has(pid),
-    sampler: () => w.busy,
+    sampler: () => w.busy, reserve: 0, loadPct: Infinity, // the load guard is off here; ci-budget-headroom.test.mjs covers it
     log: (l) => w.lines.push(l),
     ...over,
   };

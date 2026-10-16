@@ -75,17 +75,18 @@ function rowsOf(dir) {
   return readJsonl(join(dir, '.claude', 'agent-companion', 'telemetry', 'worker-wait.jsonl'));
 }
 
-test('hook: a subagent gets the hint once; the second match is silent but logged', () => {
+test('hook (worker_wait_guard=hint): a subagent gets the hint once; the second match is silent but logged', () => {
   const { dir, cleanup } = makeFixture();
   try {
-    const a = run(dir, payload());
+    const HINT = { CLAUDE_PLUGIN_OPTION_WORKER_WAIT_GUARD: 'hint' };
+    const a = run(dir, payload(), HINT);
     assert.equal(a.status, 0);
     const ctx = a.json?.hookSpecificOutput?.additionalContext;
     assert.match(ctx, /One-wait rule for workers/);
     assert.match(ctx, /pr-wait\.mjs/);
     assert.equal(a.json.hookSpecificOutput.permissionDecision, undefined);
     assert.equal(a.json.permissionDecision, undefined);
-    const b = run(dir, payload());
+    const b = run(dir, payload(), HINT);
     assert.equal((b.stdout || '').trim(), '');
     const rows = rowsOf(dir);
     assert.equal(rows.length, 2);

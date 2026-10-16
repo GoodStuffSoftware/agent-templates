@@ -138,6 +138,27 @@ export function claimOnce(key) {
   }
 }
 
+// A small per-key stamp (a JSON object, overwritten) in the same claims directory: the
+// worker one-wait guard keeps "when did this agent last match" here. Best effort both ways.
+export function writeStamp(key, obj) {
+  try {
+    mkdirSync(claimDir(), { recursive: true });
+    writeFileSync(join(claimDir(), `${safe(key)}.stamp`), JSON.stringify(obj));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function readStamp(key) {
+  try {
+    const o = JSON.parse(readFileSync(join(claimDir(), `${safe(key)}.stamp`), 'utf8'));
+    return o && typeof o === 'object' ? o : null;
+  } catch {
+    return null;
+  }
+}
+
 export function recordEvent(agentId, ev) {
   try {
     mkdirSync(eventsDir(), { recursive: true });

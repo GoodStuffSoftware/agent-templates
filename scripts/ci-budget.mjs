@@ -40,6 +40,15 @@
 // External load: busy = sum over cores of (1 - idleDelta/totalDelta) between
 //   two os.cpus() samples; external = max(0, round(busy - held)), i.e. the
 //   busy cores that our held units do not explain. The sampler is injectable.
+// Load guard (reserve and re-sample). busy = the sampled busy cores, ours
+//   included. The machine is "loaded" when busy > min(cores - reserve, cores *
+//   loadPct / 100): fewer than `reserve` cores idle (interactive work and hooks
+//   need them), or over loadPct percent busy. A loaded machine admits slowly: a
+//   new full lease gets one worker, and a resize grants at most one worker per lane
+//   (a lease already larger is cut to one). Every grow re-samples, and a resize
+//   with {resample: true} re-samples even when it asks for no more than it holds,
+//   which ci-local does between slices of a long pass. Not loaded: admission is
+//   as above. See also lowerOwnPriority().
 // Transition: a worktree on 0.31.17 or earlier still takes the old mutex's slot
 //   files and never asks this budget. Each live holder counts as one full run at
 //   the default concurrency (legacyRunUnits), read-only. See readLegacy().
@@ -51,7 +60,9 @@ import {
   mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, statSync, existsSync,
 } from 'node:fs';
 import { join, basename, dirname, resolve } from 'node:path';
-import { tmpdir, availableParallelism, cpus } from 'node:os';
+import {
+  tmpdir, availableParallelism, cpus, constants as osConstants, getPriority, setPriority,
+} from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
@@ -65,6 +76,8 @@ export const DEFAULT_STALE_MS = 90_000;
 export const DEFAULT_HEARTBEAT_MS = 20_000;
 export const DEFAULT_SAMPLE_MS = 300;
 export const DEFAULT_HEAVY_MAX_WAIT_MS = 600_000;
+export const DEFAULT_LOAD_PCT = 90; // busy share of the cores above which admission slows
+export const DEFAULT_SLICE_FILES = 6; // test files per worker in one slice of a long pass
 export const DEFAULT_QUEUE_MAX_WAIT_MS = 30 * 60_000; // a full run's queue wait
 export const DEFAULT_EXPRESS_MAX_WAIT_MS = 5 * 60_000; // a targeted run's wait
 const LEGACY_MAX_AGE_MS = 45 * 60 * 1000; // the old mutex's own age cap
@@ -99,6 +112,35 @@ export function budgetDir(env = process.env) {
 
 export function defaultBudget(cores) {
   return Math.max(2, Math.floor(cores * 0.5));
+}
+
+// Cores kept idle for interactive work and hooks: an eighth of the machine, at least one.
+export function defaultReserve(cores) {
+  return Math.max(1, Math.round(cores / 8));
+}
+
+// The busy-core count above which the machine counts as loaded and admission
+// slows: the tighter of "fewer than `reserve` cores idle" and "more than
+// `loadPct` percent busy".
+export function overloadThreshold({ cores, reserve, loadPct }) {
+  return Math.min(cores - reserve, (cores * loadPct) / 100);
+}
+
+// Run the calling process, and so every child it spawns, below normal priority
+// (children inherit the class on Windows and the nice value elsewhere), so that
+// interactive work and hooks win the cpu when tests compete with them. Never
+// raises a process that is already nicer, never throws, logs nothing.
+// Returns 'lowered' | 'kept' | 'failed'. `os` is a test seam.
+export function lowerOwnPriority(os = { getPriority, setPriority, constants: osConstants }) {
+  try {
+    const target = os.constants.priority.PRIORITY_BELOW_NORMAL;
+    if (!Number.isInteger(target)) return 'failed';
+    if (os.getPriority(0) >= target) return 'kept';
+    os.setPriority(0, target);
+    return 'lowered';
+  } catch {
+    return 'failed';
+  }
 }
 
 // What one run of the OLD ci-local (0.31.17 and earlier, which still takes the
@@ -152,8 +194,12 @@ export function resolveBudgetConfig(env = process.env, { cores = availableParall
   const heavyMaxWaitMs = posInt(env, 'CI_LOCAL_HEAVY_MAX_WAIT_MS', DEFAULT_HEAVY_MAX_WAIT_MS, warnings);
   const queueMaxWaitMs = posInt(env, 'CI_LOCAL_QUEUE_MAX_WAIT_MS', DEFAULT_QUEUE_MAX_WAIT_MS, warnings);
   const expressMaxWaitMs = posInt(env, 'CI_LOCAL_EXPRESS_MAX_WAIT_MS', DEFAULT_EXPRESS_MAX_WAIT_MS, warnings);
+  const reserve = Math.min(posInt(env, 'CI_LOCAL_RESERVE', defaultReserve(cores), warnings, { min: 0 }), Math.max(0, cores - 1));
+  const loadPct = Math.min(100, posInt(env, 'CI_LOCAL_LOAD_PCT', DEFAULT_LOAD_PCT, warnings));
+  const sliceFactor = posInt(env, 'CI_LOCAL_SLICE', DEFAULT_SLICE_FILES, warnings, { min: 0 });
   return {
     off, cores, budget, heavyCost, heavyMax, express, maxFull, pollMs, staleMs, heavyMaxWaitMs, queueMaxWaitMs, expressMaxWaitMs,
+    reserve, loadPct, sliceFactor,
     heartbeatMs: DEFAULT_HEARTBEAT_MS, announceMs: DEFAULT_ANNOUNCE_MS, sampleMs: DEFAULT_SAMPLE_MS,
     dir: budgetDir(env), warnings,
   };
@@ -162,7 +208,7 @@ export function resolveBudgetConfig(env = process.env, { cores = availableParall
 const OVERRIDES = [
   'dir', 'budget', 'heavyCost', 'heavyMax', 'express', 'maxFull', 'pollMs', 'staleMs',
   'heartbeatMs', 'announceMs', 'sampleMs', 'off', 'legacyDir', 'legacyUnits', 'heavyMaxWaitMs',
-  'queueMaxWaitMs', 'expressMaxWaitMs',
+  'queueMaxWaitMs', 'expressMaxWaitMs', 'reserve', 'loadPct', 'sliceFactor',
 ];
 
 // Environment config, then explicit options on top, plus the injectable seams.
@@ -209,10 +255,19 @@ export function sampleBusyCores({ ms = DEFAULT_SAMPLE_MS, sleep = sleepMs, read 
   return busy;
 }
 
-function measureExternal(ctx) {
+// One fresh sample of the machine: `busy` cores (ours included), `external` (the
+// busy cores our held units do not explain) and `over` (busy is above the load
+// threshold: fewer than `reserve` cores idle, or more than `loadPct` percent busy).
+function measureLoad(ctx) {
   const busy = Number(ctx.sampler());
   const held = totals(ctx, readState(ctx, { reclaim: false })).held;
-  return Number.isFinite(busy) ? Math.max(0, Math.round(busy - held)) : 0;
+  if (!Number.isFinite(busy)) return { busy: NaN, external: 0, over: false };
+  const at = overloadThreshold(ctx);
+  return { busy, external: Math.max(0, Math.round(busy - held)), over: busy > at };
+}
+
+function measureExternal(ctx) {
+  return measureLoad(ctx).external;
 }
 
 // ---------------------------------------------------------------- files
@@ -580,7 +635,7 @@ function createLease(ctx, { kind, units, heavy = 0, label = '', waitedMs = 0 }) 
      * (plain, heavy) has at least one worker; without, it takes what it can
      * get now. Returns {units, heavy}, what it now holds.
      */
-    resize(spec, { wait = false } = {}) {
+    resize(spec, { wait = false, resample = false } = {}) {
       if (released) throw new Error('ci-budget: resize on a released lease');
       const s = typeof spec === 'number' ? { units: spec } : { ...spec };
       const want = {
@@ -591,7 +646,7 @@ function createLease(ctx, { kind, units, heavy = 0, label = '', waitedMs = 0 }) 
       if (want.units + want.heavy === 0) want.units = 1;
       if (!unmanaged) {
         try {
-          return managedResize(want, wait);
+          return managedResize(want, wait, resample);
         } catch (err) {
           if (err.code === 'EBUDGETTIMEOUT') throw err;
           degrade(err);
@@ -616,12 +671,31 @@ function createLease(ctx, { kind, units, heavy = 0, label = '', waitedMs = 0 }) 
     heartbeat.stop();
   }
 
-  function managedResize(want, wait) {
+  // One line when this lease first sees the machine loaded, one when it clears.
+  let lastOver = false;
+  function noteLoad(load) {
+    if (load.over === lastOver) return;
+    lastOver = load.over;
+    ctx.log(load.over
+      ? `ci-budget: the machine is loaded (${load.busy.toFixed(1)} of ${ctx.cores} cores busy, over ${overloadThreshold(ctx).toFixed(1)}; `
+        + `${ctx.reserve} kept idle for interactive work and hooks): admitting workers slowly, `
+        + 'one per lane until it eases (CI_LOCAL_RESERVE, CI_LOCAL_LOAD_PCT).'
+      : 'ci-budget: the machine load is back under the threshold; admitting workers normally.');
+  }
+
+  function managedResize(want, wait, resample) {
     const begin = ctx.now();
     let lastAnnounce = -Infinity;
     for (;;) {
       const grows = want.units > rec.units || want.heavy > rec.heavy;
-      const external = grows ? measureExternal(ctx) : 0;
+      // Re-sample the machine on every grow, and on request (resample: a lease that
+      // is already full size asks again between slices of a long pass).
+      const load = grows || resample ? measureLoad(ctx) : { external: 0, over: false, busy: NaN };
+      const { external } = load;
+      if (grows || resample) noteLoad(load);
+      // Loaded machine: admit new workers slowly. The lease keeps (or is cut to)
+      // one worker per lane; a later request admits more once the load is down.
+      const ask = load.over ? { units: Math.min(want.units, 1), heavy: Math.min(want.heavy, 1) } : want;
       const satisfied = (g) => (want.heavy === 0 || g.heavy >= 1) && (want.units === 0 || g.units >= 1);
       const done = withAdmit(ctx, () => {
         const state = readState(ctx, { reclaim: true });
@@ -629,19 +703,19 @@ function createLease(ctx, { kind, units, heavy = 0, label = '', waitedMs = 0 }) 
         const t = totals(ctx, state);
         const ownCharge = mine ? charge(ctx, mine) : 0;
         const ownHeavy = mine ? mine.heavy : 0;
-        const keep = { units: Math.min(want.units, rec.units), heavy: Math.min(want.heavy, rec.heavy) };
+        const keep = { units: Math.min(ask.units, rec.units), heavy: Math.min(ask.heavy, rec.heavy) };
         let free = ctx.budget - (t.held - ownCharge) - external - (keep.units + keep.heavy * ctx.heavyCost);
         const heavyRoom = ctx.heavyMax - (t.heavyHeld - ownHeavy) - keep.heavy;
         let addHeavy = 0;
-        if (want.heavy > keep.heavy) {
-          addHeavy = Math.max(0, Math.min(want.heavy - keep.heavy, heavyRoom, Math.floor(free / ctx.heavyCost)));
+        if (ask.heavy > keep.heavy) {
+          addHeavy = Math.max(0, Math.min(ask.heavy - keep.heavy, heavyRoom, Math.floor(free / ctx.heavyCost)));
           // Alone on the box (nothing else is held), as in acquireFull: always
           // progress, however much outside load there is.
           if (addHeavy === 0 && heavyRoom >= 1 && t.held - ownCharge <= 0) addHeavy = 1;
           free -= addHeavy * ctx.heavyCost;
         }
         let addUnits = 0;
-        if (want.units > keep.units) addUnits = Math.max(0, Math.min(want.units - keep.units, free));
+        if (ask.units > keep.units) addUnits = Math.max(0, Math.min(ask.units - keep.units, free));
         let got = { units: keep.units + addUnits, heavy: keep.heavy + addHeavy };
         if (wait && want.heavy > 0 && got.heavy === 0) {
           // Waiting for a heavy slot: hold NOTHING meanwhile. A waiter that kept
@@ -732,7 +806,8 @@ function acquireFull(ctx, opts) {
         if (t.fullCount >= ctx.maxFull) {
           why = `${t.fullCount} full run(s) already going (CI_LOCAL_MAX_PARALLEL=${ctx.maxFull})`;
         } else {
-          external = measureExternal(ctx);
+          const load = measureLoad(ctx);
+          external = load.external;
           const got = withAdmit(ctx, () => {
             const s = readState(ctx, { reclaim: true });
             if (!s.tickets.length || s.tickets[0].id !== id) return null;
@@ -741,7 +816,8 @@ function acquireFull(ctx, opts) {
             let free = ctx.budget - tt.held - external;
             if (tt.held === 0) free = Math.max(free, 1); // alone on the box: always progress
             if (free < 1) return null;
-            const units = Math.min(desired, Math.floor(free));
+            // A loaded machine (reserve not idle, or over the load threshold) gets one worker.
+            const units = Math.min(load.over ? 1 : desired, Math.floor(free));
             const lease = createLease(ctx, {
               kind: 'full', units, label: opts.label ?? '', waitedMs: ctx.now() - begin,
             });
@@ -751,7 +827,7 @@ function acquireFull(ctx, opts) {
           if (got) {
             unregister();
             if (announced || got.lease.units < desired) {
-              ctx.log(`ci-budget: starting with ${got.lease.units} of ${desired} workers `
+              ctx.log(`ci-budget: starting with ${got.lease.units} of ${desired} workers${load.over ? ' (machine loaded)' : ''} `
                 + `(waited ${Math.round((ctx.now() - begin) / 1000)} s; ${describe(ctx, readState(ctx, { reclaim: false }), external)})`);
             }
             return got.lease;
@@ -826,11 +902,12 @@ function acquireExpress(ctx, opts) {
  * $CI_BUDGET_REPO, else the basename of the git top-level directory above the
  * worktree, see repoLabel()); worktree; env; plus overrides and test seams:
  * dir, budget, heavyCost, heavyMax, express, maxFull, pollMs, staleMs, heartbeatMs, heavyMaxWaitMs, queueMaxWaitMs, expressMaxWaitMs,
+ * reserve, loadPct, sliceFactor, cores,
  * announceMs, now(), sleep(ms), isAlive(pid), sampler() -> busy cores, log(line),
  * pid, timeoutMs, registerExit, heartbeat ('worker' | 'timer' | 'off'), off.
  *
  * Returns a lease: {id, kind, units, heavy, workers, charge, waitedMs,
- * beat(), resize(spec, {wait}), release()}. With CI_LOCAL_LOCK=0 (or off: true) it
+ * beat(), resize(spec, {wait, resample}), release()}. With CI_LOCAL_LOCK=0 (or off: true) it
  * returns a no-op lease granting `desired` and touches no files.
  */
 export function acquire(opts = {}) {
@@ -863,17 +940,19 @@ export function status(opts = {}) {
   const state = readState(ctx, { reclaim: false });
   const t = totals(ctx, state);
   const now = ctx.now();
-  let busyCores = null; let external = 0;
+  let busyCores = null; let external = 0; let loaded = null;
   if (opts.sample !== false) {
     try {
       busyCores = Number(ctx.sampler());
       external = Math.max(0, Math.round(busyCores - totals(ctx, readState(ctx, { reclaim: false })).held));
+      loaded = busyCores > overloadThreshold(ctx);
     } catch { /* sampling is best effort */ }
   }
   const age = (ms) => Math.max(0, now - num(ms));
   return {
     dir: ctx.dir, cores: ctx.cores, budget: ctx.budget, heavyCost: ctx.heavyCost, heavyMax: ctx.heavyMax,
-    express: ctx.express, maxFull: Number.isFinite(ctx.maxFull) ? ctx.maxFull : null,
+    express: ctx.express, reserve: ctx.reserve, loadPct: ctx.loadPct, loadThreshold: Math.round(overloadThreshold(ctx) * 10) / 10,
+    loaded, maxFull: Number.isFinite(ctx.maxFull) ? ctx.maxFull : null,
     held: t.held, heavyHeld: t.heavyHeld, free: Math.max(0, ctx.budget - t.held - external),
     busyCores: busyCores === null ? null : Math.round(busyCores * 10) / 10, external,
     leases: state.leases.map((l) => ({
@@ -904,6 +983,10 @@ export function formatStatus(st) {
   lines.push(st.busyCores === null
     ? '  outside load: not sampled'
     : `  outside load: ~${st.external} cores (cpu busy ${st.busyCores} cores, minus our held units)`);
+  if (st.loadThreshold !== undefined) {
+    lines.push(`  load guard: ${st.reserve} cores kept idle for interactive work and hooks; admission slows above ${st.loadThreshold} busy cores`
+      + (st.loaded === null ? '' : st.loaded ? ' (loaded now: new workers admitted one per lane)' : ' (not loaded now)'));
+  }
   lines.push(`  ledger: ${st.dir}`);
   lines.push('');
   lines.push(`Holders (${st.leases.length}):`);

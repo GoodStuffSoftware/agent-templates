@@ -1,10 +1,12 @@
-// Subagent context ceiling: a handoff nudge at 150K tokens, for sonnet/high and above.
+// Subagent context ceiling: a handoff nudge at 175K tokens, for sonnet/high and above.
 //
-// Why. A subagent that keeps working past ~150K tokens of context pays more
+// Why. A subagent that keeps working past ~175K tokens of context pays more
 // per call and ends up compacting at ~217K. The operator-approved alternative
-// (2026-10-10, evidence: tasks/usage-why-2026-10-06/ceiling-detail.md, best
-// ceiling C = 150K) is to have the worker write a checkpoint file and return,
-// so the lead continues with a FRESH worker that reads it.
+// (2026-10-10, evidence: tasks/usage-why-2026-10-06/ceiling-detail.md, first
+// ceiling C = 150K; raised to 175K on 2026-10-16 from a simulation over 544
+// workers: 18% fewer handoffs, about 40K of headroom left before the ~217K
+// subagent compaction) is to have the worker write a checkpoint file and
+// return, so the lead continues with a FRESH worker that reads it.
 //
 // Which rungs (operator, 2026-10-13). Only sonnet/high, sonnet/xhigh and every
 // opus rung are nudged (ceilingRung). Haiku, sonnet/low and sonnet/medium keep
@@ -15,10 +17,10 @@
 // What. hooks/subagent-context.mjs (PreToolUse, inside the subagent) already
 // reads the subagent's own context size from the tail of its transcript; the
 // ceiling reuses that reading (no second file read). The first time the
-// context is at or past `subagent_ceiling_tokens` (default 150000) the
-// subagent is nudged ONCE; if it keeps growing to `subagent_ceiling_repeat_tokens`
-// (default 175000) it is nudged a second and last time. A worker first seen
-// already past the repeat line gets one nudge, not two. Advice only: the hook
+// context is at or past `subagent_ceiling_tokens` (default 175000) the
+// subagent is nudged ONCE; only if `subagent_ceiling_repeat_tokens` is set (default
+// 0 = off) and it keeps growing to that line is it nudged a second and last time.
+// A worker first seen already past the repeat line gets one nudge, not two. Advice only: the hook
 // output is additionalContext and nothing else, never a deny. The existing
 // at-compaction wrap-up (lib/subagent-context.mjs) is unchanged and stays the
 // backstop.
@@ -38,8 +40,8 @@ import { stateRootPath, modelTiers, ladderVariants } from './context.mjs';
 import { claimOnce, fmtTokens } from './subagent-context.mjs';
 
 export const CEILING_CHANGE_ID = 'context-ceiling';
-export const CEILING_DEFAULT_TOKENS = 150000;
-export const CEILING_REPEAT_DEFAULT_TOKENS = 0; // once per worker; set 175000 to restore a second notice
+export const CEILING_DEFAULT_TOKENS = 175000;
+export const CEILING_REPEAT_DEFAULT_TOKENS = 0; // once per worker; set a line above the ceiling (e.g. 200000) for a second notice
 export const CEILING_LOG = 'context-ceiling.jsonl';
 
 const EFFORT_RANK = { low: 1, medium: 2, high: 3, xhigh: 4, max: 5 };

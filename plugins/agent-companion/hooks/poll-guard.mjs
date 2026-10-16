@@ -8,23 +8,34 @@
 // Kill switch: plugin option `poll_guard` (default true).
 //
 // Bash on win32 also gets the python_stdin_guard DENY (hooks/lib/python-stdin.mjs): the only
-// blocking path in this file, independent of the advisory switches above and below.
+// blocking path for the main thread; worker_wait_guard (0.31.23) can refuse a worker repeat loop, see below.
 //
 // Also PreToolUse on Bash / PowerShell, for SUBAGENTS only: the worker one-wait
 // rule (workerWaitPattern in lib/poll-guard.mjs). A sleep, poll or watch loop in
-// a worker gets one additionalContext line per worker (the model sees it; the
-// lead keeps its own rule), and every match is logged to
-// telemetry/worker-wait.jsonl. Kill switch: `worker_wait_advisory` (default true).
+// a worker gets one additionalContext line (the model sees it; the lead keeps its
+// own rule), and every match is logged to telemetry/worker-wait.jsonl. Kill switch:
+// `worker_wait_advisory` (default true). Since 0.31.23 option `worker_wait_guard`
+// (hint | deny-repeat | off, default deny-repeat) adds a DENY for a repeat match by the
+// same agent within `worker_wait_repeat_window_minutes` of its previous match (see
+// workerWaitDecision in lib/poll-guard.mjs); `hint` is the earlier hint-only behaviour.
 
 import {
-  readStdin, opt, passthrough, deny, callerTranscriptPath, tailRecords, callerIsSubagent, appendLog,
+  readStdin, opt, passthrough, deny, callerTranscriptPath, tailRecords, callerIsSubagent, appendLog, recordDenial,
 } from './lib/context.mjs';
 import { pythonStdinGuard } from './lib/python-stdin.mjs';
-import { claimOnce } from './lib/subagent-context.mjs';
+import { claimOnce, readStamp, writeStamp } from './lib/subagent-context.mjs';
 import { fileURLToPath } from 'node:url';
 import {
-  evaluate, POLL_TOOLS, TAIL_BYTES, workerWaitPattern, workerWaitHint,
+  evaluate, POLL_TOOLS, TAIL_BYTES, workerWaitPattern, workerWaitHint, workerWaitDenyText, workerWaitDecision,
+  workerWaitMode, WORKER_WAIT_WINDOW_MINUTES,
 } from './lib/poll-guard.mjs';
+
+// The clock; AGENT_COMPANION_FAKE_NOW (an ISO time) moves it for tests.
+function fakeNowMs() {
+  const fake = process.env.AGENT_COMPANION_FAKE_NOW;
+  if (fake) { const t = Date.parse(fake); if (Number.isFinite(t)) return t; }
+  return Date.now();
+}
 
 // The hint, and NO permissionDecision: "allow" would also skip the permission
 // prompt for the ScheduleWakeup / Monitor call, which advice has no business
@@ -42,7 +53,7 @@ try {
   const toolName = p.tool_name;
 
   if (toolName === 'Bash' || toolName === 'PowerShell') {
-    // python_stdin_guard (0.31.18): the one DENY path in this hook, separate from the advisories
+    // python_stdin_guard (0.31.18): a DENY path in this hook (worker_wait_guard is the other), separate from the advisories
     // below. Bash on win32 only; fail-open (any error falls through to the advisory path).
     // In warn mode the python note does not end the hook: the worker one-wait advisory (and its telemetry row) still run,
     // and the two additionalContext strings go out together.
@@ -63,18 +74,32 @@ try {
       }));
       process.exit(0);
     };
-    if (!callerIsSubagent(p) || !opt('worker_wait_advisory', true)) finish(null);
+    const mode = workerWaitMode(opt('worker_wait_guard', 'deny-repeat'));
+    if (!callerIsSubagent(p) || !opt('worker_wait_advisory', true) || mode === 'off') finish(null);
     const input = p.tool_input || {};
     const hit = workerWaitPattern(input.command, { background: input.run_in_background === true });
     if (!hit) finish(null);
-    const first = claimOnce('worker-wait-' + p.agent_id);
+    const windowMinutes = Math.max(1, opt('worker_wait_repeat_window_minutes', WORKER_WAIT_WINDOW_MINUTES));
+    const key = 'worker-wait-' + p.agent_id;
+    const now = fakeNowMs();
+    const prev = mode === 'deny-repeat' ? readStamp(key) : null;
+    const firstClaim = claimOnce(key);
+    const d = workerWaitDecision({
+      mode, prev, sessionId: p.session_id, nowMs: now, windowMs: windowMinutes * 60000, firstClaim,
+    });
+    if (mode === 'deny-repeat') writeStamp(key, { s: String(p.session_id ?? ''), t: now });
     appendLog('worker-wait.jsonl', {
       ts: new Date().toISOString(), session_id: p.session_id || null, agent_id: p.agent_id,
-      agent_type: p.agent_type || null, tool: toolName, kind: hit.kind, first,
+      agent_type: p.agent_type || null, tool: toolName, kind: hit.kind, first: d.first, action: d.action,
     });
-    if (!first) finish(null);
+    if (d.action === 'silent') finish(null);
     const root = process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('..', import.meta.url));
-    finish(workerWaitHint(root));
+    if (d.action === 'deny') {
+      const text = workerWaitDenyText(root, windowMinutes);
+      recordDenial('worker-wait', p, `${hit.kind} repeat within ${windowMinutes} min of the one-wait notice`);
+      deny(text);
+    }
+    finish(workerWaitHint(root, { denyRepeat: mode === 'deny-repeat', windowMinutes }));
   }
 
   if (!opt('poll_guard', true)) passthrough();

@@ -371,6 +371,6 @@ test('12. the plugin option and the version are declared', () => {
   assert.equal(plugin.userConfig.decision_register.default, true);
   const market = JSON.parse(readFileSync(join(PLUGIN_ROOT, '..', '..', '.claude-plugin', 'marketplace.json'), 'utf8'));
   const entry = market.plugins.find((p) => p.name === 'agent-companion');
-  assert.equal(plugin.version, '0.31.22');
+  assert.equal(plugin.version, '0.31.23');
   assert.equal(entry.version, plugin.version);
 });

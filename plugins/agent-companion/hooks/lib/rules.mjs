@@ -293,7 +293,7 @@ function builtinRules() {
       scope: 'spawn',
       gate: 'worker_wait',
       when: OPERATE_NOT_DECLARED_WHEN,
-      then: 'One-wait rule: one blocking call or one background command (run_in_background), no sleep, poll or watch loops. PR/CI wait: pr-wait.mjs. Cannot wait: STATUS: partial, the lead waits.',
+      then: 'One-wait rule: no sleep, poll or watch loops. One blocking call, or one run_in_background command that notifies on finish. PR/CI: pr-wait.mjs; main-branch run: gh run watch (both in background).',
       note: null,
     },
     {

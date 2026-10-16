@@ -2,6 +2,16 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.23 — 2026-10-16
+
+A higher context ceiling, a one-wait rule without the hand-back clause that refuses repeat polls, and ci-local that runs at below-normal priority and leaves headroom for hooks.
+
+- **Context ceiling 175K.** `subagent_ceiling_tokens` default 150000 -> 175000 (scope unchanged). A 10-16 simulation over 544 workers put 175K best (-9.6 against -7.8 units/day, 18% fewer handoffs, about 40K headroom before the ~217K subagent compaction). The repeat line stays off; its help text no longer says 175000 restores a second notice.
+- **One-wait rule.** The "Cannot wait: STATUS: partial, the lead waits" clause is gone from the `worker-one-wait` spawn rule and from the worker hint; both now point at a `run_in_background` command, `pr-wait.mjs` for PRs and CI, and a background `gh run watch` for a main-branch run. No worker used the clause in 1,109 final messages; a handled partial costs the lead about 0.6-1.0 units.
+- **Repeat polls denied (`worker_wait_guard`: `hint`, `deny-repeat` default, `off`; `worker_wait_repeat_window_minutes`, default 15).** A repeat sleep, poll or watch loop by the same worker in the same session within the window of its previous match is refused, naming the sanctioned wait, and logged to `denials.jsonl` (guard `worker-wait`); every match restarts the window; `worker-wait.jsonl` rows gain `action` (hint, deny, silent). `worker_wait_guard: hint` restores the 0.31.22 behaviour. Data: polling loops still cost 9.8 units/day, 47% of hint rows on 10-16 were repeat polls, and 82% of matches follow the worker's previous match within 15 minutes.
+- **ci-local below-normal priority.** `lowerOwnPriority()` lowers ci-local's own priority at start (silent on failure); the suites, test processes, their children and the pre-push gate inherit it. Hooks are untouched and keep normal priority; no hook timeout changed.
+- **CI budget headroom.** The shared budget keeps a core reserve (`CI_LOCAL_RESERVE`, default max(1, cores/8)) and a load threshold (`CI_LOCAL_LOAD_PCT`, default 90): on a loaded machine a lease gets one worker per lane, and nothing waits or fails. A long pass runs in slices (`CI_LOCAL_SLICE`, default 6 files per worker; 0 = single run) and re-samples the load between slices. The lease protocol and file formats are unchanged; `status` gains the load-guard fields. CONTRIBUTING.md documents the knobs.
+
 ## 0.31.22 — 2026-10-16
 
 Hook-process timing telemetry, a lead-effort rule that informs instead of asking, spawn rows that carry the working folder with a project-dir agent lookup, and the scout's naming and finished-task fixes.

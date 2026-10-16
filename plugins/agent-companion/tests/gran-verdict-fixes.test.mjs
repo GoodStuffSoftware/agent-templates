@@ -63,7 +63,7 @@ test('N1: a template echo of the STATUS contract is not a status', () => {
   assert.equal(parseStatus('STATUS: done (a/b)'), 'done');
 });
 
-test('N4: operate briefs get the operate variant (worker waits itself); other types keep the hand-back line', () => {
+test('N4: operate briefs get the operate variant (worker waits itself); other types keep the one-wait line, with no STATUS: partial hand-back', () => {
   const fx = makeFixture();
   try {
     const ids = (text) => matchRules({ scope: 'spawn', text, sessionId: 's' }).map((r) => r.id).filter((i) => i.startsWith('worker-one-wait'));
@@ -76,6 +76,9 @@ test('N4: operate briefs get the operate variant (worker waits itself); other ty
     assert.match(op.then, /you wait/);
     assert.doesNotMatch(op.then, /the lead waits/);
     const other = matchRules({ scope: 'spawn', text: 'TYPE: lookup\nx', sessionId: 's' }).find((r) => r.id === 'worker-one-wait');
-    assert.match(other.then, /STATUS: partial, the lead waits/);
+    assert.doesNotMatch(other.then, /STATUS: partial|the lead waits|Cannot wait/);
+    assert.match(other.then, /run_in_background/);
+    assert.match(other.then, /pr-wait.mjs/);
+    assert.match(other.then, /gh run watch/);
   } finally { fx.cleanup(); }
 });
