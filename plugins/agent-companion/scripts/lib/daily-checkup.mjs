@@ -54,6 +54,7 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stateFile, telemetryDir, stateRootPath, opt, rolloutTable, canonicalTaskType } from '../../hooks/lib/context.mjs';
 import { briefDeclarations, declarationValue, BRIEF_ROLES } from '../../hooks/lib/brief-directives.mjs';
+import { CEILING_DEFAULT_TOKENS } from '../../hooks/lib/context-ceiling.mjs';
 import {
   discoverTranscripts, transcriptsRoot, usageOf, contextTokensOf, isCompactBoundary, flattenContent,
 } from './transcripts.mjs';
@@ -72,7 +73,17 @@ export const DAY_OFFSET_MS = 8 * HOUR_MS; // a checkup day starts at 08:00Z
 export const WEEK0_MS = Date.parse('2026-07-03T16:00:00Z'); // a Friday 16:00Z plan reset
 export const LOOKBACK_DAYS = 8;
 export const KEEP_DAYS = 16;
-export const CEILING_CTX = 150000; // the subagent context line the record reports a share above
+export const CEILING_CTX = 150000; // the fixed subagent context line of unitsOver150k / shareOver150kPct (kept for the history series)
+
+// The active subagent context ceiling, read as hooks/subagent-context.mjs reads
+// it (option subagent_ceiling_tokens, default 175000). A value that is not a
+// positive number (0 turns the nudge off) still measures against the default,
+// so shareOverCeilingPct always has a line. The record carries the line beside
+// the share (subagent.ceilingTokens).
+export function activeCeilingTokens() {
+  const n = Number(opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS));
+  return Number.isFinite(n) && n > 0 ? n : CEILING_DEFAULT_TOKENS;
+}
 export const DEFAULT_LIMIT_UNITS = 2677;
 export const DEFAULT_PACE_PCT = 14;
 export const HOLD_RECENT_MS = 2 * 60 * 1000;
@@ -537,8 +548,15 @@ function scanFile(f, fileState, ctx) {
     const b = (state.hours[h] ||= [0, 0, 0]);
     if (r.ts > state.dataThroughMs) state.dataThroughMs = r.ts;
     if (!isSub) { b[0] += units; continue; }
+    // b = [main, subagent, over 150K, over the ceiling, the ceiling]. An hour that
+    // already holds subagent units without b[4] (a state written before 0.31.24),
+    // or whose units were counted against another ceiling, is marked -1: mixed.
+    const ceiling = ctx.ceiling ?? CEILING_DEFAULT_TOKENS;
+    if (b[4] === undefined) { b[3] = 0; b[4] = b[1] > 0 ? -1 : ceiling; } else if (b[4] !== ceiling) b[4] = -1;
     b[1] += units;
-    if (contextTokensOf(r.usage) > CEILING_CTX) b[2] += units;
+    const tokens = contextTokensOf(r.usage);
+    if (tokens > CEILING_CTX) b[2] += units;
+    if (tokens > ceiling) b[3] += units;
     const d = dayAcc(state, dayKeyOf(dayStartMs(r.ts)));
     bump(d.uType, cls.t, units);
     bump(d.uRole, cls.r, units);
@@ -583,7 +601,7 @@ function backfillFacts(st, root, nowT, mainSeen) {
   if (old && old.landed) facts.landed = { ...old.landed };
   const scratch = { v: SCHEMA, scanFromMs: from, files: {}, hours: {}, days: {}, dataThroughMs: 0, lastScanMs: 0 };
   const seen = new SeenStore(null);
-  const ctx = { state: scratch, seen, cutoffMs: from, holdMs: 0, facts };
+  const ctx = { state: scratch, seen, cutoffMs: from, holdMs: 0, facts, ceiling: activeCeilingTokens() };
   const found = discoverTranscripts(root, { sinceMs: from, main: true, subagents: true, workflows: true, meta: false });
   for (const f of found.files) {
     const rel = relative(root, f.path).split('\\').join('/');
@@ -605,7 +623,7 @@ function backfillFacts(st, root, nowT, mainSeen) {
 
 // --- The scan ------------------------------------------------------------------------
 
-export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), holdMs = HOLD_RECENT_MS, state = null, seen = null } = {}) {
+export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), holdMs = HOLD_RECENT_MS, state = null, seen = null, ceiling = activeCeilingTokens() } = {}) {
   const p = checkupPaths();
   const st = state || loadState(nowT);
   const sn = seen || (FRESH_STATES.has(st) ? new SeenStore(p.seen) : new SeenStore(p.seen).load());
@@ -620,7 +638,7 @@ export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), hold
   st.facts.landed ||= {};
   st.facts.agentIds ||= {}; // Agent/Task tool_use ids seen -> time
   st.facts.done ||= {}; // ... whose tool_result came back -> time
-  const ctx = { state: st, seen: sn, cutoffMs: st.scanFromMs, holdMs, facts: st.facts };
+  const ctx = { state: st, seen: sn, cutoffMs: st.scanFromMs, holdMs, facts: st.facts, ceiling };
   const found = discoverTranscripts(root, { sinceMs: Math.max(st.scanFromMs, nowT - KEEP_DAYS * DAY_MS), main: true, subagents: true, workflows: true, meta: false });
   let read = 0;
   let bytes = 0;
@@ -682,15 +700,25 @@ export function countCeilingNudges(fromMs, toMs) {
 
 // --- A day's record ------------------------------------------------------------------
 
+// `c` = units over the ceiling, `ceiling` = the one ceiling every hour with
+// subagent units was counted against, or null when they differ or an hour
+// predates the per-hour ceiling (then the day has no shareOverCeilingPct).
 function sumHours(state, fromMs, toMs) {
   let m = 0;
   let s = 0;
   let o = 0;
+  let c = 0;
+  let ceiling;
   for (let h = Math.floor(fromMs / HOUR_MS); h * HOUR_MS < toMs; h += 1) {
     const b = state.hours[h];
-    if (b) { m += b[0]; s += b[1]; o += b[2]; }
+    if (!b) continue;
+    m += b[0]; s += b[1]; o += b[2];
+    if (!(b[1] > 0)) continue;
+    c += b[3] || 0;
+    const hc = Number.isFinite(b[4]) && b[4] > 0 ? b[4] : null;
+    ceiling = ceiling === undefined ? hc : (ceiling === hc ? ceiling : null);
   }
-  return { m, s, o };
+  return { m, s, o, c, ceiling: ceiling ?? null };
 }
 
 function classTable(spawns, units) {
@@ -745,6 +773,9 @@ export function buildDayRecord(state, startMs, { limit = DEFAULT_LIMIT_UNITS, ta
       compactionsPer100Spawns: acc.spawns ? r1((acc.compactions / acc.spawns) * 100) : null,
       unitsOver150k: r1(day.o),
       shareOver150kPct: day.s > 0 ? r1((day.o / day.s) * 100) : null,
+      ceilingTokens: day.ceiling,
+      unitsOverCeiling: day.ceiling ? r1(day.c) : null,
+      shareOverCeilingPct: day.ceiling && day.s > 0 ? r1((day.c / day.s) * 100) : null,
     },
     ceilingNudges: countCeilingNudges(startMs, endMs),
     limit: { hits: acc.limitHits || 0, firstAt: acc.firstLimitMs ? iso(acc.firstLimitMs) : null },

@@ -25,6 +25,7 @@ function world(dir, over = {}) {
     dir, env: { CI_LOCAL_LOCK_DIR: NO_LEGACY }, legacyDir: NO_LEGACY, budget: 16, heavyCost: 3, heavyMax: 2, express: 2,
     maxFull: Infinity, pollMs: 1500, announceMs: 60_000, staleMs: 86_400_000, heartbeat: 'off', registerExit: false,
     worktree: 'wt-fix', now: () => w.t, sleep: (ms) => { w.t += ms; }, sampler: () => w.busy, reserve: 0, loadPct: Infinity, log: (l) => w.lines.push(l),
+    cores: 64, // the guard's threshold is cores - reserve: pinned, never the host's (ci-budget-small-host.test.mjs)
     ...over,
   };
   w.acquire = (extra = {}) => acquire({ ...w.opts, ...extra });

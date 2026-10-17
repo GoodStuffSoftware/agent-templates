@@ -487,6 +487,20 @@ export const REGISTER_ADAPTERS = {
       detail: (all) => ({ spawns: all.length, unitsOver150k: r4(sumBy(all, (s) => (s.ctxUnits ? s.ctxUnits[2] + s.ctxUnits[3] : 0))) }),
     }),
   },
+  // Spawn records bucket context only at 100K/150K/200K, so the share over an arbitrary ceiling comes
+  // from the day's checkup history record, which counts it per request against the active ceiling.
+  shareOverCeilingPct: {
+    recordKinds: ['day'],
+    stat(recs) {
+      const d = recs.find((r) => r.kind === 'day');
+      const h = d && d.hist ? d.hist : null;
+      const s = h && h.subagent ? h.subagent : null;
+      const over = s && finite(s.ceilingTokens) > 0 ? finite(s.unitsOverCeiling) : null;
+      const sub = h && h.units ? finite(h.units.subagent) : null;
+      if (over === null || sub === null || !(sub > 0)) return { gap: true, why: 'no checkup history record with the share over one context ceiling for the day' };
+      return { num: over, den: sub, scale: 100, sample: sub, detail: { ceilingTokens: s.ceilingTokens, unitsOverCeiling: over } };
+    },
+  },
   compactionsPer100Spawns: {
     recordKinds: ['spawn'],
     stat: (recs) => ratio(spawnsOf(recs), (s) => (s.comp ? s.comp.n : 0), count, {

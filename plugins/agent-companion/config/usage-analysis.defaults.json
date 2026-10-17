@@ -691,6 +691,19 @@
       "cadence": "daily"
     },
     {
+      "id": "ctx.overCeilingShare",
+      "title": "Share of worker units over the active context ceiling",
+      "metric": "shareOverCeilingPct",
+      "compare": [
+        "trailing-7"
+      ],
+      "threshold": {
+        "direction": "up-is-worse"
+      },
+      "severity": "info",
+      "cadence": "daily"
+    },
+    {
       "id": "ctx.ceilingNudges",
       "title": "Context ceiling nudges per day",
       "metric": "ceilingNudgesPerDay",

@@ -44,7 +44,11 @@ function world(dir, over = {}) {
     now: () => w.t,
     sleep: (ms) => { w.t += ms; w.sleeps += 1; if (w.onSleep) w.onSleep(w.sleeps); },
     isAlive: (pid) => !w.dead.has(pid),
-    sampler: () => w.busy, reserve: 0, loadPct: Infinity, // the load guard is off here; ci-budget-headroom.test.mjs covers it
+    // The load guard is off here (ci-budget-headroom.test.mjs covers it). Its
+    // threshold is cores - reserve, so the core count is pinned too: left to the
+    // host, 5 busy cores read as "loaded" on a 4-core CI runner and grants shrink
+    // to one worker. 64 is above every busy reading these tests feed.
+    sampler: () => w.busy, reserve: 0, loadPct: Infinity, cores: 64,
     log: (l) => w.lines.push(l),
     ...over,
   };

@@ -2,6 +2,15 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.24 — 2026-10-16
+
+A test fix: the ci-budget suites no longer depend on the host's core count, which turned main CI red on 0.31.23. And the daily checkup measures the share of worker units over the active context ceiling, not only over a fixed 150K.
+
+- **Share over the active ceiling.** 0.31.23 raised the `subagent_ceiling_tokens` default to 175K, but the checkup still measured `shareOver150kPct` against a hard-coded 150K, so a trigger reading it could take "ceiling not biting" from the wrong line. Day records now add `subagent.ceilingTokens`, `unitsOverCeiling` and `shareOverCeilingPct`, measured against the option as the subagent-context hook reads it (default 175000; a value that is not positive measures against 175000). `shareOver150kPct` stays, so the history series keeps comparing. The hourly buckets gain the ceiling-share slot and the ceiling they were counted against; a day whose hours were counted against two ceilings (the option changed) or that holds hours from a state written before 0.31.24 has `null` there, and the register reads it as a gap. New register metric `shareOverCeilingPct` (source `history`, also through the usage-analysis runner, which reads the day's history record), and a usage-analysis default `ctx.overCeilingShare` beside `ctx.over150kShare`. The shipped example register has no trigger on the 150K share, so nothing there moves; a personal register's trigger on `shareOver150kPct` should switch its `metric` to `shareOverCeilingPct`.
+
+- **ci-budget test worlds pin their core count.** The fake worlds in `ci-budget.test.mjs` and `ci-budget-fixes.test.mjs` injected a cpu sampler and turned the load guard off with `reserve: 0, loadPct: Infinity`, but left `cores` to the host. The guard's threshold is then `cores - reserve`, so on the 4-core Linux runner a fake reading of 5 busy cores counted as a loaded machine and grants dropped to one worker; on the 32-core Windows box it did not. Two tests failed on CI only ("external load" and "resize"). The worlds now pass `cores: 64`. `os.loadavg()` is not read anywhere in ci-budget, so the Windows-zero-loadavg difference played no part. No product code changed.
+- **Regression test.** `scripts/tests/ci-budget-small-host.test.mjs` re-runs both suites under a preload (`scripts/tests/fixtures/small-linux-host.mjs`) that makes the process look like that runner: 4 cores, a non-zero loadavg, 3 cores busy. Before the fix it fails with the same two tests as CI.
+
 ## 0.31.23 — 2026-10-16
 
 A higher context ceiling, a one-wait rule without the hand-back clause that refuses repeat polls, and ci-local that runs at below-normal priority and leaves headroom for hooks.

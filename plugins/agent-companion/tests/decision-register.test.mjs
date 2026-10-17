@@ -133,11 +133,11 @@ test('1. a staged exercise and a baselined metric validate once the rollout id e
   assert.equal(valid(r, {}).ok, false);
 });
 
-test('1. the metric catalog names are the eight of the spec plus the five lead-effort metrics', () => {
+test('1. the metric catalog names are the eight of the spec, the five lead-effort metrics and the share over the active ceiling', () => {
   assert.deepEqual(Object.keys(METRIC_CATALOG).sort(), [
     'ceilingNudgesPerDay', 'compactionsPer100Spawns', 'haikuSpawns', 'leadEffortShare', 'leadRebriefsPer100Spawns', 'leadRoutingDeniesPer100Spawns',
     'leadUnderProvisionedShare', 'mainUnitsPerDay', 'mainUnitsPerLeadSpawn', 'reviewFixShareByLeadEffort',
-    'reviewsPerWriter', 'shareOver150kPct', 'unitsPerSpawn',
+    'reviewsPerWriter', 'shareOver150kPct', 'shareOverCeilingPct', 'unitsPerSpawn',
   ]);
 });
 

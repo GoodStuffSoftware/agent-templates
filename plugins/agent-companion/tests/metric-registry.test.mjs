@@ -1,7 +1,7 @@
 // Batch 1 of the daily usage analysis (0.31.18): the metric registry under scripts/lib/usage/metrics/.
-// (1) register parity: the 13 register metrics evaluate byte-identically to the pre-move code
+// (1) register parity: the 14 register metrics evaluate byte-identically to the pre-move code
 //     (golden generated from decision-register.mjs before the move);
-// (2) id freeze: the 13 ids, their sources and the catalog projection;
+// (2) id freeze: the 14 ids, their sources and the catalog projection;
 // (3) weight sources: haiku and fable plan weights are NOT layered from planUsageMultipliers
 //     (the table has no entry for them), so they live in the checkup's unit spec only.
 // Synthetic fixtures; nothing reads the operator's register, telemetry or network.
@@ -23,10 +23,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const FROZEN = [
   'unitsPerSpawn', 'mainUnitsPerDay', 'shareOver150kPct', 'compactionsPer100Spawns', 'ceilingNudgesPerDay',
   'leadEffortShare', 'reviewsPerWriter', 'haikuSpawns', 'leadRebriefsPer100Spawns', 'reviewFixShareByLeadEffort',
-  'leadRoutingDeniesPer100Spawns', 'leadUnderProvisionedShare', 'mainUnitsPerLeadSpawn',
+  'leadRoutingDeniesPer100Spawns', 'leadUnderProvisionedShare', 'mainUnitsPerLeadSpawn', 'shareOverCeilingPct',
 ];
 
-test('parity: all 13 register metrics give byte-identical evaluations on fixture history and spawns', () => {
+test('parity: all 14 register metrics give byte-identical evaluations on fixture history and spawns', () => {
   const golden = readFileSync(join(here, 'fixtures', 'metric-registry', 'parity.golden.json'), 'utf8');
   const now = JSON.stringify(runParity(), null, 1) + '\n';
   assert.equal(now, golden);
@@ -35,14 +35,14 @@ test('parity: all 13 register metrics give byte-identical evaluations on fixture
   for (const id of FROZEN) assert.ok(parsed[id].plain.days.some((d) => d.qualifies), `${id} has no qualifying day in the fixture`);
 });
 
-test('id freeze: the 13 register ids, in order, with their sources', () => {
+test('id freeze: the 14 register ids, in order, with their sources', () => {
   assert.deepEqual(METRIC_IDS, FROZEN);
   assert.deepEqual(Object.keys(METRIC_CATALOG), FROZEN);
   assert.deepEqual([...registry.FROZEN_REGISTER_IDS], FROZEN);
   assert.deepEqual(METRIC_CATALOG, {
     unitsPerSpawn: 'history', mainUnitsPerDay: 'history', shareOver150kPct: 'history', compactionsPer100Spawns: 'history', ceilingNudgesPerDay: 'history',
     leadEffortShare: 'spawns', reviewsPerWriter: 'spawns', haikuSpawns: 'spawns', leadRebriefsPer100Spawns: 'spawns', reviewFixShareByLeadEffort: 'spawns',
-    leadRoutingDeniesPer100Spawns: 'spawns', leadUnderProvisionedShare: 'spawns', mainUnitsPerLeadSpawn: 'history',
+    leadRoutingDeniesPer100Spawns: 'spawns', leadUnderProvisionedShare: 'spawns', mainUnitsPerLeadSpawn: 'history', shareOverCeilingPct: 'history',
   });
   assert.deepEqual(registry.registerCatalog(), METRIC_CATALOG, 'the register catalog is a projection of the registry');
   assert.deepEqual([...registry.LEAD_LEVEL_METRICS].sort(), ['leadRebriefsPer100Spawns', 'leadRoutingDeniesPer100Spawns', 'leadUnderProvisionedShare', 'reviewFixShareByLeadEffort']);
@@ -69,6 +69,13 @@ test('metricDayStat keeps its contract: a stat or { gap: true }, never a zero fo
   const { metricDayStat } = registry;
   assert.deepEqual(metricDayStat({ metric: 'mainUnitsPerDay', params: {} }, { units: { total: 100, main: 70 } }, undefined), { num: 70, den: 1, scale: 1, sample: 100 });
   assert.deepEqual(metricDayStat({ metric: 'shareOver150kPct', params: {} }, { units: { total: 100, subagent: 80 }, subagent: { unitsOver150k: 20 } }), { num: 20, den: 80, scale: 100, sample: 80 });
+  assert.deepEqual(metricDayStat({ metric: 'shareOverCeilingPct', params: {} }, { units: { total: 100, subagent: 80 }, subagent: { unitsOver150k: 20, ceilingTokens: 175000, unitsOverCeiling: 12 } }), { num: 12, den: 80, scale: 100, sample: 80 });
+  assert.deepEqual(metricDayStat({ metric: 'shareOverCeilingPct', params: {} }, { units: { total: 100, subagent: 80 }, subagent: { unitsOver150k: 20 } }), { gap: true }, 'a record without a ceiling (before 0.31.24) is a gap, never the 150K share');
+  assert.deepEqual(metricDayStat({ metric: 'shareOverCeilingPct', params: {} }, { units: { total: 100, subagent: 80 }, subagent: { unitsOver150k: 20, ceilingTokens: null, unitsOverCeiling: null } }), { gap: true }, 'a day on two ceilings is a gap');
+  const ceilingStat = registry.getMetric('shareOverCeilingPct').stat;
+  assert.deepEqual(ceilingStat([{ kind: 'day', hist: { units: { subagent: 40 }, subagent: { ceilingTokens: 200000, unitsOverCeiling: 10 } } }]),
+    { num: 10, den: 40, scale: 100, sample: 40, detail: { ceilingTokens: 200000, unitsOverCeiling: 10 } }, 'the runner reads the history record');
+  assert.equal(ceilingStat([{ kind: 'day', hist: { units: { subagent: 40 }, subagent: { unitsOver150k: 9 } } }]).gap, true);
   assert.deepEqual(metricDayStat({ metric: 'mainUnitsPerDay', params: {} }, { units: { total: 0, main: 0 } }), { gap: true }, 'a zero-unit day is a gap');
   assert.deepEqual(metricDayStat({ metric: 'mainUnitsPerDay', params: {} }, { units: { total: 50, main: 5 }, limit: { hits: 1 } }), { gap: true }, 'a limit-hit day is a gap for per-day totals');
   assert.notDeepEqual(metricDayStat({ metric: 'shareOver150kPct', params: {} }, { units: { total: 50, subagent: 10 }, subagent: { unitsOver150k: 1 }, limit: { hits: 1 } }), { gap: true }, 'but not for ratio metrics');

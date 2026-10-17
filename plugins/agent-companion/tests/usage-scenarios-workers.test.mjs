@@ -188,7 +188,7 @@ const WORKER_IDS = [
 ];
 const ADAPTED = [
   'unitsPerSpawn', 'shareOver150kPct', 'compactionsPer100Spawns', 'ceilingNudgesPerDay', 'leadEffortShare', 'reviewsPerWriter', 'haikuSpawns',
-  'leadRebriefsPer100Spawns', 'reviewFixShareByLeadEffort', 'leadRoutingDeniesPer100Spawns', 'leadUnderProvisionedShare',
+  'leadRebriefsPer100Spawns', 'reviewFixShareByLeadEffort', 'leadRoutingDeniesPer100Spawns', 'leadUnderProvisionedShare', 'shareOverCeilingPct',
 ];
 
 // ------------------------------------------------------------------ tests --
@@ -204,7 +204,7 @@ test('every 6b metric and every listed register metric has both day() and stat()
   }
   for (const id of WORKER_IDS) assert.equal(getMetric(id).register, false, `${id} is not a register metric`);
   for (const id of ADAPTED) assert.equal(getMetric(id).register, true, `${id} stays a register metric`);
-  assert.equal(FROZEN_REGISTER_IDS.length, 13);
+  assert.equal(FROZEN_REGISTER_IDS.length, 14);
   // after this batch only the rater-backed lead metrics have no adapter, and they are not in the registry at all
   assert.deepEqual(listMetrics().filter((m) => typeof m.stat !== 'function').map((m) => m.id), []);
   assert.equal(getMetric('lead.corrections'), null);

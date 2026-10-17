@@ -175,6 +175,19 @@ export const REGISTRY = [
       return { num: ss.reduce((a, r) => a + r.units.main, 0), den: sp, scale: 1, sample: sp };
     },
   },
+  {
+    // The share over the ACTIVE context ceiling (subagent_ceiling_tokens, default 175K), with the line
+    // the day was counted against beside it (subagent.ceilingTokens). A day without one line is a gap.
+    id: 'shareOverCeilingPct', source: 'history', register: true, entity: 'day', label: 'M', unit: '%', direction: 'up-is-worse', pool: 'ratio',
+    needs: ['H'], perDayTotal: false, byLeadLevels: false,
+    day(p, rec) {
+      const s = rec && rec.subagent ? rec.subagent : null;
+      const over = s && finite(s.ceilingTokens) > 0 ? finite(s.unitsOverCeiling) : null;
+      const sub = rec && rec.units ? finite(rec.units.subagent) : null;
+      if (over === null || sub === null || sub <= 0) return { gap: true };
+      return { num: over, den: sub, scale: 100, sample: sub };
+    },
+  },
   // Day, week, meter, exclusion and lead metrics (batch 6a): not register metrics; each has day() and stat().
   ...DAY_METRICS,
   ...LEAD_METRICS,

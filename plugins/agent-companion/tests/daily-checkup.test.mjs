@@ -286,6 +286,89 @@ test('spawns by TYPE:/ROLE:/rung with units per spawn; compactions and the share
   } finally { fx.cleanup(); }
 });
 
+// Four subagent requests of ~10 units each (1M output on Sonnet) at 100K, 160K, 180K and 220K context.
+function ceilingDay(root) {
+  subFile(root, 'sess1', 'c1', 'agent-companion:ac-sonnet-high', 'TYPE: bounded-feature\nROLE: writer\n', [
+    asst('c1a', '2026-10-09T10:01:00Z', SONNET, { cr: 100_000, o: 1_000_000 }),
+    asst('c1b', '2026-10-09T10:02:00Z', SONNET, { cr: 160_000, o: 1_000_000 }),
+    asst('c1c', '2026-10-09T10:03:00Z', SONNET, { cr: 180_000, o: 1_000_000 }),
+    asst('c1d', '2026-10-09T10:04:00Z', SONNET, { cr: 220_000, o: 1_000_000 }),
+  ]);
+}
+const CEILING_ENV = 'CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_TOKENS';
+function withCeiling(value, fn) {
+  const before = process.env[CEILING_ENV];
+  if (value === undefined) delete process.env[CEILING_ENV]; else process.env[CEILING_ENV] = String(value);
+  try { return fn(); } finally { if (before === undefined) delete process.env[CEILING_ENV]; else process.env[CEILING_ENV] = before; }
+}
+
+for (const [label, value, ceiling, over, share] of [
+  ['a 150K ceiling', 150000, 150000, 30.1, 75],
+  ['the 175K default (option unset)', undefined, 175000, 20.1, 50],
+  ['a custom 200K ceiling', 200000, 200000, 10, 25],
+  ['an off ceiling (0) measured against the 175K default', 0, 175000, 20.1, 50],
+]) {
+  test(`share over the active context ceiling: ${label}, beside the fixed 150K share`, () => {
+    const { fx, root } = mk();
+    try {
+      ceilingDay(root);
+      withCeiling(value, () => run(root));
+      const r = record();
+      assert.equal(r.units.subagent, 40.1);
+      assert.equal(r.subagent.ceilingTokens, ceiling);
+      assert.equal(r.subagent.unitsOverCeiling, over);
+      assert.equal(r.subagent.shareOverCeilingPct, share);
+      // the fixed 150K series is unchanged whatever the ceiling
+      assert.equal(r.subagent.unitsOver150k, 30.1);
+      assert.equal(r.subagent.shareOver150kPct, 75);
+    } finally { fx.cleanup(); }
+  });
+}
+
+test('share over the ceiling: a day counted against two ceilings has no share and no ceiling, the 150K share stays', () => {
+  const { fx, root } = mk();
+  try {
+    const f = subFile(root, 'sess1', 'c1', 'agent-companion:ac-sonnet-high', 'TYPE: bounded-feature\nROLE: writer\n', [
+      asst('c1a', '2026-10-09T10:01:00Z', SONNET, { cr: 180_000, o: 1_000_000 }),
+    ]);
+    // the option changes between two scans of the same open day: the hour mixes two lines
+    const first = withCeiling(175000, () => scanTranscripts({ root, nowT: NOW, holdMs: 0 }));
+    put(f, [asst('c1b', '2026-10-09T10:05:00Z', SONNET, { cr: 160_000, o: 1_000_000 })], { append: true });
+    const scan = withCeiling(150000, () => scanTranscripts({ root, nowT: NOW, holdMs: 0, state: first.state }));
+    const r = buildDayRecord(scan.state, dayStartMs(T('2026-10-09T12:00:00Z')));
+    assert.equal(r.subagent.ceilingTokens, null);
+    assert.equal(r.subagent.unitsOverCeiling, null);
+    assert.equal(r.subagent.shareOverCeilingPct, null);
+    assert.equal(r.subagent.shareOver150kPct, 100);
+    // a day on one ceiling, hours apart from the change, keeps its share: only mixed hours drop it
+    const g = subFile(root, 'sess2', 'c2', 'agent-companion:ac-sonnet-high', 'TYPE: bounded-feature\nROLE: writer\n', [
+      asst('c2a', '2026-10-10T09:30:00Z', SONNET, { cr: 160_000, o: 1_000_000 }),
+    ]);
+    assert.ok(g);
+    const next = withCeiling(150000, () => scanTranscripts({ root, nowT: NOW + DAY_MS, holdMs: 0, state: scan.state }));
+    const r2 = buildDayRecord(next.state, dayStartMs(T('2026-10-10T12:00:00Z')));
+    assert.equal(r2.subagent.ceilingTokens, 150000);
+    assert.equal(r2.subagent.shareOverCeilingPct, 100);
+  } finally { fx.cleanup(); }
+});
+
+test('share over the ceiling: an hour from a state written before 0.31.24 (no per-hour ceiling) leaves the day without a share', () => {
+  const { fx, root } = mk();
+  try {
+    const f = subFile(root, 'sess1', 'c1', 'agent-companion:ac-sonnet-high', 'TYPE: bounded-feature\nROLE: writer\n', [
+      asst('c1a', '2026-10-09T10:01:00Z', SONNET, { cr: 180_000, o: 1_000_000 }),
+    ]);
+    const first = scanTranscripts({ root, nowT: NOW, holdMs: 0, ceiling: 175000 });
+    for (const b of Object.values(first.state.hours)) b.length = 3; // the old three-slot bucket
+    put(f, [asst('c1b', '2026-10-09T10:05:00Z', SONNET, { cr: 190_000, o: 1_000_000 })], { append: true });
+    const scan = scanTranscripts({ root, nowT: NOW, holdMs: 0, state: first.state, ceiling: 175000 });
+    const rec = buildDayRecord(scan.state, dayStartMs(T('2026-10-09T12:00:00Z')));
+    assert.equal(rec.subagent.ceilingTokens, null);
+    assert.equal(rec.subagent.shareOverCeilingPct, null);
+    assert.equal(rec.subagent.shareOver150kPct, 100);
+  } finally { fx.cleanup(); }
+});
+
 test('a later run adds units to a subagent file without counting its spawn again', () => {
   const { fx, root } = mk();
   try {

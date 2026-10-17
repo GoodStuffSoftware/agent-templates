@@ -1,5 +1,5 @@
 // Deterministic fixture for the metric-registry parity test. runParity() evaluates every one of
-// the 13 register metrics through the public evalMetric over synthetic history, spawn and denial
+// the 14 register metrics through the public evalMetric over synthetic history, spawn and denial
 // rows (plain and staged-baseline triggers) and returns one JSON-able object. The golden file
 // (fixtures/metric-registry/parity.golden.json) was generated from decision-register.mjs BEFORE
 // the metrics moved into scripts/lib/usage/metrics/, so a byte-identical result proves the move.
@@ -16,7 +16,7 @@ function history() {
     const rec = {
       day,
       units: { total: 100 + k * 7, main: 40 + k * 3, subagent: 60 + k * 4 },
-      subagent: { unitsOver150k: 10 + k, compactions: k % 4 },
+      subagent: { unitsOver150k: 10 + k, compactions: k % 4, ceilingTokens: 175000, unitsOverCeiling: 6 + k },
       spawns: { total: 20 + k * 2, byType: { 'bounded-feature': { n: 5 + k, units: 12 + k * 2 } }, byRung: { 'sonnet/high': { n: 3 + k, units: 7 + k } } },
       ceilingNudges: k % 3,
       limit: { hits: 0 },
@@ -63,7 +63,7 @@ function denialRows() {
 const SOURCES = {
   unitsPerSpawn: 'history', mainUnitsPerDay: 'history', shareOver150kPct: 'history', compactionsPer100Spawns: 'history', ceilingNudgesPerDay: 'history',
   leadEffortShare: 'spawns', reviewsPerWriter: 'spawns', haikuSpawns: 'spawns', leadRebriefsPer100Spawns: 'spawns', reviewFixShareByLeadEffort: 'spawns',
-  leadRoutingDeniesPer100Spawns: 'spawns', leadUnderProvisionedShare: 'spawns', mainUnitsPerLeadSpawn: 'history',
+  leadRoutingDeniesPer100Spawns: 'spawns', leadUnderProvisionedShare: 'spawns', mainUnitsPerLeadSpawn: 'history', shareOverCeilingPct: 'history',
 };
 const PARAMS = {
   unitsPerSpawn: { type: 'bounded-feature' }, leadEffortShare: { levels: ['high'] }, reviewsPerWriter: { writerType: 'bounded-feature' },

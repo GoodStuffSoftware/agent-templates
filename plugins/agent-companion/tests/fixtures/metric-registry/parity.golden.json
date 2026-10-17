@@ -1421,5 +1421,118 @@
    "pooled": 1.9166666666666667,
    "n": 96
   }
+ },
+ "shareOverCeilingPct": {
+  "plain": {
+   "days": [
+    {
+     "day": "2026-10-05",
+     "qualifies": true,
+     "hit": true,
+     "value": 10,
+     "n": 60
+    },
+    {
+     "day": "2026-10-06",
+     "qualifies": true,
+     "hit": true,
+     "value": 10.9375,
+     "n": 64
+    },
+    {
+     "day": "2026-10-07",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-08",
+     "qualifies": true,
+     "hit": true,
+     "value": 12.5,
+     "n": 72
+    },
+    {
+     "day": "2026-10-09",
+     "qualifies": false,
+     "hit": false
+    },
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 13.750000000000002,
+     "n": 80
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 14.285714285714285,
+     "n": 84
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 14.772727272727273,
+     "n": 88
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 15.217391304347828,
+     "n": 92
+    }
+   ],
+   "ready": true,
+   "value": 15.217391304347828,
+   "n": 92
+  },
+  "staged": {
+   "days": [
+    {
+     "day": "2026-10-10",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.225,
+     "n": 80
+    },
+    {
+     "day": "2026-10-11",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.2494456762749446,
+     "n": 164
+    },
+    {
+     "day": "2026-10-12",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.2727272727272725,
+     "n": 252
+    },
+    {
+     "day": "2026-10-13",
+     "qualifies": true,
+     "hit": true,
+     "value": 1.29492600422833,
+     "n": 344
+    }
+   ],
+   "ready": true,
+   "pre": 11.224489795918368,
+   "n": 344,
+   "value": 1.29492600422833
+  },
+  "baseline": {
+   "days": [
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-08"
+   ],
+   "pooled": 11.224489795918368,
+   "n": 196
+  }
  }
 }
