@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.27 — 2026-10-17
+
+Fix: the resource-queue probe split a process command line with the host dirname, which returns "." for a Windows path on Linux, so the Linux CI run of 0.31.26 failed the msys sampleTree test; it now splits with win32 rules on any host (Windows behavior unchanged), with a test that runs the Linux branch by injection.
+
 ## 0.31.26 — 2026-10-17
 
 Fix: the resource queue's idle rule released a live push-gate lease (`app-e2e` shown free) while a full E2E ran under it.

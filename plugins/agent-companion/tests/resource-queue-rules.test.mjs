@@ -10,11 +10,11 @@ import {
   mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, appendFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, posix } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   loadRules, capacityOf, parseRam, limitsFor, liveVerdict, appendClear, recentClears, clearsFile, sampleTree, scanStrays, descendants,
-  parseMsysPs, holdsExclusive, msysLinks, msysBinCandidates,
+  parseMsysPs, holdsExclusive, msysLinks, msysBinCandidates, exeDir,
 } from '../scripts/lib/resource-rules.mjs';
 import {
   parseResourceArg, buildRequest, subtractHeld, planCommand, installLauncher, launcherPath, LAUNCHER_SOURCE,
@@ -259,6 +259,22 @@ test('sampleTree reads msys links only for a tree with an msys process, beside i
     const nowhere = { PATH: '', ProgramFiles: join(tmpdir(), 'rq-no-git-here') };
     assert.equal(msysLinks({ env: nowhere, near: [], gitExecPath: () => null }), null, 'no ps.exe anywhere: unknown, not "no links"');
   } else assert.deepEqual(msysLinks({ env: { PATH: '' } }), []);
+});
+
+test('exeDir and msysLinks do not depend on the host: Windows command lines split on a Linux host too, and off Windows there are no links', () => {
+  // Process command lines are Windows paths. The 0.31.26 CI failure: the host's dirname returned '.'
+  // for a backslash path on Linux. posix.dirname is that Linux behaviour, run here on any host.
+  const sh = String.raw`C:\Program Files\Git\usr\bin\sh.exe`;
+  const bin = String.raw`C:\Program Files\Git\usr\bin`;
+  assert.equal(posix.dirname(sh), '.', 'the Linux host dirname does not split a backslash path (the bug)');
+  assert.equal(exeDir({ cmd: sh + ' .husky/pre-push' }), bin);
+  assert.equal(exeDir({ cmd: '"' + sh + '" -c x' }), bin, 'quoted');
+  assert.equal(exeDir({ cmd: 'C:/Git/usr/bin/bash.exe /c/x' }), 'C:/Git/usr/bin', 'forward slashes');
+  assert.equal(exeDir({ cmd: 'bash.exe -c x' }), null, 'a bare program name has no directory');
+  assert.equal(exeDir({}), null);
+  // The Linux branch, injected so it also runs on Windows: no msys there, so no links, no spawn.
+  assert.deepEqual(msysLinks({ platform: 'linux', env: { PATH: '' } }), []);
+  assert.deepEqual(msysLinks({ platform: 'darwin' }), []);
 });
 
 test('msysBinCandidates: the tree\'s own dirs, then CLAUDE_CODE_GIT_BASH_PATH\'s install, then the standard dirs (a default when the env names none), then PATH', { skip: process.platform !== 'win32' && 'Windows paths' }, () => {

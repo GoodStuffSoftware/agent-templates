@@ -10,7 +10,7 @@
 import {
   readFileSync, appendFileSync, statSync, renameSync, mkdirSync, readdirSync,
 } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, win32 } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -280,8 +280,8 @@ function parseCimDate(s) {
  * Called only when the tree holds an msys process, so a missing ps.exe is null
  * ("unknown"), not "no links". Returns [] off Windows.
  */
-export function msysLinks({ env = process.env, near = [], gitExecPath } = {}) {
-  if (process.platform !== 'win32') return [];
+export function msysLinks({ env = process.env, near = [], gitExecPath, platform = process.platform } = {}) {
+  if (platform !== 'win32') return [];
   const ps = findMsysPs(env, near, gitExecPath);
   if (!ps) return null;
   try {
@@ -355,10 +355,12 @@ function findMsysPs(env, near = [], gitExecPath = gitExecPathOf) {
 }
 
 // The directory of a process's program, from its command line (quoted or bare), or null.
-function exeDir(p) {
+// A process command line is a Windows path whatever host runs this code, so it is split with
+// win32 rules: the host's dirname would not split backslashes on Linux (0.31.26 CI failure).
+export function exeDir(p) {
   const cmd = String(p.cmd ?? '').trim();
   const m = /^"([^"]+)"/.exec(cmd) ?? /^(.+?\.exe)(?:\s|$)/i.exec(cmd);
-  return m && /[\\/]/.test(m[1]) ? dirname(m[1]) : null;
+  return m && /[\\/]/.test(m[1]) ? win32.dirname(m[1]) : null;
 }
 
 const MSYS_RE = /^(?:sh|bash|dash|zsh)\.exe$/i;
