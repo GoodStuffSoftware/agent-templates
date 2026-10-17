@@ -69,7 +69,7 @@ test('routing_trial_review_due also fires the benchmark suggestion (reuses the e
   try {
     const res = runScript('scripts/detect.mjs', [], {
       cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00.000Z' },
+      env: { AGENT_COMPANION_FAKE_NOW: '2026-11-01T00:00:00.000Z' },
     });
     assert.equal(res.status, 0, res.stderr);
     const trialSigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');

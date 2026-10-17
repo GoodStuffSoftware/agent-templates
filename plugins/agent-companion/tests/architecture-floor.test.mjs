@@ -34,7 +34,7 @@ async function stage(configText) {
 
 // --- Trial layer: the shipped table itself -----------------------------
 
-test('F5 waiver scope: the shipped trial rows carrying waivesFloor are EXACTLY {integration}', () => {
+test('F5 waiver scope: no shipped trial row carries waivesFloor (the 2026-10-16 review settled integration on sonnet/high and dropped the only one)', () => {
   const cfg = JSON.parse(SHIPPED_CONFIG);
   // Presence of the key, whatever its value: a row that even names a waiver
   // is a scope change for the operator to decide, not a quiet table edit.
@@ -42,11 +42,9 @@ test('F5 waiver scope: the shipped trial rows carrying waivesFloor are EXACTLY {
     .filter(([, t]) => t && ((t.override && Object.hasOwn(t.override, 'waivesFloor')) || Object.hasOwn(t, 'waivesFloor')))
     .map(([n]) => n)
     .sort();
-  assert.deepEqual(waived, ['integration'], 'only the integration trial row may carry an F5 waiver (0.29.2 "effort" decision)');
-  // The live gate's waived-trial class is scoped to the same set.
-  assert.deepEqual([...WAIVED_TRIAL_TYPES].sort(), waived);
-  const ov = cfg.taskTypes.integration.override;
-  assert.deepEqual([ov.waivesFloor, ov.source], ['elevated', 'operator-observed']);
+  assert.deepEqual(waived, [], 'no trial row carries an F5 waiver since the 2026-10-16 routing review (a new one is a scope change for the operator to decide)');
+  // The live gate's waived-trial class stays scoped to integration alone: a future waiver may sit there and nowhere else.
+  assert.deepEqual([...WAIVED_TRIAL_TYPES].sort(), ['integration']);
 });
 
 test('every shipped architecture-class task type is flagged, and none resolves to opus/low', async () => {
@@ -65,10 +63,10 @@ test('every shipped architecture-class task type is flagged, and none resolves t
   }
 });
 
-test('integration sits at opus/medium (0.29.2 "effort" decision); large-refactor at opus/high (2026-10-02 trial v4) and novel-design at opus/xhigh; critical-change stays opus/xhigh (F1)', async () => {
+test('integration sits at sonnet/high (2026-10-16 routing review, supersedes the 0.29.2 opus/medium decision); large-refactor at opus/high (2026-10-02 trial v4) and novel-design at opus/xhigh; critical-change stays opus/xhigh (F1)', async () => {
   const ctx = await stage(SHIPPED_CONFIG);
   const want = {
-    integration: 'opus/medium',
+    integration: 'sonnet/high',
     'large-refactor': 'opus/high',
     'novel-design': 'opus/xhigh',
     'critical-change': 'opus/xhigh',

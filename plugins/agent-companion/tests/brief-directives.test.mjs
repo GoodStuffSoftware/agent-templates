@@ -152,14 +152,14 @@ test('a misspelt header TYPE is not replaced by a body "type: explore": no route
 });
 
 test('a fenced "WEIGHT: 1" does not depart from the TYPE preset', () => {
-  const r = spawn('TYPE: integration\nWARRANT: weight 4 — x\nExample brief:\n```\nWEIGHT: 1\n```\ndo it', 'sess-dir-2');
+  const r = spawn('TYPE: integration\nWARRANT: weight 4 — x\nExample brief:\n```\nWEIGHT: 1\n```\ndo it', 'sess-dir-2', 'sonnet');
   assert.equal(r.decision, 'proceed', r.reason);
   assert.equal(r.row.declared_weight, 4);
   assert.equal(r.row.route_layer, 'trial');
 });
 
 test('a blockquoted "KIND: mechanical" does not depart from the TYPE preset', () => {
-  const r = spawn('TYPE: integration\nWARRANT: weight 4 — x\n> KIND: mechanical\ndo it', 'sess-dir-3');
+  const r = spawn('TYPE: integration\nWARRANT: weight 4 — x\n> KIND: mechanical\ndo it', 'sess-dir-3', 'sonnet');
   assert.equal(r.decision, 'proceed', r.reason);
   assert.equal(r.row.declared_kind, 'bounded');
   assert.equal(r.row.route_layer, 'trial');

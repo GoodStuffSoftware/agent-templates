@@ -14,6 +14,8 @@ import { execSyncHidden } from './lib/proc.mjs';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, readdirSync, statSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
 import { userInfo } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { recordRun, ackCommandFor, DEFAULT_REPEAT_DAYS } from './lib/scout-handoff.mjs';
 import {
   modelTiers, tierEffortProblems, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
   homeRoot, stateRoot, resolveRoute, isLadderAgentName, routingProfileState,
@@ -514,24 +516,39 @@ try {
   const drifted = [];
   // The scout scrubs absolute paths and project names out of a signal, so a repo-root project shows
   // as a bare placeholder. Name a root "repo root" (numbered when several), a worktree by its tree.
-  const isTree = (p) => /[\\/]\.claude[\\/]worktrees[\\/][^\\/]+[\\/]*$/.test(String(p));
-  const found = [];
+  // A repo's .claude/worktrees/* folders are copies of the repo, so a stale agent definition in
+  // the repo shows up once per worktree. The unit reported is the repository: a worktree folds
+  // into its repo root (the root's own drift wins; otherwise the first drifted worktree's), and
+  // the count of drifted worktree copies is appended.
+  const treeRoot = (p) => {
+    const m = /^(.*?)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+[\\/]*$/.exec(String(p));
+    return m ? m[1] : null;
+  };
+  const repoKey = (p) => {
+    const key = String(p).replace(/\\/g, '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? key.toLowerCase() : key;
+  };
+  const repos = new Map(); // repo key -> { text: root's drift text | null, trees: [drift text of each drifted worktree] }
   for (const p of candidates) {
     const c = driftCounts(projectAgentDrift(p));
     const bad = c.below + c.above + c.inherits + c.unknownType + c.parityGaps + c.parityUnverifiable;
-    if (bad) {
-      found.push({ tree: isTree(p), name: basename(p), text: [
-        c.below && `${c.below} below`, c.above && `${c.above} above`, c.inherits && `${c.inherits} inherit effort`,
-        c.unknownType && `${c.unknownType} unknown routingType`, c.parityGaps && `${c.parityGaps} writer(s) without a parity reviewer`,
-        c.parityUnverifiable && `${c.parityUnverifiable} writer(s) with unverifiable parity`,
-      ].filter(Boolean).join(', ') });
-    }
+    if (!bad) continue;
+    const text = [
+      c.below && `${c.below} below`, c.above && `${c.above} above`, c.inherits && `${c.inherits} inherit effort`,
+      c.unknownType && `${c.unknownType} unknown routingType`, c.parityGaps && `${c.parityGaps} writer(s) without a parity reviewer`,
+      c.parityUnverifiable && `${c.parityUnverifiable} writer(s) with unverifiable parity`,
+    ].filter(Boolean).join(', ');
+    const root = treeRoot(p);
+    const k = repoKey(root ?? p);
+    const e = repos.get(k) || { text: null, trees: [] };
+    if (root) e.trees.push(text); else e.text = text;
+    repos.set(k, e);
   }
-  const rootCount = found.filter((x) => !x.tree).length;
   let rootN = 0;
-  for (const x of found) {
-    const label = x.tree ? x.name : (rootN += 1, rootCount > 1 ? `repo root ${rootN}` : 'repo root');
-    drifted.push(`${label}: ${x.text}`);
+  for (const e of repos.values()) {
+    const label = repos.size > 1 ? `repo root ${(rootN += 1)}` : 'repo root';
+    const copies = e.trees.length ? ` (${e.trees.length} worktree cop${e.trees.length === 1 ? 'y' : 'ies'})` : '';
+    drifted.push(`${label}: ${e.text ?? e.trees[0]}${copies}`);
   }
   if (drifted.length) {
     sig('project_agent_drift',
@@ -552,6 +569,9 @@ function haikuFitLeak(rows, nowT) {
     const t = Date.parse(s.at);
     if (!(t > since)) return false;
     if (!/^haiku\b/i.test(String(s.fit_expected || ''))) return false;
+    // A grid row records a weight the lead declared, not a routing decision: its haiku
+    // expectation is not a route the lead then left, so it is not a leak.
+    if (s.route_layer === 'grid') return false;
     return !/haiku/i.test(String(s.model || ''));
   });
   if (!leaked.length) return null;
@@ -1671,6 +1691,16 @@ try {
 try {
   appendFileSync(stateFile('scout-history.jsonl'), `${JSON.stringify(scoutResult)}\n`);
 } catch { /* reporting still goes to stdout */ }
+
+// Hand-off for the lead: what is new, cleared, changed or repeating, minus what an
+// operator already triaged (scout-ack.mjs). Plain file writes, no model call, and a
+// failure here never touches the scout's own result above.
+try {
+  recordRun(dirname(stateFile('scout-latest.json')), scoutResult, {
+    threshold: opt('scout_repeat_days', DEFAULT_REPEAT_DAYS),
+    ackCommand: ackCommandFor(dirname(dirname(fileURLToPath(import.meta.url)))),
+  });
+} catch { /* advisory */ }
 
 process.stdout.write(JSON.stringify({
   changed: signals.length > 0,

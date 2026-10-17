@@ -60,7 +60,7 @@ import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
 import { briefDeclarations, declarationValue, BRIEF_ROLES } from './lib/brief-directives.mjs';
 import {
   selfReviewConfig, optedOut, isParityType, writerFromCaller, callerSpawnRow, definitionCarriesProtocol,
-  injectionRung, pinnedInjectionRung, selfReviewBriefText,
+  injectionRung, pinnedInjectionRung, selfReviewBriefText, reviewerRungFor,
 } from './lib/self-review.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract, noteContractAppended } from './lib/brevity.mjs';
@@ -1474,18 +1474,37 @@ try {
         // a ladder rung without it, sized to the pair its pin runs; the lead
         // opts out per spawn with the same `REVIEW: lead` line.
         const pinnedNoBlock = pinned && selfReviewExpected === null;
+        // A brief that states no CONSEQUENCE still carries its type's
+        // preset: a critical type's self-review names the critical
+        // review rung. Text only; no guard decision reads this value.
+        let reviewConsequence = consequenceWasDeclared ? declaredConsequence : null;
+        if (!consequenceWasDeclared) {
+          try { if (taskTypeDef(declaredType)?.def?.consequence === 'critical') reviewConsequence = 'critical'; } catch { /* table unreadable */ }
+        }
+        if (selfReviewExpected === true) {
+          // The definition carries the generated block, which names the
+          // writer's OWN rung as its reviewer (generated with no operator
+          // config in it). The operator's reviewerEffortFloor and
+          // reviewerEffortCap and a critical consequence still apply, so when
+          // the recommender names another rung, say so in two lines. Never a
+          // second copy of the protocol, and not counted as an injection.
+          const brung = pinned
+            ? pinnedInjectionRung(def, model, callerEffort)
+            : injectionRung(runningType, def, model);
+          const rv = brung ? reviewerRungFor(brung, { writerType: declaredType, consequence: reviewConsequence }) : null;
+          if (rv) {
+            const own = `${brung.model}${brung.effort ? '/' + brung.effort : ''}`;
+            const rvPair = `${rv.model}${rv.effort ? '/' + rv.effort : ''}`;
+            selfReviewSuffix = '\n\n---\n(agent-companion: reviewer rung for this brief.)\n' +
+              `Spawn your reviewer on subagent_type "agent-companion:${rv.agent}" (${rvPair}); this replaces the rung ` +
+              `your self-review section names. Keep \`WRITER: ${own}\` in the reviewer's brief.\n`;
+          }
+        }
         if (selfReviewExpected === false || pinnedNoBlock) {
           const rung = pinnedNoBlock
             ? pinnedInjectionRung(def, model, callerEffort)
             : injectionRung(runningType, def, model);
           if (rung) {
-            // A brief that states no CONSEQUENCE still carries its type's
-            // preset: a critical type's self-review names the critical
-            // review rung. Text only; no guard decision reads this value.
-            let reviewConsequence = consequenceWasDeclared ? declaredConsequence : null;
-            if (!consequenceWasDeclared) {
-              try { if (taskTypeDef(declaredType)?.def?.consequence === 'critical') reviewConsequence = 'critical'; } catch { /* table unreadable */ }
-            }
             selfReviewSuffix = selfReviewBriefText(rung, sr, undefined, {
               writerType: declaredType, consequence: reviewConsequence,
             });

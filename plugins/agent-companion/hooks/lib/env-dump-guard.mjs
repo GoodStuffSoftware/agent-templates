@@ -17,9 +17,15 @@
 //   redirected to a file, `compgen -e`, `(Get-ChildItem env:).Name`, `[Environment]::GetEnvironmentVariables().Keys`,
 //   `env FOO=1 cmd` (runs a command), `set -e`, `export FOO=1`, `${NAME:+x}` and `[ -n "$NAME" ]` presence tests,
 //   `$(env)` captured into an assignment, and a `$NAME` used as an argument of any other command (curl -H ... $TOKEN).
-// Not covered (documented gap): code inside a quoted -e / -c program (node -e 'console.log(process.env)').
+// Inline programs (env-dump-inline.mjs): the code of `node -e|-p`, `python -c`, `deno eval`, `bun -e`, and a program or
+//   shell script fed on stdin (a heredoc, `<<<`, `cat <<E |`, `echo '...' |`, a PowerShell string or here-string piped
+//   in), `powershell -EncodedCommand`, judged by the same two kinds. Stdout or stderr counts only where it reaches the
+//   transcript: `> file` covers stdout, `2> file` stderr, `&> file` both (a bare `2>/dev/null` no longer hides stdout).
+// A redirection to the screen is not a file (0.31.28): /dev/stdout, /dev/stderr, /dev/tty, /dev/fd/1|2, /proc/self/fd/1|2,
+//   a process substitution `>(...)`, PowerShell `CON`, and the stream merges `>&2`, `*>&1`, so `env > /dev/stdout` is denied.
 
-import { parseCommands, baseName, psParam } from './process-kill-guard.mjs';
+import { parseCommands, baseName, psParam, progIndex } from './process-kill-guard.mjs';
+import { inlinePrograms, judgeProgram } from './env-dump-inline.mjs';
 
 const MAX_DEPTH = 6;
 const BUDGET = 400000;
@@ -29,7 +35,8 @@ export const ENV_MSG =
   'This command would print environment variable VALUES (a bulk dump, or a variable named like a secret: TOKEN, KEY, SECRET, ' +
   'PASSWORD, PASSWD, AUTH, CREDENTIAL, COOKIE) into the transcript, and session-sync uploads transcripts (2026-10-17: ' +
   '`env | grep -i claude` put CLAUDE_CODE_MESSAGING_TOKEN in a transcript that went to Google Drive). List NAMES only: ' +
-  '`env | cut -d= -f1`, `printenv | sed \'s/=.*//\'`, `compgen -e`, or in PowerShell `(Get-ChildItem env:).Name`. To check that a ' +
+  '`env | cut -d= -f1`, `printenv | sed \'s/=.*//\'`, `compgen -e`, in PowerShell `(Get-ChildItem env:).Name`, in node ' +
+  '`Object.keys(process.env)`, in Python `sorted(os.environ)`. To check that a ' +
   'value is present without printing it: `[ -n "$NAME" ] && echo set || echo unset` (PowerShell: `if ($env:NAME) { \'set\' } ' +
   'else { \'unset\' }`); to use a secret, pass it as an argument or on stdin and never echo it. To switch this guard off or to a ' +
   'warning, set the plugin option env_dump_guard to off or warn.';
@@ -61,7 +68,49 @@ function rawProg(words) {
   return -1;
 }
 
-const redirected = (words) => words.some((x) => !x.q && /^\d*>>?(?!&)/.test(x.t));
+// a redirection target that is the screen, not a file: /dev/stdout, /dev/stderr, /dev/tty, /dev/fd/1|2,
+// /proc/self/fd/1|2, a terminal device, a process substitution `>(...)` (the parser leaves its `>` as the target word),
+// and the Windows console device CON / CONOUT$
+const TO_SCREEN = /^(?:\/dev\/(?:stdout|stderr|tty|console|fd\/[12]|pts\/\d+)|\/proc\/self\/fd\/[12]|con:?|conout\$|>(?:\(.*)?)$/i;
+
+// where stdout (1) and stderr (2) go: to a file (true) or on to the transcript / the pipe (false). errToOut: 2>&1 while
+// stdout was not yet a file, so stderr follows stdout down the pipe.
+function redirState(words) {
+  const r = { 1: false, 2: false, errToOut: false };
+  for (let j = 0; j < words.length; j++) {
+    const x = words[j];
+    if (x.q) continue;
+    const m = /^(&|\*|\d*)(>>?|>\|)(&?)([\s\S]*)$/.exec(x.t);
+    if (!m) continue;
+    const [, fd, , dup, rest] = m;
+    if (dup) { // n>&m: 2>&1 follows stdout; 1>&2 and >&2 stay on screen
+      if (fd === '2' && rest === '1') { if (r[1]) r[2] = true; else r.errToOut = true; }
+      continue;
+    }
+    let target = rest;
+    if (target === '' && j + 1 < words.length) target = words[++j].t; // operator alone: its target is the next word
+    if (TO_SCREEN.test(target)) continue;
+    if (fd === '&' || fd === '*') { r[1] = true; r[2] = true; } // &>f, PowerShell *>f
+    else if (fd === '' || fd === '1') r[1] = true;
+    else if (fd === '2') r[2] = true;
+  }
+  return r;
+}
+const redirected = (words) => redirState(words)[1];
+
+// argument words without redirections: in `env 2>/dev/null` or `printenv > f`, the redirection is not an argument
+function noRedir(words) {
+  const out = [];
+  for (let j = 0; j < words.length; j++) {
+    const x = words[j];
+    if (!x.q && /^(\d*|&|\*)(<<<|>>?|>\||<)$/.test(x.t)) { j++; continue; } // operator alone: its target is the next word
+    if (!x.q && /^(\d*|&|\*)(>>?|>\||<(?![<(]))/.test(x.t)) continue;
+    out.push(x);
+  }
+  return out;
+}
+// programs that print what a here-string feeds them
+const HERE_ECHO = new Set(['cat', 'tee', 'tr', 'head', 'tail', 'sort', 'uniq', 'rev', 'base64', 'xxd', 'od', 'sed', 'awk', 'gawk', 'grep', 'xargs', 'tac', 'fold', 'nl', 'paste']);
 
 // kind of an env source command: 'dump' | 'secret' | null
 function classify(cmd, shell) {
@@ -69,19 +118,46 @@ function classify(cmd, shell) {
   const k = rawProg(w);
   if (k < 0) return null;
   const prog = baseName(w[k].t);
-  const rest = w.slice(k + 1);
+  const rest = noRedir(w.slice(k + 1));
   const args = rest.map((x) => x.t);
   const ps = shell === 'powershell';
-
   if (w.some((x) => /getenvironmentvariables\(/i.test(x.t))) {
     return w.some((x) => /getenvironmentvariables\([^)]*\)\.keys\b/i.test(x.t)) ? null : 'dump';
   }
-  if (cmd.words.length === 1 && ps && /^\$\{?env:\w+\}?$/i.test(w[0].nv ?? w[0].t)) {
-    return isSecretName(/env:(\w+)/i.exec(w[0].t)[1], 'powershell') ? 'secret' : null;
+  // a PowerShell expression alone on its line prints its value; a redirection after it (`$env:NAME > CON`) is not a word
+  const lone = ps ? noRedir(w) : w;
+  if (lone.length === 1 && ps && /^\$\{?env:\w+\}?$/i.test(lone[0].nv ?? lone[0].t)) {
+    return isSecretName(/env:(\w+)/i.exec(lone[0].t)[1], 'powershell') ? 'secret' : null;
   }
-  if (cmd.words.length === 1 && ps && /getenvironmentvariable\(\s*['"]?\w+/i.test(w[0].t)) {
-    const m = /getenvironmentvariable\(\s*['"]?(\w+)/i.exec(w[0].t);
+  if (lone.length === 1 && ps && /getenvironmentvariable\(\s*['"]?\w+/i.test(lone[0].t)) {
+    const m = /getenvironmentvariable\(\s*['"]?(\w+)/i.exec(lone[0].t);
     return m && isSecretName(m[1], 'powershell') ? 'secret' : null;
+  }
+  // PowerShell: a quoted first word ('text', "text", a here-string) is a string value, not a command; it prints itself,
+  // so only a $env:NAME expanded inside a double-quoted one counts. After the call operator (`& 'C:\...\env.exe'`,
+  // `$x = & "...\printenv.exe"`) or a dot-source (`. 'C:\...\env.exe'`) the quoted word is the program, judged below.
+  if (ps && w[k].q && !cmd.call) {
+    const re = /\$\{?env:(\w+)\}?/gi;
+    let m;
+    while ((m = re.exec(w[k].nv ?? ''))) if (isSecretName(m[1], 'powershell')) return 'secret';
+    return null;
+  }
+  // bash here-string into a program that prints its input: cat <<< "$TOKEN"
+  // and an unquoted heredoc into one: bash expands its body like a double-quoted word (cat <<E / $TOKEN / E)
+  if (!ps && HERE_ECHO.has(prog) && !(prog === 'grep' && args.some((a) => /^-[A-Za-z]*[qcl]/.test(a)))) {
+    const expandsSecret = (text, honorBackslash) => {
+      const re = /(\\?)\$(?:\{([A-Za-z_]\w*)(?![\w])([^}]*)\}|([A-Za-z_]\w*))/g;
+      let m;
+      while ((m = re.exec(text))) {
+        if (m[1] && honorBackslash) continue;
+        if (m[2] !== undefined ? !/^:?\+/.test(m[3] || '') && isSecretName(m[2], shell) : isSecretName(m[4], shell)) return true;
+      }
+      return false;
+    };
+    const h = w.findIndex((x) => !x.q && x.t === '<<<');
+    if (h >= 0 && w[h + 1] && expandsSecret(w[h + 1].nv ?? w[h + 1].t, false)) return 'secret';
+    const bodies = cmd.heredocs || [];
+    for (let j = 0; j < bodies.length; j++) if (cmd.hereQuoted?.[j] === false && expandsSecret(bodies[j], true)) return 'secret';
   }
 
   if (prog === 'env') {
@@ -210,6 +286,31 @@ function psNamesOnly(downstream) {
   });
 }
 
+// The code of an inline program (env-dump-inline.mjs). A hit counts only on a stream that reaches the transcript:
+// stdout is safe when redirected to a file, piped to a names-only / count filter, or (a secret) into a quiet consumer;
+// stderr when redirected to a file, or sent down that same safe pipe by 2>&1.
+function inlineHits(c, list, i, shell, depth, st, hits) {
+  if (depth >= MAX_DEPTH) return;
+  const progs = inlinePrograms(c, i > 0 ? list[i - 1] : null, shell);
+  if (!progs.length) return;
+  const down = list.slice(i + 1);
+  const red = redirState(c.words);
+  const nested = (text) => { const h = { env: null }; scan(text, 'bash', depth + 1, st, h); return h.env ? h.env.split(':')[0] : null; };
+  for (const p of progs) {
+    if (p.lang === 'bash' || p.lang === 'powershell') { scan(p.code, p.lang, depth + 1, st, hits); if (hits.env) return; continue; }
+    const r = judgeProgram(p.lang, p.code, p.printLast, nested);
+    if (!r) continue;
+    // 2>&1 sends stderr where stdout pointed at that moment (the pipe), so a later `> file` does not cover it
+    const pipeSafe = down.some((d) => isFilter(d, shell)) || (r.kind === 'secret' && consumedQuietly(down));
+    const safe1 = red[1] || pipeSafe;
+    const safe2 = red[2] || (red.errToOut && pipeSafe);
+    if ([...r.streams].every((s) => (s === 1 ? safe1 : safe2))) continue;
+    const pk = progIndex(c.words);
+    hits.env = `${r.kind}: ${pk >= 0 && pk < c.words.length ? baseName(c.words[pk].t).slice(0, 40) : ''}`;
+    return;
+  }
+}
+
 function scan(text, shell, depth, st, hits) {
   if (depth > MAX_DEPTH) return;
   const cmds = parseCommands(text, shell, depth, st);
@@ -240,6 +341,8 @@ function scan(text, shell, depth, st, hits) {
         // the detail is the kind and the program word only: never a word of the command (an inline literal could be a secret)
         if (!safe) { const pk = rawProg(c.words); hits.env = hits.env || `${kind}: ${pk >= 0 ? baseName(c.words[pk].t).slice(0, 40) : ''}`; }
       }
+      // inline programs: node -e, python -c, a heredoc into node / python / bash / pwsh, pwsh -EncodedCommand
+      if (!hits.env) inlineHits(c, list, i, shell, depth, st, hits);
       // nested scripts
       const k = rawProg(c.words);
       if (k < 0) continue;

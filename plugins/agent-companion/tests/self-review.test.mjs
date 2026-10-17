@@ -39,7 +39,7 @@ const sync = (agentsDir) => runScript('scripts/routing-table.mjs', ['--sync-agen
 const blockOf = (file) => readSelfReviewBlock(readFileSync(file, 'utf8')).block;
 
 const WRITER_TYPES = ['bounded-feature', 'integration', 'debug-root-cause', 'large-refactor', 'novel-design', 'critical-change', 'long-autonomous-run'];
-const SELF_REVIEW_RUNGS = ['ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh'];
+const SELF_REVIEW_RUNGS = ['ac-sonnet-high', 'ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh'];
 
 test('config: selfReview lists every stand-alone writer type (lean worker shape, 2026-10-06), one fix round, and the REVIEW: lead opt-out', () => {
   const sr = selfReviewConfig(SHIPPED);
@@ -57,7 +57,7 @@ test('config: selfReview lists every stand-alone writer type (lean worker shape,
   assert.equal(keys.indexOf('selfReview'), keys.indexOf('taskTypes') + 1);
 });
 
-test('committed rungs: ac-opus-medium, ac-opus-high and ac-opus-xhigh (the defaults for the selfReview types today) carry the block, and no other rung does', () => {
+test('committed rungs: ac-sonnet-high, ac-opus-medium, ac-opus-high and ac-opus-xhigh (the defaults for the selfReview types today) carry the block, and no other rung does', () => {
   for (const rung of SHIPPED.ladder) {
     const block = blockOf(join(PLUGIN_ROOT, 'agents', `${rung.agent}.md`));
     if (SELF_REVIEW_RUNGS.includes(rung.agent)) {
@@ -112,7 +112,7 @@ test('drift: a block deleted from its rung, or pasted onto another rung, fails t
   try {
     const agentsDir = fixtureAgentsDir(dir);
     const xhigh = join(agentsDir, 'ac-opus-xhigh.md');
-    const high = join(agentsDir, 'ac-sonnet-high.md');
+    const high = join(agentsDir, 'ac-sonnet-medium.md');
     const xOrig = readFileSync(xhigh, 'utf8');
     const hOrig = readFileSync(high, 'utf8');
     const block = readSelfReviewBlock(xOrig).block;
@@ -121,7 +121,7 @@ test('drift: a block deleted from its rung, or pasted onto another rung, fails t
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
     assert.match(res.stderr, /ac-opus-xhigh \[self-review-drift\][\s\S]*actual:\s+\(absent\)/);
-    assert.match(res.stderr, /ac-sonnet-high \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
+    assert.match(res.stderr, /ac-sonnet-medium \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
     assert.equal(sync(agentsDir).status, 0);
     assert.equal(readFileSync(xhigh, 'utf8'), xOrig);
     assert.equal(readFileSync(high, 'utf8'), hOrig, 'removing the block restores the rung byte for byte');
@@ -463,7 +463,7 @@ test('recursion guard: only the sidecar named for THIS agent_id is read; a revie
     const me = h.sub('me', XHIGH, bg({ subagent_type: XHIGH, prompt: REVIEW('opus/xhigh') }), { agent_transcript_path: join(h.subDir, 'agent-rev.jsonl') });
     assert.equal(me.decision, 'proceed', me.reason);
     // The reviewer itself may still spawn helpers that are not reviews.
-    const helper = h.sub('rev', XHIGH, bg({ subagent_type: 'agent-companion:ac-opus-medium', prompt: 'TYPE: bounded-feature\nfind the call sites' }));
+    const helper = h.sub('rev', XHIGH, bg({ subagent_type: 'agent-companion:ac-opus-medium', prompt: 'TYPE: debug-root-cause\nfind the call sites' }));
     assert.equal(helper.decision, 'proceed', helper.reason);
     assert.equal(helper.row.caller_row_found, null, 'no lookup for a non-review spawn');
     assert.equal(helper.row.self_review, false);
@@ -780,4 +780,21 @@ test('the generated docs say the writer lands and the lead settles disputes', ()
   assert.match(routing, /The writer lands and verifies its own work/);
   assert.doesNotMatch(routing, /The lead still lands and merges the work/);
   assert.match(routing, /## Self-review \(every writer\)/);
+});
+
+test('a bounded-feature or integration writer on ac-sonnet-high (the shipped default route) reads the protocol once, from its body: nothing is appended to its brief', () => {
+  const SH = 'agent-companion:ac-sonnet-high';
+  const h = harness();
+  try {
+    for (const type of ['bounded-feature', 'integration']) {
+      const W = h.lead(bg({ subagent_type: SH, prompt: `TYPE: ${type}\nadd the flag` }));
+      assert.equal(W.row.self_review_expected, true, type);
+      assert.equal(W.row.self_review_injected, false, `${type}: ac-sonnet-high carries the protocol in its body, so the hook appends none`);
+      const sent = W.json?.hookSpecificOutput?.updatedInput?.prompt || '';
+      assert.doesNotMatch(sent, /does not carry the self-review protocol/, `${type}: no second copy in the brief`);
+    }
+    // A rung that does not carry the block still gets it appended (once).
+    const med = h.lead(bg({ subagent_type: 'agent-companion:ac-sonnet-medium', prompt: 'TYPE: bounded-feature\nadd the flag' }));
+    assert.equal(med.row.self_review_injected, true, 'a rung without the block gets the text appended');
+  } finally { h.cleanup(); }
 });

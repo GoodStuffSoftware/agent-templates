@@ -354,9 +354,9 @@ test('F6 refuses only the offending ROW on read; the rest of the profile still a
   const bad = ctx.resolveRoute({ type: 'integration', now: BEFORE });
   assert.notEqual(bad.layer, 'profile', 'the offending row must not win');
   assert.match(bad.skipped.find((x) => x.layer === 'profile').reason, /^F6: architecture-class task type 'integration' may never route to opus\/low/);
-  // Falls back to integration's own shipped trial (its own F5 waiver, opus/medium) — not a hard failure.
+  // Falls back to integration's own shipped trial (sonnet/high since the 2026-10-16 review) — not a hard failure.
   assert.equal(bad.layer, 'trial');
-  assert.equal(label(bad), 'opus/medium');
+  assert.equal(label(bad), 'sonnet/high');
   assert.equal(bad.profileStatus, 'ok', 'a bad ROW does not invalidate the whole profile');
 
   const good = ctx.resolveRoute({ type: 'bounded-feature', now: BEFORE });

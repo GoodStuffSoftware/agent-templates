@@ -20,6 +20,11 @@
 //      FIXED in slice 1b (b).
 // A later slice that fixes these must flip the matching assertions here
 // deliberately — that edit IS the behaviour change, and says so.
+//
+// 0.31.28: the 10-16 routing verdicts moved integration to sonnet/high, so the
+// cases below use debug-root-cause, the one writer type whose shipped trial is
+// still on opus/medium (weight 4, diagnostic, routine). The parser cases are
+// unchanged.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -38,14 +43,14 @@ function spawnOpus(prompt, sid) {
   } finally { cleanup(); }
 }
 
-test('1. "TYPE: integration / EFFORT: high / WARRANT: weight 4 — ..." on opus is ALLOWED through the shipped trial (opus/medium)', () => {
-  const r = spawnOpus('TYPE: integration\nEFFORT: high\nWARRANT: weight 4 — shared surfaces other agents depend on\ndo the multi-file change', 'sess-pin-1');
+test('1. "TYPE: debug-root-cause / EFFORT: high / WARRANT: weight 4 — ..." on opus is ALLOWED through the shipped trial (opus/medium)', () => {
+  const r = spawnOpus('TYPE: debug-root-cause\nEFFORT: high\nWARRANT: weight 4 — shared surfaces other agents depend on\ndo the multi-file change', 'sess-pin-1');
   assert.equal(r.decision, 'proceed', r.reason);
   assert.doesNotMatch(r.msg, /Best fit|Premium warrant|over-provisioned/);
-  assert.equal(r.row.declared_type, 'integration');
+  assert.equal(r.row.declared_type, 'debug-root-cause');
   assert.equal(r.row.declared_weight, 4);
-  assert.equal(r.row.declared_kind, 'bounded');
-  assert.equal(r.row.declared_consequence, 'elevated');
+  assert.equal(r.row.declared_kind, 'diagnostic');
+  assert.equal(r.row.declared_consequence, 'routine');
   assert.equal(r.row.fit, 'fit');
   assert.equal(r.row.fit_expected, 'opus/medium');
   assert.equal(r.row.fit_trial, true);
@@ -54,17 +59,17 @@ test('1. "TYPE: integration / EFFORT: high / WARRANT: weight 4 — ..." on opus 
 
 // FLIPPED in slice 1b fix (a): a WEIGHT: line equal to the preset restates
 // the type, so the trial applies (ADR §1).
-test('2. TYPE: integration + "WEIGHT: 4" (equal to the preset) restates the type -> shipped trial opus/medium -> ALLOWED', () => {
-  const r = spawnOpus('TYPE: integration\nWEIGHT: 4\nWARRANT: weight 4 — x\ndo it', 'sess-pin-2');
+test('2. TYPE: debug-root-cause + "WEIGHT: 4" (equal to the preset) restates the type -> shipped trial opus/medium -> ALLOWED', () => {
+  const r = spawnOpus('TYPE: debug-root-cause\nWEIGHT: 4\nWARRANT: weight 4 — x\ndo it', 'sess-pin-2');
   assert.equal(r.decision, 'proceed', r.reason);
   assert.equal(r.row.fit_expected, 'opus/medium');
   assert.equal(r.row.route_layer, 'trial');
 });
 
-// 3a FLIPPED in slice 1b fix (a): the stray prose "kind: bounded" is still
+// 3a FLIPPED in slice 1b fix (a): the stray prose "kind: diagnostic" is still
 // parsed as a KIND line, but it equals the preset, so it no longer departs.
-test('3a. a prose "kind: bounded" line equal to the preset no longer departs -> trial -> ALLOWED', () => {
-  const r = spawnOpus('TYPE: integration\nWARRANT: weight 4 — x\nThe kind: bounded work is in three files', 'sess-pin-3a');
+test('3a. a prose "kind: diagnostic" line equal to the preset no longer departs -> trial -> ALLOWED', () => {
+  const r = spawnOpus('TYPE: debug-root-cause\nWARRANT: weight 4 — x\nThe kind: diagnostic work is in three files', 'sess-pin-3a');
   assert.equal(r.decision, 'proceed', r.reason);
   assert.equal(r.row.route_layer, 'trial');
 });
@@ -73,41 +78,41 @@ test('3a. a prose "kind: bounded" line equal to the preset no longer departs -> 
 // a line of their own (optionally list-marked and/or markdown-bold), and the
 // first TYPE line naming a known task type wins.
 test('3b. a prose "kind: mechanical" mid-sentence is no longer a KIND declaration -> trial -> ALLOWED', () => {
-  const r = spawnOpus('TYPE: integration\nWARRANT: weight 4 — x\nThe kind: mechanical parts are renames', 'sess-pin-3b');
+  const r = spawnOpus('TYPE: debug-root-cause\nWARRANT: weight 4 — x\nThe kind: mechanical parts are renames', 'sess-pin-3b');
   assert.equal(r.decision, 'proceed', r.reason);
-  assert.equal(r.row.declared_type, 'integration');
-  assert.equal(r.row.declared_kind, 'bounded'); // filled from the preset, not the prose
+  assert.equal(r.row.declared_type, 'debug-root-cause');
+  assert.equal(r.row.declared_kind, 'diagnostic'); // filled from the preset, not the prose
   assert.equal(r.row.route_layer, 'trial');
 });
 
 test('3c. a prose "weight: 4 files" mid-sentence is no longer a WEIGHT declaration', () => {
-  const r = spawnOpus('TYPE: integration\nWARRANT: weight 4 — x\nTouches weight: 2 files only', 'sess-pin-3c');
+  const r = spawnOpus('TYPE: debug-root-cause\nWARRANT: weight 4 — x\nTouches weight: 2 files only', 'sess-pin-3c');
   assert.equal(r.decision, 'proceed', r.reason);
   assert.equal(r.row.declared_weight, 4);
   assert.equal(r.row.route_layer, 'trial');
 });
 
 test('3d. a KIND: line of its own that departs still departs -> grid -> DENIED', () => {
-  const r = spawnOpus('TYPE: integration\nKIND: mechanical\nWARRANT: weight 4 — x\ndo it', 'sess-pin-3d');
+  const r = spawnOpus('TYPE: debug-root-cause\nKIND: mechanical\nWARRANT: weight 4 — x\ndo it', 'sess-pin-3d');
   assert.equal(r.decision, 'deny');
   assert.equal(r.row.declared_kind, 'mechanical');
   assert.equal(r.row.route_layer, 'grid');
 });
 
-for (const [n, line] of [['4', '**TYPE:** integration'], ['4b', '**TYPE**: integration'], ['4c', '**TYPE: integration**'], ['4d', '- TYPE: integration'], ['4e', '  Type: integration']]) {
+for (const [n, line] of [['4', '**TYPE:** debug-root-cause'], ['4b', '**TYPE**: debug-root-cause'], ['4c', '**TYPE: debug-root-cause**'], ['4d', '- TYPE: debug-root-cause'], ['4e', '  Type: debug-root-cause']]) {
   test(`${n}. "${line}" is parsed as TYPE -> trial opus/medium -> ALLOWED`, () => {
     const r = spawnOpus(`${line}\nWARRANT: weight 4 — x\ndo it`, `sess-pin-${n}`);
     assert.equal(r.decision, 'proceed', r.reason);
-    assert.equal(r.row.declared_type, 'integration');
+    assert.equal(r.row.declared_type, 'debug-root-cause');
     assert.equal(r.row.fit_expected, 'opus/medium');
     assert.equal(r.row.route_layer, 'trial');
   });
 }
 
 test('5. an earlier stray "type: x" mid-sentence is ignored; the TYPE: line wins -> ALLOWED', () => {
-  const r = spawnOpus('Brief for type: cleanup\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5');
+  const r = spawnOpus('Brief for type: cleanup\nTYPE: debug-root-cause\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5');
   assert.equal(r.decision, 'proceed', r.reason);
-  assert.equal(r.row.declared_type, 'integration');
+  assert.equal(r.row.declared_type, 'debug-root-cause');
 });
 
 // 5b FLIPPED in the 0.29.0 RC review (R1, lead decision): the FIRST
@@ -117,23 +122,23 @@ test('5. an earlier stray "type: x" mid-sentence is ignored; the TYPE: line wins
 // type route, the warrant's weight 4 goes to the grid (sonnet/high) -> DENIED.
 // Fence the snippet (5d) or indent it as code (5e) and the TYPE line wins.
 test('5b. an earlier line-start "type: object" (a YAML snippet) is the first TYPE and stays unknown -> grid -> DENIED', () => {
-  const r = spawnOpus('schema:\n  type: object\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5b');
+  const r = spawnOpus('schema:\n  type: object\nTYPE: debug-root-cause\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5b');
   assert.equal(r.decision, 'deny');
   assert.equal(r.row.declared_type, 'object');
   assert.equal(r.row.route_layer, 'grid');
 });
 
 test('5d. the same YAML inside a fenced code block is not a declaration; the TYPE line wins -> ALLOWED', () => {
-  const r = spawnOpus('```yaml\nschema:\n  type: object\n```\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5d');
+  const r = spawnOpus('```yaml\nschema:\n  type: object\n```\nTYPE: debug-root-cause\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5d');
   assert.equal(r.decision, 'proceed', r.reason);
-  assert.equal(r.row.declared_type, 'integration');
+  assert.equal(r.row.declared_type, 'debug-root-cause');
   assert.equal(r.row.route_layer, 'trial');
 });
 
 test('5e. the same YAML as indented code (4 spaces) is not a declaration; the TYPE line wins -> ALLOWED', () => {
-  const r = spawnOpus('schema:\n\n    type: object\n\nTYPE: integration\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5e');
+  const r = spawnOpus('schema:\n\n    type: object\n\nTYPE: debug-root-cause\nWARRANT: weight 4 — x\ndo it', 'sess-pin-5e');
   assert.equal(r.decision, 'proceed', r.reason);
-  assert.equal(r.row.declared_type, 'integration');
+  assert.equal(r.row.declared_type, 'debug-root-cause');
 });
 
 test('5c. with no known type anywhere, the first TYPE line is still recorded as declared', () => {

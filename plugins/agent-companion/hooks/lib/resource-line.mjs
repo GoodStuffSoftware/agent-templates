@@ -32,8 +32,15 @@ function who(h, long) {
   const name = clip(h.label || (h.session ? String(h.session).slice(0, 8) : h.id), 16);
   if (!long) return name;
   const proj = clip(h.project || h.repo || '', 12);
-  return `${name}${proj ? `@${proj}` : ''} ${ageText(h.ageMs)}${h.alive === false ? ' DEAD' : h.stale ? ' STALE' : ''}`;
+  return `${name}${proj ? `@${proj}` : ''} ${ageText(h.ageMs)}${h.alive === false ? ' DEAD' : h.stale ? ' STALE' : ''}${isQuiet(h) ? ' IDLE?' : ''}${h.overTime ? ' OVER' : ''}${h.hbStale ? ' HB?' : ''}`;
 }
+
+// A holder over time AND measured quiet shows both flags (the sweep sets idleFlag beside overTime; a
+// status that carries only overTime.activity "idle" is read the same way).
+const isQuiet = (h) => Boolean(h.idleFlag) || h.overTime?.activity === 'idle';
+const isFlagged = (h) => isQuiet(h) || Boolean(h.overTime) || Boolean(h.hbStale);
+// The way out for a hung flagged holder: the stable launcher (installed at SessionStart) plus its lease id.
+export const releaseHint = (h) => `release a flagged one by hand: node ~/.claude/agent-companion/bin/resource-queue.mjs release ${h.id}`;
 
 function reservationText(r, now) {
   const res = clip(r.resource ?? r.name ?? '', 14);
@@ -87,16 +94,20 @@ export function renderSharedResources(status, { now = Date.now(), max = LINE_MAX
     const c = cl[0];
     parts.push(`cleared ${ageText(now - c.at)} ago: ${clip(c.rule, 14)} ${clip(c.label || c.id, 16)}${cl.length > 1 ? ` +${cl.length - 1}` : ''}`);
   }
+  // A flagged live holder is kept until it exits or the 4 h ceiling; the line names the manual way out
+  // (first flagged holder), and the body is clipped to leave room for it.
+  const flagged = (status.resources ?? []).flatMap((r) => r.holders ?? []).find((h) => h.alive !== false && isFlagged(h));
+  const hint = flagged ? ` ${releaseHint(flagged)}.` : '';
   let line = `Shared resources: ${parts.join('; ')}.`;
-  if (line.length > max) line = `${line.slice(0, max - 2)}~.`;
-  return line;
+  if (line.length > max - hint.length) line = `${line.slice(0, Math.max(1, max - hint.length - 2))}~.`;
+  return `${line}${hint}`;
 }
 
 /** Changes only when who holds, who waits, what is reserved or what was cleared changes (not with the clock). */
 export function resourceSignature(status, now = Date.now()) {
   if (!hasActivity(status, now)) return '';
   const hs = [];
-  for (const r of status.resources ?? []) for (const h of r.holders ?? []) hs.push(`${r.name}:${h.id}:${h.alive === false ? 'd' : h.stale ? 's' : 'a'}`);
+  for (const r of status.resources ?? []) for (const h of r.holders ?? []) hs.push(`${r.name}:${h.id}:${h.alive === false ? 'd' : h.stale ? 's' : 'a'}${isQuiet(h) ? 'i' : ''}${h.overTime ? 'o' : ''}${h.hbStale ? 'h' : ''}`);
   return JSON.stringify([
     hs, (status.queue ?? []).map((e) => e.id), (status.reservations ?? []).map((r) => r.id ?? r.resource),
     recentClearsIn(status, now).map((c) => `${c.at}:${c.id}`),

@@ -79,9 +79,9 @@ test('no fall-back: raw weight 1/2 still resolve to haiku after the date', () =>
   });
 });
 
-test('no fall-back: explore and verify (the haiku trial rows) still route to haiku after the date', () => {
+test('no fall-back: explore (the haiku trial row) still routes to haiku after the date', () => {
   staged(() => {
-    for (const type of ['explore', 'verify']) {
+    for (const type of ['explore']) {
       const r = resolveRoute({ type, now: AFTER, profile: false });
       assert.equal(r.model, 'haiku', type);
       assert.equal(r.layer, 'trial', type);

@@ -55,6 +55,17 @@ test.after(() => { for (const s of staged) s.cleanup(); fx.cleanup(); });
 const BASE_CONTEXT = readFileSync(join(REFERENCE_DIR, 'hooks', 'lib', 'context.mjs'), 'utf8');
 const CUR_CONTEXT = readFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', 'context.mjs'), 'utf8');
 const CUR_CONFIG = readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8');
+// The 2026-10-16 routing review settled integration on sonnet/high and dropped its F5 waiver, so the shipped
+// table has no waived trial any more. The resolver logic is still proved here: WAIVED_CONFIG is the current
+// table with integration's former waived opus/medium trial row put back (2026-09-24, waivesFloor elevated).
+const WAIVED_CONFIG = (() => {
+  const cfg = JSON.parse(CUR_CONFIG);
+  cfg.taskTypes.integration.override = {
+    ...cfg.taskTypes.integration.override,
+    model: 'opus', effort: 'medium', trialVersion: 3, waivesFloor: 'elevated', source: 'operator-observed', reviewBy: '2026-12-31',
+  };
+  return JSON.stringify(cfg);
+})();
 
 async function stage(contextSource, configText) {
   const s = await stageResolver({ contextSource, configText });
@@ -131,17 +142,23 @@ test('the tier effort floor moves only grid answers on a tier with minEffort, ea
 });
 
 test('the base resolver predates trial waivers: on the current config it lifts integration\'s trial to the elevated floor', async () => {
-  const base = await stage(BASE_CONTEXT, CUR_CONFIG);
+  const base = await stage(BASE_CONTEXT, WAIVED_CONFIG);
   const r = base.resolveRoute({ type: 'integration' });
   assert.deepEqual(shape(r), { model: 'opus', effort: 'high', layer: 'trial' });
 });
 
 test('differential: on the current table, only integration\'s own trial differs from the base resolver, and it is exactly opus/medium', async () => {
-  assertInvariant(await differential(CUR_CONFIG));
+  assertInvariant(await differential(WAIVED_CONFIG));
+});
+
+test('the shipped table carries no F5 waiver: the current resolver and the base resolver agree on every case', async () => {
+  const { changed, violations } = await differential(CUR_CONFIG);
+  assert.deepEqual(changed, []);
+  assert.deepEqual(violations, []);
 });
 
 test('the differential rejects integration at opus/xhigh, and a waived trial on any other type', async () => {
-  const cfg = JSON.parse(CUR_CONFIG);
+  const cfg = JSON.parse(WAIVED_CONFIG);
   const xhigh = structuredClone(cfg);
   xhigh.taskTypes.integration.override.effort = 'xhigh';
   const x = await differential(JSON.stringify(xhigh));

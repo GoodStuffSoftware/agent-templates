@@ -72,10 +72,10 @@ test('briefNeedsDroppedTools: ordinary words are not browser work', () => {
 
 test('general-purpose + a claude-in-chrome / UI-in-the-browser brief + a started ladder: not swapped, the advisory names the browser variant; a rung is told the same', () => {
   for (const [n, prompt] of [
-    ['c1', 'TYPE: bounded-feature\nUse claude-in-chrome to log in and read the page.'],
-    ['c2', 'TYPE: bounded-feature\nCheck the UI in the browser after the change.'],
-    ['c3', 'TYPE: bounded-feature\nTake a screenshot of localhost:3000.'],
-    ['c4', 'TYPE: bounded-feature\nUse mcp__computer-use__screenshot on the Settings window.'],
+    ['c1', 'TYPE: debug-root-cause\nUse claude-in-chrome to log in and read the page.'],
+    ['c2', 'TYPE: debug-root-cause\nCheck the UI in the browser after the change.'],
+    ['c3', 'TYPE: debug-root-cause\nTake a screenshot of localhost:3000.'],
+    ['c4', 'TYPE: debug-root-cause\nUse mcp__computer-use__screenshot on the Settings window.'],
   ]) {
     const { dir, stateDir, cleanup } = makeFixture();
     try {
@@ -95,7 +95,7 @@ test('general-purpose + browser brief + a started ladder: NOT rewritten to a run
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     seedStart(stateDir, 'sess-b1', 'agent-companion:ac-sonnet-low');
-    const res = guard(dir, 'sess-b1', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature\nUse mcp__Claude_Browser to check the page.' });
+    const res = guard(dir, 'sess-b1', { subagent_type: 'general-purpose', prompt: 'TYPE: debug-root-cause\nUse mcp__Claude_Browser to check the page.' });
     const u = updated(res);
     assert.notEqual(u?.subagent_type, 'agent-companion:ac-opus-medium');
     assert.equal(u?.subagent_type, 'general-purpose', 'subagent_type left as general-purpose');
@@ -111,7 +111,7 @@ test('general-purpose + an Artifact brief: not rewritten either, and the advisor
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     seedStart(stateDir, 'sess-b2', 'agent-companion:ac-sonnet-low');
-    const res = guard(dir, 'sess-b2', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature\nPublish an Artifact with the report.' });
+    const res = guard(dir, 'sess-b2', { subagent_type: 'general-purpose', prompt: 'TYPE: debug-root-cause\nPublish an Artifact with the report.' });
     assert.equal(updated(res)?.subagent_type, 'general-purpose');
     assert.match(msgOf(res), /Artifact or a desktop-only tool/);
     assert.doesNotMatch(msgOf(res), /ac-browser/);
@@ -122,7 +122,7 @@ test('control: the same spawn without a browser or Artifact brief is still rewri
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     seedStart(stateDir, 'sess-b3', 'agent-companion:ac-sonnet-low');
-    const res = guard(dir, 'sess-b3', { subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature\nFix the layout bug.' });
+    const res = guard(dir, 'sess-b3', { subagent_type: 'general-purpose', prompt: 'TYPE: debug-root-cause\nFix the layout bug.' });
     assert.equal(updated(res)?.subagent_type, 'agent-companion:ac-opus-medium');
   } finally { cleanup(); }
 });
@@ -144,7 +144,7 @@ test('a numbered rung spawned with a browser brief gets a note naming the browse
 test('a ladder rung with an Artifact brief gets the Artifact note', () => {
   const { dir, cleanup } = makeFixture();
   try {
-    const res = guard(dir, 'sess-b6', { subagent_type: 'agent-companion:ac-sonnet-medium', prompt: 'TYPE: bounded-feature\nPublish an Artifact of the table.' });
+    const res = guard(dir, 'sess-b6', { subagent_type: 'agent-companion:ac-sonnet-medium', prompt: 'TYPE: debug-root-cause\nPublish an Artifact of the table.' });
     assert.match(msgOf(res), /names Artifact or a desktop-only tool/);
   } finally { cleanup(); }
 });

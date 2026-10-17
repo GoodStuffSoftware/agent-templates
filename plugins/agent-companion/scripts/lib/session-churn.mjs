@@ -8,7 +8,9 @@
 //                    is_error: true, each run counted once
 //   corrections      user prompts matching CORRECTION_PATTERNS below
 //   review_rounds    parity-type spawns (declared_type whose task type has
-//                    weight "parity", e.g. code-review) in spawns.jsonl
+//                    weight "parity", e.g. code-review) in spawns.jsonl, made by
+//                    the lead; a subagent's own self-review spawn
+//                    (caller_is_subagent) is the protocol, not churn
 //
 // AGGREGATES ONLY. No message text, prompt text, tool name or file path is
 // kept: a row is a session id, a day and integers. The correction matcher
@@ -207,6 +209,9 @@ export async function scanChurn({
   const sinceDay = new Date(sinceMs).toISOString().slice(0, 10);
   for (const s of spawnRows) {
     if (!s || !s.session_id || typeof s.at !== 'string' || !isParityType(s.declared_type_resolved ?? s.declared_type)) continue;
+    // A review spawned by a subagent is the writer's own self-review under the protocol in
+    // config/model-tiers.json (selfReview), a standing design, not a lead thrashing.
+    if (s.caller_is_subagent === true) continue;
     const day = s.at.slice(0, 10);
     if (day < sinceDay) continue;
     const k = `${s.session_id}|${day}`;

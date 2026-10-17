@@ -191,14 +191,14 @@ test('spawn guard: the self-review text appended to a sonnet writer names the re
     };
     const brief = 'TYPE: bounded-feature\ndo a thing';
     // No floor (shipped): the writer's own rung.
-    for (const [agent, pair] of [['ac-sonnet-medium', 'sonnet/medium'], ['ac-sonnet-high', 'sonnet/high']]) {
+    for (const [agent, pair] of [['ac-sonnet-medium', 'sonnet/medium'], ['ac-sonnet-low', 'sonnet/low']]) {
       const p = spawn(agent, brief);
       assert.match(p, new RegExp(`subagent_type: "agent-companion:${agent}"`), `${agent} unfloored`);
       assert.match(p, new RegExp(`^ {3}WRITER: ${pair}$`, 'm'));
     }
     mkdirSync(f.stateDir, { recursive: true });
     writeFileSync(join(f.stateDir, 'model-tiers.json'), JSON.stringify({ reviewerEffortFloor: FLOOR }));
-    for (const [agent, pair] of [['ac-sonnet-medium', 'sonnet/medium'], ['ac-sonnet-high', 'sonnet/high']]) {
+    for (const [agent, pair] of [['ac-sonnet-medium', 'sonnet/medium'], ['ac-sonnet-low', 'sonnet/low']]) {
       const p = spawn(agent, brief);
       assert.match(p, /subagent_type: "agent-companion:ac-sonnet-xhigh"/, `${agent} floored`);
       assert.match(p, new RegExp(`^ {3}WRITER: ${pair}$`, 'm'), 'the WRITER line is still the writer\'s own pair');
@@ -210,13 +210,70 @@ test('spawn guard: the self-review text appended to a sonnet writer names the re
     assert.doesNotMatch(x, /not your own rung/);
     // A critical consequence (stated, or implied by TYPE: critical-change) names the opus reviewer the recommender picks.
     for (const b of ['TYPE: bounded-feature\nCONSEQUENCE: critical\ndo a thing', 'TYPE: critical-change\ndo a thing']) {
-      const c = spawn('ac-sonnet-high', b);
+      const c = spawn('ac-sonnet-medium', b);
       assert.match(c, /subagent_type: "agent-companion:ac-opus-xhigh"/, b);
       assert.match(c, /--consequence critical/);
-      assert.match(c, /^ {3}WRITER: sonnet\/high$/m);
+      assert.match(c, /^ {3}WRITER: sonnet\/medium$/m);
     }
     // A routine type is unchanged.
-    assert.match(spawn('ac-sonnet-high', brief), /subagent_type: "agent-companion:ac-sonnet-xhigh"/);
+    assert.match(spawn('ac-sonnet-medium', brief), /subagent_type: "agent-companion:ac-sonnet-xhigh"/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// A rung whose definition already carries the generated self-review block (ac-sonnet-high, the shipped
+// route of bounded-feature and integration, and the opus medium/high/xhigh rungs) is appended no second
+// copy of the protocol. The block names the writer's OWN rung as the reviewer, so the operator's
+// reviewerEffortFloor / reviewerEffortCap and a critical consequence reach it as a short note.
+test('spawn guard: a rung that carries the block is told the reviewer rung in a short note, not given the protocol twice', () => {
+  const f = makeFixture();
+  try {
+    const sid = 'sess-floor-block';
+    const env = { CLAUDE_PLUGIN_DATA: join(f.dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PREMIUM_MAX_CONCURRENT: '50' };
+    const projDir = join(f.dir, 'projects', 'proj');
+    mkdirSync(projDir, { recursive: true });
+    const transcript = join(projDir, `${sid}.jsonl`);
+    writeFileSync(transcript, '');
+    const spawn = (agent, prompt) => {
+      const res = runHook('hooks/spawn-guard.mjs', {
+        hook_event_name: 'PreToolUse', tool_name: 'Agent', session_id: sid, cwd: f.dir, transcript_path: transcript,
+        tool_input: { subagent_type: `agent-companion:${agent}`, run_in_background: false, prompt },
+      }, { env });
+      assert.equal(res.status, 0, res.stderr);
+      return res.json?.hookSpecificOutput?.updatedInput?.prompt ?? '';
+    };
+    const brief = 'TYPE: bounded-feature\ndo a thing';
+    const NOTE = /agent-companion: reviewer rung for this brief/;
+    const crit = 'TYPE: bounded-feature\nCONSEQUENCE: critical\ndo a thing';
+    // No floor (shipped): the block's own rung is right, so nothing is appended.
+    for (const [agent, b] of [['ac-sonnet-high', brief], ['ac-opus-medium', brief], ['ac-opus-xhigh', crit]]) {
+      assert.doesNotMatch(spawn(agent, b), NOTE, `${agent} unfloored`);
+    }
+    // A critical consequence on an opus rung that is not the critical reviewer's rung: told the critical reviewer (predates 0.31.28).
+    for (const agent of ['ac-opus-medium', 'ac-opus-high']) {
+      const c = spawn(agent, crit);
+      assert.match(c, NOTE, agent);
+      assert.match(c, /subagent_type "agent-companion:ac-opus-xhigh"/, agent);
+      assert.match(c, /replaces the rung/);
+      assert.doesNotMatch(c, /does not carry the self-review protocol/, `${agent}: no second copy of the protocol`);
+    }
+    // The sonnet floor reaches ac-sonnet-high.
+    mkdirSync(f.stateDir, { recursive: true });
+    writeFileSync(join(f.stateDir, 'model-tiers.json'), JSON.stringify({ reviewerEffortFloor: FLOOR }));
+    const h = spawn('ac-sonnet-high', brief);
+    assert.match(h, NOTE);
+    assert.match(h, /subagent_type "agent-companion:ac-sonnet-xhigh" \(sonnet\/xhigh\)/);
+    assert.match(h, /replaces the rung your self-review section names/);
+    assert.match(h, /`WRITER: sonnet\/high`/, 'the WRITER line stays the writer\'s own pair');
+    assert.doesNotMatch(h, /does not carry the self-review protocol/, 'no second copy of the protocol');
+    assert.equal((h.match(/Self-review before you return/g) || []).length, 0, 'the block is in the definition, not the brief');
+    // Floor and critical together: critical wins (opus/xhigh).
+    assert.match(spawn('ac-sonnet-high', crit), /subagent_type "agent-companion:ac-opus-xhigh"/);
+    // The floor changes nothing for a rung it does not touch, and nothing for an opted-out or non-writer brief.
+    assert.doesNotMatch(spawn('ac-opus-medium', brief), NOTE);
+    assert.doesNotMatch(spawn('ac-sonnet-high', 'TYPE: bounded-feature\nREVIEW: lead\ndo a thing'), NOTE);
+    assert.doesNotMatch(spawn('ac-sonnet-high', 'TYPE: research\nlook it up'), NOTE);
   } finally {
     f.cleanup();
   }

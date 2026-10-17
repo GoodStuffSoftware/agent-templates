@@ -50,18 +50,17 @@ test('the grid floors are not reported when a higher layer won (the grid was onl
   assert.deepEqual(r.floorsApplied, []);
 });
 
-// integration is the one type whose trial carries its own F5 waiver (the
-// 0.29.2 "effort" architecture decision): opus/medium is below the elevated
-// floor (high), so the waiver's raise-avoidance itself shows up in
-// floorsApplied, distinct from the "not reported" case above.
-test('a waiving trial (integration) reports the waiver in floorsApplied, not an empty list', () => {
+// integration's trial used to carry its own F5 waiver (the 0.29.2 "effort"
+// architecture decision, opus/medium). The 2026-10-16 routing review settled it
+// on sonnet/high, which already meets the elevated floor (high): no waiver and
+// no raise, so floorsApplied is empty. The waiver path itself is proved in
+// architecture-floor-diff.test.mjs on a config that restores the old row.
+test('integration (settled on sonnet/high) meets the elevated floor: no waiver, no raise', () => {
   const r = ctx.resolveRoute({ type: 'integration', now: NOW });
   assert.equal(r.layer, 'trial');
-  assert.equal(label(r), 'opus/medium');
-  assert.deepEqual(r.floorsApplied, [
-    { floor: 'F5', waived: 'effort medium kept below high (operator-observed row waives F5)' },
-  ]);
-  assert.ok(r.waiver?.honored);
+  assert.equal(label(r), 'sonnet/high');
+  assert.deepEqual(r.floorsApplied, []);
+  assert.ok(!r.waiver);
 });
 
 test('effortFor() keeps its return shape; the floors come only through the opt-in array', () => {

@@ -457,7 +457,7 @@ test('(v) three general-purpose opus spawns with no TYPE: the third is denied, w
     assert.match(r.reason, /debug-root-cause -> opus\/medium/);
     assert.match(r.reason, /agent-companion:ac-opus-medium/);
     assert.match(r.reason, /wait for the in-flight premium agents/);
-    assert.doesNotMatch(r.reason, /sonnet/i);
+    assert.doesNotMatch(r.reason, /run at sonnet/i);
     assert.equal(r.row.routed, false);
     assert.deepEqual(h.denials(), ['premium-cap']);
   } finally { h.cleanup(); }
@@ -501,10 +501,11 @@ test('(viii) routed is on every row and true only for a routing choice', () => {
       [{ subagent_type: 'agent-companion:ac-opus-low', prompt: 'x' }, true, 'ladder rung, no TYPE'],
       [{ subagent_type: 'proj-sonnet', prompt: 'x' }, true, 'project agent pin'],
       [{ subagent_type: 'proj-sonnet', model: 'opus', prompt: 'x' }, false, 'pin overridden per-spawn, no route'],
-      [{ subagent_type: 'general-purpose', model: 'opus', prompt: 'TYPE: integration\nx' }, true, 'route names the model'],
-      [{ subagent_type: 'general-purpose', prompt: 'TYPE: integration\nx' }, true, 'autofilled from the route'],
+      [{ subagent_type: 'general-purpose', model: 'sonnet', prompt: 'TYPE: integration\nx' }, true, 'route names sonnet (integration -> sonnet/high)'],
+      [{ subagent_type: 'general-purpose', model: 'opus', prompt: 'TYPE: debug-root-cause\nx' }, true, 'route names the model'],
+      [{ subagent_type: 'general-purpose', prompt: 'TYPE: debug-root-cause\nx' }, true, 'autofilled from the route'],
       [{ subagent_type: 'general-purpose', model: 'opus', prompt: 'x' }, false, 'per-spawn opus, no TYPE'],
-      [{ subagent_type: 'general-purpose', model: 'sonnet', prompt: 'TYPE: integration\nx' }, false, 'per-spawn model the route does not name'],
+      [{ subagent_type: 'general-purpose', model: 'sonnet', prompt: 'TYPE: debug-root-cause\nx' }, false, 'per-spawn model the route does not name'],
       [{ subagent_type: 'general-purpose', prompt: 'x' }, false, 'inherited'],
       [{ subagent_type: 'Explore', prompt: 'x' }, false, 'inherited, built-in type'],
     ];
@@ -599,7 +600,7 @@ test('the missing-model note names the real reason no route set the model', () =
   const noFill = harness({ CLAUDE_PLUGIN_OPTION_FIT_AUTOFILL: 'false' });
   try {
     const r = noFill.spawn({ subagent_type: 'general-purpose', prompt: 'TYPE: bounded-feature\nlook around' });
-    assert.match(r.msg, /the routing table sends this to opus\/medium, but fit_autofill is off/);
+    assert.match(r.msg, /the routing table sends this to sonnet\/high, but fit_autofill is off/);
     assert.doesNotMatch(r.msg, /not a (known )?task type|fit_guard/);
   } finally { noFill.cleanup(); }
   const h = harness();

@@ -45,7 +45,8 @@ const PS_SHELLS = new Set(['powershell', 'pwsh']);
 const PS_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Tokenizer: text -> simple commands. Each command: { words: [{ t, q }], subs: [command], chain, heredocs: [string] }.
+// Tokenizer: text -> simple commands. Each command: { words: [{ t, nv, q }], subs: [command], chain, heredocs: [string],
+// hereQuoted: [boolean] (beside heredocs), call?: true (PowerShell call operator) }.
 // `chain` is a statement id (changes at ; && || newline and & at brace depth 0), so a pipeline can be recognised as
 // "commands in one chain, in order".
 
@@ -61,9 +62,11 @@ export function parseCommands(text, shell, depth, st) {
   let words = [];
   let subs = [];
   let heredocs = [];
+  let hereQuoted = []; // beside heredocs: was that delimiter quoted ('E', "E", \E)? An unquoted one's body is expanded by bash
   let buf = '';
   let started = false;
   let quoted = false;
+  let call = false; // PowerShell: the command was started by the call operator `&` or a dot-source `.` (its first word is a program, even quoted)
   const pendingHere = [];
 
   const endWord = () => {
@@ -74,8 +77,8 @@ export function parseCommands(text, shell, depth, st) {
     endWord();
     // bash reserved braces are not commands
     if (!ps) while (words.length && (words[0].t === '{' || words[0].t === '}' || words[0].t === '!') && !words[0].q) words.shift();
-    if (words.length || subs.length) out.push({ words, subs, chain, heredocs });
-    words = []; subs = []; heredocs = [];
+    if (words.length || subs.length) out.push(call ? { words, subs, chain, heredocs, hereQuoted, call } : { words, subs, chain, heredocs, hereQuoted });
+    words = []; subs = []; heredocs = []; hereQuoted = []; call = false;
   };
   const newChain = () => { if (depthBrace === 0) chain = st.nextChain++; };
   const sub = (inner) => {
@@ -90,6 +93,7 @@ export function parseCommands(text, shell, depth, st) {
     for (let j = open; j < n; j++) {
       if (++st.steps > BUDGET) throw new Error('budget');
       const c = s[j];
+      if (!ps && c === '<' && s[j + 1] === '<' && s[j + 2] === '<') { j += 2; continue; } // here-string operator, not a heredoc
       if (!ps && c === '<' && s[j + 1] === '<' && s[j + 2] !== '<') {
         const hm = /^<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z0-9_]+))/.exec(s.slice(j, j + 200));
         if (hm) { pend.push({ word: hm[2] ?? hm[3] ?? hm[4], dash: hm[1] === '-' }); j += hm[0].length - 1; continue; }
@@ -150,12 +154,38 @@ export function parseCommands(text, shell, depth, st) {
           lines.push(line);
         }
         h.list.push(lines.join('\n'));
+        h.qlist.push(h.quoted);
         void found;
       }
       continue;
     }
     if (c === ' ' || c === '\t') { endWord(); i++; continue; }
     if (c === '#' && !started) { while (i < n && s[i] !== '\n') i++; continue; }
+    // PowerShell here-string @'...'@ / @"..."@: one data word, up to a line that starts with the closing quote and @
+    if (ps && c === '@' && !started && (s[i + 1] === "'" || s[i + 1] === '"') && /^[ \t]*\r?\n/.test(s.slice(i + 2, i + 40))) {
+      const q = s[i + 1];
+      const body0 = s.indexOf('\n', i + 2) + 1;
+      const m = new RegExp(`\\r?\\n${q}@`).exec(s.slice(body0 - 1));
+      const end = m ? body0 - 1 + m.index : n;
+      if (q === "'") buf += s.slice(body0, end).replace(/\$/g, '\u0001');
+      else { // @"..."@ expands: a $( ... ) subexpression inside it runs, like one inside "..."
+        for (let j = body0; j < end; j++) {
+          if (++st.steps > BUDGET) throw new Error('budget');
+          if (s[j] === '`' && j + 1 < end) { buf += s[j + 1]; j++; continue; }
+          if (s[j] === '$' && s[j + 1] === '(' && s[j + 2] !== '(') {
+            const e = matchClose(j + 1, '(', ')');
+            if (e > 0 && e <= end) { sub(s.slice(j + 2, e - 1)); buf += '\u0000'; j = e - 1; continue; }
+          }
+          buf += s[j];
+        }
+      }
+      started = true; quoted = true;
+      i = m ? end + m[0].length : n;
+      continue;
+    }
+    if (c === '<' && !ps && s[i + 1] === '<' && s[i + 2] === '<') { // bash here-string: `<<<` then an ordinary word
+      endWord(); words.push({ t: '<<<', nv: '<<<', q: false }); i += 3; continue;
+    }
     if (c === "'") {
       const e = (() => {
         let j = i + 1;
@@ -246,13 +276,22 @@ export function parseCommands(text, shell, depth, st) {
       i += (s[i + 1] === '&') ? 2 : 1;
       continue;
     }
+    // PowerShell dot-source `. 'C:\...\x.exe'` runs what follows like the call operator: drop the `.`, mark the command.
+    // Only a `.` that starts the command and is followed by a space or a quote (`.\x.ps1` and `./x` are paths).
+    if (c === '.' && ps && !started && words.length === 0 && /[ \t'"]/.test(s[i + 1] ?? '')) { call = true; i++; continue; }
+    // `$x = . 'C:\...\x.exe'` splits here, as `$x = & '...'` does
+    if (c === '.' && ps && !started && words.length === 2 && !words[0].q && /^\$[\w:]+$/.test(words[0].t) && words[1].t === '='
+      && !words[1].q && /[ \t'"]/.test(s[i + 1] ?? '')) { endCmd(); newChain(); call = true; i++; continue; }
     if (c === '&') {
       const prev = s[i - 1];
       const nx = s[i + 1];
       if (prev === '>' || prev === '<' || nx === '>') { buf += c; started = true; i++; continue; }
       if (nx === '&') { endCmd(); newChain(); i += 2; continue; }
-      if (ps && !started && words.length === 0) { i++; continue; } // call operator
-      endCmd(); newChain(); i++; continue;
+      if (ps && !started && words.length === 0) { call = true; i++; continue; } // call operator
+      endCmd(); newChain(); i++;
+      // PowerShell: `$x = & 'C:\...\x.exe'` splits here; the `&` after an assignment is the call operator of what follows
+      if (ps) call = true;
+      continue;
     }
     if (c === '<' && !ps && s[i + 1] === '<' && s[i + 2] !== '<') {
       let j = i + 2;
@@ -260,15 +299,16 @@ export function parseCommands(text, shell, depth, st) {
       if (s[j] === '-') { dash = true; j++; }
       while (s[j] === ' ' || s[j] === '\t') j++;
       let delim = '';
+      let hq = false;
       if (s[j] === "'" || s[j] === '"') {
         const q = s[j]; const e = s.indexOf(q, j + 1);
-        if (e > 0) { delim = s.slice(j + 1, e); j = e + 1; }
+        if (e > 0) { delim = s.slice(j + 1, e); j = e + 1; hq = true; }
       } else {
         const m = /^[^\s;&|<>()]+/.exec(s.slice(j));
-        if (m) { delim = m[0].replace(/\\/g, ''); j += m[0].length; }
+        if (m) { hq = /[\\'"]/.test(m[0]); delim = m[0].replace(/\\/g, ''); j += m[0].length; }
       }
       endWord();
-      if (delim) pendingHere.push({ delim, dash, list: heredocs });
+      if (delim) pendingHere.push({ delim, dash, quoted: hq, list: heredocs, qlist: hereQuoted });
       i = j; continue;
     }
     buf += c; started = true; i++;

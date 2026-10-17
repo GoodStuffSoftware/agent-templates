@@ -14,10 +14,10 @@ import { join, dirname, posix } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   loadRules, capacityOf, parseRam, limitsFor, liveVerdict, appendClear, recentClears, clearsFile, sampleTree, scanStrays, descendants,
-  parseMsysPs, holdsExclusive, msysLinks, msysBinCandidates, exeDir,
+  parseMsysPs, holdsExclusive, msysLinks, msysBinCandidates, exeDir, isBusyChild, processTable,
 } from '../scripts/lib/resource-rules.mjs';
 import {
-  parseResourceArg, buildRequest, subtractHeld, planCommand, installLauncher, launcherPath, LAUNCHER_SOURCE,
+  runUnderQueue, parseResourceArg, buildRequest, subtractHeld, planCommand, installLauncher, launcherPath, LAUNCHER_SOURCE,
 } from '../scripts/resource-queue.mjs';
 
 const tmp = (p = 'rq-rules-') => mkdtempSync(join(tmpdir(), p));
@@ -320,6 +320,131 @@ test('sampleTree: an orphan of a pid seen in an earlier sample stays in the tree
   assert.equal(b.active, true);
 });
 
+const procAt = (pid, ppid, name, cpuMs, startedAt, cmd = name) => ({ pid, ppid, name, cmd, cpuMs, startedAt });
+
+test('sampleTree: an orphan whose start time shows a reused pid is kept out of the tree; real orphans and unknown start times still join', () => {
+  const S = 1_000_000;
+  // Pid 11 (started S+1000) is in the tree at the first sample, then exits.
+  const t1 = [procAt(10, 1, 'node', 100, S), procAt(11, 10, 'cmd.exe', 10, S + 1000), procAt(12, 11, 'node', 1000, S + 2000)];
+  const first = sampleTree(10, { now: S + 5000, table: () => t1 });
+  assert.equal(first.size, 3);
+  assert.equal(first.born[11], S + 1000, 'the start of each tree pid is remembered');
+  // Pid 11 is gone. 12 is its real orphan (started while 11 lived). 40 has ppid 11 but started
+  // long before 11 did (its real parent was an earlier holder of the pid). 41 started after the
+  // first sample found 11 dead (its parent is a later holder of the pid).
+  const t2 = [
+    procAt(10, 1, 'node', 100, S), procAt(12, 11, 'node', 1000 + 3000, S + 2000),
+    procAt(40, 11, 'node', 9000, S - 600_000), procAt(41, 11, 'node', 9000, S + 20_000),
+  ];
+  const s = sampleTree(10, { prev: first, now: S + 10_000, table: () => t2 });
+  assert.deepEqual(s.cpu, { 10: 100, 12: 4000 }, 'the real orphan joined; the reused-pid strangers did not');
+  assert.equal(s.size, 2);
+  assert.equal(s.gone[11], S + 10_000, 'the first sample that found the pid dead is remembered');
+  // A later sample keeps the same window: 42 starts after pid 11 was first found dead.
+  const t3 = [...t2, procAt(42, 11, 'node', 9000, S + 30_000)];
+  const s3 = sampleTree(10, { prev: s, now: S + 40_000, table: () => t3 });
+  assert.equal(s3.size, 2);
+  assert.equal(s3.gone[11], S + 10_000, 'the death time is not moved by later samples');
+  // No start time on either side is no evidence: the orphan is adopted as before (keep).
+  const u1 = [procAt(10, 1, 'node', 100, null), procAt(11, 10, 'cmd.exe', 10, null)];
+  const uFirst = sampleTree(10, { now: 0, table: () => u1 });
+  const u2 = [procAt(10, 1, 'node', 100, null), procAt(40, 11, 'node', 9000, 5_000)];
+  assert.equal(sampleTree(10, { prev: uFirst, now: 30_000, table: () => u2 }).size, 2, 'the dead pid has no recorded start and neither has the root: adopt');
+  const u3 = [procAt(10, 1, 'node', 100, null), procAt(40, 11, 'node', 9000, null)];
+  assert.equal(sampleTree(10, { prev: uFirst, now: 30_000, table: () => u3 }).size, 2, 'no start time on the orphan: adopt');
+});
+
+test('sampleTree: a pid that dies and is reused by a later tree member does not keep a stale death time that hides its later orphan', () => {
+  const S = 1_000_000;
+  const s1 = sampleTree(10, { now: S + 5000, table: () => [procAt(10, 1, 'node', 100, S), procAt(11, 10, 'cmd.exe', 10, S + 1000)] });
+  const s2 = sampleTree(10, { prev: s1, now: S + 10_000, table: () => [procAt(10, 1, 'node', 100, S)] });
+  assert.equal(s2.gone[11], S + 10_000);
+  // Pid 11 is reused by a later member that spawns a long-lived child 13 (started after the first death).
+  const s3 = sampleTree(10, { prev: s2, now: S + 40_000, table: () => [procAt(10, 1, 'node', 100, S), procAt(11, 10, 'cmd.exe', 10, S + 35_000), procAt(13, 11, 'node', 500, S + 36_000)] });
+  assert.equal(s3.size, 3);
+  assert.equal(s3.gone[11], undefined, 'a pid that is alive again has no death time');
+  // The reused 11 exits, leaving 13 an orphan of a tree member: still ours, and its work counts.
+  const s4 = sampleTree(10, { prev: s3, now: S + 70_000, table: () => [procAt(10, 1, 'node', 100, S), procAt(13, 11, 'node', 500 + 29_000, S + 36_000)] });
+  assert.equal(s4.size, 2);
+  assert.equal(s4.active, true);
+  assert.match(s4.why, /^cpu/);
+});
+
+test('sampleTree: a known orphan stays a member when its parent pid is reused by a later tree member; a stranger and a different process do not', () => {
+  const S = 1_000_000;
+  const t1 = [procAt(10, 1, 'node', 100, S), procAt(11, 10, 'cmd.exe', 10, S + 1000), procAt(12, 11, 'node', 1000, S + 2000)];
+  const s1 = sampleTree(10, { now: S + 5000, table: () => t1 });
+  const s2 = sampleTree(10, { prev: s1, now: S + 10_000, table: () => [procAt(10, 1, 'node', 100, S), procAt(12, 11, 'node', 5000, S + 2000)] });
+  assert.equal(s2.size, 2, '12 is an orphan of the exited 11');
+  // 11 is reused by a later member (starts after 12): 12 now looks older than its "parent".
+  const t3 = [procAt(10, 1, 'node', 100, S), procAt(11, 10, 'cmd.exe', 10, S + 35_000), procAt(12, 11, 'node', 31_000, S + 2000)];
+  const s3 = sampleTree(10, { prev: s2, now: S + 40_000, table: () => t3 });
+  assert.ok(s3.cpu[12] !== undefined, 'the already-adopted 12 is re-adopted');
+  assert.equal(s3.size, 3);
+  assert.equal(s3.active, true, '26000 ms over 30 s from 12');
+  // A pid we saw whose recorded start differs now is another process: not re-adopted.
+  const t4 = [procAt(10, 1, 'node', 100, S), procAt(11, 10, 'cmd.exe', 10, S + 35_000), procAt(12, 11, 'node', 31_000, S - 900_000)];
+  const s4 = sampleTree(10, { prev: s2, now: S + 40_000, table: () => t4 });
+  assert.equal(s4.cpu[12], undefined, 'a different incarnation of a seen pid stays out');
+  // A never-seen process older than its parent stays out as before.
+  const t5 = [...t3.slice(0, 2), procAt(77, 11, 'node', 9000, S - 600_000)];
+  assert.equal(sampleTree(10, { prev: s2, now: S + 40_000, table: () => t5 }).cpu[77], undefined);
+});
+
+test('descendants and sampleTree: a live child older than its parent is a stale ppid after a pid reuse, not a member', () => {
+  const S = 5_000_000;
+  const table = [procAt(10, 1, 'node', 0, S), procAt(11, 10, 'sh', 0, S + 1000), procAt(50, 11, 'java', 0, S - 900_000), procAt(51, 11, 'java', 0, S + 2000), procAt(52, 11, 'java', 0, null)];
+  assert.deepEqual(descendants(table, 10).map((p) => p.pid).sort(), [11, 51, 52], 'pid 50 predates its parent');
+  // Clock slack: a child a second before its parent's recorded start is still a child.
+  assert.equal(descendants([procAt(10, 1, 'a', 0, S), procAt(11, 10, 'b', 0, S - 1000)], 10).length, 1);
+  const s = sampleTree(10, { now: S + 5000, busyChildren: ['java'], table: () => table.filter((p) => p.pid !== 51 && p.pid !== 52) });
+  assert.equal(s.active, false, 'a java that started before its parent is not the holder\'s work');
+  assert.equal(sampleTree(10, { now: S + 5000, busyChildren: ['java'], table: () => table }).active, true);
+});
+
+test('processTable on Linux reads process start times', { skip: process.platform !== 'linux' && 'Linux /proc only' }, () => {
+  const t = processTable();
+  const me = t.find((p) => p.pid === process.pid);
+  assert.ok(me && Number.isFinite(me.startedAt), 'this process has a start time');
+  assert.ok(Math.abs(me.startedAt - (Date.now() - process.uptime() * 1000)) < 5000, 'within 5 s of the node start');
+});
+
+test('isBusyChild: whole tokens and path segments match; substrings of other words do not; the shipped holder lines still match', () => {
+  const p = (cmd, name = 'node.exe') => ({ name, cmd });
+  // Not a holder's work: a word that merely contains the name, and a git branch name.
+  assert.equal(isBusyChild(p('node.exe C:\\work\\javascript-helper\\run.js'), ['java']), false, 'java in javascript');
+  assert.equal(isBusyChild(p('"C:\\Git\\bin\\git.exe" push origin fix/vitest-flake', 'git.exe'), ['vitest']), false, 'a branch name');
+  assert.equal(isBusyChild(p('git push origin vitest-fix', 'git.exe'), ['vitest']), false);
+  assert.equal(isBusyChild(p('node app.js --vitestrc'), ['vitest']), false);
+  assert.equal(isBusyChild(p('node mavitest.js'), ['vitest']), false);
+  // Real holder lines (names and command lines of the shipped busy children) that match today.
+  const real = [
+    ['java.exe', '"C:\\Program Files\\Java\\jdk-21\\bin\\java.exe" -Xmx512m -jar C:\\work\\.cache\\firebase\\emulators\\cloud-firestore-emulator-1.19.8.jar', 'java'],
+    ['javaw.exe', 'javaw -jar emulator.jar', 'java'],
+    ['java', '/usr/bin/java -jar /opt/work/.cache/firebase/emulators/x.jar', 'java'],
+    ['chrome-headless-shell.exe', '"C:\\work\\AppData\\Local\\ms-playwright\\chromium_headless_shell-1169\\chrome-win\\chrome-headless-shell.exe" --headless --remote-debugging-pipe', 'chrome-headless-shell'],
+    ['chrome-headless', '/opt/work/.cache/ms-playwright/chromium_headless_shell-1169/chrome-linux/chrome-headless-shell --headless', 'chrome-headless-shell'],
+    ['node.exe', '"C:\\Program Files\\nodejs\\node.exe" C:\\proj\\node_modules\\playwright\\cli.js test --workers=4', 'playwright'],
+    ['node.exe', 'node C:\\proj\\node_modules\\playwright-core\\lib\\server\\registry\\index.js', 'playwright'],
+    ['node.exe', 'node /proj/node_modules/@playwright/test/cli.js test', 'playwright'],
+    ['node.exe', 'node C:\\proj\\node_modules\\playwright\\lib\\common\\process.js', 'playwright'],
+    ['chrome.exe', 'C:\\work\\AppData\\Local\\ms-playwright\\chromium-1169\\chrome-win\\chrome.exe --headless', 'playwright'],
+    ['node.exe', 'node.exe C:\\proj\\node_modules\\vitest\\vitest.mjs run --reporter=dot', 'vitest'],
+    ['node.exe', 'node C:\\proj\\node_modules\\vitest\\dist\\workers\\forks.js', 'vitest'],
+    ['node.exe', '"C:\\Program Files\\nodejs\\node.exe" C:\\proj\\node_modules\\.bin\\vitest run src/foo.test.ts', 'vitest'],
+    ['node.exe', 'node /proj/node_modules/@vitest/runner/dist/index.js', 'vitest'],
+    ['cmd.exe', 'C:\\Windows\\system32\\cmd.exe /d /s /c vitest run', 'vitest'],
+    ['node.exe', 'npx vitest', 'vitest'],
+    ['vitest.cmd', 'vitest.cmd run', 'vitest'],
+    ['node.exe', 'node ./vitest.config.ts', 'vitest'],
+    ['node.exe', 'JAVA -jar x.jar', 'java'],
+  ];
+  for (const [name, cmd, n] of real) assert.equal(isBusyChild({ name, cmd }, [n]), true, `${n} in: ${cmd}`);
+  // sampleTree uses it: the branch name on a git child does not hold a lease active.
+  const rows = [proc(10, 1, 'node', 0), proc(11, 10, 'git.exe', 0, 'git push origin fix/vitest-flake')];
+  assert.equal(sampleTree(10, { now: 0, busyChildren: ['vitest'], table: () => rows }).active, false);
+});
+
 // Every program here is named by absolute path (this node, Git's sh): the test must not
 // depend on the caller's PATH. The push gate hides every PATH dir holding a claude
 // binary, which on this machine is node's own dir, so a bare `node` fails there.
@@ -370,11 +495,76 @@ test('liveVerdict: max-hold only flags a live holder of an exclusive resource th
   assert.equal(staleProbe.keep, true, 'a stale probe is unknown, not idle');
   const idle = liveVerdict(rules, lease({ act: { sampledAt: now - 10_000, activeAt: now - 400_000 } }), now);
   assert.equal(idle.rule, 'max-hold');
-  assert.equal(idle.keep, undefined, 'measured idle past the hold limit is released');
-  // A box-only lease (nothing exclusive) keeps the plain max-hold clear.
-  assert.equal(liveVerdict(rules, lease({ resources: {}, act: { sampledAt: now - 10_000, activeAt: now - 10_000 } }), now).keep, undefined);
+  assert.equal(idle.keep, true, 'measured idle past the hold limit but alive: flagged, never released');
+  assert.equal(idle.evidence.activity, 'idle');
+  // A box-only lease (nothing exclusive) has the plain max-hold verdict: a live holder is flagged too.
+  const boxOnly = liveVerdict(rules, lease({ resources: {}, act: { sampledAt: now - 10_000, activeAt: now - 10_000 } }), now);
+  assert.equal(boxOnly.rule, 'max-hold');
+  assert.equal(boxOnly.keep, true);
+  // Only a caller that has proved the holder gone gets the plain clears.
+  assert.equal(liveVerdict(rules, lease({ resources: {}, act: { sampledAt: now - 10_000, activeAt: now - 10_000 } }), now, {}, { alive: false }).keep, undefined);
+  assert.equal(liveVerdict(rules, lease({ act: { sampledAt: now - 10_000, activeAt: now - 400_000 } }), now, {}, { alive: false }).keep, undefined);
+  assert.equal(liveVerdict(rules, lease({ act: { sampledAt: now - 10_000, activeAt: now - 10_000 } }), now, {}, { alive: false }).keep, true, 'an active exclusive holder is kept even then');
   assert.equal(holdsExclusive(rules, lease()), true);
   assert.equal(holdsExclusive({ resources: { pool: { capacity: 3 } } }, lease({ resources: { pool: 1 } })), false);
+  // CI_BUDGET_RESOURCES overrides the rules' capacity, both ways, and liveVerdict honours it.
+  assert.equal(holdsExclusive(rules, lease(), { CI_BUDGET_RESOURCES: 'app-e2e=2' }), false);
+  assert.equal(holdsExclusive({ resources: { pool: { capacity: 3 } } }, lease({ resources: { pool: 1 } }), { CI_BUDGET_RESOURCES: 'pool=1' }), true);
+  const act = { act: { sampledAt: now - 10_000, activeAt: now - 10_000 } };
+  assert.equal(liveVerdict(rules, lease(act), now, { CI_BUDGET_RESOURCES: 'app-e2e=2' }).keep, true, 'capacity 2: not exclusive, the plain max-hold verdict, flagged for a live holder');
+  assert.equal(liveVerdict(rules, lease(act), now, { CI_BUDGET_RESOURCES: 'app-e2e=2' }, { alive: false }).keep, undefined, 'the same verdict clears a dead holder');
+  assert.equal(liveVerdict(rules, lease(act), now, { CI_BUDGET_RESOURCES: 'app-e2e=1' }).keep, true);
+  assert.equal(liveVerdict(rules, lease(act), now).keep, true, 'no env: the rules capacity');
+});
+
+test('liveVerdict idle: a live holder over idleMs on a quiet sampler is flagged keep:true with the sample evidence; a dead one gets the plain clear', () => {
+  const rules = { rules: [{ id: 'max-hold', enabled: true }, { id: 'idle', enabled: true, sampleMs: 30_000 }], resources: {} };
+  const ev = { n: 20, size: 5, shells: 1, links: 0, cpuMs: 3, dtMs: 30_000, pct: 0.01, kids: 0, ports: [], why: null };
+  const lease = { kind: 'run', startedAt: 1, units: 1, resources: {}, limits: { maxHoldMs: 3_600_000, idleMs: 300_000, minHoldMs: 600_000 }, act: { sampledAt: 990_000, activeAt: 1, ev } };
+  const now = 1_000_000;
+  const live = liveVerdict(rules, lease, now);
+  assert.equal(live.rule, 'idle');
+  assert.equal(live.keep, true, 'a live holder is flagged, never cleared');
+  assert.equal(live.evidence.idleMs, now - 1);
+  assert.equal(live.evidence.idleLimitMs, 300_000);
+  assert.equal(live.evidence.sampleAgeMs, 10_000);
+  assert.deepEqual(live.evidence.sample, ev);
+  assert.equal(liveVerdict(rules, lease, now, {}, { alive: true }).keep, true);
+  const dead = liveVerdict(rules, lease, now, {}, { alive: false });
+  assert.equal(dead.rule, 'idle');
+  assert.equal(dead.keep, undefined);
+  // No sample record (an older sidecar): the flag carries the age only.
+  const bare = liveVerdict(rules, { ...lease, act: { sampledAt: 990_000, activeAt: 1 } }, now);
+  assert.equal(bare.keep, true);
+  assert.equal('sample' in bare.evidence, false);
+  assert.equal(bare.evidence.sampleAgeMs, 10_000);
+});
+
+test('sampleTree reports its replay record: sample count, tree size, cpu delta, busy-child matches and ports checked', () => {
+  const now = 100_000;
+  const table = () => [
+    { pid: 10, ppid: 1, name: 'node.exe', cmd: 'node.exe rq.mjs', cpuMs: 1000 },
+    { pid: 11, ppid: 10, name: 'node.exe', cmd: 'node.exe job.mjs', cpuMs: 500 },
+  ];
+  const a = sampleTree(10, { table, now, ports: [[9000, 9100]], busyChildren: ['vitest'], listen: () => [] });
+  assert.equal(a.active, false);
+  assert.deepEqual(a.ev, { n: 1, size: 2, shells: 0, links: 0, cpuMs: null, dtMs: null, pct: null, kids: 0, ports: [], why: null });
+  const busy = () => table().map((p) => ({ ...p, cpuMs: p.cpuMs + 900 }));
+  const b = sampleTree(10, { table: busy, prev: a, now: now + 30_000, ports: [[9000, 9100]], busyChildren: ['vitest'], listen: () => [] });
+  assert.equal(b.active, true);
+  assert.equal(b.ev.n, 2);
+  assert.equal(b.ev.cpuMs, 1800);
+  assert.equal(b.ev.dtMs, 30_000);
+  assert.equal(b.ev.pct, 6);
+  assert.equal(b.ev.ports, null, 'ports are not read once the cpu test already says active');
+  assert.match(b.ev.why, /^cpu 6\.0%/);
+  const kid = () => [...table(), { pid: 12, ppid: 11, name: 'node.exe', cmd: 'node.exe node_modules/vitest/vitest.mjs run', cpuMs: 0 }];
+  const c = sampleTree(10, { table: kid, prev: b, now: now + 60_000, ports: [], busyChildren: ['vitest'], listen: () => [] });
+  assert.equal(c.ev.kids, 1);
+  assert.equal(c.ev.size, 3);
+  assert.equal(c.ev.n, 3);
+  const open = sampleTree(10, { table, prev: c, now: now + 90_000, ports: [[9000, 9100]], listen: () => [{ pid: 11, port: 9050 }, { pid: 99, port: 9051 }] });
+  assert.deepEqual(open.ev.ports, [9050]);
 });
 
 test('scanStrays reports matching processes while nothing holds the resource, orphans flagged', () => {
@@ -429,6 +619,28 @@ test('buildRequest: a class supplies defaults, explicit flags override, {cwd} is
 
   assert.throws(() => buildRequest({ cls: 'nope' }, rules), /unknown --class "nope"/);
   assert.throws(() => buildRequest({}, rules), /nothing to wait for/);
+});
+
+test('runUnderQueue hands every sample record to the lease sidecar, and a failed read leaves the sidecar alone', async () => {
+  const { EventEmitter } = await import('node:events');
+  const calls = [];
+  const lease = { id: 'x', off: false, cleared: false, bound: false, release() {}, recordActivity: (...a) => calls.push(a) };
+  const child = new EventEmitter(); child.pid = 4242; child.kill = () => {};
+  const evs = [{ n: 1, size: 3 }, null, { n: 3, size: 4 }];
+  let i = 0;
+  const probe = () => {
+    const ev = evs[Math.min(i, evs.length - 1)]; i += 1;
+    return ev ? { at: 1000 * i, active: i === 3, ev } : null;
+  };
+  const request = { box: 1, resources: {}, ramMb: 0, limits: {}, monitored: true, probe: {} };
+  setTimeout(() => child.emit('exit', 0, null), 120);
+  const code = await runUnderQueue({ request, label: 't', cmd: ['x'] }, {
+    env: { PATH: '' }, err: () => {}, spawn: () => child, acquire: async () => lease, probe, probeMs: 10, rules: { rules: [{ id: 'idle', sampleMs: 10 }] },
+  });
+  assert.equal(code, 0);
+  assert.ok(calls.length >= 2, 'sampled at least twice');
+  assert.deepEqual(calls[0], [1000, calls[0][1], { n: 1, size: 3 }]);
+  assert.deepEqual(calls[1].slice(2), [{ n: 3, size: 4 }], 'the unreadable sample wrote nothing');
 });
 
 test('subtractHeld: what an ancestor lease holds is not asked for twice', () => {

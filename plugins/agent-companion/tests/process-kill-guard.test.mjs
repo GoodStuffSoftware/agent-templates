@@ -205,6 +205,39 @@ for (const c of KILL_PS) test(`kill-by-name denied (powershell): ${JSON.stringif
 for (const c of ALLOW_BASH) test(`kill rule allows (bash): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'bash'), null, c));
 for (const c of ALLOW_PS) test(`kill rule allows (powershell): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'powershell'), null, c));
 
+// Shared tokenizer (0.31.28): bash `<<<` is an operator plus one ordinary word (it used to open a heredoc whose body
+// swallowed the following lines), and a PowerShell @'...'@ / @"..."@ here-string is one data word.
+const HERE_KILL_BASH = [
+  `cat <<< hello${NL}pkill node`,
+  `grep -c x <<< "a b"${NL}taskkill /F /IM node.exe`,
+  `cat <<<hello; killall node`,
+  `read -r v <<< 'x' && pkill -f vite`,
+  `echo "$(cat <<< x)"${NL}pkill node`,
+];
+const HERE_ALLOW_BASH = [
+  `cat <<< 'pkill node'`,
+  `grep -c killall <<< 'killall node'`,
+  `wc -c <<< "taskkill /F /IM node.exe"`,
+  `cat <<< 'x'${NL}echo pkill node`,
+];
+const HERE_KILL_PS = [
+  `$s = @'${NL}notes${NL}'@${NL}Stop-Process -Name node`,
+  `@'${NL}text${NL}'@ | Out-Null; Stop-Process -Name node`,
+  `$s = @"${NL}notes ${'$'}env:USERPROFILE${NL}"@${NL}taskkill /F /IM node.exe`,
+  `@"${NL}${'$'}(Stop-Process -Name node)${NL}"@`,
+  `$m = @"${NL}a${NL}${'$'}(taskkill /F /IM node.exe)${NL}"@`,
+];
+const HERE_ALLOW_PS = [
+  `$s = @'${NL}Stop-Process -Name node${NL}'@`,
+  `@'${NL}taskkill /F /IM node.exe${NL}it's data${NL}'@ | Set-Content notes.txt`,
+  `$s = @"${NL}Stop-Process -Name node${NL}"@`,
+  `$s = @'${NL}${'$'}(Stop-Process -Name node)${NL}'@`,
+];
+for (const c of HERE_KILL_BASH) test(`here-string tokenizer, kill denied (bash): ${JSON.stringify(c).slice(0, 90)}`, () => assert.ok(kills(c, 'bash'), c));
+for (const c of HERE_ALLOW_BASH) test(`here-string tokenizer, kill rule allows (bash): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'bash'), null, c));
+for (const c of HERE_KILL_PS) test(`here-string tokenizer, kill denied (powershell): ${JSON.stringify(c).slice(0, 90)}`, () => assert.ok(kills(c, 'powershell'), c));
+for (const c of HERE_ALLOW_PS) test(`here-string tokenizer, kill rule allows (powershell): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'powershell'), null, c));
+
 test('the messages name the replacement: find the PID, walk the parent chain, kill by PID', () => {
   assert.match(KILL_MSG, /find the PID/);
   assert.match(KILL_MSG, /parent\s+chain/);
@@ -355,3 +388,47 @@ test('hook: claude plugin uninstall is denied and the switch does not reach it',
   assert.equal(decisionOf(hook('PowerShell', 'claude plugin uninstall x').json), 'deny');
   assert.notEqual(decisionOf(hook('Bash', 'claude plugin update agent-companion@agent-templates').json), 'deny');
 });
+
+// 0.31.28 review: the parser records the PowerShell call operator on the command (cmd.call); kill decisions are unchanged
+const SYS32 = 'C:\\Windows\\System32';
+for (const c of [
+  `& '${SYS32}\\taskkill.exe' /IM node.exe /F`,
+  `& "${SYS32}\\taskkill.exe" /F /IM node.exe`,
+  `&'${SYS32}\\taskkill.exe' /IM node.exe`,
+  `$r = & '${SYS32}\\taskkill.exe' /IM node.exe /F; $r`,
+  '& Stop-Process -Name node',
+]) test(`call operator, kill denied (powershell): ${JSON.stringify(c).slice(0, 90)}`, () => assert.ok(kills(c, 'powershell'), c));
+for (const c of [
+  `& '${SYS32}\\taskkill.exe' /PID 123 /F`,
+  `$r = & '${SYS32}\\taskkill.exe' /PID 4242`,
+  `'${SYS32}\\taskkill.exe /IM node.exe'`,
+  "Write-Host '& taskkill /IM node.exe'",
+  `& '${SYS32}\\tasklist.exe' /FI "IMAGENAME eq node.exe"`,
+]) test(`call operator, kill rule allows (powershell): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'powershell'), null, c));
+// 0.31.28 review (N3): a PowerShell dot-source `. '...\x.exe'` runs the program like `&`, so a kill by name through it is
+// denied (both allowed before the review fix); a dot-sourced script path and a bash `. file` are unchanged
+for (const c of [
+  `. '${SYS32}\\taskkill.exe' /IM node.exe /F`,
+  '. taskkill /F /IM node.exe',
+  `$r = . '${SYS32}\\taskkill.exe' /IM node.exe /F; $r`,
+]) test(`dot-source, kill denied (powershell): ${JSON.stringify(c).slice(0, 90)}`, () => assert.ok(kills(c, 'powershell'), c));
+for (const c of [
+  `. '${SYS32}\\taskkill.exe' /PID 123 /F`,
+  '. .\\stop.ps1',
+  '. $PROFILE; Stop-Process -Id 123',
+]) test(`dot-source, kill rule allows (powershell): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'powershell'), null, c));
+
+// 0.31.28 review: the parser records whether a heredoc delimiter was quoted (hereQuoted); kill decisions are unchanged
+for (const c of [
+  'bash <<EOF' + NL + 'pkill node' + NL + 'EOF',
+  "bash <<'EOF'" + NL + 'pkill node' + NL + 'EOF',
+  'bash <<\\EOF' + NL + 'taskkill //F //IM node.exe' + NL + 'EOF',
+  'cat <<EOF | sh' + NL + 'killall node' + NL + 'EOF',
+  'cat <<EOF' + NL + 'notes' + NL + 'EOF' + NL + 'pkill node',
+]) test(`heredoc quoting, kill denied (bash): ${JSON.stringify(c).slice(0, 90)}`, () => assert.ok(kills(c, 'bash'), c));
+for (const c of [
+  'cat <<EOF' + NL + 'pkill node' + NL + 'EOF',
+  "cat <<'EOF'" + NL + 'pkill node' + NL + 'EOF',
+  'cat <<"EOF" > notes.txt' + NL + 'taskkill /F /IM node.exe' + NL + 'EOF',
+  'git commit -F - <<EOF' + NL + 'deny pkill and killall' + NL + 'EOF',
+]) test(`heredoc quoting, kill rule allows (bash): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'bash'), null, c));

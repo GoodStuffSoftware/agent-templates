@@ -49,11 +49,11 @@ function baseEnv(dir) {
 
 // --- (a) opus + TYPE: integration, no warrant -> allowed --------------------
 
-test('(a) opus + TYPE: integration with NO warrant is ALLOWED — the trial routes this TYPE to opus, so opus is not premium for this spawn', () => {
+test('(a) opus + TYPE: debug-root-cause with NO warrant is ALLOWED — the trial routes this TYPE to opus, so opus is not premium for this spawn', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const payload = {
-      session_id: 'sess-bug-a-integration',
+      session_id: 'sess-bug-a-debug',
       agent_type: 'main',
       cwd: dir,
       tool_input: {
@@ -61,7 +61,7 @@ test('(a) opus + TYPE: integration with NO warrant is ALLOWED — the trial rout
         model: 'opus',
         run_in_background: true,
         name: 'integration-worker',
-        prompt: 'TYPE: integration\ndo the multi-file change',
+        prompt: 'TYPE: debug-root-cause\ndo the multi-file change',
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
@@ -73,7 +73,7 @@ test('(a) opus + TYPE: integration with NO warrant is ALLOWED — the trial rout
     assert.equal(denials.length, 0, `expected no denials: ${JSON.stringify(denials)}`);
 
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
-    assert.equal(row.declared_type, 'integration');
+    assert.equal(row.declared_type, 'debug-root-cause');
     assert.equal(row.fit_trial, true);
     assert.equal(row.fit_expected, 'opus/medium');
   } finally {
