@@ -224,7 +224,11 @@ function buildThrowawayRepo() {
     '',
   ].join('\n'));
   writeFileSync(join(repo, 'scripts', 'ci-local.mjs'), readFileText(SCRIPT));
-  writeFileSync(join(repo, 'scripts', 'ci-budget.mjs'), readFileText(join(dirname(SCRIPT), 'ci-budget.mjs'))); // ci-local imports it
+  mkdirSync(join(repo, 'plugins', 'agent-companion', 'scripts'), { recursive: true });
+  for (const rel of [['scripts', 'ci-budget.mjs'], ['scripts', 'lib', 'resource-rules.mjs'], ['config', 'resource-rules.json']]) { // ci-local imports it
+    mkdirSync(dirname(join(repo, 'plugins', 'agent-companion', ...rel)), { recursive: true });
+    writeFileSync(join(repo, 'plugins', 'agent-companion', ...rel), readFileText(join(dirname(SCRIPT), '..', 'plugins', 'agent-companion', ...rel)));
+  }
   // ci-local runs node --test suites through its own reporters, resolved
   // next to itself; without them the suite would fail at once and the kill
   // below would land on an already-finished run.

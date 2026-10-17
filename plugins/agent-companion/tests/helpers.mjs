@@ -114,7 +114,22 @@ export function childEnv(env = {}) {
   // type_line_required defaults to deny in the plugin; most spawn-guard tests
   // spawn ladder rungs without a TYPE: line and are not about that rule, so
   // children run with it off unless a test sets it (tests/type-required.test.mjs).
-  return { CLAUDE_PLUGIN_OPTION_TYPE_LINE_REQUIRED: 'off', ...base, ...env };
+  // resource_gate defaults to deny: a hook test that runs `npm test` through
+  // bash-tail is not about the gate, so children run with it off unless a test
+  // sets it (tests/resource-gate*.test.mjs).
+  // The shared-resources session line reads the machine-wide ledger: a suite run
+  // under ci-local (which holds a lease there) would see it in every hook that adds
+  // context. Children get an empty ledger of their own unless a test passes CI_BUDGET_DIR.
+  return { CLAUDE_PLUGIN_OPTION_TYPE_LINE_REQUIRED: 'off', CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'off', ...base, CI_BUDGET_DIR: emptyLedger(), ...env };
+}
+
+let emptyLedgerDir = null;
+function emptyLedger() {
+  if (!emptyLedgerDir) {
+    emptyLedgerDir = mkdtempSync(join(tmpdir(), 'ac-test-ledger-'));
+    process.on('exit', () => { try { rmSync(emptyLedgerDir, { recursive: true, force: true }); } catch { /* best effort */ } });
+  }
+  return emptyLedgerDir;
 }
 
 // What a PreToolUse hook's stdout decided: its permissionDecision ('deny',

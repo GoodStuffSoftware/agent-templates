@@ -222,6 +222,12 @@ export const ALLOWED = {
     "// Overridable only for tests — same pattern as AGENT_COMPANION_HOME_OVERRIDE",
     "return process.env.AGENT_COMPANION_AGENTS_DIR_OVERRIDE",
   ],
+  "scripts/resource-queue.mjs": [
+    "const home = process.env.CLAUDE_CONFIG_DIR || join(process.env.AGENT_COMPANION_HOME_OVERRIDE || homedir(), '.claude');",
+  ],
+  "scripts/lib/resource-rules.mjs": [
+    "return env.CLAUDE_CONFIG_DIR || join(env.AGENT_COMPANION_HOME_OVERRIDE || homedir(), '.claude');",
+  ],
   "scripts/rules.mjs": [
     "if (findRule(rules, id)) usageError(`id \"${id}\" already exists — use enable/disable, or edit ${rulesPath()} directly to override a built-in`);",
   ],

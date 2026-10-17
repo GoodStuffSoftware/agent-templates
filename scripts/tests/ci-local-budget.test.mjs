@@ -188,7 +188,12 @@ test('a real run: the regular pass holds plain workers, the heavy pass holds hea
     const observe = join(root, 'observed.jsonl');
     for (const d of ['scripts/tests', 'scripts/ci-reporters', '.github/workflows']) mkdirSync(join(tree, d), { recursive: true });
     mkdirSync(oldLocks);
-    for (const f of ['ci-local.mjs', 'ci-budget.mjs']) writeFileSync(join(tree, 'scripts', f), readFileSync(join(REPO, 'scripts', f)));
+    writeFileSync(join(tree, 'scripts', 'ci-local.mjs'), readFileSync(join(REPO, 'scripts', 'ci-local.mjs')));
+    mkdirSync(join(tree, 'plugins', 'agent-companion', 'scripts'), { recursive: true });
+    for (const rel of [['scripts', 'ci-budget.mjs'], ['scripts', 'lib', 'resource-rules.mjs'], ['config', 'resource-rules.json']]) {
+      mkdirSync(dirname(join(tree, 'plugins', 'agent-companion', ...rel)), { recursive: true });
+      writeFileSync(join(tree, 'plugins', 'agent-companion', ...rel), readFileSync(join(REPO, 'plugins', 'agent-companion', ...rel)));
+    }
     for (const f of ['human.mjs', 'results.mjs']) {
       writeFileSync(join(tree, 'scripts', 'ci-reporters', f), readFileSync(join(REPO, 'scripts', 'ci-reporters', f)));
     }

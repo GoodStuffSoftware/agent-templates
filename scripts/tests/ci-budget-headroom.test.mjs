@@ -10,7 +10,7 @@ import { tmpdir, constants as osConstants } from 'node:os';
 import { join } from 'node:path';
 import {
   acquire, status, formatStatus, resolveBudgetConfig, defaultReserve, overloadThreshold, lowerOwnPriority,
-} from '../ci-budget.mjs';
+} from '../../plugins/agent-companion/scripts/ci-budget.mjs';
 
 const NO_LEGACY = mkdtempSync(join(tmpdir(), 'ci-budget-headroom-legacy-'));
 const T0 = Date.now();

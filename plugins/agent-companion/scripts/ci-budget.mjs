@@ -1,16 +1,22 @@
 #!/usr/bin/env node
-// scripts/ci-budget.mjs: a machine-wide shared worker budget for scripts/ci-local.mjs.
+// plugins/agent-companion/scripts/ci-budget.mjs: the machine-wide shared budget and
+// resource queue. One implementation, shared by the repo's scripts/ci-local.mjs
+// (kinds 'full' and 'targeted'; box units) and the cross-project CLI
+// scripts/resource-queue.mjs (kind 'run': box units, named resources, RAM).
+// Spec: docs/resource-queue.md (the one spec of the ledger format, the queue, the
+// status schema and the sweep rules).
+//
+// Below is the original design note for ci-local.
 //
 // Replaces the one-run mutex (scripts/ci-lock.mjs, removed). Several ci-local and
 // pre-push runs may go at once; the TOTAL number of test workers across all of
 // them, plus load from outside our runs, stays under one budget that scales
 // with the machine. A run that finds the box busy starts with fewer workers or
-// waits in a fair queue. It never fails. Design note: CONTRIBUTING.md, "Shared
-// CI budget".
+// waits in a fair queue. It never fails.
 //
 // The lease format and protocol (file names, fields, atomic rules, stale rules,
-// units) are specified ONCE, in CONTRIBUTING.md, "Shared CI budget"; other
-// repos follow that spec. Ledger: budgetDir() below (machine-wide, repo-neutral,
+// units) are specified ONCE, in docs/resource-queue.md (CONTRIBUTING.md, "Shared
+// CI budget", points there); other repos follow that spec. Ledger: budgetDir() below (machine-wide, repo-neutral,
 // not in any worktree). One JSON file per holder:
 //   lease-<id>.json   {id, pid, startedAt, heartbeatAt, repo, worktree, kind, units, heavy, heavyCost, label}
 //   lease-<id>.hb     heartbeat sidecar: a timestamp, rewritten by a worker thread
@@ -59,9 +65,12 @@
 import {
   mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, statSync, existsSync,
 } from 'node:fs';
+import {
+  BOX, loadRules, capacityOf, ramReserveMb, liveVerdict, appendClear, recentClears, scanStrays, NAME_RE,
+} from './lib/resource-rules.mjs';
 import { join, basename, dirname, resolve } from 'node:path';
 import {
-  tmpdir, availableParallelism, cpus, constants as osConstants, getPriority, setPriority,
+  tmpdir, availableParallelism, cpus, constants as osConstants, getPriority, setPriority, freemem, totalmem,
 } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -84,6 +93,8 @@ const LEGACY_MAX_AGE_MS = 45 * 60 * 1000; // the old mutex's own age cap
 const ADMIT_STALE_MS = 10_000;
 const DEBRIS_MAX_AGE_MS = 600_000; // *.tmp-* / *.stale-* left by a crash between write and rename
 const ADMIT_RETRY_CODES = ['EPERM', 'EBUSY', 'EACCES'];
+export const MAX_RESERVATION_MS = 4 * 3600_000; // a reservation never lasts longer than this
+export const MAX_PAUSE_MS = 4 * 3600_000; // nor does a hold on one's own queued entries
 
 // The default `repo` label: the basename of the git top-level directory above
 // `start` (the nearest ancestor holding `.git`, a directory or, in a linked
@@ -92,6 +103,33 @@ export function repoLabel(start) {
   const from = resolve(start || process.cwd());
   for (let d = from; ;) {
     if (existsSync(join(d, '.git'))) return basename(d) || 'unknown';
+    const up = dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return basename(from) || 'unknown';
+}
+
+// The project a path belongs to: like repoLabel, but a linked worktree (its .git
+// is a file reading "gitdir: <main>/.git/worktrees/<name>") names the MAIN
+// checkout, so every worktree of one repo shows the same project. Only fs calls.
+export function projectLabel(start) {
+  const from = resolve(start || process.cwd());
+  for (let d = from; ;) {
+    const g = join(d, '.git');
+    if (existsSync(g)) {
+      try {
+        if (statSync(g).isFile()) {
+          const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(g, 'utf8'));
+          if (m) {
+            const gd = resolve(d, m[1]).split(/[\\/]/);
+            const i = gd.lastIndexOf('worktrees');
+            if (i > 1 && gd[i - 1] === '.git') return gd[i - 2] || basename(d);
+          }
+        }
+      } catch { /* fall back to the directory name */ }
+      return basename(d) || 'unknown';
+    }
     const up = dirname(d);
     if (up === d) break;
     d = up;
@@ -205,17 +243,17 @@ export function resolveBudgetConfig(env = process.env, { cores = availableParall
   };
 }
 
-const OVERRIDES = [
+const CTX_KEYS = [
   'dir', 'budget', 'heavyCost', 'heavyMax', 'express', 'maxFull', 'pollMs', 'staleMs',
   'heartbeatMs', 'announceMs', 'sampleMs', 'off', 'legacyDir', 'legacyUnits', 'heavyMaxWaitMs',
-  'queueMaxWaitMs', 'expressMaxWaitMs', 'reserve', 'loadPct', 'sliceFactor',
+  'queueMaxWaitMs', 'expressMaxWaitMs', 'reserve', 'loadPct', 'sliceFactor', 'rules', 'session', 'project', 'freemem', 'totalmem', 'delay',
 ];
 
 // Environment config, then explicit options on top, plus the injectable seams.
 function makeCtx(o = {}) {
   const cfg = resolveBudgetConfig(o.env ?? process.env, { cores: o.cores ?? availableParallelism() });
   const ctx = { ...cfg };
-  for (const k of OVERRIDES) if (o[k] !== undefined) ctx[k] = o[k];
+  for (const k of CTX_KEYS) if (o[k] !== undefined) ctx[k] = o[k];
   ctx.heavyCost = Math.min(ctx.heavyCost, ctx.budget);
   ctx.legacyDir ??= legacyLockDir(o.env ?? process.env);
   ctx.legacyUnits = Math.min(ctx.legacyUnits ?? legacyRunUnits(ctx.cores), ctx.budget);
@@ -226,6 +264,13 @@ function makeCtx(o = {}) {
   ctx.pid = o.pid ?? process.pid;
   ctx.worktree = o.worktree ?? process.cwd();
   ctx.repo = o.repo ?? ((o.env ?? process.env).CI_BUDGET_REPO || repoLabel(ctx.worktree));
+  ctx.env = o.env ?? process.env;
+  ctx.rules ??= loadRules(ctx.env);
+  ctx.session = o.session ?? (ctx.env.CLAUDE_CODE_SESSION_ID || '');
+  ctx.project = o.project ?? projectLabel(ctx.worktree);
+  ctx.freemem = o.freemem ?? freemem;
+  ctx.totalmem = o.totalmem ?? totalmem;
+  ctx.delay = o.delay ?? ((ms) => new Promise((r) => { setTimeout(r, ms); }));
   ctx.sampler = o.sampler ?? (() => sampleBusyCores({ ms: ctx.sampleMs }));
   ctx.registerExit = o.registerExit ?? true;
   ctx.timeoutMs = o.timeoutMs ?? Infinity;
@@ -324,13 +369,130 @@ function readHb(file) {
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 function staleReason(ctx, e) {
+  // A pid-bound lease (a daemon such as an emulator) lives exactly as long as the
+  // bound pid: its wrapper has gone, so there is no heartbeat to expire.
+  if (e.boundPid > 0) return ctx.isAlive(e.boundPid) ? null : 'process is gone';
   if (!ctx.isAlive(e.pid)) return 'process is gone';
   const hb = Math.max(num(e.heartbeatAt), num(e.hbSide), num(e.startedAt), num(e.createdAt));
   if (ctx.now() - hb > ctx.staleMs) return 'heartbeat is stale';
   return null;
 }
 
+// Named resources of a record: { name: units }, only valid names and units >= 1.
+function normResources(v) {
+  const out = {};
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    for (const [k, n] of Object.entries(v)) {
+      const u = Math.trunc(num(n));
+      if (k !== BOX && NAME_RE.test(k) && u >= 1) out[k] = u;
+    }
+  }
+  return out;
+}
+
+// The activity sidecar of a monitored run lease: "<sampledAt> <activeAt>" in epoch ms.
+function readAct(file) {
+  try {
+    const [a, b] = readFileSync(file, 'utf8').trim().split(/\s+/).map(Number);
+    return Number.isFinite(a) && Number.isFinite(b) ? { sampledAt: a, activeAt: b } : null;
+  } catch { return null; }
+}
+
+function ruleFor(why, type) {
+  if (why === 'process is gone') return type === 'ticket' ? 'requester-gone' : 'pid-dead';
+  return type === 'ticket' ? 'ticket-heartbeat-stale' : 'heartbeat-stale';
+}
+
+// One record per cleared entry: the rules (data: config/resource-rules.json) say
+// which entries are dead; this writes the evidence down. Never kills anything.
+function noteClear(ctx, e, type, rule, evidence) {
+  appendClear(ctx.dir, {
+    at: Date.now(), rule, type, id: e.id, pid: e.pid, label: e.label || '', project: e.project || '',
+    repo: e.repo || '', worktree: e.worktree || '', session: e.session || '',
+    resources: { ...(e.units > 0 ? { [BOX]: e.units } : {}), ...(e.resources ?? {}) }, evidence,
+  });
+}
+
 const charge = (ctx, l) => l.units + l.heavy * (l.heavyCost ?? ctx.heavyCost);
+
+// ---------------------------------------------------------------- reservations and holds
+
+// reservation-<id>.json: {id, resource, forGroup, owner:{pid, session}, createdAt, expiresAt, reason}.
+// Valid only with a resource, a group, a creation time and an expiry; the effective
+// end is min(expiresAt, createdAt + 4 h), so no file can reserve for longer than 4 h.
+function readReservation(ctx, id, file, d) {
+  const created = num(d.createdAt); const expires = num(d.expiresAt);
+  const owner = d.owner && typeof d.owner === 'object' ? d.owner : {};
+  const r = {
+    id, file, resource: typeof d.resource === 'string' ? d.resource : '', forGroup: typeof d.forGroup === 'string' ? d.forGroup : '',
+    owner: { pid: Math.max(0, Math.trunc(num(owner.pid))), session: typeof owner.session === 'string' ? owner.session : '' },
+    createdAt: created, expiresAt: expires, reason: typeof d.reason === 'string' ? d.reason : '',
+  };
+  r.endsAt = created > 0 && expires > 0 ? Math.min(expires, created + MAX_RESERVATION_MS) : 0;
+  let rule = null;
+  if (!(r.resource === BOX || NAME_RE.test(r.resource)) || !NAME_RE.test(r.forGroup) || !r.endsAt) rule = 'reservation-invalid';
+  else if (ctx.now() >= r.endsAt) rule = 'reservation-expired';
+  else if (r.owner.pid > 0 && !ctx.isAlive(r.owner.pid)) rule = 'reservation-owner-gone';
+  return { r, rule };
+}
+
+function noteReservationClear(ctx, r, rule, by = null, extra = null) {
+  appendClear(ctx.dir, {
+    at: Date.now(), rule, type: 'reservation', id: r.id, pid: r.owner.pid, label: `reserve ${r.resource} for ${r.forGroup}`,
+    project: '', repo: '', worktree: '', session: r.owner.session, resources: r.resource ? { [r.resource]: 0 } : {},
+    evidence: { forGroup: r.forGroup, createdAt: r.createdAt, expiresAt: r.expiresAt, endsAt: r.endsAt, ...(by ? { by } : {}), ...(extra ?? {}) },
+  });
+}
+
+// Use-it-or-lose-it: a reservation lapses when no job of its group has held or waited for the
+// resource for reservationIdleLapseMinutes (config; default 20; 0 or null = off). The last matching
+// activity lives in reservation-<id>.active ({lastMatchAt}), so it survives the wrapper exiting.
+export const DEFAULT_RESERVATION_IDLE_LAPSE_MINUTES = 20;
+function idleLapseMs(rules) {
+  const v = rules?.reservationIdleLapseMinutes;
+  const m = v === undefined ? DEFAULT_RESERVATION_IDLE_LAPSE_MINUTES : Number(v);
+  return Number.isFinite(m) && m > 0 ? m * 60_000 : 0;
+}
+const activeFile = (dir, id) => join(dir, `reservation-${id}.active`);
+function readLastMatch(dir, id) {
+  const d = readJson(activeFile(dir, id));
+  return d ? num(d.lastMatchAt) : 0;
+}
+function writeLastMatch(ctx, id, at) {
+  try { writeAtomic(ctx, activeFile(ctx.dir, id), { lastMatchAt: at }); } catch { /* best effort */ }
+}
+// A job of `group` that used `names` just ended: restart the idle clock of the matching reservations.
+function touchReservations(ctx, group, names) {
+  if (!group) return;
+  let files = [];
+  try { files = readdirSync(ctx.dir); } catch { return; }
+  for (const name of files) {
+    const m = /^reservation-([0-9a-f]+)\.json$/.exec(name);
+    const d = m ? readJson(join(ctx.dir, name)) : null;
+    if (d && d.forGroup === group && names.includes(d.resource)) writeLastMatch(ctx, m[1], ctx.now());
+  }
+}
+const namesOfLease = (l) => [...(l.units > 0 ? [BOX] : []), ...Object.keys(l.resources ?? {})];
+
+// ticket-<id>.paused: {by, at, until}. A sidecar, so the waiter's own ticket rewrites cannot undo it.
+function readPause(ctx, file) {
+  const d = readJson(file);
+  if (!d) return null;
+  const until = Math.min(num(d.until), num(d.at) + MAX_PAUSE_MS);
+  return until > ctx.now() ? { by: typeof d.by === 'string' ? d.by : '', at: num(d.at), until } : null;
+}
+
+// The reservation (if any) that keeps a request with `group` from taking one of `names` now.
+function reservedAgainst(reservations, names, group) {
+  for (const n of names) {
+    const rs = reservations.filter((r) => r.resource === n);
+    if (rs.length && !rs.some((r) => group && r.forGroup === group)) return rs[0];
+  }
+  return null;
+}
+const namesOfTicket = (t) => [...(usesBox(t) ? [BOX] : []), ...Object.keys(t.resources ?? {})];
+// A ticket that cannot be admitted now for a reason of policy (a hold, or someone else's reservation).
+const passedOver = (state, t) => Boolean(t.paused) || Boolean(reservedAgainst(state.reservations ?? [], namesOfTicket(t), t.group));
 
 /**
  * Read the ledger. With reclaim, stale leases and tickets are removed (and
@@ -340,8 +502,8 @@ const charge = (ctx, l) => l.units + l.heavy * (l.heavyCost ?? ctx.heavyCost);
 export function readState(ctx, { reclaim = true } = {}) {
   let names = [];
   try { names = readdirSync(ctx.dir); } catch { /* no ledger yet */ }
-  const leases = []; const tickets = []; const staleEntries = []; const reclaimed = [];
-  const leaseIds = new Set();
+  const leases = []; const tickets = []; const staleEntries = []; const reclaimed = []; const reservations = [];
+  const leaseIds = new Set(); const ticketIds = new Set(); const endedLeases = [];
   const legacy = readLegacy(ctx);
   for (const name of names) {
     let m = /^lease-([0-9a-f]+)\.json$/.exec(name);
@@ -360,15 +522,39 @@ export function readState(ctx, { reclaim = true } = {}) {
         repo: typeof d.repo === 'string' ? d.repo : '',
         worktree: typeof d.worktree === 'string' ? d.worktree : '',
         label: typeof d.label === 'string' ? d.label : '',
+        project: typeof d.project === 'string' ? d.project : '',
+        session: typeof d.session === 'string' ? d.session : '',
+        group: typeof d.group === 'string' ? d.group : '', boundPid: Math.max(0, Math.trunc(num(d.boundPid))),
+        resources: normResources(d.resources), ramMb: Math.max(0, Math.trunc(num(d.ramMb))),
         units: Math.max(0, Math.trunc(num(d.units))), heavy: Math.max(0, Math.trunc(num(d.heavy))),
         heavyCost: hc >= 1 ? hc : ctx.heavyCost,
       };
+      if (e.kind === 'full' && d.kind === 'run') e.kind = 'run';
+      e.actFile = join(ctx.dir, `lease-${m[1]}.act`);
+      e.act = readAct(e.actFile);
       const why = staleReason(ctx, e);
       leaseIds.add(m[1]);
       if (why) {
         staleEntries.push({ ...e, type: 'lease', stale: why });
-        if (reclaim) { dropFile(file, hbFile); reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why }); }
-      } else leases.push(e);
+        if (reclaim) {
+          dropFile(file, hbFile, e.actFile);
+          endedLeases.push(e);
+          reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why });
+          noteClear(ctx, e, 'lease', ruleFor(why, 'lease'), { why, pid: e.pid });
+        }
+      } else {
+        // Live pid, fresh heartbeat: the config rules (max-hold, idle) may still clear it.
+        const v = reclaim ? liveVerdict(ctx.rules, e, ctx.now()) : null;
+        if (v) {
+          // The tombstone first, so the owner's heartbeat does not put the lease back.
+          try { writeFileSync(join(ctx.dir, `lease-${m[1]}.cleared`), String(ctx.now()), { flag: 'wx' }); } catch { /* already marked */ }
+          dropFile(file, hbFile, e.actFile);
+          endedLeases.push(e);
+          reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why: `rule ${v.rule}` });
+          noteClear(ctx, e, 'lease', v.rule, v.evidence);
+          ctx.log(`resource-queue: cleared the lease of pid ${e.pid} (${e.label || e.worktree}) by rule ${v.rule}; the process is not touched.`);
+        } else leases.push(e);
+      }
       continue;
     }
     m = /^ticket-([0-9a-f]+)\.json$/.exec(name);
@@ -378,18 +564,75 @@ export function readState(ctx, { reclaim = true } = {}) {
       if (!d) continue;
       const e = {
         ...d, id: m[1], file, pid: num(d.pid),
+        kind: d.kind === 'run' ? 'run' : 'full',
         repo: typeof d.repo === 'string' ? d.repo : '',
         worktree: typeof d.worktree === 'string' ? d.worktree : '',
+        label: typeof d.label === 'string' ? d.label : '',
+        project: typeof d.project === 'string' ? d.project : '',
+        session: typeof d.session === 'string' ? d.session : '',
+        resources: normResources(d.resources), ramMb: Math.max(0, Math.trunc(num(d.ramMb))),
+        boxUnits: Math.max(0, Math.trunc(num(d.boxUnits))),
         desired: Math.max(1, Math.trunc(num(d.desired)) || 1),
+        group: typeof d.group === 'string' ? d.group : '',
       };
+      delete e.boundPid;
+      ticketIds.add(m[1]);
+      e.pausedFile = join(ctx.dir, `ticket-${m[1]}.paused`);
+      const pause = readPause(ctx, e.pausedFile);
+      e.paused = Boolean(pause); e.pausedBy = pause ? pause.by : ''; e.pausedUntil = pause ? pause.until : null;
       const why = staleReason(ctx, e);
       if (why) {
         staleEntries.push({ ...e, type: 'ticket', stale: why });
-        if (reclaim) { dropFile(file); reclaimed.push({ type: 'ticket', pid: e.pid, worktree: e.worktree, why }); }
+        if (reclaim) {
+          dropFile(file, e.pausedFile); reclaimed.push({ type: 'ticket', pid: e.pid, worktree: e.worktree, why });
+          noteClear(ctx, e, 'ticket', ruleFor(why, 'ticket'), { why, pid: e.pid });
+        }
       } else tickets.push(e);
+      continue;
+    }
+    m = /^reservation-([0-9a-f]+)\.json$/.exec(name);
+    if (m) {
+      const file = join(ctx.dir, name);
+      const d = readJson(file);
+      if (!d) continue;
+      const { r, rule } = readReservation(ctx, m[1], file, d);
+      if (!rule) { reservations.push(r); continue; }
+      staleEntries.push({ ...r, type: 'reservation', stale: rule });
+      if (reclaim) {
+        dropFile(file, activeFile(ctx.dir, r.id));
+        reclaimed.push({ type: 'reservation', pid: r.owner.pid, worktree: '', why: rule });
+        noteReservationClear(ctx, r, rule);
+      }
+    }
+  }
+  if (reclaim && reservations.length) {
+    const lapseMs = idleLapseMs(ctx.rules);
+    const now = ctx.now();
+    for (const r of [...reservations]) {
+      const holdsIt = (e, names) => e.group === r.forGroup && names(e).includes(r.resource);
+      let last = readLastMatch(ctx.dir, r.id);
+      const live = leases.some((l) => holdsIt(l, namesOfLease)) || tickets.some((t) => holdsIt(t, namesOfTicket));
+      const ended = endedLeases.some((l) => holdsIt(l, namesOfLease));
+      if (live || ended) {
+        if (now - last >= 5000 || now < last) { writeLastMatch(ctx, r.id, now); last = now; }
+        continue;
+      }
+      if (!lapseMs) continue;
+      const since = Math.max(r.createdAt, last);
+      if (now - since < lapseMs) continue;
+      dropFile(r.file, activeFile(ctx.dir, r.id));
+      reservations.splice(reservations.indexOf(r), 1);
+      reclaimed.push({ type: 'reservation', pid: r.owner.pid, worktree: '', why: 'reservation-idle-lapse' });
+      noteReservationClear(ctx, r, 'reservation-idle-lapse', null, {
+        idleMinutes: Math.round(((now - since) / 60_000) * 10) / 10, lastMatchAt: since, lapseMinutes: lapseMs / 60_000,
+      });
     }
   }
   if (reclaim) {
+    for (const name of names) {
+      const am = /^reservation-([0-9a-f]+)\.active$/.exec(name);
+      if (am && !reservations.some((r) => r.id === am[1])) tryUnlink(join(ctx.dir, name));
+    }
     for (const name of names) {
       // Crash debris: a temp file from a crash between write and rename, or a
       // file moved aside and never unlinked. Young ones may be in flight.
@@ -398,14 +641,20 @@ export function readState(ctx, { reclaim = true } = {}) {
         continue;
       }
       // Orphan sidecars (a worker tick landing after its lease was removed).
-      const m = /^lease-([0-9a-f]+)\.hb$/.exec(name);
+      const pm = /^ticket-([0-9a-f]+)\.paused$/.exec(name);
+      if (pm && !ticketIds.has(pm[1])) { // a hold left behind by a ticket that is gone
+        try { if (Date.now() - statSync(join(ctx.dir, name)).mtimeMs > 60_000) tryUnlink(join(ctx.dir, name)); } catch { /* gone */ }
+        continue;
+      }
+      const m = /^lease-([0-9a-f]+)\.(?:hb|act|cleared)$/.exec(name);
       if (!m || leaseIds.has(m[1])) continue;
       try { if (Date.now() - statSync(join(ctx.dir, name)).mtimeMs > 300_000) tryUnlink(join(ctx.dir, name)); } catch { /* gone */ }
     }
   }
   leases.sort((a, b) => num(a.startedAt) - num(b.startedAt) || num(a.pid) - num(b.pid));
   tickets.sort((a, b) => num(a.createdAt) - num(b.createdAt) || num(a.pid) - num(b.pid) || (a.id < b.id ? -1 : 1));
-  return { leases, tickets, stale: staleEntries, reclaimed, legacy };
+  reservations.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
+  return { leases, tickets, stale: staleEntries, reclaimed, legacy, reservations };
 }
 
 // Live holders of the pre-budget run mutex (scripts/ci-lock.mjs, removed in
@@ -427,6 +676,16 @@ function readLegacy(ctx) {
   }
   return out;
 }
+
+// Units held per named resource across live leases.
+export function namedHeld(state) {
+  const out = {};
+  for (const l of state.leases) for (const [k, n] of Object.entries(l.resources ?? {})) out[k] = (out[k] ?? 0) + n;
+  return out;
+}
+
+// Does a queued ticket need the box? (An old 'full' ticket always does.)
+export const usesBox = (t) => t.kind !== 'run' || t.boxUnits > 0;
 
 export function totals(ctx, state) {
   let held = state.legacy.length * ctx.legacyUnits; let heavyHeld = 0; let fullCount = 0;
@@ -521,7 +780,7 @@ const tick = () => {
   try {
     if (Atomics.load(flags, 0) === 1) return;
     try { fs.writeFileSync(workerData.hbFile, String(Date.now())); } catch {}
-    if (!fs.existsSync(workerData.leaseFile)) {
+    if (!fs.existsSync(workerData.leaseFile) && !fs.existsSync(workerData.clearedFile)) {
       try { fs.writeFileSync(workerData.leaseFile, JSON.stringify(Object.assign({}, rec, { heartbeatAt: Date.now() })), { flag: 'wx' }); } catch {}
     }
   } finally {
@@ -540,14 +799,14 @@ const STOP_WAIT_MS = 5000;
 // Returns {stop() -> Promise, stopSync(), setRecord(rec)}. stopSync() blocks
 // until no tick is in progress and none can start (see HB_WORKER_SRC), so the
 // caller may then remove the lease files for good; stop() also ends the thread.
-function startHeartbeat(ctx, { leaseFile, hbFile, rec, beat }) {
+function startHeartbeat(ctx, { leaseFile, hbFile, clearedFile, rec, beat }) {
   const none = { stop: () => Promise.resolve(), stopSync() {}, setRecord() {} };
   if (!(ctx.heartbeatMs > 0) || ctx.heartbeat === 'off') return none;
   if (ctx.heartbeat === 'worker') {
     try {
       const flags = new Int32Array(new SharedArrayBuffer(8));
       const w = new Worker(HB_WORKER_SRC, {
-        eval: true, workerData: { leaseFile, hbFile, ms: ctx.heartbeatMs, rec, flags: flags.buffer },
+        eval: true, workerData: { leaseFile, hbFile, clearedFile, ms: ctx.heartbeatMs, rec, flags: flags.buffer },
       });
       w.on('error', (err) => ctx.log(`ci-budget: heartbeat thread failed (${err.message}); the lease may be reclaimed as stale`));
       w.unref();
@@ -582,37 +841,63 @@ function noopLease(ctx, units, kind) {
   return lease;
 }
 
-function createLease(ctx, { kind, units, heavy = 0, label = '', waitedMs = 0 }) {
+function createLease(ctx, {
+  kind, units, heavy = 0, label = '', waitedMs = 0, resources = {}, ramMb = 0, limits = null, monitored = false,
+  group = '', bindPid = 0,
+}) {
   const id = newId();
   const file = join(ctx.dir, `lease-${id}.json`);
   const hbFile = join(ctx.dir, `lease-${id}.hb`);
+  const clearedFile = join(ctx.dir, `lease-${id}.cleared`);
+  const actFile = join(ctx.dir, `lease-${id}.act`);
   const t0 = ctx.now();
   const rec = {
-    id, pid: ctx.pid, startedAt: t0, heartbeatAt: t0, repo: ctx.repo, worktree: ctx.worktree, kind,
+    id, pid: bindPid > 0 ? bindPid : ctx.pid, startedAt: t0, heartbeatAt: t0, repo: ctx.repo, worktree: ctx.worktree, kind,
     units, heavy, heavyCost: ctx.heavyCost, label,
   };
+  // A pid-bound lease (a daemon): it lives as long as `bindPid`, whoever wrote it. The wrapper's own
+  // pid is kept for the record; no heartbeat is written and none is needed.
+  if (bindPid > 0) { rec.boundPid = bindPid; rec.wrapperPid = ctx.pid; }
+  if (group) rec.group = group;
+  // Additive fields (docs/resource-queue.md): written only when there is something to say.
+  if (ctx.project) rec.project = ctx.project;
+  if (ctx.session) rec.session = ctx.session;
+  if (Object.keys(resources).length) rec.resources = { ...resources };
+  if (ramMb > 0) rec.ramMb = ramMb;
+  if (limits && Object.keys(limits).length) rec.limits = { ...limits };
+  if (monitored) rec.monitored = true;
   writeFileSync(file, JSON.stringify(rec), { flag: 'wx' });
   try { writeFileSync(hbFile, String(t0)); } catch { /* best effort: heartbeatAt in the lease still counts */ }
+  if (monitored) { try { writeFileSync(actFile, `${t0} ${t0}`); } catch { /* best effort */ } }
   let released = false;
   let unmanaged = false;
 
   const beat = () => {
     if (released) return;
     try { writeFileSync(hbFile, String(ctx.now())); } catch { /* best effort */ }
-    if (!existsSync(file)) { // reclaimed while we were frozen (a laptop sleep): put it back
+    if (!existsSync(file) && !existsSync(clearedFile)) { // reclaimed while we were frozen (a laptop sleep): put it back
       try { writeFileSync(file, JSON.stringify({ ...rec, heartbeatAt: ctx.now() }), { flag: 'wx' }); } catch { /* raced */ }
     }
   };
-  const heartbeat = startHeartbeat(ctx, { leaseFile: file, hbFile, rec: { ...rec }, beat });
+  const heartbeat = bindPid > 0
+    ? { stop: () => Promise.resolve(), stopSync() {}, setRecord() {} }
+    : startHeartbeat(ctx, { leaseFile: file, hbFile, clearedFile, rec: { ...rec }, beat });
 
   const lease = {
-    id, kind, dir: ctx.dir, waitedMs,
+    id, kind, dir: ctx.dir, waitedMs, file, clearedFile, actFile,
+    get cleared() { return existsSync(clearedFile); },
     get units() { return rec.units; },
     get heavy() { return rec.heavy; },
     get workers() { return rec.units + rec.heavy; },
     get charge() { return charge(ctx, rec); },
     get released() { return released; },
+    bound: bindPid > 0, boundPid: bindPid,
     beat,
+    /** Record a probe result: sampledAt = when it ran, activeAt = the last time the holder was seen working. */
+    recordActivity(sampledAt, activeAt) {
+      if (released) return;
+      try { writeFileSync(actFile, `${Math.trunc(sampledAt)} ${Math.trunc(activeAt)}`); } catch { /* best effort */ }
+    },
     release() {
       if (released) return;
       released = true;
@@ -624,6 +909,10 @@ function createLease(ctx, { kind, units, heavy = 0, label = '', waitedMs = 0 }) 
       heartbeat.stopSync();
       tryUnlink(file);
       tryUnlink(hbFile);
+      tryUnlink(actFile);
+      tryUnlink(clearedFile);
+      // A group's job ending restarts the idle clock of its reservations (survives this process).
+      try { touchReservations(ctx, group, Object.keys(resources).concat(units > 0 ? [BOX] : [])); } catch { /* best effort */ }
       heartbeat.stop();
     },
     /**
@@ -756,7 +1045,8 @@ function createLease(ctx, { kind, units, heavy = 0, label = '', waitedMs = 0 }) 
       ctx.sleep(ctx.pollMs);
     }
   }
-  const unregister = register(ctx, () => lease.release());
+  // A pid-bound lease belongs to the bound pid: this process ending must not release it.
+  const unregister = bindPid > 0 ? () => {} : register(ctx, () => lease.release());
   return lease;
 }
 
@@ -780,6 +1070,7 @@ function acquireFull(ctx, opts) {
   const ticketFile = join(ctx.dir, `ticket-${id}.json`);
   const ticket = {
     id, pid: ctx.pid, createdAt: begin, heartbeatAt: begin, repo: ctx.repo, worktree: ctx.worktree, kind: 'full', desired,
+    ...(ctx.project ? { project: ctx.project } : {}), ...(ctx.session ? { session: ctx.session } : {}),
   };
   writeFileSync(ticketFile, JSON.stringify(ticket), { flag: 'wx' });
   const unregister = register(ctx, () => tryUnlink(ticketFile));
@@ -792,10 +1083,13 @@ function acquireFull(ctx, opts) {
       for (const r of state.reclaimed) {
         ctx.log(`ci-budget: reclaimed a stale ${r.type} (${r.why}); it belonged to pid ${r.pid} in ${r.worktree}`);
       }
-      let pos = state.tickets.findIndex((t) => t.id === id);
+      // The box queue: full runs and resource-queue runs that need box units. A
+      // ticket for a named resource only does not order (or block) a full run.
+      const boxQueue = state.tickets.filter(usesBox);
+      let pos = boxQueue.findIndex((t) => t.id === id);
       if (pos < 0) { // our ticket was reclaimed during a freeze: put it back, keeping its place
         try { writeFileSync(ticketFile, JSON.stringify({ ...ticket, heartbeatAt: ctx.now() }), { flag: 'wx' }); } catch { /* raced */ }
-        pos = state.tickets.filter((t) => num(t.createdAt) <= ticket.createdAt).length;
+        pos = boxQueue.filter((t) => num(t.createdAt) <= ticket.createdAt).length;
       } else if (ctx.now() - ticket.heartbeatAt > ctx.staleMs / 4) {
         ticket.heartbeatAt = ctx.now();
         writeAtomic(ctx, ticketFile, ticket);
@@ -810,7 +1104,8 @@ function acquireFull(ctx, opts) {
           external = load.external;
           const got = withAdmit(ctx, () => {
             const s = readState(ctx, { reclaim: true });
-            if (!s.tickets.length || s.tickets[0].id !== id) return null;
+            const sq = s.tickets.filter(usesBox);
+            if (!sq.length || sq[0].id !== id) return null;
             const tt = totals(ctx, s);
             if (tt.fullCount >= ctx.maxFull) return null;
             let free = ctx.budget - tt.held - external;
@@ -835,8 +1130,8 @@ function acquireFull(ctx, opts) {
           why = describe(ctx, state, external);
         }
       } else {
-        const head = state.tickets[0] ?? {};
-        why = `queue position ${pos + 1} of ${state.tickets.length}; head is pid ${head.pid} in ${head.worktree}`;
+        const head = boxQueue[0] ?? {};
+        why = `queue position ${pos + 1} of ${boxQueue.length}; head is pid ${head.pid} in ${head.worktree}`;
       }
       if (ctx.now() - begin >= ctx.queueMaxWaitMs) { // no unbounded wait: go on with one worker, over budget
         const lease = withAdmit(ctx, () => {
@@ -900,7 +1195,7 @@ function acquireExpress(ctx, opts) {
  * opts: kind 'full' (default) | 'targeted'; desired (full: plain workers wanted,
  * default the whole budget); label; repo (a label shown in status; default
  * $CI_BUDGET_REPO, else the basename of the git top-level directory above the
- * worktree, see repoLabel()); worktree; env; plus overrides and test seams:
+ * worktree, see repoLabel()); worktree; env; plus option keys and test seams:
  * dir, budget, heavyCost, heavyMax, express, maxFull, pollMs, staleMs, heartbeatMs, heavyMaxWaitMs, queueMaxWaitMs, expressMaxWaitMs,
  * reserve, loadPct, sliceFactor, cores,
  * announceMs, now(), sleep(ms), isAlive(pid), sampler() -> busy cores, log(line),
@@ -1012,12 +1307,504 @@ export function formatStatus(st) {
   return lines.join('\n');
 }
 
+// ---------------------------------------------------------------- resource queue (kind 'run')
+
+const MB = 1024 * 1024;
+export const STATUS_SCHEMA_VERSION = 1;
+export const REENTRY_ENV = 'AC_RESOURCE_LEASE';
+
+// Resources, wanted amounts, clamped to what can ever be free: a request for more
+// than the whole box (or a resource's capacity) would wait for ever.
+function normalizeRequest(ctx, opts) {
+  const warnings = [];
+  let box = Math.max(0, Math.trunc(num(opts.box)));
+  if (box > ctx.budget) { warnings.push(`resource-queue: box:${box} is more than the whole budget (${ctx.budget}); asking for ${ctx.budget}.`); box = ctx.budget; }
+  const named = {};
+  for (const [name, n] of Object.entries(opts.resources ?? {})) {
+    if (name === BOX || !NAME_RE.test(name)) continue;
+    const cap = capacityOf(ctx.rules, ctx.env, name);
+    let u = Math.max(1, Math.trunc(num(n)) || 1);
+    if (u > cap) { warnings.push(`resource-queue: ${name}:${u} is more than its capacity (${cap}); asking for ${cap}.`); u = cap; }
+    named[name] = u;
+  }
+  const group = typeof opts.group === 'string' && NAME_RE.test(opts.group) ? opts.group : '';
+  const bindPid = Math.max(0, Math.trunc(num(opts.bindPid)));
+  return { box, named, ramMb: Math.max(0, Math.trunc(num(opts.ramMb))), group, bindPid, warnings };
+}
+
+function legacyBlock(ctx, name) {
+  for (const l of ctx.rules?.legacyLocks ?? []) {
+    if (l?.resource !== name || !l.dir) continue;
+    try {
+      // No yield file is read: a file that stops every waiter is the incident that "reserve --for" replaces.
+      if (statSync(l.dir).isDirectory()) return `the old lock ${l.dir} is held`;
+    } catch { /* absent */ }
+  }
+  return '';
+}
+
+const holdersOf = (state, name) => state.leases.filter((l) => (name === BOX ? l.units > 0 : l.resources?.[name] > 0));
+const who = (l, now) => `pid ${l.pid}${l.label ? ` "${l.label}"` : ''} for ${Math.round((now - num(l.startedAt)) / 1000)} s`;
+
+/**
+ * Does request `req` fit right now, behind the tickets ahead of `id`? Pure on
+ * (ctx, state). `external` is the sampled outside load (null: not sampled, the
+ * box check is skipped and `needsSample` says so). Returns {ok, reasons[{resource, text}], needsSample}.
+ */
+function evaluateFit(ctx, state, req, id, external) {
+  const reasons = [];
+  const now = ctx.now();
+  const t = totals(ctx, state);
+  const held = namedHeld(state);
+  const me = state.tickets.findIndex((q) => q.id === id);
+  const ahead = me < 0 ? state.tickets : state.tickets.slice(0, me);
+  let policy = false; // held or passed over for a reservation: a time that does not count toward the bounded wait
+  const mine = me < 0 ? null : state.tickets[me];
+  if (mine?.paused) {
+    reasons.push({ resource: 'hold', kind: 'paused', text: `paused by "hold" (${mine.pausedBy ? `session ${mine.pausedBy.slice(0, 8)}; ` : ''}resume with "resume")` });
+    policy = true;
+  }
+  // Someone else's reservation: passed over for that resource, place kept (the ticket stays where it is).
+  const names = [...(req.box > 0 ? [BOX] : []), ...Object.keys(req.named)];
+  const resv = reservedAgainst(state.reservations ?? [], names, req.group);
+  if (resv) {
+    reasons.push({
+      resource: resv.resource, kind: 'reserved',
+      text: `${resv.resource} is reserved for group "${resv.forGroup}" until ${new Date(resv.endsAt).toISOString().slice(11, 16)}Z`
+        + `${resv.reason ? ` (${resv.reason})` : ''}; this request ${req.group ? `is in group "${req.group}"` : 'names no group'} and keeps its place`,
+    });
+    policy = true;
+  }
+  for (const e of ahead) {
+    // A ticket ahead that is itself held or passed over cannot take anything now, so it blocks no one.
+    if (passedOver(state, e)) continue;
+    const shared = [];
+    if (req.box > 0 && usesBox(e)) shared.push(BOX);
+    for (const n of Object.keys(req.named)) if (e.resources?.[n]) shared.push(n);
+    if (shared.length) { reasons.push({ resource: shared[0], text: `queued behind pid ${e.pid} (${shared.join(', ')})` }); break; }
+  }
+  for (const [name, u] of Object.entries(req.named)) {
+    const cap = capacityOf(ctx.rules, ctx.env, name);
+    if (u > cap - (held[name] ?? 0)) {
+      const h = holdersOf(state, name)[0];
+      reasons.push({ resource: name, text: `${name} ${held[name] ?? 0}/${cap} held${h ? ` by ${who(h, now)}` : ''}` });
+    }
+    const lb = legacyBlock(ctx, name);
+    if (lb) reasons.push({ resource: name, text: lb });
+  }
+  let needsSample = false;
+  if (req.box > 0 && t.held > 0) { // alone on the box: always progress
+    if (external === null) needsSample = true;
+    else if (req.box > ctx.budget - t.held - external) {
+      reasons.push({ resource: BOX, text: `box:${req.box} needed, ${Math.max(0, ctx.budget - t.held - external)} free of ${ctx.budget} (${t.held} held, outside load ~${external})` });
+    }
+  }
+  if (req.ramMb > 0 && (state.leases.length > 0 || state.legacy.length > 0)) {
+    const total = ctx.totalmem() / MB;
+    const reserve = ramReserveMb(ctx.rules, total);
+    const ramp = ctx.rules?.ram?.rampMs ?? 60_000;
+    const committed = state.leases.filter((l) => now - num(l.startedAt) < ramp).reduce((a, l) => a + l.ramMb, 0);
+    const free = Math.round(ctx.freemem() / MB) - reserve - committed;
+    if (free < req.ramMb) reasons.push({ resource: 'ram', text: `RAM ${req.ramMb} MB needed, ${Math.max(0, free)} MB free after a ${reserve} MB reserve and ${committed} MB still ramping up` });
+  }
+  return { ok: reasons.length === 0, reasons, needsSample, policy };
+}
+
+function wantsText(req) {
+  return [...(req.box ? [`box:${req.box}`] : []), ...Object.entries(req.named).map(([n, u]) => `${n}:${u}`), ...(req.ramMb ? [`ram:${req.ramMb}M`] : [])].join(' ');
+}
+
+function noopRunLease(req) {
+  return {
+    id: 'off', kind: 'run', off: true, units: req.box, resources: { ...req.named }, waitedMs: 0, cleared: false,
+    release() {}, recordActivity() {}, beat() {},
+  };
+}
+
+/**
+ * Wait, in FIFO order, until every resource in the request is free at once, then
+ * take them all in one lease (kind 'run'). Never holds part of a request while
+ * waiting. Bounded: after maxWaitMs (default CI_LOCAL_QUEUE_MAX_WAIT_MS, 30 min)
+ * it takes the lease over budget and says so. Fails open: a broken ledger returns
+ * a no-op lease. Async only so a signal can be handled while queued.
+ *
+ * opts: box (units), resources {name: units}, ramMb, label, limits {maxHoldMs,
+ * idleMs, minHoldMs}, monitored, maxWaitMs, plus the makeCtx option keys and seams
+ * (dir, budget, now, sleep, delay, isAlive, sampler, freemem, totalmem, rules, ...).
+ */
+export async function acquireResources(opts = {}) {
+  const ctx = makeCtx(opts);
+  const req = normalizeRequest(ctx, opts);
+  for (const w of req.warnings) ctx.log(w);
+  if (ctx.off) return noopRunLease(req);
+  try {
+    mkdirSync(ctx.dir, { recursive: true });
+  } catch (err) {
+    ctx.log(`resource-queue: the ledger directory ${ctx.dir} is unusable (${err.code || err.message}); running without the queue.`);
+    return noopRunLease(req);
+  }
+  const label = String(opts.label ?? '');
+  const begin = ctx.now();
+  const maxWait = opts.maxWaitMs ?? ctx.queueMaxWaitMs;
+  const id = newId();
+  const ticketFile = join(ctx.dir, `ticket-${id}.json`);
+  const dropTicket = () => { tryUnlink(ticketFile); tryUnlink(join(ctx.dir, `ticket-${id}.paused`)); };
+  const ticket = {
+    id, pid: ctx.pid, createdAt: begin, heartbeatAt: begin, repo: ctx.repo, worktree: ctx.worktree, kind: 'run',
+    desired: Math.max(1, req.box), boxUnits: req.box, resources: { ...req.named }, ramMb: req.ramMb, label,
+    ...(ctx.project ? { project: ctx.project } : {}), ...(ctx.session ? { session: ctx.session } : {}),
+    ...(req.group ? { group: req.group } : {}),
+  };
+  const grant = (units) => {
+    const alive = req.bindPid > 0 && ctx.isAlive(req.bindPid);
+    if (req.bindPid > 0 && !alive) ctx.log(`resource-queue: the bound pid ${req.bindPid} is not running any more; the lease belongs to this process instead.`);
+    return createLease(ctx, {
+      kind: 'run', units, label, waitedMs: ctx.now() - begin, resources: req.named, ramMb: req.ramMb,
+      limits: opts.limits ?? null, monitored: Boolean(opts.monitored), group: req.group, bindPid: alive ? req.bindPid : 0,
+    });
+  };
+  try {
+    writeFileSync(ticketFile, JSON.stringify(ticket), { flag: 'wx' });
+  } catch (err) {
+    ctx.log(`resource-queue: the ledger failed (${err.code || err.message}); running without the queue.`);
+    return noopRunLease(req);
+  }
+  const unregister = register(ctx, dropTicket);
+  let lastAnnounce = -Infinity; let lastPos = -1; let announced = false;
+  let excluded = 0; let lastTick = begin; let lastPolicy = false; // time held or passed over does not count toward the bounded wait
+  try {
+    for (;;) {
+      // The sweep: every join and every poll evaluates the rules over every holder and ticket.
+      const state = readState(ctx, { reclaim: true });
+      for (const r of state.reclaimed) {
+        if (!String(r.why).startsWith('rule ')) ctx.log(`resource-queue: cleared a stale ${r.type} (${r.why}); it belonged to pid ${r.pid} in ${r.worktree}`);
+      }
+      let pos = state.tickets.findIndex((q) => q.id === id);
+      if (pos < 0) { // reclaimed during a freeze: put it back, keeping its place
+        try { writeFileSync(ticketFile, JSON.stringify({ ...ticket, heartbeatAt: ctx.now() }), { flag: 'wx' }); } catch { /* raced */ }
+        pos = state.tickets.filter((q) => num(q.createdAt) <= ticket.createdAt).length;
+      } else if (ctx.now() - ticket.heartbeatAt > ctx.staleMs / 4) {
+        ticket.heartbeatAt = ctx.now();
+        writeAtomic(ctx, ticketFile, ticket);
+      }
+      const fit = evaluateFit(ctx, state, req, id, null);
+      let reasons = fit.reasons; let policy = fit.policy;
+      if (!reasons.length) {
+        const external = req.box > 0 ? measureLoad(ctx).external : 0;
+        const got = withAdmit(ctx, () => {
+          const s = readState(ctx, { reclaim: true });
+          const f = evaluateFit(ctx, s, req, id, external);
+          if (!f.ok) return { reasons: f.reasons, policy: f.policy };
+          const lease = grant(req.box);
+          dropTicket();
+          return { lease };
+        });
+        if (got.lease) {
+          unregister();
+          if (announced) ctx.log(`resource-queue: granted ${wantsText(req)} after ${Math.round((ctx.now() - begin) / 1000)} s.`);
+          return got.lease;
+        }
+        reasons = got.reasons; policy = got.policy;
+      }
+      const tickAt = ctx.now();
+      if (lastPolicy) excluded += tickAt - lastTick;
+      lastTick = tickAt; lastPolicy = policy;
+      const waited = tickAt - begin - excluded;
+      // Held or passed over by a reservation: the wait is the policy's, not the queue's, so it neither
+      // goes over budget nor times out here; a hold and a reservation both end by their own clock (4 h at most).
+      if (!policy && waited >= maxWait) { // no unbounded wait: go on over budget
+        const lease = withAdmit(ctx, () => { const l = grant(req.box); dropTicket(); return l; });
+        unregister();
+        ctx.log(`resource-queue: waited ${Math.round(waited / 1000)} s (${reasons.map((r) => r.text).join('; ')}); `
+          + `running over budget (CI_LOCAL_QUEUE_MAX_WAIT_MS=${ctx.queueMaxWaitMs}).`);
+        return lease;
+      }
+      if (!policy && waited >= ctx.timeoutMs) throw timeoutError();
+      if (pos !== lastPos || ctx.now() - lastAnnounce >= ctx.announceMs) {
+        lastPos = pos; lastAnnounce = ctx.now(); announced = true;
+        ctx.log(`resource-queue: waiting, position ${pos + 1} of ${state.tickets.length || 1} (needs ${wantsText(req)}): ${reasons.map((r) => r.text).join('; ')}`);
+      }
+      await ctx.delay(ctx.pollMs);
+    }
+  } catch (err) {
+    if (err.code === 'EBUDGETTIMEOUT') throw err;
+    ctx.log(`resource-queue: the ledger failed (${err.code || err.message}); running without the queue.`);
+    return noopRunLease(req);
+  } finally {
+    dropTicket();
+    unregister();
+  }
+}
+
+/** A live lease by id (the re-entrancy token): its resources, or null. Reads only. */
+export function inspectLease(id, opts = {}) {
+  try {
+    if (!/^[0-9a-f]{12}$/.test(String(id))) return null;
+    const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+    const l = readState(ctx, { reclaim: false }).leases.find((x) => x.id === id);
+    return l ? { id: l.id, pid: l.pid, box: l.units, resources: l.resources, ramMb: l.ramMb } : null;
+  } catch { return null; }
+}
+
+// ---------------------------------------------------------------- resource status (schema v1)
+
+function holderOut(ctx, l, units, stale, now) {
+  const hb = Math.max(num(l.heartbeatAt), num(l.hbSide), num(l.startedAt));
+  return {
+    id: l.id, kind: l.kind, pid: l.pid, alive: ctx.isAlive(l.pid), label: l.label || '',
+    project: l.project || l.repo || '', repo: l.repo || '', worktree: l.worktree || '', session: l.session || '',
+    units, ramMb: l.ramMb || 0, startedAt: num(l.startedAt) || null, heartbeatAt: hb || null,
+    ageMs: Math.max(0, now - num(l.startedAt)), heartbeatAgeMs: Math.max(0, now - hb),
+    lastActivityAt: l.act ? l.act.activeAt : null, idleMs: l.act ? Math.max(0, now - l.act.activeAt) : null,
+    stale: stale || null, group: l.group || '', bound: l.boundPid > 0, boundPid: l.boundPid > 0 ? l.boundPid : null,
+  };
+}
+
+/**
+ * The status object (schema in docs/resource-queue.md). Reads the ledger and the
+ * clear log only: no cpu sample (unless opts.sample), no spawned process (unless
+ * opts.strays). Cheap enough for a hook. Never throws: on failure it returns
+ * { schemaVersion, ok: false, error, resources: [], queue: [], ... }.
+ */
+export function resourceStatus(opts = {}) {
+  const generatedAt = Date.now();
+  const base = { schema: 'resource-queue-status', schemaVersion: STATUS_SCHEMA_VERSION, ok: true, generatedAt };
+  try {
+    const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+    const state = readState(ctx, { reclaim: false });
+    const now = ctx.now();
+    const t = totals(ctx, state);
+    const held = namedHeld(state);
+    const totalMb = Math.round(ctx.totalmem() / MB);
+    let busyCores = null; let external = null; let loaded = null;
+    if (opts.sample === true) {
+      try {
+        busyCores = Number(ctx.sampler());
+        external = Math.max(0, Math.round(busyCores - t.held));
+        loaded = busyCores > overloadThreshold(ctx);
+      } catch { /* best effort */ }
+    }
+    const staleLeases = state.stale.filter((s) => s.type === 'lease');
+    const names = new Set([...Object.keys(ctx.rules?.resources ?? {}).filter((n) => n !== BOX && ctx.rules.resources[n]?.capacity), ...Object.keys(held)]);
+    for (const q of state.tickets) for (const n of Object.keys(q.resources ?? {})) names.add(n);
+    for (const l of staleLeases) for (const n of Object.keys(l.resources ?? {})) names.add(n);
+    const boxHolders = [
+      ...state.leases.filter((l) => l.units > 0).map((l) => holderOut(ctx, l, l.units + l.heavy * l.heavyCost, null, now)),
+      ...state.legacy.map((l) => ({
+        id: `legacy-${l.pid}`, kind: 'legacy', pid: l.pid, alive: true, label: 'old run lock', project: '', repo: '', worktree: l.worktree,
+        session: '', units: ctx.legacyUnits, ramMb: 0, startedAt: l.startedAt || null, heartbeatAt: null,
+        ageMs: Math.max(0, now - num(l.startedAt)), heartbeatAgeMs: null, lastActivityAt: null, idleMs: null, stale: null,
+      })),
+      ...staleLeases.filter((l) => l.units > 0).map((l) => holderOut(ctx, l, l.units, l.stale, now)),
+    ];
+    const resources = [{
+      name: BOX, capacity: ctx.budget, held: t.held, free: Math.max(0, ctx.budget - t.held), holders: boxHolders,
+    }];
+    for (const name of [...names].sort()) {
+      const cap = capacityOf(ctx.rules, ctx.env, name);
+      resources.push({
+        name, capacity: cap, held: held[name] ?? 0, free: Math.max(0, cap - (held[name] ?? 0)),
+        holders: [
+          ...state.leases.filter((l) => l.resources?.[name] > 0).map((l) => holderOut(ctx, l, l.resources[name], null, now)),
+          ...staleLeases.filter((l) => l.resources?.[name] > 0).map((l) => holderOut(ctx, l, l.resources[name], l.stale, now)),
+        ],
+      });
+    }
+    const queue = state.tickets.map((q, i) => {
+      const req = { box: q.kind === 'run' ? q.boxUnits : 1, named: q.resources ?? {}, ramMb: q.ramMb || 0, group: q.group || '' };
+      const fit = evaluateFit(ctx, state, req, q.id, null);
+      const hb = Math.max(num(q.heartbeatAt), num(q.createdAt));
+      return {
+        position: i + 1, id: q.id, kind: q.kind, pid: q.pid, alive: ctx.isAlive(q.pid), label: q.label || '',
+        project: q.project || q.repo || '', repo: q.repo || '', worktree: q.worktree || '', session: q.session || '',
+        wants: { ...(req.box ? { [BOX]: q.kind === 'run' ? q.boxUnits : q.desired } : {}), ...req.named },
+        ramMb: req.ramMb, createdAt: num(q.createdAt) || null, heartbeatAt: hb || null,
+        waitedMs: Math.max(0, now - num(q.createdAt)), blockedBy: [...new Set(fit.reasons.map((r) => r.resource))],
+        group: q.group || '', paused: Boolean(q.paused), pausedBy: q.pausedBy || '', pausedUntil: q.pausedUntil ?? null,
+        passedOver: fit.policy,
+      };
+    });
+    const reservations = state.reservations.map((r) => ({
+      id: r.id, resource: r.resource, forGroup: r.forGroup, owner: { pid: r.owner.pid, session: r.owner.session },
+      ownerAlive: r.owner.pid > 0 ? ctx.isAlive(r.owner.pid) : null, createdAt: r.createdAt, expiresAt: r.endsAt,
+      remainingMs: Math.max(0, r.endsAt - now), reason: r.reason,
+    }));
+    const legacyLocks = (ctx.rules?.legacyLocks ?? []).filter((l) => l?.resource && l.dir).map((l) => {
+      let present = false;
+      try { present = statSync(l.dir).isDirectory(); } catch { /* absent */ }
+      return { resource: l.resource, dir: l.dir, present };
+    });
+    let strays = null;
+    if (opts.strays === true) {
+      const heldNames = new Set([...Object.keys(held), ...(t.held > 0 ? [BOX] : [])]);
+      strays = scanStrays(ctx.rules, heldNames);
+    }
+    return {
+      ...base, dir: ctx.dir,
+      machine: {
+        cores: ctx.cores, totalRamMb: totalMb, freeRamMb: Math.round(ctx.freemem() / MB), ramReserveMb: ramReserveMb(ctx.rules, totalMb),
+        busyCores: busyCores === null ? null : Math.round(busyCores * 10) / 10, externalCores: external, loaded,
+      },
+      resources, queue, reservations, recentClears: recentClears(ctx.dir, { now }), legacyLocks, strays,
+    };
+  } catch (err) {
+    return {
+      ...base, ok: false, error: String(err && err.message || err), dir: null, machine: null,
+      resources: [], queue: [], reservations: [], recentClears: [], legacyLocks: [], strays: null,
+    };
+  }
+}
+
+/** The text form of resourceStatus() (what `status` prints without --json). */
+export function formatResourceStatus(st) {
+  if (!st.ok) return `resource queue: status unavailable (${st.error})`;
+  const lines = [];
+  const m = st.machine;
+  lines.push(`Resource queue (ledger ${st.dir})`);
+  lines.push(`  machine: ${m.cores} cores, RAM ${m.freeRamMb} MB free of ${m.totalRamMb} (reserve ${m.ramReserveMb} MB)`
+    + (m.busyCores === null ? '' : `, cpu busy ${m.busyCores} cores, outside load ~${m.externalCores}${m.loaded ? ', LOADED' : ''}`));
+  for (const r of st.resources) {
+    lines.push('');
+    lines.push(`${r.name}: ${r.held}/${r.capacity} held, ${r.free} free`);
+    if (!r.holders.length) lines.push('  free');
+    for (const h of r.holders) {
+      const flags = [h.bound ? 'BOUND to this pid' : '', h.group ? `group ${h.group}` : '', h.stale ? `STALE (${h.stale})` : '', h.kind !== 'legacy' && !h.alive ? 'PID DEAD' : ''].filter(Boolean).join(' ');
+      lines.push(`  ${h.kind.padEnd(8)} pid ${String(h.pid).padEnd(7)} ${h.units}u  age ${dur(h.ageMs)}  heartbeat ${h.heartbeatAgeMs === null ? 'n/a' : `${dur(h.heartbeatAgeMs)} ago`}`
+        + `${h.idleMs !== null ? `  idle ${dur(h.idleMs)}` : ''}  ${h.project || ''} ${h.worktree}${h.label ? `  [${h.label}]` : ''}${h.session ? `  session ${h.session.slice(0, 8)}` : ''}${flags ? `  ${flags}` : ''}`);
+    }
+  }
+  if (st.reservations?.length) {
+    lines.push('');
+    lines.push(`Reservations (${st.reservations.length}):`);
+    for (const r of st.reservations) {
+      lines.push(`  ${r.resource} for group "${r.forGroup}", ${dur(r.remainingMs)} left${r.reason ? `  (${r.reason})` : ''}`
+        + `  owner pid ${r.owner.pid || 'n/a'}${r.owner.session ? ` session ${r.owner.session.slice(0, 8)}` : ''}`);
+    }
+  }
+  lines.push('');
+  lines.push(`Queue (${st.queue.length}):`);
+  if (!st.queue.length) lines.push('  empty');
+  for (const q of st.queue) {
+    lines.push(`  #${q.position} pid ${String(q.pid).padEnd(7)} wants ${Object.entries(q.wants).map(([n, u]) => `${n}:${u}`).join(' ')}  waiting ${dur(q.waitedMs)}`
+      + `  ${q.project || ''} ${q.worktree}${q.label ? `  [${q.label}]` : ''}${q.group ? `  group ${q.group}` : ''}${q.paused ? '  PAUSED' : ''}`
+      + `${q.blockedBy.length ? `  blocked on ${q.blockedBy.join(', ')}` : ''}${q.alive ? '' : '  PID DEAD'}`);
+  }
+  if (st.recentClears.length) {
+    lines.push('');
+    lines.push(`Recent clears (${st.recentClears.length}):`);
+    for (const c of st.recentClears.slice(0, 10)) lines.push(`  ${new Date(c.at).toISOString()} ${c.rule} ${c.type} pid ${c.pid} ${c.label ? `[${c.label}] ` : ''}${c.worktree || ''}`);
+  }
+  if (st.strays && st.strays.length) {
+    lines.push('');
+    lines.push(`Leftover processes holding no lease (reported, never touched; ${st.strays.length}):`);
+    for (const s of st.strays) lines.push(`  pid ${s.pid} ${s.name}${s.orphan ? ' (orphan)' : ''} - ${s.why}`);
+  }
+  for (const l of st.legacyLocks) if (l.present) lines.push(`\nOld lock held: ${l.resource} at ${l.dir}`);
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------- reservations and hold
+
+/**
+ * Step aside for a named group on one resource. opts: resource, forGroup, until (epoch ms,
+ * required), reason, ownerPid (default CLAUDE_PID, else 0 = no owner check), ownerSession
+ * (default CLAUDE_CODE_SESSION_ID), plus the makeCtx option keys. The end is clamped to 4 h from now.
+ * Returns {ok, reservation, clamped} or {ok: false, error}. Replaces an earlier reservation of the
+ * same group on the same resource. Never blocks anyone but the waiters outside `forGroup`, for this
+ * resource only, until the end, the owner's pid is gone, or anyone runs unreserve.
+ */
+export function reserveResource(opts = {}) {
+  const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+  const resource = String(opts.resource ?? '');
+  const forGroup = String(opts.forGroup ?? '');
+  if (!(resource === BOX || NAME_RE.test(resource))) return { ok: false, error: `bad resource "${resource}"` };
+  if (!NAME_RE.test(forGroup)) return { ok: false, error: `bad group "${forGroup}" (names are letters, digits, . _ -)` };
+  const until = Number(opts.until);
+  if (!Number.isFinite(until)) return { ok: false, error: 'an expiry is required (--until)' };
+  const now = ctx.now();
+  if (until <= now) return { ok: false, error: 'the expiry is already in the past' };
+  const endsAt = Math.min(until, now + MAX_RESERVATION_MS);
+  const ownerPid = Math.max(0, Math.trunc(num(opts.ownerPid ?? ctx.env.CLAUDE_PID)));
+  const rec = {
+    id: newId(), resource, forGroup, owner: { pid: ownerPid, session: String(opts.ownerSession ?? ctx.session ?? '') },
+    createdAt: now, expiresAt: endsAt, reason: String(opts.reason ?? '').slice(0, 200),
+  };
+  try {
+    mkdirSync(ctx.dir, { recursive: true });
+    for (const old of readState(ctx, { reclaim: false }).reservations) {
+      if (old.resource === resource && old.forGroup === forGroup) dropFile(old.file, activeFile(ctx.dir, old.id));
+    }
+    writeAtomic(ctx, join(ctx.dir, `reservation-${rec.id}.json`), rec);
+  } catch (err) {
+    return { ok: false, error: `the ledger is not writable (${err.code || err.message})` };
+  }
+  return { ok: true, reservation: { ...rec, endsAt }, clamped: until > endsAt };
+}
+
+/** Remove reservations on `resource` (all of them, or only `forGroup`'s). Anyone may; each is logged. */
+export function unreserveResource(opts = {}) {
+  const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+  const removed = [];
+  try {
+    for (const r of readState(ctx, { reclaim: false }).reservations) {
+      if (r.resource !== opts.resource || (opts.forGroup && r.forGroup !== opts.forGroup)) continue;
+      dropFile(r.file, activeFile(ctx.dir, r.id));
+      noteReservationClear(ctx, r, 'unreserved', { session: ctx.session, pid: num(ctx.env.CLAUDE_PID) });
+      removed.push({ id: r.id, resource: r.resource, forGroup: r.forGroup });
+    }
+  } catch { /* nothing to remove */ }
+  return { ok: true, removed };
+}
+
+/**
+ * Pause the caller's own queued entries (matched by session): each keeps its place but is
+ * passed over until resume or the end of the hold (default and cap 4 h). Nobody else's entries change.
+ */
+export function holdMine(opts = {}) {
+  const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+  if (!ctx.session) return { ok: false, error: 'no session id (CLAUDE_CODE_SESSION_ID is not set), so there is nothing to match "mine" against' };
+  const now = ctx.now();
+  const until = Math.min(Number.isFinite(Number(opts.until)) && Number(opts.until) > now ? Number(opts.until) : now + MAX_PAUSE_MS, now + MAX_PAUSE_MS);
+  const ids = [];
+  try {
+    for (const t of readState(ctx, { reclaim: false }).tickets) {
+      if (t.session !== ctx.session) continue;
+      writeAtomic(ctx, t.pausedFile, { by: ctx.session, at: now, until });
+      ids.push(t.id);
+    }
+  } catch (err) {
+    return { ok: false, error: `the ledger is not writable (${err.code || err.message})` };
+  }
+  return { ok: true, ids, until };
+}
+
+/** Undo holdMine for the caller's session. */
+export function resumeMine(opts = {}) {
+  const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+  if (!ctx.session) return { ok: false, error: 'no session id (CLAUDE_CODE_SESSION_ID is not set)' };
+  const ids = [];
+  try {
+    for (const t of readState(ctx, { reclaim: false }).tickets) {
+      if (t.session !== ctx.session || !t.paused) continue;
+      tryUnlink(t.pausedFile);
+      ids.push(t.id);
+    }
+  } catch { /* nothing to resume */ }
+  return { ok: true, ids };
+}
+
+/** Apply the sweep rules to the ledger now (what every acquire does). Returns the cleared entries. */
+export function sweepLedger(opts = {}) {
+  const ctx = makeCtx({ ...opts, registerExit: false });
+  return readState(ctx, { reclaim: true }).reclaimed;
+}
+
 // ---------------------------------------------------------------- CLI
 
 function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd !== 'status' || rest.some((a) => !['--json', '--no-sample'].includes(a))) {
-    console.error('usage: node scripts/ci-budget.mjs status [--json] [--no-sample]');
+    console.error('usage: node plugins/agent-companion/scripts/ci-budget.mjs status [--json] [--no-sample]');
     return 2;
   }
   const st = status({ sample: !rest.includes('--no-sample') });

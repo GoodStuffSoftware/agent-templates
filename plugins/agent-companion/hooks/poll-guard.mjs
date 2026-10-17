@@ -7,6 +7,7 @@
 //
 // Kill switch: plugin option `poll_guard` (default true).
 //
+// Bash and PowerShell also get the process-kill deny (lib/process-kill-guard.mjs: kill_by_name_guard, plugin uninstall).
 // Bash on win32 also gets the python_stdin_guard DENY (hooks/lib/python-stdin.mjs): the only
 // blocking path for the main thread; worker_wait_guard (0.31.23) can refuse a worker repeat loop, see below.
 //
@@ -23,6 +24,8 @@ import {
   readStdin, opt, passthrough, deny, callerTranscriptPath, tailRecords, callerIsSubagent, appendLog, recordDenial,
 } from './lib/context.mjs';
 import { pythonStdinGuard } from './lib/python-stdin.mjs';
+import { processGuard } from './lib/process-kill-guard.mjs';
+import { envDumpGuard } from './lib/env-dump-guard.mjs';
 import { claimOnce, readStamp, writeStamp } from './lib/subagent-context.mjs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -58,12 +61,31 @@ try {
     // In warn mode the python note does not end the hook: the worker one-wait advisory (and its telemetry row) still run,
     // and the two additionalContext strings go out together.
     let pyNote = null;
+    // process_kill guards (0.31.25), Bash and PowerShell on every platform: kill-by-name (kill_by_name_guard deny|warn|off,
+    // default deny) and `claude plugin uninstall` (always denied). Fail-open like the rest of this block.
+    try {
+      const pk = processGuard(p, { mode: String(opt('kill_by_name_guard', 'deny')) });
+      if (pk) {
+        try { recordDenial(pk.kind, p, pk.detail, pk.mode === 'warn' ? 'warn' : 'deny'); } catch { /* telemetry never blocks */ }
+        if (pk.mode === 'deny') deny(pk.message);
+        pyNote = pk.message;
+      }
+    } catch { /* fail open */ }
+    // env_dump_guard (0.31.25): bulk environment-value dumps and prints of secret-named variables (deny|warn|off, default deny).
+    try {
+      const ed = envDumpGuard(p, { mode: String(opt('env_dump_guard', 'deny')) });
+      if (ed) {
+        try { recordDenial(ed.kind, p, ed.detail, ed.mode === 'warn' ? 'warn' : 'deny'); } catch { /* telemetry never blocks */ }
+        if (ed.mode === 'deny') deny(ed.message);
+        pyNote = [pyNote, ed.message].filter(Boolean).join('\n\n');
+      }
+    } catch { /* fail open */ }
     if (toolName === 'Bash') {
       try {
         const mode = String(opt('python_stdin_guard', 'deny')).toLowerCase();
         const py = pythonStdinGuard(p, { mode });
         if (py && py.mode === 'deny') deny(py.message);
-        if (py) pyNote = py.message;
+        if (py) pyNote = [pyNote, py.message].filter(Boolean).join('\n\n');
       } catch { /* fail open */ }
     }
     const finish = (advisory) => {

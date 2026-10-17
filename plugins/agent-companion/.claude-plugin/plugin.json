@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.24",
+  "version": "0.31.25",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -46,6 +46,18 @@
       "type": "string",
       "title": "Refuse Python reading its program from an empty stdin (Windows)",
       "description": "On Windows, Python 3.14 started with no program argument (python3 -, bare python3) while stdin is the NUL device (< /dev/null, an empty heredoc, or the Bash tool background stdin) takes NUL for a terminal, starts the REPL and spins at about 1 MB/s of stderr forever. \"deny\" (default): refuse such a Bash command; the message names the safe forms (-c, -m, a script file, a heredoc with a body, a pipe). \"warn\": allow it with a note. \"off\": silent. Append # guard-ack: python-stdin to a single command to override. Windows and the Bash tool only.",
+      "default": "deny"
+    },
+    "kill_by_name_guard": {
+      "type": "string",
+      "title": "Refuse killing processes by image name",
+      "description": "On a shared machine an image-name kill stops processes that other sessions own (a taskkill /F /IM node.exe once killed every node process, the pm2 daemon included). \"deny\" (default): refuse taskkill without /PID or with /IM, pkill, killall, Stop-Process -Name, Get-Process <name> piped to Stop-Process, wmic or CIM deletes filtered by name, and kill fed by a pgrep or Get-Process <name> lookup; the message says to find the PID, confirm it is yours by walking its parent chain, then kill it by PID. Kills by PID (taskkill /PID, kill <pid>, Stop-Process -Id) always pass. \"warn\": allow with a note. \"off\": silent. Judges real commands only (quoted text and arguments to echo or grep are ignored; bash -c and powershell -Command strings are followed). Bash and PowerShell tools.",
+      "default": "deny"
+    },
+    "env_dump_guard": {
+      "type": "string",
+      "title": "Refuse printing environment values in bulk or secret-named variables",
+      "description": "Transcripts are uploaded by session-sync, so a printed secret leaves the machine (2026-10-17: env | grep -i claude printed a messaging token). \"deny\" (default): refuse bare env / printenv / set / export -p / declare -x, env piped to grep, Get-ChildItem env: (gci, ls, dir), [Environment]::GetEnvironmentVariables(), and printing a variable whose name has a part TOKEN, KEY, SECRET, PASSWORD, PASSWD, AUTH, CREDENTIAL or COOKIE (printenv NAME, echo $NAME, $env:NAME). Names-only and count-only forms pass (env | cut -d= -f1, compgen -e, (Get-ChildItem env:).Name, a [ -n \"$NAME\" ] test). \"warn\": allow with a note. \"off\": silent. Bash and PowerShell tools; code inside a quoted node -e or python -c program is not judged.",
       "default": "deny"
     },
     "inherit_guard": {
@@ -514,6 +526,24 @@
       "title": "Bash output tail: permission modes",
       "description": "Comma-separated permission modes the rewrite applies in. Default bypassPermissions only, because permission rules (such as Bash(npm test:*)) are checked against the REWRITTEN command and would stop matching in a mode that asks. Set to \"any\" to apply in every mode.",
       "default": "bypassPermissions"
+    },
+    "resource_gate": {
+      "type": "string",
+      "title": "Resource queue gate",
+      "description": "What happens to a heavy Bash command (a full test suite, E2E, a pre-push gate with heavy checks, an Android emulator or gradle build, lint or typecheck of a whole project, npm ci) so agents on one machine do not overload it. `deny` (default): the call is refused and the text gives the exact command that runs it through the machine-wide resource queue (scripts/resource-queue.mjs). `rewrite`: the hook wraps the heavy part in the queue itself (rewrite only applies in the permission modes of resource_gate_permission_modes and when no deny/ask rule could match; otherwise it denies). `hint`: runs unchanged, adds a one-line suggestion. `off`: nothing happens. Targeted runs (one test file, a single-file eslint), commands already wrapped in the queue, agent-templates ci-local, quoted text and RESOURCE_QUEUE=0 are never touched. Also CLAUDE_PLUGIN_OPTION_RESOURCE_GATE; RESOURCE_QUEUE=0 in the environment turns the queue off for a process. Telemetry: telemetry/resource-gate.jsonl.",
+      "default": "deny"
+    },
+    "resource_gate_permission_modes": {
+      "type": "string",
+      "title": "Resource queue gate: permission modes for rewrite",
+      "description": "Comma-separated permission modes in which resource_gate=rewrite rewrites the command (default bypassPermissions only: permission rules are checked against the REWRITTEN command). In any other mode a rewrite becomes a deny with the same wrapped command in its text. \"any\" lifts the limit. Has no effect on deny, hint or off.",
+      "default": "bypassPermissions"
+    },
+    "shared_resources_line": {
+      "type": "boolean",
+      "title": "Shared resources line",
+      "description": "At session start, and when it changes before a prompt, add one line (about 300 characters) to the context while the machine-wide resource queue has something held, queued, reserved or cleared in the last 15 minutes: units held out of capacity, each holder (label or session, project, age, stale or dead) and the queue in order. Nothing is added while the queue is idle. Reads the ledger in-process; spawns nothing. Off = no line (session start still installs the stable launcher path).",
+      "default": true
     },
     "read_dedupe": {
       "type": "boolean",

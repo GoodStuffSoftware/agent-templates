@@ -12,10 +12,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   acquire, status, formatStatus, resolveBudgetConfig, budgetDir, sampleBusyCores, isPidAlive, legacyRunUnits,
-} from '../ci-budget.mjs';
+} from '../../plugins/agent-companion/scripts/ci-budget.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MODULE_PATH = join(HERE, '..', 'ci-budget.mjs');
+const MODULE_PATH = join(HERE, '..', '..', 'plugins', 'agent-companion', 'scripts', 'ci-budget.mjs');
 const MODULE_URL = pathToFileURL(MODULE_PATH).href;
 const DEAD_PID = 2147483646;
 const T0 = Date.now();
@@ -514,7 +514,7 @@ test('status command: node scripts/ci-budget.mjs status [--json] reads the ledge
     assert.equal(st.leases[0].worktree, 'wt-cli');
     const bad = await run(['nonsense'], env);
     assert.equal(bad.code, 2);
-    assert.match(bad.err, /usage: node scripts\/ci-budget.mjs status/);
+    assert.match(bad.err, /usage: node .*ci-budget.mjs status/);
   } finally { t.cleanup(); }
 });
 
@@ -610,15 +610,28 @@ test('release on SIGTERM: the handler frees the lease and exits 143', { skip: pr
   } finally { t.cleanup(); }
 });
 
+// The heartbeat thread rewrites the .hb file in place (truncate, then write), so a
+// reader can land in the gap and see an empty file: measured at about 0.5% of reads
+// with a 1 ms tick, on the 0.31.24 base as well. Number('') is 0, which turned a
+// healthy heartbeat into "moved -1792... ms" under load. Re-read until a stamp shows.
+function readHbStamp(file) {
+  for (let i = 0; i < 200; i += 1) {
+    const n = Number(readFileSync(file, 'utf8').trim() || NaN);
+    if (Number.isFinite(n)) return n;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  }
+  throw new Error(`heartbeat file ${file} stayed empty for 1 s`);
+}
+
 test('the heartbeat keeps ticking while the main thread is blocked (ci-local sits in spawnSync)', () => {
   const t = tmp();
   try {
     const w = world(t.dir, { heartbeat: 'worker', heartbeatMs: 50, now: Date.now });
     const a = w.acquire({ desired: 2, pid: process.pid });
     const hb = join(t.dir, `lease-${a.id}.hb`);
-    const first = Number(readFileSync(hb, 'utf8'));
+    const first = readHbStamp(hb);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); // block this thread
-    const later = Number(readFileSync(hb, 'utf8'));
+    const later = readHbStamp(hb);
     assert.ok(later - first >= 500, `heartbeat moved ${later - first} ms while blocked`);
     a.release();
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); // let the worker thread finish dying

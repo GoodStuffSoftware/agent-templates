@@ -1,5 +1,5 @@
 // Advisory notes for a lead session: live sessions (F9), peer-message warning
-// (F10), overdue worker (F14). Logic in lib/advisory-b.mjs. Never blocks, adds
+// (F10), overdue worker (F14), shared resources line (resource queue). Logic in lib/advisory-b.mjs. Never blocks, adds
 // no tokens unless a note fires, starts no child process, fails open.
 //   --event session-start   F9 (SessionStart)
 //   --event user-prompt     F9 when the set changed, F14 (UserPromptSubmit)
@@ -9,6 +9,7 @@
 //   --event task-stop       ledger stop row (PostToolUse TaskStop)
 
 import { readStdin, opt, passthrough, callerIsSubagent, sessionIsSubagent } from './lib/context.mjs';
+import { sharedResourcesNote, ensureLauncher } from './lib/resource-line.mjs';
 import {
   ledgerWrite, workerStatus, taskStopWrite, pruneState, overdueNotices, peerMessageNote, parseKnownPeers, liveSessionsNote, parseRelated, OVERDUE_DEFAULT_MINUTES,
 } from './lib/advisory-b.mjs';
@@ -52,6 +53,16 @@ try {
     if (EVENT !== 'tick' && wantF9 && !sessionIsSubagent(p)) {
       try {
         const n = liveSessionsNote(p, { related: parseRelated(opt('related_repos', '')), mode: EVENT === 'session-start' ? 'start' : 'change' });
+        if (n) parts.push(n);
+      } catch { /* advisory */ }
+    }
+    // The machine-wide resource queue, next to the other-sessions line: shown only
+    // while something is held, queued, reserved or was just cleared. SessionStart
+    // also makes sure the stable launcher path exists (idempotent).
+    if (EVENT !== 'tick' && opt('shared_resources_line', true) && !sessionIsSubagent(p)) {
+      try {
+        if (EVENT === 'session-start') await ensureLauncher();
+        const n = await sharedResourcesNote(p, { mode: EVENT === 'session-start' ? 'start' : 'change' });
         if (n) parts.push(n);
       } catch { /* advisory */ }
     }

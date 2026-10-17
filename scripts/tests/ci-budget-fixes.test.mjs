@@ -11,7 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { acquire, status, resolveBudgetConfig, repoLabel } from '../ci-budget.mjs';
+import { acquire, status, resolveBudgetConfig, repoLabel } from '../../plugins/agent-companion/scripts/ci-budget.mjs';
 
 const T0 = Date.now();
 const NO_LEGACY = mkdtempSync(join(tmpdir(), 'ci-budget-fix-no-legacy-'));

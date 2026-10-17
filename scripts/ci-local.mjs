@@ -71,8 +71,8 @@
 // A whole-run spawnSync timeout was rejected as the guard for that case: it
 // kills only `node --test` and orphans the per-file processes it spawned.
 //
-// Shared CI budget (scripts/ci-budget.mjs; protocol in CONTRIBUTING.md, "Shared
-// CI budget"): the TOTAL number of test workers across every ci-local run on the
+// Shared CI budget (plugins/agent-companion/scripts/ci-budget.mjs; protocol in
+// plugins/agent-companion/docs/resource-queue.md): the TOTAL number of test workers across every ci-local run on the
 // machine, plus load from outside our runs, stays under one budget (default half
 // the logical cores). A run takes a 'full' lease just before its first suite (the
 // pre-push scan runs without one): it asks for the concurrency above, gets what
@@ -119,7 +119,7 @@ import {
 import { join, dirname, resolve, relative, delimiter, win32, posix } from 'node:path';
 import { tmpdir, availableParallelism, homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { acquire, resolveBudgetConfig, lowerOwnPriority } from './ci-budget.mjs';
+import { acquire, resolveBudgetConfig, lowerOwnPriority } from '../plugins/agent-companion/scripts/ci-budget.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..');
@@ -283,7 +283,7 @@ function printHelp() {
                         total test workers for ALL ci-local runs on this machine
                         (default: half the logical cores). A busy machine means
                         fewer workers or a wait, never a failure; see
-                        "node scripts/ci-budget.mjs status". CI_LOCAL_LOCK=0
+                        "node plugins/agent-companion/scripts/ci-budget.mjs status". CI_LOCAL_LOCK=0
                         skips the budget. Git/sh-heavy test files run in a
                         pass of their own (CI_LOCAL_HEAVY_MAX, CI_LOCAL_HEAVY_COST).
   env ${TIMEOUT_ENV}=<ms>
@@ -777,7 +777,7 @@ export function runTestSuite({
 }
 
 // ---------------------------------------------------------------------------
-// Heavy lane and the shared budget (scripts/ci-budget.mjs)
+// Heavy lane and the shared budget (plugins/agent-companion/scripts/ci-budget.mjs)
 // ---------------------------------------------------------------------------
 
 // The ONE list of git/sh-spawn-heavy test files: each runs in the heavy pass of

@@ -22,6 +22,7 @@ ${AGENT_COMPANION_STATE_DIR}                      # override, mostly for tests
     spawns.jsonl                 # one record per subagent spawn (append-only)
     subagent-starts.jsonl        # one record per subagent actually starting
     denials.jsonl                 # one record per guard firing
+    resource-gate.jsonl           # one row per resource-gate decision (denied, hinted, rewritten)
     unknown-agent-types.jsonl    # harness drift signal
     struggle.jsonl               # one row per scored operator prompt (scores only; struggle detector)
     fixtures.jsonl                # every row from a test/verify session (see Fixtures below)
@@ -337,7 +338,7 @@ with no corresponding start was denied or failed.
 | `session_id` | string | session it fired in |
 | `agent_type` | string \| absent | the payload's `agent_type`; absent on a main-thread call, which carries none |
 | `tool_name` | string \| null | the tool the call was for (`Agent`, `Bash`, …) |
-| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, `inherit` (`inherit_guard: block`), `review-recursion` (a reviewer spawning a reviewer, `review_recursion_guard`), `type-required` (a ladder-rung spawn with no `TYPE:`, `WEIGHT:` or `KIND:` line, `type_line_required`), or `python-stdin` (a Bash call that would start Python reading its program from a NUL stdin, `python_stdin_guard`; `outcome: "warn"` in warn mode; `detail` is the command text, cut with the rest at 300 chars), or `worker-wait` (a subagent's repeat sleep, poll or watch loop within `worker_wait_repeat_window_minutes` of its previous match, `worker_wait_guard: deny-repeat`; `detail` names the match kind and the window, not the command) |
+| `guard` | string | `delegation`, `fit`, `warrant`, `premium-cap`, `foreground`, `inherit` (`inherit_guard: block`), `review-recursion` (a reviewer spawning a reviewer, `review_recursion_guard`), `type-required` (a ladder-rung spawn with no `TYPE:`, `WEIGHT:` or `KIND:` line, `type_line_required`), or `python-stdin` (a Bash call that would start Python reading its program from a NUL stdin, `python_stdin_guard`; `outcome: "warn"` in warn mode; `detail` is the command text, cut with the rest at 300 chars), or `worker-wait` (a subagent's repeat sleep, poll or watch loop within `worker_wait_repeat_window_minutes` of its previous match, `worker_wait_guard: deny-repeat`; `detail` names the match kind and the window, not the command), `kill-by-name` (a Bash or PowerShell call that kills processes by image name: `taskkill` without `/PID` or with `/IM`, `pkill`, `killall`, `Stop-Process -Name`, and the like, `kill_by_name_guard`; `outcome: "warn"` in warn mode; `detail` is the command text, cut at 300 chars), `plugin-uninstall` (`claude plugin uninstall`, `remove` or `rm` in any wrapper; no switch; `detail` is the command text), or `env-dump` (a bulk environment dump or the printing of a secret-named variable, `env_dump_guard`; `outcome: "warn"` in warn mode; `detail` is the kind and the program word only, such as `secret: echo`: not the command, no inline literal and never an environment value) |
 | `outcome` | string | `deny`, or `warn` for a `delegation_guard: warn` firing (the guard matched and did not stop the call). A consumer counting blocked calls filters on `deny`; any row proves the guard still fires |
 | `detail` | string | short reason, truncated to 300 chars. A `delegation` row ends with the scope and what the call's env said for `CLAUDE_CODE_SESSION_ATTENDED` (`scope attended, attended 1`) |
 
@@ -477,6 +478,24 @@ ran in a fixture session, whose results are kept out of this file).
 
 The effect for a review: `sum(bytes) - sum(shown_chars)` is what stayed out of
 context, per wrapped run. Characters, not tokens; convert with a measured ratio.
+
+### `resource-gate.jsonl` — the resource gate
+
+Written by `hooks/bash-tail.mjs` (the gate is its first step) when a heavy Bash command is refused, hinted or rewritten for the machine-wide resource queue (`resource_gate`, default `deny`). Nothing is written for a command that is not heavy. The command text is not stored. Spec: [resource-queue.md](resource-queue.md).
+
+| field | type | meaning |
+|---|---|---|
+| `at` | ISO 8601 string | when it was written |
+| `session_id` | string | the session |
+| `agent_type` | string | null | the caller's agent type |
+| `caller_is_subagent` | boolean | whether a subagent made the call |
+| `event` | string | `denied`, `hinted` or `rewritten` |
+| `mode` | string | the gate mode in force when it fired (`deny`, `rewrite` or `hint`) |
+| `classes` | string[] | the rules-file classes the command matched (`e2e`, `vitest-full`, `lint` ...) |
+| `command_chars` | number | length of the command |
+| `run_in_background` | boolean | `rewritten` rows only |
+
+The queue itself keeps its own log of cleared leases, `clears.jsonl`, in the ledger directory (machine-wide, outside this folder; see resource-queue.md, "The clears log").
 
 ### `git-brief.jsonl` — the git brief (trial)
 
