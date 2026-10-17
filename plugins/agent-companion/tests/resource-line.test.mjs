@@ -8,7 +8,7 @@ import './isolate.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resourceStatus, reserveResource } from '../scripts/ci-budget.mjs';
+import { resourceStatus, reserveResource, sweepLedger } from '../scripts/ci-budget.mjs';
 import {
   renderSharedResources, resourceSignature, sharedResourcesNote, LINE_MAX_CHARS, CLEARED_WINDOW_MS,
 } from '../hooks/lib/resource-line.mjs';
@@ -150,6 +150,40 @@ test('advisory-b hook: one real lease shows the line at session start, then noth
   } finally { w.done(); }
 });
 
+test('a holder that is over time and idle shows both flags, and the line names the release command within 300 characters', async () => {
+  const w = makeWorld({ budget: 8 });
+  try {
+    const a = await w.acq({
+      resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000, idleMs: 30_000, minHoldMs: 0 }, monitored: true, label: 'gate', project: 'proj-a',
+    });
+    w.t += 120_000;
+    a.recordActivity(w.t, w.t - 100_000);
+    assert.equal(sweepLedger({ ...w.opts }).length, 0);
+    const st = status(w);
+    const line = renderSharedResources(st, { now: w.t });
+    assert.match(line, /app-e2e 1\/1: gate@proj-a [^;]*IDLE\? OVER/);
+    assert.ok(line.includes(`resource-queue.mjs release ${a.id}`), 'the manual release command with the lease id');
+    assert.match(line, /release a flagged one by hand: node ~\/\.claude\/agent-companion\/bin\/resource-queue\.mjs release [0-9a-f]{12}\.$/);
+    assert.ok(line.length <= LINE_MAX_CHARS, `${line.length} chars`);
+    // A status that carries only overTime.activity "idle" (no idleFlag) reads the same.
+    const only = JSON.parse(JSON.stringify(st));
+    for (const r of only.resources) for (const h of r.holders) h.idleFlag = null;
+    assert.match(renderSharedResources(only, { now: w.t }), /IDLE\? OVER/);
+    // Over time and still working: OVER only.
+    const busy = JSON.parse(JSON.stringify(st));
+    for (const r of busy.resources) for (const h of r.holders) { h.idleFlag = null; h.overTime.activity = 'active'; }
+    const bl = renderSharedResources(busy, { now: w.t });
+    assert.match(bl, /gate@proj-a \S+ OVER\./);
+    assert.doesNotMatch(bl, /IDLE\?/);
+    // A crowded line still fits, with the hint kept.
+    for (let i = 0; i < 30; i += 1) busy.queue.push({ id: `q${i}`, label: `waiter-number-${i}`, project: 'some-long-project-name', waitedMs: 1000, blockedBy: ['app-e2e'] });
+    const crowded = renderSharedResources(busy, { now: w.t });
+    assert.ok(crowded.length <= LINE_MAX_CHARS);
+    assert.match(crowded, /release a flagged one by hand: .* release [0-9a-f]{12}\.$/);
+    a.release();
+  } finally { w.done(); }
+});
+
 test('fail soft: a missing or corrupt ledger shows no line and no error', async () => {
   const base = mkdtempSync(join(tmpdir(), 'rl-bad-'));
   try {
@@ -170,4 +204,18 @@ test('fail soft: a missing or corrupt ledger shows no line and no error', async 
     assert.equal(renderSharedResources({ ok: false }), null);
     assert.equal(renderSharedResources(undefined), null);
   } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('a live holder flagged IDLE? shows it in the line and changes the signature', async () => {
+  const w = makeWorld({ budget: 8 });
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { idleMs: 300_000, minHoldMs: 0 }, monitored: true, label: 'gate', project: 'proj-a' });
+    const before = resourceSignature(status(w), w.t);
+    w.t += 400_000;
+    a.recordActivity(w.t, w.t - 350_000);
+    const st = status(w);
+    assert.match(renderSharedResources(st, { now: w.t }), /app-e2e 1\/1: gate@proj-a [^;]*IDLE\?/);
+    assert.notEqual(resourceSignature(st, w.t), before);
+    a.release();
+  } finally { w.done(); }
 });

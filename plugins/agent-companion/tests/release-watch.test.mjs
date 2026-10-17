@@ -377,7 +377,7 @@ test('release_watch off silences the line', async () => {
 
 // routing_trial_review_due fires model_benchmark_suggested alongside it
 // (tests/model-benchmark-suggestion.test.mjs).
-const TRIAL_NOW = { AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00.000Z' };
+const TRIAL_NOW = { AGENT_COMPANION_FAKE_NOW: '2026-11-01T00:00:00.000Z' };
 
 test('scout_suppress (env): the suppressed kind is neither emitted nor counted; the others are untouched', () => {
   const { dir, cleanup } = makeFixture();

@@ -71,7 +71,7 @@ export function loadRules(env = process.env) {
 export const ruleOf = (rules, id) => (rules?.rules ?? []).find((r) => r.id === id) ?? null;
 export const classOf = (rules, id) => (rules?.classes ?? []).find((c) => c.id === id) ?? null;
 
-/** Capacity of a named resource: rules file, then CI_BUDGET_RESOURCES="a=2,b=1", else 1. */
+/** Capacity of a named resource: CI_BUDGET_RESOURCES="a=2,b=1" (env) first, then the rules file, else 1. */
 export function capacityOf(rules, env, name) {
   const fromEnv = {};
   for (const part of String(env.CI_BUDGET_RESOURCES ?? '').split(',')) {
@@ -127,10 +127,44 @@ export function limitsFor(rules, lease) {
 }
 
 /**
- * The rules that can clear a live lease whose pid and heartbeat are fine.
- * Returns { rule, evidence } or null. Pure: it reads the lease record only.
+ * The rules that can clear or flag a lease whose pid and heartbeat are fine.
+ * Returns { rule, evidence, keep? } or null. Pure: it reads the lease record only.
+ *
+ * Live-holder guard: while the holder is alive (opts.alive, default true: unknown means
+ * alive) max-hold and idle do not clear it, up to the ceiling below. A verdict that would clear it comes back with keep: true,
+ * a flag the sweep records (holder field overTime for max-hold, idleFlag for idle) and
+ * status shows (OVER TIME, IDLE?). A dead holder is cleared by the sweep itself (pid-dead,
+ * heartbeat-stale) before this runs; { alive: false } keeps the plain clears for a caller
+ * that has proved the holder gone.
+ *
+ * Ceiling: a live holder is flagged only up to the live-holder-ceiling rule's ceilingMs from its
+ * grant (default 4 h; null or 0 turns it off). Past it, a flagged live holder comes back as
+ * { rule: 'live-holder-ceiling' } with no keep, so the sweep releases it and logs the flag that
+ * held it (evidence.flaggedBy). A hung holder cannot hold its resources for ever.
+ *
+ * Evidence carries the last probe sample (act.ev: tree size, cpu delta, ports, busy-child
+ * matches, sample count) and its age, so a false reading can be replayed.
  */
-export function liveVerdict(rules, lease, now) {
+export const DEFAULT_LIVE_CEILING_MS = 4 * 3600_000;
+
+/** The hard ceiling (ms) on how long a live holder may be flagged before it is released; 0 = off. */
+export function liveCeilingMs(rules) {
+  const r = ruleOf(rules, 'live-holder-ceiling');
+  if (r && r.enabled === false) return 0;
+  const v = r && r.ceilingMs !== undefined ? r.ceilingMs : DEFAULT_LIVE_CEILING_MS;
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+export function liveVerdict(rules, lease, now, env = {}, { alive = true } = {}) {
+  const v = rawVerdict(rules, lease, now, env, { alive });
+  if (!v?.keep || !alive) return v;
+  const ceilingMs = liveCeilingMs(rules);
+  const heldMs = now - Number(lease.startedAt || now);
+  if (!ceilingMs || heldMs <= ceilingMs) return v;
+  return { rule: 'live-holder-ceiling', evidence: { heldMs, ceilingMs, flaggedBy: v.rule, ...v.evidence } };
+}
+
+function rawVerdict(rules, lease, now, env, { alive }) {
   const lim = limitsFor(rules, lease);
   const held = now - Number(lease.startedAt || now);
   const idle = ruleOf(rules, 'idle');
@@ -138,34 +172,45 @@ export function liveVerdict(rules, lease, now) {
   const act = lease.act;
   // A stale or missing probe is "unknown", never "idle".
   const fresh = Boolean(act) && now - act.sampledAt <= Math.max(3 * sampleMs, 90_000);
+  const sample = act ? { sampleAgeMs: Math.max(0, now - act.sampledAt), ...(act.ev ? { sample: act.ev } : {}) } : {};
+  const flag = (v) => (alive ? { ...v, keep: true } : v);
+  // The idle rule's reading, or null. Set beside a max-hold flag too, so a holder that is both
+  // over time and quiet carries both flags (IDLE? and OVER TIME), not just the first one.
+  const idleEvidence = () => {
+    if (!(idle && idle.enabled !== false && (idle.appliesTo ?? ['run']).includes(lease.kind) && lim.idleMs && act)) return null;
+    const minHold = lim.minHoldMs ?? 0;
+    if (fresh && held >= minHold && now - act.activeAt > lim.idleMs) {
+      return { heldMs: held, idleMs: now - act.activeAt, idleLimitMs: lim.idleMs, lastActivityAt: act.activeAt, sampledAt: act.sampledAt, ...sample };
+    }
+    return null;
+  };
+  const withIdle = (v) => { const ie = alive ? idleEvidence() : null; return ie ? { ...v, alsoIdle: ie } : v; };
   const mh = ruleOf(rules, 'max-hold');
   if (mh && mh.enabled !== false && (mh.appliesTo ?? ['run']).includes(lease.kind) && lim.maxHoldMs && held > lim.maxHoldMs) {
     const evidence = { heldMs: held, maxHoldMs: lim.maxHoldMs };
-    // An exclusive resource (any named one; capacity 1 by default) is never taken from a live
-    // holder that is active, or whose activity is unknown: the lease is flagged "over time"
-    // instead (keep: true, the sweep does not clear it). Only a measured-idle holder is cleared.
-    if (holdsExclusive(rules, lease)) {
-      const quietMs = lim.idleMs ?? 300_000;
-      const measuredIdle = fresh && now - act.activeAt > quietMs;
-      if (!measuredIdle) {
-        return { rule: 'max-hold', keep: true, evidence: { ...evidence, activity: fresh ? 'active' : 'unknown', ...(act ? { lastActivityAt: act.activeAt } : {}) } };
-      }
-      return { rule: 'max-hold', evidence: { ...evidence, idleMs: now - act.activeAt, lastActivityAt: act.activeAt, sampledAt: act.sampledAt } };
+    const quietMs = lim.idleMs ?? 300_000;
+    const measuredIdle = fresh && now - act.activeAt > quietMs;
+    const activity = measuredIdle ? 'idle' : fresh ? 'active' : 'unknown';
+    // An exclusive resource (any named one; capacity 1 by default) is cleared only from a
+    // holder measured idle; a box-only lease has the plain clear. A live holder of either is
+    // flagged "over time" and kept (keep: true), whatever the probe says.
+    if (holdsExclusive(rules, lease, env)) {
+      if (!measuredIdle) return withIdle({ rule: 'max-hold', keep: true, evidence: { ...evidence, activity, ...(act ? { lastActivityAt: act.activeAt } : {}), ...sample } });
+      return withIdle(flag({ rule: 'max-hold', evidence: { ...evidence, activity, idleMs: now - act.activeAt, lastActivityAt: act.activeAt, sampledAt: act.sampledAt, ...sample } }));
     }
-    return { rule: 'max-hold', evidence };
+    return withIdle(flag({ rule: 'max-hold', evidence: { ...evidence, activity, ...sample } }));
   }
-  if (idle && idle.enabled !== false && (idle.appliesTo ?? ['run']).includes(lease.kind) && lim.idleMs && act) {
-    const minHold = lim.minHoldMs ?? 0;
-    if (fresh && held >= minHold && now - act.activeAt > lim.idleMs) {
-      return { rule: 'idle', evidence: { heldMs: held, idleMs: now - act.activeAt, idleLimitMs: lim.idleMs, lastActivityAt: act.activeAt, sampledAt: act.sampledAt } };
-    }
-  }
+  const ie = idleEvidence();
+  if (ie) return flag({ rule: 'idle', evidence: ie });
   return null;
 }
 
-/** True when the lease holds a named resource of capacity 1 (the rules' capacity, else 1). */
-export function holdsExclusive(rules, lease) {
-  return Object.keys(lease.resources ?? {}).some((n) => n !== BOX && capacityOf(rules, {}, n) <= 1);
+/**
+ * True when the lease holds a named resource of capacity 1: CI_BUDGET_RESOURCES in `env`, else the
+ * rules' capacity, else 1 (the order capacityOf uses). The default env {} reads the rules only.
+ */
+export function holdsExclusive(rules, lease, env = {}) {
+  return Object.keys(lease.resources ?? {}).some((n) => n !== BOX && capacityOf(rules, env, n) <= 1);
 }
 
 // ---------------------------------------------------------------- clear log
@@ -225,6 +270,9 @@ export function processTable() {
     }
     if (process.platform === 'linux') {
       const tick = 10; // clock ticks are 100 Hz on every mainstream kernel
+      // Process start = boot time (/proc/stat btime, s) + starttime (stat field 22, ticks since boot).
+      let btimeMs = null;
+      try { const m = /^btime\s+(\d+)/m.exec(readFileSync('/proc/stat', 'utf8')); if (m) btimeMs = Number(m[1]) * 1000; } catch { /* unreadable: no start times */ }
       const out = [];
       for (const d of readdirSync('/proc')) {
         if (!/^\d+$/.test(d)) continue;
@@ -236,7 +284,8 @@ export function processTable() {
           try { cmd = readFileSync(`/proc/${d}/cmdline`, 'utf8').split('\0').join(' ').trim(); } catch { /* gone */ }
           out.push({
             pid: Number(d), ppid: Number(f[1]), name: st.slice(st.indexOf('(') + 1, close), cmd,
-            cpuMs: (Number(f[11]) + Number(f[12])) * tick, startedAt: null,
+            cpuMs: (Number(f[11]) + Number(f[12])) * tick,
+            startedAt: btimeMs !== null && Number.isFinite(Number(f[19])) ? btimeMs + Number(f[19]) * tick : null,
           });
         } catch { /* exited while reading */ }
       }
@@ -366,11 +415,30 @@ export function exeDir(p) {
 const MSYS_RE = /^(?:sh|bash|dash|zsh)\.exe$/i;
 const isMsys = (p) => MSYS_RE.test(p.name) || /[\\/]usr[\\/]bin[\\/]/i.test(String(p.cmd ?? ''));
 
+/**
+ * Clock slack for start-time evidence: Windows CreationDate and Linux starttime come at other
+ * resolutions than Date.now(). Slack only loosens a rejection; it never makes one easier.
+ */
+const START_SLACK_MS = 2000;
+const hasStart = (p) => p?.startedAt != null && Number.isFinite(Number(p.startedAt));
+
+/**
+ * A real child starts no earlier than its parent. A start time on both sides that puts the
+ * "child" before its "parent" means the parent's pid was reused: the link is a stale ppid, not
+ * membership. A start time missing on either side is no evidence, and the link stands (keep).
+ */
+function startsAfter(child, parent) {
+  if (!hasStart(child) || !hasStart(parent)) return true;
+  return Number(child.startedAt) >= Number(parent.startedAt) - START_SLACK_MS;
+}
+
 /** Every process under rootPid: Windows parent pids plus any extra {pid, ppid} links. */
 export function descendants(table, rootPid, links = []) {
   const kids = new Map();
   const byPid = new Map(table.map((p) => [p.pid, p]));
   const add = (ppid, p) => {
+    const parent = byPid.get(ppid);
+    if (parent && !startsAfter(p, parent)) return; // older than its parent: a reused pid
     if (!kids.has(ppid)) kids.set(ppid, []);
     kids.get(ppid).push(p);
   };
@@ -423,6 +491,36 @@ export function listeningPorts() {
  * sample, so a process that exits between samples cannot hide the work of the rest.
  */
 const SEEN_MAX = 4096;
+
+const BUSY_EXT = '(?:exe|cmd|bat|ps1|sh|[cm]?[jt]s|config)';
+const BUSY_EXT_END = new RegExp(`\\.${BUSY_EXT}$`, 'i');
+const busyRes = new Map();
+/**
+ * The regex for one busy-child name: the name as a whole token of a command line. A token starts
+ * at the line start, whitespace, a quote, a path separator (either kind), = : ; , @ ( or a hyphen
+ * (ms-playwright), and ends at the line end, whitespace, a quote, a path separator, = : ; , ), an
+ * extension (java.exe, vitest.mjs, vitest.config.ts) or -core (playwright-core). So "java" does
+ * not match "javascript", and "vitest" does not match the branch name in "git push origin fix/vitest-flake".
+ */
+function busyRe(name) {
+  let re = busyRes.get(name);
+  if (!re) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re = new RegExp(`(?:^|[\\s"'\\\\/=:;,@(-])${esc}(?=$|[\\s"'\\\\/=:;,)]|\\.${BUSY_EXT}(?![A-Za-z0-9])|-core(?![A-Za-z0-9]))`, 'i');
+    busyRes.set(name, re);
+  }
+  return re;
+}
+/** True when the process's image name or command line names one of `names` (see busyRe). */
+export function isBusyChild(p, names) {
+  const image = String(p.name ?? '').replace(BUSY_EXT_END, '').toLowerCase();
+  const cmd = String(p.cmd ?? '');
+  return names.some((raw) => {
+    const n = String(raw).toLowerCase();
+    // The image is the name itself, or the name + "w" (java, javaw).
+    return image === n || image === `${n}w` || busyRe(n).test(cmd);
+  });
+}
 export function sampleTree(rootPid, {
   prev, minCpuPct = 5, ports = [], busyChildren = [], now = Date.now(), table = processTable, listen = listeningPorts, msys = table === processTable ? msysLinks : () => [],
 } = {}) {
@@ -430,10 +528,37 @@ export function sampleTree(rootPid, {
   if (!t) return null;
   const alive = new Set(t.map((p) => p.pid));
   const extra = [];
-  // Orphans of a pid we saw in the tree before it died are still ours.
+  // Orphans of a pid we saw in the tree before it died are still ours, but only a process that
+  // could have been that pid's child: it started no earlier than the dead pid did (its recorded
+  // start, else the root's), and no later than the first sample that found the pid dead (a real
+  // orphan was made while its parent lived). A process outside that window carries a stale ppid
+  // left by a reused pid. A start time missing on either side is no evidence: adopt (keep).
+  const rootStart = t.find((p) => p.pid === rootPid)?.startedAt ?? prev?.rootStart ?? null;
+  const gone = { ...(prev?.gone ?? {}) };
   for (const pid of prev?.seen ?? []) {
-    if (pid === rootPid || alive.has(pid)) continue;
-    for (const p of t) if (p.ppid === pid) extra.push({ pid: p.pid, ppid: rootPid });
+    if (pid === rootPid) continue;
+    if (alive.has(pid)) { delete gone[pid]; continue; } // reused and running again: its next death is a new one
+    gone[pid] ??= now;
+    const lo = prev?.born?.[pid] ?? rootStart;
+    for (const p of t) {
+      if (p.ppid !== pid) continue;
+      if (hasStart(p)) {
+        if (lo != null && Number(p.startedAt) < Number(lo) - START_SLACK_MS) continue;
+        if (Number(p.startedAt) > gone[pid] + START_SLACK_MS) continue;
+      }
+      extra.push({ pid: p.pid, ppid: rootPid });
+    }
+  }
+  // A pid seen in the tree stays a member while it is the same process (same recorded start): a
+  // later holder of its parent's pid cannot drop it through the stale-ppid check in descendants().
+  const seenBefore = new Set(prev?.seen ?? []);
+  const byPidT = new Map(t.map((p) => [p.pid, p]));
+  for (const p of t) {
+    if (p.pid === rootPid || !seenBefore.has(p.pid)) continue;
+    const par = byPidT.get(p.ppid);
+    if (!par || startsAfter(p, par)) continue; // only the stale-ppid check can have dropped it
+    const b0 = prev?.born?.[p.pid];
+    if (b0 != null && Math.abs(Number(p.startedAt) - Number(b0)) <= START_SLACK_MS) extra.push({ pid: p.pid, ppid: rootPid });
   }
   const walk = (more) => [t.find((p) => p.pid === rootPid), ...descendants(t, rootPid, more)].filter(Boolean);
   let tree = walk(extra);
@@ -449,29 +574,44 @@ export function sampleTree(rootPid, {
   for (const p of tree) cpu[p.pid] = p.cpuMs;
   const cpuMs = tree.reduce((s, p) => s + p.cpuMs, 0);
   const seen = [...new Set([...(prev?.seen ?? []), ...tree.map((p) => p.pid)])].slice(-SEEN_MAX);
+  const inSeen = new Set(seen);
+  const born = {};
+  for (const [pid, at] of Object.entries(prev?.born ?? {})) if (inSeen.has(Number(pid))) born[pid] = at;
+  for (const p of tree) if (hasStart(p)) born[p.pid] = p.startedAt;
+  for (const pid of Object.keys(gone)) if (!inSeen.has(Number(pid))) delete gone[pid];
+  // `ev` is the replay record of this reading (it goes to the lease's .act sidecar, small):
+  // n samples so far, tree size, msys shells / links read (null = unreadable), summed cpu delta
+  // in ms over dt ms (null on the first sample), busy-child matches, ports seen (null = not
+  // checked because an earlier test already said active, [] = checked, none).
+  const ev = {
+    n: (prev?.ev?.n ?? 0) + 1, size: tree.length, shells: shells.length, links: links === null ? null : links.length,
+    cpuMs: null, dtMs: null, pct: null, kids: 0, ports: null,
+  };
   let why = null;
   if (prev && now > prev.at) {
     const before = prev.cpu ?? {};
     let used = 0;
     for (const p of tree) used += Math.max(0, p.cpuMs - (before[p.pid] ?? 0));
     const pct = (used / (now - prev.at)) * 100;
+    ev.cpuMs = Math.round(used); ev.dtMs = now - prev.at; ev.pct = Math.round(pct * 10) / 10;
     if (pct >= minCpuPct) why = `cpu ${pct.toFixed(1)}%`;
   }
-  if (!why && busyChildren.length) {
-    const names = busyChildren.map((n) => n.toLowerCase());
-    const hit = tree.find((p) => p.pid !== rootPid && names.some((n) => p.name.toLowerCase().includes(n) || String(p.cmd ?? '').toLowerCase().includes(n)));
-    if (hit) why = `child ${hit.name}`;
+  if (busyChildren.length) {
+    const hits = tree.filter((p) => p.pid !== rootPid && isBusyChild(p, busyChildren));
+    ev.kids = hits.length;
+    if (!why && hits.length) why = `child ${hits[0].name}`;
   }
   if (!why && links === null && tree.some(isMsys)) why = 'unknown: msys parent chain unreadable';
   if (!why && ports.length) {
     const ls = listen();
     if (ls) {
       const pids = new Set(tree.map((p) => p.pid));
-      const hit = ls.find((l) => pids.has(l.pid) && ports.some(([lo, hi]) => l.port >= lo && l.port <= hi));
-      if (hit) why = `listening on ${hit.port}`;
+      const hits = ls.filter((l) => pids.has(l.pid) && ports.some(([lo, hi]) => l.port >= lo && l.port <= hi));
+      ev.ports = hits.slice(0, 4).map((l) => l.port);
+      if (hits.length) why = `listening on ${hits[0].port}`;
     }
   }
-  return { cpuMs, cpu, seen, size: tree.length, at: now, active: Boolean(why), why };
+  return { cpuMs, cpu, seen, born, gone, rootStart, size: tree.length, at: now, active: Boolean(why), why, ev: { ...ev, why } };
 }
 
 /**

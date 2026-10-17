@@ -27,15 +27,19 @@
 // the same on both models, so opus/low is about 1.2-1.55x Sonnet 5 medium).
 // verify goes to haiku (it only checks; haiku validates, it does not
 // operate) and operate to sonnet/low. Weights and plain grid unchanged.
+//
+// UPDATED 2026-10-16 (v5): the 10-16 verdicts moved verify to sonnet/low (the
+// shipped config/model-tiers.json row); the plain grid still resolves verify
+// to haiku/medium and operate to sonnet/medium.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runScript } from './helpers.mjs';
 
-test('recommend --type verify routes to haiku under the routing trial (weight still 1)', () => {
+test('recommend --type verify routes to sonnet/low under the routing trial (weight still 1)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'verify', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(res.json.model, 'haiku');
-  assert.equal(res.json.effort, 'medium');
+  assert.equal(res.json.model, 'sonnet');
+  assert.equal(res.json.effort, 'low');
   assert.equal(res.json.weight, 1);
   assert.ok(res.json.trial, 'expected trial metadata on an overridden type');
   assert.equal(res.json.trial.gridResolution, 'haiku/medium', 'the plain grid must still resolve verify to haiku');
@@ -64,7 +68,7 @@ test('an explicit --weight that departs from the preset bypasses the operate/ver
 test('an explicit --weight EQUAL to the preset keeps the verify trial (slice 1b)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'verify', '--weight', '1', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(`${res.json.model}/${res.json.effort}`, 'haiku/medium');
+  assert.equal(`${res.json.model}/${res.json.effort}`, 'sonnet/low');
   assert.ok(res.json.trial);
 });
 

@@ -194,3 +194,26 @@ bottom tier means the routing table's lower rows are decorative.
 
 Only if something fired. Lead with what changed and what you did about it. One
 screen maximum. Link to detail; do not paste it.
+
+## Hand-off: `/ac scout delta` (show what changed, triage, acknowledge)
+
+The scout writes `state/scout-delta.md` and `scout-delta.json` after every run, with no
+model call: signals NEW this run, CLEARED, CHANGED, and the ones repeating for
+`scout_repeat_days` (default 3) or more days with nobody having triaged them.
+When asked for the delta (or when the SessionStart line says "Scout triage"), run:
+
+```bash
+node "$AC/scripts/scout-ack.mjs" show      # re-evaluates against the ledger now, prints scout-delta.md
+node "$AC/scripts/scout-ack.mjs" list      # acks: id, kind, match, expiry, active / expired / voided
+```
+
+Triage each unacknowledged signal (act on it, or decide to leave it), then record that:
+
+```bash
+node "$AC/scripts/scout-ack.mjs" add <kind> --note "<decision reference>" [--match "<detail text>"] [--days 14 | --expires YYYY-MM-DD]
+node "$AC/scripts/scout-ack.mjs" remove <id>
+```
+
+An ack holds until it expires (default 14 days) or the signal changes materially: it grows
+by 2+ entries and at least half again, or shows an entry sharing under 60% of its words
+with everything acknowledged. Then it counts as unacknowledged again. The plugin README section "Scout hand-off" has the reference.

@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.27",
+  "version": "0.31.28",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -57,7 +57,7 @@
     "env_dump_guard": {
       "type": "string",
       "title": "Refuse printing environment values in bulk or secret-named variables",
-      "description": "Transcripts are uploaded by session-sync, so a printed secret leaves the machine (2026-10-17: env | grep -i claude printed a messaging token). \"deny\" (default): refuse bare env / printenv / set / export -p / declare -x, env piped to grep, Get-ChildItem env: (gci, ls, dir), [Environment]::GetEnvironmentVariables(), and printing a variable whose name has a part TOKEN, KEY, SECRET, PASSWORD, PASSWD, AUTH, CREDENTIAL or COOKIE (printenv NAME, echo $NAME, $env:NAME). Names-only and count-only forms pass (env | cut -d= -f1, compgen -e, (Get-ChildItem env:).Name, a [ -n \"$NAME\" ] test). \"warn\": allow with a note. \"off\": silent. Bash and PowerShell tools; code inside a quoted node -e or python -c program is not judged.",
+      "description": "Transcripts are uploaded by session-sync, so a printed secret leaves the machine (2026-10-17: env | grep -i claude printed a messaging token). \"deny\" (default): refuse bare env / printenv / set / export -p / declare -x, env piped to grep, Get-ChildItem env: (gci, ls, dir), [Environment]::GetEnvironmentVariables(), and printing a variable whose name has a part TOKEN, KEY, SECRET, PASSWORD, PASSWD, AUTH, CREDENTIAL or COOKIE (printenv NAME, echo $NAME, $env:NAME). Names-only and count-only forms pass (env | cut -d= -f1, compgen -e, (Get-ChildItem env:).Name, a [ -n \"$NAME\" ] test). \"warn\": allow with a note. \"off\": silent. Bash and PowerShell tools; inline code is judged too (node -e/-p, bun -e, deno eval, python -c, a program on stdin by heredoc, <<<, a piped echo or a PowerShell here-string, bash or pwsh reading a script from stdin, powershell -EncodedCommand): a dump of process.env or os.environ (or a copy or alias) and a secret-named read that reaches stdout or stderr are refused, while names-only forms, counts, presence tests and output sent to a file pass. env 2>/dev/null and cat <<< \"$SECRET\" are refused too.",
       "default": "deny"
     },
     "inherit_guard": {
@@ -161,6 +161,18 @@
       "title": "Why those scout signals are suppressed",
       "description": "Free text recording the reason for scout_suppress (for example the operator rule behind it). Informational: nothing reads it.",
       "default": ""
+    },
+    "scout_triage_cwds": {
+      "type": "string",
+      "title": "Scout triage sessions",
+      "description": "Working-directory patterns naming the triage sessions, separated by commas or semicolons (for example \"C:/path/to/repo\"). A pattern is a path prefix: it matches that directory and everything below it, including a repo's .claude/worktrees/*; `*` matches any characters; case-insensitive. A triage session's SessionStart scout line lists the top 3 unacknowledged signals with the days they have repeated and points to scout-delta.md and the ack command (scripts/scout-ack.mjs). Empty (default) = no triage sessions: every session keeps the passive scout line.",
+      "default": ""
+    },
+    "scout_repeat_days": {
+      "type": "number",
+      "title": "Scout repeat threshold (days)",
+      "description": "A scout signal that has fired on this many days in a row and is not acknowledged is listed as repeating in scout-delta.md. Default 3.",
+      "default": 3
     },
     "scout_plugin_update": {
       "type": "boolean",

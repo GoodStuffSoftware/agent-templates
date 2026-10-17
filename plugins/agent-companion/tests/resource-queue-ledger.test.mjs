@@ -236,7 +236,9 @@ test('gone-requester: a queued ticket whose pid is dead is cleared, and a ticket
 
 // ---------------------------------------------------------------- rule clears: max-hold and idle
 
-test('max-hold on an exclusive resource: a live active holder is flagged OVER TIME and kept; once measured idle it is cleared, logged, tombstoned, never restored by a beat, process untouched', async () => {
+const EV = { n: 14, size: 7, shells: 2, links: 3, cpuMs: 12, dtMs: 30_000, pct: 0.04, kids: 0, ports: [], why: null };
+
+test('max-hold on an exclusive resource: a live holder is flagged OVER TIME and kept, active or measured idle; a dead holder is reclaimed', async () => {
   const w = makeWorld();
   try {
     const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000, idleMs: 30_000 }, monitored: true, label: 'A' });
@@ -245,32 +247,31 @@ test('max-hold on an exclusive resource: a live active holder is flagged OVER TI
     assert.equal(sweepLedger({ ...w.opts }).length, 0, 'under the limit');
     w.t += 2_000;
     assert.equal(sweepLedger({ ...w.opts }).length, 0, 'over the limit but active: kept');
-    const holder = resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0];
-    assert.deepEqual(holder.overTime, { heldMs: 61_000, maxHoldMs: 60_000, activity: 'active' });
+    const holderOf = () => resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0];
+    assert.deepEqual(holderOf().overTime, { heldMs: 61_000, maxHoldMs: 60_000, activity: 'active' });
     assert.equal(w.clears().length, 0);
     w.t += 40_000;
-    a.recordActivity(w.t, T0 + 59_000); // sampled now, quiet for 42 s (over idleMs)
-    const b = await w.acq({ resources: { 'app-e2e': 1 }, label: 'B' });
-    assert.equal(w.polls, 0);
-    const [c] = w.clears();
-    assert.equal(c.rule, 'max-hold');
-    assert.equal(c.type, 'lease');
-    assert.equal(c.label, 'A');
-    assert.equal(c.evidence.heldMs, 101_000);
-    assert.equal(c.evidence.maxHoldMs, 60_000);
-    assert.equal(c.evidence.idleMs, 42_000);
-    assert.ok(existsSync(join(w.dir, `lease-${a.id}.cleared`)), 'tombstone');
-    assert.equal(a.cleared, true);
+    a.recordActivity(w.t, T0 + 59_000, EV); // sampled now, quiet for 42 s (over idleMs)
+    assert.equal(sweepLedger({ ...w.opts }).length, 0, 'measured idle but alive: flagged, not released');
+    const flagged = holderOf().overTime;
+    assert.equal(flagged.activity, 'idle');
+    assert.equal(flagged.heldMs, 101_000);
+    assert.equal(flagged.sampleAgeMs, 0);
+    assert.deepEqual(flagged.sample, EV, 'the last sample rides on the flag');
+    assert.equal(w.clears().length, 0);
+    assert.equal(w.leases().length, 1, 'the lease file is still there');
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.cleared`)), false, 'no tombstone');
     a.beat();
-    assert.equal(existsSync(join(w.dir, `lease-${a.id}.json`)), false, 'the owner heartbeat does not put a rule-cleared lease back');
-    assert.deepEqual(w.leases().map((l) => l.label), ['B']);
+    assert.equal(w.leases().length, 1);
+    // The holder dies: the dead-pid rule reclaims it as before.
+    w.dead.add(w.leases()[0].pid);
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    assert.equal(w.clears()[0].rule, 'pid-dead');
     a.release();
-    assert.equal(existsSync(join(w.dir, `lease-${a.id}.cleared`)), false, 'release removes the tombstone');
-    b.release();
   } finally { w.done(); }
 });
 
-test('max-hold falls back to the resource limit, an unmeasured exclusive holder is kept, and a disabled rule clears nothing', async () => {
+test('max-hold falls back to the resource limit; a live holder with or without a probe, exclusive or box-only, is flagged and kept; a disabled rule flags nothing', async () => {
   const w = makeWorld();
   try {
     w.opts.rules.resources['app-e2e'].maxHoldMs = 30_000;
@@ -285,16 +286,41 @@ test('max-hold falls back to the resource limit, an unmeasured exclusive holder 
     w.opts.rules.resources.box.maxHoldMs = 30_000;
     const a = await w.acq({ box: 1, label: 'A' });
     w.t += 31_000;
-    assert.equal(sweepLedger({ ...w.opts }).length, 1, 'a box-only lease keeps the plain clear');
-    assert.equal(w.clears()[0].evidence.maxHoldMs, 30_000);
+    assert.equal(sweepLedger({ ...w.opts }).length, 0, 'a live box-only holder is flagged, never released');
+    assert.equal(w.clears().length, 0);
+    const boxHolder = resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'box').holders.find((h) => h.label === 'A');
+    assert.equal(boxHolder.overTime.maxHoldMs, 30_000);
+    assert.match(formatResourceStatus(resourceStatus({ ...w.opts })), /\[A\].*OVER TIME/);
+    // Dead: reclaimed by pid-dead at once.
+    w.dead.add(w.leases().find((l) => l.label === 'A').pid);
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    assert.equal(w.clears()[0].rule, 'pid-dead');
     a.release();
+    w.dead.clear();
 
     w.opts.rules.rules.find((r) => r.id === 'max-hold').enabled = false;
     const b = await w.acq({ resources: { 'app-e2e': 1 }, label: 'B' });
     w.t += 3_600_000;
     assert.equal(sweepLedger({ ...w.opts }).length, 0);
+    assert.equal(resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0].overTime, null);
     b.release();
   } finally { w.done(); }
+});
+
+test('max-hold flags a live holder whatever the resource capacity (CI_BUDGET_RESOURCES): none is released', async () => {
+  for (const envCap of ['app-e2e=2', 'app-e2e=1', undefined]) {
+    const w = makeWorld();
+    try {
+      if (envCap) w.opts.env.CI_BUDGET_RESOURCES = envCap;
+      const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000, idleMs: 30_000 }, monitored: true, label: 'A' });
+      w.t += 61_000;
+      a.recordActivity(w.t, w.t); // the tree is working
+      assert.equal(sweepLedger({ ...w.opts }).length, 0, 'env ' + envCap);
+      assert.equal(w.clears().length, 0);
+      assert.equal(resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0].overTime.activity, 'active');
+      a.release();
+    } finally { w.done(); }
+  }
 });
 
 test('max-hold does not apply to a full or targeted ci-local lease', async () => {
@@ -310,24 +336,32 @@ test('max-hold does not apply to a full or targeted ci-local lease', async () =>
   } finally { w.done(); }
 });
 
-test('idle clears a monitored lease idle past idleMs, once it is old enough', async () => {
+test('idle never releases a live holder: a quiet sampler flags it IDLE? with the sample evidence; a dead holder is still reclaimed', async () => {
   const w = makeWorld();
   try {
     const a = await w.acq({
       resources: { 'app-e2e': 1 }, limits: { idleMs: 300_000, minHoldMs: 600_000 }, monitored: true, label: 'A',
     });
     w.t += 660_000; // 11 min
-    a.recordActivity(w.t, T0); // sampled now, last working at the start
-    const b = await w.acq({ resources: { 'app-e2e': 1 }, label: 'B' });
-    assert.equal(w.polls, 0);
-    const [c] = w.clears();
-    assert.equal(c.rule, 'idle');
-    assert.equal(c.label, 'A');
-    assert.equal(c.evidence.idleMs, 660_000);
-    assert.equal(c.evidence.idleLimitMs, 300_000);
-    assert.ok(existsSync(join(w.dir, `lease-${a.id}.cleared`)));
+    a.recordActivity(w.t, T0, EV); // sampled now, last working at the start: the sampler reads a quiet tree
+    assert.equal(sweepLedger({ ...w.opts }).length, 0, 'alive: flagged, not cleared');
+    assert.equal(w.clears().length, 0);
+    assert.equal(w.leases().length, 1);
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.cleared`)), false, 'no tombstone');
+    const st = resourceStatus({ ...w.opts });
+    const h = st.resources.find((r) => r.name === 'app-e2e').holders[0];
+    assert.equal(h.overTime, null);
+    assert.deepEqual(h.idleFlag, { idleMs: 660_000, idleLimitMs: 300_000, sampleAgeMs: 0, sample: EV });
+    assert.match(formatResourceStatus(st), /\[A\].*IDLE\? \(quiet 11m.* holder alive: kept, not released\)/);
+    // The same flag from a sidecar written without a sample record (older wrapper): no sample, still flagged.
+    a.recordActivity(w.t, T0);
+    assert.equal(sweepLedger({ ...w.opts }).length, 0);
+    assert.equal(resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0].idleFlag.sample, null);
+    // Only the holder's death ends it.
+    w.dead.add(w.leases()[0].pid);
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    assert.equal(w.clears()[0].rule, 'pid-dead');
     a.release();
-    b.release();
   } finally { w.done(); }
 });
 
@@ -360,10 +394,169 @@ test('idle never clears on weak evidence: a stale probe, recent activity, too yo
   } finally { w.done(); }
 });
 
+// ---------------------------------------------------------------- live-holder ceiling, stale heartbeat of a live pid, manual release
+
+const CEIL = 4 * 3600_000;
+
+test('live-holder ceiling: a flagged live holder is kept up to 4 h from the grant, then released with a loud clear that names the flag', async () => {
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000, idleMs: 30_000 }, monitored: true, label: 'A', pid: 811 });
+    w.t += CEIL - 1000; // 3 h 59 min 59 s
+    a.recordActivity(w.t, w.t); // working, over the 60 s limit: flagged OVER TIME
+    assert.equal(sweepLedger({ ...w.opts }).length, 0, 'under the ceiling: flagged and kept');
+    assert.ok(resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0].overTime);
+    w.t += 2000; // past 4 h
+    a.recordActivity(w.t, w.t);
+    const cleared = sweepLedger({ ...w.opts });
+    assert.equal(cleared.length, 1);
+    const c = w.clears()[0];
+    assert.equal(c.rule, 'live-holder-ceiling');
+    assert.equal(c.pid, 811);
+    assert.equal(c.evidence.flaggedBy, 'max-hold');
+    assert.equal(c.evidence.ceilingMs, CEIL);
+    assert.equal(c.evidence.heldMs, CEIL + 1000);
+    assert.equal(c.evidence.maxHoldMs, 60_000, 'the original flag evidence rides on the record');
+    assert.ok(w.lines.some((l) => /RELEASED the lease of LIVE pid 811/.test(l) && /NOT touched/.test(l)), 'a loud line');
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.cleared`)), true, 'tombstone: the wrapper heartbeat does not put it back');
+    assert.equal(w.leases().length, 0);
+    a.release();
+  } finally { w.done(); }
+});
+
+test('live-holder ceiling: idle-flagged holders too; configurable in the rules; null or 0 or disabled keeps the flag for ever', async () => {
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { idleMs: 300_000, minHoldMs: 0 }, monitored: true, label: 'A' });
+    w.t += 600_000;
+    a.recordActivity(w.t, T0, EV);
+    assert.equal(sweepLedger({ ...w.opts }).length, 0, 'IDLE? flagged and kept');
+    w.opts.rules.rules.push({ id: 'live-holder-ceiling', enabled: true, ceilingMs: 500_000 });
+    a.recordActivity(w.t, T0, EV);
+    assert.equal(sweepLedger({ ...w.opts }).length, 1, 'a 500 s ceiling releases it at 600 s');
+    assert.equal(w.clears()[0].rule, 'live-holder-ceiling');
+    assert.equal(w.clears()[0].evidence.flaggedBy, 'idle');
+    a.release();
+    for (const off of [{ ceilingMs: null }, { ceilingMs: 0 }, { enabled: false }]) {
+      const w2 = makeWorld();
+      try {
+        w2.opts.rules.rules.push({ id: 'live-holder-ceiling', enabled: true, ceilingMs: 120_000, ...off });
+        const b = await w2.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000 }, label: 'B' });
+        w2.t += 10 * 3600_000;
+        assert.equal(sweepLedger({ ...w2.opts }).length, 0, JSON.stringify(off));
+        assert.ok(w2.leases().length === 1);
+        b.release();
+      } finally { w2.done(); }
+    }
+  } finally { w.done(); }
+});
+
+test('a holder over time and quiet carries both flags; every flag names the release command', async () => {
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000, idleMs: 30_000, minHoldMs: 0 }, monitored: true, label: 'A' });
+    w.t += 120_000;
+    a.recordActivity(w.t, T0, EV); // sampled now, quiet since the start
+    assert.equal(sweepLedger({ ...w.opts }).length, 0);
+    const st = resourceStatus({ ...w.opts });
+    const h = st.resources.find((r) => r.name === 'app-e2e').holders[0];
+    assert.equal(h.overTime.activity, 'idle');
+    assert.ok(h.idleFlag, 'idleFlag is set beside overTime');
+    assert.match(h.releaseCommand, new RegExp(`resource-queue\\.mjs" release ${a.id}$`));
+    assert.equal(h.ceilingMs, CEIL);
+    const text = formatResourceStatus(st);
+    assert.match(text, /OVER TIME .*IDLE\? /);
+    assert.match(text, new RegExp(`released by the sweep at 4h.*release by hand: node ".*resource-queue\\.mjs" release ${a.id}`));
+    a.release();
+  } finally { w.done(); }
+});
+
+test('stale heartbeat, pid verified live (started no later than the grant): flagged HEARTBEAT STALE and kept; a reused pid or an unknown start is released; the 4 h ceiling applies', async () => {
+  const w = makeWorld({ staleMs: 90_000 });
+  try {
+    w.starts[821] = T0 - 60_000; // the holder's process started before the grant
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'A', pid: 821 });
+    w.t += 120_000; // no beat for 120 s
+    // status never spawns and never writes: nothing verified yet, so it reads as stale
+    assert.equal(resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0].stale, 'heartbeat is stale');
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.live`)), false);
+    assert.equal(sweepLedger({ ...w.opts }).length, 0, 'verified live: kept');
+    assert.equal(w.clears().length, 0);
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.live`)), true, 'the verification is cached beside the lease');
+    const st = resourceStatus({ ...w.opts });
+    const h = st.resources.find((r) => r.name === 'app-e2e').holders[0];
+    assert.equal(h.stale, null);
+    assert.equal(h.hbStale.staleMs, 90_000);
+    assert.ok(h.hbStale.heartbeatAgeMs >= 120_000);
+    assert.match(formatResourceStatus(st), /HEARTBEAT STALE \(no beat for 2m.*pid verified alive: kept, not released\).*release by hand: node ".*" release /);
+    // it still holds the resource: a second request waits
+    let polled = 0;
+    const b = w.acq({ resources: { 'app-e2e': 1 }, label: 'B', delay: async (ms) => { w.t += ms; polled += 1; if (polled === 3) w.dead.add(821); } });
+    const got = await b;
+    assert.ok(polled >= 3, 'B waited behind the flagged holder');
+    assert.equal(w.clears().find((c) => c.label === 'A').rule, 'pid-dead', 'a dead holder is still cleared at once');
+    got.release();
+    a.release();
+
+    // past the ceiling
+    const c = await w.acq({ resources: { 'app-e2e': 1 }, label: 'C', pid: 822 });
+    w.starts[822] = w.t - 60_000;
+    w.t += CEIL - 1000;
+    assert.equal(sweepLedger({ ...w.opts }).length, 0, 'stale but verified live, under the ceiling');
+    w.t += 2000;
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    const cc = w.clears().find((x) => x.label === 'C');
+    assert.equal(cc.rule, 'live-holder-ceiling');
+    assert.equal(cc.evidence.flaggedBy, 'heartbeat-stale');
+    assert.equal(existsSync(join(w.dir, `lease-${c.id}.live`)), false, 'the cache file goes with the lease');
+    c.release();
+
+    // a reused pid (its process started after the grant) is not the holder: released as stale
+    const d = await w.acq({ resources: { 'app-e2e': 1 }, label: 'D', pid: 823 });
+    w.starts[823] = w.t + 30_000;
+    w.t += 120_000;
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    assert.equal(w.clears().find((x) => x.label === 'D').rule, 'heartbeat-stale');
+    d.release();
+    // an unknown start time: also released, as before
+    const e = await w.acq({ resources: { 'app-e2e': 1 }, label: 'E', pid: 824 });
+    w.t += 120_000;
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    assert.equal(w.clears().find((x) => x.label === 'E').rule, 'heartbeat-stale');
+    e.release();
+  } finally { w.done(); }
+});
+
+test('release by hand: by id or unique prefix, logged as a clear by "manual", the tombstone stops the wrapper, the process is not touched', async () => {
+  const { releaseLease } = await import('../scripts/ci-budget.mjs');
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'A', project: 'proj-a', pid: 831 });
+    const b = await w.acq({ resources: { pool: 1 }, label: 'B', pid: 832 });
+    assert.equal(releaseLease({ ...w.opts, id: 'zz' }).ok, false);
+    assert.match(releaseLease({ ...w.opts, id: 'beef01' }).error, /no lease with id/);
+    const r = releaseLease({ ...w.opts, id: a.id.slice(0, 6) });
+    assert.equal(r.ok, true);
+    assert.equal(r.released.id, a.id);
+    assert.equal(r.released.wasAlive, true);
+    const c = w.clears()[0];
+    assert.equal(c.rule, 'manual');
+    assert.equal(c.evidence.by, 'manual');
+    assert.equal(c.label, 'A');
+    assert.equal(c.pid, 831);
+    assert.deepEqual(c.resources, { 'app-e2e': 1 });
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.cleared`)), true);
+    assert.deepEqual(w.leases().map((l) => l.label), ['B'], 'only A went');
+    assert.equal(resourceStatus({ ...w.opts }).resources.find((x) => x.name === 'app-e2e').held, 0);
+    assert.equal(releaseLease({ ...w.opts, id: a.id }).ok, false, 'already gone');
+    b.release(); a.release();
+  } finally { w.done(); }
+});
+
 // ---------------------------------------------------------------- cleared but alive
 
 test('a cleared lease whose process is alive is never signalled or killed, and its CPU still counts as outside load', async () => {
-  const w = makeWorld({ budget: 8, isAlive: isPidAlive });
+  const w = makeWorld({ budget: 8, isAlive: isPidAlive, staleMs: 60_000 });
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
   const realKill = process.kill;
   const signals = [];
@@ -372,14 +565,15 @@ test('a cleared lease whose process is alive is never signalled or killed, and i
   try {
     await new Promise((r) => { child.once('spawn', r); });
     const other = await w.acq({ box: 1, label: 'other' });
-    const runaway = await w.acq({ box: 4, pid: child.pid, limits: { maxHoldMs: 60_000 }, label: 'runaway' });
+    const runaway = await w.acq({ box: 4, pid: child.pid, label: 'runaway' }); // its heartbeat goes stale: the clear that can still leave a live process
     w.busy = 5; // the runaway's 4 cores plus the other's one: nothing is idle
     process.kill = (pid, sig) => { signals.push(sig); return realKill.call(process, pid, sig); };
 
     w.t += 61_000;
+    other.beat();
     const cleared = sweepLedger({ ...w.opts });
     assert.equal(cleared.length, 1);
-    assert.equal(w.clears()[0].rule, 'max-hold');
+    assert.equal(w.clears()[0].rule, 'heartbeat-stale');
     assert.equal(w.clears()[0].pid, child.pid);
 
     assert.deepEqual(signals.filter((s) => s !== 0 && s !== undefined), [], 'only liveness probes (signal 0), never a real signal');

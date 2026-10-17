@@ -66,14 +66,14 @@ import {
   mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, statSync, existsSync,
 } from 'node:fs';
 import {
-  BOX, loadRules, capacityOf, ramReserveMb, liveVerdict, appendClear, recentClears, scanStrays, NAME_RE,
+  BOX, loadRules, capacityOf, ramReserveMb, liveVerdict, liveCeilingMs, appendClear, recentClears, scanStrays, NAME_RE, processTable,
 } from './lib/resource-rules.mjs';
 import { join, basename, dirname, resolve } from 'node:path';
 import {
   tmpdir, availableParallelism, cpus, constants as osConstants, getPriority, setPriority, freemem, totalmem,
 } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
 export const DEFAULT_HEAVY_COST = 3;
@@ -203,6 +203,24 @@ export function isPidAlive(pid) {
   }
 }
 
+// A process's start time (epoch ms), or null when the process table cannot say. One process-table
+// call (a hidden PowerShell on Windows, about 0.4 to 1 s), so a result is cached per pid for 60 s: a
+// waiter that polls every 1.5 s never spawns it twice a minute. Only the stale-heartbeat path asks.
+const PROC_START_TTL_MS = 60_000;
+const procStartCache = new Map();
+function defaultProcStart(pid) {
+  const hit = procStartCache.get(pid);
+  if (hit && Date.now() - hit.at < PROC_START_TTL_MS) return hit.startedAt;
+  let startedAt = null;
+  try {
+    const p = (processTable() ?? []).find((x) => x.pid === pid);
+    startedAt = p && Number.isFinite(Number(p.startedAt)) ? Number(p.startedAt) : null;
+  } catch { /* unknown */ }
+  if (procStartCache.size > 64) procStartCache.clear();
+  procStartCache.set(pid, { at: Date.now(), startedAt });
+  return startedAt;
+}
+
 export function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
 }
@@ -260,6 +278,7 @@ function makeCtx(o = {}) {
   ctx.now = o.now ?? Date.now;
   ctx.sleep = o.sleep ?? sleepMs;
   ctx.isAlive = o.isAlive ?? isPidAlive;
+  ctx.procStart = o.procStart ?? defaultProcStart;
   ctx.log = o.log ?? ((l) => console.error(l));
   ctx.pid = o.pid ?? process.pid;
   ctx.worktree = o.worktree ?? process.cwd();
@@ -378,6 +397,29 @@ function staleReason(ctx, e) {
   return null;
 }
 
+// A lease whose heartbeat is stale but whose wrapper pid is alive is kept (flagged) only when that
+// pid is VERIFIED to be the holder: a process that started no later than the grant (plus clock
+// slack) is the wrapper itself, since a reused pid belongs to a process started after the original
+// died, which is after the grant. The verified start is cached in lease-<id>.live ({pid, startedAt}),
+// so status (which never spawns) and every later sweep read it for free; only a sweep (`ask`) may
+// call ctx.procStart (one process-table call). Returns { pid, startedAt } or null (unverified: the
+// stale rule releases it as before).
+const LIVE_SLACK_MS = 5000;
+function verifiedLive(ctx, e, ask) {
+  const file = join(ctx.dir, `lease-${e.id}.live`);
+  const grant = num(e.startedAt) || num(e.createdAt);
+  const fits = (s) => Number.isFinite(s) && s > 0 && grant > 0 && s <= grant + LIVE_SLACK_MS;
+  const d = readJson(file);
+  if (d && d.pid === e.pid && fits(num(d.startedAt))) return { pid: e.pid, startedAt: num(d.startedAt) };
+  if (!ask) return null;
+  let s = null;
+  try { s = ctx.procStart(e.pid); } catch { /* unknown */ }
+  s = s === null || s === undefined ? NaN : Number(s);
+  if (!fits(s)) return null;
+  try { writeFileSync(file, JSON.stringify({ pid: e.pid, startedAt: s, verifiedAt: ctx.now() })); } catch { /* best effort */ }
+  return { pid: e.pid, startedAt: s };
+}
+
 // Named resources of a record: { name: units }, only valid names and units >= 1.
 function normResources(v) {
   const out = {};
@@ -393,8 +435,12 @@ function normResources(v) {
 // The activity sidecar of a monitored run lease: "<sampledAt> <activeAt>" in epoch ms.
 function readAct(file) {
   try {
-    const [a, b] = readFileSync(file, 'utf8').trim().split(/\s+/).map(Number);
-    return Number.isFinite(a) && Number.isFinite(b) ? { sampledAt: a, activeAt: b } : null;
+    const [head, ...rest] = readFileSync(file, 'utf8').split('\n');
+    const [a, b] = head.trim().split(/\s+/).map(Number);
+    if (!(Number.isFinite(a) && Number.isFinite(b))) return null;
+    let ev = null;
+    try { const d = JSON.parse(rest.join('\n')); if (d && typeof d === 'object' && !Array.isArray(d)) ev = d; } catch { /* no sample record */ }
+    return { sampledAt: a, activeAt: b, ...(ev ? { ev } : {}) };
   } catch { return null; }
 }
 
@@ -532,30 +578,54 @@ export function readState(ctx, { reclaim = true } = {}) {
       if (e.kind === 'full' && d.kind === 'run') e.kind = 'run';
       e.actFile = join(ctx.dir, `lease-${m[1]}.act`);
       e.act = readAct(e.actFile);
-      const why = staleReason(ctx, e);
+      let why = staleReason(ctx, e);
       leaseIds.add(m[1]);
+      const liveFile = join(ctx.dir, `lease-${m[1]}.live`);
+      // Stale heartbeat, but the wrapper pid is verified to be the holder (not a reused pid): a live
+      // holder is flagged and kept, like the idle and max-hold flags, up to the same ceiling.
+      if (why === 'heartbeat is stale' && !(e.boundPid > 0)) {
+        const live = verifiedLive(ctx, e, reclaim);
+        if (live) {
+          const hb = Math.max(num(e.heartbeatAt), num(e.hbSide), num(e.startedAt), num(e.createdAt));
+          e.hbStale = { heartbeatAgeMs: Math.max(0, ctx.now() - hb), staleMs: ctx.staleMs, pidStartedAt: live.startedAt };
+          why = null;
+        }
+      }
       if (why) {
         staleEntries.push({ ...e, type: 'lease', stale: why });
         if (reclaim) {
-          dropFile(file, hbFile, e.actFile);
+          dropFile(file, hbFile, e.actFile, liveFile);
           endedLeases.push(e);
           reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why });
           noteClear(ctx, e, 'lease', ruleFor(why, 'lease'), { why, pid: e.pid });
         }
       } else {
         // Live pid, fresh heartbeat: the config rules (max-hold, idle) may still clear it.
-        // A kept verdict (max-hold on a live, active or unmeasured holder of an exclusive
-        // resource) only flags the lease "over time"; it is never released for it.
-        const v = liveVerdict(ctx.rules, e, ctx.now());
-        if (v?.keep) e.overTime = v.evidence;
+        // A live holder (its wrapper pid, or the bound pid) is not released by these rules before the 4 h live-holder ceiling,
+        // whatever the probe read: the verdict comes back as a flag (max-hold -> overTime,
+        // idle -> idleFlag), with the sample evidence, and the lease is kept.
+        const holderAlive = ctx.isAlive(e.pid) || (e.boundPid > 0 && ctx.isAlive(e.boundPid));
+        let v = liveVerdict(ctx.rules, e, ctx.now(), ctx.env, { alive: holderAlive });
+        if (v?.keep) { if (v.rule === 'idle') e.idleFlag = v.evidence; else e.overTime = v.evidence; }
+        if (v?.alsoIdle) e.idleFlag = v.alsoIdle;
+        // Held only by a stale heartbeat (no max-hold or idle verdict past the ceiling): the same ceiling.
+        if (e.hbStale && !(v && !v.keep)) {
+          const ceilingMs = liveCeilingMs(ctx.rules);
+          const heldMs = ctx.now() - (num(e.startedAt) || ctx.now());
+          if (ceilingMs && heldMs > ceilingMs) {
+            v = { rule: 'live-holder-ceiling', evidence: { heldMs, ceilingMs, flaggedBy: 'heartbeat-stale', ...e.hbStale } };
+          }
+        }
         if (v && !v.keep && reclaim) {
           // The tombstone first, so the owner's heartbeat does not put the lease back.
           try { writeFileSync(join(ctx.dir, `lease-${m[1]}.cleared`), String(ctx.now()), { flag: 'wx' }); } catch { /* already marked */ }
-          dropFile(file, hbFile, e.actFile);
+          dropFile(file, hbFile, e.actFile, liveFile);
           endedLeases.push(e);
           reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why: `rule ${v.rule}` });
           noteClear(ctx, e, 'lease', v.rule, v.evidence);
-          ctx.log(`resource-queue: cleared the lease of pid ${e.pid} (${e.label || e.worktree}) by rule ${v.rule}; the process is not touched.`);
+          ctx.log(v.rule === 'live-holder-ceiling'
+            ? `resource-queue: RELEASED the lease of LIVE pid ${e.pid} (${e.label || e.worktree}) held ${Math.round(v.evidence.heldMs / 60_000)} min, past the ${Math.round(v.evidence.ceilingMs / 60_000)} min live-holder ceiling (flagged by ${v.evidence.flaggedBy}); the process is NOT touched and may still be running. Logged in clears.jsonl as live-holder-ceiling.`
+            : `resource-queue: cleared the lease of pid ${e.pid} (${e.label || e.worktree}) by rule ${v.rule}; the process is not touched.`);
         } else leases.push(e);
       }
       continue;
@@ -897,9 +967,11 @@ function createLease(ctx, {
     bound: bindPid > 0, boundPid: bindPid,
     beat,
     /** Record a probe result: sampledAt = when it ran, activeAt = the last time the holder was seen working. */
-    recordActivity(sampledAt, activeAt) {
+    recordActivity(sampledAt, activeAt, ev = null) {
       if (released) return;
-      try { writeFileSync(actFile, `${Math.trunc(sampledAt)} ${Math.trunc(activeAt)}`); } catch { /* best effort */ }
+      // Line 1 "sampledAt activeAt"; line 2 (optional) the sample's replay record as JSON.
+      const tail = ev && typeof ev === 'object' ? `\n${JSON.stringify(ev)}` : '';
+      try { writeFileSync(actFile, `${Math.trunc(sampledAt)} ${Math.trunc(activeAt)}${tail}`); } catch { /* best effort */ }
     },
     release() {
       if (released) return;
@@ -913,6 +985,7 @@ function createLease(ctx, {
       tryUnlink(file);
       tryUnlink(hbFile);
       tryUnlink(actFile);
+      tryUnlink(join(ctx.dir, `lease-${id}.live`));
       tryUnlink(clearedFile);
       // A group's job ending restarts the idle clock of its reservations (survives this process).
       try { touchReservations(ctx, group, Object.keys(resources).concat(units > 0 ? [BOX] : [])); } catch { /* best effort */ }
@@ -1551,6 +1624,9 @@ export function inspectLease(id, opts = {}) {
 
 // ---------------------------------------------------------------- resource status (schema v1)
 
+// The CLI that releases a lease by hand (resource-queue.mjs release <lease-id>), named in every flag text.
+const RELEASE_SCRIPT = fileURLToPath(new URL('./resource-queue.mjs', import.meta.url));
+
 function holderOut(ctx, l, units, stale, now) {
   const hb = Math.max(num(l.heartbeatAt), num(l.hbSide), num(l.startedAt));
   return {
@@ -1560,7 +1636,11 @@ function holderOut(ctx, l, units, stale, now) {
     ageMs: Math.max(0, now - num(l.startedAt)), heartbeatAgeMs: Math.max(0, now - hb),
     lastActivityAt: l.act ? l.act.activeAt : null, idleMs: l.act ? Math.max(0, now - l.act.activeAt) : null,
     stale: stale || null, group: l.group || '', bound: l.boundPid > 0, boundPid: l.boundPid > 0 ? l.boundPid : null,
-    overTime: l.overTime ? { heldMs: l.overTime.heldMs, maxHoldMs: l.overTime.maxHoldMs, activity: l.overTime.activity } : null,
+    overTime: l.overTime ? { heldMs: l.overTime.heldMs, maxHoldMs: l.overTime.maxHoldMs, activity: l.overTime.activity, ...(l.overTime.sample ? { sampleAgeMs: l.overTime.sampleAgeMs, sample: l.overTime.sample } : {}) } : null,
+    idleFlag: l.idleFlag ? { idleMs: l.idleFlag.idleMs, idleLimitMs: l.idleFlag.idleLimitMs, sampleAgeMs: l.idleFlag.sampleAgeMs ?? null, sample: l.idleFlag.sample ?? null } : null,
+    hbStale: l.hbStale ? { heartbeatAgeMs: l.hbStale.heartbeatAgeMs, staleMs: l.hbStale.staleMs } : null,
+    ceilingMs: liveCeilingMs(ctx.rules) || null,
+    releaseCommand: `node "${RELEASE_SCRIPT}" release ${l.id}`,
   };
 }
 
@@ -1673,7 +1753,11 @@ export function formatResourceStatus(st) {
     if (!r.holders.length) lines.push('  free');
     for (const h of r.holders) {
       const flags = [h.bound ? 'BOUND to this pid' : '', h.group ? `group ${h.group}` : '', h.stale ? `STALE (${h.stale})` : '', h.kind !== 'legacy' && !h.alive ? 'PID DEAD' : '',
-        h.overTime ? `OVER TIME (${dur(h.overTime.heldMs)} > ${dur(h.overTime.maxHoldMs)} limit, ${h.overTime.activity}: kept, not released)` : ''].filter(Boolean).join(' ');
+        h.overTime ? `OVER TIME (${dur(h.overTime.heldMs)} > ${dur(h.overTime.maxHoldMs)} limit, ${h.overTime.activity}: kept, not released)` : '',
+        h.idleFlag ? `IDLE? (quiet ${dur(h.idleFlag.idleMs)} > ${dur(h.idleFlag.idleLimitMs)}, holder alive: kept, not released)` : '',
+        h.hbStale ? `HEARTBEAT STALE (no beat for ${dur(h.hbStale.heartbeatAgeMs)} > ${dur(h.hbStale.staleMs)}, pid verified alive: kept, not released)` : '',
+        h.overTime || h.idleFlag || h.hbStale
+          ? `[flagged live holder: released by the sweep at ${h.ceilingMs ? `${dur(h.ceilingMs)} held` : 'no ceiling (never)'}, or when it exits; release by hand: ${h.releaseCommand}]` : ''].filter(Boolean).join(' ');
       lines.push(`  ${h.kind.padEnd(8)} pid ${String(h.pid).padEnd(7)} ${h.units}u  age ${dur(h.ageMs)}  heartbeat ${h.heartbeatAgeMs === null ? 'n/a' : `${dur(h.heartbeatAgeMs)} ago`}`
         + `${h.idleMs !== null ? `  idle ${dur(h.idleMs)}` : ''}  ${h.project || ''} ${h.worktree}${h.label ? `  [${h.label}]` : ''}${h.session ? `  session ${h.session.slice(0, 8)}` : ''}${flags ? `  ${flags}` : ''}`);
     }
@@ -1744,6 +1828,34 @@ export function reserveResource(opts = {}) {
     return { ok: false, error: `the ledger is not writable (${err.code || err.message})` };
   }
   return { ok: true, reservation: { ...rec, endsAt }, clamped: until > endsAt };
+}
+
+/**
+ * Release one lease by hand: the way out for a flagged live holder (OVER TIME, IDLE?, HEARTBEAT
+ * STALE) that is hung, before the ceiling releases it. `id` is the lease id, or a unique prefix of
+ * at least 4 characters. Writes the tombstone (so the owner's heartbeat does not put it back), drops
+ * the files and logs a clear by "manual". Never signals or kills the process.
+ * Returns { ok: true, released: {id, pid, label, project, wasAlive} } or { ok: false, error }.
+ */
+export function releaseLease(opts = {}) {
+  const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+  const id = String(opts.id ?? '').trim().toLowerCase();
+  if (!/^[0-9a-f]{4,12}$/.test(id)) return { ok: false, error: `bad lease id "${opts.id ?? ''}" (the hex id from status, at least 4 characters)` };
+  let st;
+  try { st = readState(ctx, { reclaim: false }); } catch (e) { return { ok: false, error: `ledger unreadable (${e.message})` }; }
+  const hits = [...st.leases, ...st.stale.filter((s) => s.type === 'lease')].filter((l) => l.id.startsWith(id));
+  const uniq = [...new Map(hits.map((l) => [l.id, l])).values()];
+  if (!uniq.length) return { ok: false, error: `no lease with id ${id} (see status)` };
+  if (uniq.length > 1) return { ok: false, error: `id ${id} matches ${uniq.length} leases (${uniq.map((l) => l.id).join(', ')}); give more characters` };
+  const e = uniq[0];
+  const wasAlive = ctx.isAlive(e.pid) || (e.boundPid > 0 && ctx.isAlive(e.boundPid));
+  try { writeFileSync(join(ctx.dir, `lease-${e.id}.cleared`), String(ctx.now()), { flag: 'wx' }); } catch { /* already marked */ }
+  dropFile(e.file, e.hbFile, e.actFile, join(ctx.dir, `lease-${e.id}.live`));
+  noteClear(ctx, e, 'lease', 'manual', {
+    by: 'manual', session: ctx.session || null, byPid: num(ctx.env.CLAUDE_PID) || null, wasAlive,
+    heldMs: Math.max(0, ctx.now() - num(e.startedAt)), pid: e.pid,
+  });
+  return { ok: true, released: { id: e.id, pid: e.pid, label: e.label, project: e.project || e.repo, wasAlive } };
 }
 
 /** Remove reservations on `resource` (all of them, or only `forGroup`'s). Anyone may; each is logged. */

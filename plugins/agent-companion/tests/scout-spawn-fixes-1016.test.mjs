@@ -26,7 +26,7 @@ function driftSignal(fx, cwd, projects) {
   return res.json.signals.find((s) => s.kind === 'project_agent_drift');
 }
 
-test('project_agent_drift: a repo root is named "repo root", a worktree by its tree, and a root listed in both slash forms once', () => {
+test('project_agent_drift: a repo root is named "repo root", its worktree is folded into it, and a root listed in both slash forms once', () => {
   const fx = makeFixture();
   try {
     const root = join(fx.dir, 'proj-a');
@@ -38,10 +38,10 @@ test('project_agent_drift: a repo root is named "repo root", a worktree by its t
     const slashes = root.replace(/\//g, '\\');
     const s = driftSignal(fx, clean, [root, slashes, tree]);
     assert.ok(s);
-    assert.match(s.detail, /^2 project\(s\)/, s.detail);
-    assert.match(s.detail, /repo root: /);
-    assert.match(s.detail, /tree-one: /);
-    assert.doesNotMatch(s.detail, /<name>|proj-a:/);
+    // 0.31.28: a repo's worktree copies fold into the repo, so root + tree-one is one project.
+    assert.match(s.detail, /^1 project\(s\)/, s.detail);
+    assert.match(s.detail, /repo root: .*\(1 worktree copy\)/);
+    assert.doesNotMatch(s.detail, /<name>|proj-a:|tree-one/);
     assert.equal((s.detail.match(/repo root/g) || []).length, 1, 'the root is listed once');
   } finally { fx.cleanup(); }
 });

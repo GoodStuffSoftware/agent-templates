@@ -5,6 +5,7 @@
 //        [--class <id>] [--ram 4G] [--label <text>] [--max-wait <seconds>] -- <cmd...>
 //   node <plugin>/scripts/resource-queue.mjs status [--json] [--resource <name>] [--sample] [--strays]
 //   node <plugin>/scripts/resource-queue.mjs sweep
+//   node <plugin>/scripts/resource-queue.mjs release <lease-id>
 //   node <plugin>/scripts/resource-queue.mjs install-launcher
 //
 // `run` waits in FIFO order until every resource it asks for is free at once,
@@ -27,13 +28,13 @@ import { constants as osConstants } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   acquireResources, inspectLease, resourceStatus, formatResourceStatus, sweepLedger, lowerOwnPriority, releaseAll, REENTRY_ENV,
-  reserveResource, unreserveResource, holdMine, resumeMine,
+  reserveResource, unreserveResource, holdMine, resumeMine, releaseLease,
 } from './ci-budget.mjs';
 import {
   BOX, NAME_RE, loadRules, classOf, ruleOf, limitsFor, parseRam, sampleTree, claudeHome,
 } from './lib/resource-rules.mjs';
 
-export { resourceStatus, formatResourceStatus, acquireResources, reserveResource, unreserveResource, holdMine, resumeMine };
+export { resourceStatus, formatResourceStatus, acquireResources, reserveResource, unreserveResource, holdMine, resumeMine, releaseLease };
 
 const SELF = fileURLToPath(import.meta.url);
 const USAGE = [
@@ -44,6 +45,7 @@ const USAGE = [
   '       resource-queue.mjs hold [--until <time>]    pause my own queued entries (keep their place)',
   '       resource-queue.mjs resume',
   '       resource-queue.mjs status [--json] [--resource <name>] [--sample] [--strays]',
+  '       resource-queue.mjs release <lease-id>       release one lease by hand (a hung live holder); the process is not touched',
   '       resource-queue.mjs sweep',
   '       resource-queue.mjs install-launcher',
 ].join('\n');
@@ -256,7 +258,7 @@ export async function runUnderQueue({
       if (!s) return; // unreadable: leave the sidecar alone, the lease reads "unknown", never "idle"
       prev = s;
       if (s.active) activeAt = s.at;
-      lease.recordActivity(s.at, activeAt);
+      lease.recordActivity(s.at, activeAt, s.ev);
     }, sampleMs);
     probeTimer.unref?.();
   }
@@ -473,6 +475,15 @@ export async function cli(argv, io = {}) {
         st.recentClears = st.recentClears.filter((c) => c.resources && only in c.resources);
       }
       out(json ? JSON.stringify(st, null, 2) : formatResourceStatus(st));
+      return 0;
+    }
+    if (cmd === 'release') {
+      if (rest.length !== 1 || rest[0].startsWith('--')) throw new Error('release needs exactly one lease id (the id shown by status)');
+      const r = releaseLease({ env, id: rest[0], ...(io.ledger ?? {}) });
+      if (!r.ok) throw new Error(r.error);
+      const l = r.released;
+      out(`released lease ${l.id} (pid ${l.pid}${l.label ? `, ${l.label}` : ''}${l.project ? ` @${l.project}` : ''}); logged in clears.jsonl as a clear by "manual". `
+        + `${l.wasAlive ? 'Its process was alive and is NOT touched: stop it yourself if it is hung. ' : ''}Its wrapper will not put the lease back.`);
       return 0;
     }
     if (cmd === 'sweep') {

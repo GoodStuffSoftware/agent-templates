@@ -526,10 +526,9 @@ test('CLI: set/why/unset/rollback/show end to end, with F1-F5 refusals at write'
     assert.equal(shown.json.journalMatches, true);
 
     assert.equal(cli('unset', 'integration').status, 0);
-    // integration's shipped trial carries its own F5 waiver (0.29.2 "effort"
-    // decision), so it still resolves to opus/medium once the profile row
-    // that was shadowing it is gone.
-    assert.match(cli('why', 'integration').stdout, /winner:\s+trial -> opus\/medium/);
+    // integration's shipped trial (sonnet/high since the 2026-10-16 routing
+    // review) wins again once the profile row that was shadowing it is gone.
+    assert.match(cli('why', 'integration').stdout, /winner:\s+trial -> sonnet\/high/);
     assert.equal(cli('rollback', '--row', 'integration').status, 0);
     assert.match(cli('why', 'integration').stdout, /winner:\s+profile/);
     assert.equal(cli('rollback', '--to', '0').status, 0);

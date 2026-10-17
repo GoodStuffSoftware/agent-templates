@@ -47,13 +47,13 @@ test('every ladder rung names an agent definition file that actually exists with
 
 test('recommend.mjs prints the namespaced spawnable agent name for a routed task', () => {
   // bounded-feature is under the routing trial (config/model-tiers.json
-  // taskTypes.bounded-feature.override, v3 amended 2026-09-27, reviewBy
-  // 2026-10-04): opus/medium, not the plain grid's sonnet/medium — see
+  // taskTypes.bounded-feature.override, settled 2026-10-17 on the 2026-10-16
+  // routing review): sonnet/high, not the plain grid's sonnet/medium — see
   // routing-trial.test.mjs and routing-table-docs.test.mjs for the trial.
   const res = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-opus-medium');
-  assert.equal(res.json.rung, 7);
+  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-sonnet-high');
+  assert.equal(res.json.rung, 4);
 });
 
 // CHANGED in slice 1b (ADR 0003 §1, operator-approved 2026-09-24): this used
@@ -72,7 +72,7 @@ test('an explicit --weight/--kind that departs from the preset bypasses the tria
 test('an explicit --kind EQUAL to the preset keeps the bounded-feature trial (slice 1b)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--kind', 'bounded', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-opus-medium');
+  assert.equal(res.json.spawnAgentNamespaced, 'agent-companion:ac-sonnet-high');
   assert.ok(res.json.trial);
 });
 

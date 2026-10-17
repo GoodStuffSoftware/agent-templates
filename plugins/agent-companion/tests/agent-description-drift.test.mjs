@@ -250,13 +250,13 @@ test('mutation: a FALSE "default for <type>" claim in a config role fails the ch
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    // verify routes to haiku/medium, not sonnet/low.
-    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-sonnet-low' ? { ...r, role: `${r.role}; default for verify` } : r)));
+    // verify routes to sonnet/low (10-16 verdict), not haiku.
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-haiku' ? { ...r, role: `${r.role}; default for verify` } : r)));
     assert.equal(sync(agentsDir).status, 0);
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
-    assert.match(res.stderr, /ac-sonnet-low \[false-claim\]/);
-    assert.match(res.stderr, /"verify" currently routes to haiku\/medium, not this rung/);
+    assert.match(res.stderr, /ac-haiku \[false-claim\]/);
+    assert.match(res.stderr, /"verify" currently routes to sonnet\/low, not this rung/);
   } finally {
     cleanup();
   }
@@ -266,7 +266,7 @@ test('a TRUE "default for <type>" claim in a config role passes once synced', ()
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-haiku' ? { ...r, role: `${r.role}; default for verify` } : r)));
+    writeLadderOverride(stateDir, shippedLadder().map((r) => (r.agent === 'ac-sonnet-low' ? { ...r, role: `${r.role}; default for verify` } : r)));
     assert.equal(sync(agentsDir).status, 0);
     const res = check(agentsDir);
     assert.equal(res.status, 0, res.stdout + res.stderr);

@@ -36,7 +36,7 @@ export function makeWorld(over = {}) {
   const legacy = mkdtempSync(join(tmpdir(), 'rq-legacy-'));
   const cfg = mkdtempSync(join(tmpdir(), 'rq-cfg-'));
   const w = {
-    t: T0, busy: 0, lines: [], dead: new Set(), dir, legacy, cfg, free: 48 * GB, total: 64 * GB, polls: 0,
+    t: T0, busy: 0, lines: [], dead: new Set(), starts: {}, dir, legacy, cfg, free: 48 * GB, total: 64 * GB, polls: 0,
   };
   w.opts = {
     dir, env: { CI_LOCAL_LOCK_DIR: legacy, CLAUDE_CONFIG_DIR: cfg }, legacyDir: legacy,
@@ -46,6 +46,7 @@ export function makeWorld(over = {}) {
     sleep: (ms) => { w.t += ms; },
     delay: async (ms) => { w.polls += 1; w.t += ms; await tick(); },
     isAlive: (pid) => !w.dead.has(pid),
+    procStart: (pid) => w.starts[pid] ?? null, // verified process start times (epoch ms); none by default: a stale heartbeat is released
     sampler: () => w.busy,
     freemem: () => w.free,
     totalmem: () => w.total,

@@ -23,7 +23,8 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   readStdin, opt, dataDirs, stateDir, stateFile, passthrough, sessionIsSubagent, scoutSuppressed, stateRootPath,
 } from './lib/context.mjs';
@@ -33,6 +34,9 @@ import { githubOwnerRepoFromUrl, repoCacheKey } from '../scripts/lib/ci-status.m
 import { readPending, markSeen } from '../scripts/lib/release-watch.mjs';
 import { pendingSurface, markSurfaced, launchCheckup } from '../scripts/lib/daily-checkup.mjs';
 import { pendingLine, markFlagsSurfaced } from '../scripts/lib/decision-register.mjs';
+import {
+  readState as readHandoffState, readAcks, evaluate as evaluateHandoff, triageLine, parseTriagePatterns, isTriageCwd, ackCommandFor, paths as handoffPaths, DEFAULT_REPEAT_DAYS,
+} from '../scripts/lib/scout-handoff.mjs';
 import { pendingUsageSummary, markUsageSurfaced, unattendedReason } from '../scripts/lib/usage/surface.mjs';
 
 const MAX_AGE_DAYS = 7;
@@ -53,8 +57,43 @@ function dedupeKinds(signals) {
   return [...counts.entries()].map(([k, n]) => (n > 1 ? `${k} x${n}` : k));
 }
 
-function buildScoutBlock() {
+// --- Piece 1b: the actionable line for a triage session -----------------------
+// Sessions whose cwd matches the scout_triage_cwds option get the top unacknowledged
+// signals (with days repeating) and the pointers to scout-delta.md and the ack
+// command, instead of the passive kinds list. Every other session is unchanged.
+// Reads only the hand-off state and ledger the scout wrote (scripts/lib/scout-handoff.mjs):
+// no scan, no network, no model. Returns undefined when there is no hand-off state
+// yet (the caller falls back to the passive line); null when everything is acknowledged.
+function buildTriageBlock() {
+  const dir = stateDir();
+  const state = readHandoffState(dir);
+  if (!state || !state.checkedAt) return undefined;
+  const ageDays = (Date.now() - Date.parse(state.checkedAt)) / 86400000;
+  if (!(ageDays <= MAX_AGE_DAYS)) return null; // stale results are not news
+  const view = evaluateHandoff(state, readAcks(dir), { nowMs: Date.now(), threshold: opt('scout_repeat_days', DEFAULT_REPEAT_DAYS) });
+  const hidden = scoutSuppressed();
+  hidden.add(RELEASE_KIND);
+  hidden.add(REGISTER_KIND);
+  const here = dirname(dirname(fileURLToPath(import.meta.url)));
+  const ctx = triageLine(view, {
+    mdPath: handoffPaths(dir).md.split(String.fromCharCode(92)).join('/'),
+    ackHint: `${ackCommandFor(here)} add <kind> --note "<why>"`,
+    skipKinds: [...hidden],
+  });
+  if (!ctx) return null;
+  return { summary: ctx.split(/\r?\n/)[0].replace('[agent-companion] ', 'agent-companion '), context: ctx };
+}
+
+function buildScoutBlock(payload) {
   if (!opt('scout_surface', true)) return null;
+  if (isTriageCwd((payload && payload.cwd) || process.cwd(), parseTriagePatterns(opt('scout_triage_cwds', '')))) {
+    // The triage line is shown once per session start; a compact start of the same
+    // session does not repeat it.
+    if (payload && payload.source === 'compact') return null;
+    let triage;
+    try { triage = buildTriageBlock(); } catch { triage = undefined; } // a damaged hand-off file falls back to the passive line
+    if (triage !== undefined) return triage;
+  }
 
   let latest = null;
   let latestFile = null;
@@ -227,7 +266,7 @@ try {
   try { ciLine = buildCiRedLine(); } catch { ciLine = null; }
 
   let scoutBlock = null;
-  try { scoutBlock = buildScoutBlock(); } catch { scoutBlock = null; }
+  try { scoutBlock = buildScoutBlock(p); } catch { scoutBlock = null; }
 
   let unattendedWhy;
   const unattended = () => {

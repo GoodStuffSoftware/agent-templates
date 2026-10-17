@@ -269,6 +269,29 @@ test('status on an empty or missing ledger is ok and has the same shape; sweep s
   } finally { b.done(); }
 });
 
+test('release <lease-id> frees one lease by hand, logs a clear by "manual", and refuses a bad or unknown id with exit 2', async () => {
+  const b = box();
+  const holder = await acquireResources({
+    dir: b.ledger, env: b.env, legacyDir: b.legacy, box: 1, resources: { 'app-e2e': 1 }, label: 'cli-hung', heartbeat: 'off', registerExit: false, log: () => {},
+  });
+  try {
+    const st = JSON.parse(b.run(['status', '--json']).stdout);
+    const h = st.resources.find((x) => x.name === 'app-e2e').holders[0];
+    assert.match(h.releaseCommand, /resource-queue\.mjs" release [0-9a-f]{12}$/);
+    assert.equal(b.run(['release']).status, 2);
+    assert.equal(b.run(['release', 'nope']).status, 2);
+    assert.equal(b.run(['release', 'beef01']).status, 2);
+    const r = b.run(['release', h.id]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /released lease [0-9a-f]{12} .*cli-hung.*"manual"/);
+    assert.match(r.stdout, /NOT touched/, 'the holder process (this one) is alive and is left alone');
+    const after = JSON.parse(b.run(['status', '--json']).stdout);
+    assert.equal(after.resources.find((x) => x.name === 'app-e2e').held, 0);
+    assert.equal(after.recentClears[0].rule, 'manual');
+    assert.equal(b.run(['release', h.id]).status, 2, 'already released');
+  } finally { holder.release(); b.done(); }
+});
+
 test('install-launcher writes the stable path under the claude dir', () => {
   const b = box();
   try {

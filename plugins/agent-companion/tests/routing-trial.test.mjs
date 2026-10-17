@@ -58,23 +58,52 @@ import { PLUGIN_ROOT, makeFixture, runScript } from './helpers.mjs';
 
 const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.json'), 'utf8'));
 
-// 2026-10-02 (trial v4): the five simple types leave opus/low. Cache reads
-// cost the same on Opus 5.5 and Sonnet 5, so opus/low is about 1.2-1.55x
-// Sonnet 5 medium; reads and checks go to haiku, the rest to sonnet/low.
+// v5 (2026-10-16 verdicts, DECISIONS.md; the lead chose sonnet/high for
+// bounded-feature): verify moves to sonnet/low, bounded-feature and
+// integration move to sonnet/high. integration's F5 waiver is gone (sonnet/high
+// meets the elevated floor of high). reviewBy is removed from the settled rows
+// (mechanical-edit, operate, debug-root-cause, novel-design); large-refactor,
+// long-autonomous-run and subagent-worker are reviewed on 2026-10-30; explore
+// keeps its 2026-10-16 review.
+const SHIPPED_ROWS = {
+  // type: [model, effort, trialSince, reviewBy or null (no review date: settled)]
+  explore: ['haiku', 'medium', '2026-10-02', '2026-10-16'],
+  'mechanical-edit': ['sonnet', 'low', '2026-10-02', null],
+  'subagent-worker': ['sonnet', 'low', '2026-10-02', '2026-10-30'],
+  operate: ['sonnet', 'low', '2026-10-02', null],
+  verify: ['sonnet', 'low', '2026-10-02', null],
+  'bounded-feature': ['sonnet', 'high', '2026-09-27', null],
+  integration: ['sonnet', 'high', '2026-09-24', null],
+  'debug-root-cause': ['opus', 'medium', '2026-09-27', null],
+  'novel-design': ['opus', 'xhigh', '2026-09-27', null],
+  'large-refactor': ['opus', 'high', '2026-10-02', '2026-10-30'],
+  'long-autonomous-run': ['opus', 'high', '2026-10-02', '2026-10-30'],
+};
+const rowOf = (type) => {
+  const [model, effort, trialSince, reviewBy] = SHIPPED_ROWS[type];
+  return { type, model, effort, trialSince, reviewBy };
+};
+const REVIEW_DATED = Object.keys(SHIPPED_ROWS).filter((t) => SHIPPED_ROWS[t][3]);
+
+// 2026-10-02 (trial v4): the simple types leave opus/low. Cache reads cost the
+// same on Opus 5.5 and Sonnet 5, so opus/low is about 1.2-1.55x Sonnet 5
+// medium; reads go to haiku, the rest to sonnet/low. verify moved on again in
+// v5 (sonnet/low); its reason no longer carries the opus/low cost text.
 const CHANGED = [
   ['explore', 'haiku', 'medium'],
-  ['verify', 'haiku', 'medium'],
+  ['verify', 'sonnet', 'low'],
   ['mechanical-edit', 'sonnet', 'low'],
   ['subagent-worker', 'sonnet', 'low'],
   ['operate', 'sonnet', 'low'],
 ];
+// The rows whose reason still states the corrected opus/low cost (v4 text).
+const V4_COST_TEXT = ['explore', 'mechanical-edit', 'subagent-worker', 'operate'];
 const V4_SINCE = '2026-10-02';
-const V4_REVIEW_BY = '2026-10-16';
 
-// The 2026-09-27 amendment (trial v3): these four moved, so their
-// trialSince is the amendment date and their reviewBy is a week later.
+// The 2026-09-27 amendment (trial v3) rows that still sit where it put them,
+// plus bounded-feature, which v5 moved to sonnet/high (trialSince unchanged).
 const AMENDED = [
-  ['bounded-feature', 'opus', 'medium'],
+  ['bounded-feature', 'sonnet', 'high'],
   ['debug-root-cause', 'opus', 'medium'],
   ['novel-design', 'opus', 'xhigh'],
 ];
@@ -86,17 +115,24 @@ const ARCH_V4 = [
   ['long-autonomous-run', 'opus', 'high'],
 ];
 const AMENDED_SINCE = '2026-09-27';
-const AMENDED_REVIEW_BY = '2026-10-04';
+
+function assertTrial(res, type) {
+  const want = rowOf(type);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.json.model, want.model, type);
+  assert.equal(res.json.effort, want.effort, type);
+  assert.ok(res.json.trial, `${type} must report trial metadata`);
+  assert.equal(res.json.trial.trialSince, want.trialSince, type);
+  if (want.reviewBy) assert.equal(res.json.trial.reviewBy, want.reviewBy, type);
+  else assert.ok(!res.json.trial.reviewBy, `${type} is settled: no reviewBy`);
+}
 
 for (const [type, model, effort] of AMENDED) {
-  test(`recommend --type ${type} routes to ${model}/${effort} under the trial (v3, since ${AMENDED_SINCE})`, () => {
+  test(`recommend --type ${type} routes to ${model}/${effort} under the trial (since ${AMENDED_SINCE}, settled: no reviewBy)`, () => {
     const res = runScript('scripts/recommend.mjs', ['--type', type, '--json']);
-    assert.equal(res.status, 0, res.stderr);
+    assertTrial(res, type);
     assert.equal(res.json.model, model);
     assert.equal(res.json.effort, effort);
-    assert.ok(res.json.trial, `${type} must report trial metadata`);
-    assert.equal(res.json.trial.trialSince, AMENDED_SINCE);
-    assert.equal(res.json.trial.reviewBy, AMENDED_REVIEW_BY);
   });
 }
 
@@ -121,15 +157,15 @@ test('no shipped trial reason still claims Opus low is cheaper than, or costs th
   }
 });
 
-test('the five v4 rows state the corrected opus/low cost (about 1.2-1.55x Sonnet medium)', () => {
-  for (const [type] of CHANGED) {
+test('the four v4 rows that kept their reason state the corrected opus/low cost (about 1.2-1.55x Sonnet medium)', () => {
+  for (const type of V4_COST_TEXT) {
     const r = cfg.taskTypes[type].override.reason;
     assert.match(r, /cache reads cost the same/i, type);
     assert.match(r, /1\.2-1\.55x Sonnet 5 MEDIUM/, type);
   }
 });
 
-test('base routing: explore and verify route to haiku, mechanical-edit, operate and subagent-worker to sonnet/low (no profile)', () => {
+test('base routing: explore routes to haiku; verify, mechanical-edit, operate and subagent-worker to sonnet/low (no profile)', () => {
   for (const [type, model, effort] of CHANGED) {
     const res = runScript('scripts/recommend.mjs', ['--type', type, '--json']);
     assert.equal(res.status, 0, res.stderr);
@@ -137,7 +173,7 @@ test('base routing: explore and verify route to haiku, mechanical-edit, operate 
     assert.equal(res.json.effort, effort, type);
   }
   // everything the correction must NOT touch
-  for (const [type, model, effort] of [['bounded-feature', 'opus', 'medium'], ['integration', 'opus', 'medium'], ['debug-root-cause', 'opus', 'medium']]) {
+  for (const [type, model, effort] of [['bounded-feature', 'sonnet', 'high'], ['integration', 'sonnet', 'high'], ['debug-root-cause', 'opus', 'medium']]) {
     const res = runScript('scripts/recommend.mjs', ['--type', type, '--json']);
     assert.equal(res.json.model, model, type);
     assert.equal(res.json.effort, effort, type);
@@ -147,27 +183,21 @@ test('base routing: explore and verify route to haiku, mechanical-edit, operate 
 for (const [type, model, effort] of CHANGED) {
   test(`recommend --type ${type} routes to ${model}/${effort} under the trial`, () => {
     const res = runScript('scripts/recommend.mjs', ['--type', type, '--json']);
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(res.json.model, model);
-    assert.equal(res.json.effort, effort);
-    assert.ok(res.json.trial, `${type} must report trial metadata`);
-    assert.equal(res.json.trial.trialSince, V4_SINCE);
-    assert.equal(res.json.trial.reviewBy, V4_REVIEW_BY);
+    assert.equal(model, rowOf(type).model);
+    assert.equal(effort, rowOf(type).effort);
+    assertTrial(res, type);
   });
 }
 
 // integration is checked separately (not in CHANGED above): its trial moved
-// AGAIN on 2026-09-24 (0.29.2 "effort" architecture decision, opus/high ->
-// opus/medium), so its trialSince differs from the rest of the 2026-09-23
-// window while reviewBy stays the same.
-test('recommend --type integration routes to opus/medium under the routing trial (v3, since 2026-09-24)', () => {
+// on 2026-09-24 (0.29.2 "effort" decision, opus/high -> opus/medium) and again
+// in v5 (2026-10-16 verdicts, opus/medium -> sonnet/high), so its trialSince
+// differs from the rest of the 2026-09-23 window and it carries no reviewBy.
+test('recommend --type integration routes to sonnet/high under the routing trial (v5, since 2026-09-24, settled)', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'integration', '--json']);
-  assert.equal(res.status, 0, res.stderr);
-  assert.equal(res.json.model, 'opus');
-  assert.equal(res.json.effort, 'medium');
-  assert.ok(res.json.trial, 'integration must report trial metadata');
-  assert.equal(res.json.trial.trialSince, '2026-09-24');
-  assert.equal(res.json.trial.reviewBy, '2026-09-30');
+  assertTrial(res, 'integration');
+  assert.equal(res.json.model, 'sonnet');
+  assert.equal(res.json.effort, 'high');
 });
 
 test('novel-design explicitly overrides the novel-design kind\'s +2 effort delta, not a silent kind change', () => {
@@ -185,11 +215,10 @@ test('novel-design explicitly overrides the novel-design kind\'s +2 effort delta
 for (const [type, model, effort] of ARCH_V4) {
   test(`${type} routes to ${model}/${effort} under trial v4 (since ${V4_SINCE}), while the plain grid still says opus/xhigh`, () => {
     const res = runScript('scripts/recommend.mjs', ['--type', type, '--json']);
-    assert.equal(res.status, 0, res.stderr);
+    assertTrial(res, type);
     assert.equal(res.json.model, model);
     assert.equal(res.json.effort, effort);
-    assert.equal(res.json.trial.trialSince, V4_SINCE);
-    assert.equal(res.json.trial.reviewBy, V4_REVIEW_BY);
+    assert.equal(res.json.trial.reviewBy, '2026-10-30');
     assert.equal(res.json.trial.gridResolution, 'opus/xhigh');
   });
 }
@@ -202,25 +231,26 @@ test('novel-design and critical-change stay on opus/xhigh after the v4 architect
   }
 });
 
-test('integration (v3): the 0.29.2 "effort" decision moved it to opus/medium via its own explicit F5 waiver (the elevated floor itself stays high)', () => {
+test('integration (v5): sonnet/high meets the elevated effort floor (F5, high) by itself: the shipped row carries no waiver', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'integration', '--json']);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(res.json.model, 'opus');
-  assert.equal(res.json.effort, 'medium');
+  assert.equal(res.json.model, 'sonnet');
+  assert.equal(res.json.effort, 'high');
   assert.equal(res.json.trial.gridResolution, 'sonnet/high');
-  // The waiver itself is proven via the human-readable --explain text (the
-  // structured --json route shape does not carry it): "why" and "explain"
-  // must both say the row's own waiver is honoured, not a lowered floor.
+  // No waiver in the config, and none in the human-readable --explain text.
+  // (The waiver path itself is proven in tests/architecture-floor-diff.test.mjs.)
+  const ov = cfg.taskTypes.integration.override;
+  assert.ok(!Object.keys(ov).some((k) => /waive/i.test(k)), `integration.override must carry no waiver key: ${Object.keys(ov).join(',')}`);
   const explained = runScript('scripts/recommend.mjs', ['--type', 'integration', '--explain']);
-  assert.match(explained.stdout, /waiver:\s+F5 elevated effort floor — HONOURED: operator-observed row waives the elevated effort floor \(F5\)/);
-  assert.match(explained.stdout, /floors:\s+F5 waived: effort medium kept below high/);
+  assert.doesNotMatch(explained.stdout, /waiver:/);
+  assert.doesNotMatch(explained.stdout, /F5 waived/);
 });
 
 test('debug-root-cause explicitly overrides the diagnostic kind\'s +1 effort delta, not a silent kind change', () => {
   const res = runScript('scripts/recommend.mjs', ['--type', 'debug-root-cause', '--json']);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.json.model, 'opus');
-  assert.equal(res.json.effort, 'medium', 'v3: level with bounded-feature at medium, even though the diagnostic kind would normally add +1');
+  assert.equal(res.json.effort, 'medium', 'v3: opus/medium, even though the diagnostic kind would normally add +1');
   assert.equal(res.json.trial.overridesKindDelta, true);
   // The grid resolution recorded alongside the override must show what the
   // diagnostic +1 delta would otherwise have produced (sonnet/xhigh: weight 4
@@ -230,11 +260,14 @@ test('debug-root-cause explicitly overrides the diagnostic kind\'s +1 effort del
   assert.match(res.json.rationale, /EXPLICIT override/i);
 });
 
-test('debug-root-cause (v3) sits level with bounded-feature, not one rung above it', () => {
+test('debug-root-cause (opus/medium) is the one writer type that stays on opus; bounded-feature (v5) is sonnet/high, and neither is at low effort', () => {
   const debug = runScript('scripts/recommend.mjs', ['--type', 'debug-root-cause', '--json']);
   const feature = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature', '--json']);
-  assert.equal(debug.json.effort, feature.json.effort);
+  assert.equal(debug.json.model, 'opus');
+  assert.equal(feature.json.model, 'sonnet');
+  assert.ok(debug.json.rung > feature.json.rung, `debug-root-cause rung ${debug.json.rung} is above bounded-feature rung ${feature.json.rung}`);
   assert.notEqual(debug.json.effort, 'low');
+  assert.notEqual(feature.json.effort, 'low');
 });
 
 const UNMEASURED = [
@@ -262,127 +295,74 @@ test('code-review (parity-sized) is unaffected by the trial — no override, wei
   assert.equal(res.json.trial, undefined);
 });
 
-test('every override in config/model-tiers.json carries evidence, trialSince and reviewBy', () => {
-  // integration's trial moved again on 2026-09-24 (0.29.2 "effort" decision),
-  // so it carries a later trialSince than the rest of the 2026-09-23 window;
-  // every override still shares the same reviewBy.
-  const trialSinceByType = {
-    integration: '2026-09-24',
-    'bounded-feature': '2026-09-27',
-    'debug-root-cause': '2026-09-27',
-    'large-refactor': '2026-09-27',
-    'novel-design': '2026-09-27',
-  };
+test('every override in config/model-tiers.json carries evidence and trialSince; reviewBy is present exactly on the dated rows and absent on the settled ones', () => {
+  const overrides = Object.entries(cfg.taskTypes).filter(([, t]) => t.override).map(([name]) => name).sort();
+  assert.deepEqual(overrides, Object.keys(SHIPPED_ROWS).sort(), 'the table and this test name the same override rows');
   for (const [name, t] of Object.entries(cfg.taskTypes)) {
     if (!t.override) continue;
     const ov = t.override;
+    const want = rowOf(name);
     assert.ok(ov.model, `${name}.override.model`);
     assert.ok(ov.reason, `${name}.override.reason`);
     assert.ok(ov.evidence?.source, `${name}.override.evidence.source`);
-    const v4 = CHANGED.some(([type]) => type === name) || ARCH_V4.some(([type]) => type === name);
-    assert.equal(ov.trialSince, v4 ? V4_SINCE : (trialSinceByType[name] || '2026-09-23'), `${name}.override.trialSince`);
-    const amended = AMENDED.some(([type]) => type === name);
-    assert.equal(ov.reviewBy, v4 ? V4_REVIEW_BY : (amended ? AMENDED_REVIEW_BY : '2026-09-30'), `${name}.override.reviewBy`);
+    assert.equal(ov.model, want.model, `${name}.override.model`);
+    assert.equal(ov.effort, want.effort, `${name}.override.effort`);
+    assert.equal(ov.trialSince, want.trialSince, `${name}.override.trialSince`);
+    if (want.reviewBy) assert.equal(ov.reviewBy, want.reviewBy, `${name}.override.reviewBy`);
+    else assert.equal(ov.reviewBy, undefined, `${name}.override.reviewBy is removed on a settled row`);
   }
 });
 
 // --- Scout: routing trial due for review --------------------------------
 // detect.mjs reads AGENT_COMPANION_FAKE_NOW (a fake clock, no real waiting
-// for the calendar to reach 2026-09-30) so this is deterministic on any date.
+// for the calendar) so this is deterministic on any date. Only a row that
+// carries a reviewBy can be due: explore (2026-10-16) and large-refactor,
+// long-autonomous-run and subagent-worker (2026-10-30).
+function dueSignals(fakeNow) {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: { AGENT_COMPANION_FAKE_NOW: fakeNow } });
+    assert.equal(res.status, 0, res.stderr);
+    return res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
+  } finally {
+    cleanup();
+  }
+}
+const dueTypes = (sigs) => sigs.map((s) => s.detail.split(' ')[0]).sort();
+
 test('scout raises routing_trial_review_due once reviewBy has passed', () => {
-  const { dir, stateDir, cleanup } = makeFixture();
-  try {
-    const res = runScript('scripts/detect.mjs', [], {
-      cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00.000Z' },
-    });
-    assert.equal(res.status, 0, res.stderr);
-    const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
-    // integration (reviewBy 2026-09-30) is the only row due on 2026-10-01.
-    assert.equal(sigs.length, 1, `expected exactly 1 routing_trial_review_due signal, got ${sigs.length}`);
-    const names = sigs.map((s) => s.detail);
-    assert.ok(names.some((d) => d.startsWith('integration routing trial due for review')));
-    // The five v4 rows review on 2026-10-16, so they are not due yet.
-    for (const [type] of CHANGED) {
-      assert.ok(!names.some((d) => d.startsWith(`${type} routing trial due`)), `${type} is not due before ${V4_REVIEW_BY}`);
-    }
-    // The four v3 rows review on 2026-10-04, so they are not due yet.
-    for (const [type] of AMENDED) {
-      assert.ok(!names.some((d) => d.startsWith(`${type} routing trial due`)), `${type} is not due before ${AMENDED_REVIEW_BY}`);
-    }
-    assert.match(sigs[0].detail, /routing trial due for review: compare spawn telemetry outcomes and escalation rates since 2026-09-24/);
-    assert.match(sigs[0].detail, /reviewBy 2026-09-30/);
-    for (const s of sigs) assert.equal(s.dispatch, 'routing-review');
-    void stateDir;
-  } finally {
-    cleanup();
+  const sigs = dueSignals('2026-10-17T00:00:00.000Z');
+  // explore (reviewBy 2026-10-16) is the only row due on 2026-10-17.
+  assert.deepEqual(dueTypes(sigs), ['explore'], `expected only explore; got ${JSON.stringify(sigs.map((s) => s.detail))}`);
+  assert.match(sigs[0].detail, /explore routing trial due for review: compare spawn telemetry outcomes and escalation rates since 2026-10-02/);
+  assert.match(sigs[0].detail, /reviewBy 2026-10-16/);
+  for (const s of sigs) assert.equal(s.dispatch, 'routing-review');
+});
+
+test('scout raises the three 2026-10-30 rows on their own reviewBy, on top of explore', () => {
+  const sigs = dueSignals('2026-10-30T00:00:00.000Z');
+  assert.deepEqual(dueTypes(sigs), ['explore', 'large-refactor', 'long-autonomous-run', 'subagent-worker']);
+  for (const type of ['large-refactor', 'long-autonomous-run', 'subagent-worker']) {
+    const s = sigs.find((x) => x.detail.startsWith(`${type} routing trial due for review`));
+    assert.ok(s, `${type} must be due on 2026-10-30`);
+    assert.match(s.detail, /since 2026-10-02 \(reviewBy 2026-10-30 has passed\)/);
   }
 });
 
-test('scout raises the four v3 rows on their own reviewBy (2026-10-04)', () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const res = runScript('scripts/detect.mjs', [], {
-      cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-10-04T00:00:00.000Z' },
-    });
-    assert.equal(res.status, 0, res.stderr);
-    const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
-    for (const [type] of AMENDED) {
-      const s = sigs.find((x) => x.detail.startsWith(`${type} routing trial due for review`));
-      assert.ok(s, `${type} must be due on ${AMENDED_REVIEW_BY}`);
-      assert.match(s.detail, /since 2026-09-27 \(reviewBy 2026-10-04 has passed\)/);
-    }
-  } finally {
-    cleanup();
-  }
-});
-
-test('scout raises the five v4 rows on their own reviewBy (2026-10-16)', () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const res = runScript('scripts/detect.mjs', [], {
-      cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-10-16T00:00:00.000Z' },
-    });
-    assert.equal(res.status, 0, res.stderr);
-    const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
-    for (const [type] of CHANGED) {
-      const s = sigs.find((x) => x.detail.startsWith(`${type} routing trial due for review`));
-      assert.ok(s, `${type} must be due on ${V4_REVIEW_BY}`);
-      assert.match(s.detail, /since 2026-10-02 \(reviewBy 2026-10-16 has passed\)/);
-    }
-  } finally {
-    cleanup();
+test('scout never raises a settled row (no reviewBy), however late the clock', () => {
+  const sigs = dueSignals('2027-01-01T00:00:00.000Z');
+  assert.deepEqual(dueTypes(sigs), REVIEW_DATED.slice().sort());
+  for (const type of ['mechanical-edit', 'operate', 'verify', 'bounded-feature', 'integration', 'debug-root-cause', 'novel-design']) {
+    assert.ok(!sigs.some((s) => s.detail.startsWith(`${type} routing trial due`)), `${type} is settled: no review date, no finding`);
   }
 });
 
 test('scout is silent on routing_trial_review_due before reviewBy', () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const res = runScript('scripts/detect.mjs', [], {
-      cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-09-25T00:00:00.000Z' },
-    });
-    assert.equal(res.status, 0, res.stderr);
-    const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
-    assert.equal(sigs.length, 0, `expected no routing_trial_review_due signals before reviewBy; got: ${JSON.stringify(sigs)}`);
-  } finally {
-    cleanup();
-  }
+  const sigs = dueSignals('2026-10-15T00:00:00.000Z');
+  assert.equal(sigs.length, 0, `expected no routing_trial_review_due signals before reviewBy; got: ${JSON.stringify(sigs)}`);
 });
 
 test('scout fires exactly on the reviewBy date itself (not only strictly after)', () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const res = runScript('scripts/detect.mjs', [], {
-      cwd: dir,
-      env: { AGENT_COMPANION_FAKE_NOW: '2026-09-30T00:00:00.000Z' },
-    });
-    assert.equal(res.status, 0, res.stderr);
-    const sigs = res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
-    assert.ok(sigs.length > 0, 'reviewBy is inclusive: the finding must fire on the date itself');
-  } finally {
-    cleanup();
-  }
+  const sigs = dueSignals('2026-10-16T00:00:00.000Z');
+  assert.deepEqual(dueTypes(sigs), ['explore'], 'reviewBy is inclusive: the finding must fire on the date itself');
 });
