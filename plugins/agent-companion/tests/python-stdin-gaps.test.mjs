@@ -156,6 +156,34 @@ const FORMS = {
       `echo "$(${P} -c 1`,
     ],
   },
+  // 0.31.29 nits. N1: a substitution inherits the stdin of the command it sits in (a pipe into that command feeds it).
+  // N2: a NUL redirect on the python inside it still overrides that feed. N5: `time f() {` and `f() ( ... )` define a
+  // function (judged at the call sites), they are not plain groups.
+  nits: {
+    deny: [
+      `echo q | echo "$(${P} - < /dev/null)"`,
+      `echo q | echo $(${P} - </dev/null)`,
+      `echo $(${P} -) | cat`,
+      `echo "$(${P} -)"`,
+      `echo q | echo $(true); ${P} -`,
+      `time f() { ${P} -; }; f`,
+      `f() ( ${P} - ); f`,
+      `f() ( ${P} - )${NL}f`,
+      `time f() { ${P} -; }; echo q | f; f`,
+    ],
+    allow: [
+      `echo q | echo "$(${P} -)"`,
+      `echo q | echo $(${P} -)`,
+      `echo q | x=$(${P} -)`,
+      `echo q | echo \`${P} -\``,
+      `echo q | echo "$(echo $(${P} -))"`,
+      `time f() { ${P} -; }`,
+      `time f() { ${P} -; }; echo q | f`,
+      `f() ( ${P} - )`,
+      `f() ( ${P} - ); echo q | f`,
+      `f() ( ${P} -c 1 ); f`,
+    ],
+  },
   combined: {
     deny: [
       `for f in a; do timeout 5 env -u X ${P} -; done`,

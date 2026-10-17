@@ -151,7 +151,10 @@ test('rule: worker-one-wait is a builtin spawn rule, short, and follows worker_w
   try {
     const r = readRules().rules.find((x) => x.id === 'worker-one-wait');
     assert.ok(r && r.builtin && r.scope === 'spawn' && r.enabled);
-    assert.ok(r.then.length <= 200, `${r.then.length} chars`);
+    assert.ok(r.then.length <= 240, `${r.then.length} chars`);
+    assert.match(r.then, /No interim notice for a planned wait/);
+    const op = readRules().rules.find((x) => x.id === 'worker-one-wait-operate');
+    assert.match(op.then, /No interim notice for a planned wait/);
     assert.ok(matchRules({ scope: 'spawn', text: 'TYPE: x\nDo a thing', sessionId: 's' }).some((x) => x.id === 'worker-one-wait'));
     process.env.CLAUDE_PLUGIN_OPTION_WORKER_WAIT_ADVISORY = 'false';
     try {

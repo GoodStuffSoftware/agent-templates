@@ -47,7 +47,7 @@ test('project_agent_drift: a repo root is named "repo root", its worktree is fol
 });
 
 // --- routine_model_drift ------------------------------------------------------------------
-test('routine_model_drift: a disabled one-time task whose fire time has passed raises no signal; a live unpinned task still does', () => {
+test('routine_model_drift: a disabled task raises no signal, whatever its fireAt; an enabled unpinned task still does', () => {
   const fx = makeFixture();
   try {
     const sessions = join(fx.dir, 'sessions');
@@ -75,8 +75,7 @@ test('routine_model_drift: a disabled one-time task whose fire time has passed r
     const hits = res.json.signals.filter((s) => s.kind === 'routine_model_drift');
     assert.equal(hits.length, 1);
     assert.match(hits[0].detail, /cron-task/);
-    assert.match(hits[0].detail, /future-once/);
-    assert.doesNotMatch(hits[0].detail, /one-off/);
+    assert.doesNotMatch(hits[0].detail, /one-off|future-once/);
   } finally { fx.cleanup(); }
 });
 

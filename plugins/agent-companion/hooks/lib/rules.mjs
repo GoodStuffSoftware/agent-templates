@@ -293,7 +293,7 @@ function builtinRules() {
       scope: 'spawn',
       gate: 'worker_wait',
       when: OPERATE_NOT_DECLARED_WHEN,
-      then: 'One-wait rule: no sleep, poll or watch loops. One blocking call, or one run_in_background command that notifies on finish. PR/CI: pr-wait.mjs; main-branch run: gh run watch (both in background).',
+      then: 'One-wait rule: no sleep, poll or watch loops. One blocking call, or one run_in_background command that notifies on finish. PR/CI: pr-wait.mjs; main-branch run: gh run watch (both in background). No interim notice for a planned wait.',
       note: null,
     },
     {
@@ -305,7 +305,7 @@ function builtinRules() {
       scope: 'spawn',
       gate: 'worker_wait',
       when: OPERATE_DECLARED_WHEN,
-      then: 'One-wait rule: no sleep, poll or watch loops. PR/CI wait: you wait, in one foreground pr-wait.mjs call. Other long waits: one blocking call or one background command (run_in_background).',
+      then: 'One-wait rule: no sleep, poll or watch loops. PR/CI wait: you wait, in one foreground pr-wait.mjs call. Other long waits: one blocking call or one background command (run_in_background). No interim notice for a planned wait.',
       note: null,
     },
     {

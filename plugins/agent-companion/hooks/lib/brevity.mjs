@@ -45,12 +45,13 @@ export const PEER_MARKER = '[agent-companion: peer brevity]';
 // decide whether the PreToolUse rewrite already landed.
 const CONTRACT_BODY = [
   CONTRACT_MARKER,
-  'Your final message is all your caller reads.',
+  'Your final message (max ~300 tokens) is all your caller reads.',
   '- Open with STATUS: done | blocked | partial.',
   '- BLOCKERS next, in full: what is blocked, what you tried, what you need.',
   '- Then the outcome: files changed, key commands, results as facts.',
   '- Omit narration, resolved dead ends, tool recaps, brief restatements, what you chose not to do.',
-  '- Long detail: write <task>-detail.md (or .json/.csv), put its path in this message; never name a file report/summary/findings/analysis*.md.',
+  '- Detail beyond that: write <task>-detail.md (or .json/.csv), put its path here; never name a file report/summary/findings/analysis*.md.',
+  '- No interim notices for planned background waits; only blockers and the final message wake the lead.',
   'To other agents: a decision or fact, one screen max.',
   '[end contract]',
 ].join('\n');

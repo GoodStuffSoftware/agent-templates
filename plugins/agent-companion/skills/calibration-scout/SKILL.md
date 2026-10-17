@@ -213,6 +213,7 @@ Triage each unacknowledged signal (act on it, or decide to leave it), then recor
 node "$AC/scripts/scout-ack.mjs" add <kind> --note "<decision reference>" [--match "<detail text>"] [--days 14 | --expires YYYY-MM-DD]
 node "$AC/scripts/scout-ack.mjs" remove <id>
 ```
+`add` is refused (exit 1, nothing written) until the scout has run once and written its hand-off state; a corrupt state file gets its own message.
 
 An ack holds until it expires (default 14 days) or the signal changes materially: it grows
 by 2+ entries and at least half again, or shows an entry sharing under 60% of its words

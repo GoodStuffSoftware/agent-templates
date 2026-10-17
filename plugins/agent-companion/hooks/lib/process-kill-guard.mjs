@@ -15,7 +15,9 @@
 // Only real command segments are judged. One linear pass splits the command into simple commands (quotes, escapes,
 // comments, heredoc bodies, $(..), backticks and PowerShell (..) groups are followed or skipped as data), so text in a
 // quoted argument to echo / grep / git commit is never a command. `bash -c`, `sh -c`, `powershell -Command`, `pwsh`,
-// `cmd /c`, `eval` and `Invoke-Expression` strings, and a shell fed by a heredoc, are parsed again as commands.
+// `cmd /c`, `eval` and `Invoke-Expression` strings, a shell fed by a heredoc, a `<<< word` or an echo / printf pipe, and
+// a here-string or quoted string piped into iex, are parsed again as commands. The $( .. ) and `..` in an unquoted
+// heredoc body run (bash expands it), so they are commands too; a quoted delimiter (<<'E', <<"E", <<\E) keeps it data.
 // Any exception or an exhausted step budget allows (fail-open, like the other guards in this hook).
 
 const MAX_DEPTH = 6;
@@ -86,28 +88,50 @@ export function parseCommands(text, shell, depth, st) {
     for (const c of cs) { out.push(c); subs.push(c); }
     return cs;
   };
+  // bash expands an unquoted heredoc body like a double-quoted word: each $( .. ) and `..` in it runs. Parse them as
+  // commands of the heredoc's owner (its subs), so `cat <<E` / `$(pkill node)` / `E` and `xargs kill <<E` / `$(pgrep x)`
+  // are judged. \$ \` \\ are escapes; $(( .. )) is arithmetic; an unbalanced opener stays data.
+  const bodySubs = (body, owner) => {
+    for (let j = 0; j < body.length; j++) {
+      if (++st.steps > BUDGET) throw new Error('budget');
+      const c = body[j];
+      if (c === '\\') { j++; continue; }
+      if (c === '$' && body[j + 1] === '(') {
+        const e = matchClose(j + 1, '(', ')', body);
+        if (e < 0) continue;
+        if (body[j + 2] !== '(') for (const sc of parseCommands(body.slice(j + 2, e - 1), shell, depth + 1, st)) { out.push(sc); owner.push(sc); }
+        j = e - 1; continue;
+      }
+      if (c === '`') {
+        const e = body.indexOf('`', j + 1);
+        if (e < 0) return;
+        for (const sc of parseCommands(body.slice(j + 1, e), shell, depth + 1, st)) { out.push(sc); owner.push(sc); }
+        j = e; continue;
+      }
+    }
+  };
   // index just past the matching closer for an opener at s[open]; quote aware; -1 when unbalanced
-  const matchClose = (open, oc, cc) => {
+  const matchClose = (open, oc, cc, str = s) => { // str: the command text, or an unquoted heredoc body
     let d = 0;
     const pend = []; // heredoc delimiters waiting for the next newline (bash only): their bodies are data
-    for (let j = open; j < n; j++) {
+    for (let j = open; j < str.length; j++) {
       if (++st.steps > BUDGET) throw new Error('budget');
-      const c = s[j];
-      if (!ps && c === '<' && s[j + 1] === '<' && s[j + 2] === '<') { j += 2; continue; } // here-string operator, not a heredoc
-      if (!ps && c === '<' && s[j + 1] === '<' && s[j + 2] !== '<') {
-        const hm = /^<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z0-9_]+))/.exec(s.slice(j, j + 200));
+      const c = str[j];
+      if (!ps && c === '<' && str[j + 1] === '<' && str[j + 2] === '<') { j += 2; continue; } // here-string operator, not a heredoc
+      if (!ps && c === '<' && str[j + 1] === '<' && str[j + 2] !== '<') {
+        const hm = /^<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z0-9_]+))/.exec(str.slice(j, j + 200));
         if (hm) { pend.push({ word: hm[2] ?? hm[3] ?? hm[4], dash: hm[1] === '-' }); j += hm[0].length - 1; continue; }
       }
       if (c === '\n' && pend.length) {
         let p = j + 1;
         while (pend.length) {
           const h = pend.shift();
-          while (p < n) {
+          while (p < str.length) {
             if (++st.steps > BUDGET) throw new Error('budget');
-            let e = s.indexOf('\n', p);
-            if (e < 0) e = n;
-            const line = s.slice(p, e).replace(/\r$/, '');
-            p = Math.min(n, e + 1);
+            let e = str.indexOf('\n', p);
+            if (e < 0) e = str.length;
+            const line = str.slice(p, e).replace(/\r$/, '');
+            p = Math.min(str.length, e + 1);
             if ((h.dash ? line.replace(/^\t+/, '') : line) === h.word) break;
           }
         }
@@ -116,12 +140,12 @@ export function parseCommands(text, shell, depth, st) {
       }
       if (c === '\\' && !ps) { j++; continue; }
       if (c === '`' && ps) { j++; continue; }
-      if (c === "'") { const e = s.indexOf("'", j + 1); if (e < 0) return -1; j = e; continue; }
+      if (c === "'") { const e = str.indexOf("'", j + 1); if (e < 0) return -1; j = e; continue; }
       if (c === '"') {
-        for (j++; j < n; j++) {
-          if (s[j] === '\\' && !ps) { j++; continue; }
-          if (s[j] === '`' && ps) { j++; continue; }
-          if (s[j] === '"') { if (ps && s[j + 1] === '"') { j++; continue; } break; }
+        for (j++; j < str.length; j++) {
+          if (str[j] === '\\' && !ps) { j++; continue; }
+          if (str[j] === '`' && ps) { j++; continue; }
+          if (str[j] === '"') { if (ps && str[j + 1] === '"') { j++; continue; } break; }
         }
         continue;
       }
@@ -155,6 +179,7 @@ export function parseCommands(text, shell, depth, st) {
         }
         h.list.push(lines.join('\n'));
         h.qlist.push(h.quoted);
+        if (!h.quoted) bodySubs(lines.join('\n'), h.subs);
         void found;
       }
       continue;
@@ -308,7 +333,7 @@ export function parseCommands(text, shell, depth, st) {
         if (m) { hq = /[\\'"]/.test(m[0]); delim = m[0].replace(/\\/g, ''); j += m[0].length; }
       }
       endWord();
-      if (delim) pendingHere.push({ delim, dash, quoted: hq, list: heredocs, qlist: hereQuoted });
+      if (delim) pendingHere.push({ delim, dash, quoted: hq, list: heredocs, qlist: hereQuoted, subs });
       i = j; continue;
     }
     buf += c; started = true; i++;
@@ -428,14 +453,23 @@ function analyze(cmd, shell, depth, st, hits) {
 
   // --- nested shells: judge their script as commands ---
   const nested = [];
+  // what the command reads on stdin as text: heredoc bodies in its chain, a bash `<<< word`, and the text an
+  // echo / quoted string piped into it (set by scan as cmd.piped). flagArgs: its arguments minus `<<< word`.
+  const stdin = [...(cmd.chainHere || cmd.heredocs), ...(cmd.piped || [])];
+  const flagArgs = [];
+  for (let j = k + 1; j < w.length; j++) {
+    if (shell === 'bash' && !w[j].q && w[j].t === '<<<') { if (w[j + 1]) stdin.push(w[j + 1].t); j++; continue; }
+    flagArgs.push(w[j].t);
+  }
+  const fromStdin = flagArgs.every((a) => a[0] === '-');
   if (SHELLS.has(prog)) {
     const ci = args.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
     if (ci >= 0 && args[ci + 1] !== undefined) nested.push([args[ci + 1], 'bash']);
-    else if (ci < 0 && args.every((a) => a[0] === '-')) for (const h of (cmd.chainHere || cmd.heredocs)) nested.push([h, 'bash']);
+    else if (ci < 0 && fromStdin) for (const h of stdin) nested.push([h, 'bash']);
   } else if (PS_SHELLS.has(prog)) {
     const ci = args.findIndex((a) => psParam(a, [['command', 1]]) || a.toLowerCase() === '-c');
-    if (ci >= 0 && args[ci + 1] !== undefined) nested.push([args.slice(ci + 1).join(' '), 'powershell']);
-    else if (ci < 0 && args.every((a) => a[0] === '-')) for (const h of (cmd.chainHere || cmd.heredocs)) nested.push([h, 'powershell']);
+    if (ci >= 0 && args[ci + 1] !== undefined && args[ci + 1] !== '-') nested.push([args.slice(ci + 1).join(' '), 'powershell']);
+    else if (fromStdin) for (const h of stdin) nested.push([h, 'powershell']); // `-Command -` reads its script from stdin
   } else if (prog === 'cmd') {
     const ci = args.findIndex((a) => /^[/-]{1,2}[ck]$/i.test(a));
     if (ci >= 0 && args[ci + 1] !== undefined) nested.push([args.slice(ci + 1).join(' '), 'bash']);
@@ -443,6 +477,7 @@ function analyze(cmd, shell, depth, st, hits) {
     nested.push([args.join(' '), shell]);
   } else if (prog === 'invoke-expression' || prog === 'iex') {
     nested.push([args.join(' '), 'powershell']);
+    if (shell === 'powershell' && !args.some((a) => a[0] !== '-')) for (const h of (cmd.piped || [])) nested.push([h, 'powershell']); // @'..'@ | iex
   }
   for (const [script, sh] of nested) scan(script, sh, depth + 1, st, hits);
 
@@ -512,8 +547,35 @@ function scan(text, shell, depth, st, hits) {
     here.set(c.chain, acc);
     c.chainHere = acc;
   }
+  // text piped into the next command of the same chain: `echo "x" | bash`, `printf 'x' | sh`, PowerShell
+  // `@'..'@ | iex`, `'x' | Invoke-Expression`, `Write-Output 'x' | iex`
+  let prev = null;
+  for (const c of cmds) {
+    if (prev && prev.chain === c.chain) {
+      const t = pipedText(prev, shell);
+      if (t != null) c.piped = [t];
+    }
+    prev = c;
+  }
   for (const c of cmds) analyze(c, shell, depth, st, hits);
   pipelineHits(cmds, shell, hits);
+}
+
+function pipedText(c, shell) {
+  const w = c.words;
+  if (!w.length) return null;
+  if (shell === 'powershell') {
+    if (w.every((x) => x.q || x.t === '+')) return w.filter((x) => x.q).map((x) => x.t).join('');
+    const k = progIndex(w);
+    if (k >= 0 && k < w.length && ['write-output', 'echo', 'write'].includes(baseName(w[k].t))) return w.slice(k + 1).map((x) => x.t).join(' ');
+    return null;
+  }
+  const k = progIndex(w);
+  if (k < 0 || k >= w.length) return null;
+  const p = baseName(w[k].t);
+  if (p === 'echo') { let j = k + 1; while (j < w.length && !w[j].q && /^-[neE]+$/.test(w[j].t)) j++; return w.slice(j).map((x) => x.t).join(' '); }
+  if (p === 'printf') return w.slice(k + 1).map((x) => x.t).join(' ');
+  return null;
 }
 
 function collect(command, shell) {

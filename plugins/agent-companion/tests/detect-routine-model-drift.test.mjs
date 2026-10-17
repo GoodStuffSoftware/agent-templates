@@ -125,6 +125,40 @@ test('scout_suppress silences the kind', () => {
   } finally { cleanup(); }
 });
 
+// Disabled scheduled tasks: the app's task store is <sessions>/acct/org/scheduled-tasks.json.
+const store = (sessions, list) => write(join(sessions, 'acct', 'org', 'scheduled-tasks.json'), JSON.stringify({ scheduledTasks: list }));
+
+const disabledScenario = (withStore) => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const sessions = join(dir, 'sessions');
+    task(dir, 'old-pilot', null);
+    task(dir, 'live-job', null);
+    task(dir, 'off-cron', 'opus');
+    record(sessions, { scheduledTaskId: 'old-pilot', cwd: dir, model: 'claude-fable-5-1', effort: 'high' });
+    record(sessions, { scheduledTaskId: 'live-job', cwd: dir, model: 'claude-fable-5-1', effort: 'high' });
+    record(sessions, { scheduledTaskId: 'off-cron', cwd: dir, model: 'claude-fable-5-1', effort: 'high' });
+    if (withStore) {
+      store(sessions, [
+        { id: 'old-pilot', enabled: false },
+        { id: 'off-cron', enabled: false, cronExpression: '0 9 * * *' },
+        { id: 'live-job', enabled: true, cronExpression: '0 9 * * *' },
+      ]);
+    }
+    return kind(run(dir, sessions)).map((s) => s.detail).join('\n');
+  } finally { cleanup(); }
+};
+
+test('a disabled task is not reported as unpinned or drifting; an enabled one still is', () => {
+  const before = disabledScenario(false); // no task store: the disabled tasks are raised
+  assert.match(before, /old-pilot/);
+  assert.match(before, /off-cron/);
+  const after = disabledScenario(true);
+  assert.doesNotMatch(after, /old-pilot/);
+  assert.doesNotMatch(after, /off-cron/);
+  assert.match(after, /live-job/, 'an enabled task with no model: line still raises');
+});
+
 test('the kind is documented in the scout routine and skill', () => {
   for (const f of [['routines', 'calibration-scout-daily.md'], ['skills', 'calibration-scout', 'SKILL.md']]) {
     assert.match(readFileSync(join(PLUGIN_ROOT, ...f), 'utf8'), /routine_model_drift/);

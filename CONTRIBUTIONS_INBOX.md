@@ -12,9 +12,9 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 ### YYYY-MM-DD — <short title>
 
 - **Trigger:** what surfaced this (the gotcha / better step / missing rule).
-- **Is it generic?** the result of the "is this generic?" test — what specifics were stripped, what reusable kernel remained.
+- **Is it generic?** (REQUIRED; empty = bounced, not folded) the "is this generic?" result: specifics stripped, reusable kernel left, and whether the principle holds without this stack's mechanism. Single incident in one stack = stays project-local.
 - **Target:** where it should land. For a **rule, gotcha, or hard-won lesson** this is a new tagged file under `lessons/` — knowledge is never pasted into an agent def or into `anthropic/shared/cross-project-rules.md` (that page is a pointer and enumerates nothing). Use a template path (e.g. `anthropic/basic-site/agents/site-builder.md`) only for scaffolding changes.
-- **Proposed change:** the actual generalized text / diff, with `{{PLACEHOLDERS}}` in place of any real values.
+- **Proposed change:** the actual generalized text / diff, with `{{PLACEHOLDERS}}` in place of any real values. Lesson body ~150 words. If it contradicts an existing lesson, say so; it waits for an A/B.
 - **Applied?** `no` (a maintainer flips this to `yes` and removes the entry once folded in).
 ```
 
@@ -22,12 +22,83 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
+### 2026-10-16 — Measure a session-start repo-state brief by git-call rate, not by session totals
+
+- **Trigger:** A hook that injected a one-line repo-state summary (branch, dirty files, upstream distance, whether a named change has landed) into every session start was trialled for a week. Per-session token totals could not show a saving: session sizes varied from a few turns to hundreds of calls with dozens of workers.
+- **Is it generic?** Yes. Any harness that front-loads a small context line to replace exploratory calls faces the same measurement trap, whatever the stack. The reusable kernel is the metric, not the hook.
+- **Target:** new lesson `lessons/measure-a-preloaded-context-line-by-the-calls-it-replaces.md`.
+- **Proposed change:** Judge a preloaded context line by (a) the rate of the calls it is meant to replace per 1,000 tool calls, and per agent in its first five calls, before and after; (b) its cost per start (a line of about 400 characters is about 120 tokens, roughly a thousandth of a unit per worker start); (c) its delivery rate, since a hook that times out silently delivers nothing (14% of starts here, 20% in the first release, 4% after a fix); (d) whether the optional query it enables is ever used. Do not compare per-session totals when session size varies. Break even is one avoided call per 20-60 starts. Report the result as "plausible, confounded" unless session mix is held constant.
+- **Applied?** `no`
+
+### 2026-10-16 — A CI-wait script should return a verdict, and its permanent-error rate is the number to watch
+
+- **Trigger:** Agents polled pull-request checks with hand-rolled loops of status calls and sleeps, burning a model turn per poll. A small wait script that polls internally and returns one verdict (passed, failed, merged, no checks, timeout) replaced the loop.
+- **Is it generic?** Yes. Any agent that waits on a remote pipeline pays a turn per poll unless the wait runs in one process; the kernel is "poll in a script, return a verdict, run it in the background".
+- **Target:** new lesson `lessons/wait-for-ci-in-one-background-script-and-track-its-error-rate.md`.
+- **Proposed change:** Run the wait as one background command that returns a verdict, never a foreground loop (a foreground call dies at the tool timeout of about two minutes). Measure it by runs, verdict mix, and the share of runs ending in a permanent error that forces a manual fallback (7 of 59 here, 12%): a wait script that errors often saves nothing. Count the script's internal polls as tool calls when comparing against hand-rolled loops (three per poll cycle here). Expected saving is small (1-2% of a session mix); worth keeping for the reliability of the verdict as much as the tokens.
+- **Applied?** `no`
+
+### 2026-10-15 — A desktop subagent's worktree lock names the session's claude.exe pid (a child of the desktop host claude.exe), not the worker's
+
+- **Trigger:** A worktree created for a subagent was locked with a reason like "claude agent agent-{{ID}} (pid {{N}})". After the worker finished, the pid was still alive, so the worktree looked in use and could not be cleaned up safely.
+- **Is it generic?** Yes. Subagents run in-process inside the host session, so any lock that records "the process" records the host's pid, whatever the stack. The principle holds for any harness that stamps a lock with the creating pid.
+- **Target:** new lesson `lessons/a-subagent-lock-pid-is-the-lead.md`.
+- **Proposed change:** Lesson body: the pid in a subagent worktree lock is the session's own claude.exe (a child of the desktop host claude.exe, not the host itself), because subagents run in-process; it stays alive after the worker ends. Safe check before unlocking: confirm the pid is in your own shell's parent-process chain, then run `git worktree unlock` and `git worktree remove` without `--force`. Never stop that pid; it is the lead. Measured 2026-10-15, twice.
+- **Applied?** `no`
+
 ### 2026-10-13 — A sanity check of the agent CLI through a terminal tab must not leave an interactive session alive
 
 - **Trigger:** a session-listing feature showed "live" sessions that nobody was using. Two interactive agent-CLI processes, started on 10-10 and 10-12 by workers running a quick "does the CLI start" check through a terminal tab (`run_in_terminal`) without the non-interactive flag, were still waiting for input. Each one kept touching its transcript, so a listing keyed on file modification time counted them as live.
 - **Is it generic?** Yes. Stripped: the project name and the feature. Kernel: starting the real interactive CLI from a tool that keeps the terminal open leaves a resident session, and that session looks like a human one to anything that reads transcripts.
 - **Target:** new tagged file under `lessons/agent-process/` (or an extension of an existing lesson about leaked child processes, if one fits).
 - **Proposed change:** A sanity check of the agent CLI must use the non-interactive form (`claude -p "<prompt>"`), which exits when it answers, or must not run the real CLI at all (test the wrapper, the flag parsing or the config instead). Never start the bare command in a terminal tab: the tab stays open, the interactive session stays alive, writes transcripts and shows up as a live peer. After any such check, list the processes and terminal tabs and close what you started. Code that lists live sessions should judge liveness by the newest timestamped record in the transcript, not by file modification time.
+- **Applied?** `no`
+
+### 2026-10-06 — Making load-sensitive tests deterministic without loosening them
+
+- **Trigger:** Tests that passed alone failed intermittently when the machine was busy. Three causes recurred: a spawn timeout sized from the unloaded run time, wall-time assertions that included process start-up and antivirus cost, and a poll loop that gave up after a single poll. The tempting fix each time was a wider margin, which hides the problem rather than removing it.
+- **Is it generic?** Yes. Every part holds in any language or test runner: timeout sizing, bounding the mechanism instead of the process, deadline-check ordering, and a paired before/after protocol under pinned CPU load. The two Windows gotchas are stack-specific and stay labelled as such.
+- **Target:** new lesson `lessons/load-sensitive-tests-bound-the-mechanism-not-the-process.md`. It qualifies the existing "widening a timing margin does not remove a race" lesson (a margin widened blindly is still wrong); it does not contradict it.
+- **Proposed change:** Lesson body:
+  - **Timeouts are hang guards.** A `spawnSync`/`exec` timeout in a test helper exists to catch hangs. Size it from the measured worst-case CORRECT child under pinned CPU load (example: worst {{WORST_SECONDS}} s gives a {{GUARD_SECONDS}} s guard, roughly 6x), never from the unloaded time. On a kill, emit a stderr note such as `killed by hang guard after {{N}} ms: {{PATH}}`, so a kill is never a silent `status null`.
+  - **Bound the mechanism, not the whole process.** When a test asserts wall time, measure only the thing under test: a step timing the product itself reports (e.g. `steps_ms.fetch`); timestamps the child stamps itself (file mtime minus an in-record `touched` stamp); or an in-process call timed separately from the spawn. Keep the same bound value. Add a type check (`typeof field === 'number'`) so a missing field cannot make the assertion vacuous.
+  - **Take a final look at the deadline.** A poll loop that `break`s on its deadline check after an overrunning poll can declare TIMEOUT after a single poll. Always take one last look that starts at or after the deadline.
+  - **Evidence protocol.** Pin the test plus busy-loop burners to the same cores with OS CPU affinity (Windows: `start /b /wait /affinity <mask>`; never a plain `start`, which opens a window). Run BEFORE and AFTER at the same time on disjoint masks, so both see the same ambient load. Pair that with a forced reproduction that injects a delay at the mechanism (a slow stub on PATH, or a preload that delays one specific child spawn).
+  - **Windows gotcha 1.** Antivirus scans the first read of freshly written files when the reading binary is not excluded. Prime a large fixture with an untimed read before timing.
+  - **Windows gotcha 2.** A worktree whose `core.hooksPath` is an absolute path to another checkout runs THAT checkout's pre-push gate against THAT tree. Push with `git -c core.hooksPath=.githooks push` and check the gate's "tested SHA" line.
+- **Applied?** `no`
+
+### 2026-10-06 — After a hand-off, the parent session relays all inbound messages to the child
+
+- **Trigger:** A session handed its work to a new agent (a task card plus a spawned session) and began winding down, but peers and the operator kept messaging the parent. Those messages stalled on a session that was no longer working, or drew stale answers, while the child lacked the context they carried.
+- **Is it generic?** Yes. Any multi-agent setup with a message bus and a "fork this work to a new agent" step has a parent that stays addressable after the fork. The kernel is that inbound traffic follows ownership, and the principle holds without this stack's bus mechanism. Operator-directed, so a standing rule, not a single incident.
+- **Target:** new lesson `lessons/after-handoff-parent-relays-to-child.md`.
+- **Proposed change:** Lesson body: once work is handed to a child agent, everything sent to the parent is the child's. The parent (a) relays each new message to the child with full content and original sender and timestamp, framed as data; (b) nudges the child's live local session with a short pointer to drain its inbox; (c) sends each active peer, and each sender on its "owed" list, a short redirect to address the child directly; (d) publishes a status reading "HANDED OFF, message {{CHILD_NAME}} directly"; (e) does not answer substantively, because the child owns answers. Why: the parent is winding down, so messages landing on it stall or get stale answers, and the child would lack the context it needs.
+- **Applied?** `no`
+
+### 2026-10-06 — Delegate multi-step browser verification to a subagent; the lead keeps only the verdict
+
+- **Trigger:** An orchestration lead on the top-tier model ran several live UI verification passes itself in the harness's built-in browser pane. Each pass was the same loop: navigate, inject a no-transition style, open menus through the DOM, read page text and accessibility trees, repeat. Every page dump stayed in the lead's long-lived context, so every later turn re-read it and compaction came sooner. The operator asked two things: should a cheaper-tier agent drive the browser, and would the messaging overhead eat the savings? A one-call probe settled the open part first. An in-process subagent could call the same browser tools and saw the same tab, including the operator's signed-in session, so no separate desktop session was needed.
+- **Is it generic?** Yes. It applies to any orchestrator with a premium, long-lived lead and tools whose output is bulky but whose conclusion is small: browser DOM and screenshots, logs, test output. The reusable rule is to route by output volume against conclusion size, and to put a price on the subagent's cold start. It holds in any harness where a subagent can reach the same tool. Where it can't, a separate session addressed by local messaging gives the same split.
+- **Target:** a new lesson, `lessons/delegate-bulky-tool-output-keep-the-verdict.md`. If an existing delegation lesson already covers keeping file dumps out of the lead, amend that one instead.
+- **Proposed change:** Lesson body:
+  - Multi-step browser verification goes to a mid-tier subagent. So does any task whose tool output is large but whose answer is a verdict. The lead receives only the verdict and a few lines of evidence.
+  - The messaging itself is cheap, about {{BRIEF_TOKENS}} for the brief and about the same for the report. The real overhead is the subagent's cold start, measured at about {{COLD_START_TOKENS}} for one spawn, though at the cheaper tier's rate. So a single one-call check stays inline, and anything with three or more round trips is delegated.
+  - Before relying on this, probe once with one read-only call that the subagent sees the browser tools and the same tab. If it can't, use a separate session addressed by local messaging.
+  - A new tab opened in the pane inherits the operator's signed-in session (proven), so each browser agent gets its own tab. One tab per agent; two agents never share a tab.
+  - A browser step sequence is execution, not validation. Route it to the mid tier, not the cheapest.
+- **Applied?** `no`
+
+### 2026-10-06 — On Windows, agent-launched processes must never open a console window
+
+- **Trigger:** The operator saw console windows flash and stay open while several agent sessions worked on one desktop. A traced live sample found three window-opening launch shapes:
+  - A session-start hook spawned a `detached` worker without `windowsHide`.
+  - A benchmark used `cmd /c start /wait /affinity <mask> node ...` to pin CPU affinity. `start` without `/b` always creates a new console.
+  - A driver spawned child processes that each got their own console.
+  The host's default terminal is {{TERMINAL_APP}}, so each slip opened a visible window or tab.
+- **Is it generic?** Yes. Any agent harness on Windows whose shell tools run hidden can leak windows through these OS rules, whatever the stack: `start` without `/b`, `Start-Process` without a hidden window style, and a detached child without the hide flag each allocate a new visible console. The kernel is "nothing an agent launches may allocate a visible console". This is not one incident: three unrelated sessions hit it the same day.
+- **Target:** new lesson `lessons/agent-launched-processes-never-open-a-console-window.md`.
+- **Proposed change:** The lesson says: agents default to the POSIX shell tool and use `cmd.exe` only when a task genuinely needs it, always hidden. Where a `start` feature is needed (affinity, priority), use `start /b ...`; from an MSYS shell, double the slashes (`cmd //c start //b ...`) because single-slash flags are path-rewritten. Every Node `spawn`/`exec`/`fork` sets `windowsHide: true`, which is mandatory with `detached: true`. Long-lived listeners launch through a hidden wrapper or a process manager, never as a bare runtime exe. To diagnose, enumerate VISIBLE console-class windows and walk the owner's parent chain. Do not count console-host processes: most of them are hidden, so they mislead.
 - **Applied?** `no`
 
 ### 2026-10-05 — A spec that fails "randomly" in a parallel suite may be a victim of the SHARED dev server

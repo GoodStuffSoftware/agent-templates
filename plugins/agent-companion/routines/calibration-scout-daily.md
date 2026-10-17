@@ -58,8 +58,8 @@ if [ -n "$CLAUDE_CODE_REMOTE_SESSION_ID" ]; then echo "PLATFORM=cloud"; else ech
 | | **cloud** — claude.ai routine | **local** — desktop scheduled task |
 |---|---|---|
 | Sandbox | fresh every run; nothing under the plugin data dir survives | persistent `~/.claude/plugins/data/agent-companion-*/` written by the hooks |
-| In scope | the lineup and pricing diff (STEP 2), `model_retirement_approaching`, the guard canary, `routing-doc` freshness; the publication-leak sweep (STEP 2.5) IN PLACE, scoped to this session's own checkout only, never a clone | **everything** — including the stateful signals: `harness_version_changed`, `zero_denials`, `spawn_activity`, `inherited_model_spawns`, `new_agent_type`; the publication-leak sweep (STEP 2.5) by cloning each configured repo's origin |
-| Out of scope | the stateful signals. They compare against a previous run and a fresh sandbox has none. They are *unobservable* here, which is different from quiet — never call them clean. Also: publication-leak sweeping any configured repo OTHER than this session's own checkout — never cloned in the cloud, reported `skipped` instead | STEP 2 is optional locally (the cloud run covers it daily); do it if WebFetch is available |
+| In scope | the lineup and pricing diff (STEP 2), `model_retirement_approaching`, the guard canary, `routing-doc` freshness; the publication-leak sweep (STEP 2.5) IN PLACE, scoped to this session's own checkout only, never a clone | **everything** — including the STEP 2 lineup diff, which runs on EVERY local run (while the cloud routine is off; WebFetch is needed, and if it is missing say the lineup diff was skipped and why, never clean), and the stateful signals: `harness_version_changed`, `zero_denials`, `spawn_activity`, `inherited_model_spawns`, `new_agent_type`; the publication-leak sweep (STEP 2.5) by cloning each configured repo's origin |
+| Out of scope | the stateful signals. They compare against a previous run and a fresh sandbox has none. They are *unobservable* here, which is different from quiet — never call them clean. Also: publication-leak sweeping any configured repo OTHER than this session's own checkout — never cloned in the cloud, reported `skipped` instead | Cloud-only paths: the cloud sweep mode and STEP 2.7 (the cloud-routine pin check needs RemoteTrigger, which a scheduled task does not have). Report each as "not run locally" in one line, only in a digest that prints something else (a quiet local run prints nothing); a skipped check is never reported as clean |
 
 Report within your scope, and name the platform in the first line of any output.
 
@@ -266,7 +266,7 @@ supports it.
 
 If this session has the **RemoteTrigger** tool, call it with `action: "list"` and look at each routine's `model` field. Report every routine whose `model` is a full id (`claude-` followed by a family and a version) rather than an alias, as one `pinned_model_id` finding: the routine's name, the id it pins, and the alias to set (`sonnet`, `opus` or `haiku`; the cloud routine API accepts the alias, measured 2026-10-12 on an update of the scout routine). An alias, or no `model` field, is not a finding.
 
-If the session does **not** have RemoteTrigger, say in one line that the cloud-routine pin check was skipped and why. A skipped check is not a clean one: never report cloud routines as free of pins.
+If the session does **not** have RemoteTrigger (always the case in a local scheduled task), say in one line that the cloud-routine pin check was not run locally and why. A skipped check is not a clean one: never report cloud routines as free of pins.
 
 ## STEP 3 — if `changed` is false AND lineup matches: stop. Emit nothing.
 

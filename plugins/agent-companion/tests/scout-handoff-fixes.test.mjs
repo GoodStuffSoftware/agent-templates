@@ -223,3 +223,33 @@ test('a renewal on the same kind and --match in a different case replaces the ac
   assert.equal(second.acks.acks.length, 1);
   assert.equal(second.acks.acks[0].note, 'n2');
 });
+
+test('scout-ack add with a corrupt scout-delta-state.json refuses with its own message and writes nothing', () => {
+  const dir = makeFixtureDir();
+  const sdir = join(dir, 'state');
+  mkdirSync(sdir, { recursive: true });
+  writeFileSync(paths(sdir).state, '{not json');
+  const r = cli(['add', 'a', '--note', 'early']);
+  assert.equal(r.status, 1);
+  assert.match(r.err, /corrupt or unreadable/);
+  assert.doesNotMatch(r.err, /no scout hand-off state yet/);
+  assert.equal(existsSync(paths(sdir).acks), false, 'no ack was written');
+});
+
+// ---------- B1: an ack before any delta state exists is refused, never silently voided ----
+
+test('scout-ack add with no scout-delta-state.json refuses and writes nothing; after one run it works and stays live', () => {
+  const dir = makeFixtureDir();
+  const sdir = join(dir, 'state');
+  const r = cli(['add', 'a', '--note', 'early']);
+  assert.notEqual(r.status, 0, 'add before any state must not succeed');
+  assert.match(r.err, /run the scout once first/);
+  assert.equal(existsSync(paths(sdir).acks), false, 'no ack was written');
+
+  recordRun(sdir, { checkedAt: new Date().toISOString(), signals: [sig('a', 'alpha one')] });
+  assert.equal(cli(['add', 'a', '--note', 'after run']).status, 0);
+  recordRun(sdir, { checkedAt: new Date(Date.now() + 1000).toISOString(), signals: [sig('a', 'alpha one')] });
+  const listed = JSON.parse(cli(['list', '--json']).out);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].status, 'active');
+});

@@ -935,6 +935,8 @@ export function scanOptionsForRel(rel) {
   };
 }
 
+const LESSON_WORD_CAP = 800;
+
 export function main(argv = process.argv.slice(2), env = process.env) {
   let opts;
   try {
@@ -967,10 +969,18 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     const r = scanText(text, { rel, derived, isSelf: resolve(file) === selfAbs, realUsers, noSha });
     hits.push(...r.hits);
     warnings.push(...r.warnings);
+    // Brevity cap for lesson bodies (warning only; see CONTRIBUTING.md "Fold gates").
+    if (/^lessons\/.+\.md$/.test(rel) && !/(^|\/)(README|INDEX)\.md$/i.test(rel)) {
+      const body = text.replace(/^---\r?\n[\s\S]*?\r?\n---/, "");
+      const words = body.split(/\s+/).filter(Boolean).length;
+      if (words > LESSON_WORD_CAP) {
+        warnings.push({ rel, line: 1, label: `lesson body over ~${LESSON_WORD_CAP} words`, token: `${words} words` });
+      }
+    }
   }
 
   if (warnings.length) {
-    console.error(`leak-check: WARNING — ${warnings.length} machine-structure mention(s) (not a failure; review):`);
+    console.error(`leak-check: WARNING — ${warnings.length} warning(s) (machine-structure or lesson length; not a failure; review):`);
     for (const w of warnings) console.error(`  ${w.rel}:${w.line}  [${w.label}]  ${w.token}`);
     console.error("");
   }

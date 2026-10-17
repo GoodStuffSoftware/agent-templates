@@ -187,7 +187,7 @@ test('the spawn rule has no partial-return escape and names the sanctioned waits
     assert.match(r.then, /run_in_background/);
     assert.match(r.then, /pr-wait\.mjs/);
     assert.match(r.then, /gh run watch/);
-    assert.ok(r.then.length <= 200, `${r.then.length} chars`);
+    assert.ok(r.then.length <= 240, `${r.then.length} chars`);
   } finally { cleanup(); }
 });
 

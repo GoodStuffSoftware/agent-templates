@@ -300,6 +300,21 @@ test("CLI: the vendor skip is SHA-ONLY and narrow (*.min.js/css, lockfiles, node
   assert.doesNotMatch(r.err, /package-lock\.json/);
 });
 
+test("CLI: a lesson body over the word cap warns (exit 0); a short lesson and a README do not", () => {
+  const missing = join(tmp("none"), "nope");
+  const args = ["--dev-root", missing, "--claude-projects", missing, "--user", "runner"];
+  const long = Array.from({ length: 900 }, () => "word").join(" ");
+  const r = runCli(scanTree({
+    "lessons/long-one.md": `---\ntitle: t\n---\n${long}\n`,
+    "lessons/short-one.md": "---\ntitle: t\n---\nA short lesson.\n",
+    "lessons/README.md": `${long}\n`,
+  }), args);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /lessons\/long-one\.md.*lesson body over ~800 words/);
+  assert.doesNotMatch(r.err, /short-one\.md/);
+  assert.doesNotMatch(r.err, /lessons\/README[.]md/);
+});
+
 test("CLI: a pinned GitHub Actions SHA (uses: owner/action@<sha>) is exempt from git-sha-like", () => {
   const missing = join(tmp("none"), "nope");
   const args = ["--dev-root", missing, "--claude-projects", missing, "--user", "runner"];

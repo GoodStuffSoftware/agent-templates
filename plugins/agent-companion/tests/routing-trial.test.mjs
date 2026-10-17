@@ -52,7 +52,7 @@
 // price. The other opus/low rows keep their route and trialSince.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { PLUGIN_ROOT, makeFixture, runScript } from './helpers.mjs';
 
@@ -365,4 +365,30 @@ test('scout is silent on routing_trial_review_due before reviewBy', () => {
 test('scout fires exactly on the reviewBy date itself (not only strictly after)', () => {
   const sigs = dueSignals('2026-10-16T00:00:00.000Z');
   assert.deepEqual(dueTypes(sigs), ['explore'], 'reviewBy is inclusive: the finding must fire on the date itself');
+});
+
+// --- Scout: a winning profile row replaces the shipped trial's review ---------
+function dueWithProfileRow(fakeNow, rowOver) {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    mkdirSync(join(stateDir, 'config'), { recursive: true });
+    writeFileSync(join(stateDir, 'config', 'routing-profile.json'), JSON.stringify({
+      schema: 'agent-companion/routing-profile', schemaVersion: 1, revision: 3,
+      basedOn: { tableVersion: 7, tableUpdated: '2026-09-23' }, objective: 'api-cost', planUsageMultipliers: null,
+      types: {},
+      rows: { explore: { state: 'trial', model: 'opus', effort: 'medium', cacheTtl: null, source: 'operator-observed', since: '2026-10-01', reviewBy: '2026-12-01', waivesFloor: null, note: null, provenance: null, ...rowOver } },
+    }));
+    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: { AGENT_COMPANION_FAKE_NOW: fakeNow } });
+    assert.equal(res.status, 0, res.stderr);
+    return res.json.signals.filter((s) => s.kind === 'routing_trial_review_due');
+  } finally { cleanup(); }
+}
+
+test('scout: explore trial past reviewBy is raised with no profile row, silent while a not-due profile row wins, raised again when the profile row is due', () => {
+  assert.deepEqual(dueTypes(dueSignals('2026-10-17T00:00:00.000Z')), ['explore']);
+  const quiet = dueWithProfileRow('2026-10-17T00:00:00.000Z', {});
+  assert.deepEqual(dueTypes(quiet), [], `the profile row routes explore; got ${JSON.stringify(quiet.map((s) => s.detail))}`);
+  const due = dueWithProfileRow('2026-10-17T00:00:00.000Z', { reviewBy: '2026-10-16' });
+  assert.deepEqual(dueTypes(due), ['explore']);
+  assert.match(due[0].detail, /profile row/);
 });

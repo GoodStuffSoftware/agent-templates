@@ -108,6 +108,7 @@ test('the daily routine checks cloud routines through RemoteTrigger and says so 
   assert.match(text, /RemoteTrigger/);
   assert.match(text, /action: "list"/);
   assert.match(text, /pinned_model_id/);
-  assert.match(text, /check was skipped/);
+  assert.match(text, /pin check was not run locally/);
+  assert.match(text, /only in a digest that prints something else/);
   assert.match(text, /A skipped check is not a clean one/);
 });

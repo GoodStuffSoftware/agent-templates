@@ -763,7 +763,11 @@ try {
   const n = nowDate();
   const todayUtc = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
   for (const name of Object.keys(cfg.taskTypes || {})) {
-    const entry = resolveRoute({ type: name, now: n }).stack.find((st) => st.layer === 'trial');
+    const route = resolveRoute({ type: name, now: n });
+    // A profile row that wins routes the type, so the shipped trial is not live; a due profile row
+    // is raised by the profile block below.
+    if (route.layer === 'profile') continue;
+    const entry = route.stack.find((st) => st.layer === 'trial');
     const ov = entry && entry.present ? entry.meta : null;
     if (!ov || !ov.reviewBy) continue;
     const reviewUtc = Date.parse(ov.reviewBy);

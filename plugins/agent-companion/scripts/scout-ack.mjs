@@ -16,7 +16,7 @@
 
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { stateFile, opt } from '../hooks/lib/context.mjs';
 import {
   readAcks, writeAcks, readState, addAck, removeAck, parseExpiry, refreshView, paths,
@@ -83,7 +83,15 @@ if (cmd === 'add') {
   for (const f of ['expires', 'match', 'days']) if (flag(f) === '') usage(`--${f} needs a value`);
   const exp = parseExpiry(flag('expires'), nowMs, { days: flag('days') });
   if (exp.error) usage(exp.error);
-  const state = readState(dir) || { kinds: {} };
+  const state = readState(dir);
+  if (!state && existsSync(paths(dir).state)) {
+    process.stderr.write('scout-ack: the scout hand-off state file (scout-delta-state.json) is corrupt or unreadable, so an ack now would remember nothing; run the scout once to rewrite it, then add the ack.\n');
+    process.exit(1);
+  }
+  if (!state) {
+    process.stderr.write('scout-ack: no scout hand-off state yet, so an ack now would remember nothing and be voided by the first run; run the scout once first, then add the ack.\n');
+    process.exit(1);
+  }
   let ack;
   try {
     ack = withAcksLock(dir, () => {

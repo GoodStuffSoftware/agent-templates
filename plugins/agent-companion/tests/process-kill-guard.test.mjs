@@ -432,3 +432,57 @@ for (const c of [
   'cat <<"EOF" > notes.txt' + NL + 'taskkill /F /IM node.exe' + NL + 'EOF',
   'git commit -F - <<EOF' + NL + 'deny pkill and killall' + NL + 'EOF',
 ]) test(`heredoc quoting, kill rule allows (bash): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'bash'), null, c));
+
+// 0.31.29 (K1a): kill commands that run from text. An unquoted heredoc body is expanded, so its $( .. ) and `..` run;
+// a shell reads `<<< word` and an echo / printf pipe as its script; a here-string or quoted string piped into iex runs.
+// Quoted heredocs stay literal, and text piped into a non-shell is data.
+const TEXT_KILL_BASH = [
+  'cat <<EOF' + NL + '$(pkill node)' + NL + 'EOF',
+  'cat <<EOF' + NL + 'x `killall node` y' + NL + 'EOF',
+  'cat > notes.txt <<EOF' + NL + 'line' + NL + 'pid $(pkill -f vite)' + NL + 'EOF',
+  'xargs kill <<EOF' + NL + '$(pgrep node)' + NL + 'EOF',
+  'cat <<-EOF' + NL + '\t$(taskkill //F //IM node.exe)' + NL + '\tEOF',
+  'gh pr create --body "$(cat <<EOF' + NL + 'body $(pkill node)' + NL + 'EOF' + NL + ')"',
+  'bash <<< "pkill node"',
+  "sh -s <<< 'killall node'",
+  'bash<<<"taskkill //F //IM node.exe"',
+  'echo "pkill node" | bash',
+  "printf 'killall node' | sh",
+  'pwsh -Command - <<< "Stop-Process -Name node"',
+];
+const TEXT_ALLOW_BASH = [
+  "cat <<'EOF'" + NL + '$(pkill node)' + NL + 'EOF',
+  'cat <<"EOF"' + NL + '`killall node`' + NL + 'EOF',
+  'cat <<\\EOF' + NL + '$(pkill node)' + NL + 'EOF',
+  'gh pr create --body "$(cat <<\'EOF\'' + NL + 'body $(pkill node) `killall x`' + NL + 'EOF' + NL + ')"',
+  'cat <<EOF' + NL + '\\$(pkill node) and \\`killall node\\`' + NL + 'EOF',
+  'cat <<EOF' + NL + '$((1+2)) pkill node' + NL + 'EOF',
+  'cat <<EOF' + NL + 'a lone ` backtick, pkill node' + NL + 'EOF',
+  'git commit -F - <<EOF' + NL + 'fix: $(git rev-parse HEAD) never pkill' + NL + 'EOF',
+  'cat <<EOF' + NL + 'kill $(cat pidfile)' + NL + 'EOF',
+  'grep pkill <<< "pkill node"',
+  'echo "pkill node" | grep pkill',
+  'echo "pkill node" | bash -c "cat"',
+  'echo "pkill node" && bash',
+  'echo "pkill node" | bash script.sh',
+];
+const TEXT_KILL_PS = [
+  "@'" + NL + 'Stop-Process -Name node' + NL + "'@ | iex",
+  '@"' + NL + 'Stop-Process -Name node' + NL + '"@ | Invoke-Expression',
+  "@'" + NL + 'Get-Process node | Stop-Process -Force' + NL + "'@ | Invoke-Expression",
+  "'Stop-Process -Name node' | iex",
+  '"taskkill /F /IM node.exe" | iex',
+  "Write-Output 'Get-Process node | Stop-Process' | iex",
+];
+const TEXT_ALLOW_PS = [
+  "@'" + NL + 'Stop-Process -Name node' + NL + "'@ | Set-Content x.ps1",
+  "'Stop-Process -Name node' | Out-File notes.txt",
+  "@'" + NL + 'Stop-Process -Id 42' + NL + "'@ | iex",
+  "@'" + NL + 'notes about Stop-Process' + NL + "'@ | iex -ErrorAction Stop",
+  "'Stop-Process -Name node'; iex",
+  "$m = @'" + NL + 'never Stop-Process -Name node' + NL + "'@" + NL + 'git commit -m $m',
+];
+for (const c of TEXT_KILL_BASH) test(`text run as commands, kill denied (bash): ${JSON.stringify(c).slice(0, 90)}`, () => assert.ok(kills(c, 'bash'), c));
+for (const c of TEXT_ALLOW_BASH) test(`text kept as data, kill rule allows (bash): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'bash'), null, c));
+for (const c of TEXT_KILL_PS) test(`text run as commands, kill denied (powershell): ${JSON.stringify(c).slice(0, 90)}`, () => assert.ok(kills(c, 'powershell'), c));
+for (const c of TEXT_ALLOW_PS) test(`text kept as data, kill rule allows (powershell): ${JSON.stringify(c).slice(0, 90)}`, () => assert.equal(kills(c, 'powershell'), null, c));

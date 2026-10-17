@@ -158,7 +158,9 @@ function scan(cmd, i0, base, depth, term, ctx) {
     stack.push(fr); gtop = fr;
     if (fr.fn) ctx.fns.push(fr);
   };
-  const pop = () => { const t = stack.pop(); if (t && (t.kind === 'group' || t.kind === 'loop')) gtop = t.parentG; return t; };
+  const pop = () => { const t = stack.pop(); if (t && (t.kind === 'group' || t.kind === 'loop' || t.kind === 'subst' || t.kind === 'bt')) gtop = t.parentG; return t; };
+  // a substitution runs in a subshell that inherits the stdin of the command it sits in: inside a piped-into command it is fed
+  const openSub = (kind) => { const fr = { kind, saved: cur, parentG: gtop, piped: cur.piped, redirs: [], res: undefined }; stack.push(fr); gtop = fr; };
   const skipArith = (p) => { // p is just past an opening ((; returns the index past the matching ))
     let d = 2;
     for (; p < n; p++) { if (cmd[p] === '(') d++; else if (cmd[p] === ')' && --d === 0) return p + 1; }
@@ -179,7 +181,7 @@ function scan(cmd, i0, base, depth, term, ctx) {
           else if (depth < PY_MAX_DEPTH && (d === '`' || (d === '$' && cmd[i + 1] === '(' && cmd[i + 2] !== '('))) {
             // a substitution inside double quotes runs like an unquoted one: scan its body in place
             o += '\0';
-            i = scan(cmd, i + (d === '`' ? 1 : 2), gtop, depth + 1, d === '`' ? '`' : ')', ctx);
+            i = scan(cmd, i + (d === '`' ? 1 : 2), { kind: 'subst', parentG: gtop, piped: cur.piped, redirs: [], res: undefined }, depth + 1, d === '`' ? '`' : ')', ctx);
           } else o += cmd[i++];
         }
         i++; continue;
@@ -243,16 +245,20 @@ function scan(cmd, i0, base, depth, term, ctx) {
     if (c === '$' && cmd[i + 1] === '(' && cmd[i + 2] === '(') { cur.words.push(' '); i = skipArith(i + 3); continue; } // $(( .. ))
     if (c === '(' && cmd[i + 1] === '(' && cur.words.length === 0) { finish(); i = skipArith(i + 2); start(false); continue; } // (( .. ))
     if ((c === '$' || c === '<' || c === '>') && cmd[i + 1] === '(') { // $(..), <(..), >(..)
-      cur.words.push('\0'); stack.push({ kind: 'subst', saved: cur }); i += 2; start(false); continue;
+      cur.words.push('\0'); openSub('subst'); i += 2; start(false); continue;
     }
     if (c === '(') {
       let j = i + 1;
       while (j < n && ws(cmd[j])) j++;
-      if (cmd[j] === ')' && (cur.words.length === 1 || (cur.words.length === 2 && cur.words[0] === 'function'))) { // name() or function name()
+      // name() or function name(), also behind time / ! (`time f() {` defines f, it does not run anything)
+      const leadOnly = cur.words.length >= 1 && cur.words.slice(0, -1).every((x) => x === 'time' || x === '!');
+      if (cmd[j] === ')' && (leadOnly || (cur.words.length === 2 && cur.words[0] === 'function'))) {
         const nm = cur.words[cur.words.length - 1];
         i = j + 1; start(false); cur.fnDef = true; cur.fnName = nm; continue;
       }
-      const pp = cur.piped; finish(); open('group', pp); i++; start(false); continue;
+      // `f() ( ... )`: the body is a subshell group, judged at the call sites like `f() { ... }`
+      const fnBody = cur.fnDef && !cur.words.length && !cur.redirs.length ? { fn: true, name: cur.fnName } : undefined;
+      const pp = cur.piped; finish(); open('group', pp, fnBody); i++; start(false); continue;
     }
     if (c === ')') {
       const t = stack[stack.length - 1];
@@ -268,7 +274,7 @@ function scan(cmd, i0, base, depth, term, ctx) {
       i++;
       const top = stack[stack.length - 1];
       if (!top && term === '`') { finish(); return i; } // the end of a backtick substitution inside double quotes (i is past it)
-      if (top && top.kind === 'bt') { finish(); pop(); cur = top.saved; } else { cur.words.push('\0'); stack.push({ kind: 'bt', saved: cur }); start(false); }
+      if (top && top.kind === 'bt') { finish(); pop(); cur = top.saved; } else { cur.words.push('\0'); openSub('bt'); start(false); }
       continue;
     }
     PY_FD.lastIndex = i;

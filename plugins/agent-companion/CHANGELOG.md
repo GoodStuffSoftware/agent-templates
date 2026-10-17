@@ -2,6 +2,18 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.29 — 2026-10-17
+
+- **Kill guard (W1).** A kill inside `$( )` or backticks in an unquoted heredoc body, a shell fed by `<<<` or an echo/printf pipe (and `pwsh -Command -`), and a here-string or quoted string piped into `iex` / `Invoke-Expression` are now denied; quoted heredocs and text piped into a non-shell stay data.
+- **Python-stdin and env guards (W2).** python_stdin_guard: a command substitution inside a piped-into command is fed by that pipe (N1), an inner NUL redirect still overrides it (N2), `time f() {` and `f() ( ... )` define a function judged at its call sites (N5). env_dump_guard: `env -S STRING` (also `-SSTRING`, `-iS`, `--split-string=`) is split into words and the command it names is judged, so `env printenv` / `env -S printenv` deny and `env -S "ls -l"` allows.
+- **Reporting contract (W3).** Caps the final worker notice at about 300 tokens (detail goes to the detail file) and bars interim notices for planned background waits.
+- **Calibration scout routine (W4).** The local run does the model-lineup diff on every run; cloud-only paths and the cloud-routine pin check are reported as not run locally, never as clean.
+- **scout-ack (W5).** `scout-ack add` before any hand-off state exists is refused ("run the scout once first") instead of writing an ack the first scout run would void.
+- **Scout detectors (W6).** `routing_trial_review_due` no longer re-raises a shipped trial that a winning profile row has replaced (the profile row's own reviewBy still raises); `routine_model_drift` ignores disabled scheduled tasks (`enabled: false`), cron or one-off.
+- **Contribution folding (W7).** Fold gates in CONTRIBUTING.md, new CONTRIBUTIONS_INBOX.md entries and a lesson; leak-check warns on lesson bodies over 150 words.
+- **env guard, second pass (fix S).** `env -S STRING` gets the full scan again (nested shells, `eval`, `xargs`, inline programs, quote-aware split), `env` as a prefix before a nested shell is judged, and `xargs` and `awk ENVIRON` programs are judged.
+- **Review fixes (fix B).** Stale tests corrected; the worker-wait rules say no interim notice; a quiet local scout run prints nothing; the lesson word cap is 800; a corrupt scout state gets its own `scout-ack` refusal message; the inbox lists newest first.
+
 ## 0.31.28 — 2026-10-17
 
 Five parts: the env-dump guard judges inline code, the 10-16 routing verdicts reach the shipped table, the daily scout hands off a delta instead of repeating itself, and three resource-queue probe nits from the 0.31.26 review, and idle and max-hold flag a live holder instead of releasing it.

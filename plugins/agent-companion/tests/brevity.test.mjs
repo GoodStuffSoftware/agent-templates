@@ -547,3 +547,17 @@ test('S5 fix: brevity-started markers older than 24h are pruned on a start; fres
     cleanup();
   }
 });
+
+// --- 0.31.29: notice cap and no interim notices -------------------------------
+test('contract states the ~300 token cap and the no-interim-notice rule, within a size bound', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const text = buildContract('general-purpose');
+    assert.match(text, /final message \(max ~300 tokens\)/);
+    assert.match(text, /Detail beyond that: write <task>-detail\.md/);
+    assert.match(text, /No interim notices for planned background waits; only blockers and the final message wake the lead/);
+    assert.ok(text.length <= 720, `contract is ${text.length} chars`);
+  } finally {
+    cleanup();
+  }
+});

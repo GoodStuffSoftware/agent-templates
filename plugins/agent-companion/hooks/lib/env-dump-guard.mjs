@@ -112,6 +112,62 @@ function noRedir(words) {
 // programs that print what a here-string feeds them
 const HERE_ECHO = new Set(['cat', 'tee', 'tr', 'head', 'tail', 'sort', 'uniq', 'rev', 'base64', 'xxd', 'od', 'sed', 'awk', 'gawk', 'grep', 'xargs', 'tac', 'fold', 'nl', 'paste']);
 
+// split an `env -S` string into words the way env does: whitespace separates, '...' and "..." group (quotes dropped)
+function splitEnvString(str) {
+  const out = [];
+  let buf = '';
+  let started = false;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (c === '\\' && i + 1 < str.length) { buf += str[++i]; started = true; continue; }
+    if (c === "'" || c === '"') {
+      const e = str.indexOf(c, i + 1);
+      const end = e < 0 ? str.length : e;
+      buf += str.slice(i + 1, end);
+      started = true;
+      i = end;
+      continue;
+    }
+    if (/\s/.test(c)) { if (started) { out.push(buf); buf = ''; started = false; } continue; }
+    buf += c; started = true;
+  }
+  if (started) out.push(buf);
+  return out;
+}
+// the `-S` option at word j of an env argument list: { str, used } or null; matches -S STR, -SSTR, -iS STR, --split-string=STR
+function envSplitAt(ws, j) {
+  const a = ws[j].t;
+  const sm = /^--split-string(?:=([\s\S]*))?$/.exec(a) || /^-[i0v]*S([\s\S]*)$/.exec(a);
+  if (!sm) return null;
+  const inline = sm[1] !== undefined && sm[1] !== '';
+  return { str: inline ? sm[1] : (ws[j + 1] ? ws[j + 1].t : ''), used: inline ? 1 : 2 };
+}
+const shq = (t) => `'${String(t).replace(/'/g, "'\\''")}'`;
+// `env ... -S STRING ...` as command text: the string stays shell text (so quotes, nested shells, eval, xargs and inline
+// programs inside it are judged by a full scan), every other word is single-quoted. null when env has no -S.
+function envSplitText(words, k) {
+  const rest = noRedir(words.slice(k + 1));
+  const parts = [];
+  let found = false;
+  let j = 0;
+  while (j < rest.length) {
+    const a = rest[j].t;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) { parts.push(shq(a)); j++; continue; }
+    if (a === '--') { parts.push(shq(a)); j++; break; }
+    const sp = envSplitAt(rest, j);
+    if (sp) { found = true; parts.push(sp.str); j += sp.used; continue; }
+    if (a.length > 1 && a[0] === '-') {
+      const n = /^-(u|C|-unset|-chdir)$/.test(a) ? 2 : 1;
+      for (let q = 0; q < n && j < rest.length; q++, j++) parts.push(shq(rest[j].t));
+      continue;
+    }
+    break;
+  }
+  if (!found) return null;
+  for (; j < rest.length; j++) parts.push(shq(rest[j].t));
+  return 'env ' + parts.join(' ');
+}
+
 // kind of an env source command: 'dump' | 'secret' | null
 function classify(cmd, shell) {
   const w = cmd.words;
@@ -161,15 +217,34 @@ function classify(cmd, shell) {
   }
 
   if (prog === 'env') {
+    // `env -S STRING` splits STRING into words (also -SSTRING, -iS STRING, --split-string=STRING): those words are options,
+    // NAME=value words or the command, as if written out. A command that follows is judged as that command.
+    const ws = rest.slice();
     let j = 0;
-    while (j < args.length) {
-      const a = args[j];
+    while (j < ws.length) {
+      const a = ws[j].t;
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) { j++; continue; }
       if (a === '--') { j++; break; }
-      if (a.length > 1 && a[0] === '-') { j += /^-(u|C|S|-unset|-chdir)$/.test(a) ? 2 : 1; continue; }
+      const sp = envSplitAt(ws, j);
+      if (sp) {
+        ws.splice(j, sp.used, ...splitEnvString(sp.str).map((t) => ({ t, q: false })));
+        continue;
+      }
+      if (a.length > 1 && a[0] === '-') { j += /^-(u|C|-unset|-chdir)$/.test(a) ? 2 : 1; continue; }
       break;
     }
-    return j >= args.length ? 'dump' : null;
+    if (j >= ws.length) return 'dump';
+    return classify({ ...cmd, words: ws.slice(j) }, shell);
+  }
+  if (!ps && (prog === 'awk' || prog === 'gawk' || prog === 'mawk' || prog === 'nawk')) {
+    // an awk program that prints the ENVIRON array: `for (k in ENVIRON) print k, ENVIRON[k]`, print ENVIRON["API_KEY"]
+    const code = args.filter((a) => a[0] !== '-').join(' ');
+    if (/\bENVIRON\b/.test(code) && /\bprint(f)?\b/.test(code)) {
+      const idx = [...code.matchAll(/\bENVIRON\s*\[\s*([^\]]*?)\s*\]/g)].map((m) => m[1]);
+      const lit = idx.map((x) => /^"([^"]*)"$/.exec(x) || /^'([^']*)'$/.exec(x));
+      if (/\bin\s+ENVIRON\b/.test(code) || lit.some((m) => !m)) return 'dump';
+      return lit.some((m) => isSecretName(m[1], shell)) ? 'secret' : null;
+    }
   }
   if (prog === 'printenv') {
     const names = args.filter((a) => a[0] !== '-');
@@ -311,7 +386,9 @@ function inlineHits(c, list, i, shell, depth, st, hits) {
   }
 }
 
-function scan(text, shell, depth, st, hits) {
+// skipTop: the commands of this text are the inside of an `env -S` string; the outer command already ran classify on it
+// (with the pipeline filters around it), so only the nested shells, eval, xargs and inline programs are judged here.
+function scan(text, shell, depth, st, hits, skipTop = false) {
   if (depth > MAX_DEPTH) return;
   const cmds = parseCommands(text, shell, depth, st);
   const byChain = new Map();
@@ -332,7 +409,7 @@ function scan(text, shell, depth, st, hits) {
     for (let i = 0; i < list.length; i++) {
       const c = list[i];
       if (c.captured) continue;
-      const kind = classify(c, shell);
+      const kind = skipTop ? null : classify(c, shell);
       if (kind === 'secret' && c.condition) continue; // if (\$env:NAME) { ... }: a presence test
       if (kind && !redirected(c.words)) {
         const down = list.slice(i + 1);
@@ -344,12 +421,28 @@ function scan(text, shell, depth, st, hits) {
       // inline programs: node -e, python -c, a heredoc into node / python / bash / pwsh, pwsh -EncodedCommand
       if (!hits.env) inlineHits(c, list, i, shell, depth, st, hits);
       // nested scripts
-      const k = rawProg(c.words);
+      let k = rawProg(c.words);
       if (k < 0) continue;
+      // env as a prefix: `env -S "bash -c env"` (the string is shell text, scanned in full one level deeper);
+      // `env [-i] [NAME=v] bash -c env` runs the program after env's own words
+      if (baseName(c.words[k].t) === 'env') {
+        const split = envSplitText(c.words, k);
+        if (split !== null) {
+          scan(split, shell, depth + 1, st, hits, true);
+          continue;
+        }
+        const pk = progIndex(c.words);
+        if (pk > k && pk < c.words.length) k = pk; else continue;
+      }
       const prog = baseName(c.words[k].t);
       const args = c.words.slice(k + 1).map((x) => x.t);
       let nested = null;
-      if (['bash', 'sh', 'zsh', 'dash', 'ksh'].includes(prog)) {
+      if (prog === 'xargs') {
+        // the command xargs runs: the first word that is not an option (or an option's value)
+        let a = 0;
+        while (a < args.length && args[a][0] === '-' && args[a].length > 1) a += /^-[IneEsLPdaiSl]$/.test(args[a]) ? 2 : 1;
+        if (a < args.length) nested = [args.slice(a).join(' '), shell];
+      } else if (['bash', 'sh', 'zsh', 'dash', 'ksh'].includes(prog)) {
         const ci = args.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
         if (ci >= 0 && args[ci + 1] !== undefined) nested = [args[ci + 1], 'bash'];
       } else if (prog === 'powershell' || prog === 'pwsh') {

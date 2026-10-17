@@ -144,6 +144,13 @@ Remember the tag semantics: **AND across axes, OR within an axis** (`[stack:nuxt
 
 If a change is generic but only relevant to one vendor's agent model, tag it `vendor:<id>`. Vendor-neutral scaffolding still goes in that vendor's folder for now (a top-level shared location is a future refactor); vendor-neutral *knowledge* is just a lesson with no `vendor:` tag.
 
+
+**Fold gates (enforced at fold time):**
+- **Generality record required.** An inbox entry whose "Is it generic?" field is empty or missing is bounced back to the project, not folded.
+- **One incident, one stack = project-local.** Evidence from a single incident in one specific stack/tool stays in the project unless the generic principle can be stated without that stack's mechanism. A scrubbed but mechanism-specific lesson fails this test even when leak-check passes.
+- **Contested claims need an A/B.** A lesson that contradicts or amends an existing lesson is not folded on interpretation alone. Park both claims until a controlled A/B (or equivalent reproduction) in the source project settles it; record only the winner and remove or correct the loser.
+- **Brevity.** Lesson body of ~150 words: the rule, the trigger, how to apply, a one-line incident. `leak-check` warns (not fails) above that.
+
 ---
 
 ## Contribution path
