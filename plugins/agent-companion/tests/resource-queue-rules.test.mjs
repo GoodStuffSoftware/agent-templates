@@ -14,6 +14,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   loadRules, capacityOf, parseRam, limitsFor, liveVerdict, appendClear, recentClears, clearsFile, sampleTree, scanStrays, descendants,
+  parseMsysPs, holdsExclusive, msysLinks, msysBinCandidates,
 } from '../scripts/lib/resource-rules.mjs';
 import {
   parseResourceArg, buildRequest, subtractHeld, planCommand, installLauncher, launcherPath, LAUNCHER_SOURCE,
@@ -21,6 +22,19 @@ import {
 
 const tmp = (p = 'rq-rules-') => mkdtempSync(join(tmpdir(), p));
 const rm = (d) => rmSync(d, { recursive: true, force: true });
+// Git for Windows' sh.exe, or null, found where the probe looks (never the caller's PATH alone).
+function gitSh() {
+  if (process.platform !== 'win32') return null;
+  for (const d of msysBinCandidates(process.env)) {
+    const p = join(d, 'sh.exe');
+    if (existsSync(p) && existsSync(join(d, 'msys-2.0.dll'))) return p;
+  }
+  return null;
+}
+// Why the real msys process-tree test cannot run here, or false when it can.
+const machineTreeSkip = process.platform !== 'win32' ? 'Windows only: msys process chains'
+  : !gitSh() ? 'no Git for Windows sh.exe found'
+    : msysLinks() === null ? 'the probe cannot find or read Git\'s ps.exe' : false;
 const shipped = () => loadRules({ AC_RESOURCE_RULES: join(tmpdir(), 'rq-no-such-rules.json'), CLAUDE_CONFIG_DIR: join(tmpdir(), 'rq-no-such-dir') });
 
 // ---------------------------------------------------------------- rules file
@@ -55,7 +69,7 @@ test('a user rules file merges over the shipped one: objects key by key, classes
     assert.equal(r.ram.reserveMb, 5000);
     assert.equal(r.ram.rampMs, 60_000, 'keys the user did not set stay');
     assert.equal(r.resources['app-e2e'].capacity, 3);
-    assert.equal(r.resources['app-e2e'].maxHoldMs, 900_000, 'merged key by key');
+    assert.equal(r.resources['app-e2e'].maxHoldMs, 1_800_000, 'merged key by key');
     assert.equal(r.resources.mine.capacity, 2);
     const lint = r.classes.find((c) => c.id === 'lint');
     assert.equal(lint.box, 1);
@@ -188,6 +202,163 @@ test('sampleTree: active on cpu use, on a busy child, or on a listening port; ne
 test('descendants walks the whole tree once, even with a cycle', () => {
   const t = [proc(1, 0, 'a', 0), proc(2, 1, 'b', 0), proc(3, 2, 'c', 0), proc(4, 3, 'd', 0), proc(1, 4, 'loop', 0), proc(9, 8, 'other', 0)];
   assert.deepEqual(descendants(t, 1).map((p) => p.pid).sort(), [2, 3, 4]);
+  assert.deepEqual(descendants(t, 1, [{ pid: 9, ppid: 3 }]).map((p) => p.pid).sort(), [2, 3, 4, 9], 'an extra link adopts a subtree');
+});
+
+// The 0.31.25 incident shape: wrapper -> git -> pre-push sh, whose fork + exec of an msys
+// program (an npm/npx shim's bash) leaves that program with a dead Windows parent. The
+// wrapper's direct tree is quiet; all the work sits under the orphaned bash.
+const prePush = (busyCpu) => [
+  proc(100, 1, 'node.exe', 200, 'node resource-queue.mjs run --class push-gate -- git push'),
+  proc(101, 100, 'git.exe', 50), proc(102, 101, 'sh.exe', 30, 'C:\\Program Files\\Git\\usr\\bin\\sh.exe .husky/pre-push'),
+  proc(200, 199, 'bash.exe', 20, 'C:\\Program Files\\Git\\usr\\bin\\bash.exe /c/nvm4w/nodejs/npm run test:e2e'), // 199 is dead
+  proc(201, 200, 'node.exe', 100, 'node npm-cli.js run test:e2e'),
+  proc(202, 201, 'node.exe', busyCpu, 'node playwright/cli.js test'),
+  proc(203, 202, 'java.exe', 0, 'java -jar cloud-firestore-emulator.jar'),
+];
+const msysPs = [
+  '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND',
+  '      500       1     500        102  ?         197611 07:37:44 /usr/bin/sh',
+  '      501     500     500        200  ?         197611 07:37:45 /usr/bin/bash',
+  '      502     501     500        201  ?         197611 07:37:45 /c/nvm4w/nodejs/node',
+  ' S    503       1     503        999  ?         197611 07:37:45 /usr/bin/sleep',
+].join('\n');
+
+test('parseMsysPs maps msys parent pids to Windows pids, status letters and unknown parents included', () => {
+  assert.deepEqual(parseMsysPs(msysPs), [{ pid: 200, ppid: 102 }, { pid: 201, ppid: 200 }]);
+  assert.deepEqual(parseMsysPs(''), []);
+});
+
+test('sampleTree: a pre-push tree with a quiet wrapper and git but busy grandchildren is active (msys links)', () => {
+  const links = () => parseMsysPs(msysPs);
+  const first = sampleTree(100, { now: 0, table: () => prePush(1000), msys: links });
+  assert.equal(first.size, 7, 'the orphaned bash and everything under it are in the tree');
+  const s = sampleTree(100, { prev: first, now: 30_000, table: () => prePush(1000 + 15_000), msys: links });
+  assert.equal(s.active, true);
+  assert.match(s.why, /^cpu 50\.0%/);
+  const child = sampleTree(100, { prev: first, now: 30_000, table: () => prePush(1000), msys: links, busyChildren: ['java'] });
+  assert.equal(child.why, 'child java.exe', 'a heavy-class descendant is activity even at rest');
+  const port = sampleTree(100, { prev: first, now: 30_000, table: () => prePush(1000), msys: links, ports: [[18080, 18999]], listen: () => [{ port: 18080, pid: 203 }] });
+  assert.equal(port.why, 'listening on 18080');
+  // Without the links the old walk sees only wrapper, git and sh: the 0.31.25 bug.
+  const blind = sampleTree(100, { prev: first, now: 30_000, table: () => prePush(1000 + 15_000), msys: () => [] });
+  assert.equal(blind.size, 3);
+  assert.equal(blind.active, false, 'the Windows walk alone cannot see the orphaned work (why the links exist)');
+});
+
+test('sampleTree reads msys links only for a tree with an msys process, beside its own sh; no ps.exe found is "unknown"', () => {
+  const calls = [];
+  const spy = (o) => { calls.push(o); return parseMsysPs(msysPs); };
+  sampleTree(100, { now: 0, table: () => prePush(1000), msys: spy });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].near, ['C:\\Program Files\\Git\\usr\\bin'], 'the ps.exe beside the tree\'s own sh is tried first');
+  const plain = [proc(10, 1, 'node.exe', 0), proc(11, 10, 'node.exe', 0)];
+  sampleTree(10, { now: 0, table: () => plain, msys: spy });
+  assert.equal(calls.length, 1, 'no msys process in the tree: no spawn');
+  if (process.platform === 'win32') {
+    const nowhere = { PATH: '', ProgramFiles: join(tmpdir(), 'rq-no-git-here') };
+    assert.equal(msysLinks({ env: nowhere, near: [], gitExecPath: () => null }), null, 'no ps.exe anywhere: unknown, not "no links"');
+  } else assert.deepEqual(msysLinks({ env: { PATH: '' } }), []);
+});
+
+test('msysBinCandidates: the tree\'s own dirs, then CLAUDE_CODE_GIT_BASH_PATH\'s install, then the standard dirs (a default when the env names none), then PATH', { skip: process.platform !== 'win32' && 'Windows paths' }, () => {
+  const env = { CLAUDE_CODE_GIT_BASH_PATH: 'D:\\Tools\\Git\\bin\\bash.exe', ProgramFiles: 'E:\\PF', PATH: 'F:\\x;G:\\y' };
+  const c = msysBinCandidates(env, ['N:\\near']);
+  assert.equal(c[0], 'N:\\near');
+  assert.equal(c[1], join('D:\\Tools\\Git\\bin'));
+  assert.equal(c[2], join('D:\\Tools\\Git\\usr\\bin'), '<Git>\\bin\\bash.exe -> <Git>\\usr\\bin');
+  assert.equal(c[3], join('E:\\PF', 'Git', 'usr', 'bin'));
+  assert.deepEqual(c.slice(-2), ['F:\\x', 'G:\\y'], 'PATH last: another msys on PATH cannot see Git Bash\'s processes');
+  assert.ok(msysBinCandidates({}).includes(join('C:\\Program Files', 'Git', 'usr', 'bin')), 'a stripped env still tries the standard install');
+});
+
+test('msysLinks finds Git\'s ps.exe in a stripped environment (no PATH, no ProgramFiles): standard dir or git --exec-path', { skip: machineTreeSkip }, () => {
+  const links = msysLinks({ env: {} });
+  assert.ok(Array.isArray(links), 'empty env: still readable');
+  const viaGit = msysLinks({ env: { PATH: '', ProgramFiles: join(tmpdir(), 'rq-no-git-here') } });
+  assert.ok(Array.isArray(viaGit), 'no install dir and no PATH: git --exec-path finds it');
+});
+
+test('sampleTree: a broken parent chain is "unknown", so active; a genuinely idle tree is idle', () => {
+  const first = sampleTree(100, { now: 0, table: () => prePush(1000), msys: () => null });
+  const s = sampleTree(100, { prev: first, now: 30_000, table: () => prePush(1000), msys: () => null });
+  assert.equal(s.active, true);
+  assert.match(s.why, /^unknown/);
+  const quiet = [proc(100, 1, 'node.exe', 200), proc(101, 100, 'git.exe', 50), proc(102, 101, 'sh.exe', 30)];
+  const q1 = sampleTree(100, { now: 0, table: () => quiet, msys: () => [] });
+  const q2 = sampleTree(100, { prev: q1, now: 30_000, table: () => quiet, msys: () => [], busyChildren: ['java'], ports: [[9100, 9103]], listen: () => [] });
+  assert.equal(q2.active, false, 'readable chain, no cpu, no heavy child, no port: idle');
+});
+
+test('sampleTree: an orphan of a pid seen in an earlier sample stays in the tree, and an exited process cannot mask the rest', () => {
+  const t1 = [proc(10, 1, 'node', 100), proc(11, 10, 'cmd.exe', 10), proc(12, 11, 'node', 1000)];
+  const first = sampleTree(10, { now: 0, table: () => t1 });
+  const t2 = [proc(10, 1, 'node', 100), proc(12, 11, 'node', 1000 + 3000)]; // 11 exited; 12 kept working
+  const s = sampleTree(10, { prev: first, now: 30_000, table: () => t2 });
+  assert.equal(s.size, 2);
+  assert.equal(s.active, true, '3000 ms over 30 s from the adopted orphan');
+  // A big exited process no longer drags the sum negative.
+  const t3 = [proc(10, 1, 'node', 100), proc(11, 10, 'x', 50_000), proc(12, 10, 'y', 0)];
+  const a = sampleTree(10, { now: 0, table: () => t3 });
+  const b = sampleTree(10, { prev: a, now: 30_000, table: () => [proc(10, 1, 'node', 100), proc(12, 10, 'y', 3000)] });
+  assert.equal(b.active, true);
+});
+
+// Every program here is named by absolute path (this node, Git's sh): the test must not
+// depend on the caller's PATH. The push gate hides every PATH dir holding a claude
+// binary, which on this machine is node's own dir, so a bare `node` fails there.
+test('sampleTree on this machine: wrapper -> sh -c -> msys sh script -> node -> busy node is active', { skip: machineTreeSkip }, async () => {
+  const d = tmp('rq-tree-');
+  try {
+    const fwd = (p) => p.replace(/\\/g, '/');
+    const busy = fwd(join(d, 'busy.js'));
+    const started = join(d, 'started');
+    writeFileSync(busy, `require('fs').writeFileSync(${JSON.stringify(started)},'');const {spawn}=require('child_process');spawn(process.execPath,['-e','const e=Date.now()+20000;while(Date.now()<e){}'],{stdio:'ignore',windowsHide:true});setTimeout(()=>{},20000);\n`);
+    writeFileSync(join(d, 'inner.sh'), `"${fwd(process.execPath)}" "${busy}"\n`);
+    const quiet = `const {spawn}=require('child_process');const c=spawn(${JSON.stringify(gitSh())},['-c',${JSON.stringify(`"${fwd(gitSh())}" "${fwd(join(d, 'inner.sh'))}"; echo done`)}],{stdio:'ignore',windowsHide:true});c.on('exit',()=>process.exit(0));`;
+    const { spawn } = await import('node:child_process');
+    const root = spawn(process.execPath, ['-e', quiet], { stdio: 'ignore', windowsHide: true });
+    let ours = [];
+    try {
+      await new Promise((r) => setTimeout(r, 4000));
+      const first = sampleTree(root.pid, { now: Date.now() });
+      await new Promise((r) => setTimeout(r, 3000));
+      const s = sampleTree(root.pid, { prev: first, now: Date.now() });
+      assert.ok(first && s, 'process table readable');
+      assert.ok(existsSync(started), 'the msys sh script started the busy node (else the tree under test never existed)');
+      ours = s.seen.filter((pid) => pid !== root.pid);
+      assert.equal(s.active, true, `the busy grandchild is seen (tree ${s.size}, ${s.why})`);
+      assert.match(s.why, /^cpu/);
+      // The same moment through the Windows parent walk alone (no links, no earlier tree): the work is invisible.
+      const blind = sampleTree(root.pid, { prev: { cpu: first.cpu, at: first.at }, now: Date.now(), msys: () => [] });
+      assert.equal(blind.active, false, `the plain walk misses the orphaned msys subtree (tree ${blind.size} of ${s.size})`);
+    } finally {
+      try { root.kill(); } catch { /* gone */ }
+      for (const pid of ours) { try { process.kill(pid); } catch { /* gone */ } } // only the tree this test started
+    }
+  } finally { rm(d); }
+});
+
+test('liveVerdict: max-hold only flags a live holder of an exclusive resource that is active or unmeasured, and clears a measured-idle one', () => {
+  const rules = { rules: [{ id: 'max-hold', enabled: true }, { id: 'idle', enabled: true, sampleMs: 30_000 }], resources: { 'app-e2e': { capacity: 1 } } };
+  const lease = (extra) => ({ kind: 'run', startedAt: 1, units: 8, resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 1_800_000, idleMs: 300_000, minHoldMs: 600_000 }, ...extra });
+  const now = 1_900_000;
+  const active = liveVerdict(rules, lease({ act: { sampledAt: now - 10_000, activeAt: now - 10_000 } }), now);
+  assert.equal(active.rule, 'max-hold');
+  assert.equal(active.keep, true, 'an active holder over time is flagged, never released');
+  assert.equal(active.evidence.activity, 'active');
+  const unmeasured = liveVerdict(rules, lease(), now);
+  assert.equal(unmeasured.keep, true, 'no probe: unknown means keep');
+  assert.equal(unmeasured.evidence.activity, 'unknown');
+  const staleProbe = liveVerdict(rules, lease({ act: { sampledAt: now - 600_000, activeAt: 0 } }), now);
+  assert.equal(staleProbe.keep, true, 'a stale probe is unknown, not idle');
+  const idle = liveVerdict(rules, lease({ act: { sampledAt: now - 10_000, activeAt: now - 400_000 } }), now);
+  assert.equal(idle.rule, 'max-hold');
+  assert.equal(idle.keep, undefined, 'measured idle past the hold limit is released');
+  // A box-only lease (nothing exclusive) keeps the plain max-hold clear.
+  assert.equal(liveVerdict(rules, lease({ resources: {}, act: { sampledAt: now - 10_000, activeAt: now - 10_000 } }), now).keep, undefined);
+  assert.equal(holdsExclusive(rules, lease()), true);
+  assert.equal(holdsExclusive({ resources: { pool: { capacity: 3 } } }, lease({ resources: { pool: 1 } })), false);
 });
 
 test('scanStrays reports matching processes while nothing holds the resource, orphans flagged', () => {
@@ -222,7 +393,7 @@ test('buildRequest: a class supplies defaults, explicit flags override, {cwd} is
   assert.equal(e2e.box, 8);
   assert.deepEqual(e2e.resources, { 'app-e2e': 1 });
   assert.equal(e2e.ramMb, 5000);
-  assert.equal(e2e.limits.maxHoldMs, 720_000);
+  assert.equal(e2e.limits.maxHoldMs, 1_800_000);
   assert.ok(e2e.probe.ports.length > 0);
   assert.equal(e2e.monitored, true, 'app-e2e has an idleMs, so the lease is probed');
 

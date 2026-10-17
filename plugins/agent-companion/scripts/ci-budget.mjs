@@ -544,8 +544,11 @@ export function readState(ctx, { reclaim = true } = {}) {
         }
       } else {
         // Live pid, fresh heartbeat: the config rules (max-hold, idle) may still clear it.
-        const v = reclaim ? liveVerdict(ctx.rules, e, ctx.now()) : null;
-        if (v) {
+        // A kept verdict (max-hold on a live, active or unmeasured holder of an exclusive
+        // resource) only flags the lease "over time"; it is never released for it.
+        const v = liveVerdict(ctx.rules, e, ctx.now());
+        if (v?.keep) e.overTime = v.evidence;
+        if (v && !v.keep && reclaim) {
           // The tombstone first, so the owner's heartbeat does not put the lease back.
           try { writeFileSync(join(ctx.dir, `lease-${m[1]}.cleared`), String(ctx.now()), { flag: 'wx' }); } catch { /* already marked */ }
           dropFile(file, hbFile, e.actFile);
@@ -1557,6 +1560,7 @@ function holderOut(ctx, l, units, stale, now) {
     ageMs: Math.max(0, now - num(l.startedAt)), heartbeatAgeMs: Math.max(0, now - hb),
     lastActivityAt: l.act ? l.act.activeAt : null, idleMs: l.act ? Math.max(0, now - l.act.activeAt) : null,
     stale: stale || null, group: l.group || '', bound: l.boundPid > 0, boundPid: l.boundPid > 0 ? l.boundPid : null,
+    overTime: l.overTime ? { heldMs: l.overTime.heldMs, maxHoldMs: l.overTime.maxHoldMs, activity: l.overTime.activity } : null,
   };
 }
 
@@ -1668,7 +1672,8 @@ export function formatResourceStatus(st) {
     lines.push(`${r.name}: ${r.held}/${r.capacity} held, ${r.free} free`);
     if (!r.holders.length) lines.push('  free');
     for (const h of r.holders) {
-      const flags = [h.bound ? 'BOUND to this pid' : '', h.group ? `group ${h.group}` : '', h.stale ? `STALE (${h.stale})` : '', h.kind !== 'legacy' && !h.alive ? 'PID DEAD' : ''].filter(Boolean).join(' ');
+      const flags = [h.bound ? 'BOUND to this pid' : '', h.group ? `group ${h.group}` : '', h.stale ? `STALE (${h.stale})` : '', h.kind !== 'legacy' && !h.alive ? 'PID DEAD' : '',
+        h.overTime ? `OVER TIME (${dur(h.overTime.heldMs)} > ${dur(h.overTime.maxHoldMs)} limit, ${h.overTime.activity}: kept, not released)` : ''].filter(Boolean).join(' ');
       lines.push(`  ${h.kind.padEnd(8)} pid ${String(h.pid).padEnd(7)} ${h.units}u  age ${dur(h.ageMs)}  heartbeat ${h.heartbeatAgeMs === null ? 'n/a' : `${dur(h.heartbeatAgeMs)} ago`}`
         + `${h.idleMs !== null ? `  idle ${dur(h.idleMs)}` : ''}  ${h.project || ''} ${h.worktree}${h.label ? `  [${h.label}]` : ''}${h.session ? `  session ${h.session.slice(0, 8)}` : ''}${flags ? `  ${flags}` : ''}`);
     }

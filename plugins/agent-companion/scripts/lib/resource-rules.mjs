@@ -133,21 +133,39 @@ export function limitsFor(rules, lease) {
 export function liveVerdict(rules, lease, now) {
   const lim = limitsFor(rules, lease);
   const held = now - Number(lease.startedAt || now);
+  const idle = ruleOf(rules, 'idle');
+  const sampleMs = idle?.sampleMs ?? 30_000;
+  const act = lease.act;
+  // A stale or missing probe is "unknown", never "idle".
+  const fresh = Boolean(act) && now - act.sampledAt <= Math.max(3 * sampleMs, 90_000);
   const mh = ruleOf(rules, 'max-hold');
   if (mh && mh.enabled !== false && (mh.appliesTo ?? ['run']).includes(lease.kind) && lim.maxHoldMs && held > lim.maxHoldMs) {
-    return { rule: 'max-hold', evidence: { heldMs: held, maxHoldMs: lim.maxHoldMs } };
+    const evidence = { heldMs: held, maxHoldMs: lim.maxHoldMs };
+    // An exclusive resource (any named one; capacity 1 by default) is never taken from a live
+    // holder that is active, or whose activity is unknown: the lease is flagged "over time"
+    // instead (keep: true, the sweep does not clear it). Only a measured-idle holder is cleared.
+    if (holdsExclusive(rules, lease)) {
+      const quietMs = lim.idleMs ?? 300_000;
+      const measuredIdle = fresh && now - act.activeAt > quietMs;
+      if (!measuredIdle) {
+        return { rule: 'max-hold', keep: true, evidence: { ...evidence, activity: fresh ? 'active' : 'unknown', ...(act ? { lastActivityAt: act.activeAt } : {}) } };
+      }
+      return { rule: 'max-hold', evidence: { ...evidence, idleMs: now - act.activeAt, lastActivityAt: act.activeAt, sampledAt: act.sampledAt } };
+    }
+    return { rule: 'max-hold', evidence };
   }
-  const idle = ruleOf(rules, 'idle');
-  const act = lease.act;
   if (idle && idle.enabled !== false && (idle.appliesTo ?? ['run']).includes(lease.kind) && lim.idleMs && act) {
-    const sampleMs = idle.sampleMs ?? 30_000;
-    const fresh = now - act.sampledAt <= Math.max(3 * sampleMs, 90_000); // a stale probe is "unknown", never "idle"
     const minHold = lim.minHoldMs ?? 0;
     if (fresh && held >= minHold && now - act.activeAt > lim.idleMs) {
       return { rule: 'idle', evidence: { heldMs: held, idleMs: now - act.activeAt, idleLimitMs: lim.idleMs, lastActivityAt: act.activeAt, sampledAt: act.sampledAt } };
     }
   }
   return null;
+}
+
+/** True when the lease holds a named resource of capacity 1 (the rules' capacity, else 1). */
+export function holdsExclusive(rules, lease) {
+  return Object.keys(lease.resources ?? {}).some((n) => n !== BOX && capacityOf(rules, {}, n) <= 1);
 }
 
 // ---------------------------------------------------------------- clear log
@@ -202,7 +220,7 @@ export function processTable() {
       return arr.map((x) => ({
         pid: x.p, ppid: x.pp, name: String(x.n ?? ''), cmd: String(x.c ?? ''),
         cpuMs: Math.round(Number(x.k) / 10_000), // 100 ns units
-        startedAt: x.s ? Date.parse(String(x.s)) || null : null,
+        startedAt: parseCimDate(x.s),
       }));
     }
     if (process.platform === 'linux') {
@@ -235,11 +253,129 @@ export function processTable() {
   } catch { return null; }
 }
 
-export function descendants(table, rootPid) {
+// Windows PowerShell 5.1 ConvertTo-Json writes a DateTime as "/Date(<epoch ms>)/".
+function parseCimDate(s) {
+  if (!s) return null;
+  const m = /Date\((\d+)/.exec(String(s));
+  if (m) return Number(m[1]);
+  return Date.parse(String(s)) || null;
+}
+
+/**
+ * Git Bash (msys) parent links, as [{pid, ppid}] in Windows pids, or null when
+ * the msys process list cannot be read. Why it is needed: when an msys process
+ * (the pre-push hook's sh, a bash running an npm or npx shim) forks and the
+ * child execs another msys program, the exec'd program is a new Windows process
+ * whose Windows parent is the forked child, and that child exits at once. The
+ * Windows table then shows the exec'd program, and everything under it, with a
+ * dead parent: a walk over Windows parent pids never reaches it. msys keeps the
+ * real chain in its own pids (`ps -a -l`: PID PPID PGID WINPID ...); this maps
+ * it back to Windows pids. One hidden spawn of Git's ps.exe, wrapper side only.
+ * `near`: directories of the msys programs seen in the tree; the ps.exe beside
+ * them is tried first (another msys on PATH cannot see this install's processes).
+ * Then Git for Windows is found the way the plugin finds Git Bash, never through
+ * PATH alone (a hook or gate may run with a stripped PATH): msysBinCandidates(),
+ * and last `git --exec-path` (one spawn, only when nothing else matched).
+ * `gitExecPath` is a test seam: () => the git-core dir, or null.
+ * Called only when the tree holds an msys process, so a missing ps.exe is null
+ * ("unknown"), not "no links". Returns [] off Windows.
+ */
+export function msysLinks({ env = process.env, near = [], gitExecPath } = {}) {
+  if (process.platform !== 'win32') return [];
+  const ps = findMsysPs(env, near, gitExecPath);
+  if (!ps) return null;
+  try {
+    const r = spawnSync(ps, ['-a', '-l'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
+    if (r.status !== 0 || !r.stdout) return null;
+    return parseMsysPs(r.stdout);
+  } catch { return null; }
+}
+
+/** `ps -a -l` text -> [{pid, ppid}] in Windows pids (rows whose msys parent is listed). */
+export function parseMsysPs(text) {
+  const rows = [];
+  for (const l of String(text).split('\n')) {
+    const m = /^\s*[A-Z]?\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s/.exec(l);
+    if (m) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), win: Number(m[4]) });
+  }
+  const winOf = new Map(rows.map((r) => [r.pid, r.win]));
+  const out = [];
+  for (const r of rows) {
+    const parentWin = winOf.get(r.ppid);
+    if (parentWin && parentWin !== r.win) out.push({ pid: r.win, ppid: parentWin });
+  }
+  return out;
+}
+
+// `git --exec-path` (<Git>/mingw64/libexec/git-core), or null. Runs with this
+// process's own environment, so a stripped `env` argument cannot hide git.
+function gitExecPathOf() {
+  try {
+    const r = spawnSync('git', ['--exec-path'], { encoding: 'utf8', windowsHide: true, timeout: 5_000 });
+    return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+  } catch { return null; }
+}
+
+/**
+ * The dirs that may hold Git's ps.exe, in lookup order (no spawn): the tree's own
+ * msys dirs, then CLAUDE_CODE_GIT_BASH_PATH's install, then the standard install
+ * dirs (C:\Program Files when the env names none), then PATH. Git's install comes
+ * before PATH because another msys (MSYS2, Cygwin) cannot see Git Bash's processes.
+ */
+export function msysBinCandidates(env = process.env, near = []) {
+  const dirs = [...near];
+  const bash = env.CLAUDE_CODE_GIT_BASH_PATH; // <Git>\bin\bash.exe or <Git>\usr\bin\bash.exe
+  if (bash) dirs.push(dirname(bash), join(dirname(bash), '..', 'usr', 'bin'));
+  const roots = [env.ProgramFiles ?? env.ProgramW6432 ?? 'C:\\Program Files', env['ProgramFiles(x86)'], env.LOCALAPPDATA && join(env.LOCALAPPDATA, 'Programs')];
+  for (const p of roots.filter(Boolean)) dirs.push(join(p, 'Git', 'usr', 'bin'));
+  dirs.push(...String(env.PATH ?? env.Path ?? '').split(';').filter(Boolean));
+  return dirs;
+}
+
+const isMsysBin = (d) => {
+  try { statSync(join(d, 'msys-2.0.dll')); statSync(join(d, 'ps.exe')); return true; } catch { return false; }
+};
+const msysPsCache = new Map();
+function findMsysPs(env, near = [], gitExecPath = gitExecPathOf) {
+  const dirs = msysBinCandidates(env, near);
+  const key = dirs.join(';');
+  const seam = gitExecPath !== gitExecPathOf;
+  if (!seam && msysPsCache.has(key)) return msysPsCache.get(key);
+  const hit = dirs.find(isMsysBin);
+  let found = hit ? join(hit, 'ps.exe') : null;
+  if (!found) { // last: ask git where it lives (<Git>/mingw64/libexec/git-core -> <Git>/usr/bin)
+    const core = gitExecPath();
+    const d = core && join(core, '..', '..', '..', 'usr', 'bin');
+    if (d && isMsysBin(d)) found = join(d, 'ps.exe');
+  }
+  if (seam) return found; // a test seam is never cached
+  if (msysPsCache.size > 16) msysPsCache.clear();
+  msysPsCache.set(key, found);
+  return found;
+}
+
+// The directory of a process's program, from its command line (quoted or bare), or null.
+function exeDir(p) {
+  const cmd = String(p.cmd ?? '').trim();
+  const m = /^"([^"]+)"/.exec(cmd) ?? /^(.+?\.exe)(?:\s|$)/i.exec(cmd);
+  return m && /[\\/]/.test(m[1]) ? dirname(m[1]) : null;
+}
+
+const MSYS_RE = /^(?:sh|bash|dash|zsh)\.exe$/i;
+const isMsys = (p) => MSYS_RE.test(p.name) || /[\\/]usr[\\/]bin[\\/]/i.test(String(p.cmd ?? ''));
+
+/** Every process under rootPid: Windows parent pids plus any extra {pid, ppid} links. */
+export function descendants(table, rootPid, links = []) {
   const kids = new Map();
-  for (const p of table) {
-    if (!kids.has(p.ppid)) kids.set(p.ppid, []);
-    kids.get(p.ppid).push(p);
+  const byPid = new Map(table.map((p) => [p.pid, p]));
+  const add = (ppid, p) => {
+    if (!kids.has(ppid)) kids.set(ppid, []);
+    kids.get(ppid).push(p);
+  };
+  for (const p of table) add(p.ppid, p);
+  for (const l of links) {
+    const p = byPid.get(l.pid);
+    if (p && l.ppid !== p.ppid) add(l.ppid, p);
   }
   const out = []; const seen = new Set([rootPid]);
   const stack = [rootPid];
@@ -274,23 +410,57 @@ export function listeningPorts() {
  * process table could not be read (the caller then leaves the sidecar alone, so
  * the lease reads "unknown", never "idle").
  * Active when any of: the tree used >= minCpuPct of one core since prev; it owns
- * a listening socket in one of `ports`; a descendant is named in `busyChildren`.
+ * a listening socket in one of `ports`; a descendant is named in `busyChildren`
+ * (its image name, or its command line); or the tree's parent chain cannot be
+ * read (an msys process in the tree while the msys list is unreadable): unknown
+ * means keep, never idle.
+ *
+ * The tree is the Windows parent walk plus the msys links (see msysLinks()), plus
+ * the children of any pid an earlier sample saw in the tree that has since died
+ * (an orphaned subtree stays ours). CPU is summed per pid against the previous
+ * sample, so a process that exits between samples cannot hide the work of the rest.
  */
-export function sampleTree(rootPid, { prev, minCpuPct = 5, ports = [], busyChildren = [], now = Date.now(), table = processTable, listen = listeningPorts } = {}) {
+const SEEN_MAX = 4096;
+export function sampleTree(rootPid, {
+  prev, minCpuPct = 5, ports = [], busyChildren = [], now = Date.now(), table = processTable, listen = listeningPorts, msys = table === processTable ? msysLinks : () => [],
+} = {}) {
   const t = table();
   if (!t) return null;
-  const tree = [t.find((p) => p.pid === rootPid), ...descendants(t, rootPid)].filter(Boolean);
+  const alive = new Set(t.map((p) => p.pid));
+  const extra = [];
+  // Orphans of a pid we saw in the tree before it died are still ours.
+  for (const pid of prev?.seen ?? []) {
+    if (pid === rootPid || alive.has(pid)) continue;
+    for (const p of t) if (p.ppid === pid) extra.push({ pid: p.pid, ppid: rootPid });
+  }
+  const walk = (more) => [t.find((p) => p.pid === rootPid), ...descendants(t, rootPid, more)].filter(Boolean);
+  let tree = walk(extra);
+  // msys links are read only when an msys process is in the tree (the hook's sh stays alive
+  // while it runs), so a missing or unreadable list there is "unknown", never "no links".
+  const shells = tree.filter(isMsys);
+  let links = [];
+  if (shells.length) {
+    links = msys({ near: [...new Set(shells.map(exeDir).filter(Boolean))] });
+    if (links?.length) tree = walk([...extra, ...links]);
+  }
+  const cpu = {};
+  for (const p of tree) cpu[p.pid] = p.cpuMs;
   const cpuMs = tree.reduce((s, p) => s + p.cpuMs, 0);
+  const seen = [...new Set([...(prev?.seen ?? []), ...tree.map((p) => p.pid)])].slice(-SEEN_MAX);
   let why = null;
   if (prev && now > prev.at) {
-    const pct = ((cpuMs - prev.cpuMs) / (now - prev.at)) * 100;
+    const before = prev.cpu ?? {};
+    let used = 0;
+    for (const p of tree) used += Math.max(0, p.cpuMs - (before[p.pid] ?? 0));
+    const pct = (used / (now - prev.at)) * 100;
     if (pct >= minCpuPct) why = `cpu ${pct.toFixed(1)}%`;
   }
   if (!why && busyChildren.length) {
     const names = busyChildren.map((n) => n.toLowerCase());
-    const hit = tree.find((p) => p.pid !== rootPid && names.some((n) => p.name.toLowerCase().includes(n)));
+    const hit = tree.find((p) => p.pid !== rootPid && names.some((n) => p.name.toLowerCase().includes(n) || String(p.cmd ?? '').toLowerCase().includes(n)));
     if (hit) why = `child ${hit.name}`;
   }
+  if (!why && links === null && tree.some(isMsys)) why = 'unknown: msys parent chain unreadable';
   if (!why && ports.length) {
     const ls = listen();
     if (ls) {
@@ -299,7 +469,7 @@ export function sampleTree(rootPid, { prev, minCpuPct = 5, ports = [], busyChild
       if (hit) why = `listening on ${hit.port}`;
     }
   }
-  return { cpuMs, at: now, active: Boolean(why), why };
+  return { cpuMs, cpu, seen, size: tree.length, at: now, active: Boolean(why), why };
 }
 
 /**

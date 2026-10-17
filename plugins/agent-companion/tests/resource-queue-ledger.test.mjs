@@ -11,7 +11,7 @@ import './isolate.mjs';
 import { existsSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { resourceStatus, isPidAlive, sweepLedger } from '../scripts/ci-budget.mjs';
+import { resourceStatus, formatResourceStatus, isPidAlive, sweepLedger } from '../scripts/ci-budget.mjs';
 import { makeWorld, settle, GB, T0 } from './resource-queue-world.mjs';
 
 const heldOf = (w, name) => resourceStatus({ ...w.opts }).resources.find((r) => r.name === name)?.held ?? 0;
@@ -236,21 +236,29 @@ test('gone-requester: a queued ticket whose pid is dead is cleared, and a ticket
 
 // ---------------------------------------------------------------- rule clears: max-hold and idle
 
-test('max-hold clears a lease over its limit: logged, tombstoned, never restored by a beat, process untouched', async () => {
+test('max-hold on an exclusive resource: a live active holder is flagged OVER TIME and kept; once measured idle it is cleared, logged, tombstoned, never restored by a beat, process untouched', async () => {
   const w = makeWorld();
   try {
-    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000 }, label: 'A' });
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000, idleMs: 30_000 }, monitored: true, label: 'A' });
     w.t += 59_000;
+    a.recordActivity(w.t, w.t); // the tree is working
     assert.equal(sweepLedger({ ...w.opts }).length, 0, 'under the limit');
     w.t += 2_000;
+    assert.equal(sweepLedger({ ...w.opts }).length, 0, 'over the limit but active: kept');
+    const holder = resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0];
+    assert.deepEqual(holder.overTime, { heldMs: 61_000, maxHoldMs: 60_000, activity: 'active' });
+    assert.equal(w.clears().length, 0);
+    w.t += 40_000;
+    a.recordActivity(w.t, T0 + 59_000); // sampled now, quiet for 42 s (over idleMs)
     const b = await w.acq({ resources: { 'app-e2e': 1 }, label: 'B' });
     assert.equal(w.polls, 0);
     const [c] = w.clears();
     assert.equal(c.rule, 'max-hold');
     assert.equal(c.type, 'lease');
     assert.equal(c.label, 'A');
-    assert.equal(c.evidence.heldMs, 61_000);
+    assert.equal(c.evidence.heldMs, 101_000);
     assert.equal(c.evidence.maxHoldMs, 60_000);
+    assert.equal(c.evidence.idleMs, 42_000);
     assert.ok(existsSync(join(w.dir, `lease-${a.id}.cleared`)), 'tombstone');
     assert.equal(a.cleared, true);
     a.beat();
@@ -262,13 +270,22 @@ test('max-hold clears a lease over its limit: logged, tombstoned, never restored
   } finally { w.done(); }
 });
 
-test('max-hold falls back to the resource limit, and a disabled rule clears nothing', async () => {
+test('max-hold falls back to the resource limit, an unmeasured exclusive holder is kept, and a disabled rule clears nothing', async () => {
   const w = makeWorld();
   try {
     w.opts.rules.resources['app-e2e'].maxHoldMs = 30_000;
-    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'A' });
+    const e = await w.acq({ resources: { 'app-e2e': 1 }, label: 'E' });
     w.t += 31_000;
-    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    assert.equal(sweepLedger({ ...w.opts }).length, 0, 'no probe on an exclusive holder: unknown means keep');
+    const held = resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0];
+    assert.equal(held.overTime.activity, 'unknown');
+    assert.match(formatResourceStatus(resourceStatus({ ...w.opts })), /OVER TIME \(.* limit, unknown: kept, not released\)/);
+    e.release();
+
+    w.opts.rules.resources.box.maxHoldMs = 30_000;
+    const a = await w.acq({ box: 1, label: 'A' });
+    w.t += 31_000;
+    assert.equal(sweepLedger({ ...w.opts }).length, 1, 'a box-only lease keeps the plain clear');
     assert.equal(w.clears()[0].evidence.maxHoldMs, 30_000);
     a.release();
 

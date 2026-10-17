@@ -17,7 +17,7 @@ const TOP = ['dir', 'generatedAt', 'legacyLocks', 'machine', 'ok', 'queue', 'rec
 const MACHINE = ['busyCores', 'cores', 'externalCores', 'freeRamMb', 'loaded', 'ramReserveMb', 'totalRamMb'];
 const RESOURCE = ['capacity', 'free', 'held', 'holders', 'name'];
 const HOLDER = [
-  'ageMs', 'alive', 'bound', 'boundPid', 'group', 'heartbeatAgeMs', 'heartbeatAt', 'id', 'idleMs', 'kind', 'label', 'lastActivityAt', 'pid', 'project', 'ramMb',
+  'ageMs', 'alive', 'bound', 'boundPid', 'group', 'heartbeatAgeMs', 'heartbeatAt', 'id', 'idleMs', 'kind', 'label', 'lastActivityAt', 'overTime', 'pid', 'project', 'ramMb',
   'repo', 'session', 'stale', 'startedAt', 'units', 'worktree',
 ];
 const QUEUE = [

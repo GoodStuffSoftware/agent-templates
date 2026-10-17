@@ -393,7 +393,7 @@ test('a pid-bound lease lives as long as that pid, not the wrapper, and is relea
   } finally { w.done(); }
 });
 
-test('the max-hold sweep applies to a bound pid, and the process is not touched', async () => {
+test('max-hold on a live bound pid of an exclusive resource flags it over time and keeps it; a dead one is cleared at once; the process is never touched', async () => {
   const w = world();
   try {
     const rules = {
@@ -405,11 +405,15 @@ test('the max-hold sweep applies to a bound pid, and the process is not touched'
     w.t += 59 * 60_000;
     assert.equal(sweepLedger(w.opts({ rules })).length, 0);
     w.t += 2 * 60_000;
+    assert.equal(sweepLedger(w.opts({ rules })).length, 0, 'live and unmeasured: kept');
+    const h = resourceStatus(w.opts({ rules })).resources.find((r) => r.name === 'android-emu').holders[0];
+    assert.equal(h.overTime.activity, 'unknown');
+    assert.equal(w.dead.has(777), false, 'the bound process is never signaled');
+    w.dead.add(777); // the emulator exits
     const cleared = sweepLedger(w.opts({ rules }));
     assert.equal(cleared.length, 1);
-    assert.match(cleared[0].why, /max-hold/);
-    assert.equal(w.dead.has(777), false, 'the bound process is never signaled');
-    assert.equal(w.clears().at(-1).rule, 'max-hold');
+    assert.equal(cleared[0].why, 'process is gone');
+    assert.equal(w.clears().at(-1).rule, 'pid-dead');
   } finally { w.done(); }
 });
 

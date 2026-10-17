@@ -131,12 +131,12 @@ A rule clears a lease or ticket, which means it **releases the claim**. It never
 | `pid-dead` | leases, tickets | the holder's or requester's pid is not alive (a pid-bound lease: the bound pid) |
 | `heartbeat-stale` | leases, tickets | no heartbeat for `CI_LOCAL_BUDGET_STALE_MS` (90 s). A bound lease has no heartbeat rule |
 | `requester-gone` | tickets | the queued requester's pid is not alive (the clears log names this rule for tickets) |
-| `max-hold` | run leases | older than the limit: its class's `maxHoldMs`, else the smallest `maxHoldMs` of the resources it holds |
-| `idle` | run leases with an `.act` sidecar | at least `minHoldMs` old and, for `idleMs`, the process tree used under `minCpuPct` (5) of one core, held no listening socket in the class's port bands and had no busy child. A lease nobody measures is never idle-cleared. A bound lease has no sidecar, so it is exempt |
+| `max-hold` | run leases | older than the limit: its class's `maxHoldMs`, else the smallest `maxHoldMs` of the resources it holds. A live holder of an exclusive resource (a named resource of capacity 1) is cleared only when its `.act` sidecar is fresh and shows it quiet for `idleMs` (default 5 min); while it is active, or unmeasured, it is kept and `status` flags it `OVER TIME` (holder field `overTime`: `heldMs`, `maxHoldMs`, `activity` `active` or `unknown`). A box-only lease is cleared at the limit. With `idle` disabled no lease is probed, so a live exclusive holder is only ever flagged. Dead and stale holders go at once under `pid-dead` and `heartbeat-stale` |
+| `idle` | run leases with an `.act` sidecar | at least `minHoldMs` old and, for `idleMs`, the process tree used under `minCpuPct` (5) of one core, held no listening socket in the class's port bands and had no busy child (image name or command line). The tree is the Windows parent walk plus Git Bash (msys) links read from Git's `ps -a -l` (Git's `ps.exe` is found beside the tree's sh, then through `CLAUDE_CODE_GIT_BASH_PATH`, the standard install dirs, PATH and `git --exec-path`, so a stripped PATH cannot hide it), plus the children of any pid seen in the tree earlier: an msys fork + exec of an msys program (a hook running an npm or npx shim) leaves the exec'd program with a dead Windows parent. An msys process in the tree while that list is unreadable counts as active (unknown means keep). CPU is summed per pid against the previous sample. A lease nobody measures is never idle-cleared. A bound lease has no sidecar, so it is exempt |
 | `reservation-expired`, `reservation-owner-gone`, `reservation-invalid`, `unreserved` | reservations | see "Reservations, hold and bound leases" |
 | `reservation-idle-lapse` | reservations | see "Reservations, hold and bound leases" |
 
-The shipped rule defaults: `max-hold` and `idle` enabled; `idle` with `sampleMs` 30000 and `minCpuPct` 5; `app-e2e` with `maxHoldMs` 900000, `minHoldMs` 600000 and `idleMs` 300000.
+The shipped rule defaults: `max-hold` and `idle` enabled; `idle` with `sampleMs` 30000 and `minCpuPct` 5; `app-e2e` with `maxHoldMs` 1800000, `minHoldMs` 600000 and `idleMs` 300000; the `e2e`, `e2e-spec` and `push-gate` classes flag over time at 1800000 (loaded full runs were measured at 10 to 18 minutes).
 
 ### The clears log
 
@@ -181,7 +181,7 @@ resume
 run --resource <name>[:N] [--class <id>] --bind-pid <pid> [-- <cmd...>]
 ```
 
-For a daemon the wrapper does not outlive (an Android emulator holding `android-emu:1` for up to 60 minutes). The request queues like any other; when granted, the lease gets `pid` = `boundPid` = the bound pid and `wrapperPid` = the wrapper's pid. The wrapper writes no heartbeat and does not release at exit. With a command, the command runs and its exit does not release the lease; without one, the wrapper prints the lease id and exits 0. The lease is stale exactly when `boundPid` is not alive (rule `pid-dead`); `max-hold` applies and clears the lease, never the process. If the bound pid is not running at the grant, the lease is the wrapper's, an ordinary one, and a line says so (with no command nothing stays held and the exit code is 1). A reused pid keeps a bound lease alive until `max-hold`.
+For a daemon the wrapper does not outlive (an Android emulator holding `android-emu:1` for up to 60 minutes). The request queues like any other; when granted, the lease gets `pid` = `boundPid` = the bound pid and `wrapperPid` = the wrapper's pid. The wrapper writes no heartbeat and does not release at exit. With a command, the command runs and its exit does not release the lease; without one, the wrapper prints the lease id and exits 0. The lease is stale exactly when `boundPid` is not alive (rule `pid-dead`); `max-hold` flags it over time (an exclusive resource is never taken from a live bound pid that is unmeasured); the lease, never the process, is cleared when the pid is gone. If the bound pid is not running at the grant, the lease is the wrapper's, an ordinary one, and a line says so (with no command nothing stays held and the exit code is 1). A reused pid keeps a bound lease alive; `status` shows it OVER TIME past `max-hold`.
 
 #### Compatibility
 
@@ -230,7 +230,7 @@ It picks the newest `plugins/cache/*/agent-companion/<version>` copy (falling ba
   resources: [ { name, capacity, held, free,
       holders: [ { id, kind, pid, alive, label, project, repo, worktree, session, units, ramMb,
                    startedAt, heartbeatAt, ageMs, heartbeatAgeMs, lastActivityAt, idleMs, stale,
-                   group, bound, boundPid } ] } ],
+                   group, bound, boundPid, overTime } ] } ],
   queue: [ { position, id, kind, pid, alive, label, project, repo, worktree, session, wants, ramMb,
              createdAt, heartbeatAt, waitedMs, blockedBy, group, paused, pausedBy, pausedUntil, passedOver } ],
   reservations: [ { id, resource, forGroup, owner: { pid, session }, ownerAlive,

@@ -11,12 +11,12 @@
   },
   "resources": {
     "box": { "notes": "capacity is the CI budget (CI_LOCAL_BUDGET, default max(2, floor(cores / 2))); sized from the machine, never set here" },
-    "app-e2e": { "capacity": 1, "maxHoldMs": 900000, "minHoldMs": 600000, "idleMs": 300000 }
+    "app-e2e": { "capacity": 1, "maxHoldMs": 1800000, "minHoldMs": 600000, "idleMs": 300000 }
   },
   "classes": [
-    { "id": "e2e", "box": 8, "resources": { "app-e2e": 1 }, "ramMb": 5000, "maxHoldMs": 720000, "ports": [[9100, 9103], [14000, 14999], [18080, 18999], [19099, 19999], [24000, 24999], [28080, 28999], [29099, 29999], [34000, 34999], [38080, 38999], [39099, 39999]], "busyChildren": ["java", "chrome-headless-shell", "playwright", "vitest"], "notes": "M: 8 emulator JVMs + about 12 Chrome (plan: 4.8 GB per 8 slots)" },
-    { "id": "e2e-spec", "box": 5, "resources": { "app-e2e": 1 }, "ramMb": 3500, "maxHoldMs": 720000, "ports": [[9100, 9103], [14000, 14999], [18080, 18999], [19099, 19999]], "busyChildren": ["java", "chrome-headless-shell", "playwright", "vitest"], "notes": "E2E with a spec path still boots the pool (M)" },
-    { "id": "push-gate", "box": 8, "resources": { "app-e2e": 1 }, "ramMb": 6000, "maxHoldMs": 900000, "ports": [[9100, 9103], [14000, 14999], [18080, 18999], [19099, 19999]], "busyChildren": ["java", "chrome-headless-shell", "playwright", "vitest"], "notes": "lint + vitest + E2E in sequence, charged at its peak phase" },
+    { "id": "e2e", "box": 8, "resources": { "app-e2e": 1 }, "ramMb": 5000, "maxHoldMs": 1800000, "ports": [[9100, 9103], [14000, 14999], [18080, 18999], [19099, 19999], [24000, 24999], [28080, 28999], [29099, 29999], [34000, 34999], [38080, 38999], [39099, 39999]], "busyChildren": ["java", "chrome-headless-shell", "playwright", "vitest"], "notes": "M: 8 emulator JVMs + about 12 Chrome (plan: 4.8 GB per 8 slots)" },
+    { "id": "e2e-spec", "box": 5, "resources": { "app-e2e": 1 }, "ramMb": 3500, "maxHoldMs": 1800000, "ports": [[9100, 9103], [14000, 14999], [18080, 18999], [19099, 19999]], "busyChildren": ["java", "chrome-headless-shell", "playwright", "vitest"], "notes": "E2E with a spec path still boots the pool (M)" },
+    { "id": "push-gate", "box": 8, "resources": { "app-e2e": 1 }, "ramMb": 6000, "maxHoldMs": 1800000, "ports": [[9100, 9103], [14000, 14999], [18080, 18999], [19099, 19999]], "busyChildren": ["java", "chrome-headless-shell", "playwright", "vitest"], "notes": "lint + vitest + E2E in sequence, charged at its peak phase; M: loaded full runs 10-18 min, so the over-time flag sits at 30 min (E)" },
     { "id": "vitest-full", "box": 12, "ramMb": 3000, "maxHoldMs": 720000, "busyChildren": ["vitest"], "notes": "E: about cores - 1 workers" },
     { "id": "vitest-dir", "box": 6, "ramMb": 2000, "maxHoldMs": 720000, "busyChildren": ["vitest"] },
     { "id": "lint", "box": 3, "ramMb": 2000, "maxHoldMs": 360000, "notes": "eslint, tsc, vue-tsc" },
@@ -30,7 +30,7 @@
     { "id": "pid-dead", "builtin": true, "applies": "leases and tickets", "when": "the holder or requester pid is not alive; cleared at once" },
     { "id": "heartbeat-stale", "builtin": true, "applies": "leases and tickets", "when": "no heartbeat for the stale age (CI_LOCAL_BUDGET_STALE_MS, default 90 s)" },
     { "id": "requester-gone", "builtin": true, "applies": "tickets", "when": "a queued requester's pid is not alive (the record names this rule for tickets)" },
-    { "id": "max-hold", "enabled": true, "appliesTo": ["run"], "when": "a lease is older than its limit: its class's maxHoldMs, else the smallest maxHoldMs of the resources it holds" },
+    { "id": "max-hold", "enabled": true, "appliesTo": ["run"], "when": "a lease is older than its limit: its class's maxHoldMs, else the smallest maxHoldMs of the resources it holds. A live holder of an exclusive resource (any named resource of capacity 1) is cleared only when its activity probe shows it idle; while it is active or unmeasured it is flagged OVER TIME in status and kept" },
     { "id": "idle", "enabled": true, "appliesTo": ["run"], "sampleMs": 30000, "minCpuPct": 5, "when": "the lease is at least minHoldMs old and, for idleMs, its process tree used under minCpuPct of one core, held no listening socket in the class's port bands and had no busy child; needs the wrapper's activity sidecar, so a lease nobody measures is never idle-cleared" }
   ],
   "legacyLocks": [],

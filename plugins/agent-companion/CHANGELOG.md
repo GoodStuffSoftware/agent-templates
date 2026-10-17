@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.26 — 2026-10-17
+
+Fix: the resource queue's idle rule released a live push-gate lease (`app-e2e` shown free) while a full E2E ran under it.
+
+- **Root cause.** The activity probe walked Windows parent pids only. When a Git Bash (msys) process forks and the child execs another msys program (a pre-push hook running an npm or npx shim through bash), the exec'd program is a new Windows process whose Windows parent, the forked child, exits at once. Everything under it had a dead Windows parent and fell outside the walk: the probe saw only the wrapper, git and the hook's sh, all quiet, and never recorded activity (the clear's evidence: idle 600371 ms of a 600389 ms hold). Reproduced on Windows with a wrapper -> sh -c -> msys sh script -> node -> busy node tree.
+- **Probe.** `sampleTree()` adds msys parent links from Git's `ps -a -l` (one hidden spawn in the wrapper, never on the hook path), adopts the children of any pid seen in the tree before it died, sums CPU per pid against the previous sample (an exited process no longer masks the rest), matches busy children by command line as well as image name, and counts an msys process in the tree as active when the msys list is unreadable (unknown means keep).
+- **Max-hold.** A live holder of an exclusive resource is no longer released at its hold limit while it is active or unmeasured: `status` flags it `OVER TIME` (holder field `overTime`) and keeps it. It is cleared only when its probe shows it quiet for `idleMs`. Box-only leases keep the plain clear; dead and stale holders are cleared at once, as before. Clears still never signal a process.
+- **Finding ps.exe.** The probe finds Git's `ps.exe` the way the plugin finds Git Bash, not through PATH alone: beside the tree's own sh, then `CLAUDE_CODE_GIT_BASH_PATH`'s install, the standard install dirs, PATH, and last `git --exec-path`. A hook or the push gate can run with a stripped PATH. The real msys process-tree test names every program by absolute path and skips with a stated reason when Git's `ps.exe` cannot be found; it had failed only inside the push gate, which hides every PATH dir holding a `claude` binary (here node's own dir), so its bare `node` never started.
+- **Limits.** `e2e`, `e2e-spec`, `push-gate` and the `app-e2e` resource flag over time at 30 minutes (loaded full runs measured 10 to 18 minutes).
+- **Status.** CIM process start times are parsed (the PowerShell 5.1 `/Date(ms)/` form).
+
 ## 0.31.25 — 2026-10-17
 
 A machine-wide resource queue with a gate that routes heavy commands through it, a "Shared resources:" session line, and three new guards (kill by name, plugin uninstall, environment dump). The one spec of the queue is now `docs/resource-queue.md`.
