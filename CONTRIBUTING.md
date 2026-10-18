@@ -149,7 +149,7 @@ If a change is generic but only relevant to one vendor's agent model, tag it `ve
 - **Generality record required.** An inbox entry whose "Is it generic?" field is empty or missing is bounced back to the project, not folded.
 - **One incident, one stack = project-local.** Evidence from a single incident in one specific stack/tool stays in the project unless the generic principle can be stated without that stack's mechanism. A scrubbed but mechanism-specific lesson fails this test even when leak-check passes.
 - **Contested claims need an A/B.** A lesson that contradicts or amends an existing lesson is not folded on interpretation alone. Park both claims until a controlled A/B (or equivalent reproduction) in the source project settles it; record only the winner and remove or correct the loser.
-- **Brevity.** Lesson body of ~150 words: the rule, the trigger, how to apply, a one-line incident. `leak-check` warns (not fails) above that.
+- **Brevity.** Lesson body of ~150 words: the rule, the trigger, how to apply, a one-line incident. `leak-check` FAILS a new or changed lesson above that; lessons that predate the cap are listed with a body digest in `scripts/lesson-baseline.json` and only warn above ~800 words (trim a lesson rather than re-baselining it; `node scripts/lesson-baseline.mjs` regenerates the file).
 
 ---
 

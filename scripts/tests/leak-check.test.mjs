@@ -20,7 +20,7 @@ import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { deriveTokens, compileDerived, scanText, decodeProjectDir } from "../leak-check.mjs";
+import { deriveTokens, compileDerived, scanText, decodeProjectDir, lessonDigest } from "../leak-check.mjs";
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "leak-check.mjs");
 
@@ -304,8 +304,10 @@ test("CLI: a lesson body over the word cap warns (exit 0); a short lesson and a 
   const missing = join(tmp("none"), "nope");
   const args = ["--dev-root", missing, "--claude-projects", missing, "--user", "runner"];
   const long = Array.from({ length: 900 }, () => "word").join(" ");
+  const longLesson = `---\ntitle: t\n---\n${long}\n`;
   const r = runCli(scanTree({
-    "lessons/long-one.md": `---\ntitle: t\n---\n${long}\n`,
+    "scripts/lesson-baseline.json": JSON.stringify({ lessons: { "lessons/long-one.md": lessonDigest(longLesson) } }),
+    "lessons/long-one.md": longLesson,
     "lessons/short-one.md": "---\ntitle: t\n---\nA short lesson.\n",
     "lessons/README.md": `${long}\n`,
   }), args);
@@ -313,6 +315,44 @@ test("CLI: a lesson body over the word cap warns (exit 0); a short lesson and a 
   assert.match(r.err, /lessons\/long-one\.md.*lesson body over ~800 words/);
   assert.doesNotMatch(r.err, /short-one\.md/);
   assert.doesNotMatch(r.err, /lessons\/README[.]md/);
+});
+
+// The new-or-changed cap is content-addressed (scripts/lesson-baseline.json),
+// so these trees are plain directories: no git history, no base branch. That is
+// exactly the shape of a clean shallow clone in the push gate and of CI.
+test("CLI: lesson cap 150 fails a new lesson, fails a changed one, passes unchanged-long and new-short", () => {
+  const missing = join(tmp("none"), "nope");
+  const args = ["--dev-root", missing, "--claude-projects", missing, "--user", "runner"];
+  const words = (n) => Array.from({ length: n }, () => "word").join(" ");
+  const lesson = (n) => `---\ntitle: t\n---\n${words(n)}\n`;
+  const baseline = (files) => JSON.stringify({
+    lessons: Object.fromEntries(Object.entries(files).map(([k, v]) => [k, lessonDigest(v)])),
+  });
+
+  // new, over 150: fails
+  const added = runCli(scanTree({ "lessons/new-long.md": lesson(151) }), args);
+  assert.equal(added.code, 1, added.err);
+  assert.match(added.err, /lessons\/new-long\.md.*new or changed lesson over 150 words/);
+
+  // changed after being baselined: fails
+  const old = lesson(300);
+  const changed = runCli(scanTree({
+    "scripts/lesson-baseline.json": baseline({ "lessons/was-long.md": old }),
+    "lessons/was-long.md": old.replace("word", "edited"),
+  }), args);
+  assert.equal(changed.code, 1, changed.err);
+  assert.match(changed.err, /lessons\/was-long\.md/);
+
+  // unchanged long lesson (also with CRLF line endings): passes
+  const same = runCli(scanTree({
+    "scripts/lesson-baseline.json": baseline({ "lessons/was-long.md": old }),
+    "lessons/was-long.md": old.replace(/\n/g, "\r\n"),
+  }), args);
+  assert.equal(same.code, 0, same.err);
+
+  // new, at the cap: passes
+  const ok = runCli(scanTree({ "lessons/new-ok.md": lesson(150) }), args);
+  assert.equal(ok.code, 0, ok.err);
 });
 
 test("CLI: a pinned GitHub Actions SHA (uses: owner/action@<sha>) is exempt from git-sha-like", () => {

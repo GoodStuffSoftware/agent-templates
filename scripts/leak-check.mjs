@@ -92,6 +92,7 @@ import { readFileSync, readdirSync, statSync, realpathSync } from "node:fs";
 import { join, relative, sep, resolve, basename, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir, userInfo, tmpdir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -936,6 +937,36 @@ export function scanOptionsForRel(rel) {
 }
 
 const LESSON_WORD_CAP = 800;
+// New or changed lessons are held to the CONTRIBUTING.md brevity cap and fail
+// above it. A lesson is "unchanged" when its body digest equals the entry in
+// scripts/lesson-baseline.json (the long lessons that predate the cap); those
+// keep the loose warning above. The baseline is content-addressed, not
+// git-history-addressed, so a local run, the push gate's clean shallow clone
+// and CI all decide identically with no base branch to find.
+const LESSON_NEW_CAP = 150;
+const LESSON_BASELINE_REL = "scripts/lesson-baseline.json";
+
+export function lessonBody(text) {
+  return text.replace(/^---\r?\n[\s\S]*?\r?\n---/, "");
+}
+
+// Digest of the body with line endings normalised (autocrlf must not change
+// it). Hex digits are mapped to letters g-v so the stored value can never
+// look like a git sha to the scanner.
+export function lessonDigest(text) {
+  const norm = lessonBody(text).replace(/\r\n/g, "\n");
+  const hex = createHash("sha256").update(norm).digest("hex");
+  return hex.replace(/[0-9a-f]/g, (c) => String.fromCharCode(103 + parseInt(c, 16)));
+}
+
+function loadLessonBaseline(root) {
+  try {
+    const j = JSON.parse(readFileSync(join(root, LESSON_BASELINE_REL), "utf8"));
+    return j && typeof j === "object" && j.lessons && typeof j.lessons === "object" ? j.lessons : {};
+  } catch {
+    return {};
+  }
+}
 
 export function main(argv = process.argv.slice(2), env = process.env) {
   let opts;
@@ -954,6 +985,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   const selfAbs = resolve(fileURLToPath(import.meta.url));
   const hits = [];
   const warnings = [];
+  const lessonBaseline = loadLessonBaseline(root);
   for (const file of listCommittableFiles(root)) {
     if (BINARY_EXT.test(file)) continue;
     // EXEMPT keys are written with forward slashes; normalize or the exemption
@@ -969,11 +1001,13 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     const r = scanText(text, { rel, derived, isSelf: resolve(file) === selfAbs, realUsers, noSha });
     hits.push(...r.hits);
     warnings.push(...r.warnings);
-    // Brevity cap for lesson bodies (warning only; see CONTRIBUTING.md "Fold gates").
+    // Brevity cap for lesson bodies (see CONTRIBUTING.md "Fold gates").
     if (/^lessons\/.+\.md$/.test(rel) && !/(^|\/)(README|INDEX)\.md$/i.test(rel)) {
-      const body = text.replace(/^---\r?\n[\s\S]*?\r?\n---/, "");
-      const words = body.split(/\s+/).filter(Boolean).length;
-      if (words > LESSON_WORD_CAP) {
+      const words = lessonBody(text).split(/\s+/).filter(Boolean).length;
+      const unchanged = lessonBaseline[rel] === lessonDigest(text);
+      if (!unchanged && words > LESSON_NEW_CAP) {
+        hits.push({ rel, line: 1, label: `new or changed lesson over ${LESSON_NEW_CAP} words`, token: `${words} words`, text: "trim to the rule, trigger, how to apply and a one-line incident" });
+      } else if (words > LESSON_WORD_CAP) {
         warnings.push({ rel, line: 1, label: `lesson body over ~${LESSON_WORD_CAP} words`, token: `${words} words` });
       }
     }

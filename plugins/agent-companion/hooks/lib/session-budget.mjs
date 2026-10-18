@@ -266,8 +266,9 @@ export function budgetNoticeText(total) {
   const n = Math.round(total);
   const pct = Math.round((total / weeklyPlanUnits()) * 100);
   return `[agent-companion] This session, including its subagents, has used about ${n} plan units (~${pct}% of a ~${weeklyPlanUnits().toLocaleString('en-US')}-unit week). `
-    + 'At the next phase boundary, finish the phase, update SESSION-STATE.md, and offer the operator a hand-off to a fresh session. '
-    + 'Do not hand off mid-release or while agents are running.';
+    + 'A hand-off to a fresh session does not save usage; let auto-compaction handle context. '
+    + 'What cuts spend is fewer and smaller spawns: pick the lowest rung that fits, brief tightly, cap fan-out, and do not re-spawn for work a live worker can continue. '
+    + 'Hand over only when a fresh session is required (a plugin version change) or the job ends.';
 }
 
 // The hook's whole job, for one lead payload. Never throws. Returns what it

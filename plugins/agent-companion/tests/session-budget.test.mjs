@@ -61,11 +61,13 @@ test('a tier with no plan multiplier is counted at its own API price and flagged
   assert.equal(planUnitsOf({ output: 1e6 }, 'claude-mystery-1'), null);
 });
 
-test('the notice text carries the units, the share of the week and the hand-off advice', () => {
+test('the notice text carries the units, the share of the week and what helps, not a hand-off', () => {
   const t = budgetNoticeText(700);
   assert.match(t, /This session, including its subagents, has used about 700 plan units \(~26% of a ~2,677-unit week\)\./);
-  assert.ok(t.includes('At the next phase boundary, finish the phase, update SESSION-STATE.md, and offer the operator a hand-off to a fresh session.'));
-  assert.match(t, /Do not hand off mid-release or while agents are running\./);
+  assert.ok(t.includes('A hand-off to a fresh session does not save usage; let auto-compaction handle context.'));
+  assert.match(t, /fewer and smaller spawns: pick the lowest rung that fits, brief tightly, cap fan-out/);
+  assert.match(t, /Hand over only when a fresh session is required \(a plugin version change\) or the job ends\./);
+  assert.doesNotMatch(t, /offer the operator a hand-off|finish the phase/);
   assert.equal(weeklyPlanUnits(), 2677);
   assert.equal(SESSION_BUDGET_DEFAULT_UNITS, 350);
 });
