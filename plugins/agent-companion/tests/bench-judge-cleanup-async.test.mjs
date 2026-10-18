@@ -122,3 +122,21 @@ test('removeDirWithRetry itself resolves the fake dir path with ok:true for a di
   assert.equal(result.ok, true);
   assert.equal(fs.existsSync(dir), false);
 });
+
+test('makeCliJudgeCaller survives an asynchronous stdin EPIPE from a child that exited before reading its prompt', async () => {
+  // Deterministic version of the race: the child's stdin stream emits an
+  // 'error' event after the write, and the child then exits. Without an
+  // 'error' listener on stdin the event is an unhandled error.
+  const { EventEmitter } = await import('node:events');
+  const stdin = new EventEmitter();
+  stdin.write = () => { setImmediate(() => stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))); return true; };
+  stdin.end = () => {};
+  const execFileImpl = (bin, args, options, callback) => {
+    setTimeout(() => callback(new Error('exited'), ''), 20);
+    return { stdin };
+  };
+  const caller = makeCliJudgeCaller(getFakeClaudeBin, { removeDirImpl: async () => ({ ok: true }), execFileImpl });
+  const result = await caller({ system: 's', user: 'u', model: 'm', effort: null, maxBudgetUsd: 0.01 });
+  assert.equal(result.is_error, true);
+  assert.match(result.error, /exited/);
+});
