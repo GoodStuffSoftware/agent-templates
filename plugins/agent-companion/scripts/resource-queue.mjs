@@ -282,10 +282,6 @@ export async function runUnderQueue({
   let plan;
   if (bash) {
     childEnv[SHELL_COMMAND_ENV] = cmd[0];
-    // The outer Git Bash hands this node process PWD in Windows spelling (C:/Users/...). A bash that
-    // imports it prints that spelling for $PWD where the unwrapped line prints /tmp/...; unset, it
-    // reads the cwd itself and spells it the way the outer shell does.
-    if (process.platform === 'win32') delete childEnv.PWD;
     plan = { file: bash, args: ['-c', `eval "$${SHELL_COMMAND_ENV}"`], verbatim: false, mode: 'bash' };
   } else plan = planCommand(cmd, env);
   let child;
