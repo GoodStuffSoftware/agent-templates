@@ -21,6 +21,8 @@
 //     passes through without looking at what is inside it;
 //   - agent-templates' own ci-local (and a push in a repo whose pre-push is
 //     ci-local) passes through: it holds its own lease.
+// Rule of the rewrite: the whole command line goes into the queue unchanged (see
+// rewriteCommand), never one segment of it.
 // Everything fails open: any error here means "not heavy".
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -382,7 +384,8 @@ function pushClass(words, ctx) {
   }
   if (args[i] !== 'push') return null;
   const rest = args.slice(i + 1);
-  if (hasAny(rest, ['--dry-run', '-n', '--delete', '-d', '--help'])) return null;
+  // --no-verify skips the pre-push hook, so nothing heavy runs.
+  if (hasAny(rest, ['--dry-run', '-n', '--delete', '-d', '--help', '--no-verify'])) return null;
   const refs = rest.filter((a) => !isFlag(a));
   if (rest.includes('--tags') && refs.length <= 1) return null; // tags only (the remote name is the one positional)
   const root = findUp(ctx, '.git', cwd);
@@ -569,30 +572,66 @@ export function classifyCommand(command, { cwd, exists, read } = {}) {
 
 // ---------------------------------------------------------------- rewriting
 
-/** The shell text that runs `segment` under the queue as class `cls`. */
-export function wrapSegment(segment, cls, launcher) {
-  return `node ${shq(launcher)} run --class ${cls} --label ${cls} -- ${shq(segment.trim())}`;
+/**
+ * The shell text that runs `text` under the queue as class `cls`. `--shell bash`
+ * makes the queue run the text, byte for byte, with `bash -c 'eval "$AC_RQ_COMMAND"'`
+ * (the text travels in that environment variable, so no second quoting layer and
+ * no Windows command-line parsing touches it).
+ */
+export function wrapSegment(text, cls, launcher) {
+  // Git Bash rewrites an argument it takes for a POSIX path before node sees it: one that
+  // starts with / or -, or whose first word is NAME=/... (`/usr/bin/x` arrives as
+  // `C:/Program Files/Git/usr/bin/x`). A leading newline stops that and is a blank line to eval.
+  const body = /^[/-]|^\S*=/.test(text) ? `\n${text}` : text;
+  return `node ${shq(launcher)} run --class ${cls} --label ${cls} --shell bash -- ${shq(body)}`;
 }
 
 /**
- * Rewrite a command so every heavy segment runs through the queue. In place per
- * segment when the structure allows (so `cd x && npm test` keeps its cd); the whole
- * command as one wrapped run when it has a heredoc or a group (parentheses, braces).
- * `heavyestOf(classes)` picks the class for a whole-command wrap.
+ * Rewrite a command so it runs through the queue. The WHOLE command line is wrapped,
+ * unchanged, never one segment of it: a segment moved into a child shell loses every
+ * shell variable, function and option set earlier in the same line (2026-10-18:
+ * `M=$(git commit-tree ...); git push origin $M:refs/heads/b` had its push wrapped
+ * alone, M was empty in the child, and git deleted the remote branch). The one thing
+ * kept outside is a leading `cd <dir> &&`: nothing runs before it, so no state can be
+ * lost, and the directory change still lasts past the call as it would unwrapped.
+ * `heavyestOf(classes)` picks the class.
  */
 export function rewriteCommand(command, heavy, flags, launcher, heavyestOf = (cs) => cs[0]) {
   if (!heavy.length) return command;
-  if (flags.has('heredoc') || flags.has('group')) {
-    return wrapSegment(command, heavyestOf(heavy.map((h) => h.class)), launcher);
-  }
-  let s = String(command);
-  for (const h of [...heavy].sort((a, b) => b.start - a.start)) {
-    const seg = s.slice(h.start, h.end);
-    const lead = seg.match(/^\s*/)[0];
-    const trail = seg.match(/\s*$/)[0];
-    s = `${s.slice(0, h.start)}${lead}${wrapSegment(seg, h.class, launcher)}${trail}${s.slice(h.end)}`;
-  }
-  return s;
+  const s = String(command);
+  const cls = heavyestOf(heavy.map((h) => h.class));
+  const lead = leadingCd(s);
+  if (lead && heavy.every((h) => h.start >= lead.cdEnd)) return `${s.slice(0, lead.rest)}${wrapSegment(s.slice(lead.rest), cls, launcher)}`;
+  return wrapSegment(s, cls, launcher);
+}
+
+/** A leading `cd <dir> && ` (plain words, no heredoc): { rest } = where the rest starts; else null. */
+function leadingCd(s) {
+  let scanned;
+  try { scanned = scanCommand(s); } catch { return null; }
+  const [first, second] = scanned.segments;
+  if (!first || !second || s.slice(0, first.start).trim() !== '') return null;
+  if (!/^\s*&&\s*$/.test(s.slice(first.end, second.start))) return null;
+  if (/<<|[`$]/.test(first.text)) return null;
+  const w = wordsOf(first.text);
+  if (w[0] !== 'cd' || w.length > 2) return null;
+  return { rest: second.start + second.text.match(/^\s*/)[0].length, cdEnd: first.end };
+}
+
+/**
+ * True when the part of `command` that would run inside the queue's child shell
+ * changes the directory at the top level (cd, pushd, popd): wrapped, that change
+ * would not last past the call. Rewrite mode denies such a command instead.
+ */
+export function wrapLosesCwd(command) {
+  const s = String(command);
+  const lead = leadingCd(s);
+  let scanned;
+  try { scanned = scanCommand(lead ? s.slice(lead.rest) : s); } catch { return false; }
+  return scanned.segments.some((seg) => {
+    const w = stripPrefix(wordsOf(seg.text)).words;
+    return ['cd', 'pushd', 'popd'].includes(w[0]);
+  });
 }
 
 function toSlash(p) { return String(p).replace(/\\/g, '/'); }
@@ -643,7 +682,8 @@ export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env
     const wrapped = rewriteCommand(command, heavy, found.flags, launcher, heaviest);
     const weight = classes.map((c) => `${c} (box ${boxOf(rules, c)})`).join(', ');
     const canRewrite = typeof rewriteAllowed === 'function' ? Boolean(rewriteAllowed(wrapped)) : Boolean(rewriteAllowed);
-    const effective = mode === 'rewrite' && !canRewrite ? 'deny' : mode;
+    const losesCwd = mode === 'rewrite' && canRewrite && wrapLosesCwd(command);
+    const effective = mode === 'rewrite' && (!canRewrite || losesCwd) ? 'deny' : mode;
     if (effective === 'rewrite') {
       return { action: 'rewrite', classes, command: wrapped, text: `Heavy command (${weight}) runs through the machine-wide resource queue so agents do not overload the box; it waits for its turn if the box is busy.` };
     }
@@ -653,7 +693,9 @@ export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env
     if (effective === 'hint') {
       return { action: 'hint', classes, command: wrapped, text: `Heavy command (${weight}). ${how}${bg}`.trim() };
     }
-    const why = mode === 'rewrite' ? ' (rewrite does not apply in this permission mode or next to a permission rule, so it is a denial)' : '';
+    const why = !(mode === 'rewrite') ? ''
+      : losesCwd ? ' (not rewritten: it changes directory after its first step, and inside the queue that change would not last past this call)'
+        : ' (rewrite does not apply in this permission mode or next to a permission rule, so it is a denial)';
     return {
       action: 'deny', classes, command: wrapped,
       text: `Heavy command (${weight}) not run${why}. ${how}${bg}Prefix RESOURCE_QUEUE=0 only when the queue itself is broken.`,

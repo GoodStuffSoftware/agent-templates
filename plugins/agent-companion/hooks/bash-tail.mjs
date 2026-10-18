@@ -5,8 +5,9 @@
 //   1. resource gate (hooks/lib/resource-gate.mjs): a heavy command (full test
 //      suite, E2E, emulator, gradle...) is sent through the machine-wide resource
 //      queue. Setting resource_gate: rewrite | deny | hint | off, default deny.
-//      deny and hint end or annotate the call; rewrite replaces the heavy
-//      segments with `node <launcher> run --class <id> -- '<segment>'` in place.
+//      deny and hint end or annotate the call; rewrite replaces the whole command
+//      line (after a leading `cd <dir> &&`) with `node <launcher> run --class <id>
+//      --shell bash -- '<line>'`, which runs the line unchanged in bash.
 //   2. output tail (below): a known long-runner's output goes to a file and only
 //      its tail comes back. It analyzes the ORIGINAL command (what the agent
 //      wrote) and wraps the command step 1 produced, so both survive together.

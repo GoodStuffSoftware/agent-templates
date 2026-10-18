@@ -26,6 +26,7 @@ import {
 import { pythonStdinGuard } from './lib/python-stdin.mjs';
 import { processGuard } from './lib/process-kill-guard.mjs';
 import { envDumpGuard } from './lib/env-dump-guard.mjs';
+import { pushDeleteGuard } from './lib/push-delete-guard.mjs';
 import { claimOnce, readStamp, writeStamp } from './lib/subagent-context.mjs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -78,6 +79,15 @@ try {
         try { recordDenial(ed.kind, p, ed.detail, ed.mode === 'warn' ? 'warn' : 'deny'); } catch { /* telemetry never blocks */ }
         if (ed.mode === 'deny') deny(ed.message);
         pyNote = [pyNote, ed.message].filter(Boolean).join('\n\n');
+      }
+    } catch { /* fail open */ }
+    // push_delete_guard (0.31.30): a git push that deletes remote refs (`:ref`, `+:ref`, --delete, -d, --prune,
+    // --mirror) needs `# guard-ack: destructive-git` (lib/push-delete-guard.mjs). Always deny; fail-open.
+    try {
+      const pd = pushDeleteGuard(p);
+      if (pd) {
+        try { recordDenial(pd.kind, p, pd.detail, 'deny'); } catch { /* telemetry never blocks */ }
+        deny(pd.message);
       }
     } catch { /* fail open */ }
     if (toolName === 'Bash') {

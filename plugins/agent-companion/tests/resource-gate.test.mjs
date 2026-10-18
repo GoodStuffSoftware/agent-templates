@@ -8,7 +8,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
 import {
-  classifyCommand, scanCommand, wordsOf, rewriteCommand, wrapSegment, gateDecision, gateMode, gateDisabledByEnv, DEFAULT_GATE_MODE,
+  classifyCommand, scanCommand, wordsOf, rewriteCommand, wrapSegment, wrapLosesCwd, gateDecision, gateMode, gateDisabledByEnv, DEFAULT_GATE_MODE,
 } from '../hooks/lib/resource-gate.mjs';
 
 // A pretend file system: a set of existing paths and a map of file contents.
@@ -201,12 +201,34 @@ const rewrite = (command, fs = NOFS) => {
   return rewriteCommand(command, f.heavy, f.flags, LAUNCHER, (cs) => cs[0]);
 };
 
-test('rewrite: wraps the heavy segment in place, keeping cd, pipes and redirects where they were', () => {
+test('rewrite: the whole line is wrapped unchanged; only a leading cd stays outside', () => {
   assert.equal(rewrite('cd app && npx vitest run'), `cd app && ${wrapSegment('npx vitest run', 'vitest-full', LAUNCHER)}`);
-  assert.equal(rewrite('npx vitest run | tail -5'), `${wrapSegment('npx vitest run', 'vitest-full', LAUNCHER)} | tail -5`);
-  assert.equal(rewrite('npm ci && npx vitest run'), `${wrapSegment('npm ci', 'install', LAUNCHER)} && ${wrapSegment('npx vitest run', 'vitest-full', LAUNCHER)}`);
-  assert.equal(rewrite('npm test &'), `${wrapSegment('npm test', 'vitest-full', LAUNCHER)} &`);
+  assert.equal(rewrite('npx vitest run | tail -5'), wrapSegment('npx vitest run | tail -5', 'vitest-full', LAUNCHER));
+  assert.equal(rewrite('npm ci && npx vitest run'), wrapSegment('npm ci && npx vitest run', 'install', LAUNCHER), 'one wrap, the first heavy class (the caller picks the heaviest)');
+  assert.equal(rewrite('npm test &'), wrapSegment('npm test &', 'vitest-full', LAUNCHER));
+  assert.equal(rewrite('M=1; npm ci'), wrapSegment('M=1; npm ci', 'install', LAUNCHER), 'an assignment before the heavy segment goes in with it');
+  assert.equal(rewrite('cd $D && npm ci'), wrapSegment('cd $D && npm ci', 'install', LAUNCHER), 'a cd with an expansion is not hoisted');
   assert.equal(rewrite('echo hi'), 'echo hi');
+});
+
+test('rewrite: wrapLosesCwd flags a directory change inside the wrapped part only', () => {
+  assert.equal(wrapLosesCwd('cd app && npm ci'), false);
+  assert.equal(wrapLosesCwd('npm ci && cd app'), true);
+  assert.equal(wrapLosesCwd('cd a && npm ci; pushd b'), true);
+  assert.equal(wrapLosesCwd('npm ci'), false);
+});
+
+test('decision: rewrite mode denies, with the reason, a line whose directory change would not last', async () => {
+  const d = await dec('npm ci && cd sub', { mode: 'rewrite' });
+  assert.equal(d.action, 'deny');
+  assert.match(d.text, /changes directory/);
+  assert.equal((await dec('cd sub && npm ci', { mode: 'rewrite' })).action, 'rewrite');
+});
+
+test('classify: a push with --no-verify skips the pre-push hook, so it is not heavy', () => {
+  const fs = fakeFs({ '/work/app/.git/hooks/pre-push': '#!/bin/sh\nnpm test\n' }, ['/work/app/.git']);
+  assert.equal(heavy('git push origin main', fs), true);
+  assert.equal(heavy('git push -q --no-verify origin main', fs), false);
 });
 
 test('rewrite: a heredoc or a group is wrapped as one whole command', () => {
@@ -235,9 +257,9 @@ test('rewrite: quotes, spaces and metacharacters survive as exactly one argument
       const r = spawnSync(BASH, ['-c', out], { encoding: 'utf8', windowsHide: true, env: { ...process.env, PATH: NODE_PATH } });
       assert.equal(r.status, 0, r.stderr);
       const argv = JSON.parse(r.stdout.trim());
-      assert.deepEqual(argv.slice(0, 5), ['run', '--class', f.heavy[0].class, '--label', f.heavy[0].class]);
-      assert.equal(argv[5], '--');
-      assert.equal(argv[6], cmd.trim(), 'the segment arrives byte for byte as one argument');
+      assert.deepEqual(argv.slice(0, 7), ['run', '--class', f.heavy[0].class, '--label', f.heavy[0].class, '--shell', 'bash']);
+      assert.equal(argv[7], '--');
+      assert.equal(argv[8].replace(/^\n/, ''), cmd, 'the command line arrives byte for byte as one argument (after a guard newline)');
     }
   } finally { fx.cleanup(); }
 });
@@ -269,7 +291,7 @@ test('decision: deny names the exact wrapped command and suggests run_in_backgro
   const d = await dec('cd app && npx vitest run', { mode: 'deny' });
   assert.equal(d.action, 'deny');
   assert.deepEqual(d.classes, ['vitest-full']);
-  assert.match(d.text, /^cd app && node '.*resource-queue\.mjs' run --class vitest-full --label vitest-full -- 'npx vitest run'$/m, 'the exact command is on a line of its own');
+  assert.match(d.text, /^cd app && node '.*resource-queue\.mjs' run --class vitest-full --label vitest-full --shell bash -- 'npx vitest run'$/m, 'the exact command is on a line of its own');
   assert.match(d.text, /run_in_background: true/);
   assert.match(d.text, /10-minute foreground limit/);
   const lint = await dec('npx eslint .', { mode: 'deny' });
@@ -280,7 +302,7 @@ test('decision: deny names the exact wrapped command and suggests run_in_backgro
 test('decision: rewrite returns the wrapped command; hint returns text and no command change; off and not-heavy do nothing', async () => {
   const rw = await dec('npm ci', { mode: 'rewrite' });
   assert.equal(rw.action, 'rewrite');
-  assert.match(rw.command, /^node '.*resource-queue\.mjs' run --class install --label install -- 'npm ci'$/);
+  assert.match(rw.command, /^node '.*resource-queue\.mjs' run --class install --label install --shell bash -- 'npm ci'$/);
   const h = await dec('npm ci', { mode: 'hint' });
   assert.equal(h.action, 'hint');
   assert.match(h.text, /resource-queue\.mjs/);
@@ -353,7 +375,7 @@ test('hook: rewrite copies timeout, run_in_background and description unchanged 
     assert.equal(out.updatedInput.description, 'install deps');
     assert.equal(out.updatedInput.timeout, 123000);
     assert.equal(out.updatedInput.run_in_background, true);
-    assert.match(out.updatedInput.command, /^node '.*resource-queue\.mjs' run --class install --label install -- 'npm ci'$/);
+    assert.match(out.updatedInput.command, /^node '.*resource-queue\.mjs' run --class install --label install --shell bash -- 'npm ci'$/);
     assert.equal(gateRows(fx)[0].event, 'rewritten');
   } finally { fx.cleanup(); }
 });
@@ -420,7 +442,7 @@ test('compose: gate rewrite and output tail both survive in ONE updatedInput', (
     const r = runHook('hooks/bash-tail.mjs', pl('cd app && npm ci', {}, { description: 'd', timeout: 5000 }), { env: env(fx, { CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'rewrite' }) });
     const u = r.json.hookSpecificOutput.updatedInput;
     assert.ok(u.command.includes('[ac-bash-tail]'), 'the output tail wrapped the command');
-    assert.match(u.command, /cd app && node '.*resource-queue\.mjs' run --class install --label install -- 'npm ci'/, 'the gate wrapped the heavy segment, inside the tail wrapper');
+    assert.match(u.command, /cd app && node '.*resource-queue\.mjs' run --class install --label install --shell bash -- 'npm ci'/, 'the gate wrapped the line after its leading cd, inside the tail wrapper');
     assert.equal(u.description, 'd');
     assert.equal(u.timeout, 5000);
     assert.equal(r.json.hookSpecificOutput.permissionDecision, undefined);
@@ -441,7 +463,7 @@ test('compose: with the tail off, or a background run, only the gate rewrite is 
     assert.equal(bg.json.hookSpecificOutput.updatedInput.run_in_background, true);
     assert.ok(bg.json.hookSpecificOutput.updatedInput.command.includes('resource-queue.mjs'));
     const piped = runHook('hooks/bash-tail.mjs', pl('npm ci | tail -2'), { env: e });
-    assert.match(piped.json.hookSpecificOutput.updatedInput.command, /-- 'npm ci' \| tail -2$/, 'piped: tail declines, gate still wraps in place');
+    assert.match(piped.json.hookSpecificOutput.updatedInput.command, /--shell bash -- 'npm ci \| tail -2'$/, 'piped: tail declines, the gate wraps the whole line');
   } finally { fx.cleanup(); }
 });
 

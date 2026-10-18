@@ -2,7 +2,8 @@
 // resource-queue.mjs: the cross-project resource queue CLI.
 //
 //   node <plugin>/scripts/resource-queue.mjs run --resource box:8 [--resource app-e2e[:N]]
-//        [--class <id>] [--ram 4G] [--label <text>] [--max-wait <seconds>] -- <cmd...>
+//        [--class <id>] [--ram 4G] [--label <text>] [--max-wait <seconds>] [--shell bash] -- <cmd...>
+//        (--shell bash: one argument, a bash command line run byte for byte by bash)
 //   node <plugin>/scripts/resource-queue.mjs status [--json] [--resource <name>] [--sample] [--strays]
 //   node <plugin>/scripts/resource-queue.mjs sweep
 //   node <plugin>/scripts/resource-queue.mjs release <lease-id>
@@ -38,7 +39,7 @@ export { resourceStatus, formatResourceStatus, acquireResources, reserveResource
 
 const SELF = fileURLToPath(import.meta.url);
 const USAGE = [
-  'usage: resource-queue.mjs run --resource box:N [--resource <name>[:N]] [--class <id>] [--ram 4G] [--label <text>] [--max-wait <s>] [--group <name>] [--bind-pid <pid>] -- <cmd...>',
+  'usage: resource-queue.mjs run --resource box:N [--resource <name>[:N]] [--class <id>] [--ram 4G] [--label <text>] [--max-wait <s>] [--group <name>] [--bind-pid <pid>] [--shell bash] -- <cmd...>',
   '       resource-queue.mjs run --resource <name> --bind-pid <pid>          (hold for a running daemon, no command)',
   '       resource-queue.mjs reserve <resource> --for <group> --until <30m|2h|14:30|ISO> [--reason <text>]    (at most 4 h)',
   '       resource-queue.mjs unreserve <resource> [--for <group>]',
@@ -150,6 +151,43 @@ function shellFor(env) {
   return { file: env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c'], verbatim: true };
 }
 
+/**
+ * The bash for `run --shell bash`, or null. Never the System32 / WindowsApps bash (WSL).
+ * On Windows, Git's bin\bash.exe is a launcher that puts /mingw64/bin and /usr/bin in
+ * front of PATH; its usr\bin\bash.exe sibling keeps PATH as the caller had it, so it
+ * is preferred (the command must see the PATH order its own shell had).
+ */
+export function bashFor(env = process.env, exists = existsSync) {
+  if (process.platform !== 'win32') {
+    const onPath = findOnPath('bash', env);
+    if (onPath) return onPath;
+    return exists('/bin/bash') ? '/bin/bash' : null;
+  }
+  const wsl = (p) => /\\(?:system32|sysnative|windowsapps)\\/i.test(String(p).replace(/\//g, '\\'));
+  const cands = [];
+  if (env.CLAUDE_CODE_GIT_BASH_PATH) cands.push(env.CLAUDE_CODE_GIT_BASH_PATH);
+  const git = findOnPath('git', env);
+  if (git) {
+    let d = dirname(git);
+    for (let up = 0; up < 3 && d !== dirname(d); up += 1) {
+      cands.push(join(d, 'bin', 'bash.exe'));
+      d = dirname(d);
+    }
+  }
+  const pf = env.ProgramFiles || env.PROGRAMFILES || 'C:\\Program Files';
+  cands.push(join(pf, 'Git', 'bin', 'bash.exe'));
+  for (const c of cands) {
+    if (!c || wsl(c) || !exists(c)) continue;
+    const plain = join(dirname(c), '..', 'usr', 'bin', 'bash.exe');
+    if (/[\\/]bin[\\/]bash\.exe$/i.test(c) && !/[\\/]usr[\\/]bin[\\/]bash\.exe$/i.test(c) && exists(plain)) return resolve(plain);
+    return c;
+  }
+  return null;
+}
+
+/** The env variable `run --shell bash` passes the command line in. */
+export const SHELL_COMMAND_ENV = 'AC_RQ_COMMAND';
+
 const cmdQuote = (a) => (a === '' || /[\s"&|<>^()%!]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
 
 /**
@@ -190,11 +228,21 @@ function defaultLabel(cmd) {
  * { env, err(line), acquire, spawn, probe, pollMs }.
  */
 export async function runUnderQueue({
-  request, label, cmd, maxWaitSeconds = null, group = '', bindPid = 0,
+  request, label, cmd, maxWaitSeconds = null, group = '', bindPid = 0, shell = '',
 }, io = {}) {
   const env = io.env ?? process.env;
   const err = io.err ?? ((l) => process.stderr.write(`${l}\n`));
   const spawnFn = io.spawn ?? spawn;
+  // --shell bash: the one argument is a bash command line, run byte for byte. No bash
+  // means the command does not run: another shell would change what it does.
+  let bash = null;
+  if (shell === 'bash') {
+    bash = (io.bashFor ?? bashFor)(env);
+    if (!bash) {
+      err('resource-queue: --shell bash: no bash found (Git for Windows bash, or bash on PATH); the command was not run, since another shell would change what it does. Run it without the queue: prefix RESOURCE_QUEUE=0.');
+      return 127;
+    }
+  }
   lowerOwnPriority();
   const off = String(env.RESOURCE_QUEUE ?? '').trim() === '0' || String(env.CI_LOCAL_LOCK ?? '').trim() === '0';
   let req = request; let lease = null;
@@ -231,7 +279,11 @@ export async function runUnderQueue({
     return off ? 0 : 1;
   }
   const childEnv = { ...env, ...(lease && !lease.off ? { [REENTRY_ENV]: lease.id } : {}) };
-  const plan = planCommand(cmd, env);
+  let plan;
+  if (bash) {
+    childEnv[SHELL_COMMAND_ENV] = cmd[0];
+    plan = { file: bash, args: ['-c', `eval "$${SHELL_COMMAND_ENV}"`], verbatim: false, mode: 'bash' };
+  } else plan = planCommand(cmd, env);
   let child;
   try {
     child = spawnFn(plan.file, plan.args, {
@@ -381,10 +433,14 @@ export async function cli(argv, io = {}) {
       const sep = rest.indexOf('--');
       if (sep >= 0 && sep === rest.length - 1) throw new Error('run needs a command after "--"');
       const flags = sep < 0 ? rest : rest.slice(0, sep); const command = sep < 0 ? [] : rest.slice(sep + 1);
-      const resources = []; let ram = null; let cls = null; let label = ''; let maxWait = null; let group = ''; let bindPid = 0;
+      const resources = []; let ram = null; let cls = null; let label = ''; let maxWait = null; let group = ''; let bindPid = 0; let shell = '';
       for (let i = 0; i < flags.length; i += 1) {
         const f = flags[i];
-        if (f === '--group') {
+        if (f === '--shell') {
+          shell = flagValue(flags, i, f);
+          if (shell !== 'bash') throw new Error(`bad --shell "${shell}" (only bash)`);
+          i += 1;
+        } else if (f === '--group') {
           group = flagValue(flags, i, f);
           if (!NAME_RE.test(group)) throw new Error(`bad --group "${group}" (names are letters, digits, . _ -)`);
           i += 1;
@@ -406,10 +462,11 @@ export async function cli(argv, io = {}) {
         } else throw new Error(`unknown option "${f}"`);
       }
       if (!command.length && !bindPid) throw new Error('run needs a command after "--" (or --bind-pid <pid> to hold for a running process)');
+      if (shell && command.length !== 1) throw new Error('--shell bash takes exactly one argument after "--": the command line');
       const rules = io.rules ?? loadRules(env);
       const request = buildRequest({ resources, ram, cls }, rules);
       return await runUnderQueue({
-        request, label: label || (command.length ? defaultLabel(command) : `pid ${bindPid}`), cmd: command, maxWaitSeconds: maxWait, group, bindPid,
+        request, label: label || (command.length ? defaultLabel(command) : `pid ${bindPid}`), cmd: command, maxWaitSeconds: maxWait, group, bindPid, shell,
       }, { ...io, env, err, rules });
     }
     if (cmd === 'reserve') {
