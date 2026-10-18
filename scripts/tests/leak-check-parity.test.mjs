@@ -117,11 +117,7 @@ test("parity: decodeProjectDir, exactNameKey, isUnsafeDevRoot agree", () => {
     assert.deepEqual(script.decodeProjectDir(e), core.decodeProjectDir(e));
   }
   for (const s of ["Zorbl Internal", "zorbl_internal", "ZORBL-internal"]) assert.equal(script.exactNameKey(s), core.exactNameKey(s));
-  // A missing child of a temp dir spelled in 8.3 short form (RUNNER~1 on a hosted Windows runner) is
-  // resolved through its existing ancestor by the plugin copy only; the standalone script copy is
-  // changed on another branch, so that one case is compared only when the temp dir is already canonical.
-  const tmpCanonical = realpathSync.native(tmpdir()).toLowerCase() === resolve(tmpdir()).toLowerCase();
-  for (const p of [tmpdir(), ...(tmpCanonical ? [join(tmpdir(), "x")] : []), process.platform === "win32" ? "Q:\zb-projects" : "/opt/zb-projects"]) {
+  for (const p of [tmpdir(), join(tmpdir(), "x"), process.platform === "win32" ? "Q:\zb-projects" : "/opt/zb-projects"]) {
     assert.equal(script.isUnsafeDevRoot(p, "/nonexistent-home"), core.isUnsafeDevRoot(p, "/nonexistent-home"));
   }
 });

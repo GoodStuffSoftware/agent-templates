@@ -805,7 +805,17 @@ function mainCheckoutDir(root) {
 export function isUnsafeDevRoot(p, home = homedir()) {
   const norm = (x) => {
     let r = resolve(x);
-    try { r = realpathSync.native(r); } catch { /* missing: compare as given */ }
+    // A path that does not exist yet is resolved through its deepest existing
+    // ancestor, so a missing child of a temp dir spelled in 8.3 short form
+    // (RUNNER~1 on a hosted Windows runner) still lands inside that temp dir.
+    const tail = [];
+    for (let cur = r; ; ) {
+      try { r = join(realpathSync.native(cur), ...tail.reverse()); break; } catch { /* missing: try the parent */ }
+      const up = dirname(cur);
+      if (up === cur) break;
+      tail.push(basename(cur));
+      cur = up;
+    }
     return r.replace(/[\\/]+$/, "").toLowerCase();
   };
   const d = norm(p);

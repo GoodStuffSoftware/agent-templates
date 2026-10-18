@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.29",
+  "version": "0.31.30",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -710,7 +710,7 @@
     "session_budget_units": {
       "type": "number",
       "title": "Session budget notice: plan units",
-      "description": "Advisory only. The plan units this whole session has used, the lead plus every subagent (tokens priced at Sonnet 5 rates times the model's plan multiplier, so Opus counts 1.5), are added up on each lead prompt and each foreground Agent return. Each time the total crosses another multiple of this number the lead gets one notice to finish the phase, update SESSION-STATE.md and offer the operator a hand-off to a fresh session. Nothing is ever blocked. 0 turns it off.",
+      "description": "Advisory only. The plan units this whole session has used, the lead plus every subagent (tokens priced at Sonnet 5 rates times the model's plan multiplier, so Opus counts 1.5), are added up on each lead prompt and each foreground Agent return. Each time the total crosses another multiple of this number the lead gets one notice that a hand-off does not save usage, that fewer and smaller spawns do, and that a hand-over is only for a plugin version change or the end of the job. Nothing is ever blocked. 0 turns it off.",
       "default": 350
     },
     "subagent_context_notice_tokens": {
