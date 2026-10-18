@@ -4,6 +4,11 @@ name: agent-companion-tests
 # Every test isolates itself under a fresh temp dir via
 # AGENT_COMPANION_HOME_OVERRIDE / AGENT_COMPANION_STATE_DIR, so this never
 # touches anything outside the checkout.
+#
+# Since 0.31.30 this workflow is THE test gate: the pre-push hook only scans
+# for leaks and private names, and a contributor runs just the targeted tests
+# for the files they touch. The matrix covers Linux and Windows, because the
+# local runs on a Windows machine used to be the only Windows coverage.
 
 on:
   push:
@@ -14,8 +19,25 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      # One OS going red must not hide the other's result.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
+      # git for Windows ships core.autocrlf=true, which rewrites LF to CRLF in
+      # the working tree while the stored blob stays untouched, so a test that
+      # compares bytes (or runs `git apply`) fails on a Windows checkout with
+      # nothing visible in `git status`. Turn it off before checkout so every
+      # OS gets the stored bytes. .gitattributes pins eol=lf for the files the
+      # tooling reads byte-exact as a second layer.
+      - name: Disable git autocrlf
+        shell: bash
+        run: git config --global core.autocrlf false
+
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -35,10 +57,17 @@ jobs:
         with:
           node-version: 24
 
-      # Calls the same entry point a contributor runs locally (by hand, or
-      # via .githooks/pre-push) -- see CONTRIBUTING.md. ci-local.mjs expands
-      # the plugins/agent-companion/tests/*.test.mjs glob itself, so this
-      # stays independent of any platform's own glob resolution inside the
-      # test runner.
+      # Calls the same entry point a contributor can run by hand -- see
+      # CONTRIBUTING.md. ci-local.mjs expands the
+      # plugins/agent-companion/tests/*.test.mjs glob itself, so this stays
+      # independent of any platform's own glob resolution inside the test
+      # runner.
       - name: Run agent-companion test suite
         run: node scripts/ci-local.mjs --suite agent-companion-tests
+
+      # leak-check.yml runs scripts-tests (ci-local, push-scan, setup-hooks and
+      # the hook-tree tests) on Linux only. The local runs on Windows used to
+      # cover those on Windows too, so run them here for the Windows leg.
+      - name: Run scripts tests (Windows)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: node scripts/ci-local.mjs --suite scripts-tests

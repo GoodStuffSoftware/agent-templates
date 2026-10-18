@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync, readdirSync, renameSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, isAbsolute } from 'node:path';
 import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
 
 const fx = makeFixture();
@@ -56,7 +56,7 @@ test('the profile and every file beside it live under the state root, never the 
   assert.equal(ctx.routingProfilePath(), PROFILE);
   assert.equal(ctx.routingProfileInvalidMarkerPath(), MARKER);
   assert.ok(!relative(fx.stateDir, ctx.routingProfilePath()).startsWith('..'));
-  assert.ok(relative(PLUGIN_ROOT, ctx.routingProfilePath()).startsWith('..'), 'profile path must not be inside the plugin dir');
+  assert.ok(relative(PLUGIN_ROOT, ctx.routingProfilePath()).startsWith('..') || isAbsolute(relative(PLUGIN_ROOT, ctx.routingProfilePath())), 'profile path must not be inside the plugin dir');
 });
 
 test('no profile: every shipped type resolves exactly as with the profile layer off (the acceptance gate)', () => {

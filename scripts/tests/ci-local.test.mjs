@@ -9,8 +9,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   parseArgs, classifyRef, parsePrePushStdin, isDeletedRef, readCheckoutDepth,
   stripGitEnv, SUITE_NAMES, DEFAULT_ORDER,
@@ -70,6 +72,32 @@ test('parseArgs: --pre-push-hook takes the hook\'s two arguments, the destinatio
   assert.equal(bare.pushUrl, null);
   assert.equal(parseArgs(['--pre-push-hook', 'origin']).pushUrl, null);
   assert.throws(() => parseArgs(['--pre-push-hook', 'a', 'b', 'c']), /unknown argument "c"/);
+});
+
+test('parseArgs: --with-suites is off by default and sets withSuites alongside --pre-push-hook', () => {
+  assert.equal(parseArgs(['--pre-push-hook']).withSuites, false);
+  const o = parseArgs(['--pre-push-hook', 'origin', 'https://example.invalid/r.git', '--with-suites']);
+  assert.equal(o.withSuites, true);
+  assert.equal(o.pushUrl, 'https://example.invalid/r.git');
+});
+
+// The hook's mode, end to end with empty stdin (no refs, so nothing is scanned
+// or run): the banner line says which mode is on.
+function hookBanner(args, extraEnv) {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const env = { ...stripGitEnv(process.env), CI_LOCAL_PRE_PUSH_SUITES: '', ...extraEnv };
+  const r = spawnSync(process.execPath, [join(root, 'scripts', 'ci-local.mjs'), '--pre-push-hook', ...args], {
+    cwd: root, env, input: '', encoding: 'utf8', windowsHide: true,
+  });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout;
+}
+
+test('pre-push hook mode: scan-only by default; --with-suites and CI_LOCAL_PRE_PUSH_SUITES=1 switch the suites on', () => {
+  assert.match(hookBanner([]), /scan only .*the suites run on GitHub CI/);
+  assert.match(hookBanner(['origin', 'https://example.invalid/r.git', '--with-suites']), /normal refs run its suites here/);
+  assert.match(hookBanner([], { CI_LOCAL_PRE_PUSH_SUITES: '1' }), /normal refs run its suites here/);
+  assert.match(hookBanner([], { CI_LOCAL_PRE_PUSH_SUITES: '0' }), /scan only/);
 });
 
 test('parseArgs: --help sets the flag without requiring other args', () => {

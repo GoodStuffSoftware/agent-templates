@@ -539,7 +539,10 @@ function walk(dir, acc = []) {
 export function listCommittableFiles(root) {
   try {
     const top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
-    if (resolve(top).toLowerCase() !== resolve(root).toLowerCase()) throw new Error('scan root is not a git top-level');
+    // Compare canonical spellings: git prints the long form of a path, a caller may hold the
+    // 8.3 short form (RUNNER~1 on a hosted Windows runner) of the same directory.
+    const canon = (p) => { try { return realpathSync.native(resolve(p)).toLowerCase(); } catch { return resolve(p).toLowerCase(); } };
+    if (canon(top) !== canon(root)) throw new Error('scan root is not a git top-level');
     const out = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     return out.split(/\r?\n/).filter(Boolean).map((rel) => join(root, rel));
   } catch (err) {
@@ -557,7 +560,17 @@ export function listCommittableFiles(root) {
 export function isUnsafeDevRoot(p, home = homedir()) {
   const norm = (x) => {
     let r = resolve(x);
-    try { r = realpathSync.native(r); } catch { /* missing: compare as given */ }
+    // A path that does not exist yet is resolved through its deepest existing
+    // ancestor, so a missing child of a temp dir spelled in 8.3 short form
+    // (RUNNER~1 on a hosted Windows runner) still lands inside that temp dir.
+    const tail = [];
+    for (let cur = r; ; ) {
+      try { r = join(realpathSync.native(cur), ...tail.reverse()); break; } catch { /* missing: try the parent */ }
+      const up = dirname(cur);
+      if (up === cur) break;
+      tail.push(basename(cur));
+      cur = up;
+    }
     return r.replace(/[\\/]+$/, '').toLowerCase();
   };
   const d = norm(p);

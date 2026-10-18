@@ -157,7 +157,7 @@ test('the default results directory resolves OUTSIDE this repo (the plugin data 
     const outDir = m[1].trim();
     assert.ok(isAbsolute(outDir), `out dir should be absolute, got ${outDir}`);
     const rel = relative(PLUGIN_ROOT, outDir);
-    assert.ok(rel.startsWith('..'), `out dir ${outDir} must be outside the repo (relative(PLUGIN_ROOT, outDir) = ${rel})`);
+    assert.ok(rel.startsWith('..') || isAbsolute(rel), `out dir ${outDir} must be outside the repo (relative(PLUGIN_ROOT, outDir) = ${rel})`);
     assert.match(outDir, /benchmarks[\\/]pilot-\d{4}-\d{2}-\d{2}/);
   } finally {
     cleanup();

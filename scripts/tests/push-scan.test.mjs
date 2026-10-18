@@ -995,6 +995,33 @@ test('R1: ci-local prints a ref name only through the scan\'s redactor, and with
   assert.match(text, /suites skipped for <\d+>/);
 });
 
+test('pre-push gate: scan-only (suites: false) still scans every ref, runs no suite and returns 0', async () => {
+  const { repo, commit } = makeRepo();
+  const sha = commit({ 'a.txt': 'clean\n' });
+  const g = gateWith(repo, stateDirWith([synth()]));
+  const status = await prePushGate([
+    { localRef: 'refs/heads/main', localSha: sha, remoteRef: 'refs/heads/main', remoteSha: ZERO },
+    { localRef: 'refs/heads/wip/x', localSha: sha, remoteRef: 'refs/heads/wip/x', remoteSha: ZERO },
+  ], { ...g.opts, suites: false });
+  assert.equal(status, 0);
+  assert.deepEqual(g.scanned, ['refs/heads/main', 'refs/heads/wip/x']);
+  assert.deepEqual(g.suiteCalls, []);
+  assert.match(g.out.join('\n'), /suites run on GitHub CI/);
+});
+
+test('pre-push gate: scan-only still blocks on a hit', async () => {
+  const name = synth();
+  const { repo, commit } = makeRepo();
+  const sha = commit({ 'a.txt': `${name}\n` });
+  const g = gateWith(repo, stateDirWith([name]));
+  const status = await prePushGate([
+    { localRef: 'refs/heads/feature', localSha: sha, remoteRef: 'refs/heads/feature', remoteSha: ZERO },
+  ], { ...g.opts, suites: false });
+  assert.equal(status, 1);
+  assert.deepEqual(g.suiteCalls, []);
+  assertNoName(g.out.join('\n'), [name]);
+});
+
 test('R1: the real gate blocks a named ref with clean content, and prints no name', async () => {
   const name = synth();
   const { repo, commit, publish } = makeRepo();

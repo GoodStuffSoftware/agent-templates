@@ -443,7 +443,13 @@ export function makeCliJudgeCaller(getBin, { removeDirImpl = removeDirWithRetry,
       // NO_CLAUDE / CLAUDE_BIN-not-found seam) can fail synchronously before
       // stdin is ever attached, and a write to a dead pipe would otherwise
       // throw EPIPE past this function's own error handling.
+      // A child that exits before reading stdin makes the write fail
+      // asynchronously as an 'error' EVENT on the stream (EPIPE), which the
+      // try/catch cannot see and which would crash the process as an
+      // unhandled error. The child's own exit (callback above) carries the
+      // real outcome, so the stream error is deliberately ignored.
       try {
+        child.stdin.on('error', () => {});
         child.stdin.write(user, 'utf8');
         child.stdin.end();
       } catch { /* process already gone (e.g. ENOENT on getBin()): the exit handler above still fires */ }

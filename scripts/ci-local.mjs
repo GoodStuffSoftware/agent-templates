@@ -2,9 +2,12 @@
 // scripts/ci-local.mjs — the ONE place that knows what "the suite" is. Both
 // GitHub Actions workflows (.github/workflows/leak-check.yml and
 // agent-companion-tests.yml) call this file for their actual work, and a
-// contributor runs the exact same file locally before pushing (via
-// `.githooks/pre-push`, or by hand). Local and CI cannot drift because there
-// is only one command, not two copies of one.
+// contributor can run the exact same file locally, by hand. Local and CI
+// cannot drift because there is only one command, not two copies of one.
+// Since 0.31.30 the pre-push hook (`.githooks/pre-push`) runs only the
+// pushed-commit leak and private-names scan from this file; the suites run on
+// GitHub CI (Linux and Windows). `--pre-push-hook --with-suites` (or env
+// CI_LOCAL_PRE_PUSH_SUITES=1) restores the old behaviour of running them there.
 //
 // Background: overnight, a shallow-clone checkout, a missing `claude` CLI on
 // the runner, and a sha-like token in a test comment produced 60+ red CI
@@ -28,7 +31,8 @@
 //                                                     (git pre-push protocol; the
 //                                                     hook's own two arguments
 //                                                     name the destination) and
-//                                                     run whatever they require
+//                                                     scan them (suites: add
+//                                                     --with-suites)
 //
 // Exit code: 0 if every suite that ran passed; 1 otherwise; 2 on a bad
 // invocation (unknown flag/suite).
@@ -40,9 +44,10 @@
 //   FAIL    a test file failed, and failed again when re-run on its own.
 //   FLAKY   a test file failed in the full run and PASSED when re-run once on
 //           its own ("flaky on isolated re-run"). Printed loudly with the
-//           file's name. Does NOT block a plain run or the pre-push gate for
-//           an ordinary branch; under --ci-parity (and so for pushes to main
-//           and release/**) it counts as a failure.
+//           file's name. Does NOT block a plain run (or the pre-push gate
+//           under --with-suites) for an ordinary branch; under --ci-parity
+//           (and so, with --with-suites, for pushes to main and release/**)
+//           it counts as a failure.
 //
 // Concurrency: node --test runs at most N test files at once, N =
 // $CI_LOCAL_TEST_CONCURRENCY when it is a positive integer, otherwise half
@@ -169,7 +174,8 @@ export const DEFAULT_ORDER = ['scripts-tests', 'leak-check', 'agent-companion-te
 
 export function parseArgs(argv) {
   const opts = {
-    suites: null, ciParity: false, prePushHook: false, ref: 'HEAD', help: false, pushRemote: null, pushUrl: null,
+    suites: null, ciParity: false, prePushHook: false, withSuites: false, ref: 'HEAD', help: false,
+    pushRemote: null, pushUrl: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -192,6 +198,8 @@ export function parseArgs(argv) {
       opts.suites.push(name);
     } else if (a === '--ci-parity') {
       opts.ciParity = true;
+    } else if (a === '--with-suites') {
+      opts.withSuites = true;
     } else if (a === '--ref') {
       const ref = argv[i += 1];
       if (!ref) throw new Error('--ref requires a value');
@@ -270,11 +278,14 @@ function printHelp() {
   --pre-push-hook [<remote> [<url>]]
                         read pushed refs from stdin (git pre-push protocol),
                         scan every pushed ref name and every pushed commit on
-                        every ref for leaks and private names, then run
-                        whatever suites the refs require. <remote> and <url>
-                        are the hook's own arguments (the destination); only
-                        commits that destination already has are skipped.
-                        Used by .githooks/pre-push.
+                        every ref for leaks and private names, and stop: the
+                        test suites run on GitHub CI, not in the hook. <remote>
+                        and <url> are the hook's own arguments (the
+                        destination); only commits that destination already
+                        has are skipped. Used by .githooks/pre-push.
+  --with-suites         with --pre-push-hook, run the suites the refs require
+                        after the scan (the pre-0.31.30 behaviour). Same as
+                        env CI_LOCAL_PRE_PUSH_SUITES=1.
 
   env ${CONCURRENCY_ENV}=<n>
                         run at most n test files at once (default: half the
@@ -1095,7 +1106,7 @@ function defaultRunSuites(cls, localSha) {
 export async function prePushGate(refs, {
   scan = defaultPushScan, runSuites = defaultRunSuites,
   log = (m) => console.log(m), err = (m) => console.error(m),
-  remote = null, url = null,
+  remote = null, url = null, suites = true,
 } = {}) {
   const live = refs.filter((r) => !isDeletedRef(r.localSha));
   if (live.length === 0) {
@@ -1122,6 +1133,12 @@ export async function prePushGate(refs, {
   const showRef = typeof scanRes.showRef === 'function'
     ? (r) => scanRes.showRef(r.remoteRefBytes ?? r.remoteRef)
     : () => WITHHELD_REF;
+  if (!suites) {
+    // Scan-only (the hook's default since 0.31.30): the suites run on GitHub
+    // CI, on Linux and Windows, so a push costs seconds and takes no lease.
+    log('\nci-local pre-push: scan passed. The test suites run on GitHub CI, not here (node scripts/ci-local.mjs runs them by hand).');
+    return 0;
+  }
   let overallStatus = 0;
   let flaky = false;
   const ran = new Set();
@@ -1207,7 +1224,7 @@ export function workTreeOverrideWarning(honoured, own, opts) {
   return `ci-local pre-push: WARNING — GIT_WORK_TREE names ${show(honoured)}, but this directory's own work tree is ${show(own)}; the gate is testing the GIT_WORK_TREE tree (${show(honoured)}).`;
 }
 
-async function runPrePushHook(remote, url) {
+async function runPrePushHook(remote, url, withSuites = false) {
   const pushedTree = pushedTreeToplevel();
   if (process.env.GIT_WORK_TREE) {
     const warning = workTreeOverrideWarning(pushedTree, pushedTreeToplevel(process.env, { honourWorkTree: false }));
@@ -1219,7 +1236,10 @@ async function runPrePushHook(remote, url) {
     console.error('Make core.hooksPath relative (node scripts/setup-hooks.mjs) or update the checkout it points into; see CONTRIBUTING.md.');
     return 1;
   }
-  console.log(`ci-local pre-push: tree ${scrubHomeDir(REPO_ROOT)}: normal refs run its suites here; main and release/** test the pushed sha in a temp clone; wip/** and backup/** are scan-only.`);
+  const runSuitesToo = withSuites || process.env.CI_LOCAL_PRE_PUSH_SUITES === '1';
+  console.log(runSuitesToo
+    ? `ci-local pre-push: tree ${scrubHomeDir(REPO_ROOT)}: normal refs run its suites here; main and release/** test the pushed sha in a temp clone; wip/** and backup/** are scan-only.`
+    : `ci-local pre-push: tree ${scrubHomeDir(REPO_ROOT)}: scan only (leaks and private names, every ref); the suites run on GitHub CI.`);
   let stdin;
   try {
     stdin = readFileSync(0); // raw bytes: ref names are read byte-exact
@@ -1227,7 +1247,7 @@ async function runPrePushHook(remote, url) {
     console.error(`ci-local pre-push: could not read stdin: ${scrubHomeDir(err.message)}`);
     return 1;
   }
-  return prePushGate(parsePrePushStdin(stdin), { remote, url });
+  return prePushGate(parsePrePushStdin(stdin), { remote, url, suites: runSuitesToo });
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,7 +1281,7 @@ async function main() {
   if (tmo.warning) console.error(tmo.warning);
   try {
     if (opts.prePushHook) {
-      process.exitCode = await runPrePushHook(opts.pushRemote, opts.pushUrl);
+      process.exitCode = await runPrePushHook(opts.pushRemote, opts.pushUrl, opts.withSuites);
       return;
     }
     setBudgetKind(leaseKindFor(opts.suites));
