@@ -31,6 +31,7 @@ if (args[0] === 'api') {
   const m = /commits\\/([^/?]+)\\/(check-runs|status)/.exec(args[1] || '');
   if (m) { key = (m[2] === 'status' ? 'st:' : 'cr:') + m[1]; ndjson = true; }
   else if (/\\/branches\\//.test(args[1] || '')) key = 'branch';
+  else if (/\\/commits\\/[^/?]+$/.test(args[1] || '')) key = 'commit';
 }
 const scenario = JSON.parse(readFileSync(dir + '/scenario.json', 'utf8'));
 const cf = dir + '/counter.json';
@@ -579,4 +580,104 @@ test('plugin.json declares pr_wait as a boolean defaulting to on', () => {
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).userConfig.pr_wait;
   assert.equal(cfg.type, 'boolean');
   assert.equal(cfg.default, true);
+});
+
+// ---- commit mode: a sha, or a branch with no PR, waits for every workflow run of the commit
+
+const wr = (name, status, conclusion) => ({ databaseId: 1, workflowName: name, status, conclusion: conclusion || '', url: `https://ci.example/run/${name}` });
+const runsOut = (...r) => ({ out: r });
+const SHA = 'abcdefa';
+
+test('commit mode: a sha with two workflows, both green: waits for both, exit 0, mode commit', () => {
+  const t = setup({ commit: [{ out: { sha: SHA } }], list: [
+    runsOut(wr('tests', 'in_progress'), wr('leak', 'completed', 'success')),
+    runsOut(wr('tests', 'completed', 'success'), wr('leak', 'completed', 'success')),
+  ] });
+  try {
+    const r = t.run(SHA, '--repo', 'o/r');
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.start, /^pr-wait: waiting on commit abcdefa \(o\/r\)/);
+    assert.match(r.final, /^COMMIT @abcdefa PASS \| runs 2 passed, 0 failed, 2 total \| \d+s$/);
+    assert.ok(t.calls().some((c) => c.startsWith(`run list --commit ${SHA} `) && c.includes('--repo o/r')), t.calls().join('\n'));
+    assert.ok(!t.calls().some((c) => c.startsWith('pr view')), 'a sha never asks for a PR');
+    assert.equal(t.rows().at(-1).mode, 'commit');
+  } finally { t.fx.cleanup(); }
+});
+
+test('commit mode: one run failed, another cancelled: exit 1 once nothing is pending, failures named', () => {
+  const t = setup({ commit: [{ out: { sha: SHA } }], list: [
+    runsOut(wr('tests', 'completed', 'failure'), wr('leak', 'in_progress'), wr('docs', 'completed', 'cancelled')),
+    runsOut(wr('tests', 'completed', 'failure'), wr('leak', 'completed', 'success'), wr('docs', 'completed', 'cancelled')),
+  ] });
+  try {
+    const r = t.run('--sha', SHA);
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.final, /^COMMIT @abcdefa FAIL \| runs 1 passed, 2 failed, 3 total/);
+    assert.deepEqual(r.detail.map((l) => l.split(' ')[1]), ['tests', 'docs']);
+  } finally { t.fx.cleanup(); }
+});
+
+test('commit mode: a branch with no open PR waits for its head commit, read from the branch', () => {
+  const t = setup({
+    pr: [{ err: 'no pull requests found for branch "main"', code: 1 }],
+    branch: [{ out: { commit: { sha: SHA } } }],
+    list: [runsOut(wr('tests', 'completed', 'success'))],
+  });
+  try {
+    const r = t.run('main', '--repo', 'o/r');
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.final, /^COMMIT @abcdefa PASS \| runs 1 passed/);
+    assert.equal(t.calls().filter((c) => c.startsWith('pr view')).length, 1, 'one probe, not retried');
+    assert.ok(t.calls().some((c) => c.startsWith('api repos/o/r/branches/main')));
+    assert.equal(t.rows().at(-1).mode, 'commit');
+  } finally { t.fx.cleanup(); }
+});
+
+test('commit mode: runs not registered yet are waited for, then judged; zero runs after the grace is NO-RUNS', () => {
+  const late = setup({ commit: [{ out: { sha: SHA } }], list: [
+    runsOut(), runsOut(),
+    runsOut(wr('tests', 'completed', 'failure')),
+  ] }, { PR_WAIT_NO_CHECKS_GRACE_MS: '20000' });
+  try {
+    const r = late.run(SHA);
+    assert.equal(r.code, 1, `did not exit 0 on the empty first polls: ${r.stdout}${r.stderr}`);
+    assert.match(r.final, /^COMMIT @abcdefa FAIL/);
+  } finally { late.fx.cleanup(); }
+  const none = setup({ commit: [{ out: { sha: SHA } }], list: [runsOut()] });
+  try {
+    const r = none.run(SHA);
+    assert.equal(r.code, 0);
+    assert.match(r.final, /^COMMIT @abcdefa NO-RUNS \| no workflow run registered/);
+  } finally { none.fx.cleanup(); }
+});
+
+test('commit mode: an unknown sha is a gh error, exit 3, not retried', () => {
+  const t = setup({ commit: [{ err: 'gh: No commit found for SHA: abcdefa (HTTP 422)', code: 1 }] });
+  try {
+    const r = t.run(SHA);
+    assert.equal(r.code, 3);
+    assert.equal(t.calls().length, 1, 'permanent: not retried');
+  } finally { t.fx.cleanup(); }
+});
+
+test('commit mode: a branch that has a PR keeps the PR path (no run list; the probe is the first poll)', () => {
+  const t = setup(onSha('sha-1', [pr('OPEN', 'sha-1')], [checks(cr('build', 'completed', 'success'))]));
+  try {
+    const r = t.run('feature-branch');
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.final, /^PR 31 OPEN PASS @sha-1/);
+    assert.ok(!t.calls().some((c) => c.startsWith('run list')));
+    assert.equal(t.calls().filter((c) => c.startsWith('pr view')).length, 2, 'two polls, the first being the probe');
+    assert.equal(t.rows().at(-1).mode, 'pr');
+  } finally { t.fx.cleanup(); }
+});
+
+test('usage mentions the sha forms and --run with --sha is refused', () => {
+  const t = setup({});
+  try {
+    const h = t.run('--help');
+    assert.equal(h.code, 0);
+    assert.match(h.stdout, /sha/);
+    assert.equal(t.run('--run', '--sha', SHA).code, 3);
+  } finally { t.fx.cleanup(); }
 });

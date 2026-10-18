@@ -10,6 +10,15 @@
 // Usage:
 //   node pr-wait.mjs <pr-number|branch|url> [--repo owner/repo] [--timeout 20m]
 //   node pr-wait.mjs --run <run-id|branch>   [--repo owner/repo] [--timeout 20m]
+//   node pr-wait.mjs <commit-sha>            [--repo owner/repo] [--timeout 20m]
+//   node pr-wait.mjs --sha <commit>          [--repo owner/repo] [--timeout 20m]
+//
+// A commit sha (7-40 hex with a letter in it, or --sha), and a branch that has
+// NO open PR (main after a direct push), wait for EVERY workflow run of that
+// commit (for a branch: its current head commit, re-read each poll) and exit 0
+// only when all succeeded; any failed or cancelled run exits 1. Runs of a fresh
+// push register a few seconds late, so zero runs is waited on for the no-checks
+// grace (90 s), then reported as NO-RUNS (exit 0, "nothing failed").
 //
 // --timeout takes 90 / 90s / 20m / 1h (a bare number is seconds). Default 20m.
 //
@@ -151,12 +160,14 @@ function parseDuration(text) {
 
 // ---------------------------------------------------------------- arguments
 
-const HELP = `usage: pr-wait <pr-number|branch|url> [--repo owner/repo] [--timeout 20m]
+const HELP = `usage: pr-wait <pr-number|branch|url|sha> [--repo owner/repo] [--timeout 20m]
        pr-wait --run <run-id|branch> [--repo owner/repo] [--timeout 20m]
+       pr-wait --sha <commit> [--repo owner/repo] [--timeout 20m]
+  a sha, or a branch with no open PR, waits for all workflow runs of the commit
 exit: 0 passed or merged | 1 failed or closed unmerged | 2 timeout | 3 usage or gh error`;
 
 function parseArgs(argv) {
-  const out = { target: '', repo: '', timeoutMs: DEFAULT_TIMEOUT_MS, run: false, help: false };
+  const out = { target: '', repo: '', timeoutMs: DEFAULT_TIMEOUT_MS, run: false, sha: false, help: false };
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -169,6 +180,10 @@ function parseArgs(argv) {
       out.run = true;
       // `--run <id>` takes the next bare word as its target; `--run` alone is
       // also fine when the target is given positionally.
+      if (inline !== undefined) positional.push(inline);
+      else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('-')) positional.push(argv[++i]);
+    } else if (flag === '--sha') {
+      out.sha = true;
       if (inline !== undefined) positional.push(inline);
       else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('-')) positional.push(argv[++i]);
     } else if (flag === '--repo') {
@@ -191,7 +206,7 @@ function parseArgs(argv) {
 // ---------------------------------------------------------------- gh
 
 // Failures that will not heal by waiting. Anything else is retried.
-const PERMANENT = /could not resolve|no pull requests? found|not found|no workflow runs? found|not a git repository|gh auth login|not logged in|authentication|bad credentials|http 40[134]|invalid|unknown (?:flag|command)|accepts at most|required flag/i;
+const PERMANENT = /could not resolve|no pull requests? found|not found|no workflow runs? found|no commit found|not a git repository|gh auth login|not logged in|authentication|bad credentials|http 40[134]|invalid|unknown (?:flag|command)|accepts at most|required flag/i;
 
 function ghCall(args, lines = false) {
   const script = process.env.PR_WAIT_GH_SCRIPT;
@@ -289,8 +304,8 @@ function detailLines(prefix, items, total) {
 
 const sha7 = (sha) => (sha ? ` @${String(sha).slice(0, 7)}` : '');
 
-function countsText(t) {
-  return `checks ${t.pass} passed, ${t.fail} failed, ${t.total} total${t.pending ? `, ${t.pending} pending` : ''}`;
+function countsText(t, noun = 'checks') {
+  return `${noun} ${t.pass} passed, ${t.fail} failed, ${t.total} total${t.pending ? `, ${t.pending} pending` : ''}`;
 }
 
 // ---------------------------------------------------------------- PR mode
@@ -324,7 +339,18 @@ async function waitPr(opts) {
 
   for (;;) {
     cycles += 1;
-    const pr = await ghJson(base, backoff);
+    let pr;
+    if (cycles === 1 && !/^\d+$/.test(opts.target) && !/^https?:\/\//.test(opts.target)) {
+      // A branch may have no PR (main after a direct push): then its head commit's runs are the thing to wait on.
+      polls += 1;
+      const probe = ghCall(base);
+      if (!probe.ok && /no pull requests? found/i.test(probe.msg)) {
+        cycles = 0;
+        mode = 'commit';
+        return waitCommit(opts, 'branch', backoff);
+      }
+      pr = probe.ok ? probe.data : await ghJson(base, backoff);
+    } else pr = await ghJson(base, backoff);
     const num = pr.number ?? opts.target;
     const sha = String(pr.headRefOid || '');
     if (!sha) {
@@ -392,6 +418,95 @@ async function waitPr(opts) {
   const { num, t, state, at } = last;
   finish(2, 'timeout', [
     `PR ${num} ${state || 'OPEN'} TIMEOUT${at} after ${fmtElapsed(opts.timeoutMs)} | ${countsText(t)} | ${fmtElapsed(Date.now() - startedAt)}`,
+    ...detailLines('FAIL', t.failed),
+    ...detailLines('PENDING', t.waiting),
+  ].slice(0, MAX_DETAIL_LINES + 1));
+}
+
+// ---------------------------------------------------------------- commit mode
+
+const SHA_LIKE = /^(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}$/i;
+const COMMIT_RUN_FIELDS = 'databaseId,status,conclusion,workflowName,url';
+
+// Every workflow run of one commit. kind 'sha': the commit is fixed (resolved
+// once). kind 'branch': the branch's current head is re-read each poll.
+async function waitCommit(opts, kind, backoff = makeBackoff()) {
+  const deadline = startedAt + opts.timeoutMs;
+  const scope = opts.repo ? ['--repo', opts.repo] : [];
+  const repo = opts.repo || '{owner}/{repo}';
+  const ref = opts.target.split('/').map(encodeURIComponent).join('/');
+  let fixed = '';
+  let noneSince = 0;
+  let settle = { sig: '', at: 0 };
+  let last = null;
+  info.repo = opts.repo;
+
+  for (;;) {
+    cycles += 1;
+    let sha = fixed;
+    if (!sha) {
+      if (kind === 'sha') {
+        const c = await ghJson(['api', `repos/${repo}/commits/${ref}`], backoff);
+        sha = fixed = String(c?.sha || '');
+      } else {
+        const b = await ghJson(['api', `repos/${repo}/branches/${ref}`], backoff);
+        sha = String(b?.commit?.sha || '');
+      }
+      if (!sha) {
+        process.stderr.write('pr-wait: gh returned no commit for the target\n');
+        info.errClass = 'permanent';
+        finish(3, 'gh-error');
+      }
+    }
+    info.head = sha;
+    const list = await ghJson(['run', 'list', '--commit', sha, '--limit', '50', '--json', COMMIT_RUN_FIELDS, ...scope], backoff);
+    const items = (Array.isArray(list) ? list : []).map(classifyCheck);
+    const t = tally(items);
+    const at = sha7(sha);
+    const elapsed = () => fmtElapsed(Date.now() - startedAt);
+    last = { t, at };
+
+    let wait = null;
+    if (t.total === 0) {
+      settle = { sig: '', at: 0 };
+      if (!noneSince) noneSince = Date.now();
+      if (Date.now() - noneSince >= NO_CHECKS_GRACE_MS) {
+        finish(0, 'no-checks', [`COMMIT${at} NO-RUNS | no workflow run registered after ${fmtElapsed(NO_CHECKS_GRACE_MS)}, no CI observed (exit 0 = nothing failed) | ${elapsed()}`]);
+      }
+    } else {
+      noneSince = 0;
+      if (t.pending > 0) {
+        settle = { sig: '', at: 0 };
+      } else if (t.fail > 0) {
+        finish(1, 'failed', [`COMMIT${at} FAIL | ${countsText(t, 'runs')} | ${elapsed()}`, ...detailLines('FAIL', t.failed)]);
+      } else {
+        // All finished and green: PASS only once the same set of runs has held
+        // for SETTLE_MS, so a second workflow that registers late is not missed.
+        const sig = `${sha}|${items.map((c) => `${c.name}:${c.verdict}`).sort().join(',')}`;
+        if (settle.sig !== sig) settle = { sig, at: Date.now(), seen: 1 };
+        else settle.seen += 1;
+        const held = Date.now() - settle.at;
+        if (settle.seen >= 2 && held >= SETTLE_MS) {
+          finish(0, 'passed', [`COMMIT${at} PASS | ${countsText(t, 'runs')} | ${elapsed()}`]);
+        }
+        wait = Math.max(1, SETTLE_MS - held);
+        settleWaits += 1;
+      }
+    }
+
+    if (wait === null) wait = backoff.step();
+    if (Date.now() + wait > deadline) {
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      await sleep(left);
+    } else {
+      await sleep(wait);
+    }
+  }
+
+  const { t, at } = last;
+  finish(2, 'timeout', [
+    `COMMIT${at} TIMEOUT after ${fmtElapsed(opts.timeoutMs)} | ${countsText(t, 'runs')} | ${fmtElapsed(Date.now() - startedAt)}`,
     ...detailLines('FAIL', t.failed),
     ...detailLines('PENDING', t.waiting),
   ].slice(0, MAX_DETAIL_LINES + 1));
@@ -471,8 +586,10 @@ async function main() {
     process.stdout.write(`${HELP}\n`);
     finish(0, 'help');
   }
-  mode = opts.run ? 'run' : 'pr';
-  if (!opts.target) usageError(`a PR number, branch or run id is required\n${HELP}`);
+  const commitKind = !opts.run && (opts.sha || SHA_LIKE.test(opts.target));
+  mode = opts.run ? 'run' : commitKind ? 'commit' : 'pr';
+  if (!opts.target) usageError(`a PR number, branch, commit sha or run id is required\n${HELP}`);
+  if (opts.run && opts.sha) usageError(`--run and --sha cannot be combined\n${HELP}`);
 
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, () => finish(130, 'interrupted'));
@@ -486,8 +603,9 @@ async function main() {
     if (sid()) row.session_id = sid();
     appendLog('pr-wait.jsonl', row);
   } catch { /* telemetry is never allowed to change the answer */ }
-  out(`pr-wait: waiting on ${opts.run ? 'run' : 'PR'} ${opts.target}${opts.repo ? ` (${opts.repo})` : ''}, timeout ${fmtElapsed(opts.timeoutMs)}\n`);
+  out(`pr-wait: waiting on ${opts.run ? 'run' : commitKind ? 'commit' : 'PR'} ${opts.target}${opts.repo ? ` (${opts.repo})` : ''}, timeout ${fmtElapsed(opts.timeoutMs)}\n`);
   if (opts.run) await waitRun(opts);
+  else if (commitKind) await waitCommit(opts, 'sha');
   else await waitPr(opts);
 }
 

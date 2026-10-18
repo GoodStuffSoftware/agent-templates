@@ -590,7 +590,7 @@ Two rows per run of `scripts/pr-wait.mjs`, both written by the script itself: a 
 | `at` | ISO 8601 string | when the row was written |
 | `event` | `start` \| `end` | which row |
 | `session_id` | string \| absent | the session, from `CLAUDE_SESSION_ID` or `CLAUDE_CODE_SESSION_ID` when the harness exports one |
-| `mode` | `pr` \| `run` | `--run` selects `run` |
+| `mode` | `pr` \| `run` \| `commit` | `--run` selects `run`; a commit sha, `--sha`, or a branch with no open PR selects `commit` (all workflow runs of the commit) |
 | `target_hash` | string \| absent | first 8 hex characters of the SHA-256 of the PR or branch argument; absent on a usage error. The argument itself is never logged |
 | `repo_hash` | string \| absent | the same hash of the repository (`owner/name`), once known |
 | `timeout_ms` | number | `start` only: the wait's overall timeout |

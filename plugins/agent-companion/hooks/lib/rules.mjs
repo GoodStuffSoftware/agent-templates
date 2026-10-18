@@ -151,7 +151,7 @@ const LEAD_EFFORT_AFTER = Object.freeze({ then: LEAD_EFFORT_CHECK_TEXT_HIGH });
 // Size: the wording WITHOUT the path is pinned at 125 characters (a test), so
 // the whole line is that plus the plugin path (~70 in a typical cache install).
 const PLUGIN_ROOT = (process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('../..', import.meta.url))).replace(/\\/g, '/').replace(/\/+$/, '');
-export const PR_WAIT_HINT_WORDING = 'PR/CI wait: run_in_background (foreground dies at 2m), no gh/sleep loops: node "@/scripts/pr-wait.mjs" <pr|branch>';
+export const PR_WAIT_HINT_WORDING = 'PR/CI wait: run_in_background (foreground dies at 2m), no gh/sleep loops: node "@/scripts/pr-wait.mjs" <pr|branch|sha>';
 export const PR_WAIT_HINT_TEXT = PR_WAIT_HINT_WORDING.replace('@', () => PLUGIN_ROOT); // a function, so a `$` in the path is literal, not a replace pattern
 
 function builtinRules() {
