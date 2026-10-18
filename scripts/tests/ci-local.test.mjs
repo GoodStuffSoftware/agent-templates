@@ -72,6 +72,13 @@ test('parseArgs: --pre-push-hook takes the hook\'s two arguments, the destinatio
   assert.throws(() => parseArgs(['--pre-push-hook', 'a', 'b', 'c']), /unknown argument "c"/);
 });
 
+test('parseArgs: --with-suites is off by default and sets withSuites alongside --pre-push-hook', () => {
+  assert.equal(parseArgs(['--pre-push-hook']).withSuites, false);
+  const o = parseArgs(['--pre-push-hook', 'origin', 'https://example.invalid/r.git', '--with-suites']);
+  assert.equal(o.withSuites, true);
+  assert.equal(o.pushUrl, 'https://example.invalid/r.git');
+});
+
 test('parseArgs: --help sets the flag without requiring other args', () => {
   assert.equal(parseArgs(['--help']).help, true);
   assert.equal(parseArgs(['-h']).help, true);
