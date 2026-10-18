@@ -225,6 +225,7 @@ test('makeCliJudgeCaller pipes the prompt through stdin, not argv (fails on the 
     const chunks = [];
     return {
       stdin: {
+        on() {}, // the caller attaches an error listener (EPIPE) before writing
         write(chunk) { chunks.push(chunk); return true; },
         end() {
           captured.stdin = chunks.join('');
