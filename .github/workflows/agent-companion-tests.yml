@@ -64,3 +64,10 @@ jobs:
       # runner.
       - name: Run agent-companion test suite
         run: node scripts/ci-local.mjs --suite agent-companion-tests
+
+      # leak-check.yml runs scripts-tests (ci-local, push-scan, setup-hooks and
+      # the hook-tree tests) on Linux only. The local runs on Windows used to
+      # cover those on Windows too, so run them here for the Windows leg.
+      - name: Run scripts tests (Windows)
+        if: runner.os == 'Windows'
+        run: node scripts/ci-local.mjs --suite scripts-tests

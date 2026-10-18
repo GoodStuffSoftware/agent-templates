@@ -3,7 +3,7 @@
 # of every pushed commit and ref name, on every ref, takes seconds and takes no
 # resource-queue lease. The test suites run on GitHub CI (Linux and Windows),
 # not here. All logic lives in scripts/ci-local.mjs (to run the suites here as
-# well, add --with-suites to the exec line below or export
+# well, append --with-suites AFTER "$@" on the exec line below, or export
 # CI_LOCAL_PRE_PUSH_SUITES=1) — this file only finds node and execs it, passing the pushed
 # refs through on stdin exactly as git gave them to us, and git's own two
 # arguments (the destination remote's name and URL) through as "$@": the

@@ -44,9 +44,10 @@
 //   FAIL    a test file failed, and failed again when re-run on its own.
 //   FLAKY   a test file failed in the full run and PASSED when re-run once on
 //           its own ("flaky on isolated re-run"). Printed loudly with the
-//           file's name. Does NOT block a plain run or the pre-push gate for
-//           an ordinary branch; under --ci-parity (and so for pushes to main
-//           and release/**) it counts as a failure.
+//           file's name. Does NOT block a plain run (or the pre-push gate
+//           under --with-suites) for an ordinary branch; under --ci-parity
+//           (and so, with --with-suites, for pushes to main and release/**)
+//           it counts as a failure.
 //
 // Concurrency: node --test runs at most N test files at once, N =
 // $CI_LOCAL_TEST_CONCURRENCY when it is a positive integer, otherwise half
