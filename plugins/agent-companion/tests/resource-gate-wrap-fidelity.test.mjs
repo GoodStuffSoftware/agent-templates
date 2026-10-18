@@ -74,7 +74,9 @@ EOF`],
   ['CRLF line ends', 'echo crlf\r\necho two\r\n'],
   ['a function defined in the line', 'f() { echo "fn $1"; }; f arg'],
   ['exit status', 'echo x; exit 5'],
-  ['leading cd stays in the outer shell', 'cd .. && echo "$PWD" && pwd'],
+  ['leading cd stays in the outer shell', 'cd .. && basename "$PWD" && basename "$(pwd)"'],
+  // $PWD itself is spelled by the outer shell (a logical /tmp/... path) and may be spelled differently by
+  // the child bash on Windows; the directory it names is what must match.
   ['bash arrays', 'a=(one two); echo "${a[1]} ${#a[@]}"'],
   ['a line that starts with a POSIX path', '/usr/bin/env echo direct'],
   ['a first word NAME=/path (env prefix)', 'ZZ_P=/tmp/a printenv ZZ_P'],
