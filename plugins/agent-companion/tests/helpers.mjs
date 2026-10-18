@@ -12,13 +12,22 @@
 // FIRST import, on purpose: it sandboxes the process's state paths and arms the
 // real-home tripwire before any other module reads them (see isolate.mjs).
 import { REAL_CLAUDE, REAL_CLAUDE_DIRS } from './isolate.mjs';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export { REAL_CLAUDE_DIRS };
+
+// os.tmpdir() spelled the way git and realpath spell it. On a hosted Windows
+// runner tmpdir() returns the 8.3 short form (RUNNER~1 in the user profile)
+// while git, realpath and process.cwd() return the long form, so a test that
+// compares a path it built from tmpdir() with one a tool reported fails on a
+// path that is the same.
+export function realTmpdir() {
+  try { return realpathSync.native(tmpdir()); } catch { return tmpdir(); }
+}
 
 export const TESTS_DIR = dirname(fileURLToPath(import.meta.url));
 export const PLUGIN_ROOT = join(TESTS_DIR, '..');
@@ -36,7 +45,7 @@ const ENV_KEYS = ['AGENT_COMPANION_HOME_OVERRIDE', 'AGENT_COMPANION_STATE_DIR', 
 // cleanup() }. Call cleanup() in a `finally` (or node:test's `after`) —
 // it restores whatever these env vars were before and removes the temp dir.
 export function makeFixture() {
-  const dir = mkdtempSync(join(tmpdir(), `ac-test-${process.pid}-`)); // pid in the name: see sandbox-sweep.mjs
+  const dir = mkdtempSync(join(realTmpdir(), `ac-test-${process.pid}-`)); // pid in the name: see sandbox-sweep.mjs
   const saved = {};
   for (const k of ENV_KEYS) saved[k] = process.env[k];
 

@@ -12,7 +12,7 @@ import {
 import { main as cli } from '../scripts/usage-config.mjs';
 
 const made = [];
-const tmp = (p) => { const d = realpathSync(mkdtempSync(join(tmpdir(), `ac-usagecfg-${p}-`))); made.push(d); return d; };
+const tmp = (p) => { const d = realpathSync.native(mkdtempSync(join(tmpdir(), `ac-usagecfg-${p}-`))); made.push(d); return d; };
 after(() => { for (const d of made) try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 const BASE = { schema: 'agent-companion/usage-analysis', schemaVersion: 1 };
