@@ -181,7 +181,7 @@ resume
 #### Pid-bound leases (daemons)
 
 ```
-run --resource <name>[:N] [--class <id>] --bind-pid <pid> [-- <cmd...>]
+run --resource <name>[:N] [--class <id>] [--shell bash] --bind-pid <pid> [-- <cmd...>]
 ```
 
 For a daemon the wrapper does not outlive (an Android emulator holding `android-emu:1` for up to 60 minutes). The request queues like any other; when granted, the lease gets `pid` = `boundPid` = the bound pid and `wrapperPid` = the wrapper's pid. The wrapper writes no heartbeat and does not release at exit. With a command, the command runs and its exit does not release the lease; without one, the wrapper prints the lease id and exits 0. The lease is stale exactly when `boundPid` is not alive (rule `pid-dead`); `max-hold` flags it over time (an exclusive resource is not taken from a live bound pid that is unmeasured before the 4 h ceiling); the lease, never the process, is cleared when the pid is gone. If the bound pid is not running at the grant, the lease is the wrapper's, an ordinary one, and a line says so (with no command nothing stays held and the exit code is 1). A reused pid keeps a bound lease alive; `status` shows it OVER TIME past `max-hold`, and the ceiling releases it 4 h after the grant like any other live holder.

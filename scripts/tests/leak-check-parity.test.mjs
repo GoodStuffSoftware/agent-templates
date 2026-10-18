@@ -13,7 +13,7 @@
 
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -117,7 +117,7 @@ test("parity: decodeProjectDir, exactNameKey, isUnsafeDevRoot agree", () => {
     assert.deepEqual(script.decodeProjectDir(e), core.decodeProjectDir(e));
   }
   for (const s of ["Zorbl Internal", "zorbl_internal", "ZORBL-internal"]) assert.equal(script.exactNameKey(s), core.exactNameKey(s));
-  for (const p of [tmpdir(), join(tmpdir(), "x"), process.platform === "win32" ? "Q:\zb-projects" : "/opt/zb-projects"]) {
+  for (const p of [tmpdir(), join(tmpdir(), "x"), process.platform === "win32" ? "Q:\\zb-projects" : "/opt/zb-projects"]) {
     assert.equal(script.isUnsafeDevRoot(p, "/nonexistent-home"), core.isUnsafeDevRoot(p, "/nonexistent-home"));
   }
 });

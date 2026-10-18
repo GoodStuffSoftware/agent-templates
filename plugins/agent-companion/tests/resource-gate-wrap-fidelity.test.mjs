@@ -14,6 +14,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import './isolate.mjs';
 import { scanCommand, rewriteCommand, gateDecision } from '../hooks/lib/resource-gate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));

@@ -83,6 +83,9 @@ export const ALLOWED = {
     "// memory files even with the override set.",
     "// silently override the 2000-char default, hitting 0 on the very first",
   ],
+  "hooks/lib/push-delete-guard.mjs": [
+    "const home = env.CLAUDE_CONFIG_DIR || join(env.AGENT_COMPANION_HOME_OVERRIDE || homedir(), '.claude');",
+  ],
   "hooks/lib/rules.mjs": [
     "// the operator's file overrides or disables any of them by id, or adds their",
     "// accepts as a valid override. New (non-builtin) rules are written in full.",
