@@ -65,7 +65,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-slow-suite-is-mostly-idle-time` — A slow test suite is mostly idle time — measure efficiency first, then remove sleeps, serial leftovers and serialized boots — [universal] — active
 - `a-stall-detector-before-the-recovery-step-flags-recovery` — A staleness detector that runs before the recovery step flags normal recovery as failure — and one symptom string can have two producers — [universal] — active
 - `a-state-tool-answers-about-its-own-clone` — A repo-state tool that reads its own clone reports absence and staleness that describe the tool, not the repo — [agent-process] — active
-- `a-stopped-task-handle-may-leave-its-process-running` — Stopping a background task handle may leave its script running — and editing a running script changes nothing — [agent-process, vendor:anthropic] — active
+- `a-stopped-task-handle-may-leave-its-process-running` — Stopping a background task handle may leave its script running — and a replace-style edit does not reach a running instance — [agent-process, vendor:anthropic] — active
 - `a-subagent-lock-pid-is-the-lead` — A subagent worktree lock names the lead session's process, not the worker's — it outlives the worker, and it is not yours to stop — [agent-process, vendor:anthropic] — active
 - `a-suppress-verdict-expires` — A "benign, suppress" verdict expires — key a triage conclusion to the pair of references that produced it — [universal] — active
 - `a-tag-on-a-rolling-session-overcounts-arrivals` — A campaign tag that rides a rolling session overcounts arrivals — derive from a single-row property and name the count a floor — [universal] — active

@@ -16,6 +16,6 @@ Two recurring mistakes: listing a to-do as the human's when they already did it 
 - When you do need them, the ask carries a clickable link and one line on what to look at.
 - Never navigate a tab the human is working in.
 
-Incident: a one-time key download was lost when an agent navigated the human's tab.
+Incident: a one-time key download can be lost when an agent navigates the human's tab.
 
 Related: [[a-local-path-is-not-a-shared-artifact]], [[outcome-level-reporting]].
