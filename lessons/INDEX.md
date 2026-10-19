@@ -12,6 +12,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-category-warning-does-not-name-the-token` — A validator that reports a CATEGORY has not named the token — bisect it, and confirm on a reload — [universal] — active
 - `a-checkout-hook-makes-a-fresh-tree-dirty` — A post-checkout hook can make a brand-new tree dirty before you touch it — and block the merge you came to do — [universal, stack:git] — active
 - `a-checkout-is-not-the-running-system` — A working copy or an unmerged branch describes what could ship, never what is running — fetch, or query the live system — [universal] — active
+- `a-cli-sanity-check-must-not-leave-an-interactive-session` — A "does the agent CLI start" check must not leave an interactive session alive — it looks like a human peer — [agent-process, vendor:anthropic] — active
 - `a-cli-script-without-a-main-guard-runs-on-import` — A CLI-style script with no main-module guard runs on import — add the guard before the first test imports it — [universal] — active
 - `a-commit-hook-formatter-rewrites-the-bytes-you-verified` — A formatter in the commit hook changes the bytes after your verification — the committed content was never tested — [universal] — active
 - `a-completed-background-agent-may-only-be-paused` — A "completed" agent that ran background commands may only be paused — never spawn a second writer onto the same worktree — [agent-process] — active
@@ -57,10 +58,15 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-right-conclusion-does-not-vouch-for-its-premise` — A wrong premise that yields the right conclusion is the hardest to catch — the outcome vouches for it, so check premises on their own — [agent-process] — active
 - `a-scheduled-job-needs-a-registered-but-unobserved-state` — A scheduled job needs a "deployed, unconfirmed" state and a two-timestamp heartbeat, or it gets marked done on deploy day — [universal] — active
 - `a-scheduled-routine-starts-at-its-folders-effort` — A scheduled routine starts at the effort of the folder it was created in — pin effort per folder and rate a dispatch-only parent as light — [agent-process, vendor:anthropic] — active
+- `a-secret-managers-list-command-can-print-every-value` — A secret manager's list command can print every value — a briefed filter is not a control — [universal] — active
 - `a-shared-mock-across-a-boundary-production-does-not-share` — A shared mock across a boundary that production does not share will validate any claim — build both sides separately — [universal] — active
+- `a-shared-test-context-needs-a-reset-canary-that-fails-the-run` — Reusing one expensive test context needs a reset canary — and a canary trip must fail the run, not retry into a pass — [universal] — active
 - `a-silent-guard-needs-a-canary` — A guard whose success signal is the absence of events needs a canary — sustained zero is ambiguous, not good news — [universal] — active
+- `a-slow-suite-is-mostly-idle-time` — A slow test suite is mostly idle time — measure efficiency first, then remove sleeps, serial leftovers and serialized boots — [universal] — active
 - `a-stall-detector-before-the-recovery-step-flags-recovery` — A staleness detector that runs before the recovery step flags normal recovery as failure — and one symptom string can have two producers — [universal] — active
 - `a-state-tool-answers-about-its-own-clone` — A repo-state tool that reads its own clone reports absence and staleness that describe the tool, not the repo — [agent-process] — active
+- `a-stopped-task-handle-may-leave-its-process-running` — Stopping a background task handle may leave its script running — and editing a running script changes nothing — [agent-process, vendor:anthropic] — active
+- `a-subagent-lock-pid-is-the-lead` — A subagent worktree lock names the lead session's process, not the worker's — it outlives the worker, and it is not yours to stop — [agent-process, vendor:anthropic] — active
 - `a-suppress-verdict-expires` — A "benign, suppress" verdict expires — key a triage conclusion to the pair of references that produced it — [universal] — active
 - `a-tag-on-a-rolling-session-overcounts-arrivals` — A campaign tag that rides a rolling session overcounts arrivals — derive from a single-row property and name the count a floor — [universal] — active
 - `a-test-written-from-the-fix-agrees-with-itself` — An expectation derived from the thing it checks cannot fail — source the expected value independently — [universal] — active
@@ -82,6 +88,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `alert-kinds-get-independent-budgets-and-count-what-the-server-saw` — Give each alert kind its own bounds, count what the server observed rather than what a client claimed, and fire from the write that crosses the threshold — [universal] — active
 - `an-absence-is-evidence-only-if-the-window-could-have-produced-one` — An absence of evidence is only evidence when the window could have produced some — compute the earliest possible occurrence first — [universal] — active
 - `an-activity-digest-must-not-enumerate-default-branches` — A digest that reads only default branches misses the work that happened on side branches — [universal, stack:git] — active
+- `an-empty-refspec-source-deletes-the-remote-branch` — An empty refspec source deletes the remote branch — write literal shas, and read the remote back after every push — [universal, stack:git] — active
 - `an-ephemeral-instance-can-print-a-first-run-secret` — A fresh service instance can print a first-run credential at boot — never let an agent read its stdout — [universal] — active
 - `an-ignore-rule-protects-a-spelling-not-a-concept` — An ignore rule protects a spelling, not a concept — audit deny-lists by what they miss, by testing paths that do not exist yet — [universal] — active
 - `an-inherited-env-var-beats-the-child-cwd` — An inherited environment variable beats the child's working directory — a fixture test under a hook operates on the real system — [universal] — active
@@ -98,10 +105,12 @@ One line per lesson: `id — title — [scope] — status`.
 - `avoid-report-prefixed-filenames` — Name lessons and docs with neutral ids so write guards don't trip on the filename — [vendor:anthropic] — active
 - `background-agents-die-with-their-host` — A background agent is a child of its host process — long work runs in an independent session and pushes within minutes — [agent-process] — active
 - `bash-tool-routes-to-wsl` — The Bash tool is whatever shell the harness spawns — Git Bash when Claude Code runs natively on Windows, WSL only when the harness itself runs inside WSL — [env:windows, vendor:anthropic] — active
+- `before-listing-a-step-as-the-humans-check-it-is-not-already-done` — Before you list a step as the human's, check it is not already done and that no agent can run it — [agent-process] — active
 - `branch-what-deploys` — Branch what deploys; commit dev-config straight to the integration branch — [universal] — active
 - `brief-for-the-decision-not-your-conclusion` — Brief for the decision, not for your conclusion — and name the research that already exists — [agent-process] — active
 - `bucket-by-the-other-systems-calendar` — When reconciling against someone else's dashboard, bucket by THEIR day boundary and allow for THEIR reporting lag — [universal] — active
 - `budget-fan-out-against-host-memory` — Budget agent fan-out width against the host's memory, not just against the task — the damage surfaces as "flaky tests" somewhere else — [agent-process] — active
+- `build-the-fix-shape-the-operator-names` — When the operator names the shape of a fix, build that shape first — do not substitute a fuller design — [agent-process] — active
 - `bulk-edit-success-log-is-not-evidence` — A bulk edit's success log is not evidence — read a changed file, and assert your input's shape — [universal] — active
 - `calibrate-a-bound-against-the-real-distribution` — Never specify a bound you have not counted — "blocks everything on day one" and "never fires" are equally broken — [universal] — active
 - `capture-gate-output-in-full` — Capture a gate's output in full — a pipeline truncation destroys the evidence and lies about the exit code — [universal] — active
@@ -182,6 +191,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `make-test-isolation-structural-not-empirical` — "No test depends on the real home or shared state" must be enforced by the harness, not held by luck — [universal] — active
 - `match-ids-not-dates` — Match identifiers, don't compare dates — distinct date fields name distinct events — [universal] — active
 - `match-instrument-to-failure-class` — A gate only refutes the failure class it can observe — green from a blind gate is no evidence — [universal] — active
+- `measure-a-preloaded-context-line-by-the-calls-it-replaces` — Judge a preloaded context line by the calls it replaces, not by per-session token totals — [agent-process] — active
 - `measure-gates-under-normal-load` — A green measurement taken in a quiet window is not evidence about a contended one — [universal] — active
 - `migrated-config-carries-source-host-env` — Config and daemon state copied from another host still describes that host — read identity from the live system — [universal] — active
 - `monitor-default-target-is-part-of-the-finding` — A monitor's default target is part of its finding — an alarm must report what it probed, not just what it found — [universal] — active

@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-28
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 A cleanup step that kills every process matching an image or executable name (`taskkill /IM node.exe /T`, `pkill node`, `Stop-Process -Name node`) has an unbounded blast radius on any machine running more than one concurrent workload: it takes down a process-manager daemon, every other session's dev servers and tunnels, and any in-flight test or deploy run sharing that name — not just the load the caller itself generated.
 

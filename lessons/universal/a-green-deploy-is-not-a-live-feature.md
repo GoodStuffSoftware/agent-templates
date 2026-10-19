@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-10-05
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 In one codebase, three separate incidents had a deploy report success while the deployed thing was dark. A conditionally declared secret was never bound because module scope was evaluated before configuration loaded; the runtime still received the config, so the feature ran unprotected and every payment verification failed. A deploy wrapper reported a hard refusal as a timeout or a possible success. A scheduled job's deploy exited 0 while nothing proved it would ever fire.
 
