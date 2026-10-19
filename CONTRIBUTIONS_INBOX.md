@@ -22,15 +22,6 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 
 ## Entries
 
-### 2026-10-16 — A CI-wait script should return a verdict, and its permanent-error rate is the number to watch
-
-- **Status:** parked on branch `lessons/fold-2026-10-19` (PR) because it amends `hold-a-wait-in-a-cheap-foreground-worker` (a background wait script versus a foreground worker). Remove this entry when that PR merges.
-- **Trigger:** Agents polled pull-request checks with hand-rolled loops of status calls and sleeps, burning a model turn per poll. A small wait script that polls internally and returns one verdict (passed, failed, merged, no checks, timeout) replaced the loop.
-- **Is it generic?** Yes. Any agent that waits on a remote pipeline pays a turn per poll unless the wait runs in one process; the kernel is "poll in a script, return a verdict, run it in the background".
-- **Target:** new lesson `lessons/wait-for-ci-in-one-background-script-and-track-its-error-rate.md`.
-- **Proposed change:** Run the wait as one background command that returns a verdict, never a foreground loop (a foreground call dies at the tool timeout of about two minutes). Measure it by runs, verdict mix, and the share of runs ending in a permanent error that forces a manual fallback (7 of 59 here, 12%): a wait script that errors often saves nothing. Count the script's internal polls as tool calls when comparing against hand-rolled loops (three per poll cycle here). Expected saving is small (1-2% of a session mix); worth keeping for the reliability of the verdict as much as the tokens.
-- **Applied?** `no`
-
 ### 2026-10-05 — A spec that fails "randomly" in a parallel suite may be a victim of the SHARED dev server
 
 - **Status:** carried by PR on branch `lessons/fold-2026-10-05` (new lesson plus an amendment of `widening-a-timing-margin-does-not-remove-a-race`, which it contradicts). Remove this entry when that PR merges.

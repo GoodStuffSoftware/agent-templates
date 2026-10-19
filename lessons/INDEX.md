@@ -292,6 +292,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `verify-the-inbound-direction` — Reachability is directional — proving you can reach peers proves nothing about peers reaching you — [agent-process] — active
 - `verify-tools-then-fall-back-to-a-builtin-agent-type` — A custom agent type can come up missing its declared tools — verify tools as the literal first instruction, then respawn as a built-in type — [agent-process] — active
 - `version-bump-at-integration` — Version bumps happen at the integration point, not on feature branches — [universal, stack:git] — active
+- `wait-for-ci-in-one-background-script-and-track-its-error-rate` — A CI wait is one background script that returns a verdict — and its permanent-error rate is the number to watch — [agent-process] — active
 - `widening-a-timing-margin-does-not-remove-a-race` — Widening a timing margin does not remove a race condition — [universal] — active
 - `windows-home-config-glob` — On Windows, the agent tool's Glob may not traverse the user-profile config dir — [env:windows, vendor:anthropic] — active
 - `windows-shell-layers-mangle-your-arguments` — Every shell layer between you and the tool rewrites your arguments — leading slashes, carets and drive paths — [env:windows] — active
