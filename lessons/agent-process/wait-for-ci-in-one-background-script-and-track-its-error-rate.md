@@ -16,4 +16,4 @@ Agents that poll pull-request checks with hand-rolled status calls and sleeps bu
 - Count its internal polls as tool calls when comparing against hand-rolled loops.
 - Expect a small saving (1-2% of a session mix); the verdict's reliability is the point.
 
-**Amends** [[hold-a-wait-in-a-cheap-foreground-worker]]: that lesson rejects a background loop and prefers a foreground worker. Parked for an A/B before either is rewritten.
+**Amends** [[hold-a-wait-in-a-cheap-foreground-worker]]: that lesson rejects a background loop and prefers a foreground worker. Parked for an A/B.
