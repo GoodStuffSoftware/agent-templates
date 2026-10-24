@@ -554,8 +554,20 @@
     "shared_resources_line": {
       "type": "boolean",
       "title": "Shared resources line",
-      "description": "At session start, and when it changes before a prompt, add one line (about 300 characters) to the context while the machine-wide resource queue has something held, queued, reserved or cleared in the last 15 minutes: units held out of capacity, each holder (label or session, project, age, stale or dead) and the queue in order. Nothing is added while the queue is idle. Reads the ledger in-process; spawns nothing. Off = no line (session start still installs the stable launcher path).",
+      "description": "At session start, and when it changes before a prompt, add one line (about 300 characters) to the context while the machine-wide resource queue has something held, queued, reserved or cleared in the last 15 minutes: units held out of capacity, each holder (label or session, project, age, stale or dead) and the queue in order. The line also counts the leads (sessions with a helper spawn in the last hour) from two up, and warns above 4 that each extra lead adds cold re-reads; nothing else is added while the queue is idle. Reads the ledgers in-process; spawns nothing. Off = no line (session start still installs the stable launcher path).",
       "default": true
+    },
+    "keep_warm": {
+      "type": "boolean",
+      "title": "Keep a lead warm while helpers run",
+      "description": "After a background helper spawn, tell the lead once to arm ONE wakeup 55 minutes out (inside its 1-hour prompt cache window), and at each ping tell it whether to re-arm: helpers still running and under the cap = re-arm; none running = stop. No pings while nothing runs, no polling. Each ping costs about 1/9 of the cold re-read it prevents. Off = no keep-warm notes.",
+      "default": true
+    },
+    "keep_warm_max_minutes": {
+      "type": "number",
+      "title": "Keep-warm cap (minutes)",
+      "description": "How long one idle stretch is kept warm: pings are 55 minutes apart, so the default 180 allows 3 (55, 110 and 165 minutes). A new background spawn starts the count over. Past the cap the cache is let go, because a gap that long is cheaper to rebuild once than to ping through. 0 turns keep-warm off.",
+      "default": 180
     },
     "read_dedupe": {
       "type": "boolean",

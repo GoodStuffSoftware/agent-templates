@@ -11,11 +11,17 @@
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pathToFileURL } from 'node:url';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { stateDir } from './context.mjs';
 
 export const LINE_MAX_CHARS = 300;
 export const CLEARED_WINDOW_MS = 15 * 60_000;
+// An orchestration session ("lead") is one with a helper spawn in the last hour; the line shows the
+// count from two leads up and warns above LEAD_WARN_ABOVE (each extra lead adds cold re-reads).
+export const LEAD_WINDOW_MS = 3600_000;
+export const LEAD_WARN_ABOVE = 4;
+export const LEAD_SHOW_FROM = 2;
+const LEDGER_TAIL_BYTES = 256 * 1024;
 
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
 
@@ -54,6 +60,51 @@ export function recentClearsIn(status, now) {
   return (status.recentClears ?? []).filter((c) => Number(c.at) >= now - CLEARED_WINDOW_MS && Number(c.at) <= now + 60_000);
 }
 
+/**
+ * How many orchestration sessions on this machine spawned a helper in the last hour, from the plugin's
+ * per-session worker ledger (state/worker-ledger/<session>.jsonl, one row per SubagentStart and Stop).
+ * One stat per file; only a file touched inside the window is read, and only its last 256 KB. Never throws.
+ */
+export function activeLeads({ now = Date.now(), windowMs = LEAD_WINDOW_MS, dir = join(stateDir(), 'worker-ledger') } = {}) {
+  let names;
+  try { names = readdirSync(dir); } catch { return 0; }
+  const cutoff = now - windowMs;
+  let n = 0;
+  for (const name of names) {
+    if (!name.endsWith('.jsonl')) continue;
+    try {
+      const f = join(dir, name);
+      if (statSync(f).mtimeMs < cutoff) continue;
+      if (lastStartMs(f) >= cutoff) n += 1;
+    } catch { /* one bad file never hides the rest */ }
+  }
+  return n;
+}
+
+// Newest 'start' row time in a ledger file (ms), or 0. Reads at most the tail of the file.
+function lastStartMs(file) {
+  let fd;
+  try {
+    fd = openSync(file, 'r');
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, LEDGER_TAIL_BYTES);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    const lines = buf.toString('utf8').split('\n');
+    let best = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"start"')) continue;
+      let r; try { r = JSON.parse(lines[i]); } catch { continue; }
+      if (r && r.ev === 'start') { const t = Date.parse(r.at); if (Number.isFinite(t) && t > best) best = t; }
+    }
+    return best;
+  } catch { return 0; } finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } } }
+}
+
+const leadsShown = (leads) => Number(leads) >= LEAD_SHOW_FROM;
+const leadsPart = (leads) => `leads active (helper spawn in the last hour): ${leads}`;
+const LEADS_WARNING = ` More than ${LEAD_WARN_ABOVE} leads active: each extra lead adds cold re-reads of its whole conversation.`;
+
 /** Is there anything worth a line? */
 export function hasActivity(status, now = Date.now()) {
   if (!status || status.ok === false) return false;
@@ -69,8 +120,9 @@ export function hasActivity(status, now = Date.now()) {
  * Each holder is spelled out once (first resource that lists it); later resources
  * name it by label only, so the 300-character budget goes to the information.
  */
-export function renderSharedResources(status, { now = Date.now(), max = LINE_MAX_CHARS } = {}) {
-  if (!hasActivity(status, now)) return null;
+export function renderSharedResources(status, { now = Date.now(), max = LINE_MAX_CHARS, leads = 0 } = {}) {
+  const queueBusy = hasActivity(status, now);
+  if (!queueBusy && !leadsShown(leads)) return null;
   const seen = new Set();
   const parts = [];
   for (const r of status.resources ?? []) {
@@ -96,21 +148,28 @@ export function renderSharedResources(status, { now = Date.now(), max = LINE_MAX
   }
   // A flagged live holder is kept until it exits or the 4 h ceiling; the line names the manual way out
   // (first flagged holder), and the body is clipped to leave room for it.
+  if (leadsShown(leads)) parts.push(leadsPart(leads));
+  const warn = Number(leads) > LEAD_WARN_ABOVE ? LEADS_WARNING : '';
   const flagged = (status.resources ?? []).flatMap((r) => r.holders ?? []).find((h) => h.alive !== false && isFlagged(h));
   const hint = flagged ? ` ${releaseHint(flagged)}.` : '';
+  // The lead warning and the release hint are reserved first; the body is clipped to what is left.
+  const tail = `${warn}${hint}`;
   let line = `Shared resources: ${parts.join('; ')}.`;
-  if (line.length > max - hint.length) line = `${line.slice(0, Math.max(1, max - hint.length - 2))}~.`;
-  return `${line}${hint}`;
+  if (line.length > max - tail.length) line = `${line.slice(0, Math.max(1, max - tail.length - 2))}~.`;
+  return `${line}${tail}`;
 }
 
 /** Changes only when who holds, who waits, what is reserved or what was cleared changes (not with the clock). */
-export function resourceSignature(status, now = Date.now()) {
-  if (!hasActivity(status, now)) return '';
+export function resourceSignature(status, now = Date.now(), leads = 0) {
+  // The lead count joins the signature as a bucket (none, a few, over the warning level), so a change
+  // of count inside a bucket does not re-show the line on every prompt.
+  const lb = Number(leads) > LEAD_WARN_ABOVE ? 'warn' : leadsShown(leads) ? 'few' : '';
+  if (!hasActivity(status, now)) return lb ? JSON.stringify(['leads', lb]) : '';
   const hs = [];
   for (const r of status.resources ?? []) for (const h of r.holders ?? []) hs.push(`${r.name}:${h.id}:${h.alive === false ? 'd' : h.stale ? 's' : 'a'}${isQuiet(h) ? 'i' : ''}${h.overTime ? 'o' : ''}${h.hbStale ? 'h' : ''}`);
   return JSON.stringify([
     hs, (status.queue ?? []).map((e) => e.id), (status.reservations ?? []).map((r) => r.id ?? r.resource),
-    recentClearsIn(status, now).map((c) => `${c.at}:${c.id}`),
+    recentClearsIn(status, now).map((c) => `${c.at}:${c.id}`), lb,
   ]);
 }
 
@@ -126,11 +185,12 @@ const safe = (s) => String(s || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_');
  * mode 'change': only when the signature differs from the last one this session saw.
  * Never throws; returns null on any failure.
  */
-export async function sharedResourcesNote(p, { mode = 'start', now = Date.now(), status = null, sigFile = null } = {}) {
+export async function sharedResourcesNote(p, { mode = 'start', now = Date.now(), status = null, sigFile = null, leads = null } = {}) {
   try {
     const st = status ?? await readStatus();
-    const line = renderSharedResources(st, { now });
-    const sig = resourceSignature(st, now);
+    const nLeads = leads ?? activeLeads({ now });
+    const line = renderSharedResources(st, { now, leads: nLeads });
+    const sig = resourceSignature(st, now, nLeads);
     const f = sigFile ?? join(stateDir(), `resource-line-${safe(p?.session_id)}.sig`);
     let prev = null;
     try { prev = readFileSync(f, 'utf8'); } catch { /* none */ }
