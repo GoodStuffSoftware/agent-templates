@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.32",
+  "version": "0.31.33",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -742,6 +742,36 @@
       "title": "Subagent context ceiling: second notice tokens",
       "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. Default 0 = off (the handoff nudge fires once per worker); set a line above the ceiling (for example 200000) to turn the second notice on.",
       "default": 0
+    },
+    "step_budget": {
+      "type": "boolean",
+      "title": "Helper step budget",
+      "description": "On (default): the same PreToolUse hook that runs inside each subagent counts the subagent's own tool calls. At the warning line it is told ONCE how many of its steps are used and to finish, write its detail file and report what is left. Past the stop line every tool call is DENIED except writing a report or detail file (Write or Edit of a .md, .txt, .json or .csv file whose name says report, detail, handoff, review, summary, findings, analysis, verdict or notes), with the reason 'Step budget reached: write your report now and stop.' A subagent whose context compacts a second time is stopped the same way. The lines come from the subagent's brief: TYPE lookup, research, survey, explore and verify use the lookup lines, every other or missing TYPE the writer lines, and a 'BUDGET: <n>' line in the brief sets the stop value with the warning at 80% of it. The lead's own session is never counted. Off = no counting, no warning, no stop.",
+      "default": true
+    },
+    "step_budget_warn": {
+      "type": "number",
+      "title": "Helper step budget: warning at (writers and other types)",
+      "description": "Tool calls after which a subagent whose TYPE is not a lookup type (and has no BUDGET line) is told once to wrap up. 9 in 10 helpers finish under 80 calls. 0 = no warning.",
+      "default": 80
+    },
+    "step_budget_stop": {
+      "type": "number",
+      "title": "Helper step budget: stop at (writers and other types)",
+      "description": "Tool calls a subagent whose TYPE is not a lookup type (and has no BUDGET line) may make before every further call except writing its report or detail file is denied. 99 in 100 helpers finish under 120 calls. 0 = no stop for this class.",
+      "default": 120
+    },
+    "step_budget_lookup_warn": {
+      "type": "number",
+      "title": "Helper step budget: warning at (lookup types)",
+      "description": "Tool calls after which a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) is told once to wrap up. 0 = no warning.",
+      "default": 40
+    },
+    "step_budget_lookup_stop": {
+      "type": "number",
+      "title": "Helper step budget: stop at (lookup types)",
+      "description": "Tool calls a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) may make before every further call except writing its report or detail file is denied. 0 = no stop for this class.",
+      "default": 60
     },
     "usage_analysis": {
       "type": "boolean",

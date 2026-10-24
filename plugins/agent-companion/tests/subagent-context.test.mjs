@@ -96,9 +96,11 @@ test('compaction trigger: a compact_boundary just behind the agent says "you jus
     assert.equal(ctxText(r), '[agent-companion] You just compacted. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.');
     assert.equal(runHook('hooks/subagent-context.mjs', pre(lead)).stdout.trim(), '', 'same boundary: once');
 
-    // A second compaction is a second event.
+    // A second compaction is a second event, and stops the helper (step budget, hooks/lib/step-budget.mjs).
     appendFileSync(agentFile, turn('r3', 190000) + boundary('b-2', 'manual') + user('summary') + turn('r4', 25000));
-    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /You just compacted/);
+    const second = runHook('hooks/subagent-context.mjs', pre(lead));
+    assert.equal(second.json.hookSpecificOutput.permissionDecision, 'deny');
+    assert.match(second.json.hookSpecificOutput.permissionDecisionReason, /^Step budget reached/);
     const logged = rows();
     assert.deepEqual(logged.map((x) => x.kind), ['compaction', 'compaction']);
     assert.equal(logged[0].trigger, 'auto');

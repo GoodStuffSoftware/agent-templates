@@ -5,8 +5,8 @@
 // claims.
 //
 // A subagent payload carries agent_id (the main thread's carries none:
-// callerIsSubagent, lib/context.mjs), so the lead exits at once. Never blocks
-// or denies: the only output is additionalContext.
+// callerIsSubagent, lib/context.mjs), so the lead exits at once. The context
+// notice and the ceiling never block: their only output is additionalContext.
 //
 // The same hook carries the 175K context CEILING (lib/context-ceiling.mjs): the
 // first time the context of a sonnet/high-or-above or opus subagent (never
@@ -16,18 +16,26 @@
 // is set). Gated by the rollout schedule; reuses the
 // transcript reading below, so it adds no read. Advice only, never a deny.
 //
+// The STEP BUDGET rides on the same hook (lib/step-budget.mjs): it counts the helper's
+// tool calls, warns once at the soft line and DENIES every call but a report or detail
+// write past the hard one (40/60 for lookup-type helpers, 80/120 otherwise, a `BUDGET: <n>`
+// brief line replaces the stop). A second compaction stops the helper the same way. This
+// is the one place the hook denies; options step_budget, step_budget_warn, step_budget_stop,
+// step_budget_lookup_warn, step_budget_lookup_stop.
+//
 // Each firing writes one row to telemetry subagent-context.jsonl (phase
 // "mid-run") and to the agent's events file, which hooks/runaway-check.mjs
 // reads at SubagentStop to tell the lead.
 
-import { readStdin, opt, passthrough, callerIsSubagent, appendLog } from './lib/context.mjs';
+import { readStdin, opt, passthrough, deny, callerIsSubagent, appendLog } from './lib/context.mjs';
 import { resolveAgentTranscript } from './lib/runaway.mjs';
 import {
-  CONTEXT_DEFAULT_TOKENS, readContextSignal, claimSignals, recordEvent, subagentNoticeText, pruneContextState,
+  CONTEXT_DEFAULT_TOKENS, readContextSignal, claimSignals, recordEvent, readEvents, subagentNoticeText, pruneContextState,
 } from './lib/subagent-context.mjs';
 import {
   CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
 } from './lib/context-ceiling.mjs';
+import { STEP_LOG, stepBudgetCheck } from './lib/step-budget.mjs';
 
 try {
   const p = readStdin();
@@ -35,12 +43,14 @@ try {
   const threshold = opt('subagent_context_notice_tokens', CONTEXT_DEFAULT_TOKENS);
   const ceiling = opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS);
   const repeat = opt('subagent_ceiling_repeat_tokens', CEILING_REPEAT_DEFAULT_TOKENS);
-  if (!(threshold > 0) && !(ceiling > 0)) passthrough();
+  const stepsOn = opt('step_budget', true);
+  if (!(threshold > 0) && !(ceiling > 0) && !stepsOn) passthrough();
 
-  const sig = readContextSignal(resolveAgentTranscript(p));
+  const path = resolveAgentTranscript(p);
+  const wantCtx = threshold > 0 || ceiling > 0;
+  const sig = wantCtx ? readContextSignal(path) : null;
   const kinds = threshold > 0 ? claimSignals(p.agent_id, sig, threshold, { fresh: true }) : [];
   const nudge = ceilingCheck(p, sig, { ceiling, repeat });
-  if (!kinds.length && !nudge) passthrough();
 
   const at = new Date().toISOString();
   for (const kind of kinds) {
@@ -53,8 +63,21 @@ try {
     recordEvent(p.agent_id, row);
   }
   if (nudge) appendLog(CEILING_LOG, nudge.row);
-  pruneContextState();
-  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : ''].filter(Boolean).join('\n');
+  if (kinds.length || nudge) pruneContextState();
+
+  // The step budget: count this call, warn once, deny past the stop. A helper that
+  // has compacted twice is stopped the same way.
+  let step = null;
+  if (stepsOn) {
+    const compactions = readEvents(p.agent_id).filter((e) => e.kind === 'compaction' && e.phase === 'mid-run').length;
+    step = stepBudgetCheck(p, { transcript: path, compactions });
+    if (step) appendLog(STEP_LOG, step.row);
+  }
+  if (step && step.deny) deny(step.deny);
+
+  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : '', step ? step.warn : '']
+    .filter(Boolean).join('\n');
+  if (!text) passthrough();
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: text },
   }));

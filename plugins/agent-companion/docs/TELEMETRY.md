@@ -411,6 +411,22 @@ Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-abov
 | `rung_class` | string | `sonnet-high+` or `opus` |
 | `ceiling`, `repeat` | number | the two thresholds as set |
 
+### `step-budget.jsonl` — one record per step-budget warning or denied call
+
+Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a subagent is told it has used its warning share of steps (`kind` `warn`, once per worker) and each time a call is denied past the stop or after a second compaction (`kind` `stop`). The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`.
+
+| field | type | meaning |
+|---|---|---|
+| `v`, `at` | number, ISO 8601 | schema version, when written |
+| `session_id` | string | the lead's session |
+| `agent_id`, `agent_type` | string | the subagent |
+| `tool` | string | the tool call that triggered the row |
+| `steps` | number | the subagent's tool calls so far, this one included |
+| `type` | string or null | the `TYPE:` line of the subagent's brief |
+| `caps` | object | `warn`, `stop` and `kind` (`writer`, `lookup` or `brief` when a `BUDGET:` line set the stop) |
+| `kind` | string | `warn` or `stop` |
+| `why` | string; `stop` only | `steps` (the stop value was reached) or `compactions` (a second compaction) |
+
 ### `bash-exit.jsonl` — Bash exit status
 
 One row per Bash call, written by `hooks/bash-exit.mjs` (record only; nothing is printed or blocked).
