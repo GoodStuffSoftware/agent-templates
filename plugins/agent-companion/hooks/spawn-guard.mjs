@@ -64,6 +64,7 @@ import {
 } from './lib/self-review.mjs';
 import { parseRepoGlobs, DEFAULT_REPO_GLOBS } from './lib/memory-index.mjs';
 import { buildContract, noteContractAppended } from './lib/brevity.mjs';
+import { buildScopeClause } from './lib/scope-rule.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
 import { leadEffortLive, mergeLeadEffort } from './lib/lead-effort-live.mjs';
 import {
@@ -1012,6 +1013,9 @@ try {
         ]);
       }
     } catch { /* fail open: no contract, spawn proceeds untouched */ }
+
+    // 1b. The scope rule: one short clause by task type or role (lib/scope-rule.mjs).
+    try { suffix += buildScopeClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
 
     // 2. Operator-authored standing rules scoped to spawns, their conditions
     //    matched against this brief's own text. See lib/rules.mjs.

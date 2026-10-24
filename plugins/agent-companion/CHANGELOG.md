@@ -2,6 +2,12 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.31 — 2026-10-23
+
+- **Token bleed guard, phase 1: step backstop.** Every agent definition (`ac-*` rungs and `ac-browser*`) carries `maxTurns: 150`, the Claude Code turn limit (documented as supported for plugin agents; at the limit the parent gets the partial output back). A live spawn test was not possible here (headless auth expired).
+- **Scope rule in briefs.** The spawn guard appends one short clause by `TYPE:` (else `ROLE:`): writers are told to build the smallest change and to report before creating anything the brief does not name; lookup, research, survey, explore and verify briefs are told to create no new files beyond the requested output. Reviews and other types get none (`hooks/lib/scope-rule.mjs`).
+- **Self-review question.** Step 1 of the self-review protocol, in the generated block of the rungs that carry it and in the copy the spawn guard appends, now first lists anything built that the brief did not ask for, to remove or flag to the lead.
+
 ## 0.31.30 — 2026-10-18
 
 - **Session budget notice (handover-lessons).** The notice no longer recommends a hand-off to a fresh session (measured: no usage saving); it says auto-compaction handles context, lists what cuts spend, and allows a hand-over only for a plugin version change or job end. (Repo) leak-check fails new or changed lessons over 150 words; unchanged long lessons are grandfathered by a digest baseline (`scripts/lesson-baseline.json`).
