@@ -623,6 +623,21 @@ Written by `hooks/poll-guard.mjs` on a subagent's Bash or PowerShell call that l
 
 Count matches per week against the 1,145 worker poll requests that cost 2.6% of the weekly limit in one measured week.
 
+### `scope-tripwire.jsonl` — the new-file tripwire
+
+Written by `hooks/scope-tripwire.mjs` when a helper's Write of a new file the brief does not name reaches a threshold: a row for the note and for each deny. Nothing for files under the threshold, for the lead, or for a brief the tripwire does not judge. Toggles: `scope_tripwire`, `scope_tripwire_lookup_deny`, `scope_tripwire_writer_note`, `scope_tripwire_writer_deny`.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when it was written |
+| `session_id` | string | null | the lead's session |
+| `action` | string | `note` or `deny` |
+| `kind` | string | `lookup` or `writer` (from the brief's `TYPE:`, else `ROLE:`) |
+| `count` | number | unrequested new files this helper has now tried to create |
+| `file` | string | the path, normalised and lowercased |
+| `agent_id`, `agent_type` | string | the helper |
+
 ### `unknown-agent-types.jsonl` — harness drift signal
 
 | field | type | meaning |

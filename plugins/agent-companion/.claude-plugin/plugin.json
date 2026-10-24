@@ -569,6 +569,36 @@
       "description": "How long one idle stretch is kept warm: pings are 55 minutes apart, so the default 180 allows 3 (55, 110 and 165 minutes). A new background spawn starts the count over. Past the cap the cache is let go, because a gap that long is cheaper to rebuild once than to ping through. Below 55, or 0, turns keep-warm off.",
       "default": 180
     },
+    "scope_tripwire": {
+      "type": "boolean",
+      "title": "New-file tripwire",
+      "description": "Count the new files a helper creates that its brief does not name (the brief is the first user message of the helper's transcript; its requested output, its detail or handoff file and its scratchpad never count). A lookup, research, survey, explore or verify helper is denied at the first one (\"Your brief asks for no new files: report the proposal instead.\"); a writer gets one note at the third and is denied from the fourth (\"Check in with the lead before building more beyond the brief.\"). The lead's own session is never counted. Off = no counting.",
+      "default": true
+    },
+    "scope_tripwire_lookup_deny": {
+      "type": "number",
+      "title": "Tripwire: lookup helpers denied at file",
+      "description": "The unrequested new file at which a lookup-kind helper is denied. Default 1.",
+      "default": 1
+    },
+    "scope_tripwire_writer_note": {
+      "type": "number",
+      "title": "Tripwire: writer note at file",
+      "description": "The unrequested new file at which a writer gets its one-time note. Default 3.",
+      "default": 3
+    },
+    "scope_tripwire_writer_deny": {
+      "type": "number",
+      "title": "Tripwire: writer denied at file",
+      "description": "The unrequested new file at which a writer is denied (and every one after). Default 4.",
+      "default": 4
+    },
+    "redo_alert": {
+      "type": "boolean",
+      "title": "Redo alert",
+      "description": "When the lead spawns a helper whose brief closely matches a task that ended STATUS: partial, or that already ran twice, in the last 24 hours (same TYPE, word-set similarity of at least 0.5, from the worker ledger), add one note for the lead: third attempt at this task: re-brief it or move it up a rung instead of retrying. Reviews are never matched. Advisory only; never blocks.",
+      "default": true
+    },
     "read_dedupe": {
       "type": "boolean",
       "title": "Read dedupe",
