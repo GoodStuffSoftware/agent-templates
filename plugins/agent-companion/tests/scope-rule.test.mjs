@@ -18,7 +18,7 @@ const STEP = 'List anything you built that the brief did not ask for; remove it 
 
 test('clause text is the approved wording', () => {
   assert.equal(SCOPE_WRITER_CLAUSE, 'Build the smallest change that meets the ask. Before creating a script, workflow, module, test file or feature the brief does not name, stop and report the proposal to the lead instead of building it.');
-  assert.equal(SCOPE_LOOKUP_CLAUSE, 'Create no new files beyond the requested output.');
+  assert.equal(SCOPE_LOOKUP_CLAUSE, 'Create no new files beyond the requested output and the <task>-detail.md detail file.');
 });
 
 test('selection by TYPE', () => {

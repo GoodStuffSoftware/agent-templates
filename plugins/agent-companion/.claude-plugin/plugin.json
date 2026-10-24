@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.31",
+  "version": "0.31.32",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -560,13 +560,13 @@
     "keep_warm": {
       "type": "boolean",
       "title": "Keep a lead warm while helpers run",
-      "description": "After a background helper spawn, tell the lead once to arm ONE wakeup 55 minutes out (inside its 1-hour prompt cache window), and at each ping tell it whether to re-arm: helpers still running and under the cap = re-arm; none running = stop. No pings while nothing runs, no polling. Each ping costs about 1/9 of the cold re-read it prevents. Off = no keep-warm notes.",
+      "description": "After a background helper spawn, tell the lead once to arm ONE wakeup 55 minutes out (inside its 1-hour prompt cache window), and at each ping tell it whether to re-arm: helpers still running and under the cap = re-arm; none running = stop. Nothing is armed while nothing runs (one trailing ping may fire after the last helper ends), no polling. Each ping costs about 1/9 of the cold re-read it prevents. Off = no keep-warm notes.",
       "default": true
     },
     "keep_warm_max_minutes": {
       "type": "number",
       "title": "Keep-warm cap (minutes)",
-      "description": "How long one idle stretch is kept warm: pings are 55 minutes apart, so the default 180 allows 3 (55, 110 and 165 minutes). A new background spawn starts the count over. Past the cap the cache is let go, because a gap that long is cheaper to rebuild once than to ping through. 0 turns keep-warm off.",
+      "description": "How long one idle stretch is kept warm: pings are 55 minutes apart, so the default 180 allows 3 (55, 110 and 165 minutes). A new background spawn starts the count over. Past the cap the cache is let go, because a gap that long is cheaper to rebuild once than to ping through. Below 55, or 0, turns keep-warm off.",
       "default": 180
     },
     "read_dedupe": {

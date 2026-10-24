@@ -10,7 +10,7 @@
 export const SCOPE_MARKER = '[agent-companion: scope]';
 
 export const SCOPE_WRITER_CLAUSE = 'Build the smallest change that meets the ask. Before creating a script, workflow, module, test file or feature the brief does not name, stop and report the proposal to the lead instead of building it.';
-export const SCOPE_LOOKUP_CLAUSE = 'Create no new files beyond the requested output.';
+export const SCOPE_LOOKUP_CLAUSE = 'Create no new files beyond the requested output and the <task>-detail.md detail file.';
 
 export const SCOPE_WRITER_TYPES = [
   'bounded-feature', 'bounded-feature-small', 'integration', 'debug-root-cause', 'large-refactor',

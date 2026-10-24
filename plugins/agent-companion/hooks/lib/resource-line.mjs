@@ -4,7 +4,7 @@
 //
 // Reads resourceStatus() (scripts/ci-budget.mjs) in-process: no spawn, no cpu
 // sample, fail soft. The line appears only when something is held, queued,
-// reserved or was cleared in the last 15 minutes, and stays near 300 characters.
+// reserved or was cleared in the last 15 minutes (or, from 2 active leads, to show the lead count), and stays near 300 characters.
 // Spec: docs/resource-queue.md (status schema v1; `reservations` is read when the
 // status carries it).
 

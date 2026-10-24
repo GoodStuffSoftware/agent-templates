@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, utimesSync, mkdtempSync, rmSync, existsSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
-import { maxPings, isBackgroundSpawn, KEEP_WARM_DELAY_S, KEEP_WARM_MARKER } from '../hooks/lib/keep-warm.mjs';
+import { maxPings, isBackgroundSpawn, KEEP_WARM_DELAY_S, KEEP_WARM_MARKER, KEEP_WARM_PROMPT } from '../hooks/lib/keep-warm.mjs';
 import {
   activeLeads, renderSharedResources, resourceSignature, sharedResourcesNote, LINE_MAX_CHARS, LEAD_WINDOW_MS,
 } from '../hooks/lib/resource-line.mjs';
@@ -24,8 +24,9 @@ const bgSpawn = (extra = {}) => ({
 });
 const startWorker = (id, sid = SID) => run('worker-start', { session_id: sid, agent_id: id, agent_type: 'general-purpose' });
 const stopWorker = (id, sid = SID) => run('worker-stop', { session_id: sid, agent_id: id, agent_type: 'general-purpose' });
-const ping = (sid = SID, env) => run('user-prompt', { session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: KEEP_WARM_MARKER }, env);
-const arm = (input = { delaySeconds: KEEP_WARM_DELAY_S, prompt: KEEP_WARM_MARKER, reason: 'keep warm' }, tool = 'ScheduleWakeup') =>
+const ping = (sid = SID, env) => run('user-prompt', { session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: KEEP_WARM_PROMPT }, env);
+const pingPrompt = (prompt) => run('user-prompt', { session_id: SID, hook_event_name: 'UserPromptSubmit', prompt });
+const arm = (input = { delaySeconds: KEEP_WARM_DELAY_S, prompt: KEEP_WARM_PROMPT, reason: 'keep warm' }, tool = 'ScheduleWakeup') =>
   run('tick', { session_id: SID, hook_event_name: 'PostToolUse', tool_name: tool, tool_input: input, tool_response: {} });
 
 describe('keep-warm', () => {
@@ -45,8 +46,10 @@ describe('keep-warm', () => {
       const c = ctx(r);
       assert.equal(r.status, 0);
       assert.match(c, /Keep-warm: 1 background helper running/);
+      assert.match(c, /CronCreate with recurring false/);
+      assert.ok(c.indexOf('CronCreate') < c.indexOf('ScheduleWakeup'), 'CronCreate is named first');
       assert.match(c, /delaySeconds 3300/);
-      assert.match(c, /prompt "keep-warm ping"/);
+      assert.match(c, /prompt "\[ac-keep-warm\] ping"/);
       assert.match(c, /ONE wakeup/);
       assert.match(c, /never poll/);
       assert.equal(r.json.hookSpecificOutput.hookEventName, 'PostToolUse');
@@ -90,7 +93,7 @@ describe('keep-warm', () => {
       } finally { fx2.cleanup(); }
       const fx3 = makeFixture();
       try {
-        assert.equal(ctx(arm({ cron: '5 14 23 10 *', recurring: false, prompt: 'keep-warm ping' }, 'CronCreate')), '');
+        assert.equal(ctx(arm({ cron: '5 14 23 10 *', recurring: false, prompt: KEEP_WARM_PROMPT }, 'CronCreate')), '');
         assert.equal(ctx(run('tick', bgSpawn())), '', 'a one-shot cron with the marker counts too');
       } finally { fx3.cleanup(); }
     } finally { fx.cleanup(); }
@@ -104,6 +107,7 @@ describe('keep-warm', () => {
       const p1 = ctx(ping());
       assert.match(p1, /Keep-warm ping 1 of 3: 2 helpers still running/);
       assert.match(p1, /arm ONE more wakeup/);
+      assert.match(p1, /CronCreate recurring false/);
       assert.match(p1, /delaySeconds 3300/);
       const p2 = ctx(ping());
       assert.match(p2, /ping 2 of 3/);
@@ -113,6 +117,19 @@ describe('keep-warm', () => {
       assert.match(p3, /Cap reached/);
       assert.match(p3, /do not re-arm/);
       assert.doesNotMatch(p3, /arm ONE more/);
+    } finally { fx.cleanup(); }
+  });
+
+  test('only the short prompt the plugin arms is a ping: a manual keep-warm prompt or a chat mention is not', () => {
+    const fx = makeFixture();
+    try {
+      startWorker('a1');
+      const manual = 'Keep-warm ping for the agent-companion lead: reply ok in one word, then re-arm ONE more one-shot CronCreate 55 minutes out. If the cap is reached, do not re-arm.';
+      assert.equal(ctx(pingPrompt(manual)), '');
+      assert.equal(ctx(pingPrompt('why did the keep-warm ping fire twice yesterday?')), '');
+      assert.equal(ctx(pingPrompt(`why did ${KEEP_WARM_MARKER} fire twice yesterday, was it the cap or a stuck helper that kept it going?`)), '');
+      assert.equal(ctx(arm({ cron: '5 14 23 10 *', recurring: false, prompt: 'keep-warm ping' }, 'CronCreate')), '', 'a manual cron prompt is not recorded');
+      assert.match(ctx(pingPrompt(KEEP_WARM_PROMPT)), /ping 1 of 3/, 'the cap slot was not consumed by the chatter');
     } finally { fx.cleanup(); }
   });
 
@@ -158,11 +175,26 @@ describe('keep-warm', () => {
     assert.ok(evaluate({ toolName: 'ScheduleWakeup', input: { delaySeconds: 270, noop: true }, records: [launch, wake(3, { delaySeconds: 270 }), wake(2, { delaySeconds: 270 }), wake(1, { delaySeconds: 270 })] }));
   });
 
-  test('cost: three pings at 55-minute spacing stay under the cold rebuild they prevent (sim numbers, 200K context)', () => {
+  test('cost: the real chain of pings stays under the cold rebuild it prevents (sim numbers, 200K context)', () => {
     // r-keepwarm-sim-1017: one-shot ping 0.1287 u and rebuild premium 1.14 u at 200K on opus; 0.43 / 3.8 on fable.
-    for (const [ping1, rebuild] of [[0.1287, 1.14], [0.429, 3.8], [0.0687, 0.57]]) {
-      assert.ok(maxPings(180) * ping1 < rebuild, `${maxPings(180)} pings (${(maxPings(180) * ping1).toFixed(2)} u) vs ${rebuild} u`);
-    }
+    // Run the hook itself: ping until a note says do not re-arm, count the pings, price them.
+    const fx = makeFixture();
+    try {
+      startWorker('a1');
+      let count = 0;
+      let note = '';
+      do { note = ctx(ping()); count++; } while (/arm ONE more/.test(note) && count < 20);
+      assert.ok(count >= 1 && count < 20, 'the chain ends');
+      assert.equal(count, maxPings(180));
+      for (const [ping1, rebuild] of [[0.1287, 1.14], [0.429, 3.8], [0.0687, 0.57]]) {
+        assert.ok(count * ping1 < rebuild, `${count} pings (${(count * ping1).toFixed(2)} u) vs ${rebuild} u`);
+      }
+    } finally { fx.cleanup(); }
+  });
+
+  test('keep_warm_max_minutes below 55 turns keep-warm off', () => {
+    assert.equal(maxPings(54), 0);
+    assert.equal(maxPings(55), 1);
   });
 });
 

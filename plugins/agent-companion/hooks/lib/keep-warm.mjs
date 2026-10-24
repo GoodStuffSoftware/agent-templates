@@ -6,30 +6,37 @@
 //
 // The mechanism is hook-driven and costs the lead nothing until a helper is spawned in the background:
 //   1. PostToolUse of a background Agent spawn: when no wakeup is pending, one note tells the lead to arm
-//      ONE wakeup 55 min out (ScheduleWakeup 3300 s, prompt "keep-warm ping"; CronCreate one-shot when it
-//      has no ScheduleWakeup).
-//   2. PostToolUse of that ScheduleWakeup / CronCreate call: recorded as the pending wakeup.
+//      ONE wakeup 55 min out (CronCreate one-shot, recurring false, prompt "[ac-keep-warm] ping"; ScheduleWakeup
+//      3300 s as the alternative where it exists: it is not in every harness).
+//   2. PostToolUse of that CronCreate / ScheduleWakeup call: recorded as the pending wakeup.
 //   3. UserPromptSubmit of the ping itself: helpers still running and under the cap -> "re-arm ONE more";
-//      none running -> "do not re-arm"; cap reached -> "no more pings". So there is never a ping when
-//      nothing is running, and never a loop: each ping is armed by the previous one's note, one at a time.
+//      none running -> "do not re-arm"; cap reached -> "no more pings". Nothing is armed while nothing runs
+//      (one trailing ping may fire up to 55 min after the last helper ends and says do not re-arm), and there
+//      is never a loop: each ping is armed by the previous one's note, one at a time.
 // 55 min is a delay above the poll guard's 600 s line, so hooks/poll-guard.mjs never reads it as a poll.
 // Claude Code 2.1.304 fixed 1-hour wakeups firing just after the cache expired; 55 min keeps a 5 min margin
 // for older builds as well.
 //
-// State: state/keep-warm/<session>.json { dueAt, instructedAt, pings }. Never throws; every reader fails open.
+// State: state/keep-warm/<session>.json { dueAt, pings } plus a keep-warm-told claim marker. Never throws; every reader fails open.
 
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { stateDir, readJson, writeJsonAtomic } from './context.mjs';
-import { readWorkers, agentNames } from './advisory-b.mjs';
+import { readWorkers, agentNames, claimOnce } from './advisory-b.mjs';
 
 export const KEEP_WARM_DELAY_S = 3300; // 55 min: inside the 1 h cache window with a 5 min margin
 export const KEEP_WARM_MAX_DEFAULT_MIN = 180; // the sim's best cap: pings past 3 h of one idle stretch lose money
-export const KEEP_WARM_MARKER = 'keep-warm ping';
+export const KEEP_WARM_MARKER = '[ac-keep-warm]';
+export const KEEP_WARM_PROMPT = `${KEEP_WARM_MARKER} ping`; // the whole prompt the lead arms
+// Only the plugin's own short prompt counts as a ping: a manual keep-warm prompt or a chat that mentions
+// the marker must not be decided on (the marker must open the prompt, and the prompt stay short).
+const PING_PROMPT_MAX = 80;
 // Spawns inside this window of the last instruction do not repeat it (a lead spawns a batch in a row).
 const INSTRUCT_DEDUPE_MS = 5 * 60_000;
 const ARM_TOOL_RE = /(?:^|__)(?:ScheduleWakeup|CronCreate)$/;
-const MARKER_RE = new RegExp(KEEP_WARM_MARKER, 'i');
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const MARKER_RE = new RegExp(escapeRe(KEEP_WARM_MARKER), 'i');
+const isPingPrompt = (s) => typeof s === 'string' && s.trim().length <= PING_PROMPT_MAX && s.trim().toLowerCase().startsWith(KEEP_WARM_MARKER);
 
 const safe = (s) => String(s || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_');
 
@@ -44,7 +51,7 @@ const readState = (sid) => {
 };
 const writeState = (sid, st) => { try { writeJsonAtomic(stateFile(sid), st); } catch { /* fail open */ } };
 
-/** Pings allowed in one idle stretch: 3 at the default 180 min (55, 110 and 165 min). 0 turns it off. */
+/** Pings allowed in one idle stretch: 3 at the default 180 min (55, 110 and 165 min). Below 55 minutes (or 0) it is off. */
 export const maxPings = (maxMinutes = KEEP_WARM_MAX_DEFAULT_MIN) =>
   Math.floor((Math.max(0, Number(maxMinutes) || 0) * 60) / KEEP_WARM_DELAY_S);
 
@@ -69,7 +76,7 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
 function armText(n) {
   return `Keep-warm: ${plural(n, 'background helper')} running. Past 1 hour idle this session's prompt cache expires and the next turn re-reads the whole conversation at full price. ` +
-    `Arm ONE wakeup now, 55 minutes out: ScheduleWakeup with delaySeconds ${KEEP_WARM_DELAY_S} and prompt "${KEEP_WARM_MARKER}" (no ScheduleWakeup: CronCreate, recurring false, about 55 minutes ahead, same prompt). ` +
+    `Arm ONE wakeup now, 55 minutes out: CronCreate with recurring false, a cron for the minute 55 minutes from now in local time (now + 55 minutes), and prompt "${KEEP_WARM_PROMPT}" (load it with ToolSearch if it is deferred; where ScheduleWakeup exists, delaySeconds ${KEEP_WARM_DELAY_S} and the same prompt also works). ` +
     'Arm no second one and never poll: a helper finishing wakes you anyway. On the ping reply "ok" in one word, and re-arm only when the keep-warm note tells you to.';
 }
 
@@ -92,11 +99,11 @@ export function keepWarmToolNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_M
     const st = readState(p.session_id);
     // A new spawn is real activity: the idle stretch (and its ping cap) starts over.
     const next = { ...st, pings: 0 };
-    const pending = Number(st.dueAt) > now + 60_000;
-    const justTold = Number(st.instructedAt) > 0 && now - Number(st.instructedAt) < INSTRUCT_DEDUPE_MS;
-    if (pending || justTold) { writeState(p.session_id, next); return null; }
-    next.instructedAt = now;
+    const pending = Number(st.dueAt) > now;
     writeState(p.session_id, next);
+    if (pending) return null;
+    // Exclusive create: a parallel batch of spawns gets one note, not several.
+    if (!claimOnce('keep-warm-told', p.session_id, Math.floor(now / INSTRUCT_DEDUPE_MS))) return null;
     // The spawn's own SubagentStart row may not be written yet: at least this one helper is running.
     return armText(Math.max(1, running(p, now).length));
   } catch { return null; }
@@ -108,7 +115,7 @@ export function keepWarmToolNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_M
  */
 export function keepWarmPingNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_MAX_DEFAULT_MIN } = {}) {
   try {
-    if (!p || !p.session_id || typeof p.prompt !== 'string' || !MARKER_RE.test(p.prompt)) return null;
+    if (!p || !p.session_id || !isPingPrompt(p.prompt)) return null;
     const limit = maxPings(maxMinutes);
     if (limit < 1) return null;
     const st = readState(p.session_id);
@@ -123,6 +130,6 @@ export function keepWarmPingNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_M
     if (pings >= limit) {
       return `Keep-warm ping ${pings} of ${limit}: ${plural(live.length, 'helper')} still running (${who}). Cap reached (${limit} pings, about 3 h idle): reply "ok" in one word and do not re-arm; the cache goes cold unless a helper reports first.`;
     }
-    return `Keep-warm ping ${pings} of ${limit}: ${plural(live.length, 'helper')} still running (${who}). Reply "ok" in one word, then arm ONE more wakeup: ScheduleWakeup delaySeconds ${KEEP_WARM_DELAY_S}, prompt "${KEEP_WARM_MARKER}" (or CronCreate one-shot about 55 minutes ahead).`;
+    return `Keep-warm ping ${pings} of ${limit}: ${plural(live.length, 'helper')} still running (${who}). Reply "ok" in one word, then arm ONE more wakeup: CronCreate recurring false, a cron for now + 55 minutes in local time, prompt "${KEEP_WARM_PROMPT}" (or ScheduleWakeup delaySeconds ${KEEP_WARM_DELAY_S} where it exists).`;
   } catch { return null; }
 }

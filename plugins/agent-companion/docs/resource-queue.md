@@ -273,7 +273,7 @@ A heavy command started bare overloads the machine and, because the hooks share 
 
 ## Part 5: the "Shared resources:" session line
 
-At SessionStart, and before a prompt when it changed, `hooks/advisory-b.mjs` adds one line to the context, next to the other-live-sessions line, from `resourceStatus()`. It appears only when something is held, queued, reserved, or was cleared in the last 15 minutes; an idle queue adds nothing. It is cut at 300 characters. Option `shared_resources_line` (default true).
+At SessionStart, and before a prompt when it changed, `hooks/advisory-b.mjs` adds one line to the context, next to the other-live-sessions line, from `resourceStatus()`. It appears only when something is held, queued, reserved, or was cleared in the last 15 minutes; an idle queue adds nothing on its own (from 2 active leads the line appears with the lead count, see below). It is cut at 300 characters. Option `shared_resources_line` (default true).
 
 Shape: each resource with units out of capacity and its holders (label or session, `@project`, age, `DEAD` or `STALE`, then `IDLE?`, `OVER` and `HB?` for a live holder flagged by the idle rule, the max-hold rule or a stale heartbeat; a holder past both limits shows `IDLE? OVER`), then the queue in order (up to four, `blockedBy` named), then up to two reservations (`<resource> for <group>`, time left), then the newest clear under 15 minutes old. When a live holder is flagged, the line ends with `release a flagged one by hand: node ~/.claude/agent-companion/bin/resource-queue.mjs release <id>.` for the first one (the rest of the line is clipped to keep the 300 characters):
 
