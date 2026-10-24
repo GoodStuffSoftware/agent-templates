@@ -4,7 +4,7 @@ All notable changes to the `agent-companion` plugin. Dates are UTC.
 
 ## 0.31.31 — 2026-10-23
 
-- **Token bleed guard, phase 1: step backstop.** Every agent definition (`ac-*` rungs and `ac-browser*`) carries `maxTurns: 150`, the Claude Code turn limit (documented as supported for plugin agents; at the limit the parent gets the partial output back). A live spawn test was not possible here (headless auth expired).
+- **Token bleed guard, phase 1: step backstop.** Every agent definition (`ac-*` rungs and `ac-browser*`) carries `maxTurns: 150`, the Claude Code turn limit (documented as supported for plugin agents; at the limit the parent gets the partial output back). A live spawn test was not possible here (headless auth expired). The limit also applies to `long-autonomous-run` agents, which can no longer exceed 150 turns per spawn, and ladder agents can no longer reach the 300-turn `runaway_turns` note.
 - **Scope rule in briefs.** The spawn guard appends one short clause by `TYPE:` (else `ROLE:`): writers are told to build the smallest change and to report before creating anything the brief does not name; lookup, research, survey, explore and verify briefs are told to create no new files beyond the requested output. Reviews and other types get none (`hooks/lib/scope-rule.mjs`).
 - **Self-review question.** Step 1 of the self-review protocol, in the generated block of the rungs that carry it and in the copy the spawn guard appends, now first lists anything built that the brief did not ask for, to remove or flag to the lead.
 
