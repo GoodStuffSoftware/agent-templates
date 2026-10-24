@@ -135,8 +135,15 @@ test('BUDGET: <n> sets the stop, the warning at 80% of it', () => {
   } finally { fx.cleanup(); }
 });
 
-test('a prose Budget line with no number right after the label declares nothing', () => {
-  assert.deepEqual(briefStepInfo('TYPE: bounded-feature\nBudget: about 100 tool calls.'), { type: 'bounded-feature', budget: null });
+test('only a plain step count is a BUDGET: units, thousands separators, decimals and tiny numbers declare nothing', () => {
+  const b = (line) => briefStepInfo(`TYPE: bounded-feature\n${line}\nbuild it`).budget;
+  assert.equal(b('Budget: about 100 tool calls.'), null);
+  for (const [line, want] of [
+    ['BUDGET: 100', 100], ['BUDGET: 100 tool calls', 100], ['**BUDGET:** 90 steps.', 90], ['budget: 60 turns', 60], ['BUDGET: 10', 10],
+  ]) assert.equal(b(line), want, line);
+  for (const line of ['BUDGET: 1,000 tool calls', 'BUDGET: 2.5 hours', 'BUDGET: 30 minutes', 'BUDGET: 50% of context', 'BUDGET: 5 USD', 'BUDGET: 1', 'BUDGET: 9', 'BUDGET: 0', 'BUDGET: 12345']) {
+    assert.equal(b(line), null, line);
+  }
 });
 
 test('warn once: the second call past the line is silent', () => {
@@ -228,6 +235,20 @@ test('second compaction: the first only warns the context way, the second stops 
     assert.equal(denied(run(lead, ctxOn)), true);
     assert.equal(denied(run(lead, ctxOn, { tool_name: 'Write', tool_input: { file_path: 'x-detail.md', content: 'x' } })), false);
     assert.equal(readFileSync(counterFile(), 'utf8').length, 4);
+  } finally { fx.cleanup(); }
+});
+
+test('second compaction stops the helper even with the context notice off, and writes no context telemetry', () => {
+  const fx = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fx);
+    appendFileSync(agentFile, boundary('b1') + turn('r2'));
+    assert.equal(denied(run(lead)), false);
+    appendFileSync(agentFile, boundary('b2') + turn('r3'));
+    const r = run(lead); // OFF_CTX: subagent_context_notice_tokens 0
+    assert.equal(denied(r), true);
+    assert.equal(existsSync(join(telemetryDir(), 'subagent-context.jsonl')), false);
+    assert.equal(readJsonl(join(telemetryDir(), 'denials.jsonl')).at(-1).guard, 'step-budget');
   } finally { fx.cleanup(); }
 });
 

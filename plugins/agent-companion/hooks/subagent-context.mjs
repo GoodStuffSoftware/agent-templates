@@ -27,10 +27,10 @@
 // "mid-run") and to the agent's events file, which hooks/runaway-check.mjs
 // reads at SubagentStop to tell the lead.
 
-import { readStdin, opt, passthrough, deny, callerIsSubagent, appendLog } from './lib/context.mjs';
+import { readStdin, opt, passthrough, deny, recordDenial, callerIsSubagent, appendLog } from './lib/context.mjs';
 import { resolveAgentTranscript } from './lib/runaway.mjs';
 import {
-  CONTEXT_DEFAULT_TOKENS, readContextSignal, claimSignals, recordEvent, readEvents, subagentNoticeText, pruneContextState,
+  CONTEXT_DEFAULT_TOKENS, readContextSignal, claimSignals, recordEvent, subagentNoticeText, pruneContextState,
 } from './lib/subagent-context.mjs';
 import {
   CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
@@ -47,7 +47,7 @@ try {
   if (!(threshold > 0) && !(ceiling > 0) && !stepsOn) passthrough();
 
   const path = resolveAgentTranscript(p);
-  const wantCtx = threshold > 0 || ceiling > 0;
+  const wantCtx = threshold > 0 || ceiling > 0 || stepsOn; // the step budget counts compactions itself
   const sig = wantCtx ? readContextSignal(path) : null;
   const kinds = threshold > 0 ? claimSignals(p.agent_id, sig, threshold, { fresh: true }) : [];
   const nudge = ceilingCheck(p, sig, { ceiling, repeat });
@@ -69,11 +69,13 @@ try {
   // has compacted twice is stopped the same way.
   let step = null;
   if (stepsOn) {
-    const compactions = readEvents(p.agent_id).filter((e) => e.kind === 'compaction' && e.phase === 'mid-run').length;
-    step = stepBudgetCheck(p, { transcript: path, compactions });
+    step = stepBudgetCheck(p, { transcript: path, sig });
     if (step) appendLog(STEP_LOG, step.row);
   }
-  if (step && step.deny) deny(step.deny);
+  if (step && step.deny) {
+    recordDenial('step-budget', p, `${step.row.why} at ${step.row.steps} steps`);
+    deny(step.deny);
+  }
 
   const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : '', step ? step.warn : '']
     .filter(Boolean).join('\n');

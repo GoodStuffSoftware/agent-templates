@@ -17,7 +17,8 @@
 // <lead dir>/<session_id>/subagents/agent-<id>.jsonl):
 //   - TYPE: lookup | research | survey | explore | verify -> warn 40, stop 60;
 //   - any other TYPE, or none -> warn 80, stop 120 (the writer caps);
-//   - a `BUDGET: <n>` line sets the stop value; the warning is at 80% of it.
+//   - a `BUDGET: <n>` line (10 to 9999, optional calls/steps/turns unit, nothing else on the
+//     line) sets the stop value; the warning is at 80% of it.
 // All five numbers are options (step_budget_*; step_budget off disables the lot).
 //
 // Counting. One byte appended to state/step-budget/<agent>.cnt per call; the
@@ -27,9 +28,9 @@
 // The deny starts with the first call after the stop value has been reached:
 // with a stop of 120, calls 1 to 120 run and call 121 is refused.
 //
-// A helper that compacts a SECOND time is stopped the same way: the caller
-// passes the compactions subagent-context.mjs has recorded for it, and a sticky
-// marker keeps the stop on afterwards.
+// A helper that compacts a SECOND time is stopped the same way: the compaction
+// signal subagent-context.mjs already reads is counted here (state/step-budget/<agent>.cmp),
+// independent of the context notice, and a sticky marker keeps the stop on afterwards.
 //
 // The deny lets one kind of call through: writing a report or detail file
 // (Write/Edit of a .md/.txt/.json/.csv file whose name says report, detail,
@@ -40,7 +41,7 @@
 import { openSync, fstatSync, readSync, closeSync, mkdirSync, appendFileSync, statSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { opt, stateDir } from './context.mjs';
-import { claimOnce } from './subagent-context.mjs';
+import { claimOnce, BOUNDARY_FRESH_TURNS } from './subagent-context.mjs';
 import { briefDeclarations, declarationValue } from './brief-directives.mjs';
 import { safe } from './runaway.mjs';
 
@@ -49,6 +50,7 @@ export const STEP_STOP_DEFAULT = 120;
 export const STEP_LOOKUP_WARN_DEFAULT = 40;
 export const STEP_LOOKUP_STOP_DEFAULT = 60;
 export const STEP_LOG = 'step-budget.jsonl';
+export const BUDGET_MIN = 10;
 export const LOOKUP_TYPES = ['lookup', 'research', 'survey', 'explore', 'verify'];
 export const STOP_REASON = 'Step budget reached: write your report now and stop.';
 const BRIEF_HEAD_BYTES = [64 * 1024, 1024 * 1024];
@@ -93,9 +95,11 @@ export function readBrief(path) {
 export function briefStepInfo(brief) {
   const decls = briefDeclarations(String(brief || ''));
   const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
-  const bm = declarationValue(decls, 'BUDGET', /(\d{1,6})\b/.source);
+  // Digits, optionally followed by a call unit, and nothing else on the line: "BUDGET: 1,000 tool calls",
+  // "2.5 hours" or "30 minutes" are not step budgets and declare nothing. Under BUDGET_MIN is ignored too.
+  const bm = declarationValue(decls, 'BUDGET', /(\d{1,4})(?:[ \t]*(?:tool[ -]?)?(?:calls?|steps?|turns?))?[ \t]*\.?[ \t]*$/.source);
   const budget = bm ? Number(bm[1]) : null;
-  return { type: tm ? tm[1].toLowerCase() : null, budget: budget > 0 ? budget : null };
+  return { type: tm ? tm[1].toLowerCase() : null, budget: budget >= BUDGET_MIN ? budget : null };
 }
 
 // { warn, stop, kind } for a brief. A stop <= 0 means no hard stop for the class.
@@ -136,6 +140,23 @@ export function isReportWrite(toolName, toolInput) {
   return REPORT_EXT.test(name) && REPORT_NAME.test(name);
 }
 
+// The helper's compactions, counted here (a one-byte-per-compaction file) so the second-compaction
+// stop does not depend on the context notice being on. A boundary is counted once, when it is just
+// behind the helper (the same freshness the context notice uses); returns the count so far.
+function countCompaction(agentId, sig) {
+  try {
+    const f = join(budgetDir(), `${safe(agentId)}.cmp`);
+    if (sig && sig.boundary && sig.turnsAfterBoundary <= BOUNDARY_FRESH_TURNS
+      && claimOnce(`budget-compact-${agentId}-${sig.boundary.id}`)) {
+      mkdirSync(budgetDir(), { recursive: true });
+      appendFileSync(f, '.');
+    }
+    return existsSync(f) ? statSync(f).size : 0;
+  } catch {
+    return 0;
+  }
+}
+
 const stopMarker = (agentId) => join(budgetDir(), `${safe(agentId)}.stop`);
 
 // The compaction stop is sticky: once a helper has compacted twice, every later call is stopped.
@@ -160,10 +181,11 @@ export const warnText = (n, m) => `[agent-companion] ${n} of ${m} steps used: fi
 // The whole check for one helper tool call. `compactions` is how many compactions
 // subagent-context.mjs has recorded for this agent (including one found on this
 // very call). Returns null (nothing to do), { warn: text, row } or { deny: reason, row }.
-export function stepBudgetCheck(p, { transcript, compactions = 0 }) {
+export function stepBudgetCheck(p, { transcript, sig = null }) {
   if (!opt('step_budget', true) || !p.agent_id || !transcript) return null;
   const brief = readBrief(transcript);
   if (!brief) return null; // brief unreadable: not a helper this guard understands
+  const compactions = countCompaction(p.agent_id, sig);
   const info = briefStepInfo(brief);
   const caps = capsFor(info);
   const n = countCall(p.agent_id);
