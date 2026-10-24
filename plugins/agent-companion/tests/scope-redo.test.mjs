@@ -224,10 +224,12 @@ function spawn(dir, prompt, sid = 'lead-sess-2') {
 }
 const noteIn = (r) => String(r.json?.hookSpecificOutput?.additionalContext || '').includes(REDO_NOTE);
 
-test('redo alert: a task that ended partial, spawned again with a re-sent brief, gets the note', () => {
+test('redo alert: two earlier runs (one partial), spawned a third time with a re-sent brief, gets the note; one partial run does not', () => {
   const { dir, cleanup } = makeFixture();
   try {
     runHelper(dir, BRIEF_A, 'h1', 'partial');
+    assert.ok(!noteIn(spawn(dir, BRIEF_A_RESENT)), 'one partial run is a normal handoff');
+    runHelper(dir, BRIEF_A, 'h1b', 'partial');
     const r = spawn(dir, BRIEF_A_RESENT);
     assert.equal(r.status, 0, r.stderr);
     assert.notEqual(decisionOf(r.json), 'deny', r.stdout);
@@ -242,7 +244,8 @@ test('redo alert: distinct tasks of the same type and boilerplate never match', 
     runHelper(dir, BRIEF_A, 'h1', 'partial');
     runHelper(dir, BRIEF_B, 'h2', 'partial');
     assert.ok(!noteIn(spawn(dir, BRIEF_C)), 'C vs A+B');
-    assert.ok(noteIn(spawn(dir, BRIEF_B.replace('three cases', 'four cases'))), 'control: a lightly edited B matches B');
+    runHelper(dir, BRIEF_B, 'h3', 'partial');
+    assert.ok(noteIn(spawn(dir, BRIEF_B.replace('three cases', 'four cases'))), 'control: a lightly edited B matches the two B runs');
   } finally { cleanup(); }
 });
 
@@ -261,7 +264,8 @@ test('redo alert: not for a review (it quotes the writer brief), a different TYP
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     runHelper(dir, BRIEF_A, 'h1', 'partial');
-    const review = `TYPE: code-review\nROLE: reviewer\n\nReview this change against the brief below.\n\n${BRIEF_A}`;
+    runHelper(dir, BRIEF_A, 'h1b', 'partial');
+    const review =`TYPE: code-review\nROLE: reviewer\n\nReview this change against the brief below.\n\n${BRIEF_A}`;
     assert.ok(!noteIn(spawn(dir, review)), 'review');
     assert.ok(!noteIn(spawn(dir, BRIEF_A_RESENT.replace('TYPE: bounded-feature', 'TYPE: integration'))), 'other type');
     const sub = runHook('hooks/spawn-guard.mjs', {
@@ -294,6 +298,8 @@ test('redoNote: pure check over a ledger directory', () => {
     writeFileSync(join(dir, 's1.jsonl'), `${row('x1', 'done')}\n`);
     assert.equal(redoNote(BRIEF_A_RESENT), null);
     writeFileSync(join(dir, 's1.jsonl'), `${row('x1', 'partial')}\n`);
+    assert.equal(redoNote(BRIEF_A_RESENT), null);
+    writeFileSync(join(dir, 's1.jsonl'), `${row('x1', 'partial')}\n${row('x2', 'partial')}\n`);
     assert.equal(redoNote(BRIEF_A_RESENT), REDO_NOTE);
     // The same agent id twice is one run.
     writeFileSync(join(dir, 's1.jsonl'), `${row('x1', 'done')}\n${row('x1', 'done')}\n`);

@@ -2,6 +2,14 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.34 — 2026-10-23
+
+Phase 2 of the token bleed guard, parts D and E: a new-file tripwire for helpers and a redo alert for the lead.
+
+- **New-file tripwire.** `hooks/scope-tripwire.mjs` (PreToolUse on `Write`, logic in `hooks/lib/scope-tripwire.mjs`) counts, per `agent_id`, the new files a helper writes that its brief does not name. `TYPE:` `lookup`, `research`, `survey`, `explore` or `verify` briefs are denied at the first one (`Your brief asks for no new files: report the proposal instead.`); writers get a one-time note at the third and a deny at the fourth (`Check in with the lead before building more beyond the brief.`). Never counted: a file the brief names (path, file name or directory), `<task>-detail.*` and `*handoff*` files (the context-ceiling notice asks every helper for one), the helper's scratchpad, overwrites of existing files, the lead, and briefs with no `TYPE`/`ROLE` or of review and operate types. Options `scope_tripwire` (on), `scope_tripwire_lookup_deny`, `scope_tripwire_writer_note`, `scope_tripwire_writer_deny`. Rows in `telemetry/scope-tripwire.jsonl` (docs/TELEMETRY.md); state in `state/scope-tripwire/<agent_id>.json`.
+- **Redo alert.** `hooks/lib/redo-alert.mjs` and `hooks/lib/brief-match.mjs`. SubagentStop worker-ledger rows now carry `bfp` (a 96-hash word sketch of the brief, no text) and `bty` (its `TYPE`). When the lead spawns a helper whose brief has the same `TYPE` and at least 0.5 word-set similarity to two or more earlier runs in the last 24 hours (every session's ledger; one run per agent id; reviews never match), the spawn gets one note: `third attempt at this task: re-brief it or move it up a rung instead of retrying`. A single earlier partial run is a normal handoff and stays silent (lead decision: fires at the third attempt, not after one partial). Option `redo_alert` (on). Advisory only.
+- Reverse: `scope_tripwire` or `redo_alert` false, or revert the commit; to alert after one earlier run, use `runs.length >= 1` in `redoNote()`.
+
 ## 0.31.33 — 2026-10-23
 
 Phase 2 of the token bleed guard, part C: a live step budget for helpers.

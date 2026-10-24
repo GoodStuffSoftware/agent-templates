@@ -1,6 +1,6 @@
 // Redo alert (token bleed guard, phase 2, part E). When the lead spawns a helper whose brief
-// closely matches a task that already ended STATUS: partial, or that was already run twice,
-// in the last 24 hours, the spawn gets one note for the lead: re-brief it or move it up a
+// closely matches two or more earlier runs of the same task in the last 24 hours (a third
+// attempt), the spawn gets one note for the lead: re-brief it or move it up a
 // rung instead of retrying.
 //
 // Data: the worker ledger (state/worker-ledger/<session>.jsonl, lib/advisory-b.mjs). Each
@@ -82,11 +82,11 @@ export function matchingRuns(text, { now = Date.now(), windowMs = REDO_WINDOW_MS
   return [...seen.values()];
 }
 
-// The note, or null: a close match ended partial, or the task has already run twice.
+// The note, or null: two or more earlier close matches. One earlier partial run is a normal handoff.
 export function redoNote(text, opts = {}) {
   try {
     const runs = matchingRuns(text, opts);
-    if (runs.length >= 2 || runs.some((r) => r.status === 'partial')) return REDO_NOTE;
+    if (runs.length >= 2) return REDO_NOTE;
   } catch { /* advisory */ }
   return null;
 }
