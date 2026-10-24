@@ -596,7 +596,7 @@
     "redo_alert": {
       "type": "boolean",
       "title": "Redo alert",
-      "description": "When the lead spawns a helper whose brief closely matches a task that ended STATUS: partial, or that already ran twice, in the last 24 hours (same TYPE, word-set similarity of at least 0.5, from the worker ledger), add one note for the lead: third attempt at this task: re-brief it or move it up a rung instead of retrying. Reviews are never matched. Advisory only; never blocks.",
+      "description": "When the lead spawns a helper whose brief closely matches two or more earlier runs of the same task (a third attempt) in the last 24 hours; one earlier partial run stays silent (same TYPE, word-set similarity of at least 0.5, from the worker ledger), add one note for the lead: third attempt at this task: re-brief it or move it up a rung instead of retrying. Reviews are never matched. Advisory only; never blocks.",
       "default": true
     },
     "read_dedupe": {

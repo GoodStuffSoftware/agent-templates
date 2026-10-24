@@ -75,6 +75,12 @@ test('tripwire: never counted - a file the brief names, the detail and handoff f
     // A brief that names a directory covers files under it.
     const dirBrief = `${LOOKUP_BRIEF}\nPut the output under reports/out/.`;
     assert.equal(decisionOf(writeFile(dir, 'a3', dirBrief, join(dir, 'reports', 'out', 'x.md')).json), null);
+    // Naming a file in a directory is not naming the directory.
+    assert.equal(decisionOf(writeFile(dir, 'a4', LOOKUP_BRIEF, join(dir, 'src', 'gateway', 'probe.mjs')).json), 'deny');
+    assert.equal(decisionOf(writeFile(dir, 'a5', WRITER_BRIEF, join(dir, 'scripts', 'extra-a.mjs')).json), null);
+    writeFile(dir, 'a5', WRITER_BRIEF, join(dir, 'scripts', 'extra-b.mjs'));
+    writeFile(dir, 'a5', WRITER_BRIEF, join(dir, 'scripts', 'extra-c.mjs'));
+    assert.equal(decisionOf(writeFile(dir, 'a5', WRITER_BRIEF, join(dir, 'scripts', 'extra-d.mjs')).json), 'deny');
   } finally { cleanup(); }
 });
 

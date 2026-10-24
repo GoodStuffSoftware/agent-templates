@@ -5,7 +5,7 @@
 // (1), scope_tripwire_writer_note (3), scope_tripwire_writer_deny (4). Each note or deny is one row
 // in telemetry/scope-tripwire.jsonl. Fails open.
 
-import { readStdin, opt, passthrough, deny, callerIsSubagent, appendLog } from './lib/context.mjs';
+import { readStdin, opt, passthrough, deny, callerIsSubagent, appendLog, recordDenial } from './lib/context.mjs';
 import { checkNewFile, DEFAULTS } from './lib/scope-tripwire.mjs';
 
 try {
@@ -21,7 +21,10 @@ try {
   });
   if (r.action === 'pass') passthrough();
   appendLog('scope-tripwire.jsonl', { at: new Date().toISOString(), session_id: p.session_id, action: r.action, ...r.row });
-  if (r.action === 'deny') deny(r.reason);
+  if (r.action === 'deny') {
+    try { recordDenial('scope-tripwire', p, r.reason); } catch { /* telemetry never blocks */ }
+    deny(r.reason);
+  }
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: r.note },
   }));

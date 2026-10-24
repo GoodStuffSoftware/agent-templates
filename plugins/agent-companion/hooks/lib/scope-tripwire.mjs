@@ -75,7 +75,14 @@ export function isNamedOrExempt(filePath, cwd, brief, scratchDir = '') {
   if (rel && !rel.startsWith('..')) {
     let d = norm(dirname(rel));
     while (d && d !== '.' && d !== '/') {
-      if (text.includes(`${d.toLowerCase()}/`)) return true;
+      // At a path boundary: "scripts/" inside "x/scripts/prune.mjs" or "myscripts/" is not it.
+      const needle = `${d.toLowerCase()}/`;
+      for (let i = text.indexOf(needle); i !== -1; i = text.indexOf(needle, i + 1)) {
+        if (i === 0 || !/[a-z0-9._/-]/.test(text[i - 1])) {
+          // A brief that names a FILE in that directory names the file, not the directory.
+          if (!/^[^\s`'")\],;]+\.[a-z0-9]+/.test(text.slice(i + needle.length))) return true;
+        }
+      }
       const up = norm(dirname(d));
       if (up === d) break;
       d = up;
