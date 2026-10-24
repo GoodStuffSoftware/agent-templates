@@ -107,7 +107,7 @@ export function pruneState(now = Date.now()) {
     const gate = join(stateDir(), 'advisory-prune.stamp');
     try { if (now - statSync(gate).mtimeMs < PRUNE_EVERY_MS) return; } catch { /* first run */ }
     writeFileSync(gate, String(now));
-    for (const d of ['worker-ledger', 'peer-warned', 'peer-known', 'overdue-flagged', 'live-sessions']) pruneOld(d);
+    for (const d of ['worker-ledger', 'peer-warned', 'peer-known', 'overdue-flagged', 'live-sessions', 'keep-warm']) pruneOld(d);
   } catch { /* best effort */ }
 }
 

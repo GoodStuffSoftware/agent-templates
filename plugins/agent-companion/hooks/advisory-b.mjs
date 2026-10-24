@@ -1,5 +1,5 @@
 // Advisory notes for a lead session: live sessions (F9), peer-message warning
-// (F10), overdue worker (F14), shared resources line (resource queue). Logic in lib/advisory-b.mjs. Never blocks, adds
+// (F10), overdue worker (F14), shared resources line (resource queue), keep-warm (lib/keep-warm.mjs). Logic in lib/advisory-b.mjs. Never blocks, adds
 // no tokens unless a note fires, starts no child process, fails open.
 //   --event session-start   F9 (SessionStart)
 //   --event user-prompt     F9 when the set changed, F14 (UserPromptSubmit)
@@ -10,6 +10,7 @@
 
 import { readStdin, opt, passthrough, callerIsSubagent, sessionIsSubagent } from './lib/context.mjs';
 import { sharedResourcesNote, ensureLauncher } from './lib/resource-line.mjs';
+import { keepWarmToolNote, keepWarmPingNote, KEEP_WARM_MAX_DEFAULT_MIN } from './lib/keep-warm.mjs';
 import {
   ledgerWrite, workerStatus, taskStopWrite, pruneState, overdueNotices, peerMessageNote, parseKnownPeers, liveSessionsNote, parseRelated, OVERDUE_DEFAULT_MINUTES,
 } from './lib/advisory-b.mjs';
@@ -50,6 +51,15 @@ try {
   if (EVENT === 'tick' || EVENT === 'user-prompt' || EVENT === 'session-start') {
     if (EVENT === 'session-start') pruneState();
     const parts = [];
+    // Keep-warm: while background helpers run, the lead is told to arm one wakeup inside its cache window
+    // (after a background spawn) and, at each ping, whether to re-arm. Lead only; one small state file.
+    if (opt('keep_warm', true) && !sessionIsSubagent(p)) {
+      try {
+        const maxMinutes = opt('keep_warm_max_minutes', KEEP_WARM_MAX_DEFAULT_MIN);
+        const n = EVENT === 'tick' ? keepWarmToolNote(p, { maxMinutes }) : EVENT === 'user-prompt' ? keepWarmPingNote(p, { maxMinutes }) : null;
+        if (n) parts.push(n);
+      } catch { /* advisory */ }
+    }
     if (EVENT !== 'tick' && wantF9 && !sessionIsSubagent(p)) {
       try {
         const n = liveSessionsNote(p, { related: parseRelated(opt('related_repos', '')), mode: EVENT === 'session-start' ? 'start' : 'change' });

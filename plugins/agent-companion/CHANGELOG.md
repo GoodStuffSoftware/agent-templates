@@ -2,6 +2,13 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.32 — 2026-10-23
+
+Phase 1 of the token bleed guard, part A (lead sessions): keep a lead warm while its helpers run, and count the leads.
+
+- **Keep-warm (`keep_warm`, `keep_warm_max_minutes`).** A week of transcripts put 12.8% of the weekly limit on big lead conversations re-read in full after the 1-hour prompt cache expired, 6 to 12 points of it avoidable. After a background `Agent` spawn the lead gets one note (only when no wakeup is pending) to arm ONE wakeup 55 minutes out (`ScheduleWakeup` 3300 s, prompt `keep-warm ping`; a one-shot `CronCreate` when it has no `ScheduleWakeup`). When the ping arrives the hook decides: helpers still running and fewer than 3 pings (55, 110, 165 minutes) = re-arm one more; none running = do not re-arm; cap reached = let go. No ping while nothing runs, no polling loop (the poll guard stays satisfied: 3300 s is above its 600 s line, and a test runs it with three no-op wakes on record), a new background spawn starts the count over. A one-shot ping costs about 1/9 of the rebuild it prevents (0.13 u against 1.14 u at 200K on opus, from the 10-17 simulation, which also found a 3 h cap saves the most); a test pins that three pings stay under one rebuild. No handoff advice (0.31.30 measured no saving). Claude Code 2.1.304 fixed 1-hour wakeups firing just after the cache expired; the 5-minute margin covers older builds. Implemented in the existing `PostToolUse` tick and `UserPromptSubmit` of `advisory-b.mjs` (no new hook process); state in `state/keep-warm/<session>.json`, pruned with the other advisory state.
+- **Lead count on the session line.** The `Shared resources:` line now counts the orchestration sessions on this machine (a session with a helper spawn in the last hour, from `state/worker-ledger/`): from two it shows `leads active (helper spawn in the last hour): N`, even with an idle queue, and above 4 it adds `More than 4 leads active: each extra lead adds cold re-reads of its whole conversation.` The prompt-time line comes back only when the count crosses 2 or 4. Option `shared_resources_line` still turns it off. Tests: `tests/keep-warm.test.mjs`.
+
 ## 0.31.30 — 2026-10-18
 
 - **Session budget notice (handover-lessons).** The notice no longer recommends a hand-off to a fresh session (measured: no usage saving); it says auto-compaction handles context, lists what cuts spend, and allows a hand-over only for a plugin version change or job end. (Repo) leak-check fails new or changed lessons over 150 words; unchanged long lessons are grandfathered by a digest baseline (`scripts/lesson-baseline.json`).
