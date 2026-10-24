@@ -9,6 +9,7 @@
 //   --event task-stop       ledger stop row (PostToolUse TaskStop)
 
 import { readStdin, opt, passthrough, callerIsSubagent, sessionIsSubagent } from './lib/context.mjs';
+import { briefLedgerFields } from './lib/redo-alert.mjs';
 import { sharedResourcesNote, ensureLauncher } from './lib/resource-line.mjs';
 import { keepWarmToolNote, keepWarmPingNote, KEEP_WARM_MAX_DEFAULT_MIN } from './lib/keep-warm.mjs';
 import {
@@ -32,7 +33,7 @@ try {
   if (EVENT === 'worker-start' || EVENT === 'worker-stop') {
     if (wantF14 || wantF10) {
       if (EVENT === 'worker-start') ledgerWrite(p.session_id, 'start', p);
-      else ledgerWrite(p.session_id, 'stop', p, Date.now(), { status: workerStatus(p) });
+      else ledgerWrite(p.session_id, 'stop', p, Date.now(), { status: workerStatus(p), ...briefLedgerFields(p) });
     }
     passthrough();
   }

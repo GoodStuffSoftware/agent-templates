@@ -67,6 +67,7 @@ import { buildContract, noteContractAppended } from './lib/brevity.mjs';
 import { buildScopeClause } from './lib/scope-rule.mjs';
 import { matchRules, renderRules } from './lib/rules.mjs';
 import { leadEffortLive, mergeLeadEffort } from './lib/lead-effort-live.mjs';
+import { redoAlertCheck, mergeRedoAlert } from './lib/redo-alert.mjs';
 import {
   buildCandidateName, sessionSpawnNames, reserveUniqueName, buildNamegateBrief,
 } from './lib/namegate.mjs';
@@ -94,6 +95,7 @@ const RECOMMEND_CMD = (() => {
 // model fill-in does not need one.
 function allowWith(systemMessage, updatedInput, additionalContext) {
   ({ systemMessage, additionalContext } = mergeLeadEffort(systemMessage, additionalContext)); // lead-effort live check (text only)
+  additionalContext = mergeRedoAlert(additionalContext); // redo alert (text only; lib/redo-alert.mjs)
   // Text that is empty or only whitespace is no text. When there is nothing at
   // all to say or change, emit nothing: a bare {hookSpecificOutput:
   // {hookEventName}} object shows the lead an empty "PreToolUse:Agent says:".
@@ -481,6 +483,7 @@ try {
   const callerModel = (callerMeta && callerMeta.model) || null;
   const callerEffort = p.effort?.level || (callerMeta && callerMeta.effort) || null;
   const leadLive = leadEffortLive({ sid, subagentCaller, callerEffort, isCanary }); // telemetry fields; text goes out via allowWith
+  redoAlertCheck({ p, brief, isCanary, enabled: opt('redo_alert', true) }); // held until an allow is emitted (allowWith)
   let writerInferred = null;     // the caller-derived writer, while it is the one in use
   let writerInferProblem = null; // why inference was tried and yielded no writer
   // What the calling subagent was seen running, for inference: its model only
