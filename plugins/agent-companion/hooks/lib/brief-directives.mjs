@@ -45,13 +45,29 @@
 // caller's regex source, applied to what follows the colon exactly as the
 // single-regex form did before.
 
-export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'WRITER', 'EFFORT', 'REVIEW', 'ROLE', 'REASON', 'BUDGET'];
+export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'WRITER', 'EFFORT', 'REVIEW', 'ROLE', 'REASON', 'BUDGET', 'PREMIUM'];
 
 // ROLE: names what the spawn's main deliverable is, for usage measurement only
 // (0.31.3). It routes nothing and gates nothing; the spawn guard reads it to
 // record declared_role and to nudge when it is missing. The vocabulary is the
 // one the usage study's role classifier uses (spawn-roles-v2.mjs).
 export const BRIEF_ROLES = ['reviewer', 'fixer', 'lander', 'writer', 'docs', 'lookup', 'operate', 'other'];
+
+// The ROLE a brief with no ROLE: line gets (0.31.36), from its task type: the spawn guard inserts it
+// silently. Lookup-class types read and report; code-review is a reviewer; the types that
+// build or change something are writers; everything else (operate, no TYPE, an unknown TYPE) is other.
+const LOOKUP_ROLE_TYPES = new Set(['lookup', 'research', 'survey', 'explore', 'verify']);
+const WRITER_ROLE_TYPES = new Set([
+  'bounded-feature', 'bounded-feature-small', 'mechanical-edit', 'integration', 'debug-root-cause',
+  'large-refactor', 'novel-design', 'critical-change', 'long-autonomous-run', 'subagent-worker',
+]);
+export function inferRole(type) {
+  const t = String(type || '').toLowerCase();
+  if (t === 'code-review') return 'reviewer';
+  if (LOOKUP_ROLE_TYPES.has(t)) return 'lookup';
+  if (WRITER_ROLE_TYPES.has(t)) return 'writer';
+  return 'other';
+}
 
 const BOLD = '(?:\\*\\*|__)?';
 const LINE = new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?${BOLD}(${DIRECTIVE_LABELS.join('|')})${BOLD}[ \\t]*:(.*)$`, 'i');

@@ -4,6 +4,9 @@
 // it warm for the price of about 1/9 of that rebuild (r-keepwarm-sim-1017: one-shot ping 0.13 u against a
 // 1.14 u rebuild premium at 200K context; one-shot pings at 55 min capped at 3 h saved the most).
 //
+// 0.31.36: the arm note is one line under 160 characters and only on the transition from no helper to a helper running
+// (PostToolUse updatedToolOutput, which would keep it out of the chat, was not confirmed for Agent: see CHANGELOG).
+//
 // The mechanism is hook-driven and costs the lead nothing until a helper is spawned in the background:
 //   1. PostToolUse of a background Agent spawn: when no wakeup is pending, one note tells the lead to arm
 //      ONE wakeup 55 min out (CronCreate one-shot, recurring false, prompt "[ac-keep-warm] ping"; ScheduleWakeup
@@ -63,9 +66,9 @@ export function isBackgroundSpawn(p) {
   return input.run_in_background === true || resp.status === 'async_launched' || resp.isAsync === true;
 }
 
-function running(p, now) {
+function running(p, now, exceptId = null) {
   const workers = readWorkers(p.session_id, { transcriptPath: p.transcript_path, now });
-  const ids = [...workers].filter(([, w]) => w.running).map(([id]) => id);
+  const ids = [...workers].filter(([id, w]) => w.running && id !== exceptId).map(([id]) => id);
   if (!ids.length) return [];
   let names = new Map();
   try { names = agentNames(p.transcript_path, p.session_id); } catch { /* names are a courtesy */ }
@@ -74,10 +77,10 @@ function running(p, now) {
 
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
-function armText(n) {
-  return `Keep-warm: ${plural(n, 'background helper')} running. Past 1 hour idle this session's prompt cache expires and the next turn re-reads the whole conversation at full price. ` +
-    `Arm ONE wakeup now, 55 minutes out: CronCreate with recurring false, a cron for the minute 55 minutes from now in local time (now + 55 minutes), and prompt "${KEEP_WARM_PROMPT}" (load it with ToolSearch if it is deferred; where ScheduleWakeup exists, delaySeconds ${KEEP_WARM_DELAY_S} and the same prompt also works). ` +
-    'Arm no second one and never poll: a helper finishing wakes you anyway. On the ping reply "ok" in one word, and re-arm only when the keep-warm note tells you to.';
+// One short line (under 160 characters): it reaches the lead as additionalContext, which the app shows.
+// 0.31.36: the full instruction is gone; the ping notes below still carry the re-arm wording.
+export function armText(n) {
+  return `Keep-warm: ${plural(n, 'helper')} running. Arm ONE CronCreate wakeup 55 min out (recurring false, prompt "${KEEP_WARM_PROMPT}"); the cache expires after 1 h idle.`;
 }
 
 /**
@@ -102,6 +105,10 @@ export function keepWarmToolNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_M
     const pending = Number(st.dueAt) > now;
     writeState(p.session_id, next);
     if (pending) return null;
+    // 0.31.36: told only on the 0-to-N helpers transition: another helper already running (this spawn's own
+    // agent id left out) means the lead has been told and a wakeup is its business.
+    const resp = p.tool_response && typeof p.tool_response === 'object' ? p.tool_response : {};
+    if (running(p, now, typeof resp.agentId === 'string' ? resp.agentId : null).length > 0) return null;
     // Exclusive create: a parallel batch of spawns gets one note, not several.
     if (!claimOnce('keep-warm-told', p.session_id, Math.floor(now / INSTRUCT_DEDUPE_MS))) return null;
     // The spawn's own SubagentStart row may not be written yet: at least this one helper is running.
