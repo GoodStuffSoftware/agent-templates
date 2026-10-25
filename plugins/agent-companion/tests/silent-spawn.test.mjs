@@ -149,6 +149,13 @@ test('over-provisioned rung: a PREMIUM: line, fit_over_autofix off, an unregiste
   assert.notEqual(prem.ui?.subagent_type, 'agent-companion:ac-sonnet-low');
   assert.equal(prem.out.permissionDecision, undefined, 'PREMIUM also skips the over-provisioned deny');
   assert.ok(!(prem.row.silent_fixes || []).some((s) => s.startsWith('fit_over_rewrite')));
+  // A premium rung: a PREMIUM line alone keeps it and passes the warrant check too (review S2).
+  const opus = { subagent_type: 'agent-companion:ac-opus-high', name: 'w', run_in_background: true };
+  const keep = spawn({ ...opus, prompt: 'TYPE: bounded-feature\nPREMIUM: needs depth\nbuild x' }, { started: RUNGS });
+  assert.equal(keep.out.permissionDecision, undefined, 'PREMIUM alone is not denied by the warrant check');
+  assert.notEqual(keep.ui?.subagent_type, 'agent-companion:ac-sonnet-high');
+  const down = spawn({ ...opus, prompt: 'TYPE: bounded-feature\nbuild x' }, { started: RUNGS });
+  assert.equal(down.ui?.subagent_type, 'agent-companion:ac-sonnet-high', 'control: without PREMIUM the premium rung is rewritten down');
   const off = spawn({ ...base, prompt: brief }, { started: RUNGS, env: { CLAUDE_PLUGIN_OPTION_FIT_OVER_AUTOFIX: 'false' } });
   assert.notEqual(off.ui?.subagent_type, 'agent-companion:ac-sonnet-low');
   assert.equal(off.row.fit_before_fix, null);

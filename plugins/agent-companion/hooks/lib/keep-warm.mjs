@@ -129,12 +129,16 @@ export function keepWarmToolNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_M
     const pending = Number(st.dueAt) > now;
     writeState(p.session_id, next);
     if (pending) return null;
-    // 0.31.36: told only on the 0-to-N helpers transition: another helper already running (this spawn's own
-    // agent id left out) means the lead has been told and a wakeup is its business.
+    // 0.31.36: told only on the 0-to-N helpers transition. Another helper already running means the lead has
+    // been told, but only when the state says so (toldAt within one wakeup delay): a parallel batch whose starts
+    // all land before the first tick has every helper "running", and its first tick must still be the one that
+    // tells. This spawn's own agent id is left out of the count.
     const resp = p.tool_response && typeof p.tool_response === 'object' ? p.tool_response : {};
-    if (running(p, now, typeof resp.agentId === 'string' ? resp.agentId : null).length > 0) return null;
+    const toldRecently = Number(st.toldAt) > now - KEEP_WARM_DELAY_S * 1000;
+    if (toldRecently && running(p, now, typeof resp.agentId === 'string' ? resp.agentId : null).length > 0) return null;
     // Exclusive create: a parallel batch of spawns gets one note, not several.
     if (!claimOnce('keep-warm-told', p.session_id, Math.floor(now / INSTRUCT_DEDUPE_MS))) return null;
+    writeState(p.session_id, { ...next, toldAt: now });
     // The spawn's own SubagentStart row may not be written yet: at least this one helper is running.
     return armText(Math.max(1, running(p, now).length));
   } catch { return null; }

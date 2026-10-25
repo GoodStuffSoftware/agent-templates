@@ -2055,7 +2055,9 @@ try {
   // above): a premium reviewer its route does not name gets the soft note.
   // A pinned spawn needs none: the pin is the operator's own warrant.
   if (opt('warrant_required', true) && !pinned) {
-    if (!warrantDeclared) {
+    // A `PREMIUM: <reason>` line is the lead's stated justification too (0.31.36): it keeps the spawned premium
+    // rung past the fit rewrite, so it must also pass here.
+    if (!warrantDeclared && !premiumDeclared) {
       if (spawnAlias === 'fable' || (routingKnown && !parityRoute)) {
         recordDenial('warrant', p, `premium tier ${model} requested with no warrant`);
         deny(

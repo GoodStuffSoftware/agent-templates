@@ -65,11 +65,22 @@ describe('keep-warm', () => {
   test('0.31.36: the arm line is told only on the 0-to-N transition: another helper already running means no line', () => {
     const fx = makeFixture();
     try {
-      startWorker('other');
       startWorker('a1');
-      const r = run('tick', bgSpawn());
+      assert.match(ctx(run('tick', bgSpawn())), /Keep-warm: 1 helper running/, 'the first helper tells the lead');
+      startWorker('a2');
+      const r = run('tick', bgSpawn({ tool_response: { isAsync: true, status: 'async_launched', agentId: 'a2' } }));
       assert.equal(r.status, 0);
       assert.equal(ctx(r), '', 'a helper was already running: the lead has been told');
+    } finally { fx.cleanup(); }
+  });
+
+  test('0.31.36: a parallel batch whose starts all land before the first tick still gets exactly one line', () => {
+    const fx = makeFixture();
+    try {
+      for (const id of ['a1', 'a2', 'a3']) startWorker(id);
+      const notes = ['a1', 'a2', 'a3'].map((id) => ctx(run('tick', bgSpawn({ tool_response: { isAsync: true, status: 'async_launched', agentId: id } }))));
+      assert.equal(notes.filter(Boolean).length, 1, JSON.stringify(notes));
+      assert.match(notes[0], /Keep-warm: 3 helpers running/);
     } finally { fx.cleanup(); }
   });
 

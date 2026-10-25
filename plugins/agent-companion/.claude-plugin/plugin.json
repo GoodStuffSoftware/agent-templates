@@ -255,7 +255,7 @@
     "fit_over_autofix": {
       "type": "boolean",
       "title": "Rewrite an over-provisioned ladder rung silently",
-      "description": "When a spawn names an ac-* ladder rung that the best-fit check finds over-provisioned for its TYPE, rewrite subagent_type (and the model parameter, when the call set one) to the rung the routing table names, with no message; the spawn row records it (silent_fixes, fit_before_fix). Only to a rung the session has shown it registered (as fit_autofill_ladder does). A `PREMIUM: <reason>` line in the brief keeps the spawned rung and also skips the premium over-provisioned deny. Never rewrites a project pin, a reviewer on its parity route, or an under-provisioned spawn (that one is only logged). Off = the old behaviour: announce, or deny for a premium model.",
+      "description": "When a spawn names an ac-* ladder rung that the best-fit check finds over-provisioned for its TYPE, rewrite subagent_type (and the model parameter, when the call set one) to the rung the routing table names, with no message; the spawn row records it (silent_fixes, fit_before_fix). Only to a rung the session has shown it registered (as fit_autofill_ladder does). A `PREMIUM: <reason>` line in the brief keeps the spawned rung and also counts as the premium warrant (it skips the over-provisioned deny and the no-warrant deny). Never rewrites a project pin, a reviewer on its parity route, or an under-provisioned spawn (that one is only logged). Off = the old behaviour: announce, or deny for a premium model.",
       "default": true
     },
     "review_recursion_guard": {
