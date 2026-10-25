@@ -57,9 +57,20 @@ describe('keep-warm', () => {
       try {
         n += 1;
         const r = run('tick', { ...brief(head), session_id: `kw-long-${n}` });
-        assert.match(ctx(r), /Keep-warm: \d+ background helper/, `${head} arms`);
+        assert.match(ctx(r), /Keep-warm: \d+ helper/, `${head} arms`);
       } finally { fx.cleanup(); }
     }
+  });
+
+  test('0.31.36: the arm line is told only on the 0-to-N transition: another helper already running means no line', () => {
+    const fx = makeFixture();
+    try {
+      startWorker('other');
+      startWorker('a1');
+      const r = run('tick', bgSpawn());
+      assert.equal(r.status, 0);
+      assert.equal(ctx(r), '', 'a helper was already running: the lead has been told');
+    } finally { fx.cleanup(); }
   });
 
   test('a background spawn is told to arm ONE wakeup 55 min out; a foreground spawn is not', () => {
@@ -69,19 +80,18 @@ describe('keep-warm', () => {
       const r = run('tick', bgSpawn());
       const c = ctx(r);
       assert.equal(r.status, 0);
-      assert.match(c, /Keep-warm: 1 background helper running/);
-      assert.match(c, /CronCreate with recurring false/);
-      assert.ok(c.indexOf('CronCreate') < c.indexOf('ScheduleWakeup'), 'CronCreate is named first');
-      assert.match(c, /delaySeconds 3300/);
+      assert.match(c, /Keep-warm: 1 helper running/);
+      assert.match(c, /CronCreate wakeup 55 min out \(recurring false/);
       assert.match(c, /prompt "\[ac-keep-warm\] ping"/);
-      assert.match(c, /ONE wakeup/);
-      assert.match(c, /never poll/);
+      assert.match(c, /ONE/);
+      assert.ok(c.length < 160, `one short line (0.31.36), got ${c.length} chars`);
+      assert.ok(!c.includes('\n'), 'one line');
       assert.equal(r.json.hookSpecificOutput.hookEventName, 'PostToolUse');
       // The harness' own async acknowledgement alone is enough (no run_in_background in the input).
       const fx2 = makeFixture();
       try {
         const r2 = run('tick', bgSpawn({ session_id: 'kw-other', tool_input: { name: 'h2', prompt: 'x' } }));
-        assert.match(ctx(r2), /Keep-warm: 1 background helper running/, 'the ledger row may not exist yet: at least the new helper');
+        assert.match(ctx(r2), /Keep-warm: 1 helper running/, 'the ledger row may not exist yet: at least the new helper');
       } finally { fx2.cleanup(); }
     } finally { fx.cleanup(); }
     const fx3 = makeFixture();

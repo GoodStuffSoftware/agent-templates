@@ -57,7 +57,7 @@ import {
 } from './lib/context.mjs';
 
 import { buildMemoryBrief, buildMemoryNudge } from './lib/memory-brief.mjs';
-import { briefDeclarations, declarationValue, BRIEF_ROLES } from './lib/brief-directives.mjs';
+import { briefDeclarations, declarationValue, BRIEF_ROLES, inferRole } from './lib/brief-directives.mjs';
 import {
   selfReviewConfig, optedOut, isParityType, writerFromCaller, callerSpawnRow, definitionCarriesProtocol,
   injectionRung, pinnedInjectionRung, selfReviewBriefText, reviewerRungFor,
@@ -381,11 +381,13 @@ try {
   // line gets a short non-blocking nudge (role_line_nudge), NEVER a deny.
   const rm = declarationValue(decls, 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`);
   const declaredRole = rm ? rm[1].toLowerCase() : null;
-  const roleLineNudge = !declaredRole && opt('role_line_nudge', true)
-    ? 'agent-companion: this brief has no `ROLE:` line. Add one on its own line next to `TYPE:`: ' +
-      '`ROLE: <reviewer|fixer|lander|writer|docs|lookup|operate|other>`, the role of the main deliverable. ' +
-      'It tags the spawn for usage measurement only and changes no routing. Not blocking.'
+  // 0.31.36: no message. A brief with no usable ROLE: line gets one inserted through updatedInput
+  // (first line of the brief), inferred from its TYPE (inferRole). Measurement only: it routes nothing.
+  const roleInserted = !declaredRole && opt('role_line_nudge', true) && brief.trim()
+    ? inferRole(declaredType)
     : null;
+  const silentFixes = []; // what this guard fixed without a message, for the spawn row (silent_fixes)
+  if (roleInserted) silentFixes.push(`role_inserted:${roleInserted}`);
   // A TYPE: line that is no type (and no alias) routes and measures nothing:
   // say so once, naming the valid ones (type_line_nudge). Never a deny.
   const typeNudge = declaredTypeRaw && !canonicalTaskType(declaredTypeRaw) && opt('type_line_nudge', true)
@@ -404,7 +406,7 @@ try {
   const typeRequiredWarn = typeRequiredMissing && typeRequiredMode === 'warn'
     ? 'agent-companion: this ladder-rung brief has no `TYPE:` line (and no WEIGHT: or KIND: line that stands in for it). Add `TYPE: <task type>` on its own line; with type_line_required on its default (deny) this spawn would be refused.'
     : null;
-  const roleNudge = [roleLineNudge, typeNudge, typeRequiredWarn].filter(Boolean).join('\n') || null;
+  const roleNudge = [typeNudge, typeRequiredWarn].filter(Boolean).join('\n') || null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
   // controls by what it writes into the brief text — effort is locked to the
@@ -636,10 +638,10 @@ try {
   // purpose: routingNote is explicit that "nothing routes to fable — it is
   // an exception, not a row", so no route can ever justify it, and it stays
   // a warranted exception on every spawn regardless of TYPE/WEIGHT.
-  const spawnAlias = model ? classifyModel(model).alias : '';
+  let spawnAlias = model ? classifyModel(model).alias : '';
   const routingKnown = fitOn && !!route?.model;
-  const routeMatchesModel = routingKnown && !!spawnAlias && classifyModel(route.model).alias === spawnAlias;
-  const isPremiumForSpawn = spawnAlias === 'fable' ? true : (routeMatchesModel ? false : isPremium(model));
+  let routeMatchesModel = routingKnown && !!spawnAlias && classifyModel(route.model).alias === spawnAlias;
+  let isPremiumForSpawn = spawnAlias === 'fable' ? true : (routeMatchesModel ? false : isPremium(model));
   // A parity route (TYPE: code-review + WRITER:) counts like any other route
   // here: a reviewer on the model it names (its writer's, after the floors)
   // is not premium for this spawn, so it needs no WARRANT and the cap does
@@ -1041,8 +1043,8 @@ try {
     //    (see Gate 4 below): who it is, its lead, its known peers.
     suffix += namegateSuffix || '';
 
-    if (!suffix) return baseInput;
-    return { ...(baseInput || input), prompt: `${input.prompt || ''}${suffix}` };
+    if (!suffix && !roleInserted) return baseInput;
+    return { ...(baseInput || input), prompt: `${roleInserted ? `ROLE: ${roleInserted}\n` : ''}${input.prompt || ''}${suffix}` };
   }
 
   // --- Spawn-shape gating (Gates 1-3) -------------------------------------
@@ -1062,8 +1064,8 @@ try {
   // Anthropic publishes no foreground-vs-background guidance. Gate 1 is
   // this plugin's own operating decision, and its message says so.
   // subagentCaller: computed with the WRITER line above (callerIsSubagent).
-  const runsInBackground = input.run_in_background === true;
-  const gate1Applicable = !subagentCaller && !runsInBackground;
+  const bgDeclared = input.run_in_background === true;
+  const gate1Applicable = !subagentCaller && !bgDeclared;
 
   // Exemption: the resolved model (post-autofill — what will ACTUALLY run)
   // is the plugin's own cheapest KNOWN tier per config/model-tiers.json
@@ -1088,16 +1090,29 @@ try {
   } catch { /* fail open: not exempt */ }
   const gate1Exempt = gate1Applicable && gate1CheapExempt;
 
-  const gate1ModeRaw = String(opt('foreground_guard', 'warn')).toLowerCase();
+  // 0.31.36: "fix" (default; "warn" is its old name and means the same) sets run_in_background: true
+  // through updatedInput on a spawn that left the flag out, with no message.
+  const gate1ModeRaw = String(opt('foreground_guard', 'fix')).toLowerCase();
   // Unrecognised value: fail toward the default, same direction
   // memory_brief_mode takes for a typo'd config rather than going silent.
-  const gate1Mode = ['off', 'warn', 'block'].includes(gate1ModeRaw) ? gate1ModeRaw : 'warn';
+  const gate1Mode = ['off', 'warn', 'fix', 'block'].includes(gate1ModeRaw) ? (gate1ModeRaw === 'warn' ? 'fix' : gate1ModeRaw) : 'fix';
   const gate1Live = gate1Applicable && !gate1Exempt && gate1Mode !== 'off';
   const gate1Justified = /FOREGROUND\s*:/i.test(brief);
-  let gate1Action = 'none'; // none | warn | block — what THIS spawn actually gets
+  let gate1Action = 'none'; // none | fix | block — what THIS spawn actually gets
   if (gate1Live) {
-    gate1Action = gate1Mode === 'block' ? (gate1Justified ? 'none' : 'block') : 'warn';
+    if (gate1Mode === 'block') gate1Action = gate1Justified ? 'none' : 'block';
+    // Only a spawn that LEFT OUT the flag is fixed: an explicit run_in_background: false is the
+    // lead's own choice (logged, not changed), a FOREGROUND: line is the opt-out, and a teammate
+    // spawn is not an ordinary subagent.
+    else if (!gate1Justified && input.run_in_background === undefined && !input.team_name) gate1Action = 'fix';
+    else if (!gate1Justified) silentFixes.push('foreground_logged');
   }
+  if (gate1Action === 'fix') {
+    updatedInput = { ...(updatedInput || input), run_in_background: true };
+    silentFixes.push('background_set');
+  }
+  // What the rest of the guard (namegate below) treats as backgrounded: declared, or just set above.
+  const runsInBackground = bgDeclared || gate1Action === 'fix';
 
   // Gate 2: telemetry only (0.31.7). It used to tell the caller that a spawn
   // passing both a name and isolation is an ordinary subagent, not an
@@ -1180,26 +1195,18 @@ try {
   // "probably read-only" types on weak evidence.
   const gate3Fired = opt('shared_tree_notice', true) && !namegateEffectiveName && !input.isolation;
 
-  const gate1WarnMsg = gate1Action === 'warn'
-    ? 'agent-companion: this spawn runs in the FOREGROUND and will block the lead\'s entire turn until it returns ' +
-      '(not Anthropic guidance - this plugin\'s own operating decision: most main-session spawns measured this way ' +
-      'ran foreground, and single foreground spawns have locked the operator out for 18-27 minutes). If the result ' +
-      'is not needed before the lead can continue, add run_in_background: true.'
-    : '';
+
   const gate3Msg = gate3Fired
     ? 'agent-companion: this spawn has no name and no isolation - it runs in the LEAD\'S OWN working tree (it can ' +
       'commit and move HEAD there) and has no address to re-brief it later. Consider isolation: "worktree" and/or a name.'
     : '';
-  const gate4Msg = gate4Action === 'autofill'
-    ? `agent-companion (namegate): this spawn ran in the background with no name; set name="${namegateName}" - an ` +
-      'unnamed background worker cannot be addressed with SendMessage afterward. Set namegate_autofill: false to ' +
-      'only advise instead of naming.'
-    : gate4Action === 'hint'
+  // 0.31.36: an autofilled name is a silent fix (the worker's brief carries it; name_autofilled is in the row).
+  const gate4Msg = gate4Action === 'hint'
       ? 'agent-companion (namegate): this spawn runs in the background with no name - it will not be addressable ' +
         'by SendMessage afterward, and other workers this session won\'t see it in a peer list. Add a name (e.g. ' +
         '"<project>-<type>-<slug>"), or turn on namegate_autofill so the guard assigns one.'
       : '';
-  const gateMessage = [gate1WarnMsg, gate3Msg, gate4Msg].filter(Boolean).join('\n\n');
+  const gateMessage = [gate3Msg, gate4Msg].filter(Boolean).join('\n\n');
 
   // With no route, the plain grid is the yardstick only for a weight the
   // brief itself declared. Never for a parity-sized TYPE whose only weight is
@@ -1237,6 +1244,38 @@ try {
       if (f.verdict === 'under') fit = { ...f, parityFloor: true };
     } catch { /* table unreadable */ }
   }
+
+  // --- Over-provisioned ladder spawn: silent rewrite to the routed rung (0.31.36) ----------
+  // An ac-* rung that the fit check finds over-provisioned for its TYPE is rewritten, through
+  // updatedInput, to the rung the table names (ladderRewriteTarget: only a type the session has
+  // shown registered), with no message; the spawn row records it (silent_fixes, fit_before_fix).
+  // The model parameter, when the call set one, moves to the routed model too: it would
+  // otherwise replace the rung's own. A "PREMIUM: <reason>" line opts out (and also the
+  // premium over-provisioned deny below: the lead has stated why). Under-provisioned spawns
+  // are logged, never changed. No target (an unregistered rung, an ignored rewrite, a project
+  // pin, a reviewer on its parity route): nothing changes, as before.
+  const premiumDeclared = !!(decls.PREMIUM && String(decls.PREMIUM.rest || '').replace(/[\s*_`]/g, ''));
+  let fitBeforeFix = null;
+  if (fit?.verdict === 'over' && typeReqIsRung && !parityRoute && !pinned && !autofilled && !premiumDeclared
+    && !(rewriteState && rewriteState.ignored) && route?.model && opt('fit_over_autofix', true) && opt('fit_autofill_ladder', true)) {
+    try {
+      const rung = rungFor(route.model, route.effort || null);
+      const pick = rung ? ladderRewriteTarget(sid, rung.agent, p.cwd, loadedAtMs) : null;
+      if (pick && pick.target && pick.target !== input.subagent_type) {
+        updatedInput = { ...(updatedInput || input), subagent_type: pick.target, ...(input.model ? { model: route.model } : {}) };
+        ladderRewrite = { from: input.subagent_type || null, to: pick.target };
+        def = pick.def;
+        model = route.model;
+        spawnAlias = classifyModel(model).alias;
+        routeMatchesModel = true;
+        isPremiumForSpawn = false;
+        fitBeforeFix = fit.verdict;
+        fit = { ...fit, verdict: 'fit' };
+        silentFixes.push(`fit_over_rewrite:${ladderRewrite.from}->${pick.target}`);
+      }
+    } catch { /* fail open: nothing rewritten */ }
+  }
+  if (fit?.verdict === 'under' && typeReqIsRung && !parityRoute && !pinned) silentFixes.push('fit_under_logged');
 
   // --- Was this spawn's model a routing choice? ----------------------------
   // `routed` (spawns.jsonl) records where the model came from. It came from
@@ -1736,10 +1775,12 @@ try {
       // "worktree-main" firing on a worktree spawn is the fix working.
       memory_addition_here_source: memoryFacts ? (memoryFacts.hereSource || null) : null,
       // --- Spawn-shape gate outcomes (additive v2 fields) -----------------
-      gate1_mode: gate1Mode,             // off | warn | block — the configured mode
+      silent_fixes: silentFixes.length ? silentFixes : null, // what the guard fixed or logged without a message (background_set, role_inserted:<role>, fit_over_rewrite:<from>-><to>, fit_under_logged, foreground_logged)
+      fit_before_fix: fitBeforeFix,      // 'over' when the spawn was rewritten to the routed rung (fit then reads 'fit')
+      gate1_mode: gate1Mode,             // off | fix | block — the configured mode ("warn" reads as fix)
       gate1_applicable: gate1Applicable, // main-session caller, not already backgrounded
       gate1_exempt: gate1Exempt,         // applicable, but excused: resolved model is the cheapest known tier
-      gate1_action: gate1Action,         // none | warn | block — what THIS spawn actually got
+      gate1_action: gate1Action,         // none | fix | block — what THIS spawn actually got (fix = run_in_background set silently)
       gate2_fired: gate2Fired,           // name+isolation both set: teammate silently demoted to subagent
       gate3_fired: gate3Fired,           // unnamed AND unisolated: shares the lead's tree, unaddressable
       gate4_applicable: gate4Applicable, // main-session, explicitly background, no name, namegate on
@@ -1851,11 +1892,11 @@ try {
     // Reviewer parity speaks for itself (see "Reviewer parity" above); null
     // when the reviewer matches its writer.
     note = parityNote;
-  } else if (fit?.verdict === 'under') {
-    // The cheap direction is never blocked, but a weight-4 task on haiku is
-    // the failure that ships wrong code, so it is said out loud.
+  } else if (fit?.verdict === 'under' && !typeReqIsRung) {
+    // Logged only for a ladder rung (silent_fixes: fit_under_logged, and fit in the row). Any other
+    // agent type still says it out loud: a weight-4 task on haiku is the failure that ships wrong code.
     note =`agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}${routeLayerNote}. ${fit.action}.`;
-  } else if (fit?.verdict === 'over' && !isPremiumForSpawn) {
+  } else if (fit?.verdict === 'over' && !isPremiumForSpawn && !typeReqIsRung) {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}${routeLayerNote}. Re-spawn there unless the weight is understated.`;
   }
   // Haiku-trial leak, advisory only (0.31.17, operator 2026-10-13): the resolved route
@@ -1984,7 +2025,7 @@ try {
   // parity route: reviewer parity is a note in this release (a mis-read
   // WRITER line must not block a review), so a reviewer above its writer is
   // said out loud by the parity note instead.
-  if (fit?.verdict === 'over' && !parityRoute && !pinned) {
+  if (fit?.verdict === 'over' && !parityRoute && !pinned && !premiumDeclared) {
     recordDenial('fit', p, `${model} requested for declared weight ${declaredWeight}; table says ${routeLabel}`);
     deny(
       `Best fit: this spawn requests "${model}" but declares weight ${declaredWeight}` +

@@ -215,13 +215,12 @@ test('live below target: one non-blocking note to the lead naming live and targe
   }
 });
 
-test('live above target: an operator message, nothing asked of the lead', () => {
+test('live above target (0.31.36): nothing is said, the row still records both fields', () => {
   const fx = setup();
   try {
     const { res, row } = spawn(fx, { effort: 'xhigh', now: AFTER });
-    assert.match(msgOf(res), /this session runs at xhigh; the lead target is high since 2030-01-10T12:00Z/);
+    assert.doesNotMatch(msgOf(res), /this session runs at|lead target/);
     assert.doesNotMatch(ctxOf(res), /lead target|live effort/);
-    assert.doesNotMatch(msgOf(res), /AskUserQuestion|raise|lower|please/i);
     assert.equal(row.lead_effort_live, 'xhigh');
     assert.equal(row.lead_effort_target, 'high');
   } finally {
@@ -230,8 +229,8 @@ test('live above target: an operator message, nothing asked of the lead', () => 
   const fx2 = setup();
   try {
     const { res } = spawn(fx2, { effort: 'max', now: BEFORE });
-    assert.match(msgOf(res), /this session runs at max; the lead target is xhigh\./);
-    assert.doesNotMatch(msgOf(res), /since/);
+    assert.doesNotMatch(msgOf(res), /this session runs at|lead target/);
+    assert.doesNotMatch(ctxOf(res), /lead target|live effort/);
   } finally {
     fx2.cleanup();
   }

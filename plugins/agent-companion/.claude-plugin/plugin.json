@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.35",
+  "version": "0.31.36",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -249,7 +249,13 @@
     "fit_guard": {
       "type": "boolean",
       "title": "Best-fit guard",
-      "description": "When a spawn brief declares WEIGHT (and optionally KIND / CONSEQUENCE), grade the named model against the routing table: under- and cheap-over-provisioned spawns are allowed and announced; a premium model over-provisioned for its own declared weight is denied with the correction. Off = telemetry only.",
+      "description": "When a spawn brief declares WEIGHT (and optionally KIND / CONSEQUENCE), grade the named model against the routing table: under-provisioned spawns are allowed (the grade goes to the spawn row, not to the lead); an over-provisioned ladder rung is rewritten to the routed rung (see fit_over_autofix); another cheap over-provisioned spawn is allowed and announced; a premium model over-provisioned for its own declared weight is denied with the correction. Off = telemetry only.",
+      "default": true
+    },
+    "fit_over_autofix": {
+      "type": "boolean",
+      "title": "Rewrite an over-provisioned ladder rung silently",
+      "description": "When a spawn names an ac-* ladder rung that the best-fit check finds over-provisioned for its TYPE, rewrite subagent_type (and the model parameter, when the call set one) to the rung the routing table names, with no message; the spawn row records it (silent_fixes, fit_before_fix). Only to a rung the session has shown it registered (as fit_autofill_ladder does). A `PREMIUM: <reason>` line in the brief keeps the spawned rung and also skips the premium over-provisioned deny. Never rewrites a project pin, a reviewer on its parity route, or an under-provisioned spawn (that one is only logged). Off = the old behaviour: announce, or deny for a premium model.",
       "default": true
     },
     "review_recursion_guard": {
@@ -260,8 +266,8 @@
     },
     "role_line_nudge": {
       "type": "boolean",
-      "title": "Nudge when a brief has no ROLE: line",
-      "description": "A spawn brief should carry a ROLE: line (reviewer, fixer, lander, writer, docs, lookup, operate or other: what its main deliverable is), next to TYPE:. It tags the spawn for usage measurement and changes no routing. When the line is missing or not one of those words, the spawn guard adds one short line of context (never a deny, never a block) saying so. Turn this off to silence the nudge; the line is still read and recorded as declared_role in the spawn telemetry.",
+      "title": "Insert a ROLE: line when a brief has none",
+      "description": "A spawn brief should carry a ROLE: line (reviewer, fixer, lander, writer, docs, lookup, operate or other: what its main deliverable is), next to TYPE:. It tags the spawn for usage measurement and changes no routing. Since 0.31.36, when the line is missing or not one of those words, the spawn guard inserts one as the first line of the brief, inferred from the TYPE:, and says nothing (never a deny, never a block). Turn this off to insert nothing; the line is still read and recorded as declared_role in the spawn telemetry.",
       "default": true
     },
     "type_line_nudge": {
@@ -279,7 +285,7 @@
     "lead_effort_live_check": {
       "type": "boolean",
       "title": "Check the lead's live effort at its first spawn",
-      "description": "While the lead-effort-check standing rule is enabled, the first Agent spawn of a main session compares the live effort in the hook payload (get_session shows only the effort the session was created at) with the lead target. Below the target: one non-blocking note to the lead. Above it: one informational message to the operator, asking the lead for nothing. Equal: nothing. Once per session, never a deny, never a rewrite. Recorded as lead_effort_live and lead_effort_target in the spawn telemetry. Turn this off to skip the check.",
+      "description": "While the lead-effort-check standing rule is enabled, the first Agent spawn of a main session compares the live effort in the hook payload (get_session shows only the effort the session was created at) with the lead target. Below the target: one non-blocking note to the lead. Above it or equal: nothing (since 0.31.36 the above-target message is gone; the row still records both values). Once per session, never a deny, never a rewrite. Recorded as lead_effort_live and lead_effort_target in the spawn telemetry. Turn this off to skip the check.",
       "default": true
     },
     "lead_effort_rollout_id": {
@@ -309,8 +315,8 @@
     "foreground_guard": {
       "type": "string",
       "title": "Foreground-spawn guard",
-      "description": "How to treat a MAIN-SESSION spawn that is not run_in_background: true. A foreground spawn blocks the lead's entire turn until it returns — measured baseline: most main-session spawns run foreground, and individual foreground spawns have locked the operator out for 18-27 minutes, unable to act on messages sent mid-turn. \"off\": nothing. \"warn\" (default): a systemMessage naming the cost and the fix, zero model tokens. \"block\": deny unless the brief states a line of the form `FOREGROUND: <why>`, escapable exactly like the premium warrant. Either way, a spawn whose resolved model is the plugin's own cheapest known tier (haiku) is exempt — cheapest is also fastest, so blocking the lead's turn for one is genuinely low-cost; an unknown or unresolved model is never exempt. This is NOT Anthropic guidance — Claude Code publishes no foreground-vs-background recommendation, so this default is this plugin's own operating decision.",
-      "default": "warn"
+      "description": "How to treat a MAIN-SESSION spawn that is not run_in_background: true. A foreground spawn blocks the lead's entire turn until it returns — measured baseline: most main-session spawns run foreground, and individual foreground spawns have locked the operator out for 18-27 minutes, unable to act on messages sent mid-turn. \"off\": nothing. \"fix\" (default since 0.31.36; \"warn\" is its old name and means the same): a spawn that left run_in_background out gets it set to true through updatedInput, with no message; an explicit run_in_background: false, a `FOREGROUND: <why>` line, a teammate spawn (team_name) and a subagent's own spawn are left alone. \"block\": deny unless the brief states a line of the form `FOREGROUND: <why>`, escapable exactly like the premium warrant. Either way, a spawn whose resolved model is the plugin's own cheapest known tier (haiku) is exempt — cheapest is also fastest, so blocking the lead's turn for one is genuinely low-cost; an unknown or unresolved model is never exempt. This is NOT Anthropic guidance — Claude Code publishes no foreground-vs-background recommendation, so this default is this plugin's own operating decision.",
+      "default": "fix"
     },
     "isolation_demotion_notice": {
       "type": "boolean",
@@ -566,7 +572,7 @@
     "keep_warm": {
       "type": "boolean",
       "title": "Keep a lead warm while helpers run",
-      "description": "After a background helper spawn, tell the lead once to arm ONE wakeup 55 minutes out (inside its 1-hour prompt cache window), and at each ping tell it whether to re-arm: helpers still running and under the cap = re-arm; none running = stop. Nothing is armed while nothing runs (one trailing ping may fire after the last helper ends), no polling. Each ping costs about 1/9 of the cold re-read it prevents. Off = no keep-warm notes.",
+      "description": "When the first background helper starts (none was running), tell the lead once, in one line, to arm ONE wakeup 55 minutes out (inside its 1-hour prompt cache window); a helper that starts while another runs, and a short helper (TYPE lookup, explore or verify, or a BUDGET under 40), get no line. At each ping tell it whether to re-arm: helpers still running and under the cap = re-arm; none running = stop. Nothing is armed while nothing runs (one trailing ping may fire after the last helper ends), no polling. Each ping costs about 1/9 of the cold re-read it prevents. Off = no keep-warm notes.",
       "default": true
     },
     "keep_warm_max_minutes": {

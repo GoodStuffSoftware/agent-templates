@@ -539,7 +539,7 @@ test('a self-reviewing TYPE on a ladder rung WITHOUT the block gets the generate
     assert.equal(r.decision, 'proceed', r.reason);
     assert.equal(r.row.self_review_expected, true);
     assert.equal(r.row.self_review_injected, true);
-    assert.match(r.prompt, /^TYPE: novel-design\nWARRANT: weight 5 - test\ndesign it\n\n---\n\(agent-companion: your definition does not carry the self-review protocol/);
+    assert.match(r.prompt, /^ROLE: writer\nTYPE: novel-design\nWARRANT: weight 5 - test\ndesign it\n\n---\n\(agent-companion: your definition does not carry the self-review protocol/);
     assert.match(r.prompt, /## Self-review before you return/);
     assert.match(r.prompt, /subagent_type: "agent-companion:ac-opus-max"/);
     assert.match(r.prompt, /^ {3}WRITER: opus\/max$/m);

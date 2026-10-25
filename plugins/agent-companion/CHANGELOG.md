@@ -2,6 +2,19 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.36 — 2026-10-25
+
+Silent spawn fixes: the guard fixes a spawn's shape through `updatedInput` and stops telling the lead about it. The spawn row is where each fix shows.
+
+- **Foreground autofix (`foreground_guard` default `fix`; `warn` reads as `fix`).** A main-session spawn that left `run_in_background` out gets `true` set through updatedInput, with no message. An explicit `false`, a `FOREGROUND:` line, a `team_name` spawn, a subagent's own spawn and a haiku-tier spawn are left alone (the explicit false is logged only). Namegate then names the spawn and its own autofill message is gone. `off` and `block` are unchanged. Row: `gate1_action` `fix` (was `warn`), `silent_fixes`.
+- **ROLE line inserted, not nudged (`role_line_nudge`).** A brief with no usable `ROLE:` line gets one as its first line, inferred from the `TYPE:` (`inferRole`: lookup types give `lookup`, `code-review` gives `reviewer`, the writer types give `writer`, anything else `other`). No message. `declared_role` still records only the brief's own line.
+- **Over-provisioned ladder rung rewritten silently (new option `fit_over_autofix`, default on).** A spawn naming an `ac-*` rung that the fit check finds over-provisioned for its `TYPE:` is rewritten to the routed rung (`subagent_type`, and the `model` parameter when the call set one), only to a rung the session has shown registered. Decided before the self-review block and the spawn row are built, so the block names the rung that runs and the row logs its model (the same order as the 0.31.35 project-route fix). A `PREMIUM: <reason>` line keeps the spawned rung and also skips the premium over-provisioned deny. An under-provisioned rung is logged only (`fit_under_logged`), with no note. Row: `fit_before_fix`, `silent_fixes`.
+- **Quieter lead-effort check.** Only the below-target note is sent (once per session); the above-target operator message is gone. Both values stay on the row.
+- **Keep-warm line is one line under 160 characters**, told only when the first background helper starts (none already running), plus the existing no-pending-wakeup, short-helper and once-per-5-minutes limits. It still rides `additionalContext`: the PostToolUse `updatedToolOutput` field exists, but which field of the Agent result the model reads is unconfirmed.
+- **New row fields:** `silent_fixes` (`background_set`, `role_inserted:<role>`, `fit_over_rewrite:<from>-><to>`, `fit_under_logged`, `foreground_logged`) and `fit_before_fix`.
+- Other case-specific notes (redo alert, parity notes, type nudge, tool and pin notes, gate 3, hints) are unchanged.
+- Reverse: `foreground_guard` `off`, `role_line_nudge` false, `fit_over_autofix` false; or revert the commit.
+
 ## 0.31.35 — 2026-10-25
 
 Token bleed guard, part B (the routing leak), plus keep-warm and telemetry follow-ups.
