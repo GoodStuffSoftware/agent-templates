@@ -2,6 +2,16 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.35 — 2026-10-25
+
+Token bleed guard, part B (the routing leak), plus keep-warm and telemetry follow-ups.
+
+- **Project agents pinned to Opus follow the routing table (`project_route_guard`: `autofix` default, `warn`, `off`).** The table governed only ladder (`ac-*`) spawns; a project or user agent pinned to `model: opus` bypassed it (20.1% of all usage over 10-02 to 10-23, e.g. an opus project agent spawned for bounded-feature and integration briefs the table sends to Sonnet). `hooks/spawn-guard.mjs` now resolves the named agent's definition (`<project>/.claude/agents`, then `~/.claude/agents`), and when it pins Opus and the brief's `TYPE:` resolves in the live table (profile, shipped trial and grid, parity routes with a `WRITER:` line) to a non-Opus model, rewrites the spawn silently through `updatedInput`: the Agent call's `model` parameter, which overrides the agent file's model, is set to the table's model. The agent keeps its instructions and effort; no message, no deny. One `routing-autofix` row in `telemetry/denials.jsonl` (`subagent_type`, `declared_type`, `from_model`, `to_model`, outcome `autofix`). A `PREMIUM: <reason>` line (a new brief directive) skips the rewrite. Types the table keeps on Opus pass untouched; an Opus project agent with no usable `TYPE:` is left unchanged and logged (outcome `untyped`: the plugin has no brief classifier to infer a type from). A spawn whose `model` parameter already replaces the pin is not touched. `warn` leaves the spawn alone with a note and the same row. The rewritten spawn is not premium any more, so the warrant and the premium cap do not apply to it.
+- **Keep-warm arms only for helpers likely to outlive the cache window.** A background spawn whose brief is typed `lookup`, `explore` or `verify`, or declares `BUDGET:` under 40 calls, no longer gets the arm instruction (and starts no ping count). Basis: 1131 helpers, 10-16 to 10-23 (bleed-data): median 37 calls in 10.6 min of wall time, 9 in 10 done within 55 min; `ac-haiku` and `ac-sonnet-low` p90 wall 4.8 and 8.1 min. No other threshold added: past the 55 min line only about 10% of helpers remain, and the brief does not tell which.
+- **`agent_id` on `denials.jsonl` rows.** Every row written for a subagent's own call now carries the payload's `agent_id`, so test probes can be separated from a lead's rows (a lead's rows carry none).
+- **Redo alert telemetry.** Each time the redo note goes out, one row (guard `redo-alert`, outcome `note`, `detail` = earlier matches, TYPE, spawn) is written to `denials.jsonl`.
+- Reverse: `project_route_guard` off; `keep_warm` is unchanged apart from the skip; revert the commit.
+
 ## 0.31.34 — 2026-10-23
 
 Phase 2 of the token bleed guard, parts D and E: a new-file tripwire for helpers and a redo alert for the lead.

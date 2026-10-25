@@ -1,5 +1,5 @@
 // Brief directives: the "LABEL: value" lines a spawn brief declares
-// (TYPE, WEIGHT, KIND, CONSEQUENCE, WARRANT, WRITER, EFFORT, REVIEW, ROLE), read by the
+// (TYPE, WEIGHT, KIND, CONSEQUENCE, WARRANT, WRITER, EFFORT, REVIEW, ROLE, PREMIUM), read by the
 // spawn guard. BUDGET (`BUDGET: <n>` tool calls) is read by the step budget, inside the helper
 // (lib/step-budget.mjs). WRITER names the writer a review brief gates (`WRITER: opus/xhigh`
 // or `WRITER: <agent-name>`), so a parity-sized review can be sized at spawn
@@ -45,7 +45,7 @@
 // caller's regex source, applied to what follows the colon exactly as the
 // single-regex form did before.
 
-export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'WRITER', 'EFFORT', 'REVIEW', 'ROLE', 'REASON', 'BUDGET'];
+export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'WRITER', 'EFFORT', 'REVIEW', 'ROLE', 'REASON', 'BUDGET', 'PREMIUM'];
 
 // ROLE: names what the spawn's main deliverable is, for usage measurement only
 // (0.31.3). It routes nothing and gates nothing; the spawn guard reads it to

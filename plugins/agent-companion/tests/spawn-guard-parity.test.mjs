@@ -428,7 +428,8 @@ test('a project agent whose definition pins opus is not counted, TYPE line or no
     h.agent('proj-architect', 'model: opus\neffort: xhigh');
     for (let i = 0; i < 3; i += 1) assert.equal(h.spawn({ subagent_type: 'proj-architect', prompt: 'design it' }).decision, 'proceed');
     assert.equal(h.window(), 0);
-    assert.deepEqual(h.denials(), []);
+    // No TYPE line: the project routing check (0.31.35) leaves it alone and logs each one as untyped; nothing is denied.
+    assert.deepEqual(h.denials(), Array(3).fill('routing-autofix'));
   } finally { h.cleanup(); }
 });
 

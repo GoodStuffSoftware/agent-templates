@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, utimesSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook, decisionOf } from './helpers.mjs';
+import { makeFixture, runHook, decisionOf, readJsonl } from './helpers.mjs';
 import { briefSketch, sketchSimilarity, briefBody, firstUserText } from '../hooks/lib/brief-match.mjs';
 import { redoNote, REDO_NOTE } from '../hooks/lib/redo-alert.mjs';
 import { LOOKUP_DENY_REASON, WRITER_DENY_REASON } from '../hooks/lib/scope-tripwire.mjs';
@@ -231,7 +231,7 @@ function spawn(dir, prompt, sid = 'lead-sess-2') {
 const noteIn = (r) => String(r.json?.hookSpecificOutput?.additionalContext || '').includes(REDO_NOTE);
 
 test('redo alert: two earlier runs (one partial), spawned a third time with a re-sent brief, gets the note; one partial run does not', () => {
-  const { dir, cleanup } = makeFixture();
+  const { dir, stateDir, cleanup } = makeFixture();
   try {
     runHelper(dir, BRIEF_A, 'h1', 'partial');
     assert.ok(!noteIn(spawn(dir, BRIEF_A_RESENT)), 'one partial run is a normal handoff');
@@ -241,6 +241,13 @@ test('redo alert: two earlier runs (one partial), spawned a third time with a re
     assert.notEqual(decisionOf(r.json), 'deny', r.stdout);
     assert.ok(noteIn(r), r.stdout);
     assert.equal(REDO_NOTE, 'third attempt at this task: re-brief it or move it up a rung instead of retrying');
+    // One telemetry row per time the note goes out (0.31.35), and none for the silent spawn before it.
+    const rows = readJsonl(join(stateDir, 'telemetry', 'denials.jsonl')).filter((d) => d.guard === 'redo-alert');
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].outcome, 'note');
+    assert.equal(rows[0].session_id, 'lead-sess-2');
+    assert.match(rows[0].detail, /^2 earlier close matches, TYPE bounded-feature, spawn agent-companion:ac-sonnet-high/);
+    assert.equal(rows[0].agent_id, undefined, 'a lead spawn carries no agent_id');
   } finally { cleanup(); }
 });
 

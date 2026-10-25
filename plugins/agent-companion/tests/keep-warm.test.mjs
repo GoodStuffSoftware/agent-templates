@@ -38,6 +38,30 @@ describe('keep-warm', () => {
     assert.equal(KEEP_WARM_DELAY_S, 3300, '55 minutes: inside the 1 h cache window');
   });
 
+  test('short helpers arm nothing: TYPE lookup, explore or verify, or a BUDGET under 40; any other brief still arms', () => {
+    const brief = (head) => bgSpawn({ tool_input: { name: 'h', run_in_background: true, prompt: `${head}\nROLE: lookup\ndo the thing` } });
+    let n = 0;
+    for (const head of ['TYPE: lookup', 'TYPE: explore', 'TYPE: verify', 'type: Verify', 'TYPE: bounded-feature\nBUDGET: 39', 'TYPE: research\nBUDGET: 30 tool calls']) {
+      const fx = makeFixture();
+      try {
+        n += 1;
+        const sid = `kw-short-${n}`;
+        const r = run('tick', { ...brief(head), session_id: sid });
+        assert.equal(r.status, 0);
+        assert.equal(ctx(r), '', `${head} must not arm`);
+        assert.equal(existsSync(join(fx.stateDir, 'state', 'keep-warm', `${sid}.json`)), false, `${head}: no state touched`);
+      } finally { fx.cleanup(); }
+    }
+    for (const head of ['TYPE: bounded-feature', 'TYPE: bounded-feature\nBUDGET: 40', 'TYPE: bounded-feature\nBUDGET: 120', 'TYPE: integration', 'TYPE: research']) {
+      const fx = makeFixture();
+      try {
+        n += 1;
+        const r = run('tick', { ...brief(head), session_id: `kw-long-${n}` });
+        assert.match(ctx(r), /Keep-warm: \d+ background helper/, `${head} arms`);
+      } finally { fx.cleanup(); }
+    }
+  });
+
   test('a background spawn is told to arm ONE wakeup 55 min out; a foreground spawn is not', () => {
     const fx = makeFixture();
     try {

@@ -53,6 +53,7 @@ function writeProfile(fx) {
   }));
 }
 
+// project_route_guard (0.31.35) is off here: these tests pin the 0.31.13 pin rules, not the routing rewrite (tests/project-route.test.mjs).
 let counter = 0;
 function spawn(fx, { type, prompt, model, cwd, env, effort, extra } = {}) {
   counter += 1;
@@ -63,7 +64,7 @@ function spawn(fx, { type, prompt, model, cwd, env, effort, extra } = {}) {
     tool_input: {
       subagent_type: type, run_in_background: true, name: `w${counter}`, prompt, ...(model ? { model } : {}), ...(extra || {}),
     },
-  }, { env: { CLAUDE_PLUGIN_DATA: join(fx.dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...(env || {}) } });
+  }, { env: { CLAUDE_PLUGIN_DATA: join(fx.dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_ROUTE_GUARD: 'off', ...(env || {}) } });
   assert.equal(res.status, 0, res.stderr);
   const row = readJsonl(join(fx.stateDir, 'telemetry', 'spawns.jsonl')).filter((r) => r.session_id === sid).pop();
   const hso = res.json?.hookSpecificOutput || {};

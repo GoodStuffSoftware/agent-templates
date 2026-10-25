@@ -21,8 +21,9 @@
 
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { stateDir, readJson, writeJsonAtomic } from './context.mjs';
+import { stateDir, readJson, writeJsonAtomic, canonicalTaskType } from './context.mjs';
 import { readWorkers, agentNames, claimOnce } from './advisory-b.mjs';
+import { briefStepInfo } from './step-budget.mjs';
 
 export const KEEP_WARM_DELAY_S = 3300; // 55 min: inside the 1 h cache window with a 5 min margin
 export const KEEP_WARM_MAX_DEFAULT_MIN = 180; // the sim's best cap: pings past 3 h of one idle stretch lose money
@@ -37,6 +38,27 @@ const ARM_TOOL_RE = /(?:^|__)(?:ScheduleWakeup|CronCreate)$/;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const MARKER_RE = new RegExp(escapeRe(KEEP_WARM_MARKER), 'i');
 const isPingPrompt = (s) => typeof s === 'string' && s.trim().length <= PING_PROMPT_MAX && s.trim().toLowerCase().startsWith(KEEP_WARM_MARKER);
+
+// A helper that finishes in minutes needs no wakeup: its result lands inside the cache window anyway.
+// Measured (bleed-data, 1131 helpers, 10-16 to 10-23): the median helper makes 37 calls in 10.6 min of wall
+// time, 9 in 10 finish in 55 min (calls p90 77), and the short rungs sit far under that (ac-haiku and
+// ac-sonnet-low p90 wall 4.8 and 8.1 min, 19 calls at p90). So a brief typed lookup, explore or verify, or
+// with a BUDGET under 40 calls (about 11 min at the median pace), does not arm a ping. Anything else still
+// does: the helpers past the 55 min line (about 10% of them, mostly long writers) are what the ping is for.
+export const KEEP_WARM_SKIP_TYPES = ['lookup', 'explore', 'verify'];
+export const KEEP_WARM_MIN_BUDGET = 40;
+
+/** Why a background spawn's brief is not worth a keep-warm ping, or null. */
+export function shortHelperReason(input) {
+  try {
+    const prompt = input && typeof input === 'object' ? input.prompt : '';
+    const { type, budget } = briefStepInfo(prompt);
+    const t = type ? (canonicalTaskType(type)?.name || type) : '';
+    if (t && KEEP_WARM_SKIP_TYPES.includes(t)) return `TYPE ${t}`;
+    if (budget && budget < KEEP_WARM_MIN_BUDGET) return `BUDGET ${budget}`;
+  } catch { /* an unreadable brief arms as before */ }
+  return null;
+}
 
 const safe = (s) => String(s || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_');
 
@@ -96,6 +118,8 @@ export function keepWarmToolNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_M
       return null;
     }
     if (!isBackgroundSpawn(p)) return null;
+    // A short helper (lookup, explore, verify, or a BUDGET under 40) is no reason to arm: touches no state.
+    if (shortHelperReason(p.tool_input)) return null;
     const st = readState(p.session_id);
     // A new spawn is real activity: the idle stretch (and its ping cap) starts over.
     const next = { ...st, pings: 0 };

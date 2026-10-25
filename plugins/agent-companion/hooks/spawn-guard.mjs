@@ -1450,6 +1450,47 @@ try {
     } catch { writerBelowCallerNote = null; }
   }
 
+  // --- Project-agent routing, first half (project_route_guard: autofix | warn | off) ---
+  // The routing table governs ladder (ac-*) spawns; a project or user agent pinned to opus used to bypass
+  // it (measured 10-02 to 10-23: project agents pinned to opus took 20.1% of all usage, spawned for
+  // bounded-feature and integration briefs the table sends to sonnet). A spawn that would run an opus
+  // definition from <project>/.claude/agents or ~/.claude/agents is therefore judged by the brief's TYPE
+  // against the live table (the route resolved above, the same resolver the ladder uses):
+  //   - the table puts the TYPE on a non-opus model: the spawn is rewritten silently (updatedInput.model,
+  //     which the harness lets replace the agent file's model); the agent keeps its own instructions and
+  //     effort. One telemetry row, guard `routing-autofix`. A `PREMIUM: <reason>` line skips the rewrite;
+  //   - the table keeps the TYPE on opus (debug-root-cause, novel-design, ...): untouched;
+  //   - no usable TYPE (the plugin has no brief classifier to infer one): untouched, one row logs it;
+  //   - warn mode: untouched, with a visible note, and the same row.
+  // Nothing here denies. A model parameter that already replaces the opus pin is not an opus spawn.
+  // Decided HERE, before the self-review block and the spawns.jsonl row, so both see the model that
+  // will actually run (a rewritten sonnet writer is not told to use an opus reviewer, and the spawn
+  // row does not claim opus). The row, the allow and the warn note come later (second half).
+  let projectRoutePlan = null;
+  {
+    const prModeRaw = String(opt('project_route_guard', 'autofix')).toLowerCase();
+    const prMode = ['autofix', 'warn', 'off'].includes(prModeRaw) ? prModeRaw : 'autofix';
+    if (prMode !== 'off' && pin.pinned && pin.fields !== 'effort' && fromDef
+      && classifyModel(fromDef).alias === 'opus' && spawnAlias === 'opus') {
+      let pr = route && route.model ? route : parityYardstick;
+      if (!pr && declaredType) { try { const r = resolveRoute({ type: declaredType }); if (r.model) pr = r; } catch { /* table unreadable */ } }
+      const premiumReason = !!decls.PREMIUM && String(decls.PREMIUM.rest || '').replace(/[\s*_`]/g, '').length > 0;
+      const basis = declaredType ? `TYPE ${declaredType}` : 'no usable TYPE';
+      if (pr && pr.model) {
+        const prAlias = classifyModel(pr.model).alias;
+        if (prAlias && prAlias !== 'opus' && prAlias !== 'fable' && !premiumReason) {
+          projectRoutePlan = { pr, fromDef, basis, action: prMode === 'autofix' ? 'autofix' : 'warn' };
+          if (prMode === 'autofix') {
+            model = pr.model;
+            updatedInput = { ...(updatedInput || input), model };
+          }
+        }
+      } else if (!typeIsParity && !(declaredType && canonicalTaskType(declaredType))) {
+        projectRoutePlan = { pr: null, fromDef, basis, action: 'untyped' };
+      }
+    }
+  }
+
   // --- Is this writer expected to review itself? ---------------------------
   // For a TYPE listed in config/model-tiers.json selfReview.types: false when
   // the brief opts out (`REVIEW: lead`), else whether the definition that
@@ -1790,6 +1831,8 @@ try {
     );
   }
 
+  let projectRouteNote = null; // warn mode only (project_route_guard), set below
+
   const who = input.subagent_type || 'an agent';
   const routeBasis = parityRoute
     ? `TYPE ${declaredType} sized to its writer ${writer.label}${writerInferred ? ' (inferred from the caller)' : ''}`
@@ -1878,7 +1921,45 @@ try {
     haikuLeakNote,
     toolNote,
     pinReplacedNote,
+    projectRouteNote,
   );
+
+  // --- Project-agent routing, second half (decided earlier: see projectRoutePlan) ---
+  if (projectRoutePlan) {
+    const { pr, fromDef: prFrom } = projectRoutePlan;
+    const prRow = (outcome, toModel) => {
+      if (isCanary) return;
+      appendLog('denials.jsonl', {
+        at: new Date().toISOString(),
+        session_id: String(sid),
+        agent_type: p.agent_type,
+        ...(subagentCaller ? { agent_id: String(p.agent_id) } : {}),
+        tool_name: p.tool_name,
+        guard: 'routing-autofix',
+        outcome,
+        subagent_type: input.subagent_type || null,
+        declared_type: declaredType || null,
+        from_model: prFrom,
+        to_model: toModel || null,
+        detail: `${input.subagent_type} (${pin.scope} agent) pins ${prFrom}; ${projectRoutePlan.basis}${toModel ? ` routes to ${toModel}` : ''}`.slice(0, 300),
+      });
+    };
+    if (projectRoutePlan.action === 'autofix') {
+      prRow('autofix', pr.model);
+      await notePending();
+      // Silent: no systemMessage (the notes written for the pinned opus spawn no longer apply).
+      // Not premium any more: the warrant and the cap do not apply to the rewritten spawn.
+      allowWith(null, withAdditions({ ...(updatedInput || input), model: pr.model }), roleNudge);
+    } else if (projectRoutePlan.action === 'warn') {
+      prRow('warn', pr.model);
+      const prRung = rungFor(pr.model, pr.effort || null);
+      projectRouteNote = `agent-companion: ${input.subagent_type} (${pin.scope} agent pinned to ${prFrom}): the routing table sends ${declaredType ? `TYPE: ${declaredType}` : 'this brief'} ` +
+        `to ${pr.model}${pr.effort ? '/' + pr.effort : ''}${routeLayerTag(pr.layer)}${prRung ? ` (agent-companion:${prRung.agent})` : ''}, not Opus. ` +
+        `Spawn that rung or a project agent pinned to ${pr.model}, or add a \`PREMIUM: <reason>\` line to keep Opus. Not rewriting (project_route_guard is warn).`;
+    } else if (projectRoutePlan.action === 'untyped') {
+      prRow('untyped', null); // logged only
+    }
+  }
 
   if (!isPremiumForSpawn) {
     // HELD DECISION (ADR 0003 open question 8, 2026-09-24): counting a

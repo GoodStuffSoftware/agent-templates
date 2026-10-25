@@ -16,7 +16,7 @@
 
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { stateDir, tailRecords, callerIsSubagent } from './context.mjs';
+import { stateDir, tailRecords, callerIsSubagent, recordDenial } from './context.mjs';
 import { firstUserText, briefSketch, sketchSimilarity } from './brief-match.mjs';
 import { resolveAgentTranscript } from './runaway.mjs';
 import { briefDeclarations, declarationValue } from './brief-directives.mjs';
@@ -94,21 +94,37 @@ export function redoNote(text, opts = {}) {
 // Held by the spawn guard until an allow is emitted (a denied spawn says nothing), like the
 // lead-effort note in lib/lead-effort-live.mjs.
 let pending = null;
+let pendingCtx = null; // { p, brief } of the spawn the held note belongs to, for its telemetry row
 
 // Called once per spawn from the lead; lead-side only, never for a helper's own spawns.
 export function redoAlertCheck({ p, brief, isCanary = false, enabled = true }) {
   pending = null;
+  pendingCtx = null;
   try {
     if (!enabled || isCanary || callerIsSubagent(p)) return null;
-    pending = redoNote(brief);
+    const runs = matchingRuns(brief);
+    if (runs.length < 2) return null;
+    pending = REDO_NOTE;
+    pendingCtx = { p, brief, matches: runs.length };
     return pending;
   } catch { return null; }
 }
 
 // Adds the held note to the allow's additionalContext. Unchanged when there is none.
+// Each time the note goes out, one telemetry row (telemetry/denials.jsonl, guard 'redo-alert', outcome
+// 'note': the note fired and the spawn ran) says which task and how many earlier runs matched.
 export function mergeRedoAlert(additionalContext) {
   const n = pending;
   if (!n) return additionalContext;
   pending = null;
+  const c = pendingCtx;
+  pendingCtx = null;
+  try {
+    if (c) {
+      const type = briefType(c.brief) || 'none';
+      const input = c.p && c.p.tool_input && typeof c.p.tool_input === 'object' ? c.p.tool_input : {};
+      recordDenial('redo-alert', c.p, `${c.matches} earlier close matches, TYPE ${type}, spawn ${input.subagent_type || 'an agent'}${input.name ? ` "${input.name}"` : ''}`, 'note');
+    }
+  } catch { /* telemetry never blocks */ }
   return [additionalContext, n].filter((x) => typeof x === 'string' && x.trim()).join('\n\n');
 }
