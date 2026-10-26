@@ -16,4 +16,4 @@ A flush that reads its outbox once, awaits the network, then writes a snapshot-d
 - On a non-retryable batch failure, split in halves until rejected units stand alone; ack the rest, quarantine and report the rejected. A transient failure stops the flush, dropping nothing.
 - Send error reports from a leg no poison can block.
 
-**Incident:** per-producer fixes left the jam class open until this invariant was written down.
+**Incident:** each fix for one producer of a rejected write left the jam class open; records stayed stuck behind one rejected write until the invariant was written down.
