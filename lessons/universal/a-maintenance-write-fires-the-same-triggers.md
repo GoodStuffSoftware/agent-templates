@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-14
 provenance: [contrib-2]
-corroborated: 2
+corroborated: 3
 ---
 A backfill stamped one new field onto a set of user records. Those writes fired the ordinary on-write trigger, which granted two promotional entitlements and **sent two thank-you emails to real addresses**. A later attempt to revert the backfill fired it again and sent two more. Nothing in the migration mentioned promotions; the trigger did not care.
 

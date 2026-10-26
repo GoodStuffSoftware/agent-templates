@@ -14,6 +14,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-checkout-is-not-the-running-system` — A working copy or an unmerged branch describes what could ship, never what is running — fetch, or query the live system — [universal] — active
 - `a-cli-sanity-check-must-not-leave-an-interactive-session` — A "does the agent CLI start" check must not leave an interactive session alive — it looks like a human peer — [agent-process, vendor:anthropic] — active
 - `a-cli-script-without-a-main-guard-runs-on-import` — A CLI-style script with no main-module guard runs on import — add the guard before the first test imports it — [universal] — active
+- `a-client-mirror-of-server-rules-shares-its-fixtures-with-the-real-engine` — A client-side mirror of server validation rules drifts unless one fixture table runs against both the mirror and the real engine — [universal] — active
 - `a-commit-hook-formatter-rewrites-the-bytes-you-verified` — A formatter in the commit hook changes the bytes after your verification — the committed content was never tested — [universal] — active
 - `a-completed-background-agent-may-only-be-paused` — A "completed" agent that ran background commands may only be paused — never spawn a second writer onto the same worktree — [agent-process] — active
 - `a-condition-never-binding-fires-always` — An anomalous count can be a property of the data, not of the actor — check whether the emitting condition is trivially satisfiable — [universal] — active
@@ -22,6 +23,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-correction-pass-must-grep-the-summary-too` — A correction pass follows the prose and skips the summary — status tables and acceptance-criteria rows are claims too — [universal] — active
 - `a-crashing-check-reads-as-a-clean-pass` — A check that cannot fail is not a check — a crashing command can read as a clean pass — [universal] — active
 - `a-default-timeout-shorter-than-cold-start-manufactures-flakes` — A default test timeout shorter than a cold process spawn manufactures flakes — the red file is rarely the changed one — [universal] — active
+- `a-deploy-that-ships-its-own-env-resets-values-set-on-the-live-service` — A deploy that ships its own env copy resets any value set directly on the live service — read live values back after every deploy — [universal] — active
 - `a-detector-contains-what-it-detects` — A detector contains what it detects — scope the exception to the one file and rule, never disable the check — [universal] — active
 - `a-fact-check-with-zero-tool-uses-is-fabricated` — A fact-check answered with zero tool uses is fabricated — read the usage record before the answer, and demand raw output — [agent-process] — active
 - `a-fail-open-guard-must-finish-inside-its-timeout` — A guard that fails open on timeout turns a deny into an allow on large input — make its matchers linear and test the worst shapes — [universal] — active
@@ -56,6 +58,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-read-that-opens-an-edit-is-a-write` — A read that opens a server-side edit session is a write — quiesce your monitors during a mutation window — [universal] — active
 - `a-recorded-commit-id-dies-at-rebase` — A recorded commit id dies at rebase — verify shipped work by branch tip and commit subject — [universal, stack:git] — active
 - `a-right-conclusion-does-not-vouch-for-its-premise` — A wrong premise that yields the right conclusion is the hardest to catch — the outcome vouches for it, so check premises on their own — [agent-process] — active
+- `a-scaffold-default-asset-passes-every-existence-check` — A scaffold's default asset passes every existence check — verify provenance, and never allowlist a new default — [universal] — active
 - `a-scheduled-job-needs-a-registered-but-unobserved-state` — A scheduled job needs a "deployed, unconfirmed" state and a two-timestamp heartbeat, or it gets marked done on deploy day — [universal] — active
 - `a-scheduled-routine-starts-at-its-folders-effort` — A scheduled routine starts at the effort of the folder it was created in — pin effort per folder and rate a dispatch-only parent as light — [agent-process, vendor:anthropic] — active
 - `a-secret-managers-list-command-can-print-every-value` — A secret manager's list command can print every value — a briefed filter is not a control — [universal] — active
@@ -69,6 +72,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-subagent-lock-pid-is-the-lead` — A subagent worktree lock names the lead session's process, not the worker's — it outlives the worker, and it is not yours to stop — [agent-process, vendor:anthropic] — active
 - `a-suppress-verdict-expires` — A "benign, suppress" verdict expires — key a triage conclusion to the pair of references that produced it — [universal] — active
 - `a-tag-on-a-rolling-session-overcounts-arrivals` — A campaign tag that rides a rolling session overcounts arrivals — derive from a single-row property and name the count a floor — [universal] — active
+- `a-test-with-fixed-dates-fails-when-the-calendar-passes-its-window` — A test seeded with fixed dates fails the day the calendar passes its lookback window — pin the clock or seed relative to now — [universal] — active
 - `a-test-written-from-the-fix-agrees-with-itself` — An expectation derived from the thing it checks cannot fail — source the expected value independently — [universal] — active
 - `a-timeout-kills-the-root-not-its-children` — A test timeout kills only the root process — its survivors hold the fixture and the cleanup error replaces the real failure — [universal] — active
 - `a-timeout-message-names-the-threshold-not-the-moment` — A timeout message names the configured threshold, not the moment the blocking call actually returned — [universal] — active
@@ -271,6 +275,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `stack-work-behind-a-serialized-gate` — Stack related branches under one gate when the gate is the bottleneck — and always when one opens a hazard the other closes — [universal, stack:git] — active
 - `staff-the-shared-layer-before-fanning-out` — Disjoint-write fan-out duplicates the shared layer — staff it on day one, then make reuse a repo gate — [agent-process] — active
 - `static-instructions-teach-discovery` — Static instruction artifacts must teach how to DISCOVER a mutable capability surface, never enumerate its current state — [agent-process] — active
+- `subtract-confirmed-units-from-a-shared-outbox` — A flush owns only what the server confirmed — subtract confirmed units from the live outbox, never overwrite it with a snapshot — [universal] — active
 - `sync-or-shutdown-stale-teammates` — After invalidating a teammate's world, sync it or shut it down before it reports stale state — [agent-process] — active
 - `team-vs-subagent-gate` — Score weight, phases, communication, and width before spawning a team — a team must earn its order-of-magnitude cost — [agent-process] — active
 - `teammate-reports-to-files` — Teammates write long reports to files and send only a one-line pointer — [agent-process] — active
