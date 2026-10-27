@@ -132,7 +132,7 @@ test('spawn_effort_source: definition | inherited | none', () => {
         tool_input: { subagent_type: c.subagent_type, prompt: 'do the thing' },
       };
       const res = runHook('hooks/spawn-guard.mjs', payload, {
-        env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+        env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' }, // the inherited source is what this case measures
       });
       assert.equal(res.status, 0, `spawn-guard exited ${res.status} for ${c.sid}: ${res.stderr}`);
     }

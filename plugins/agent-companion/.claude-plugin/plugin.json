@@ -48,6 +48,12 @@
       "description": "A spawn of a project or user agent (<project>/.claude/agents, ~/.claude/agents) whose own definition pins Opus is judged by the brief's TYPE against the live routing table, like a ladder spawn. \"autofix\" (default): when the table sends that TYPE to a non-Opus model, the spawn is silently rewritten to run on that model (the Agent call's model parameter overrides the agent file's model; the agent keeps its instructions and effort), with one routing-autofix row in telemetry/denials.jsonl and no message. A PREMIUM: <reason> line in the brief keeps Opus. Types the table keeps on Opus pass; a brief with no usable TYPE is left alone and logged (outcome untyped). Never denies. \"warn\": leave the spawn as is, with a note and the same row. \"off\": silent. Opus project agents took 20.1% of all usage in a measured three weeks, mostly on bounded-feature and integration briefs the table sends to Sonnet.",
       "default": "autofix"
     },
+    "project_effort_fill": {
+      "type": "string",
+      "title": "Fill the effort of project agents that set a model but no effort",
+      "description": "A project or user agent (<project>/.claude/agents, ~/.claude/agents) whose definition sets a model but no effort line inherits the lead session's effort (xhigh on a premium lead: two haiku explorers ran at xhigh). \"autofix\" (default): when the spawn sets no effort either, the guard sets the Agent call's effort silently, from the routing table entry for the brief's TYPE when that route is on the model that runs, else the model's own default effort; one spawns.jsonl row records it (spawn_effort_source guard-fill), no message. An effort in the spawn input or in the agent file always wins. \"off\": silent, effort stays inherited.",
+      "default": "autofix"
+    },
     "python_stdin_guard": {
       "type": "string",
       "title": "Refuse Python reading its program from an empty stdin (Windows)",

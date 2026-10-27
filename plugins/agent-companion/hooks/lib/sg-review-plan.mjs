@@ -4,7 +4,8 @@
 // the locals it declares or reassigns that later phases read.
 
 import {
-  agentDefinition, canonicalTaskType, classifyModel, opt, resolveRoute, rungFor, taskTypeDef,
+  agentDefinition, canonicalTaskType, classifyModel, effortSupported, modelTiers, opt, referenceEffortSupported,
+  resolveRoute, rungFor, taskTypeDef,
 } from './context.mjs';
 import {
   definitionCarriesProtocol, injectionRung, optedOut, pinnedInjectionRung, reviewerRungFor,
@@ -14,7 +15,7 @@ import {
 export function projectRouteAndSelfReview({
   pin, fromDef, spawnAlias, route, parityYardstick, declaredType, decls, model, updatedInput, input,
   typeIsParity, srCfg, brief, ladderRewrite, def, pinned, consequenceWasDeclared, declaredConsequence,
-  callerEffort, selfReviewSuffix, p,
+  callerEffort, selfReviewSuffix, p, silentFixes,
 }) {
 
   // --- Project-agent routing, first half (project_route_guard: autofix | warn | off) ---
@@ -56,6 +57,45 @@ export function projectRouteAndSelfReview({
         projectRoutePlan = { pr: null, fromDef, basis, action: 'untyped' };
       }
     }
+  }
+
+  // --- Project-agent effort fill (project_effort_fill: autofix | off) ---------
+  // A project or user agent whose definition sets a model but no `effort:` line inherits the LEAD's effort
+  // (xhigh on a premium lead): two haiku explorers ran at xhigh on 10-27. When the spawn also sets no effort
+  // of its own, the guard sets updatedInput.effort silently (the Agent tool takes an `effort` parameter, as
+  // `model` does): the effort the routing table gives the spawn's TYPE when that route is on the model that
+  // will run, else the model's own default effort (tier resolvesTo.defaultEffort). An effort in the spawn
+  // input or in the agent file always wins; a model that takes no effort is left alone. Runs after the model
+  // rewrite above (it sizes the effort to the model that will run) and before the self-review block and the
+  // spawns.jsonl row, so both see the effort that will run: `def` becomes an effective copy carrying it.
+  // No message; the spawn row records it (silent_fixes `effort_filled:<effort>`, spawn_effort_source `guard-fill`).
+  {
+    const efModeRaw = String(opt('project_effort_fill', 'autofix')).toLowerCase();
+    const efMode = ['autofix', 'off'].includes(efModeRaw) ? efModeRaw : 'autofix';
+    try {
+      if (efMode === 'autofix' && pin.pinned && pin.fields === 'model' && def && !def.effort
+        && !input.effort && !(updatedInput && updatedInput.effort) && model) {
+        const alias = classifyModel(model).alias;
+        const takes = (e) => {
+          const ref = referenceEffortSupported(model, e);
+          return (ref || effortSupported(model, e)).ok;
+        };
+        let level = null;
+        if (alias) {
+          let r = route && route.model ? route : parityYardstick;
+          if (!(r && r.model) && declaredType) { try { r = resolveRoute({ type: declaredType }); } catch { r = null; } }
+          const fromTable = r && r.model && r.effort && classifyModel(r.model).alias === alias
+            ? String(r.effort).toLowerCase() : null;
+          const own = String(((modelTiers().tiers || {})[alias] || {}).resolvesTo?.defaultEffort || '').toLowerCase();
+          level = [fromTable, own].find((e) => e && takes(e)) || null;
+        }
+        if (level) {
+          updatedInput = { ...(updatedInput || input), effort: level };
+          def = { ...def, effort: level, effortFilled: true };
+          if (silentFixes) silentFixes.push(`effort_filled:${level}`);
+        }
+      }
+    } catch { /* fail open: the spawn keeps the inherited effort */ }
   }
 
   // --- Is this writer expected to review itself? ---------------------------
@@ -149,6 +189,6 @@ export function projectRouteAndSelfReview({
   } catch { selfReviewExpected = null; selfReviewNote = null; selfReviewInjected = false; selfReviewSuffix = ''; }
   return {
     projectRoutePlan, selfReviewExpected, selfReviewNote, selfReviewInjected, model, updatedInput,
-    selfReviewSuffix,
+    selfReviewSuffix, def,
   };
 }

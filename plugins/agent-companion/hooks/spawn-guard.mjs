@@ -132,12 +132,12 @@ try {
   const projectRouteAndSelfReviewOut = projectRouteAndSelfReview({
     pin, fromDef, spawnAlias, route, parityYardstick, declaredType, decls, model, updatedInput, input,
     typeIsParity, srCfg, brief, ladderRewrite, def, pinned, consequenceWasDeclared, declaredConsequence,
-    callerEffort, selfReviewSuffix, p,
+    callerEffort, selfReviewSuffix, p, silentFixes,
   });
   let {
     projectRoutePlan, selfReviewExpected, selfReviewNote, selfReviewInjected,
   } = projectRouteAndSelfReviewOut;
-  ({ model, updatedInput, selfReviewSuffix } = projectRouteAndSelfReviewOut);
+  ({ model, updatedInput, selfReviewSuffix, def } = projectRouteAndSelfReviewOut);
   writeSpawnRow({
     isCanary, input, model, def, callerEffort, sid, leadLive, p, loadedAtMs, ladderRewrite, declared, fromDef,
     autofilled, trulyInherited, namegateName, subagentCaller, callerModel, declaredWeight, declaredKind,
