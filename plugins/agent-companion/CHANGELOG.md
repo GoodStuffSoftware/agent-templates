@@ -2,6 +2,11 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## Unreleased
+
+- **Project agents with a model but no effort get an effort (`project_effort_fill`: `autofix` default, `off`).** A project or user agent whose definition sets a model and no `effort:` line inherited the lead session's effort (`xhigh` on a premium lead; two haiku explorer spawns ran at `xhigh` on 10-27). When the spawn input sets no effort either, `hooks/spawn-guard.mjs` now sets `updatedInput.effort` silently: the routing table's effort for the brief's `TYPE:` when that route is on the model that runs (after any `project_route_guard` rewrite), else the model's own default effort. An effort in the spawn input or in the agent file always wins. The rewrite is decided with the other `updatedInput` rewrites, before the self-review block and the `spawns.jsonl` row, so both see it. No message (the rule-1 "effort not stated" note is dropped for a filled spawn); the row carries `spawn_effort_source: guard-fill` and `silent_fixes: [effort_filled:<effort>]`. Reverse: `project_effort_fill` `off`, or revert the commit.
+- **A review with no verdict line counts as no review (self-review protocol).** A writer landed a refactor after its reviewer ran out of context and returned no `VERDICT:` line. Step 5 of the generated protocol (`selfReviewBlock`, written into the self-reviewing `agents/ac-*.md` rungs by `scripts/routing-table.mjs --sync-agent-descriptions` and appended to a brief at spawn for other rungs) now says: no `VERDICT: PASS` or `VERDICT: FIX` means the writer does not land or merge, reports "review incomplete" and returns for the lead to review instead. The rationale in `config/model-tiers.json` `selfReview` records it. Reverse: revert the commit and re-sync.
+
 ## 0.31.37 — 2026-10-27
 
 Refactor, no behaviour change: `hooks/spawn-guard.mjs` (2229 lines) is split into a 168-line dispatcher and ten modules under `hooks/lib/` (`sg-helpers`, `sg-brief`, `sg-route`, `sg-autofill`, `sg-gates`, `sg-fit`, `sg-review-plan`, `sg-telemetry`, `sg-deny`, `sg-finish`).

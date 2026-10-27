@@ -42,7 +42,7 @@ export function writeSpawnRow({
     let spawnEffortSource = 'none';
     if (def?.effort) {
       spawnEffort = def.effort;
-      spawnEffortSource = 'definition';
+      spawnEffortSource = def.effortFilled ? 'guard-fill' : 'definition';
     } else if (!noEffortModel && callerEffort) {
       spawnEffort = callerEffort;
       spawnEffortSource = 'inherited';
@@ -104,7 +104,7 @@ export function writeSpawnRow({
       spawn_effort: spawnEffort,          // the SPAWN's own effort
       spawn_effort_source: spawnEffortSource, // definition | inherited | none
       effective_effort: effectiveEffort,      // definition value, "inherited(<parent effort|unknown>)", or null (no-effort model)
-      effort_definition: def?.effort || null,
+      effort_definition: (def?.effortFilled ? null : def?.effort) || null,
       declared_weight: declaredWeight,   // null when the brief did not say (may be filled from declared_type's own preset)
       declared_kind: declaredKind,
       declared_consequence: declaredConsequence,

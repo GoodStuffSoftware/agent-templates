@@ -167,7 +167,8 @@ export async function finishSpawn({
     writerBelowCallerNote,
     gateMessage,
     missingModelNote,
-    parityInheritedEffort ? null : noEffortStatedNote,
+    // An effort the guard filled in (project_effort_fill) is stated: nothing to tell the lead.
+    parityInheritedEffort || def?.effortFilled ? null : noEffortStatedNote,
     buildFloorNote,
     warrantSoftNote,
     haikuLeakNote,
