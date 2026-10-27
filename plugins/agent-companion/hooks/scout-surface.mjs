@@ -197,8 +197,7 @@ function buildReleaseLine(unattended) {
   const oldest = pending.versions[pending.versions.length - 1];
   const range = pending.versions.length > 1 ? `${oldest} to ${pending.versions[0]}` : pending.versions[0];
   return `[agent-companion] Claude Code ${pending.latest} is out (installed ${pending.installed}): ${pending.releases} new release(s) (${range}), `
-    + `${pending.items} changelog item(s) on subagents, hooks, cache, compaction, effort, models, transcripts, plugins and related. `
-    + `Details: ${stateFile('cli-release-details.md')}`;
+    + `${pending.items} relevant item(s). What it changes for us is a decision in the morning brief.`;
 }
 
 // --- Piece 4: yesterday's plan usage, once per day -------------------------

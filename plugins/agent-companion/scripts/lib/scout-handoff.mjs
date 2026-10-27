@@ -62,6 +62,18 @@ function daysBetween(dayA, dayB) {
   return Math.round((Date.parse(`${dayB}T00:00:00Z`) - Date.parse(`${dayA}T00:00:00Z`)) / 86400000);
 }
 
+// A signal unacknowledged for more than this many days stops being repeated in the
+// SessionStart line: the scout's decide step (scripts/intake-decide.mjs) turns it
+// into a "decide" finding for the morning brief.
+export const STALE_DAYS = 7;
+
+// Whole days from an entry's firstDay to the day of `atIso`; null when unreadable.
+export function ageDaysOf(entry, atIso) {
+  const from = entry && /^\d{4}-\d{2}-\d{2}$/.test(String(entry.firstDay)) ? entry.firstDay : null;
+  const to = dayOf(atIso);
+  return from && to ? daysBetween(from, to) : null;
+}
+
 // ---------- grouping a scout result by kind ---------------------------------
 
 export function groupByKind(signals) {
@@ -490,14 +502,22 @@ export function isTriageCwd(cwd, patterns) {
 
 // Returns null when there is nothing unacknowledged to say (the caller then shows
 // nothing from the scout for this session). Two lines at most.
-export function triageLine(view, { mdPath, ackHint, skipKinds = [] } = {}) {
+export function triageLine(view, { mdPath, ackHint, skipKinds = [], staleDays = STALE_DAYS } = {}) {
   const skip = new Set(skipKinds);
-  const open = (view.unacknowledged || []).filter((u) => !skip.has(u.kind));
-  if (open.length === 0) return null;
+  const all = (view.unacknowledged || []).filter((u) => !skip.has(u.kind));
+  if (all.length === 0) return null;
+  // Signals open past STALE_DAYS are decisions in the morning brief, not a repeated line.
+  const isStale = (u) => { const a = ageDaysOf(u, view.evaluatedAt || view.checkedAt); return a !== null && a > staleDays; };
+  const open = all.filter((u) => !isStale(u));
+  const stale = all.length - open.length;
+  const briefNote = stale > 0 ? `${stale} open over ${staleDays} days: decision in the morning brief` : '';
   const top = open.slice(0, 3).map((u) => `${u.kind} (day ${u.days}${u.count > 1 ? `, x${u.count}` : ''})`).join('; ');
   const more = open.length > 3 ? ` +${open.length - 3} more` : '';
+  const first = open.length === 0
+    ? `[agent-companion] Scout triage: ${briefNote}. Delta: ${mdPath}`
+    : `[agent-companion] Scout triage: ${open.length} unacknowledged signal(s): ${top}${more}${briefNote ? `; ${briefNote}` : ''}. Delta: ${mdPath}`;
   return [
-    `[agent-companion] Scout triage: ${open.length} unacknowledged signal(s): ${top}${more}. Delta: ${mdPath}`,
+    first,
     `For the plugin owner, not other tasks. Ack: ${ackHint}`,
   ].join('\n');
 }
