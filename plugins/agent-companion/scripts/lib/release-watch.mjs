@@ -136,7 +136,8 @@ function writeState(file, state) {
   try {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify(state, null, 2));
-  } catch { /* fail open: a missed write only means one more check */ }
+    return true;
+  } catch { return false; /* fail open: a missed write only means one more check */ }
 }
 
 // Due unless an attempt was made inside the window. A timestamp in the future
@@ -378,8 +379,7 @@ export function markDecided(stateFilePath, versions) {
     const decided = new Set(Array.isArray(state.decided) ? state.decided : []);
     for (const v of versions) decided.add(v);
     state.decided = [...decided].slice(-MAX_SEEN);
-    writeState(stateFilePath, state);
-    return true;
+    return writeState(stateFilePath, state);
   } catch { return false; }
 }
 

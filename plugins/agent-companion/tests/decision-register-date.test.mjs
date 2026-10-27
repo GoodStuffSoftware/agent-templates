@@ -120,15 +120,23 @@ test('reviewedOn: validated as a date, closes flags raised on or before that day
   assert.equal(openFlags(state, reg, T('2026-10-21T01:00:00Z')).length, 1, 'next day reopens');
 });
 
-test('the scout raises no decision_review_due for a settled review, so the intake queue has nothing to decide', () => {
+test('the scout raises no decision_review_due for a settled review (the same register without reviewedOn raises it)', () => {
   const fx = makeFixture();
   try {
+    const env = { AGENT_COMPANION_FAKE_NOW: '2026-10-20T10:00:00Z' };
     const reg = register();
     reg.decisions[0].reviewedOn = '2026-10-20';
     put(reg);
-    const res = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_FAKE_NOW: '2026-10-20T10:00:00Z' } });
+    const res = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.json.signals.some((s) => s.kind === 'decision_review_due'), false);
+  } finally { fx.cleanup(); }
+  // Control: the same register without reviewedOn does raise it.
+  const fx2 = makeFixture();
+  try {
+    put(register());
+    const res = runScript('scripts/detect.mjs', [], { cwd: fx2.dir, env: { AGENT_COMPANION_FAKE_NOW: '2026-10-20T10:00:00Z' } });
+    assert.equal(res.json.signals.some((s) => s.kind === 'decision_review_due'), true);
   } finally { fx.cleanup(); }
 });
 
