@@ -176,7 +176,7 @@ export const REGISTRY = [
     },
   },
   {
-    // The share over the ACTIVE context ceiling (subagent_ceiling_tokens, default 175K), with the line
+    // The share over the ACTIVE context ceiling (subagent_ceiling_tokens; measured against 175K while the option is 0), with the line
     // the day was counted against beside it (subagent.ceilingTokens). A day without one line is a gap.
     id: 'shareOverCeilingPct', source: 'history', register: true, entity: 'day', label: 'M', unit: '%', direction: 'up-is-worse', pool: 'ratio',
     needs: ['H'], perDayTotal: false, byLeadLevels: false,

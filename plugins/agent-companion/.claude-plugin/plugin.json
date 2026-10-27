@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.38",
+  "version": "0.31.39",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -782,13 +782,13 @@
     "subagent_ceiling_tokens": {
       "type": "number",
       "title": "Subagent context ceiling: tokens",
-      "description": "Advisory only. The first time a subagent's own context reaches this many tokens, the same PreToolUse hook as subagent_context_notice_tokens tells it ONCE to write a handoff file (state, files touched, next step, open questions) and return, giving the file path and STATUS: partial in its final message; the lead then starts a FRESH worker on the same rung that reads the file. Applies only to sonnet/high, sonnet/xhigh and every opus rung (never haiku, sonnet/low or sonnet/medium; the set is read from config/model-tiers.json). Nothing is ever blocked. It does nothing until the rollout schedule (rollout.json in the agent-companion state dir, id context-ceiling) says it is active. 0 turns it off.",
-      "default": 175000
+      "description": "Default 0 = off: workers compact instead of handing off (lead handoffs saved nothing when measured on 2026-10-09, and a compaction replay confirmed one fixed compaction point is enough). Set a positive number to turn the handoff nudge back on. Advisory only. The first time a subagent's own context reaches this many tokens, the same PreToolUse hook as subagent_context_notice_tokens tells it ONCE to write a handoff file (state, files touched, next step, open questions) and return, giving the file path and STATUS: partial in its final message; the lead may then start a FRESH worker on the same rung that reads the file. Applies only to sonnet/high, sonnet/xhigh and every opus rung (never haiku, sonnet/low or sonnet/medium; the set is read from config/model-tiers.json). Nothing is ever blocked. It does nothing until the rollout schedule (rollout.json in the agent-companion state dir, id context-ceiling) says it is active. 0 turns it off.",
+      "default": 0
     },
     "subagent_ceiling_repeat_tokens": {
       "type": "number",
       "title": "Subagent context ceiling: second notice tokens",
-      "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. Default 0 = off (the handoff nudge fires once per worker); set a line above the ceiling (for example 200000) to turn the second notice on.",
+      "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. Default 0 = off (the handoff nudge fires once per worker); only used when subagent_ceiling_tokens is on. Set a line above the ceiling (for example 200000) to turn the second notice on.",
       "default": 0
     },
     "step_budget": {

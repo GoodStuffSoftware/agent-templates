@@ -164,8 +164,8 @@ export async function autofillAndModelNotes({
         'rather than any model default, which couples this subagent\'s depth of thinking to whatever the caller ' +
         'happens to be running at. That counts as a rule-1 violation: every spawn must name a definition that ' +
         'states BOTH model and effort. State it explicitly by setting `effort:` in the agent definition ' +
-        'frontmatter — a brief-level "EFFORT:" line does NOT set it; effort is locked to the definition, not the ' +
-        'spawn call.')
+        'frontmatter — a brief-level "EFFORT:" line does NOT set it; the effort comes from the definition ' +
+        'or from the spawn call\'s own effort parameter, not from the brief text.')
     : null;
 
   // --- Missing model (SPAWNING RULE 1, other half) ------------------------

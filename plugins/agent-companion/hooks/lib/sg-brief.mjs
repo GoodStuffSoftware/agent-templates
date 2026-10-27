@@ -154,8 +154,9 @@ export function readSpawnBrief() {
   const roleNudge = [typeNudge, typeRequiredWarn].filter(Boolean).join('\n') || null;
   // NOTE: deliberately no WEIGHT/WARRANT-style "EFFORT:" line here. Unlike
   // model, weight, kind and consequence — all of which the ORCHESTRATOR
-  // controls by what it writes into the brief text — effort is locked to the
-  // spawned agent's OWN definition frontmatter; no documented Claude Code
+  // controls by what it writes into the brief text — effort comes from the
+  // spawned agent's OWN definition frontmatter or the spawn call's effort parameter
+  // (the guard fills it, see sg-review-plan.mjs); no documented Claude Code
   // mechanism turns free text in a prompt into a per-spawn effort parameter.
   // An earlier version of this hook let an "EFFORT: <level>" line in the
   // brief silence the no-effort warning below, which was actively

@@ -50,7 +50,7 @@ test('config: selfReview lists every stand-alone writer type (lean worker shape,
   }
   assert.equal(sr.fixRounds, 1);
   assert.equal(sr.optOut.line, 'REVIEW: lead');
-  assert.equal(sr.updated, '2026-10-06');
+  assert.equal(sr.updated, '2026-10-27');
   assert.ok(sr.rationale.length > 100);
   // It sits with the task types, so it moves with the table.
   const keys = Object.keys(SHIPPED);

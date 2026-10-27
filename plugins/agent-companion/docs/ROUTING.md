@@ -132,7 +132,7 @@ A writer spawned as `bounded-feature`, `integration`, `debug-root-cause`, `large
 | Fix rounds | 1 (never a second review) |
 | Opt-out brief line | `REVIEW: lead` |
 | Rungs carrying the protocol | `ac-sonnet-high`, `ac-opus-medium`, `ac-opus-high`, `ac-opus-xhigh` |
-| Updated | 2026-10-06 |
+| Updated | 2026-10-27 |
 
 The protocol text is generated into those rungs' `agents/ac-*.md` bodies from `config/model-tiers.json` `selfReview` by this script (`--sync-agent-descriptions`), and `--check-agent-descriptions` fails when a rung that routes a listed type lacks it, or a rung that no longer does still carries it. A listed type spawned on another ladder rung gets the same text, sized to that rung, appended to its brief by the spawn guard. The protocol tells the writer to open the reviewer's brief with `TYPE: code-review` and `WRITER: <the writer's model>/<effort>`, and to include the lead's brief verbatim (or its path), the branch, sha and diff range, the adversarial instruction, the review file path and a checkout of its own. At spawn time a code-review a subagent spawns with no `WRITER:` line is sized to the caller's own definition (checked against the model it was seen running), a self-reviewing writer that names a `WRITER:` below itself gets a note, a critical-change writer's review is floored by F1, and the spawn guard denies a code-review spawned by an agent that was itself spawned as a code-review: reviewers never spawn reviewers.
 

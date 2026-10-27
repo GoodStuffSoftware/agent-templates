@@ -399,7 +399,7 @@ compaction once per compaction).
 
 ### `context-ceiling.jsonl` — one record per context-ceiling nudge
 
-Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-above or opus subagent to write a handoff file and return (`subagent_ceiling_tokens`, default 175000), once per worker (a second row only if `subagent_ceiling_repeat_tokens` is set; default 0 = off). Haiku, sonnet/low and sonnet/medium are never nudged and write no row. Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
+Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-above or opus subagent to write a handoff file and return (`subagent_ceiling_tokens`, default 0 = off since 0.31.39, so no rows unless it is set above 0), once per worker (a second row only if `subagent_ceiling_repeat_tokens` is set; default 0 = off). Haiku, sonnet/low and sonnet/medium are never nudged and write no row. Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
 
 | field | type | meaning |
 |---|---|---|
