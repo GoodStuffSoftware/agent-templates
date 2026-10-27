@@ -107,9 +107,11 @@ export const ALLOWED = {
     "// type's own weight/kind/consequence preset AND its override, same as",
     "// a deliberate deviation and bypasses the override when its value DEPARTS",
   ],
+  "hooks/lib/sg-fit.mjs": [
+    "// against it directly instead of recomputing an override-blind",
+  ],
   "hooks/spawn-guard.mjs": [
     "// were wanted. Global switch, per-agent override in either direction,",
-    "// against it directly instead of recomputing an override-blind",
     "fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid",
   ],
   // FS9 fix (2026-09-24 round-2 family-split review, HIGH): scripts/benchmark.mjs
