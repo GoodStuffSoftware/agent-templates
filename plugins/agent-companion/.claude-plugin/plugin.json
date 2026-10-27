@@ -189,7 +189,7 @@
     "release_watch": {
       "type": "boolean",
       "title": "Claude Code release watch",
-      "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on subagents, hooks, cache, compaction, effort, models, transcripts, SendMessage, worktrees, workflows and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one line naming the versions, the item count and the details path (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
+      "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on subagents, hooks, cache, compaction, effort, models, transcripts, SendMessage, worktrees, workflows and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one short line pointing to the morning brief (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
       "default": true
     },
     "pinned_model_check": {

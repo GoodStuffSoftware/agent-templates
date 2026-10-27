@@ -186,7 +186,7 @@ export function releaseFinding(d, nowIso) {
 // generic wording, worded by whether the signal carries an action.
 export const STALE_GUIDE = {
   project_agent_drift: { means: 'A project agent definition disagrees with the routing table (below or above its tier, effort inherited, or no parity reviewer).', action: 'fix' },
-  decision_review_due: { means: 'A standing decision passed its review date and was never settled.', action: 'fix' },
+  decision_review_due: { means: 'A standing decision passed its review date and was never settled (a settled review is closed by setting reviewedOn on the decision).', action: 'fix' },
   budget_notices: { means: 'Count of session and worker budget notices; informational, it changes nothing by itself.', action: 'ack' },
   spawn_activity: { means: 'Count of spawns in 24h; informational, a volume reading with no defect.', action: 'retire' },
   inherited_effort_spawns: { means: 'Spawns named no effort and ran at the lead effort.', action: 'fix' },

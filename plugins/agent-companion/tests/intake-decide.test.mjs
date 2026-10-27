@@ -4,7 +4,7 @@
 import './isolate.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runScript, runHook, PLUGIN_ROOT } from './helpers.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
@@ -115,6 +115,17 @@ test('a release is decided only when marked; marked releases leave the queue; a 
     const state = JSON.parse(readFileSync(stateFile('release-watch.json'), 'utf8'));
     assert.deepEqual(state.decided.sort(), ['9.0.2', '9.0.3']);
     assert.equal(state.latest, '9.0.3', 'marking keeps the rest of the state');
+  } finally { fx.cleanup(); }
+});
+
+test('markDecided reports a failed write instead of claiming success', () => {
+  const fx = makeFixture();
+  try {
+    writeRelease();
+    // The state "file" is a directory: the write cannot succeed.
+    const dirAsFile = join(fx.stateDir, 'state', 'not-a-file');
+    mkdirSync(dirAsFile, { recursive: true });
+    assert.equal(markDecided(dirAsFile, ['9.0.3']), false);
   } finally { fx.cleanup(); }
 });
 
