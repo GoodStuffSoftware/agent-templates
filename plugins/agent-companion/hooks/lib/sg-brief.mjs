@@ -10,7 +10,7 @@ import {
 } from './context.mjs';
 import { pinInfo } from './sg-helpers.mjs';
 
-export function readSpawnBrief({  }) {
+export function readSpawnBrief() {
   const p = readStdin();
   noteAgentType(p);
 
@@ -204,11 +204,11 @@ export function readSpawnBrief({  }) {
     else writerProblem = parsed.reason;
   }
   return {
-  p, input, sid, declared, isLadderSpawn, def, fromDef, model, trulyInherited, pin, pinned,
-  pinModelOverridden, pinReplacedNote, isCanary, brief, decls, warrantDeclared, weightLineExplicit,
-  declaredWeight, weightWasDeclared, declaredKind, kindWasDeclared, declaredConsequence,
-  consequenceWasDeclared, declaredTypeRaw, declaredType, declaredRole, roleInserted, silentFixes,
-  typeRequiredMode, typeReqIsRung, typeRequiredMissing, roleNudge, typeWeight, typeIsParity, writer,
-  writerProblem, writerRaw,
-};
+    p, input, sid, declared, isLadderSpawn, def, fromDef, model, trulyInherited, pin, pinned,
+    pinModelOverridden, pinReplacedNote, isCanary, brief, decls, warrantDeclared, weightLineExplicit,
+    declaredWeight, weightWasDeclared, declaredKind, kindWasDeclared, declaredConsequence,
+    consequenceWasDeclared, declaredTypeRaw, declaredType, declaredRole, roleInserted, silentFixes,
+    typeRequiredMode, typeReqIsRung, typeRequiredMissing, roleNudge, typeWeight, typeIsParity, writer,
+    writerProblem, writerRaw,
+  };
 }
