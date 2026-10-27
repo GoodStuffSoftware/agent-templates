@@ -110,9 +110,11 @@ export const ALLOWED = {
   "hooks/lib/sg-fit.mjs": [
     "// against it directly instead of recomputing an override-blind",
   ],
+  "hooks/lib/sg-telemetry.mjs": [
+    "fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid",
+  ],
   "hooks/spawn-guard.mjs": [
     "// were wanted. Global switch, per-agent override in either direction,",
-    "fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid",
   ],
   // FS9 fix (2026-09-24 round-2 family-split review, HIGH): scripts/benchmark.mjs
   // (the gated entry point) gained its own --evidence-family flag/env
