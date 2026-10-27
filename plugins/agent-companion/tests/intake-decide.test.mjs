@@ -10,7 +10,7 @@ import { makeFixture, runScript, runHook, PLUGIN_ROOT } from './helpers.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
 import {
   slug, releaseDocId, staleDocId, decideItem, decideRelease, releaseFinding, staleEntries, staleFinding,
-  buildQueue, SURFACES, DETAIL_MAX, DECISIONS_FILE,
+  buildQueue, SURFACES, CHANGES, DETAIL_MAX, DECISIONS_FILE,
 } from '../scripts/lib/intake-decide.mjs';
 import { undecidedOf, markDecided } from '../scripts/lib/release-watch.mjs';
 import { triageLine, ageDaysOf } from '../scripts/lib/scout-handoff.mjs';
@@ -46,21 +46,29 @@ test('doc ids follow the store contract slug rule', () => {
 
 // ---------- release decisions ---------------------------------------------------
 
-test('item recommendations: fix on a core topic adopts, a core feature watches, a side feature is ignored', () => {
-  assert.equal(decideItem(item('Fixed hooks firing twice', ['hooks'])).rec, 'adopt');
+test('item recommendations: adopt needs a concrete change; an area we use without one is watch', () => {
+  const stop = decideItem(item('Fixed SubagentStop hooks running twice a minute', ['subagents', 'hooks']));
+  assert.equal(stop.rec, 'adopt');
+  assert.equal(stop.changes[0].file, 'hooks/subagent-context.mjs');
+  assert.ok(stop.changes[0].change.length > 0, 'it says what to change');
+  assert.equal(decideItem(item('updatedInput from PreToolUse hooks is now validated like Claude\'s own input', ['hooks'])).rec, 'adopt');
+  // Core topic or a fix, but nothing here to change: watch.
+  assert.equal(decideItem(item('Fixed hooks firing twice', ['hooks'])).rec, 'watch');
+  assert.equal(decideItem(item('Fixed compaction keeping too much of a long conversation', ['compaction'])).rec, 'watch');
   assert.equal(decideItem(item('Added an effort option to the Agent tool', ['subagents', 'effort'])).rec, 'watch');
+  assert.equal(decideItem(item('Removed the old hook output format', ['hooks'])).rec, 'watch', 'a breaking change with nothing to name is watched');
   assert.equal(decideItem(item('Added plugin progress', ['plugins'])).rec, 'ignore');
-  assert.equal(decideItem(item('Removed the old hook output format', ['hooks'])).rec, 'adopt', 'a breaking change is adopted and verified');
 });
 
-test('every item names the file or option it could change', () => {
+test('every adopt item names the file or option and what to change; watch items name none', () => {
   const d = decideItem(item('Fixed SubagentStop hooks firing twice', ['subagents', 'hooks']));
   assert.ok(d.surfaces.length > 0);
-  assert.equal(d.surfaces[0].file, 'hooks/subagent-context.mjs', 'a SubagentStop item points at the hook count and telemetry');
+  assert.equal(d.surfaces[0].file, 'hooks/subagent-context.mjs');
   assert.ok(d.surfaces.some((s) => s.file === 'hooks/spawn-guard.mjs'));
+  assert.deepEqual(decideItem(item('Fixed hooks firing twice', ['hooks'])).changes, []);
 });
 
-test('the surface table only names files that exist and options the plugin declares', () => {
+test('the surface and change tables only name files that exist and options the plugin declares', () => {
   const manifest = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
   const declared = new Set(Object.keys(manifest.userConfig || manifest.options || {}));
   for (const [topic, list] of Object.entries(SURFACES)) {
@@ -69,33 +77,66 @@ test('the surface table only names files that exist and options the plugin decla
       if (s.option) assert.ok(declared.has(s.option), `${topic}: option ${s.option} not declared`);
     }
   }
+  for (const c of CHANGES) {
+    assert.ok(existsSync(join(PLUGIN_ROOT, c.file)), `change ${c.match}: ${c.file} missing`);
+    if (c.option) assert.ok(declared.has(c.option), `change ${c.match}: option ${c.option} not declared`);
+    assert.ok(c.change && c.change.length <= 60, `change text for ${c.file} must be short`);
+  }
 });
 
-test('a release finding has the contract fields, expect decide, and a detail within the cap', () => {
-  const big = { version: '9.1.0', items: Array.from({ length: 9 }, (_, i) => item(`Fixed subagent problem number ${i} with a deliberately long description of what went wrong inside the harness`, ['subagents'])) };
-  const f = releaseFinding(decideRelease(big), '2026-10-27T09:00:00.000Z');
-  assert.equal(f.docId, 'findings/scout-cli-release-9-1-0');
+test('one finding covers every adopt release of a run; it has the contract fields and a detail within the cap', () => {
+  const rel = (version, text) => decideRelease({ version, items: [item(text, ['subagents', 'hooks'])] });
+  const ds = [rel('9.1.1', 'Fixed SubagentStop hooks running twice'), rel('9.1.0', 'updatedInput is now validated'), rel('9.0.9', 'Fixed a hook crash')];
+  assert.deepEqual(ds.map((d) => d.rec), ['adopt', 'adopt', 'watch']);
+  const f = releaseFinding(ds, '2026-10-27T09:00:00.000Z');
+  assert.equal(f.docId, 'findings/scout-cli-release-9-1-0-to-9-1-1');
   assert.equal(f.source, 'scout');
   assert.equal(f.expect, 'decide');
   assert.equal(f.lookedAt, null);
   assert.equal(f.useful, null);
   assert.equal(f.firstSeen, f.lastSeen);
   assert.ok(f.detail.length <= DETAIL_MAX, f.detail.length);
-  assert.match(f.detail, /Recommend adopt/);
-  assert.match(f.title, /^Claude Code 9\.1\.0: adopt/);
+  assert.match(f.detail, /hooks\/subagent-context\.mjs: /);
+  assert.match(f.detail, /hooks\/spawn-guard\.mjs: /);
+  assert.match(f.title, /^Claude Code 9\.1\.0 to 9\.1\.1: adopt/);
   assert.match(f.impact, /hooks\/spawn-guard\.mjs/);
+  assert.doesNotMatch(f.detail, /9\.0\.9/, 'a watch release is not in the finding');
+  // A single adopt release keeps its own doc id; no adopt release gives no finding.
+  assert.equal(releaseFinding([ds[0]], 'x').docId, 'findings/scout-cli-release-9-1-1');
+  assert.equal(releaseFinding([ds[2]], 'x'), null);
 });
 
-test('queue: unseen releases produce findings on the first run, side-topic and empty releases do not', () => {
+test('queue: one finding for the adopt releases; watch, side-topic and empty releases are quiet and counted', () => {
   const fx = makeFixture();
   try {
     writeRelease();
     const q = buildQueue({ stateDirPath: join(fx.stateDir, 'state'), nowMs: NOW });
-    assert.deepEqual(q.releases.map((r) => r.version), ['9.0.3', '9.0.1']);
-    assert.deepEqual(q.releases.map((r) => r.rec), ['adopt', 'watch']);
-    assert.deepEqual(q.quiet, ['9.0.2'], 'nothing touches us: decided locally, no finding');
+    assert.equal(q.releases.length, 1);
+    assert.deepEqual(q.releases[0].versions, ['9.0.3']);
+    assert.equal(q.releases[0].rec, 'adopt');
+    assert.deepEqual(q.quiet, ['9.0.2', '9.0.1'], 'watch and side-topic releases: decided locally, no finding');
+    assert.deepEqual(q.counts, { adopt: 1, watch: 1, none: 1 });
     assert.ok(existsSync(join(fx.stateDir, 'state', DECISIONS_FILE)));
-    assert.match(readFileSync(join(fx.stateDir, 'state', DECISIONS_FILE), 'utf8'), /could change: hooks\/subagent-context\.mjs/);
+    const md = readFileSync(join(fx.stateDir, 'state', DECISIONS_FILE), 'utf8');
+    assert.match(md, /CHANGE: hooks\/subagent-context\.mjs/);
+    assert.match(md, /## 9\.0\.1: watch/);
+  } finally { fx.cleanup(); }
+});
+
+test('queue: several adopt releases give one finding that lists every version to mark', () => {
+  const fx = makeFixture();
+  try {
+    const more = [
+      { version: '9.0.5', items: [item('Fixed SubagentStop hooks running twice', ['subagents', 'hooks'])] },
+      { version: '9.0.4', items: [item('updatedInput is now validated', ['hooks'])] },
+      ...RELEASES,
+    ];
+    writeRelease({ latest: '9.0.5', releases: more });
+    const q = buildQueue({ stateDirPath: join(fx.stateDir, 'state'), nowMs: NOW });
+    assert.equal(q.releases.length, 1);
+    assert.deepEqual(q.releases[0].versions, ['9.0.3', '9.0.4', '9.0.5']);
+    assert.equal(q.releases[0].finding.docId, 'findings/scout-cli-release-9-0-3-to-9-0-5');
+    assert.deepEqual(q.counts, { adopt: 3, watch: 1, none: 1 });
   } finally { fx.cleanup(); }
 });
 
@@ -105,13 +146,13 @@ test('a release is decided only when marked; marked releases leave the queue; a 
     writeRelease();
     const dir = join(fx.stateDir, 'state');
     const before = buildQueue({ stateDirPath: dir, nowMs: NOW });
-    assert.equal(before.releases.length, 2);
+    assert.equal(before.releases.length, 1);
     // No mark yet (the store write failed): the same queue again.
-    assert.equal(buildQueue({ stateDirPath: dir, nowMs: NOW }).releases.length, 2);
+    assert.equal(buildQueue({ stateDirPath: dir, nowMs: NOW }).releases.length, 1);
     assert.ok(markDecided(stateFile('release-watch.json'), ['9.0.3', '9.0.2']));
     const after = buildQueue({ stateDirPath: dir, nowMs: NOW });
-    assert.deepEqual(after.releases.map((r) => r.version), ['9.0.1']);
-    assert.deepEqual(after.quiet, []);
+    assert.deepEqual(after.releases, []);
+    assert.deepEqual(after.quiet, ['9.0.1']);
     const state = JSON.parse(readFileSync(stateFile('release-watch.json'), 'utf8'));
     assert.deepEqual(state.decided.sort(), ['9.0.2', '9.0.3']);
     assert.equal(state.latest, '9.0.3', 'marking keeps the rest of the state');
@@ -134,7 +175,7 @@ test('releases at or below the installed version are not queued', () => {
   try {
     writeRelease();
     const q = buildQueue({ stateDirPath: join(fx.stateDir, 'state'), nowMs: NOW, runningVersion: '9.0.2' });
-    assert.deepEqual(q.releases.map((r) => r.version), ['9.0.3']);
+    assert.deepEqual(q.releases.map((r) => r.versions).flat(), ['9.0.3']);
     assert.deepEqual(undecidedOf({ releases: RELEASES }, '9.0.1').map((r) => r.version), ['9.0.3', '9.0.2']);
   } finally { fx.cleanup(); }
 });
@@ -196,8 +237,9 @@ test('CLI: queue prints findings and mark records decided; bad usage exits 2', (
     writeDelta([unackedEntry('project_agent_drift', '2026-10-04')], new Date().toISOString());
     const q = runScript('scripts/intake-decide.mjs', ['queue']);
     assert.equal(q.status, 0, q.stderr);
-    assert.deepEqual(q.json.releases.map((r) => r.version), ['9.0.3', '9.0.1']);
-    assert.deepEqual(q.json.quiet, ['9.0.2']);
+    assert.deepEqual(q.json.releases.map((r) => r.version), ['9.0.3']);
+    assert.deepEqual(q.json.quiet, ['9.0.2', '9.0.1']);
+    assert.deepEqual(q.json.counts, { adopt: 1, watch: 1, none: 1 });
     assert.equal(q.json.stale.length, 1);
     assert.equal(q.json.releases[0].finding.expect, 'decide');
 
@@ -205,7 +247,8 @@ test('CLI: queue prints findings and mark records decided; bad usage exits 2', (
     assert.equal(m.status, 0, m.stderr);
     assert.match(m.stdout, /decided: 9\.0\.3 9\.0\.2/);
     const q2 = runScript('scripts/intake-decide.mjs', ['queue']);
-    assert.deepEqual(q2.json.releases.map((r) => r.version), ['9.0.1']);
+    assert.deepEqual(q2.json.releases, []);
+    assert.deepEqual(q2.json.quiet, ['9.0.1']);
 
     assert.equal(runScript('scripts/intake-decide.mjs', ['mark', 'latest']).status, 2);
     assert.equal(runScript('scripts/intake-decide.mjs', ['nope']).status, 2);

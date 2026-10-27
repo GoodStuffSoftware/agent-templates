@@ -3,10 +3,12 @@
 //
 //   node intake-decide.mjs queue [--stale-days N]
 //        Print one JSON object:
-//          releases[]  { version, rec, finding }  one decide finding each: a Claude Code
-//                      release with an item that could change a hook, guard or option
-//          quiet[]     versions with nothing that touches this plugin: mark them decided,
-//                      write no finding
+//          releases[]  at most ONE { version, versions[], rec, changes[], finding }: a single
+//                      decide finding covering every undecided release with an adopt item (an
+//                      item with a concrete change: file or option, and what to change)
+//          quiet[]     versions with no adopt item (watch, or nothing that touches this plugin):
+//                      mark them decided, write no finding
+//          counts      { adopt, watch, none } releases
 //          stale[]     { kind, ageDays, finding }  scout signals unacknowledged past the
 //                      threshold (default 7 days)
 //          notes[]     why a part was skipped

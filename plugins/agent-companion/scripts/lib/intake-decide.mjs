@@ -113,30 +113,42 @@ export function surfacesFor(topics) {
   return out;
 }
 
-// One item -> { text, topics, kind, rec, surfaces }. The draft rule:
-//   adopt  a fix on a core topic (the update brings it), or a breaking change
-//          (update, then run the guard canary);
-//   watch  a feature on a core topic, or any fix off the core topics;
-//   ignore a non-core feature.
+// A concrete change: a changelog item that names something this plugin handles, with
+// the file (or option) to change and what to change in it. "adopt" needs one. A test
+// checks each file exists and each option is declared. Keep the change text short: it
+// goes into a 300-character finding.
+export const CHANGES = [
+  { match: /\bSubagent(?:Start|Stop)\b/, file: 'hooks/subagent-context.mjs', option: 'subagent_context_notice_tokens', change: 'recheck SubagentStart/Stop counts' },
+  { match: /\bupdatedInput\b/, file: 'hooks/spawn-guard.mjs', option: 'foreground_guard', change: 'updatedInput keys the tool accepts' },
+  { match: /always run (?:the )?main conversation's subagents in the background/i, file: 'hooks/spawn-guard.mjs', option: 'foreground_guard', change: 'foreground autofix moot on desktop' },
+  { match: /AUTO_COMPACT_WINDOW/, file: 'scripts/lib/cache-advisor.mjs', option: 'compact_window_drift_pct', change: 'window advice takes k/M suffixes' },
+  { match: /\bcache_creation_(?:5m|1h)_tokens\b/, file: 'scripts/usage-analysis.mjs', option: 'usage_analysis', change: 'read the 5m/1h cache write split' },
+];
+
+// One item -> { text, topics, kind, rec, surfaces, changes }. The rule:
+//   adopt  the item has a concrete change (CHANGES: a file or option and what to change);
+//   watch  no concrete change, but it touches a core topic, is a fix, or is a breaking
+//          change (an area we use);
+//   ignore a non-core, non-fix, non-breaking item.
 export function decideItem(item) {
   const text = String((item && item.text) || '');
   const topics = Array.isArray(item && item.topics) ? item.topics : [];
   const core = topics.some((t) => CORE_TOPICS.has(t));
   const breaking = BREAKING_RE.test(text);
   const fix = FIX_RE.test(text);
+  const changes = CHANGES.filter((c) => c.match.test(text)).map(({ file, option, change }) => ({ file, option, change }));
   let rec = 'ignore';
-  if (breaking || (fix && core)) rec = 'adopt';
-  else if (core || fix) rec = 'watch';
-  const surfaces = surfacesFor(topics);
-  if (/\bSubagent(?:Start|Stop)\b/.test(text)) {
-    surfaces.unshift({ file: 'hooks/subagent-context.mjs', note: 'SubagentStart and SubagentStop hook firing counts and telemetry (hooks.json wires both)' });
-  }
-  return { text, topics, kind: breaking ? 'breaking' : fix ? 'fix' : 'change', rec, surfaces };
+  if (changes.length) rec = 'adopt';
+  else if (core || fix || breaking) rec = 'watch';
+  // The files the item names a change for come first, then what the topic touches.
+  const named = changes.map((c) => ({ file: c.file, option: c.option, note: c.change }));
+  const surfaces = [...named, ...surfacesFor(topics).filter((x) => !named.some((n) => n.file === x.file))];
+  return { text, topics, kind: breaking ? 'breaking' : fix ? 'fix' : 'change', rec, surfaces, changes };
 }
 
 const WHY = {
-  adopt: 'a fix or breaking change on a surface the guards read; update and run the guard canary',
-  watch: 'touches a surface we steer, no fix we depend on; revisit when it ships in a release we run',
+  adopt: 'an item names a concrete change here',
+  watch: 'touches an area we use, but no concrete change to make',
   ignore: 'only side topics (plugins, workflows, worktrees, SendMessage); nothing to change',
 };
 
@@ -145,33 +157,43 @@ export function decideRelease(release) {
   let rec = 'ignore';
   for (const i of items) if (RANK[i.rec] > RANK[rec]) rec = i.rec;
   const topics = [...new Set(items.flatMap((i) => i.topics))];
-  return { version: release.version, rec, why: WHY[rec], topics, items };
+  const seen = new Set();
+  const changes = [];
+  for (const c of items.flatMap((i) => i.changes)) {
+    const key = `${c.file}|${c.change}`;
+    if (!seen.has(key)) { seen.add(key); changes.push(c); }
+  }
+  return { version: release.version, rec, why: WHY[rec], topics, items, changes };
 }
 
 const surfaceLabel = (s) => (s.option ? `${s.file} (option ${s.option})` : s.file);
+const changeLabel = (c) => `${c.option ? `${c.file} (option ${c.option})` : c.file}: ${c.change}`;
 
-export function releaseDetail(d) {
-  const shown = d.items.filter((i) => i.surfaces.length).slice(0, 3);
-  const parts = shown.map((i) => `"${clip(i.text, 55)}" -> ${i.surfaces[0].file}`);
-  const more = d.items.length - shown.length;
-  const tail = ` Full list: ${DECISIONS_FILE} in the scout state dir.`;
-  const head = `${d.items.length} item(s). Recommend ${d.rec}: ${d.why}. `;
-  const body = parts.join('; ') + (more > 0 ? `; +${more} more.` : '.');
-  return clip(head + body + tail, DETAIL_MAX).replace(/\.\.\.$/, '...');
-}
-
-export function releaseFinding(d, nowIso) {
-  const topics = d.topics.slice(0, 4).join(', ');
+// One finding for every adopt release of this run (one run can find several undecided
+// releases; the operator gets one decision, not one per release). A single release keeps
+// its own doc id; several share a range id. Null when no release is adopt.
+export function releaseFinding(ds, nowIso) {
+  const list = (Array.isArray(ds) ? ds : [ds]).filter((d) => d.rec === 'adopt');
+  if (!list.length) return null;
+  const versions = list.map((d) => d.version).sort(compareVersions);
+  const lo = versions[0];
+  const hi = versions[versions.length - 1];
+  const byKey = new Map();
+  for (const c of list.flatMap((d) => d.changes)) byKey.set(`${c.file}|${c.change}`, c);
+  const changes = [...byKey.values()];
+  const range = versions.length === 1 ? hi : `${lo} to ${hi}`;
+  const head = 'Changes: ';
+  const tail = '';
   const byFile = new Map();
-  for (const s of d.items.flatMap((i) => i.surfaces)) if (!byFile.has(s.file)) byFile.set(s.file, s);
-  const surfaces = [...byFile.values()].map(surfaceLabel).slice(0, 3);
+  for (const c of changes) byFile.set(c.file, [...(byFile.get(c.file) || []), c.change]);
+  const body = [...byFile].map(([file, list]) => `${file}: ${list.join(', ')}`).join('; ');
   return {
-    docId: releaseDocId(d.version),
+    docId: releaseDocId(versions.length === 1 ? hi : `${lo}-to-${hi}`),
     source: SOURCE,
-    title: `Claude Code ${d.version}: ${d.rec}${topics ? ` (${topics})` : ''}`,
-    detail: releaseDetail(d),
-    url: `https://github.com/anthropics/claude-code/releases/tag/v${d.version}`,
-    impact: `Could change: ${surfaces.join(', ') || 'guards and routing'}.`,
+    title: `Claude Code ${range}: adopt, ${changes.length} change(s) to make`,
+    detail: clip(head + body + '.' + tail, DETAIL_MAX),
+    url: `https://github.com/anthropics/claude-code/releases/tag/v${hi}`,
+    impact: `Could change: ${[...new Set(changes.map((c) => c.file))].join(', ')}. All items: ${DECISIONS_FILE} in the scout state dir.`,
     expect: 'decide',
     firstSeen: nowIso,
     lastSeen: nowIso,
@@ -245,12 +267,13 @@ export function staleEntries(view, { staleDays = STALE_DAYS, skipKinds = [], now
 // --- the file for the full list ----------------------------------------------
 
 export function decisionsMarkdown(decisions, nowIso) {
-  const L = [`# Claude Code release decisions (drafted ${nowIso})`, '', 'Draft recommendations from `scripts/intake-decide.mjs`: adopt = update and verify, watch = revisit, ignore = nothing to change. The finding in the morning brief carries the short form.', ''];
+  const L = [`# Claude Code release decisions (drafted ${nowIso})`, '', 'Draft recommendations from `scripts/intake-decide.mjs`: adopt = a concrete change to make (file or option, and what to change), watch = touches an area we use with no concrete change (no finding), ignore = nothing to change. The finding in the morning brief carries the adopt items only.', ''];
   for (const d of decisions) {
     L.push(`## ${d.version}: ${d.rec}`);
     L.push('');
     for (const i of d.items) {
       L.push(`- [${i.topics.join(', ')}] (${i.rec}) ${i.text}`);
+      for (const c of i.changes) L.push(`  - CHANGE: ${changeLabel(c)}`);
       for (const s of i.surfaces) L.push(`  - could change: ${surfaceLabel(s)} (${s.note})`);
     }
     L.push('');
@@ -279,7 +302,7 @@ export function buildQueue({
   stateDirPath, nowMs = Date.now(), staleDays = STALE_DAYS, skipKinds = [], releases = true, runningVersion = null,
 }) {
   const nowIso = new Date(nowMs).toISOString();
-  const out = { checkedAt: nowIso, releases: [], quiet: [], stale: [], notes: [] };
+  const out = { checkedAt: nowIso, releases: [], quiet: [], counts: { adopt: 0, watch: 0, none: 0 }, stale: [], notes: [] };
 
   if (releases) {
     const state = readState(join(stateDirPath, 'release-watch.json'));
@@ -291,10 +314,23 @@ export function buildQueue({
       const decisions = undecidedOf(state, inst).map(decideRelease);
       if (decisions.length) {
         writeDecisionsFile(join(stateDirPath, DECISIONS_FILE), decisions, nowIso);
-        // Only a release with something that could change a hook, guard or option gets a
-        // finding; the rest are recorded decided locally and keep the brief to decisions.
-        out.releases = decisions.filter((d) => d.rec !== 'ignore').map((d) => ({ version: d.version, rec: d.rec, finding: releaseFinding(d, nowIso) }));
-        out.quiet = decisions.filter((d) => d.rec === 'ignore').map((d) => d.version);
+        // Only a release with a concrete change (adopt) gets a finding, and one finding covers
+        // every adopt release of the run. Watch and ignore releases are recorded decided
+        // locally (quiet) and stay in the decisions file, so the brief keeps to decisions.
+        const adopt = decisions.filter((d) => d.rec === 'adopt');
+        const finding = releaseFinding(adopt, nowIso);
+        if (finding) {
+          const versions = adopt.map((d) => d.version).sort(compareVersions);
+          out.releases = [{
+            version: versions[versions.length - 1],
+            versions,
+            rec: 'adopt',
+            changes: adopt.flatMap((d) => d.changes.map((c) => ({ ...c, version: d.version }))),
+            finding,
+          }];
+        }
+        out.quiet = decisions.filter((d) => d.rec !== 'adopt').map((d) => d.version);
+        out.counts = { adopt: adopt.length, watch: decisions.filter((d) => d.rec === 'watch').length, none: decisions.filter((d) => d.rec === 'ignore').length };
       }
     }
   }

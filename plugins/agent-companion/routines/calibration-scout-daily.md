@@ -276,17 +276,17 @@ Detecting is not enough: every cycle should end in a decision someone sees. This
 node "$AC/scripts/intake-decide.mjs" queue
 ```
 
-It prints `{ releases, quiet, stale, notes }` (no network, no model). Every `releases` and `stale` entry carries a `finding` already shaped for the store: `docId`, `source`, `title`, `detail` (300 characters at most), `url`, `impact`, `expect` (`decide`), `firstSeen`, `lastSeen`, `lookedAt` null, `useful` null.
+It prints `{ releases, quiet, counts, stale, notes }` (no network, no model). Every `releases` and `stale` entry carries a `finding` already shaped for the store: `docId`, `source`, `title`, `detail` (300 characters at most), `url`, `impact`, `expect` (`decide`), `firstSeen`, `lastSeen`, `lookedAt` null, `useful` null.
 
 1. **Read the store first.** If another producer already wrote a doc for a release (its title or detail names the version), write no second doc for it: count that release as covered.
-2. **Releases.** Each `releases` entry is a Claude Code release with at least one changelog item that could change a hook, guard or option of this plugin (the draft names the file or option) and a recommendation: `adopt` (update, then run the guard canary) or `watch`. Keep the draft unless an item plainly does not apply here; then reword `title`/`detail` honestly, and if nothing applies at all treat the release as `quiet`. Write each one with its `docId` (create it when absent; when it exists update `lastSeen` only).
-3. **Mark decided, only after the finding exists** (just written, already there, or covered by step 1), and mark every version in `quiet` (nothing touches this plugin: no finding):
+2. **Releases.** `releases` holds at most ONE entry: a single finding covering every undecided release that has an `adopt` item, an item with a concrete change (the file or option and what to change in it; `versions` lists the releases, `changes` the items). A release whose items only touch an area we use, with no concrete change, is `watch`: it is not in `releases`, it is in `quiet` and recorded in `cli-release-decisions.md`. Keep the draft unless a change plainly does not apply here; then reword `title`/`detail` honestly. Write it with its `docId` (create it when absent; when it exists update `lastSeen` only).
+3. **Mark decided, only after the finding exists** (just written, already there, or covered by step 1): mark every version in the entry's `versions`, plus every version in `quiet` (watch or nothing touches this plugin: no finding):
 
    ```bash
    node "$AC/scripts/intake-decide.mjs" mark <version> <version> ...
    ```
 
-   Never mark a version whose write failed or whose store was unreachable; it is queued again next run. The first run after install can queue a dozen releases.
+   Never mark a `versions` entry whose write failed or whose store was unreachable; it is queued again next run (marking `quiet` is always safe). The first run after install can queue a dozen releases and still writes one finding.
 4. **Stale signals.** Each `stale` entry is a scout signal unacknowledged for more than 7 days, with what it means and the recommended action (fix, ack with a reason, or retire the detector). Write its `docId` the same way (an existing doc: `lastSeen` only). A kind written here gets no separate per-signal doc from the plain hand-off step, and the SessionStart line no longer repeats it. Nothing is marked for these: they stay queued until the signal is acknowledged, fixed or retired.
 5. A non-empty `notes` list is a skipped part, not a clean one: say so in one line only if something else is printed.
 
