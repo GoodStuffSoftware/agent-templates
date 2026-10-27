@@ -49,7 +49,7 @@ test('doc ids follow the store contract slug rule', () => {
 test('item recommendations: adopt needs a concrete change; an area we use without one is watch', () => {
   const stop = decideItem(item('Fixed SubagentStop hooks running twice a minute', ['subagents', 'hooks']));
   assert.equal(stop.rec, 'adopt');
-  assert.equal(stop.changes[0].file, 'hooks/subagent-context.mjs');
+  assert.equal(stop.changes[0].file, 'hooks/hooks.json');
   assert.ok(stop.changes[0].change.length > 0, 'it says what to change');
   assert.equal(decideItem(item('updatedInput from PreToolUse hooks is now validated like Claude\'s own input', ['hooks'])).rec, 'adopt');
   // Core topic or a fix, but nothing here to change: watch.
@@ -60,11 +60,20 @@ test('item recommendations: adopt needs a concrete change; an area we use withou
   assert.equal(decideItem(item('Added plugin progress', ['plugins'])).rec, 'ignore');
 });
 
+test('the change patterns match their own wording and not a neighbour', () => {
+  const rec = (text, topics) => decideItem(item(text, topics)).rec;
+  assert.equal(rec('Fixed the CLAUDE_CODE_AUTO_COMPACT_WINDOW=200k setting silently giving a 100K window', ['compaction']), 'adopt');
+  assert.equal(rec('Fixed CLAUDE_CODE_AUTO_COMPACT_WINDOW being ignored in cloud sessions', ['compaction']), 'watch');
+  assert.equal(rec('Added agent_type to the SubagentStop hook input', ['subagents', 'hooks']), 'watch');
+  assert.equal(rec('Changed the desktop app to always run the main conversation\u2019s subagents in the background', ['subagents']), 'adopt', 'a typographic apostrophe');
+  assert.equal(rec("Changed the desktop app to always run the main conversation's subagents in the background", ['subagents']), 'adopt');
+});
+
 test('every adopt item names the file or option and what to change; watch items name none', () => {
   const d = decideItem(item('Fixed SubagentStop hooks firing twice', ['subagents', 'hooks']));
   assert.ok(d.surfaces.length > 0);
-  assert.equal(d.surfaces[0].file, 'hooks/subagent-context.mjs');
-  assert.ok(d.surfaces.some((s) => s.file === 'hooks/spawn-guard.mjs'));
+  assert.equal(d.surfaces[0].file, 'hooks/hooks.json');
+  assert.ok(d.surfaces.some((s) => s.file === 'hooks/lib/sg-finish.mjs'), 'then what the topic touches');
   assert.deepEqual(decideItem(item('Fixed hooks firing twice', ['hooks'])).changes, []);
 });
 
@@ -96,17 +105,27 @@ test('one finding covers every adopt release of a run; it has the contract field
   assert.equal(f.useful, null);
   assert.equal(f.firstSeen, f.lastSeen);
   assert.ok(f.detail.length <= DETAIL_MAX, f.detail.length);
-  assert.match(f.detail, /hooks\/subagent-context\.mjs: /);
-  assert.match(f.detail, /hooks\/spawn-guard\.mjs: /);
+  assert.match(f.detail, /hooks\/hooks\.json: /);
+  assert.match(f.detail, /hooks\/lib\/sg-finish\.mjs: /);
   assert.match(f.title, /^Claude Code 9\.1\.0 to 9\.1\.1: adopt/);
-  assert.match(f.impact, /hooks\/spawn-guard\.mjs/);
+  assert.match(f.impact, /hooks\/lib\/sg-finish\.mjs/);
   assert.doesNotMatch(f.detail, /9\.0\.9/, 'a watch release is not in the finding');
   // A single adopt release keeps its own doc id; no adopt release gives no finding.
   assert.equal(releaseFinding([ds[0]], 'x').docId, 'findings/scout-cli-release-9-1-1');
   assert.equal(releaseFinding([ds[2]], 'x'), null);
 });
 
-test('queue: one finding for the adopt releases; watch, side-topic and empty releases are quiet and counted', () => {
+test('the finding detail fits the cap with every change in the table at once, untruncated', () => {
+  const all = decideRelease({ version: '9.9.9', items: CHANGES.map((c, i) => item(`placeholder ${i}`, ['hooks'])) });
+  all.rec = 'adopt';
+  all.changes = CHANGES.map(({ file, option, change }) => ({ file, option, change }));
+  const f = releaseFinding([all], 'x');
+  assert.ok(f.detail.length <= DETAIL_MAX - 5, `margin: ${f.detail.length}`);
+  assert.doesNotMatch(f.detail, /\.\.\.$/);
+  for (const c of CHANGES) assert.ok(f.detail.includes(c.change), c.change);
+});
+
+test('queue: one finding for the adopt releases; watch and side-topic releases are quiet and counted', () => {
   const fx = makeFixture();
   try {
     writeRelease();
@@ -118,7 +137,7 @@ test('queue: one finding for the adopt releases; watch, side-topic and empty rel
     assert.deepEqual(q.counts, { adopt: 1, watch: 1, none: 1 });
     assert.ok(existsSync(join(fx.stateDir, 'state', DECISIONS_FILE)));
     const md = readFileSync(join(fx.stateDir, 'state', DECISIONS_FILE), 'utf8');
-    assert.match(md, /CHANGE: hooks\/subagent-context\.mjs/);
+    assert.match(md, /CHANGE: hooks\/hooks\.json/);
     assert.match(md, /## 9\.0\.1: watch/);
   } finally { fx.cleanup(); }
 });

@@ -5,9 +5,9 @@
 // model call and no network:
 //
 //   1. Claude Code releases not yet decided (state/release-watch.json `releases`
-//      minus `decided`): one finding per release with the matching changelog
-//      items, the plugin file or option each could change, and a draft
-//      recommendation (adopt / ignore / watch).
+//      minus `decided`): each is adopt (an item with a concrete change: a file or
+//      option and what to change), watch (touches an area we use, nothing to
+//      change) or ignore. ONE finding per run covers every adopt release.
 //   2. Scout signals unacknowledged for more than STALE_DAYS (scout-delta.json):
 //      one finding per kind with what it means and the action (fix, ack with a
 //      reason, or retire the detector).
@@ -48,12 +48,12 @@ const clip = (s, n) => {
 // plugin option name (a test checks it is declared), when one governs it.
 export const SURFACES = {
   subagents: [
-    { file: 'hooks/spawn-guard.mjs', option: 'foreground_guard', note: 'spawn input rewrite and routing on the Agent tool' },
+    { file: 'hooks/lib/sg-gates.mjs', option: 'foreground_guard', note: 'spawn input rewrite and routing on the Agent tool' },
     { file: 'hooks/subagent-context.mjs', option: 'subagent_context_notice_tokens', note: 'worker context notices' },
   ],
   hooks: [
     { file: 'hooks/hooks.json', note: 'hook event wiring' },
-    { file: 'hooks/spawn-guard.mjs', note: 'updatedInput and permission output' },
+    { file: 'hooks/lib/sg-finish.mjs', note: 'updatedInput and permission output' },
   ],
   cache: [
     { file: 'hooks/lib/keep-warm.mjs', option: 'keep_warm', note: 'cache keep-warm line' },
@@ -65,7 +65,7 @@ export const SURFACES = {
   ],
   effort: [
     { file: 'config/model-tiers.json', note: 'tier efforts and minEffort' },
-    { file: 'hooks/spawn-guard.mjs', option: 'lead_effort_live_check', note: 'effort floor and lead effort check' },
+    { file: 'hooks/lib/lead-effort-live.mjs', option: 'lead_effort_live_check', note: 'effort floor and lead effort check' },
   ],
   models: [
     { file: 'config/model-tiers.json', note: 'tier ids, aliases and retirement' },
@@ -79,7 +79,7 @@ export const SURFACES = {
     { file: 'hooks/resume-guard.mjs', option: 'resume_guard', note: 'continue-versus-fresh advice' },
   ],
   worktree: [
-    { file: 'hooks/spawn-guard.mjs', option: 'isolation_demotion_notice', note: 'isolation and shared-tree notices' },
+    { file: 'hooks/lib/sg-gates.mjs', option: 'isolation_demotion_notice', note: 'isolation and shared-tree notices' },
   ],
   workflow: [
     { file: 'hooks/spawn-guard.mjs', note: 'guard coverage of workflow-spawned agents' },
@@ -118,11 +118,11 @@ export function surfacesFor(topics) {
 // checks each file exists and each option is declared. Keep the change text short: it
 // goes into a 300-character finding.
 export const CHANGES = [
-  { match: /\bSubagent(?:Start|Stop)\b/, file: 'hooks/subagent-context.mjs', option: 'subagent_context_notice_tokens', change: 'recheck SubagentStart/Stop counts' },
-  { match: /\bupdatedInput\b/, file: 'hooks/spawn-guard.mjs', option: 'foreground_guard', change: 'updatedInput keys the tool accepts' },
-  { match: /always run (?:the )?main conversation's subagents in the background/i, file: 'hooks/spawn-guard.mjs', option: 'foreground_guard', change: 'foreground autofix moot on desktop' },
-  { match: /AUTO_COMPACT_WINDOW/, file: 'scripts/lib/cache-advisor.mjs', option: 'compact_window_drift_pct', change: 'window advice takes k/M suffixes' },
-  { match: /\bcache_creation_(?:5m|1h)_tokens\b/, file: 'scripts/usage-analysis.mjs', option: 'usage_analysis', change: 'read the 5m/1h cache write split' },
+  // A SubagentStart/SubagentStop hook firing more or fewer times than before.
+  { match: /\bSubagent(?:Start|Stop)\b.*\b(?:twice|once|more than once|duplicate\w*|repeat\w*)\b/i, file: 'hooks/hooks.json', change: 'check SubagentStop handlers run once per agent' },
+  { match: /\bupdatedInput\b/, file: 'hooks/lib/sg-finish.mjs', change: 'send only valid keys in updatedInput' },
+  { match: /always run (?:the )?main conversation['\u2019]s subagents in the background/i, file: 'hooks/lib/sg-gates.mjs', option: 'foreground_guard', change: 'foreground autofix is moot on desktop' },
+  { match: /AUTO_COMPACT_WINDOW\W*\d+[kKmM]\b/, file: 'scripts/lib/cache-advisor.mjs', option: 'compact_window_drift_pct', change: 'accept k/M suffixes in window advice' },
 ];
 
 // One item -> { text, topics, kind, rec, surfaces, changes }. The rule:
@@ -182,8 +182,6 @@ export function releaseFinding(ds, nowIso) {
   for (const c of list.flatMap((d) => d.changes)) byKey.set(`${c.file}|${c.change}`, c);
   const changes = [...byKey.values()];
   const range = versions.length === 1 ? hi : `${lo} to ${hi}`;
-  const head = 'Changes: ';
-  const tail = '';
   const byFile = new Map();
   for (const c of changes) byFile.set(c.file, [...(byFile.get(c.file) || []), c.change]);
   const body = [...byFile].map(([file, list]) => `${file}: ${list.join(', ')}`).join('; ');
@@ -191,7 +189,7 @@ export function releaseFinding(ds, nowIso) {
     docId: releaseDocId(versions.length === 1 ? hi : `${lo}-to-${hi}`),
     source: SOURCE,
     title: `Claude Code ${range}: adopt, ${changes.length} change(s) to make`,
-    detail: clip(head + body + '.' + tail, DETAIL_MAX),
+    detail: clip(`Changes: ${body}.`, DETAIL_MAX),
     url: `https://github.com/anthropics/claude-code/releases/tag/v${hi}`,
     impact: `Could change: ${[...new Set(changes.map((c) => c.file))].join(', ')}. All items: ${DECISIONS_FILE} in the scout state dir.`,
     expect: 'decide',
