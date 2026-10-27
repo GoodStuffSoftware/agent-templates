@@ -1,8 +1,7 @@
 // Subagent context ceiling: an optional handoff nudge, OFF by default since 0.31.39
 // (subagent_ceiling_tokens default 0). Workers compact instead of handing off: lead
 // handoffs were measured on 2026-10-09 as saving nothing, and a 2026-10-27 compaction
-// replay (tasks/usage-why-2026-10-06/compaction-replay-detail.md) confirmed one fixed
-// compaction point is enough. The code stays, so a positive value turns the nudge back on.
+// replay confirmed one fixed compaction point is enough. The code stays, so a positive value turns the nudge back on.
 //
 // Why (when it is on). A subagent that keeps working past ~175K tokens of context pays more
 // per call and ends up compacting at ~217K. The operator-approved alternative

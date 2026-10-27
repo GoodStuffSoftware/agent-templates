@@ -8,7 +8,7 @@
 // callerIsSubagent, lib/context.mjs), so the lead exits at once. The context
 // notice and the ceiling never block: their only output is additionalContext.
 //
-// The same hook carries the optional context CEILING (default 0 = off since 0.31.39) (lib/context-ceiling.mjs): the
+// The same hook carries the optional context CEILING (lib/context-ceiling.mjs; off by default since 0.31.39): the
 // first time the context of a sonnet/high-or-above or opus subagent (never
 // haiku, sonnet/low or sonnet/medium) is at or past subagent_ceiling_tokens it
 // is told ONCE to write a handoff file and return, so the lead starts a fresh
