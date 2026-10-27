@@ -190,6 +190,18 @@ Aggregate transcripts by model and by agent type. Report cost share, tier mix,
 and whether the cheapest tier is actually being used. A near-zero share at the
 bottom tier means the routing table's lower rows are decorative.
 
+## Step 2b — decide (releases and stale signals)
+
+Detecting a Claude Code release or a signal nobody acknowledged is not the end of a cycle. The scheduled scout runs the decide step (routine STEP 2.9):
+
+```bash
+node "$AC/scripts/intake-decide.mjs" queue          # releases[], quiet[], stale[], notes[]; no network, no model
+node "$AC/scripts/intake-decide.mjs" mark <version>...   # only after the finding exists
+```
+
+- **Releases:** one "decide" finding per unseen release whose changelog items could change a hook, guard or option (file or option named, recommendation `adopt` or `watch`). Releases with nothing that touches the plugin are marked decided with no finding. A release is marked decided only once its finding is in the findings store, so a failed write is retried.
+- **Stale signals:** a signal unacknowledged for more than 7 days becomes a "decide" finding (what it means; fix, ack with a reason, or retire the detector by adding the kind to `scout_suppress`). The SessionStart triage line stops listing it and says it is in the morning brief.
+
 ## Step 3 — report
 
 Only if something fired. Lead with what changed and what you did about it. One

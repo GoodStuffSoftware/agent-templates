@@ -268,9 +268,31 @@ If this session has the **RemoteTrigger** tool, call it with `action: "list"` an
 
 If the session does **not** have RemoteTrigger (always the case in a local scheduled task), say in one line that the cloud-routine pin check was not run locally and why. A skipped check is not a clean one: never report cloud routines as free of pins.
 
+## STEP 2.9 — decide step (local only)
+
+Detecting is not enough: every cycle should end in a decision someone sees. This step turns two things into "decide" findings for the findings store named in your task prompt (the store, its fields and its write procedure come from there; a run with no store prints each finding as a `FINDING: <title> | <detail> | <url>` line instead). It runs on EVERY local run, including a quiet one, and its findings are not printed as run output.
+
+```bash
+node "$AC/scripts/intake-decide.mjs" queue
+```
+
+It prints `{ releases, quiet, stale, notes }` (no network, no model). Every `releases` and `stale` entry carries a `finding` already shaped for the store: `docId`, `source`, `title`, `detail` (300 characters at most), `url`, `impact`, `expect` (`decide`), `firstSeen`, `lastSeen`, `lookedAt` null, `useful` null.
+
+1. **Read the store first.** If another producer already wrote a doc for a release (its title or detail names the version), write no second doc for it: count that release as covered.
+2. **Releases.** Each `releases` entry is a Claude Code release with at least one changelog item that could change a hook, guard or option of this plugin (the draft names the file or option) and a recommendation: `adopt` (update, then run the guard canary) or `watch`. Keep the draft unless an item plainly does not apply here; then reword `title`/`detail` honestly, and if nothing applies at all treat the release as `quiet`. Write each one with its `docId` (create it when absent; when it exists update `lastSeen` only).
+3. **Mark decided, only after the finding exists** (just written, already there, or covered by step 1), and mark every version in `quiet` (nothing touches this plugin: no finding):
+
+   ```bash
+   node "$AC/scripts/intake-decide.mjs" mark <version> <version> ...
+   ```
+
+   Never mark a version whose write failed or whose store was unreachable; it is queued again next run. The first run after install can queue a dozen releases.
+4. **Stale signals.** Each `stale` entry is a scout signal unacknowledged for more than 7 days, with what it means and the recommended action (fix, ack with a reason, or retire the detector). Write its `docId` the same way (an existing doc: `lastSeen` only). A kind written here gets no separate per-signal doc from the plain hand-off step, and the SessionStart line no longer repeats it. Nothing is marked for these: they stay queued until the signal is acknowledged, fixed or retired.
+5. A non-empty `notes` list is a skipped part, not a clean one: say so in one line only if something else is printed.
+
 ## STEP 3 — if `changed` is false AND lineup matches: stop. Emit nothing.
 
-Not a summary, not a confirmation. Silence is the success case. (A STEP 2.7 finding counts as a change; the skipped-check line does not, so on an otherwise quiet day print nothing for it.)
+Not a summary, not a confirmation. Silence is the success case. (A STEP 2.7 finding counts as a change; the skipped-check line does not, so on an otherwise quiet day print nothing for it. STEP 2.9 writes to the store, not to this output, so it never ends the silence by itself.)
 
 ## STEP 4 — dispatch, only for signals that fired
 
