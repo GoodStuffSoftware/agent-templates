@@ -149,7 +149,9 @@ test('ladder descriptions total at most 1250 bytes (1766 before 0.31.11) and eac
 // --- worker-facing hook text names scripts by path, not by skill -------------
 
 test('spawn-guard messages name the recommender by absolute path, not a bare relative one', () => {
-  const src = readFileSync(join(PLUGIN_ROOT, 'hooks', 'spawn-guard.mjs'), 'utf8');
+  // The guard's message text lives in hooks/spawn-guard.mjs and the hooks/lib/sg-*.mjs modules split from it.
+  const sgFiles = ['spawn-guard.mjs', ...readdirSync(join(PLUGIN_ROOT, 'hooks', 'lib')).filter((n) => /^sg-.*\.mjs$/.test(n)).map((n) => join('lib', n))];
+  const src = sgFiles.map((n) => readFileSync(join(PLUGIN_ROOT, 'hooks', n), 'utf8')).join('\n');
   // One occurrence is allowed: the fallback when the guard cannot resolve its own location.
   const bare = src.match(/node scripts\/recommend\.mjs/g) || [];
   assert.equal(bare.length, 1, 'only the RECOMMEND_CMD fallback may carry the bare form');

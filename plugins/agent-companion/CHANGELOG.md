@@ -2,6 +2,13 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.37 — 2026-10-27
+
+Refactor, no behaviour change: `hooks/spawn-guard.mjs` (2229 lines) is split into a 168-line dispatcher and ten modules under `hooks/lib/` (`sg-helpers`, `sg-brief`, `sg-route`, `sg-autofill`, `sg-gates`, `sg-fit`, `sg-review-plan`, `sg-telemetry`, `sg-deny`, `sg-finish`).
+
+- **Verbatim move.** Each phase of the old try block is cut as written into one exported function; the dispatcher calls them in the original order, so the fit autofix and the project route plan still run before the self-review block and the spawn row (the 0.31.35 and 0.31.36 ordering). Every original line is present in the new files except the import lines and the seven helper declaration lines (now `export`), and the two lazy imports now name sibling paths.
+- **Tests.** `lean-listings` and `delegation-guard` source scans now read `spawn-guard.mjs` plus the `sg-*` modules, so they check the same message text as before. The route-readers allowlist fixture moved its `spawn-guard.mjs` entries, texts unchanged, to the keys of the modules that hold them. Suite result unchanged from 0.31.36.
+
 ## 0.31.36 — 2026-10-25
 
 Silent spawn fixes: the guard fixes a spawn's shape through `updatedInput` and stops telling the lead about it. The spawn row is where each fix shows.

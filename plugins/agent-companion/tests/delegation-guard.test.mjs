@@ -11,7 +11,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT, childEnv, decisionOf } from './helpers.mjs';
@@ -109,7 +109,8 @@ test('callerIsSubagent / isMainThread: agent_id decides, agent_type does not', (
 });
 
 test('spawn-guard and runaway-notice use the shared helper, not a variant of their own', () => {
-  for (const f of ['hooks/spawn-guard.mjs', 'hooks/runaway-notice.mjs', 'hooks/delegation-guard.mjs']) {
+  const sgModules = readdirSync(join(PLUGIN_ROOT, 'hooks', 'lib')).filter((n) => /^sg-.*\.mjs$/.test(n)).map((n) => 'hooks/lib/' + n);
+  for (const f of ['hooks/spawn-guard.mjs', ...sgModules, 'hooks/runaway-notice.mjs', 'hooks/delegation-guard.mjs']) {
     const src = readFileSync(join(PLUGIN_ROOT, f), 'utf8');
     assert.doesNotMatch(src, /!!\s*p\.agent_id|if\s*\(\s*p\.agent_id\s*\)/, `${f} re-implements the main-thread test`);
     assert.doesNotMatch(src, /agent_type\s*===\s*'main'/, `${f} tests agent_type for the main thread`);
