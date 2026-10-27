@@ -100,6 +100,38 @@ test('the scout does not re-flag once the decision is retired', () => {
   } finally { fx.cleanup(); }
 });
 
+test('reviewedOn: validated as a date, closes flags raised on or before that day, a later flag reopens', () => {
+  const withReview = (reviewedOn) => { const r = register(); if (reviewedOn !== undefined) r.decisions[0].reviewedOn = reviewedOn; return r; };
+  assert.equal(validateRegister(withReview('2026-10-20'), { rollout: {} }).ok, true);
+  for (const bad of ['soon', '2026-10-9', '2026-02-30', 20261020, '']) {
+    const v = validateRegister(withReview(bad), { rollout: {} });
+    assert.equal(v.ok, false, String(bad));
+    assert.match(v.errors.join('\n'), /reviewedOn must be a UTC date/);
+  }
+  const reg = withReview('2026-10-20');
+  const state = emptyState();
+  evaluateTriggers({ register: register(), nowT: T('2026-10-20T10:00:00Z'), state });
+  assert.equal(openFlags(state, register(), T('2026-10-21T00:00:00Z')).length, 1, 'no reviewedOn: open');
+  assert.equal(openFlags(state, reg, T('2026-10-21T00:00:00Z')).length, 0, 'flag on the reviewedOn day is settled');
+  assert.equal(openFlags(state, withReview('2026-10-19'), T('2026-10-21T00:00:00Z')).length, 1, 'flag after reviewedOn stays open');
+  state.flags['trial-x/due@2026-10-19'].at = '2026-10-20T23:59:59.000Z';
+  assert.equal(openFlags(state, reg, T('2026-10-21T00:00:00Z')).length, 0, 'end of the reviewedOn day still settled');
+  state.flags['trial-x/due@2026-10-19'].at = '2026-10-21T00:00:00.000Z';
+  assert.equal(openFlags(state, reg, T('2026-10-21T01:00:00Z')).length, 1, 'next day reopens');
+});
+
+test('the scout raises no decision_review_due for a settled review, so the intake queue has nothing to decide', () => {
+  const fx = makeFixture();
+  try {
+    const reg = register();
+    reg.decisions[0].reviewedOn = '2026-10-20';
+    put(reg);
+    const res = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_FAKE_NOW: '2026-10-20T10:00:00Z' } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.json.signals.some((s) => s.kind === 'decision_review_due'), false);
+  } finally { fx.cleanup(); }
+});
+
 test('decision-register.mjs --check validates a date trigger', () => {
   const fx = makeFixture();
   try {

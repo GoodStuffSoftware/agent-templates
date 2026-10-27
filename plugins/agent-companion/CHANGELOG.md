@@ -2,6 +2,16 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.38 — 2026-10-27
+
+Intake decide step: what the scout finds now reaches the morning brief as a decision with a recommendation, not as a repeating line.
+
+- **Release decide.** `scripts/intake-decide.mjs queue` turns each undecided Claude Code release into adopt, watch or ignore against a table of what each topic touches. A release with an item that could change a hook, the guard or an option gets a finding (`scout-cli-release-<version>`, expect `decide`) naming the file or option; the rest are listed as quiet. `intake-decide.mjs mark <version>...` records them in `release-watch.json` (`decided`, kept across checks). New STEP 2.9 in the `calibration-scout-daily` routine and Step 2b in the `calibration-scout` skill; the routine reads the store first so a release another producer already covers gets no second doc.
+- **Stale decide.** A scout signal unacknowledged for more than 7 days gets one `scout-decide-<kind>` finding (what it means, the one action) instead of repeating in the triage line, which now says "N open over 7 days: decision in the morning brief".
+- **Short lines.** The SessionStart release line is one short line pointing to the brief.
+- **Settled reviews (`reviewedOn`).** New optional decision-register field, a UTC date. Flags raised on or before that day count as closed, so a settled review raises no `decision_review_due` signal and no decide finding; a flag raised later opens again. Validated by `--check`.
+- Reverse: stop running STEP 2.9; `reviewedOn` is optional and ignored when absent.
+
 ## 0.31.37 — 2026-10-27
 
 Refactor, no behaviour change: `hooks/spawn-guard.mjs` (2229 lines) is split into a 168-line dispatcher and ten modules under `hooks/lib/` (`sg-helpers`, `sg-brief`, `sg-route`, `sg-autofill`, `sg-gates`, `sg-fit`, `sg-review-plan`, `sg-telemetry`, `sg-deny`, `sg-finish`).
