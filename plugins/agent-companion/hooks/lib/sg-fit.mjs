@@ -58,7 +58,8 @@ export function fitAndParity({
   // --- Over-provisioned ladder spawn: silent rewrite to the routed rung (0.31.36) ----------
   // An ac-* rung that the fit check finds over-provisioned for its TYPE is rewritten, through
   // updatedInput, to the rung the table names (ladderRewriteTarget: only a type the session has
-  // shown registered), with no message; the spawn row records it (silent_fixes, fit_before_fix).
+  // shown registered, a namespaced rung on the call itself included), with no message; the spawn
+  // row records it (silent_fixes, fit_before_fix).
   // The model parameter, when the call set one, moves to the routed model too: it would
   // otherwise replace the rung's own. A "PREMIUM: <reason>" line opts out (and also the
   // premium over-provisioned deny below: the lead has stated why). Under-provisioned spawns
@@ -70,7 +71,7 @@ export function fitAndParity({
     && !(rewriteState && rewriteState.ignored) && route?.model && opt('fit_over_autofix', true) && opt('fit_autofill_ladder', true)) {
     try {
       const rung = rungFor(route.model, route.effort || null);
-      const pick = rung ? ladderRewriteTarget(sid, rung.agent, p.cwd, loadedAtMs) : null;
+      const pick = rung ? ladderRewriteTarget(sid, rung.agent, p.cwd, loadedAtMs, input.subagent_type) : null;
       if (pick && pick.target && pick.target !== input.subagent_type) {
         updatedInput = { ...(updatedInput || input), subagent_type: pick.target, ...(input.model ? { model: route.model } : {}) };
         ladderRewrite = { from: input.subagent_type || null, to: pick.target };
