@@ -11,6 +11,10 @@ Workers compact and keep going (operator decision 2026-10-27): two plugin behavi
 - Tests: step-budget (default third compaction, option value, 0 off, works with the notice off) and subagent-context (notice text, lead line).
 - Reverse: `step_budget_compaction_stop` 2; the notice text is in `subagentNoticeText` (`hooks/lib/subagent-context.mjs`) and the lead line in `contextCheck` (`hooks/runaway-check.mjs`).
 
+## 0.31.41 — 2026-10-28
+
+- **The first over-provisioned ladder spawn after a plugin load is rewritten too (`haiku_fit_leak`).** `fit_over_autofix` only rewrote to a rung once a SubagentStart in the session (since its plugins loaded) showed the ladder registered, so the session's first ladder spawn ran over-provisioned: the two rows the `haiku_fit_leak` scout signal counted were explore/lookup briefs on `ac-opus-low` and `ac-sonnet-medium`, each its session's first ladder spawn. `ladderRewriteTarget` (`hooks/lib/sg-helpers.mjs`) now also takes the call's own namespaced `agent-companion:ac-*` rung as that evidence: plugin agents register together, so the rewrite can fail only where the spawn as written would. Wider effect: any over-provisioned namespaced rung is rewritten on the first spawn, not only from the second. Bare names and the built-in-type autofill path are unchanged. Still silent, still before the self-review block and the spawn row. The detector was right and is unchanged. README and plugin.json describe the evidence rule. Reverse: revert the commit, or set `fit_over_autofix` false.
+
 ## 0.31.40 — 2026-10-28
 
 Adopts Claude Code 2.1.300 to 2.1.311 (release decisions in `state/cli-release-decisions.md`). The guard still works on 2.1.299.

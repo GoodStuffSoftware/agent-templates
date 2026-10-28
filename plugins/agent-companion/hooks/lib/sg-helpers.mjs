@@ -95,9 +95,15 @@ export function combineNotes(...parts) {
 //     ~/.claude/agents). Outside this plugin's own repo a bare name
 //     registers only from those, and a partial user-level install is common;
 //   - otherwise nothing, and the guard gives its advisory.
+// `spawnedType`, when the call being rewritten is itself a plugin-namespaced
+// ladder rung, counts as that evidence too (0.31.41): the call names a sibling
+// from the same agents/ folder, so the rewrite can fail only where the spawn as
+// written would fail as well. Without it, the first ladder spawn after a
+// plugin load was never rewritten (the haiku_fit_leak rows). The autofill
+// path passes none: its spawn names a built-in type, which proves nothing.
 // Returns { target, why }; `why` explains a null target. Bounded tail read;
 // never throws.
-export function ladderRewriteTarget(sid, rungAgent, cwd, loadedAtMs) {
+export function ladderRewriteTarget(sid, rungAgent, cwd, loadedAtMs, spawnedType = null) {
   let namespacedPrefix = null;
   let bareExact = false;
   let anyBare = false;
@@ -117,6 +123,10 @@ export function ladderRewriteTarget(sid, rungAgent, cwd, loadedAtMs) {
       else { anyBare = true; if (t === rungAgent) bareExact = true; }
     }
   } catch { /* no evidence */ }
+  if (namespacedPrefix === null && spawnedType && String(spawnedType).includes(':') && isLadderAgentName(spawnedType)) {
+    const t = String(spawnedType);
+    namespacedPrefix = `${t.slice(0, t.indexOf(':'))}:`;
+  }
   if (namespacedPrefix !== null) {
     const target = `${namespacedPrefix}${rungAgent}`;
     const d = agentDefinition(target, cwd);
