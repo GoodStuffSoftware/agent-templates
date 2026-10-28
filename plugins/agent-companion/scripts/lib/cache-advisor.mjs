@@ -191,15 +191,22 @@ export function parseEnvInt(raw) {
   return parseInt(s, 10);
 }
 
-// CLAUDE_CODE_AUTO_COMPACT_WINDOW as Claude Code applies it: not a number or
-// <= 0 is invalid and ignored (settings then apply); above 1M is capped at 1M;
-// below 100K is raised to 100K (docs, env-vars: "a value like 500k reads as 500
-// and clamps to the 100K minimum").
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW as Claude Code applies it. From 2.1.304 a value
+// ending in k or M is a size ("183k" = 183000, "1M" = 1000000, "0.5M" = 500000;
+// the number before the letter may have a fraction); before that, "183k" read as
+// 183 and was raised to the 100K minimum. A value with no suffix is still the
+// integer parse above ("500" is 500, below the minimum). Not a number or <= 0
+// is invalid and ignored (settings then apply); above 1M is capped at 1M; below
+// 100K is raised to 100K. The same reading as the --autocompact flag, except that
+// a bare 100-1000 is NOT thousands here (parseWindow does that for the flag).
+// `suffixed` marks the k/M form, which only 2.1.304 and later read this way.
 export function envWindow(raw) {
-  const n = parseEnvInt(raw);
-  if (Number.isNaN(n) || n <= 0) return { tokens: null, parsed: n, status: 'invalid' };
+  const t = String(raw).trim();
+  const suffix = /[kKmM]$/.test(t) ? t.slice(-1).toLowerCase() : null;
+  const n = suffix ? Math.round(parseFloat(t) * (suffix === 'm' ? 1e6 : 1e3)) : parseEnvInt(raw);
+  if (Number.isNaN(n) || n < 1) return { tokens: null, parsed: n, status: 'invalid', ...(suffix ? { suffixed: true } : {}) };
   const tokens = Math.max(WINDOW_MIN, Math.min(n, WINDOW_MAX));
-  return { tokens, parsed: n, status: tokens === n ? 'valid' : 'clamped' };
+  return { tokens, parsed: n, status: tokens === n ? 'valid' : 'clamped', ...(suffix ? { suffixed: true } : {}) };
 }
 
 // Where Claude Code reads managed-settings.json (2.1.280). MDM, registry and
@@ -235,6 +242,8 @@ export function configuredWindow({
     if (e.status === 'invalid') ignored.push({ source: 'env CLAUDE_CODE_AUTO_COMPACT_WINDOW', raw: ev, reason: 'it is not a positive whole number' });
     else {
       if (e.status === 'clamped') notes.push(`CLAUDE_CODE_AUTO_COMPACT_WINDOW="${ev}" reads as ${e.parsed} and is clamped to ${e.tokens}`);
+      // Before 2.1.304 "183k" read as 183 and was raised to 100000; the plain integer reads the same on every version.
+      if (e.suffixed) notes.push(`CLAUDE_CODE_AUTO_COMPACT_WINDOW="${ev}" reads as ${e.tokens} from Claude Code 2.1.304 on; earlier versions read it as ${parseInt(String(ev), 10)} and raise it to ${WINDOW_MIN} (the plain number ${e.tokens} reads the same on every version)`);
       result = { tokens: e.tokens, raw: ev, source: 'env CLAUDE_CODE_AUTO_COMPACT_WINDOW' };
     }
   }
@@ -966,7 +975,8 @@ export function whereMoneyGoes(mi) {
 // --- The whole advice --------------------------------------------------------------------
 
 // The two forms to type for a window setting: the settings.json integer and
-// the /autocompact command (applies at once in that session).
+// the /autocompact command (applies at once in that session). The report adds
+// the environment variable line itself.
 export function settingForms(window) {
   if (!window) return null;
   return { settingsValue: Math.round(window), command: `/autocompact ${Math.round(window / 1000)}k` };
@@ -1324,6 +1334,7 @@ export function formatAdvice(a, { curve = false } = {}) {
       + `within 1%: ${K(g.band1[0])}-${K(g.band1[1])}  within 5%: ${K(g.band5[0])}-${K(g.band5[1])}  (voters: ${g.voters.join(', ')})`);
     out.push(`  TO APPLY, type one of: ${forms.command}   (in a session: applies at once, and saves it to your user settings)`);
     out.push(`                     or: "autoCompactWindow": ${forms.settingsValue}   (settings.json: an INTEGER — a string like "${Math.round(W / 1000)}k" is silently ignored; read when a session starts)`);
+    out.push(`                     or: CLAUDE_CODE_AUTO_COMPACT_WINDOW=${forms.settingsValue}   (environment; the "${Math.round(W / 1000)}k" spelling reads the same from Claude Code 2.1.304, earlier versions read it as ${Math.round(W / 1000)} and raise it to 100000)`);
     const tpc = g.optimum.perModelTurnsPerCompaction || {};
     out.push(`  at ${K(W)}: a compaction about every ${turnsTxt(g.optimum.turnsPerCompaction)} turns overall; per model `
       + Object.entries(tpc).map(([m, t]) => `${m} ${t == null ? 'none' : t.toFixed(0)}`).join(', '));

@@ -199,7 +199,7 @@ node "$AC/scripts/intake-decide.mjs" queue          # releases[] (at most one), 
 node "$AC/scripts/intake-decide.mjs" mark <version>...   # only after the finding exists
 ```
 
-- **Releases:** one "decide" finding per run, covering every unseen release that has an `adopt` item. `adopt` needs a concrete change: the file or option and what to change in it. An item that only touches an area we use is `watch`, and a release with only watch or side-topic items is marked decided with no finding (listed in `state/cli-release-decisions.md`, which each run with undecided releases rewrites). The `adopt` releases are marked decided only once the finding is in the findings store, so a failed write is retried.
+- **Releases:** one "decide" finding per run (a `uw-*` doc from the cloud Update Watch does not block it; add `See also: <uw ids>` to its detail when that fits in 300 characters; only a doc with the finding's own `docId` means it is already written), covering every unseen release that has an `adopt` item. `adopt` needs a concrete change: the file or option and what to change in it. An item that only touches an area we use is `watch`, and a release with only watch or side-topic items is marked decided with no finding (listed in `state/cli-release-decisions.md`, which each run with undecided releases rewrites). The `adopt` releases are marked decided only once the finding is in the findings store, so a failed write is retried.
 - **Stale signals:** a signal unacknowledged for more than 7 days becomes a "decide" finding (what it means; fix, ack with a reason, or retire the detector by adding the kind to `scout_suppress`). The SessionStart triage line stops listing it and says it is in the morning brief.
 
 ## Step 3 — report

@@ -4,6 +4,7 @@
 // the locals it declares or reassigns that later phases read.
 
 import { classifyModel, dataDir, modelTiers, opt } from './context.mjs';
+import { harnessBackgroundsMain } from './harness-bg.mjs';
 import { buildMemoryBrief, buildMemoryNudge } from './memory-brief.mjs';
 import { DEFAULT_REPO_GLOBS, parseRepoGlobs } from './memory-index.mjs';
 import { buildCandidateName, buildNamegateBrief, reserveUniqueName, sessionSpawnNames } from './namegate.mjs';
@@ -145,7 +146,10 @@ export function memoryAndShapeGates({
   // Unrecognised value: fail toward the default, same direction
   // memory_brief_mode takes for a typo'd config rather than going silent.
   const gate1Mode = ['off', 'warn', 'fix', 'block'].includes(gate1ModeRaw) ? (gate1ModeRaw === 'warn' ? 'fix' : gate1ModeRaw) : 'fix';
-  const gate1Live = gate1Applicable && !gate1Exempt && gate1Mode !== 'off';
+  // 2.1.302: desktop and VS Code run the main conversation's subagents in the background whatever the
+  // spawn says, so the fix (and a block of a spawn that cannot run foreground) is moot there.
+  const harnessBg = gate1Applicable && harnessBackgroundsMain();
+  const gate1Live = gate1Applicable && !gate1Exempt && gate1Mode !== 'off' && !harnessBg;
   const gate1Justified = /FOREGROUND\s*:/i.test(brief);
   let gate1Action = 'none'; // none | fix | block — what THIS spawn actually gets
   if (gate1Live) {
@@ -160,8 +164,11 @@ export function memoryAndShapeGates({
     updatedInput = { ...(updatedInput || input), run_in_background: true };
     silentFixes.push('background_set');
   }
-  // What the rest of the guard (namegate below) treats as backgrounded: declared, or just set above.
-  const runsInBackground = bgDeclared || gate1Action === 'fix';
+  // The harness did the fix on desktop and VS Code: leave a trace in the spawn row, change nothing.
+  if (harnessBg && gate1Mode !== 'off' && !gate1Exempt && input.run_in_background === undefined) silentFixes.push('background_by_harness');
+  // What the rest of the guard (namegate below) treats as backgrounded: declared, just set above, or
+  // forced by the harness (an explicit run_in_background: false included).
+  const runsInBackground = bgDeclared || gate1Action === 'fix' || harnessBg;
 
   // Gate 2: telemetry only (0.31.7). It used to tell the caller that a spawn
   // passing both a name and isolation is an ordinary subagent, not an

@@ -92,9 +92,19 @@ test('configuredWindow: env wins and is clamped; a string in settings is ignored
     assert.equal(env.tokens, 300000);
     assert.match(env.source, /env/);
     assert.match(ignoredWindowLines(env)[0], /300K from env CLAUDE_CODE_AUTO_COMPACT_WINDOW applies/);
-    const k = configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500k' }, settingsPath, managedPath });
-    assert.equal(k.tokens, 100000, '"500k" reads as 500 and is clamped to the 100K minimum');
-    assert.match(k.notes[0], /reads as 500 and is clamped to 100000/);
+    // 2.1.304: k and M suffixes are sizes in the environment variable; settings.json stays integer-only (above).
+    const k = configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '183k' }, settingsPath, managedPath });
+    assert.equal(k.tokens, 183000, '"183k" is 183000 tokens');
+    assert.match(k.source, /env/);
+    assert.deepEqual(k.ignored.map((i) => i.source), ['user settings autoCompactWindow'], 'the env value is not ignored');
+    assert.match(k.notes[0], /"183k" reads as 183000 from Claude Code 2.1.304 on; earlier versions read it as 183 and raise it to 100000/);
+    const m = configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1M' }, settingsPath, managedPath });
+    assert.equal(m.tokens, 1000000, '"1M" is one million tokens');
+    const low = configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '50k' }, settingsPath, managedPath });
+    assert.equal(low.tokens, 100000, '"50k" is under the minimum and raised to it');
+    assert.match(low.notes[0], /reads as 50000 and is clamped to 100000/);
+    // A bare number is not thousands in the environment variable, as before.
+    assert.equal(configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '183' }, settingsPath, managedPath }).tokens, 100000);
     assert.equal(configuredWindow({ env: {}, settingsPath: join(dir, 'missing.json'), managedPath }).source, 'unset');
     // Read-only: the settings file is byte-identical afterwards.
     assert.equal(readFileSync(settingsPath, 'utf8'), JSON.stringify({ autoCompactWindow: '400k' }));
@@ -108,7 +118,14 @@ test('settingsWindowValid / envWindow: the schema and the env parse as Claude Co
   assert.equal(envWindow('5e5').tokens, 500000, 'scientific notation is a whole number');
   assert.equal(envWindow('500,000').tokens, 500000, 'thousands separators are read');
   assert.equal(envWindow('2000000').tokens, 1000000, 'capped at 1M');
-  assert.equal(envWindow('1M').tokens, 100000, '"1M" reads as 1 and is raised to 100K');
+  assert.deepEqual(envWindow('183k'), { tokens: 183000, parsed: 183000, status: 'valid', suffixed: true });
+  assert.equal(envWindow('1M').tokens, 1000000, '"1M" is one million (2.1.304)');
+  assert.equal(envWindow('0.5M').tokens, 500000, 'a fraction before the letter');
+  assert.equal(envWindow(' 200K ').tokens, 200000, 'trimmed, either case');
+  assert.equal(envWindow('2M').tokens, 1000000, 'capped at 1M');
+  assert.equal(envWindow('2M').status, 'clamped');
+  assert.equal(envWindow('k').status, 'invalid');
+  assert.equal(envWindow('0k').status, 'invalid');
   assert.equal(envWindow('abc').status, 'invalid');
   assert.equal(envWindow('0').status, 'invalid');
 });
@@ -697,6 +714,7 @@ test('formatAdvice: the value to type in both forms, list price, the rework-off 
   const text = formatAdvice(a).join('\n');
   assert.ok(text.includes(`TO APPLY, type one of: /autocompact ${W / 1000}k`));
   assert.ok(text.includes(`"autoCompactWindow": ${W}`));
+  assert.ok(text.includes(`CLAUDE_CODE_AUTO_COMPACT_WINDOW=${W}   (environment; the "${W / 1000}k" spelling reads the same from Claude Code 2.1.304`), "the environment form is advised too, with the version the k spelling needs");
   assert.match(text, /compacts at about \d+K on 1M models/);
   assert.match(text, /API list price/);
   assert.doesNotMatch(text, /anchored/);
