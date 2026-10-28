@@ -134,6 +134,9 @@ test('harnessBackgroundsMain: desktop and VS Code from 2.1.302 only; unknown ver
   assert.equal(harnessBackgroundsMain(env('cli', '2.1.309')), false, 'the terminal');
   assert.equal(harnessBackgroundsMain(env('sdk-cli', '2.1.309')), false);
   assert.equal(harnessBackgroundsMain({}), false);
+  assert.equal(harnessBackgroundsMain({ ...env('claude-desktop', '2.1.309'), CLAUDE_CODE_FORK_SUBAGENT: '0' }), false, 'fork subagents off: the harness does not force background');
+  assert.equal(harnessBackgroundsMain({ ...env('claude-desktop', '2.1.309'), CLAUDE_CODE_FORK_SUBAGENT: 'false' }), false);
+  assert.equal(harnessBackgroundsMain({ ...env('claude-desktop', '2.1.309'), CLAUDE_CODE_FORK_SUBAGENT: '1' }), true);
 });
 
 const desktop = (v) => ({ CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_CODE_EXECPATH: `C:\\x\\claude-code\\${v}\\h\\claude.exe` });

@@ -9,6 +9,7 @@
 // Both facts come from the hook process's environment: CLAUDE_CODE_ENTRYPOINT
 // (claude-desktop, claude-desktop-3p, claude-vscode) and the version in the path
 // of the running CLI (CLAUDE_CODE_EXECPATH, ".../claude-code/2.1.309/<hash>/claude.exe").
+// VS Code only counts when its binary path carries an exact x.y.z folder name like the desktop layout.
 // When either is missing or unreadable the answer is false: the fix stays on,
 // which is harmless where the harness already backgrounds the spawn.
 
@@ -32,7 +33,12 @@ export function versionAtLeast(v, min) {
   return true;
 }
 
+// The harness backgrounds these spawns through its fork-subagent gate; CLAUDE_CODE_FORK_SUBAGENT=0 (or false)
+// turns the gate off, and then a foreground spawn stays foreground, so the fix must stay on.
+const FORK_OFF = new Set(['0', 'false', 'off', 'no']);
+
 export function harnessBackgroundsMain(env = process.env) {
+  if (FORK_OFF.has(String(env.CLAUDE_CODE_FORK_SUBAGENT || '').trim().toLowerCase())) return false;
   if (!ENTRYPOINTS.has(String(env.CLAUDE_CODE_ENTRYPOINT || '').trim())) return false;
   return versionAtLeast(cliVersionFromPath(env.CLAUDE_CODE_EXECPATH), HARNESS_BG_SINCE);
 }
