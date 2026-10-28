@@ -10,6 +10,34 @@ import {
 import { mergeLeadEffort } from './lead-effort-live.mjs';
 import { mergeRedoAlert } from './redo-alert.mjs';
 
+// The Agent tool's input fields. Claude Code 2.1.300 and later validates a hook's
+// updatedInput like its own tool input: keys outside the schema are dropped and
+// input that fails validation is denied, so a stray key or a bad value in a
+// rewrite must never reach the harness. `team_name` is deprecated but still a field.
+export const AGENT_INPUT_KEYS = Object.freeze([
+  'description', 'prompt', 'subagent_type', 'model', 'effort', 'run_in_background',
+  'name', 'isolation', 'mode', 'team_name',
+]);
+const EFFORT_VALUES = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'lower', 'higher']);
+
+// Keep only schema keys, and drop a value of the wrong shape (a dropped value
+// leaves the spawn as the caller wrote it, which is always valid).
+export function sanitizeAgentInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const out = {};
+  for (const k of AGENT_INPUT_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(input, k)) continue;
+    const v = input[k];
+    if (v === undefined || v === null) continue;
+    if (k === 'run_in_background') { if (typeof v !== 'boolean') continue; }
+    else if (k === 'effort') { if (!EFFORT_VALUES.has(v)) continue; }
+    else if (typeof v !== 'string') continue;
+    else if ((k === 'model' || k === 'subagent_type') && !v.trim()) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 // Let the spawn through — optionally saying something to the user, and/or
 // rewriting the tool input (`updatedInput` is how a PreToolUse hook fills in a
 // model the spawn left blank). The guard never blocks the cheap direction, but
@@ -22,6 +50,7 @@ import { mergeRedoAlert } from './redo-alert.mjs';
 // updatedInput and no permissionBehavior yields hookUpdatedInput), so the
 // model fill-in does not need one.
 export function allowWith(systemMessage, updatedInput, additionalContext) {
+  if (updatedInput) updatedInput = sanitizeAgentInput(updatedInput);
   ({ systemMessage, additionalContext } = mergeLeadEffort(systemMessage, additionalContext)); // lead-effort live check (text only)
   additionalContext = mergeRedoAlert(additionalContext); // redo alert (text only; lib/redo-alert.mjs)
   // Text that is empty or only whitespace is no text. When there is nothing at
