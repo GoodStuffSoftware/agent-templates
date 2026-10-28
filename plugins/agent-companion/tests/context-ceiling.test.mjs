@@ -243,7 +243,7 @@ test('a compaction with no request after it yet is not read as a big context', (
     writeFileSync(agentFile, user('go') + turn('r1', 217000) + b);
     // The existing compaction notice still fires; the ceiling does not read the stale pre-compaction size.
     const text = ctxText(run(lead));
-    assert.match(text, /You just compacted/);
+    assert.match(text, /You compacted; re-read only/);
     assert.doesNotMatch(text, /Handoff checkpoint/);
     assert.equal(existsSync(join(telemetryDir(), 'context-ceiling.jsonl')), false);
   } finally { fx.cleanup(); }
