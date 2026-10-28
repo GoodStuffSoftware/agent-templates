@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.39",
+  "version": "0.31.42",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -776,7 +776,7 @@
     "subagent_context_notice_tokens": {
       "type": "number",
       "title": "Subagent context notice: tokens",
-      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens, or the subagent has just compacted, the subagent is told once to finish the current step, return its results and say what is left, and the lead is told when it stops. Nothing is ever blocked. 0 turns it off.",
+      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens the subagent is told once to finish the current step, return its results and say what is left; when it has just compacted it is told only to re-read what the next step needs and continue (no wrap-up: workers compact and keep going). The lead is told when it stops. Nothing is ever blocked. 0 turns it off, the compaction note included.",
       "default": 300000
     },
     "subagent_ceiling_tokens": {
@@ -794,7 +794,7 @@
     "step_budget": {
       "type": "boolean",
       "title": "Helper step budget",
-      "description": "On (default): the same PreToolUse hook that runs inside each subagent counts the subagent's own tool calls. At the warning line it is told ONCE how many of its steps are used and to finish, write its detail file and report what is left. Past the stop line every tool call is DENIED except writing a report or detail file (Write or Edit of a .md, .txt, .json or .csv file whose name says report, detail, handoff, review, summary, findings, analysis, verdict or notes), with the reason 'Step budget reached: write your report now and stop.' A subagent whose context compacts a second time is stopped the same way. The lines come from the subagent's brief: TYPE lookup, research, survey, explore and verify use the lookup lines, every other or missing TYPE the writer lines, and a 'BUDGET: <n>' line in the brief (10 to 9999, optionally followed by calls, tool calls, steps or turns) sets the stop value with the warning at 80% of it. The lead's own session is never counted. Off = no counting, no warning, no stop.",
+      "description": "On (default): the same PreToolUse hook that runs inside each subagent counts the subagent's own tool calls. At the warning line it is told ONCE how many of its steps are used and to finish, write its detail file and report what is left. Past the stop line every tool call is DENIED except writing a report or detail file (Write or Edit of a .md, .txt, .json or .csv file whose name says report, detail, handoff, review, summary, findings, analysis, verdict or notes), with the reason 'Step budget reached: write your report now and stop.' A subagent whose context compacts step_budget_compaction_stop times (default 3) is stopped the same way. The lines come from the subagent's brief: TYPE lookup, research, survey, explore and verify use the lookup lines, every other or missing TYPE the writer lines, and a 'BUDGET: <n>' line in the brief (10 to 9999, optionally followed by calls, tool calls, steps or turns) sets the stop value with the warning at 80% of it. The lead's own session is never counted. Off = no counting, no warning, no stop.",
       "default": true
     },
     "step_budget_warn": {
@@ -820,6 +820,12 @@
       "title": "Helper step budget: stop at (lookup types)",
       "description": "Tool calls a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) may make before every further call except writing its report or detail file is denied. 0 = no stop for this class.",
       "default": 60
+    },
+    "step_budget_compaction_stop": {
+      "type": "number",
+      "title": "Helper step budget: stop at this many compactions",
+      "description": "A subagent whose context has compacted this many times is stopped like the step stop: every further call except writing its report or detail file is denied, and the stop stays on. Default 3 (a whole number): at the 183000 subagent compaction window that is about the work volume the old 2-compaction stop allowed at the 250000 window. 0 = no compaction stop; the step-count stops stay the runaway guard. Only used while step_budget is on.",
+      "default": 3
     },
     "usage_analysis": {
       "type": "boolean",

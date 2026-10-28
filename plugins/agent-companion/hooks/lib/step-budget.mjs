@@ -28,7 +28,7 @@
 // The deny starts with the first call after the stop value has been reached:
 // with a stop of 120, calls 1 to 120 run and call 121 is refused.
 //
-// A helper that compacts a SECOND time is stopped the same way: the compaction
+// A helper that compacts step_budget_compaction_stop times (default 3, 0 = off) is stopped the same way: the compaction
 // signal subagent-context.mjs already reads is counted here (state/step-budget/<agent>.cmp),
 // independent of the context notice, and a sticky marker keeps the stop on afterwards.
 //
@@ -49,6 +49,7 @@ export const STEP_WARN_DEFAULT = 80;
 export const STEP_STOP_DEFAULT = 120;
 export const STEP_LOOKUP_WARN_DEFAULT = 40;
 export const STEP_LOOKUP_STOP_DEFAULT = 60;
+export const COMPACTION_STOP_DEFAULT = 3;
 export const STEP_LOG = 'step-budget.jsonl';
 export const BUDGET_MIN = 10;
 export const LOOKUP_TYPES = ['lookup', 'research', 'survey', 'explore', 'verify'];
@@ -140,7 +141,7 @@ export function isReportWrite(toolName, toolInput) {
   return REPORT_EXT.test(name) && REPORT_NAME.test(name);
 }
 
-// The helper's compactions, counted here (a one-byte-per-compaction file) so the second-compaction
+// The helper's compactions, counted here (a one-byte-per-compaction file) so the compaction
 // stop does not depend on the context notice being on. A boundary is counted once, when it is just
 // behind the helper (the same freshness the context notice uses); returns the count so far.
 function countCompaction(agentId, sig) {
@@ -159,7 +160,7 @@ function countCompaction(agentId, sig) {
 
 const stopMarker = (agentId) => join(budgetDir(), `${safe(agentId)}.stop`);
 
-// The compaction stop is sticky: once a helper has compacted twice, every later call is stopped.
+// The compaction stop is sticky: once a helper has reached the compaction stop, every later call is stopped.
 function markCompactionStop(agentId) {
   try {
     mkdirSync(budgetDir(), { recursive: true });
@@ -196,8 +197,9 @@ export function stepBudgetCheck(p, { transcript, sig = null }) {
     tool: p.tool_name, steps: n, type: info.type, caps: { warn: caps.warn, stop: caps.stop, kind: caps.kind },
   });
 
-  if (compactions >= 2) markCompactionStop(p.agent_id);
-  const compactionStop = existsSync(stopMarker(p.agent_id));
+  const compactionLimit = opt('step_budget_compaction_stop', COMPACTION_STOP_DEFAULT);
+  if (compactionLimit > 0 && compactions >= compactionLimit) markCompactionStop(p.agent_id);
+  const compactionStop = compactionLimit > 0 && existsSync(stopMarker(p.agent_id)); // 0 = off, also for a marker left earlier
   const stepStop = caps.stop > 0 && n > caps.stop;
   if ((stepStop || compactionStop) && !isReportWrite(p.tool_name, p.tool_input)) {
     return { deny: STOP_REASON, row: { ...base(), kind: 'stop', why: stepStop ? 'steps' : 'compactions' } };

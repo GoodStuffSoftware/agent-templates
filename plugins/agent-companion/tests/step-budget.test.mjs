@@ -1,6 +1,6 @@
 // Live step budget: hooks/subagent-context.mjs (PreToolUse, inside the helper) counts the
 // helper's tool calls per agent_id, warns once at the soft line and denies everything but
-// a report or detail write past the hard one; a second compaction stops it the same way.
+// a report or detail write past the hard one; the Nth compaction (step_budget_compaction_stop) stops it the same way.
 // Caps come from the helper's brief (first user message of its own transcript): lookup,
 // research, survey, explore and verify 40/60, everything else 80/120, `BUDGET: <n>` sets
 // the stop with the warning at 80%. Library: hooks/lib/step-budget.mjs.
@@ -217,34 +217,62 @@ test('options: step_budget_stop, step_budget_warn and the lookup pair move the l
   } finally { fx.cleanup(); }
 });
 
-test('second compaction: the first only warns the context way, the second stops the helper', () => {
+test('compaction stop: the default is the third compaction; the first two only inform', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
     const ctxOn = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_TOKENS: '0' };
     appendFileSync(agentFile, boundary('b1') + turn('r2'));
     const first = run(lead, ctxOn);
-    assert.match(ctxText(first), /You just compacted/);
+    assert.match(ctxText(first), /You compacted; re-read only what the next step needs and continue\./);
+    assert.doesNotMatch(ctxText(first), /split|return your results/);
     assert.equal(denied(first), false);
     appendFileSync(agentFile, boundary('b2') + turn('r3'));
-    const second = run(lead, ctxOn);
-    assert.equal(denied(second), true);
-    assert.equal(second.json.hookSpecificOutput.permissionDecisionReason, STOP_REASON);
+    assert.equal(denied(run(lead, ctxOn)), false, 'two compactions no longer stop the helper');
+    appendFileSync(agentFile, boundary('b3') + turn('r4'));
+    const third = run(lead, ctxOn);
+    assert.equal(denied(third), true);
+    assert.equal(third.json.hookSpecificOutput.permissionDecisionReason, STOP_REASON);
     assert.equal(rows().at(-1).why, 'compactions');
     // sticky: later calls stay stopped, a report write still passes
     assert.equal(denied(run(lead, ctxOn)), true);
     assert.equal(denied(run(lead, ctxOn, { tool_name: 'Write', tool_input: { file_path: 'x-detail.md', content: 'x' } })), false);
-    assert.equal(readFileSync(counterFile(), 'utf8').length, 4);
+    assert.equal(readFileSync(counterFile(), 'utf8').length, 5);
   } finally { fx.cleanup(); }
 });
 
-test('second compaction stops the helper even with the context notice off, and writes no context telemetry', () => {
+test('step_budget_compaction_stop: a set value moves the stop, 0 turns it off (the step caps still apply)', () => {
+  const fx = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fx);
+    const two = { CLAUDE_PLUGIN_OPTION_STEP_BUDGET_COMPACTION_STOP: '2' };
+    appendFileSync(agentFile, boundary('b1') + turn('r2'));
+    assert.equal(denied(run(lead, two)), false);
+    appendFileSync(agentFile, boundary('b2') + turn('r3'));
+    assert.equal(denied(run(lead, two)), true, 'a stop of 2 is the old second-compaction stop');
+    // 0: never stops on compactions, however many, and the marker left above is ignored
+    const off = { CLAUDE_PLUGIN_OPTION_STEP_BUDGET_COMPACTION_STOP: '0' };
+    assert.equal(denied(run(lead, off)), false);
+    for (const b of ['b3', 'b4', 'b5']) {
+      appendFileSync(agentFile, boundary(b) + turn(`r-${b}`));
+      assert.equal(denied(run(lead, off)), false);
+    }
+    // the step-count stop is untouched by the option
+    seed(121);
+    assert.equal(denied(run(lead, off)), true);
+    assert.equal(rows().at(-1).why, 'steps');
+  } finally { fx.cleanup(); }
+});
+
+test('compaction stop works with the context notice off, and writes no context telemetry', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
     appendFileSync(agentFile, boundary('b1') + turn('r2'));
     assert.equal(denied(run(lead)), false);
     appendFileSync(agentFile, boundary('b2') + turn('r3'));
+    assert.equal(denied(run(lead)), false);
+    appendFileSync(agentFile, boundary('b3') + turn('r4'));
     const r = run(lead); // OFF_CTX: subagent_context_notice_tokens 0
     assert.equal(denied(r), true);
     assert.equal(existsSync(join(telemetryDir(), 'subagent-context.jsonl')), false);

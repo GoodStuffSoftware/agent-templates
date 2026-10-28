@@ -19,7 +19,7 @@
 // The STEP BUDGET rides on the same hook (lib/step-budget.mjs): it counts the helper's
 // tool calls, warns once at the soft line and DENIES every call but a report or detail
 // write past the hard one (40/60 for lookup-type helpers, 80/120 otherwise, a `BUDGET: <n>`
-// brief line replaces the stop). A second compaction stops the helper the same way. This
+// brief line replaces the stop). The Nth compaction (step_budget_compaction_stop, default 3, 0 = off) stops it the same way. This
 // is the one place the hook denies; options step_budget, step_budget_warn, step_budget_stop,
 // step_budget_lookup_warn, step_budget_lookup_stop.
 //
@@ -66,7 +66,7 @@ try {
   if (kinds.length || nudge) pruneContextState();
 
   // The step budget: count this call, warn once, deny past the stop. A helper that
-  // has compacted twice is stopped the same way.
+  // has reached step_budget_compaction_stop compactions is stopped the same way.
   let step = null;
   if (stepsOn) {
     step = stepBudgetCheck(p, { transcript: path, sig });

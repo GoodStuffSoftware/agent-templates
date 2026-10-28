@@ -2,6 +2,15 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.42 — 2026-10-28
+
+Workers compact and keep going (operator decision 2026-10-27): two plugin behaviours that still worked against it are changed.
+
+- **The first-compaction notice no longer asks for a wrap-up.** A worker that compacted was told "Finish the current step, return your results, and say what is left so the lead can split it"; it now gets `You compacted; re-read only what the next step needs and continue.` The size notice (`subagent_context_notice_tokens`) keeps its wrap-up wording, and a size-plus-compaction message keeps it too. The lead-facing SubagentStop line for a compaction alone drops "told mid-run to wrap up" and the "split the remainder into smaller briefs" advice; it only says the worker compacted. A size event keeps both.
+- **New option `step_budget_compaction_stop` (integer, default 3, 0 = off).** The step budget stopped a worker at its second compaction. With `autoCompactWindow` 183000 for subagents that is about 260K of context growth, against about 377K at the old window, so the stop fired on roughly 30% less work than when it was approved; since 10-27, 13 workers were stopped by compactions and none by step count. Default 3 keeps about the same work volume. 0 turns the compaction stop off (also for a stop marker left earlier); the step-count caps stay the runaway guard. Set 2 for the old behaviour.
+- Tests: step-budget (default third compaction, option value, 0 off, works with the notice off) and subagent-context (notice text, lead line).
+- Reverse: `step_budget_compaction_stop` 2; the notice text is in `subagentNoticeText` (`hooks/lib/subagent-context.mjs`) and the lead line in `contextCheck` (`hooks/runaway-check.mjs`).
+
 ## 0.31.39 — 2026-10-27
 
 - **Project agents with a model but no effort get an effort (`project_effort_fill`: `autofix` default, `off`).** A project or user agent whose definition sets a model and no `effort:` line inherited the lead session's effort (`xhigh` on a premium lead; two haiku explorer spawns ran at `xhigh` on 10-27). When the spawn input sets no effort either, the spawn guard (`hooks/lib/sg-review-plan.mjs`) now sets `updatedInput.effort` silently: the routing table's effort for the brief's `TYPE:` when that route is on the model that runs (after any `project_route_guard` rewrite), else the model's own default effort. An effort in the spawn input or in the agent file always wins. The rewrite is decided with the other `updatedInput` rewrites, before the self-review block and the `spawns.jsonl` row, so both see it. No message (the rule-1 "effort not stated" note is dropped for a filled spawn); the row carries `spawn_effort_source: guard-fill` and `silent_fixes: [effort_filled:<effort>]`. Reverse: `project_effort_fill` `off`, or revert the commit.
