@@ -210,6 +210,19 @@ test('SubagentStop: a mid-run event reaches the lead next to the runaway flag, o
   } finally { fx.cleanup(); }
 });
 
+test('SubagentStop: a size event seen mid-run keeps the "told mid-run to wrap up" line and the split advice', () => {
+  const fx = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fx);
+    writeFileSync(agentFile, user('go') + turn('r1', 80000) + turn('r2', 340000));
+    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /Your context is past 300,000 tokens/);
+    runHook('hooks/runaway-check.mjs', stopPayload(lead));
+    const text = ctxText(leadDrain(lead));
+    assert.match(text, /passed 300,000 tokens of context \(340,000 at its last call\); it was told mid-run to wrap up\./);
+    assert.match(text, /split the remainder into smaller briefs/);
+  } finally { fx.cleanup(); }
+});
+
 test('SubagentStop fallback: a worker the mid-run hook never reached is recorded with phase "stop" and the lead is told', () => {
   const fx = makeFixture();
   try {

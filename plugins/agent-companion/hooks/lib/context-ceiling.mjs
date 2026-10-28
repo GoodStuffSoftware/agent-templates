@@ -25,8 +25,8 @@
 // 0 = off) and it keeps growing to that line is it nudged a second and last time.
 // A worker first seen already past the repeat line gets one nudge, not two. Advice only: the hook
 // output is additionalContext and nothing else, never a deny. The existing
-// at-compaction wrap-up (lib/subagent-context.mjs) is unchanged and stays the
-// backstop.
+// at-compaction note (lib/subagent-context.mjs) is informative only since 0.31.42; the size notice
+// is the wrap-up backstop.
 //
 // Rollout gate. The operator rolls changes out one per day. The nudge does
 // nothing until `activeFrom` for change id "context-ceiling" in the shared
