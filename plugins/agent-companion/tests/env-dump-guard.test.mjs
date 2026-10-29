@@ -11,6 +11,17 @@ const hit = (cmd, shell = 'bash') => envDumpHits(cmd, shell).env;
 
 const DENY_BASH = [
   'env',
+  "env | sed 's/=.*/&/'", // & re-emits the match
+  "env | sed 's/=.*/x&/'",
+  "env | sed -E 's/=(.*)/=\\1/'",
+  "env | sed 's/=.*/\\0/'",
+  "env | sed 's/=.*/x/e'", // e runs the line
+  "env | sed 's.=.*.#.'", // delimiter inside the match: sed splits the script elsewhere and the value comes back
+  "env | sed 's*=.**#*'",
+  'env | sed \'s$=.*$$;e env #$\'',
+  "env | sed 's=.*=x='",
+  'env | sed "s/=.*/$(printf \'&\')/"', // the shell expands $(...) before sed runs
+  'env | sed "s/=.*/`printf \'&\'`/"',
   'env | grep -i claude',
   'env | grep CLAUDE_CODE',
   'env | sort',
@@ -193,6 +204,8 @@ const ALLOW_BASH = [
   'env | cut --delimiter== --fields=1',
   "printenv | sed 's/=.*//'",
   "printenv | sed -E 's/=.*$//'",
+  "env | grep -i -E 'firebase|google|gcloud|GITHUB|GH_' | sed 's/=.*/=…/'",
+  "printenv | sed 's|=.*|=<hidden>|g'",
   "env | awk -F= '{print $1}'",
   "env | grep -o '^[^=]*'",
   'env | grep -i claude | cut -d= -f1',

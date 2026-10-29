@@ -267,6 +267,8 @@ A heavy command started bare overloads the machine and, because the hooks share 
 | `hint` | Runs unchanged; adds a one-line suggestion. |
 | `off` | Nothing happens. |
 
+**Cloud sessions.** When `CLAUDE_CODE_REMOTE` is `true` (Claude Code sets it in a cloud session) the gate does nothing in any mode: a cloud session is one disposable sandbox with no shared machine to protect, and a command rewritten into the queue wrapper looks suspicious to the cloud's own classifier (measured 2026-10-29: the wrapped `npm ci` was denied there and the routine failed). The "Shared resources:" line, the launcher install at session start, the capacity line and the keep-warm notes are skipped there too. Only `CLAUDE_CODE_REMOTE` counts (`isCloudSession` in `hooks/lib/context.mjs`); local behavior is unchanged.
+
 **Not yet verified live:** whether Claude Code applies `updatedInput` with no `permissionDecision` under `bypassPermissions`. The composition is proven in tests, including one real bash run through the real queue (exit code 7 passed through, ledger empty afterwards). Keep `deny` as the default until a fresh-session check confirms `rewrite`.
 
 **Telemetry.** `telemetry/resource-gate.jsonl`: one row per `denied`, `hinted` or `rewritten` decision (`event`), with `mode`, `classes`, `command_chars` and, for a rewrite, `run_in_background`; never the command text.

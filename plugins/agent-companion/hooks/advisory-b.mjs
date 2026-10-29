@@ -8,7 +8,7 @@
 //   --event worker-start | worker-stop   ledger (SubagentStart / SubagentStop)
 //   --event task-stop       ledger stop row (PostToolUse TaskStop)
 
-import { readStdin, opt, passthrough, callerIsSubagent, sessionIsSubagent } from './lib/context.mjs';
+import { readStdin, opt, passthrough, callerIsSubagent, sessionIsSubagent, isCloudSession } from './lib/context.mjs';
 import { briefLedgerFields } from './lib/redo-alert.mjs';
 import { sharedResourcesNote, ensureLauncher } from './lib/resource-line.mjs';
 import { keepWarmToolNote, keepWarmPingNote, KEEP_WARM_MAX_DEFAULT_MIN } from './lib/keep-warm.mjs';
@@ -54,7 +54,8 @@ try {
     const parts = [];
     // Keep-warm: while background helpers run, the lead is told to arm one wakeup inside its cache window
     // (after a background spawn) and, at each ping, whether to re-arm. Lead only; one small state file.
-    if (opt('keep_warm', true) && !sessionIsSubagent(p)) {
+    // Not in a cloud session: a cloud run is a short-lived sandbox, so a wakeup to keep its cache warm has no use there.
+    if (opt('keep_warm', true) && !sessionIsSubagent(p) && !isCloudSession()) {
       try {
         const maxMinutes = opt('keep_warm_max_minutes', KEEP_WARM_MAX_DEFAULT_MIN);
         const n = EVENT === 'tick' ? keepWarmToolNote(p, { maxMinutes }) : EVENT === 'user-prompt' ? keepWarmPingNote(p, { maxMinutes }) : null;
@@ -70,7 +71,8 @@ try {
     // The machine-wide resource queue, next to the other-sessions line: shown only
     // while something is held, queued, reserved or was just cleared. SessionStart
     // also makes sure the stable launcher path exists (idempotent).
-    if (EVENT !== 'tick' && opt('shared_resources_line', true) && !sessionIsSubagent(p)) {
+    // Not in a cloud session: there is no shared box, and no launcher is needed (the gate is off there).
+    if (EVENT !== 'tick' && opt('shared_resources_line', true) && !sessionIsSubagent(p) && !isCloudSession()) {
       try {
         if (EVENT === 'session-start') await ensureLauncher();
         const n = await sharedResourcesNote(p, { mode: EVENT === 'session-start' ? 'start' : 'change' });

@@ -28,6 +28,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isCloudSession } from './context.mjs';
 
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
 export const GATE_MODES = ['rewrite', 'deny', 'hint', 'off'];
@@ -41,8 +42,13 @@ export function gateMode(value) {
   return GATE_MODES.includes(v) ? v : DEFAULT_GATE_MODE;
 }
 
-/** True when the environment of the hook says "do not queue": opt-out, or already inside a queued run. */
+/**
+ * True when the environment of the hook says "do not queue": opt-out, already inside a queued run, or a
+ * cloud session (one disposable sandbox with no shared box to protect; the rewritten command only looks
+ * suspicious to the cloud's own classifier).
+ */
 export function gateDisabledByEnv(env = process.env) {
+  if (isCloudSession(env)) return true;
   if (String(env.RESOURCE_QUEUE ?? '') === '0') return true;
   if (env.AC_RESOURCE_LEASE) return true;
   return false;

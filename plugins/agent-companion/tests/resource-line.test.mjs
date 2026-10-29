@@ -145,6 +145,10 @@ test('advisory-b hook: one real lease shows the line at session start, then noth
     assert.doesNotMatch(ctxOf(r2), /Shared resources/);
     const off = runHook('hooks/advisory-b.mjs', { session_id: `${sid}-off` }, { args: ['--event', 'session-start'], env: { ...env, CLAUDE_PLUGIN_OPTION_SHARED_RESOURCES_LINE: '0' } });
     assert.doesNotMatch(ctxOf(off), /Shared resources/);
+    // A cloud session has no shared box: the same lease on disk produces no line there.
+    const cloud = runHook('hooks/advisory-b.mjs', { session_id: `${sid}-cloud` }, { args: ['--event', 'session-start'], env: { ...env, CLAUDE_CODE_REMOTE: 'true' } });
+    assert.equal(cloud.status, 0);
+    assert.doesNotMatch(ctxOf(cloud), /Shared resources/);
     lease.release();
     assert.deepEqual(readdirSync(w.dir).filter((n) => /^lease-/.test(n)), []);
   } finally { w.done(); }

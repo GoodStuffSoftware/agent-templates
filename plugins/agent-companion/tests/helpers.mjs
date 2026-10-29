@@ -125,6 +125,9 @@ export function childEnv(env = {}) {
   // off: a suite run from a desktop session must not decide that for every test.
   delete base.CLAUDE_CODE_ENTRYPOINT;
   delete base.CLAUDE_CODE_EXECPATH;
+  // A cloud session sets CLAUDE_CODE_REMOTE=true, which switches the resource gate and the machine-local
+  // session lines off: a suite run from one must not do that to every test (tests set it when they mean it).
+  delete base.CLAUDE_CODE_REMOTE;
   // type_line_required defaults to deny in the plugin; most spawn-guard tests
   // spawn ladder rungs without a TYPE: line and are not about that rule, so
   // children run with it off unless a test sets it (tests/type-required.test.mjs).
