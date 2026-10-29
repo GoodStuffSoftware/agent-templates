@@ -298,7 +298,10 @@ function classify(cmd, shell) {
   return null;
 }
 
-const isSedNames = (a) => /^s(.)=\.\*\$?\1\1[a-z]*$/.test(a);
+// `s/=.*//` drops the value. A non-empty replacement (`s/=.*/=.../`) is as safe while it cannot re-emit what
+// the match held: no `&` and no backslash (so no \1, \0 or other escape), no delimiter inside, one line, and
+// only the g/I/i flags (not `e`, which runs the line, nor `w`, which writes it).
+const isSedNames = (a) => /^s(.)=\.\*\$?\1\1[a-z]*$/.test(a) || /^s(?![&\\])(.)=\.\*\$?\1((?:(?!\1)[^&\\\n])*)\1[gIi]*$/.test(a);
 
 // does a downstream command keep values off the transcript (names only, a count, a hash, a quiet test)?
 function isFilter(cmd, shell) {

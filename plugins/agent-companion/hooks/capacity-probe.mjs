@@ -12,7 +12,7 @@
 // A HOOK MUST NEVER BREAK A SESSION. Wrapped end to end; any failure here
 // degrades to passthrough, never a thrown error or a hung hook.
 
-import { readStdin, opt, passthrough, sessionIsSubagent } from './lib/context.mjs';
+import { readStdin, opt, passthrough, sessionIsSubagent, isCloudSession } from './lib/context.mjs';
 import { buildReport, formatHookLine } from '../scripts/capacity.mjs';
 
 try {
@@ -21,6 +21,8 @@ try {
   // the lead. A subagent that compacted has no use for it.
   if (sessionIsSubagent(p)) passthrough();
   if (!opt('capacity_probe', true)) passthrough();
+  // A cloud sandbox is not the operator's machine: its memory says nothing about how many local sessions fit.
+  if (isCloudSession()) passthrough();
 
   const report = buildReport({ includeProcessCount: false });
   const line = formatHookLine(report);

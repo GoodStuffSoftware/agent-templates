@@ -2447,6 +2447,13 @@ function scalarOrUndefined(v) {
   return undefined;
 }
 
+// True in a Claude Code cloud (remote) session, which sets CLAUDE_CODE_REMOTE=true. A cloud session is one
+// disposable sandbox: nothing in it is shared with the operator's own machine, so the hooks that guard that
+// machine (resource gate, shared-resources line, capacity line, keep-warm) stay out of it.
+export function isCloudSession(env = process.env) {
+  return String(env?.CLAUDE_CODE_REMOTE ?? '').trim().toLowerCase() === 'true';
+}
+
 export function opt(key, fallback) {
   let raw;
   try {
