@@ -291,8 +291,10 @@ test('main session: one line with versions, item count and details path; the nex
     const ctx = hookCtx(first);
     assert.match(ctx, /Claude Code 9\.0\.3 is out \(installed 9\.0\.1\)/);
     assert.match(ctx, /2 new release\(s\) \(9\.0\.2 to 9\.0\.3\)/);
-    assert.match(ctx, /3 changelog item\(s\)/);
-    assert.ok(ctx.includes(stateFile('cli-release-details.md')), ctx);
+    assert.match(ctx, /3 relevant item\(s\)/);
+    assert.match(ctx, /morning brief/);
+    const relLine = ctx.split('\n').find((l) => l.includes('Claude Code 9.0.3'));
+    assert.ok(relLine.length < 260, `one short line, got ${relLine.length}`);
     assert.equal(ctx.split('\n').filter((l) => l.includes('Claude Code 9.0.3')).length, 1, 'exactly one line');
     // The generic scout block does not repeat the release signal.
     assert.doesNotMatch(ctx, /cli_release_available/);

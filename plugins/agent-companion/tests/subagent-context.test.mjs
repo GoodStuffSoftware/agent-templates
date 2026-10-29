@@ -93,14 +93,21 @@ test('compaction trigger: a compact_boundary just behind the agent says "you jus
     // Context is far below the threshold: with a 200K window this is the usual case.
     writeFileSync(agentFile, user('go') + turn('r1', 195000) + boundary('b-1') + user('summary') + turn('r2', 30000));
     const r = runHook('hooks/subagent-context.mjs', pre(lead));
-    assert.equal(ctxText(r), '[agent-companion] You just compacted. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.');
+    assert.equal(ctxText(r), '[agent-companion] You compacted; re-read only what the next step needs and continue.');
+    assert.doesNotMatch(ctxText(r), /split|return your results|Finish/, 'a compaction alone asks for no wrap-up');
     assert.equal(runHook('hooks/subagent-context.mjs', pre(lead)).stdout.trim(), '', 'same boundary: once');
 
-    // A second compaction is a second event.
+    // A second compaction is a second event; the default stop is the third (step budget, hooks/lib/step-budget.mjs).
     appendFileSync(agentFile, turn('r3', 190000) + boundary('b-2', 'manual') + user('summary') + turn('r4', 25000));
-    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /You just compacted/);
+    const second = runHook('hooks/subagent-context.mjs', pre(lead));
+    assert.equal(second.json.hookSpecificOutput.permissionDecision, undefined, 'two compactions no longer stop the helper');
+    assert.match(ctxText(second), /You compacted; re-read only/);
+    appendFileSync(agentFile, turn('r5', 190000) + boundary('b-3', 'auto') + user('summary') + turn('r6', 25000));
+    const third = runHook('hooks/subagent-context.mjs', pre(lead));
+    assert.equal(third.json.hookSpecificOutput.permissionDecision, 'deny');
+    assert.match(third.json.hookSpecificOutput.permissionDecisionReason, /^Step budget reached/);
     const logged = rows();
-    assert.deepEqual(logged.map((x) => x.kind), ['compaction', 'compaction']);
+    assert.deepEqual(logged.map((x) => x.kind), ['compaction', 'compaction', 'compaction']);
     assert.equal(logged[0].trigger, 'auto');
     assert.equal(logged[0].pre_tokens, 210000);
     assert.equal(logged[1].trigger, 'manual');
@@ -188,17 +195,31 @@ test('SubagentStop: a mid-run event reaches the lead next to the runaway flag, o
   try {
     const { lead, agentFile } = layout(fx);
     writeFileSync(agentFile, user('go') + turn('r0', 190000) + boundary('b-1') + turn('r1', 30000));
-    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /just compacted/);
+    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /You compacted; re-read only/);
     const env = { CLAUDE_PLUGIN_OPTION_RUNAWAY_TURNS: '1' }; // the same stop also trips the runaway flag
     const s1 = runHook('hooks/runaway-check.mjs', stopPayload(lead), { env });
     assert.equal(s1.stdout.trim(), '', 'SubagentStop output stays empty: queued, not emitted');
     runHook('hooks/runaway-check.mjs', stopPayload(lead), { env }); // continued with SendMessage and stopped again
     const text = ctxText(leadDrain(lead));
     assert.match(text, /runaway spawn: general-purpose/);
-    assert.match(text, /subagent context: general-purpose \(worker-ctx-t\) compacted; it was told mid-run to wrap up\./);
+    assert.match(text, /subagent context: general-purpose \(worker-ctx-t\) compacted; row in subagent-context\.jsonl\./);
+    assert.doesNotMatch(text, /split the remainder|told mid-run/, 'a compaction alone: no advice to the lead');
     assert.equal((text.match(/subagent context:/g) || []).length, 1, 'reported once');
     assert.equal(leadDrain(lead).stdout.trim(), '');
     assert.equal(rows().length, 1, 'the stop did not log a second row for the same compaction');
+  } finally { fx.cleanup(); }
+});
+
+test('SubagentStop: a size event seen mid-run keeps the "told mid-run to wrap up" line and the split advice', () => {
+  const fx = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fx);
+    writeFileSync(agentFile, user('go') + turn('r1', 80000) + turn('r2', 340000));
+    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /Your context is past 300,000 tokens/);
+    runHook('hooks/runaway-check.mjs', stopPayload(lead));
+    const text = ctxText(leadDrain(lead));
+    assert.match(text, /passed 300,000 tokens of context \(340,000 at its last call\); it was told mid-run to wrap up\./);
+    assert.match(text, /split the remainder into smaller briefs/);
   } finally { fx.cleanup(); }
 });
 
@@ -251,6 +272,9 @@ test('hooks.json: a PreToolUse entry with NO matcher runs the hook, the plugin d
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
   assert.equal(cfg.userConfig.subagent_context_notice_tokens.default, 300000);
   assert.equal(subagentNoticeText(['size'], 300000).startsWith('[agent-companion] Your context is past 300,000 tokens.'), true);
+  assert.match(subagentNoticeText(['compaction', 'size'], 300000), /^\[agent-companion\] You just compacted\. Finish the current step.*can split it\.$/);
+  assert.equal(subagentNoticeText(['compaction'], 300000), '[agent-companion] You compacted; re-read only what the next step needs and continue.');
+  assert.equal(cfg.userConfig.step_budget_compaction_stop.default, 3);
 });
 
 test('detect.mjs: budget_notices counts both notices over 24 hours (dispatch none), older rows excluded', () => {

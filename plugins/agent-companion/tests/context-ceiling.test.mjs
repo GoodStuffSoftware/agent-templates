@@ -1,6 +1,7 @@
 // Subagent context ceiling: hooks/subagent-context.mjs also nudges a sonnet/high-or-above
 // or opus subagent to write a HANDOFF file and return when its context reaches
-// subagent_ceiling_tokens (175K), once per worker (a second notice only if
+// subagent_ceiling_tokens (OFF by default since 0.31.39; these tests set 175K
+// explicitly through ON), once per worker (a second notice only if
 // subagent_ceiling_repeat_tokens is set; default 0). Never haiku, sonnet/low or
 // sonnet/medium. Gated by the rollout schedule
 // <state root>/rollout.json ("context-ceiling": activeFrom). Advice only: never a
@@ -16,7 +17,8 @@ import { rolloutActive, ceilingNoticeText, ceilingRung, CEILING_DEFAULT_TOKENS, 
 
 const SID = 'sess-ceil';
 const AGENT = 'worker-ceil-test-1';
-const ON = { AGENT_COMPANION_FAKE_NOW: '2026-10-15T00:00:00Z' };
+const ON = { AGENT_COMPANION_FAKE_NOW: '2026-10-15T00:00:00Z', CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_TOKENS: '175000' };
+const DEFAULTS = { AGENT_COMPANION_FAKE_NOW: '2026-10-15T00:00:00Z' }; // the option unset: the shipped default
 
 const turn = (id, ctx, model = 'claude-sonnet-5-5') => `${JSON.stringify({
   type: 'assistant', requestId: id,
@@ -202,11 +204,11 @@ test('not yet active: before activeFrom nothing happens, no claim is burned', ()
   try {
     const { lead, agentFile } = layout(fx);
     writeFileSync(agentFile, user('go') + turn('r1', 180000));
-    const before = { AGENT_COMPANION_FAKE_NOW: '2026-10-14T07:59:59Z' };
+    const before = { ...ON, AGENT_COMPANION_FAKE_NOW: '2026-10-14T07:59:59Z' };
     assert.equal(run(lead, before).stdout.trim(), '');
     assert.equal(existsSync(join(telemetryDir(), 'context-ceiling.jsonl')), false);
     // The same agent, once the time has passed, is still nudged (the quiet period used no claim).
-    assert.match(ctxText(run(lead, { AGENT_COMPANION_FAKE_NOW: '2026-10-14T08:00:00Z' })), /Handoff checkpoint/);
+    assert.match(ctxText(run(lead, { ...ON, AGENT_COMPANION_FAKE_NOW: '2026-10-14T08:00:00Z' })), /Handoff checkpoint/);
     assert.equal(rows().length, 1);
   } finally { fx.cleanup(); }
 });
@@ -228,8 +230,8 @@ test('rollout gate: a BOM-prefixed file (PowerShell 5.1) still works; a zone-les
   try {
     const { lead, agentFile } = layout(fx, { schedule: '\uFEFF{"context-ceiling":"2026-10-14T08:00:00"}' });
     writeFileSync(agentFile, user('go') + turn('r1', 180000));
-    assert.equal(run(lead, { AGENT_COMPANION_FAKE_NOW: '2026-10-14T07:59:59Z' }).stdout.trim(), '');
-    assert.match(ctxText(run(lead, { AGENT_COMPANION_FAKE_NOW: '2026-10-14T08:00:00Z' })), /Handoff checkpoint/);
+    assert.equal(run(lead, { ...ON, AGENT_COMPANION_FAKE_NOW: '2026-10-14T07:59:59Z' }).stdout.trim(), '');
+    assert.match(ctxText(run(lead, { ...ON, AGENT_COMPANION_FAKE_NOW: '2026-10-14T08:00:00Z' })), /Handoff checkpoint/);
   } finally { fx.cleanup(); }
 });
 
@@ -241,7 +243,7 @@ test('a compaction with no request after it yet is not read as a big context', (
     writeFileSync(agentFile, user('go') + turn('r1', 217000) + b);
     // The existing compaction notice still fires; the ceiling does not read the stale pre-compaction size.
     const text = ctxText(run(lead));
-    assert.match(text, /You just compacted/);
+    assert.match(text, /You compacted; re-read only/);
     assert.doesNotMatch(text, /Handoff checkpoint/);
     assert.equal(existsSync(join(telemetryDir(), 'context-ceiling.jsonl')), false);
   } finally { fx.cleanup(); }
@@ -282,7 +284,7 @@ test('the existing compaction/size notice is unchanged and combines with the cei
     try {
       const l2 = layout(fx2);
       writeFileSync(l2.agentFile, user('go') + turn('r1', 320000));
-      const only = ctxText(run(l2.lead, { AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00Z', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }));
+      const only = ctxText(run(l2.lead, { ...ON, AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00Z', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }));
       assert.equal(only, '[agent-companion] Your context is past 300,000 tokens. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.');
     } finally { fx2.cleanup(); }
   } finally { fx.cleanup(); }
@@ -363,13 +365,20 @@ test('the 300K size notice still fires for a low rung, unchanged', () => {
   } finally { fx.cleanup(); }
 });
 
-test('the shipped default is 175K: plugin.json and the library agree; 174,999 is silent, 175,000 fires', () => {
+test('the shipped default is off (0): plugin.json and the library agree; nothing fires unless the option is set above 0', () => {
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
   const props = cfg.userConfig || cfg.options || {};
-  assert.equal(props.subagent_ceiling_tokens.default, 175000);
+  assert.equal(props.subagent_ceiling_tokens.default, 0);
   assert.equal(props.subagent_ceiling_repeat_tokens.default, 0);
-  assert.equal(CEILING_DEFAULT_TOKENS, 175000);
+  assert.equal(CEILING_DEFAULT_TOKENS, 0);
   assert.equal(CEILING_REPEAT_DEFAULT_TOKENS, 0);
+  // option unset: silent at any size, no row, even for an opus rung past the line
+  for (const ctx of [175000, 210000, 280000]) {
+    const r = nudged('ac-opus-high', { ctx, env: DEFAULTS });
+    assert.equal(r.out, '', String(ctx));
+    assert.equal(r.rows, 0, String(ctx));
+  }
+  // a positive value turns it back on: 174,999 is silent, 175,000 fires
   assert.equal(nudged('ac-sonnet-high', { ctx: 174999 }).out, '');
   assert.match(nudged('ac-sonnet-high', { ctx: 175000 }).out, /past the 175,000-token line/);
 });

@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.30",
+  "version": "0.31.43",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -41,6 +41,18 @@
       "title": "Require a TYPE line on ladder spawns",
       "description": "A spawn of a ladder rung (agent-companion:ac-haiku ... ac-opus-max) whose brief has no TYPE: line, and no WEIGHT:, KIND: or weighted WARRANT: line standing in for it, records nothing about the work and checks no fit. \"deny\" (default): refuse it; the message gives the line to add and the nearest types (lookup, survey, bounded-feature ...). \"warn\": allow it with a note. \"off\": silent. Built-in, project and browser agents are never affected. A worker spawning its own sub-worker follows the same rule.",
       "default": "deny"
+    },
+    "project_route_guard": {
+      "type": "string",
+      "title": "Route project agents pinned to Opus",
+      "description": "A spawn of a project or user agent (<project>/.claude/agents, ~/.claude/agents) whose own definition pins Opus is judged by the brief's TYPE against the live routing table, like a ladder spawn. \"autofix\" (default): when the table sends that TYPE to a non-Opus model, the spawn is silently rewritten to run on that model (the Agent call's model parameter overrides the agent file's model; the agent keeps its instructions and effort), with one routing-autofix row in telemetry/denials.jsonl and no message. A PREMIUM: <reason> line in the brief keeps Opus. Types the table keeps on Opus pass; a brief with no usable TYPE is left alone and logged (outcome untyped). Never denies. \"warn\": leave the spawn as is, with a note and the same row. \"off\": silent. Opus project agents took 20.1% of all usage in a measured three weeks, mostly on bounded-feature and integration briefs the table sends to Sonnet.",
+      "default": "autofix"
+    },
+    "project_effort_fill": {
+      "type": "string",
+      "title": "Fill the effort of project agents that set a model but no effort",
+      "description": "A built-in type (general-purpose, Explore, Plan, claude-code-guide, statusline-setup, claude) spawned with no effort is filled the same way (0.31.43). A project or user agent (<project>/.claude/agents, ~/.claude/agents) whose definition sets a model but no effort line inherits the lead session's effort (xhigh on a premium lead: two haiku explorers ran at xhigh). \"autofix\" (default): when the spawn sets no effort either, the guard sets the Agent call's effort silently, from the routing table entry for the brief's TYPE when that route is on the model that runs, else the model's own default effort; one spawns.jsonl row records it (spawn_effort_source guard-fill), no message. An effort in the spawn input or in the agent file always wins. \"off\": silent, effort stays inherited.",
+      "default": "autofix"
     },
     "python_stdin_guard": {
       "type": "string",
@@ -183,7 +195,7 @@
     "release_watch": {
       "type": "boolean",
       "title": "Claude Code release watch",
-      "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on subagents, hooks, cache, compaction, effort, models, transcripts, SendMessage, worktrees, workflows and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one line naming the versions, the item count and the details path (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
+      "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on subagents, hooks, cache, compaction, effort, models, transcripts, SendMessage, worktrees, workflows and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one short line pointing to the morning brief (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
       "default": true
     },
     "pinned_model_check": {
@@ -243,7 +255,13 @@
     "fit_guard": {
       "type": "boolean",
       "title": "Best-fit guard",
-      "description": "When a spawn brief declares WEIGHT (and optionally KIND / CONSEQUENCE), grade the named model against the routing table: under- and cheap-over-provisioned spawns are allowed and announced; a premium model over-provisioned for its own declared weight is denied with the correction. Off = telemetry only.",
+      "description": "When a spawn brief declares WEIGHT (and optionally KIND / CONSEQUENCE), grade the named model against the routing table: under-provisioned spawns are allowed (the grade goes to the spawn row, not to the lead); an over-provisioned ladder rung is rewritten to the routed rung (see fit_over_autofix); another cheap over-provisioned spawn is allowed and announced; a premium model over-provisioned for its own declared weight is denied with the correction. Off = telemetry only.",
+      "default": true
+    },
+    "fit_over_autofix": {
+      "type": "boolean",
+      "title": "Rewrite an over-provisioned ladder rung silently",
+      "description": "When a spawn names an ac-* ladder rung that the best-fit check finds over-provisioned for its TYPE, rewrite subagent_type (and the model parameter, when the call set one) to the rung the routing table names, with no message; the spawn row records it (silent_fixes, fit_before_fix). Only to a rung the session has shown it registered (as fit_autofill_ladder does); a namespaced agent-companion:ac-* rung on the call itself counts as that evidence (0.31.41). A `PREMIUM: <reason>` line in the brief keeps the spawned rung and also counts as the premium warrant (it skips the over-provisioned deny and the no-warrant deny). Never rewrites a project pin, a reviewer on its parity route, or an under-provisioned spawn (that one is only logged). Off = the old behaviour: announce, or deny for a premium model.",
       "default": true
     },
     "review_recursion_guard": {
@@ -254,8 +272,8 @@
     },
     "role_line_nudge": {
       "type": "boolean",
-      "title": "Nudge when a brief has no ROLE: line",
-      "description": "A spawn brief should carry a ROLE: line (reviewer, fixer, lander, writer, docs, lookup, operate or other: what its main deliverable is), next to TYPE:. It tags the spawn for usage measurement and changes no routing. When the line is missing or not one of those words, the spawn guard adds one short line of context (never a deny, never a block) saying so. Turn this off to silence the nudge; the line is still read and recorded as declared_role in the spawn telemetry.",
+      "title": "Insert a ROLE: line when a brief has none",
+      "description": "A spawn brief should carry a ROLE: line (reviewer, fixer, lander, writer, docs, lookup, operate or other: what its main deliverable is), next to TYPE:. It tags the spawn for usage measurement and changes no routing. Since 0.31.36, when the line is missing or not one of those words, the spawn guard inserts one as the first line of the brief, inferred from the TYPE:, and says nothing (never a deny, never a block). Turn this off to insert nothing; the line is still read and recorded as declared_role in the spawn telemetry.",
       "default": true
     },
     "type_line_nudge": {
@@ -273,7 +291,7 @@
     "lead_effort_live_check": {
       "type": "boolean",
       "title": "Check the lead's live effort at its first spawn",
-      "description": "While the lead-effort-check standing rule is enabled, the first Agent spawn of a main session compares the live effort in the hook payload (get_session shows only the effort the session was created at) with the lead target. Below the target: one non-blocking note to the lead. Above it: one informational message to the operator, asking the lead for nothing. Equal: nothing. Once per session, never a deny, never a rewrite. Recorded as lead_effort_live and lead_effort_target in the spawn telemetry. Turn this off to skip the check.",
+      "description": "While the lead-effort-check standing rule is enabled, the first Agent spawn of a main session compares the live effort in the hook payload (get_session shows only the effort the session was created at) with the lead target. Below the target: one non-blocking note to the lead. Above it or equal: nothing (since 0.31.36 the above-target message is gone; the row still records both values). Once per session, never a deny, never a rewrite. Recorded as lead_effort_live and lead_effort_target in the spawn telemetry. Turn this off to skip the check.",
       "default": true
     },
     "lead_effort_rollout_id": {
@@ -303,8 +321,8 @@
     "foreground_guard": {
       "type": "string",
       "title": "Foreground-spawn guard",
-      "description": "How to treat a MAIN-SESSION spawn that is not run_in_background: true. A foreground spawn blocks the lead's entire turn until it returns — measured baseline: most main-session spawns run foreground, and individual foreground spawns have locked the operator out for 18-27 minutes, unable to act on messages sent mid-turn. \"off\": nothing. \"warn\" (default): a systemMessage naming the cost and the fix, zero model tokens. \"block\": deny unless the brief states a line of the form `FOREGROUND: <why>`, escapable exactly like the premium warrant. Either way, a spawn whose resolved model is the plugin's own cheapest known tier (haiku) is exempt — cheapest is also fastest, so blocking the lead's turn for one is genuinely low-cost; an unknown or unresolved model is never exempt. This is NOT Anthropic guidance — Claude Code publishes no foreground-vs-background recommendation, so this default is this plugin's own operating decision.",
-      "default": "warn"
+      "description": "How to treat a MAIN-SESSION spawn that is not run_in_background: true. A foreground spawn blocks the lead's entire turn until it returns — measured baseline: most main-session spawns run foreground, and individual foreground spawns have locked the operator out for 18-27 minutes, unable to act on messages sent mid-turn. \"off\": nothing. \"fix\" (default since 0.31.36; \"warn\" is its old name and means the same): a spawn that left run_in_background out gets it set to true through updatedInput, with no message; an explicit run_in_background: false, a `FOREGROUND: <why>` line, a teammate spawn (team_name) and a subagent's own spawn are left alone. \"block\": deny unless the brief states a line of the form `FOREGROUND: <why>`, escapable exactly like the premium warrant. Either way, a spawn whose resolved model is the plugin's own cheapest known tier (haiku) is exempt — cheapest is also fastest, so blocking the lead's turn for one is genuinely low-cost; an unknown or unresolved model is never exempt. This is NOT Anthropic guidance — Claude Code publishes no foreground-vs-background recommendation, so this default is this plugin's own operating decision.",
+      "default": "fix"
     },
     "isolation_demotion_notice": {
       "type": "boolean",
@@ -554,7 +572,49 @@
     "shared_resources_line": {
       "type": "boolean",
       "title": "Shared resources line",
-      "description": "At session start, and when it changes before a prompt, add one line (about 300 characters) to the context while the machine-wide resource queue has something held, queued, reserved or cleared in the last 15 minutes: units held out of capacity, each holder (label or session, project, age, stale or dead) and the queue in order. Nothing is added while the queue is idle. Reads the ledger in-process; spawns nothing. Off = no line (session start still installs the stable launcher path).",
+      "description": "At session start, and when it changes before a prompt, add one line (about 300 characters) to the context while the machine-wide resource queue has something held, queued, reserved or cleared in the last 15 minutes: units held out of capacity, each holder (label or session, project, age, stale or dead) and the queue in order. The line also counts the leads (sessions with a helper spawn in the last hour) from two up, and warns above 4 that each extra lead adds cold re-reads; nothing else is added while the queue is idle. Reads the ledgers in-process; spawns nothing. Off = no line (session start still installs the stable launcher path).",
+      "default": true
+    },
+    "keep_warm": {
+      "type": "boolean",
+      "title": "Keep a lead warm while helpers run",
+      "description": "When the first background helper starts (none was running), tell the lead once, in one line, to arm ONE wakeup 55 minutes out (inside its 1-hour prompt cache window); a helper that starts while another runs, and a short helper (TYPE lookup, explore or verify, or a BUDGET under 40), get no line. At each ping tell it whether to re-arm: helpers still running and under the cap = re-arm; none running = stop. Nothing is armed while nothing runs (one trailing ping may fire after the last helper ends), no polling. Each ping costs about 1/9 of the cold re-read it prevents. Off = no keep-warm notes.",
+      "default": true
+    },
+    "keep_warm_max_minutes": {
+      "type": "number",
+      "title": "Keep-warm cap (minutes)",
+      "description": "How long one idle stretch is kept warm: pings are 55 minutes apart, so the default 180 allows 3 (55, 110 and 165 minutes). A new background spawn starts the count over. Past the cap the cache is let go, because a gap that long is cheaper to rebuild once than to ping through. Below 55, or 0, turns keep-warm off.",
+      "default": 180
+    },
+    "scope_tripwire": {
+      "type": "boolean",
+      "title": "New-file tripwire",
+      "description": "Count the new files a helper creates that its brief does not name (the brief is the first user message of the helper's transcript; its requested output, its detail or handoff file and its scratchpad never count). A lookup, research, survey, explore or verify helper is denied at the first one (\"Your brief asks for no new files: report the proposal instead.\"); a writer gets one note at the third and is denied from the fourth (\"Check in with the lead before building more beyond the brief.\"). The lead's own session is never counted. Off = no counting.",
+      "default": true
+    },
+    "scope_tripwire_lookup_deny": {
+      "type": "number",
+      "title": "Tripwire: lookup helpers denied at file",
+      "description": "The unrequested new file at which a lookup-kind helper is denied. Default 1.",
+      "default": 1
+    },
+    "scope_tripwire_writer_note": {
+      "type": "number",
+      "title": "Tripwire: writer note at file",
+      "description": "The unrequested new file at which a writer gets its one-time note. Default 3.",
+      "default": 3
+    },
+    "scope_tripwire_writer_deny": {
+      "type": "number",
+      "title": "Tripwire: writer denied at file",
+      "description": "The unrequested new file at which a writer is denied (and every one after). Default 4.",
+      "default": 4
+    },
+    "redo_alert": {
+      "type": "boolean",
+      "title": "Redo alert",
+      "description": "When the lead spawns a helper whose brief closely matches two or more earlier runs of the same task (a third attempt) in the last 24 hours; one earlier partial run stays silent (same TYPE, word-set similarity of at least 0.5, from the worker ledger), add one note for the lead: third attempt at this task: re-brief it or move it up a rung instead of retrying. Reviews are never matched. Advisory only; never blocks.",
       "default": true
     },
     "read_dedupe": {
@@ -716,20 +776,56 @@
     "subagent_context_notice_tokens": {
       "type": "number",
       "title": "Subagent context notice: tokens",
-      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens, or the subagent has just compacted, the subagent is told once to finish the current step, return its results and say what is left, and the lead is told when it stops. Nothing is ever blocked. 0 turns it off.",
+      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens the subagent is told once to finish the current step, return its results and say what is left; when it has just compacted it is told only to re-read what the next step needs and continue (no wrap-up: workers compact and keep going). The lead is told when it stops. Nothing is ever blocked. 0 turns it off, the compaction note included.",
       "default": 300000
     },
     "subagent_ceiling_tokens": {
       "type": "number",
       "title": "Subagent context ceiling: tokens",
-      "description": "Advisory only. The first time a subagent's own context reaches this many tokens, the same PreToolUse hook as subagent_context_notice_tokens tells it ONCE to write a handoff file (state, files touched, next step, open questions) and return, giving the file path and STATUS: partial in its final message; the lead then starts a FRESH worker on the same rung that reads the file. Applies only to sonnet/high, sonnet/xhigh and every opus rung (never haiku, sonnet/low or sonnet/medium; the set is read from config/model-tiers.json). Nothing is ever blocked. It does nothing until the rollout schedule (rollout.json in the agent-companion state dir, id context-ceiling) says it is active. 0 turns it off.",
-      "default": 175000
+      "description": "Default 0 = off: workers compact instead of handing off (lead handoffs saved nothing when measured on 2026-10-09, and a compaction replay confirmed one fixed compaction point is enough). Set a positive number to turn the handoff nudge back on. Advisory only. The first time a subagent's own context reaches this many tokens, the same PreToolUse hook as subagent_context_notice_tokens tells it ONCE to write a handoff file (state, files touched, next step, open questions) and return, giving the file path and STATUS: partial in its final message; the lead may then start a FRESH worker on the same rung that reads the file. Applies only to sonnet/high, sonnet/xhigh and every opus rung (never haiku, sonnet/low or sonnet/medium; the set is read from config/model-tiers.json). Nothing is ever blocked. It does nothing until the rollout schedule (rollout.json in the agent-companion state dir, id context-ceiling) says it is active. 0 turns it off.",
+      "default": 0
     },
     "subagent_ceiling_repeat_tokens": {
       "type": "number",
       "title": "Subagent context ceiling: second notice tokens",
-      "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. Default 0 = off (the handoff nudge fires once per worker); set a line above the ceiling (for example 200000) to turn the second notice on.",
+      "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. Default 0 = off (the handoff nudge fires once per worker); only used when subagent_ceiling_tokens is on. Set a line above the ceiling (for example 200000) to turn the second notice on.",
       "default": 0
+    },
+    "step_budget": {
+      "type": "boolean",
+      "title": "Helper step budget",
+      "description": "On (default): the same PreToolUse hook that runs inside each subagent counts the subagent's own tool calls. At the warning line it is told ONCE how many of its steps are used and to finish, write its detail file and report what is left. Past the stop line every tool call is DENIED except writing a report or detail file (Write or Edit of a .md, .txt, .json or .csv file whose name says report, detail, handoff, review, summary, findings, analysis, verdict or notes), with the reason 'Step budget reached: write your report now and stop.' A subagent whose context compacts step_budget_compaction_stop times (default 3) is stopped the same way. The lines come from the subagent's brief: TYPE lookup, research, survey, explore and verify use the lookup lines, every other or missing TYPE the writer lines, and a 'BUDGET: <n>' line in the brief (10 to 9999, optionally followed by calls, tool calls, steps or turns) sets the stop value with the warning at 80% of it. The lead's own session is never counted. Off = no counting, no warning, no stop.",
+      "default": true
+    },
+    "step_budget_warn": {
+      "type": "number",
+      "title": "Helper step budget: warning at (writers and other types)",
+      "description": "Tool calls after which a subagent whose TYPE is not a lookup type (and has no BUDGET line) is told once to wrap up. 9 in 10 helpers finish under 80 calls. 0 = no warning.",
+      "default": 80
+    },
+    "step_budget_stop": {
+      "type": "number",
+      "title": "Helper step budget: stop at (writers and other types)",
+      "description": "Tool calls a subagent whose TYPE is not a lookup type (and has no BUDGET line) may make before every further call except writing its report or detail file is denied. 99 in 100 helpers finish under 120 calls. 0 = no stop for this class.",
+      "default": 120
+    },
+    "step_budget_lookup_warn": {
+      "type": "number",
+      "title": "Helper step budget: warning at (lookup types)",
+      "description": "Tool calls after which a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) is told once to wrap up. 0 = no warning.",
+      "default": 40
+    },
+    "step_budget_lookup_stop": {
+      "type": "number",
+      "title": "Helper step budget: stop at (lookup types)",
+      "description": "Tool calls a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) may make before every further call except writing its report or detail file is denied. 0 = no stop for this class.",
+      "default": 60
+    },
+    "step_budget_compaction_stop": {
+      "type": "number",
+      "title": "Helper step budget: stop at this many compactions",
+      "description": "A subagent whose context has compacted this many times is stopped like the step stop: every further call except writing its report or detail file is denied, and the stop stays on. Default 3 (a whole number): at the 183000 subagent compaction window that is about the work volume the old 2-compaction stop allowed at the 250000 window. 0 = no compaction stop; the step-count stops stay the runaway guard. Only used while step_budget is on.",
+      "default": 3
     },
     "usage_analysis": {
       "type": "boolean",

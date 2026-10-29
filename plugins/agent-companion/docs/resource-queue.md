@@ -273,7 +273,7 @@ A heavy command started bare overloads the machine and, because the hooks share 
 
 ## Part 5: the "Shared resources:" session line
 
-At SessionStart, and before a prompt when it changed, `hooks/advisory-b.mjs` adds one line to the context, next to the other-live-sessions line, from `resourceStatus()`. It appears only when something is held, queued, reserved, or was cleared in the last 15 minutes; an idle queue adds nothing. It is cut at 300 characters. Option `shared_resources_line` (default true).
+At SessionStart, and before a prompt when it changed, `hooks/advisory-b.mjs` adds one line to the context, next to the other-live-sessions line, from `resourceStatus()`. It appears only when something is held, queued, reserved, or was cleared in the last 15 minutes; an idle queue adds nothing on its own (from 2 active leads the line appears with the lead count, see below). It is cut at 300 characters. Option `shared_resources_line` (default true).
 
 Shape: each resource with units out of capacity and its holders (label or session, `@project`, age, `DEAD` or `STALE`, then `IDLE?`, `OVER` and `HB?` for a live holder flagged by the idle rule, the max-hold rule or a stale heartbeat; a holder past both limits shows `IDLE? OVER`), then the queue in order (up to four, `blockedBy` named), then up to two reservations (`<resource> for <group>`, time left), then the newest clear under 15 minutes old. When a live holder is flagged, the line ends with `release a flagged one by hand: node ~/.claude/agent-companion/bin/resource-queue.mjs release <id>.` for the first one (the rest of the line is clipped to keep the 300 characters):
 
@@ -282,3 +282,5 @@ Shared resources: box 3/8: full-suite@agent-templ~ 0s; app-e2e 1/1: e2e-run@app 
 ```
 
 (The sample is a real render from a test ledger with three leases and tickets and one reservation.) A holder is spelled out the first time it appears; later resources name it by label only. The prompt-time line is re-added only when the holders, the queue, the reservations or the recent clears change, not as ages tick. Turning the line off does not stop SessionStart installing the launcher.
+
+**Lead count (0.31.32).** The line also says how many orchestration sessions ("leads") are active on this machine: a lead is a session with a helper spawn in the last hour, read from the plugin's per-session worker ledger (`state/worker-ledger/<session>.jsonl`, one stat per file, a tail read only of files touched in the last hour). From two leads the line carries `leads active (helper spawn in the last hour): N` (it appears even with an idle queue); above 4 it adds `More than 4 leads active: each extra lead adds cold re-reads of its whole conversation.` The warning and the release hint are reserved before the body is clipped to 300 characters. The prompt-time signature holds the count only as a level (under 2, 2 to 4, over 4), so a change of count inside a level adds nothing.

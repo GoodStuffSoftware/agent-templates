@@ -53,6 +53,7 @@ function writeProfile(fx) {
   }));
 }
 
+// project_route_guard (0.31.35) is off here: these tests pin the 0.31.13 pin rules, not the routing rewrite (tests/project-route.test.mjs).
 let counter = 0;
 function spawn(fx, { type, prompt, model, cwd, env, effort, extra } = {}) {
   counter += 1;
@@ -63,7 +64,7 @@ function spawn(fx, { type, prompt, model, cwd, env, effort, extra } = {}) {
     tool_input: {
       subagent_type: type, run_in_background: true, name: `w${counter}`, prompt, ...(model ? { model } : {}), ...(extra || {}),
     },
-  }, { env: { CLAUDE_PLUGIN_DATA: join(fx.dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...(env || {}) } });
+  }, { env: { CLAUDE_PLUGIN_DATA: join(fx.dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_ROUTE_GUARD: 'off', CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off', ...(env || {}) } });
   assert.equal(res.status, 0, res.stderr);
   const row = readJsonl(join(fx.stateDir, 'telemetry', 'spawns.jsonl')).filter((r) => r.session_id === sid).pop();
   const hso = res.json?.hookSpecificOutput || {};
@@ -210,7 +211,7 @@ test('5b. an effort-only pin (model: inherit) has no model to replace: no overri
   } finally { fx.cleanup(); }
 });
 
-test('6. role rules still apply to a pinned spawn: contract, standing rules, ROLE nudge, recorded declarations', () => {
+test('6. role rules still apply to a pinned spawn: contract, standing rules, ROLE insert, recorded declarations', () => {
   const fx = setup();
   try {
     mkdirSync(dirname(rulesPath()), { recursive: true });
@@ -233,9 +234,10 @@ test('6. role rules still apply to a pinned spawn: contract, standing rules, ROL
     assert.equal(rv.decision, 'proceed');
     assert.match(rv.updated?.prompt || '', /REVIEW FRAMING: try to refute/);
     assert.equal(rv.row.declared_role, 'reviewer');
-    // No ROLE line: the nudge is delivered, as for any spawn.
+    // No ROLE line (0.31.36): one is inserted silently, no nudge.
     const nr = spawn(fx, { type: 'proj-architect', prompt: 'TYPE: bounded-feature\ndo it' });
-    assert.match(nr.ctx, /no `ROLE:` line/);
+    assert.doesNotMatch(nr.ctx, /no `ROLE:` line/);
+    assert.match(nr.updated?.prompt || '', /^ROLE: writer\nTYPE: bounded-feature\ndo it/);
     assert.equal(nr.row.declared_role, null);
     assert.equal(nr.row.project_pinned, true);
   } finally { fx.cleanup(); }

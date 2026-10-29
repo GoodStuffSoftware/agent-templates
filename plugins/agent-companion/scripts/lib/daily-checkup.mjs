@@ -54,7 +54,7 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stateFile, telemetryDir, stateRootPath, opt, rolloutTable, canonicalTaskType } from '../../hooks/lib/context.mjs';
 import { briefDeclarations, declarationValue, BRIEF_ROLES } from '../../hooks/lib/brief-directives.mjs';
-import { CEILING_DEFAULT_TOKENS } from '../../hooks/lib/context-ceiling.mjs';
+import { CEILING_DEFAULT_TOKENS, CEILING_MEASURE_TOKENS } from '../../hooks/lib/context-ceiling.mjs';
 import {
   discoverTranscripts, transcriptsRoot, usageOf, contextTokensOf, isCompactBoundary, flattenContent,
 } from './transcripts.mjs';
@@ -76,13 +76,13 @@ export const KEEP_DAYS = 16;
 export const CEILING_CTX = 150000; // the fixed subagent context line of unitsOver150k / shareOver150kPct (kept for the history series)
 
 // The active subagent context ceiling, read as hooks/subagent-context.mjs reads
-// it (option subagent_ceiling_tokens, default 175000). A value that is not a
-// positive number (0 turns the nudge off) still measures against the default,
-// so shareOverCeilingPct always has a line. The record carries the line beside
+// it (option subagent_ceiling_tokens, default 0 = off). A value that is not a
+// positive number (0 turns the nudge off) still measures against 175000
+// (CEILING_MEASURE_TOKENS), so shareOverCeilingPct always has a line. The record carries the line beside
 // the share (subagent.ceilingTokens).
 export function activeCeilingTokens() {
   const n = Number(opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS));
-  return Number.isFinite(n) && n > 0 ? n : CEILING_DEFAULT_TOKENS;
+  return Number.isFinite(n) && n > 0 ? n : CEILING_MEASURE_TOKENS;
 }
 export const DEFAULT_LIMIT_UNITS = 2677;
 export const DEFAULT_PACE_PCT = 14;
@@ -551,7 +551,7 @@ function scanFile(f, fileState, ctx) {
     // b = [main, subagent, over 150K, over the ceiling, the ceiling]. An hour that
     // already holds subagent units without b[4] (a state written before 0.31.24),
     // or whose units were counted against another ceiling, is marked -1: mixed.
-    const ceiling = ctx.ceiling ?? CEILING_DEFAULT_TOKENS;
+    const ceiling = ctx.ceiling ?? CEILING_MEASURE_TOKENS;
     if (b[4] === undefined) { b[3] = 0; b[4] = b[1] > 0 ? -1 : ceiling; } else if (b[4] !== ceiling) b[4] = -1;
     b[1] += units;
     const tokens = contextTokensOf(r.usage);

@@ -17,7 +17,7 @@ function baseEnv(dir) {
   return { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') };
 }
 
-test('gate1 (foreground guard): warn is the default and fires for a plain main-session foreground spawn', () => {
+test('gate1 (foreground guard): fix is the default (0.31.36): a plain main-session spawn that left the flag out is backgrounded silently', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const payload = {
@@ -32,14 +32,15 @@ test('gate1 (foreground guard): warn is the default and fires for a plain main-s
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0, `exited ${res.status}: ${res.stderr}`);
     assert.equal(decisionOf(res.json), 'proceed');
-    assert.match(res.json?.systemMessage || '', /FOREGROUND/);
-    assert.match(res.json?.systemMessage || '', /not Anthropic guidance/i);
+    assert.doesNotMatch(res.json?.systemMessage || '', /FOREGROUND/);
+    assert.equal(res.json?.hookSpecificOutput?.updatedInput?.run_in_background, true);
 
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
-    assert.equal(row.gate1_mode, 'warn');
+    assert.equal(row.gate1_mode, 'fix');
     assert.equal(row.gate1_applicable, true);
     assert.equal(row.gate1_exempt, false);
-    assert.equal(row.gate1_action, 'warn');
+    assert.equal(row.gate1_action, 'fix');
+    assert.ok(row.silent_fixes.includes('background_set'));
   } finally {
     cleanup();
   }
@@ -79,7 +80,7 @@ test('rule 1 effort note: the haiku alias draws it, the legacy claude-haiku-4-5 
       const res = runHook('hooks/spawn-guard.mjs', {
         session_id: sid, agent_type: 'main', cwd: dir,
         tool_input: { subagent_type: 'general-purpose', model, name: 'isolate-from-gate3', prompt: 'quick lookup' },
-      }, { env: baseEnv(dir) });
+      }, { env: { ...baseEnv(dir), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' } });
       assert.equal(res.status, 0);
       return res.json?.systemMessage || '';
     } finally { cleanup(); }
@@ -389,9 +390,13 @@ test('regression: fit-autofill + premium warrant + memory nudge + gates all coex
     assert.equal(row.model_autofilled, true);
     assert.equal(row.declared_weight, 5);
     assert.equal(row.memory_addition_mode, 'nudge', 'memory nudge must still run alongside the gates');
-    // This spawn is unnamed and unisolated, so gate3 fires alongside everything else.
-    assert.equal(row.gate3_fired, true);
-    assert.match(res.json.systemMessage || '', /own working tree/i);
+    // The unnamed, unisolated spawn is backgrounded by the foreground fix (0.31.36), then named by
+    // namegate, so gate3 no longer fires: every fix rides the same single updatedInput.
+    assert.equal(out.updatedInput.run_in_background, true);
+    assert.equal(row.gate1_action, 'fix');
+    assert.equal(row.name_autofilled, true);
+    assert.ok(out.updatedInput.name);
+    assert.equal(row.gate3_fired, false);
 
     // Premium + weight-5 + WARRANT present -> no warrant denial.
     const denials = readJsonl(join(stateDir, 'telemetry', 'denials.jsonl'));

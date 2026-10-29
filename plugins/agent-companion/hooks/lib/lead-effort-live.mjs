@@ -115,7 +115,9 @@ export function leadEffortLive({ sid, subagentCaller, callerEffort, isCanary }) 
     const live = callerEffort ? String(callerEffort).toLowerCase() : null;
     const row = { lead_effort_live: live, lead_effort_target: targetInfo.target };
     const verdict = leadEffortVerdict(live, targetInfo);
-    if (verdict) pending = { sid, verdict };
+    // 0.31.36: only the note for the lead (below target) is delivered; a live effort above the target is
+    // recorded (lead_effort_live, lead_effort_target) and shows nobody a message.
+    if (verdict && verdict.context) pending = { sid, verdict };
     return row;
   } catch {
     return none;

@@ -268,9 +268,31 @@ If this session has the **RemoteTrigger** tool, call it with `action: "list"` an
 
 If the session does **not** have RemoteTrigger (always the case in a local scheduled task), say in one line that the cloud-routine pin check was not run locally and why. A skipped check is not a clean one: never report cloud routines as free of pins.
 
+## STEP 2.9 — decide step (local only)
+
+Detecting is not enough: every cycle should end in a decision someone sees. This step turns two things into "decide" findings for the findings store named in your task prompt (the store, its fields and its write procedure come from there; a run with no store prints each finding as a `FINDING: <title> | <detail> | <url>` line instead). It runs on EVERY local run, including a quiet one, and its findings are not printed as run output.
+
+```bash
+node "$AC/scripts/intake-decide.mjs" queue
+```
+
+It prints `{ releases, quiet, counts, stale, notes }` (no network, no model). Every `releases` and `stale` entry carries a `finding` already shaped for the store: `docId`, `source`, `title`, `detail` (300 characters at most), `url`, `impact`, `expect` (`decide`), `firstSeen`, `lastSeen`, `lookedAt` null, `useful` null.
+
+1. **Read the store first.** A `uw-*` doc from the cloud Update Watch does NOT block the release finding: that routine cannot see our code, and this finding carries the concrete change it lacks. Write the release finding anyway, and append `See also: <uw doc ids>` to its `detail` when that still fits in 300 characters (leave it off otherwise). Write no new doc only when a doc with this finding's own `docId` already exists: count that release as covered and update `lastSeen` only.
+2. **Releases.** `releases` holds at most ONE entry: a single finding covering every undecided release that has an `adopt` item, an item with a concrete change (the file or option and what to change in it; `versions` lists the releases, `changes` the items). A release whose items only touch an area we use, with no concrete change, is `watch`: it is not in `releases`, it is in `quiet` and recorded in `cli-release-decisions.md`. Keep the draft unless a change plainly does not apply here; then reword `title`/`detail` honestly, and if no change applies at all write no finding and treat those versions as `quiet`. Write it with its `docId` (create it when absent; when it exists update `lastSeen` only, as in step 1).
+3. **Mark decided, only after the finding exists** (just written, or already there under its own `docId`): mark every version in the entry's `versions`, plus every version in `quiet` (watch or nothing touches this plugin: no finding):
+
+   ```bash
+   node "$AC/scripts/intake-decide.mjs" mark <version> <version> ...
+   ```
+
+   Never mark a `versions` entry whose write failed or was skipped, or whose store was unreachable; it is queued again next run (marking `quiet` is always safe). The first run after install can queue a dozen releases and still writes one finding.
+4. **Stale signals.** Each `stale` entry is a scout signal unacknowledged for more than 7 days, with what it means and the recommended action (fix, ack with a reason, or retire the detector). Write its `docId` the same way (an existing doc: `lastSeen` only). A kind written here gets no separate per-signal doc from the plain hand-off step, and the SessionStart line no longer repeats it. Nothing is marked for these: they stay queued until the signal is acknowledged, fixed or retired.
+5. A non-empty `notes` list is a skipped part, not a clean one: say so in one line only if something else is printed.
+
 ## STEP 3 — if `changed` is false AND lineup matches: stop. Emit nothing.
 
-Not a summary, not a confirmation. Silence is the success case. (A STEP 2.7 finding counts as a change; the skipped-check line does not, so on an otherwise quiet day print nothing for it.)
+Not a summary, not a confirmation. Silence is the success case. (A STEP 2.7 finding counts as a change; the skipped-check line does not, so on an otherwise quiet day print nothing for it. STEP 2.9 writes to the store, not to this output, so it never ends the silence by itself.)
 
 ## STEP 4 — dispatch, only for signals that fired
 

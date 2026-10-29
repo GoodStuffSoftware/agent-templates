@@ -33,7 +33,7 @@ function runAsync(script, payload, env) {
   });
 }
 
-test('namegate: background + no name -> hint AND autofill (default on)', () => {
+test('namegate: background + no name -> autofill, no message (0.31.36; default on)', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const payload = {
@@ -48,7 +48,7 @@ test('namegate: background + no name -> hint AND autofill (default on)', () => {
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0, `exited ${res.status}: ${res.stderr}`);
     assert.equal(decisionOf(res.json), 'proceed', 'namegate never blocks');
-    assert.match(res.json?.systemMessage || '', /namegate/i);
+    assert.doesNotMatch(res.json?.systemMessage || '', /namegate/i, 'the autofill is silent (0.31.36)');
 
     const assignedName = res.json?.hookSpecificOutput?.updatedInput?.name;
     assert.ok(assignedName, 'updatedInput.name must be set');
@@ -100,21 +100,21 @@ test('namegate: background + name already set -> untouched', () => {
   }
 });
 
-test('namegate: foreground (no run_in_background field at all) + no name -> untouched', () => {
+test('namegate: explicit run_in_background:false + no name -> untouched (an absent field is autofixed to background first, 0.31.36)', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const payload = {
       session_id: 'sess-ng-foreground',
       agent_type: 'main',
       cwd: dir,
-      tool_input: { subagent_type: 'general-purpose', model: 'sonnet', prompt: 'foreground work' },
+      tool_input: { subagent_type: 'general-purpose', model: 'sonnet', run_in_background: false, prompt: 'foreground work' },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, { env: baseEnv(dir) });
     assert.equal(res.status, 0);
     assert.doesNotMatch(res.json?.systemMessage || '', /namegate/i);
 
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
-    assert.equal(row.gate4_applicable, false, 'an absent run_in_background field is never treated as background');
+    assert.equal(row.gate4_applicable, false, 'an explicit false is never treated as background');
     assert.equal(row.gate4_action, 'none');
     assert.equal(row.name_autofilled, false);
   } finally {

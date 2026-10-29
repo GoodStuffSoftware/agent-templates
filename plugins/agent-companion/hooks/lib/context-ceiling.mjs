@@ -1,6 +1,9 @@
-// Subagent context ceiling: a handoff nudge at 175K tokens, for sonnet/high and above.
+// Subagent context ceiling: an optional handoff nudge, OFF by default since 0.31.39
+// (subagent_ceiling_tokens default 0). Workers compact instead of handing off: lead
+// handoffs were measured on 2026-10-09 as saving nothing, and a 2026-10-27 compaction
+// replay confirmed one fixed compaction point is enough. The code stays, so a positive value turns the nudge back on.
 //
-// Why. A subagent that keeps working past ~175K tokens of context pays more
+// Why (when it is on). A subagent that keeps working past ~175K tokens of context pays more
 // per call and ends up compacting at ~217K. The operator-approved alternative
 // (2026-10-10, evidence: tasks/usage-why-2026-10-06/ceiling-detail.md, first
 // ceiling C = 150K; raised to 175K on 2026-10-16 from a simulation over 544
@@ -17,13 +20,13 @@
 // What. hooks/subagent-context.mjs (PreToolUse, inside the subagent) already
 // reads the subagent's own context size from the tail of its transcript; the
 // ceiling reuses that reading (no second file read). The first time the
-// context is at or past `subagent_ceiling_tokens` (default 175000) the
+// context is at or past `subagent_ceiling_tokens` (default 0 = off) the
 // subagent is nudged ONCE; only if `subagent_ceiling_repeat_tokens` is set (default
 // 0 = off) and it keeps growing to that line is it nudged a second and last time.
 // A worker first seen already past the repeat line gets one nudge, not two. Advice only: the hook
 // output is additionalContext and nothing else, never a deny. The existing
-// at-compaction wrap-up (lib/subagent-context.mjs) is unchanged and stays the
-// backstop.
+// at-compaction note (lib/subagent-context.mjs) is informative only since 0.31.42; the size notice
+// is the wrap-up backstop.
 //
 // Rollout gate. The operator rolls changes out one per day. The nudge does
 // nothing until `activeFrom` for change id "context-ceiling" in the shared
@@ -40,7 +43,8 @@ import { stateRootPath, modelTiers, ladderVariants } from './context.mjs';
 import { claimOnce, fmtTokens } from './subagent-context.mjs';
 
 export const CEILING_CHANGE_ID = 'context-ceiling';
-export const CEILING_DEFAULT_TOKENS = 175000;
+export const CEILING_DEFAULT_TOKENS = 0; // off: compaction handles worker context
+export const CEILING_MEASURE_TOKENS = 175000; // the line the daily checkup measures shareOverCeilingPct against while the nudge is off
 export const CEILING_REPEAT_DEFAULT_TOKENS = 0; // once per worker; set a line above the ceiling (e.g. 200000) for a second notice
 export const CEILING_LOG = 'context-ceiling.jsonl';
 

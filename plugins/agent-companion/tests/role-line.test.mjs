@@ -45,15 +45,17 @@ test('a brief with ROLE: records declared_role and carries no nudge', () => {
   assert.ok(!JSON.stringify(out || {}).includes('no `ROLE:` line'), 'no nudge when the line is present');
 });
 
-test('a brief without ROLE: is allowed, nudged in additionalContext, and nothing else changes', () => {
+test('a brief without ROLE: is allowed, gets a ROLE line inserted (0.31.36), no message, and nothing else changes', () => {
   const withRole = spawn('ROLE: writer\nTYPE: explore\ndo it', 'sess-role-2a');
   const without = spawn('TYPE: explore\ndo it', 'sess-role-2b');
   assert.equal(without.res.status, 0, without.res.stderr);
   assert.notEqual(without.out?.hookSpecificOutput?.permissionDecision, 'deny');
-  assert.equal(without.row.declared_role, null);
-  const ctx = without.out?.hookSpecificOutput?.additionalContext || '';
-  assert.match(ctx, /no `ROLE:` line/);
-  assert.match(ctx, /Not blocking/);
+  assert.equal(without.row.declared_role, null, 'declared_role stays the brief itself');
+  assert.equal(without.out?.hookSpecificOutput?.additionalContext, undefined, 'no nudge');
+  assert.doesNotMatch(without.out?.systemMessage || '', /ROLE/, 'no ROLE message');
+  const sent = without.out?.hookSpecificOutput?.updatedInput?.prompt || '';
+  assert.ok(sent.startsWith('ROLE: lookup\nTYPE: explore\ndo it'), `ROLE inferred from TYPE and inserted first: ${sent.slice(0, 60)}`);
+  assert.ok((without.row.silent_fixes || []).includes('role_inserted:lookup'));
   // The role line changes no routing or decision.
   for (const k of ['declared_type', 'route_layer', 'fit', 'fit_expected', 'denied']) {
     assert.deepEqual(without.row[k], withRole.row[k], k);
@@ -61,18 +63,20 @@ test('a brief without ROLE: is allowed, nudged in additionalContext, and nothing
   assert.equal(withRole.out?.hookSpecificOutput?.additionalContext, undefined);
 });
 
-test('an invalid ROLE value nudges and records null; it never denies', () => {
+test('an invalid ROLE value records null and gets a valid line inserted; it never denies', () => {
   const { res, row, out } = spawn('ROLE: janitor\nTYPE: explore\ndo it', 'sess-role-3');
   assert.equal(res.status, 0, res.stderr);
   assert.equal(row.declared_role, null);
-  assert.match(out?.hookSpecificOutput?.additionalContext || '', /no `ROLE:` line/);
+  assert.equal(out?.hookSpecificOutput?.additionalContext, undefined);
+  assert.ok((out?.hookSpecificOutput?.updatedInput?.prompt || '').startsWith('ROLE: lookup\n'));
   assert.notEqual(out?.hookSpecificOutput?.permissionDecision, 'deny');
 });
 
-test('role_line_nudge off silences the nudge but still records the role', () => {
+test('role_line_nudge off silences the insert but still records the role', () => {
   const env = { CLAUDE_PLUGIN_OPTION_ROLE_LINE_NUDGE: '0' };
   const a = spawn('TYPE: explore\ndo it', 'sess-role-4a', env);
   assert.equal(a.out?.hookSpecificOutput?.additionalContext, undefined);
+  assert.ok(!String(a.out?.hookSpecificOutput?.updatedInput?.prompt || '').startsWith('ROLE:'), 'off: nothing inserted either');
   const b = spawn('ROLE: lookup\nTYPE: explore\ndo it', 'sess-role-4b', env);
   assert.equal(b.row.declared_role, 'lookup');
 });

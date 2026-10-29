@@ -203,8 +203,13 @@ export function claimSignals(agentId, sig, threshold, { fresh }) {
 
 export const fmtTokens = (n) => Number(n).toLocaleString('en-US');
 
-// The text the subagent sees.
+// The text the subagent sees. A compaction alone is informative only: workers compact and keep
+// going (operator decision 2026-10-27), so no wrap-up and no return is asked. The size notice
+// keeps its wrap-up wording, and so does a size-plus-compaction message.
 export function subagentNoticeText(kinds, threshold) {
+  if (!kinds.includes('size')) {
+    return '[agent-companion] You compacted; re-read only what the next step needs and continue.';
+  }
   const what = kinds.includes('compaction')
     ? 'You just compacted'
     : `Your context is past ${fmtTokens(threshold)} tokens`;

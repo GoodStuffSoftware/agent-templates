@@ -22,7 +22,7 @@ test('spawn resolving to opus with no effort anywhere gets the no-effort-stated 
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
@@ -55,7 +55,7 @@ test('an EFFORT: line in the BRIEF does NOT silence the warning — brief text c
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
@@ -97,7 +97,7 @@ test('an agent definition with effort: set in frontmatter silences the no-effort
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
@@ -117,7 +117,7 @@ test('a sonnet spawn with no effort anywhere ALSO gets the warning — the hazar
       tool_input: { subagent_type: 'general-purpose', model: 'sonnet', prompt: 'plain sonnet spawn' },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
@@ -137,7 +137,7 @@ test('a haiku spawn gets the no-effort-stated warning like any model with an eff
       tool_input: { subagent_type: 'general-purpose', model: 'haiku', prompt: 'a quick read' },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';

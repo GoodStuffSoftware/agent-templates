@@ -2948,6 +2948,9 @@ export function recordDenial(guard, payload, detail, outcome = 'deny') {
     at: new Date().toISOString(),
     session_id: String(payload?.session_id ?? ''),
     agent_type: payload?.agent_type,
+    // Set only for a subagent's own call (the harness stamps agent_id on those), so a test probe's rows
+    // can be told apart from a lead's; a lead's row carries no agent_id field at all.
+    ...(callerIsSubagent(payload) ? { agent_id: String(payload.agent_id) } : {}),
     tool_name: payload?.tool_name,
     guard,
     outcome,

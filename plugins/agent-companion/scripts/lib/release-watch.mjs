@@ -136,7 +136,8 @@ function writeState(file, state) {
   try {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify(state, null, 2));
-  } catch { /* fail open: a missed write only means one more check */ }
+    return true;
+  } catch { return false; /* fail open: a missed write only means one more check */ }
 }
 
 // Due unless an attempt was made inside the window. A timestamp in the future
@@ -303,6 +304,7 @@ export async function runReleaseWatch({
       // in flight; keep its marks rather than overwrite them with the older set.
       const fresh = readState(stateFilePath);
       if (Array.isArray(fresh.seen)) state.seen = [...new Set([...(Array.isArray(state.seen) ? state.seen : []), ...fresh.seen])].slice(-MAX_SEEN);
+      if (Array.isArray(fresh.decided)) state.decided = [...new Set([...(Array.isArray(state.decided) ? state.decided : []), ...fresh.decided])].slice(-MAX_SEEN);
       writeState(stateFilePath, state);
     }
 
@@ -355,6 +357,30 @@ export function readPending(stateFilePath, runningVersion) {
   } catch {
     return null;
   }
+}
+
+// --- the decide step's side ----------------------------------------------------
+// "Seen" means the SessionStart hook showed a line. "Decided" means the scout's
+// decide step (scripts/intake-decide.mjs) wrote a finding for the release, or
+// found nothing in it that touches this plugin. The two are independent.
+
+// Releases newer than `installed`, with at least one topic item, not yet decided.
+export function undecidedOf(state, installed) {
+  const decided = new Set(Array.isArray(state.decided) ? state.decided : []);
+  return (Array.isArray(state.releases) ? state.releases : [])
+    .filter((r) => r && compareVersions(r.version, installed) === 1 && !decided.has(r.version)
+      && Array.isArray(r.items) && r.items.length > 0)
+    .sort((a, b) => compareVersions(b.version, a.version));
+}
+
+export function markDecided(stateFilePath, versions) {
+  try {
+    const state = readState(stateFilePath);
+    const decided = new Set(Array.isArray(state.decided) ? state.decided : []);
+    for (const v of versions) decided.add(v);
+    state.decided = [...decided].slice(-MAX_SEEN);
+    return writeState(stateFilePath, state);
+  } catch { return false; }
 }
 
 // Marks versions surfaced. Read-modify-write on a tiny file; two sessions

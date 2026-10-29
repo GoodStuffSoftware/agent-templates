@@ -99,6 +99,10 @@ function contextCheck(p, path) {
   if (fresh.some((e) => e.kind === 'compaction')) parts.push('compacted');
   const size = fresh.find((e) => e.kind === 'size');
   if (size) parts.push(`passed ${fmtTokens(size.threshold)} tokens of context (${fmtTokens(size.tokens)} at its last call)`);
+  if (!size) { // a compaction alone is routine (workers compact and keep going): say so, advise nothing
+    queueNotice(p.session_id, `[agent-companion] subagent context: ${who} ${parts.join(' and ')}; row in subagent-context.jsonl.`);
+    return;
+  }
   const told = fresh.every((e) => e.phase === 'mid-run') ? 'it was told mid-run to wrap up' : 'it was not reached mid-run';
   queueNotice(p.session_id, `[agent-companion] subagent context: ${who} ${parts.join(' and ')}; ${told}. `
     + 'If it left work undone, split the remainder into smaller briefs rather than resuming it with everything; row in subagent-context.jsonl.');

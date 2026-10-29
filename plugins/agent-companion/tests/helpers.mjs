@@ -120,6 +120,11 @@ export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, 
 export function childEnv(env = {}) {
   const base = { ...process.env };
   delete base.CLAUDE_CODE_SESSION_ATTENDED;
+  // The entrypoint and the CLI path say whether the harness backgrounds the main conversation's subagents
+  // itself (desktop and VS Code from 2.1.302; hooks/lib/harness-bg.mjs), which switches the foreground fix
+  // off: a suite run from a desktop session must not decide that for every test.
+  delete base.CLAUDE_CODE_ENTRYPOINT;
+  delete base.CLAUDE_CODE_EXECPATH;
   // type_line_required defaults to deny in the plugin; most spawn-guard tests
   // spawn ladder rungs without a TYPE: line and are not about that rule, so
   // children run with it off unless a test sets it (tests/type-required.test.mjs).
