@@ -95,7 +95,13 @@ export async function finishSpawn({
       (ladderRewrite
         ? ` Rewrote subagent_type ${ladderRewrite.from ? `"${ladderRewrite.from}"` : '(none)'} -> "${ladderRewrite.to}" so effort ${route.effort} is pinned too (that form of the ladder has already started in this session, so the harness registered it).`
         : '');
-    if (autofillAdvisory && !def?.effortFilled) note = `${note}\n\n${autofillAdvisory}`;
+    if (autofillAdvisory) {
+      // The guard filled the effort too (project_effort_fill): the advisory's first sentence no longer holds.
+      const adv = def?.effortFilled
+        ? autofillAdvisory.replace(/^agent-companion: effort not pinned \S+ the model was filled in as (\S+), but effort \S+ was not: this worker inherits the session's effort\./, `agent-companion: the model was filled in as $1 and the effort as ${def.effort}.`)
+        : autofillAdvisory;
+      note = `${note}\n\n${adv}`;
+    }
   } else if (fit?.parityFloor) {
     note = `agent-companion: spawning ${who} at ${model}${def?.effort ? '/' + def.effort : ''} for a critical ${declaredType} is under-provisioned — ${fit.reason}. ` +
       `F1: a critical review is never sized below ${parityFloorLabel}, whatever its writer (no writer is declared, so parity with it is not checked here — add \`WRITER: <model>/<effort>\` to check it). ${fit.action}.`;
