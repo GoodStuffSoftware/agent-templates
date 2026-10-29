@@ -940,6 +940,12 @@ test('3. the eight catalog metrics compute their day values from the two sources
   const wr = (at) => srow(at, { declared_type: 'bounded-feature' });
   const revRows = [wr('2026-10-10T09:00:00Z'), wr('2026-10-10T10:00:00Z'), rev('2026-10-10T11:00:00Z', 'a'), rev('2026-10-10T12:00:00Z', 'a'), rev('2026-10-10T13:00:00Z', 'b'), rev('2026-10-10T14:00:00Z', '')];
   assert.equal(lastValue(val({ ...base, source: 'spawns', metric: 'reviewsPerWriter', params: { writerType: 'bounded-feature' } }, [], revRows)), 1.5, '3 reviews with a caller id / 2 writers');
+  // The denominator is every writer type, not the one named in params: reviews cover them all (2026-10-29).
+  const wo = (at, type) => srow(at, { declared_type: type });
+  const mixed = [wr('2026-10-10T09:00:00Z'), wo('2026-10-10T09:30:00Z', 'integration'), wo('2026-10-10T10:00:00Z', 'critical-change'), wo('2026-10-10T10:30:00Z', 'mechanical-edit'),
+    wo('2026-10-10T10:45:00Z', 'explore'), rev('2026-10-10T11:00:00Z', 'a'), rev('2026-10-10T12:00:00Z', 'b')];
+  assert.equal(lastValue(val({ ...base, source: 'spawns', metric: 'reviewsPerWriter', params: { writerType: 'bounded-feature' } }, [], mixed)), 0.5,
+    '2 reviews / 4 writer spawns of any writer type (a read-only explore spawn is not a writer)');
   const hk = [srow('2026-10-10T09:00:00Z', { model: 'haiku' }), srow('2026-10-10T10:00:00Z'), srow('2026-10-10T11:00:00Z', { model: 'haiku' })];
   assert.equal(lastValue(val({ ...base, source: 'spawns', metric: 'haikuSpawns', params: {} }, [], hk)), 2);
 });

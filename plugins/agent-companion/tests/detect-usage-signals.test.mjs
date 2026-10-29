@@ -124,6 +124,22 @@ test('usage_analysis_stale: a settled day not computed after its expected run, o
   } finally { cleanup(); }
 });
 
+test('usage_analysis_stale: an older closed day with no facts file fires once; a complete run of days does not', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const f = files(stateDir);
+    write(f.status, okStatus('2026-03-10T08:10:30Z'));
+    const facts = (d) => write(join(stateDir, 'state', 'usage-facts', `${d}.json`), { day: d });
+    for (const d of ['2026-03-05', '2026-03-07', '2026-03-08', '2026-03-09']) facts(d);
+    const hit = ofKind(detect(dir, LATE), 'usage_analysis_stale');
+    assert.equal(hit.length, 1, 'the 03-06 gap is reported');
+    assert.match(hit[0].detail, /2026-03-06 has no facts file/);
+    assert.deepEqual(ofKind(detect(dir, LATE), 'usage_analysis_stale'), [], 'not repeated for the same day');
+    facts('2026-03-06');
+    assert.deepEqual(ofKind(detect(dir, LATE), 'usage_analysis_stale'), [], 'the retried day clears it');
+  } finally { cleanup(); }
+});
+
 test('usage_analysis_stale: no run for more than 36 hours, even when the day is recorded computed', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {

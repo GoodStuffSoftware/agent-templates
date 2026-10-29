@@ -13,6 +13,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { METRIC_CATALOG, validateRegister } from '../scripts/lib/decision-register.mjs';
 import * as registry from '../scripts/lib/usage/metrics/index.mjs';
+import { WRITER_TYPES } from '../scripts/lib/usage/metrics/helpers.mjs';
 import { unitsOf, resetUnitCache } from '../scripts/lib/daily-checkup.mjs';
 import { planPriceSpecFor, planBaselineModel } from '../scripts/lib/pricing.mjs';
 import { modelTiers } from '../hooks/lib/context.mjs';
@@ -137,4 +138,11 @@ test('zero-token and no-I/O: the registry modules import only each other and cal
     for (const i of imports) assert.ok(i.startsWith('./'), `${f} imports ${i}`);
     assert.doesNotMatch(src, /\b(spawn|exec|fork|fetch|writeFile)\w*\(/, f);
   }
+});
+
+test("reviewsPerWriter: WRITER_TYPES covers every selfReview type in config/model-tiers.json", () => {
+  const sr = modelTiers().selfReview;
+  assert.ok(Array.isArray(sr.types) && sr.types.length > 0);
+  for (const t of sr.types) assert.ok(WRITER_TYPES.has(t), `${t} is a self-reviewed writer type but missing from WRITER_TYPES`);
+  assert.ok(!WRITER_TYPES.has("code-review"), "a review is not a writer");
 });

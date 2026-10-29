@@ -851,7 +851,8 @@ export function writeOpenFile(state, nowT) {
 
 // The facts file of every closed day that is settled (close + SETTLE_MS), whole
 // (inside the facts window) and not yet written. A day file is never rewritten.
-export function writeFactsFiles(state, nowT) {
+// `deferredOut`, when given, receives the day keys held back for a still-open spawn (retried on a later run).
+export function writeFactsFiles(state, nowT, deferredOut = null) {
   const facts = state.facts;
   if (!facts) return [];
   const out = [];
@@ -869,7 +870,7 @@ export function writeFactsFiles(state, nowT) {
     // Spawn records land on their start day. A day file is written once, so it waits for its
     // still-open spawns (closed: idle 30 min, or 48 h after the start).
     const mine = Object.values(facts.spawns || {}).filter((a) => a.n > 0 && (a.start || a.t0) >= s && (a.start || a.t0) < s + DAY_MS);
-    if (mine.some((a) => isOpen(a, nowT, completedOf(facts, a)))) continue;
+    if (mine.some((a) => isOpen(a, nowT, completedOf(facts, a)))) { if (deferredOut) deferredOut.push(day); continue; }
     const idx = mine.length ? spawnRowIndex() : { fit: {}, type: {} };
     const spawns = mine
       .map((a) => spawnRecord(a, { fit: (a.tu && idx.fit[a.tu]) || null, type: (a.tu && idx.type[a.tu]) || null }))
@@ -903,14 +904,19 @@ export function runCheckup({ root = transcriptsRoot(), nowT = nowMs(), holdMs = 
   }
   // Facts: one file per closed, settled day, written once. Fail-open; the history line above is the contract.
   let factsWritten = [];
-  try { factsWritten = writeFactsFiles(state, nowT); } catch { /* facts are additive: never fail the checkup */ }
+  const factsDeferred = [];
+  try { factsWritten = writeFactsFiles(state, nowT, factsDeferred); } catch { /* facts are additive: never fail the checkup */ }
   try { writeOpenFile(state, nowT); } catch { /* the mirror is informational */ }
   // Write the cursor and the seen set together, after the history line: a crash
   // before this point re-reads the same bytes and the history guard stops a duplicate line.
   seen.save(nowT - KEEP_DAYS * DAY_MS);
   atomicWrite(p.state, JSON.stringify(state));
+  // lastDay means "every closed day up to here is covered". A day whose facts file waits for a still-open
+  // spawn is not covered: stop lastDay at the day before the earliest such day, so checkupDue stays true
+  // and the next session start (after RETRY_MS) retries it. Without this a deferred day was never retried.
+  const lastDay = factsDeferred.length ? dayKeyOf(Date.parse(`${factsDeferred.slice().sort()[0]}T08:00:00Z`) - DAY_MS) : dayKeyOf(lastClosedStart);
   atomicWrite(p.status, JSON.stringify({
-    lastRunMs: nowT, lastAttemptMs: nowT, lastDay: dayKeyOf(lastClosedStart), written,
+    lastRunMs: nowT, lastAttemptMs: nowT, lastDay, written,
   }));
   return { written, factsWritten, filesRead: scan.filesRead, bytesRead: scan.bytesRead, filesSeen: scan.filesSeen, dataThrough: state.dataThroughMs ? iso(state.dataThroughMs) : null };
 }
