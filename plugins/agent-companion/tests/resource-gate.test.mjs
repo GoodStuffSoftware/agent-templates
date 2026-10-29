@@ -287,8 +287,7 @@ test('env: RESOURCE_QUEUE=0 and a live lease token switch the gate off', () => {
 
 test('cloud: CLAUDE_CODE_REMOTE=true switches the gate off; any other value leaves it on', () => {
   assert.equal(gateDisabledByEnv({ CLAUDE_CODE_REMOTE: 'true' }), true);
-  assert.equal(gateDisabledByEnv({ CLAUDE_CODE_REMOTE: 'TRUE' }), true);
-  for (const v of ['', '0', 'false', '1', 'yes']) assert.equal(gateDisabledByEnv({ CLAUDE_CODE_REMOTE: v }), false, v);
+  for (const v of ['', '0', 'false', '1', 'yes', 'TRUE', ' true ']) assert.equal(gateDisabledByEnv({ CLAUDE_CODE_REMOTE: v }), false, v);
   assert.equal(gateDisabledByEnv({ CLAUDE_CODE_REMOTE_SESSION_ID: 'x' }), false, 'the session id alone is not the cloud flag');
 });
 

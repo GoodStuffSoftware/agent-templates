@@ -16,6 +16,12 @@ const DENY_BASH = [
   "env | sed -E 's/=(.*)/=\\1/'",
   "env | sed 's/=.*/\\0/'",
   "env | sed 's/=.*/x/e'", // e runs the line
+  "env | sed 's.=.*.#.'", // delimiter inside the match: sed splits the script elsewhere and the value comes back
+  "env | sed 's*=.**#*'",
+  'env | sed \'s$=.*$$;e env #$\'',
+  "env | sed 's=.*=x='",
+  'env | sed "s/=.*/$(printf \'&\')/"', // the shell expands $(...) before sed runs
+  'env | sed "s/=.*/`printf \'&\'`/"',
   'env | grep -i claude',
   'env | grep CLAUDE_CODE',
   'env | sort',

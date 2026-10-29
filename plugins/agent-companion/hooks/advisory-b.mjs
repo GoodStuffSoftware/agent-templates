@@ -54,7 +54,7 @@ try {
     const parts = [];
     // Keep-warm: while background helpers run, the lead is told to arm one wakeup inside its cache window
     // (after a background spawn) and, at each ping, whether to re-arm. Lead only; one small state file.
-    // Not in a cloud session: a routine run ends on its own and a wakeup never fires in it.
+    // Not in a cloud session: a cloud run is a short-lived sandbox, so a wakeup to keep its cache warm has no use there.
     if (opt('keep_warm', true) && !sessionIsSubagent(p) && !isCloudSession()) {
       try {
         const maxMinutes = opt('keep_warm_max_minutes', KEEP_WARM_MAX_DEFAULT_MIN);

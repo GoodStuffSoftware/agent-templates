@@ -388,6 +388,17 @@ test('hook: capacity-probe passes through silently when capacity_probe option is
   }
 });
 
+test('hook: capacity-probe passes through silently in a cloud session (CLAUDE_CODE_REMOTE=true)', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const res = runHook('hooks/capacity-probe.mjs', { session_id: 'sess-cap-cloud', cwd: dir }, { env: { CLAUDE_CODE_REMOTE: 'true' } });
+    assert.equal(res.status, 0, `stderr=${res.stderr}`);
+    assert.equal(res.stdout.trim(), '', 'a cloud sandbox says nothing about the operator machine');
+  } finally {
+    cleanup();
+  }
+});
+
 test('hook: capacity-probe never throws even when the probe itself is made to fail', () => {
   const { dir, cleanup } = makeFixture();
   try {

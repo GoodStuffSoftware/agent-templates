@@ -84,6 +84,17 @@ describe('keep-warm', () => {
     } finally { fx.cleanup(); }
   });
 
+  test('a cloud session (CLAUDE_CODE_REMOTE=true) is told nothing and no state is written', () => {
+    const fx = makeFixture();
+    try {
+      startWorker('a1');
+      const r = run('tick', bgSpawn(), { CLAUDE_CODE_REMOTE: 'true' });
+      assert.equal(r.status, 0);
+      assert.equal(ctx(r), '');
+      assert.equal(existsSync(join(fx.stateDir, 'state', 'keep-warm', `${SID}.json`)), false);
+    } finally { fx.cleanup(); }
+  });
+
   test('a background spawn is told to arm ONE wakeup 55 min out; a foreground spawn is not', () => {
     const fx = makeFixture();
     try {

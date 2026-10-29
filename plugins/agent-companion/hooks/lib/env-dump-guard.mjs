@@ -299,9 +299,11 @@ function classify(cmd, shell) {
 }
 
 // `s/=.*//` drops the value. A non-empty replacement (`s/=.*/=.../`) is as safe while it cannot re-emit what
-// the match held: no `&` and no backslash (so no \1, \0 or other escape), no delimiter inside, one line, and
-// only the g/I/i flags (not `e`, which runs the line, nor `w`, which writes it).
-const isSedNames = (a) => /^s(.)=\.\*\$?\1\1[a-z]*$/.test(a) || /^s(?![&\\])(.)=\.\*\$?\1((?:(?!\1)[^&\\\n])*)\1[gIi]*$/.test(a);
+// the match held and the delimiter cannot make sed split the script somewhere else than this pattern does: the
+// delimiter is one of / | , : @ % ~ # (never = . * $ or a letter); the replacement has no `&`, no backslash (so
+// no \1, \0 or other escape), no `$` or backtick (a double-quoted script is expanded by the shell first), no
+// delimiter, no control character (the tokenizer leaves a NUL where a `$(...)` stood), one line; and the flags are only g, I, i (not `e`, which runs the line, nor `w`, which writes it).
+const isSedNames = (a) => /^s(.)=\.\*\$?\1\1[a-z]*$/.test(a) || /^s([/|,:@%~#])=\.\*\$?\1((?:(?!\1)[^&\\$`\x00-\x1f])*)\1[gIi]*$/.test(a);
 
 // does a downstream command keep values off the transcript (names only, a count, a hash, a quiet test)?
 function isFilter(cmd, shell) {

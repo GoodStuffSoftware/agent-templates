@@ -2451,7 +2451,7 @@ function scalarOrUndefined(v) {
 // disposable sandbox: nothing in it is shared with the operator's own machine, so the hooks that guard that
 // machine (resource gate, shared-resources line, capacity line, keep-warm) stay out of it.
 export function isCloudSession(env = process.env) {
-  return String(env?.CLAUDE_CODE_REMOTE ?? '').trim().toLowerCase() === 'true';
+  return env?.CLAUDE_CODE_REMOTE === 'true';
 }
 
 export function opt(key, fallback) {
