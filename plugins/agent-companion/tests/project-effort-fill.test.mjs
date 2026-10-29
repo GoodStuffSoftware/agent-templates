@@ -157,6 +157,13 @@ test('built-in types: a model and no effort gets the table or tier-default effor
     assert.ok(ex.updated?.model, ex.all);
     assert.equal(ex.updated.effort, resolveRoute({ type: 'lookup' }).effort, ex.all);
     assert.equal(ex.row?.spawn_effort_source, 'guard-fill');
+    assert.doesNotMatch(ex.msg, /effort not pinned|inherits the session/i, ex.msg);
+    const par = spawn(fx, { type: 'general-purpose', prompt: `TYPE: code-review
+WRITER: sonnet/high
+ROLE: reviewer
+review it`, extra: { model: 'sonnet' } });
+    assert.equal(par.row?.spawn_effort_source, 'guard-fill', par.all);
+    assert.doesNotMatch(par.msg, /states no effort|parity with the route/i, par.msg);
   } finally { fx.cleanup(); }
 });
 

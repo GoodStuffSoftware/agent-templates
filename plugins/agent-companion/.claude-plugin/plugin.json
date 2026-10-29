@@ -51,7 +51,7 @@
     "project_effort_fill": {
       "type": "string",
       "title": "Fill the effort of project agents that set a model but no effort",
-      "description": "A project or user agent (<project>/.claude/agents, ~/.claude/agents) whose definition sets a model but no effort line inherits the lead session's effort (xhigh on a premium lead: two haiku explorers ran at xhigh). \"autofix\" (default): when the spawn sets no effort either, the guard sets the Agent call's effort silently, from the routing table entry for the brief's TYPE when that route is on the model that runs, else the model's own default effort; one spawns.jsonl row records it (spawn_effort_source guard-fill), no message. An effort in the spawn input or in the agent file always wins. \"off\": silent, effort stays inherited.",
+      "description": "A built-in type (general-purpose, Explore, Plan, claude-code-guide, statusline-setup, claude) spawned with no effort is filled the same way (0.31.43). A project or user agent (<project>/.claude/agents, ~/.claude/agents) whose definition sets a model but no effort line inherits the lead session's effort (xhigh on a premium lead: two haiku explorers ran at xhigh). \"autofix\" (default): when the spawn sets no effort either, the guard sets the Agent call's effort silently, from the routing table entry for the brief's TYPE when that route is on the model that runs, else the model's own default effort; one spawns.jsonl row records it (spawn_effort_source guard-fill), no message. An effort in the spawn input or in the agent file always wins. \"off\": silent, effort stays inherited.",
       "default": "autofix"
     },
     "python_stdin_guard": {

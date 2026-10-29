@@ -95,14 +95,14 @@ export async function finishSpawn({
       (ladderRewrite
         ? ` Rewrote subagent_type ${ladderRewrite.from ? `"${ladderRewrite.from}"` : '(none)'} -> "${ladderRewrite.to}" so effort ${route.effort} is pinned too (that form of the ladder has already started in this session, so the harness registered it).`
         : '');
-    if (autofillAdvisory) note = `${note}\n\n${autofillAdvisory}`;
+    if (autofillAdvisory && !def?.effortFilled) note = `${note}\n\n${autofillAdvisory}`;
   } else if (fit?.parityFloor) {
     note = `agent-companion: spawning ${who} at ${model}${def?.effort ? '/' + def.effort : ''} for a critical ${declaredType} is under-provisioned — ${fit.reason}. ` +
       `F1: a critical review is never sized below ${parityFloorLabel}, whatever its writer (no writer is declared, so parity with it is not checked here — add \`WRITER: <model>/<effort>\` to check it). ${fit.action}.`;
   } else if (parityRoute) {
     // Reviewer parity speaks for itself (see "Reviewer parity" above); null
     // when the reviewer matches its writer.
-    note = parityNote;
+    note = parityInheritedEffort && def?.effortFilled ? null : parityNote;
   } else if (fit?.verdict === 'under' && !typeReqIsRung) {
     // Logged only for a ladder rung (silent_fixes: fit_under_logged, and fit in the row). Any other
     // agent type still says it out loud: a weight-4 task on haiku is the failure that ships wrong code.
