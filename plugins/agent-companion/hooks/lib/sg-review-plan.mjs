@@ -12,6 +12,8 @@ import {
   selfReviewBriefText, selfReviewConfig,
 } from './self-review.mjs';
 
+const BUILTIN_AGENT_TYPES = new Set(['', 'general-purpose', 'explore', 'plan', 'claude-code-guide', 'statusline-setup', 'claude']);
+
 export function projectRouteAndSelfReview({
   pin, fromDef, spawnAlias, route, parityYardstick, declaredType, decls, model, updatedInput, input,
   typeIsParity, srCfg, brief, ladderRewrite, def, pinned, consequenceWasDeclared, declaredConsequence,
@@ -68,12 +70,16 @@ export function projectRouteAndSelfReview({
   // input or in the agent file always wins; a model that takes no effort is left alone. Runs after the model
   // rewrite above (it sizes the effort to the model that will run) and before the self-review block and the
   // spawns.jsonl row, so both see the effort that will run: `def` becomes an effective copy carrying it.
+  // The same holds for a built-in type (general-purpose, Explore, Plan, claude-code-guide, statusline-setup,
+  // the catch-all `claude`): it has no definition file, so it inherits the lead's effort whenever its input sets none
+  // (measured 10-28: a general-purpose sonnet spawn ran at the lead's xhigh). Filled the same way, once a model is known.
   // No message; the spawn row records it (silent_fixes `effort_filled:<effort>`, spawn_effort_source `guard-fill`).
   {
     const efModeRaw = String(opt('project_effort_fill', 'autofix')).toLowerCase();
     const efMode = ['autofix', 'off'].includes(efModeRaw) ? efModeRaw : 'autofix';
     try {
-      if (efMode === 'autofix' && pin.pinned && pin.fields === 'model' && def && !def.effort
+      const builtin = !def && BUILTIN_AGENT_TYPES.has(String(input.subagent_type || '').toLowerCase());
+      if (efMode === 'autofix' && ((pin.pinned && pin.fields === 'model' && def && !def.effort) || builtin)
         && !input.effort && !(updatedInput && updatedInput.effort) && model) {
         const alias = classifyModel(model).alias;
         const takes = (e) => {
@@ -91,7 +97,7 @@ export function projectRouteAndSelfReview({
         }
         if (level) {
           updatedInput = { ...(updatedInput || input), effort: level };
-          def = { ...def, effort: level, effortFilled: true };
+          def = { ...(def || {}), effort: level, effortFilled: true };
           if (silentFixes) silentFixes.push(`effort_filled:${level}`);
         }
       }

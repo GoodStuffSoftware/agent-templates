@@ -135,3 +135,40 @@ test('off: nothing is filled', () => {
     assert.match(r.msg, /INHERIT/, 'off: the existing rule-1 note is unchanged');
   } finally { fx.cleanup(); }
 });
+
+test('built-in types: a model and no effort gets the table or tier-default effort, silently', () => {
+  const fx = setup();
+  try {
+    const gp = spawn(fx, { type: 'general-purpose', prompt: `TYPE: operate\n${W}do it`, extra: { model: 'sonnet' } });
+    assert.equal(gp.decision, 'proceed', gp.all);
+    const route = resolveRoute({ type: 'operate' });
+    const want = route.model === 'sonnet' ? route.effort : ownDefault('sonnet');
+    assert.equal(gp.updated?.effort, want, gp.all);
+    assert.equal(gp.updated?.model, 'sonnet');
+    assert.equal(gp.msg, '');
+    assert.equal(gp.row?.spawn_effort_source, 'guard-fill');
+    assert.ok((gp.row?.silent_fixes || []).includes(`effort_filled:${want}`));
+    // no TYPE: the model's own default
+    const bare = spawn(fx, { type: 'general-purpose', prompt: `${W}do it`, extra: { model: 'haiku' } });
+    assert.equal(bare.updated?.effort, ownDefault('haiku'), bare.all);
+    // Explore with no model: the TYPE routes the model, then the effort is filled
+    const ex = spawn(fx, { type: 'Explore', prompt: `TYPE: lookup\n${W}find it` });
+    assert.equal(ex.decision, 'proceed', ex.all);
+    assert.ok(ex.updated?.model, ex.all);
+    assert.equal(ex.updated.effort, resolveRoute({ type: 'lookup' }).effort, ex.all);
+    assert.equal(ex.row?.spawn_effort_source, 'guard-fill');
+  } finally { fx.cleanup(); }
+});
+
+test('built-in types: an explicit effort wins, and off fills nothing', () => {
+  const fx = setup();
+  try {
+    const given = spawn(fx, { type: 'general-purpose', prompt: `TYPE: operate\n${W}do it`, extra: { model: 'sonnet', effort: 'low' } });
+    assert.ok(!given.updated || given.updated.effort === 'low', given.all);
+    assert.notEqual(given.row?.spawn_effort_source, 'guard-fill');
+    const off = spawn(fx, { type: 'general-purpose', prompt: `TYPE: operate\n${W}do it`, extra: { model: 'sonnet' },
+      env: { CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' } });
+    assert.ok(!off.updated || off.updated.effort === undefined, off.all);
+    assert.notEqual(off.row?.spawn_effort_source, 'guard-fill');
+  } finally { fx.cleanup(); }
+});

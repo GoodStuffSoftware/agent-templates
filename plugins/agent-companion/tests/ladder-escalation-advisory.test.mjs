@@ -38,7 +38,7 @@ test('non-ladder type + explicit model differing from the lead + no effort: the 
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
@@ -72,7 +72,7 @@ test('when the lead\'s own effort cannot be read, the advisory says so instead o
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
@@ -98,7 +98,7 @@ test('a LADDER agent type explicitly named does NOT get the non-ladder advisory,
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
@@ -127,7 +127,7 @@ test('the namespaced form (agent-companion:ac-opus-low) is also recognised as a 
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
@@ -150,7 +150,7 @@ test('no escalation note when the caller\'s own model cannot be determined at al
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';
@@ -178,7 +178,7 @@ test('no escalation note when the explicit model matches the lead\'s own model (
       },
     };
     const res = runHook('hooks/spawn-guard.mjs', payload, {
-      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') },
+      env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' },
     });
     assert.equal(res.status, 0, res.stderr);
     const msg = res.json?.systemMessage || '';

@@ -2,6 +2,12 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.43 — 2026-10-29
+
+- **Built-in agent types get the effort fill too (`project_effort_fill`).** `general-purpose`, `Explore`, `Plan`, `claude-code-guide`, `statusline-setup` and the catch-all `claude` have no definition file, so the 0.31.39 fill never covered them: a `general-purpose` spawn with model `sonnet` and no effort ran at the lead's `xhigh` (measured 10-28). When the spawn input sets no effort and a model is known (named in the input or filled by the routing table), the guard now sets `updatedInput.effort` silently: the table's effort for the brief's `TYPE:` when that route is on the model that runs, else the model's tier default. An explicit effort always wins; `off` leaves it inherited. The spawn row shows `spawn_effort_source: "guard-fill"` and `effort_filled:<effort>`. A spawn that names no model and gets none from the table is left as before.
+- Tests: `project-effort-fill` (general-purpose with a model, Explore with a TYPE-routed model, explicit effort, off).
+- Reverse: `project_effort_fill` `off`; the built-in list is `BUILTIN_AGENT_TYPES` in `hooks/lib/sg-review-plan.mjs`.
+
 ## 0.31.42 — 2026-10-28
 
 Workers compact and keep going (operator decision 2026-10-27): two plugin behaviours that still worked against it are changed.
