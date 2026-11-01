@@ -37,7 +37,7 @@ test('highest crossing per agent, last 24 h only, bad lines skipped', () => {
   const r = longRuns({ file, now: NOW });
   assert.equal(r.runs.length, 2);
   assert.equal(r.runs[0].steps, 250);
-  assert.match(r.line, /^Long runs \(24h\): 2 past 150 steps\n- ac-sonnet-high, model \?, 250 steps, 42 min, \? compactions: build x/);
+  assert.match(r.line, /^Long runs \(24h\): 2 past a step threshold [(]150, the step-budget stop, every further 100[)]\n- ac-sonnet-high, model \?, 250 steps, 42 min, \? compactions: build x/);
   assert.match(r.line, /\(no description\)/);
   assert.equal(longRuns({ file, now: NOW, since: '4d' }).runs[0].steps, 350);
 });

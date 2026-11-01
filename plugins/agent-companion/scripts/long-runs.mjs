@@ -92,7 +92,7 @@ export function longRuns({ since = '24h', now = Date.now(), file } = {}) {
     const mins = r.minutes != null ? `${Math.round(r.minutes)} min` : '? min';
     return `- ${r.type || 'agent'}, ${r.model || 'model ?'}, ${r.steps} steps${f}, ${mins}, ${r.compactions ?? '?'} compactions: ${short(r.description, 80) || '(no description)'}`;
   });
-  return { line: `Long runs (24h): ${runs.length} past 150 steps\n${items.join('\n')}`, runs };
+  return { line: `Long runs (24h): ${runs.length} past a step threshold (150, the step-budget stop, every further 100)\n${items.join('\n')}`, runs };
 }
 
 export function main(argv, { out = (s) => process.stdout.write(`${s}\n`), ...inject } = {}) {

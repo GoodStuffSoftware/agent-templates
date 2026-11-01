@@ -105,7 +105,8 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
     assert.ok(!('CLAUDE_CODE_USE_POWERSHELL_TOOL' in o.env));
     assert.equal(o.env.BASH_MAX_TIMEOUT_MS, '600000');
     assert.deepEqual(SDK_DISALLOWED.filter((t) => SDK_TOOLS.includes(t)), []);
-    assert.equal(o.permissionMode, 'dontAsk');
+    assert.equal(o.permissionMode, 'dontAsk'); // requested; the binary reports default under the env scrub, so the lists below are what hold
+    assert.ok(o.allowedTools.length > 0 && o.disallowedTools.length > 0, 'explicit allow and deny lists carry the safety');
     assert.equal(typeof o.systemPrompt, 'string');
     assert.match(o.systemPrompt, /VERDICT: PASS/);
     assert.equal(o.cwd, process.cwd());

@@ -17,8 +17,8 @@
 //   - settingSources: [] loads no user, project or local settings; plugins, skills and MCP servers
 //     have their own options and default to none.
 //   - systemPrompt takes a string; tools names the built-in tools that exist at all; allowedTools
-//     auto-approves; disallowedTools removes tools; permissionMode "dontAsk" denies whatever is not
-//     pre-approved, so nothing ever prompts.
+//     auto-approves; disallowedTools removes tools; permissionMode "dontAsk" is requested, but the binary reports "default" while
+//     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 is set (measured 0.3.316): safety rests on the explicit allowedTools and disallowedTools lists, so nothing unlisted runs and nothing prompts.
 //   - env REPLACES the subprocess environment. There is no apiKey or headers option: the key goes in
 //     ANTHROPIC_API_KEY and the workspace header in ANTHROPIC_CUSTOM_HEADERS ("Name: Value").
 //   - assistant messages carry the API usage; the result carries total_cost_usd and modelUsage.

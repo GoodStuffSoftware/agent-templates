@@ -1,5 +1,5 @@
 // Token bleed guard, phase 1: the scope clause the spawn guard appends to a
-// brief, the self-review step, and (since 0.31.47) no hard maxTurns on any shipped
+// brief, the self-review step, and (since 0.31.46) no hard maxTurns on any shipped
 // agent definition: long runs get the soft note in long-run.test.mjs instead.
 
 import test from 'node:test';
