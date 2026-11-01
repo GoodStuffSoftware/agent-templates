@@ -116,7 +116,8 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
     assert.match(o.systemPrompt, /VERDICT: PASS/);
     assert.equal(o.cwd, process.cwd());
     assert.equal(o.model, 'claude-sonnet-5-5');
-    assert.equal(o.maxBudgetUsd, DEFAULT_HARD_USD);
+    assert.equal(o.maxBudgetUsd, undefined, 'the backstop is the runner\'s own check, never the SDK\'s maxBudgetUsd (it discards a final reply that crosses it)');
+    assert.equal(o.settings.env.ANTHROPIC_BASE_URL, 'https://api.anthropic.com', 'the API host is pinned against a project settings env block');
     assert.equal(o.plugins[0].path, PLUGIN_ROOT, 'only the running copy of this plugin is loaded');
     assert.equal(o.env.ANTHROPIC_API_KEY, KEY);
     assert.equal(o.env.ANTHROPIC_CUSTOM_HEADERS, 'anthropic-workspace-id: wrkspc_test1');
@@ -242,14 +243,14 @@ test('runApiSdk: soft limits: a slow run is logged and goes on; $1 is a note; me
     const rows = [];
     const sdk = fakeSdk(async function* () {
       yield init();
-      for (let i = 0; i < 4; i += 1) { // 4 x 60 ms: longer than slowMs 100 and hungMs 200 in total, but never 200 ms of silence
-        await new Promise((r) => setTimeout(r, 60));
+      for (let i = 0; i < 4; i += 1) { // 4 x 40 ms: longer than slowMs 100 in total, but never 400 ms (hungMs) of silence
+        await new Promise((r) => setTimeout(r, 40));
         yield assistant(`m${i}`, [{ type: 'tool_use', id: `t${i}`, name: 'Bash', input: {} }], { input_tokens: 300000, output_tokens: 10 }); // about $0.60 a turn
       }
       yield assistant('mz', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 10, output_tokens: 10 }, { stop: 'end_turn' });
       yield result();
     });
-    const r = await run(sdk, { hungMs: 200, slowMs: 100, maxUsd: 0, logRow: (row) => rows.push(row) });
+    const r = await run(sdk, { hungMs: 400, slowMs: 100, maxUsd: 0, logRow: (row) => rows.push(row) });
     assert.equal(r.ok, true, r.reason);
     await new Promise((res) => setTimeout(res, 20)); // the slow row is written by a fire-and-forget async call
     assert.equal(rows.length, 2, 'one long-runs row at the slow mark, one at the soft spend limit');
@@ -260,7 +261,7 @@ test('runApiSdk: soft limits: a slow run is logged and goes on; $1 is a note; me
     assert.equal(r.notes.filter((n) => /soft spend limit/.test(n)).length, 1);
     const e = ledgerOf(fx).entries.at(-1);
     assert.ok(e.notes.some((n) => /soft spend limit/.test(n)) && e.notes.some((n) => /ran past/.test(n)), 'both notes are in the ledger entry');
-    assert.equal(sdk.calls[0].options.maxBudgetUsd, undefined, 'backstop 0 = no maxBudgetUsd at all');
+    assert.equal(sdk.calls[0].options.maxBudgetUsd, undefined, 'the SDK never gets a budget');
   } finally { fx.cleanup(); }
 });
 
@@ -272,7 +273,7 @@ test('runApiSdk: the backstop does not abort a reply that ends the turn; the rou
     assert.equal(r.ok, true, r.reason);
     assert.ok(r.usd > 1);
     assert.equal(sdk.calls[0].options.effort, 'xhigh');
-    assert.equal(sdk.calls[0].options.maxBudgetUsd, 1);
+    assert.equal(sdk.calls[0].options.maxBudgetUsd, undefined);
     const none = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}x`), { input_tokens: 1, output_tokens: 1 }, { stop: 'end_turn' }), result()]);
     await run(none, {});
     assert.equal('effort' in none.calls[0].options, false);
@@ -407,11 +408,11 @@ test('api-review: --runner sdk runs the SDK engine, inlines the brief and the di
     assert.match(p, /\+two/);
     assert.match(p, /shell [(]Bash, and PowerShell on Windows[)].*run the affected tests/);
     assert.match(p, /Run the tests affected by the diff, never the full suite or ci-local/);
-    assert.equal(sdk.calls[0].options.maxBudgetUsd, DEFAULT_HARD_USD);
+    assert.equal(sdk.calls[0].options.maxBudgetUsd, undefined);
     assert.equal('effort' in sdk.calls[0].options, false);
     const capped = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 1, output_tokens: 1 }), result()]);
     await t.go(['--runner', 'sdk', '--max-usd', '0.25'], { sdk: capped });
-    assert.equal(capped.calls[0].options.maxBudgetUsd, 0.25);
+    assert.equal(capped.calls[0].options.maxBudgetUsd, undefined);
     // The routed --model/--effort of the self-review clause reach the SDK options (effort changes the request).
     const eff = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 1, output_tokens: 1 }), result()]);
     await t.go(['--runner', 'sdk', '--effort', 'xhigh'], { sdk: eff });
@@ -486,7 +487,7 @@ test('sdkOptions: project settings and only this plugin; no skills, no MCP; our 
   assert.equal(o.env.CLAUDE_CONFIG_DIR, '/cfg');
   assert.ok(o.disallowedTools.includes('Edit') && o.disallowedTools.includes('Write'), 'a project allow rule cannot widen the deny list');
   assert.deepEqual(o.allowedTools, o.tools);
-  assert.equal(o.maxBudgetUsd, 0.5);
+  assert.equal(o.maxBudgetUsd, undefined);
   assert.deepEqual(sdkOptions({ cwd: '/r', modelId: 'm', key: KEY, platform: 'linux', pluginRoot: '/no/such/plugin' }).plugins, [], 'a layout that is not a plugin loads none');
 });
 
@@ -498,6 +499,13 @@ test('pluginIdentity reads the running copy; initMismatch passes the expected in
   assert.equal(initMismatch(ok, id), null, 'built-in cc-plugin-* entries are the binary, not a loaded plugin');
   assert.equal(isBuiltinPlugin({ name: 'cc-plugin-agents-md', version: null }), true);
   assert.equal(isBuiltinPlugin({ name: 'cc-plugin-x', version: '1.0.0' }), false);
+  assert.equal(isBuiltinPlugin({ name: 'cc-plugin-fake', version: null }), false, 'only the two known built-ins');
+  assert.equal(isBuiltinPlugin({ name: 'cc-plugin-agents-md', version: null, source: 'cc-plugin-agents-md@builtin' }), true);
+  assert.equal(isBuiltinPlugin({ name: 'cc-plugin-agents-md', version: null, source: 'cc-plugin-agents-md@market' }), false, 'a built-in name from another source');
+  const own = { name: 'agent-companion', version: '1', source: 'agent-companion@inline' };
+  assert.equal(initMismatch(initProof({ plugins: [own, { name: 'cc-plugin-agents-md', source: 'cc-plugin-agents-md@builtin' }, { name: 'cc-plugin-plugin-authoring', source: 'cc-plugin-plugin-authoring@builtin' }] }), id), null);
+  assert.match(initMismatch(initProof({ plugins: [own, { name: 'cc-plugin-fake' }] }), id), /cc-plugin-fake/, 'a third cc-plugin-* is not tolerated');
+  assert.match(initMismatch(initProof({ plugins: [{ name: 'agent-companion', version: '1', source: 'agent-companion@market' }] }), id), /agent-companion \(agent-companion@market\)/, 'the own name from another source is another plugin');
   assert.match(initMismatch(initProof({ plugins: [{ name: 'agent-companion' }, { name: 'other-plugin', version: '2' }] }), id), /other-plugin/);
   assert.match(initMismatch(initProof({ plugins: [{ name: 'agent-companion' }], mcp_servers: [{ name: 'fixture', status: 'connected' }] }), id), /MCP servers.*fixture/);
 });
@@ -522,7 +530,7 @@ test('runApiSdk: the init proof comes back with the result', async () => {
     const sdk = fakeSdk([{ ...init(), plugins: [{ name: 'agent-companion', version: '1' }], mcp_servers: [] }, assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 5, output_tokens: 5 }, { stop: 'end_turn' }), result()]);
     const r = await run(sdk);
     assert.equal(r.ok, true, r.reason);
-    assert.deepEqual(r.init.plugins, [{ name: 'agent-companion', version: '1' }]);
+    assert.deepEqual(r.init.plugins, [{ name: 'agent-companion', version: '1', source: null }]);
     assert.equal(r.init.apiKeySource, 'ANTHROPIC_API_KEY');
   } finally { fx.cleanup(); }
 });

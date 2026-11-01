@@ -162,7 +162,11 @@ export function sdkOptions({
     systemPrompt: system || sdkSystem(maxTurns),
     // allowedTools and disallowedTools are command-line rules: a project's permissions.allow cannot widen them (deny wins).
     tools, allowedTools: [...tools], disallowedTools: [...SDK_DISALLOWED, ...SDK_READ_DENY, ...SDK_BASH_DENY, ...(ps ? SDK_POWERSHELL_DENY : [])],
-    permissionMode: 'dontAsk', maxTurns, ...(maxUsd > 0 ? { maxBudgetUsd: maxUsd } : {}), persistSession: false, ...(abortController ? { abortController } : {}),
+    permissionMode: 'dontAsk', maxTurns, persistSession: false,
+    // The spend backstop (maxUsd) is the runner's own check between messages, which keeps a final reply that ends the turn. It is NOT passed as the SDK's
+    // maxBudgetUsd: the SDK enforces that after the final reply too and then reports an error, discarding a review that was already paid for.
+    // The API host is pinned: a project .claude/settings.json `env` block must not be able to send the review key elsewhere (flag settings beat project settings).
+    settings: { env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } }, ...(abortController ? { abortController } : {}),
     ...(effortOption ? { effort: effortOption } : {}), // the routed effort: the SDK passes it to the binary as --effort
   };
 }
@@ -172,7 +176,7 @@ export function initProof(msg) {
   const names = (a) => (Array.isArray(a) ? a.map((x) => (x && typeof x === 'object' ? String(x.name ?? x) : String(x))) : []);
   return {
     apiKeySource: msg.apiKeySource ?? null, claudeCodeVersion: msg.claude_code_version ?? null, model: msg.model ?? null, permissionMode: msg.permissionMode ?? null,
-    plugins: Array.isArray(msg.plugins) ? msg.plugins.map((p) => ({ name: String(p.name), version: p.version ?? null })) : [],
+    plugins: Array.isArray(msg.plugins) ? msg.plugins.map((p) => ({ name: String(p.name), version: p.version ?? null, source: p.source == null ? null : String(p.source) })) : [],
     pluginErrors: Array.isArray(msg.plugin_errors) ? msg.plugin_errors.map((e) => `${e.plugin}: ${e.type}`) : [],
     mcpServers: Array.isArray(msg.mcp_servers) ? msg.mcp_servers.map((m) => `${m.name}:${m.status}${m.source ? `:${m.source}` : ''}`) : [],
     tools: names(msg.tools), skills: names(msg.skills), slashCommands: names(msg.slash_commands).length, agents: names(msg.agents),
@@ -181,9 +185,13 @@ export function initProof(msg) {
 // null when the init shows what a review is meant to load; else why not. Checked before the first API call.
 // The binary's own built-in plugins (names cc-plugin-*, no version: agents-md, plugin-authoring as of 0.3.316) are loaded in every
 // session, plugin-less and settings-less ones too (measured), and cannot be switched off from the options: they are not counted.
-export const isBuiltinPlugin = (p) => /^cc-plugin-/.test(String(p && p.name)) && !(p && p.version);
+// Exactly these two, and (when the init reports a source) only from the binary itself (`<name>@builtin`).
+export const BUILTIN_PLUGINS = Object.freeze(['cc-plugin-agents-md', 'cc-plugin-plugin-authoring']);
+export const isBuiltinPlugin = (p) => !!p && BUILTIN_PLUGINS.includes(String(p.name)) && !p.version && (p.source == null || String(p.source) === `${p.name}@builtin`);
+// This plugin as the run loads it: by name, and (when the init reports a source) as an inline plugin from the path given to the options.
+export const isOwnPlugin = (p, identity) => !!identity && !!p && p.name === identity.name && (p.source == null || /@inline$/.test(String(p.source)));
 export function initMismatch(proof, identity = pluginIdentity()) {
-  const extra = proof.plugins.filter((p) => !isBuiltinPlugin(p) && (!identity || p.name !== identity.name)).map((p) => p.name);
+  const extra = proof.plugins.filter((p) => !isBuiltinPlugin(p) && !isOwnPlugin(p, identity)).map((p) => (p.source ? `${p.name} (${p.source})` : p.name));
   if (extra.length) return `the SDK session loaded a plugin other than ${identity ? identity.name : 'none'} (${extra.join(', ')})`;
   if (proof.mcpServers.length) return `the SDK session connected MCP servers (${proof.mcpServers.join(', ')}); a review loads none`;
   return null;

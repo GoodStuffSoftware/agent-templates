@@ -38,6 +38,14 @@ test('safety guard stays on: kill by image name is denied in a reviewer session'
   assert.equal(decisionOf(r.json), 'deny');
 });
 
+test('safety guards stay on: plugin uninstall and a remote branch delete are denied in a reviewer session', () => {
+  for (const [i, command] of ['claude plugin uninstall agent-companion', 'git push origin --delete topic', 'git push origin :topic'].entries()) {
+    const r = runHook('hooks/poll-guard.mjs', { tool_name: 'Bash', tool_input: { command }, session_id: `s-rev-g${i}` }, { env: MARK });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(decisionOf(r.json), 'deny', command);
+  }
+});
+
 test('lead-only: the delegation guard blocks the long execution streak without the marker and is silent with it', () => {
   const fx = makeFixture();
   try {
