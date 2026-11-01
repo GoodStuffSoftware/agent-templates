@@ -80,7 +80,9 @@ export function makeTools(cwd) {
     const given = String(p || '.');
     // Before any filesystem call: no UNC or device path (touching one opens a network connection),
     // no drive letter, and a lexical containment and deny-list check of the name as given.
-    if (/^[\/]{2}/.test(given) || /^[A-Za-z]:/.test(given)) throw new Error(`path is outside the repository: ${p}`);
+    // Either slash, on any platform: on Linux a backslash name is only a missing file, but the
+    // refusal (and its message) is then the same everywhere.
+    if (/^[\\/]{2}/.test(given) || /^[A-Za-z]:/.test(given)) throw new Error(`path is outside the repository: ${p}`);
     const abs = resolve(root, given);
     if (!inside(abs)) throw new Error(`path is outside the repository: ${p}`);
     if (relative(root, abs).split(sep).some(deniedName)) throw new Error(`path is not readable: ${p}`);
