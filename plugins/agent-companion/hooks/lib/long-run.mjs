@@ -96,7 +96,7 @@ function firstLine(text) {
   return null;
 }
 
-// Append one crossing row to state/long-runs.jsonl (stateDir honours the plugin's state-dir override).
+// Append one crossing row to state/long-runs.jsonl (stateDir follows the plugin state root).
 export function logLongRun(row) {
   try {
     mkdirSync(stateDir(), { recursive: true });
