@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, PLUGIN_ROOT, queueFreeEnv } from './helpers.mjs';
 import {
   classifyCommand, scanCommand, wordsOf, rewriteCommand, wrapSegment, wrapLosesCwd, gateDecision, gateMode, gateDisabledByEnv, DEFAULT_GATE_MODE,
 } from '../hooks/lib/resource-gate.mjs';
@@ -254,7 +254,7 @@ test('rewrite: quotes, spaces and metacharacters survive as exactly one argument
       const f = classifyCommand(cmd, { cwd: CWD, ...NOFS });
       assert.ok(f.heavy.length, cmd);
       const out = rewriteCommand(cmd, f.heavy, f.flags, stub.replace(/\\/g, '/'), (cs) => cs[0]);
-      const r = spawnSync(BASH, ['-c', out], { encoding: 'utf8', windowsHide: true, env: { ...process.env, PATH: NODE_PATH } });
+      const r = spawnSync(BASH, ['-c', out], { encoding: 'utf8', windowsHide: true, env: { ...queueFreeEnv(), PATH: NODE_PATH } });
       assert.equal(r.status, 0, r.stderr);
       const argv = JSON.parse(r.stdout.trim());
       assert.deepEqual(argv.slice(0, 7), ['run', '--class', f.heavy[0].class, '--label', f.heavy[0].class, '--shell', 'bash']);
@@ -529,7 +529,7 @@ test('compose: the rewritten command, run in real bash through the real queue, k
     const w = spawnSync(BASH, ['-c', cmd], {
       encoding: 'utf8', windowsHide: true, timeout: 60000,
       env: {
-        ...process.env, PATH: `${bin.replace(/\\/g, '/')}${sep}${NODE_PATH}`, CI_BUDGET_DIR: ledger, CI_LOCAL_LOCK_DIR: lock,
+        ...queueFreeEnv(), PATH: `${bin.replace(/\\/g, '/')}${sep}${NODE_PATH}`, CI_BUDGET_DIR: ledger, CI_LOCAL_LOCK_DIR: lock,
         AGENT_COMPANION_HOME_OVERRIDE: fx.dir, CLAUDE_CONFIG_DIR: join(fx.dir, '.claude'),
       },
     });

@@ -117,6 +117,10 @@ export function runHook(hookRelPath, payload, { env = {}, cwd, timeout = 15000, 
 // from inside a session inherits CLAUDE_CODE_SESSION_ATTENDED ("1" attended,
 // "0" under `claude -p`), which would decide the delegation guard's scope
 // for every test. A test that needs it passes it in `env`.
+export const QUEUE_ENV = ['AC_RESOURCE_LEASE', 'AC_RESOURCE_RULES', 'RESOURCE_QUEUE'];
+// process.env without the live resource queue's variables, for a test that spawns a process itself.
+export const queueFreeEnv = () => { const e = { ...process.env }; for (const k of QUEUE_ENV) delete e[k]; return e; };
+
 export function childEnv(env = {}) {
   const base = { ...process.env };
   delete base.CLAUDE_CODE_SESSION_ATTENDED;
@@ -128,6 +132,10 @@ export function childEnv(env = {}) {
   // A cloud session sets CLAUDE_CODE_REMOTE=true, which switches the resource gate and the machine-local
   // session lines off: a suite run from one must not do that to every test (tests set it when they mean it).
   delete base.CLAUDE_CODE_REMOTE;
+  // A suite run through ci-local (the resource-queue wrapper) inherits AC_RESOURCE_LEASE, the re-entry token that
+  // switches the resource gate off, and may carry RESOURCE_QUEUE=0 or a rules override. A hook child must not see the
+  // live queue's state: strip them (a test that means one passes it in `env`).
+  for (const k of QUEUE_ENV) delete base[k];
   // type_line_required defaults to deny in the plugin; most spawn-guard tests
   // spawn ladder rungs without a TYPE: line and are not about that rule, so
   // children run with it off unless a test sets it (tests/type-required.test.mjs).
