@@ -39,19 +39,13 @@ import { stateFile } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { loadConfig, resolveKey, record, recordFailure, recordSpend } from './api-credits.mjs';
 import { spawnSyncHidden } from './proc.mjs';
-import { validKeyShape, scrub, resolveModel, isUnavailable, isSpendLimit, isWorkspaceMissing, hasVerdict, WORKSPACE_ENV, WORKSPACE_HINT } from './api-run.mjs';
+import {
+  validKeyShape, scrub, resolveModel, isUnavailable, isSpendLimit, isWorkspaceMissing, hasVerdict, WORKSPACE_ENV, WORKSPACE_HINT,
+  SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD, slowNote, softUsdNote, logSlowReview,
+} from './api-run.mjs';
 
 export const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
 export const DEFAULT_SDK_VERSION = '0.3.316';
-export const DEFAULT_SDK_MAX_USD = 1;
-// Bash and PowerShell: the default per-command timeout is the Claude Code default (2 minutes, so a
-// hung command is not given the whole review); the ceiling is 10 minutes, so a reviewer that passes
-// `timeout: 600000` can run the full test suite.
-export const DEFAULT_BASH_TIMEOUT_MS = 120000;
-export const MAX_BASH_TIMEOUT_MS = 600000;
-// The deadline of a whole sdk review. The fetch engine's 8 minutes cannot hold a test run of up to 10
-// minutes plus the turns around it, so an sdk review gets 15.
-export const DEFAULT_SDK_DEADLINE_MS = 15 * 60 * 1000;
 export const REQUIRED_KEY_SOURCE = 'ANTHROPIC_API_KEY';
 
 export const SDK_TOOLS = ['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch'];
@@ -81,8 +75,8 @@ export const SDK_POWERSHELL_DENY = [
 
 export const SDK_SYSTEM_PREFIX = [
   'You are a code reviewer. The repository under review is your working directory, checked out at the head of the diff you are given.',
-  'Tools: Read, Grep, Glob, Bash (and PowerShell on Windows), WebSearch and WebFetch. Use the shell to run the tests and the checks the change needs (run the test files the diff touches first, then the wider suite);',
-  'a shell command times out after 2 minutes unless you pass a larger timeout, up to 600000 ms, so pass one for a test run. Use WebSearch and WebFetch only to check a library, API or tool the change relies on, never to send out repository content.',
+  'Tools: Read, Grep, Glob, Bash (and PowerShell on Windows), WebSearch and WebFetch. Use the shell to run the tests AFFECTED by the diff and the other checks the change needs: the test files that cover the changed files, through an affected-test selector of the repository if it has one (look in its scripts, package.json or ci-local), otherwise mapped from the diff.',
+  'Never run the full test suite or ci-local: the writer and CI run those. Use WebSearch and WebFetch only to check a library, API or tool the change relies on, never to send out repository content.',
   'Never modify the repository: no edits, no git commit, push, reset or checkout, no installs. Read the surrounding code, not only the diff, and try to refute the change.',
   'Write the review as soon as you can support a verdict. Start it with one line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit with file:line and a repro,',
   'and say which checks you ran and which you could not.',
@@ -115,12 +109,10 @@ const TRIM_ENV = {
   DISABLE_AUTOUPDATER: '1',
 };
 
-export function sdkEnv({ key, workspace = '', base = process.env, bashTimeoutMs = DEFAULT_BASH_TIMEOUT_MS, bashMaxTimeoutMs = MAX_BASH_TIMEOUT_MS, configDir = '', powershell = false }) {
+export function sdkEnv({ key, workspace = '', base = process.env, configDir = '', powershell = false }) {
   const out = {};
   for (const k of Object.keys(base)) if (ENV_ALLOW.has(k.toLowerCase()) && typeof base[k] === 'string') out[k] = base[k];
   Object.assign(out, TRIM_ENV);
-  out.BASH_DEFAULT_TIMEOUT_MS = String(bashTimeoutMs);
-  out.BASH_MAX_TIMEOUT_MS = String(Math.max(bashTimeoutMs, bashMaxTimeoutMs)); // the ceiling is the larger of the two
   if (powershell) out.CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'; // else the scoped Bash deny rules switch the tool off
   out.ANTHROPIC_API_KEY = key;
   if (configDir) out.CLAUDE_CONFIG_DIR = configDir;
@@ -183,13 +175,14 @@ function usageFromApi(u) {
   };
 }
 
-// Same result shape as runApi, plus `path: 'sdk'`. `sdkUnavailable: true` means the SDK could not be
+// Same result shape and limits as runApi (soft: a note at 8 minutes and at $1; stops only a hung run, no message
+// for 10 minutes, and at the spend backstop maxUsd, 0 = none), plus `path: 'sdk'`. `sdkUnavailable: true` means the SDK could not be
 // installed or imported before anything was spent: the caller falls back to the fetch engine.
 // Never throws.
 export async function runApiSdk({
   prompt, model, effort = null, cwd = process.cwd(), category = 'review', meta = '', system = null,
-  maxUsd = DEFAULT_SDK_MAX_USD, maxTurns = 30, deadlineMs = DEFAULT_SDK_DEADLINE_MS, requireVerdict = false,
-  bashTimeoutMs = DEFAULT_BASH_TIMEOUT_MS, sdkVersion = DEFAULT_SDK_VERSION, platform = process.platform,
+  maxUsd = DEFAULT_HARD_USD, softUsd = SOFT_USD, maxTurns = 30, requireVerdict = false,
+  hungMs = HUNG_MS, slowMs = SLOW_REVIEW_MS, logRow = null, sdkVersion = DEFAULT_SDK_VERSION, platform = process.platform,
   cfg = loadConfig(), env = process.env, now = Date.now(),
   sdk = null, load = loadSdk,
 }) {
@@ -199,13 +192,15 @@ export async function runApiSdk({
   let turnCount = 0;
   let ledgerError = null;
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const notes = [];
+  const startedAt = Date.now();
   const ledgerFailed = (what, e) => { ledgerError ||= `ledger write failed; ${what} (${scrub(String((e && e.message) || e), key).replace(/\s+/g, ' ').slice(0, 80)})`; };
   let modelId = String(model);
   const bookCost = (ok, error = null) => {
     try {
       record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
         cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok,
-        detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'sdk', error: ok ? null : error },
+        detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'sdk', error: ok ? null : error, notes },
       });
     } catch (e) { ledgerFailed(`$${(usd - booked).toFixed(4)} not recorded`, e); }
   };
@@ -215,17 +210,24 @@ export async function runApiSdk({
   const fail = (unavailable, reason) => {
     const r = scrub(reason, key).slice(0, 200);
     bookCost(false, r);
-    return { ok: false, unavailable, reason: r, usd, path: 'sdk', ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: false, unavailable, reason: r, usd, path: 'sdk', notes, ...(ledgerError ? { ledgerError } : {}) };
   };
-  const deadlineReason = () => `wall-clock deadline of ${Math.round((deadlineMs / 60000) * 10) / 10} minutes reached after ${turnCount} turn(s); falling back to the plan`;
-  const capReason = () => `the review reached its spend cap of $${maxUsd} after ${turnCount} turn(s) without a verdict; falling back to the plan`;
+  const hungReason = () => `no new message or tool result for ${Math.round((hungMs / 60000) * 10) / 10} minutes after ${turnCount} turn(s); falling back to the plan`;
+  const capReason = () => `the review reached its spend backstop of $${maxUsd} after ${turnCount} turn(s) without a verdict; falling back to the plan`;
 
   const ac = new AbortController();
   let abortReason = null;
   let wake = () => {};
   const aborted = new Promise((resolve) => { wake = resolve; }); // lets the loop stop even when the SDK ignores the abort
   const abort = (r) => { if (!abortReason) { abortReason = r; ac.abort(); wake(); } };
-  let timer = null;
+  let hungTimer = null;
+  let slowTimer = null;
+  const armHung = () => { // re-armed by every message: only silence stops the run
+    clearTimeout(hungTimer);
+    hungTimer = setTimeout(() => abort('hung'), Math.max(1, hungMs));
+    if (hungTimer.unref) hungTimer.unref();
+  };
+  const stopTimers = () => { clearTimeout(hungTimer); clearTimeout(slowTimer); };
   try {
     key = resolveKey(cfg.keySource, env);
     if (!validKeyShape(key)) throw configError('the configured secret is not a Console API key (it must start sk-ant-, and sk-ant-admin and sk-ant-oat are refused)');
@@ -243,14 +245,18 @@ export async function runApiSdk({
     const tools = sdkToolsFor(platform);
     const ps = tools.includes('PowerShell');
     const options = {
-      cwd, model: modelId, env: sdkEnv({ key, workspace: ws, base: env, bashTimeoutMs, configDir: configDirOf(sdkVersion), powershell: ps }),
+      cwd, model: modelId, env: sdkEnv({ key, workspace: ws, base: env, configDir: configDirOf(sdkVersion), powershell: ps }),
       settingSources: [], systemPrompt: system || sdkSystem(maxTurns),
       tools, allowedTools: [...tools], disallowedTools: [...SDK_DISALLOWED, ...SDK_READ_DENY, ...SDK_BASH_DENY, ...(ps ? SDK_POWERSHELL_DENY : [])],
-      permissionMode: 'dontAsk', maxTurns, maxBudgetUsd: maxUsd, persistSession: false, abortController: ac,
-      ...(effort && m.effort ? { effort } : {}),
+      permissionMode: 'dontAsk', maxTurns, ...(maxUsd > 0 ? { maxBudgetUsd: maxUsd } : {}), persistSession: false, abortController: ac,
+      ...(effort && m.effort ? { effort } : {}), // the routed effort: the SDK passes it to the binary as --effort
     };
-    timer = setTimeout(() => abort('deadline'), Math.max(1, deadlineMs));
-    if (timer.unref) timer.unref();
+    armHung();
+    slowTimer = setTimeout(() => { // soft: one long-runs row and a note, the review goes on
+      notes.push(slowNote(Math.round(slowMs / 6000) / 10));
+      logSlowReview({ meta, turns: turnCount, startedAt, now: Date.now(), logRow }).catch(() => {});
+    }, Math.max(1, slowMs));
+    if (slowTimer.unref) slowTimer.unref();
 
     const seen = new Map(); // assistant message id -> usage already counted (one API call can arrive as several messages)
     let lastText = '';
@@ -270,6 +276,7 @@ export async function runApiSdk({
         nxt.catch(() => {}); // a late rejection after an abort is not an unhandled one
         const step = await Promise.race([nxt, aborted.then(() => ({ done: true }))]);
         if (step.done) break;
+        armHung();
         const msg = step.value;
         if (!msg || typeof msg !== 'object') continue;
         if (msg.type === 'system' && msg.subtype === 'init') {
@@ -297,15 +304,17 @@ export async function runApiSdk({
           if (t) lastText = t;
           if (am.stop_reason) lastStop = am.stop_reason;
           if (msg.error) lastAssistantError = String(msg.error);
-          // Checked between messages: one expensive turn can overshoot the cap by its own cost.
-          if (usd >= maxUsd) { abort('spend-cap'); break; }
+          if (usd >= softUsd && !notes.some((n) => n.startsWith('passed the $'))) notes.push(softUsdNote(softUsd));
+          // The backstop is checked between messages (one expensive turn can overshoot it by its own cost);
+          // a reply that already ends the turn is the review, so it is kept.
+          if (maxUsd > 0 && usd >= maxUsd && am.stop_reason !== 'end_turn') { abort('spend-cap'); break; }
         } else if (msg.type === 'result') {
           result = msg;
           break;
         }
       }
     } finally {
-      clearTimeout(timer);
+      stopTimers();
       // Close the stream, but never wait on an SDK that has stalled.
       if (typeof it.return === 'function') {
         let t2;
@@ -328,7 +337,7 @@ export async function runApiSdk({
     }
     if (sdkUsd > usd) usd = sdkUsd;
 
-    if (abortReason === 'deadline') return fail(false, deadlineReason());
+    if (abortReason === 'hung') return fail(false, hungReason());
     if (abortReason === 'spend-cap') return fail(false, capReason());
     if (!result) return fail(false, inited ? 'the SDK run ended without a result' : 'the SDK run produced no messages');
 
@@ -348,11 +357,11 @@ export async function runApiSdk({
       if (!hasVerdict(text)) return fail(false, `the review has no VERDICT line (stop_reason ${stop})`);
     }
     bookCost(true);
-    return { ok: true, text, usd, turns: turnCount, tokens, model: modelId, stopReason: stop, path: 'sdk', sdkUsd, ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: true, text, usd, turns: turnCount, tokens, model: modelId, stopReason: stop, path: 'sdk', sdkUsd, notes, ...(ledgerError ? { ledgerError } : {}) };
   } catch (e) {
-    if (timer) clearTimeout(timer);
+    stopTimers();
     const reason = scrub(String((e && e.message) || e), key).slice(0, 200);
-    if (abortReason === 'deadline') return fail(false, deadlineReason());
+    if (abortReason === 'hung') return fail(false, hungReason());
     if (abortReason === 'spend-cap') return fail(false, capReason());
     if (e && e.configFailure) noteFailure(reason);
     return fail(!!(e && e.configFailure), reason);

@@ -12,13 +12,13 @@ import {
   DEFAULT_SHARES, decide, record, recordFailure, status, summaryLine, cycleOf,
   keyConfigured, parseKeySource, parseShares,
 } from '../scripts/lib/api-credits.mjs';
-import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, OFFICIAL_ENDPOINT } from '../scripts/lib/api-run.mjs';
+import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
 import { main as reviewMain, buildPrompt } from '../scripts/api-review.mjs';
 import { main as creditsMain } from '../scripts/api-credits.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
 import { spawnSyncHidden } from '../scripts/lib/proc.mjs';
-import { selfReviewBlock } from '../hooks/lib/self-review.mjs';
+import { selfReviewBlock, REVIEW_INSTRUCTION } from '../hooks/lib/self-review.mjs';
 
 const NL = '\n';
 const T = (s) => Date.parse(s);
@@ -530,7 +530,10 @@ test('read-only tools: confined to the repository, line-numbered, no shell', () 
 test('buildPrompt: protocol header, verbatim brief, the instruction, the diff', () => {
   const p = buildPrompt({ brief: 'BRIEF TEXT\n\n', diffRef: 'a..b', writer: 'sonnet/high', stat: ' x | 1 +', diff: 'diff --git a/x b/x' });
   assert.match(p, /^TYPE: code-review\nWRITER: sonnet\/high\nROLE: reviewer\n\nBRIEF TEXT\n/);
-  assert.ok(p.includes('Try to refute this change. Run the tests. Start with a verdict line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit, with file:line and a repro.'));
+  assert.ok(p.includes(REVIEW_INSTRUCTION), 'the runner prompt and the self-review clause share one instruction');
+  assert.match(REVIEW_INSTRUCTION, /Start with a verdict line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit, with file:line and a repro\.$/);
+  assert.match(REVIEW_INSTRUCTION, /Run the tests affected by the diff, never the full suite or ci-local/);
+  assert.match(REVIEW_INSTRUCTION, /affected-test selector if it has one .*otherwise mapped from the diff/);
   assert.ok(p.includes('Diff range under review: a..b'));
   assert.ok(p.includes('diff --git a/x b/x'));
 });
@@ -570,7 +573,10 @@ test('the self-review clause runs the governor before spawning a reviewer, and k
   assert.ok(block.includes('--model sonnet --effort high'));
   assert.ok(block.includes('--review-file'));
   assert.ok(block.includes('no verdict line, no land'));
-  assert.ok(block.includes('run_in_background') && block.includes('15 minutes on the sdk engine'), 'the sdk runner outlives a foreground Bash call (10 minutes), so it runs in the background');
+  assert.ok(block.includes('run_in_background') && block.includes('it logs itself at 8 minutes and goes on, and only a hung run is stopped'), 'a review can outlive a foreground Bash call (10 minutes), so it runs in the background');
+  assert.ok(!block.includes('15 minutes') && !block.includes('stops itself after'), 'no wall-clock stop is promised');
+  assert.ok(block.includes(`this instruction: "${REVIEW_INSTRUCTION}"`), 'the reviewer brief carries the affected-tests-only instruction');
+  assert.ok(block.includes('can run the affected tests'));
   assert.ok(!block.includes('Bash timeout of 600000 ms'));
   assert.ok(block.includes("brief TEXT goes into that file, never only a path to it"));
   assert.ok(block.includes('spawn exactly ONE reviewer, in the foreground'));
@@ -606,19 +612,118 @@ test('runner: each paid turn is booked as it completes, so a run killed mid-way 
   } finally { t.fx.cleanup(); }
 });
 
-test('runner: the wall-clock deadline stops the run, books what was paid and returns the fall-back result', async () => {
+test('runner: no wall-clock deadline: a review past 8 minutes is logged to long-runs and goes on to a verdict', async () => {
   const t = rig();
   try {
     let tNow = 1000;
-    const f = stubFetch(() => { tNow += 9 * 60 * 1000; return msg([toolUse('t1', 'glob', { pattern: '*' })], USAGE, 'tool_use'); });
-    const r = await direct(t, f, { clock: () => tNow });
-    assert.equal(f.calls.length, 1, 'no request after the deadline');
+    const rows = [];
+    const f = stubFetch((n) => {
+      tNow += 9 * 60 * 1000; // each response takes 9 minutes of the injected clock
+      return n === 1 ? msg([toolUse('t1', 'glob', { pattern: '*' })], USAGE, 'tool_use') : msg([text(`VERDICT: PASS${NL}fine`)]);
+    });
+    const r = await direct(t, f, { clock: () => tNow, logRow: (row) => rows.push(row), requireVerdict: true });
+    assert.equal(r.ok, true, r.reason);
+    assert.equal(f.calls.length, 2, 'the review was not stopped at the old 8-minute deadline');
+    assert.equal(rows.length, 1, 'one long-runs row');
+    assert.equal(rows[0].agentType, 'api-review');
+    assert.equal(rows[0].steps, 1);
+    assert.ok(rows[0].durationMin >= 8, String(rows[0].durationMin));
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['agentId', 'agentType', 'description', 'durationMin', 'sessionId', 'startedAt', 'steps', 'transcriptPath', 'ts']);
+    assert.ok(r.notes.some((n) => /ran past 8 minutes/.test(n) && /not stopped/.test(n)));
+    assert.match(t.ledger().entries[0].notes[0], /ran past 8 minutes/, 'visible in the ledger');
+    assert.equal(SLOW_REVIEW_MS, 8 * 60 * 1000);
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: the slow row really lands in state/long-runs.jsonl (the schema the scout reads)', async () => {
+  const t = rig();
+  try {
+    let tNow = 1000;
+    const f = stubFetch(() => { tNow += 9 * 60 * 1000; return msg([text(`VERDICT: PASS${NL}fine`)]); });
+    const r = await direct(t, f, { clock: () => tNow, meta: 'review a..b' });
+    assert.equal(r.ok, true, r.reason);
+    const p = join(t.fx.stateDir, 'state', 'long-runs.jsonl');
+    assert.ok(existsSync(p), p);
+    const row = JSON.parse(readFileSync(p, 'utf8').trim().split('\n')[0]);
+    assert.equal(row.agentType, 'api-review');
+    assert.equal(row.description, 'review a..b');
+    assert.ok(Number.isFinite(row.steps) && Number.isFinite(Date.parse(row.ts)));
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: only a hung run is stopped: no response for 10 minutes books what was paid and falls back', async () => {
+  const t = rig();
+  try {
+    let tNow = 1000;
+    let n = 0;
+    const f = async (url, init) => { // turn 1 answers; turn 2 never answers (the clock jumps 11 minutes, then the call fails)
+      n += 1;
+      if (n === 1) return { status: 200, text: async () => JSON.stringify(msg([toolUse('t1', 'glob', { pattern: '*' })], USAGE, 'tool_use').body) };
+      tNow += 11 * 60 * 1000;
+      throw new Error('This operation was aborted');
+    };
+    const r = await direct(t, f, { clock: () => tNow, logRow: () => {} });
     assert.equal(r.ok, false);
     assert.equal(r.unavailable, false, 'exit 4: the writer falls back to the subagent reviewer');
-    assert.match(r.reason, /wall-clock deadline of 8 minutes reached after 1 turn/);
+    assert.match(r.reason, /no response for 10 minutes after 1 turn/);
+    assert.equal(HUNG_MS, 10 * 60 * 1000);
     const cy = t.ledger();
     assert.ok(Math.abs(cy.spent.review - sonnetUsd(USAGE)) < 1e-9);
-    assert.match(cy.entries[0].error, /wall-clock deadline/);
+    assert.match(cy.entries[0].error, /no response for 10 minutes/);
+    // A slow but responding review (9 minutes per turn, no 10-minute silence) is not hung.
+    let t2 = 0;
+    const g = stubFetch((k) => { t2 += 9 * 60 * 1000; return k < 4 ? msg([toolUse(`t${k}`, 'glob', { pattern: '*' })], USAGE, 'tool_use') : msg([text(`VERDICT: PASS${NL}ok`)]); });
+    const ok = await direct(t, g, { clock: () => t2, logRow: () => {}, requireVerdict: true });
+    assert.equal(ok.ok, true, ok.reason);
+    assert.equal(g.calls.length, 4);
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: a soft note at $1 (ledger and result) and the run goes on; the backstop is api_review_hard_usd, 0 disables it', async () => {
+  const t = rig();
+  try {
+    const big = { input_tokens: 400000, output_tokens: 10 }; // about $0.80 a turn on Sonnet
+    const script = (k) => (k < 4 ? msg([toolUse(`t${k}`, 'glob', { pattern: '*' })], big, 'tool_use') : msg([text(`VERDICT: PASS${NL}ok`)], big));
+    const f = stubFetch(script);
+    const r = await direct(t, f, { requireVerdict: true, maxUsd: 0 }); // backstop off: 4 turns, about $3.20
+    assert.equal(r.ok, true, r.reason);
+    assert.equal(f.calls.length, 4, 'nothing stopped it');
+    assert.ok(r.usd > SOFT_USD);
+    assert.equal(r.notes.filter((n) => /soft spend limit/.test(n)).length, 1, 'one note, not one per turn');
+    assert.match(t.ledger().entries[0].notes.join(' '), /passed the \$1 soft spend limit; not stopped/);
+    assert.ok(!f.calls.some((c) => c.body.tool_choice), 'no forced final turn with the backstop off');
+    // With the default $5 backstop the run is also left alone until 80% of it ($4).
+    const g = stubFetch(script);
+    const r2 = await direct(t, g, { requireVerdict: true });
+    assert.equal(r2.ok, true, r2.reason);
+    assert.equal(DEFAULT_HARD_USD, 5);
+  } finally { t.fx.cleanup(); }
+});
+
+test('hardUsdFrom: the option value, 0 disables, junk and negatives take the default', () => {
+  assert.equal(hardUsdFrom(''), 5);
+  assert.equal(hardUsdFrom(undefined), 5);
+  assert.equal(hardUsdFrom('3'), 3);
+  assert.equal(hardUsdFrom(0), 0);
+  assert.equal(hardUsdFrom('0'), 0);
+  assert.equal(hardUsdFrom(-1), 5);
+  assert.equal(hardUsdFrom('abc'), 5);
+});
+
+test('runner effort: the routed effort rides in output_config.effort on every request; none, none sent', async () => {
+  const t = rig();
+  try {
+    const f = stubFetch((k) => (k === 1 ? msg([toolUse('t1', 'glob', { pattern: '*' })], USAGE, 'tool_use') : msg([text(`VERDICT: PASS${NL}ok`)])));
+    const r = await direct(t, f, { effort: 'high' });
+    assert.equal(r.ok, true, r.reason);
+    assert.equal(f.calls.length, 2);
+    for (const c of f.calls) assert.deepEqual(c.body.output_config, { effort: 'high' });
+    const g = stubFetch([msg([text(`VERDICT: PASS${NL}ok`)])]);
+    await direct(t, g, {});
+    assert.equal('output_config' in g.calls[0].body, false, 'no effort asked, none sent');
+    const h = stubFetch([msg([text(`VERDICT: PASS${NL}ok`)])]);
+    await t.run(h, { extra: [] }); // the CLI path: --effort xhigh reaches the request
+    assert.deepEqual(h.calls[0].body.output_config, { effort: 'xhigh' });
   } finally { t.fx.cleanup(); }
 });
 

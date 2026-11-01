@@ -11,8 +11,9 @@ import { priceUsage } from '../scripts/lib/pricing.mjs';
 import { spawnSyncHidden } from '../scripts/lib/proc.mjs';
 import {
   runApiSdk, loadSdk, sdkEnv, SDK_TOOLS, SDK_DISALLOWED, SDK_BASH_DENY, SDK_POWERSHELL_DENY, SDK_READ_DENY, DEFAULT_SDK_VERSION,
-  sdkToolsFor, sdkSystem, DEFAULT_SDK_DEADLINE_MS, DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS,
+  sdkToolsFor, sdkSystem,
 } from '../scripts/lib/api-sdk-run.mjs';
+import { SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { main as reviewMain, DEFAULT_RUNNER, chooseRunner, briefAsksForCommands, buildPrompt } from '../scripts/api-review.mjs';
 
 const CFG = { budget: 200, cycleDay: 1, shares: { ...DEFAULT_SHARES }, keySource: 'env:AC_API_KEY', reviewRatio: 0.5, itemEstimate: 2 };
@@ -54,20 +55,17 @@ test('sdkEnv: a minimal copy of the system variables; every other Anthropic, Cla
     ANTHROPIC_API_KEY: 'old', ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_BASE_URL: 'https://gw', ANTHROPIC_CUSTOM_HEADERS: 'x: y',
     CLAUDE_CODE_OAUTH_TOKEN: 'oat', CLAUDE_CODE_USE_BEDROCK: '1', AWS_SECRET_ACCESS_KEY: 's', GITHUB_TOKEN: 'g', AC_API_KEY: KEY, BWS_ACCESS_TOKEN: 'b',
   };
-  const e = sdkEnv({ key: KEY, workspace: 'wrkspc_a', base, bashTimeoutMs: 90000 });
+  const e = sdkEnv({ key: KEY, workspace: 'wrkspc_a', base });
   assert.equal(e.ANTHROPIC_API_KEY, KEY);
   assert.equal(e.ANTHROPIC_CUSTOM_HEADERS, 'anthropic-workspace-id: wrkspc_a');
   assert.equal(e.Path, 'C:\\bin');
   assert.equal(e.CLAUDE_CODE_GIT_BASH_PATH, 'C:\\Git\\bash.exe');
   for (const k of ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'AC_API_KEY', 'BWS_ACCESS_TOKEN']) assert.ok(!(k in e), `${k} leaked`);
   assert.equal(e.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, '1');
-  assert.equal(e.BASH_DEFAULT_TIMEOUT_MS, '90000');
-  assert.equal(e.BASH_MAX_TIMEOUT_MS, '600000', 'the ceiling lets a test run use 10 minutes');
+  assert.ok(!('BASH_DEFAULT_TIMEOUT_MS' in e) && !('BASH_MAX_TIMEOUT_MS' in e), 'no custom shell-timeout ceiling: Claude Code\'s own tool defaults apply');
   assert.ok(!('CLAUDE_CODE_USE_POWERSHELL_TOOL' in e), 'PowerShell is only switched on when asked');
   assert.equal(sdkEnv({ key: KEY, base, powershell: true }).CLAUDE_CODE_USE_POWERSHELL_TOOL, '1');
   const d = sdkEnv({ key: KEY, base });
-  assert.equal(d.BASH_DEFAULT_TIMEOUT_MS, String(DEFAULT_BASH_TIMEOUT_MS));
-  assert.equal(d.BASH_MAX_TIMEOUT_MS, String(MAX_BASH_TIMEOUT_MS));
   assert.equal('ANTHROPIC_CUSTOM_HEADERS' in sdkEnv({ key: KEY, base }), false, 'no workspace, no header');
 });
 
@@ -103,7 +101,8 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
     for (const t of SDK_READ_DENY) assert.ok(o.disallowedTools.includes(t), `credential deny ${t}`);
     assert.ok(!o.disallowedTools.some((t) => t.startsWith('PowerShell')), 'no PowerShell tool off Windows, so no PowerShell rules');
     assert.ok(!('CLAUDE_CODE_USE_POWERSHELL_TOOL' in o.env));
-    assert.equal(o.env.BASH_MAX_TIMEOUT_MS, '600000');
+    assert.ok(!('BASH_MAX_TIMEOUT_MS' in o.env) && !('BASH_DEFAULT_TIMEOUT_MS' in o.env));
+    assert.equal('effort' in o, false, 'no effort asked, none passed');
     assert.deepEqual(SDK_DISALLOWED.filter((t) => SDK_TOOLS.includes(t)), []);
     assert.equal(o.permissionMode, 'dontAsk'); // requested; the binary reports default under the env scrub, so the lists below are what hold
     assert.ok(o.allowedTools.length > 0 && o.disallowedTools.length > 0, 'explicit allow and deny lists carry the safety');
@@ -111,7 +110,7 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
     assert.match(o.systemPrompt, /VERDICT: PASS/);
     assert.equal(o.cwd, process.cwd());
     assert.equal(o.model, 'claude-sonnet-5-5');
-    assert.equal(o.maxBudgetUsd, 1);
+    assert.equal(o.maxBudgetUsd, DEFAULT_HARD_USD);
     assert.equal('plugins' in o || 'mcpServers' in o || 'skills' in o, false, 'no plugins, MCP servers or skills are passed at all');
     assert.equal(o.env.ANTHROPIC_API_KEY, KEY);
     assert.equal(o.env.ANTHROPIC_CUSTOM_HEADERS, 'anthropic-workspace-id: wrkspc_test1');
@@ -135,9 +134,13 @@ test('toolset: Read, Grep, Glob, Bash, WebSearch, WebFetch everywhere, PowerShel
   for (const t of sdkToolsFor('win32')) assert.ok(!SDK_DISALLOWED.includes(t), t);
   for (const t of ['Edit', 'Write', 'NotebookEdit', 'Agent', 'Task']) { assert.ok(!sdkToolsFor('win32').includes(t), t); assert.ok(SDK_DISALLOWED.includes(t), t); }
   assert.ok(!sdkToolsFor('win32').some((t) => t.startsWith('mcp__')));
-  assert.equal(DEFAULT_SDK_DEADLINE_MS, 15 * 60 * 1000, 'a test run of up to 10 minutes needs more than the fetch engine 8');
-  assert.ok(MAX_BASH_TIMEOUT_MS < DEFAULT_SDK_DEADLINE_MS);
-  assert.match(sdkSystem(30), /600000/, 'the reviewer is told how to ask for a long timeout');
+  assert.equal(SLOW_REVIEW_MS, 8 * 60 * 1000);
+  assert.equal(HUNG_MS, 10 * 60 * 1000);
+  assert.equal(SOFT_USD, 1);
+  assert.doesNotMatch(sdkSystem(30), /600000|timeout/i, 'no shell-timeout instruction: the tool defaults apply');
+  assert.match(sdkSystem(30), /AFFECTED by the diff/);
+  assert.match(sdkSystem(30), /Never run the full test suite or ci-local/);
+  assert.match(sdkSystem(30), /affected-test selector/);
   for (const rule of SDK_POWERSHELL_DENY) assert.match(rule, /^PowerShell\(.+ \*\)$/);
 });
 
@@ -186,7 +189,7 @@ test('runApiSdk: an init that is not on ANTHROPIC_API_KEY aborts the run before 
   } finally { fx.cleanup(); }
 });
 
-test('runApiSdk: the per-review spend cap aborts the run and falls back (no verdict)', async () => {
+test('runApiSdk: the spend backstop aborts a runaway loop and falls back (no verdict)', async () => {
   const fx = makeFixture();
   try {
     let aborted = false;
@@ -197,10 +200,10 @@ test('runApiSdk: the per-review spend cap aborts the run and falls back (no verd
       yield assistant('m2', [{ type: 'tool_use', id: 't', name: 'Bash', input: {} }], { input_tokens: 400000, output_tokens: 10 }); // over $1
       yield assistant('m3', txt(`VERDICT: PASS${NL}too late`), { input_tokens: 1, output_tokens: 1 });
     });
-    const r = await run(sdk);
+    const r = await run(sdk, { maxUsd: 1 });
     assert.equal(r.ok, false);
     assert.equal(r.unavailable, false);
-    assert.match(r.reason, /spend cap of \$1 after 2 turn/);
+    assert.match(r.reason, /spend backstop of \$1 after 2 turn/);
     assert.equal(aborted, true);
     assert.ok(r.usd > 1);
     const cy = ledgerOf(fx);
@@ -208,7 +211,7 @@ test('runApiSdk: the per-review spend cap aborts the run and falls back (no verd
   } finally { fx.cleanup(); }
 });
 
-test('runApiSdk: the wall-clock deadline aborts a hung run', async () => {
+test('runApiSdk: a run with no message for hungMs is stopped as hung', async () => {
   const fx = makeFixture();
   try {
     const sdk = fakeSdk(async function* (args) {
@@ -219,10 +222,52 @@ test('runApiSdk: the wall-clock deadline aborts a hung run', async () => {
         s.addEventListener('abort', () => reject(new Error('Claude Code process aborted by user')));
       });
     });
-    const r = await run(sdk, { deadlineMs: 40 });
+    const r = await run(sdk, { hungMs: 40 });
     assert.equal(r.ok, false);
     assert.equal(r.unavailable, false);
-    assert.match(r.reason, /wall-clock deadline/);
+    assert.match(r.reason, /no new message or tool result for/);
+  } finally { fx.cleanup(); }
+});
+
+test('runApiSdk: soft limits: a slow run is logged and goes on; $1 is a note; messages keep a long run from being hung', async () => {
+  const fx = makeFixture();
+  try {
+    const rows = [];
+    const sdk = fakeSdk(async function* () {
+      yield init();
+      for (let i = 0; i < 4; i += 1) { // 4 x 60 ms: longer than slowMs 100 and hungMs 200 in total, but never 200 ms of silence
+        await new Promise((r) => setTimeout(r, 60));
+        yield assistant(`m${i}`, [{ type: 'tool_use', id: `t${i}`, name: 'Bash', input: {} }], { input_tokens: 300000, output_tokens: 10 }); // about $0.60 a turn
+      }
+      yield assistant('mz', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 10, output_tokens: 10 }, { stop: 'end_turn' });
+      yield result();
+    });
+    const r = await run(sdk, { hungMs: 200, slowMs: 100, maxUsd: 0, logRow: (row) => rows.push(row) });
+    assert.equal(r.ok, true, r.reason);
+    await new Promise((res) => setTimeout(res, 20)); // the slow row is written by a fire-and-forget async call
+    assert.equal(rows.length, 1, 'one long-runs row at the slow mark');
+    assert.equal(rows[0].agentType, 'api-review');
+    assert.ok(r.notes.some((n) => /ran past .* minutes/.test(n) && /not stopped/.test(n)));
+    assert.ok(r.usd > SOFT_USD);
+    assert.equal(r.notes.filter((n) => /soft spend limit/.test(n)).length, 1);
+    const e = ledgerOf(fx).entries.at(-1);
+    assert.ok(e.notes.some((n) => /soft spend limit/.test(n)) && e.notes.some((n) => /ran past/.test(n)), 'both notes are in the ledger entry');
+    assert.equal(sdk.calls[0].options.maxBudgetUsd, undefined, 'backstop 0 = no maxBudgetUsd at all');
+  } finally { fx.cleanup(); }
+});
+
+test('runApiSdk: the backstop does not abort a reply that ends the turn; the routed effort reaches query()', async () => {
+  const fx = makeFixture();
+  try {
+    const sdk = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}over the backstop, but it is the review`), { input_tokens: 800000, output_tokens: 10 }, { stop: 'end_turn' }), result()]);
+    const r = await run(sdk, { maxUsd: 1, effort: 'xhigh' });
+    assert.equal(r.ok, true, r.reason);
+    assert.ok(r.usd > 1);
+    assert.equal(sdk.calls[0].options.effort, 'xhigh');
+    assert.equal(sdk.calls[0].options.maxBudgetUsd, 1);
+    const none = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}x`), { input_tokens: 1, output_tokens: 1 }, { stop: 'end_turn' }), result()]);
+    await run(none, {});
+    assert.equal('effort' in none.calls[0].options, false);
   } finally { fx.cleanup(); }
 });
 
@@ -310,7 +355,7 @@ test('chooseRunner / briefAsksForCommands: an explicit choice wins; the default 
   assert.equal(briefAsksForCommands('the tests pass (api-* files)'), false);
   assert.equal(briefAsksForCommands('Please run the api tests with node --test'), true);
   assert.equal(briefAsksForCommands('execute the lint command'), true);
-  assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b', shell: true }), /Read, Grep, Glob, shell [(]Bash, and PowerShell on Windows[)], WebSearch and WebFetch tools can read it and run the tests/);
+  assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b', shell: true }), /Read, Grep, Glob, shell [(]Bash, and PowerShell on Windows[)], WebSearch and WebFetch tools can read it and run the affected tests/);
   assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b' }), /you have no shell/);
 });
 
@@ -352,11 +397,18 @@ test('api-review: --runner sdk runs the SDK engine, inlines the brief and the di
     assert.match(p, /^TYPE: code-review\nWRITER: sonnet\/high\nROLE: reviewer/);
     assert.match(p, /the lead brief, verbatim/);
     assert.match(p, /\+two/);
-    assert.match(p, /shell [(]Bash, and PowerShell on Windows[)].*run the tests/);
-    assert.equal(sdk.calls[0].options.maxBudgetUsd, 1);
+    assert.match(p, /shell [(]Bash, and PowerShell on Windows[)].*run the affected tests/);
+    assert.match(p, /Run the tests affected by the diff, never the full suite or ci-local/);
+    assert.equal(sdk.calls[0].options.maxBudgetUsd, DEFAULT_HARD_USD);
+    assert.equal('effort' in sdk.calls[0].options, false);
     const capped = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 1, output_tokens: 1 }), result()]);
     await t.go(['--runner', 'sdk', '--max-usd', '0.25'], { sdk: capped });
     assert.equal(capped.calls[0].options.maxBudgetUsd, 0.25);
+    // The routed --model/--effort of the self-review clause reach the SDK options (effort changes the request).
+    const eff = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 1, output_tokens: 1 }), result()]);
+    await t.go(['--runner', 'sdk', '--effort', 'xhigh'], { sdk: eff });
+    assert.equal(eff.calls[0].options.effort, 'xhigh');
+    assert.equal(eff.calls[0].options.model, 'claude-sonnet-5-5');
   } finally { t.fx.cleanup(); }
 });
 
@@ -380,7 +432,7 @@ test('api-review: an SDK that cannot be loaded falls back to the fetch engine; a
   } finally { t.fx.cleanup(); }
 });
 
-test('runApiSdk: a hung SDK that ignores the abort signal still ends at the deadline; tokens and cost follow modelUsage', async () => {
+test('runApiSdk: a hung SDK that ignores the abort signal still ends as hung; tokens and cost follow modelUsage', async () => {
   const fx = makeFixture();
   try {
     const hung = fakeSdk(async function* () {
@@ -388,9 +440,9 @@ test('runApiSdk: a hung SDK that ignores the abort signal still ends at the dead
       yield assistant('m1', txt('thinking'), { input_tokens: 1000, output_tokens: 1 });
       await new Promise(() => {}); // never settles, ignores abortController
     });
-    const r = await run(hung, { deadlineMs: 60 });
+    const r = await run(hung, { hungMs: 60 });
     assert.equal(r.ok, false);
-    assert.match(r.reason, /wall-clock deadline/);
+    assert.match(r.reason, /no new message or tool result/);
     assert.ok(r.usd > 0, 'the one paid turn is still in the result');
     assert.ok(Math.abs(ledgerOf(fx).spent.review - r.usd) < 1e-9);
 

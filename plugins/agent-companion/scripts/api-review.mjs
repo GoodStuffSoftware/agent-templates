@@ -15,9 +15,12 @@
 //   3  "API review unavailable: <reason>" (credit balance, 401/402/403, usage policy, missing
 //      workspace id): the writer spawns the plan reviewer subagent at once. Two in a row make
 //      `api-credits.mjs decide review` answer plan for the rest of the cycle.
-//   4  "API review failed: <reason>" (anything else, including the wall-clock deadline (8 minutes on fetch, 15 on sdk) and
-//      a brief file that holds only a path): same fallback.
-// Each paid turn is booked in the ledger as it completes. Run it in the background (run_in_background) and wait for its notification: a foreground Bash call is cut at 10 minutes, shorter than the sdk deadline.
+//   4  "API review failed: <reason>" (anything else, including a hung run (no message or tool result for 10 minutes), the
+//      spend backstop (api_review_hard_usd, $5; 0 = none) and a brief file that holds only a path): same fallback.
+// Limits are soft: a review that runs past 8 minutes is logged to long-runs.jsonl and continues; one that passes $1 gets a
+// note (stderr, the review-path label and the ledger entry) and continues. Each paid turn is booked in the ledger as it
+// completes. Run it in the background (run_in_background) and wait for its notification: a foreground Bash call is cut at
+// 10 minutes and a review can outlast that.
 // The key is read from the configured source (api_credits_key_source: env:<NAME> or
 // bws:<secret-name>), reaches only the request headers and is never printed.
 
@@ -25,10 +28,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { isMain } from './lib/is-main.mjs';
 import { execFileSyncHidden } from './lib/proc.mjs';
 import { opt } from '../hooks/lib/context.mjs';
-import { runApi, REVIEW_SYSTEM, EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE, EXIT_FAILED } from './lib/api-run.mjs';
-import { runApiSdk, DEFAULT_SDK_VERSION, DEFAULT_SDK_MAX_USD } from './lib/api-sdk-run.mjs';
+import { REVIEW_INSTRUCTION as INSTRUCTION } from '../hooks/lib/self-review.mjs';
+import { runApi, REVIEW_SYSTEM, hardUsdFrom, EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE, EXIT_FAILED } from './lib/api-run.mjs';
+import { runApiSdk, DEFAULT_SDK_VERSION } from './lib/api-sdk-run.mjs';
 
-const INSTRUCTION = 'Try to refute this change. Run the tests. Start with a verdict line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit, with file:line and a repro.';
 const DIFF_CAP = 150000;
 const BRIEF_CAP = 60000;
 
@@ -74,7 +77,7 @@ export function buildPrompt({ brief, diffRef, writer, stat = '', diff = '', note
     '',
     '---',
     shell
-      ? `Diff range under review: ${diffRef}. Your working directory is the repository at the head of that range. Your Read, Grep, Glob, shell (Bash, and PowerShell on Windows), WebSearch and WebFetch tools can read it and run the tests and checks it needs; say which checks you ran and which you could not.`
+      ? `Diff range under review: ${diffRef}. Your working directory is the repository at the head of that range. Your Read, Grep, Glob, shell (Bash, and PowerShell on Windows), WebSearch and WebFetch tools can read it and run the affected tests and the checks it needs; say which checks you ran and which you could not.`
       : `Diff range under review: ${diffRef}. Your read_file, grep and glob tools see the repository at the head of that range; you have no shell, so you cannot run commands or tests: say which checks you could not run.`,
     INSTRUCTION,
     'Add nothing that narrows the review.',
@@ -115,12 +118,14 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   try { d = gitDiff(o.cwd, o['diff-ref']); } catch (e) { out(`API review failed: cannot read the diff ${o['diff-ref']} in ${o.cwd}`); return EXIT_FAILED; }
   const runner = chooseRunner({ flag: o.runner, option: opt('api_review_runner', ''), brief });
   const meta = `review ${o['diff-ref']}`.slice(0, 120);
+  // The one hard spend backstop (0 = none); --max-usd takes precedence over the option for this review.
+  const maxUsd = o['max-usd'] ? Number(o['max-usd']) : hardUsdFrom(opt('api_review_hard_usd', ''));
   let r = null;
   if (runner === 'sdk') {
     r = await runApiSdk({
       prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, shell: true, ...d }),
       model: o.model, effort: o.effort || null, cwd: o.cwd, category: 'review', meta,
-      maxUsd: o['max-usd'] ? Number(o['max-usd']) : Number(opt('api_sdk_review_max_usd', DEFAULT_SDK_MAX_USD)),
+      maxUsd,
       ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),
       sdkVersion: String(opt('api_sdk_version', DEFAULT_SDK_VERSION)),
       requireVerdict: true, env, ...(sdk ? { sdk } : {}), ...(loadSdk ? { load: loadSdk } : {}),
@@ -132,7 +137,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, ...d }),
     system: REVIEW_SYSTEM,
     model: o.model, effort: o.effort || null, cwd: o.cwd, category: 'review', meta,
-    ...(o['max-usd'] ? { maxUsd: Number(o['max-usd']) } : {}),
+    maxUsd,
     ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),
     ...(o['max-tokens'] ? { maxTokens: Number(o['max-tokens']) } : {}),
     requireVerdict: true, ...(clock ? { clock } : {}),
@@ -140,11 +145,12 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     ...(now ? { now } : {}), ...(cfg ? { cfg } : {}),
   });
   if (r.ledgerError) err(r.ledgerError); // the spend is not in the ledger: say so
+  for (const n of r.notes || []) err(`API review note: ${n}`);
   if (!r.ok) {
     out(r.unavailable ? `API review unavailable: ${r.reason}` : `API review failed: ${r.reason}`);
     return r.unavailable ? EXIT_UNAVAILABLE : EXIT_FAILED;
   }
-  const text = `${r.text}\n\n(review path: API credits, ${r.path || runner}, ${r.model}, ${r.turns} turn${r.turns === 1 ? '' : 's'}, $${r.usd.toFixed(2)}${r.ledgerError ? `; ${r.ledgerError}` : ''})`;
+  const text = `${r.text}\n\n(review path: API credits, ${r.path || runner}, ${r.model}, ${r.turns} turn${r.turns === 1 ? '' : 's'}, $${r.usd.toFixed(2)}${(r.notes || []).length ? `; ${r.notes.join('; ')}` : ''}${r.ledgerError ? `; ${r.ledgerError}` : ''})`;
   if (o['review-file']) {
     try { writeFileSync(o['review-file'], `${text}\n`); } catch (e) { out(`API review failed: cannot write the review file (${e.code || 'error'})`); return EXIT_FAILED; }
   }

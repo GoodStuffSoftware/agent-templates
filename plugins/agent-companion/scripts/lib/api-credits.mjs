@@ -211,7 +211,7 @@ export function record(category, usd, meta = '', { now = Date.now(), cfg = loadC
     if (count) c.n[category] = (c.n[category] || 0) + 1;
     c.entries.push({
       t: new Date(now).toISOString(), cat: category, usd: n, meta: String(meta).slice(0, 200),
-      ...(detail ? { project: String(detail.project || '').slice(0, 80), model: String(detail.model || '').slice(0, 80), tokens: detail.tokens || null, turns: detail.turns ?? null, ...(detail.path ? { path: String(detail.path).slice(0, 20) } : {}), ...(detail.error ? { error: String(detail.error).slice(0, 200) } : {}) } : {}),
+      ...(detail ? { project: String(detail.project || '').slice(0, 80), model: String(detail.model || '').slice(0, 80), tokens: detail.tokens || null, turns: detail.turns ?? null, ...(detail.path ? { path: String(detail.path).slice(0, 20) } : {}), ...(detail.error ? { error: String(detail.error).slice(0, 200) } : {}), ...(Array.isArray(detail.notes) && detail.notes.length ? { notes: detail.notes.slice(0, 5).map((x) => String(x).slice(0, 120)) } : {}) } : {}),
     });
     if (c.entries.length > MAX_ENTRIES) c.entries.splice(0, c.entries.length - MAX_ENTRIES);
     if (success) { c.fails = 0; c.tripped = null; }

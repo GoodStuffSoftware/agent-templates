@@ -115,22 +115,59 @@ function markCache(messages) {
 const textOf = (content) => (Array.isArray(content) ? content.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n').trim() : '');
 
 // Run one conversation on the API key. Returns
-//   { ok:true, text, usd, turns, tokens:{input,output,cacheRead,cacheWrite}, model, stopReason }
-//   { ok:false, unavailable:true|false, reason, usd }
+//   { ok:true, text, usd, turns, tokens:{input,output,cacheRead,cacheWrite}, model, stopReason, notes }
+//   { ok:false, unavailable:true|false, reason, usd, notes }
 // either with `ledgerError` set when a ledger write failed (the amount is then not in the ledger).
 // Books each paid turn as it completes (a killed run still leaves its spend) and the run as one
-// ledger entry at the end, failures included (usd 0, with an error field). Stops at the wall-clock
-// deadline (default 8 minutes) with a falls-back result. requireVerdict makes a run that ends
-// without a VERDICT line (or was cut off) a failure instead of a pass. Never throws.
+// ledger entry at the end, failures included (usd 0, with an error field). requireVerdict makes a run
+// that ends without a VERDICT line (or was cut off) a failure instead of a pass. Never throws.
+//
+// Limits (operator ruling 2026-11-01: soft limits, not hard stops; shared by both engines):
+//   - slow: at SLOW_REVIEW_MS (8 minutes) one row goes to state/long-runs.jsonl and a note is kept;
+//     the review continues.
+//   - hung: a run with no new message or tool result for HUNG_MS (10 minutes) is stopped (falls back).
+//     This is the only time limit.
+//   - spend: a note at SOFT_USD ($1), and one backstop, `maxUsd` (DEFAULT_HARD_USD, $5; option
+//     api_review_hard_usd; 0 disables it), that ends a runaway tool loop (fetch: at 80% of it the next turn is the final, no-tools one; sdk: an abort). A reply that is already a final answer is kept.
+//   `notes` is the list of soft-limit strings; they go into the ledger entry (`notes`).
 export const DEFAULT_MAX_TOKENS = 64000; // thinking counts toward max_tokens; the effort docs start Opus xhigh/max at 64k
-export const DEFAULT_DEADLINE_MS = 8 * 60 * 1000;
+export const SLOW_REVIEW_MS = 8 * 60 * 1000;
+export const HUNG_MS = 10 * 60 * 1000;
+export const SOFT_USD = 1;
+export const DEFAULT_HARD_USD = 5;
+
+// The hard backstop from an option value: a finite number >= 0 (0 disables it), else the default.
+export function hardUsdFrom(raw, fallback = DEFAULT_HARD_USD) {
+  if (raw === '' || raw === null || raw === undefined) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+// Soft-limit notes, worded once for both engines.
+export const slowNote = (min) => `ran past ${min} minutes (logged to long-runs.jsonl); not stopped`;
+export const softUsdNote = (softUsd) => `passed the $${softUsd} soft spend limit; not stopped`;
+
+// Append the slow-review row to state/long-runs.jsonl (the schema of hooks/lib/long-run.mjs).
+// Returns the row, or null when the log could not be written. Never throws.
+export async function logSlowReview({ meta = '', turns = 0, startedAt = Date.now(), now = Date.now(), logRow = null } = {}) {
+  try {
+    const row = {
+      ts: new Date(now).toISOString(), sessionId: null, agentId: `api-review-${process.pid}-${startedAt}`, agentType: 'api-review',
+      steps: turns, startedAt: new Date(startedAt).toISOString(), durationMin: Math.round(((now - startedAt) / 60000) * 10) / 10,
+      description: String(meta || 'review').slice(0, 200), transcriptPath: null,
+    };
+    const log = logRow || (await import('../../hooks/lib/long-run.mjs')).logLongRun;
+    log(row);
+    return row;
+  } catch { return null; }
+}
 const CUT_OFF = ['max_tokens', 'refusal', 'pause_turn'];
 export const hasVerdict = (t) => /^[\s*#`>_-]*VERDICT:\s*(?:PASS|FIX)\b/m.test(String(t || ''));
 
 export async function runApi({
   prompt, model, effort = null, cwd = process.cwd(), category = 'review', meta = '', system = null,
-  tools = true, maxUsd = 8, maxTurns = 30, maxTokens = DEFAULT_MAX_TOKENS, requestTimeoutMs = 5 * 60 * 1000,
-  deadlineMs = DEFAULT_DEADLINE_MS, clock = Date.now, requireVerdict = false,
+  tools = true, maxUsd = DEFAULT_HARD_USD, softUsd = SOFT_USD, maxTurns = 30, maxTokens = DEFAULT_MAX_TOKENS,
+  hungMs = HUNG_MS, requestTimeoutMs = hungMs, slowMs = SLOW_REVIEW_MS, logRow = null, clock = Date.now, requireVerdict = false,
   cfg = loadConfig(), env = process.env, now = Date.now(), fetchImpl = globalThis.fetch, endpoint = OFFICIAL_ENDPOINT,
   sleep = sleepMs, retries = 2,
 }) {
@@ -139,7 +176,10 @@ export async function runApi({
   let booked = 0; // spend already in the ledger, turn by turn
   let turnCount = 0;
   let ledgerError = null;
-  const deadline = clock() + deadlineMs;
+  const startedAt = clock();
+  let lastProgress = startedAt; // the last response or tool result: the hung clock
+  const notes = [];
+  let slowLogged = false;
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const ledgerFailed = (what, e) => { ledgerError ||= `ledger write failed; ${what} (${scrub(String((e && e.message) || e), key).replace(/\s+/g, ' ').slice(0, 80)})`; };
   let modelId = String(model);
@@ -147,7 +187,7 @@ export async function runApi({
     try {
       record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
         cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok,
-        detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'fetch', error: ok ? null : error },
+        detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'fetch', error: ok ? null : error, notes },
       });
     } catch (e) { ledgerFailed(`$${(usd - booked).toFixed(4)} not recorded`, e); }
   };
@@ -157,7 +197,7 @@ export async function runApi({
   const fail = (unavailable, reason) => {
     const r = scrub(reason, key).slice(0, 200);
     bookCost(false, r);
-    return { ok: false, unavailable, reason: r, usd, path: 'fetch', ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: false, unavailable, reason: r, usd, path: 'fetch', notes, ...(ledgerError ? { ledgerError } : {}) };
   };
   try {
     key = resolveKey(cfg.keySource, env);
@@ -172,13 +212,20 @@ export async function runApi({
     if (ws) headers['anthropic-workspace-id'] = ws;
     const toolbox = tools ? makeTools(cwd) : null;
     const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }];
-    const softCap = maxUsd * 0.8;
-    const deadlineReason = () => `wall-clock deadline of ${Math.round((deadlineMs / 60000) * 10) / 10} minutes reached after ${turnCount} turn(s); falling back to the plan`;
+    const softCap = maxUsd > 0 ? maxUsd * 0.8 : Infinity; // the backstop here: at 80% of it the next turn is the last, a no-tools turn that writes the review (no tool loop runs past it)
+    const hungReason = () => `no response for ${Math.round((hungMs / 60000) * 10) / 10} minutes after ${turnCount} turn(s); falling back to the plan`;
+    const hung = () => clock() - lastProgress >= hungMs;
+    const checkSlow = async () => {
+      if (slowLogged || clock() - startedAt < slowMs) return;
+      slowLogged = true;
+      notes.push(slowNote(Math.round(slowMs / 6000) / 10));
+      await logSlowReview({ meta, turns: turnCount, startedAt, now: clock(), logRow });
+    };
     let turns = 0;
     let last = null;
 
     for (;;) {
-      if (clock() >= deadline) return fail(false, deadlineReason());
+      await checkSlow();
       const final = !toolbox || turns >= maxTurns - 1 || usd >= softCap;
       if (final && toolbox && turns > 0) {
         const tail = messages[messages.length - 1];
@@ -195,16 +242,16 @@ export async function runApi({
       for (let attempt = 0; ; attempt++) {
         try {
           // redirect: 'error' so the key header can never follow a redirect off the official host.
-          res = await fetchImpl(endpoint, { method: 'POST', headers, body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(Math.max(1, Math.min(requestTimeoutMs, deadline - clock()))) });
+          res = await fetchImpl(endpoint, { method: 'POST', headers, body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(Math.max(1, Math.min(requestTimeoutMs, hungMs - (clock() - lastProgress)))) });
           raw = await res.text();
         } catch (e) {
           res = null; raw = String((e && e.message) || e);
         }
         const st = res ? res.status : 0;
-        if ((st === 0 || st === 429 || st >= 500) && attempt < retries && clock() < deadline) { await sleep(1000 * 3 ** attempt); continue; }
+        if ((st === 0 || st === 429 || st >= 500) && attempt < retries && !hung()) { await sleep(1000 * 3 ** attempt); continue; }
         break;
       }
-      if (!res && clock() >= deadline) return fail(false, deadlineReason());
+      if (!res && hung()) return fail(false, hungReason());
       const status = res ? res.status : 0;
       let j = null;
       try { j = JSON.parse(raw); } catch { /* not JSON */ }
@@ -224,6 +271,7 @@ export async function runApi({
 
       turns += 1;
       turnCount = turns;
+      lastProgress = clock();
       const u = usageOf(j.usage);
       for (const k of Object.keys(tokens)) tokens[k] += u[k];
       const p = priceUsage(u, modelId);
@@ -231,6 +279,7 @@ export async function runApi({
       // Book this paid turn now: a run that is killed or times out later still leaves its spend.
       if (p && p.usd > 0) { try { recordSpend(category, p.usd, { cfg, now }); booked += p.usd; } catch { /* the final record() books the rest and reports a failure */ } }
       last = j;
+      if (usd >= softUsd && !notes.some((n) => n.startsWith('passed the $'))) notes.push(softUsdNote(softUsd));
       const content = Array.isArray(j.content) ? j.content : [];
       const uses = content.filter((b) => b && b.type === 'tool_use');
       if (j.stop_reason === 'tool_use' && uses.length && toolbox && !final) {
@@ -241,6 +290,7 @@ export async function runApi({
           }
         });
         messages.push({ role: 'user', content: results });
+        lastProgress = clock();
         continue;
       }
       break;
@@ -252,8 +302,9 @@ export async function runApi({
       if (CUT_OFF.includes(last.stop_reason)) return fail(false, `the review was cut off (stop_reason ${last.stop_reason}); no usable verdict`);
       if (!hasVerdict(text)) return fail(false, `the review has no VERDICT line (stop_reason ${last.stop_reason})`);
     }
+    await checkSlow();
     bookCost(true);
-    return { ok: true, text, usd, turns, tokens, model: modelId, stopReason: last.stop_reason, path: 'fetch', ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: true, text, usd, turns, tokens, model: modelId, stopReason: last.stop_reason, path: 'fetch', notes, ...(ledgerError ? { ledgerError } : {}) };
   } catch (e) {
     const reason = scrub(String((e && e.message) || e), key).slice(0, 200);
     if (e && e.configFailure) noteFailure(reason);
