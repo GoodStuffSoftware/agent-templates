@@ -414,6 +414,10 @@ Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-abov
 | `rung_class` | string | `sonnet-high+` or `opus` |
 | `ceiling`, `repeat` | number | the two thresholds as set |
 
+### `long-runs.jsonl` (in `state/`, not `telemetry/`) — one record per long-run crossing
+
+Written by `hooks/lib/long-run.mjs` when a subagent's tool-call count first reaches 150 and each further 100. Fields: `ts` (ISO), `sessionId`, `agentId`, `agentType` (string or null), `steps` (number), `startedAt` (ISO or null, the transcript's first timestamp), `durationMin` (number or null), `description` (first line of the brief, or null), `transcriptPath` (string or null).
+
 ### `step-budget.jsonl` — one record per step-budget warning or denied call
 
 Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a subagent is told it has used its warning share of steps (`kind` `warn`, once per worker) and each time a call is denied past the stop or once the helper has reached `step_budget_compaction_stop` compactions (default 3; `kind` `stop`). The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`, `step_budget_compaction_stop`.

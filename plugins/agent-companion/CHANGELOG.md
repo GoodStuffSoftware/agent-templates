@@ -2,6 +2,11 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## Unreleased
+
+- **The hard `maxTurns: 150` is gone; long runs get a soft note.** `maxTurns` is removed from every `ac-*` and `ac-browser*` agent definition (hand-maintained frontmatter: no template or sync script writes the line, so a re-sync cannot bring it back; `scope-rule.test.mjs` now asserts its absence). The PreToolUse hook `hooks/subagent-context.mjs` (`hooks/lib/long-run.mjs`) counts each subagent's tool calls and, at 150 and every further 100, injects one short `additionalContext` note (progress: keep going and update your running notes file; stuck or looping: stop and report) and appends a row to `state/long-runs.jsonl` (`ts, sessionId, agentId, agentType, steps, startedAt, durationMin, description, transcriptPath`). It never blocks. The subagent is identified by the payload's `agent_id` (`callerIsSubagent`), the mechanism the step budget already uses; a PostToolUse payload was not needed. The step budget's own stop (80/120 for writers, 40/60 for lookup types, or a `BUDGET:` line) is unchanged and still denies before 150 unless a brief raises it or `step_budget_stop` is raised; that is a separate decision. Tests: `long-run`.
+- Reverse: restore `maxTurns: 150` in the 12 agent files and drop the `longRunCheck` calls in `hooks/subagent-context.mjs`.
+
 ## 0.31.46 — 2026-11-01
 
 - **Reviews can run on the plan's API credits.** `scripts/api-credits.mjs` (`decide <category>`, `record`, `status`, `summary`, `probe`) is a credit governor over a ledger at `state/api-credits.json`: a monthly budget (`api_credits_budget_usd`, 200) split into shares (review 0.5, overflow 0.3, rater 0.1, reserve 0.1, the reserve released in the last 3 days of the cycle), spend paced linearly (share x budget x elapsed fraction, plus one average item), reviews alternating api and plan by a persisted counter (`api_credits_review_ratio`, 0.5) with pacing and balance able only to turn api into plan. Any error, no key or an unreadable ledger answers `plan`. Overflow and a bulk rater are categories of the same budget, not built yet. The ledger keeps one entry per run (timestamp, project, model, input/output/cache tokens, turns, dollar cost at list price); `summary` prints `API credits: reviews $X of $100, cycle day N`.

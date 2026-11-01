@@ -3,8 +3,8 @@
 //
 // Why. 9 in 10 helpers finish in under 80 calls and 99 in 100 in under 120
 // (tasks/usage-why-2026-10-06/bleed-data-detail.md: median 37, p90 77, p99 115);
-// the rest are runaways. maxTurns on the agent definitions (0.31.31) is the
-// outer backstop; this is the inner, softer one: it tells the helper to wrap up
+// the rest are runaways. the hard maxTurns on the agent definitions (0.31.31) was
+// removed; the soft long-run note (long-run.mjs) now marks 150 steps and beyond. This guard tells the helper to wrap up
 // and then refuses everything but writing its report.
 //
 // Where. hooks/subagent-context.mjs (PreToolUse, no matcher, subagent only)

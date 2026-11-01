@@ -23,6 +23,10 @@
 // is the one place the hook denies; options step_budget, step_budget_warn, step_budget_stop,
 // step_budget_lookup_warn, step_budget_lookup_stop.
 //
+// The soft LONG-RUN note (lib/long-run.mjs) replaces the old hard maxTurns: 150 on the agent definitions: at 150 tool calls
+// and every further 100 the helper is told once to keep going (updating its notes) or stop and report if stuck, and the
+// crossing is logged in state/long-runs.jsonl. It never denies.
+//
 // Each firing writes one row to telemetry subagent-context.jsonl (phase
 // "mid-run") and to the agent's events file, which hooks/runaway-check.mjs
 // reads at SubagentStop to tell the lead.
@@ -36,6 +40,7 @@ import {
   CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
 } from './lib/context-ceiling.mjs';
 import { STEP_LOG, stepBudgetCheck } from './lib/step-budget.mjs';
+import { longRunCheck, logLongRun } from './lib/long-run.mjs';
 
 try {
   const p = readStdin();
@@ -44,7 +49,6 @@ try {
   const ceiling = opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS);
   const repeat = opt('subagent_ceiling_repeat_tokens', CEILING_REPEAT_DEFAULT_TOKENS);
   const stepsOn = opt('step_budget', true);
-  if (!(threshold > 0) && !(ceiling > 0) && !stepsOn) passthrough();
 
   const path = resolveAgentTranscript(p);
   const wantCtx = threshold > 0 || ceiling > 0 || stepsOn; // the step budget counts compactions itself
@@ -65,6 +69,11 @@ try {
   if (nudge) appendLog(CEILING_LOG, nudge.row);
   if (kinds.length || nudge) pruneContextState();
 
+  // The soft long-run note: at 150 tool calls and every further 100, once. Never denies; counted before the step
+  // budget so a call that budget denies is still counted.
+  const longRun = longRunCheck(p, { transcript: path });
+  if (longRun) logLongRun(longRun.row);
+
   // The step budget: count this call, warn once, deny past the stop. A helper that
   // has reached step_budget_compaction_stop compactions is stopped the same way.
   let step = null;
@@ -77,7 +86,7 @@ try {
     deny(step.deny);
   }
 
-  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : '', step ? step.warn : '']
+  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '']
     .filter(Boolean).join('\n');
   if (!text) passthrough();
   process.stdout.write(JSON.stringify({
