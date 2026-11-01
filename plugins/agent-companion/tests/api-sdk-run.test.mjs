@@ -1,4 +1,4 @@
-// API SDK engine (0.31.47): scripts/lib/api-sdk-run.mjs driven with an injected fake SDK module
+// API SDK engine (0.31.46): scripts/lib/api-sdk-run.mjs driven with an injected fake SDK module
 // (no live calls, no install), and its wiring in scripts/api-review.mjs (engine choice, fallback).
 import './isolate.mjs';
 import test from 'node:test';
@@ -10,7 +10,8 @@ import { DEFAULT_SHARES } from '../scripts/lib/api-credits.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
 import { spawnSyncHidden } from '../scripts/lib/proc.mjs';
 import {
-  runApiSdk, loadSdk, sdkEnv, SDK_TOOLS, SDK_DISALLOWED, SDK_BASH_DENY, DEFAULT_SDK_VERSION,
+  runApiSdk, loadSdk, sdkEnv, SDK_TOOLS, SDK_DISALLOWED, SDK_BASH_DENY, SDK_POWERSHELL_DENY, SDK_READ_DENY, DEFAULT_SDK_VERSION,
+  sdkToolsFor, sdkSystem, DEFAULT_SDK_DEADLINE_MS, DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS,
 } from '../scripts/lib/api-sdk-run.mjs';
 import { main as reviewMain, DEFAULT_RUNNER, chooseRunner, briefAsksForCommands, buildPrompt } from '../scripts/api-review.mjs';
 
@@ -61,7 +62,12 @@ test('sdkEnv: a minimal copy of the system variables; every other Anthropic, Cla
   for (const k of ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'AC_API_KEY', 'BWS_ACCESS_TOKEN']) assert.ok(!(k in e), `${k} leaked`);
   assert.equal(e.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, '1');
   assert.equal(e.BASH_DEFAULT_TIMEOUT_MS, '90000');
-  assert.equal(e.BASH_MAX_TIMEOUT_MS, '90000');
+  assert.equal(e.BASH_MAX_TIMEOUT_MS, '600000', 'the ceiling lets a test run use 10 minutes');
+  assert.ok(!('CLAUDE_CODE_USE_POWERSHELL_TOOL' in e), 'PowerShell is only switched on when asked');
+  assert.equal(sdkEnv({ key: KEY, base, powershell: true }).CLAUDE_CODE_USE_POWERSHELL_TOOL, '1');
+  const d = sdkEnv({ key: KEY, base });
+  assert.equal(d.BASH_DEFAULT_TIMEOUT_MS, String(DEFAULT_BASH_TIMEOUT_MS));
+  assert.equal(d.BASH_MAX_TIMEOUT_MS, String(MAX_BASH_TIMEOUT_MS));
   assert.equal('ANTHROPIC_CUSTOM_HEADERS' in sdkEnv({ key: KEY, base }), false, 'no workspace, no header');
 });
 
@@ -78,7 +84,7 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
       assistant('m2', txt(`VERDICT: PASS${NL}fine`), u2, { stop: 'end_turn' }),
       result({ total_cost_usd: 0.0123 }),
     ]);
-    const r = await run(sdk);
+    const r = await run(sdk, { platform: 'linux' });
     assert.equal(r.ok, true, r.reason);
     assert.equal(r.path, 'sdk');
     assert.equal(r.turns, 2);
@@ -89,10 +95,15 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
     // options
     const o = sdk.calls[0].options;
     assert.deepEqual(o.settingSources, []);
-    assert.deepEqual(o.tools, SDK_TOOLS);
-    assert.deepEqual(o.allowedTools, SDK_TOOLS);
-    for (const t of ['Edit', 'Write', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'NotebookEdit']) assert.ok(o.disallowedTools.includes(t), t);
+    assert.deepEqual(o.tools, ['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch']);
+    assert.deepEqual(o.allowedTools, o.tools);
+    for (const t of ['Edit', 'Write', 'Task', 'Agent', 'NotebookEdit']) assert.ok(o.disallowedTools.includes(t), t);
+    for (const t of ['WebFetch', 'WebSearch', 'PowerShell']) assert.ok(!o.disallowedTools.includes(t), `${t} is allowed`);
     for (const t of SDK_BASH_DENY) assert.ok(o.disallowedTools.includes(t));
+    for (const t of SDK_READ_DENY) assert.ok(o.disallowedTools.includes(t), `credential deny ${t}`);
+    assert.ok(!o.disallowedTools.some((t) => t.startsWith('PowerShell')), 'no PowerShell tool off Windows, so no PowerShell rules');
+    assert.ok(!('CLAUDE_CODE_USE_POWERSHELL_TOOL' in o.env));
+    assert.equal(o.env.BASH_MAX_TIMEOUT_MS, '600000');
     assert.deepEqual(SDK_DISALLOWED.filter((t) => SDK_TOOLS.includes(t)), []);
     assert.equal(o.permissionMode, 'dontAsk');
     assert.equal(typeof o.systemPrompt, 'string');
@@ -113,6 +124,34 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
     assert.equal(e.path, 'sdk');
     assert.equal(e.turns, 2);
     assert.ok(!JSON.stringify(cy).includes(KEY));
+  } finally { fx.cleanup(); }
+});
+
+test('toolset: Read, Grep, Glob, Bash, WebSearch, WebFetch everywhere, PowerShell on Windows; no edit, write, agent, notebook or MCP tool', () => {
+  assert.deepEqual(sdkToolsFor('linux'), ['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch']);
+  assert.deepEqual(sdkToolsFor('darwin'), sdkToolsFor('linux'));
+  assert.deepEqual(sdkToolsFor('win32'), [...sdkToolsFor('linux'), 'PowerShell']);
+  for (const t of sdkToolsFor('win32')) assert.ok(!SDK_DISALLOWED.includes(t), t);
+  for (const t of ['Edit', 'Write', 'NotebookEdit', 'Agent', 'Task']) { assert.ok(!sdkToolsFor('win32').includes(t), t); assert.ok(SDK_DISALLOWED.includes(t), t); }
+  assert.ok(!sdkToolsFor('win32').some((t) => t.startsWith('mcp__')));
+  assert.equal(DEFAULT_SDK_DEADLINE_MS, 15 * 60 * 1000, 'a test run of up to 10 minutes needs more than the fetch engine 8');
+  assert.ok(MAX_BASH_TIMEOUT_MS < DEFAULT_SDK_DEADLINE_MS);
+  assert.match(sdkSystem(30), /600000/, 'the reviewer is told how to ask for a long timeout');
+  for (const rule of SDK_POWERSHELL_DENY) assert.match(rule, /^PowerShell\(.+ \*\)$/);
+});
+
+test('runApiSdk on Windows: PowerShell is allowed, switched on in the child env, and has its own deny rules', async () => {
+  const fx = makeFixture();
+  try {
+    const sdk = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 10, output_tokens: 10 }, { stop: 'end_turn' }), result()]);
+    const r = await run(sdk, { platform: 'win32' });
+    assert.equal(r.ok, true, r.reason);
+    const o = sdk.calls[0].options;
+    assert.ok(o.tools.includes('PowerShell') && o.allowedTools.includes('PowerShell'));
+    assert.equal(o.env.CLAUDE_CODE_USE_POWERSHELL_TOOL, '1', 'else the scoped Bash deny rules turn the tool off');
+    for (const t of SDK_POWERSHELL_DENY) assert.ok(o.disallowedTools.includes(t), t);
+    for (const t of SDK_BASH_DENY) assert.ok(o.disallowedTools.includes(t), t);
+    assert.ok(!o.disallowedTools.includes('PowerShell'), 'the bare tool name is not denied');
   } finally { fx.cleanup(); }
 });
 
@@ -270,7 +309,7 @@ test('chooseRunner / briefAsksForCommands: an explicit choice wins; the default 
   assert.equal(briefAsksForCommands('the tests pass (api-* files)'), false);
   assert.equal(briefAsksForCommands('Please run the api tests with node --test'), true);
   assert.equal(briefAsksForCommands('execute the lint command'), true);
-  assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b', shell: true }), /Read, Grep, Glob and Bash tools can read it and run the tests/);
+  assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b', shell: true }), /Read, Grep, Glob, shell [(]Bash, and PowerShell on Windows[)], WebSearch and WebFetch tools can read it and run the tests/);
   assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b' }), /you have no shell/);
 });
 
@@ -312,7 +351,7 @@ test('api-review: --runner sdk runs the SDK engine, inlines the brief and the di
     assert.match(p, /^TYPE: code-review\nWRITER: sonnet\/high\nROLE: reviewer/);
     assert.match(p, /the lead brief, verbatim/);
     assert.match(p, /\+two/);
-    assert.match(p, /Bash tools can read it and run the tests/);
+    assert.match(p, /shell [(]Bash, and PowerShell on Windows[)].*run the tests/);
     assert.equal(sdk.calls[0].options.maxBudgetUsd, 1);
     const capped = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 1, output_tokens: 1 }), result()]);
     await t.go(['--runner', 'sdk', '--max-usd', '0.25'], { sdk: capped });

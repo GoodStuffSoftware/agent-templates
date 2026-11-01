@@ -15,9 +15,9 @@
 //   3  "API review unavailable: <reason>" (credit balance, 401/402/403, usage policy, missing
 //      workspace id): the writer spawns the plan reviewer subagent at once. Two in a row make
 //      `api-credits.mjs decide review` answer plan for the rest of the cycle.
-//   4  "API review failed: <reason>" (anything else, including the 8-minute wall-clock deadline and
+//   4  "API review failed: <reason>" (anything else, including the wall-clock deadline (8 minutes on fetch, 15 on sdk) and
 //      a brief file that holds only a path): same fallback.
-// Each paid turn is booked in the ledger as it completes. Run it with a Bash timeout of 600000 ms.
+// Each paid turn is booked in the ledger as it completes. Run it in the background (run_in_background) and wait for its notification: a foreground Bash call is cut at 10 minutes, shorter than the sdk deadline.
 // The key is read from the configured source (api_credits_key_source: env:<NAME> or
 // bws:<secret-name>), reaches only the request headers and is never printed.
 
@@ -74,7 +74,7 @@ export function buildPrompt({ brief, diffRef, writer, stat = '', diff = '', note
     '',
     '---',
     shell
-      ? `Diff range under review: ${diffRef}. Your working directory is the repository at the head of that range. Your Read, Grep, Glob and Bash tools can read it and run the tests and checks it needs; say which checks you ran and which you could not.`
+      ? `Diff range under review: ${diffRef}. Your working directory is the repository at the head of that range. Your Read, Grep, Glob, shell (Bash, and PowerShell on Windows), WebSearch and WebFetch tools can read it and run the tests and checks it needs; say which checks you ran and which you could not.`
       : `Diff range under review: ${diffRef}. Your read_file, grep and glob tools see the repository at the head of that range; you have no shell, so you cannot run commands or tests: say which checks you could not run.`,
     INSTRUCTION,
     'Add nothing that narrows the review.',

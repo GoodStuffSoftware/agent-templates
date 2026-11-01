@@ -570,7 +570,8 @@ test('the self-review clause runs the governor before spawning a reviewer, and k
   assert.ok(block.includes('--model sonnet --effort high'));
   assert.ok(block.includes('--review-file'));
   assert.ok(block.includes('no verdict line, no land'));
-  assert.ok(block.includes('Bash timeout of 600000 ms'), 'the runner outlives the default Bash timeout');
+  assert.ok(block.includes('run_in_background') && block.includes('15 minutes on the sdk engine'), 'the sdk runner outlives a foreground Bash call (10 minutes), so it runs in the background');
+  assert.ok(!block.includes('Bash timeout of 600000 ms'));
   assert.ok(block.includes("brief TEXT goes into that file, never only a path to it"));
   assert.ok(block.includes('spawn exactly ONE reviewer, in the foreground'));
   assert.ok(block.includes('API review unavailable'));

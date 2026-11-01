@@ -255,7 +255,7 @@
     "api_review_runner": {
       "type": "string",
       "title": "API reviews: engine (sdk or fetch)",
-      "description": "Which engine scripts/api-review.mjs uses for a review on the API credits. \"fetch\": the Messages API with read-only read_file, grep and glob tools confined to the repository (no dependency, cheapest; the reviewer cannot run commands). \"sdk\": the Claude Agent SDK on the same API key with Read, Grep, Glob and Bash, so the reviewer can run the tests (installed on demand into the agent-companion state dir, never into the plugin; not confined to the repository). Empty = the built-in default; the --runner flag overrides this. If the SDK cannot be installed or imported, the fetch engine runs instead.",
+      "description": "Which engine scripts/api-review.mjs uses for a review on the API credits. \"fetch\": the Messages API with read-only read_file, grep and glob tools confined to the repository (no dependency, cheapest; the reviewer cannot run commands). \"sdk\": the Claude Agent SDK on the same API key with Read, Grep, Glob, Bash, WebSearch and WebFetch (and PowerShell on Windows), so the reviewer can run the tests; a 15-minute deadline (installed on demand into the agent-companion state dir, never into the plugin; not confined to the repository). Empty = the built-in default; the --runner flag overrides this. If the SDK cannot be installed or imported, the fetch engine runs instead.",
       "default": ""
     },
     "api_sdk_version": {

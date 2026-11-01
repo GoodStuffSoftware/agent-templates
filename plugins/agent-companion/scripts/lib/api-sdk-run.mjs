@@ -1,7 +1,10 @@
 // api-sdk-run.mjs — the second review engine: the Claude Agent SDK on the Console API key.
 // Same interface and guarantees as scripts/lib/api-run.mjs (the fetch engine), plus the one thing
-// the fetch engine cannot do: the reviewer has the plan reviewers' tools, including Bash, so it can
-// run the tests.
+// the fetch engine cannot do: the reviewer has the plan reviewers' tools, including Bash (and PowerShell
+// on Windows), so it can run the tests. The toolset follows what the operator's reviewers used in 14 days
+// of transcripts (2026-10-18 to 2026-11-01): Bash 97%, Read 66%, Grep 26%, PowerShell 24%, WebFetch 4%,
+// Glob 3%, WebSearch 2%. Edit and Write (the runner writes the review file itself), Agent/Task,
+// notebooks and MCP stay off.
 //
 // Why this is allowed on the credits: the plan's API credits cover the Claude API, Managed Agents,
 // the Agent SDK and the Playground, and do NOT cover Claude Code
@@ -36,18 +39,28 @@ import { stateFile } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { loadConfig, resolveKey, record, recordFailure, recordSpend } from './api-credits.mjs';
 import { spawnSyncHidden } from './proc.mjs';
-import { validKeyShape, scrub, resolveModel, isUnavailable, isSpendLimit, isWorkspaceMissing, hasVerdict, DEFAULT_DEADLINE_MS, WORKSPACE_ENV, WORKSPACE_HINT } from './api-run.mjs';
+import { validKeyShape, scrub, resolveModel, isUnavailable, isSpendLimit, isWorkspaceMissing, hasVerdict, WORKSPACE_ENV, WORKSPACE_HINT } from './api-run.mjs';
 
 export const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
 export const DEFAULT_SDK_VERSION = '0.3.316';
 export const DEFAULT_SDK_MAX_USD = 1;
+// Bash and PowerShell: the default per-command timeout is the Claude Code default (2 minutes, so a
+// hung command is not given the whole review); the ceiling is 10 minutes, so a reviewer that passes
+// `timeout: 600000` can run the full test suite.
 export const DEFAULT_BASH_TIMEOUT_MS = 120000;
+export const MAX_BASH_TIMEOUT_MS = 600000;
+// The deadline of a whole sdk review. The fetch engine's 8 minutes cannot hold a test run of up to 10
+// minutes plus the turns around it, so an sdk review gets 15.
+export const DEFAULT_SDK_DEADLINE_MS = 15 * 60 * 1000;
 export const REQUIRED_KEY_SOURCE = 'ANTHROPIC_API_KEY';
 
-export const SDK_TOOLS = ['Read', 'Grep', 'Glob', 'Bash'];
+export const SDK_TOOLS = ['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch'];
+// PowerShell is a built-in tool of the SDK's binary (BUILTIN_TOOL_NAMES); it is added on Windows only,
+// where the operator's reviewers use it (24% of runs). Elsewhere it needs pwsh 7+.
+export const sdkToolsFor = (platform = process.platform) => (platform === 'win32' ? [...SDK_TOOLS, 'PowerShell'] : [...SDK_TOOLS]);
 // Removed from the model's context outright (bare names). Edit and Write are not in `tools` either;
 // the explicit list is belt and braces against a future default.
-export const SDK_DISALLOWED = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'Skill', 'TodoWrite'];
+export const SDK_DISALLOWED = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'Task', 'Agent', 'Skill', 'TodoWrite'];
 // Scoped denials: they hold in every permission mode. A guard rail, not a sandbox: Bash runs with the
 // operator's own file access (as a plan reviewer does), so the credential directories are denied to the
 // file tools by name and the claude binary is pointed at a private config dir (CLAUDE_CONFIG_DIR).
@@ -56,11 +69,21 @@ export const SDK_BASH_DENY = [
   'Bash(git push:*)', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(git checkout:*)', 'Bash(git clean:*)',
   'Bash(git merge:*)', 'Bash(git rebase:*)', 'Bash(rm:*)', 'Bash(del:*)', 'Bash(rmdir:*)', 'Bash(curl:*)', 'Bash(wget:*)',
 ];
+// The same guard rails for the PowerShell tool, which has its own permission rules (a Bash rule does not
+// restrict it). Note: with Git Bash installed, any scoped Bash deny rule turns the PowerShell tool off
+// unless CLAUDE_CODE_USE_POWERSHELL_TOOL=1 is in the environment (sdkEnv sets it) or a PowerShell rule exists.
+export const SDK_POWERSHELL_DENY = [
+  'PowerShell(git push *)', 'PowerShell(git commit *)', 'PowerShell(git reset *)', 'PowerShell(git checkout *)', 'PowerShell(git clean *)',
+  'PowerShell(git merge *)', 'PowerShell(git rebase *)', 'PowerShell(Remove-Item *)', 'PowerShell(rm *)', 'PowerShell(del *)', 'PowerShell(rmdir *)',
+  'PowerShell(Set-Content *)', 'PowerShell(Add-Content *)', 'PowerShell(Out-File *)', 'PowerShell(Invoke-WebRequest *)', 'PowerShell(Invoke-RestMethod *)',
+  'PowerShell(iwr *)', 'PowerShell(irm *)', 'PowerShell(curl *)', 'PowerShell(wget *)', 'PowerShell(Start-Process *)',
+];
 
 export const SDK_SYSTEM_PREFIX = [
   'You are a code reviewer. The repository under review is your working directory, checked out at the head of the diff you are given.',
-  'Tools: Read, Grep, Glob and Bash. Use Bash to run the tests and the checks the change needs (run the test files the diff touches first, then the wider suite if it is cheap).',
-  'Never modify the repository: no edits, no git commit, push, reset or checkout, no installs, no network. Read the surrounding code, not only the diff, and try to refute the change.',
+  'Tools: Read, Grep, Glob, Bash (and PowerShell on Windows), WebSearch and WebFetch. Use the shell to run the tests and the checks the change needs (run the test files the diff touches first, then the wider suite);',
+  'a shell command times out after 2 minutes unless you pass a larger timeout, up to 600000 ms, so pass one for a test run. Use WebSearch and WebFetch only to check a library, API or tool the change relies on, never to send out repository content.',
+  'Never modify the repository: no edits, no git commit, push, reset or checkout, no installs. Read the surrounding code, not only the diff, and try to refute the change.',
   'Write the review as soon as you can support a verdict. Start it with one line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit with file:line and a repro,',
   'and say which checks you ran and which you could not.',
 ].join(' ');
@@ -92,12 +115,13 @@ const TRIM_ENV = {
   DISABLE_AUTOUPDATER: '1',
 };
 
-export function sdkEnv({ key, workspace = '', base = process.env, bashTimeoutMs = DEFAULT_BASH_TIMEOUT_MS, configDir = '' }) {
+export function sdkEnv({ key, workspace = '', base = process.env, bashTimeoutMs = DEFAULT_BASH_TIMEOUT_MS, bashMaxTimeoutMs = MAX_BASH_TIMEOUT_MS, configDir = '', powershell = false }) {
   const out = {};
   for (const k of Object.keys(base)) if (ENV_ALLOW.has(k.toLowerCase()) && typeof base[k] === 'string') out[k] = base[k];
   Object.assign(out, TRIM_ENV);
   out.BASH_DEFAULT_TIMEOUT_MS = String(bashTimeoutMs);
-  out.BASH_MAX_TIMEOUT_MS = String(bashTimeoutMs);
+  out.BASH_MAX_TIMEOUT_MS = String(Math.max(bashTimeoutMs, bashMaxTimeoutMs)); // the ceiling is the larger of the two
+  if (powershell) out.CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'; // else the scoped Bash deny rules switch the tool off
   out.ANTHROPIC_API_KEY = key;
   if (configDir) out.CLAUDE_CONFIG_DIR = configDir;
   if (workspace) out.ANTHROPIC_CUSTOM_HEADERS = `anthropic-workspace-id: ${workspace}`;
@@ -164,8 +188,8 @@ function usageFromApi(u) {
 // Never throws.
 export async function runApiSdk({
   prompt, model, effort = null, cwd = process.cwd(), category = 'review', meta = '', system = null,
-  maxUsd = DEFAULT_SDK_MAX_USD, maxTurns = 30, deadlineMs = DEFAULT_DEADLINE_MS, requireVerdict = false,
-  bashTimeoutMs = DEFAULT_BASH_TIMEOUT_MS, sdkVersion = DEFAULT_SDK_VERSION,
+  maxUsd = DEFAULT_SDK_MAX_USD, maxTurns = 30, deadlineMs = DEFAULT_SDK_DEADLINE_MS, requireVerdict = false,
+  bashTimeoutMs = DEFAULT_BASH_TIMEOUT_MS, sdkVersion = DEFAULT_SDK_VERSION, platform = process.platform,
   cfg = loadConfig(), env = process.env, now = Date.now(),
   sdk = null, load = loadSdk,
 }) {
@@ -216,10 +240,12 @@ export async function runApiSdk({
       return { ok: false, unavailable: false, sdkUnavailable: true, reason: scrub(`the Agent SDK is not available: ${String((e && e.message) || e)}`, key).slice(0, 200), usd: 0, path: 'sdk' };
     }
 
+    const tools = sdkToolsFor(platform);
+    const ps = tools.includes('PowerShell');
     const options = {
-      cwd, model: modelId, env: sdkEnv({ key, workspace: ws, base: env, bashTimeoutMs, configDir: configDirOf(sdkVersion) }),
+      cwd, model: modelId, env: sdkEnv({ key, workspace: ws, base: env, bashTimeoutMs, configDir: configDirOf(sdkVersion), powershell: ps }),
       settingSources: [], systemPrompt: system || sdkSystem(maxTurns),
-      tools: [...SDK_TOOLS], allowedTools: [...SDK_TOOLS], disallowedTools: [...SDK_DISALLOWED, ...SDK_READ_DENY, ...SDK_BASH_DENY],
+      tools, allowedTools: [...tools], disallowedTools: [...SDK_DISALLOWED, ...SDK_READ_DENY, ...SDK_BASH_DENY, ...(ps ? SDK_POWERSHELL_DENY : [])],
       permissionMode: 'dontAsk', maxTurns, maxBudgetUsd: maxUsd, persistSession: false, abortController: ac,
       ...(effort && m.effort ? { effort } : {}),
     };
