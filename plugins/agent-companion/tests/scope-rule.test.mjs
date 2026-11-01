@@ -1,6 +1,6 @@
 // Token bleed guard, phase 1: the scope clause the spawn guard appends to a
-// brief, the self-review step, and the maxTurns backstop on every shipped
-// agent definition.
+// brief, the self-review step, and (since 0.31.47) no hard maxTurns on any shipped
+// agent definition: long runs get the soft note in long-run.test.mjs instead.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -80,12 +80,12 @@ test('the self-review step is in the generated block and in every rung that carr
   assert.ok(carried >= 1);
 });
 
-test('every shipped agent definition carries maxTurns: 150 in its frontmatter', () => {
+test('no shipped agent definition carries a hard maxTurns in its frontmatter (soft long-run note instead)', () => {
   const files = readdirSync(join(ROOT, 'agents')).filter((f) => f.endsWith('.md'));
   assert.ok(files.some((f) => f.startsWith('ac-browser')) && files.some((f) => f.startsWith('ac-sonnet')));
   for (const f of files) {
     const t = readFileSync(join(ROOT, 'agents', f), 'utf8').replace(/\r\n/g, '\n');
     const fm = t.split('\n---\n')[0];
-    assert.match(fm, /^maxTurns: 150$/m, f);
+    assert.doesNotMatch(fm, /^maxTurns:/m, f);
   }
 });

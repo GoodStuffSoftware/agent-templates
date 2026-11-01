@@ -97,13 +97,14 @@ test('compaction trigger: a compact_boundary just behind the agent says "you jus
     assert.doesNotMatch(ctxText(r), /split|return your results|Finish/, 'a compaction alone asks for no wrap-up');
     assert.equal(runHook('hooks/subagent-context.mjs', pre(lead)).stdout.trim(), '', 'same boundary: once');
 
-    // A second compaction is a second event; the default stop is the third (step budget, hooks/lib/step-budget.mjs).
+    // A second compaction is a second event; the stop (opt-in) is the third (step budget, hooks/lib/step-budget.mjs).
     appendFileSync(agentFile, turn('r3', 190000) + boundary('b-2', 'manual') + user('summary') + turn('r4', 25000));
     const second = runHook('hooks/subagent-context.mjs', pre(lead));
     assert.equal(second.json.hookSpecificOutput.permissionDecision, undefined, 'two compactions no longer stop the helper');
     assert.match(ctxText(second), /You compacted; re-read only/);
     appendFileSync(agentFile, turn('r5', 190000) + boundary('b-3', 'auto') + user('summary') + turn('r6', 25000));
-    const third = runHook('hooks/subagent-context.mjs', pre(lead));
+    // The compaction stop denies only on the step_budget_deny opt-in (soft by default, 2026-11-01).
+    const third = runHook('hooks/subagent-context.mjs', pre(lead), { env: { CLAUDE_PLUGIN_OPTION_STEP_BUDGET_DENY: 'true' } });
     assert.equal(third.json.hookSpecificOutput.permissionDecision, 'deny');
     assert.match(third.json.hookSpecificOutput.permissionDecisionReason, /^Step budget reached/);
     const logged = rows();
