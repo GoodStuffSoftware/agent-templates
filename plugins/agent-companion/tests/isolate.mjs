@@ -135,6 +135,9 @@ process.env.AGENT_COMPANION_HOME_OVERRIDE = sandbox;
 process.env.AGENT_COMPANION_STATE_DIR = join(sandbox, '.claude', 'agent-companion');
 process.env.AGENT_COMPANION_DESKTOP_DIR = join(sandbox, 'desktop');
 delete process.env.CLAUDE_PLUGIN_DATA;
+// A suite run by an SDK reviewer inherits its marker (AC_REVIEWER_SESSION, hooks/lib/context.mjs), which would silence the lead-only hooks under test.
+// A test that means a reviewer session sets it in the `env` of its own hook call.
+delete process.env.AC_REVIEWER_SESSION;
 delete process.env.CLAUDE_CONFIG_DIR;
 delete process.env.AGENT_COMPANION_VAULT_DIR;
 // The scout's release watch makes one request to the changelog host; no test may reach

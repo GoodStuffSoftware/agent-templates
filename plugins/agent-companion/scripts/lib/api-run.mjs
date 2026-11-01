@@ -127,14 +127,16 @@ const textOf = (content) => (Array.isArray(content) ? content.filter((b) => b &&
 //     the review continues.
 //   - hung: a run with no new message or tool result for HUNG_MS (10 minutes) is stopped (falls back).
 //     This is the only time limit.
-//   - spend: a note at SOFT_USD ($1), and one backstop, `maxUsd` (DEFAULT_HARD_USD, $5; option
+//   - spend: a note at SOFT_USD ($0.20), and one backstop, `maxUsd` (DEFAULT_HARD_USD, $0.50; option
 //     api_review_hard_usd; 0 disables it), that ends a runaway tool loop (fetch: at 80% of it the next turn is the final, no-tools one; sdk: an abort). A reply that is already a final answer is kept.
 //   `notes` is the list of soft-limit strings; they go into the ledger entry (`notes`).
 export const DEFAULT_MAX_TOKENS = 64000; // thinking counts toward max_tokens; the effort docs start Opus xhigh/max at 64k
 export const SLOW_REVIEW_MS = 8 * 60 * 1000;
 export const HUNG_MS = 10 * 60 * 1000;
-export const SOFT_USD = 1;
-export const DEFAULT_HARD_USD = 5;
+// Operator ruling 2026-11-01: measured normal reviews cost $0.005-0.10, so 20 cents flags a review worth a look
+// and 50 cents means a runaway tool loop.
+export const SOFT_USD = 0.2;
+export const DEFAULT_HARD_USD = 0.5;
 
 // The hard backstop from an option value: a finite number >= 0 (0 disables it), else the default.
 export function hardUsdFrom(raw, fallback = DEFAULT_HARD_USD) {
@@ -145,16 +147,17 @@ export function hardUsdFrom(raw, fallback = DEFAULT_HARD_USD) {
 
 // Soft-limit notes, worded once for both engines.
 export const slowNote = (min) => `ran past ${min} minutes (logged to long-runs.jsonl); not stopped`;
-export const softUsdNote = (softUsd) => `passed the $${softUsd} soft spend limit; not stopped`;
+export const softUsdNote = (softUsd) => `passed the $${Number(softUsd).toFixed(2)} soft spend limit; not stopped`;
 
-// Append the slow-review row to state/long-runs.jsonl (the schema of hooks/lib/long-run.mjs).
-// Returns the row, or null when the log could not be written. Never throws.
-export async function logSlowReview({ meta = '', turns = 0, startedAt = Date.now(), now = Date.now(), logRow = null } = {}) {
+// Append the slow-review row to state/long-runs.jsonl (the schema of hooks/lib/long-run.mjs). Written for both soft
+// limits, 8 minutes and the soft spend limit; for the spend limit `notes` (what it passed) go into the description, which is
+// what the scout's `long-runs.mjs` listing shows. Returns the row, or null when the log could not be written. Never throws.
+export async function logSlowReview({ meta = '', turns = 0, startedAt = Date.now(), now = Date.now(), logRow = null, notes = [] } = {}) {
   try {
     const row = {
       ts: new Date(now).toISOString(), sessionId: null, agentId: `api-review-${process.pid}-${startedAt}`, agentType: 'api-review',
       steps: turns, startedAt: new Date(startedAt).toISOString(), durationMin: Math.round(((now - startedAt) / 60000) * 10) / 10,
-      description: String(meta || 'review').slice(0, 200), transcriptPath: null,
+      description: `${String(meta || 'review')}${notes.length ? ` [${notes.join('; ')}]` : ''}`.slice(0, 200), transcriptPath: null,
     };
     const log = logRow || (await import('../../hooks/lib/long-run.mjs')).logLongRun;
     log(row);
@@ -279,7 +282,10 @@ export async function runApi({
       // Book this paid turn now: a run that is killed or times out later still leaves its spend.
       if (p && p.usd > 0) { try { recordSpend(category, p.usd, { cfg, now }); booked += p.usd; } catch { /* the final record() books the rest and reports a failure */ } }
       last = j;
-      if (usd >= softUsd && !notes.some((n) => n.startsWith('passed the $'))) notes.push(softUsdNote(softUsd));
+      if (usd >= softUsd && !notes.some((n) => n.startsWith('passed the $'))) {
+        notes.push(softUsdNote(softUsd)); // also a long-runs row, so the scout lists the review (unless the slow row below already is one)
+        await logSlowReview({ meta, turns: turnCount, startedAt, now: clock(), logRow, notes: [`${notes[notes.length - 1]}: $${usd.toFixed(2)} after ${turnCount} turn(s)`] });
+      }
       const content = Array.isArray(j.content) ? j.content : [];
       const uses = content.filter((b) => b && b.type === 'tool_use');
       if (j.stop_reason === 'tool_use' && uses.length && toolbox && !final) {

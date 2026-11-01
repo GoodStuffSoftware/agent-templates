@@ -15,7 +15,10 @@
 // What the SDK docs say (https://code.claude.com/docs/en/agent-sdk/typescript, checked 2026-11-01
 // and against the types of 0.3.316):
 //   - settingSources: [] loads no user, project or local settings; plugins, skills and MCP servers
-//     have their own options and default to none.
+//     have their own options and default to none. 'project' loads the project's .claude/settings.json (hooks,
+//     permissions, enabledPlugins) and, per sdk.d.ts, "must include 'project' to load CLAUDE.md files".
+//   - plugins: [{ type: 'local', path }] loads one plugin directory (its hooks, skills, agents, commands and
+//     .mcp.json); strictMcpConfig: true ignores every MCP source except the mcpServers option.
 //   - systemPrompt takes a string; tools names the built-in tools that exist at all; allowedTools
 //     auto-approves; disallowedTools removes tools; permissionMode "dontAsk" is requested, but the binary reports "default" while
 //     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 is set (measured 0.3.316): safety rests on the explicit allowedTools and disallowedTools lists, so nothing unlisted runs and nothing prompts.
@@ -25,6 +28,17 @@
 //   - the package bundles the native binary as a platform optional dependency.
 // The SDK's own spawn of the binary already sets windowsHide; our npm install goes through proc.mjs.
 //
+// What the reviewer loads (operator ruling 2026-11-01: an API reviewer gets the project rules and our guards):
+//   - the PROJECT's settings (settingSources ['project']): its CLAUDE.md, .claude/settings.json and project hooks;
+//   - this plugin, agent-companion, from the directory this very file lives in (the copy that runs api-review.mjs),
+//     so its guards are the same version as the lead's;
+//   - nothing else: no user settings (never in settingSources, and CLAUDE_CONFIG_DIR is a private empty dir), no other
+//     plugin (a project that enables others finds none installed in that dir), skills: [], strictMcpConfig with no
+//     servers (the project's .mcp.json is ignored). The tool lists below win over any project permission.
+//   The init message is the proof; runApiSdk returns it as `init` and aborts the run when it lists a plugin other than ours or an MCP server.
+//   The hooks know they run under a reviewer through REVIEWER_SESSION_ENV in the child env (hooks/lib/context.mjs): the lead-only hooks
+//   exit silently, the safety guards run.
+//
 // The key reaches only the child's ANTHROPIC_API_KEY. CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 strips it
 // from the Bash tool's environment, and every string leaving this module is scrubbed of it anyway.
 // Unlike the fetch engine, this one is NOT confined to the repository: Bash can read and write
@@ -32,10 +46,10 @@
 // the file tools, git push/commit/reset, rm), not a determined model; run it on trusted diffs.
 
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { priceUsage } from './pricing.mjs';
-import { stateFile } from '../../hooks/lib/context.mjs';
+import { stateFile, REVIEWER_SESSION_ENV } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { loadConfig, resolveKey, record, recordFailure, recordSpend } from './api-credits.mjs';
 import { spawnSyncHidden } from './proc.mjs';
@@ -78,6 +92,7 @@ export const SDK_SYSTEM_PREFIX = [
   'Tools: Read, Grep, Glob, Bash (and PowerShell on Windows), WebSearch and WebFetch. Use the shell to run the tests AFFECTED by the diff and the other checks the change needs: the test files that cover the changed files, through an affected-test selector of the repository if it has one (look in its scripts, package.json or ci-local), otherwise mapped from the diff.',
   'Never run the full test suite or ci-local: the writer and CI run those. Use WebSearch and WebFetch only to check a library, API or tool the change relies on, never to send out repository content.',
   'Never modify the repository: no edits, no git commit, push, reset or checkout, no installs. Read the surrounding code, not only the diff, and try to refute the change.',
+  'The project rules (its CLAUDE.md) are loaded: follow its conventions and prohibitions. Rules that address a lead or a writer (delegate, spawn agents, load skills, run a knowledge check, ask the user) do not apply to you: you are the reviewer, you do no knowledge check, and your reply is the review.',
   'Write the review as soon as you can support a verdict. Start it with one line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit with file:line and a repro,',
   'and say which checks you ran and which you could not.',
 ].join(' ');
@@ -103,7 +118,6 @@ const ENV_ALLOW = new Set([
 const TRIM_ENV = {
   CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1',
   CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
-  CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1',
   CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: '1',
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
   DISABLE_AUTOUPDATER: '1',
@@ -113,11 +127,66 @@ export function sdkEnv({ key, workspace = '', base = process.env, configDir = ''
   const out = {};
   for (const k of Object.keys(base)) if (ENV_ALLOW.has(k.toLowerCase()) && typeof base[k] === 'string') out[k] = base[k];
   Object.assign(out, TRIM_ENV);
+  out[REVIEWER_SESSION_ENV] = '1'; // the hooks' marker: lead-only hooks stay silent, safety guards run (hooks/lib/context.mjs)
   if (powershell) out.CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'; // else the scoped Bash deny rules switch the tool off
   out.ANTHROPIC_API_KEY = key;
   if (configDir) out.CLAUDE_CONFIG_DIR = configDir;
   if (workspace) out.ANTHROPIC_CUSTOM_HEADERS = `anthropic-workspace-id: ${workspace}`;
   return out;
+}
+
+// --- what the reviewer loads ---------------------------------------------------------------------
+
+// The plugin copy this file belongs to (scripts/lib/ -> the plugin root): the reviewer gets the same version as the
+// lead that started it. Empty when the layout is not a plugin (then no plugin is loaded and the run says so).
+export const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+export function pluginIdentity(root = PLUGIN_ROOT) {
+  try {
+    const j = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8'));
+    return j && typeof j.name === 'string' && j.name ? { name: j.name, version: String(j.version || ''), root } : null;
+  } catch { return null; }
+}
+
+// The SDK query() options for one review. Exported so the tests and the init-message proof use the exact set a review uses.
+export function sdkOptions({
+  cwd, modelId, effortOption = null, key, workspace = '', base = process.env, configDir = '', platform = process.platform,
+  system, maxTurns = 30, maxUsd = 0, abortController, pluginRoot = PLUGIN_ROOT,
+}) {
+  const tools = sdkToolsFor(platform);
+  const ps = tools.includes('PowerShell');
+  const plugin = pluginIdentity(pluginRoot);
+  return {
+    cwd, model: modelId, env: sdkEnv({ key, workspace, base, configDir, powershell: ps }),
+    // Project rules and project hooks, plus ONLY this plugin; no user settings, no skills, no MCP servers (project .mcp.json included).
+    settingSources: ['project'], plugins: plugin ? [{ type: 'local', path: plugin.root }] : [], skills: [], mcpServers: {}, strictMcpConfig: true,
+    systemPrompt: system || sdkSystem(maxTurns),
+    // allowedTools and disallowedTools are command-line rules: a project's permissions.allow cannot widen them (deny wins).
+    tools, allowedTools: [...tools], disallowedTools: [...SDK_DISALLOWED, ...SDK_READ_DENY, ...SDK_BASH_DENY, ...(ps ? SDK_POWERSHELL_DENY : [])],
+    permissionMode: 'dontAsk', maxTurns, ...(maxUsd > 0 ? { maxBudgetUsd: maxUsd } : {}), persistSession: false, ...(abortController ? { abortController } : {}),
+    ...(effortOption ? { effort: effortOption } : {}), // the routed effort: the SDK passes it to the binary as --effort
+  };
+}
+
+// The init message, reduced to what proves what the session loaded. Carries names and paths only, never the key.
+export function initProof(msg) {
+  const names = (a) => (Array.isArray(a) ? a.map((x) => (x && typeof x === 'object' ? String(x.name ?? x) : String(x))) : []);
+  return {
+    apiKeySource: msg.apiKeySource ?? null, claudeCodeVersion: msg.claude_code_version ?? null, model: msg.model ?? null, permissionMode: msg.permissionMode ?? null,
+    plugins: Array.isArray(msg.plugins) ? msg.plugins.map((p) => ({ name: String(p.name), version: p.version ?? null })) : [],
+    pluginErrors: Array.isArray(msg.plugin_errors) ? msg.plugin_errors.map((e) => `${e.plugin}: ${e.type}`) : [],
+    mcpServers: Array.isArray(msg.mcp_servers) ? msg.mcp_servers.map((m) => `${m.name}:${m.status}${m.source ? `:${m.source}` : ''}`) : [],
+    tools: names(msg.tools), skills: names(msg.skills), slashCommands: names(msg.slash_commands).length, agents: names(msg.agents),
+  };
+}
+// null when the init shows what a review is meant to load; else why not. Checked before the first API call.
+// The binary's own built-in plugins (names cc-plugin-*, no version: agents-md, plugin-authoring as of 0.3.316) are loaded in every
+// session, plugin-less and settings-less ones too (measured), and cannot be switched off from the options: they are not counted.
+export const isBuiltinPlugin = (p) => /^cc-plugin-/.test(String(p && p.name)) && !(p && p.version);
+export function initMismatch(proof, identity = pluginIdentity()) {
+  const extra = proof.plugins.filter((p) => !isBuiltinPlugin(p) && (!identity || p.name !== identity.name)).map((p) => p.name);
+  if (extra.length) return `the SDK session loaded a plugin other than ${identity ? identity.name : 'none'} (${extra.join(', ')})`;
+  if (proof.mcpServers.length) return `the SDK session connected MCP servers (${proof.mcpServers.join(', ')}); a review loads none`;
+  return null;
 }
 
 // --- install on demand -------------------------------------------------------------------------
@@ -175,7 +244,7 @@ function usageFromApi(u) {
   };
 }
 
-// Same result shape and limits as runApi (soft: a note at 8 minutes and at $1; stops only a hung run, no message
+// Same result shape and limits as runApi (soft: a note at 8 minutes and at $0.20; stops only a hung run, no message
 // for 10 minutes, and at the spend backstop maxUsd, 0 = none), plus `path: 'sdk'`. `sdkUnavailable: true` means the SDK could not be
 // installed or imported before anything was spent: the caller falls back to the fetch engine.
 // Never throws.
@@ -213,7 +282,7 @@ export async function runApiSdk({
     return { ok: false, unavailable, reason: r, usd, path: 'sdk', notes, ...(ledgerError ? { ledgerError } : {}) };
   };
   const hungReason = () => `no new message or tool result for ${Math.round((hungMs / 60000) * 10) / 10} minutes after ${turnCount} turn(s); falling back to the plan`;
-  const capReason = () => `the review reached its spend backstop of $${maxUsd} after ${turnCount} turn(s) without a verdict; falling back to the plan`;
+  const capReason = () => `the review reached its spend backstop of $${Number(maxUsd).toFixed(2)} after ${turnCount} turn(s) without a verdict; falling back to the plan`;
 
   const ac = new AbortController();
   let abortReason = null;
@@ -242,15 +311,10 @@ export async function runApiSdk({
       return { ok: false, unavailable: false, sdkUnavailable: true, reason: scrub(`the Agent SDK is not available: ${String((e && e.message) || e)}`, key).slice(0, 200), usd: 0, path: 'sdk' };
     }
 
-    const tools = sdkToolsFor(platform);
-    const ps = tools.includes('PowerShell');
-    const options = {
-      cwd, model: modelId, env: sdkEnv({ key, workspace: ws, base: env, configDir: configDirOf(sdkVersion), powershell: ps }),
-      settingSources: [], systemPrompt: system || sdkSystem(maxTurns),
-      tools, allowedTools: [...tools], disallowedTools: [...SDK_DISALLOWED, ...SDK_READ_DENY, ...SDK_BASH_DENY, ...(ps ? SDK_POWERSHELL_DENY : [])],
-      permissionMode: 'dontAsk', maxTurns, ...(maxUsd > 0 ? { maxBudgetUsd: maxUsd } : {}), persistSession: false, abortController: ac,
-      ...(effort && m.effort ? { effort } : {}), // the routed effort: the SDK passes it to the binary as --effort
-    };
+    const options = sdkOptions({
+      cwd, modelId, effortOption: effort && m.effort ? effort : null, key, workspace: ws, base: env, configDir: configDirOf(sdkVersion), platform,
+      system, maxTurns, maxUsd, abortController: ac,
+    });
     armHung();
     slowTimer = setTimeout(() => { // soft: one long-runs row and a note, the review goes on
       notes.push(slowNote(Math.round(slowMs / 6000) / 10));
@@ -264,6 +328,7 @@ export async function runApiSdk({
     let lastStop = null;
     let result = null;
     let inited = false;
+    let init = null;
     const book = (delta) => {
       if (delta > 0) { try { recordSpend(category, delta, { cfg, now }); booked += delta; } catch { /* the final record() books the rest */ } }
     };
@@ -281,6 +346,11 @@ export async function runApiSdk({
         if (!msg || typeof msg !== 'object') continue;
         if (msg.type === 'system' && msg.subtype === 'init') {
           inited = true;
+          init = initProof(msg);
+          if (msg.apiKeySource === REQUIRED_KEY_SOURCE) {
+            const bad = initMismatch(init);
+            if (bad) { abort('init-mismatch'); throw configError(bad); }
+          }
           if (msg.apiKeySource !== REQUIRED_KEY_SOURCE) {
             abort('auth-source');
             throw configError(`the SDK run authenticates with "${msg.apiKeySource}", not ${REQUIRED_KEY_SOURCE}: it would not be billed to the API credits`);
@@ -304,7 +374,10 @@ export async function runApiSdk({
           if (t) lastText = t;
           if (am.stop_reason) lastStop = am.stop_reason;
           if (msg.error) lastAssistantError = String(msg.error);
-          if (usd >= softUsd && !notes.some((n) => n.startsWith('passed the $'))) notes.push(softUsdNote(softUsd));
+          if (usd >= softUsd && !notes.some((n) => n.startsWith('passed the $'))) {
+            notes.push(softUsdNote(softUsd)); // also a long-runs row, so the scout lists the review
+            logSlowReview({ meta, turns: turnCount, startedAt, now: Date.now(), logRow, notes: [`${notes[notes.length - 1]}: $${usd.toFixed(2)} after ${turnCount} turn(s)`] }).catch(() => {});
+          }
           // The backstop is checked between messages (one expensive turn can overshoot it by its own cost);
           // a reply that already ends the turn is the review, so it is kept.
           if (maxUsd > 0 && usd >= maxUsd && am.stop_reason !== 'end_turn') { abort('spend-cap'); break; }
@@ -357,7 +430,7 @@ export async function runApiSdk({
       if (!hasVerdict(text)) return fail(false, `the review has no VERDICT line (stop_reason ${stop})`);
     }
     bookCost(true);
-    return { ok: true, text, usd, turns: turnCount, tokens, model: modelId, stopReason: stop, path: 'sdk', sdkUsd, notes, ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: true, text, usd, turns: turnCount, tokens, model: modelId, stopReason: stop, path: 'sdk', sdkUsd, notes, init, ...(ledgerError ? { ledgerError } : {}) };
   } catch (e) {
     stopTimers();
     const reason = scrub(String((e && e.message) || e), key).slice(0, 200);

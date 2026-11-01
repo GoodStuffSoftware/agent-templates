@@ -6,6 +6,8 @@
 // passthrough() with no hint, never a stall or a block.
 //
 // Kill switch: plugin option `poll_guard` (default true).
+// Reviewer sessions (env AC_REVIEWER_SESSION=1, set by the SDK API-review engine): the Bash/PowerShell safety denials below stay on; the
+// worker one-wait advisory and the poll guard are off.
 //
 // Bash and PowerShell also get the process-kill deny (lib/process-kill-guard.mjs: kill_by_name_guard, plugin uninstall).
 // Bash on win32 also gets the python_stdin_guard DENY (hooks/lib/python-stdin.mjs): the only
@@ -21,7 +23,7 @@
 // workerWaitDecision in lib/poll-guard.mjs); `hint` is the earlier hint-only behaviour.
 
 import {
-  readStdin, opt, passthrough, deny, callerTranscriptPath, tailRecords, callerIsSubagent, appendLog, recordDenial,
+  readStdin, opt, passthrough, deny, callerTranscriptPath, tailRecords, callerIsSubagent, appendLog, recordDenial, isReviewerSession,
 } from './lib/context.mjs';
 import { pythonStdinGuard } from './lib/python-stdin.mjs';
 import { processGuard } from './lib/process-kill-guard.mjs';
@@ -107,7 +109,8 @@ try {
       process.exit(0);
     };
     const mode = workerWaitMode(opt('worker_wait_guard', 'deny-repeat'));
-    if (!callerIsSubagent(p) || !opt('worker_wait_advisory', true) || mode === 'off') finish(null);
+    // A reviewer session (AC_REVIEWER_SESSION, hooks/lib/context.mjs) keeps the safety denials above and skips the worker one-wait advisory.
+    if (isReviewerSession() || !callerIsSubagent(p) || !opt('worker_wait_advisory', true) || mode === 'off') finish(null);
     const input = p.tool_input || {};
     const hit = workerWaitPattern(input.command, { background: input.run_in_background === true });
     if (!hit) finish(null);
@@ -134,7 +137,7 @@ try {
     finish(workerWaitHint(root, { denyRepeat: mode === 'deny-repeat', windowMinutes }));
   }
 
-  if (!opt('poll_guard', true)) passthrough();
+  if (!opt('poll_guard', true) || isReviewerSession()) passthrough(); // the poll guard is lead doctrine: off in a reviewer session
   if (!POLL_TOOLS.includes(toolName)) passthrough();
 
   const input = p.tool_input || {};

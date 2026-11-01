@@ -267,8 +267,8 @@
     "api_review_hard_usd": {
       "type": "number",
       "title": "API reviews: hard spend backstop of one review (USD, 0 = none)",
-      "description": "Reviews on the API credits have soft limits: a note at 8 minutes (logged to long-runs.jsonl) and at $1 of spend, and the review goes on. Only a hung review (no message or tool result for 10 minutes) and this backstop stop one: a review that has spent this much without finishing is ended (fetch: its next turn is the last; sdk: aborted, and falls back to the plan reviewer) (a client-side estimate; each turn is booked in the ledger as it completes). Normal reviews cost $0.005-0.10. 0 disables the backstop. --max-usd overrides it for one review.",
-      "default": 5
+      "description": "Reviews on the API credits have soft limits: a note at 8 minutes (logged to long-runs.jsonl) and at $0.20 of spend (listed by the scout), and the review goes on. Only a hung review (no message or tool result for 10 minutes) and this backstop stop one: a review that has spent this much without finishing is ended (fetch: its next turn is the last; sdk: aborted, and falls back to the plan reviewer) (a client-side estimate; each turn is booked in the ledger as it completes). Measured normal reviews cost $0.005-0.10, so 20 cents flags a review and 50 cents means a runaway. 0 disables the backstop. --max-usd overrides it for one review.",
+      "default": 0.5
     },
     "api_admin_key_source": {
       "type": "string",

@@ -16,15 +16,16 @@
 //      workspace id): the writer spawns the plan reviewer subagent at once. Two in a row make
 //      `api-credits.mjs decide review` answer plan for the rest of the cycle.
 //   4  "API review failed: <reason>" (anything else, including a hung run (no message or tool result for 10 minutes), the
-//      spend backstop (api_review_hard_usd, $5; 0 = none) and a brief file that holds only a path): same fallback.
-// Limits are soft: a review that runs past 8 minutes is logged to long-runs.jsonl and continues; one that passes $1 gets a
+//      spend backstop (api_review_hard_usd, $0.50; 0 = none) and a brief file that holds only a path): same fallback.
+// Limits are soft: a review that runs past 8 minutes is logged to long-runs.jsonl and continues; one that passes $0.20 gets a
 // note (stderr, the review-path label and the ledger entry) and continues. Each paid turn is booked in the ledger as it
 // completes. Run it in the background (run_in_background) and wait for its notification: a foreground Bash call is cut at
 // 10 minutes and a review can outlast that.
 // The key is read from the configured source (api_credits_key_source: env:<NAME> or
 // bws:<secret-name>), reaches only the request headers and is never printed.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { isMain } from './lib/is-main.mjs';
 import { execFileSyncHidden } from './lib/proc.mjs';
 import { opt } from '../hooks/lib/context.mjs';
@@ -34,6 +35,45 @@ import { runApiSdk, DEFAULT_SDK_VERSION } from './lib/api-sdk-run.mjs';
 
 const DIFF_CAP = 150000;
 const BRIEF_CAP = 60000;
+// The fetch engine inlines the project's rules into the system prompt (the sdk engine loads them itself, through the
+// SDK's project settings). Cap: 20,000 characters in all, about 8K tokens (prose runs about 2.4 characters per token). A
+// CLAUDE.md is meant to stay under about 200 lines, roughly 8-10K characters, so a normal one fits whole; the cap bounds what
+// one review pays for them: about two cents on Sonnet on a cold cache (first turn), a fraction of a cent per later turn, against a
+// $0.20 soft limit. A file that does not fit is cut, with a note saying how much was left out. The fetch engine runs no hooks: its
+// guard coverage is the tool allow-list in lib/api-tools.mjs (read_file, grep, glob, confined to the repository) and nothing else.
+export const RULES_CAP = 20000;
+const norm = (p) => p.split('\\').join('/').toLowerCase();
+export function readProjectRules(cwd, cap = RULES_CAP) {
+  const roots = [cwd];
+  try {
+    const top = execFileSyncHidden('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' }).trim();
+    if (top && norm(top) !== norm(cwd)) roots.push(top);
+  } catch { /* not a git checkout: cwd only */ }
+  const seen = new Set();
+  const parts = [];
+  let left = cap;
+  for (const root of roots) {
+    for (const rel of ['CLAUDE.md', join('.claude', 'CLAUDE.md')]) {
+      const p = join(root, rel);
+      if (seen.has(norm(p)) || !existsSync(p)) continue;
+      seen.add(norm(p));
+      let t;
+      try { t = readFileSync(p, 'utf8').trim(); } catch { continue; }
+      if (!t) continue;
+      const name = norm(rel);
+      if (left <= 0) { parts.push(`[${name} left out: the ${cap}-character cap on project rules was reached]`); continue; }
+      const cut = t.length > left;
+      const note = cut ? `[cut: ${t.length - left} more characters not shown, the ${cap}-character cap on project rules]\n` : '';
+      parts.push(`<project-rules file="${name}">\n${cut ? t.slice(0, left) : t}\n${note}</project-rules>`);
+      left -= Math.min(left, t.length);
+    }
+  }
+  return parts.join('\n');
+}
+export function fetchSystem(base, rules) {
+  if (!rules) return base;
+  return `${base}\n\nThe repository's own rules follow (its CLAUDE.md files). Follow its conventions and prohibitions. Rules that address a lead or a writer (delegate, spawn agents, load skills, run a knowledge check, ask the user) do not apply to you: you are the reviewer and do no knowledge check.\n\n${rules}`;
+}
 
 // Two engines: 'fetch' (Messages API, read-only tools confined to the repository, cheapest) and 'sdk'
 // (the Agent SDK, with Bash, so the reviewer can run the tests). DEFAULT_RUNNER is what a review uses
@@ -135,7 +175,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   }
   if (!r) r = await runApi({
     prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, ...d }),
-    system: REVIEW_SYSTEM,
+    system: fetchSystem(REVIEW_SYSTEM, readProjectRules(o.cwd)),
     model: o.model, effort: o.effort || null, cwd: o.cwd, category: 'review', meta,
     maxUsd,
     ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),

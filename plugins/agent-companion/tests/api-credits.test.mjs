@@ -14,7 +14,7 @@ import {
 } from '../scripts/lib/api-credits.mjs';
 import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
-import { main as reviewMain, buildPrompt } from '../scripts/api-review.mjs';
+import { main as reviewMain, buildPrompt, readProjectRules, fetchSystem, RULES_CAP } from '../scripts/api-review.mjs';
 import { main as creditsMain } from '../scripts/api-credits.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
 import { spawnSyncHidden } from '../scripts/lib/proc.mjs';
@@ -679,7 +679,7 @@ test('runner: only a hung run is stopped: no response for 10 minutes books what 
   } finally { t.fx.cleanup(); }
 });
 
-test('runner: a soft note at $1 (ledger and result) and the run goes on; the backstop is api_review_hard_usd, 0 disables it', async () => {
+test('runner: a soft note at $0.20 (ledger and result), a long-runs row for the scout, and the run goes on and the run goes on; the backstop is api_review_hard_usd, 0 disables it', async () => {
   const t = rig();
   try {
     const big = { input_tokens: 400000, output_tokens: 10 }; // about $0.80 a turn on Sonnet
@@ -690,24 +690,33 @@ test('runner: a soft note at $1 (ledger and result) and the run goes on; the bac
     assert.equal(f.calls.length, 4, 'nothing stopped it');
     assert.ok(r.usd > SOFT_USD);
     assert.equal(r.notes.filter((n) => /soft spend limit/.test(n)).length, 1, 'one note, not one per turn');
-    assert.match(t.ledger().entries[0].notes.join(' '), /passed the \$1 soft spend limit; not stopped/);
+    assert.match(t.ledger().entries[0].notes.join(' '), /passed the \$0\.20 soft spend limit; not stopped/);
     assert.ok(!f.calls.some((c) => c.body.tool_choice), 'no forced final turn with the backstop off');
-    // With the default $5 backstop the run is also left alone until 80% of it ($4).
-    const g = stubFetch(script);
+    const lr = join(t.fx.stateDir, 'state', 'long-runs.jsonl');
+    const rows = readFileSync(lr, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(rows.length, 1, 'one row for the spend limit, not one per turn');
+    assert.equal(rows[0].agentType, 'api-review');
+    assert.match(rows[0].description, /soft spend limit; not stopped: \$0\.\d\d after 1 turn/);
+    assert.ok(Number.isFinite(rows[0].steps));
+    // With the default $0.50 backstop the run is also left alone until 80% of it ($0.40).
+    const mid = { input_tokens: 40000, output_tokens: 10 }; // about $0.08 a turn
+    const g = stubFetch((k) => (k < 3 ? msg([toolUse(`m${k}`, 'glob', { pattern: '*' })], mid, 'tool_use') : msg([text(`VERDICT: PASS${NL}ok`)], mid)));
     const r2 = await direct(t, g, { requireVerdict: true });
     assert.equal(r2.ok, true, r2.reason);
-    assert.equal(DEFAULT_HARD_USD, 5);
+    assert.ok(!g.calls.some((c) => c.body.tool_choice), 'under 80% of the backstop: no forced final turn');
+    assert.equal(DEFAULT_HARD_USD, 0.5);
+    assert.equal(SOFT_USD, 0.2);
   } finally { t.fx.cleanup(); }
 });
 
 test('hardUsdFrom: the option value, 0 disables, junk and negatives take the default', () => {
-  assert.equal(hardUsdFrom(''), 5);
-  assert.equal(hardUsdFrom(undefined), 5);
+  assert.equal(hardUsdFrom(''), 0.5);
+  assert.equal(hardUsdFrom(undefined), 0.5);
   assert.equal(hardUsdFrom('3'), 3);
   assert.equal(hardUsdFrom(0), 0);
   assert.equal(hardUsdFrom('0'), 0);
-  assert.equal(hardUsdFrom(-1), 5);
-  assert.equal(hardUsdFrom('abc'), 5);
+  assert.equal(hardUsdFrom(-1), 0.5);
+  assert.equal(hardUsdFrom('abc'), 0.5);
 });
 
 test('runner effort: the routed effort rides in output_config.effort on every request; none, none sent', async () => {
@@ -855,4 +864,31 @@ test('read-only tools: the deny list holds against case, trailing dots, streams 
     assert.match(tools.run('grep', { pattern: '^(?:one)+$' }), /a\.txt:1:one/);
     if (process.platform === 'win32') assert.throws(() => tools.run('read_file', { path: 'NUL' }), /not readable/);
   } finally { t.fx.cleanup(); }
+});
+
+test('readProjectRules / fetchSystem: the project CLAUDE.md files are inlined under a stated cap; none means the base prompt unchanged', () => {
+  const fx = makeFixture();
+  try {
+    assert.equal(RULES_CAP, 20000);
+    const none = join(fx.dir, 'norules');
+    mkdirSync(none, { recursive: true });
+    assert.equal(readProjectRules(none), '', 'no CLAUDE.md: nothing inlined');
+    assert.equal(fetchSystem('BASE', ''), 'BASE');
+    const p = join(fx.dir, 'proj');
+    mkdirSync(join(p, '.claude'), { recursive: true });
+    writeFileSync(join(p, 'CLAUDE.md'), '# Root rules\nUse tabs.\n');
+    writeFileSync(join(p, '.claude', 'CLAUDE.md'), 'Second file rule.\n');
+    const r = readProjectRules(p);
+    assert.match(r, /<project-rules file="claude\.md">\n# Root rules\nUse tabs\.\n<\/project-rules>/);
+    assert.match(r, /<project-rules file=".claude\/claude\.md">\nSecond file rule\./);
+    const sys = fetchSystem('BASE', r);
+    assert.ok(sys.startsWith('BASE\n\n'));
+    assert.match(sys, /do no knowledge check/);
+    assert.match(sys, /Use tabs\./);
+    // the cap: the first file is cut with a stated count, the second is named as left out
+    const cut = readProjectRules(p, 10);
+    assert.match(cut, /\[cut: \d+ more characters not shown, the 10-character cap on project rules\]/);
+    assert.match(cut, /\.claude\/claude\.md left out: the 10-character cap/);
+    assert.ok(cut.includes('# Root rul') && !cut.includes('Use tabs'));
+  } finally { fx.cleanup(); }
 });

@@ -11,7 +11,7 @@ import { priceUsage } from '../scripts/lib/pricing.mjs';
 import { spawnSyncHidden } from '../scripts/lib/proc.mjs';
 import {
   runApiSdk, loadSdk, sdkEnv, SDK_TOOLS, SDK_DISALLOWED, SDK_BASH_DENY, SDK_POWERSHELL_DENY, SDK_READ_DENY, DEFAULT_SDK_VERSION,
-  sdkToolsFor, sdkSystem,
+  sdkToolsFor, sdkSystem, sdkOptions, initProof, initMismatch, pluginIdentity, isBuiltinPlugin, PLUGIN_ROOT,
 } from '../scripts/lib/api-sdk-run.mjs';
 import { SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { main as reviewMain, DEFAULT_RUNNER, chooseRunner, briefAsksForCommands, buildPrompt } from '../scripts/api-review.mjs';
@@ -92,7 +92,13 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
     assert.match(r.text, /^VERDICT: PASS/);
     // options
     const o = sdk.calls[0].options;
-    assert.deepEqual(o.settingSources, []);
+    assert.deepEqual(o.settingSources, ['project']);
+    assert.deepEqual(o.skills, []);
+    assert.deepEqual(o.mcpServers, {});
+    assert.equal(o.strictMcpConfig, true);
+    assert.equal(o.plugins.length, 1);
+    assert.equal(o.plugins[0].type, 'local');
+    assert.equal(o.env.AC_REVIEWER_SESSION, '1', 'the child is marked a reviewer session');
     assert.deepEqual(o.tools, ['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch']);
     assert.deepEqual(o.allowedTools, o.tools);
     for (const t of ['Edit', 'Write', 'Task', 'Agent', 'NotebookEdit']) assert.ok(o.disallowedTools.includes(t), t);
@@ -111,7 +117,7 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
     assert.equal(o.cwd, process.cwd());
     assert.equal(o.model, 'claude-sonnet-5-5');
     assert.equal(o.maxBudgetUsd, DEFAULT_HARD_USD);
-    assert.equal('plugins' in o || 'mcpServers' in o || 'skills' in o, false, 'no plugins, MCP servers or skills are passed at all');
+    assert.equal(o.plugins[0].path, PLUGIN_ROOT, 'only the running copy of this plugin is loaded');
     assert.equal(o.env.ANTHROPIC_API_KEY, KEY);
     assert.equal(o.env.ANTHROPIC_CUSTOM_HEADERS, 'anthropic-workspace-id: wrkspc_test1');
     assert.ok(!('AC_API_KEY' in o.env) && !('AC_API_WORKSPACE_ID' in o.env));
@@ -136,7 +142,8 @@ test('toolset: Read, Grep, Glob, Bash, WebSearch, WebFetch everywhere, PowerShel
   assert.ok(!sdkToolsFor('win32').some((t) => t.startsWith('mcp__')));
   assert.equal(SLOW_REVIEW_MS, 8 * 60 * 1000);
   assert.equal(HUNG_MS, 10 * 60 * 1000);
-  assert.equal(SOFT_USD, 1);
+  assert.equal(SOFT_USD, 0.2);
+  assert.equal(DEFAULT_HARD_USD, 0.5);
   assert.doesNotMatch(sdkSystem(30), /600000|timeout/i, 'no shell-timeout instruction: the tool defaults apply');
   assert.match(sdkSystem(30), /AFFECTED by the diff/);
   assert.match(sdkSystem(30), /Never run the full test suite or ci-local/);
@@ -203,7 +210,7 @@ test('runApiSdk: the spend backstop aborts a runaway loop and falls back (no ver
     const r = await run(sdk, { maxUsd: 1 });
     assert.equal(r.ok, false);
     assert.equal(r.unavailable, false);
-    assert.match(r.reason, /spend backstop of \$1 after 2 turn/);
+    assert.match(r.reason, /spend backstop of \$1\.00 after 2 turn/);
     assert.equal(aborted, true);
     assert.ok(r.usd > 1);
     const cy = ledgerOf(fx);
@@ -245,8 +252,9 @@ test('runApiSdk: soft limits: a slow run is logged and goes on; $1 is a note; me
     const r = await run(sdk, { hungMs: 200, slowMs: 100, maxUsd: 0, logRow: (row) => rows.push(row) });
     assert.equal(r.ok, true, r.reason);
     await new Promise((res) => setTimeout(res, 20)); // the slow row is written by a fire-and-forget async call
-    assert.equal(rows.length, 1, 'one long-runs row at the slow mark');
-    assert.equal(rows[0].agentType, 'api-review');
+    assert.equal(rows.length, 2, 'one long-runs row at the slow mark, one at the soft spend limit');
+    assert.ok(rows.every((x) => x.agentType === 'api-review'));
+    assert.ok(rows.some((x) => /soft spend limit/.test(x.description || '')), 'the spend row says why');
     assert.ok(r.notes.some((n) => /ran past .* minutes/.test(n) && /not stopped/.test(n)));
     assert.ok(r.usd > SOFT_USD);
     assert.equal(r.notes.filter((n) => /soft spend limit/.test(n)).length, 1);
@@ -464,5 +472,57 @@ test('runApiSdk: the child gets a private CLAUDE_CONFIG_DIR and the credential d
     assert.match(o.env.CLAUDE_CONFIG_DIR, /sdk[\\/]config-/);
     assert.ok(o.env.CLAUDE_CONFIG_DIR.startsWith(fx.stateDir), 'under the (sandboxed) state dir, not the operator config');
     assert.ok(o.disallowedTools.includes('Read(~/.claude/**)') && o.disallowedTools.includes('Read(~/.ssh/**)'));
+  } finally { fx.cleanup(); }
+});
+
+test('sdkOptions: project settings and only this plugin; no skills, no MCP; our tool lists still carry the safety', () => {
+  const o = sdkOptions({ cwd: '/r', modelId: 'claude-haiku-5-5', key: KEY, workspace: '', base: ENV, configDir: '/cfg', platform: 'linux', maxTurns: 5, maxUsd: 0.5 });
+  assert.deepEqual(o.settingSources, ['project'], 'no user settings');
+  assert.deepEqual(o.plugins, [{ type: 'local', path: PLUGIN_ROOT }]);
+  assert.deepEqual(o.skills, []);
+  assert.deepEqual(o.mcpServers, {});
+  assert.equal(o.strictMcpConfig, true, 'a project .mcp.json is not read');
+  assert.equal(o.env.AC_REVIEWER_SESSION, '1');
+  assert.equal(o.env.CLAUDE_CONFIG_DIR, '/cfg');
+  assert.ok(o.disallowedTools.includes('Edit') && o.disallowedTools.includes('Write'), 'a project allow rule cannot widen the deny list');
+  assert.deepEqual(o.allowedTools, o.tools);
+  assert.equal(o.maxBudgetUsd, 0.5);
+  assert.deepEqual(sdkOptions({ cwd: '/r', modelId: 'm', key: KEY, platform: 'linux', pluginRoot: '/no/such/plugin' }).plugins, [], 'a layout that is not a plugin loads none');
+});
+
+test('pluginIdentity reads the running copy; initMismatch passes the expected init and flags another plugin or an MCP server', () => {
+  const id = pluginIdentity();
+  assert.equal(id.name, 'agent-companion');
+  assert.equal(id.root, PLUGIN_ROOT);
+  const ok = initProof({ apiKeySource: 'ANTHROPIC_API_KEY', plugins: [{ name: 'agent-companion', version: '1' }, { name: 'cc-plugin-agents-md' }], mcp_servers: [], tools: ['Read'], skills: [] });
+  assert.equal(initMismatch(ok, id), null, 'built-in cc-plugin-* entries are the binary, not a loaded plugin');
+  assert.equal(isBuiltinPlugin({ name: 'cc-plugin-agents-md', version: null }), true);
+  assert.equal(isBuiltinPlugin({ name: 'cc-plugin-x', version: '1.0.0' }), false);
+  assert.match(initMismatch(initProof({ plugins: [{ name: 'agent-companion' }, { name: 'other-plugin', version: '2' }] }), id), /other-plugin/);
+  assert.match(initMismatch(initProof({ plugins: [{ name: 'agent-companion' }], mcp_servers: [{ name: 'fixture', status: 'connected' }] }), id), /MCP servers.*fixture/);
+});
+
+test('runApiSdk: an init that loaded another plugin aborts the run before any work, as a configuration failure', async () => {
+  const fx = makeFixture();
+  try {
+    const sdk = fakeSdk(async function* () {
+      yield { ...init(), plugins: [{ name: 'agent-companion', version: '1' }, { name: 'other-plugin', version: '2' }] };
+      yield assistant('m1', txt('never read'), { input_tokens: 5, output_tokens: 5 });
+    });
+    const r = await run(sdk);
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /other-plugin/);
+    assert.equal(r.usd, 0);
+  } finally { fx.cleanup(); }
+});
+
+test('runApiSdk: the init proof comes back with the result', async () => {
+  const fx = makeFixture();
+  try {
+    const sdk = fakeSdk([{ ...init(), plugins: [{ name: 'agent-companion', version: '1' }], mcp_servers: [] }, assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 5, output_tokens: 5 }, { stop: 'end_turn' }), result()]);
+    const r = await run(sdk);
+    assert.equal(r.ok, true, r.reason);
+    assert.deepEqual(r.init.plugins, [{ name: 'agent-companion', version: '1' }]);
+    assert.equal(r.init.apiKeySource, 'ANTHROPIC_API_KEY');
   } finally { fx.cleanup(); }
 });
