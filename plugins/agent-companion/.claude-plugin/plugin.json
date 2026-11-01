@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.45",
+  "version": "0.31.46",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -215,6 +215,42 @@
       "title": "Decision register",
       "description": "Reads your own register of standing decisions (config/decision-register.json in the agent-companion config dir; absent means nothing happens) and flags a decision for review when its trigger fires: a Claude Code changelog item that matches a pattern you wrote, a plan-usage metric from the daily checkup past a threshold, or a staged change not exercised or exercised wrongly. No model call and no extra network (the changelog scan rides on the release-watch fetch). The next MAIN session start shows ONE line per flag, once, and only while the flag is under 72 hours old (subagents get nothing); the full text goes to decision-register-details.md in the scout state dir. Off = no scan, no line, no signal.",
       "default": true
+    },
+    "api_credits_key_source": {
+      "type": "string",
+      "title": "API credits: where the Console API key comes from",
+      "description": "Where scripts/api-review.mjs finds the Console API key that bills a review to the plan's API credits: \"env:<NAME>\" (a user environment variable; default env:AC_API_KEY) or \"bws:<secret-name>\" (Bitwarden Secrets Manager CLI, with BWS_ACCESS_TOKEN in the environment). The key goes only into the x-api-key header of a Messages API request (the credits do not cover Claude Code, so no claude process is started); it is never printed, logged, written or put on a command line. If the key is not scoped to a workspace, also set the environment variable AC_API_WORKSPACE_ID. With the variable unset, `api-credits.mjs decide` answers plan and nothing changes. Create the key in the Claude Console and turn auto-reload off there so nothing charges a card.",
+      "default": "env:AC_API_KEY"
+    },
+    "api_credits_budget_usd": {
+      "type": "number",
+      "title": "API credits: monthly budget (USD)",
+      "description": "The plan's monthly Claude Platform API credits, in USD. Spend is paced linearly across the billing cycle, so the credits last the month.",
+      "default": 200
+    },
+    "api_credits_cycle_day": {
+      "type": "number",
+      "title": "API credits: billing cycle start day",
+      "description": "Day of the month (1-28, UTC) the credit cycle starts. The ledger rolls over then.",
+      "default": 1
+    },
+    "api_credits_shares": {
+      "type": "string",
+      "title": "API credits: category shares",
+      "description": "Share of the budget per category as name=fraction pairs. Default review=0.5,overflow=0.3,rater=0.1,reserve=0.1. A category may have spent at most share x budget x elapsed fraction of the cycle plus one average item. The reserve is held back until the last 3 days of the cycle. Only review is used today; overflow and rater are reserved for later.",
+      "default": "review=0.5,overflow=0.3,rater=0.1,reserve=0.1"
+    },
+    "api_credits_review_ratio": {
+      "type": "number",
+      "title": "API credits: target share of reviews on credits",
+      "description": "Target fraction of writer reviews run on the API credits (default 0.5: alternate by a persisted counter). Pacing and the remaining balance can only lower it.",
+      "default": 0.5
+    },
+    "api_credits_item_estimate_usd": {
+      "type": "number",
+      "title": "API credits: estimated cost of one review (USD)",
+      "description": "Used as the pace slack and balance check until the cycle has a recorded review. An agentic review costs about $1-3.",
+      "default": 2
     },
     "weekly_limit_units": {
       "type": "number",
