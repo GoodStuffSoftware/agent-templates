@@ -35,7 +35,7 @@
 import { basename, resolve } from 'node:path';
 import { priceUsage } from './pricing.mjs';
 import { modelTiers } from '../../hooks/lib/context.mjs';
-import { loadConfig, resolveKey, record, recordFailure } from './api-credits.mjs';
+import { loadConfig, resolveKey, record, recordFailure, recordSpend } from './api-credits.mjs';
 import { makeTools } from './api-tools.mjs';
 
 export const EXIT_OK = 0;
@@ -117,27 +117,48 @@ const textOf = (content) => (Array.isArray(content) ? content.filter((b) => b &&
 // Run one conversation on the API key. Returns
 //   { ok:true, text, usd, turns, tokens:{input,output,cacheRead,cacheWrite}, model, stopReason }
 //   { ok:false, unavailable:true|false, reason, usd }
-// Books the cost (and a billing/auth/config failure) in the ledger. Never throws.
+// either with `ledgerError` set when a ledger write failed (the amount is then not in the ledger).
+// Books each paid turn as it completes (a killed run still leaves its spend) and the run as one
+// ledger entry at the end, failures included (usd 0, with an error field). Stops at the wall-clock
+// deadline (default 8 minutes) with a falls-back result. requireVerdict makes a run that ends
+// without a VERDICT line (or was cut off) a failure instead of a pass. Never throws.
+export const DEFAULT_MAX_TOKENS = 64000; // thinking counts toward max_tokens; the effort docs start Opus xhigh/max at 64k
+export const DEFAULT_DEADLINE_MS = 8 * 60 * 1000;
+const CUT_OFF = ['max_tokens', 'refusal', 'pause_turn'];
+export const hasVerdict = (t) => /^[\s*#`>_-]*VERDICT:\s*(?:PASS|FIX)\b/m.test(String(t || ''));
+
 export async function runApi({
   prompt, model, effort = null, cwd = process.cwd(), category = 'review', meta = '', system = null,
-  tools = true, maxUsd = 8, maxTurns = 30, maxTokens = 16000, requestTimeoutMs = 5 * 60 * 1000,
+  tools = true, maxUsd = 8, maxTurns = 30, maxTokens = DEFAULT_MAX_TOKENS, requestTimeoutMs = 5 * 60 * 1000,
+  deadlineMs = DEFAULT_DEADLINE_MS, clock = Date.now, requireVerdict = false,
   cfg = loadConfig(), env = process.env, now = Date.now(), fetchImpl = globalThis.fetch, endpoint = OFFICIAL_ENDPOINT,
   sleep = sleepMs, retries = 2,
 }) {
   let key = '';
   let usd = 0;
+  let booked = 0; // spend already in the ledger, turn by turn
   let turnCount = 0;
+  let ledgerError = null;
+  const deadline = clock() + deadlineMs;
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  const bookCost = (ok) => {
-    if (usd > 0 || ok) {
-      try {
-        record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
-          cfg, now, success: ok, detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount },
-        });
-      } catch { /* ledger trouble does not change the answer */ }
-    }
-  };
+  const ledgerFailed = (what, e) => { ledgerError ||= `ledger write failed; ${what} (${scrub(String((e && e.message) || e), key).replace(/\s+/g, ' ').slice(0, 80)})`; };
   let modelId = String(model);
+  const bookCost = (ok, error = null) => {
+    try {
+      record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
+        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok,
+        detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, error: ok ? null : error },
+      });
+    } catch (e) { ledgerFailed(`$${(usd - booked).toFixed(4)} not recorded`, e); }
+  };
+  const noteFailure = (reason, hard = false) => {
+    try { recordFailure(reason, { cfg, now, hard }); } catch (e) { ledgerFailed('the failure count was not recorded', e); }
+  };
+  const fail = (unavailable, reason) => {
+    const r = scrub(reason, key).slice(0, 200);
+    bookCost(false, r);
+    return { ok: false, unavailable, reason: r, usd, ...(ledgerError ? { ledgerError } : {}) };
+  };
   try {
     key = resolveKey(cfg.keySource, env);
     if (!validKeyShape(key)) throw configError('the configured secret is not a Console API key (it must start sk-ant-, and sk-ant-admin and sk-ant-oat are refused)');
@@ -152,10 +173,12 @@ export async function runApi({
     const toolbox = tools ? makeTools(cwd) : null;
     const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }];
     const softCap = maxUsd * 0.8;
+    const deadlineReason = () => `wall-clock deadline of ${Math.round((deadlineMs / 60000) * 10) / 10} minutes reached after ${turnCount} turn(s); falling back to the plan`;
     let turns = 0;
     let last = null;
 
     for (;;) {
+      if (clock() >= deadline) return fail(false, deadlineReason());
       const final = !toolbox || turns >= maxTurns - 1 || usd >= softCap;
       if (final && toolbox && turns > 0) {
         const tail = messages[messages.length - 1];
@@ -171,33 +194,32 @@ export async function runApi({
       let raw = '';
       for (let attempt = 0; ; attempt++) {
         try {
-          res = await fetchImpl(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(requestTimeoutMs) });
+          // redirect: 'error' so the key header can never follow a redirect off the official host.
+          res = await fetchImpl(endpoint, { method: 'POST', headers, body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(Math.max(1, Math.min(requestTimeoutMs, deadline - clock()))) });
           raw = await res.text();
         } catch (e) {
           res = null; raw = String((e && e.message) || e);
         }
         const st = res ? res.status : 0;
-        if ((st === 0 || st === 429 || st >= 500) && attempt < retries) { await sleep(1000 * 3 ** attempt); continue; }
+        if ((st === 0 || st === 429 || st >= 500) && attempt < retries && clock() < deadline) { await sleep(1000 * 3 ** attempt); continue; }
         break;
       }
+      if (!res && clock() >= deadline) return fail(false, deadlineReason());
       const status = res ? res.status : 0;
       let j = null;
       try { j = JSON.parse(raw); } catch { /* not JSON */ }
       if (status !== 200 || !j || j.type === 'error') {
         const msg = scrub((j && j.error && j.error.message) || raw || 'no response', key).replace(/\s+/g, ' ').trim().slice(0, 200);
         if (isWorkspaceMissing({ status, text: msg })) {
-          try { recordFailure(WORKSPACE_HINT, { cfg, now }); } catch { /* see above */ }
-          bookCost(false);
-          return { ok: false, unavailable: true, reason: WORKSPACE_HINT, usd };
+          noteFailure(WORKSPACE_HINT);
+          return fail(true, WORKSPACE_HINT);
         }
         if (isUnavailable({ status, text: msg }) || isSpendLimit({ status, text: msg })) {
           const reason = `HTTP ${status || '?'}: ${msg}`.slice(0, 200);
-          try { recordFailure(reason, { cfg, now, hard: isSpendLimit({ status, text: msg }) }); } catch { /* see above */ }
-          bookCost(false);
-          return { ok: false, unavailable: true, reason, usd };
+          noteFailure(reason, isSpendLimit({ status, text: msg }));
+          return fail(true, reason);
         }
-        bookCost(false);
-        return { ok: false, unavailable: false, reason: `HTTP ${status || '?'}: ${msg}`.slice(0, 200), usd };
+        return fail(false, `HTTP ${status || '?'}: ${msg}`);
       }
 
       turns += 1;
@@ -206,6 +228,8 @@ export async function runApi({
       for (const k of Object.keys(tokens)) tokens[k] += u[k];
       const p = priceUsage(u, modelId);
       usd += p ? p.usd : 0;
+      // Book this paid turn now: a run that is killed or times out later still leaves its spend.
+      if (p && p.usd > 0) { try { recordSpend(category, p.usd, { cfg, now }); booked += p.usd; } catch { /* the final record() books the rest and reports a failure */ } }
       last = j;
       const content = Array.isArray(j.content) ? j.content : [];
       const uses = content.filter((b) => b && b.type === 'tool_use');
@@ -223,16 +247,16 @@ export async function runApi({
     }
 
     const text = scrub(textOf(last.content), key);
-    if (!text) {
-      bookCost(false);
-      return { ok: false, unavailable: false, reason: `the model returned no text (stop_reason ${last.stop_reason})`, usd };
+    if (!text) return fail(false, `the model returned no text (stop_reason ${last.stop_reason})`);
+    if (requireVerdict) {
+      if (CUT_OFF.includes(last.stop_reason)) return fail(false, `the review was cut off (stop_reason ${last.stop_reason}); no usable verdict`);
+      if (!hasVerdict(text)) return fail(false, `the review has no VERDICT line (stop_reason ${last.stop_reason})`);
     }
     bookCost(true);
-    return { ok: true, text, usd, turns, tokens, model: modelId, stopReason: last.stop_reason };
+    return { ok: true, text, usd, turns, tokens, model: modelId, stopReason: last.stop_reason, ...(ledgerError ? { ledgerError } : {}) };
   } catch (e) {
-    bookCost(false);
     const reason = scrub(String((e && e.message) || e), key).slice(0, 200);
-    if (e && e.configFailure) { try { recordFailure(reason, { cfg, now }); } catch { /* see above */ } }
-    return { ok: false, unavailable: !!(e && e.configFailure), reason, usd };
+    if (e && e.configFailure) noteFailure(reason);
+    return fail(!!(e && e.configFailure), reason);
   }
 }

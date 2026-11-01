@@ -183,7 +183,7 @@ function stubFetch(script) {
   const calls = [];
   const f = async (url, init) => {
     const body = JSON.parse(init.body);
-    calls.push({ url, headers: { ...init.headers }, body, raw: init.body });
+    calls.push({ url, headers: { ...init.headers }, body, raw: init.body, redirect: init.redirect });
     const r = typeof script === 'function' ? script(calls.length, body) : script[Math.min(calls.length - 1, script.length - 1)];
     return { status: r.status, text: async () => (typeof r.body === 'string' ? r.body : JSON.stringify(r.body)) };
   };
@@ -210,11 +210,12 @@ function rig() {
   writeFileSync(brief, 'TYPE: bounded-feature\nthe lead brief, verbatim\n');
   const run = async (fetchImpl, { extra = [], env = {}, key = SENTINEL } = {}) => {
     const lines = [];
+    const errs = [];
     const code = await reviewMain(
       ['run', '--brief-file', brief, '--diff-ref', 'HEAD~1..HEAD', '--model', 'sonnet', '--effort', 'xhigh', '--cwd', repo, '--writer', 'sonnet/high', ...extra],
-      { out: (s) => lines.push(s), env: { AC_API_KEY: key, ...env }, fetchImpl, sleep: async () => {}, cfg: CFG },
+      { out: (s) => lines.push(s), err: (s) => errs.push(s), env: { AC_API_KEY: key, ...env }, fetchImpl, sleep: async () => {}, cfg: CFG },
     );
-    return { code, out: lines.join('\n') };
+    return { code, out: lines.join('\n'), err: errs.join('\n') };
   };
   const ledger = () => {
     const p = join(fx.stateDir, 'state', 'api-credits.json');
@@ -413,7 +414,14 @@ test('runner: the workspace spend limit (400) trips the breaker at once; a 429 i
     assert.equal(slow.code, 4);
     assert.match(slow.out, /^API review failed: HTTP 429/);
     assert.equal(f.calls.length, 3, 'one try and two retries');
-    assert.equal(t.ledger(), null, 'nothing booked, nothing tripped');
+    const l429 = t.ledger();
+    assert.equal(l429.fails, 0, 'nothing tripped');
+    assert.equal(l429.tripped, null);
+    assert.equal(l429.spent.review, 0, 'nothing booked');
+    assert.equal(l429.n.review, undefined, 'a $0 failed run is not counted as an item (it would lower the average)');
+    assert.equal(l429.entries.length, 1, 'but it leaves a ledger entry');
+    assert.equal(l429.entries[0].usd, 0);
+    assert.match(l429.entries[0].error, /^HTTP 429/);
     assert.equal(decide('review', { cfg: CFG, env: KEYENV }).decision, 'api');
 
     const g = stubFetch([apiError(400, 'You have reached your specified workspace API usage limits. You will regain access on 2026-12-01 at 00:00 UTC')]);
@@ -562,9 +570,183 @@ test('the self-review clause runs the governor before spawning a reviewer, and k
   assert.ok(block.includes('--model sonnet --effort high'));
   assert.ok(block.includes('--review-file'));
   assert.ok(block.includes('no verdict line, no land'));
+  assert.ok(block.includes('Bash timeout of 600000 ms'), 'the runner outlives the default Bash timeout');
+  assert.ok(block.includes("brief TEXT goes into that file, never only a path to it"));
   assert.ok(block.includes('spawn exactly ONE reviewer, in the foreground'));
   assert.ok(block.includes('API review unavailable'));
   const agent = readFileSync(join(PLUGIN_ROOT, 'agents', 'ac-sonnet-high.md'), 'utf8');
   assert.ok(agent.includes('api-credits.mjs" decide review'), 'the generated rung body carries the clause');
 });
 
+
+// --- review fixes (0.31.46 fix round) ---------------------------------------------------------
+
+const direct = (t, fetchImpl, extra = {}) => runApi({
+  prompt: 'review this', model: 'sonnet', cwd: t.repo, cfg: CFG, env: { AC_API_KEY: SENTINEL }, fetchImpl, sleep: async () => {}, ...extra,
+});
+
+test('runner: each paid turn is booked as it completes, so a run killed mid-way still leaves its spend; the final entry does not double-count', async () => {
+  const t = rig();
+  try {
+    let seenAfterTurn1 = null;
+    const f = stubFetch((n) => {
+      if (n === 1) return msg([toolUse('t1', 'glob', { pattern: '*' })], USAGE, 'tool_use');
+      if (n === 2) { seenAfterTurn1 = t.ledger(); return msg([text(`VERDICT: PASS${NL}ok`)]); }
+      throw new Error('unexpected');
+    });
+    const r = await t.run(f);
+    assert.equal(r.code, 0, r.out);
+    assert.ok(seenAfterTurn1 && Math.abs(seenAfterTurn1.spent.review - sonnetUsd(USAGE)) < 1e-9, 'turn 1 was in the ledger before turn 2 was requested');
+    assert.equal(seenAfterTurn1.n.review, undefined, 'no run entry yet');
+    const cy = t.ledger();
+    assert.ok(Math.abs(cy.spent.review - 2 * sonnetUsd(USAGE)) < 1e-9, 'two turns, booked once each');
+    assert.equal(cy.n.review, 1);
+    assert.ok(Math.abs(cy.entries[0].usd - 2 * sonnetUsd(USAGE)) < 1e-9);
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: the wall-clock deadline stops the run, books what was paid and returns the fall-back result', async () => {
+  const t = rig();
+  try {
+    let tNow = 1000;
+    const f = stubFetch(() => { tNow += 9 * 60 * 1000; return msg([toolUse('t1', 'glob', { pattern: '*' })], USAGE, 'tool_use'); });
+    const r = await direct(t, f, { clock: () => tNow });
+    assert.equal(f.calls.length, 1, 'no request after the deadline');
+    assert.equal(r.ok, false);
+    assert.equal(r.unavailable, false, 'exit 4: the writer falls back to the subagent reviewer');
+    assert.match(r.reason, /wall-clock deadline of 8 minutes reached after 1 turn/);
+    const cy = t.ledger();
+    assert.ok(Math.abs(cy.spent.review - sonnetUsd(USAGE)) < 1e-9);
+    assert.match(cy.entries[0].error, /wall-clock deadline/);
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: a brief file that holds only a path is exit 4 before any call; a long brief is cut and says so', async () => {
+  const t = rig();
+  try {
+    writeFileSync(t.brief, "TYPE: bounded-feature\nThe lead's brief: C:/Users/me/.claude/tasks/x/brief.md\n");
+    const f = stubFetch([msg([text('VERDICT: PASS')])]);
+    const r = await t.run(f);
+    assert.equal(r.code, 4);
+    assert.match(r.out, /^API review failed: the brief file holds a file path or no text/);
+    assert.equal(f.calls.length, 0);
+    writeFileSync(t.brief, 'TYPE: bounded-feature\n');
+    assert.equal((await t.run(f)).code, 4, 'no brief text at all');
+    const long = buildPrompt({ brief: 'x'.repeat(70000), diffRef: 'a..b', writer: 'w' });
+    assert.ok(long.includes('[brief cut at 60000 characters]'));
+    assert.ok(!buildPrompt({ brief: 'short brief', diffRef: 'a..b' }).includes('[brief cut'));
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: requireVerdict makes a verdict-less or cut-off answer a failure, booked once; the plain runner (probe) still passes any text', async () => {
+  const t = rig();
+  try {
+    const f = stubFetch([msg([text('Let me check the files first.')])]);
+    const r = await t.run(f);
+    assert.equal(r.code, 4);
+    assert.match(r.out, /^API review failed: the review has no VERDICT line/);
+    const cy = t.ledger();
+    assert.ok(Math.abs(cy.spent.review - sonnetUsd(USAGE)) < 1e-9, 'paid, and booked once');
+    assert.equal(cy.fails, 0);
+    const g = stubFetch([msg([text(`VERDICT: FIX${NL}blocker: half a`)], USAGE, 'max_tokens')]);
+    const cut = await t.run(g);
+    assert.equal(cut.code, 4);
+    assert.match(cut.out, /cut off \(stop_reason max_tokens\)/);
+    const ok = await t.run(stubFetch([msg([text(`**VERDICT: PASS**${NL}fine`)])]));
+    assert.equal(ok.code, 0, 'a bold verdict line counts');
+    const plain = await direct(t, stubFetch([msg([text('ok')])]), { tools: false });
+    assert.equal(plain.ok, true);
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: max_tokens defaults to 64000 and can be set; redirects are refused; bad numbers are exit 2', async () => {
+  const t = rig();
+  try {
+    const f = stubFetch([msg([text('VERDICT: PASS')])]);
+    await t.run(f);
+    assert.equal(f.calls[0].body.max_tokens, 64000);
+    assert.equal(f.calls[0].redirect, 'error', 'the key header never follows a redirect');
+    const g = stubFetch([msg([text('VERDICT: PASS')])]);
+    await t.run(g, { extra: ['--max-tokens', '4000'] });
+    assert.equal(g.calls[0].body.max_tokens, 4000);
+    for (const bad of ['--max-turns', '--max-usd', '--max-tokens']) {
+      const h = stubFetch([msg([text('VERDICT: PASS')])]);
+      const r = await t.run(h, { extra: [bad, 'abc'] });
+      assert.equal(r.code, 2, bad);
+      assert.equal(h.calls.length, 0);
+    }
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: a ledger write failure is reported on stderr and in the label, not swallowed', async () => {
+  const t = rig();
+  try {
+    const p = join(t.fx.stateDir, 'state', 'api-credits.json');
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, '{ not json');
+    const r = await t.run(stubFetch([msg([text('VERDICT: PASS')])]));
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.err, /^ledger write failed; \$[0-9.]+ not recorded/);
+    assert.match(r.out, /ledger write failed; \$[0-9.]+ not recorded/);
+    assert.ok(!r.err.includes(SENTINEL) && !r.out.includes(SENTINEL));
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: a failed run that cost nothing still leaves a ledger entry with its error', async () => {
+  const t = rig();
+  try {
+    const r = await t.run(stubFetch([apiError(401, 'invalid x-api-key', 'authentication_error')]));
+    assert.equal(r.code, 3);
+    const cy = t.ledger();
+    assert.equal(cy.entries.length, 1);
+    assert.equal(cy.entries[0].usd, 0);
+    assert.match(cy.entries[0].error, /^HTTP 401/);
+    assert.equal(cy.fails, 1);
+  } finally { t.fx.cleanup(); }
+});
+
+test('runner: a bws lookup failure is a config failure: it counts toward the breaker, and decide then answers plan', async () => {
+  const t = rig();
+  const was = process.env.AGENT_COMPANION_BWS_BIN;
+  process.env.AGENT_COMPANION_BWS_BIN = join(t.fx.dir, 'no-such-bws-binary');
+  try {
+    const cfg = { ...CFG, keySource: 'bws:my-secret' };
+    const env = { BWS_ACCESS_TOKEN: 'tok' };
+    const f = stubFetch([msg([text('VERDICT: PASS')])]);
+    for (let i = 0; i < 2; i++) {
+      const r = await runApi({ prompt: 'x', model: 'sonnet', cwd: t.repo, cfg, env, fetchImpl: f, sleep: async () => {} });
+      assert.equal(r.ok, false);
+      assert.equal(r.unavailable, true, 'exit 3 class');
+      assert.match(r.reason, /bws failed to return the secret/);
+    }
+    assert.equal(f.calls.length, 0);
+    assert.equal(t.ledger().fails, 2);
+    assert.match(decide('review', { cfg, env, path: join(t.fx.stateDir, 'state', 'api-credits.json') }).reason, /failed 2 times in a row/);
+  } finally {
+    if (was === undefined) delete process.env.AGENT_COMPANION_BWS_BIN; else process.env.AGENT_COMPANION_BWS_BIN = was;
+    t.fx.cleanup();
+  }
+});
+
+test('read-only tools: the deny list holds against case, trailing dots, streams and 8.3 names; UNC, device and drive paths are refused before the filesystem', () => {
+  const t = rig();
+  try {
+    mkdirSync(join(t.repo, '.git'), { recursive: true });
+    writeFileSync(join(t.repo, '.git', 'config'), 'url = https://u:tok@example.com/r.git');
+    writeFileSync(join(t.repo, '.env'), 'SECRET=1');
+    const tools = makeTools(t.repo);
+    for (const p of ['.GIT/config', '.Git\\config', '.git./config', '.git /config', '.git::$INDEX_ALLOCATION/config', 'GIT~1/config', '.ENV', '.Env', '.env.', '.env::$DATA', 'ENV~1', 'src/../.GIT/config']) {
+      assert.throws(() => tools.run('read_file', { path: p }), /not readable|no such path/, p);
+    }
+    assert.throws(() => tools.run('grep', { pattern: 'tok', path: '.GIT' }), /not readable/);
+    assert.ok(!tools.run('grep', { pattern: 'tok|SECRET' }).includes('tok@'), 'the walk skips them');
+    const t0 = Date.now();
+    for (const p of ['\\\\192.0.2.1\\share\\x.txt', '//192.0.2.1/share/x.txt', '\\\\?\\C:\\Windows\\win.ini', '\\\\.\\pipe\\x', 'C:a.txt', 'C:\\Windows\\win.ini', '/etc/passwd']) {
+      assert.throws(() => tools.run('read_file', { path: p }), /outside the repository/, p);
+    }
+    assert.ok(Date.now() - t0 < 2000, 'no network lookup was started');
+    assert.throws(() => tools.run('grep', { pattern: '^(a+)+$' }), /nested quantifiers/);
+    assert.match(tools.run('grep', { pattern: '^(?:one)+$' }), /a\.txt:1:one/);
+    if (process.platform === 'win32') assert.throws(() => tools.run('read_file', { path: 'NUL' }), /not readable/);
+  } finally { t.fx.cleanup(); }
+});

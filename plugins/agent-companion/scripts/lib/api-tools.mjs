@@ -59,18 +59,35 @@ export function globToRegExp(glob) {
   return new RegExp(`^${re}$`);
 }
 
+const WIN = process.platform === 'win32';
+const DEVICE_RE = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/;
+
+// A path component the tools never read: .git, .env* and, on Windows where names are
+// case-insensitive and have other spellings, those under any case, trailing dots or spaces, an
+// NTFS stream suffix (a colon), an 8.3 short name (GIT~1, ENV~1) or a reserved device name.
+export function deniedName(seg) {
+  const n = String(seg).replace(/[. ]+$/, '').toLowerCase();
+  if (n === '.git' || n.startsWith('.env') || n.includes(':') || /^(?:git|env)~\d/.test(n)) return true;
+  return WIN && DEVICE_RE.test(n.split('.')[0]);
+}
+
 export function makeTools(cwd) {
-  const root = realpathSync(resolve(cwd));
+  const root = realpathSync.native(resolve(cwd));
   const inside = (p) => p === root || p.startsWith(root + sep);
   const rel = (p) => relative(root, p).split(sep).join('/');
 
   function confine(p) {
-    const abs = resolve(root, String(p || '.'));
+    const given = String(p || '.');
+    // Before any filesystem call: no UNC or device path (touching one opens a network connection),
+    // no drive letter, and a lexical containment and deny-list check of the name as given.
+    if (/^[\/]{2}/.test(given) || /^[A-Za-z]:/.test(given)) throw new Error(`path is outside the repository: ${p}`);
+    const abs = resolve(root, given);
+    if (!inside(abs)) throw new Error(`path is outside the repository: ${p}`);
+    if (relative(root, abs).split(sep).some(deniedName)) throw new Error(`path is not readable: ${p}`);
     let real;
-    try { real = realpathSync(abs); } catch { throw new Error(`no such path: ${p}`); }
+    try { real = realpathSync.native(abs); } catch { throw new Error(`no such path: ${p}`); }
     if (!inside(real)) throw new Error(`path is outside the repository: ${p}`);
-    const parts = rel(real).split('/');
-    if (parts.some((s) => s === '.git' || /^\.env/.test(s))) throw new Error(`path is not readable: ${p}`);
+    if (rel(real).split('/').some(deniedName)) throw new Error(`path is not readable: ${p}`);
     return real;
   }
 
@@ -83,7 +100,7 @@ export function makeTools(cwd) {
       try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
       entries.sort((a, b) => (a.name < b.name ? 1 : -1));
       for (const e of entries) {
-        if (SKIP_DIRS.has(e.name) || /^\.env/.test(e.name) || e.isSymbolicLink()) continue;
+        if (SKIP_DIRS.has(e.name) || deniedName(e.name) || e.isSymbolicLink()) continue;
         const full = join(dir, e.name);
         if (e.isDirectory()) stack.push(full);
         else if (e.isFile()) { if (++seen > MAX_WALK_FILES) return; yield full; }
@@ -119,6 +136,8 @@ export function makeTools(cwd) {
     },
     grep({ pattern, path = '.', glob = null, ignore_case = false }) {
       let re;
+      // A nested quantifier such as (a+)+ can backtrack for minutes, and nothing in-process can stop a synchronous match.
+      if (/\([^)]*[+*][^)]*\)\s*[+*{]/.test(String(pattern))) throw new Error('refused: nested quantifiers can hang the search; use a simpler pattern');
       try { re = new RegExp(pattern, ignore_case ? 'i' : ''); } catch (e) { throw new Error(`bad regular expression: ${e.message}`); }
       const start = confine(path);
       const gre = glob ? globToRegExp(glob) : null;

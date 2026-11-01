@@ -104,6 +104,10 @@ export function keyConfigured(src, env = process.env) {
   return !!env.BWS_ACCESS_TOKEN;
 }
 
+// A key-lookup failure that is the configuration's fault (bws failed, no such secret): the runner
+// counts it toward the two-strikes breaker, like a billing or auth failure.
+const keyError = (msg) => Object.assign(new Error(msg), { configFailure: true });
+
 // The key itself. Runner only. Throws a message that never contains the key.
 export function resolveKey(src, env = process.env) {
   const p = parseKeySource(src);
@@ -117,11 +121,11 @@ export function resolveKey(src, env = process.env) {
   const isId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.name);
   const args = isId ? ['secret', 'get', p.name, '-o', 'json'] : ['secret', 'list', '-o', 'json'];
   const r = spawnSyncHidden(process.env.AGENT_COMPANION_BWS_BIN || 'bws', args, { env, encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
-  if (r.error || r.status !== 0) throw new Error('bws failed to return the secret');
+  if (r.error || r.status !== 0) throw keyError('bws failed to return the secret');
   let j;
-  try { j = JSON.parse(r.stdout); } catch { throw new Error('bws returned unreadable output'); }
+  try { j = JSON.parse(r.stdout); } catch { throw keyError('bws returned unreadable output'); }
   const hit = isId ? j : (Array.isArray(j) ? j.find((s) => s && s.key === p.name) : null);
-  if (!hit || typeof hit.value !== 'string' || !hit.value) throw new Error(`bws has no secret named ${p.name}`);
+  if (!hit || typeof hit.value !== 'string' || !hit.value) throw keyError(`bws has no secret named ${p.name}`);
   return hit.value;
 }
 
@@ -198,21 +202,29 @@ export function decide(category, { now = Date.now(), cfg = loadConfig(), path = 
 
 // --- record ----------------------------------------------------------------------------
 
-export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null } = {}) {
+export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null, alreadyBooked = 0, count = true } = {}) {
   if (!CATEGORIES.includes(category)) throw new Error(`unknown category "${category}"`);
   const n = Number(usd);
   if (!Number.isFinite(n) || n < 0) throw new Error('usd must be a non-negative number');
   return mutate(now, cfg, path, (c) => {
-    c.spent[category] = (c.spent[category] || 0) + n;
-    c.n[category] = (c.n[category] || 0) + 1;
+    c.spent[category] = (c.spent[category] || 0) + n - (Number(alreadyBooked) || 0);
+    if (count) c.n[category] = (c.n[category] || 0) + 1;
     c.entries.push({
       t: new Date(now).toISOString(), cat: category, usd: n, meta: String(meta).slice(0, 200),
-      ...(detail ? { project: String(detail.project || '').slice(0, 80), model: String(detail.model || '').slice(0, 80), tokens: detail.tokens || null, turns: detail.turns ?? null } : {}),
+      ...(detail ? { project: String(detail.project || '').slice(0, 80), model: String(detail.model || '').slice(0, 80), tokens: detail.tokens || null, turns: detail.turns ?? null, ...(detail.error ? { error: String(detail.error).slice(0, 200) } : {}) } : {}),
     });
     if (c.entries.length > MAX_ENTRIES) c.entries.splice(0, c.entries.length - MAX_ENTRIES);
     if (success) { c.fails = 0; c.tripped = null; }
     return { spent: c.spent[category], n: c.n[category] };
   });
+}
+
+// Spend of one paid turn, booked as it happens so a killed run still leaves its cost in the
+// ledger. The run's final record() passes the total with alreadyBooked set to this sum.
+export function recordSpend(category, usd, { now = Date.now(), cfg = loadConfig(), path = ledgerPath() } = {}) {
+  const n = Number(usd);
+  if (!CATEGORIES.includes(category) || !Number.isFinite(n) || n <= 0) return;
+  mutate(now, cfg, path, (c) => { c.spent[category] = (c.spent[category] || 0) + n; });
 }
 
 // A billing or auth failure of an API run. Two in a row trip the breaker for the cycle; a hard
