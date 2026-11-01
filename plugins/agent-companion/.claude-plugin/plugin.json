@@ -252,6 +252,24 @@
       "description": "Used as the pace slack and balance check until the cycle has a recorded review. An agentic review costs about $1-3.",
       "default": 2
     },
+    "api_admin_key_source": {
+      "type": "string",
+      "title": "API spend watch: where the Admin API key comes from",
+      "description": "Where scripts/api-spend.mjs finds the organization's Admin API key (sk-ant-admin...), which reads the cost report: \"dpapi:<path>\" (a file written by PowerShell ConvertFrom-SecureString for the current Windows user; default <state root>/secrets/anthropic-admin-key.dpapi), \"env:<NAME>\" or \"bws:<secret-name>\". The key goes only into the x-api-key header of a GET request; it is never printed, logged, written or put on a command line. Only an organization has an Admin API; with no key the watch reports 'unavailable' and nothing else changes.",
+      "default": ""
+    },
+    "api_spend_alerts": {
+      "type": "string",
+      "title": "API spend watch: reviewer spend alert thresholds (USD)",
+      "description": "Comma-separated dollar amounts. api-spend.mjs check lists a notification for each one the reviewers workspace has reached this billing cycle and that has not been acknowledged (ack <alert-id>). Default 50.",
+      "default": "50"
+    },
+    "api_spend_reviewers_workspace": {
+      "type": "string",
+      "title": "API spend watch: the reviewers workspace",
+      "description": "The workspace whose spend is compared with the governor ledger: a workspace id (wrkspc_...) or a workspace name looked up through the Admin API. Default: a workspace named reviewers.",
+      "default": "reviewers"
+    },
     "weekly_limit_units": {
       "type": "number",
       "title": "Daily checkup: weekly limit in plan units",

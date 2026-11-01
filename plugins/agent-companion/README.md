@@ -1088,6 +1088,23 @@ Options: `api_credits_key_source` (default `env:AC_API_KEY`), `api_credits_budge
 
 **The ledger.** The Admin API is unavailable for individual accounts, so no usage or cost report exists for these credits and `state/api-credits.json` is the only machine record of API spend. Every run is one entry: timestamp, category, project (the repository folder name), model, input, output and cache tokens, turns, and the dollar cost at list price. Nothing is built against `/v1/organizations/*`. API-key runs write no Claude Code transcripts, so they never count as plan units in the usage analysis.
 
+## API spend watch (what the credits actually billed)
+
+The governor's ledger is the plugin's own record of API-credit spend. The spend watch checks it against the organization's cost report, so a runaway or an unrelated user of the same key does not go unnoticed. It needs an organization (the Admin API is unavailable for individual accounts) and an Admin API key (`sk-ant-admin...`); without one it reports `unavailable` and nothing else changes.
+
+`node scripts/api-spend.mjs check` prints one JSON object:
+
+- `line`: `API credits: reviewers $X of $100 · total $Y of $200 · cycle day N`, plus `· unexplained $Z` when there is spend the ledger cannot explain. On any key or API failure it is `API credits: unavailable (<reason>)` and the command still exits 0.
+- `notify`: the alerts not yet acknowledged this billing cycle, each `{ id, message }`. The default alert is `reviewers-50` (the reviewers workspace has spent $50 or more this cycle); `unexplained` fires when the reviewers workspace was billed more than the ledger recorded for the same window by more than max($1, 10%).
+
+`node scripts/api-spend.mjs ack <alert-id>` marks an alert done for the cycle. A scheduled task that delivers the notification acks only after delivery succeeded, so a failed delivery is retried the next day. The alert state is `state/api-spend-alerts.json`, next to the governor's `api-credits.json`, and rolls over with the cycle.
+
+Notes. The cost report holds completed UTC days only, so spend lags by up to a day, and the ledger is cut at the same instant for the comparison. Cost is before credits. The budget, share and cycle day come from the governor options (`api_credits_*`), so `$100` is the review share of the budget and `$200` the budget.
+
+Options: `api_admin_key_source` (`dpapi:<path>`, `env:<NAME>` or `bws:<secret-name>`; default a `dpapi:` file at `<state root>/secrets/anthropic-admin-key.dpapi`), `api_spend_alerts` (comma-separated dollar thresholds, default `50`), `api_spend_reviewers_workspace` (a workspace id or name, default a workspace named `reviewers`).
+
+**The key.** A `dpapi:` file is a blob written for the current Windows user by `Read-Host -AsSecureString | ConvertFrom-SecureString`; the script decrypts it in a hidden `powershell -NoProfile -NonInteractive` child and reads the key from that child's stdout only. On other platforms `dpapi:` reports unsupported; use `env:` or `bws:`. The key goes only into the `x-api-key` header of a GET to the Admin API; it is never in argv, a URL, a log, a file or an error message.
+
 ## Model benchmark
 
 The routing table's `taskTypes.*.override` entries (routing trials) are
