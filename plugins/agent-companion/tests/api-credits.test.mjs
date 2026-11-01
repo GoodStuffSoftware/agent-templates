@@ -241,7 +241,7 @@ test('runner: the key rides only in the x-api-key header; cost is metered from u
     const r = await t.run(f, { env: { ANTHROPIC_BASE_URL: 'https://gateway.example.net/v1' } });
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /^VERDICT: PASS/);
-    assert.match(r.out, /\(review path: API credits, claude-sonnet-5-5, 1 turn, \$0\.00\)$/);
+    assert.match(r.out, /\(review path: API credits, fetch, claude-sonnet-5-5, 1 turn, \$0\.00\)$/);
     const c = f.calls[0];
     assert.equal(c.url, OFFICIAL_ENDPOINT, 'ANTHROPIC_BASE_URL is ignored: the key never goes to a gateway');
     assert.equal(c.headers['x-api-key'], SENTINEL);
