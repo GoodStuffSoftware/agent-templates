@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_SHARES, record } from '../scripts/lib/api-credits.mjs';
+import { DEFAULT_SHARES, record, recordSpend } from '../scripts/lib/api-credits.mjs';
 import {
   check, ack, ackedIds, readAdminKey, parseAdminKeySource, parseAlerts, loadSpendConfig, scrub, unexplained,
 } from '../scripts/lib/api-spend.mjs';
@@ -155,6 +155,15 @@ test('unexplained spend: reviewers beyond the ledger by more than max($1, 10%)',
   ack('unexplained', { now: NOW, cfg: CFG, path: p.alerts });
   const after = await run(stub({ cents: { [REV]: 5200 } }), p);
   assert.deepEqual(after.notify.map((n) => n.id), ['reviewers-50']);
+});
+
+test('spend booked per turn without an entry (a killed run) is in the ledger, not unexplained', async () => {
+  const p = tmp();
+  recordSpend('review', 3, { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
+  const r = await run(stub({ cents: { [REV]: 300 } }), p);
+  assert.doesNotMatch(r.line, /unexplained/);
+  assert.deepEqual(r.notify, []);
+  assert.equal(r.ledger, 3);
 });
 
 test('ledger spend after the cost report cut-off does not hide unexplained spend', async () => {

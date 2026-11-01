@@ -236,7 +236,12 @@ export async function check({
     const st = status({ now, cfg, ...(ledgerPath ? { path: ledgerPath } : {}), env });
     const ledgerOk = !/ledger unreadable/.test(st.text);
     const entries = st.ledger && Array.isArray(st.ledger.entries) ? st.ledger.entries : null;
-    const ledger = entries ? entries.reduce((a, e) => (Date.parse(e.t) < endMs ? a + (Number(e.usd) || 0) : a), 0) : st.total;
+    // Turns of a run that died before its entry was written are booked in `spent` without an entry
+    // (recordSpend): they are in the ledger, so they must not read as unexplained spend.
+    const entered = entries ? entries.reduce((a, e) => a + (Number(e.usd) || 0), 0) : 0;
+    const ledger = entries
+      ? entries.reduce((a, e) => (Date.parse(e.t) < endMs ? a + (Number(e.usd) || 0) : a), 0) + Math.max(0, st.total - entered)
+      : st.total;
     const unex = ledgerOk ? unexplained(reviewers, ledger) : 0;
 
     const day = Math.floor((now - cy.start) / DAY_MS) + 1;

@@ -1086,7 +1086,7 @@ Options: `api_credits_key_source` (default `env:AC_API_KEY`), `api_credits_budge
 
 **The key.** It is read only from the configured source and lives in one request-headers object (`x-api-key`); it is never printed, logged, written to a file, put in a URL, a request body or on a command line, and never set globally. Every string the runner returns is scrubbed of it. The endpoint is fixed to `https://api.anthropic.com/v1/messages`; `ANTHROPIC_BASE_URL` is read by Claude Code itself (nothing in this plugin reads it) and the runner ignores it, so the key never goes to a gateway.
 
-**The ledger.** The Admin API is unavailable for individual accounts, so no usage or cost report exists for these credits and `state/api-credits.json` is the only machine record of API spend. Every run is one entry: timestamp, category, project (the repository folder name), model, input, output and cache tokens, turns, and the dollar cost at list price. Nothing is built against `/v1/organizations/*`. API-key runs write no Claude Code transcripts, so they never count as plan units in the usage analysis.
+**The ledger.** The Admin API is unavailable for individual accounts, so no usage or cost report exists for these credits and `state/api-credits.json` is the only machine record of API spend. Every run is one entry: timestamp, category, project (the repository folder name), model, input, output and cache tokens, turns, and the dollar cost at list price. The governor itself reads nothing from `/v1/organizations/*`; the optional spend watch below checks the ledger against the Admin API cost report when an organization key exists. API-key runs write no Claude Code transcripts, so they never count as plan units in the usage analysis.
 
 ## API spend watch (what the credits actually billed)
 
@@ -1103,7 +1103,7 @@ Notes. The cost report holds completed UTC days only, so spend lags by up to a d
 
 Options: `api_admin_key_source` (`dpapi:<path>`, `env:<NAME>` or `bws:<secret-name>`; default a `dpapi:` file at `<state root>/secrets/anthropic-admin-key.dpapi`), `api_spend_alerts` (comma-separated dollar thresholds, default `50`), `api_spend_reviewers_workspace` (a workspace id or name, default a workspace named `reviewers`).
 
-**The key.** A `dpapi:` file is a blob written for the current Windows user by `Read-Host -AsSecureString | ConvertFrom-SecureString`; the script decrypts it in a hidden `powershell -NoProfile -NonInteractive` child and reads the key from that child's stdout only. On other platforms `dpapi:` reports unsupported; use `env:` or `bws:`. The key goes only into the `x-api-key` header of a GET to the Admin API; it is never in argv, a URL, a log, a file or an error message.
+**The key.** A `dpapi:` file is a blob written for the current Windows user by `Read-Host -AsSecureString | ConvertFrom-SecureString | Set-Content "$env:USERPROFILE\.claude\agent-companion\secrets\anthropic-admin-key.dpapi"` (create the `secrets` folder first; or point `api_admin_key_source` at another path); the script decrypts it in a hidden `powershell -NoProfile -NonInteractive` child and reads the key from that child's stdout only. On other platforms `dpapi:` reports unsupported; use `env:` or `bws:`. The key goes only into the `x-api-key` header of a GET to the Admin API; it is never in argv, a URL, a log, a file or an error message.
 
 ## Model benchmark
 

@@ -39,7 +39,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   if (cmd === 'summary') { out(summaryLine({ now, cfg })); return 0; }
   if (cmd === 'probe') {
     const r = await runApi({
-      prompt: 'Reply with exactly one word: ok', model: 'haiku', tools: false, maxTokens: 32, category: 'review', meta: 'probe', cfg, now, env,
+      prompt: 'Reply with exactly one word: ok', model: 'haiku', tools: false, maxTokens: 512, category: 'review', meta: 'probe', cfg, now, env,
       ...(fetchImpl ? { fetchImpl } : {}), ...(endpoint ? { endpoint } : {}), ...(sleep ? { sleep } : {}),
     });
     if (r.ok) {

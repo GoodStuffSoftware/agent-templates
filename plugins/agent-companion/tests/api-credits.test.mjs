@@ -492,7 +492,7 @@ test('probe: one tiny haiku call through the same path reports status, tokens an
     const b = f.calls[0].body;
     assert.equal(b.model, 'claude-haiku-5-5');
     assert.equal(b.tools, undefined);
-    assert.equal(b.max_tokens, 32);
+    assert.equal(b.max_tokens, 512);
     assert.equal(f.calls[0].headers['x-api-key'], SENTINEL);
     assert.ok(!lines.join('\n').includes(SENTINEL));
     const cy = t.ledger();
