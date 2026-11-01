@@ -147,7 +147,7 @@ export async function runApi({
     try {
       record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
         cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok,
-        detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, error: ok ? null : error },
+        detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'fetch', error: ok ? null : error },
       });
     } catch (e) { ledgerFailed(`$${(usd - booked).toFixed(4)} not recorded`, e); }
   };
@@ -157,7 +157,7 @@ export async function runApi({
   const fail = (unavailable, reason) => {
     const r = scrub(reason, key).slice(0, 200);
     bookCost(false, r);
-    return { ok: false, unavailable, reason: r, usd, ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: false, unavailable, reason: r, usd, path: 'fetch', ...(ledgerError ? { ledgerError } : {}) };
   };
   try {
     key = resolveKey(cfg.keySource, env);
@@ -253,7 +253,7 @@ export async function runApi({
       if (!hasVerdict(text)) return fail(false, `the review has no VERDICT line (stop_reason ${last.stop_reason})`);
     }
     bookCost(true);
-    return { ok: true, text, usd, turns, tokens, model: modelId, stopReason: last.stop_reason, ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: true, text, usd, turns, tokens, model: modelId, stopReason: last.stop_reason, path: 'fetch', ...(ledgerError ? { ledgerError } : {}) };
   } catch (e) {
     const reason = scrub(String((e && e.message) || e), key).slice(0, 200);
     if (e && e.configFailure) noteFailure(reason);
