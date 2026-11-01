@@ -420,7 +420,7 @@ Written by `hooks/lib/long-run.mjs` when a subagent's tool-call count first reac
 
 ### `step-budget.jsonl` — one record per step-budget warning or denied call
 
-Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a subagent is told it has used its warning share of steps (`kind` `warn`, once per worker) and each time a call is denied past the stop or once the helper has reached `step_budget_compaction_stop` compactions (default 3; `kind` `stop`). The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`, `step_budget_compaction_stop`.
+Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a subagent is told it has used its warning share of steps (`kind` `warn`, once per worker), and at the stop value as a soft note (`kind` `soft-stop`, once per worker; the same crossing also writes a `state/long-runs.jsonl` row) and (only with `step_budget_deny`) each time a call is denied past the stop or once the helper has reached `step_budget_compaction_stop` compactions (default 3; `kind` `stop`). The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`, `step_budget_compaction_stop`.
 
 | field | type | meaning |
 |---|---|---|
@@ -431,7 +431,7 @@ Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a sub
 | `steps` | number | the subagent's tool calls so far, this one included |
 | `type` | string or null | the `TYPE:` line of the subagent's brief |
 | `caps` | object | `warn`, `stop` and `kind` (`writer`, `lookup` or `brief` when a `BUDGET:` line set the stop) |
-| `kind` | string | `warn` or `stop` |
+| `kind` | string | `warn`, `soft-stop` or `stop` |
 | `why` | string; `stop` only | `steps` (the stop value was reached) or `compactions` (the `step_budget_compaction_stop`th compaction) |
 
 ### `bash-exit.jsonl` — Bash exit status

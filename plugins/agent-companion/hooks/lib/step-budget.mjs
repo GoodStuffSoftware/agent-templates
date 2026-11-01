@@ -1,5 +1,7 @@
 // Live step budget (token bleed guard, phase 2, part C): a counter of a helper's
-// own tool calls, a warning at a soft line and a deny at the hard one.
+// own tool calls, a warning at a soft line, a one-time long-run note at the stop value and,
+// only with step_budget_deny on (default off, operator ruling 2026-11-01), a deny past it.
+// The text below describes the deny, which is now the opt-in.
 //
 // Why. 9 in 10 helpers finish in under 80 calls and 99 in 100 in under 120
 // (tasks/usage-why-2026-10-06/bleed-data-detail.md: median 37, p90 77, p99 115);
@@ -44,6 +46,7 @@ import { opt, stateDir } from './context.mjs';
 import { claimOnce, BOUNDARY_FRESH_TURNS } from './subagent-context.mjs';
 import { briefDeclarations, declarationValue } from './brief-directives.mjs';
 import { safe } from './runaway.mjs';
+import { longRunText } from './long-run.mjs';
 
 export const STEP_WARN_DEFAULT = 80;
 export const STEP_STOP_DEFAULT = 120;
@@ -197,12 +200,20 @@ export function stepBudgetCheck(p, { transcript, sig = null }) {
     tool: p.tool_name, steps: n, type: info.type, caps: { warn: caps.warn, stop: caps.stop, kind: caps.kind },
   });
 
+  // Soft by default (operator ruling 2026-11-01): the stop value is a line that gets a note and a long-runs.jsonl
+  // row, never a deny. step_budget_deny true restores the old deny past the stop and at the compaction stop.
+  const denyOn = opt('step_budget_deny', false);
   const compactionLimit = opt('step_budget_compaction_stop', COMPACTION_STOP_DEFAULT);
-  if (compactionLimit > 0 && compactions >= compactionLimit) markCompactionStop(p.agent_id);
-  const compactionStop = compactionLimit > 0 && existsSync(stopMarker(p.agent_id)); // 0 = off, also for a marker left earlier
-  const stepStop = caps.stop > 0 && n > caps.stop;
+  if (denyOn && compactionLimit > 0 && compactions >= compactionLimit) markCompactionStop(p.agent_id);
+  const compactionStop = denyOn && compactionLimit > 0 && existsSync(stopMarker(p.agent_id)); // 0 = off, also for a marker left earlier
+  const stepStop = denyOn && caps.stop > 0 && n > caps.stop;
   if ((stepStop || compactionStop) && !isReportWrite(p.tool_name, p.tool_input)) {
     return { deny: STOP_REASON, row: { ...base(), kind: 'stop', why: stepStop ? 'steps' : 'compactions' } };
+  }
+  // The soft stop: at the stop value, once, the same note as the 150-step one. The claim key is the long-run
+  // threshold key, so a stop value of 150 (or 250, ...) gives one note, not two.
+  if (!denyOn && caps.stop > 0 && n >= caps.stop && claimOnce(`long-run-${p.agent_id}-${caps.stop}`)) {
+    return { warn: longRunText(n), row: { ...base(), kind: 'soft-stop' }, longRunSteps: n };
   }
   if (caps.stop > 0 && caps.warn > 0 && caps.warn < caps.stop && n >= caps.warn && claimOnce(`step-warn-${p.agent_id}`)) {
     return { warn: warnText(n, caps.stop), row: { ...base(), kind: 'warn' } };

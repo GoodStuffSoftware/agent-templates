@@ -105,6 +105,23 @@ export function logLongRun(row) {
   } catch { /* best effort */ }
 }
 
+// The log row for a crossing at n steps (the schema in the header).
+export function longRunRow(p, n, transcript = null, now = new Date()) {
+  const startedAt = readStartedAt(transcript);
+  const dur = startedAt ? (now.getTime() - Date.parse(startedAt)) / 60000 : null;
+  return {
+    ts: now.toISOString(),
+    sessionId: p.session_id ?? null,
+    agentId: p.agent_id ?? null,
+    agentType: p.agent_type ?? null,
+    steps: n,
+    startedAt,
+    durationMin: dur !== null && Number.isFinite(dur) ? Math.round(dur * 10) / 10 : null,
+    description: firstLine(readBrief(transcript)),
+    transcriptPath: transcript || null,
+  };
+}
+
 // The whole check for one helper tool call: count it, and on the first call at or past a
 // new threshold return { text, row } (else null). Never throws.
 export function longRunCheck(p, { transcript = null, now = new Date() } = {}) {
@@ -115,22 +132,7 @@ export function longRunCheck(p, { transcript = null, now = new Date() } = {}) {
     if (n === 1) pruneState();
     const t = thresholdFor(n);
     if (t === null || !claimOnce(`long-run-${p.agent_id}-${t}`)) return null;
-    const startedAt = readStartedAt(transcript);
-    const dur = startedAt ? (now.getTime() - Date.parse(startedAt)) / 60000 : null;
-    return {
-      text: longRunText(n),
-      row: {
-        ts: now.toISOString(),
-        sessionId: p.session_id ?? null,
-        agentId: p.agent_id,
-        agentType: p.agent_type ?? null,
-        steps: n,
-        startedAt,
-        durationMin: dur !== null && Number.isFinite(dur) ? Math.round(dur * 10) / 10 : null,
-        description: firstLine(readBrief(transcript)),
-        transcriptPath: transcript || null,
-      },
-    };
+    return { text: longRunText(n), row: longRunRow(p, n, transcript, now) };
   } catch {
     return null;
   }

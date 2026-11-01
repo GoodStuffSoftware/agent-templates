@@ -17,10 +17,11 @@
 // transcript reading below, so it adds no read. Advice only, never a deny.
 //
 // The STEP BUDGET rides on the same hook (lib/step-budget.mjs): it counts the helper's
-// tool calls, warns once at the soft line and DENIES every call but a report or detail
-// write past the hard one (40/60 for lookup-type helpers, 80/120 otherwise, a `BUDGET: <n>`
-// brief line replaces the stop). The Nth compaction (step_budget_compaction_stop, default 3, 0 = off) stops it the same way. This
-// is the one place the hook denies; options step_budget, step_budget_warn, step_budget_stop,
+// tool calls, warns once at the warning line and notes once at the stop value (never a deny by default; with
+// step_budget_deny on it DENIES every call but a report or detail
+// write past the stop (40/60 for lookup-type helpers, 80/120 otherwise, a `BUDGET: <n>`
+// brief line replaces the stop). With step_budget_deny the Nth compaction (step_budget_compaction_stop, default 3, 0 = off) stops it the same way. This
+// is the one place the hook can deny, and only on that opt-in; options step_budget, step_budget_deny, step_budget_warn, step_budget_stop,
 // step_budget_lookup_warn, step_budget_lookup_stop.
 //
 // The soft LONG-RUN note (lib/long-run.mjs) replaces the old hard maxTurns: 150 on the agent definitions: at 150 tool calls
@@ -40,7 +41,7 @@ import {
   CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
 } from './lib/context-ceiling.mjs';
 import { STEP_LOG, stepBudgetCheck } from './lib/step-budget.mjs';
-import { longRunCheck, logLongRun } from './lib/long-run.mjs';
+import { longRunCheck, logLongRun, longRunRow } from './lib/long-run.mjs';
 
 try {
   const p = readStdin();
@@ -80,6 +81,7 @@ try {
   if (stepsOn) {
     step = stepBudgetCheck(p, { transcript: path, sig });
     if (step) appendLog(STEP_LOG, step.row);
+    if (step && step.longRunSteps) logLongRun(longRunRow(p, step.longRunSteps, path));
   }
   if (step && step.deny) {
     recordDenial('step-budget', p, `${step.row.why} at ${step.row.steps} steps`);
