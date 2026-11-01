@@ -177,6 +177,12 @@ function classify(cmd, shell) {
   const rest = noRedir(w.slice(k + 1));
   const args = rest.map((x) => x.t);
   const ps = shell === 'powershell';
+  // a PowerShell assignment (`$env:NAME=[Environment]::GetEnvironmentVariable('X','User')`, `$x=$env:KEY`) stores the value and prints
+  // nothing. Only a single leading word `$name=...` / `$env:NAME=...` / `${env:NAME}=...` counts (no `==`); a paren-wrapped
+  // `($x=...)` or a `$x=...` that is not the whole first word still goes through the checks below.
+  if (ps && !cmd.call && !cmd.isSub && !cmd.piped && /^\$(?:\{[\w:.-]+\}|[\w:]+)\s*[-+*\/%]?=(?!=)/.test(w[k].t) && w.length === k + 1 && !/[;|&\r\n]/.test(w[k].t)) {
+    return null;
+  }
   if (w.some((x) => /getenvironmentvariables\(/i.test(x.t))) {
     return w.some((x) => /getenvironmentvariables\([^)]*\)\.keys\b/i.test(x.t)) ? null : 'dump';
   }
@@ -402,6 +408,7 @@ function scan(text, shell, depth, st, hits, skipTop = false) {
     byChain.get(c.chain).push(c);
   }
   // sub commands whose result is only captured or only has its names read are not printed
+  for (const c of cmds) for (const sc of c.subs) sc.isSub = true; // `($x=...)` prints its value: not an assignment statement
   for (const c of cmds) {
     const k = rawProg(c.words);
     if (k < 0) for (const sc of c.subs) sc.captured = true; // VAR=$(...) with no command
@@ -414,6 +421,7 @@ function scan(text, shell, depth, st, hits, skipTop = false) {
     for (let i = 0; i < list.length; i++) {
       const c = list[i];
       if (c.captured) continue;
+      c.piped = i < list.length - 1; // `$x=... | Write-Host` is a pipeline, not a plain assignment
       const kind = skipTop ? null : classify(c, shell);
       if (kind === 'secret' && c.condition) continue; // if (\$env:NAME) { ... }: a presence test
       if (kind && !redirected(c.words)) {

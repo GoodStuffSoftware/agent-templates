@@ -933,3 +933,35 @@ test('hook: inline names-only, presence and plain reads pass', () => {
   assert.notEqual(decisionOf(hook('Bash', "python3 -c 'import os; print(bool(os.getenv(\"GITHUB_TOKEN\")))'").json), 'deny');
   assert.notEqual(decisionOf(hook('PowerShell', "node -e 'console.log(process.env.PATH)'").json), 'deny');
 });
+
+// 2026-11-01: a PowerShell assignment stores the value and prints nothing.
+const PS_ASSIGN_PASS = [
+  "$env:ANTHROPIC_API_KEY=[Environment]::GetEnvironmentVariable('AC_API_KEY','User'); node script.mjs",
+  "$env:ANTHROPIC_API_KEY=[Environment]::GetEnvironmentVariable('AC_API_KEY','User')",
+  "$key=[Environment]::GetEnvironmentVariable('GITHUB_TOKEN','User'); node x.mjs",
+  '$x=$env:GITHUB_TOKEN; node x.mjs',
+  "$env:ANTHROPIC_API_KEY = [Environment]::GetEnvironmentVariable('AC_API_KEY','User'); node script.mjs",
+];
+const PS_ASSIGN_DENY = [
+  "[Environment]::GetEnvironmentVariable('AC_API_KEY','User')",
+  "($x=[Environment]::GetEnvironmentVariable('AC_API_KEY','User'))",
+  "Write-Host ([Environment]::GetEnvironmentVariable('AC_API_KEY','User'))",
+  "$x=1; Write-Host $env:GITHUB_TOKEN",
+  "$x=1; $env:GITHUB_TOKEN",
+  "$x=1; [Environment]::GetEnvironmentVariable('GITHUB_TOKEN','User')",
+  "$x=1; echo $env:GITHUB_TOKEN",
+  'Write-Output "key: $env:GITHUB_TOKEN"',
+  '$env:GITHUB_TOKEN',
+  '$env:GITHUB_TOKEN | Out-File x.txt',
+  "$x=1; Get-ChildItem env:",
+  "$x=1; [Environment]::GetEnvironmentVariables()",
+  "$x=[Environment]::GetEnvironmentVariable('AC_API_KEY','User') | Write-Host",
+  "$x=1; $env:GITHUB_TOKEN | Out-Host",
+];
+test('PowerShell assignments of env values pass', () => {
+  for (const c of PS_ASSIGN_PASS) assert.ok(!hit(c, 'powershell'), c);
+});
+test('PowerShell prints of env values stay denied', () => {
+  for (const c of PS_ASSIGN_DENY) assert.ok(hit(c, 'powershell'), c);
+});
+test('bash bulk dumps stay denied', () => { for (const c of ['set', 'env', 'printenv']) assert.ok(hit(c), c); });
