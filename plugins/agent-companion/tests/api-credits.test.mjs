@@ -212,7 +212,7 @@ function rig() {
     const lines = [];
     const errs = [];
     const code = await reviewMain(
-      ['run', '--brief-file', brief, '--diff-ref', 'HEAD~1..HEAD', '--model', 'sonnet', '--effort', 'xhigh', '--cwd', repo, '--writer', 'sonnet/high', ...extra],
+      ['run', '--brief-file', brief, '--diff-ref', 'HEAD~1..HEAD', '--model', 'sonnet', '--effort', 'xhigh', '--cwd', repo, '--writer', 'sonnet/high', ...(extra.includes('--runner') ? [] : ['--runner', 'fetch']), ...extra],
       { out: (s) => lines.push(s), err: (s) => errs.push(s), env: { AC_API_KEY: key, ...env }, fetchImpl, sleep: async () => {}, cfg: CFG },
     );
     return { code, out: lines.join('\n'), err: errs.join('\n') };

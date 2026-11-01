@@ -35,7 +35,7 @@ const BRIEF_CAP = 60000;
 // Two engines: 'fetch' (Messages API, read-only tools confined to the repository, cheapest) and 'sdk'
 // (the Agent SDK, with Bash, so the reviewer can run the tests). DEFAULT_RUNNER is what a review uses
 // when the api_review_runner option and --runner are unset; see the README for the measurement behind it.
-export const DEFAULT_RUNNER = 'fetch';
+export const DEFAULT_RUNNER = 'sdk';
 const COMMANDS_RE = /\b(?:run|runs|running|execute|executing)\b[^.\n]{0,40}\b(?:tests?|test suite|suite|commands?|build|lint|linter|checks?)\b|\bnpm (?:run )?test\b|\bnode --test\b|\bpytest\b/i;
 export const briefAsksForCommands = (brief) => COMMANDS_RE.test(String(brief || ''));
 // An explicit choice (--runner, then the option) always wins; with none, the default engine, except

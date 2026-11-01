@@ -48,7 +48,10 @@ export const SDK_TOOLS = ['Read', 'Grep', 'Glob', 'Bash'];
 // Removed from the model's context outright (bare names). Edit and Write are not in `tools` either;
 // the explicit list is belt and braces against a future default.
 export const SDK_DISALLOWED = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'Skill', 'TodoWrite'];
-// Scoped denials: they hold in every permission mode. A guard rail, not a sandbox.
+// Scoped denials: they hold in every permission mode. A guard rail, not a sandbox: Bash runs with the
+// operator's own file access (as a plan reviewer does), so the credential directories are denied to the
+// file tools by name and the claude binary is pointed at a private config dir (CLAUDE_CONFIG_DIR).
+export const SDK_READ_DENY = ['Read(~/.claude/**)', 'Read(~/.ssh/**)', 'Read(~/.aws/**)', 'Read(~/.config/**)', 'Read(~/.npmrc)'];
 export const SDK_BASH_DENY = [
   'Bash(git push:*)', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(git checkout:*)', 'Bash(git clean:*)',
   'Bash(git merge:*)', 'Bash(git rebase:*)', 'Bash(rm:*)', 'Bash(del:*)', 'Bash(rmdir:*)', 'Bash(curl:*)', 'Bash(wget:*)',
@@ -89,13 +92,14 @@ const TRIM_ENV = {
   DISABLE_AUTOUPDATER: '1',
 };
 
-export function sdkEnv({ key, workspace = '', base = process.env, bashTimeoutMs = DEFAULT_BASH_TIMEOUT_MS }) {
+export function sdkEnv({ key, workspace = '', base = process.env, bashTimeoutMs = DEFAULT_BASH_TIMEOUT_MS, configDir = '' }) {
   const out = {};
   for (const k of Object.keys(base)) if (ENV_ALLOW.has(k.toLowerCase()) && typeof base[k] === 'string') out[k] = base[k];
   Object.assign(out, TRIM_ENV);
   out.BASH_DEFAULT_TIMEOUT_MS = String(bashTimeoutMs);
   out.BASH_MAX_TIMEOUT_MS = String(bashTimeoutMs);
   out.ANTHROPIC_API_KEY = key;
+  if (configDir) out.CLAUDE_CONFIG_DIR = configDir;
   if (workspace) out.ANTHROPIC_CUSTOM_HEADERS = `anthropic-workspace-id: ${workspace}`;
   return out;
 }
@@ -103,6 +107,8 @@ export function sdkEnv({ key, workspace = '', base = process.env, bashTimeoutMs 
 // --- install on demand -------------------------------------------------------------------------
 
 export const sdkDir = (version) => stateFile(join('sdk', version));
+// A private, empty Claude config dir for the child: no user credentials, settings or sessions are read or written.
+const configDirOf = (version) => { try { const d = stateFile(join('sdk', `config-${version}`)); mkdirSync(d, { recursive: true }); return d; } catch { return ''; } };
 const entryOf = (dir) => join(dir, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs');
 const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/;
 
@@ -192,7 +198,9 @@ export async function runApiSdk({
 
   const ac = new AbortController();
   let abortReason = null;
-  const abort = (r) => { if (!abortReason) { abortReason = r; ac.abort(); } };
+  let wake = () => {};
+  const aborted = new Promise((resolve) => { wake = resolve; }); // lets the loop stop even when the SDK ignores the abort
+  const abort = (r) => { if (!abortReason) { abortReason = r; ac.abort(); wake(); } };
   let timer = null;
   try {
     key = resolveKey(cfg.keySource, env);
@@ -209,9 +217,9 @@ export async function runApiSdk({
     }
 
     const options = {
-      cwd, model: modelId, env: sdkEnv({ key, workspace: ws, base: env, bashTimeoutMs }),
+      cwd, model: modelId, env: sdkEnv({ key, workspace: ws, base: env, bashTimeoutMs, configDir: configDirOf(sdkVersion) }),
       settingSources: [], systemPrompt: system || sdkSystem(maxTurns),
-      tools: [...SDK_TOOLS], allowedTools: [...SDK_TOOLS], disallowedTools: [...SDK_DISALLOWED, ...SDK_BASH_DENY],
+      tools: [...SDK_TOOLS], allowedTools: [...SDK_TOOLS], disallowedTools: [...SDK_DISALLOWED, ...SDK_READ_DENY, ...SDK_BASH_DENY],
       permissionMode: 'dontAsk', maxTurns, maxBudgetUsd: maxUsd, persistSession: false, abortController: ac,
       ...(effort && m.effort ? { effort } : {}),
     };
@@ -229,8 +237,14 @@ export async function runApiSdk({
     };
 
     const q = sdk.query({ prompt, options });
+    const it = q[Symbol.asyncIterator]();
     try {
-      for await (const msg of q) {
+      for (;;) {
+        const nxt = it.next();
+        nxt.catch(() => {}); // a late rejection after an abort is not an unhandled one
+        const step = await Promise.race([nxt, aborted.then(() => ({ done: true }))]);
+        if (step.done) break;
+        const msg = step.value;
         if (!msg || typeof msg !== 'object') continue;
         if (msg.type === 'system' && msg.subtype === 'init') {
           inited = true;
@@ -257,6 +271,7 @@ export async function runApiSdk({
           if (t) lastText = t;
           if (am.stop_reason) lastStop = am.stop_reason;
           if (msg.error) lastAssistantError = String(msg.error);
+          // Checked between messages: one expensive turn can overshoot the cap by its own cost.
           if (usd >= maxUsd) { abort('spend-cap'); break; }
         } else if (msg.type === 'result') {
           result = msg;
@@ -265,11 +280,26 @@ export async function runApiSdk({
       }
     } finally {
       clearTimeout(timer);
-      if (q && typeof q.return === 'function') { try { await q.return(); } catch { /* already finished */ } }
+      // Close the stream, but never wait on an SDK that has stalled.
+      if (typeof it.return === 'function') {
+        let t2;
+        await Promise.race([Promise.resolve().then(() => it.return()).catch(() => {}), new Promise((resolve) => { t2 = setTimeout(resolve, 2000); if (t2.unref) t2.unref(); })]);
+        clearTimeout(t2);
+      }
     }
 
-    // Reconcile with the SDK's own estimate: never book less than either figure says was spent.
+    // Reconcile. The usage on streamed assistant messages can carry a placeholder output count, so the
+    // result's modelUsage is the better token total, and never book less than any figure says was spent:
+    // the per-call sum, modelUsage priced from the table, and the SDK's own total_cost_usd.
     const sdkUsd = result && Number.isFinite(Number(result.total_cost_usd)) ? Number(result.total_cost_usd) : 0;
+    const mu = result && result.modelUsage && typeof result.modelUsage === 'object' ? Object.values(result.modelUsage) : [];
+    if (mu.length) {
+      const sum = (k) => mu.reduce((a, x) => a + (Number(x && x[k]) || 0), 0);
+      const fin = { input: sum('inputTokens'), output: sum('outputTokens'), cacheRead: sum('cacheReadInputTokens'), cacheWrite: sum('cacheCreationInputTokens'), cacheWrite1h: sum('cacheCreationEphemeral1hInputTokens') };
+      for (const k of Object.keys(tokens)) tokens[k] = Math.max(tokens[k], fin[k]);
+      const pf = priceUsage(fin, modelId);
+      if (pf && pf.usd > usd) usd = pf.usd;
+    }
     if (sdkUsd > usd) usd = sdkUsd;
 
     if (abortReason === 'deadline') return fail(false, deadlineReason());

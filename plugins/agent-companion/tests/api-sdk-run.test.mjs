@@ -12,7 +12,7 @@ import { spawnSyncHidden } from '../scripts/lib/proc.mjs';
 import {
   runApiSdk, loadSdk, sdkEnv, SDK_TOOLS, SDK_DISALLOWED, SDK_BASH_DENY, DEFAULT_SDK_VERSION,
 } from '../scripts/lib/api-sdk-run.mjs';
-import { main as reviewMain, chooseRunner, briefAsksForCommands, buildPrompt } from '../scripts/api-review.mjs';
+import { main as reviewMain, DEFAULT_RUNNER, chooseRunner, briefAsksForCommands, buildPrompt } from '../scripts/api-review.mjs';
 
 const CFG = { budget: 200, cycleDay: 1, shares: { ...DEFAULT_SHARES }, keySource: 'env:AC_API_KEY', reviewRatio: 0.5, itemEstimate: 2 };
 const KEY = 'sk-ant-api03-SENTINEL-sdk-do-not-leak-0123456789';
@@ -265,6 +265,8 @@ test('chooseRunner / briefAsksForCommands: an explicit choice wins; the default 
   assert.equal(chooseRunner({ brief: 'Run the tests and report', fallback: 'fetch' }), 'sdk');
   assert.equal(chooseRunner({ brief: 'a plain review', fallback: 'fetch' }), 'fetch');
   assert.equal(chooseRunner({ brief: 'a plain review', fallback: 'sdk' }), 'sdk');
+  assert.equal(DEFAULT_RUNNER, 'sdk', 'default chosen by measurement: the fixed overhead is under $0.02');
+  assert.equal(chooseRunner({ brief: 'a plain review' }), 'sdk');
   assert.equal(briefAsksForCommands('the tests pass (api-* files)'), false);
   assert.equal(briefAsksForCommands('Please run the api tests with node --test'), true);
   assert.equal(briefAsksForCommands('execute the lint command'), true);
@@ -336,4 +338,39 @@ test('api-review: an SDK that cannot be loaded falls back to the fetch engine; a
     const bad = await t.go(['--runner', 'both'], {});
     assert.equal(bad.code, 2);
   } finally { t.fx.cleanup(); }
+});
+
+test('runApiSdk: a hung SDK that ignores the abort signal still ends at the deadline; tokens and cost follow modelUsage', async () => {
+  const fx = makeFixture();
+  try {
+    const hung = fakeSdk(async function* () {
+      yield init();
+      yield assistant('m1', txt('thinking'), { input_tokens: 1000, output_tokens: 1 });
+      await new Promise(() => {}); // never settles, ignores abortController
+    });
+    const r = await run(hung, { deadlineMs: 60 });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /wall-clock deadline/);
+    assert.ok(r.usd > 0, 'the one paid turn is still in the result');
+    assert.ok(Math.abs(ledgerOf(fx).spent.review - r.usd) < 1e-9);
+
+    // Streamed usage carries a placeholder output count; the result's modelUsage is the truth.
+    const mu = { 'claude-sonnet-5-5': { inputTokens: 1000, outputTokens: 5000, cacheReadInputTokens: 2000, cacheCreationInputTokens: 3000, cacheCreationEphemeral1hInputTokens: 0, costUSD: 0 } };
+    const ok = await run(fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}x`), { input_tokens: 1000, output_tokens: 1, cache_read_input_tokens: 2000, cache_creation_input_tokens: 3000 }, { stop: 'end_turn' }), result({ modelUsage: mu, total_cost_usd: 0 })]));
+    assert.equal(ok.ok, true);
+    assert.equal(ok.tokens.output, 5000);
+    assert.ok(Math.abs(ok.usd - sonnetUsd({ input: 1000, output: 5000, cacheRead: 2000, cacheWrite: 3000 })) < 1e-9);
+  } finally { fx.cleanup(); }
+});
+
+test('runApiSdk: the child gets a private CLAUDE_CONFIG_DIR and the credential directories are denied to Read', async () => {
+  const fx = makeFixture();
+  try {
+    const sdk = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}x`), { input_tokens: 1, output_tokens: 1 }, { stop: 'end_turn' }), result()]);
+    await run(sdk, { env: { ...ENV, CLAUDE_CONFIG_DIR: 'C:/Users/x/.claude' } });
+    const o = sdk.calls[0].options;
+    assert.match(o.env.CLAUDE_CONFIG_DIR, /sdk[\\/]config-/);
+    assert.ok(o.env.CLAUDE_CONFIG_DIR.startsWith(fx.stateDir), 'under the (sandboxed) state dir, not the operator config');
+    assert.ok(o.disallowedTools.includes('Read(~/.claude/**)') && o.disallowedTools.includes('Read(~/.ssh/**)'));
+  } finally { fx.cleanup(); }
 });
