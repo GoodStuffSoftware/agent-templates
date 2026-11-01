@@ -113,6 +113,8 @@ async function adminGet(path, query, key, fetchImpl) {
   try {
     res = await fetchImpl(`${ENDPOINT}${path}?${qs}`, {
       method: 'GET',
+      // redirect: 'error' so the key header can never follow a redirect off the official host.
+      redirect: 'error',
       headers: { 'x-api-key': key, 'anthropic-version': API_VERSION, 'user-agent': 'agent-companion-api-spend' },
       signal: AbortSignal.timeout(30000),
     });

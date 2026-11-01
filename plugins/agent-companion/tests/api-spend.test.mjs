@@ -196,6 +196,9 @@ test('the key never appears in output, argv-like fields or any file', async () =
   assert.deepEqual(j.notify.map((n) => n.id), ['reviewers-50']);
   assert.equal(out.join('').includes('SENTINEL'), false);
   for (const c of s.calls) assert.equal(c.url.includes('SENTINEL'), false);
+  // The key header must never follow a redirect off the official host.
+  assert.ok(s.calls.length > 0);
+  for (const c of s.calls) { assert.equal(c.init.redirect, 'error'); assert.equal(c.init.method, 'GET'); assert.equal(new URL(c.url).origin, 'https://api.anthropic.com'); }
   const ackOut = [];
   assert.equal(await main(['ack', 'reviewers-50'], { out: (x) => ackOut.push(x), cfg: CFG, alertPath: p.alerts }), 0);
   assert.equal(JSON.parse(ackOut[0]).ok, true);
