@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-14
 provenance: [contrib-2]
-corroborated: 4
+corroborated: 3
 ---
 Two counts from the same product, both wrong in the same way:
 

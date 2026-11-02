@@ -13,8 +13,8 @@ An orchestrator ran a ~35-step design one step at a time: each step got its own 
 **How to apply:**
 - For {{N}}+ steps, builders run local builds and unit tests only.
 - Then ONE integration pass: local runs wherever the target exists, CI only for what cannot run locally, one parity review of the whole diff, one fix round.
-- Split work across workers for context size; never split the testing.
+- Split work across workers for context size; keep the testing in the one pass.
 - Per-step CI plus review is for steps whose blast radius justifies it.
-- Before a long run, state the shape (workers, CI runs, reviews) and a rough share of the usage budget, and get the operator's nod.
+- Before a long run, state the shape (workers, CI runs, reviews) and a rough share of the usage budget; if the operator cannot answer, take the cheaper default and log it.
 
-Related: [[size-subagents-by-context-not-by-task]], [[reviewer-matches-the-tier-it-reviews]].
+Related: [[size-subagents-by-context-not-by-task]], [[reviewer-matches-the-tier-it-reviews]], [[no-stall-decision-protocol]].
