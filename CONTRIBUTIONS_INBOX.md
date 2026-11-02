@@ -29,6 +29,7 @@ Append a new dated entry at the **top** of the Entries list (newest first), usin
 - Operator (2026-11-01): follow the existing agent-companion and agent-templates sizing. Sometimes a handoff doesn't make sense, because the context is almost as long. The cost of continuing a worker and the cost of a fresh handoff are close, so continuing can be the better choice.
 - Suggested: one line saying briefs carry no tool-call caps and splitting happens when the job is planned. The ~10-call limit on continuing a worker should yield when a fresh handoff would need nearly the same context.
 - **Applied?** `no`
+
 ### 2026-10-05 — A spec that fails "randomly" in a parallel suite may be a victim of the SHARED dev server
 
 - **Status:** carried by PR on branch `lessons/fold-2026-10-05` (new lesson plus an amendment of `widening-a-timing-margin-does-not-remove-a-race`, which it contradicts). Remove this entry when that PR merges.
