@@ -1,10 +1,12 @@
 // Live step budget (token bleed guard, phase 2, part C): a counter of a helper's
-// own tool calls, a warning at a soft line and a deny at the hard one.
+// own tool calls, a warning at a soft line, a one-time long-run note at the stop value and,
+// only with step_budget_deny on (default off, operator ruling 2026-11-01), a deny past it.
+// The text below describes the deny, which is now the opt-in.
 //
 // Why. 9 in 10 helpers finish in under 80 calls and 99 in 100 in under 120
 // (tasks/usage-why-2026-10-06/bleed-data-detail.md: median 37, p90 77, p99 115);
-// the rest are runaways. maxTurns on the agent definitions (0.31.31) is the
-// outer backstop; this is the inner, softer one: it tells the helper to wrap up
+// the rest are runaways. the hard maxTurns on the agent definitions (0.31.31) was
+// removed; the soft long-run note (long-run.mjs) now marks 150 steps and beyond. This guard tells the helper to wrap up
 // and then refuses everything but writing its report.
 //
 // Where. hooks/subagent-context.mjs (PreToolUse, no matcher, subagent only)
@@ -28,7 +30,7 @@
 // The deny starts with the first call after the stop value has been reached:
 // with a stop of 120, calls 1 to 120 run and call 121 is refused.
 //
-// A helper that compacts a SECOND time is stopped the same way: the compaction
+// A helper that compacts step_budget_compaction_stop times (default 3, 0 = off) is stopped the same way: the compaction
 // signal subagent-context.mjs already reads is counted here (state/step-budget/<agent>.cmp),
 // independent of the context notice, and a sticky marker keeps the stop on afterwards.
 //
@@ -44,11 +46,13 @@ import { opt, stateDir } from './context.mjs';
 import { claimOnce, BOUNDARY_FRESH_TURNS } from './subagent-context.mjs';
 import { briefDeclarations, declarationValue } from './brief-directives.mjs';
 import { safe } from './runaway.mjs';
+import { longRunText } from './long-run.mjs';
 
 export const STEP_WARN_DEFAULT = 80;
 export const STEP_STOP_DEFAULT = 120;
 export const STEP_LOOKUP_WARN_DEFAULT = 40;
 export const STEP_LOOKUP_STOP_DEFAULT = 60;
+export const COMPACTION_STOP_DEFAULT = 3;
 export const STEP_LOG = 'step-budget.jsonl';
 export const BUDGET_MIN = 10;
 export const LOOKUP_TYPES = ['lookup', 'research', 'survey', 'explore', 'verify'];
@@ -140,7 +144,7 @@ export function isReportWrite(toolName, toolInput) {
   return REPORT_EXT.test(name) && REPORT_NAME.test(name);
 }
 
-// The helper's compactions, counted here (a one-byte-per-compaction file) so the second-compaction
+// The helper's compactions, counted here (a one-byte-per-compaction file) so the compaction
 // stop does not depend on the context notice being on. A boundary is counted once, when it is just
 // behind the helper (the same freshness the context notice uses); returns the count so far.
 function countCompaction(agentId, sig) {
@@ -159,7 +163,7 @@ function countCompaction(agentId, sig) {
 
 const stopMarker = (agentId) => join(budgetDir(), `${safe(agentId)}.stop`);
 
-// The compaction stop is sticky: once a helper has compacted twice, every later call is stopped.
+// The compaction stop is sticky: once a helper has reached the compaction stop, every later call is stopped.
 function markCompactionStop(agentId) {
   try {
     mkdirSync(budgetDir(), { recursive: true });
@@ -196,11 +200,20 @@ export function stepBudgetCheck(p, { transcript, sig = null }) {
     tool: p.tool_name, steps: n, type: info.type, caps: { warn: caps.warn, stop: caps.stop, kind: caps.kind },
   });
 
-  if (compactions >= 2) markCompactionStop(p.agent_id);
-  const compactionStop = existsSync(stopMarker(p.agent_id));
-  const stepStop = caps.stop > 0 && n > caps.stop;
+  // Soft by default (operator ruling 2026-11-01): the stop value is a line that gets a note and a long-runs.jsonl
+  // row, never a deny. step_budget_deny true restores the old deny past the stop and at the compaction stop.
+  const denyOn = opt('step_budget_deny', false);
+  const compactionLimit = opt('step_budget_compaction_stop', COMPACTION_STOP_DEFAULT);
+  if (denyOn && compactionLimit > 0 && compactions >= compactionLimit) markCompactionStop(p.agent_id);
+  const compactionStop = denyOn && compactionLimit > 0 && existsSync(stopMarker(p.agent_id)); // 0 = off, also for a marker left earlier
+  const stepStop = denyOn && caps.stop > 0 && n > caps.stop;
   if ((stepStop || compactionStop) && !isReportWrite(p.tool_name, p.tool_input)) {
     return { deny: STOP_REASON, row: { ...base(), kind: 'stop', why: stepStop ? 'steps' : 'compactions' } };
+  }
+  // The soft stop: at the stop value, once, the same note as the 150-step one. The claim key is the long-run
+  // threshold key, so a stop value of 150 (or 250, ...) gives one note, not two.
+  if (!denyOn && caps.stop > 0 && n >= caps.stop && claimOnce(`long-run-${p.agent_id}-${caps.stop}`)) {
+    return { warn: longRunText(n), row: { ...base(), kind: 'soft-stop' }, longRunSteps: n };
   }
   if (caps.stop > 0 && caps.warn > 0 && caps.warn < caps.stop && n >= caps.warn && claimOnce(`step-warn-${p.agent_id}`)) {
     return { warn: warnText(n, caps.stop), row: { ...base(), kind: 'warn' } };

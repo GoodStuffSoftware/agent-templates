@@ -15,7 +15,7 @@ test('agent definition with an explicit effort: effective_effort equals it verba
     const res = runHook('hooks/spawn-guard.mjs', {
       session_id: 'sess-eff-def', agent_type: 'main', cwd: dir,
       tool_input: { subagent_type: 'definer', prompt: 'WARRANT: weight 5 — needs opus' },
-    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
+    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' } });
     assert.equal(res.status, 0, res.stderr);
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.effective_effort, 'xhigh');
@@ -35,7 +35,7 @@ test('opus spawn with no effort anywhere: effective_effort is inherited(<caller 
     const res = runHook('hooks/spawn-guard.mjs', {
       session_id: 'sess-eff-opus-unset', agent_type: 'main', cwd: dir, transcript_path: transcriptPath,
       tool_input: { subagent_type: 'general-purpose', model: 'opus', prompt: 'WARRANT: weight 5 — needs opus' },
-    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
+    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' } });
     assert.equal(res.status, 0, res.stderr);
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.effective_effort, 'inherited(high)');
@@ -48,7 +48,7 @@ test('opus spawn with no effort anywhere and no readable caller transcript: effe
     const res = runHook('hooks/spawn-guard.mjs', {
       session_id: 'sess-eff-opus-unknown', agent_type: 'main', cwd: dir,
       tool_input: { subagent_type: 'general-purpose', model: 'opus', prompt: 'WARRANT: weight 5 — needs opus' },
-    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
+    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' } });
     assert.equal(res.status, 0, res.stderr);
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.effective_effort, 'inherited(unknown)');
@@ -61,7 +61,7 @@ test('haiku spawn with no effort anywhere: effective_effort is inherited(unknown
     const res = runHook('hooks/spawn-guard.mjs', {
       session_id: 'sess-eff-haiku', agent_type: 'main', cwd: dir,
       tool_input: { subagent_type: 'general-purpose', model: 'haiku', prompt: 'a quick read' },
-    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
+    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' } });
     assert.equal(res.status, 0, res.stderr);
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.effective_effort, 'inherited(unknown)');
@@ -79,7 +79,7 @@ test('a model whose tier takes no effort parameter: effective_effort is null', (
     const res = runHook('hooks/spawn-guard.mjs', {
       session_id: 'sess-eff-none', agent_type: 'main', cwd: dir,
       tool_input: { subagent_type: 'general-purpose', model: 'haiku', prompt: 'a quick read' },
-    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x') } });
+    }, { env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' } });
     assert.equal(res.status, 0, res.stderr);
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'))[0];
     assert.equal(row.effective_effort, null);

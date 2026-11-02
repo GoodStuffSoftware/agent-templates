@@ -116,8 +116,8 @@ function runStart(p) {
 
   // The real payload carries no prompt (see the handoff note in
   // lib/brevity.mjs), so the check above only fires for a payload that does.
-  // A repeat start for the same agent_id is skipped (this hook can run more
-  // than once), and so is a start whose spawn-guard rewrite is on record.
+  // A repeat start for the same agent_id is skipped (SubagentStart fires once per
+  // agent; a resumed worker starts again), and so is a start whose spawn-guard rewrite is on record.
   if (p.agent_id && !firstStartFor(p.agent_id)) passthrough();
   // Only a record written for this start's own agent type counts: a start with
   // no spawn-guard record (a workflow-subagent) must not eat another spawn's.
@@ -150,8 +150,10 @@ function runStop(p) {
       const dir = join(stateDir(), 'brevity-gated');
       mkdirSync(dir, { recursive: true });
       // Exclusive create: the ONE process whose create wins is the one that
-      // gates. A second SubagentStop for the same agent_id (this hook can be
-      // invoked more than once) hits EEXIST and falls through ungated.
+      // gates. A later SubagentStop for the same agent_id (since Claude Code 2.1.311
+      // that is only a worker continued with SendMessage that stops again; before it,
+      // the event also fired about twice a minute while the worker ran) hits EEXIST
+      // and falls through ungated.
       writeFileSync(join(dir, safeMarkerName(p.agent_id)), '', { flag: 'wx' });
       gated = true;
     } catch {

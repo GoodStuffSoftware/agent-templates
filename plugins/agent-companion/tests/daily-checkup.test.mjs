@@ -304,9 +304,9 @@ function withCeiling(value, fn) {
 
 for (const [label, value, ceiling, over, share] of [
   ['a 150K ceiling', 150000, 150000, 30.1, 75],
-  ['the 175K default (option unset)', undefined, 175000, 20.1, 50],
+  ['the 175K measuring line (option unset, the shipped default is off)', undefined, 175000, 20.1, 50],
   ['a custom 200K ceiling', 200000, 200000, 10, 25],
-  ['an off ceiling (0) measured against the 175K default', 0, 175000, 20.1, 50],
+  ['an off ceiling (0) measured against the 175K line', 0, 175000, 20.1, 50],
 ]) {
   test(`share over the active context ceiling: ${label}, beside the fixed 150K share`, () => {
     const { fx, root } = mk();

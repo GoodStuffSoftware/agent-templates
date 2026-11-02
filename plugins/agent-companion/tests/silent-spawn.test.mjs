@@ -159,13 +159,30 @@ test('over-provisioned rung: a PREMIUM: line, fit_over_autofix off, an unregiste
   const off = spawn({ ...base, prompt: brief }, { started: RUNGS, env: { CLAUDE_PLUGIN_OPTION_FIT_OVER_AUTOFIX: 'false' } });
   assert.notEqual(off.ui?.subagent_type, 'agent-companion:ac-sonnet-low');
   assert.equal(off.row.fit_before_fix, null);
-  const unreg = spawn({ ...base, prompt: brief }, { started: [] });
-  assert.notEqual(unreg.ui?.subagent_type, 'agent-companion:ac-sonnet-low', 'no started ladder: not rewritten, as before');
+  // A bare rung with no ladder start in the session: no evidence its sibling is registered, not rewritten.
+  const unreg = spawn({ ...base, subagent_type: 'ac-sonnet-high', prompt: brief }, { started: [] });
+  assert.ok(!['ac-sonnet-low', 'agent-companion:ac-sonnet-low'].includes(unreg.ui?.subagent_type), 'bare, no started ladder: not rewritten');
+  assert.ok(!(unreg.row.silent_fixes || []).some((s) => s.startsWith('fit_over_rewrite')));
   const under = spawn({ subagent_type: 'agent-companion:ac-sonnet-low', name: 'w', run_in_background: true, prompt: 'TYPE: bounded-feature\nbuild x' }, { started: RUNGS });
   assert.equal(under.row.fit, 'under');
   assert.ok(under.row.silent_fixes.includes('fit_under_logged'));
   assert.doesNotMatch(`${under.msg}${under.ctx}`, /under-provisioned/i, 'the under note is gone, the row has it');
   assert.notEqual(under.ui?.subagent_type, 'agent-companion:ac-sonnet-high', 'never upgraded silently');
+});
+
+test('over-provisioned rung: the FIRST ladder spawn after a plugin load is rewritten too (haiku_fit_leak, 0.31.41)', () => {
+  // The leak rows: an explore/lookup brief on ac-opus-low or ac-sonnet-medium, the session's first ladder spawn
+  // since its plugins loaded, so no SubagentStart showed the ladder registered and the rewrite was skipped. The
+  // call's own namespaced rung is that evidence: its siblings register with it from one agents/ folder.
+  for (const from of ['agent-companion:ac-opus-low', 'agent-companion:ac-sonnet-medium']) {
+    const r = spawn({ subagent_type: from, name: 'look', run_in_background: true, prompt: 'TYPE: explore\nfind where x is set' }, { started: [] });
+    assert.equal(r.ui?.subagent_type, 'agent-companion:ac-haiku', from);
+    assert.equal(r.row.subagent_type_rewritten_to, 'agent-companion:ac-haiku', from);
+    assert.equal(r.row.fit_before_fix, 'over', from);
+    assert.match(String(r.row.model), /haiku/, `${from}: the row logs the model that runs`);
+    assert.ok(r.row.silent_fixes.includes(`fit_over_rewrite:${from}->agent-companion:ac-haiku`), from);
+    assert.doesNotMatch(`${r.msg}${r.ctx}`, /over-provisioned|re-spawn|haiku/i, `${from}: silent`);
+  }
 });
 
 test('the fixes ride one updatedInput: background, ROLE, rewrite and name together, one row', () => {

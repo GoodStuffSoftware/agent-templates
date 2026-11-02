@@ -163,7 +163,7 @@ whose.
 | `guard_source` | `cache` \| `checkout` \| `bundle` \| null | where that copy runs from: `cache` is an installed copy under the plugin cache (current or orphaned), `checkout` a source work tree with a `.git` entry (the operator's own tree, never judged stale), `bundle` anywhere else, such as an app-extracted desktop bundle (a `--plugin-dir` copy that is not a work tree also counts as `bundle`). Before round 3 every copy outside the cache was written as `checkout` |
 | `loaded_at` | ISO 8601 string \| null | when this session last loaded its plugins, from a trusted source only: self-update's per-session record when it came from a startup, a fresh-process resume, an in-process /resume (the process's own load time) or a /reload-plugins marker; else this process's own load record (`CLAUDE_PID`), only while that record says the process is running this session; else null, never "now". The scout judges a session against what was installed at this time |
 | `guard_scope` | string \| null | the install scope that applies to the spawn's cwd in `installed_plugins.json`: `user`, or `project:<hash>` / `local:<hash>` (first 12 hex of sha256 of the normalised project path, never the path); null when nothing is installed. The daily scout compares `guard_version` against the version installed for this scope (`stale_copy_loaded`, `session_outdated`) |
-| `silent_fixes` | string[] \| null | what the guard fixed or logged without a message on this spawn (0.31.36): `background_set`, `role_inserted:<role>`, `fit_over_rewrite:<from>-><to>`, `fit_under_logged`, `foreground_logged`; null when none |
+| `silent_fixes` | string[] \| null | what the guard fixed or logged without a message on this spawn (0.31.36): `background_set`, `role_inserted:<role>`, `fit_over_rewrite:<from>-><to>`, `fit_under_logged`, `foreground_logged`, `effort_filled:<effort>` (`project_effort_fill`), `background_by_harness` (0.31.40: the desktop app or VS Code from 2.1.302 backgrounds the spawn itself, so `foreground_guard` set nothing); null when none |
 | `fit_before_fix` | `over` \| null | `over` when an over-provisioned ladder rung was rewritten (`fit_over_autofix`): `fit` then holds the grade after the rewrite, and `subagent_type_rewritten_to` and `model` the rung that runs; null otherwise |
 | `subagent_type_rewritten_to` | string \| null | the ladder rung best-fit autofill rewrote a general-purpose (or unnamed) spawn to, so its effort is pinned too (`fit_autofill_ladder`); null when not rewritten. `subagent_type` keeps the type as the caller wrote it |
 | `spawned_by_agent_type` | string | what requested it — `main`, `subagent`, `teammate`, … |
@@ -184,7 +184,7 @@ whose.
 | `caller_model` | string \| null | the CALLER's own model, read from the last assistant record of the caller's transcript (bounded tail-read). The harness writes the CURRENT assistant turn to the transcript only after PreToolUse hooks return, so this is the model of the caller's PREVIOUS turn. A spawn made on a session's very first turn therefore logs `null`, and a `/model` switch shows up one turn late. |
 | `caller_effort` | string \| null | the CALLER's effort — what v1's `effort` field held |
 | `spawn_effort` | string \| null | the SPAWNED agent's own effort: the agent definition's frontmatter effort if it has one; null if the resolved model takes no effort parameter (a legacy id such as Haiku 4.5; every current tier takes one); otherwise the caller's effort (built-in types run at the caller's effort) |
-| `spawn_effort_source` | `definition` \| `inherited` \| `none` | which of the three rules above produced `spawn_effort` |
+| `spawn_effort_source` | `definition` \| `guard-fill` \| `inherited` \| `none` | which rule produced `spawn_effort`. `guard-fill` (`project_effort_fill`): a project agent named a model but no effort, or a built-in type (0.31.43) was spawned with no effort, and the guard set the spawn's `effort` from the routing table or the model's default; `silent_fixes` then holds `effort_filled:<effort>` and `effort_definition` is null |
 | `effective_effort` | string \| null | what will ACTUALLY run: the agent definition's own effort when it names one (same value as `spawn_effort` in that case); otherwise `"inherited(<parent session's effort, or 'unknown'>)"`. CORRECTED 2026-09-23: an earlier version of this field recorded a model API default (`"unset(model-default:<level>)"`) for the no-effort case — per Claude Code's sub-agents docs (code.claude.com/docs/en/sub-agents), a definition with no `effort` frontmatter actually **inherits the orchestrating session's current effort**, not any model default, so that was wrong. `null` when the resolved model takes no effort parameter at all (haiku). Exists so a later join against a transcript's `output_tokens` can compute tokens-per-effort per model — transcripts do not record effort themselves. |
 | `effort_definition` | string \| null | the effort named in the agent definition, if any |
 | `declared_weight` | 1-5 or null | task weight declared in the brief (`WEIGHT:` or `WARRANT: weight N`). Every brief declaration (`TYPE:`, `WEIGHT:`, `WARRANT:`, `KIND:`, `CONSEQUENCE:`, `WRITER:`) is read only from a line of its own, which may be list-marked (`-`, `*`) and/or markdown-bold (`**TYPE:** x`); the same words mid-sentence are prose, not declarations, and so is any line inside fenced code, indented code (4+ columns) or a `>` blockquote. The first line declaring each label wins, whether or not its value is valid (`WEIGHT: 9` declares no weight, and a later `WEIGHT:` line does not replace it) |
@@ -399,7 +399,7 @@ compaction once per compaction).
 
 ### `context-ceiling.jsonl` — one record per context-ceiling nudge
 
-Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-above or opus subagent to write a handoff file and return (`subagent_ceiling_tokens`, default 175000), once per worker (a second row only if `subagent_ceiling_repeat_tokens` is set; default 0 = off). Haiku, sonnet/low and sonnet/medium are never nudged and write no row. Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
+Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-above or opus subagent to write a handoff file and return (`subagent_ceiling_tokens`, default 0 = off since 0.31.39, so no rows unless it is set above 0), once per worker (a second row only if `subagent_ceiling_repeat_tokens` is set; default 0 = off). Haiku, sonnet/low and sonnet/medium are never nudged and write no row. Nothing is written while the rollout gate is closed (`rollout.json`, change id `context-ceiling`).
 
 | field | type | meaning |
 |---|---|---|
@@ -414,9 +414,13 @@ Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-abov
 | `rung_class` | string | `sonnet-high+` or `opus` |
 | `ceiling`, `repeat` | number | the two thresholds as set |
 
+### `long-runs.jsonl` (in `state/`, not `telemetry/`) — one record per long-run crossing
+
+Written by `hooks/lib/long-run.mjs` when a subagent's tool-call count first reaches 150 and each further 100. Fields: `ts` (ISO), `sessionId`, `agentId`, `agentType` (string or null), `steps` (number), `startedAt` (ISO or null, the transcript's first timestamp), `durationMin` (number or null), `description` (first line of the brief, or null), `transcriptPath` (string or null).
+
 ### `step-budget.jsonl` — one record per step-budget warning or denied call
 
-Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a subagent is told it has used its warning share of steps (`kind` `warn`, once per worker) and each time a call is denied past the stop or after a second compaction (`kind` `stop`). The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`.
+Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a subagent is told it has used its warning share of steps (`kind` `warn`, once per worker), and at the stop value as a soft note (`kind` `soft-stop`, once per worker; the same crossing also writes a `state/long-runs.jsonl` row) and (only with `step_budget_deny`) each time a call is denied past the stop or once the helper has reached `step_budget_compaction_stop` compactions (default 3; `kind` `stop`). The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`, `step_budget_compaction_stop`.
 
 | field | type | meaning |
 |---|---|---|
@@ -427,8 +431,8 @@ Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a sub
 | `steps` | number | the subagent's tool calls so far, this one included |
 | `type` | string or null | the `TYPE:` line of the subagent's brief |
 | `caps` | object | `warn`, `stop` and `kind` (`writer`, `lookup` or `brief` when a `BUDGET:` line set the stop) |
-| `kind` | string | `warn` or `stop` |
-| `why` | string; `stop` only | `steps` (the stop value was reached) or `compactions` (a second compaction) |
+| `kind` | string | `warn`, `soft-stop` or `stop` |
+| `why` | string; `stop` only | `steps` (the stop value was reached) or `compactions` (the `step_budget_compaction_stop`th compaction) |
 
 ### `bash-exit.jsonl` — Bash exit status
 
@@ -726,7 +730,7 @@ Written by `scripts/daily-checkup.mjs` (the scout starts it in the background; s
 | `vsTargetPct` | total percent minus the target |
 | `week` | `start` (the Friday 16:00Z reset), `units`, `pctSoFar` at the end of the day, `elapsedPct` of the week, `paceAtResetPct` (so far over the elapsed share), `partial` (the scan began after the week did) |
 | `spawns` | `total`, and `byType`, `byRole`, `byRung`: per class `n` (subagent files whose first prompt is in the day), `units` (consumed in the day) and `unitsPerSpawn`. Type and role come from the prompt's `TYPE:`/`ROLE:` lines (`none` when absent), the rung from the agent type (`sonnet/high`, `opus/medium`, `haiku`, else the type name) |
-| `subagent` | `compactions`, `compactionsPer100Spawns`, `unitsOver150k` and `shareOver150kPct` (of subagent units, requests with more than 150K context: a fixed line, kept so the series stays comparable), and since 0.31.24 `ceilingTokens`, `unitsOverCeiling` and `shareOverCeilingPct` (the same share over the active context ceiling, option `subagent_ceiling_tokens`, default 175000; a value that is not positive measures against 175000). `ceilingTokens` is the line the day was counted against; it and the share are `null` when the day's hours were counted against more than one ceiling (the option changed) or come from a state written before 0.31.24 |
+| `subagent` | `compactions`, `compactionsPer100Spawns`, `unitsOver150k` and `shareOver150kPct` (of subagent units, requests with more than 150K context: a fixed line, kept so the series stays comparable), and since 0.31.24 `ceilingTokens`, `unitsOverCeiling` and `shareOverCeilingPct` (the same share over the active context ceiling, option `subagent_ceiling_tokens`, default 0 = off since 0.31.39; an option that is not positive measures against 175000). `ceilingTokens` is the line the day was counted against; it and the share are `null` when the day's hours were counted against more than one ceiling (the option changed) or come from a state written before 0.31.24 |
 | `ceilingNudges` | rows of `telemetry/context-ceiling.jsonl` in the day (0 when the log is missing) |
 | `limit` | `hits` and `firstAt`: the synthetic "hit your ... limit" messages in the day's transcripts, each counted once (`hits` 0 and `firstAt` null when none). A day with 0 units and `hits` above 0 is a usage lockout, not a scan gap. Records written before 0.31.12 have no `limit` field and are not rewritten |
 | `changes` | `active` (`{id, activeFrom}` for every `rollout.json` entry in force by the end of the day) and `switchedOn` (ids whose time fell inside the day); both empty without a rollout file |

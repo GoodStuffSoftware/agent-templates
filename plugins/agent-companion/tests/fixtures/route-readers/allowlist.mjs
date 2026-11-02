@@ -99,15 +99,21 @@ export const ALLOWED = {
     "return process.env.AGENT_COMPANION_INSTALLED_PLUGINS_OVERRIDE",
     "// Same AGENT_COMPANION_HOME_OVERRIDE covers these two — a test fixture is one",
   ],
-  "hooks/spawn-guard.mjs": [
+  "hooks/lib/sg-brief.mjs": [
     "// Model resolution order is: env override -> spawn parameter -> the agent's",
     "// and its routing-trial override entirely, fell back to the plain grid,",
     "// explicit TYPE (with its trial override) > a real WEIGHT: line >",
     "// the only place a benchmark-backed ROUTING TRIAL override attaches.",
     "// type's own weight/kind/consequence preset AND its override, same as",
     "// a deliberate deviation and bypasses the override when its value DEPARTS",
+  ],
+  "hooks/lib/sg-finish.mjs": [
     "// were wanted. Global switch, per-agent override in either direction,",
+  ],
+  "hooks/lib/sg-fit.mjs": [
     "// against it directly instead of recomputing an override-blind",
+  ],
+  "hooks/lib/sg-telemetry.mjs": [
     "fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid",
   ],
   // FS9 fix (2026-09-24 round-2 family-split review, HIGH): scripts/benchmark.mjs

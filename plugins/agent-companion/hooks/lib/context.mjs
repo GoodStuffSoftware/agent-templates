@@ -2447,6 +2447,13 @@ function scalarOrUndefined(v) {
   return undefined;
 }
 
+// True in a Claude Code cloud (remote) session, which sets CLAUDE_CODE_REMOTE=true. A cloud session is one
+// disposable sandbox: nothing in it is shared with the operator's own machine, so the hooks that guard that
+// machine (resource gate, shared-resources line, capacity line, keep-warm) stay out of it.
+export function isCloudSession(env = process.env) {
+  return env?.CLAUDE_CODE_REMOTE === 'true';
+}
+
 export function opt(key, fallback) {
   let raw;
   try {
@@ -3135,6 +3142,31 @@ function writeHookTiming(cpuMicros, startMs, wallMs) {
   };
   appendFileSync(file, JSON.stringify(row) + '\n');
 }
+
+// ---------------------------------------------------------------------------
+// Reviewer sessions (API reviews on the Agent SDK, scripts/lib/api-sdk-run.mjs).
+//
+// The SDK reviewer is the TOP-LEVEL session of its own Claude Code process and loads this
+// plugin, so every lead-only hook would misfire on it (the delegation guard blocks the 4th
+// execution call in a row, which would cripple a reviewer). api-sdk-run sets
+// AC_REVIEWER_SESSION=1 in the child environment only. A hook process whose script is in
+// REVIEWER_OFF_HOOKS exits here, at once and silently (= passthrough), before it reads its
+// input or does any work. Everything not listed keeps running: the safety guards (bash-tail's
+// resource gate; poll-guard's kill-by-name, plugin-uninstall, env-dump, push-delete and
+// python-stdin guards, which skip only their poll and worker-wait advisories in a reviewer
+// session) and the neutral record or efficiency hooks. The full table, hook by hook, is in
+// the README ("Reviewer sessions"). Without the variable nothing here does anything.
+export const REVIEWER_SESSION_ENV = 'AC_REVIEWER_SESSION';
+export const isReviewerSession = (env = process.env) => String((env && env[REVIEWER_SESSION_ENV]) || '') === '1';
+export const REVIEWER_OFF_HOOKS = Object.freeze([
+  // lead and orchestration behaviour
+  'delegation-guard', 'standing-rules', 'advisory-b', 'session-delta', 'struggle-detector', 'memory-budget', 'settings-journal',
+  'self-update', 'scout-surface', 'capacity-probe', 'ladder-check', 'git-brief', 'telemetry-send',
+  // spawn, worker and routine hooks (their tools are not in a reviewer's toolset)
+  'spawn-guard', 'spawn-log', 'resume-guard', 'subagent-brevity', 'review-verdict', 'runaway-check', 'runaway-notice',
+  'chip-check', 'publish-check', 'cloud-routine-pin', 'routine-placement', 'routine-pin-check',
+]);
+if (isHookProcess() && isReviewerSession() && REVIEWER_OFF_HOOKS.includes(basename(process.argv[1]).replace(/.mjs$/i, ''))) process.exit(0);
 
 if (isHookProcess()) {
   process.on('exit', () => {

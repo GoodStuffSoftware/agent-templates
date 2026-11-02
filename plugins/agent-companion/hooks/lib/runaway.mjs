@@ -130,7 +130,8 @@ export const safe = (s) => String(s || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_
 function queueDir() { return join(stateDir(), 'runaway-queue'); }
 
 // Once per agent_id: SubagentStop fires again when a stopped worker is
-// continued with SendMessage and stops again, and its transcript is still
+// continued with SendMessage and stops again (before Claude Code 2.1.311 it
+// also fired about twice a minute while a worker ran), and its transcript is still
 // over the line. Exclusive create — the one process whose create wins flags.
 export function claimAgentOnce(agentId) {
   try {

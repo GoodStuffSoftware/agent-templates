@@ -12,7 +12,7 @@ import { join, dirname, relative } from 'node:path';
 import { makeFixture, runScript } from './helpers.mjs';
 import { telemetryDir } from '../hooks/lib/context.mjs';
 import {
-  runCheckup, scanTranscripts, resetUnitCache, factsDir, writeOpenFile,
+  runCheckup, scanTranscripts, resetUnitCache, factsDir, writeOpenFile, checkupPaths, checkupDue, RETRY_MS,
 } from '../scripts/lib/daily-checkup.mjs';
 import {
   classTool, classToolsOf, requestCategory, statusOf, nameStem, respawnKey, requestBucket, contextBucket,
@@ -192,6 +192,32 @@ test('a spawn open across the day boundary waits, then lands on its start day', 
     assert.ok(d9.rows.some((x) => x.hour === '2026-10-09T08:00:00.000Z'), 'its post-boundary tokens stay in the session-hour rows of the later day');
     const open2 = JSON.parse(readFileSync(join(factsDir(), 'open.json'), 'utf8'));
     assert.deepEqual(open2.spawns, [], 'nothing is open any more');
+  } finally { fx.cleanup(); }
+});
+
+test('a day deferred for an open spawn is not marked covered: it is due again after the retry delay and then written', () => {
+  const { fx, root } = mk();
+  try {
+    resetUnitCache();
+    const file = subFile(root, 'sess3', 'w3', { agentType: 'agent-companion:ac-haiku', description: 'd', toolUseId: 'toolu_C' });
+    put(file, [
+      user('b', '2026-10-09T07:50:00Z', 'TYPE: explore\nROLE: lookup\nlook'),
+      asst('a1', '2026-10-09T07:55:00Z', HAIKU, { i: 5, o: 50, cr: WARM }, tu('t1', 'Read', {})),
+      asst('a2', '2026-10-09T08:05:00Z', HAIKU, { i: 5, o: 50, cr: WARM }, tu('t2', 'Read', {})),
+    ]);
+    const early = Date.parse('2026-10-09T08:10:00Z');
+    const r1 = runCheckup({ root, nowT: early, holdMs: 0 });
+    assert.deepEqual(r1.factsWritten, []);
+    const st1 = JSON.parse(readFileSync(checkupPaths().status, 'utf8'));
+    assert.equal(st1.lastDay, '2026-10-07', 'the deferred day 2026-10-08 is not covered');
+    assert.equal(checkupDue(early + 60 * 60 * 1000), false, 'rate-limited inside the 3 h retry delay');
+    const later = early + RETRY_MS + 60 * 1000;
+    assert.equal(checkupDue(later), true, 'due again once the retry delay has passed');
+    const r2 = runCheckup({ root, nowT: later, holdMs: 0 });
+    assert.deepEqual(r2.factsWritten, ['2026-10-08'], 'the retry writes the deferred day (the spawn is idle by then)');
+    assert.ok(existsSync(join(factsDir(), '2026-10-08.json')));
+    assert.equal(JSON.parse(readFileSync(checkupPaths().status, 'utf8')).lastDay, '2026-10-08', 'now covered');
+    assert.equal(checkupDue(later + RETRY_MS + 1), false, 'normal path: one run per day once the facts file exists');
   } finally { fx.cleanup(); }
 });
 

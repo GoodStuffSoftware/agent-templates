@@ -246,8 +246,11 @@ test('spawn guard: a rung that carries the block is told the reviewer rung in a 
     const brief = 'TYPE: bounded-feature\ndo a thing';
     const NOTE = /agent-companion: reviewer rung for this brief/;
     const crit = 'TYPE: bounded-feature\nCONSEQUENCE: critical\ndo a thing';
+    // A type routed to ac-opus-medium itself: a bounded-feature brief there is over-provisioned and is rewritten
+    // to ac-sonnet-high (0.31.41: even with no ladder start in the session), which the sonnet floor does touch.
+    const opusBrief = 'TYPE: debug-root-cause\ndo a thing';
     // No floor (shipped): the block's own rung is right, so nothing is appended.
-    for (const [agent, b] of [['ac-sonnet-high', brief], ['ac-opus-medium', brief], ['ac-opus-xhigh', crit]]) {
+    for (const [agent, b] of [['ac-sonnet-high', brief], ['ac-opus-medium', opusBrief], ['ac-opus-xhigh', crit]]) {
       assert.doesNotMatch(spawn(agent, b), NOTE, `${agent} unfloored`);
     }
     // A critical consequence on an opus rung that is not the critical reviewer's rung: told the critical reviewer (predates 0.31.28).
@@ -271,7 +274,7 @@ test('spawn guard: a rung that carries the block is told the reviewer rung in a 
     // Floor and critical together: critical wins (opus/xhigh).
     assert.match(spawn('ac-sonnet-high', crit), /subagent_type "agent-companion:ac-opus-xhigh"/);
     // The floor changes nothing for a rung it does not touch, and nothing for an opted-out or non-writer brief.
-    assert.doesNotMatch(spawn('ac-opus-medium', brief), NOTE);
+    assert.doesNotMatch(spawn('ac-opus-medium', opusBrief), NOTE);
     assert.doesNotMatch(spawn('ac-sonnet-high', 'TYPE: bounded-feature\nREVIEW: lead\ndo a thing'), NOTE);
     assert.doesNotMatch(spawn('ac-sonnet-high', 'TYPE: research\nlook it up'), NOTE);
   } finally {

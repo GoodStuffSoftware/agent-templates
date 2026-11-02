@@ -33,14 +33,14 @@ test('R1 configuredWindow: a settings value Claude Code drops is not a configure
   } finally { cleanup(); }
 });
 
-// R2. Docs (env-vars): "a value like 500k reads as 500 and clamps to the 100K
-// minimum" — the variable is still in effect, at 100K, and it beats settings.
-test('R2 configuredWindow: CLAUDE_CODE_AUTO_COMPACT_WINDOW=500k is in effect at 100K', () => {
+// R2. A value under the minimum is still in effect, at 100K, and beats settings. (Before 2.1.304 the docs'
+// example was 500k, read as 500; the k suffix is a size now, so the bare 500 stands in for it.)
+test('R2 configuredWindow: CLAUDE_CODE_AUTO_COMPACT_WINDOW=500 is in effect at 100K', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const settingsPath = join(dir, 'settings.json');
     writeFileSync(settingsPath, JSON.stringify({ autoCompactWindow: 400000 }));
-    assert.equal(configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500k' }, settingsPath }).tokens, 100000);
+    assert.equal(configuredWindow({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500' }, settingsPath }).tokens, 100000);
   } finally { cleanup(); }
 });
 

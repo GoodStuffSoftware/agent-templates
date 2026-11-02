@@ -8,7 +8,7 @@
 // Labels: M = measured from telemetry as written; E = estimated or heuristic (the re-brief
 // detector is unvalidated, see helpers.mjs buildLeadIndex).
 import {
-  isObj, finite, nonEmpty, typeOf, isLeadRow, verdictOf, buildLeadIndex, denialEffort, DENY_GUARDS,
+  isObj, finite, nonEmpty, typeOf, WRITER_TYPES, isLeadRow, verdictOf, buildLeadIndex, denialEffort, DENY_GUARDS,
 } from './helpers.mjs';
 import { DAY_METRICS } from './day.mjs';
 import { LEAD_METRICS } from './lead.mjs';
@@ -94,7 +94,10 @@ export const REGISTRY = [
     needs: ['S'], perDayTotal: false, byLeadLevels: false,
     day(p, rec, rows) {
       const reviews = (rows || []).filter((r) => typeOf(r) === 'code-review' && nonEmpty(r.caller_tool_use_id)).length;
-      const writers = (rows || []).filter((r) => typeOf(r) === p.writerType).length;
+      // Reviews cover every writer type, so the denominator is all writer spawns, not one type: counting
+      // bounded-feature alone read 3.5 where the true figure is about 0.6-0.7 (2026-10-29). params.writerType
+      // stays required so existing register entries remain valid; it no longer narrows the count.
+      const writers = (rows || []).filter((r) => WRITER_TYPES.has(typeOf(r))).length;
       return { num: reviews, den: writers, scale: 1, sample: writers };
     },
   },
@@ -176,7 +179,7 @@ export const REGISTRY = [
     },
   },
   {
-    // The share over the ACTIVE context ceiling (subagent_ceiling_tokens, default 175K), with the line
+    // The share over the ACTIVE context ceiling (subagent_ceiling_tokens; measured against 175K while the option is 0), with the line
     // the day was counted against beside it (subagent.ceilingTokens). A day without one line is a gap.
     id: 'shareOverCeilingPct', source: 'history', register: true, entity: 'day', label: 'M', unit: '%', direction: 'up-is-worse', pool: 'ratio',
     needs: ['H'], perDayTotal: false, byLeadLevels: false,

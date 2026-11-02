@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.36",
+  "version": "0.31.46",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -46,6 +46,12 @@
       "type": "string",
       "title": "Route project agents pinned to Opus",
       "description": "A spawn of a project or user agent (<project>/.claude/agents, ~/.claude/agents) whose own definition pins Opus is judged by the brief's TYPE against the live routing table, like a ladder spawn. \"autofix\" (default): when the table sends that TYPE to a non-Opus model, the spawn is silently rewritten to run on that model (the Agent call's model parameter overrides the agent file's model; the agent keeps its instructions and effort), with one routing-autofix row in telemetry/denials.jsonl and no message. A PREMIUM: <reason> line in the brief keeps Opus. Types the table keeps on Opus pass; a brief with no usable TYPE is left alone and logged (outcome untyped). Never denies. \"warn\": leave the spawn as is, with a note and the same row. \"off\": silent. Opus project agents took 20.1% of all usage in a measured three weeks, mostly on bounded-feature and integration briefs the table sends to Sonnet.",
+      "default": "autofix"
+    },
+    "project_effort_fill": {
+      "type": "string",
+      "title": "Fill the effort of project agents that set a model but no effort",
+      "description": "A built-in type (general-purpose, Explore, Plan, claude-code-guide, statusline-setup, claude) spawned with no effort is filled the same way (0.31.43). A project or user agent (<project>/.claude/agents, ~/.claude/agents) whose definition sets a model but no effort line inherits the lead session's effort (xhigh on a premium lead: two haiku explorers ran at xhigh). \"autofix\" (default): when the spawn sets no effort either, the guard sets the Agent call's effort silently, from the routing table entry for the brief's TYPE when that route is on the model that runs, else the model's own default effort; one spawns.jsonl row records it (spawn_effort_source guard-fill), no message. An effort in the spawn input or in the agent file always wins. \"off\": silent, effort stays inherited.",
       "default": "autofix"
     },
     "python_stdin_guard": {
@@ -189,7 +195,7 @@
     "release_watch": {
       "type": "boolean",
       "title": "Claude Code release watch",
-      "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on subagents, hooks, cache, compaction, effort, models, transcripts, SendMessage, worktrees, workflows and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one line naming the versions, the item count and the details path (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
+      "description": "The daily scout compares the installed Claude Code with the newest release in the public changelog (one request to the changelog host, at most once per 24 hours, 3 second limit; silent when offline) and, for releases it has not told you about, keeps the changelog items on subagents, hooks, cache, compaction, effort, models, transcripts, SendMessage, worktrees, workflows and plugins in a details file under the scout state dir. It raises a `cli_release_available` scout signal, and the next MAIN session start gets one short line pointing to the morning brief (subagents get nothing). Each release is surfaced once. Off = no request and no signal.",
       "default": true
     },
     "pinned_model_check": {
@@ -209,6 +215,78 @@
       "title": "Decision register",
       "description": "Reads your own register of standing decisions (config/decision-register.json in the agent-companion config dir; absent means nothing happens) and flags a decision for review when its trigger fires: a Claude Code changelog item that matches a pattern you wrote, a plan-usage metric from the daily checkup past a threshold, or a staged change not exercised or exercised wrongly. No model call and no extra network (the changelog scan rides on the release-watch fetch). The next MAIN session start shows ONE line per flag, once, and only while the flag is under 72 hours old (subagents get nothing); the full text goes to decision-register-details.md in the scout state dir. Off = no scan, no line, no signal.",
       "default": true
+    },
+    "api_credits_key_source": {
+      "type": "string",
+      "title": "API credits: where the Console API key comes from",
+      "description": "Where scripts/api-review.mjs finds the Console API key that bills a review to the plan's API credits: \"env:<NAME>\" (a user environment variable; default env:AC_API_KEY) or \"bws:<secret-name>\" (Bitwarden Secrets Manager CLI, with BWS_ACCESS_TOKEN in the environment). The key goes only into the x-api-key header of a Messages API request (the credits do not cover Claude Code, so no claude process is started); it is never printed, logged, written or put on a command line. If the key is not scoped to a workspace, also set the environment variable AC_API_WORKSPACE_ID. With the variable unset, `api-credits.mjs decide` answers plan and nothing changes. Create the key in the Claude Console and turn auto-reload off there so nothing charges a card.",
+      "default": "env:AC_API_KEY"
+    },
+    "api_credits_budget_usd": {
+      "type": "number",
+      "title": "API credits: monthly budget (USD)",
+      "description": "The plan's monthly Claude Platform API credits, in USD. Spend is paced linearly across the billing cycle, so the credits last the month.",
+      "default": 200
+    },
+    "api_credits_cycle_day": {
+      "type": "number",
+      "title": "API credits: billing cycle start day",
+      "description": "Day of the month (1-28, UTC) the credit cycle starts. The ledger rolls over then.",
+      "default": 1
+    },
+    "api_credits_shares": {
+      "type": "string",
+      "title": "API credits: category shares",
+      "description": "Share of the budget per category as name=fraction pairs. Default review=0.5,overflow=0.3,rater=0.1,reserve=0.1. A category may have spent at most share x budget x elapsed fraction of the cycle plus one average item. The reserve is held back until the last 3 days of the cycle. Only review is used today; overflow and rater are reserved for later.",
+      "default": "review=0.5,overflow=0.3,rater=0.1,reserve=0.1"
+    },
+    "api_credits_review_ratio": {
+      "type": "number",
+      "title": "API credits: target share of reviews on credits",
+      "description": "Target fraction of writer reviews run on the API credits (default 0.5: alternate by a persisted counter). Pacing and the remaining balance can only lower it.",
+      "default": 0.5
+    },
+    "api_credits_item_estimate_usd": {
+      "type": "number",
+      "title": "API credits: estimated cost of one review (USD)",
+      "description": "Used as the pace slack and balance check until the cycle has a recorded review. An agentic review costs about $1-3.",
+      "default": 2
+    },
+    "api_review_runner": {
+      "type": "string",
+      "title": "API reviews: engine (sdk or fetch)",
+      "description": "Which engine scripts/api-review.mjs uses for a review on the API credits. \"fetch\": the Messages API with read-only read_file, grep and glob tools confined to the repository (no dependency, cheapest; the reviewer cannot run commands). \"sdk\": the Claude Agent SDK on the same API key with Read, Grep, Glob, Bash, WebSearch and WebFetch (and PowerShell on Windows), so the reviewer can run the affected tests (installed on demand into the agent-companion state dir, never into the plugin; not confined to the repository). Empty = the built-in default; the --runner flag overrides this. If the SDK cannot be installed or imported, the fetch engine runs instead.",
+      "default": ""
+    },
+    "api_sdk_version": {
+      "type": "string",
+      "title": "API reviews: pinned Agent SDK version",
+      "description": "The @anthropic-ai/claude-agent-sdk version the sdk engine installs on demand into <state dir>/sdk/<version>/ (a plain x.y.z version).",
+      "default": "0.3.316"
+    },
+    "api_review_hard_usd": {
+      "type": "number",
+      "title": "API reviews: hard spend backstop of one review (USD, 0 = none)",
+      "description": "Reviews on the API credits have soft limits: a note at 8 minutes (logged to long-runs.jsonl) and at $0.20 of spend (listed by the scout), and the review goes on. Only a hung review (no message or tool result for 10 minutes) and this backstop stop one: a review that has spent this much without finishing is ended (fetch: its next turn is the last; sdk: aborted, and falls back to the plan reviewer) (a client-side estimate; each turn is booked in the ledger as it completes). Measured normal reviews cost $0.005-0.10, so 20 cents flags a review and 50 cents means a runaway. 0 disables the backstop. --max-usd overrides it for one review.",
+      "default": 0.5
+    },
+    "api_admin_key_source": {
+      "type": "string",
+      "title": "API spend watch: where the Admin API key comes from",
+      "description": "Where scripts/api-spend.mjs finds the organization's Admin API key (sk-ant-admin...), which reads the cost report: \"dpapi:<path>\" (a file written by PowerShell ConvertFrom-SecureString for the current Windows user; default <state root>/secrets/anthropic-admin-key.dpapi), \"env:<NAME>\" or \"bws:<secret-name>\". The key goes only into the x-api-key header of a GET request; it is never printed, logged, written or put on a command line. Only an organization has an Admin API; with no key the watch reports 'unavailable' and nothing else changes.",
+      "default": ""
+    },
+    "api_spend_alerts": {
+      "type": "string",
+      "title": "API spend watch: reviewer spend alert thresholds (USD)",
+      "description": "Comma-separated dollar amounts. api-spend.mjs check lists a notification for each one the reviewers workspace has reached this billing cycle and that has not been acknowledged (ack <alert-id>). Default 50.",
+      "default": "50"
+    },
+    "api_spend_reviewers_workspace": {
+      "type": "string",
+      "title": "API spend watch: the reviewers workspace",
+      "description": "The workspace whose spend is compared with the governor ledger: a workspace id (wrkspc_...) or a workspace name looked up through the Admin API. Default: a workspace named reviewers.",
+      "default": "reviewers"
     },
     "weekly_limit_units": {
       "type": "number",
@@ -255,7 +333,7 @@
     "fit_over_autofix": {
       "type": "boolean",
       "title": "Rewrite an over-provisioned ladder rung silently",
-      "description": "When a spawn names an ac-* ladder rung that the best-fit check finds over-provisioned for its TYPE, rewrite subagent_type (and the model parameter, when the call set one) to the rung the routing table names, with no message; the spawn row records it (silent_fixes, fit_before_fix). Only to a rung the session has shown it registered (as fit_autofill_ladder does). A `PREMIUM: <reason>` line in the brief keeps the spawned rung and also counts as the premium warrant (it skips the over-provisioned deny and the no-warrant deny). Never rewrites a project pin, a reviewer on its parity route, or an under-provisioned spawn (that one is only logged). Off = the old behaviour: announce, or deny for a premium model.",
+      "description": "When a spawn names an ac-* ladder rung that the best-fit check finds over-provisioned for its TYPE, rewrite subagent_type (and the model parameter, when the call set one) to the rung the routing table names, with no message; the spawn row records it (silent_fixes, fit_before_fix). Only to a rung the session has shown it registered (as fit_autofill_ladder does); a namespaced agent-companion:ac-* rung on the call itself counts as that evidence (0.31.41). A `PREMIUM: <reason>` line in the brief keeps the spawned rung and also counts as the premium warrant (it skips the over-provisioned deny and the no-warrant deny). Never rewrites a project pin, a reviewer on its parity route, or an under-provisioned spawn (that one is only logged). Off = the old behaviour: announce, or deny for a premium model.",
       "default": true
     },
     "review_recursion_guard": {
@@ -770,25 +848,25 @@
     "subagent_context_notice_tokens": {
       "type": "number",
       "title": "Subagent context notice: tokens",
-      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens, or the subagent has just compacted, the subagent is told once to finish the current step, return its results and say what is left, and the lead is told when it stops. Nothing is ever blocked. 0 turns it off.",
+      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens the subagent is told once to finish the current step, return its results and say what is left; when it has just compacted it is told only to re-read what the next step needs and continue (no wrap-up: workers compact and keep going). The lead is told when it stops. Nothing is ever blocked. 0 turns it off, the compaction note included.",
       "default": 300000
     },
     "subagent_ceiling_tokens": {
       "type": "number",
       "title": "Subagent context ceiling: tokens",
-      "description": "Advisory only. The first time a subagent's own context reaches this many tokens, the same PreToolUse hook as subagent_context_notice_tokens tells it ONCE to write a handoff file (state, files touched, next step, open questions) and return, giving the file path and STATUS: partial in its final message; the lead then starts a FRESH worker on the same rung that reads the file. Applies only to sonnet/high, sonnet/xhigh and every opus rung (never haiku, sonnet/low or sonnet/medium; the set is read from config/model-tiers.json). Nothing is ever blocked. It does nothing until the rollout schedule (rollout.json in the agent-companion state dir, id context-ceiling) says it is active. 0 turns it off.",
-      "default": 175000
+      "description": "Default 0 = off: workers compact instead of handing off (lead handoffs saved nothing when measured on 2026-10-09, and a compaction replay confirmed one fixed compaction point is enough). Set a positive number to turn the handoff nudge back on. Advisory only. The first time a subagent's own context reaches this many tokens, the same PreToolUse hook as subagent_context_notice_tokens tells it ONCE to write a handoff file (state, files touched, next step, open questions) and return, giving the file path and STATUS: partial in its final message; the lead may then start a FRESH worker on the same rung that reads the file. Applies only to sonnet/high, sonnet/xhigh and every opus rung (never haiku, sonnet/low or sonnet/medium; the set is read from config/model-tiers.json). Nothing is ever blocked. It does nothing until the rollout schedule (rollout.json in the agent-companion state dir, id context-ceiling) says it is active. 0 turns it off.",
+      "default": 0
     },
     "subagent_ceiling_repeat_tokens": {
       "type": "number",
       "title": "Subagent context ceiling: second notice tokens",
-      "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. Default 0 = off (the handoff nudge fires once per worker); set a line above the ceiling (for example 200000) to turn the second notice on.",
+      "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. Default 0 = off (the handoff nudge fires once per worker); only used when subagent_ceiling_tokens is on. Set a line above the ceiling (for example 200000) to turn the second notice on.",
       "default": 0
     },
     "step_budget": {
       "type": "boolean",
       "title": "Helper step budget",
-      "description": "On (default): the same PreToolUse hook that runs inside each subagent counts the subagent's own tool calls. At the warning line it is told ONCE how many of its steps are used and to finish, write its detail file and report what is left. Past the stop line every tool call is DENIED except writing a report or detail file (Write or Edit of a .md, .txt, .json or .csv file whose name says report, detail, handoff, review, summary, findings, analysis, verdict or notes), with the reason 'Step budget reached: write your report now and stop.' A subagent whose context compacts a second time is stopped the same way. The lines come from the subagent's brief: TYPE lookup, research, survey, explore and verify use the lookup lines, every other or missing TYPE the writer lines, and a 'BUDGET: <n>' line in the brief (10 to 9999, optionally followed by calls, tool calls, steps or turns) sets the stop value with the warning at 80% of it. The lead's own session is never counted. Off = no counting, no warning, no stop.",
+      "description": "On (default): the same PreToolUse hook that runs inside each subagent counts the subagent's own tool calls. At the warning line it is told ONCE how many of its steps are used and to finish, write its detail file and report what is left. At the stop line it is told ONCE, with the same short note as the 150-step long-run note (keep going and update your notes if progress, stop and report if stuck), and a row goes to state/long-runs.jsonl. By default nothing is ever denied: a long run that is working is not stopped. With step_budget_deny on, every call past the stop line is DENIED except writing a report or detail file (Write or Edit of a .md, .txt, .json or .csv file whose name says report, detail, handoff, review, summary, findings, analysis, verdict or notes), with the reason 'Step budget reached: write your report now and stop.', and a subagent whose context compacts step_budget_compaction_stop times (default 3) is stopped the same way. The lines come from the subagent's brief: TYPE lookup, research, survey, explore and verify use the lookup lines, every other or missing TYPE the writer lines, and a 'BUDGET: <n>' line in the brief (10 to 9999, optionally followed by calls, tool calls, steps or turns) sets the stop value with the warning at 80% of it. The lead's own session is never counted. Off = no counting, no warning, no note.",
       "default": true
     },
     "step_budget_warn": {
@@ -800,7 +878,7 @@
     "step_budget_stop": {
       "type": "number",
       "title": "Helper step budget: stop at (writers and other types)",
-      "description": "Tool calls a subagent whose TYPE is not a lookup type (and has no BUDGET line) may make before every further call except writing its report or detail file is denied. 99 in 100 helpers finish under 120 calls. 0 = no stop for this class.",
+      "description": "Tool calls a subagent whose TYPE is not a lookup type (and has no BUDGET line) may make before it gets the one-time long-run note (denied past it only with step_budget_deny). 99 in 100 helpers finish under 120 calls. 0 = no stop line for this class.",
       "default": 120
     },
     "step_budget_lookup_warn": {
@@ -812,8 +890,20 @@
     "step_budget_lookup_stop": {
       "type": "number",
       "title": "Helper step budget: stop at (lookup types)",
-      "description": "Tool calls a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) may make before every further call except writing its report or detail file is denied. 0 = no stop for this class.",
+      "description": "Tool calls a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) may make before it gets the one-time long-run note (denied past it only with step_budget_deny). 0 = no stop line for this class.",
       "default": 60
+    },
+    "step_budget_deny": {
+      "type": "boolean",
+      "title": "Helper step budget: deny past the stop (opt-in)",
+      "description": "Off (default): the step stop lines only add a note and a state/long-runs.jsonl row, and nothing is ever denied. On: the old hard stop, every call past the stop line (and past step_budget_compaction_stop compactions) is denied except writing a report or detail file. Only used while step_budget is on.",
+      "default": false
+    },
+    "step_budget_compaction_stop": {
+      "type": "number",
+      "title": "Helper step budget: stop at this many compactions",
+      "description": "With step_budget_deny on, a subagent whose context has compacted this many times is stopped like the step stop: every further call except writing its report or detail file is denied, and the stop stays on. Default 3 (a whole number): at the 183000 subagent compaction window that is about the work volume the old 2-compaction stop allowed at the 250000 window. 0 = no compaction stop. Only used while step_budget and step_budget_deny are on.",
+      "default": 3
     },
     "usage_analysis": {
       "type": "boolean",

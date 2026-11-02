@@ -50,7 +50,7 @@ test('config: selfReview lists every stand-alone writer type (lean worker shape,
   }
   assert.equal(sr.fixRounds, 1);
   assert.equal(sr.optOut.line, 'REVIEW: lead');
-  assert.equal(sr.updated, '2026-10-06');
+  assert.equal(sr.updated, '2026-10-27');
   assert.ok(sr.rationale.length > 100);
   // It sits with the task types, so it moves with the table.
   const keys = Object.keys(SHIPPED);
@@ -88,6 +88,17 @@ test('the committed block is byte-identical to a fresh generation (and --check p
   }
   const res = runScript('scripts/routing-table.mjs', ['--check-agent-descriptions']);
   assert.equal(res.status, 0, res.stdout + res.stderr);
+});
+
+test('the protocol carries the incomplete-review rule: no verdict line counts as no review, the writer does not land (committed rungs and the brief text)', () => {
+  const rule = (text, where) => {
+    assert.match(text, /returned no verdict line/, where);
+    assert.match(text, /counts as no review: do not land or merge/, where);
+    assert.match(text, /\"review incomplete\"/, where);
+    assert.match(text, /the lead to review instead/, where);
+  };
+  for (const agent of SELF_REVIEW_RUNGS) rule(blockOf(join(PLUGIN_ROOT, 'agents', `${agent}.md`)), agent);
+  rule(selfReviewBlock(SHIPPED.ladder.find((r) => r.agent === 'ac-sonnet-high'), selfReviewConfig(SHIPPED)), 'generated');
 });
 
 test('drift: a hand-edited block fails the check as self-review-drift, and --sync restores it', () => {

@@ -177,6 +177,12 @@ function classify(cmd, shell) {
   const rest = noRedir(w.slice(k + 1));
   const args = rest.map((x) => x.t);
   const ps = shell === 'powershell';
+  // a PowerShell assignment (`$env:NAME=[Environment]::GetEnvironmentVariable('X','User')`, `$x=$env:KEY`) stores the value and prints
+  // nothing. Only a single leading word `$name=...` / `$env:NAME=...` / `${env:NAME}=...` counts (no `==`); a paren-wrapped
+  // `($x=...)` or a `$x=...` that is not the whole first word still goes through the checks below.
+  if (ps && !cmd.call && !cmd.isSub && !cmd.piped && /^\$(?:\{[\w:.-]+\}|[\w:]+)\s*[-+*\/%]?=(?!=)/.test(w[k].t) && w.length === k + 1 && !/[;|&\r\n]/.test(w[k].t)) {
+    return null;
+  }
   if (w.some((x) => /getenvironmentvariables\(/i.test(x.t))) {
     return w.some((x) => /getenvironmentvariables\([^)]*\)\.keys\b/i.test(x.t)) ? null : 'dump';
   }
@@ -298,7 +304,12 @@ function classify(cmd, shell) {
   return null;
 }
 
-const isSedNames = (a) => /^s(.)=\.\*\$?\1\1[a-z]*$/.test(a);
+// `s/=.*//` drops the value. A non-empty replacement (`s/=.*/=.../`) is as safe while it cannot re-emit what
+// the match held and the delimiter cannot make sed split the script somewhere else than this pattern does: the
+// delimiter is one of / | , : @ % ~ # (never = . * $ or a letter); the replacement has no `&`, no backslash (so
+// no \1, \0 or other escape), no `$` or backtick (a double-quoted script is expanded by the shell first), no
+// delimiter, no control character (the tokenizer leaves a NUL where a `$(...)` stood), one line; and the flags are only g, I, i (not `e`, which runs the line, nor `w`, which writes it).
+const isSedNames = (a) => /^s(.)=\.\*\$?\1\1[a-z]*$/.test(a) || /^s([/|,:@%~#])=\.\*\$?\1((?:(?!\1)[^&\\$`\x00-\x1f])*)\1[gIi]*$/.test(a);
 
 // does a downstream command keep values off the transcript (names only, a count, a hash, a quiet test)?
 function isFilter(cmd, shell) {
@@ -397,6 +408,7 @@ function scan(text, shell, depth, st, hits, skipTop = false) {
     byChain.get(c.chain).push(c);
   }
   // sub commands whose result is only captured or only has its names read are not printed
+  for (const c of cmds) for (const sc of c.subs) sc.isSub = true; // `($x=...)` prints its value: not an assignment statement
   for (const c of cmds) {
     const k = rawProg(c.words);
     if (k < 0) for (const sc of c.subs) sc.captured = true; // VAR=$(...) with no command
@@ -409,6 +421,7 @@ function scan(text, shell, depth, st, hits, skipTop = false) {
     for (let i = 0; i < list.length; i++) {
       const c = list[i];
       if (c.captured) continue;
+      c.piped = i < list.length - 1; // `$x=... | Write-Host` is a pipeline, not a plain assignment
       const kind = skipTop ? null : classify(c, shell);
       if (kind === 'secret' && c.condition) continue; // if (\$env:NAME) { ... }: a presence test
       if (kind && !redirected(c.words)) {

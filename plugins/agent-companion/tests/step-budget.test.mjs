@@ -1,6 +1,6 @@
-// Live step budget: hooks/subagent-context.mjs (PreToolUse, inside the helper) counts the
+// Live step budget (the deny is opt-in via step_budget_deny; soft tests at the end): hooks/subagent-context.mjs (PreToolUse, inside the helper) counts the
 // helper's tool calls per agent_id, warns once at the soft line and denies everything but
-// a report or detail write past the hard one; a second compaction stops it the same way.
+// a report or detail write past the hard one; the Nth compaction (step_budget_compaction_stop) stops it the same way.
 // Caps come from the helper's brief (first user message of its own transcript): lookup,
 // research, survey, explore and verify 40/60, everything else 80/120, `BUDGET: <n>` sets
 // the stop with the warning at 80%. Library: hooks/lib/step-budget.mjs.
@@ -14,6 +14,7 @@ import { writeFileSync, appendFileSync, mkdirSync, existsSync, readFileSync, sta
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 import { telemetryDir, stateDir } from '../hooks/lib/context.mjs';
+import { longRunText } from '../hooks/lib/long-run.mjs';
 import { briefStepInfo, capsFor, isReportWrite, STOP_REASON, warnText } from '../hooks/lib/step-budget.mjs';
 
 const SID = 'sess-step';
@@ -52,7 +53,11 @@ const pre = (lead, extra = {}) => ({
   hook_event_name: 'PreToolUse', session_id: SID, transcript_path: lead, cwd: 'x', permission_mode: 'default',
   agent_id: AGENT, agent_type: 'ac-sonnet-high', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 'toolu_1', ...extra,
 });
-const run = (lead, env = {}, extra = {}) => runHook('hooks/subagent-context.mjs', pre(lead, extra), { env: { ...OFF_CTX, ...env } });
+// The deny is opt-in (step_budget_deny, default off since the 2026-11-01 ruling), so most tests here run with it on;
+// the soft tests at the end use runSoft.
+const DENY_ON = { CLAUDE_PLUGIN_OPTION_STEP_BUDGET_DENY: 'true' };
+const run = (lead, env = {}, extra = {}) => runHook('hooks/subagent-context.mjs', pre(lead, extra), { env: { ...OFF_CTX, ...DENY_ON, ...env } });
+const runSoft = (lead, env = {}, extra = {}) => runHook('hooks/subagent-context.mjs', pre(lead, extra), { env: { ...OFF_CTX, ...env } });
 const ctxText = (r) => r.json?.hookSpecificOutput?.additionalContext || '';
 const denied = (r) => r.json?.hookSpecificOutput?.permissionDecision === 'deny';
 const rows = () => readJsonl(join(telemetryDir(), 'step-budget.jsonl'));
@@ -217,34 +222,62 @@ test('options: step_budget_stop, step_budget_warn and the lookup pair move the l
   } finally { fx.cleanup(); }
 });
 
-test('second compaction: the first only warns the context way, the second stops the helper', () => {
+test('compaction stop: the default is the third compaction; the first two only inform', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
     const ctxOn = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_TOKENS: '0' };
     appendFileSync(agentFile, boundary('b1') + turn('r2'));
     const first = run(lead, ctxOn);
-    assert.match(ctxText(first), /You just compacted/);
+    assert.match(ctxText(first), /You compacted; re-read only what the next step needs and continue\./);
+    assert.doesNotMatch(ctxText(first), /split|return your results/);
     assert.equal(denied(first), false);
     appendFileSync(agentFile, boundary('b2') + turn('r3'));
-    const second = run(lead, ctxOn);
-    assert.equal(denied(second), true);
-    assert.equal(second.json.hookSpecificOutput.permissionDecisionReason, STOP_REASON);
+    assert.equal(denied(run(lead, ctxOn)), false, 'two compactions no longer stop the helper');
+    appendFileSync(agentFile, boundary('b3') + turn('r4'));
+    const third = run(lead, ctxOn);
+    assert.equal(denied(third), true);
+    assert.equal(third.json.hookSpecificOutput.permissionDecisionReason, STOP_REASON);
     assert.equal(rows().at(-1).why, 'compactions');
     // sticky: later calls stay stopped, a report write still passes
     assert.equal(denied(run(lead, ctxOn)), true);
     assert.equal(denied(run(lead, ctxOn, { tool_name: 'Write', tool_input: { file_path: 'x-detail.md', content: 'x' } })), false);
-    assert.equal(readFileSync(counterFile(), 'utf8').length, 4);
+    assert.equal(readFileSync(counterFile(), 'utf8').length, 5);
   } finally { fx.cleanup(); }
 });
 
-test('second compaction stops the helper even with the context notice off, and writes no context telemetry', () => {
+test('step_budget_compaction_stop: a set value moves the stop, 0 turns it off (the step caps still apply)', () => {
+  const fx = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fx);
+    const two = { CLAUDE_PLUGIN_OPTION_STEP_BUDGET_COMPACTION_STOP: '2' };
+    appendFileSync(agentFile, boundary('b1') + turn('r2'));
+    assert.equal(denied(run(lead, two)), false);
+    appendFileSync(agentFile, boundary('b2') + turn('r3'));
+    assert.equal(denied(run(lead, two)), true, 'a stop of 2 is the old second-compaction stop');
+    // 0: never stops on compactions, however many, and the marker left above is ignored
+    const off = { CLAUDE_PLUGIN_OPTION_STEP_BUDGET_COMPACTION_STOP: '0' };
+    assert.equal(denied(run(lead, off)), false);
+    for (const b of ['b3', 'b4', 'b5']) {
+      appendFileSync(agentFile, boundary(b) + turn(`r-${b}`));
+      assert.equal(denied(run(lead, off)), false);
+    }
+    // the step-count stop is untouched by the option
+    seed(121);
+    assert.equal(denied(run(lead, off)), true);
+    assert.equal(rows().at(-1).why, 'steps');
+  } finally { fx.cleanup(); }
+});
+
+test('compaction stop works with the context notice off, and writes no context telemetry', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
     appendFileSync(agentFile, boundary('b1') + turn('r2'));
     assert.equal(denied(run(lead)), false);
     appendFileSync(agentFile, boundary('b2') + turn('r3'));
+    assert.equal(denied(run(lead)), false);
+    appendFileSync(agentFile, boundary('b3') + turn('r4'));
     const r = run(lead); // OFF_CTX: subagent_context_notice_tokens 0
     assert.equal(denied(r), true);
     assert.equal(existsSync(join(telemetryDir(), 'subagent-context.jsonl')), false);
@@ -263,5 +296,65 @@ test('fail open: no transcript, no brief, or a lead-only payload counts and caps
     const r = runHook('hooks/subagent-context.mjs', noFile, { env: OFF_CTX });
     assert.equal(r.status, 0);
     assert.equal(r.stdout.trim(), '');
+  } finally { fx.cleanup(); }
+});
+
+test('soft by default: past the stop value nothing is denied; the stop value gets the long-run note once and a long-runs.jsonl row', () => {
+  const fx = makeFixture();
+  try {
+    const { lead } = layout(fx); // bounded-feature: 80 / 120
+    seed(119);
+    seed(119);
+    const before = runSoft(lead); // call 119, past the warning line (warns once at 80 only when crossed; seeded past it)
+    assert.equal(denied(before), false);
+    const at = runSoft(lead); // call 120
+    assert.equal(denied(at), false);
+    assert.ok(ctxText(at).includes(longRunText(120)), 'the note at the stop value');
+    const rowsLR = readJsonl(join(stateDir(), 'long-runs.jsonl'));
+    assert.equal(rowsLR.length, 1);
+    assert.deepEqual(Object.keys(rowsLR[0]), ['ts', 'sessionId', 'agentId', 'agentType', 'steps', 'startedAt', 'durationMin', 'description', 'transcriptPath']);
+    assert.equal(rowsLR[0].steps, 120);
+    assert.equal(rowsLR[0].agentId, AGENT);
+    assert.equal(rows().at(-1).kind, 'soft-stop');
+    // once: later calls past it are silent and allowed, any tool, no report-write exception needed
+    for (const tool of ['Bash', 'Read', 'Agent']) {
+      const r = runSoft(lead, {}, { tool_name: tool, tool_input: { command: 'ls' } });
+      assert.equal(denied(r), false, tool);
+      assert.equal(r.stdout.trim(), '', tool);
+    }
+    assert.equal(readJsonl(join(stateDir(), 'long-runs.jsonl')).length, 1);
+  } finally { fx.cleanup(); }
+});
+
+test('soft by default: lookup (60) and BUDGET lines also only note; the compaction stop never denies', () => {
+  const fx = makeFixture();
+  try {
+    const lk = layout(fx, 'TYPE: research\nfind it');
+    seed(60);
+    const r = runSoft(lk.lead);
+    assert.equal(denied(r), false);
+    assert.ok(ctxText(r).includes(longRunText(60)));
+    seed(200);
+    assert.equal(denied(runSoft(lk.lead)), false);
+    const b = layout(fx, 'TYPE: bounded-feature\nBUDGET: 30\nbuild');
+    rmSync(join(fx.stateDir, 'state', 'subagent-context-claims', `long-run-${AGENT}-60.seen`), { force: true });
+    seed(31);
+    assert.equal(denied(runSoft(b.lead)), false);
+    // three compactions, soft: no deny
+    appendFileSync(b.agentFile, boundary('b1') + turn('r2'));
+    appendFileSync(b.agentFile, boundary('b2') + turn('r3'));
+    appendFileSync(b.agentFile, boundary('b3') + turn('r4'));
+    assert.equal(denied(runSoft(b.lead, { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' })), false);
+  } finally { fx.cleanup(); }
+});
+
+test('soft stop value 150 gives one note with the long-run threshold, not two', () => {
+  const fx = makeFixture();
+  try {
+    const { lead } = layout(fx, 'TYPE: bounded-feature\nBUDGET: 150\nbuild');
+    seed(150);
+    const r = runSoft(lead);
+    assert.equal(ctxText(r).split(longRunText(150)).length - 1, 1);
+    assert.equal(readJsonl(join(stateDir(), 'long-runs.jsonl')).length, 1);
   } finally { fx.cleanup(); }
 });

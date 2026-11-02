@@ -263,10 +263,11 @@ test('trap: a general-purpose opus reviewer with no WARRANT whose model matches 
     for (let i = 0; i < 3; i += 1) {
       const r = h.spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: REVIEW('opus/xhigh') });
       assert.equal(r.decision, 'proceed', r.reason);
-      // Effort is inherited on a built-in type: parity cannot be verified.
-      assert.match(r.msg, /states no effort, so it runs at the session's effort/);
-      assert.match(r.msg, /spawn agent-companion:ac-opus-xhigh to pin opus\/xhigh/);
-      assert.doesNotMatch(r.msg, /SPAWNING RULE 1/, 'the parity note replaces the generic no-effort note');
+      // Built-in type: the guard fills the effort (0.31.43), so no inherited-effort parity note is left.
+      assert.doesNotMatch(r.msg, /states no effort, so it runs at the session's effort/);
+      assert.equal(r.row.spawn_effort_source, 'guard-fill', JSON.stringify(r.row));
+      assert.equal(r.row.spawn_effort, 'xhigh', 'the fill follows the writer\'s pair');
+      assert.doesNotMatch(r.msg, /SPAWNING RULE 1/);
       assert.equal(r.row.routed, true);
     }
     assert.equal(h.window(), 0);

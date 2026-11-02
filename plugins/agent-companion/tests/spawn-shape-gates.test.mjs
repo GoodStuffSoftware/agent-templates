@@ -80,7 +80,7 @@ test('rule 1 effort note: the haiku alias draws it, the legacy claude-haiku-4-5 
       const res = runHook('hooks/spawn-guard.mjs', {
         session_id: sid, agent_type: 'main', cwd: dir,
         tool_input: { subagent_type: 'general-purpose', model, name: 'isolate-from-gate3', prompt: 'quick lookup' },
-      }, { env: baseEnv(dir) });
+      }, { env: { ...baseEnv(dir), CLAUDE_PLUGIN_OPTION_PROJECT_EFFORT_FILL: 'off' } });
       assert.equal(res.status, 0);
       return res.json?.systemMessage || '';
     } finally { cleanup(); }

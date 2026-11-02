@@ -54,7 +54,7 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stateFile, telemetryDir, stateRootPath, opt, rolloutTable, canonicalTaskType } from '../../hooks/lib/context.mjs';
 import { briefDeclarations, declarationValue, BRIEF_ROLES } from '../../hooks/lib/brief-directives.mjs';
-import { CEILING_DEFAULT_TOKENS } from '../../hooks/lib/context-ceiling.mjs';
+import { CEILING_DEFAULT_TOKENS, CEILING_MEASURE_TOKENS } from '../../hooks/lib/context-ceiling.mjs';
 import {
   discoverTranscripts, transcriptsRoot, usageOf, contextTokensOf, isCompactBoundary, flattenContent,
 } from './transcripts.mjs';
@@ -76,13 +76,13 @@ export const KEEP_DAYS = 16;
 export const CEILING_CTX = 150000; // the fixed subagent context line of unitsOver150k / shareOver150kPct (kept for the history series)
 
 // The active subagent context ceiling, read as hooks/subagent-context.mjs reads
-// it (option subagent_ceiling_tokens, default 175000). A value that is not a
-// positive number (0 turns the nudge off) still measures against the default,
-// so shareOverCeilingPct always has a line. The record carries the line beside
+// it (option subagent_ceiling_tokens, default 0 = off). A value that is not a
+// positive number (0 turns the nudge off) still measures against 175000
+// (CEILING_MEASURE_TOKENS), so shareOverCeilingPct always has a line. The record carries the line beside
 // the share (subagent.ceilingTokens).
 export function activeCeilingTokens() {
   const n = Number(opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS));
-  return Number.isFinite(n) && n > 0 ? n : CEILING_DEFAULT_TOKENS;
+  return Number.isFinite(n) && n > 0 ? n : CEILING_MEASURE_TOKENS;
 }
 export const DEFAULT_LIMIT_UNITS = 2677;
 export const DEFAULT_PACE_PCT = 14;
@@ -551,7 +551,7 @@ function scanFile(f, fileState, ctx) {
     // b = [main, subagent, over 150K, over the ceiling, the ceiling]. An hour that
     // already holds subagent units without b[4] (a state written before 0.31.24),
     // or whose units were counted against another ceiling, is marked -1: mixed.
-    const ceiling = ctx.ceiling ?? CEILING_DEFAULT_TOKENS;
+    const ceiling = ctx.ceiling ?? CEILING_MEASURE_TOKENS;
     if (b[4] === undefined) { b[3] = 0; b[4] = b[1] > 0 ? -1 : ceiling; } else if (b[4] !== ceiling) b[4] = -1;
     b[1] += units;
     const tokens = contextTokensOf(r.usage);
@@ -851,7 +851,8 @@ export function writeOpenFile(state, nowT) {
 
 // The facts file of every closed day that is settled (close + SETTLE_MS), whole
 // (inside the facts window) and not yet written. A day file is never rewritten.
-export function writeFactsFiles(state, nowT) {
+// `deferredOut`, when given, receives the day keys held back for a still-open spawn (retried on a later run).
+export function writeFactsFiles(state, nowT, deferredOut = null) {
   const facts = state.facts;
   if (!facts) return [];
   const out = [];
@@ -869,7 +870,7 @@ export function writeFactsFiles(state, nowT) {
     // Spawn records land on their start day. A day file is written once, so it waits for its
     // still-open spawns (closed: idle 30 min, or 48 h after the start).
     const mine = Object.values(facts.spawns || {}).filter((a) => a.n > 0 && (a.start || a.t0) >= s && (a.start || a.t0) < s + DAY_MS);
-    if (mine.some((a) => isOpen(a, nowT, completedOf(facts, a)))) continue;
+    if (mine.some((a) => isOpen(a, nowT, completedOf(facts, a)))) { if (deferredOut) deferredOut.push(day); continue; }
     const idx = mine.length ? spawnRowIndex() : { fit: {}, type: {} };
     const spawns = mine
       .map((a) => spawnRecord(a, { fit: (a.tu && idx.fit[a.tu]) || null, type: (a.tu && idx.type[a.tu]) || null }))
@@ -903,14 +904,19 @@ export function runCheckup({ root = transcriptsRoot(), nowT = nowMs(), holdMs = 
   }
   // Facts: one file per closed, settled day, written once. Fail-open; the history line above is the contract.
   let factsWritten = [];
-  try { factsWritten = writeFactsFiles(state, nowT); } catch { /* facts are additive: never fail the checkup */ }
+  const factsDeferred = [];
+  try { factsWritten = writeFactsFiles(state, nowT, factsDeferred); } catch { /* facts are additive: never fail the checkup */ }
   try { writeOpenFile(state, nowT); } catch { /* the mirror is informational */ }
   // Write the cursor and the seen set together, after the history line: a crash
   // before this point re-reads the same bytes and the history guard stops a duplicate line.
   seen.save(nowT - KEEP_DAYS * DAY_MS);
   atomicWrite(p.state, JSON.stringify(state));
+  // lastDay means "every closed day up to here is covered". A day whose facts file waits for a still-open
+  // spawn is not covered: stop lastDay at the day before the earliest such day, so checkupDue stays true
+  // and the next session start (after RETRY_MS) retries it. Without this a deferred day was never retried.
+  const lastDay = factsDeferred.length ? dayKeyOf(Date.parse(`${factsDeferred.slice().sort()[0]}T08:00:00Z`) - DAY_MS) : dayKeyOf(lastClosedStart);
   atomicWrite(p.status, JSON.stringify({
-    lastRunMs: nowT, lastAttemptMs: nowT, lastDay: dayKeyOf(lastClosedStart), written,
+    lastRunMs: nowT, lastAttemptMs: nowT, lastDay, written,
   }));
   return { written, factsWritten, filesRead: scan.filesRead, bytesRead: scan.bytesRead, filesSeen: scan.filesSeen, dataThrough: state.dataThroughMs ? iso(state.dataThroughMs) : null };
 }

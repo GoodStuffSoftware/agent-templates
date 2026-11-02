@@ -14,6 +14,6 @@ Several analysis workers each bundled a full-history scan, hand-labelling, analy
 - Size a worker to finish within {{TIME_BUDGET}} and under {{CONTEXT_CEILING}} (tune both per setup). A build-test-fix-land job is ONE worker when it fits.
 - A job that will not fit is split by phase (scan, label, analyse, review). Each phase is a fresh worker that writes its output to a file, which the next one reads, and prints only a summary. Run independent phases in parallel.
 - Never continue a cold worker just to carry context; pass a file ([[resume-the-same-worker-across-follow-up-rounds]] covers when a warm resume is cheaper).
-- Prefer a checkpoint at a context ceiling over waiting for compaction.
+- Let compaction handle a worker's context; do not hand off at a ceiling to avoid it (lead handoffs were measured as saving nothing, 2026-10-09).
 
 Related: [[teammate-reports-to-files]], [[delegate-wide-queries-the-result-set-lands-in-you]].

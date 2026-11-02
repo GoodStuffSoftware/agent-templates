@@ -384,7 +384,7 @@ test('advisory path: no ladder start in this session -> model filled in, subagen
     assert.equal(u?.subagent_type, 'general-purpose');
     assert.equal(u?.model, 'opus');
     const msg = msgOf(res);
-    assert.match(msg, /effort not pinned/);
+    assert.match(msg, /the model was filled in as \S+ and the effort as \w+/);
     assert.match(msg, /Spawn subagent_type "agent-companion:ac-opus-medium" to pin opus\/medium together/);
     assert.match(msg, /no ladder agent has started in this session, so the harness has not shown it registered the ladder here/);
     assert.doesNotMatch(msg, /SPAWNING RULE 1/); // the advisory replaces the generic note, not stacked on it

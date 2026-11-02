@@ -7,6 +7,14 @@ export const finite = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : 
 export const nonEmpty = (x) => (typeof x === 'string' && x.trim() !== '' ? x : null);
 export const typeOf = (r) => r.declared_type_resolved ?? r.declared_type;
 
+// Task types that write or change things: every config/model-tiers.json selfReview.types entry (a test
+// pins that), plus the two writer types that are not self-reviewed (bounded-feature-small, mechanical-edit).
+// The reviewsPerWriter denominator counts all of them, since reviews cover every one.
+export const WRITER_TYPES = new Set([
+  "bounded-feature", "bounded-feature-small", "integration", "debug-root-cause", "large-refactor",
+  "novel-design", "critical-change", "long-autonomous-run", "mechanical-edit",
+]);
+
 // --- lead-effort helpers (decision leads-at-high) ---------------------------------------------
 export const REBRIEF_WINDOW_MS = 6 * 3600 * 1000;
 export const DENY_GUARDS = new Set(['fit', 'warrant', 'premium-cap', 'inherit']); // routing-guard denials

@@ -24,16 +24,20 @@ const SETTLE_MS = 5 * 60 * 1000;
 const EXPECTED_RUN_MS = 90 * 60 * 1000;
 const STATUS_MAX_AGE_MS = 36 * HOUR_MS;
 const LATEST_MAX_AGE_DAYS = 3;
+const GAP_LOOKBACK_DAYS = 7; // an older closed day with no facts file is looked for this far back
 const KEEP_KEYS = 80;
 
 // The earliest day with a facts file under state/usage-facts (YYYY-MM-DD.json), or null. The runner
 // plans every day from that day on, so a settled day at or after it has an entry in the status file
 // (computed, or deferred with a reason); a settled day before it was never expected to have one.
-function earliestFactsDay(root) {
+function factsDays(root) {
   try {
-    const days = readdirSync(join(root, 'state', 'usage-facts')).filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)).filter(isDayKey).sort();
-    return days.length ? days[0] : null;
-  } catch { return null; }
+    return readdirSync(join(root, 'state', 'usage-facts')).filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)).filter(isDayKey).sort();
+  } catch { return []; }
+}
+function earliestFactsDay(root) {
+  const days = factsDays(root);
+  return days.length ? days[0] : null;
 }
 
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return null; } };
@@ -104,15 +108,26 @@ export function usageSignals({ root, nowMs, baseline = {}, boundary = DEFAULT_BO
     const firstFacts = earliestFactsDay(root);
     const planned = isObj(entry) || (firstFacts !== null && firstFacts <= lastClosed);
     let why = null;
+    let staleKey = lastClosed;
     if (nowMs >= due && planned && !(isObj(entry) && entry.state === 'computed')) {
       const reason = isObj(entry) && entry.state === 'deferred' ? `deferred (${clip(entry.kind, 30)}: ${clip(entry.reason, 100)})` : 'no result recorded';
       why = `the settled day ${lastClosed} was not computed after its expected run: ${reason}`;
     } else if (Number.isFinite(ranAt) && nowMs - ranAt > STATUS_MAX_AGE_MS) {
       why = `no analysis run for ${Math.floor((nowMs - ranAt) / HOUR_MS)} h (limit 36 h)`;
     }
-    if (why && baseline.knownUsageStaleDay !== lastClosed) {
+    // An older closed day (within GAP_LOOKBACK_DAYS) with no facts file: a deferral that was never retried.
+    // Only days from the first facts file on are expected to have one.
+    if (!why) {
+      const have = new Set(factsDays(root));
+      const first = have.size ? [...have][0] : null;
+      for (let i = GAP_LOOKBACK_DAYS; i >= 1 && first; i--) {
+        const d = addDays(lastClosed, -i);
+        if (d >= first && !have.has(d)) { why = `the closed day ${d} has no facts file after its retry window (a deferred day that was not retried)`; staleKey = d; break; }
+      }
+    }
+    if (why && baseline.knownUsageStaleDay !== staleKey) {
       signals.push({ kind: 'usage_analysis_stale', detail: `${why}. Run \`/ac usage status\` for the per-day state, and check that the scout's first step ran.`, dispatch: 'manual-check' });
-      next.knownUsageStaleDay = lastClosed;
+      next.knownUsageStaleDay = staleKey;
     } else if (!why && baseline.knownUsageStaleDay) {
       next.knownUsageStaleDay = null;
     }

@@ -121,6 +121,11 @@ export function selfReviewTypesForRung(rung, sr = selfReviewConfig()) {
   return out;
 }
 
+// The instruction every reviewer brief carries (the plan reviewer's brief, step 3 below, and the API runner's
+// prompt in scripts/api-review.mjs, which imports this). Reviewers run the AFFECTED tests only (operator
+// ruling 2026-11-01): the writer and CI run the full suite.
+export const REVIEW_INSTRUCTION = 'Try to refute this change. Run the tests affected by the diff, never the full suite or ci-local (the writer and CI run those): the test files that cover the changed files, through the repository\'s affected-test selector if it has one (look in its scripts, package.json or ci-local), otherwise mapped from the diff. Start with a verdict line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit, with file:line and a repro.';
+
 // Config mistakes the generator cannot paper over, one string each: a listed
 // type the table does not know, a parity type (a reviewer that self-reviews
 // is the recursion the guard denies), and a type whose route lands on no
@@ -170,7 +175,7 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
     'When it applies, before you return (you have no Skill tool: this text is the whole spawn recipe, so do not look for the team-orchestration skill):',
     '',
     '1. List anything you built that the brief did not ask for; remove it or flag it to the lead. Then commit your work, so the review has a fixed sha.',
-    `2. Spawn exactly ONE reviewer, in the foreground (\`run_in_background: false\`), with \`subagent_type: "${spawnAs}"\`: ${rv ? `the rung the routing table names for a review of your pair (${rvPair}, not your own rung: the operator sets reviewer effort per model, and \`/ac recommend --type code-review --writer ${pair}${ptr}\` says the same)` : 'this rung, which matches your own model and effort'}. Its brief opens with these three lines, as plain text:`,
+    `2. First run \`node "<plugin>/scripts/api-credits.mjs" decide review\` (<plugin> is the agent-companion folder above the \`scripts/git-brief.mjs\` your start-up context names). If it prints \`api\`, run the review on the plan's API credits instead of a subagent: write the reviewer brief of step 3 to a file (the lead's brief TEXT goes into that file, never only a path to it: the runner sends the file's text, and its tools cannot read outside the repository) and run \`node "<plugin>/scripts/api-review.mjs" run --brief-file <file> --diff-ref <base>..<head> --model ${(rv || rung).model}${(rv || rung).effort ? ` --effort ${(rv || rung).effort}` : ''} --writer ${pair} --review-file <the review file of step 3> --cwd <your worktree>\` in the background (\`run_in_background\`), waiting for its notification (a review is not cut by the clock: it logs itself at 8 minutes and goes on, and only a hung run is stopped; a foreground Bash call is cut at 10 minutes and kills it mid-run); the sdk engine's reviewer can run the affected tests and the fetch engine's cannot (read-only tools), and its stdout is the reviewer's result, with the same VERDICT rules (no verdict line, no land). If it prints \`plan\`, errors, or the runner exits nonzero (stdout starts \`API review unavailable\` or \`API review failed\`), spawn the subagent at once: spawn exactly ONE reviewer, in the foreground (\`run_in_background: false\`), with \`subagent_type: "${spawnAs}"\`: ${rv ? `the rung the routing table names for a review of your pair (${rvPair}, not your own rung: the operator sets reviewer effort per model, and \`/ac recommend --type code-review --writer ${pair}${ptr}\` says the same)` : 'this rung, which matches your own model and effort'}. Its brief opens with these three lines, as plain text:`,
     '   ```',
     '   TYPE: code-review',
     `   WRITER: ${pair}`,
@@ -179,12 +184,12 @@ export function selfReviewBlock(rung, sr = selfReviewConfig(), plugin = 'agent-c
     '3. The rest of the reviewer\'s brief must contain:',
     '   - the lead\'s original brief, verbatim, or the path of a file that holds it verbatim;',
     '   - the branch, the commit sha and the diff range under review;',
-    '   - this instruction: "Try to refute this change. Run the tests. Start with a verdict line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit, with file:line and a repro.";',
+    `   - this instruction: "${REVIEW_INSTRUCTION}";`,
     '   - the review file to write: the path the lead\'s brief names for it, if any; otherwise `REVIEW-<name>.md` next to your report file, `<name>` being a short name for this task;',
     '   - where to work: its own checkout of that sha (for example `git worktree add --detach <path> <sha>`, run from your working tree), never your working tree; it makes no commits and no pushes.',
     '   Add nothing that narrows the review: no areas to skip, no findings to expect, no summary of your own that stands in for the diff.',
     `4. ${fix}`,
-    '5. Land your own work, but not past an open question: if a blocker is disputed or left unfixed, or a gate is pending, stop before merging and return it for the lead to settle. Otherwise merge the way the repo and the lead\'s brief say, and verify the deploy where the repo deploys on merge. Every release gate stays: a user sign-off step, a production deploy approval, anything the repo\'s CLAUDE.md requires. If neither the brief nor the repo says how to land, push your branch and say so in your report.',
+    '5. Land your own work, but not past an open question: if the reviewer returned no verdict line (neither `VERDICT: PASS` nor `VERDICT: FIX`; it ran out of context, was cut off or wrote only prose), that counts as no review: do not land or merge, report "review incomplete" and return it for the lead to review instead. If a blocker is disputed or left unfixed, or a gate is pending, stop before merging and return it for the lead to settle. Otherwise merge the way the repo and the lead\'s brief say, and verify the deploy where the repo deploys on merge. Every release gate stays: a user sign-off step, a production deploy approval, anything the repo\'s CLAUDE.md requires. If neither the brief nor the repo says how to land, push your branch and say so in your report.',
     '6. Return: your report, the reviewer\'s verdict line verbatim, the review file path, the post-fix commit sha, the merge sha (or the gate you stopped at), and the disputed findings.',
     '',
     'If the reviewer cannot be spawned (no Agent tool here, or the spawn is denied), say so in your report and return: the lead reviews instead.',

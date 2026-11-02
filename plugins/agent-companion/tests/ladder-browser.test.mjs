@@ -99,7 +99,7 @@ test('general-purpose + browser brief + a started ladder: NOT rewritten to a run
     const u = updated(res);
     assert.notEqual(u?.subagent_type, 'agent-companion:ac-opus-medium');
     assert.equal(u?.subagent_type, 'general-purpose', 'subagent_type left as general-purpose');
-    assert.match(msgOf(res), /effort not pinned/);
+    assert.match(msgOf(res), /the model was filled in as \S+ and the effort as \w+/);
     assert.match(msgOf(res), /agent-companion:ac-browser-opus/);
     assert.match(msgOf(res), /the brief names the browser/);
     const row = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl')).filter((r) => r.session_id === 'sess-b1').pop();

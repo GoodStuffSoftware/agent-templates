@@ -263,6 +263,7 @@ export function validateRegister(obj, { rollout, scenarioIds } = {}) {
       else if (d.title.length > 60) err(`title is ${d.title.length} chars (max 60)`);
       if (!['active', 'retired'].includes(d.status)) err('status must be "active" or "retired"');
       if (!(typeof d.decided === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.decided))) err('decided must be a UTC date YYYY-MM-DD');
+      if (d.reviewedOn !== undefined && !(typeof d.reviewedOn === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.reviewedOn) && Number.isFinite(Date.parse(`${d.reviewedOn}T00:00:00Z`)) && new Date(`${d.reviewedOn}T00:00:00Z`).toISOString().slice(0, 10) === d.reviewedOn)) err('reviewedOn must be a UTC date YYYY-MM-DD');
       if (!isStr(d.decision)) err('decision text is required');
       if (!isStr(d.reverse)) err('reverse text is required');
       if (d.rolloutId !== undefined && !isStr(d.rolloutId)) err('rolloutId must be a string');
@@ -1001,7 +1002,11 @@ export function openFlags(state, register, nowT = nowMs()) {
   return Object.values(state.flags || {}).filter((f) => {
     if (!f || f.closed || !active.has(f.decision)) return false;
     const at = Date.parse(f.at);
-    return Number.isFinite(at) && nowT - at <= OPEN_FLAG_DAYS * DAY_MS;
+    if (!Number.isFinite(at)) return false;
+    // A settled review (reviewedOn) closes every flag raised on or before that UTC day; a later flag opens again.
+    const rv = active.get(f.decision).reviewedOn;
+    if (typeof rv === 'string' && at <= Date.parse(`${rv}T23:59:59.999Z`)) return false;
+    return nowT - at <= OPEN_FLAG_DAYS * DAY_MS;
   });
 }
 

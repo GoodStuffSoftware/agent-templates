@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { makeFixture, runHook, readJsonl, PLUGIN_ROOT, queueFreeEnv } from './helpers.mjs';
 import {
   classifyCommand, scanCommand, wordsOf, rewriteCommand, wrapSegment, wrapLosesCwd, gateDecision, gateMode, gateDisabledByEnv, DEFAULT_GATE_MODE,
 } from '../hooks/lib/resource-gate.mjs';
@@ -254,7 +254,7 @@ test('rewrite: quotes, spaces and metacharacters survive as exactly one argument
       const f = classifyCommand(cmd, { cwd: CWD, ...NOFS });
       assert.ok(f.heavy.length, cmd);
       const out = rewriteCommand(cmd, f.heavy, f.flags, stub.replace(/\\/g, '/'), (cs) => cs[0]);
-      const r = spawnSync(BASH, ['-c', out], { encoding: 'utf8', windowsHide: true, env: { ...process.env, PATH: NODE_PATH } });
+      const r = spawnSync(BASH, ['-c', out], { encoding: 'utf8', windowsHide: true, env: { ...queueFreeEnv(), PATH: NODE_PATH } });
       assert.equal(r.status, 0, r.stderr);
       const argv = JSON.parse(r.stdout.trim());
       assert.deepEqual(argv.slice(0, 7), ['run', '--class', f.heavy[0].class, '--label', f.heavy[0].class, '--shell', 'bash']);
@@ -285,6 +285,12 @@ test('env: RESOURCE_QUEUE=0 and a live lease token switch the gate off', () => {
   assert.equal(gateDisabledByEnv({}), false);
 });
 
+test('cloud: CLAUDE_CODE_REMOTE=true switches the gate off; any other value leaves it on', () => {
+  assert.equal(gateDisabledByEnv({ CLAUDE_CODE_REMOTE: 'true' }), true);
+  for (const v of ['', '0', 'false', '1', 'yes', 'TRUE', ' true ']) assert.equal(gateDisabledByEnv({ CLAUDE_CODE_REMOTE: v }), false, v);
+  assert.equal(gateDisabledByEnv({ CLAUDE_CODE_REMOTE_SESSION_ID: 'x' }), false, 'the session id alone is not the cloud flag');
+});
+
 const dec = (command, opts = {}) => gateDecision(command, { cwd: CWD, env: { AGENT_COMPANION_HOME_OVERRIDE: '/nonexistent-home' }, ...NOFS, ...opts });
 
 test('decision: deny names the exact wrapped command and suggests run_in_background for a full suite', async () => {
@@ -311,6 +317,18 @@ test('decision: rewrite returns the wrapped command; hint returns text and no co
   assert.equal((await dec('npx vitest run src/a.test.ts', { mode: 'deny' })).action, 'none');
   assert.equal((await dec('npm ci', { mode: 'deny', env: { RESOURCE_QUEUE: '0' } })).action, 'none');
   assert.equal((await dec('npm ci', { mode: 'deny', env: { AC_RESOURCE_LEASE: 'x' } })).action, 'none');
+});
+
+test('decision: in a cloud session a heavy command passes untouched in every mode; locally it is still gated', async () => {
+  const cloud = { AGENT_COMPANION_HOME_OVERRIDE: '/nonexistent-home', CLAUDE_CODE_REMOTE: 'true' };
+  for (const mode of ['deny', 'rewrite', 'hint']) {
+    for (const c of ['npm ci', 'npx vitest run', 'cd app && npm ci && node scripts/digest.mjs']) {
+      assert.deepEqual(await dec(c, { mode, env: cloud }), { action: 'none', classes: [] }, `${mode}: ${c}`);
+    }
+  }
+  const local = { AGENT_COMPANION_HOME_OVERRIDE: '/nonexistent-home', CLAUDE_CODE_REMOTE: 'false' };
+  assert.equal((await dec('npm ci', { mode: 'deny', env: local })).action, 'deny');
+  assert.equal((await dec('npm ci', { mode: 'deny', env: { AGENT_COMPANION_HOME_OVERRIDE: '/nonexistent-home' } })).action, 'deny');
 });
 
 test('decision: rewrite that is not allowed (mode or permission rule) becomes a deny with the same command', async () => {
@@ -416,6 +434,22 @@ test('hook: hint adds context and changes nothing; off prints nothing', () => {
   } finally { fx.cleanup(); }
 });
 
+test('hook: in a cloud session (CLAUDE_CODE_REMOTE=true) a heavy install passes through in deny, rewrite and hint; locally it is still denied', () => {
+  const fx = makeFixture();
+  try {
+    for (const mode of ['deny', 'rewrite', 'hint']) {
+      const e = env(fx, { CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: mode, CLAUDE_PLUGIN_OPTION_BASH_TAIL: '0', CLAUDE_CODE_REMOTE: 'true' });
+      const r = runHook('hooks/bash-tail.mjs', pl('npm ci'), { env: e });
+      assert.equal(r.status, 0, mode);
+      assert.equal(r.json, null, `${mode}: no decision, no rewrite, no message`);
+    }
+    assert.deepEqual(gateRows(fx), [], 'the gate logged nothing');
+    const local = runHook('hooks/bash-tail.mjs', pl('npm ci'), { env: env(fx, { CLAUDE_PLUGIN_OPTION_BASH_TAIL: '0', CLAUDE_CODE_REMOTE: 'false' }) });
+    assert.equal(local.json.hookSpecificOutput.permissionDecision, 'deny');
+    assert.match(local.json.hookSpecificOutput.permissionDecisionReason, /resource-queue\.mjs/);
+  } finally { fx.cleanup(); }
+});
+
 test('hook: never touches a command that is not heavy, one already queued, ci-local, or an opt-out', () => {
   const fx = makeFixture();
   try {
@@ -495,7 +529,7 @@ test('compose: the rewritten command, run in real bash through the real queue, k
     const w = spawnSync(BASH, ['-c', cmd], {
       encoding: 'utf8', windowsHide: true, timeout: 60000,
       env: {
-        ...process.env, PATH: `${bin.replace(/\\/g, '/')}${sep}${NODE_PATH}`, CI_BUDGET_DIR: ledger, CI_LOCAL_LOCK_DIR: lock,
+        ...queueFreeEnv(), PATH: `${bin.replace(/\\/g, '/')}${sep}${NODE_PATH}`, CI_BUDGET_DIR: ledger, CI_LOCAL_LOCK_DIR: lock,
         AGENT_COMPANION_HOME_OVERRIDE: fx.dir, CLAUDE_CONFIG_DIR: join(fx.dir, '.claude'),
       },
     });
