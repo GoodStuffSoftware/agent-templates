@@ -1,0 +1,20 @@
+---
+id: build-the-whole-plan-then-test-it-once
+title: Build a multi-step plan to the end, then test, review and fix it once — not CI plus a review per step
+scope: [agent-process]
+requires: {}
+status: active
+since: 2026-11-02
+provenance: [contrib-2]
+corroborated: 1
+---
+An orchestrator ran a ~35-step design one step at a time: each step got its own top-tier worker, a cloud CI run and a same-tier reviewer. One day used about a third of a weekly usage allowance before anyone noticed; the operator never saw the plan's shape or cost.
+
+**How to apply:**
+- For {{N}}+ steps, builders run local builds and unit tests only.
+- Then ONE integration pass: local runs wherever the target exists, CI only for what cannot run locally, one parity review of the whole diff, one fix round.
+- Split work across workers for context size; never split the testing.
+- Per-step CI plus review is for steps whose blast radius justifies it.
+- Before a long run, state the shape (workers, CI runs, reviews) and a rough share of the usage budget, and get the operator's nod.
+
+Related: [[size-subagents-by-context-not-by-task]], [[reviewer-matches-the-tier-it-reviews]].

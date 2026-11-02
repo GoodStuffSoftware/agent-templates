@@ -43,9 +43,11 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-longer-cache-ttl-is-a-bet-on-request-gaps` — A longer prompt-cache TTL is a bet on the gaps between requests — measure the gap distribution before flipping it, and set it per role — [agent-process] — active
 - `a-maintenance-write-fires-the-same-triggers` — A maintenance write fires the same triggers a user action does — close the granting switch before you migrate — [universal] — active
 - `a-manufactured-reproduction-proves-can-never-did` — A manufactured reproduction proves a failure CAN happen, never that it DID — label everything downstream as a hypothesis — [universal] — active
+- `a-metric-field-nothing-writes-reads-zero-and-a-restamped-one-overcounts` — A usage chart reads whatever field you point it at — check the field is written, and written once, before trusting the line — [universal] — active
 - `a-mitigation-that-delays-a-symptom-delays-the-diagnosis` — A mitigation that delays a symptom also delays the diagnosis — state the diagnostic cost of every resilience mechanism — [universal] — active
 - `a-mock-hides-a-cross-runtime-api-incompatibility` — A mock hides exactly the layer that differs between runtimes — validate a runtime-sensitive option inside the real runtime, not just against a mock — [universal] — active
 - `a-necessity-claim-enumerates-the-terms-you-had-in-mind` — A reachability or necessity claim is only an enumeration of the terms you had in mind — [universal] — active
+- `a-new-first-run-screen-fails-every-spec-unless-the-base-fixture-dismisses-it` — A new one-time first-run screen fails every end-to-end spec unless the base fixture starts devices as already past it — [universal] — active
 - `a-parameter-named-like-an-automatic-variable-does-not-bind` — A PowerShell parameter named like an automatic variable silently does not bind — and the failed assignment can echo a secret — [env:windows] — active
 - `a-pathspec-commit-does-not-protect-a-shared-file` — A pathspec commit protects other files, not the same file — the unit of collision is the file, and the orchestrator is also a writer — [agent-process] — active
 - `a-per-scope-override-must-be-bidirectional` — A per-scope override must work in both directions, or it is just a mute button — [universal] — active
@@ -61,7 +63,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-scaffold-default-asset-passes-every-existence-check` — A scaffold's default asset passes every existence check — verify provenance, and never allowlist a new default — [universal] — active
 - `a-scheduled-job-needs-a-registered-but-unobserved-state` — A scheduled job needs a "deployed, unconfirmed" state and a two-timestamp heartbeat, or it gets marked done on deploy day — [universal] — active
 - `a-scheduled-routine-starts-at-its-folders-effort` — A scheduled routine starts at the effort of the folder it was created in — pin effort per folder and rate a dispatch-only parent as light — [agent-process, vendor:anthropic] — active
-- `a-secret-managers-list-command-can-print-every-value` — A secret manager's list command can print every value — a briefed filter is not a control — [universal] — active
+- `a-secret-managers-list-command-can-print-every-value` — A list or inspect command can print every secret value — a briefed filter is not a control — [universal] — active
 - `a-shared-mock-across-a-boundary-production-does-not-share` — A shared mock across a boundary that production does not share will validate any claim — build both sides separately — [universal] — active
 - `a-shared-test-context-needs-a-reset-canary-that-fails-the-run` — Reusing one expensive test context needs a reset canary — and a canary trip must fail the run, not retry into a pass — [universal] — active
 - `a-silent-guard-needs-a-canary` — A guard whose success signal is the absence of events needs a canary — sustained zero is ambiguous, not good news — [universal] — active
@@ -86,6 +88,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `absence-observed-is-not-absence-explained` — Observed absence is not structural impossibility — verify the mechanism before writing "cannot" into a contract — [universal] — active
 - `adjust-a-shared-accumulator-by-delta` — A field several independent sources stack into is adjusted by delta, never overwritten — and a cumulative total is not a per-event amount — [universal] — active
 - `after-handoff-parent-relays-to-child` — After a hand-off, everything sent to the parent session belongs to the child — relay it, redirect senders, do not answer — [agent-process] — active
+- `agent-driven-browsers-run-muted` — Every agent-driven browser or test run of an app that makes sound runs muted — [agent-process] — active
 - `agent-filesystem-overlay-hides-failed-installs` — Never run an installer for the user — a sandboxed agent's package writes can land in an overlay the user's shell cannot see — [agent-process] — active
 - `agreement-between-agents-who-share-a-method-is-one-observation` — Agreement between agents who share a method is not corroboration — it is one observation, run several times — [agent-process] — active
 - `alarm-on-the-runway-not-the-failure` — A supply that depends on someone remembering to refill it is a dated outage — alarm on remaining runway — [universal] — active
@@ -104,6 +107,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `an-unquoted-heredoc-executes-its-content` — An unquoted heredoc executes its content — quote the delimiter and substitute placeholders afterwards — [universal] — active
 - `answer-no-such-thing-not-i-wont` — When a request is misrouted to you, answer "no such thing" — not "I won't" — [agent-process] — active
 - `architect-owns-deploy` — The agent that built the feature owns the deploy — not the orchestrator — [agent-process] — active
+- `ask-the-live-owner-before-spawning-a-lookup` — Before spawning a worker to look something up, ask the live session that owns the topic — [agent-process] — active
 - `assert-the-guard-saw-something` — A guard that passes on an empty input set is worse than no guard — assert it saw something — [universal] — active
 - `assert-the-resolved-value-not-the-declaration` — Assert the value the system resolves, not the one you declared — precedence rules, unread flags, and unforwarded arguments live in the gap — [universal] — active
 - `avoid-report-prefixed-filenames` — Name lessons and docs with neutral ids so write guards don't trip on the filename — [vendor:anthropic] — active
@@ -115,6 +119,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `bucket-by-the-other-systems-calendar` — When reconciling against someone else's dashboard, bucket by THEIR day boundary and allow for THEIR reporting lag — [universal] — active
 - `budget-fan-out-against-host-memory` — Budget agent fan-out width against the host's memory, not just against the task — the damage surfaces as "flaky tests" somewhere else — [agent-process] — active
 - `build-the-fix-shape-the-operator-names` — When the operator names the shape of a fix, build that shape first — do not substitute a fuller design — [agent-process] — active
+- `build-the-whole-plan-then-test-it-once` — Build a multi-step plan to the end, then test, review and fix it once — not CI plus a review per step — [agent-process] — active
 - `bulk-edit-success-log-is-not-evidence` — A bulk edit's success log is not evidence — read a changed file, and assert your input's shape — [universal] — active
 - `calibrate-a-bound-against-the-real-distribution` — Never specify a bound you have not counted — "blocks everything on day one" and "never fires" are equally broken — [universal] — active
 - `capture-gate-output-in-full` — Capture a gate's output in full — a pipeline truncation destroys the evidence and lies about the exit code — [universal] — active
@@ -133,6 +138,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `continuous-contribution-loop` — Wire capture, sweep, and fold steps so project learning flows to the library continuously — [agent-process] — active
 - `correct-a-durable-record-explicitly` — Overturn a wrong entry in a durable record explicitly — an unmarked correction leaves two contradictory claims — [universal] — active
 - `correlate-by-onset-not-by-volume` — Trace an intermittent event by what starts just before it, not by what runs a lot — [universal] — active
+- `count-an-expected-transient-failure-and-file-only-a-repeat` — Count an expected transient failure instead of filing it — file only the repeat — [universal] — active
 - `cowork-auto-worktree-detection` — Detect and abort when a writer agent lands in a Cowork auto-generated worktree — [vendor:anthropic] — active
 - `credentials-never-reach-an-error-path` — Treat every error path in credential-handling code as a publication surface — [universal] — active
 - `cross-tab-side-effect-needs-a-write-then-reread-claim` — Two same-origin tabs can both pass a check-then-act gate — dedupe with a write-then-reread claim token, not a plain flag — [universal, stack:web] — active

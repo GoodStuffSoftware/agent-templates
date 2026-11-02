@@ -1,18 +1,18 @@
 ---
 id: a-secret-managers-list-command-can-print-every-value
-title: A secret manager's list command can print every value — a briefed filter is not a control
+title: A list or inspect command can print every secret value — a briefed filter is not a control
 scope: [universal]
 requires: {}
 status: active
 since: 2026-10-19
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
-Some secret-manager CLIs return each secret's value in their list output, not only its name and date. Briefing an agent to "run list and filter to names" protects nothing: if the filter breaks, every value lands in the transcript and the model's context. Incident: a verify agent printed a full private key that way minutes after it was generated.
+Some CLIs return secret values in their list or inspect output: a secret manager's list, a process manager's list/show/env (each app's full environment, tokens included). "Run it and filter to names" protects nothing: if the filter breaks, every value lands in the transcript. Incidents: a verify agent printed a full private key; a filtered one-liner hit a byte-order mark, failed to parse and echoed its raw input, environment included.
 
 **How to apply:**
-- Never brief an agent to run list or get on a secret store, filtered or not.
-- For existence and date checks, run a script file that drops the value field inside the process before printing, or use the setup tool's own verify-only mode.
+- Never brief an agent to run such a command raw, filtered or not.
+- Check through a script file that runs the command itself, prints only named fields and, on any error, prints one fixed line, never the input.
 - Prefer commands known to be metadata-only.
 - If a value leaks, say so plainly and recommend rotation; that call is the owner's.
 
