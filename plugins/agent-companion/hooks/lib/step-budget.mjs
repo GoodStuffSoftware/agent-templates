@@ -44,7 +44,7 @@ import { openSync, fstatSync, readSync, closeSync, mkdirSync, appendFileSync, st
 import { join, basename } from 'node:path';
 import { opt, stateDir } from './context.mjs';
 import { claimOnce, BOUNDARY_FRESH_TURNS } from './subagent-context.mjs';
-import { briefDeclarations, declarationValue } from './brief-directives.mjs';
+import { briefDeclarations, declarationValue, splitBudget, BUDGET_STEPS_SRC } from './brief-directives.mjs';
 import { safe } from './runaway.mjs';
 import { longRunText } from './long-run.mjs';
 
@@ -101,7 +101,10 @@ export function briefStepInfo(brief) {
   const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
   // Digits, optionally followed by a call unit, and nothing else on the line: "BUDGET: 1,000 tool calls",
   // "2.5 hours" or "30 minutes" are not step budgets and declare nothing. Under BUDGET_MIN is ignored too.
-  const bm = declarationValue(decls, 'BUDGET', /(\d{1,4})(?:[ \t]*(?:tool[ -]?)?(?:calls?|steps?|turns?))?[ \t]*\.?[ \t]*$/.source);
+  // A `BUDGET: <n>%` allowance (lib/plan-allowance.mjs) is not a step budget: its percent part is taken off the line first.
+  const bm = decls.BUDGET
+    ? declarationValue({ BUDGET: { ...decls.BUDGET, rest: splitBudget(decls.BUDGET.rest).stepRest } }, 'BUDGET', BUDGET_STEPS_SRC)
+    : null;
   const budget = bm ? Number(bm[1]) : null;
   return { type: tm ? tm[1].toLowerCase() : null, budget: budget >= BUDGET_MIN ? budget : null };
 }

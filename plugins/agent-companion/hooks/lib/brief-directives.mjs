@@ -200,3 +200,35 @@ export function declarationValue(decls, label, valueSrc) {
   if (!d) return null;
   return new RegExp(`^[ \\t]*${BOLD}[ \\t]*${valueSrc}`, 'i').exec(d.rest);
 }
+
+// BUDGET has two forms (0.31.47): `BUDGET: <n>` [calls|steps|turns], the step budget (lib/step-budget.mjs), and
+// `BUDGET: <n>%`, an allowance as a percent of the weekly plan limit (lib/plan-allowance.mjs). One line may carry
+// both, split by a comma, semicolon or slash (`BUDGET: 3%, 60 calls`). The step form's value check, as a regex source:
+export const BUDGET_STEPS_SRC = /(\d{1,4})(?:[ \t]*(?:tool[ -]?)?(?:calls?|steps?|turns?))?[ \t]*\.?[ \t]*$/.source;
+const PCT_TOKEN = /(?<![\d.])(\d{1,3}(?:\.\d{1,3})?)[ \t]*%(?:[ \t]+of[ \t]+(?:the[ \t]+)?(?:weekly|week)(?:[ \t]+(?:plan|limit|usage|allowance))*)?/i;
+
+// The text after `BUDGET:` split into its percent part and the rest: { pct: number | null, stepRest: string }.
+// pct is null when there is no percent token or it is not in (0, 100]; stepRest is then the text unchanged.
+// Otherwise stepRest is the text with the percent token and its separators removed, for the step-form check.
+export function splitBudget(rest) {
+  const s = String(rest || '');
+  const m = PCT_TOKEN.exec(s);
+  if (!m) return { pct: null, stepRest: s };
+  const pct = Number(m[1]);
+  if (!(pct > 0 && pct <= 100)) return { pct: null, stepRest: s };
+  const stepRest = `${s.slice(0, m.index)} ${s.slice(m.index + m[0].length)}`
+    .replace(/\*\*|__/g, ' ').replace(/^[\s,;/&]+|[\s,;/&]+$/g, '');
+  return { pct, stepRest };
+}
+
+// The allowance percent a brief declares (`BUDGET: 3%`, `BUDGET: 0.5%`, `BUDGET: 3%, 60 calls`), or null. The line must
+// hold the percent and, at most, a valid step value: anything else on the line declares nothing.
+export function briefAllowancePct(brief) {
+  const d = briefDeclarations(String(brief || '')).BUDGET;
+  if (!d) return null;
+  const { pct, stepRest } = splitBudget(d.rest);
+  if (pct === null) return null;
+  const left = stepRest.trim();
+  if (left && !new RegExp(`^${BUDGET_STEPS_SRC}`, 'i').test(left)) return null;
+  return pct;
+}

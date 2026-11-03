@@ -28,6 +28,9 @@
 // and every further 100 the helper is told once to keep going (updating its notes) or stop and report if stuck, and the
 // crossing is logged in state/long-runs.jsonl. It never denies.
 //
+// A brief line `BUDGET: N%` (percent of the weekly plan limit) makes the same hook add ONE allowance note at the helper's
+// first call (lib/plan-allowance.mjs; option plan_allowance). Advice only: nothing warns, stops or denies on it.
+//
 // Each firing writes one row to telemetry subagent-context.jsonl (phase
 // "mid-run") and to the agent's events file, which hooks/runaway-check.mjs
 // reads at SubagentStop to tell the lead.
@@ -42,6 +45,7 @@ import {
 } from './lib/context-ceiling.mjs';
 import { STEP_LOG, stepBudgetCheck } from './lib/step-budget.mjs';
 import { longRunCheck, logLongRun, longRunRow } from './lib/long-run.mjs';
+import { allowanceNote } from './lib/plan-allowance.mjs';
 
 try {
   const p = readStdin();
@@ -88,7 +92,10 @@ try {
     deny(step.deny);
   }
 
-  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '']
+  // The percent allowance note (`BUDGET: N%`, lib/plan-allowance.mjs): once, at the first call. Advice only: never a deny.
+  const allowance = opt('plan_allowance', true) ? allowanceNote(p, { transcript: path, sig }) : null;
+
+  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '']
     .filter(Boolean).join('\n');
   if (!text) passthrough();
   process.stdout.write(JSON.stringify({

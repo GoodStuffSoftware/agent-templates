@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "updated": "2026-11-03",
+  "note": "How many plan units one percent of the WEEKLY plan limit is, and how heavily each model's tokens count against it, as DATA (like model-tiers.json: a number baked into code goes stale silently). Read by hooks/lib/plan-allowance.mjs (the `BUDGET: N%` spawn note) and scripts/allowance.mjs (an agent's own spend). Override without a release by writing a file of this shape to <state root>/plan-weights.json (the same place as the model-tiers.json override; merged by key, one level deep, so a file naming only models.opus.weight keeps everything else). Every figure carries its date, source, interval and status: 'measured' (fitted from the operator's own official readings), 'assumed' (a stand-in, not fitted) or 'estimated' (derived from a neighbouring cell). Nothing here is a published limit.",
+  "unit": {
+    "description": "A plan unit is a token count priced at the Sonnet 5 vector, then times the model's weight: input 1, output 5, cache write 1.25 (5 minute) or 2 (1 hour), cache read 0.1 (times cacheReadFactor), all times inPerMTok/1e6.",
+    "inPerMTok": 2,
+    "outRatio": 5,
+    "w5": 1.25,
+    "w1": 2,
+    "readRatio": 0.1
+  },
+  "unitsPerPercent": {
+    "value": 28.6,
+    "interval": [
+      28.4,
+      28.8
+    ],
+    "status": "measured",
+    "date": "2026-11-03",
+    "source": "Weight fit of 2026-11-03: 107 official weekly readings (2026-10-02 to 2026-11-03) against 502,767 requests from local transcripts. Three independent weeks gave 28.4, 28.8 and 28.5 units per 1% at Opus 1.5 and cache reads at API price."
+  },
+  "cacheReadFactor": {
+    "value": 1,
+    "interval": [
+      0.5,
+      1
+    ],
+    "status": "assumed",
+    "date": "2026-11-03",
+    "source": "Same fit. Cache reads counted at API price (1.0). The fit mildly prefers 0.5 to 0.75 (residual 86.5 and 87.5 against 101.6 at 1.0) but readings inside a window are serially correlated, so the preference is not conclusive. Kept at 1.0; at 0.5 the Opus weight fits 1.10 and units per percent 17.5, so the two must move together."
+  },
+  "models": {
+    "sonnet": {
+      "weight": 1,
+      "status": "baseline",
+      "date": "2026-11-03",
+      "source": "Defined as 1.0; every other weight is relative to it."
+    },
+    "opus": {
+      "weight": 1.38,
+      "interval": [
+        1.26,
+        1.51
+      ],
+      "status": "measured",
+      "date": "2026-11-03",
+      "source": "Weight fit of 2026-11-03, bootstrap of 107 readings at cache reads priced 1.0 (90% interval). The in-app tooltip says 1.5, inside the interval."
+    },
+    "haiku": {
+      "weight": 0.5,
+      "interval": [
+        0.1,
+        0.9
+      ],
+      "status": "assumed",
+      "date": "2026-11-03",
+      "source": "API price ratio. The fit gave 0.29 +-0.38 to 0.68 +-0.47, not distinguishable from 0 to 1."
+    },
+    "fable": {
+      "weight": 2.75,
+      "interval": [
+        2.3,
+        3.2
+      ],
+      "status": "assumed",
+      "date": "2026-11-03",
+      "source": "Weight fit of 2026-11-03: 2.3 +-0.8 (cache reads at half price) to 3.2 +-1.1 (API price) on the weekly meter, from only 548 Fable requests (7 in the current week). Unreliable, so a rough guide (+-1). The 5x API price ratio is not what the meter showed."
+    }
+  },
+  "perCall": {
+    "description": "Median plan cost of ONE model call (one API request, main thread and subagents together) as a percent of the weekly limit, by model and effort, from transcripts since 2026-10-02. It is dominated by cache reads of the loaded context, so it moves little with effort. Each model's cells were computed at basisWeight; the reader rescales them by weight / basisWeight so a changed weight moves the call estimate with it. A cell marked in 'estimated' is not measured: the reader falls back to the nearest effort of the same model.",
+    "date": "2026-11-03",
+    "source": "Weight fit of 2026-11-03, section 4: median % of weekly per call from 100% of calls since 2026-10-02 (sonnet 6.9k to 56.6k calls per effort, opus 19k to 63k, haiku 1.8k, fable 353). Opus low is n=60; haiku high and xhigh and fable high are on assumed weights.",
+    "basisWeight": {
+      "sonnet": 1,
+      "opus": 1.5,
+      "haiku": 0.5,
+      "fable": 5
+    },
+    "medianPct": {
+      "sonnet": {
+        "low": 0.00076,
+        "medium": 0.0009,
+        "high": 0.00115,
+        "xhigh": 0.00129
+      },
+      "opus": {
+        "low": 0.0013,
+        "medium": 0.00169,
+        "high": 0.00181,
+        "xhigh": 0.00228
+      },
+      "haiku": {
+        "medium": 0.00054,
+        "high": 0.00039,
+        "xhigh": 0.00077
+      },
+      "fable": {
+        "high": 0.01107
+      }
+    },
+    "estimated": [
+      "sonnet.max",
+      "opus.max",
+      "haiku.low",
+      "fable.low",
+      "fable.medium",
+      "fable.xhigh",
+      "fable.max"
+    ],
+    "thin": [
+      "opus.low"
+    ],
+    "mainThreadNote": "A main-thread call costs about 1.6 to 1.8 times a subagent call at equal effort (a bigger context). The cells mix both; a lead planning its own work should expect the higher end."
+  }
+}
