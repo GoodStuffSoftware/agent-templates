@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-09-28
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 An orchestrator treated a worker's completion report as the end of the task rather than a checkpoint. Follow-up work on the same change — review findings, a mid-task scope change, a live-test failure — kept spawning a fresh worker instead of resuming the one that already held the design and had already walked the dead ends. One worker resumed across four follow-up rounds (a mid-task scope change, a permission-classifier denial, an in-place redesign, and an auto-discovery requirement) each landed in minutes, because the resumed worker never had to rediscover context a fresh spawn would pay for twice: once to explore, once to re-derive what the last worker already ruled out.
 
@@ -20,3 +20,9 @@ An orchestrator treated a worker's completion report as the end of the task rath
 - Stopped-and-resumed versus kept-idle is a capability choice, not a cost one — neither keeps the prompt cache warm past its window, so the two cost roughly the same. Choose based on capability instead: an idle worker is still a live process (memory matters at fleet scale on small machines), it cannot nest under some spawn modes, and it dies with the lead's own process regardless. Reserve always-alive workers for cases where direct peer-to-peer messaging earns its keep — a writer/reviewer pair working concurrently — not as a default holding pattern between rounds of the same task.
 
 Related: [[team-vs-subagent-gate]], [[shutdown-after-verified-not-after-committed]], [[background-agents-die-with-their-host]].
+
+**Measured amendment: resume only while the cache is warm and the follow-on is short.** A transcript study over five weeks of real traffic tested "reuse workers by default" and refuted it. A continued worker costs about 0.11 (warm) to 0.16 (cold, over an hour) plan units per call, against 0.06 to 0.07 for a fresh follow-on, because the continued worker re-reads its whole earlier context on every call. A cold resume's first call cost about 8 times a fresh worker's. Re-discovery was only 1 to 4 percent of a follow-on's cost, so skipping it rarely repays the re-read. Applied to one week, continuing every follow-on would have cost 7 to 13 percent of the weekly limit more.
+- Rule: continue a worker only while its cache is warm (under 5 minutes) AND the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff file naming what was found and what was ruled out.
+- Never resume merely to keep a worker "in the loop" after its cache expired, and go fresh when its context is far larger than the next task needs.
+- Limits of the evidence: no matched tasks; quality, rework and operator time were not measured. Re-measure on matched tasks before widening the rule.
+This amends the "resume by default" framing above: the checkpoint idea stands, but the cost basis decides.
