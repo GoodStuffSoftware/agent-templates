@@ -24,7 +24,7 @@ const FABLE = 'claude-fable-5-1';
 const NOW = Date.parse('2026-10-11T12:00:00Z'); // 2026-10-10 (08:00Z to 08:00Z) is the last closed, settled day
 const FIRST = '2026-10-02';
 const LAST = '2026-10-10';
-const LATE = 26.77; // 1% of the 2677-unit weekly limit, in the last hours of the day, after the meter sample
+const LATE = 28.6; // 1% of the 2860-unit weekly limit, in the last hours of the day, after the meter sample
 const TOTAL = 91 + LATE;
 const tok = (u) => [u, 0, 0, 0, 0, 1]; // u plan units of plain input under SPEC
 const zero = () => [0, 0, 0, 0, 0, 0];
@@ -89,7 +89,7 @@ const WEEK_START = '2026-10-09T16:00:00.000Z';
 const RESETS_AT = Date.parse('2026-10-16T16:00:00.000Z') / 1000;
 function historyLine(day, { hits = 2, partial = false, pctSoFar = 12 } = {}) {
   return JSON.stringify({
-    v: 1, day, limitUnits: 2677, targetPct: 4, units: { main: 1, subagent: 1, total: 2 }, pct: { total: 4 },
+    v: 1, day, limitUnits: 2860, targetPct: 4, units: { main: 1, subagent: 1, total: 2 }, pct: { total: 4 },
     // elapsedPct is past week.pace's minElapsedPct (25): earlier in the plan week the projection is a gap, see usage-scenarios-fixes.test.mjs
     week: { start: WEEK_START, units: 321.24, pctSoFar, elapsedPct: 30, paceAtResetPct: 120, partial },
     limit: { hits, firstAt: hits ? `${day}T12:00:00.000Z` : null },
@@ -224,7 +224,7 @@ test('day, week, meter and exclusion metrics on a fixture day, through the runne
     // the runner's exclusions section carries the same rule and its share of the weekly limit
     const row0 = res.exclusions.rows.find((x) => x.name === 'fable-tree');
     near(row0.units, 50, 'exclusion row units');
-    assert.ok(Math.abs(row0.pctOfWeeklyLimit - (50 / 2677) * 100) < 1e-3, 'exclusion % of the weekly limit');
+    assert.ok(Math.abs(row0.pctOfWeeklyLimit - (50 / 2860) * 100) < 1e-3, 'exclusion % of the weekly limit');
   } finally { fx.cleanup(); }
 });
 

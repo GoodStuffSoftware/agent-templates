@@ -4,7 +4,7 @@
   "schemaVersion": 1,
   "revision": 1,
   "environment": {
-    "plan": { "weeklyLimitUnits": 2677 },
+    "plan": { "weeklyLimitUnits": 2860 },
     "day": { "boundaryUtcHour": 8 },
     "week": { "resetUtc": "Fri 16:00" },
     "projects": {

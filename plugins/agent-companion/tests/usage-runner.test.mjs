@@ -128,7 +128,7 @@ test('a first run computes every settled day and writes results, reports, the la
     assert.equal(res.runnerVersion, RUNNER_VERSION);
     assert.equal(res.totals.units, 3 * avgOf(LAST));
     assert.equal(res.totals.sessions, 3);
-    assert.equal(res.totals.pctOfWeeklyLimit, Math.round((3 * avgOf(LAST) / 2677) * 1e6) / 1e4);
+    assert.equal(res.totals.pctOfWeeklyLimit, Math.round((3 * avgOf(LAST) / 2860) * 1e6) / 1e4);
     const sc = res.scenarios.find((s) => s.id === 'u.units');
     assert.equal(sc.comparisons[0].current.value, 3 * avgOf(LAST));
     // an unimplemented metric is a gap that names itself, never a zero

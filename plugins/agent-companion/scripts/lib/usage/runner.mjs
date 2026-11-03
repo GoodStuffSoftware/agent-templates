@@ -45,6 +45,7 @@ import { readTelemetry, telemetryRecords, versionFirstSeen } from './telemetry.m
 import { makeRoutineSource } from './routines.mjs';
 import { sessionRecordRoot } from '../routine-model-drift.mjs';
 import { homeRoot, claudeDir } from '../../../hooks/lib/context.mjs';
+import { weeklyLimitUnits } from '../../../hooks/lib/plan-allowance.mjs';
 import {
   renderReport, summaryLines, regressionsOf, regressionIdsOf, infoRegressionsOf, r4,
 } from './report.mjs';
@@ -58,7 +59,6 @@ export const DEFER_LOOKBACK_DAYS = 8; // older missing days are not listed one b
 export const BASELINE_DAYS = 28; // the farthest baseline a built-in comparison reads (same-weekday-4)
 export const WINDOW_DEP_DAYS = 60; // window spans are followed this far back when hashing a day's inputs
 export const MAX_REVISIONS_KEPT = 20;
-export const DEFAULT_LIMIT_UNITS = 2677;
 export const DEFAULT_KEEP_DAYS = 180;
 export const STATUS_DAYS_KEPT = 60;
 
@@ -686,7 +686,7 @@ function buildLatest(res, reportPath) {
  * Run the analysis stage. Never throws: a failure comes back as { error }.
  *   root         state root (required)
  *   nowT         the clock (ms)
- *   limitUnits   weekly limit in plan units (default 2677)
+ *   limitUnits   weekly limit in plan units (default: weeklyLimitUnits(), 100 x units per 1% in plan-weights.json)
  *   days | from,to   explicit selection (YYYY-MM-DD);
  *   scenarios    restrict to these scenario ids; a restricted run is never persisted
  *   maxSeconds   wall-clock budget; the first day always runs
@@ -711,7 +711,7 @@ function runAnalysisUnsafe(opts, t0, clock) {
   const root = opts.root;
   if (!root) throw new Error('runAnalysis: root is required');
   const nowT = Number.isFinite(opts.nowT) ? opts.nowT : Date.now();
-  const limit = opts.limitUnits > 0 ? opts.limitUnits : DEFAULT_LIMIT_UNITS;
+  const limit = opts.limitUnits > 0 ? opts.limitUnits : weeklyLimitUnits();
   const restricted = Array.isArray(opts.scenarios) && opts.scenarios.length > 0;
   const persist = !opts.dryRun && !restricted;
   const paths = usagePaths(root, opts.reportDir || null);

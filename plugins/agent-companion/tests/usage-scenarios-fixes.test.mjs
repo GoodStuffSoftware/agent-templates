@@ -246,7 +246,7 @@ test('level comparison: a figure above 0 is the verdict whatever the days before
 
 function historyLine(day, week) {
   return JSON.stringify({
-    v: 1, day, limitUnits: 2677, targetPct: 4, units: { main: 1, subagent: 1, total: 2 }, pct: { total: 4 }, week,
+    v: 1, day, limitUnits: 2860, targetPct: 4, units: { main: 1, subagent: 1, total: 2 }, pct: { total: 4 }, week,
     limit: { hits: 0, firstAt: null },
   });
 }

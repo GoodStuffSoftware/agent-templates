@@ -18,7 +18,7 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateRoot, stateDir, classifyModel } from './context.mjs';
+import { stateRootPath, stateDir, classifyModel } from './context.mjs';
 import { briefAllowancePct } from './brief-directives.mjs';
 import { readBrief } from './step-budget.mjs';
 import { usageOf, safe } from './runaway.mjs';
@@ -40,7 +40,7 @@ export function planWeights() {
   let cfg = {};
   try { cfg = JSON.parse(readFileSync(shipped, 'utf8')); } catch { /* defaults below */ }
   let over = null;
-  try { over = JSON.parse(readFileSync(join(stateRoot(), 'plan-weights.json'), 'utf8')); } catch { /* no override: expected */ }
+  try { over = JSON.parse(readFileSync(join(stateRootPath(), 'plan-weights.json'), 'utf8')); } catch { /* no override: expected; a read never creates the state root (a dry run writes nothing) */ }
   if (plain(over)) {
     const merged = { ...cfg };
     for (const [k, v] of Object.entries(over)) merged[k] = plain(v) && plain(cfg[k]) ? { ...cfg[k], ...v } : v;
@@ -57,6 +57,10 @@ export function planWeights() {
 
 const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d);
 export function unitsPerPercent() { return num(planWeights().unitsPerPercent?.value, 28.6); }
+
+// What 100% of the weekly plan limit is, in plan units: 100 x units per 1% (2860 shipped). The ONE place the weekly limit comes from:
+// the session budget notice, the daily checkup and the usage analysis all call this (the option `weekly_limit_units` overrides it when set above 0).
+export function weeklyLimitUnits() { return Math.round(100 * unitsPerPercent() * 1e6) / 1e6; }
 
 // The model's weight vs Sonnet, and whether it is a measured figure. alias '' (an unrecognised model) counts as Sonnet.
 export function modelWeight(alias) {

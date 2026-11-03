@@ -8,10 +8,11 @@ import assert from 'node:assert/strict';
 import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, statSync, utimesSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { makeFixture, runHook, runScript } from './helpers.mjs';
+import { _resetPlanWeightsForTests, unitsPerPercent, weeklyLimitUnits } from '../hooks/lib/plan-allowance.mjs';
 import {
   unitsOf, dayStartMs, weekStartMs, dayKeyOf, runCheckup, readHistory, checkupPaths, buildDayRecord,
   scanTranscripts, readRollout, countCeilingNudges, launchCheckup, checkupDue, pendingSurface, markSurfaced,
-  formatLine, resetUnitCache, DAY_MS,
+  formatLine, resetUnitCache, DAY_MS, checkupOptions,
 } from '../scripts/lib/daily-checkup.mjs';
 
 const T = (s) => Date.parse(s);
@@ -113,11 +114,11 @@ test('a request belongs to the day its own timestamp is in; the week resets Frid
     assert.equal(r.to, '2026-10-10T08:00:00.000Z');
     assert.equal(r.week.start, '2026-10-09T16:00:00.000Z');
     assert.equal(r.week.units, 5, 'week so far counts from the 16:00Z reset only');
-    assert.equal(r.pct.total, Math.round((9 / 2677) * 10000) / 100);
+    assert.equal(r.pct.total, Math.round((9 / 2860) * 10000) / 100);
     assert.equal(r.targetPct, 14);
-    // 5 units is 0.19% of 2677; the week is 16 of 168 hours old at the end of the day
+    // 5 units is 0.17% of 2860; the week is 16 of 168 hours old at the end of the day
     assert.equal(r.week.elapsedPct, 9.5);
-    assert.equal(r.week.paceAtResetPct, Math.round(((5 / 2677) * 100 / (16 / 168)) * 10) / 10);
+    assert.equal(r.week.paceAtResetPct, Math.round(((5 / 2860) * 100 / (16 / 168)) * 10) / 10);
     assert.equal(record('2026-10-08').units.total, 2, 'the 07:59:59Z request is in the previous day');
     assert.equal(readHistory().find((x) => x.day === '2026-10-10'), undefined, 'the open day is not written');
   } finally { fx.cleanup(); }
@@ -141,6 +142,28 @@ test('the weekly limit and pace target are options', () => {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
     fx.cleanup();
+  }
+});
+
+test('one weekly-limit figure: unset or 0 derives 100 x units per 1% from plan-weights; no copy of the number stays in the sources', () => {
+  const keep = process.env.CLAUDE_PLUGIN_OPTION_WEEKLY_LIMIT_UNITS;
+  try {
+    _resetPlanWeightsForTests();
+    assert.equal(weeklyLimitUnits(), Math.round(100 * unitsPerPercent() * 1e6) / 1e6);
+    assert.equal(weeklyLimitUnits(), 2860);
+    delete process.env.CLAUDE_PLUGIN_OPTION_WEEKLY_LIMIT_UNITS;
+    assert.equal(checkupOptions().limit, weeklyLimitUnits());
+    process.env.CLAUDE_PLUGIN_OPTION_WEEKLY_LIMIT_UNITS = '0';
+    assert.equal(checkupOptions().limit, weeklyLimitUnits(), '0 means derive');
+    process.env.CLAUDE_PLUGIN_OPTION_WEEKLY_LIMIT_UNITS = '1234';
+    assert.equal(checkupOptions().limit, 1234, 'a user override still wins');
+    const root = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+    for (const f of ['scripts/lib/daily-checkup.mjs', 'scripts/lib/usage/runner.mjs']) {
+      assert.doesNotMatch(readFileSync(join(root, f), 'utf8'), /\b2677\b/, f);
+    }
+    assert.doesNotMatch(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8'), /\b2677\b/);
+  } finally {
+    if (keep === undefined) delete process.env.CLAUDE_PLUGIN_OPTION_WEEKLY_LIMIT_UNITS; else process.env.CLAUDE_PLUGIN_OPTION_WEEKLY_LIMIT_UNITS = keep;
   }
 });
 

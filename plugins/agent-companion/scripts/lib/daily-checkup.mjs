@@ -21,7 +21,7 @@
 //   (planUsageMultipliers) and config/model-pricing.json through
 //   scripts/lib/pricing.mjs; Haiku (0.5) and Fable (5) have no entry there, so
 //   they use the study's constants below; a model that matches nothing counts as
-//   Opus, as the study did. 100% = the weekly limit option (default 2677 units).
+//   Opus, as the study did. 100% = the weekly limit option (default: 100 x units per 1% in plan-weights.json, 2860 units).
 //
 // --- Incremental scan ------------------------------------------------------------
 //   state/daily-checkup.json holds a byte offset per transcript. A run reads only
@@ -59,6 +59,7 @@ import {
   discoverTranscripts, transcriptsRoot, usageOf, contextTokensOf, isCompactBoundary, flattenContent,
 } from './transcripts.mjs';
 import { planPriceSpecFor, planBaselineModel } from './pricing.mjs';
+import { weeklyLimitUnits } from '../../hooks/lib/plan-allowance.mjs';
 import {
   newFacts, addRequest, addPrompt, pruneFacts, operatorPromptText, toolKindsOf, buildFactsFile, SETTLE_MS,
 } from './usage/facts.mjs';
@@ -84,7 +85,6 @@ export function activeCeilingTokens() {
   const n = Number(opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS));
   return Number.isFinite(n) && n > 0 ? n : CEILING_MEASURE_TOKENS;
 }
-export const DEFAULT_LIMIT_UNITS = 2677;
 export const DEFAULT_PACE_PCT = 14;
 export const HOLD_RECENT_MS = 2 * 60 * 1000;
 export const LOCK_STALE_MS = 30 * 60 * 1000;
@@ -731,7 +731,7 @@ function classTable(spawns, units) {
   return out;
 }
 
-export function buildDayRecord(state, startMs, { limit = DEFAULT_LIMIT_UNITS, target = DEFAULT_PACE_PCT, computedAt = nowMs() } = {}) {
+export function buildDayRecord(state, startMs, { limit = weeklyLimitUnits(), target = DEFAULT_PACE_PCT, computedAt = nowMs() } = {}) {
   const endMs = startMs + DAY_MS;
   const day = sumHours(state, startMs, endMs);
   const pct = (u) => r2((u / limit) * 100);
@@ -801,10 +801,10 @@ export function readHistory(file = checkupPaths().history) {
 }
 
 export function checkupOptions() {
-  const limit = Number(opt('weekly_limit_units', DEFAULT_LIMIT_UNITS));
+  const limit = Number(opt('weekly_limit_units', 0));
   const target = Number(opt('daily_pace_target_pct', DEFAULT_PACE_PCT));
   return {
-    limit: limit > 0 ? limit : DEFAULT_LIMIT_UNITS,
+    limit: limit > 0 ? limit : weeklyLimitUnits(),
     target: target > 0 ? target : DEFAULT_PACE_PCT,
   };
 }

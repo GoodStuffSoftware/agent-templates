@@ -297,8 +297,8 @@
     "weekly_limit_units": {
       "type": "number",
       "title": "Daily checkup: weekly limit in plan units",
-      "description": "What 100% of the weekly plan limit is, in the plan units the daily checkup uses (every request priced at the Sonnet price vector, times the model's plan weight: Opus 1.5, Haiku 0.5, Fable 5). Default 2677, so 1% = 26.8 units. Weeks reset Friday 16:00Z.",
-      "default": 2677
+      "description": "What 100% of the weekly plan limit is, in the plan units the daily checkup uses (every request priced at the Sonnet price vector, times the model's plan weight). Default 0: derive it from config/plan-weights.json (100 x units per 1%, 2860 shipped, so 1% = 28.6 units), the same figure the session budget notice uses; set a number above 0 to override it. Weeks reset Friday 16:00Z.",
+      "default": 0
     },
     "daily_pace_target_pct": {
       "type": "number",

@@ -178,13 +178,19 @@ export function mapHookResult(h, r, key = '') {
 // `env` is where the user's config dir is resolved; `childEnv` is the reviewer child env the hook commands run in (plus AC_REVIEWER_SESSION=1
 // and CLAUDE_PROJECT_DIR; the review key is dropped from it, a user command has no business with it).
 // -> { hooks, summary: { wrapped, names, skippedPlugin, skippedOther, disabled } }
-export function buildUserGuards({ configDir, env = process.env, childEnv = {}, cwd = process.cwd(), pluginRoot = '', key = '', reviewerEnvName = 'AC_REVIEWER_SESSION', spawnImpl = spawn }) {
-  const dir = configDir || userConfigDir(env);
+export function buildUserGuards({ configDir, env = process.env, childEnv = {}, cwd = process.cwd(), pluginRoot = '', key = '', reviewerEnvName = 'AC_REVIEWER_SESSION', spawnImpl = spawn, home = homedir() }) {
+  const dir = configDir || userConfigDir(env, home);
   const parsed = readUserPreToolUseHooks({ configDir: dir, pluginRoot });
   const summary = { wrapped: 0, names: [], skippedPlugin: parsed.skipped.plugin, skippedOther: parsed.skipped.other, disabled: parsed.disabled };
   if (!parsed.hooks.length) return { hooks: null, summary };
   const hookEnv = { ...childEnv, [reviewerEnvName]: '1', CLAUDE_PROJECT_DIR: cwd };
   delete hookEnv.ANTHROPIC_API_KEY;
+  // The reviewer child env points CLAUDE_CONFIG_DIR at a private empty dir (only the SDK binary should use that). A user guard keeps its state
+  // (backup records, allowlists) in the user's REAL config dir, so it gets that one: the dir the settings were read from, which is
+  // CLAUDE_CONFIG_DIR as the parent had it, else the default (the variable removed, so the guard resolves ~/.claude itself).
+  if (configDir) hookEnv.CLAUDE_CONFIG_DIR = dir;
+  else if (env && typeof env.CLAUDE_CONFIG_DIR === 'string' && env.CLAUDE_CONFIG_DIR.trim()) hookEnv.CLAUDE_CONFIG_DIR = resolve(env.CLAUDE_CONFIG_DIR.trim());
+  else delete hookEnv.CLAUDE_CONFIG_DIR;
   const gitBash = process.platform === 'win32' && childEnv.CLAUDE_CODE_GIT_BASH_PATH ? String(childEnv.CLAUDE_CODE_GIT_BASH_PATH) : '';
   const matchers = parsed.hooks.map((h) => {
     const callback = async (input) => {

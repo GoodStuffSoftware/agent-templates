@@ -46,7 +46,7 @@ import { join, dirname, basename, relative } from 'node:path';
 import { stateDir, appendLog, classifyModel } from './context.mjs';
 import { priceUsage } from '../../scripts/lib/pricing.mjs';
 import { usageOf, queueNotice, safe } from './runaway.mjs';
-import { requestUnits, modelWeight, unitsPerPercent } from './plan-allowance.mjs';
+import { requestUnits, modelWeight, weeklyLimitUnits } from './plan-allowance.mjs';
 
 export const SESSION_BUDGET_DEFAULT_UNITS = 350;
 const CHUNK_BYTES = 8 * 1024 * 1024;
@@ -57,7 +57,7 @@ const STATE_TTL_MS = 7 * 86400000;
 
 // The weekly limit in plan units: 100 x the units per 1% in config/plan-weights.json (plus the override).
 export function weeklyPlanUnits() {
-  return 100 * unitsPerPercent();
+  return weeklyLimitUnits();
 }
 
 // Plan units for one usage record (lib/runaway.mjs usageOf shape).

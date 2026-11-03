@@ -88,7 +88,7 @@ function seed(root, fx) {
   // the history record of the last day, with ceiling nudges
   mkdirSync(join(root, 'state'), { recursive: true });
   writeFileSync(join(root, 'state', 'daily-checkup-history.jsonl'), `${JSON.stringify({
-    v: 1, day: LAST, limitUnits: 2677, targetPct: 4, units: { main: 1, subagent: 1, total: 2 }, pct: { total: 4 },
+    v: 1, day: LAST, limitUnits: 2860, targetPct: 4, units: { main: 1, subagent: 1, total: 2 }, pct: { total: 4 },
     week: { start: '2026-10-09T16:00:00.000Z', units: 321.24, pctSoFar: 12, elapsedPct: 10, paceAtResetPct: 120, partial: false },
     limit: { hits: 0, firstAt: null }, ceilingNudges: 3,
   })}\n`);

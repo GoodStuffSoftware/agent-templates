@@ -3,7 +3,7 @@
 import './isolate.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DEFAULT_SHARES } from '../scripts/lib/api-credits.mjs';
@@ -150,6 +150,35 @@ test('buildUserGuards: one SDK matcher per command hook, the matcher passed thro
   assert.deepEqual(g.summary, { wrapped: 1, names: ['guard.mjs'], skippedPlugin: 0, skippedOther: 0, disabled: false });
   assert.ok(!JSON.stringify(g.summary).includes('sk-ant-xyz') && !JSON.stringify(g.summary).includes('secret-token'));
   assert.equal(buildUserGuards({ configDir: tmp() }).hooks, null);
+});
+
+test('buildUserGuards: the guard command gets the user real config dir, not the private reviewer one; the review key stays out', async () => {
+  const d = tmp();
+  const out = join(d, 'seen.json');
+  const cmd = script(d, 'cfg.mjs', `${readStdin}process.getBuiltinModule('node:fs').writeFileSync(${JSON.stringify(out)},JSON.stringify({c:process.env.CLAUDE_CONFIG_DIR||null,k:process.env.ANTHROPIC_API_KEY||null,m:process.env.AC_REVIEWER_SESSION}));process.exit(0)});`);
+  writeFileSync(join(d, 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: cmd }] }] } }));
+  const PRIVATE = join(tmp(), 'private-sdk-config');
+  const childEnv = { ...base(), CLAUDE_CONFIG_DIR: PRIVATE, ANTHROPIC_API_KEY: KEY };
+  const seen = async (opts) => {
+    const g = buildUserGuards({ ...opts, childEnv, cwd: d, pluginRoot: PLUGIN_ROOT, key: KEY });
+    await g.hooks.PreToolUse[0].hooks[0](bashInput('git status', { cwd: d }));
+    return JSON.parse(readFileSync(out, 'utf8'));
+  };
+  // the parent had CLAUDE_CONFIG_DIR set: the guard gets exactly that, never the private dir
+  const a = await seen({ env: { CLAUDE_CONFIG_DIR: d } });
+  assert.equal(fwd(a.c), fwd(d));
+  assert.notEqual(fwd(a.c), fwd(PRIVATE));
+  assert.equal(a.k, null, 'the review key is stripped');
+  assert.equal(a.m, '1');
+  // the parent had none (default ~/.claude): the guard sees no variable at all, so it resolves its default itself
+  const home = tmp();
+  mkdirSync(join(home, '.claude'));
+  writeFileSync(join(home, '.claude', 'settings.json'), readFileSync(join(d, 'settings.json')));
+  const b = await seen({ env: {}, home });
+  assert.equal(b.c, null);
+  // an explicit configDir argument: the guard gets that dir
+  const c = await seen({ configDir: d, env: {} });
+  assert.equal(fwd(c.c), fwd(d));
 });
 
 // A fake SDK that behaves like the real one where it matters here: it calls the PreToolUse callbacks of the matchers that match a tool call.
