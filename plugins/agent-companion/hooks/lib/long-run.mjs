@@ -132,7 +132,7 @@ export function longRunCheck(p, { transcript = null, now = new Date() } = {}) {
     if (n === 1) pruneState();
     const t = thresholdFor(n);
     if (t === null || !claimOnce(`long-run-${p.agent_id}-${t}`)) return null;
-    // A helper on a `BUDGET: N%` allowance alone is told nothing will warn it: the crossing is still logged, the note is not sent.
+    // A helper on a `BUDGET: N%` allowance alone gets its own 80% / 100% notices instead: the crossing is still logged, the note is not sent.
     const quiet = !!transcript && briefAllowanceOnly(readBrief(transcript));
     return { text: quiet ? '' : longRunText(n), row: longRunRow(p, n, transcript, now) };
   } catch {

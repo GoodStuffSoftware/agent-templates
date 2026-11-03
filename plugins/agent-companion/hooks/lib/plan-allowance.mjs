@@ -142,8 +142,8 @@ export function fmtTokens(n, digits = 2) {
   const sig = (x) => String(Number(x.toPrecision(digits)));
   if (!(n > 0)) return '0';
   if (n >= 1e9) return `${sig(n / 1e9)} billion`;
-  if (n >= 1e6) return `${sig(n / 1e6)} million`;
-  if (n >= 1e3) return `${sig(n / 1e3)} thousand`;
+  if (n >= 1e6) return Number(sig(n / 1e6)) >= 1000 ? `${sig(n / 1e9)} billion` : `${sig(n / 1e6)} million`;
+  if (n >= 1e3) return Number(sig(n / 1e3)) >= 1000 ? `${sig(n / 1e6)} million` : `${sig(n / 1e3)} thousand`;
   return String(Math.round(n));
 }
 const trimNum = (n) => String(Math.round(n * 100) / 100);
@@ -322,7 +322,8 @@ function meterKids(st, transcript, agentId, deadline) {
       if (parent === agentId || st.kids[parent]) { st.kids[id] = freshMeter(); fresh.delete(id); grew = true; }
     }
   }
-  for (const id of fresh.keys()) st.skip.push(id);
+  // Skip the unresolved only after a complete pass: on a cut-short one their parent may simply not have been read yet.
+  if (complete) for (const id of fresh.keys()) st.skip.push(id);
   st.dirMtime = complete ? mtime : 0;
   return true;
 }

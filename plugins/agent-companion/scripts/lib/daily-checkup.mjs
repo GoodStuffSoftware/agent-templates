@@ -19,7 +19,7 @@
 //   1-hour cache writes, cache reads) and multiplied by the model's plan weight.
 //   The price vector is the baseline model's, from config/model-pricing.json through
 //   scripts/lib/pricing.mjs. The plan WEIGHT of every model comes from one place,
-//   config/plan-weights.json (shipped plus the per-user override), through modelWeight()
+//   config/plan-weights.json (shipped plus the per-user file), through modelWeight()
 //   in hooks/lib/plan-allowance.mjs, like the allowance note and the session notice:
 //   Sonnet 1, Opus 1.38, Haiku 0.5, Fable 2.75 as shipped; a model that matches no
 //   family counts as Opus, as the study did. 100% = the weekly limit option (default: 100 x units per 1% in plan-weights.json, 2860 units).
@@ -165,7 +165,7 @@ export function weightInfoFor(model) {
   const s = unitSpecFor(model);
   if (!s) return { family: family(model), mult: 0, source: 'unpriced', label: 'E', inUsd: 0, outRatio: 0, r: 0, w5: 0, w1: 0 };
   return {
-    family: family(model), mult: s.mult, source: 'plan-weights', label: s.status === 'measured' || s.status === 'baseline' ? 'M' : 'E',
+    family: family(model), mult: s.mult, source: 'plan-weights', label: (s.status === 'measured' || s.status === 'baseline') && /haiku|sonnet|opus|fable/i.test(String(model || '')) ? 'M' : 'E',
     inUsd: s.inUsd, outRatio: s.outRatio, r: s.r, w5: s.w5, w1: s.w1,
   };
 }

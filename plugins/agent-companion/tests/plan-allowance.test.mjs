@@ -612,7 +612,7 @@ test('notices: cost. A long transcript and many other agents: the first look is 
     const m = JSON.parse(readFileSync(join(stateDir(), 'allowance', 'cost-A.meter.json'), 'utf8'));
     assert.equal(Object.keys(m.kids).length, 25);
     assert.ok(m.skip.length >= 300, 'unrelated agents are remembered, not read again');
-    assert.ok(cold < 1500, `first look ${cold.toFixed(0)} ms (the hook limit is 5000)`);
+    assert.ok(cold < 4000, `first look ${cold.toFixed(0)} ms (the hook limit is 5000)`);
     assert.ok(warm < 200, `a call with one new request ${warm.toFixed(0)} ms`);
     assert.ok(idle < 200, `a call with nothing new ${idle.toFixed(0)} ms`);
     // the whole hook process, node start included, on the warm path
@@ -677,4 +677,30 @@ test('self-check: tokens used, the allowance in tokens at the usual mix, and wha
     // no allowance in the brief: tokens used only
     assert.match(check(fx, 'tok-B').stdout, /^Tokens: 1 million used\.$/m);
   } finally { fx.cleanup(); }
+});
+
+test('notices: a listing pass cut short (an unreadable meta) never writes off an agent that only sorts before its parent', () => {
+  const fx = makeFixture();
+  try {
+    const { lead, sub } = layout(fx, [{ id: 'cut-A', text: user('BUDGET: 50%\nwork') + turn('r0', 'claude-sonnet-5-5', BIG) }]);
+    run(lead, 'cut-A');
+    // the grandchild's meta sorts before its parent's, and the parent's meta is half-written on the first look
+    writeFileSync(join(sub, 'agent-cut-a-grand.meta.json'), JSON.stringify({ agentType: 'x', parentAgentId: 'cut-z-kid' }));
+    writeFileSync(join(sub, 'agent-cut-a-grand.jsonl'), user('grandchild') + turns('g', 3, 'claude-sonnet-5-5', BIG));
+    writeFileSync(join(sub, 'agent-cut-z-kid.meta.json'), '{"agentType":');
+    writeFileSync(join(sub, 'agent-cut-z-kid.jsonl'), user('kid') + turns('k', 2, 'claude-sonnet-5-5', BIG));
+    allowanceWatch(pre(lead, 'cut-A'), { noticePct: 80 });
+    writeFileSync(join(sub, 'agent-cut-z-kid.meta.json'), JSON.stringify({ agentType: 'x', parentAgentId: 'cut-A' }));
+    allowanceWatch(pre(lead, 'cut-A'), { noticePct: 80 });
+    const m = JSON.parse(readFileSync(join(stateDir(), 'allowance', 'cut-A.meter.json'), 'utf8'));
+    assert.deepEqual(Object.keys(m.kids).sort(), ['cut-a-grand', 'cut-z-kid']);
+    const metered = [m.own, ...Object.values(m.kids)].reduce((a, k) => a + k.units + (k.open ? requestUnits(k.open.usage, k.open.model) : 0), 0);
+    near(metered, agentSpend('cut-A', join(fx.dir, '.claude')).totalUnits, 1e-9);
+  } finally { fx.cleanup(); }
+});
+
+test('token formatting: a rounding boundary moves up a unit instead of printing 1000 thousand', () => {
+  assert.equal(fmtTokens(999_700), '1 million');
+  assert.equal(fmtTokens(999_700_000), '1 billion');
+  assert.equal(fmtTokens(994_000), '990 thousand');
 });

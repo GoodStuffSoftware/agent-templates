@@ -253,7 +253,7 @@ if (out.aliasOf) console.log(`type ${out.aliasOf} is an alias of ${out.taskType}
 if (out.role) console.log(`brief lines:    TYPE: ${out.taskType} + ROLE: ${out.role} (one of ${BRIEF_ROLES.join('/')}: what the main deliverable is; fixer, lander, docs when it is that. Tags the spawn for usage measurement only)`);
 console.log(`inputs:         weight=${out.weight} kind=${out.kind} consequence=${out.consequence}`);
 console.log(`why:            ${out.rationale}`);
-console.log('budget:         a brief may carry BUDGET: N% (an allowance of N% of the weekly plan limit that the agent plans against; no warnings or stops. BUDGET: <n> stays the separate step budget)');
+console.log('budget:         a brief may carry BUDGET: N% (an allowance of N% of the weekly plan limit that the agent plans against; it gets a notice at 80% and 100% and is never stopped. BUDGET: <n> stays the separate step budget)');
 if (out.browser) {
   const b = out.browser;
   if (b.agent) {
