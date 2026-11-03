@@ -35,6 +35,9 @@
 //   - nothing else: no user settings (never in settingSources, and CLAUDE_CONFIG_DIR is a private empty dir), no other
 //     plugin (a project that enables others finds none installed in that dir), skills: [], strictMcpConfig with no
 //     servers (the project's .mcp.json is ignored). The tool lists below win over any project permission.
+//   - plus the operator's user-level PreToolUse COMMAND hooks, and only those, as programmatic SDK hooks (the `hooks` option; scripts/lib/api-sdk-guards.mjs):
+//     the user's guards (e.g. a destructive-git or secret guard) run in reviewer sessions without any user settings, plugin, MCP server or skill being loaded.
+//     Option api_review_user_guards (default on) turns this off; plugin-own hooks are not wrapped (already loaded).
 //   The init message is the proof; runApiSdk returns it as `init` and aborts the run when it lists a plugin other than ours or an MCP server.
 //   The hooks know they run under a reviewer through REVIEWER_SESSION_ENV in the child env (hooks/lib/context.mjs): the lead-only hooks
 //   exit silently, the safety guards run.
@@ -53,6 +56,7 @@ import { stateFile, REVIEWER_SESSION_ENV } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { loadConfig, resolveKey, record, recordFailure, recordSpend } from './api-credits.mjs';
 import { spawnSyncHidden } from './proc.mjs';
+import { buildUserGuards } from './api-sdk-guards.mjs';
 import {
   validKeyShape, scrub, resolveModel, isUnavailable, isSpendLimit, isWorkspaceMissing, hasVerdict, WORKSPACE_ENV, WORKSPACE_HINT,
   SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD, slowNote, softUsdNote, logSlowReview,
@@ -150,7 +154,7 @@ export function pluginIdentity(root = PLUGIN_ROOT) {
 // The SDK query() options for one review. Exported so the tests and the init-message proof use the exact set a review uses.
 export function sdkOptions({
   cwd, modelId, effortOption = null, key, workspace = '', base = process.env, configDir = '', platform = process.platform,
-  system, maxTurns = 30, maxUsd = 0, abortController, pluginRoot = PLUGIN_ROOT,
+  system, maxTurns = 30, maxUsd = 0, abortController, pluginRoot = PLUGIN_ROOT, hooks = null,
 }) {
   const tools = sdkToolsFor(platform);
   const ps = tools.includes('PowerShell');
@@ -167,6 +171,8 @@ export function sdkOptions({
     // maxBudgetUsd: the SDK enforces that after the final reply too and then reports an error, discarding a review that was already paid for.
     // The API host is pinned: a project .claude/settings.json `env` block must not be able to send the review key elsewhere (flag settings beat project settings).
     settings: { env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } }, ...(abortController ? { abortController } : {}),
+    // The user's own PreToolUse command hooks as programmatic SDK hooks (scripts/lib/api-sdk-guards.mjs): guards only, no user settings loaded.
+    ...(hooks ? { hooks } : {}),
     ...(effortOption ? { effort: effortOption } : {}), // the routed effort: the SDK passes it to the binary as --effort
   };
 }
@@ -261,7 +267,7 @@ export async function runApiSdk({
   maxUsd = DEFAULT_HARD_USD, softUsd = SOFT_USD, maxTurns = 30, requireVerdict = false,
   hungMs = HUNG_MS, slowMs = SLOW_REVIEW_MS, logRow = null, sdkVersion = DEFAULT_SDK_VERSION, platform = process.platform,
   cfg = loadConfig(), env = process.env, now = Date.now(),
-  sdk = null, load = loadSdk,
+  sdk = null, load = loadSdk, userGuards = true, userConfigDir = null,
 }) {
   let key = '';
   let usd = 0;
@@ -323,6 +329,15 @@ export async function runApiSdk({
       cwd, modelId, effortOption: effort && m.effort ? effort : null, key, workspace: ws, base: env, configDir: configDirOf(sdkVersion), platform,
       system, maxTurns, maxUsd, abortController: ac,
     });
+    // The operator's user-level PreToolUse command hooks, wrapped as SDK hook callbacks (option api_review_user_guards, default on).
+    let guards = null;
+    if (userGuards) {
+      try {
+        const g = buildUserGuards({ configDir: userConfigDir || undefined, env, childEnv: options.env, cwd, pluginRoot: PLUGIN_ROOT, key, reviewerEnvName: REVIEWER_SESSION_ENV });
+        guards = g.summary;
+        if (g.hooks) options.hooks = g.hooks;
+      } catch { guards = null; } // a guard problem never stops the review
+    }
     armHung();
     slowTimer = setTimeout(() => { // soft: one long-runs row and a note, the review goes on
       notes.push(slowNote(Math.round(slowMs / 6000) / 10));
@@ -438,7 +453,7 @@ export async function runApiSdk({
       if (!hasVerdict(text)) return fail(false, `the review has no VERDICT line (stop_reason ${stop})`);
     }
     bookCost(true);
-    return { ok: true, text, usd, turns: turnCount, tokens, model: modelId, stopReason: stop, path: 'sdk', sdkUsd, notes, init, ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: true, text, usd, turns: turnCount, tokens, model: modelId, stopReason: stop, path: 'sdk', sdkUsd, notes, init, userGuards: guards,...(ledgerError ? { ledgerError } : {}) };
   } catch (e) {
     stopTimers();
     const reason = scrub(String((e && e.message) || e), key).slice(0, 200);

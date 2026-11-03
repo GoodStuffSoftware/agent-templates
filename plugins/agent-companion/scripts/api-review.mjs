@@ -168,6 +168,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
       maxUsd,
       ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),
       sdkVersion: String(opt('api_sdk_version', DEFAULT_SDK_VERSION)),
+      userGuards: opt('api_review_user_guards', true),
       requireVerdict: true, env, ...(sdk ? { sdk } : {}), ...(loadSdk ? { load: loadSdk } : {}),
       ...(now ? { now } : {}), ...(cfg ? { cfg } : {}),
     });
