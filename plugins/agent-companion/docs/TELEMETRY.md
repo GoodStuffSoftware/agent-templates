@@ -368,13 +368,13 @@ total that skips several multiples at once still writes one.
 | `at` | ISO 8601 string | when the crossing was seen |
 | `session_id` | string | the lead session |
 | `event` | string | `crossing` |
-| `units` | number | the session's plan units at that moment (tokens at Sonnet 5 rates times the model's plan multiplier) |
+| `units` | number | the session's plan units at that moment (tokens at Sonnet 5 rates times the model's weight in `config/plan-weights.json`) |
 | `level` | number | the multiple of the threshold just passed, in units |
 | `threshold` | number | `session_budget_units` as set |
-| `week_pct` | number | `units` as a percentage of `weeklyPlanUnits` in `config/session-budget.json` |
+| `week_pct` | number | `units` as a percentage of the week, 100 x `unitsPerPercent` in `config/plan-weights.json` (plus the per-user override) |
 | `transcripts` | number | transcripts read: the lead's plus its subagents' |
 | `scan_complete` | boolean | false when the scan stopped at its deadline and `units` is a lower bound |
-| `estimated_turns` | number | requests counted at their own API list price because their tier has no measured plan multiplier (haiku, fable) |
+| `estimated_turns` | number | requests counted at their own API list price because their weight in `config/plan-weights.json` is not measured (status `assumed` or `estimated`: haiku, fable) |
 | `unpriced_turns` | number | requests on a model with no price at all, counted as zero |
 
 ### `subagent-context.jsonl` — one record per subagent context notice

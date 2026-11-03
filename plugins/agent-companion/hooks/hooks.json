@@ -633,6 +633,19 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "^mcp__.*__get_usage$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/plan-meter-sample.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [

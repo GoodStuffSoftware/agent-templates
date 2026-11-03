@@ -4,24 +4,32 @@
 // runaway-notice path (UserPromptSubmit, PostToolUse ^Agent$). Advice only.
 //
 // Unit arithmetic used below: a plan unit is a token count priced at Sonnet 5
-// rates times the model's tier multiplier (Opus 1.5). Sonnet 5 output is
-// $10/MTok, so 1M sonnet output tokens = 10 units and 1M opus output tokens = 15.
+// rates times the model's weight from config/plan-weights.json (plus the per-user override). Sonnet 5 output is
+// $10/MTok, so 1M sonnet output tokens = 10 units and 1M opus output tokens = 10 x the opus weight (15 at 1.5, which the
+// timing tests pin with opus15() so they do not move when the shipped weight is refitted).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { writeFileSync, appendFileSync, mkdirSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
-import { telemetryDir, stateDir } from '../hooks/lib/context.mjs';
+import { telemetryDir, stateDir, stateRoot } from '../hooks/lib/context.mjs';
 import {
-  planUnitsOf, checkSessionBudget, scanSession, budgetNoticeText, weeklyPlanUnits, SESSION_BUDGET_DEFAULT_UNITS, WEEKLY_PLAN_UNITS_DEFAULT,
+  planUnitsOf, checkSessionBudget, scanSession, budgetNoticeText, weeklyPlanUnits, SESSION_BUDGET_DEFAULT_UNITS,
 } from '../hooks/lib/session-budget.mjs';
 import { usageOf } from '../hooks/lib/runaway.mjs';
-import { planPriceSpecFor } from '../scripts/lib/pricing.mjs';
+import { _resetPlanWeightsForTests, unitsPerPercent, modelWeight } from '../hooks/lib/plan-allowance.mjs';
 
 const SID = 'sess-budget';
 const OPUS = 'claude-opus-5-5';
 const SONNET = 'claude-sonnet-5';
+
+// Pin a per-user override of the plan weights in the fixture's state root (hooks run as children read it too).
+function override(obj) {
+  writeFileSync(join(stateRoot(), 'plan-weights.json'), JSON.stringify(obj));
+  _resetPlanWeightsForTests();
+}
+const opus15 = () => override({ models: { opus: { weight: 1.5 } } });
 
 // One assistant request, written the streaming way: two lines sharing a requestId.
 function req(id, model, output, extra = {}) {
@@ -42,33 +50,40 @@ const prompt = (lead, extra = {}) => ({
 });
 const notice = (r) => r.json?.hookSpecificOutput?.additionalContext || '';
 
-test('plan units use the plugin plan-usage pricing: Sonnet 5 rates x tier multiplier', () => {
-  // The first row of the 2026-10-02 usage ledger: opus, 266 output, 69966 1h cache write -> 0.4238 units.
-  const u = usageOf({ input_tokens: 2, output_tokens: 266, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 69966 } });
-  const r = planUnitsOf(u, 'claude-opus-5');
-  assert.ok(Math.abs(r.units - 0.4238) < 0.0005, `got ${r.units}`);
-  assert.equal(r.estimated, false);
-  const s = planUnitsOf(u, SONNET);
-  assert.ok(Math.abs(r.units / s.units - planPriceSpecFor('claude-opus-5').multiplier) < 1e-9, 'opus = sonnet x the table multiplier');
-  assert.ok(Math.abs(planUnitsOf({ output: 1e6 }, SONNET).units - 10) < 1e-9);
-  assert.ok(Math.abs(planUnitsOf({ output: 1e6 }, OPUS).units - 15) < 1e-9);
+test('plan units use the plan-weights pricing: Sonnet 5 rates x the model weight', () => {
+  const fx = makeFixture();
+  try {
+    // The first row of the 2026-10-02 usage ledger: opus, 266 output, 69966 1h cache write -> 0.4238 units at Opus 1.5.
+    const u = usageOf({ input_tokens: 2, output_tokens: 266, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 69966 } });
+    opus15();
+    const r = planUnitsOf(u, 'claude-opus-5');
+    assert.ok(Math.abs(r.units - 0.4238) < 0.0005, `got ${r.units}`);
+    assert.equal(r.estimated, false, 'opus is a measured weight');
+    assert.ok(Math.abs(planUnitsOf({ output: 1e6 }, SONNET).units - 10) < 1e-9);
+    assert.ok(Math.abs(planUnitsOf({ output: 1e6 }, OPUS).units - 15) < 1e-9);
+    // No override: the shipped weight, whatever it is now.
+    rmSync(join(stateRoot(), 'plan-weights.json'));
+    _resetPlanWeightsForTests();
+    const w = modelWeight('opus').weight;
+    assert.ok(Math.abs(planUnitsOf({ output: 1e6 }, OPUS).units - 10 * w) < 1e-9);
+  } finally { _resetPlanWeightsForTests(); fx.cleanup(); }
 });
 
-test('a tier with no plan multiplier is counted at its own API price and flagged estimated; an unpriced model is null', () => {
+test('a model whose weight is only assumed (haiku) is counted and flagged estimated; an unpriced model is null', () => {
   const haiku = planUnitsOf({ output: 1e6 }, 'claude-haiku-4-5');
   assert.equal(haiku.estimated, true);
-  assert.ok(Math.abs(haiku.units - 5) < 1e-9, 'haiku output is $5/MTok');
+  assert.ok(Math.abs(haiku.units - 5) < 1e-9, 'haiku output: 1M x 5 x $2/M x the assumed weight 0.5');
   assert.equal(planUnitsOf({ output: 1e6 }, 'claude-mystery-1'), null);
 });
 
 test('the notice text carries the units, the share of the week and what helps, not a hand-off', () => {
   const t = budgetNoticeText(700);
-  assert.match(t, /This session, including its subagents, has used about 700 plan units \(~26% of a ~2,677-unit week\)\./);
+  assert.match(t, /This session, including its subagents, has used about 700 plan units \(~24% of a ~2,860-unit week\)\./);
   assert.ok(t.includes('A hand-off to a fresh session does not save usage; let auto-compaction handle context.'));
   assert.match(t, /fewer and smaller spawns: pick the lowest rung that fits, brief tightly, cap fan-out/);
   assert.match(t, /Hand over only when a fresh session is required \(a plugin version change\) or the job ends\./);
   assert.doesNotMatch(t, /offer the operator a hand-off|finish the phase/);
-  assert.equal(weeklyPlanUnits(), 2677);
+  assert.ok(Math.abs(weeklyPlanUnits() - 2860) < 1e-6, 'the week is 100 x the 28.6 units per 1%');
   assert.equal(SESSION_BUDGET_DEFAULT_UNITS, 350);
 });
 
@@ -77,6 +92,7 @@ test('lead plus subagents are summed; one notice per crossed multiple, delivered
   try {
     const { lead, sub } = layout(fx);
     const env = { CLAUDE_PLUGIN_OPTION_SESSION_BUDGET_UNITS: '10' };
+    opus15();
     writeFileSync(lead, req('l1', OPUS, 400000)); // 6 units: under the threshold
     assert.equal(notice(runHook('hooks/runaway-notice.mjs', prompt(lead), { env })), '', 'under: nothing');
 
@@ -110,6 +126,7 @@ test('delivered after a foreground Agent returns (PostToolUse ^Agent$), lead onl
   try {
     const { lead, sub } = layout(fx);
     const env = { CLAUDE_PLUGIN_OPTION_SESSION_BUDGET_UNITS: '10' };
+    opus15();
     writeFileSync(lead, req('l1', OPUS, 100000));
     writeFileSync(join(sub, 'agent-a1.jsonl'), req('s1', OPUS, 900000)); // 1.5 + 13.5 = 15
     const post = { ...prompt(lead), hook_event_name: 'PostToolUse', tool_name: 'Agent' };
@@ -232,15 +249,25 @@ test('the plugin declares session_budget_units (default 350) and the hook timeou
   }
 });
 
-test('weekly allowance: config and the in-code fallback both carry the 2026-10-06 limit (2,677 units, 1% = 26.8), not the retired 1,900', () => {
-  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'session-budget.json'), 'utf8'));
-  assert.equal(cfg.weeklyPlanUnits, 2677);
-  assert.equal(WEEKLY_PLAN_UNITS_DEFAULT, 2677);
-  assert.equal(cfg.weeklyPlanUnits, WEEKLY_PLAN_UNITS_DEFAULT, 'file and fallback agree');
-  assert.match(cfg.note, /2,677 units \(1% = 26\.8 units\)/);
-  assert.doesNotMatch(cfg.note, /so ~1,900 is the working number/);
-  // 1% of the week is 26.8 units: a 268-unit session is 10%.
-  assert.match(budgetNoticeText(268), /\(~10% of a ~2,677-unit week\)/);
-  const src = readFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', 'session-budget.mjs'), 'utf8');
-  assert.doesNotMatch(src, /let n = 1900/);
+test('one source of truth: the week and the model weights come from plan-weights.json (shipped plus override); no copy of them stays here', () => {
+  const fx = makeFixture();
+  try {
+    assert.equal(existsSync(join(PLUGIN_ROOT, 'config', 'session-budget.json')), false, 'the duplicated file is gone');
+    const src = readFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', 'session-budget.mjs'), 'utf8');
+    assert.doesNotMatch(src, /2677|26\.8|config\/session-budget\.json|planPriceSpecFor/);
+    // shipped: 1% = unitsPerPercent, a 286-unit session is 10% of the week
+    _resetPlanWeightsForTests();
+    assert.ok(Math.abs(weeklyPlanUnits() - 100 * unitsPerPercent()) < 1e-9);
+    assert.match(budgetNoticeText(286), /\(~10% of a ~2,860-unit week\)/);
+    // an override of units per 1% moves the notice and the week; an override of a weight moves a turn's units
+    override({ unitsPerPercent: { value: 20 }, models: { opus: { weight: 2 } } });
+    assert.equal(weeklyPlanUnits(), 2000);
+    assert.match(budgetNoticeText(200), /\(~10% of a ~2,000-unit week\)/);
+    assert.ok(Math.abs(planUnitsOf({ output: 1e6 }, OPUS).units - 20) < 1e-9);
+    // a hook child reads the same override: 1M opus output tokens at weight 2 is 20 units
+    const { lead } = layout(fx);
+    writeFileSync(lead, req('l1', OPUS, 1000000));
+    const r = runHook('hooks/runaway-notice.mjs', prompt(lead), { env: { CLAUDE_PLUGIN_OPTION_SESSION_BUDGET_UNITS: '10' } });
+    assert.match(notice(r), /about 20 plan units \(~1% of a ~2,000-unit week\)/);
+  } finally { _resetPlanWeightsForTests(); fx.cleanup(); }
 });

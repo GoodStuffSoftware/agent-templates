@@ -6,17 +6,15 @@
 // (callers fail open).
 //
 // --- Plan units --------------------------------------------------------------
-// The plugin's existing plan-usage pricing, not a second table
-// (scripts/lib/pricing.mjs planPriceSpecFor, the same function the compaction
-// advisor and bench/runner.mjs's plan_usage_index use): every model's tokens
-// priced at the BASELINE tier's rates (Sonnet 5, the tier config/model-tiers.json
-// planUsageMultipliers defines as 1.0) times the model's own tier multiplier.
-// A tier with no measured multiplier (haiku, fable) has no plan figure there;
-// for the budget it is counted at its own API list price, which is its
-// API-price ratio to the baseline as the multiplier (haiku 0.5, fable 5, the
-// same stand-ins the 2026-10-02 usage postmortem used), and the row says how
-// many turns were estimated that way. A model with no price at all counts as
-// zero and is counted separately.
+// One source of truth: config/plan-weights.json (shipped, plus the per-user override
+// <state root>/plan-weights.json that scripts/calibrate-weights.mjs writes), read through
+// hooks/lib/plan-allowance.mjs. Every model's tokens are priced at the Sonnet 5 vector
+// times the model's weight, and 1% of the weekly limit is that file's unitsPerPercent
+// (so the week is 100 x that). Nothing here holds a number of its own. A turn on a
+// model whose weight is not measured (status assumed or estimated: haiku, fable today)
+// is counted all the same and the row says how many such turns there were. A model
+// the file does not know falls back to its API list price in dollars (counted as
+// estimated); a model with no price at all counts as zero and is counted separately.
 //
 // --- Tracking a whole session cheaply ----------------------------------------
 // The lead's transcript is <project>/<session_id>.jsonl and each subagent
@@ -45,45 +43,29 @@ import {
   readdirSync, statSync, renameSync, rmSync,
 } from 'node:fs';
 import { join, dirname, basename, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { stateDir, appendLog } from './context.mjs';
-import { planPriceSpecFor, priceUsage } from '../../scripts/lib/pricing.mjs';
+import { stateDir, appendLog, classifyModel } from './context.mjs';
+import { priceUsage } from '../../scripts/lib/pricing.mjs';
 import { usageOf, queueNotice, safe } from './runaway.mjs';
+import { requestUnits, modelWeight, unitsPerPercent } from './plan-allowance.mjs';
 
 export const SESSION_BUDGET_DEFAULT_UNITS = 350;
-// Shipped default for the weekly allowance when config/session-budget.json is
-// unreadable (2026-10-06 recalibration: 1% of the weekly limit = 26.8 units).
-export const WEEKLY_PLAN_UNITS_DEFAULT = 2677;
 const CHUNK_BYTES = 8 * 1024 * 1024;
 export const BUDGET_DEADLINE_MS = 2500;
 const RECENT_KEYS = 64;
 const MAX_FILES = 2000;
 const STATE_TTL_MS = 7 * 86400000;
 
-let _week = null;
+// The weekly limit in plan units: 100 x the units per 1% in config/plan-weights.json (plus the override).
 export function weeklyPlanUnits() {
-  if (_week) return _week;
-  let n = WEEKLY_PLAN_UNITS_DEFAULT;
-  try {
-    const f = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'session-budget.json');
-    const v = Number(JSON.parse(readFileSync(f, 'utf8')).weeklyPlanUnits);
-    if (Number.isFinite(v) && v > 0) n = v;
-  } catch { /* shipped default */ }
-  _week = n;
-  return n;
+  return 100 * unitsPerPercent();
 }
 
 // Plan units for one usage record (lib/runaway.mjs usageOf shape).
 // { units, estimated } or null when the model has no price at all.
 export function planUnitsOf(usage, model) {
-  const spec = planPriceSpecFor(model);
-  if (spec) {
-    const w1 = usage.cacheWrite1h || 0;
-    const w5 = Math.max(0, (usage.cacheWrite || 0) - w1);
-    const base = (usage.input || 0) + w5 * spec.w5 + w1 * spec.w1
-      + (usage.cacheRead || 0) * spec.r + (usage.output || 0) * spec.outRatio;
-    return { units: base * spec.inUsd * spec.multiplier, estimated: false };
-  }
+  const alias = classifyModel(model).alias;
+  const m = modelWeight(alias);
+  if (m.known) return { units: requestUnits(usage, model), estimated: m.status !== 'measured' && m.status !== 'baseline' };
   const priced = priceUsage(usage, model);
   if (!priced) return null;
   return { units: priced.usd, estimated: true };
