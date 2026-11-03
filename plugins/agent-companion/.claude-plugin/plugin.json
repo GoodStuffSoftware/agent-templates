@@ -264,6 +264,12 @@
       "description": "The @anthropic-ai/claude-agent-sdk version the sdk engine installs on demand into <state dir>/sdk/<version>/ (a plain x.y.z version).",
       "default": "0.3.316"
     },
+    "api_review_user_guards": {
+      "type": "boolean",
+      "title": "API reviews (sdk engine): run my user-level PreToolUse command hooks as guards",
+      "description": "The sdk reviewer loads no user settings (they would pull in every user plugin, MCP server and skill), so your own guard hooks would not run in it. On (default): the command hooks under hooks.PreToolUse in your user settings.json are wrapped as Agent SDK hook callbacks and run as guards (exit 2 or a JSON permissionDecision deny blocks the tool call; a hook that errors or times out does not, as in Claude Code). Only PreToolUse command hooks; this plugin's own hooks are not wrapped. Off: the reviewer runs without them.",
+      "default": true
+    },
     "api_review_hard_usd": {
       "type": "number",
       "title": "API reviews: hard spend backstop of one review (USD, 0 = none)",
