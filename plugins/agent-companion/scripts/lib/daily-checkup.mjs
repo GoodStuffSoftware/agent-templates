@@ -17,11 +17,12 @@
 //   The unit model is the one of the usage study's week scan: every request is
 //   priced at the BASELINE (Sonnet) price vector (input, output, 5-minute and
 //   1-hour cache writes, cache reads) and multiplied by the model's plan weight.
-//   Opus and Sonnet take their weight and prices from config/model-tiers.json
-//   (planUsageMultipliers) and config/model-pricing.json through
-//   scripts/lib/pricing.mjs; Haiku (0.5) and Fable (5) have no entry there, so
-//   they use the study's constants below; a model that matches nothing counts as
-//   Opus, as the study did. 100% = the weekly limit option (default: 100 x units per 1% in plan-weights.json, 2860 units).
+//   The price vector is the baseline model's, from config/model-pricing.json through
+//   scripts/lib/pricing.mjs. The plan WEIGHT of every model comes from one place,
+//   config/plan-weights.json (shipped plus the per-user override), through modelWeight()
+//   in hooks/lib/plan-allowance.mjs, like the allowance note and the session notice:
+//   Sonnet 1, Opus 1.38, Haiku 0.5, Fable 2.75 as shipped; a model that matches no
+//   family counts as Opus, as the study did. 100% = the weekly limit option (default: 100 x units per 1% in plan-weights.json, 2860 units).
 //
 // --- Incremental scan ------------------------------------------------------------
 //   state/daily-checkup.json holds a byte offset per transcript. A run reads only
@@ -59,7 +60,7 @@ import {
   discoverTranscripts, transcriptsRoot, usageOf, contextTokensOf, isCompactBoundary, flattenContent,
 } from './transcripts.mjs';
 import { planPriceSpecFor, planBaselineModel } from './pricing.mjs';
-import { weeklyLimitUnits } from '../../hooks/lib/plan-allowance.mjs';
+import { weeklyLimitUnits, modelWeight } from '../../hooks/lib/plan-allowance.mjs';
 import {
   newFacts, addRequest, addPrompt, pruneFacts, operatorPromptText, toolKindsOf, buildFactsFile, SETTLE_MS,
 } from './usage/facts.mjs';
@@ -101,10 +102,7 @@ const SURFACED_FILE = 'daily-checkup-surfaced.json';
 const LOCK_FILE = 'daily-checkup.lock';
 const CEILING_LOG = 'context-ceiling.jsonl';
 
-// Plan weights the config has no entry for (the usage study's constants).
-const FALLBACK_MULT = { haiku: 0.5, fable: 5 };
-const UNKNOWN_MULT = 1.5; // a model that matches no family: counted as Opus, as the study did
-
+// Plan weights: config/plan-weights.json, see Units above.
 export function nowMs() {
   const fake = process.env.AGENT_COMPANION_FAKE_NOW;
   if (fake) { const t = Date.parse(fake); if (Number.isFinite(t)) return t; }
@@ -142,39 +140,32 @@ function family(model) {
 let _unitSpec = null;
 export function resetUnitCache() { _unitSpec = null; }
 
-// The price vector and the plan weight for one model, or null when the baseline
-// itself cannot be priced (then no unit can be computed at all).
+// The price vector (the baseline's) and the plan weight (config/plan-weights.json) for one model, or null when
+// the baseline itself cannot be priced (then no unit can be computed at all).
 function unitSpecFor(model) {
   const key = String(model || '');
   if (!_unitSpec) _unitSpec = new Map();
   if (_unitSpec.has(key)) return _unitSpec.get(key);
   let spec = null;
   try {
-    const own = planPriceSpecFor(key);
-    if (own) {
-      spec = { inUsd: own.inUsd, outRatio: own.outRatio, r: own.r, w5: own.w5, w1: own.w1, mult: own.multiplier };
-    } else {
-      const baseModel = planBaselineModel();
-      const base = baseModel ? planPriceSpecFor(baseModel) : null;
-      if (base) {
-        const fam = family(key);
-        spec = { inUsd: base.inUsd, outRatio: base.outRatio, r: base.r, w5: base.w5, w1: base.w1, mult: FALLBACK_MULT[fam] ?? UNKNOWN_MULT };
-      }
+    const baseModel = planBaselineModel();
+    const base = baseModel ? planPriceSpecFor(baseModel) : null;
+    if (base) {
+      const w = modelWeight(family(key));
+      spec = { inUsd: base.inUsd, outRatio: base.outRatio, r: base.r, w5: base.w5, w1: base.w1, mult: w.weight, status: w.status };
     }
   } catch { spec = null; }
   _unitSpec.set(key, spec);
   return spec;
 }
 
-// The plan weight and price vector for one model, with where the weight comes from:
-// 'model-tiers' (M: the config's own entry) or 'study-constant' (E: Haiku, Fable or an unplaced model).
+// The plan weight and price vector for one model, with where the weight comes from: always 'plan-weights';
+// label M when that weight is measured (or the Sonnet baseline), E when it is an assumed or estimated figure.
 export function weightInfoFor(model) {
   const s = unitSpecFor(model);
   if (!s) return { family: family(model), mult: 0, source: 'unpriced', label: 'E', inUsd: 0, outRatio: 0, r: 0, w5: 0, w1: 0 };
-  let own = null;
-  try { own = planPriceSpecFor(String(model || '')); } catch { own = null; }
   return {
-    family: family(model), mult: s.mult, source: own ? 'model-tiers' : 'study-constant', label: own ? 'M' : 'E',
+    family: family(model), mult: s.mult, source: 'plan-weights', label: s.status === 'measured' || s.status === 'baseline' ? 'M' : 'E',
     inUsd: s.inUsd, outRatio: s.outRatio, r: s.r, w5: s.w5, w1: s.w1,
   };
 }

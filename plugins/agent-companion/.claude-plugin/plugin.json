@@ -878,8 +878,14 @@
     "plan_allowance": {
       "type": "boolean",
       "title": "Percent allowance note (BUDGET: N%)",
-      "description": "On (default): a brief line 'BUDGET: <n>%' (decimals allowed, 0 to 100) gives the subagent an allowance of n percent of the WEEKLY plan limit. The same PreToolUse hook that runs inside each subagent tells it ONCE, at its first tool call, in about 300 characters: the allowance and its plan units, roughly how many calls that buys at its model and effort, that it should plan its work to fit, that nothing will warn or stop it, and the command that prints its own spend (scripts/allowance.mjs <agent_id>: its own transcript and its subagents', weighted per model from config/plan-weights.json). There is no soft budget behind it: no warning, no stop, no deny, whatever it spends. The percent form never sets a step budget; the 'BUDGET: <n>' form is unchanged. Off = no note (the command still works).",
+      "description": "On (default): a brief line 'BUDGET: <n>%' (decimals allowed, 0 to 100) gives the subagent an allowance of n percent of the WEEKLY plan limit. The same PreToolUse hook that runs inside each subagent tells it ONCE, at its first tool call, in about 300 characters: the allowance, its plan units and roughly how many tokens that is at its model and effort's usual mix, that it should plan its work to fit, that it will get a notice at 80% and 100% (allowance_notice_pct) and that nothing stops it, and the command that prints its own spend (scripts/allowance.mjs <agent_id>: its own transcript and its subagents', weighted per model from config/plan-weights.json, with tokens used and left). There is no soft budget behind it: nothing stops or denies it, whatever it spends. The percent form never sets a step budget; the 'BUDGET: <n>' form is unchanged. Off = no note and no notices (the command still works).",
       "default": true
+    },
+    "allowance_notice_pct": {
+      "type": "number",
+      "title": "Percent allowance: notice at this percent used (and at 100%)",
+      "description": "Default 80. When a subagent with a 'BUDGET: <n>%' allowance has spent this percent of it (its own transcript plus the agents it spawned; other agents never count), the PreToolUse hook adds ONE notice at its next tool call, and a second at 100%, once per threshold per agent. The notice tells it to send whoever briefed it ONE short status (what is done, what is left, how much more it needs; a subagent by SendMessage to main) and keep going. Nothing is denied or stopped. Read incrementally from a per-agent offset, so a call costs a state-file read and the new bytes only. 0 = no notices (and the first-call note then says nothing will warn it). 100 or more = the 100% notice only. Needs plan_allowance on.",
+      "default": 80
     },
     "step_budget_warn": {
       "type": "number",

@@ -5,10 +5,11 @@
 //
 // Counts the agent's OWN transcript (input, cache write, cache read and output, weighted by model, config/plan-weights.json)
 // plus the transcripts of the agents it spawned. Other agents running in parallel are never read. Prints figures only:
-// no paths, no keys. An advisory estimate; nothing here warns, stops or blocks anyone. Logic: hooks/lib/plan-allowance.mjs.
+// no paths, no keys. An advisory estimate; nothing here stops or blocks anyone (the 80% / 100% notices come from the
+// PreToolUse hook, hooks/lib/plan-allowance.mjs, which also holds the logic).
 
 import { claudeDir } from '../hooks/lib/context.mjs';
-import { agentSpend, unitsPerPercent, planWeights, modelWeight } from '../hooks/lib/plan-allowance.mjs';
+import { agentSpend, unitsPerPercent, planWeights, modelWeight, fmtTokens } from '../hooks/lib/plan-allowance.mjs';
 
 const agentId = process.argv.slice(2).find((a) => !a.startsWith('-'));
 if (!agentId) {
@@ -39,5 +40,10 @@ const basis = r.models.map((a) => {
 }).join(', ');
 console.log(head);
 console.log(`${own}${sub}`);
+// Tokens: input, output, cache write and cache read together. The allowance in tokens is at the model's usual mix; "left" is its unspent share.
+const tokens = r.allowancePct && r.allowanceTokens
+  ? `Tokens: ${fmtTokens(r.totalTokens, 3)} used. The allowance is about ${fmtTokens(r.allowanceTokens)} at ${r.allowanceModel}'s usual mix; about ${fmtTokens(r.tokensLeft ?? 0)} left.`
+  : `Tokens: ${fmtTokens(r.totalTokens, 3)} used.`;
+console.log(tokens);
 console.log(`Basis: ${per} units = 1%, weights ${basis}; cache reads at API price. An estimate (${planWeights().updated || 'undated'} fit).`);
 if (r.unknownCalls) console.log(`${r.unknownCalls} calls on an unrecognised model were counted at the Sonnet weight.`);

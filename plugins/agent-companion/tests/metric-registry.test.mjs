@@ -104,8 +104,9 @@ test('the register validates against the registry catalog: unknown metric and wr
 // The design asked: do planPriceSpecFor and modelTiers() layer the routing profile's
 // planUsageMultipliers? They do not: modelTiers() merges only the shipped table and the
 // model-tiers.json state override (by tier alias), and the shipped table has no haiku or fable
-// entry. Haiku (0.5, E) and fable (5, E) are the checkup's FALLBACK_MULT in its unit spec, so no
-// route-golden output can move from them. This test pins that finding.
+// entry. Since 0.31.47 the checkup no longer reads planUsageMultipliers for its weights at all: every
+// model's weight (sonnet 1, opus 1.38, haiku 0.5, fable 2.75) comes from config/plan-weights.json through
+// modelWeight(), so no route-golden output can move from them. This test pins the layering finding.
 
 const USAGE = { input: 1000, output: 400, cacheRead: 50000, cacheWrite: 2000 };
 
@@ -120,14 +121,14 @@ test('weight sources: only sonnet and opus come from planUsageMultipliers; haiku
   assert.ok(planBaselineModel(), 'the baseline price vector is pinned');
 });
 
-test('weight sources: units per model are the baseline price vector times 1.0 / 1.5 / 0.5 (E) / 5 (E)', () => {
+test('weight sources: units per model are the baseline price vector times the plan-weights.json weights 1.0 / 1.38 / 0.5 / 2.75', () => {
   resetUnitCache();
   const son = unitsOf(USAGE, 'claude-sonnet-5-5');
   assert.ok(son > 0);
   const ratio = (model) => unitsOf(USAGE, model) / son;
-  assert.ok(Math.abs(ratio('claude-opus-5-5') - 1.5) < 1e-12, 'opus 1.5 (M, tooltip)');
-  assert.ok(Math.abs(ratio('claude-haiku-5-5') - 0.5) < 1e-12, 'haiku 0.5 (E, checkup unit spec)');
-  assert.ok(Math.abs(ratio('claude-fable-5-1') - 5) < 1e-12, 'fable 5 (E, checkup unit spec)');
+  assert.ok(Math.abs(ratio('claude-opus-5-5') - 1.38) < 1e-12, 'opus 1.38 (plan-weights.json)');
+  assert.ok(Math.abs(ratio('claude-haiku-5-5') - 0.5) < 1e-12, 'haiku 0.5 (plan-weights.json)');
+  assert.ok(Math.abs(ratio('claude-fable-5-1') - 2.75) < 1e-12, 'fable 2.75 (plan-weights.json)');
   resetUnitCache();
 });
 

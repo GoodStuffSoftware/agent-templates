@@ -29,7 +29,9 @@
 // crossing is logged in state/long-runs.jsonl. It never denies.
 //
 // A brief line `BUDGET: N%` (percent of the weekly plan limit) makes the same hook add ONE allowance note at the helper's
-// first call (lib/plan-allowance.mjs; option plan_allowance). Advice only: nothing warns, stops or denies on it.
+// first call (lib/plan-allowance.mjs; option plan_allowance) and ONE notice when the helper's own spend (its transcript and
+// the agents it spawned) reaches allowance_notice_pct (80) percent of the allowance and one at 100%: it should send whoever
+// briefed it a short status and keep going. Advice only: nothing stops or denies on it.
 //
 // Each firing writes one row to telemetry subagent-context.jsonl (phase
 // "mid-run") and to the agent's events file, which hooks/runaway-check.mjs
@@ -45,7 +47,7 @@ import {
 } from './lib/context-ceiling.mjs';
 import { STEP_LOG, stepBudgetCheck } from './lib/step-budget.mjs';
 import { longRunCheck, logLongRun, longRunRow } from './lib/long-run.mjs';
-import { allowanceNote } from './lib/plan-allowance.mjs';
+import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
 
 try {
   const p = readStdin();
@@ -93,9 +95,13 @@ try {
   }
 
   // The percent allowance note (`BUDGET: N%`, lib/plan-allowance.mjs): once, at the first call. Advice only: never a deny.
-  const allowance = opt('plan_allowance', true) ? allowanceNote(p, { transcript: path, sig }) : null;
+  // The 80% and 100% notices of that allowance (option allowance_notice_pct, 0 = off): incremental, one send per threshold.
+  const planOn = opt('plan_allowance', true);
+  const noticePct = opt('allowance_notice_pct', 80);
+  const allowance = planOn ? allowanceNote(p, { transcript: path, sig, noticePct }) : null;
+  const nearLimit = planOn && noticePct > 0 ? allowanceWatch(p, { noticePct }) : null;
 
-  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '']
+  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
     .filter(Boolean).join('\n');
   if (!text) passthrough();
   process.stdout.write(JSON.stringify({

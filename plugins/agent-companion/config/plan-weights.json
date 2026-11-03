@@ -1,7 +1,7 @@
 {
   "version": 1,
   "updated": "2026-11-03",
-  "note": "How many plan units one percent of the WEEKLY plan limit is, and how heavily each model's tokens count against it, as DATA (like model-tiers.json: a number baked into code goes stale silently). Read by hooks/lib/plan-allowance.mjs (the `BUDGET: N%` spawn note) and scripts/allowance.mjs (an agent's own spend). Override without a release by writing a file of this shape to <state root>/plan-weights.json (the same place as the model-tiers.json override; merged by key, one level deep, so a file naming only models.opus.weight keeps everything else). Every figure carries its date, source, interval and status: 'measured' (fitted from the operator's own official readings), 'assumed' (a stand-in, not fitted) or 'estimated' (derived from a neighbouring cell). Nothing here is a published limit.",
+  "note": "How many plan units one percent of the WEEKLY plan limit is, and how heavily each model's tokens count against it, as DATA (like model-tiers.json: a number baked into code goes stale silently). Read by hooks/lib/plan-allowance.mjs (the `BUDGET: N%` spawn note and its 80% / 100% notices), scripts/allowance.mjs (an agent's own spend) and scripts/lib/daily-checkup.mjs (the daily checkup and the usage analysis: its model weights). Override without a release by writing a file of this shape to <state root>/plan-weights.json (the same place as the model-tiers.json override; merged by key, one level deep, so a file naming only models.opus.weight keeps everything else). Every figure carries its date, source, interval and status: 'measured' (fitted from the operator's own official readings), 'assumed' (a stand-in, not fitted) or 'estimated' (derived from a neighbouring cell). Nothing here is a published limit.",
   "unit": {
     "description": "A plan unit is a token count priced at the Sonnet 5 vector, then times the model's weight: input 1, output 5, cache write 1.25 (5 minute) or 2 (1 hour), cache read 0.1 (times cacheReadFactor), all times inPerMTok/1e6.",
     "inPerMTok": 2,
@@ -100,6 +100,29 @@
         "high": 0.01107
       }
     },
+    "medianTokens": {
+      "sonnet": {
+        "low": 51953,
+        "medium": 70915,
+        "high": 104728,
+        "xhigh": 110815
+      },
+      "opus": {
+        "low": 68782,
+        "medium": 97885,
+        "high": 109625,
+        "xhigh": 139358
+      },
+      "haiku": {
+        "medium": 62357,
+        "high": 72564,
+        "xhigh": 104629
+      },
+      "fable": {
+        "high": 239696
+      }
+    },
+    "medianTokensSource": "Median TOTAL tokens per call (input + output + cache write + cache read, one API request, main thread and subagents together) from the same 502,767-request scan of 2026-11-03 (usage-weight-fit-detail.md section 4), same calls and same cut (since 2026-10-02) as medianPct: sonnet 6.9k to 56.6k calls per effort, opus 19k to 63k (low n=60), haiku 0.5k to 1.8k, fable 353. Recomputed by taking the median of in + out + cw5 + cw1 + cr over each model x effort cell of requests.jsonl. A call is mostly cache reads of the loaded context, so the figure moves little with effort. A cell in 'estimated' has no tokens of its own either: the reader falls back to the nearest effort of the same model, as for medianPct. The note multiplies the calls an allowance buys (allowance / medianPct) by this median to say how many tokens that is at the agent's typical mix.",
     "estimated": [
       "sonnet.max",
       "opus.max",

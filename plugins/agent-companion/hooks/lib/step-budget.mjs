@@ -100,13 +100,16 @@ export function briefStepInfo(brief) {
   const decls = briefDeclarations(String(brief || ''));
   const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
   // Digits, optionally followed by a call unit, and nothing else on the line: "BUDGET: 1,000 tool calls",
-  // "2.5 hours" or "30 minutes" are not step budgets and declare nothing. Under BUDGET_MIN is ignored too.
+  // "2.5 hours" or "30 minutes" are not step budgets and declare nothing. Under BUDGET_MIN is ignored too, except beside a
+  // percent (`BUDGET: 3%, 5 calls`): a number the brief wrote next to an allowance is a step budget of that size.
   // A `BUDGET: <n>%` allowance (lib/plan-allowance.mjs) is not a step budget: its percent part is taken off the line first.
-  const bm = decls.BUDGET
-    ? declarationValue({ BUDGET: { ...decls.BUDGET, rest: splitBudget(decls.BUDGET.rest).stepRest } }, 'BUDGET', BUDGET_STEPS_SRC)
+  const split = decls.BUDGET ? splitBudget(decls.BUDGET.rest) : null;
+  const bm = split
+    ? declarationValue({ BUDGET: { ...decls.BUDGET, rest: split.stepRest } }, 'BUDGET', BUDGET_STEPS_SRC)
     : null;
   const budget = bm ? Number(bm[1]) : null;
-  return { type: tm ? tm[1].toLowerCase() : null, budget: budget >= BUDGET_MIN ? budget : null };
+  const min = split && split.pct !== null ? 1 : BUDGET_MIN;
+  return { type: tm ? tm[1].toLowerCase() : null, budget: budget >= min ? budget : null };
 }
 
 // A brief that gives a percent allowance (`BUDGET: 3%`) and no step value. Such a helper has NO step budget at all: no warning, no soft stop,

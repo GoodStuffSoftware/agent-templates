@@ -75,14 +75,32 @@ test('unit maths: the Sonnet price vector times the plan weight', () => {
   // (1000*2 + 500*10 + 2000*2.5 + 1000*4 + 100000*0.2) / 1e6 = 0.036 on Sonnet
   const u = { input: 1000, output: 500, cacheRead: 100000, cacheWrite: 3000, cacheWrite5m: 2000, cacheWrite1h: 1000 };
   assert.ok(Math.abs(unitsOf(u, SONNET) - 0.036) < 1e-9);
-  assert.ok(Math.abs(unitsOf(u, OPUS) - 0.054) < 1e-9, 'Opus is 1.5x');
-  assert.ok(Math.abs(unitsOf(u, 'claude-haiku-4-5') - 0.018) < 1e-9, 'Haiku is 0.5x (the study constant)');
-  assert.ok(Math.abs(unitsOf(u, 'claude-fable-5-1') - 0.18) < 1e-9, 'Fable is 5x (the study constant)');
-  assert.ok(Math.abs(unitsOf(u, 'claude-mystery-9') - 0.054) < 1e-9, 'an unplaced model counts as Opus');
+  assert.ok(Math.abs(unitsOf(u, OPUS) - 0.036 * 1.38) < 1e-9, 'Opus is 1.38x (plan-weights.json)');
+  assert.ok(Math.abs(unitsOf(u, 'claude-haiku-4-5') - 0.018) < 1e-9, 'Haiku is 0.5x (plan-weights.json)');
+  assert.ok(Math.abs(unitsOf(u, 'claude-fable-5-1') - 0.036 * 2.75) < 1e-9, 'Fable is 2.75x (plan-weights.json)');
+  assert.ok(Math.abs(unitsOf(u, 'claude-mystery-9') - 0.036 * 1.38) < 1e-9, 'an unplaced model counts as Opus');
   // a flat cache write with no 5m/1h split is priced as 5m
   const flat = { input: 0, output: 0, cacheRead: 0, cacheWrite: 4_000_000, cacheWrite5m: 0, cacheWrite1h: 0 };
   assert.ok(Math.abs(unitsOf(flat, SONNET) - 10) < 1e-9);
   assert.equal(unitsOf(u, ''), unitsOf(u, 'unknown-thing'), 'no model: same as unplaced');
+});
+
+test('the checkup reads model weights from plan-weights (the shared helper): an override moves them, and no weight constants stay in its source', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(fx.stateDir, { recursive: true });
+    writeFileSync(join(fx.stateDir, 'plan-weights.json'), JSON.stringify({ models: { opus: { weight: 2 }, haiku: { weight: 0.25 } } }));
+    _resetPlanWeightsForTests(); resetUnitCache();
+    const u = { input: 1000, output: 500, cacheRead: 100000, cacheWrite: 3000, cacheWrite5m: 2000, cacheWrite1h: 1000 };
+    assert.ok(Math.abs(unitsOf(u, OPUS) - 0.036 * 2) < 1e-9, 'Opus follows the override');
+    assert.ok(Math.abs(unitsOf(u, 'claude-haiku-4-5') - 0.036 * 0.25) < 1e-9, 'Haiku follows the override');
+    assert.ok(Math.abs(unitsOf(u, 'claude-fable-5-1') - 0.036 * 2.75) < 1e-9, 'Fable keeps the shipped weight');
+    assert.ok(Math.abs(unitsOf(u, SONNET) - 0.036) < 1e-9);
+    const root = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+    const src = readFileSync(join(root, 'scripts/lib/daily-checkup.mjs'), 'utf8');
+    assert.doesNotMatch(src, /FALLBACK_MULT|UNKNOWN_MULT/);
+    assert.match(src, /modelWeight/);
+  } finally { _resetPlanWeightsForTests(); resetUnitCache(); fx.cleanup(); }
 });
 
 test('day and week boundaries: 08:00Z days, Friday 16:00Z weeks', () => {
@@ -101,24 +119,24 @@ test('a request belongs to the day its own timestamp is in; the week resets Frid
       asst('a1', '2026-10-09T07:59:59Z', SONNET, TEN_M), // previous day (2.0)
       asst('a2', '2026-10-09T08:00:00Z', SONNET, TEN_M), // this day, before the week reset (2.0)
       asst('a3', '2026-10-09T15:59:59Z', SONNET, TEN_M), // this day, last second of the old week (2.0)
-      asst('a4', '2026-10-09T16:00:00Z', OPUS, TEN_M), // this day, first second of the new week (3.0)
+      asst('a4', '2026-10-09T16:00:00Z', OPUS, TEN_M), // this day, first second of the new week (2.76)
       asst('a5', '2026-10-10T07:59:59Z', SONNET, TEN_M), // this day, new week (2.0)
       asst('a6', '2026-10-10T08:00:00Z', SONNET, TEN_M), // next day (2.0)
     ]);
     run(root);
     const r = record();
     assert.ok(r, 'the 2026-10-09 line was written');
-    assert.equal(r.units.main, 9);
+    assert.equal(r.units.main, 8.8);
     assert.equal(r.units.subagent, 0);
     assert.equal(r.from, '2026-10-09T08:00:00.000Z');
     assert.equal(r.to, '2026-10-10T08:00:00.000Z');
     assert.equal(r.week.start, '2026-10-09T16:00:00.000Z');
-    assert.equal(r.week.units, 5, 'week so far counts from the 16:00Z reset only');
-    assert.equal(r.pct.total, Math.round((9 / 2860) * 10000) / 100);
+    assert.equal(r.week.units, 4.8, 'week so far counts from the 16:00Z reset only (2.76 Opus + 2)');
+    assert.equal(r.pct.total, Math.round((8.76 / 2860) * 10000) / 100);
     assert.equal(r.targetPct, 14);
-    // 5 units is 0.17% of 2860; the week is 16 of 168 hours old at the end of the day
+    // 4.8 units (rounded) is 0.17% of 2860; the week is 16 of 168 hours old at the end of the day
     assert.equal(r.week.elapsedPct, 9.5);
-    assert.equal(r.week.paceAtResetPct, Math.round(((5 / 2860) * 100 / (16 / 168)) * 10) / 10);
+    assert.equal(r.week.paceAtResetPct, Math.round(((4.8 / 2860) * 100 / (16 / 168)) * 10) / 10);
     assert.equal(record('2026-10-08').units.total, 2, 'the 07:59:59Z request is in the previous day');
     assert.equal(readHistory().find((x) => x.day === '2026-10-10'), undefined, 'the open day is not written');
   } finally { fx.cleanup(); }
@@ -190,7 +208,7 @@ test('incremental cursor: a later run reads only the new bytes, and no line is w
     assert.equal(second.filesRead, 1);
     assert.equal(second.bytesRead, added, 'exactly the appended bytes');
     assert.deepEqual(second.written, ['2026-10-10']);
-    assert.equal(record('2026-10-10').units.total, 5);
+    assert.equal(record('2026-10-10').units.total, 4.8);
     assert.equal(record('2026-10-09').units.total, 2, 'an earlier line is untouched');
     assert.equal(readHistory().length, before + 1);
     const state = JSON.parse(readFileSync(checkupPaths().state, 'utf8'));
@@ -300,13 +318,13 @@ test('spawns by TYPE:/ROLE:/rung with units per spawn; compactions and the share
     assert.equal(r.spawns.byRung.Explore.n, 1);
     assert.equal(r.spawns.byRung['sonnet/high'].units, 20);
     assert.equal(r.spawns.byRung['sonnet/high'].unitsPerSpawn, 20.01);
-    assert.equal(r.spawns.byRung['opus/medium'].unitsPerSpawn, 3);
-    assert.equal(r.spawns.byType['code-review'].units, 3);
+    assert.equal(r.spawns.byRung['opus/medium'].unitsPerSpawn, 2.76);
+    assert.equal(r.spawns.byType['code-review'].units, 2.8);
     assert.equal(r.subagent.compactions, 1);
     assert.equal(r.subagent.compactionsPer100Spawns, 33.3);
-    // above 150K: w1a (20) and r1a (3) of 23.02 subagent units
-    assert.equal(r.subagent.unitsOver150k, 23);
-    assert.equal(r.subagent.shareOver150kPct, Math.round((23 / 23.02) * 1000) / 10);
+    // above 150K: w1a (20) and r1a (2.76) of 22.78 subagent units
+    assert.equal(r.subagent.unitsOver150k, 22.8);
+    assert.equal(r.subagent.shareOver150kPct, Math.round((22.76 / 22.78) * 1000) / 10);
   } finally { fx.cleanup(); }
 });
 

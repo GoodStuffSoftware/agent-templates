@@ -126,7 +126,7 @@ test('golden facts: rows, raw tokens per model, prompt buckets, tool counts, ver
     assert.equal(f.weightsUsed[SONNET].label, 'M');
     assert.equal(f.weightsUsed[HAIKU].mult, 0.5);
     assert.equal(f.weightsUsed[HAIKU].label, 'E');
-    assert.equal(f.weightsUsed[HAIKU].source, 'study-constant');
+    assert.equal(f.weightsUsed[HAIKU].source, 'plan-weights');
     // facts hold counts and flags, never the text
     assert.ok(!readFileSync(factsFile(), 'utf8').includes('parser'));
     assert.ok(!readFileSync(factsFile(), 'utf8').includes('xxxxxxxx'));
