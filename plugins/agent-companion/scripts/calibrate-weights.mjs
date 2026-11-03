@@ -14,13 +14,13 @@
 //
 // Windows the fit cannot explain are left out: a window whose meter went DOWN by more than 2 points (a reset the card does
 // not show, as in September 2026), and, after a first fit, a window whose residual is far above the others'.
-// --days <n> (default 60; 0 = all) skips transcripts not modified in n days. Default: print the fit. --apply writes <state root>/plan-weights.json (the per-user override read by
-// hooks/lib/plan-allowance.mjs), only for figures whose interval is TIGHTER than the one now in force (shipped plus override).
+// --days <n> (default 60; 0 = all) skips transcripts not modified in n days. Default: print the fit. --apply writes <state root>/plan-weights.json (the per-user file read by
+// hooks/lib/plan-allowance.mjs), only for figures whose interval is TIGHTER than the one now in force (shipped plus user file).
 
 import { readFileSync, writeFileSync, readdirSync, renameSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { claudeDir, stateDir, stateRoot, classifyModel } from '../hooks/lib/context.mjs';
+import { claudeDir, stateRootPath, stateRoot, classifyModel } from '../hooks/lib/context.mjs';
 import { planWeights } from '../hooks/lib/plan-allowance.mjs';
 import { parseUsage } from '../hooks/lib/plan-meter.mjs';
 
@@ -341,30 +341,42 @@ const width = (iv) => (Array.isArray(iv) && iv.length === 2 && iv.every(Number.i
 const r2 = (v) => Math.round(v * 100) / 100;
 const r1 = (v) => Math.round(v * 10) / 10;
 
-// The figures --apply would write: only those whose new interval is tighter than the one in force (shipped plus override).
+// The figures --apply would write: only those whose new interval is tighter than the one in force (shipped plus user file).
+// --apply only TIGHTENS: a figure replaces the one in force only when its interval is narrower, it overlaps the interval in force (a
+// fit that lands far outside what is in force is shown, not applied) and the fit rests on at least MIN_APPLY_WINDOWS weekly windows
+// (rows inside one window are serially correlated, so their bootstrap interval is too tight).
+export const MIN_APPLY_WINDOWS = 3;
+const overlaps = (a, b) => !Array.isArray(b) || b.length < 2 || (Array.isArray(a) && a.length >= 2 && a[0] <= b[1] && b[0] <= a[1]);
 export function applyPlan(result, current = planWeights(), today = new Date().toISOString().slice(0, 10)) {
   const rho = typeof current.cacheReadFactor?.value === 'number' ? current.cacheReadFactor.value : 1;
   const source = `calibrate-weights.mjs ${today}: ${result.n} official weekly readings in ${result.windows.filter((w) => w.used).length} windows against local transcripts, cache reads at ${rho} x API price; 90% bootstrap interval.`;
   const decisions = [];
   const patch = { models: {} };
+  const usedWindows = result.windows.filter((w) => w.used).length;
+  const verdict = (newI, curI) => {
+    if (usedWindows < MIN_APPLY_WINDOWS) return { apply: false, reason: `only ${usedWindows} window(s) behind the fit (need ${MIN_APPLY_WINDOWS})` };
+    if (!(width(newI) < width(curI))) return { apply: false, reason: 'interval not tighter than the one in force' };
+    if (!overlaps(newI, curI)) return { apply: false, reason: 'interval does not overlap the one in force' };
+    return { apply: true, reason: 'interval tighter' };
+  };
   for (const [alias, m] of Object.entries(result.models)) {
     if (alias === 'sonnet') continue;
     const cur = current.models?.[alias];
-    const tighter = width(m.interval) < width(cur?.interval);
-    decisions.push({ what: `models.${alias}`, apply: tighter, reason: tighter ? 'interval tighter' : 'interval not tighter than the one in force' });
-    if (tighter) {
+    const v = verdict(m.interval, cur?.interval);
+    decisions.push({ what: `models.${alias}`, ...v });
+    if (v.apply) {
       patch.models[alias] = { weight: r2(m.weight), interval: m.interval.map(r2), status: 'measured', date: today, n: m.readings, source };
     }
   }
   const curU = current.unitsPerPercent;
-  const upTighter = width(result.upp.interval) < width(curU?.interval);
-  decisions.push({ what: 'unitsPerPercent', apply: upTighter, reason: upTighter ? 'interval tighter' : 'interval not tighter than the one in force' });
-  if (upTighter) patch.unitsPerPercent = { value: r1(result.upp.value), interval: result.upp.interval.map(r1), status: 'measured', date: today, source };
+  const vu = verdict(result.upp.interval, curU?.interval);
+  decisions.push({ what: 'unitsPerPercent', ...vu });
+  if (vu.apply) patch.unitsPerPercent = { value: r1(result.upp.value), interval: result.upp.interval.map(r1), status: 'measured', date: today, source };
   if (!Object.keys(patch.models).length) delete patch.models;
   return { patch, decisions };
 }
 
-export function writeOverride(patch, file = join(stateRoot(), 'plan-weights.json')) {
+export function writeUserFile(patch, file = join(stateRoot(), 'plan-weights.json')) {
   let cur = {};
   try { cur = JSON.parse(readFileSync(file, 'utf8')); } catch { /* none yet */ }
   if (!cur || typeof cur !== 'object' || Array.isArray(cur)) cur = {};
@@ -390,7 +402,7 @@ function argOf(argv, name) {
 
 export function main(argv = process.argv.slice(2)) {
   const projects = argOf(argv, '--projects') || join(claudeDir(), 'projects');
-  const samplesFile = argOf(argv, '--samples') || join(stateDir(), 'plan-meter-samples.jsonl');
+  const samplesFile = argOf(argv, '--samples') || join(stateRootPath(), 'state', 'plan-meter-samples.jsonl'); // a read: never creates the state root
   const since = argOf(argv, '--since') ? Date.parse(argOf(argv, '--since')) : NaN;
   const boot = Number(argOf(argv, '--boot')) > 0 ? Number(argOf(argv, '--boot')) : 400;
   const days = Number(argOf(argv, '--days')) >= 0 && argOf(argv, '--days') !== null ? Number(argOf(argv, '--days')) : 60;
@@ -411,7 +423,7 @@ export function main(argv = process.argv.slice(2)) {
   }
   const plan = applyPlan(result, current);
   out.apply = plan;
-  if (argv.includes('--apply') && (plan.patch.models || plan.patch.unitsPerPercent)) out.written = writeOverride(plan.patch);
+  if (argv.includes('--apply') && (plan.patch.models || plan.patch.unitsPerPercent)) out.written = writeUserFile(plan.patch);
   if (argv.includes('--json')) { console.log(JSON.stringify(out, null, 2)); return 0; }
 
   const f = (v, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : '-');
@@ -433,7 +445,7 @@ export function main(argv = process.argv.slice(2)) {
   console.log('');
   console.log(`Units per 1% of the weekly limit (Sonnet-priced): ${f(result.upp.value, 1)} ${ivs(result.upp.interval, 1)}; in force ${cu ? `${cu.value} ${ivs(cu.interval, 1)}` : '-'}; ${du && du.apply ? 'tighter' : 'not tighter'}.`);
   if (argv.includes('--apply')) console.log(out.written ? `Wrote the tighter figures to ${out.written}.` : 'Nothing is tighter than what is in force: no file written.');
-  else if (plan.patch.models || plan.patch.unitsPerPercent) console.log('Run again with --apply to write the tighter figures to the per-user override.');
+  else if (plan.patch.models || plan.patch.unitsPerPercent) console.log('Run again with --apply to write the tighter figures to the per-user file.');
   return 0;
 }
 

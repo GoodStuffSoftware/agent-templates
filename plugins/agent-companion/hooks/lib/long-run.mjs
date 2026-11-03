@@ -23,7 +23,7 @@ import { openSync, fstatSync, readSync, closeSync, mkdirSync, appendFileSync, st
 import { join } from 'node:path';
 import { stateDir } from './context.mjs';
 import { claimOnce } from './subagent-context.mjs';
-import { readBrief } from './step-budget.mjs';
+import { readBrief, briefAllowanceOnly } from './step-budget.mjs';
 import { safe } from './runaway.mjs';
 
 export const LONG_RUN_FIRST = 150;
@@ -132,7 +132,9 @@ export function longRunCheck(p, { transcript = null, now = new Date() } = {}) {
     if (n === 1) pruneState();
     const t = thresholdFor(n);
     if (t === null || !claimOnce(`long-run-${p.agent_id}-${t}`)) return null;
-    return { text: longRunText(n), row: longRunRow(p, n, transcript, now) };
+    // A helper on a `BUDGET: N%` allowance alone is told nothing will warn it: the crossing is still logged, the note is not sent.
+    const quiet = !!transcript && briefAllowanceOnly(readBrief(transcript));
+    return { text: quiet ? '' : longRunText(n), row: longRunRow(p, n, transcript, now) };
   } catch {
     return null;
   }

@@ -453,7 +453,7 @@ export async function runApiSdk({
       if (!hasVerdict(text)) return fail(false, `the review has no VERDICT line (stop_reason ${stop})`);
     }
     bookCost(true);
-    return { ok: true, text, usd, turns: turnCount, tokens, model: modelId, stopReason: stop, path: 'sdk', sdkUsd, notes, init, userGuards: guards,...(ledgerError ? { ledgerError } : {}) };
+    return { ok: true, text, usd, turns: turnCount, tokens, model: modelId, stopReason: stop, path: 'sdk', sdkUsd, notes, init, userGuards: guards, ...(ledgerError ? { ledgerError } : {}) };
   } catch (e) {
     stopTimers();
     const reason = scrub(String((e && e.message) || e), key).slice(0, 200);

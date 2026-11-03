@@ -5,7 +5,7 @@
 //
 // Why a conversion, not the live meter. Several agents run at once, so the account's usage % cannot be told apart per
 // agent. A helper's own tokens are converted to % instead: plan units (tokens priced at the Sonnet 5 vector, times the
-// model's weight) over unitsPerPercent. All figures are data in config/plan-weights.json (override: <state root>/
+// model's weight) over unitsPerPercent. All figures are data in config/plan-weights.json (user file: <state root>/
 // plan-weights.json, merged one level deep), each with its date, source, interval and measured/assumed status.
 //
 // Which agent. The note carries the agent id in the command; the first call also writes
@@ -18,7 +18,7 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateRootPath, stateDir, classifyModel } from './context.mjs';
+import { stateRootPath, opt, classifyModel } from './context.mjs';
 import { briefAllowancePct } from './brief-directives.mjs';
 import { readBrief } from './step-budget.mjs';
 import { usageOf, safe } from './runaway.mjs';
@@ -40,7 +40,7 @@ export function planWeights() {
   let cfg = {};
   try { cfg = JSON.parse(readFileSync(shipped, 'utf8')); } catch { /* defaults below */ }
   let over = null;
-  try { over = JSON.parse(readFileSync(join(stateRootPath(), 'plan-weights.json'), 'utf8')); } catch { /* no override: expected; a read never creates the state root (a dry run writes nothing) */ }
+  try { over = JSON.parse(readFileSync(join(stateRootPath(), 'plan-weights.json'), 'utf8')); } catch { /* no user file: expected; a read never creates the state root (a dry run writes nothing) */ }
   if (plain(over)) {
     const merged = { ...cfg };
     for (const [k, v] of Object.entries(over)) merged[k] = plain(v) && plain(cfg[k]) ? { ...cfg[k], ...v } : v;
@@ -59,8 +59,11 @@ const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v 
 export function unitsPerPercent() { return num(planWeights().unitsPerPercent?.value, 28.6); }
 
 // What 100% of the weekly plan limit is, in plan units: 100 x units per 1% (2860 shipped). The ONE place the weekly limit comes from:
-// the session budget notice, the daily checkup and the usage analysis all call this (the option `weekly_limit_units` overrides it when set above 0).
-export function weeklyLimitUnits() { return Math.round(100 * unitsPerPercent() * 1e6) / 1e6; }
+// the session budget notice, the daily checkup and the usage analysis all call this; the option `weekly_limit_units` replaces it when set above 0.
+export function weeklyLimitUnits() {
+  const o = opt('weekly_limit_units', 0);
+  return o > 0 ? o : Math.round(100 * unitsPerPercent() * 1e6) / 1e6;
+}
 
 // The model's weight vs Sonnet, and whether it is a measured figure. alias '' (an unrecognised model) counts as Sonnet.
 export function modelWeight(alias) {
@@ -143,7 +146,7 @@ function pluginRoot() {
   return (process.env.CLAUDE_PLUGIN_ROOT || join(dirname(fileURLToPath(import.meta.url)), '..', '..')).replace(/\\/g, '/');
 }
 
-const allowDir = () => join(stateDir(), 'allowance');
+const allowDir = () => join(stateRootPath(), 'state', 'allowance'); // paths only: a read (scripts/allowance.mjs) never creates the state root; the writer makes the dir
 export const allowanceFile = (agentId) => join(allowDir(), `${safe(agentId)}.json`);
 
 function pruneAllowanceState(now = Date.now()) {

@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
 import { stateDir } from '../hooks/lib/context.mjs';
 import { briefAllowancePct, splitBudget } from '../hooks/lib/brief-directives.mjs';
-import { briefStepInfo, capsFor } from '../hooks/lib/step-budget.mjs';
+import { briefStepInfo, briefAllowanceOnly, capsFor } from '../hooks/lib/step-budget.mjs';
 import {
   allowanceNoteText, perCallPct, requestUnits, rungOf, unitsPerPercent, planWeights, modelWeight, NOTE_MAX_CHARS,
   _resetPlanWeightsForTests,
@@ -55,6 +55,10 @@ test('the percent form never becomes a step budget; the number form is unchanged
   // both on one line: the step value is read as before
   assert.deepEqual(briefStepInfo('BUDGET: 3%, 60 calls'), { type: null, budget: 60 });
   assert.deepEqual(briefStepInfo('BUDGET: 60 steps; 3%'), { type: null, budget: 60 });
+  assert.equal(briefAllowanceOnly('BUDGET: 3%'), true);
+  assert.equal(briefAllowanceOnly('BUDGET: 3%, 60 calls'), false);
+  assert.equal(briefAllowanceOnly('BUDGET: 60'), false);
+  assert.equal(briefAllowanceOnly('no directives'), false);
   // the number form, exactly as before
   assert.deepEqual(briefStepInfo('TYPE: research\nBUDGET: 150\nx'), { type: 'research', budget: 150 });
   assert.deepEqual(briefStepInfo('BUDGET: 200 tool calls'), { type: null, budget: 200 });
@@ -229,23 +233,33 @@ test('hook: no note without a percent line; the number form gets no note and kee
   } finally { fx.cleanup(); }
 });
 
-test('hook: the percent form never denies or warns, however many calls, even with the step deny on', () => {
+test('hook: the percent form never denies, warns or nags, however many calls, even with the step deny on (empty output at calls 80, 121, 150 and 500)', () => {
   const fx = makeFixture();
   try {
     const { lead } = layout(fx, [{ id: 'allow-big', text: user('TYPE: integration\nBUDGET: 90%\nbuild it') + turn('r1', 'claude-sonnet-5-5') }]);
-    run(lead, 'allow-big'); // the note
-    // A step budget read from "90" would warn at 72 and deny past 90; none exists. The default writer lines (80/120)
-    // are far off at call 50, so with the step deny on nothing happens.
+    const first = run(lead, 'allow-big'); // the one allowance note
+    assert.match(ctxText(first), /Allowance/);
+    const dir = (d) => { mkdirSync(join(stateDir(), d), { recursive: true }); return join(stateDir(), d, 'allow-big.cnt'); };
+    const setCalls = (n) => { writeFileSync(dir('step-budget'), '.'.repeat(n - 1)); writeFileSync(dir('long-runs'), '.'.repeat(n - 1)); };
+    for (const n of [80, 121, 150, 500]) {
+      setCalls(n);
+      for (const env of [{}, { CLAUDE_PLUGIN_OPTION_STEP_BUDGET_DENY: 'true' }]) {
+        const r = run(lead, 'allow-big', env);
+        assert.equal(r.stdout.trim(), '', `call ${n} ${JSON.stringify(env)}: nothing is said`);
+        assert.equal(denied(r), false);
+      }
+    }
+  } finally { fx.cleanup(); }
+});
+
+test('hook: BUDGET: 3%, 60 calls keeps its step budget (the number part is a budget as before)', () => {
+  const fx = makeFixture();
+  try {
+    const { lead } = layout(fx, [{ id: 'allow-both', text: user('TYPE: integration\nBUDGET: 3%, 60 calls\nbuild it') + turn('r1', 'claude-sonnet-5-5') }]);
+    run(lead, 'allow-both');
     mkdirSync(join(stateDir(), 'step-budget'), { recursive: true });
-    writeFileSync(join(stateDir(), 'step-budget', 'allow-big.cnt'), '.'.repeat(49));
-    const r = run(lead, 'allow-big', { CLAUDE_PLUGIN_OPTION_STEP_BUDGET_DENY: 'true' });
-    assert.equal(r.stdout.trim(), '');
-    assert.equal(denied(r), false);
-    // default (soft) options at 500 calls: no deny either, and no allowance warning text
-    writeFileSync(join(stateDir(), 'step-budget', 'allow-big.cnt'), '.'.repeat(499));
-    const r2 = run(lead, 'allow-big');
-    assert.equal(denied(r2), false);
-    assert.doesNotMatch(ctxText(r2), /Allowance|allowance/);
+    writeFileSync(join(stateDir(), 'step-budget', 'allow-both.cnt'), '.'.repeat(47));
+    assert.match(ctxText(run(lead, 'allow-both')), /48 of 60 steps used/);
   } finally { fx.cleanup(); }
 });
 
@@ -316,6 +330,15 @@ test('self-check: prints no path, a missing agent is reported, junk input is ref
     assert.equal(junk.status, 2);
     const none = runHook('scripts/allowance.mjs', undefined, { args: [] });
     assert.equal(none.status, 2);
+  } finally { fx.cleanup(); }
+});
+
+test('self-check is a read: it creates nothing under a fresh state root', () => {
+  const fx = makeFixture();
+  try {
+    const fresh = join(fx.dir, 'fresh-state-root');
+    runHook('scripts/allowance.mjs', undefined, { args: ['agent-nobody'], env: { CLAUDE_CONFIG_DIR: join(fx.dir, '.claude'), AGENT_COMPANION_STATE_DIR: fresh } });
+    assert.equal(existsSync(fresh), false, 'no state root, README or state dir created by a read');
   } finally { fx.cleanup(); }
 });
 

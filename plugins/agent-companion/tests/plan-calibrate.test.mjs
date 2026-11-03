@@ -262,7 +262,7 @@ test('calibrator --apply: writes the per-user override only for figures whose in
 test('applyPlan: only a narrower interval is applied; no interval in force counts as infinitely wide', () => {
   const result = {
     n: 30,
-    windows: [{ used: 5 }],
+    windows: [{ used: true }, { used: true }, { used: true }, { used: true }, { used: true }],
     models: { sonnet: { weight: 1, interval: null }, opus: { weight: 1.3, interval: [1.2, 1.4] }, haiku: { weight: 0.4, interval: [0.2, 0.6] }, fable: { weight: 3, interval: [2, 4] } },
     upp: { value: 28, interval: [27, 29] },
   };
@@ -277,6 +277,17 @@ test('applyPlan: only a narrower interval is applied; no interval in force count
   assert.equal(decisions.find((d) => d.what === 'unitsPerPercent').apply, false);
   const wide = { ...result, models: { ...result.models, opus: { weight: 1.3, interval: [1.0, 1.7] } } };
   assert.equal(applyPlan(wide, current).patch.models.opus, undefined);
+  // a fit on fewer than 3 windows applies nothing, however tight (rows inside one window are serially correlated)
+  const one = { ...result, windows: [{ used: true }], upp: { value: 20, interval: [19.9, 20.1] }, models: { ...result.models, opus: { weight: 2.4, interval: [2.3, 2.5] } } };
+  const r1 = applyPlan(one, current);
+  assert.deepEqual(r1.patch, {}, 'one window: nothing applied');
+  assert.match(r1.decisions.find((d) => d.what === 'unitsPerPercent').reason, /window/);
+  // a tighter interval that does not overlap the one in force is shown, not applied
+  const far = { ...result, upp: { value: 20, interval: [19.9, 20.1] }, models: { ...result.models, opus: { weight: 2.4, interval: [2.3, 2.5] } } };
+  const rf = applyPlan(far, current);
+  assert.equal(rf.patch.models.opus, undefined);
+  assert.equal(rf.patch.unitsPerPercent, undefined);
+  assert.match(rf.decisions.find((d) => d.what === 'models.opus').reason, /overlap/);
 });
 
 test('calibrator inputs: samples file reads both line shapes; near-identical readings dedupe', () => {

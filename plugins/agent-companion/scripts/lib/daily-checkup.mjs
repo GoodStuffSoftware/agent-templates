@@ -801,10 +801,9 @@ export function readHistory(file = checkupPaths().history) {
 }
 
 export function checkupOptions() {
-  const limit = Number(opt('weekly_limit_units', 0));
   const target = Number(opt('daily_pace_target_pct', DEFAULT_PACE_PCT));
   return {
-    limit: limit > 0 ? limit : weeklyLimitUnits(),
+    limit: weeklyLimitUnits(), // the option weekly_limit_units (above 0) or 100 x units per 1% from plan-weights
     target: target > 0 ? target : DEFAULT_PACE_PCT,
   };
 }

@@ -44,7 +44,7 @@ import { openSync, fstatSync, readSync, closeSync, mkdirSync, appendFileSync, st
 import { join, basename } from 'node:path';
 import { opt, stateDir } from './context.mjs';
 import { claimOnce, BOUNDARY_FRESH_TURNS } from './subagent-context.mjs';
-import { briefDeclarations, declarationValue, splitBudget, BUDGET_STEPS_SRC } from './brief-directives.mjs';
+import { briefDeclarations, declarationValue, splitBudget, briefAllowancePct, BUDGET_STEPS_SRC } from './brief-directives.mjs';
 import { safe } from './runaway.mjs';
 import { longRunText } from './long-run.mjs';
 
@@ -107,6 +107,12 @@ export function briefStepInfo(brief) {
     : null;
   const budget = bm ? Number(bm[1]) : null;
   return { type: tm ? tm[1].toLowerCase() : null, budget: budget >= BUDGET_MIN ? budget : null };
+}
+
+// A brief that gives a percent allowance (`BUDGET: 3%`) and no step value. Such a helper has NO step budget at all: no warning, no soft stop,
+// no deny (step_budget_deny included), no long-run note. The allowance note it was shown says so (hooks/lib/plan-allowance.mjs).
+export function briefAllowanceOnly(brief) {
+  return briefStepInfo(brief).budget === null && briefAllowancePct(brief) !== null;
 }
 
 // { warn, stop, kind } for a brief. A stop <= 0 means no hard stop for the class.
@@ -193,6 +199,7 @@ export function stepBudgetCheck(p, { transcript, sig = null }) {
   const brief = readBrief(transcript);
   if (!brief) return null; // brief unreadable: not a helper this guard understands
   const compactions = countCompaction(p.agent_id, sig);
+  if (briefAllowanceOnly(brief)) return null; // `BUDGET: N%` alone: nothing counts, warns, stops or denies (hooks/lib/plan-allowance.mjs)
   const info = briefStepInfo(brief);
   const caps = capsFor(info);
   const n = countCall(p.agent_id);

@@ -157,6 +157,7 @@ test('one weekly-limit figure: unset or 0 derives 100 x units per 1% from plan-w
     assert.equal(checkupOptions().limit, weeklyLimitUnits(), '0 means derive');
     process.env.CLAUDE_PLUGIN_OPTION_WEEKLY_LIMIT_UNITS = '1234';
     assert.equal(checkupOptions().limit, 1234, 'a user override still wins');
+    assert.equal(weeklyLimitUnits(), 1234, 'the shared helper (session notice, usage runner) follows the option too');
     const root = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
     for (const f of ['scripts/lib/daily-checkup.mjs', 'scripts/lib/usage/runner.mjs']) {
       assert.doesNotMatch(readFileSync(join(root, f), 'utf8'), /\b2677\b/, f);

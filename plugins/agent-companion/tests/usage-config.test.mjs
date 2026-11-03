@@ -61,7 +61,7 @@ test('example.json loads as a user layer with no problems and its overrides win'
   assert.equal(cfg.resolved.scenarios.get('lead.unitsPerPrompt').def.threshold.relPct, 30);
   assert.equal(cfg.resolved.scenarios.get('u.leadsXhighVsHigh').layer, 'user');
   assert.equal(cfg.resolved.scenarios.get('spawn.simpleRuns').state, 'disabled');
-  assert.equal(cfg.resolved.environment.plan.weeklyLimitUnits, 2860);
+  assert.equal(cfg.resolved.environment.plan.weeklyLimitUnits, undefined, 'the weekly limit comes from plan-weights.json, not from a copy here');
 });
 
 test('precedence matrix: user overrides > project (own ids) > shipped, field by field', () => {

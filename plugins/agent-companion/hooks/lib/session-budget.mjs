@@ -6,7 +6,7 @@
 // (callers fail open).
 //
 // --- Plan units --------------------------------------------------------------
-// One source of truth: config/plan-weights.json (shipped, plus the per-user override
+// One source of truth: config/plan-weights.json (shipped, plus the per-user file
 // <state root>/plan-weights.json that scripts/calibrate-weights.mjs writes), read through
 // hooks/lib/plan-allowance.mjs. Every model's tokens are priced at the Sonnet 5 vector
 // times the model's weight, and 1% of the weekly limit is that file's unitsPerPercent
@@ -55,7 +55,7 @@ const RECENT_KEYS = 64;
 const MAX_FILES = 2000;
 const STATE_TTL_MS = 7 * 86400000;
 
-// The weekly limit in plan units: 100 x the units per 1% in config/plan-weights.json (plus the override).
+// The weekly limit in plan units: 100 x the units per 1% in config/plan-weights.json (plus the user file).
 export function weeklyPlanUnits() {
   return weeklyLimitUnits();
 }
