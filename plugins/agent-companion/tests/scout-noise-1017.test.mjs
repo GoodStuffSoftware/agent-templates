@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { makeFixture, runScript } from './helpers.mjs';
 import { telemetryDir, resolveRoute } from '../hooks/lib/context.mjs';
 import { scanChurn } from '../scripts/lib/session-churn.mjs';
+import { groupByKind } from '../scripts/lib/scout-handoff.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const shipped = JSON.parse(readFileSync(join(HERE, '..', 'config', 'model-tiers.json'), 'utf8'));
@@ -25,14 +26,21 @@ test('no shipped routing trial is past its reviewBy as of 2026-10-17, explore (t
   assert.equal(shipped.taskTypes.explore.override.model, 'haiku', 'explore is left to the 10-19 review');
 });
 
-test('the 10-16 verdicts: settled rows carry no reviewBy, extended rows review on 2026-10-30', () => {
+test('the 10-16 verdicts and the 2026-11-07 settlement: no shipped override carries a reviewBy', () => {
   for (const name of ['mechanical-edit', 'operate', 'debug-root-cause', 'novel-design', 'verify', 'bounded-feature', 'integration']) {
     assert.ok(shipped.taskTypes[name].override, `${name} keeps its override`);
     assert.equal(shipped.taskTypes[name].override.reviewBy, undefined, `${name} is settled`);
   }
-  for (const name of ['large-refactor', 'long-autonomous-run', 'subagent-worker']) {
-    assert.equal(shipped.taskTypes[name].override.reviewBy, '2026-10-30', name);
+  // The four trials whose reviewBy had passed were adopted as routing-profile rows (explore
+  // 10-19, large-refactor 10-30, long-autonomous-run and subagent-worker 11-07): same value, now permanent.
+  const permanent = { explore: ['haiku', 'medium'], 'large-refactor': ['opus', 'high'], 'long-autonomous-run': ['opus', 'high'], 'subagent-worker': ['sonnet', 'low'] };
+  for (const [name, [model, effort]] of Object.entries(permanent)) {
+    const o = shipped.taskTypes[name].override;
+    assert.deepEqual([o.model, o.effort], [model, effort], name);
+    assert.equal(o.reviewBy, undefined, `${name} is settled`);
+    assert.match(o.reason, /SETTLED 2026-11-07/, name);
   }
+  for (const [name, t] of Object.entries(shipped.taskTypes)) assert.equal(t.override?.reviewBy, undefined, `${name} has no reviewBy`);
   assert.equal(shipped.taskTypes.integration.override.waivesFloor, undefined, 'sonnet/high meets the elevated floor');
 });
 
@@ -95,15 +103,17 @@ const driftAgent = (dir, name, fm) => {
   const lines = Object.entries({ name, description: `${name} agent`, ...fm }).map(([k, v]) => `${k}: ${v}`);
   put(join(dir, '.claude', 'agents', `${name}.md`), `---\n${lines.join('\n')}\n---\n\nBody.\n`);
 };
-function driftSignal(fx, cwd, projects) {
+function driftSignals(fx, cwd, projects) {
+  mkdirSync(cwd, { recursive: true });
   const cj = join(fx.dir, 'claude.json');
   writeFileSync(cj, JSON.stringify({ projects: Object.fromEntries(projects.map((p) => [p, {}])) }));
   const res = runScript('scripts/detect.mjs', [], {
     cwd, env: { AGENT_COMPANION_DISCOVERY_CLAUDE_JSON: cj, AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, timeout: 60000,
   });
   assert.equal(res.status, 0, res.stderr);
-  return res.json.signals.find((s) => s.kind === 'project_agent_drift');
+  return res.json.signals.filter((s) => s.kind === 'project_agent_drift');
 }
+const driftSignal = (fx, cwd, projects) => driftSignals(fx, cwd, projects).find((s) => s.severity !== 'info');
 
 test('project_agent_drift: a repo and its worktree copies are one project, with the copy count', () => {
   const fx = makeFixture();
@@ -121,7 +131,7 @@ test('project_agent_drift: a repo and its worktree copies are one project, with 
   } finally { fx.cleanup(); }
 });
 
-test('project_agent_drift: worktrees whose root is not listed fold into one entry; separate repos stay separate', () => {
+test('project_agent_drift: a repo whose root drifts and one with drift only in worktree copies are told apart', () => {
   const fx = makeFixture();
   try {
     const a = join(fx.dir, 'proj-a');
@@ -130,10 +140,31 @@ test('project_agent_drift: worktrees whose root is not listed fold into one entr
     for (const d of [...aTrees, b]) driftAgent(d, 'debugger', { model: 'sonnet', effort: 'high', routingType: 'debug-root-cause' });
     const clean = join(fx.dir, 'clean');
     mkdirSync(join(clean, '.claude', 'agents'), { recursive: true });
-    const s = driftSignal(fx, clean, [...aTrees, b]);
-    assert.ok(s);
-    assert.match(s.detail, /^2 project\(s\)/, s.detail);
-    assert.match(s.detail, /\(2 worktree copies\)/, s.detail);
-    assert.equal((s.detail.match(/repo root \d/g) || []).length, 2);
+    const sigs = driftSignals(fx, clean, [...aTrees, b]);
+    const finding = sigs.find((x) => x.severity !== 'info');
+    assert.ok(finding);
+    assert.match(finding.detail, /^1 project\(s\)/, finding.detail);
+    assert.doesNotMatch(finding.detail, /worktree cop/, 'proj-a (clean root) is not in the finding');
+    const info = sigs.find((x) => x.severity === 'info');
+    assert.ok(info, 'proj-a is reported as info');
+    assert.match(info.detail, /clean root/, info.detail);
+    assert.match(info.detail, /2 worktree copies drift/, info.detail);
+    assert.equal(info.dispatch, 'none');
+  } finally { fx.cleanup(); }
+});
+
+test('project_agent_drift: a clean root with drift only in other sessions\' worktree copies is info, never a finding', () => {
+  const fx = makeFixture();
+  try {
+    const root = join(fx.dir, 'proj-a');
+    mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
+    driftAgent(root, 'debugger', { model: 'opus', effort: 'medium', routingType: 'debug-root-cause' }); // on the table: no drift
+    const trees = ['t1', 't2'].map((t) => join(root, '.claude', 'worktrees', t));
+    for (const d of trees) driftAgent(d, 'debugger', { model: 'sonnet', effort: 'high', routingType: 'debug-root-cause' });
+    const sigs = driftSignals(fx, join(fx.dir, 'elsewhere'), trees);
+    assert.ok(sigs.length > 0);
+    assert.ok(sigs.every((x) => x.severity === 'info' && x.dispatch === 'none'), JSON.stringify(sigs));
+    // The hand-off never tracks it, so it cannot sit in the unacknowledged list.
+    assert.deepEqual(groupByKind(sigs), {});
   } finally { fx.cleanup(); }
 });

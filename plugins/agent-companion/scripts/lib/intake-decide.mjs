@@ -209,7 +209,7 @@ export const STALE_GUIDE = {
   decision_review_due: { means: 'A standing decision passed its review date and was never settled (a settled review is closed by setting reviewedOn on the decision).', action: 'fix' },
   budget_notices: { means: 'Count of session and worker budget notices; informational, it changes nothing by itself.', action: 'ack' },
   spawn_activity: { means: 'Count of spawns in 24h; informational, a volume reading with no defect.', action: 'retire' },
-  inherited_effort_spawns: { means: 'Spawns named no effort and ran at the lead effort.', action: 'fix' },
+  inherited_effort_spawns: { means: 'Spawns named no effort, so the harness chose it (the lead effort, or the spawn model\'s own default on a different model since Claude Code 2.1.317).', action: 'fix' },
   inherited_model_spawns: { means: 'Spawns named no model and inherited the lead tier.', action: 'fix' },
   session_churn: { means: 'Sessions crossed the churn thresholds (effort switches, tool errors, corrections, review rounds).', action: 'fix' },
   haiku_fit_leak: { means: 'Spawns the table routes to haiku ran on another model.', action: 'fix' },

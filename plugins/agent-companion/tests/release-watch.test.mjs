@@ -380,10 +380,20 @@ test('release_watch off silences the line', async () => {
 // routing_trial_review_due fires model_benchmark_suggested alongside it
 // (tests/model-benchmark-suggestion.test.mjs).
 const TRIAL_NOW = { AGENT_COMPANION_FAKE_NOW: '2026-11-01T00:00:00.000Z' };
+// No shipped trial is review-dated since 0.31.48, so the due trial is a profile trial row past its reviewBy.
+function seedDueTrial(stateDir) {
+  mkdirSync(join(stateDir, 'config'), { recursive: true });
+  writeFileSync(join(stateDir, 'config', 'routing-profile.json'), JSON.stringify({
+    schema: 'agent-companion/routing-profile', schemaVersion: 1, revision: 3,
+    basedOn: { tableVersion: 7, tableUpdated: '2026-09-23' }, objective: 'api-cost', planUsageMultipliers: null, types: {},
+    rows: { explore: { state: 'trial', model: 'opus', effort: 'medium', cacheTtl: null, source: 'operator-observed', since: '2026-10-01', reviewBy: '2026-10-16', waivesFloor: null, note: null, provenance: null } },
+  }));
+}
 
 test('scout_suppress (env): the suppressed kind is neither emitted nor counted; the others are untouched', () => {
-  const { dir, cleanup } = makeFixture();
+  const { dir, stateDir, cleanup } = makeFixture();
   try {
+    seedDueTrial(stateDir);
     const plain = runScript('scripts/detect.mjs', [], { cwd: dir, env: TRIAL_NOW });
     assert.equal(plain.status, 0, plain.stderr);
     const nBench = plain.json.signals.filter((s) => s.kind === 'model_benchmark_suggested').length;
@@ -402,8 +412,9 @@ test('scout_suppress (env): the suppressed kind is neither emitted nor counted; 
 });
 
 test('scout_suppress through settings.json (the plugin config layer), with a reason, and a list', () => {
-  const { dir, cleanup } = makeFixture();
+  const { dir, stateDir, cleanup } = makeFixture();
   try {
+    seedDueTrial(stateDir);
     const f = join(dir, '.claude', 'settings.json');
     mkdirSync(dirname(f), { recursive: true });
     writeFileSync(f, JSON.stringify({

@@ -11,6 +11,10 @@
 //                    weight "parity", e.g. code-review) in spawns.jsonl, made by
 //                    the lead; a subagent's own self-review spawn
 //                    (caller_is_subagent) is the protocol, not churn
+//   writer_spawns    the lead's spawns of a writing task type (not parity, not
+//                    one of READ_ONLY_TYPES) that day. review_rounds is judged
+//                    against it: a review per writer is normal reviewer traffic
+//                    (see crosses()), so only reviews well past the writers count
 //
 // AGGREGATES ONLY. No message text, prompt text, tool name or file path is
 // kept: a row is a session id, a day and integers. The correction matcher
@@ -60,6 +64,13 @@ export const MAX_CORRECTION_CHARS = 1500;
 // re-reviewed; an effort flipped mid-session is a sizing decision made late).
 export const CHURN_THRESHOLDS = { effort_switches: 3, tool_error_runs: 2, corrections: 3, review_rounds: 4 };
 export const CHURN_MIN_SESSION_DAYS = 2;
+// review_rounds counts toward churn only above REVIEW_ROUNDS_PER_WRITER reviews per
+// writer spawn the same session-day (a writer and its review round or two is the
+// normal shape). A row with no writer_spawns field (written before 0.31.48) reads as
+// zero writers, so it keeps the plain review_rounds threshold.
+export const REVIEW_ROUNDS_PER_WRITER = 2;
+// Task types that read or check and change nothing: their spawns are not writers.
+export const READ_ONLY_TYPES = new Set(['explore', 'lookup', 'research', 'survey', 'verify']);
 // session-churn.jsonl older than this is reported as stale by the scout,
 // never read as "no churn" (the daily scout routine refreshes it).
 export const CHURN_STALE_MS = 2 * 86400000;
@@ -104,7 +115,7 @@ function promptText(rec) {
 }
 
 const emptyRow = (sessionId, day) => ({
-  session_id: sessionId, day, effort_switches: 0, tool_error_runs: 0, corrections: 0, review_rounds: 0, prompts: 0, requests: 0,
+  session_id: sessionId, day, effort_switches: 0, tool_error_runs: 0, corrections: 0, review_rounds: 0, writer_spawns: 0, prompts: 0, requests: 0,
 });
 
 // Feed one transcript's records; returns Map day -> row.
@@ -155,6 +166,11 @@ export async function churnOfTranscript(path, sessionId, fallbackDay) {
 function isParityType(t) {
   if (!t) return false;
   try { return taskTypeDef(t, { profile: false })?.def?.weight === 'parity'; } catch { return false; }
+}
+
+function isWriterType(t) {
+  if (!t || READ_ONLY_TYPES.has(String(t))) return false;
+  try { const w = taskTypeDef(t, { profile: false })?.def?.weight; return w !== undefined && w !== 'parity'; } catch { return false; }
 }
 
 export function readSpawnRows() {
@@ -208,15 +224,19 @@ export async function scanChurn({
   }
   const sinceDay = new Date(sinceMs).toISOString().slice(0, 10);
   for (const s of spawnRows) {
-    if (!s || !s.session_id || typeof s.at !== 'string' || !isParityType(s.declared_type_resolved ?? s.declared_type)) continue;
+    if (!s || !s.session_id || typeof s.at !== 'string') continue;
+    const declared = s.declared_type_resolved ?? s.declared_type;
+    const parity = isParityType(declared);
+    if (!parity && !isWriterType(declared)) continue;
     // A review spawned by a subagent is the writer's own self-review under the protocol in
-    // config/model-tiers.json (selfReview), a standing design, not a lead thrashing.
+    // config/model-tiers.json (selfReview), a standing design, not a lead thrashing. A
+    // subagent's own spawns are not the lead's writers either.
     if (s.caller_is_subagent === true) continue;
     const day = s.at.slice(0, 10);
     if (day < sinceDay) continue;
     const k = `${s.session_id}|${day}`;
     if (!byKey.has(k)) byKey.set(k, emptyRow(s.session_id, day));
-    byKey.get(k).review_rounds += 1;
+    byKey.get(k)[parity ? 'review_rounds' : 'writer_spawns'] += 1;
   }
   return {
     rows: [...byKey.values()].filter((r) => r.day >= sinceDay),
@@ -255,8 +275,16 @@ export function writeChurnRows(rows, file = churnFile()) {
   renameSync(tmp, file);
 }
 
+// Whether one count of a row crosses its threshold. review_rounds must also exceed
+// REVIEW_ROUNDS_PER_WRITER reviews per writer spawn (the row's own writer_spawns).
+function crosses(r, k) {
+  const n = r[k] || 0;
+  if (n < CHURN_THRESHOLDS[k]) return false;
+  return k !== 'review_rounds' || n > REVIEW_ROUNDS_PER_WRITER * (r.writer_spawns || 0);
+}
+
 export function churnReasons(r) {
-  return Object.entries(CHURN_THRESHOLDS).filter(([k, t]) => (r[k] || 0) >= t).map(([k]) => `${k}=${r[k]}`);
+  return Object.keys(CHURN_THRESHOLDS).filter((k) => crosses(r, k)).map((k) => `${k}=${r[k]}`);
 }
 
 // { fire, detail, churning } over the last WINDOW_DAYS of rows.
@@ -265,7 +293,7 @@ export function churnVerdict(rows, { now = new Date(), days = WINDOW_DAYS, minSe
   const churning = rows.filter((r) => r && typeof r.day === 'string' && r.day >= sinceDay && churnReasons(r).length);
   if (churning.length < minSessionDays) return { fire: false, detail: '', churning: churning.length };
   const tally = {};
-  for (const r of churning) for (const k of Object.keys(CHURN_THRESHOLDS)) if ((r[k] || 0) >= CHURN_THRESHOLDS[k]) tally[k] = (tally[k] || 0) + 1;
+  for (const r of churning) for (const k of Object.keys(CHURN_THRESHOLDS)) if (crosses(r, k)) tally[k] = (tally[k] || 0) + 1;
   const parts = Object.entries(tally).map(([k, n]) => `${k} ${n}`).join(', ');
   return {
     fire: true,

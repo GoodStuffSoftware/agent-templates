@@ -467,14 +467,20 @@ const premium = recent.filter(isUnroutedPremium);
 const inherited = recent.filter((s) => s.model === '(inherited)');
 // A spawn can name its model and still inherit the lead's EFFORT (no effort in
 // its definition; every built-in type) — the guard records that as
-// spawn_effort_source 'inherited'. inherited_model_spawns cannot see it.
+// spawn_effort_source 'inherited'. inherited_model_spawns cannot see it. 'inherited' means
+// "the harness chose the effort", not "the lead's effort": since Claude Code 2.1.317 a
+// subagent on a model different from the session's takes that model's saved or default effort.
 const inheritedEffort = recent.filter((s) => s.spawn_effort_source === 'inherited');
 
 next.spawnTotal = spawns.length;
 if (recent.length) {
+  // A clean day (no unrouted premium, no spawn without a model) is a count, not a finding:
+  // severity 'info' keeps it in the scout output but out of the hand-off's unacknowledged list.
+  const cleanDay = premium.length === 0 && inherited.length === 0;
   sig('spawn_activity',
     `${recent.length} spawns/24h; ${premium.length} unrouted premium; ${inherited.length} with no explicit model`,
-    premium.length > (baseline.premiumPerDay ?? 0) * 2 ? 'spend-deep-dive' : 'none');
+    premium.length > (baseline.premiumPerDay ?? 0) * 2 ? 'spend-deep-dive' : 'none',
+    cleanDay ? 'info' : undefined);
 }
 next.premiumPerDay = premium.length;
 
@@ -487,7 +493,7 @@ if (inherited.length > 0) {
 }
 if (inheritedEffort.length > 0) {
   sig('inherited_effort_spawns',
-    `${inheritedEffort.length} spawn(s) in 24h set no effort (neither the call nor the agent definition) and ran at the lead session's effort`,
+    `${inheritedEffort.length} spawn(s) in 24h set no effort (neither the call nor the agent definition), so the harness chose it: the lead session's effort when the spawn runs on the lead's model, that model's own saved or default effort when it names a different model (Claude Code 2.1.317 and later)`,
     'routing-review');
 }
 
@@ -503,7 +509,12 @@ try {
   const listed = readClaudeJsonProjectPaths({ claudeJsonPath }) || [];
   // One project is often listed in both slash forms (and again by this run's cwd): fold to one.
   const seenProj = new Set();
-  const candidates = [process.cwd(), ...listed]
+  // A worktree copy's repo root is read too, so "the root is clean" is something the scout saw.
+  const rootOfTree = (p) => {
+    const m = /^(.*?)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+[\\/]*$/.exec(String(p));
+    return m ? m[1] : null;
+  };
+  const candidates = [process.cwd(), ...listed].flatMap((p) => [p, ...(rootOfTree(p) ? [rootOfTree(p)] : [])])
     .filter((p) => {
       const key = String(p).replace(/\\/g, '/').replace(/\/+$/, '');
       const k = process.platform === 'win32' ? key.toLowerCase() : key;
@@ -545,15 +556,24 @@ try {
     repos.set(k, e);
   }
   let rootN = 0;
+  // A repo whose root is clean and whose drift sits only in worktree copies (other sessions'
+  // scratch checkouts) is reported as info: nothing in the repo itself needs fixing.
+  const copiesOnly = [];
   for (const e of repos.values()) {
     const label = repos.size > 1 ? `repo root ${(rootN += 1)}` : 'repo root';
     const copies = e.trees.length ? ` (${e.trees.length} worktree cop${e.trees.length === 1 ? 'y' : 'ies'})` : '';
-    drifted.push(`${label}: ${e.text ?? e.trees[0]}${copies}`);
+    if (e.text === null) copiesOnly.push(`${label}: clean; ${e.trees.length} worktree cop${e.trees.length === 1 ? 'y' : 'ies'} drift (${e.trees[0]})`);
+    else drifted.push(`${label}: ${e.text}${copies}`);
   }
   if (drifted.length) {
     sig('project_agent_drift',
       `${drifted.length} project(s) have agents off the routing table: ${drifted.slice(0, 8).join('; ')}${drifted.length > 8 ? '; ...' : ''} — run /ac audit agent-defs in each`,
       'routing-review');
+  }
+  if (copiesOnly.length) {
+    sig('project_agent_drift',
+      `${copiesOnly.length} repo(s) have a clean root and agent drift only in worktree copies of other sessions: ${copiesOnly.slice(0, 8).join('; ')}${copiesOnly.length > 8 ? '; ...' : ''}; informational, the copies go away with their worktrees`,
+      'none', 'info');
   }
 } catch { /* fail open: a drift read never blocks the scout */ }
 

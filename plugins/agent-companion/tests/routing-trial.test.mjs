@@ -67,17 +67,17 @@ const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'config', 'model-tiers.jso
 // keeps its 2026-10-16 review.
 const SHIPPED_ROWS = {
   // type: [model, effort, trialSince, reviewBy or null (no review date: settled)]
-  explore: ['haiku', 'medium', '2026-10-02', '2026-10-16'],
+  explore: ['haiku', 'medium', '2026-10-02', null],
   'mechanical-edit': ['sonnet', 'low', '2026-10-02', null],
-  'subagent-worker': ['sonnet', 'low', '2026-10-02', '2026-10-30'],
+  'subagent-worker': ['sonnet', 'low', '2026-10-02', null],
   operate: ['sonnet', 'low', '2026-10-02', null],
   verify: ['sonnet', 'low', '2026-10-02', null],
   'bounded-feature': ['sonnet', 'high', '2026-09-27', null],
   integration: ['sonnet', 'high', '2026-09-24', null],
   'debug-root-cause': ['opus', 'medium', '2026-09-27', null],
   'novel-design': ['opus', 'xhigh', '2026-09-27', null],
-  'large-refactor': ['opus', 'high', '2026-10-02', '2026-10-30'],
-  'long-autonomous-run': ['opus', 'high', '2026-10-02', '2026-10-30'],
+  'large-refactor': ['opus', 'high', '2026-10-02', null],
+  'long-autonomous-run': ['opus', 'high', '2026-10-02', null],
 };
 const rowOf = (type) => {
   const [model, effort, trialSince, reviewBy] = SHIPPED_ROWS[type];
@@ -218,7 +218,7 @@ for (const [type, model, effort] of ARCH_V4) {
     assertTrial(res, type);
     assert.equal(res.json.model, model);
     assert.equal(res.json.effort, effort);
-    assert.equal(res.json.trial.reviewBy, '2026-10-30');
+    assert.equal(res.json.trial.reviewBy, undefined, 'settled 2026-11-07: no review date');
     assert.equal(res.json.trial.gridResolution, 'opus/xhigh');
   });
 }
@@ -315,9 +315,10 @@ test('every override in config/model-tiers.json carries evidence and trialSince;
 
 // --- Scout: routing trial due for review --------------------------------
 // detect.mjs reads AGENT_COMPANION_FAKE_NOW (a fake clock, no real waiting
-// for the calendar) so this is deterministic on any date. Only a row that
-// carries a reviewBy can be due: explore (2026-10-16) and large-refactor,
-// long-autonomous-run and subagent-worker (2026-10-30).
+// for the calendar) so this is deterministic on any date. Since 0.31.48 no
+// shipped row carries a reviewBy (explore, large-refactor, long-autonomous-run
+// and subagent-worker were settled on 2026-11-07), so only an operator's
+// routing-profile trial row can be due.
 function dueSignals(fakeNow) {
   const { dir, cleanup } = makeFixture();
   try {
@@ -330,44 +331,15 @@ function dueSignals(fakeNow) {
 }
 const dueTypes = (sigs) => sigs.map((s) => s.detail.split(' ')[0]).sort();
 
-test('scout raises routing_trial_review_due once reviewBy has passed', () => {
-  const sigs = dueSignals('2026-10-17T00:00:00.000Z');
-  // explore (reviewBy 2026-10-16) is the only row due on 2026-10-17.
-  assert.deepEqual(dueTypes(sigs), ['explore'], `expected only explore; got ${JSON.stringify(sigs.map((s) => s.detail))}`);
-  assert.match(sigs[0].detail, /explore routing trial due for review: compare spawn telemetry outcomes and escalation rates since 2026-10-02/);
-  assert.match(sigs[0].detail, /reviewBy 2026-10-16/);
-  for (const s of sigs) assert.equal(s.dispatch, 'routing-review');
-});
-
-test('scout raises the three 2026-10-30 rows on their own reviewBy, on top of explore', () => {
-  const sigs = dueSignals('2026-10-30T00:00:00.000Z');
-  assert.deepEqual(dueTypes(sigs), ['explore', 'large-refactor', 'long-autonomous-run', 'subagent-worker']);
-  for (const type of ['large-refactor', 'long-autonomous-run', 'subagent-worker']) {
-    const s = sigs.find((x) => x.detail.startsWith(`${type} routing trial due for review`));
-    assert.ok(s, `${type} must be due on 2026-10-30`);
-    assert.match(s.detail, /since 2026-10-02 \(reviewBy 2026-10-30 has passed\)/);
+test('scout never raises a shipped row (none carries a reviewBy), however late the clock', () => {
+  assert.deepEqual(REVIEW_DATED, [], 'no shipped override is review-dated');
+  for (const now of ['2026-10-17T00:00:00.000Z', '2026-11-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z']) {
+    const sigs = dueSignals(now);
+    assert.deepEqual(dueTypes(sigs), [], `${now}: expected no routing_trial_review_due; got ${JSON.stringify(sigs.map((s) => s.detail))}`);
   }
 });
 
-test('scout never raises a settled row (no reviewBy), however late the clock', () => {
-  const sigs = dueSignals('2027-01-01T00:00:00.000Z');
-  assert.deepEqual(dueTypes(sigs), REVIEW_DATED.slice().sort());
-  for (const type of ['mechanical-edit', 'operate', 'verify', 'bounded-feature', 'integration', 'debug-root-cause', 'novel-design']) {
-    assert.ok(!sigs.some((s) => s.detail.startsWith(`${type} routing trial due`)), `${type} is settled: no review date, no finding`);
-  }
-});
-
-test('scout is silent on routing_trial_review_due before reviewBy', () => {
-  const sigs = dueSignals('2026-10-15T00:00:00.000Z');
-  assert.equal(sigs.length, 0, `expected no routing_trial_review_due signals before reviewBy; got: ${JSON.stringify(sigs)}`);
-});
-
-test('scout fires exactly on the reviewBy date itself (not only strictly after)', () => {
-  const sigs = dueSignals('2026-10-16T00:00:00.000Z');
-  assert.deepEqual(dueTypes(sigs), ['explore'], 'reviewBy is inclusive: the finding must fire on the date itself');
-});
-
-// --- Scout: a winning profile row replaces the shipped trial's review ---------
+// --- Scout: a profile trial row is reviewed on its own reviewBy ---------------
 function dueWithProfileRow(fakeNow, rowOver) {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
@@ -384,11 +356,11 @@ function dueWithProfileRow(fakeNow, rowOver) {
   } finally { cleanup(); }
 }
 
-test('scout: explore trial past reviewBy is raised with no profile row, silent while a not-due profile row wins, raised again when the profile row is due', () => {
-  assert.deepEqual(dueTypes(dueSignals('2026-10-17T00:00:00.000Z')), ['explore']);
+test('scout: a profile trial row is silent before its reviewBy and raised on the date itself (inclusive)', () => {
   const quiet = dueWithProfileRow('2026-10-17T00:00:00.000Z', {});
-  assert.deepEqual(dueTypes(quiet), [], `the profile row routes explore; got ${JSON.stringify(quiet.map((s) => s.detail))}`);
-  const due = dueWithProfileRow('2026-10-17T00:00:00.000Z', { reviewBy: '2026-10-16' });
+  assert.deepEqual(dueTypes(quiet), [], `not due yet; got ${JSON.stringify(quiet.map((s) => s.detail))}`);
+  const due = dueWithProfileRow('2026-10-16T00:00:00.000Z', { reviewBy: '2026-10-16' });
   assert.deepEqual(dueTypes(due), ['explore']);
   assert.match(due[0].detail, /profile row/);
+  assert.equal(due[0].dispatch, 'routing-review');
 });
