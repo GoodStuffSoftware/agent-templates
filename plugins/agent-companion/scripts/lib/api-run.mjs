@@ -127,22 +127,45 @@ const textOf = (content) => (Array.isArray(content) ? content.filter((b) => b &&
 //     the review continues.
 //   - hung: a run with no new message or tool result for HUNG_MS (10 minutes) is stopped (falls back).
 //     This is the only time limit.
-//   - spend: a note at SOFT_USD ($0.20), and one backstop, `maxUsd` (DEFAULT_HARD_USD, $0.50; option
-//     api_review_hard_usd; 0 disables it), that ends a runaway tool loop (fetch: at 80% of it the next turn is the final, no-tools one; sdk: an abort). A reply that is already a final answer is kept.
+//   - spend: a note at `softUsd` (SOFT_USD, $1.00; option api_review_soft_usd), and one backstop, `maxUsd` (DEFAULT_HARD_USD, $2.00; option
+//     api_review_hard_usd; 0 disables it; the note is kept below it, see reviewLimits), that ends a runaway tool loop (fetch: at 80% of it the next turn is the final, no-tools one; sdk: an abort). A reply that is already a final answer is kept.
 //   `notes` is the list of soft-limit strings; they go into the ledger entry (`notes`).
 export const DEFAULT_MAX_TOKENS = 64000; // thinking counts toward max_tokens; the effort docs start Opus xhigh/max at 64k
 export const SLOW_REVIEW_MS = 8 * 60 * 1000;
 export const HUNG_MS = 10 * 60 * 1000;
-// Operator ruling 2026-11-01: measured normal reviews cost $0.005-0.10, so 20 cents flags a review worth a look
-// and 50 cents means a runaway tool loop.
-export const SOFT_USD = 0.2;
-export const DEFAULT_HARD_USD = 0.5;
+// Operator ruling 2026-11-07, from 29 real API reviews since 11-03 (median $0.52, p90 $0.96, max $1.00): the note at $1.00
+// flags a review above the normal range, the backstop at $2.00 ends a runaway tool loop. (The 2026-11-01 figures, $0.20 and $0.50,
+// came from probe-sized runs and cut 7 of those 29 reviews off, wasting their spend.)
+export const SOFT_USD = 1.0;
+export const DEFAULT_HARD_USD = 2.0;
 
 // The hard backstop from an option value: a finite number >= 0 (0 disables it), else the default.
 export function hardUsdFrom(raw, fallback = DEFAULT_HARD_USD) {
   if (raw === '' || raw === null || raw === undefined) return fallback;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+// The soft note from an option value: a finite number > 0, else the default.
+export function softUsdFrom(raw, fallback = SOFT_USD) {
+  if (raw === '' || raw === null || raw === undefined) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// Both spend limits of one review, from the option values (api_review_soft_usd, api_review_hard_usd) and the --max-usd flag
+// (which takes precedence over the hard option). The soft note must stay below the hard stop: a note at or above an active
+// backstop could never show, so it is clamped to half of the backstop and `clamped` says so (the caller logs it once).
+export function reviewLimits({ softRaw = '', hardRaw = '', maxUsdFlag = null } = {}) {
+  const maxUsd = maxUsdFlag ? Number(maxUsdFlag) : hardUsdFrom(hardRaw);
+  let softUsd = softUsdFrom(softRaw);
+  let clamped = null;
+  if (maxUsd > 0 && softUsd >= maxUsd) {
+    const was = softUsd;
+    softUsd = Math.round((maxUsd / 2) * 10000) / 10000;
+    clamped = `api_review_soft_usd $${was.toFixed(2)} is not below the hard stop $${maxUsd.toFixed(2)}; using $${softUsd.toFixed(2)}`;
+  }
+  return { softUsd, maxUsd, clamped };
 }
 
 // Soft-limit notes, worded once for both engines.
@@ -169,7 +192,7 @@ export const hasVerdict = (t) => /^[\s*#`>_-]*VERDICT:\s*(?:PASS|FIX)\b/m.test(S
 
 export async function runApi({
   prompt, model, effort = null, cwd = process.cwd(), category = 'review', meta = '', system = null,
-  tools = true, maxUsd = DEFAULT_HARD_USD, softUsd = SOFT_USD, maxTurns = 30, maxTokens = DEFAULT_MAX_TOKENS,
+  tools = true, maxUsd = DEFAULT_HARD_USD, softUsd = SOFT_USD, maxTurns = 30, maxTokens = DEFAULT_MAX_TOKENS, reviewId = null,
   hungMs = HUNG_MS, requestTimeoutMs = hungMs, slowMs = SLOW_REVIEW_MS, logRow = null, clock = Date.now, requireVerdict = false,
   cfg = loadConfig(), env = process.env, now = Date.now(), fetchImpl = globalThis.fetch, endpoint = OFFICIAL_ENDPOINT,
   sleep = sleepMs, retries = 2,
@@ -189,7 +212,7 @@ export async function runApi({
   const bookCost = (ok, error = null) => {
     try {
       record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
-        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok,
+        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok, id: reviewId,
         detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'fetch', error: ok ? null : error, notes },
       });
     } catch (e) { ledgerFailed(`$${(usd - booked).toFixed(4)} not recorded`, e); }

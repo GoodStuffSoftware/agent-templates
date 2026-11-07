@@ -270,11 +270,17 @@
       "description": "The sdk reviewer loads no user settings (they would pull in every user plugin, MCP server and skill), so your own guard hooks would not run in it. On (default): the command hooks under hooks.PreToolUse in your user settings.json are wrapped as Agent SDK hook callbacks and run as guards (exit 2 or a JSON permissionDecision deny blocks the tool call; a hook that errors or times out does not, as in Claude Code). Only PreToolUse command hooks; this plugin's own hooks are not wrapped. Off: the reviewer runs without them.",
       "default": true
     },
+    "api_review_soft_usd": {
+      "type": "number",
+      "title": "API reviews: soft spend note of one review (USD)",
+      "description": "A review on the API credits that has spent this much gets a note (stderr, the review-path label, the ledger entry and a long-runs.jsonl row the scout lists) and goes on; nothing is stopped. Used by both engines. Measured over 29 real reviews (2026-11-03 to 11-07): median $0.52, p90 $0.96, max $1.00. It must stay below api_review_hard_usd: a value at or above an active hard stop is clamped to half of it, and the review says so once. Default 1.00.",
+      "default": 1.0
+    },
     "api_review_hard_usd": {
       "type": "number",
       "title": "API reviews: hard spend backstop of one review (USD, 0 = none)",
-      "description": "Reviews on the API credits have soft limits: a note at 8 minutes (logged to long-runs.jsonl) and at $0.20 of spend (listed by the scout), and the review goes on. Only a hung review (no message or tool result for 10 minutes) and this backstop stop one: a review that has spent this much without finishing is ended (fetch: its next turn is the last; sdk: aborted, and falls back to the plan reviewer) (a client-side estimate; each turn is booked in the ledger as it completes). Measured normal reviews cost $0.005-0.10, so 20 cents flags a review and 50 cents means a runaway. 0 disables the backstop. --max-usd overrides it for one review.",
-      "default": 0.5
+      "description": "Reviews on the API credits have soft limits: a note at 8 minutes (logged to long-runs.jsonl) and at api_review_soft_usd of spend (listed by the scout), and the review goes on. Only a hung review (no message or tool result for 10 minutes) and this backstop stop one: a review that has spent this much without finishing is ended (fetch: its next turn is the last; sdk: aborted, and falls back to the plan reviewer) (a client-side estimate; each turn is booked in the ledger as it completes). Measured real reviews cost a median $0.52 and at most $1.00, so $2.00 means a runaway (the earlier $0.50 cut off 7 of 29 reviews and wasted their spend). 0 disables the backstop. --max-usd overrides it for one review.",
+      "default": 2.0
     },
     "api_admin_key_source": {
       "type": "string",
