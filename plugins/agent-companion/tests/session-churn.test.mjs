@@ -217,3 +217,68 @@ test('session_churn reports a stale or missing aggregate instead of going quiet'
     assert.match(s.detail, /stale/);
   } finally { fx.cleanup(); }
 });
+
+// --- 0.31.48: review rounds are judged against the writers they review ----------------------------
+test('review_rounds: a review per writer is normal traffic; only reviews well past the writers churn', async () => {
+  const fx = makeFixture();
+  try {
+    const root = join(fx.dir, 'projects');
+    mkdirSync(root, { recursive: true });
+    const rev = (sid) => ({ at: ts(), session_id: sid, declared_type: 'code-review' });
+    const wr = (sid, type = 'bounded-feature', extra = {}) => ({ at: ts(), session_id: sid, declared_type: type, ...extra });
+    const spawnRows = [
+      // normal: 5 reviews for 4 writers
+      ...Array.from({ length: 5 }, () => rev('normal')), ...Array.from({ length: 4 }, () => wr('normal')),
+      // thrash: 5 reviews for 1 writer
+      ...Array.from({ length: 5 }, () => rev('thrash')), wr('thrash'),
+      // read-only spawns and a subagent's spawns are not writers
+      ...Array.from({ length: 4 }, () => rev('readers')), wr('readers', 'explore'), wr('readers', 'verify'), wr('readers', 'bounded-feature', { caller_is_subagent: true }),
+    ];
+    const { rows } = await scanChurn({ root, spawnRows });
+    const get = (sid) => rows.find((r) => r.session_id === sid);
+    assert.deepEqual([get('normal').review_rounds, get('normal').writer_spawns], [5, 4]);
+    assert.deepEqual([get('thrash').review_rounds, get('thrash').writer_spawns], [5, 1]);
+    assert.deepEqual([get('readers').review_rounds, get('readers').writer_spawns], [4, 0]);
+    const now = new Date();
+    assert.equal(churnVerdict([get('normal'), { ...get('normal'), session_id: 'n2' }], { now }).fire, false, 'reviewer traffic alone is not churn');
+    const v = churnVerdict([get('thrash'), get('readers')], { now });
+    assert.equal(v.fire, true);
+    assert.match(v.detail, /review_rounds 2/);
+    // A row from before writer_spawns existed keeps the plain threshold.
+    const legacy = { day: TODAY, session_id: 'old', review_rounds: CHURN_THRESHOLDS.review_rounds };
+    assert.equal(churnVerdict([legacy, { ...legacy, session_id: 'old2' }], { now }).fire, true);
+  } finally { fx.cleanup(); }
+});
+
+// --- 0.31.48: spawn_activity ----------------------------------------------------------------------
+test('spawn_activity: a clean day is info and never reaches the hand-off; an unrouted premium spawn is a finding', async () => {
+  const { groupByKind } = await import('../scripts/lib/scout-handoff.mjs');
+  const fx = makeFixture();
+  try {
+    writeSpawns([{ model: 'sonnet' }, { model: 'opus', routed: true }, { model: 'haiku' }]);
+    const clean = detect(fx).find((x) => x.kind === 'spawn_activity');
+    assert.ok(clean);
+    assert.match(clean.detail, /3 spawns\/24h; 0 unrouted premium; 0 with no explicit model/);
+    assert.equal(clean.severity, 'info');
+    assert.deepEqual(groupByKind([clean]), {});
+    writeSpawns([{ model: 'sonnet' }, { model: 'opus', routed: false }]);
+    const hot = detect(fx).find((x) => x.kind === 'spawn_activity');
+    assert.equal(hot.severity, undefined);
+    assert.deepEqual(Object.keys(groupByKind([hot])), ['spawn_activity']);
+    writeSpawns([{ model: '(inherited)' }]);
+    assert.equal(detect(fx).find((x) => x.kind === 'spawn_activity').severity, undefined, 'a spawn with no model is a finding too');
+  } finally { fx.cleanup(); }
+});
+
+// --- 0.31.48: the inherited-effort wording after Claude Code 2.1.317 --------------------------------
+test('inherited_effort_spawns: does not say the spawn ran at the lead effort (2.1.317 changed that for other models)', () => {
+  const fx = makeFixture();
+  try {
+    writeSpawns([{ model: 'sonnet', spawn_effort_source: 'inherited' }]);
+    const s = detect(fx).find((x) => x.kind === 'inherited_effort_spawns');
+    assert.ok(s);
+    assert.doesNotMatch(s.detail, /ran at the lead session's effort/);
+    assert.match(s.detail, /saved or default effort/);
+    assert.match(s.detail, /2\.1\.317/);
+  } finally { fx.cleanup(); }
+});

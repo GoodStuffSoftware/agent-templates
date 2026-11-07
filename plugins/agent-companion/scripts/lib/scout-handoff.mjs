@@ -79,6 +79,10 @@ export function ageDaysOf(entry, atIso) {
 export function groupByKind(signals) {
   const out = {};
   for (const s of Array.isArray(signals) ? signals : []) {
+    // severity 'info' is a count the scout reports for the record (a clean spawn_activity
+    // day, drift confined to worktree copies), not a finding: it is never tracked, so it
+    // cannot sit in the unacknowledged list waiting for an ack.
+    if (s && s.severity === 'info') continue;
     const kind = String((s && s.kind) || 'unknown');
     (out[kind] ||= []).push({ detail: String((s && s.detail) ?? ''), dispatch: String((s && s.dispatch) ?? '') });
   }
