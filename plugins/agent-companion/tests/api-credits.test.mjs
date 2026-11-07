@@ -790,6 +790,14 @@ test('runner: max_tokens defaults to 64000 and can be set; redirects are refused
       assert.equal(r.code, 2, bad);
       assert.equal(h.calls.length, 0);
     }
+    {
+      const h = stubFetch([msg([text('VERDICT: PASS')])]);
+      const r = await t.run(h, { extra: ['--max-usd', '-1'] });
+      assert.equal(r.code, 2, 'a negative --max-usd');
+      assert.equal(h.calls.length, 0);
+      const z = await t.run(stubFetch([msg([text('VERDICT: PASS')])]), { extra: ['--max-usd', '0'] });
+      assert.equal(z.code, 0, '--max-usd 0 turns the hard stop off');
+    }
   } finally { t.fx.cleanup(); }
 });
 
@@ -927,6 +935,13 @@ test('limits: a soft note not below the hard stop is clamped to half of it, once
   assert.deepEqual(reviewLimits({ softRaw: '3', hardRaw: '2' }), { softUsd: 1, maxUsd: 2, clamped: 'api_review_soft_usd $3.00 is not below the hard stop $2.00; using $1.00' });
   assert.equal(reviewLimits({ softRaw: '2', hardRaw: '2' }).softUsd, 1, 'equal is not below');
   assert.equal(reviewLimits({ softRaw: '1', maxUsdFlag: '0.6' }).softUsd, 0.3, 'against --max-usd too');
+  assert.match(reviewLimits({ softRaw: '1', maxUsdFlag: '0.6' }).clamped, /^api_review_soft_usd \$1\.00 /, 'a soft value from the option names the option');
+  assert.doesNotMatch(reviewLimits({ maxUsdFlag: '0.6' }).clamped, /api_review_soft_usd/, 'the default soft value does not name the setting');
+  assert.doesNotMatch(reviewLimits({ softRaw: 'abc', maxUsdFlag: '0.6' }).clamped, /api_review_soft_usd/, 'an unusable option value fell back to the default');
+  // A bad --max-usd is an error, never a silently removed hard stop; 0 still means off.
+  for (const bad of ['abc', '-1', 'NaN', 'Infinity']) assert.throws(() => reviewLimits({ maxUsdFlag: bad }), /max-usd must be a number/, bad);
+  assert.equal(reviewLimits({ maxUsdFlag: '0' }).maxUsd, 0);
+  assert.equal(reviewLimits({ maxUsdFlag: 0 }).maxUsd, 0);
   const t = rig();
   try {
     const r = await withOpts({ api_review_soft_usd: 5 }, () => t.run(stubFetch([msg([text(`VERDICT: PASS${NL}ok`)])])));

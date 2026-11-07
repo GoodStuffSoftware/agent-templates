@@ -384,7 +384,7 @@ export function record(state, { agent, pk, input, response, stat, now = Date.now
   const fresh = !rec || !sameStat(rec, stat) || now - rec.since > MAX_AGE_MS;
   const cpl = content.length / numLines;
   if (fresh) {
-    rec = { mtimeMs: stat.mtimeMs, size: stat.size, ctimeMs: stat.ctimeMs, total: totalLines, since: now, ranges: [], cpl, lines: 0, last: '', denied: [], t: now };
+    rec = { mtimeMs: stat.mtimeMs, size: stat.size, ctimeMs: stat.ctimeMs, total: totalLines, since: now, ranges: [], cpl, lines: 0, denied: [], t: now };
     files[pk] = rec;
   } else {
     rec.cpl = (rec.cpl * rec.lines + content.length) / (rec.lines + numLines);
@@ -392,7 +392,6 @@ export function record(state, { agent, pk, input, response, stat, now = Date.now
   rec.lines = (rec.lines || 0) + numLines;
   rec.total = totalLines;
   rec.ranges = addRange(rec.ranges, startLine, startLine + numLines - 1);
-  rec.last = req.raw;
   rec.t = now;
   evictOld(files);
   return { dirty: true };

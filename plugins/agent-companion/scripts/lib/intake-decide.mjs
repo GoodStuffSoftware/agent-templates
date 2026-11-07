@@ -20,6 +20,7 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { compareVersions, parseSemver } from '../../hooks/lib/context.mjs';
 import { readState, undecidedOf } from './release-watch.mjs';
 import { STALE_DAYS, ageDaysOf } from './scout-handoff.mjs';
@@ -299,10 +300,13 @@ export function mergeDecisionsMarkdown(previous, decisions, nowIso) {
 export function writeDecisionsFile(file, decisions, nowIso) {
   try {
     mkdirSync(dirname(file), { recursive: true });
-    let previous = '';
-    try { previous = existsSync(file) ? readFileSync(file, 'utf8') : ''; } catch { /* start fresh */ }
-    writeFileSync(file, mergeDecisionsMarkdown(previous, decisions, nowIso));
-    return true;
+    // The read-modify-write is locked so two runs cannot each read the same file and drop the other's sections.
+    return withFileLock(`${file}.lock`, () => {
+      let previous = '';
+      try { previous = existsSync(file) ? readFileSync(file, 'utf8') : ''; } catch { /* start fresh */ }
+      writeFileSync(file, mergeDecisionsMarkdown(previous, decisions, nowIso));
+      return true;
+    }, { waitMs: 3000, staleMs: 10000 });
   } catch { return false; }
 }
 

@@ -150,9 +150,11 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   if (o.error || o.cmd !== 'run' || !o['brief-file'] || !o['diff-ref'] || !o.model || !o.cwd) { out(o.error || usage); return EXIT_USAGE; }
   // The numeric options are validated: a NaN would silently remove its own cap.
   if (o.runner !== undefined && !['sdk', 'fetch'].includes(o.runner)) { out('runner must be sdk or fetch'); return EXIT_USAGE; }
-  for (const k of ['max-usd', 'max-turns', 'max-tokens']) {
+  for (const k of ['max-turns', 'max-tokens']) {
     if (o[k] !== undefined && !(Number.isFinite(Number(o[k])) && Number(o[k]) > 0)) { out(`${k} must be a positive number`); return EXIT_USAGE; }
   }
+  // --max-usd: 0 turns the hard stop off (as the option does); anything else that is not a number >= 0 is a usage error.
+  if (o['max-usd'] !== undefined && !(o['max-usd'] !== '' && Number.isFinite(Number(o['max-usd'])) && Number(o['max-usd']) >= 0)) { out('max-usd must be a number, 0 or more (0 turns the hard stop off)'); return EXIT_USAGE; }
   // Read once, here, and inlined: the model's tools cannot read outside the repository.
   let brief;
   try { brief = readFileSync(o['brief-file'], 'utf8'); } catch (e) { out(`API review failed: cannot read the brief file (${e.code || 'error'})`); return EXIT_FAILED; }
@@ -163,7 +165,9 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   const meta = `review ${o['diff-ref']}`.slice(0, 120);
   // The soft note and the one hard spend backstop (0 = none); --max-usd takes precedence over the hard option for this review.
   // A soft note that is not below an active backstop is clamped, and said so once.
-  const { softUsd, maxUsd, clamped } = reviewLimits({ softRaw: opt('api_review_soft_usd', ''), hardRaw: opt('api_review_hard_usd', ''), maxUsdFlag: o['max-usd'] });
+  let limits;
+  try { limits = reviewLimits({ softRaw: opt('api_review_soft_usd', ''), hardRaw: opt('api_review_hard_usd', ''), maxUsdFlag: o['max-usd'] }); } catch (e) { out(e.message); return EXIT_USAGE; }
+  const { softUsd, maxUsd, clamped } = limits;
   if (clamped) err(`API review note: ${clamped}`);
   const reviewId = `rv-${randomUUID().slice(0, 8)}`; // the ledger entry's id, for api-credits.mjs record-fallback
   let r = null;

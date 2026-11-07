@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { makeFixture, runHook, runScript, childEnv, PLUGIN_ROOT } from './helpers.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
 import {
-  topicsOf, parseChangelog, newerMatching, checkDue, fetchChangelogHead, CHECK_INTERVAL_MS, runReleaseWatch, markSeen, markDecided, triageFloor, undecidedOf,
+  topicsOf, parseChangelog, newerMatching, checkDue, fetchChangelogHead, CHECK_INTERVAL_MS, runReleaseWatch, markSeen, markDecided, triageFloor, undecidedOf, keepUndecided,
 } from '../scripts/lib/release-watch.mjs';
 
 const CHANGELOG = [
@@ -600,4 +600,19 @@ test('a first check with nothing decided does not queue the whole changelog', as
     const st = JSON.parse(readFileSync(args.stateFilePath, 'utf8'));
     assert.deepEqual(st.releases.map((r) => r.version), ['9.0.6', '9.0.5']);
   } finally { cleanup(); }
+});
+
+test('keepUndecided: a stored release with no topic items is dropped before the cut, so it cannot push an undecided one out', () => {
+  const rel = (n, items = [{ topics: ['hooks'], text: 'x' }]) => ({ version: `9.1.${n}`, items });
+  // 9.1.0 was stored with no items (never decided); 9.1.1 is undecided with items; 40 newer releases follow.
+  const fresh = []; for (let n = 2; n < 42; n++) fresh.push(rel(n));
+  const full = keepUndecided({ releases: [rel(0, []), rel(1)], decided: [] }, fresh).map((r) => r.version);
+  assert.equal(full.length, 40);
+  assert.ok(!full.includes('9.1.0'));
+  // With room to spare the empty one is still gone and the one with items stays.
+  assert.deepEqual(keepUndecided({ releases: [rel(0, []), rel(1)], decided: [] }, [rel(2)]).map((r) => r.version), ['9.1.2', '9.1.1']);
+  // The empty one, were it kept, would be the 40th and evict the undecided one with items.
+  const f39 = []; for (let n = 3; n < 42; n++) f39.push(rel(n)); // 39 fresh
+  const kept = keepUndecided({ releases: [rel(0, []), rel(1), rel(2)], decided: [] }, f39).map((r) => r.version);
+  assert.ok(kept.includes('9.1.2') && kept.includes('9.1.1') === false, 'newest 40 by version: 39 fresh + 9.1.2');
 });

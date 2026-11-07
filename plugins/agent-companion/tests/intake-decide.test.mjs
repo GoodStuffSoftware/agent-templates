@@ -6,11 +6,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { makeFixture, runScript, runHook, PLUGIN_ROOT } from './helpers.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
 import {
   slug, releaseDocId, staleDocId, decideItem, decideRelease, releaseFinding, staleEntries, staleFinding,
-  buildQueue, SURFACES, CHANGES, DETAIL_MAX, DECISIONS_FILE,
+  buildQueue, SURFACES, CHANGES, DETAIL_MAX, DECISIONS_FILE, writeDecisionsFile,
 } from '../scripts/lib/intake-decide.mjs';
 import { undecidedOf, markDecided } from '../scripts/lib/release-watch.mjs';
 import { triageLine, ageDaysOf } from '../scripts/lib/scout-handoff.mjs';
@@ -338,5 +340,24 @@ test('release line at session start: one short line that points to the brief', (
     assert.match(line, /morning brief/);
     assert.doesNotMatch(line, /subagents, hooks, cache/, 'no topic list');
     assert.ok(line.length < 260, line.length);
+  } finally { fx.cleanup(); }
+});
+
+test('writeDecisionsFile is locked: concurrent runs each keep their section', async () => {
+  const fx = makeFixture();
+  try {
+    const dir = join(fx.stateDir, 'state'); mkdirSync(dir, { recursive: true });
+    const file = join(dir, DECISIONS_FILE);
+    const mod = pathToFileURL(join(PLUGIN_ROOT, 'scripts', 'lib', 'intake-decide.mjs')).href;
+    const code = `import(${JSON.stringify(mod)}).then((m) => { const v = process.argv[1]; process.exit(m.writeDecisionsFile(${JSON.stringify(file)}, [{ version: v, rec: 'watch', items: [] }], '2026-11-07T00:00:00Z') ? 0 : 1); });`;
+    const versions = ['9.0.1', '9.0.2', '9.0.3', '9.0.4', '9.0.5', '9.0.6'];
+    const codes = await Promise.all(versions.map((v) => new Promise((res) => {
+      const c = spawn(process.execPath, ['-e', code, v], { stdio: 'ignore', windowsHide: true });
+      c.on('close', res);
+    })));
+    assert.deepEqual(codes, versions.map(() => 0));
+    const md = readFileSync(file, 'utf8');
+    for (const v of versions) assert.ok(md.includes('## ' + v + ': '), v);
+    assert.equal(existsSync(`${file}.lock`), false, 'the lock is released');
   } finally { fx.cleanup(); }
 });

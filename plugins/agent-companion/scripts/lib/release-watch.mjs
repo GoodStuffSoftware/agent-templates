@@ -136,11 +136,13 @@ export function triageFloor(state, installed) {
 
 // Releases stored by an earlier check that no decision covers yet, kept across checks so an
 // upgrade or a gap in the decided list never drops one.
-function keepUndecided(state, fresh) {
+export function keepUndecided(state, fresh) {
   const decided = new Set(Array.isArray(state.decided) ? state.decided : []);
   const byVersion = new Map((fresh || []).map((r) => [r.version, r]));
   for (const r of Array.isArray(state.releases) ? state.releases : []) {
-    if (r && r.version && !decided.has(r.version) && !byVersion.has(r.version)) byVersion.set(r.version, r);
+    // A stored release with no topic items is never decided (it is not news), so it is dropped here, before the cut,
+    // or it would sit in the list for good and push an undecided release with items out of the newest MAX_RELEASES_KEPT.
+    if (r && r.version && Array.isArray(r.items) && r.items.length > 0 && !decided.has(r.version) && !byVersion.has(r.version)) byVersion.set(r.version, r);
   }
   return [...byVersion.values()].sort((a, b) => compareVersions(b.version, a.version)).slice(0, MAX_RELEASES_KEPT);
 }

@@ -157,13 +157,20 @@ export function softUsdFrom(raw, fallback = SOFT_USD) {
 // (which takes precedence over the hard option). The soft note must stay below the hard stop: a note at or above an active
 // backstop could never show, so it is clamped to half of the backstop and `clamped` says so (the caller logs it once).
 export function reviewLimits({ softRaw = '', hardRaw = '', maxUsdFlag = null } = {}) {
-  const maxUsd = maxUsdFlag ? Number(maxUsdFlag) : hardUsdFrom(hardRaw);
+  let maxUsd;
+  if (maxUsdFlag !== null && maxUsdFlag !== undefined && maxUsdFlag !== '') {
+    // An explicit flag is never silently replaced: a value that is not a number >= 0 would otherwise turn the hard stop off.
+    maxUsd = Number(maxUsdFlag);
+    if (!Number.isFinite(maxUsd) || maxUsd < 0) throw new RangeError(`max-usd must be a number, 0 or more (0 turns the hard stop off); got ${JSON.stringify(String(maxUsdFlag))}`);
+  } else maxUsd = hardUsdFrom(hardRaw);
   let softUsd = softUsdFrom(softRaw);
   let clamped = null;
   if (maxUsd > 0 && softUsd >= maxUsd) {
     const was = softUsd;
     softUsd = Math.round((maxUsd / 2) * 10000) / 10000;
-    clamped = `api_review_soft_usd $${was.toFixed(2)} is not below the hard stop $${maxUsd.toFixed(2)}; using $${softUsd.toFixed(2)}`;
+    // The setting is named only when the value came from it; the default ($1.00) is not something the user set.
+    const named = softUsdFrom(softRaw, null) !== null ? 'api_review_soft_usd' : 'the default soft spend note';
+    clamped = `${named} $${was.toFixed(2)} is not below the hard stop $${maxUsd.toFixed(2)}; using $${softUsd.toFixed(2)}`;
   }
   return { softUsd, maxUsd, clamped };
 }
