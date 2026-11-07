@@ -143,8 +143,8 @@ test('toolset: Read, Grep, Glob, Bash, WebSearch, WebFetch everywhere, PowerShel
   assert.ok(!sdkToolsFor('win32').some((t) => t.startsWith('mcp__')));
   assert.equal(SLOW_REVIEW_MS, 8 * 60 * 1000);
   assert.equal(HUNG_MS, 10 * 60 * 1000);
-  assert.equal(SOFT_USD, 0.2);
-  assert.equal(DEFAULT_HARD_USD, 0.5);
+  assert.equal(SOFT_USD, 1);
+  assert.equal(DEFAULT_HARD_USD, 2);
   assert.doesNotMatch(sdkSystem(30), /600000|timeout/i, 'no shell-timeout instruction: the tool defaults apply');
   assert.match(sdkSystem(30), /AFFECTED by the diff/);
   assert.match(sdkSystem(30), /Never run the full test suite or ci-local/);
@@ -533,4 +533,27 @@ test('runApiSdk: the init proof comes back with the result', async () => {
     assert.deepEqual(r.init.plugins, [{ name: 'agent-companion', version: '1', source: null }]);
     assert.equal(r.init.apiKeySource, 'ANTHROPIC_API_KEY');
   } finally { fx.cleanup(); }
+});
+
+test('api-review: the sdk engine takes the soft note from api_review_soft_usd, and a clamped value is the one it uses', async () => {
+  const t = rig();
+  const KEYNAME = 'CLAUDE_PLUGIN_OPTION_API_REVIEW_SOFT_USD';
+  const saved = process.env[KEYNAME];
+  try {
+    const script = () => fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 300000, output_tokens: 10 }, { stop: 'end_turn' }), result()]); // about $0.60
+    const dflt = await t.go(['--runner', 'sdk'], { sdk: script() });
+    assert.equal(dflt.code, 0, dflt.out);
+    assert.doesNotMatch(dflt.err, /soft spend limit/, 'under the default $1.00: no note');
+    process.env[KEYNAME] = '0.5';
+    const low = await t.go(['--runner', 'sdk'], { sdk: script() });
+    assert.equal(low.code, 0, low.out);
+    assert.match(low.err, /API review note: passed the \$0\.50 soft spend limit; not stopped/);
+    process.env[KEYNAME] = '9';
+    const clamp = await t.go(['--runner', 'sdk', '--max-usd', '0.8'], { sdk: script() });
+    assert.match(clamp.err, /api_review_soft_usd \$9\.00 is not below the hard stop \$0\.80; using \$0\.40/);
+    assert.match(clamp.err, /passed the \$0\.40 soft spend limit/, 'the clamped value is the one the engine uses');
+  } finally {
+    if (saved === undefined) delete process.env[KEYNAME]; else process.env[KEYNAME] = saved;
+    t.fx.cleanup();
+  }
 });

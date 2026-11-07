@@ -258,13 +258,13 @@ function usageFromApi(u) {
   };
 }
 
-// Same result shape and limits as runApi (soft: a note at 8 minutes and at $0.20; stops only a hung run, no message
+// Same result shape and limits as runApi (soft: a note at 8 minutes and at softUsd, $1.00; stops only a hung run, no message
 // for 10 minutes, and at the spend backstop maxUsd, 0 = none), plus `path: 'sdk'`. `sdkUnavailable: true` means the SDK could not be
 // installed or imported before anything was spent: the caller falls back to the fetch engine.
 // Never throws.
 export async function runApiSdk({
   prompt, model, effort = null, cwd = process.cwd(), category = 'review', meta = '', system = null,
-  maxUsd = DEFAULT_HARD_USD, softUsd = SOFT_USD, maxTurns = 30, requireVerdict = false,
+  maxUsd = DEFAULT_HARD_USD, softUsd = SOFT_USD, maxTurns = 30, requireVerdict = false, reviewId = null,
   hungMs = HUNG_MS, slowMs = SLOW_REVIEW_MS, logRow = null, sdkVersion = DEFAULT_SDK_VERSION, platform = process.platform,
   cfg = loadConfig(), env = process.env, now = Date.now(),
   sdk = null, load = loadSdk, userGuards = true, userConfigDir = null,
@@ -282,7 +282,7 @@ export async function runApiSdk({
   const bookCost = (ok, error = null) => {
     try {
       record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
-        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok,
+        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok, id: reviewId,
         detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'sdk', error: ok ? null : error, notes },
       });
     } catch (e) { ledgerFailed(`$${(usd - booked).toFixed(4)} not recorded`, e); }

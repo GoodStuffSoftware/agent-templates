@@ -9,10 +9,10 @@ import { writeFileSync, readFileSync, mkdirSync, readdirSync, statSync, existsSy
 import { join, dirname } from 'node:path';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
-  DEFAULT_SHARES, decide, record, recordFailure, status, summaryLine, cycleOf,
+  DEFAULT_SHARES, decide, record, recordFailure, recordFallback, reviewStats, summarizeReviews, reviewSummaryLine, status, summaryLine, cycleOf,
   keyConfigured, parseKeySource, parseShares,
 } from '../scripts/lib/api-credits.mjs';
-import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
+import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, softUsdFrom, reviewLimits, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
 import { main as reviewMain, buildPrompt, readProjectRules, fetchSystem, RULES_CAP } from '../scripts/api-review.mjs';
 import { main as creditsMain } from '../scripts/api-credits.mjs';
@@ -679,7 +679,7 @@ test('runner: only a hung run is stopped: no response for 10 minutes books what 
   } finally { t.fx.cleanup(); }
 });
 
-test('runner: a soft note at $0.20 (ledger and result), a long-runs row for the scout, and the run goes on and the run goes on; the backstop is api_review_hard_usd, 0 disables it', async () => {
+test('runner: a soft note at $1.00 (ledger and result), a long-runs row for the scout, and the run goes on and the run goes on; the backstop is api_review_hard_usd, 0 disables it', async () => {
   const t = rig();
   try {
     const big = { input_tokens: 400000, output_tokens: 10 }; // about $0.80 a turn on Sonnet
@@ -690,33 +690,33 @@ test('runner: a soft note at $0.20 (ledger and result), a long-runs row for the 
     assert.equal(f.calls.length, 4, 'nothing stopped it');
     assert.ok(r.usd > SOFT_USD);
     assert.equal(r.notes.filter((n) => /soft spend limit/.test(n)).length, 1, 'one note, not one per turn');
-    assert.match(t.ledger().entries[0].notes.join(' '), /passed the \$0\.20 soft spend limit; not stopped/);
+    assert.match(t.ledger().entries[0].notes.join(' '), /passed the \$1\.00 soft spend limit; not stopped/);
     assert.ok(!f.calls.some((c) => c.body.tool_choice), 'no forced final turn with the backstop off');
     const lr = join(t.fx.stateDir, 'state', 'long-runs.jsonl');
     const rows = readFileSync(lr, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     assert.equal(rows.length, 1, 'one row for the spend limit, not one per turn');
     assert.equal(rows[0].agentType, 'api-review');
-    assert.match(rows[0].description, /soft spend limit; not stopped: \$0\.\d\d after 1 turn/);
+    assert.match(rows[0].description, /soft spend limit; not stopped: \$1\.\d\d after 2 turn/);
     assert.ok(Number.isFinite(rows[0].steps));
-    // With the default $0.50 backstop the run is also left alone until 80% of it ($0.40).
+    // With the default $2.00 backstop the run is also left alone until 80% of it ($1.60).
     const mid = { input_tokens: 40000, output_tokens: 10 }; // about $0.08 a turn
     const g = stubFetch((k) => (k < 3 ? msg([toolUse(`m${k}`, 'glob', { pattern: '*' })], mid, 'tool_use') : msg([text(`VERDICT: PASS${NL}ok`)], mid)));
     const r2 = await direct(t, g, { requireVerdict: true });
     assert.equal(r2.ok, true, r2.reason);
     assert.ok(!g.calls.some((c) => c.body.tool_choice), 'under 80% of the backstop: no forced final turn');
-    assert.equal(DEFAULT_HARD_USD, 0.5);
-    assert.equal(SOFT_USD, 0.2);
+    assert.equal(DEFAULT_HARD_USD, 2);
+    assert.equal(SOFT_USD, 1);
   } finally { t.fx.cleanup(); }
 });
 
 test('hardUsdFrom: the option value, 0 disables, junk and negatives take the default', () => {
-  assert.equal(hardUsdFrom(''), 0.5);
-  assert.equal(hardUsdFrom(undefined), 0.5);
+  assert.equal(hardUsdFrom(''), 2);
+  assert.equal(hardUsdFrom(undefined), 2);
   assert.equal(hardUsdFrom('3'), 3);
   assert.equal(hardUsdFrom(0), 0);
   assert.equal(hardUsdFrom('0'), 0);
-  assert.equal(hardUsdFrom(-1), 0.5);
-  assert.equal(hardUsdFrom('abc'), 0.5);
+  assert.equal(hardUsdFrom(-1), 2);
+  assert.equal(hardUsdFrom('abc'), 2);
 });
 
 test('runner effort: the routed effort rides in output_config.effort on every request; none, none sent', async () => {
@@ -891,4 +891,150 @@ test('readProjectRules / fetchSystem: the project CLAUDE.md files are inlined un
     assert.match(cut, /\.claude\/claude\.md left out: the 10-character cap/);
     assert.ok(cut.includes('# Root rul') && !cut.includes('Use tabs'));
   } finally { fx.cleanup(); }
+});
+
+// --- 0.31.48: limits from the measured range, fallbacks recorded, real-review count ----------------------------
+
+const withOpts = async (opts, fn) => {
+  const keys = Object.keys(opts).map((k) => `CLAUDE_PLUGIN_OPTION_${k.toUpperCase()}`);
+  const saved = keys.map((k) => process.env[k]);
+  Object.entries(opts).forEach(([k, v]) => { process.env[`CLAUDE_PLUGIN_OPTION_${k.toUpperCase()}`] = String(v); });
+  try { return await fn(); } finally { keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; }); }
+};
+const ledgerEntriesAt = (path) => Object.values(JSON.parse(readFileSync(path, 'utf8')).cycles).flatMap((c) => c.entries);
+
+test('limits: soft note $1.00 and hard stop $2.00 by default; the options override; the plugin.json defaults agree', () => {
+  assert.equal(SOFT_USD, 1);
+  assert.equal(DEFAULT_HARD_USD, 2);
+  assert.equal(softUsdFrom(''), 1);
+  assert.equal(softUsdFrom(undefined), 1);
+  assert.equal(softUsdFrom('0.4'), 0.4);
+  assert.equal(softUsdFrom(0), 1, '0 is not a soft limit; the default stands');
+  assert.equal(softUsdFrom(-2), 1);
+  assert.equal(softUsdFrom('abc'), 1);
+  assert.deepEqual(reviewLimits({}), { softUsd: 1, maxUsd: 2, clamped: null });
+  assert.deepEqual(reviewLimits({ softRaw: '0.5', hardRaw: '3' }), { softUsd: 0.5, maxUsd: 3, clamped: null });
+  assert.equal(reviewLimits({ hardRaw: '0' }).maxUsd, 0, '0 still disables the hard stop');
+  assert.equal(reviewLimits({ softRaw: '5', hardRaw: '0' }).softUsd, 5, 'no hard stop: nothing to clamp against');
+  assert.equal(reviewLimits({ softRaw: '0.5', hardRaw: '3', maxUsdFlag: '0.8' }).maxUsd, 0.8, '--max-usd wins over the hard option');
+  const manifest = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
+  const opts = manifest.userConfig || manifest.options;
+  assert.equal(opts.api_review_soft_usd.default, SOFT_USD);
+  assert.equal(opts.api_review_hard_usd.default, DEFAULT_HARD_USD);
+});
+
+test('limits: a soft note not below the hard stop is clamped to half of it, once, on stderr', async () => {
+  assert.deepEqual(reviewLimits({ softRaw: '3', hardRaw: '2' }), { softUsd: 1, maxUsd: 2, clamped: 'api_review_soft_usd $3.00 is not below the hard stop $2.00; using $1.00' });
+  assert.equal(reviewLimits({ softRaw: '2', hardRaw: '2' }).softUsd, 1, 'equal is not below');
+  assert.equal(reviewLimits({ softRaw: '1', maxUsdFlag: '0.6' }).softUsd, 0.3, 'against --max-usd too');
+  const t = rig();
+  try {
+    const r = await withOpts({ api_review_soft_usd: 5 }, () => t.run(stubFetch([msg([text(`VERDICT: PASS${NL}ok`)])])));
+    assert.equal(r.code, 0, r.out);
+    assert.equal(r.err.split('\n').filter((l) => /not below the hard stop/.test(l)).length, 1);
+    assert.match(r.err, /API review note: api_review_soft_usd \$5\.00 is not below the hard stop \$2\.00; using \$1\.00/);
+    const quiet = await t.run(stubFetch([msg([text(`VERDICT: PASS${NL}ok`)])]));
+    assert.doesNotMatch(quiet.err, /not below/);
+  } finally { t.fx.cleanup(); }
+});
+
+test('limits: the fetch engine takes the soft note from api_review_soft_usd', async () => {
+  const t = rig();
+  try {
+    const turn = { input_tokens: 150000, output_tokens: 10 }; // about $0.30 on Sonnet
+    const last = () => stubFetch([msg([text(`VERDICT: PASS${NL}ok`)], turn)]);
+    const dflt = await t.run(last());
+    assert.equal(dflt.code, 0, dflt.out);
+    assert.doesNotMatch(dflt.err, /soft spend limit/, 'under the default $1.00: no note');
+    const low = await withOpts({ api_review_soft_usd: 0.2 }, () => t.run(last()));
+    assert.equal(low.code, 0, low.out);
+    assert.match(low.err, /API review note: passed the \$0\.20 soft spend limit; not stopped/);
+    assert.match(low.out, /\(review path: API credits, fetch, .*passed the \$0\.20 soft spend limit; not stopped\)$/);
+  } finally { t.fx.cleanup(); }
+});
+
+test('record-fallback: a failed review prints its id; the command marks that ledger entry; unknown ids and re-marking are handled', async () => {
+  const t = rig();
+  try {
+    const f = stubFetch([msg([text('no verdict here')])]);
+    const r = await t.run(f);
+    assert.equal(r.code, 4);
+    const m = /^API review failed: .* \(review id: (rv-[0-9a-f]{8})\)$/.exec(r.out);
+    assert.ok(m, r.out);
+    const id = m[1];
+    assert.equal(t.ledger().entries.at(-1).id, id);
+    assert.equal(t.ledger().entries.at(-1).fallback, undefined);
+    const lines = [];
+    assert.equal(await creditsMain(['record-fallback', id, '--reason', 'no', 'verdict line'], { out: (s) => lines.push(s), cfg: CFG }), 0, lines.join('\n'));
+    assert.match(lines[0], new RegExp(`^fallback recorded for review ${id} `));
+    const e = t.ledger().entries.at(-1);
+    assert.equal(e.fallback.reason, 'no verdict line');
+    assert.ok(Number.isFinite(Date.parse(e.fallback.t)));
+    assert.equal(t.ledger().entries.length, 1, 'no new entry');
+    const again = [];
+    assert.equal(await creditsMain(['record-fallback', id], { out: (s) => again.push(s), cfg: CFG }), 0);
+    assert.match(again[0], /already marked/);
+    assert.equal(t.ledger().entries.at(-1).fallback.reason, 'no verdict line', 'a repeat without a reason keeps the first one');
+    const none = [];
+    assert.equal(await creditsMain(['record-fallback', 'rv-00000000'], { out: (s) => none.push(s), cfg: CFG }), 1);
+    assert.match(none[0], /no review with id rv-00000000/);
+    assert.equal(await creditsMain(['record-fallback'], { out: () => {}, cfg: CFG }), 2);
+    const ok = await t.run(stubFetch([msg([text(`VERDICT: PASS${NL}ok`)])])); // a good run prints no id: nothing to fall back from
+    assert.doesNotMatch(ok.out, /review id/);
+  } finally { t.fx.cleanup(); }
+});
+
+test('self-review protocol: the API path tells the writer to run record-fallback with the review id before the plan reviewer', () => {
+  const block = selfReviewBlock({ model: 'sonnet', effort: 'high', agent: 'ac-sonnet-high' });
+  assert.match(block, /\(review id: <id>\)/);
+  assert.match(block, /api-credits\.mjs" record-fallback <id> --reason "<why>"/);
+});
+
+test('real-review count: probe and measure rows are left out; stopped and fallen-back reviews are counted with their spend', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const NOWT = T('2026-11-16T10:00:00Z');
+    const put = (usd, meta, extra = {}) => record('review', usd, meta, { now: NOWT, cfg: CFG, path, ...extra });
+    put(0.0003, 'probe ok');
+    put(0.01, 'probe partial', { success: false });
+    put(0.002, 'measure ok');
+    put(0.2, 'measure ok');
+    put(0.4, 'review a..b ok', { id: 'rv-aaaaaaaa', detail: { path: 'sdk' } });
+    put(0.6, 'review c..d ok', { id: 'rv-bbbbbbbb', detail: { path: 'sdk' } });
+    put(1.0, 'review e..f ok', { id: 'rv-cccccccc', detail: { path: 'sdk' } });
+    put(0.5, 'review g..h partial', { success: false, id: 'rv-dddddddd', detail: { path: 'sdk', error: 'the review reached its spend backstop' } });
+    const s0 = summarizeReviews(ledgerEntriesAt(path));
+    assert.equal(s0.n, 4, 'probes and measure runs are not reviews');
+    assert.ok(Math.abs(s0.usd - 2.5) < 1e-9);
+    assert.ok(Math.abs(s0.median - 0.55) < 1e-9, 'median of 0.4 0.5 0.6 1.0');
+    assert.equal(s0.stopped, 1);
+    assert.equal(s0.fellBack, 0);
+    assert.equal(s0.lost, 1);
+    assert.equal(recordFallback('rv-cccccccc', 'redone', { now: NOWT, cfg: CFG, path }).found, true);
+    assert.equal(recordFallback('rv-dddddddd', 'plan reviewer', { now: NOWT, cfg: CFG, path }).found, true);
+    const s = summarizeReviews(ledgerEntriesAt(path));
+    assert.equal(s.n, 4);
+    assert.equal(s.stopped, 1);
+    assert.equal(s.fellBack, 2);
+    assert.equal(s.lost, 2, 'the stopped one that fell back counts once');
+    assert.ok(Math.abs(s.lostUsd - 1.5) < 1e-9);
+    assert.match(reviewSummaryLine(s), /^4 real reviews \(\$2\.50\), median \$0\.55; 2 stopped or fell back to a plan review \(\$1\.50 spent on them\)$/);
+    assert.match(status({ now: NOWT, cfg: CFG, path }).text, /real reviews this cycle: 4 real reviews \(\$2\.50\)/);
+    assert.equal(reviewStats({ path, since: NOWT + 1 }).n, 0, 'the window filters');
+    assert.equal(reviewStats({ path, since: NOWT, until: NOWT + 1 }).n, 4);
+    assert.equal(summarizeReviews([]).median, 0);
+  } finally { fx.cleanup(); }
+});
+
+test('CLI: api-credits reviews counts real reviews only', async () => {
+  const t = rig();
+  try {
+    record('review', 0.0003, 'probe ok', { cfg: CFG });
+    record('review', 0.7, 'review x..y ok', { cfg: CFG });
+    const lines = [];
+    assert.equal(await creditsMain(['reviews'], { out: (s) => lines.push(s), cfg: CFG }), 0);
+    assert.match(lines[0], /^1 real review \(\$0\.70\), median \$0\.70; 0 stopped or fell back/);
+    assert.equal(await creditsMain(['reviews', '--since', 'nonsense'], { out: () => {}, cfg: CFG }), 2);
+  } finally { t.fx.cleanup(); }
 });

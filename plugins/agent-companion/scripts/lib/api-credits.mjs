@@ -202,7 +202,7 @@ export function decide(category, { now = Date.now(), cfg = loadConfig(), path = 
 
 // --- record ----------------------------------------------------------------------------
 
-export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null, alreadyBooked = 0, count = true } = {}) {
+export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null, alreadyBooked = 0, count = true, id = null } = {}) {
   if (!CATEGORIES.includes(category)) throw new Error(`unknown category "${category}"`);
   const n = Number(usd);
   if (!Number.isFinite(n) || n < 0) throw new Error('usd must be a non-negative number');
@@ -210,7 +210,7 @@ export function record(category, usd, meta = '', { now = Date.now(), cfg = loadC
     c.spent[category] = (c.spent[category] || 0) + n - (Number(alreadyBooked) || 0);
     if (count) c.n[category] = (c.n[category] || 0) + 1;
     c.entries.push({
-      t: new Date(now).toISOString(), cat: category, usd: n, meta: String(meta).slice(0, 200),
+      ...(id ? { id: String(id).slice(0, 40) } : {}), t: new Date(now).toISOString(), cat: category, usd: n, meta: String(meta).slice(0, 200),
       ...(detail ? { project: String(detail.project || '').slice(0, 80), model: String(detail.model || '').slice(0, 80), tokens: detail.tokens || null, turns: detail.turns ?? null, ...(detail.path ? { path: String(detail.path).slice(0, 20) } : {}), ...(detail.error ? { error: String(detail.error).slice(0, 200) } : {}), ...(Array.isArray(detail.notes) && detail.notes.length ? { notes: detail.notes.slice(0, 5).map((x) => String(x).slice(0, 120)) } : {}) } : {}),
     });
     if (c.entries.length > MAX_ENTRIES) c.entries.splice(0, c.entries.length - MAX_ENTRIES);
@@ -225,6 +225,55 @@ export function recordSpend(category, usd, { now = Date.now(), cfg = loadConfig(
   const n = Number(usd);
   if (!CATEGORIES.includes(category) || !Number.isFinite(n) || n <= 0) return;
   mutate(now, cfg, path, (c) => { c.spent[category] = (c.spent[category] || 0) + n; });
+}
+
+// A review that ended partial, failed or stopped and was redone as a plan review: marks its ledger entry (looked up by the id
+// api-review.mjs printed) so the spend on it counts as double-spent. Idempotent; the reason of the first call stands unless a
+// later one brings a new one. Returns { found, already, usd }.
+export function recordFallback(id, reason = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath() } = {}) {
+  const want = String(id || '').trim();
+  if (!want) throw new Error('a review id is required');
+  return mutate(now, cfg, path, (c, cy, led) => {
+    for (const cyc of Object.values(led.cycles)) {
+      const e = (cyc.entries || []).find((x) => x && x.id === want);
+      if (!e) continue;
+      const already = !!e.fallback;
+      const why = String(reason || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+      if (!already || why) e.fallback = { t: new Date(now).toISOString(), reason: why || 'unspecified' };
+      return { found: true, already, usd: Number(e.usd) || 0 };
+    }
+    return { found: false, already: false, usd: 0 };
+  });
+}
+
+// --- review statistics -------------------------------------------------------------------------
+
+// A real review: a review-category entry that is not a probe or a measure run.
+export const isRealReview = (e) => !!e && e.cat === 'review' && !/^(?:probe|measure)\b/i.test(String(e.meta || '').trim());
+const median = (xs) => { if (!xs.length) return 0; const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const wasStopped = (e) => !!e.error || /\bpartial$/.test(String(e.meta || ''));
+
+// Count real reviews in a list of ledger entries: n, spend, median cost, and how many were stopped (ended partial or failed) or
+// fell back to a plan review (marked by record-fallback), with the spend on those.
+export function summarizeReviews(entries) {
+  const real = (entries || []).filter(isRealReview);
+  const lost = real.filter((e) => wasStopped(e) || e.fallback);
+  return {
+    n: real.length, usd: real.reduce((a, e) => a + (Number(e.usd) || 0), 0), median: median(real.map((e) => Number(e.usd) || 0)),
+    stopped: real.filter(wasStopped).length, fellBack: real.filter((e) => e.fallback).length,
+    lost: lost.length, lostUsd: lost.reduce((a, e) => a + (Number(e.usd) || 0), 0),
+  };
+}
+
+export function reviewSummaryLine(s) {
+  return `${s.n} real review${s.n === 1 ? '' : 's'} ($${s.usd.toFixed(2)}), median $${s.median.toFixed(2)}; ${s.lost} stopped or fell back to a plan review ($${s.lostUsd.toFixed(2)} spent on them)`;
+}
+
+// Real-review statistics over the whole kept ledger, optionally from `since` (ms) up to `until` (ms, exclusive).
+export function reviewStats({ since = null, until = null, path = ledgerPath() } = {}) {
+  const all = [];
+  for (const c of Object.values(readLedger(path).cycles)) all.push(...(c.entries || []));
+  return summarizeReviews(all.filter((e) => { const t = Date.parse(e.t); return (since === null || t >= since) && (until === null || t < until); }));
 }
 
 // A billing or auth failure of an API run. Two in a row trip the breaker for the cycle; a hard
@@ -254,6 +303,7 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
     const pace = (sh[k] || 0) * cfg.budget * cy.frac;
     lines.push(`${k.padEnd(9)} spent $${(c.spent[k] || 0).toFixed(2)} in ${c.n[k] || 0} item(s); share ${(sh[k] * 100).toFixed(0)}% = $${(sh[k] * cfg.budget).toFixed(2)}; paced allowance now $${pace.toFixed(2)}`);
   }
+  if (!unreadable) lines.push(`real reviews this cycle: ${reviewSummaryLine(summarizeReviews(c.entries))}`);
   lines.push(`total spent $${total.toFixed(2)} of $${cfg.budget}; left $${(cfg.budget - total).toFixed(2)} (reserve $${((sh.reserve || 0) * cfg.budget).toFixed(2)})`);
   if (c.tripped) lines.push(`BREAKER TRIPPED ${c.tripped.at}: ${c.tripped.reason}; decide answers plan until the cycle ends or a probe succeeds`);
   else if (c.fails) lines.push(`${c.fails} billing/auth failure(s) in a row (trips at ${TRIP_AFTER})`);

@@ -16,8 +16,10 @@
 //      workspace id): the writer spawns the plan reviewer subagent at once. Two in a row make
 //      `api-credits.mjs decide review` answer plan for the rest of the cycle.
 //   4  "API review failed: <reason>" (anything else, including a hung run (no message or tool result for 10 minutes), the
-//      spend backstop (api_review_hard_usd, $0.50; 0 = none) and a brief file that holds only a path): same fallback.
-// Limits are soft: a review that runs past 8 minutes is logged to long-runs.jsonl and continues; one that passes $0.20 gets a
+//      spend backstop (api_review_hard_usd, $2.00; 0 = none) and a brief file that holds only a path): same fallback. The message
+//      ends with `(review id: rv-...)` when the run was booked: after a fallback to the plan reviewer, the writer runs
+//      `api-credits.mjs record-fallback <review id> --reason <r>` so the weekly report can count the double-spent review.
+// Limits are soft: a review that runs past 8 minutes is logged to long-runs.jsonl and continues; one that passes api_review_soft_usd ($1.00) gets a
 // note (stderr, the review-path label and the ledger entry) and continues. Each paid turn is booked in the ledger as it
 // completes. Run it in the background (run_in_background) and wait for its notification: a foreground Bash call is cut at
 // 10 minutes and a review can outlast that.
@@ -26,11 +28,12 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { isMain } from './lib/is-main.mjs';
 import { execFileSyncHidden } from './lib/proc.mjs';
 import { opt } from '../hooks/lib/context.mjs';
 import { REVIEW_INSTRUCTION as INSTRUCTION } from '../hooks/lib/self-review.mjs';
-import { runApi, REVIEW_SYSTEM, hardUsdFrom, EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE, EXIT_FAILED } from './lib/api-run.mjs';
+import { runApi, REVIEW_SYSTEM, reviewLimits, EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE, EXIT_FAILED } from './lib/api-run.mjs';
 import { runApiSdk, DEFAULT_SDK_VERSION } from './lib/api-sdk-run.mjs';
 
 const DIFF_CAP = 150000;
@@ -39,7 +42,7 @@ const BRIEF_CAP = 60000;
 // SDK's project settings). Cap: 20,000 characters in all, about 8K tokens (prose runs about 2.4 characters per token). A
 // CLAUDE.md is meant to stay under about 200 lines, roughly 8-10K characters, so a normal one fits whole; the cap bounds what
 // one review pays for them: about two cents on Sonnet on a cold cache (first turn), a fraction of a cent per later turn, against a
-// $0.20 soft limit. A file that does not fit is cut, with a note saying how much was left out. The fetch engine runs no hooks: its
+// $1.00 soft limit. A file that does not fit is cut, with a note saying how much was left out. The fetch engine runs no hooks: its
 // guard coverage is the tool allow-list in lib/api-tools.mjs (read_file, grep, glob, confined to the repository) and nothing else.
 export const RULES_CAP = 20000;
 const norm = (p) => p.split('\\').join('/').toLowerCase();
@@ -158,14 +161,17 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   try { d = gitDiff(o.cwd, o['diff-ref']); } catch (e) { out(`API review failed: cannot read the diff ${o['diff-ref']} in ${o.cwd}`); return EXIT_FAILED; }
   const runner = chooseRunner({ flag: o.runner, option: opt('api_review_runner', ''), brief });
   const meta = `review ${o['diff-ref']}`.slice(0, 120);
-  // The one hard spend backstop (0 = none); --max-usd takes precedence over the option for this review.
-  const maxUsd = o['max-usd'] ? Number(o['max-usd']) : hardUsdFrom(opt('api_review_hard_usd', ''));
+  // The soft note and the one hard spend backstop (0 = none); --max-usd takes precedence over the hard option for this review.
+  // A soft note that is not below an active backstop is clamped, and said so once.
+  const { softUsd, maxUsd, clamped } = reviewLimits({ softRaw: opt('api_review_soft_usd', ''), hardRaw: opt('api_review_hard_usd', ''), maxUsdFlag: o['max-usd'] });
+  if (clamped) err(`API review note: ${clamped}`);
+  const reviewId = `rv-${randomUUID().slice(0, 8)}`; // the ledger entry's id, for api-credits.mjs record-fallback
   let r = null;
   if (runner === 'sdk') {
     r = await runApiSdk({
       prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, shell: true, ...d }),
       model: o.model, effort: o.effort || null, cwd: o.cwd, category: 'review', meta,
-      maxUsd,
+      maxUsd, softUsd, reviewId,
       ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),
       sdkVersion: String(opt('api_sdk_version', DEFAULT_SDK_VERSION)),
       userGuards: opt('api_review_user_guards', true),
@@ -178,7 +184,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, ...d }),
     system: fetchSystem(REVIEW_SYSTEM, readProjectRules(o.cwd)),
     model: o.model, effort: o.effort || null, cwd: o.cwd, category: 'review', meta,
-    maxUsd,
+    maxUsd, softUsd, reviewId,
     ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),
     ...(o['max-tokens'] ? { maxTokens: Number(o['max-tokens']) } : {}),
     requireVerdict: true, ...(clock ? { clock } : {}),
@@ -188,7 +194,8 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   if (r.ledgerError) err(r.ledgerError); // the spend is not in the ledger: say so
   for (const n of r.notes || []) err(`API review note: ${n}`);
   if (!r.ok) {
-    out(r.unavailable ? `API review unavailable: ${r.reason}` : `API review failed: ${r.reason}`);
+    const idNote = r.ledgerError ? '' : ` (review id: ${reviewId})`; // no ledger entry, no id to record a fallback against
+    out(r.unavailable ? `API review unavailable: ${r.reason}${idNote}` : `API review failed: ${r.reason}${idNote}`);
     return r.unavailable ? EXIT_UNAVAILABLE : EXIT_FAILED;
   }
   const text = `${r.text}\n\n(review path: API credits, ${r.path || runner}, ${r.model}, ${r.turns} turn${r.turns === 1 ? '' : 's'}, $${r.usd.toFixed(2)}${(r.notes || []).length ? `; ${r.notes.join('; ')}` : ''}${r.ledgerError ? `; ${r.ledgerError}` : ''})`;
