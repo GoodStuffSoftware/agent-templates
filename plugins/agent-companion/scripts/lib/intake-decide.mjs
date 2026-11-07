@@ -279,10 +279,29 @@ export function decisionsMarkdown(decisions, nowIso) {
   return L.join('\n');
 }
 
+export const DECISIONS_KEEP = 60;
+
+// The file is cumulative: each run's drafts go on top and the sections of earlier runs stay
+// below (a version in this run replaces its old section), so a release decided on an earlier
+// day is never erased by a later run. At most DECISIONS_KEEP sections are kept.
+export function mergeDecisionsMarkdown(previous, decisions, nowIso) {
+  const fresh = decisionsMarkdown(decisions, nowIso);
+  const have = new Set(decisions.map((d) => d.version));
+  const older = String(previous || '').split(/^(?=## \d+\.\d+\.\d+: )/m)
+    .filter((b) => /^## \d+\.\d+\.\d+: /.test(b))
+    .filter((b) => !have.has(/^## (\d+\.\d+\.\d+): /.exec(b)[1]));
+  const sections = fresh.split(/^(?=## \d+\.\d+\.\d+: )/m);
+  const head = sections.filter((b) => !/^## \d+\.\d+\.\d+: /.test(b)).join('');
+  const mine = sections.filter((b) => /^## \d+\.\d+\.\d+: /.test(b));
+  return head + [...mine, ...older].slice(0, DECISIONS_KEEP).map((b) => (b.endsWith('\n') ? b : `${b}\n`)).join('');
+}
+
 export function writeDecisionsFile(file, decisions, nowIso) {
   try {
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, decisionsMarkdown(decisions, nowIso));
+    let previous = '';
+    try { previous = existsSync(file) ? readFileSync(file, 'utf8') : ''; } catch { /* start fresh */ }
+    writeFileSync(file, mergeDecisionsMarkdown(previous, decisions, nowIso));
     return true;
   } catch { return false; }
 }

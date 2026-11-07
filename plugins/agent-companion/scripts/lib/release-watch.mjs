@@ -121,6 +121,30 @@ export function newestVersion(releases) {
   return best;
 }
 
+// The floor a check keeps releases above. Triage covers every release since the last one
+// decided, not only those newer than the installed version: once the machine upgrades past a
+// release nobody triaged, that release must stay queued. The floor is the LOWER of the
+// installed version and the highest decided one (no decision yet: the installed version, so a
+// first run does not queue the whole changelog).
+export function triageFloor(state, installed) {
+  let hi = null;
+  for (const v of Array.isArray(state && state.decided) ? state.decided : []) {
+    if (parseSemver(v) && (!hi || compareVersions(v, hi) === 1)) hi = v;
+  }
+  return hi && compareVersions(hi, installed) === -1 ? hi : installed;
+}
+
+// Releases stored by an earlier check that no decision covers yet, kept across checks so an
+// upgrade or a gap in the decided list never drops one.
+function keepUndecided(state, fresh) {
+  const decided = new Set(Array.isArray(state.decided) ? state.decided : []);
+  const byVersion = new Map((fresh || []).map((r) => [r.version, r]));
+  for (const r of Array.isArray(state.releases) ? state.releases : []) {
+    if (r && r.version && !decided.has(r.version) && !byVersion.has(r.version)) byVersion.set(r.version, r);
+  }
+  return [...byVersion.values()].sort((a, b) => compareVersions(b.version, a.version)).slice(0, MAX_RELEASES_KEPT);
+}
+
 // --- state ----------------------------------------------------------------
 
 export function readState(file) {
@@ -274,7 +298,7 @@ export async function runReleaseWatch({
         state.installedAtCheck = inst;
         state.source = source;
         state.checkedAt = state.lastAttemptAt;
-        state.releases = newerMatching(parsed, inst);
+        state.releases = keepUndecided(state, newerMatching(parsed, triageFloor(state, inst)));
         notify(parsed);
       } else if (!state.lastOk) {
         // The fetch failed: fall back to the changelog Claude Code caches. It
@@ -284,7 +308,7 @@ export async function runReleaseWatch({
         const local = readLocalChangelog(claudeDirPath);
         const lp = local ? parseChangelog(local) : [];
         if (lp.length) notify(lp);
-        const lnewer = newerMatching(lp, inst);
+        const lnewer = newerMatching(lp, triageFloor(state, inst));
         if (lnewer.length) {
           const byVersion = new Map();
           for (const r of Array.isArray(state.releases) ? state.releases : []) if (r && r.version) byVersion.set(r.version, r);
@@ -364,11 +388,13 @@ export function readPending(stateFilePath, runningVersion) {
 // decide step (scripts/intake-decide.mjs) wrote a finding for the release, or
 // found nothing in it that touches this plugin. The two are independent.
 
-// Releases newer than `installed`, with at least one topic item, not yet decided.
-export function undecidedOf(state, installed) {
+// Stored releases with at least one topic item, not yet decided. The installed version does not
+// cut the list: a release the machine has already upgraded past still needs its decision.
+// (`_installed` is kept for callers; it is not used.)
+export function undecidedOf(state, _installed) {
   const decided = new Set(Array.isArray(state.decided) ? state.decided : []);
   return (Array.isArray(state.releases) ? state.releases : [])
-    .filter((r) => r && compareVersions(r.version, installed) === 1 && !decided.has(r.version)
+    .filter((r) => r && r.version && !decided.has(r.version)
       && Array.isArray(r.items) && r.items.length > 0)
     .sort((a, b) => compareVersions(b.version, a.version));
 }
