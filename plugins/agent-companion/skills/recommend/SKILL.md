@@ -35,7 +35,7 @@ Config v8 (updated 2026-10-13). **Premium** = the spawn brief needs a `WARRANT:`
 
 | Task type | Route | Premium | What it is |
 |---|---|---|---|
-| `explore` | `haiku/medium` (routing trial, review by 2026-10-16) | no | legacy bimodal type (excludes multi-hop research, that is the research type); prefer lookup for a single fact or list, survey for multi-source reading. Its Haiku trial row and register decision are reviewed 2026-10-19 |
+| `explore` | `haiku/medium` (routing trial) | no | legacy bimodal type (excludes multi-hop research, that is the research type); prefer lookup for a single fact or list, survey for multi-source reading. Its Haiku trial row and register decision are reviewed 2026-10-19 |
 | `research` | `sonnet/medium` | no | multi-source investigation: read, cross-reference and synthesise across files or sources; more than locate-and-report |
 | `lookup` | `haiku/medium` | no | a single fact or list: where is X, does Z exist; about 12 requests or fewer, no judgement |
 | `survey` | `sonnet/medium` | no | multi-source read and synthesis, roughly 25-60 requests, one summary back; promote to sonnet/high on a snag |
@@ -44,12 +44,12 @@ Config v8 (updated 2026-10-13). **Premium** = the spawn brief needs a `WARRANT:`
 | `bounded-feature` | `sonnet/high` (routing trial) | no | a feature against a clear spec, 1-3 files, known shape |
 | `integration` | `sonnet/high` (routing trial) | no | multi-file, cross-referencing, touches shared config or things other agents depend on |
 | `debug-root-cause` | `opus/medium` (routing trial) | yes | a specific failure, unexplained regression, flaky test - the answer exists and must be found |
-| `large-refactor` | `opus/high` (routing trial, review by 2026-10-30) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
+| `large-refactor` | `opus/high` (routing trial) | yes | large-scale refactor across a module or subsystem; the target shape is known, the surface is wide |
 | `novel-design` | `opus/xhigh` (routing trial) | yes | a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape |
 | `critical-change` | `opus/xhigh` | yes | production data, migrations, destructive ops, auth, billing, secrets - regardless of size |
 | `code-review` | writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's | as writer (opus if critical or fable) | adversarial review of a diff; sized to the writer it gates |
-| `long-autonomous-run` | `opus/high` (routing trial, review by 2026-10-30) | yes | an agent session expected to run for hours with minimal supervision |
-| `subagent-worker` | `sonnet/low` (routing trial, review by 2026-10-30) | no | a delegated worker doing a bounded, well-specified piece of a larger task; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
+| `long-autonomous-run` | `opus/high` (routing trial) | yes | an agent session expected to run for hours with minimal supervision |
+| `subagent-worker` | `sonnet/low` (routing trial) | no | a delegated worker doing a bounded, well-specified piece of a larger task; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself |
 | `verify` | `sonnet/low` (routing trial) | no | confirm a claim against reality: read a file, check a value, take a screenshot, does X exist/match Y — reports back, changes nothing |
 | `operate` | `sonnet/low` (routing trial) | no | execute an ordered procedure or change a live system — even when every individual step looks trivial in isolation |
 
