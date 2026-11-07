@@ -572,7 +572,7 @@ contend for a lock.
 | `deny_chars` | number \| absent | `deny` only: characters of the denial text the model received (the cost side of `est_chars_avoided`) |
 | `age_ms` | number \| absent | `deny`, `allow` (repeat-eligible) and `retry-ran`: the time since the file's original read was recorded |
 | `deny_at` | ISO 8601 string \| absent | `retry-ran` only: when the denial that was retried happened |
-| `allow_reason` | string \| absent | `allow` only: `builtin-last` (the exact repeat of the last read, left to the built-in stub), `aged` (the record outlived the age cap), `uncovered` (the lines were not all in earlier reads), `small` (under the size threshold) |
+| `allow_reason` | string \| absent | `allow` only: `aged` (the record outlived the age cap), `uncovered` (the lines were not all in earlier reads), `small` (under the size threshold). Rows written before 0.31.48 may also carry `builtin-last` (the exact repeat of the last read, then left to Claude Code's own stub, removed in 2.1.317) |
 | `read_index` | number \| absent | how many Reads this agent had made in the session, counting this one: how deep into its session the event fell (the PreToolUse count, so absent on `post`, `invalidate` and `reset` rows) |
 | `lock_wait_ms` | number | time spent waiting for the state lock |
 | `duration_ms` | number | wall time of the hook, process start to the row |

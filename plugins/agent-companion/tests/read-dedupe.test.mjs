@@ -104,7 +104,7 @@ test('decide: a change of ctime alone (same size, same mtime) clears the record'
 test('decide: an allowed repeat-eligible read says why; a first read says nothing; retry carries the deny time and the record age', () => {
   const s = blank();
   assert.equal(unitRead(s, { offset: 1, limit: 400 }, { now: 1000 }).why, undefined, 'first read is not repeat-eligible');
-  assert.equal(unitRead(s, { offset: 1, limit: 400 }, { now: 2000 }).why, 'builtin-last');
+  assert.equal(unitRead(s, { offset: 1, limit: 400 }, { now: 2000 }).action, 'deny', 'the exact repeat is denied (Claude Code 2.1.317 removed its own stub)');
   assert.equal(unitRead(s, { offset: 380, limit: 100 }, { now: 3000 }).why, 'uncovered');
   const d = unitRead(s, { offset: 100, limit: 100 }, { now: 4000 });
   assert.equal(d.action, 'deny');
@@ -239,13 +239,12 @@ test('hook: a range inside an earlier, larger read is denied with the exact text
   assert.equal(r.pre.json.hookSpecificOutput.hookEventName, 'PreToolUse');
 }));
 
-test('hook: A, then B, then A again is denied (the built-in keeps only the last range)', () => withFx((fx) => {
+test('hook: A, then B, then A again is denied (the old built-in kept only the last range)', () => withFx((fx) => {
   const f = makeFile(fx, 'big.txt', 500);
   const a = new Agent(fx, session());
   assert.equal(a.read(f, 1, 100).denied, false);
   assert.equal(a.read(f, 300, 100).denied, false);
   assert.equal(a.read(f, 1, 100).denied, true);
-  // B's exact repeat is still the last READ that ran, so the built-in's; a part of it is ours.
   assert.equal(a.read(f, 310, 50).denied, true);
 }));
 
@@ -257,12 +256,34 @@ test('hook: two adjacent reads cover a range spanning both', () => withFx((fx) =
   assert.equal(a.read(f, 150, 100).denied, false, 'not fully covered');
 }));
 
-test('hook: the exact repeat of the last read is left to the built-in stub', () => withFx((fx) => {
+test('hook: the exact repeat of the last read is denied by the hook itself (Claude Code 2.1.317 dropped its stub), and the same call repeated runs', () => withFx((fx) => {
   const f = makeFile(fx, 'big.txt', 500);
   const a = new Agent(fx, session());
   a.read(f, 1, 100);
-  const pre = a.pre(f, 1, 100);
-  assert.equal(pre.json, null, 'no output: the built-in answers it');
+  const r = a.read(f, 1, 100);
+  assert.equal(r.denied, true);
+  assert.match(r.reason, /lines 1-100/);
+  assert.equal(a.read(f, 1, 100).denied, false, 'a denied request, repeated, runs');
+}));
+
+test('hook: an exact repeat is denied for a whole-file read and for a partial read, and runs once the file changed', () => withFx((fx) => {
+  const f = makeFile(fx, 'big.txt', 500);
+  const a = new Agent(fx, session());
+  a.read(f);
+  assert.equal(a.read(f).denied, true, 'whole file, exact repeat');
+  assert.equal(a.read(f).denied, false, 'retry runs');
+  const g = makeFile(fx, 'part.txt', 500);
+  a.read(g, 200, 120);
+  assert.equal(a.read(g, 200, 120).denied, true, 'partial read, exact repeat');
+  assert.equal(a.read(g, 200, 121).denied, false, 'one line more than was read is not covered');
+  assert.equal(a.read(g, 190, 120).denied, false, 'a shifted window is not covered');
+  // The file changes between reads (new content, new size): the repeat runs.
+  const h = makeFile(fx, 'changed.txt', 500);
+  a.read(h, 1, 100);
+  writeFileSync(h, readFileSync(h, 'utf8') + 'more\n');
+  const t = new Date(Date.now() + 5000);
+  utimesSync(h, t, t);
+  assert.equal(a.read(h, 1, 100).denied, false, 'changed file: the repeat runs');
 }));
 
 test('hook: no offset or limit means the whole file, clamped to its length', () => withFx((fx) => {
@@ -285,7 +306,7 @@ test('hook: a read below the size threshold runs, and one at or above it is deni
   assert.equal(a.read(f, 1, 111).denied, false, '111 x 18 = 1,998 < 2,000');
 }));
 
-test('hook: a denied read, repeated, runs and logs both rows; the third identical call is the built-in\'s', () => withFx((fx) => {
+test('hook: a denied read, repeated, runs and logs both rows; a further identical call is denied again', () => withFx((fx) => {
   const f = makeFile(fx, 'big.txt', 500);
   const a = new Agent(fx, session());
   a.read(f, 1, 400);
@@ -298,8 +319,8 @@ test('hook: a denied read, repeated, runs and logs both rows; the third identica
   assert.equal(rows[0].range, '120-180');
   assert.ok(rows[0].est_chars_avoided > 2000);
   assert.equal(rows[1].est_chars_avoided, 0);
-  // The same request after the retry: it is the last read now, the built-in's.
-  assert.equal(a.read(f, 120, 61).denied, false);
+  // The same request after the retry is covered again (the hook handles exact repeats now).
+  assert.equal(a.read(f, 120, 61).denied, true);
 }));
 
 test('hook: a different request after a denial is judged afresh, and a repeat of the denied one still runs', () => withFx((fx) => {

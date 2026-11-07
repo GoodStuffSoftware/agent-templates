@@ -346,7 +346,7 @@ test('loadSdk: installs the pinned version once into the given dir, validates th
     assert.match(seen[0], /^file:\/\/\/.*claude-agent-sdk\/sdk\.mjs$/);
     await assert.rejects(loadSdk({ version: '1.0.0 && calc', dir, install, importer }), /not a plain version number/);
     await assert.rejects(loadSdk({ version: '9.9.8', dir: join(fx.dir, 'sdk', '9.9.8'), install: () => {}, importer }), /is not 9\.9\.8/);
-    assert.equal(DEFAULT_SDK_VERSION, '0.3.316');
+    assert.equal(DEFAULT_SDK_VERSION, '0.3.319');
   } finally { fx.cleanup(); }
 });
 
@@ -499,11 +499,12 @@ test('pluginIdentity reads the running copy; initMismatch passes the expected in
   assert.equal(initMismatch(ok, id), null, 'built-in cc-plugin-* entries are the binary, not a loaded plugin');
   assert.equal(isBuiltinPlugin({ name: 'cc-plugin-agents-md', version: null }), true);
   assert.equal(isBuiltinPlugin({ name: 'cc-plugin-x', version: '1.0.0' }), false);
-  assert.equal(isBuiltinPlugin({ name: 'cc-plugin-fake', version: null }), false, 'only the two known built-ins');
+  assert.equal(isBuiltinPlugin({ name: 'cc-plugin-fake', version: null }), false, 'only the known built-ins');
   assert.equal(isBuiltinPlugin({ name: 'cc-plugin-agents-md', version: null, source: 'cc-plugin-agents-md@builtin' }), true);
   assert.equal(isBuiltinPlugin({ name: 'cc-plugin-agents-md', version: null, source: 'cc-plugin-agents-md@market' }), false, 'a built-in name from another source');
   const own = { name: 'agent-companion', version: '1', source: 'agent-companion@inline' };
-  assert.equal(initMismatch(initProof({ plugins: [own, { name: 'cc-plugin-agents-md', source: 'cc-plugin-agents-md@builtin' }, { name: 'cc-plugin-plugin-authoring', source: 'cc-plugin-plugin-authoring@builtin' }] }), id), null);
+  assert.equal(initMismatch(initProof({ plugins: [own, { name: 'cc-plugin-agents-md', source: 'cc-plugin-agents-md@builtin' }, { name: 'cc-plugin-plugin-authoring', source: 'cc-plugin-plugin-authoring@builtin' }, { name: 'cc-plugin-privacy', source: 'cc-plugin-privacy@builtin' }] }), id), null, 'the three built-ins of the 0.3.319 binary');
+  assert.equal(isBuiltinPlugin({ name: 'cc-plugin-privacy', version: null, source: 'cc-plugin-privacy@market' }), false, 'privacy from another source is not the built-in');
   assert.match(initMismatch(initProof({ plugins: [own, { name: 'cc-plugin-fake' }] }), id), /cc-plugin-fake/, 'a third cc-plugin-* is not tolerated');
   assert.match(initMismatch(initProof({ plugins: [{ name: 'agent-companion', version: '1', source: 'agent-companion@market' }] }), id), /agent-companion \(agent-companion@market\)/, 'the own name from another source is another plugin');
   assert.match(initMismatch(initProof({ plugins: [{ name: 'agent-companion' }, { name: 'other-plugin', version: '2' }] }), id), /other-plugin/);
