@@ -63,7 +63,7 @@ import {
 } from './api-run.mjs';
 
 export const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
-export const DEFAULT_SDK_VERSION = '0.3.316';
+export const DEFAULT_SDK_VERSION = '0.3.319';
 export const REQUIRED_KEY_SOURCE = 'ANTHROPIC_API_KEY';
 
 export const SDK_TOOLS = ['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch'];
@@ -189,10 +189,10 @@ export function initProof(msg) {
   };
 }
 // null when the init shows what a review is meant to load; else why not. Checked before the first API call.
-// The binary's own built-in plugins (names cc-plugin-*, no version: agents-md, plugin-authoring as of 0.3.316) are loaded in every
+// The binary's own built-in plugins (names cc-plugin-*, no version: agents-md, plugin-authoring as of 0.3.316; privacy joined in 0.3.319, no tool or skill) are loaded in every
 // session, plugin-less and settings-less ones too (measured), and cannot be switched off from the options: they are not counted.
-// Exactly these two, and (when the init reports a source) only from the binary itself (`<name>@builtin`).
-export const BUILTIN_PLUGINS = Object.freeze(['cc-plugin-agents-md', 'cc-plugin-plugin-authoring']);
+// Exactly these three, and (when the init reports a source) only from the binary itself (`<name>@builtin`).
+export const BUILTIN_PLUGINS = Object.freeze(['cc-plugin-agents-md', 'cc-plugin-plugin-authoring', 'cc-plugin-privacy']);
 export const isBuiltinPlugin = (p) => !!p && BUILTIN_PLUGINS.includes(String(p.name)) && !p.version && (p.source == null || String(p.source) === `${p.name}@builtin`);
 // This plugin as the run loads it: by name, and (when the init reports a source) as an inline plugin from the path given to the options.
 export const isOwnPlugin = (p, identity) => !!identity && !!p && p.name === identity.name && (p.source == null || /@inline$/.test(String(p.source)));

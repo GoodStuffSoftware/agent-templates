@@ -262,7 +262,7 @@
       "type": "string",
       "title": "API reviews: pinned Agent SDK version",
       "description": "The @anthropic-ai/claude-agent-sdk version the sdk engine installs on demand into <state dir>/sdk/<version>/ (a plain x.y.z version).",
-      "default": "0.3.316"
+      "default": "0.3.319"
     },
     "api_review_user_guards": {
       "type": "boolean",

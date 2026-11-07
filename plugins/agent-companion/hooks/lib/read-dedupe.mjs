@@ -1,18 +1,23 @@
 // Read dedupe: rules and per-agent state for hooks/read-dedupe.mjs.
 //
-// THE GAP THIS COVERS. Claude Code's own Read already stubs a repeat read
+// THE GAP THIS COVERS. Claude Code's own Read used to stub a repeat read
 // ("File unchanged since last read ...", verified in the 2.1.283 binary), but
-// only when ALL of these hold: the file's mtime is unchanged, the request's
-// offset and limit are EXACTLY those of the most recent read of that path, and
-// that read was a clean view. It keeps ONE (offset, limit) per path, so:
+// only when ALL of these held: the file's mtime was unchanged, the request's
+// offset and limit were EXACTLY those of the most recent read of that path, and
+// that read was a clean view. Claude Code 2.1.317 removed that stub, so since
+// plugin 0.31.48 this module handles the exact repeat too. On an older CLI the
+// hook still runs first (PreToolUse): a denied repeat never reaches the tool,
+// so there is no second stub; a repeat the hook allows (small, aged, a retry)
+// falls to the old stub once, as before. The built-in kept ONE (offset, limit)
+// per path, so:
 //   - a range inside an earlier, larger read is not caught (read 1-400, then
 //     120-180);
 //   - after reading A then B, a repeat of A is not caught (only B is kept);
 //   - two adjacent reads do not add up to a covered third.
 // A 7-day measurement (2026-10-04) found 654 re-reads of unchanged files, 551
 // of them partial, and only 26 stub-sized: those are the gap. This module
-// remembers every COVERED LINE RANGE per (session, agent, path) and leaves the
-// built-in's own case (the exact range just read) to the built-in.
+// remembers every COVERED LINE RANGE per (session, agent, path), the exact
+// range just read included.
 //
 // Contract, in the order the hook applies it (each is a hard requirement):
 //   1. State is per agent: session_id + agent_id ("main" when absent), one
@@ -291,7 +296,7 @@ function evictOld(files) {
 //   { action: 'allow', why, a, b, est, age_ms }
 //                                    a repeat-eligible read (the file was read
 //                                    before and is unchanged) that ran, and why:
-//                                    'builtin-last' | 'aged' | 'uncovered' | 'small'
+//                                    'aged' | 'uncovered' | 'small'
 //   { action: 'deny',  a, b, est, age_ms }   the request is covered: deny it
 //   { action: 'retry', a, b, est, age_ms, deny_at }
 //                                    a denied request repeated: it runs
@@ -341,9 +346,6 @@ export function decide(state, { agent, pk, input, stat, now = Date.now() }) {
     remember();
     return { value: { action: 'retry', idx, a, b, est, age_ms, deny_at }, dirty: true };
   }
-
-  // The exact range just read is the built-in's case (it stubs it itself).
-  if (rec.last === req.raw) return eligible('builtin-last');
 
   if (age_ms > MAX_AGE_MS) return eligible('aged');
   if (!covers(rec.ranges, a, b)) return eligible('uncovered');
