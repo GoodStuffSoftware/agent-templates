@@ -189,13 +189,35 @@ test('markDecided reports a failed write instead of claiming success', () => {
   } finally { fx.cleanup(); }
 });
 
-test('releases at or below the installed version are not queued', () => {
+test('releases the machine already upgraded past are still queued until decided (every release since the last triaged)', () => {
   const fx = makeFixture();
   try {
     writeRelease();
+    // The machine runs 9.0.2, but 9.0.2 and 9.0.1 were never triaged: they stay queued.
     const q = buildQueue({ stateDirPath: join(fx.stateDir, 'state'), nowMs: NOW, runningVersion: '9.0.2' });
     assert.deepEqual(q.releases.map((r) => r.versions).flat(), ['9.0.3']);
-    assert.deepEqual(undecidedOf({ releases: RELEASES }, '9.0.1').map((r) => r.version), ['9.0.3', '9.0.2']);
+    assert.deepEqual(q.quiet, ['9.0.2', '9.0.1']);
+    assert.deepEqual(undecidedOf({ releases: RELEASES }, '9.0.1').map((r) => r.version), ['9.0.3', '9.0.2', '9.0.1']);
+    // Decided ones leave the queue whatever is installed.
+    assert.deepEqual(undecidedOf({ releases: RELEASES, decided: ['9.0.3', '9.0.1'] }, '9.0.9').map((r) => r.version), ['9.0.2']);
+  } finally { fx.cleanup(); }
+});
+
+test('the decisions file keeps earlier runs: a later run adds sections and never erases a decided release', () => {
+  const fx = makeFixture();
+  try {
+    const dir = join(fx.stateDir, 'state');
+    writeRelease({ releases: RELEASES.filter((r) => r.version !== '9.0.3') });
+    buildQueue({ stateDirPath: dir, nowMs: NOW });
+    markDecided(stateFile('release-watch.json'), ['9.0.2', '9.0.1']);
+    writeRelease({ decided: ['9.0.2', '9.0.1'] });
+    buildQueue({ stateDirPath: dir, nowMs: NOW + 86400000 });
+    const md = readFileSync(join(dir, DECISIONS_FILE), 'utf8');
+    assert.match(md, /## 9.0.3: adopt/);
+    assert.match(md, /## 9.0.2: ignore/);
+    assert.match(md, /## 9.0.1: watch/);
+    assert.equal(md.match(/^## 9.0.2: /gm).length, 1, 'a re-drafted version replaces its old section');
+    assert.ok(md.indexOf('## 9.0.3') < md.indexOf('## 9.0.2'), 'the newest run is on top');
   } finally { fx.cleanup(); }
 });
 

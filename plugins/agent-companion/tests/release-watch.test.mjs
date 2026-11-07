@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { makeFixture, runHook, runScript, childEnv, PLUGIN_ROOT } from './helpers.mjs';
 import { stateFile } from '../hooks/lib/context.mjs';
 import {
-  topicsOf, parseChangelog, newerMatching, checkDue, fetchChangelogHead, CHECK_INTERVAL_MS, runReleaseWatch, markSeen,
+  topicsOf, parseChangelog, newerMatching, checkDue, fetchChangelogHead, CHECK_INTERVAL_MS, runReleaseWatch, markSeen, markDecided, triageFloor, undecidedOf,
 } from '../scripts/lib/release-watch.mjs';
 
 const CHANGELOG = [
@@ -558,4 +558,35 @@ test('the 3 s budget holds through runReleaseWatch: a host that never answers en
     const st = JSON.parse(readFileSync(join(dir, 'state', 'release-watch.json'), 'utf8'));
     assert.equal(st.lastReason, 'timeout');
   } finally { await srv.close(); cleanup(); }
+});
+
+test('triage floor: the lower of the installed and the highest decided version; none decided means installed', () => {
+  assert.equal(triageFloor({}, '9.0.5'), '9.0.5');
+  assert.equal(triageFloor({ decided: ['9.0.2', '9.0.4'] }, '9.0.9'), '9.0.4');
+  assert.equal(triageFloor({ decided: ['9.0.7'] }, '9.0.3'), '9.0.3');
+});
+
+test('a release the machine upgraded past stays queued until decided (range since the last triaged, not since installed)', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const args = rwArgs(dir, { installed: '9.0.1' });
+    const t0 = Date.parse('2026-10-09T00:00:00Z');
+    await runReleaseWatch({ ...args, nowMs: t0, fetchImpl: stubFetch(changelogUpTo(4)) });
+    // Triage decides 9.0.2 and 9.0.4 only; 9.0.3 is left undecided (a failed store write).
+    markDecided(args.stateFilePath, ['9.0.2', '9.0.4']);
+    // The machine upgrades to 9.0.5 and a new release appears.
+    await runReleaseWatch({ ...args, installed: '9.0.5', nowMs: t0 + 25 * 3600 * 1000, fetchImpl: stubFetch(changelogUpTo(6)) });
+    const st = JSON.parse(readFileSync(args.stateFilePath, 'utf8'));
+    assert.deepEqual(undecidedOf(st, '9.0.5').map((r) => r.version), ['9.0.6', '9.0.5', '9.0.3']);
+  } finally { cleanup(); }
+});
+
+test('a first check with nothing decided does not queue the whole changelog', async () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const args = rwArgs(dir, { installed: '9.0.4' });
+    await runReleaseWatch({ ...args, nowMs: Date.now(), fetchImpl: stubFetch(changelogUpTo(6)) });
+    const st = JSON.parse(readFileSync(args.stateFilePath, 'utf8'));
+    assert.deepEqual(st.releases.map((r) => r.version), ['9.0.6', '9.0.5']);
+  } finally { cleanup(); }
 });
