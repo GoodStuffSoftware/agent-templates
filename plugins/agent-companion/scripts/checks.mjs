@@ -1260,9 +1260,13 @@ const brevityCanary = {
     }
 
     // --- 4. subagent-brevity.mjs --event start: no double-injection --------
+    // A fresh agent_id per run: the hook skips a repeat start for an id it has
+    // seen in the last 24h (brevity-started marker), so a fixed id made the
+    // second audit of a day read silence as "self-heal inert".
+    const runTag = `${process.pid}-${Date.now().toString(36)}`;
     const alreadyHas = probe('subagent-brevity.mjs', {
       session_id: 'canary-brevity-sub-a',
-      agent_id: 'canary-brevity-agent-a',
+      agent_id: `canary-brevity-agent-a-${runTag}`,
       agent_type: 'general-purpose',
       agent_prompt: `some prior brief text\n\n${CONTRACT_MARKER}\nalready injected by spawn-guard`,
     }, ['--event', 'start']);
@@ -1274,7 +1278,7 @@ const brevityCanary = {
 
     const missingIt = probe('subagent-brevity.mjs', {
       session_id: 'canary-brevity-sub-b',
-      agent_id: 'canary-brevity-agent-b',
+      agent_id: `canary-brevity-agent-b-${runTag}`,
       agent_type: 'general-purpose',
       agent_prompt: 'some prior brief text with no reporting contract in it at all',
     }, ['--event', 'start']);

@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.49 — unreleased
+
+- **Audit `brevity-canary`: no false "self-heal path is inert" on a second run in a day.** The hook was fine; the canary was not. `scripts/checks.mjs` fed `subagent-brevity.mjs --event start` a fixed `agent_id`, and the hook (correctly) skips a repeat start for an id it has seen in the last 24 hours (`brevity-started/<agent_id>` marker, `firstStartFor`), so every audit after the first read silence as an inert top-up. The canary now uses an `agent_id` unique to each run. Tests: `brevity` (two canary runs in one state directory both pass the self-heal probe; a prompt already carrying the contract gets nothing added).
+
 ## 0.31.48 — 2026-11-07
 
 - **Release triage covers every release since the last one decided, not only the ones newer than the installed version.** `scripts/lib/release-watch.mjs`: a check keeps releases above `triageFloor` (the lower of the installed version and the highest decided one; none decided = the installed version, so a first run does not queue the whole changelog) and keeps earlier undecided releases when it replaces the stored list; `undecidedOf` no longer cuts at the installed version. Before, a release the machine upgraded past, or one whose decide write failed while a later one was marked, fell out of the queue untriaged.
