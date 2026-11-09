@@ -59,6 +59,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `a-re-injected-file-marked-current-is-still-a-snapshot` — A re-read file marked "current" is still a snapshot, and says so nowhere — report when your copy arrived — [agent-process] — active
 - `a-read-that-opens-an-edit-is-a-write` — A read that opens a server-side edit session is a write — quiesce your monitors during a mutation window — [universal] — active
 - `a-recorded-commit-id-dies-at-rebase` — A recorded commit id dies at rebase — verify shipped work by branch tip and commit subject — [universal, stack:git] — active
+- `a-recurrence-before-the-fix-ships-is-not-a-regression` — A recurring error is a regression only if its fix has shipped — check the fix against the release branch first — [agent-process] — active
 - `a-right-conclusion-does-not-vouch-for-its-premise` — A wrong premise that yields the right conclusion is the hardest to catch — the outcome vouches for it, so check premises on their own — [agent-process] — active
 - `a-scaffold-default-asset-passes-every-existence-check` — A scaffold's default asset passes every existence check — verify provenance, and never allowlist a new default — [universal] — active
 - `a-scheduled-job-needs-a-registered-but-unobserved-state` — A scheduled job needs a "deployed, unconfirmed" state and a two-timestamp heartbeat, or it gets marked done on deploy day — [universal] — active
@@ -168,11 +169,13 @@ One line per lesson: `id — title — [scope] — status`.
 - `fail-open-fallback-expires-with-the-flag` — Tie a rollout fail-open to the feature's own enablement flag — never to someone remembering to close it — [universal] — active
 - `fail-open-on-the-action-never-on-the-record` — Fail open on the ACTION, never on the RECORD — a guard that swallows its own exception becomes a silent no-op — [universal] — active
 - `fan-out-multiplier-at-the-delivery-boundary` — Fan-out cost is one worker per recipient — put the liveness filter at the boundary every send path crosses — [agent-process] — active
+- `fetch-files-with-curl-not-the-browser-pane` — Fetch a public file from the shell, not in a browser pane the operator can see — [agent-process] — active
 - `find-the-asset-before-you-generate-it` — Search where finished assets already live before exporting, rendering, or downloading a new one — [agent-process] — active
 - `firestore-rules-pre-merge-checklist` — Firestore rule changes require an explicit identity-binding and schema-drift review before merge — [stack:firestore] — active
 - `first-action-read-only` — Writer agents open with a read-only diagnostic and a liveness report — [agent-process] — active
 - `fix-the-doc-not-the-security-matcher` — Do not broaden a security matcher to fix a documentation bug — [universal] — active
 - `fixed-overlay-cannot-scroll-the-page` — A `position: fixed` overlay cannot make the page scroll — the overflow is in the normal flow underneath — [stack:css] — active
+- `freeze-one-dispatcher-tool-so-features-need-no-reconnect` — Give a connector one frozen dispatcher tool so new features need no reconnect — [agent-process, vendor:anthropic] — active
 - `fresh-fire-wake-handle-costs-a-session` — A fresh-fire wake handle turns every message into a session spawn — act for the name, never re-register it — [agent-process] — active
 - `gate-review-rounds-on-blocking-findings-not-round-count` — Gate each new review round on whether the PREVIOUS verdict had blocking findings, never on a round count — [agent-process] — active
 - `gate-the-write-not-the-aftermath` — A check that runs after the thing it gates is decoration — assert before the write, and verify the call ORDER before the deploy — [universal] — active
@@ -192,6 +195,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `idempotent-gates-crossed-messages` — Design async agent gates idempotently — approvals and reports cross in flight — [agent-process] — active
 - `identify-which-target-woke-you` — If a dispatcher started you, resolve WHICH target you are running for before diagnosing a repeat — [agent-process] — active
 - `kernel-file-trace-names-the-opener` — When process polling cannot name the culprit, a built-in kernel file trace can — no third-party tools — [env:windows] — active
+- `key-a-loop-breaker-on-the-build-not-the-version` — Key a reload-loop guard on the build identity, not the version string, and give it a TTL — [universal] — active
 - `knowledge-routing-ladder` — Route "remember this" by kind — skill, memory, slim core, or library inbox — and enforce the ladder with a guard hook — [agent-process] — active
 - `latch-once-only-guards-after-success` — Latch a once-only guard AFTER success, and clear a cached promise on rejection — [universal] — active
 - `lifecycle-hook-runs-in-production-installs` — A build hook on an in-tree path dependency also runs in production installs — and that failure never reproduces locally — [universal] — active
