@@ -723,7 +723,7 @@ test('every stand-alone writer type self-reviews (the 2026-10-02 narrowing is re
 
 test('the protocol tells the writer where its reviewer works', () => {
   const rung = SHIPPED.ladder.find((r) => r.agent === 'ac-opus-xhigh');
-  assert.match(selfReviewBlock(rung, selfReviewConfig(SHIPPED)), /where to work: its own checkout of that sha \(for example `git worktree add --detach <path> <sha>`, run from your working tree\), never your working tree/);
+  assert.match(selfReviewBlock(rung, selfReviewConfig(SHIPPED)), /where to read: its own checkout of that sha \(for example `git worktree add --detach <path> <sha>`, run from your working tree\), never your working tree/);
 });
 
 test('no self-review path for a type that is not listed (an edit worker); every self-review path either denies or sets no decision (never "allow")', () => {

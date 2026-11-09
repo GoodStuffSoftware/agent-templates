@@ -107,7 +107,7 @@ the lead can read:
 
 - The instructions are fixed and generated, not written by the writer: they
   tell it to give the reviewer the lead's brief verbatim, the diff range and
-  a refute-this instruction, to add nothing that narrows the review, and to
+  an adversarial read-only refute-this instruction (it reads the diff and its callers and consumers; at most the tests that cover the changed code, and only when they need no build), to add nothing that narrows the review, and to
   return the verdict line verbatim.
 - The spawn guard checks what it can see at the reviewer's spawn: a
   `WRITER:` line below the writer's own pair gets a note, a critical-change

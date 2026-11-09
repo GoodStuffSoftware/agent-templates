@@ -52,6 +52,10 @@ export const SCOPES = ['user-prompt', 'always', 'session-start', 'spawn'];
 
 const WHEN_MAX_CHARS = 400;
 const DEFAULT_MAX_CHARS = 3000;
+// The most the standing-rules hook emits in one injection. The harness writes additionalContext above 10000 characters
+// to a file and substitutes a preview, so the option can raise the cap only up to OUTPUT_CAP_CEILING. Unset: 4000.
+export const DEFAULT_OUTPUT_CAP = 4000;
+export const OUTPUT_CAP_CEILING = 9500;
 
 let resolveBrevity = null;
 try {
@@ -745,6 +749,14 @@ export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
     try { re = new RegExp(r.when, 'i'); } catch { return false; }
     return re.test(subject);
   });
+}
+
+// The hook's hard output cap: the option `standing_rules_max_chars` when it is a positive number (so the option can
+// raise the limit as well as lower it), else DEFAULT_OUTPUT_CAP; never above OUTPUT_CAP_CEILING.
+export function outputCap() {
+  const n = opt('standing_rules_max_chars', 0);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_OUTPUT_CAP;
+  return Math.min(Math.floor(n), OUTPUT_CAP_CEILING);
 }
 
 // '' for an empty list — silence is the default state throughout this

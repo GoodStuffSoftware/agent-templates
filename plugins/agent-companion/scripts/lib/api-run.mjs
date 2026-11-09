@@ -6,7 +6,7 @@
 // (https://platform.claude.com/docs/en/about-claude/api-credits-for-subscribers). So this
 // module calls the API directly with Node's built-in fetch (no dependencies) and runs a small
 // read-only tool loop (src: scripts/lib/api-tools.mjs: read_file, grep, glob, confined to the
-// repository under review). The reviewer cannot run commands, so it cannot run the tests.
+// repository under review). The reviewer cannot run commands, and a review is a read of the code anyway: the writer runs the tests and hands over the raw output.
 //
 // What the official docs say (checked 2026-11-01):
 //   - Messages API, https://platform.claude.com/docs/en/api/messages : POST /v1/messages with
@@ -98,9 +98,11 @@ const configError = (msg) => Object.assign(new Error(msg), { configFailure: true
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export const REVIEW_SYSTEM = [
-  'You are a code reviewer. The repository under review is the head of the diff you are given, and you have three read-only tools:',
-  'read_file, grep and glob. You cannot run commands, tests or git, and you cannot edit anything; say plainly in your review which',
-  'checks you could not run. Read the surrounding code, not only the diff, and try to refute the change. Stop calling tools and write the',
+  'You are an adversarial code reviewer, and a review is a READ of the code: assume the change is wrong and hunt for what the writer missed. The repository under review is the head of the diff you are given, and you have three read-only tools:',
+  'read_file, grep and glob. You cannot run commands, tests or git, you do not build or run anything, and you cannot edit anything. Read the',
+  'surrounding code, not only the diff: the code it touches, its callers and consumers (grep, trace the call path), and the writer\'s raw test and',
+  'build output in the brief (say so if it is missing). Try to refute the change by reading. Find the repository\'s recorded decisions and standards (ADR files such as docs/adr/, docs/decisions/ or ADR-*.md, any conventions or contributing doc; the project CLAUDE.md is in this prompt) with glob and read_file, and check the change against them and against the patterns of neighbouring code (naming, error handling, file layout, how similar features are done): a deviation is a finding unless the change also updates or adds the ADR that justifies it; if there are no ADRs, say so and check against the patterns alone. The instruction may allow targeted tests; you cannot run them, so name the ones you would have run. Your reply is a report to the main agent that asked for the',
+  'review of what it missed: defects, gaps against the acceptance criteria, callers and consumers left unhandled, deviations from the ADRs and patterns. Do not fix anything. Stop calling tools and write the',
   'review as soon as you can support a verdict.',
 ].join(' ');
 
@@ -173,6 +175,19 @@ export function reviewLimits({ softRaw = '', hardRaw = '', maxUsdFlag = null } =
     clamped = `${named} $${was.toFixed(2)} is not below the hard stop $${maxUsd.toFixed(2)}; using $${softUsd.toFixed(2)}`;
   }
   return { softUsd, maxUsd, clamped };
+}
+
+// The status line for `api-credits.mjs status`: the soft limit and hard stop a review would use now, from reviewLimits (the one
+// source both engines use), each with where it came from: the option, the default, or off (a hard stop of 0).
+export function reviewLimitsLine({ softRaw = '', hardRaw = '' } = {}) {
+  const { softUsd, maxUsd, clamped } = reviewLimits({ softRaw, hardRaw });
+  const softFromOption = softUsdFrom(softRaw, null) !== null;
+  const hardFromOption = hardUsdFrom(hardRaw, null) !== null;
+  const soft = `soft limit $${softUsd.toFixed(2)} (${clamped ? 'option api_review_soft_usd, lowered to half the hard stop' : softFromOption ? 'option api_review_soft_usd' : 'default'}, a note only)`;
+  const hard = maxUsd === 0
+    ? 'hard stop off (option api_review_hard_usd = 0)'
+    : `hard stop $${maxUsd.toFixed(2)} (${hardFromOption ? 'option api_review_hard_usd' : 'default'}; --max-usd sets it per review)`;
+  return `review limits: ${soft}; ${hard}`;
 }
 
 // Soft-limit notes, worded once for both engines.

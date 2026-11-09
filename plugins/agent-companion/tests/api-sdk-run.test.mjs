@@ -10,7 +10,7 @@ import { DEFAULT_SHARES } from '../scripts/lib/api-credits.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
 import { spawnSyncHidden } from '../scripts/lib/proc.mjs';
 import {
-  runApiSdk, loadSdk, sdkEnv, SDK_TOOLS, SDK_DISALLOWED, SDK_BASH_DENY, SDK_POWERSHELL_DENY, SDK_READ_DENY, DEFAULT_SDK_VERSION,
+  runApiSdk, loadSdk, sdkEnv, SDK_TOOLS, SDK_DISALLOWED, SDK_BASH_DENY, SDK_READ_DENY, DEFAULT_SDK_VERSION,
   sdkToolsFor, sdkSystem, sdkOptions, initProof, initMismatch, pluginIdentity, isBuiltinPlugin, PLUGIN_ROOT,
 } from '../scripts/lib/api-sdk-run.mjs';
 import { SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
@@ -63,8 +63,7 @@ test('sdkEnv: a minimal copy of the system variables; every other Anthropic, Cla
   for (const k of ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'AC_API_KEY', 'BWS_ACCESS_TOKEN']) assert.ok(!(k in e), `${k} leaked`);
   assert.equal(e.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, '1');
   assert.ok(!('BASH_DEFAULT_TIMEOUT_MS' in e) && !('BASH_MAX_TIMEOUT_MS' in e), 'no custom shell-timeout ceiling: Claude Code\'s own tool defaults apply');
-  assert.ok(!('CLAUDE_CODE_USE_POWERSHELL_TOOL' in e), 'PowerShell is only switched on when asked');
-  assert.equal(sdkEnv({ key: KEY, base, powershell: true }).CLAUDE_CODE_USE_POWERSHELL_TOOL, '1');
+  assert.ok(!('CLAUDE_CODE_USE_POWERSHELL_TOOL' in e), 'no PowerShell tool, so nothing switches it on');
   const d = sdkEnv({ key: KEY, base });
   assert.equal('ANTHROPIC_CUSTOM_HEADERS' in sdkEnv({ key: KEY, base }), false, 'no workspace, no header');
 });
@@ -99,10 +98,11 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
     assert.equal(o.plugins.length, 1);
     assert.equal(o.plugins[0].type, 'local');
     assert.equal(o.env.AC_REVIEWER_SESSION, '1', 'the child is marked a reviewer session');
-    assert.deepEqual(o.tools, ['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch']);
+    assert.deepEqual(o.tools, ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch'], 'a review is a read: no Bash, no PowerShell');
     assert.deepEqual(o.allowedTools, o.tools);
     for (const t of ['Edit', 'Write', 'Task', 'Agent', 'NotebookEdit']) assert.ok(o.disallowedTools.includes(t), t);
-    for (const t of ['WebFetch', 'WebSearch', 'PowerShell']) assert.ok(!o.disallowedTools.includes(t), `${t} is allowed`);
+    for (const t of ['WebFetch', 'WebSearch']) assert.ok(!o.disallowedTools.includes(t), `${t} is allowed`);
+    assert.ok(!o.tools.includes('Bash') && !o.tools.includes('PowerShell') && !o.allowedTools.includes('Bash') && !o.allowedTools.includes('PowerShell'));
     for (const t of SDK_BASH_DENY) assert.ok(o.disallowedTools.includes(t));
     for (const t of SDK_READ_DENY) assert.ok(o.disallowedTools.includes(t), `credential deny ${t}`);
     assert.ok(!o.disallowedTools.some((t) => t.startsWith('PowerShell')), 'no PowerShell tool off Windows, so no PowerShell rules');
@@ -134,10 +134,11 @@ test('runApiSdk: the trimmed options reach query(); the ledger gets each call on
   } finally { fx.cleanup(); }
 });
 
-test('toolset: Read, Grep, Glob, Bash, WebSearch, WebFetch everywhere, PowerShell on Windows; no edit, write, agent, notebook or MCP tool', () => {
-  assert.deepEqual(sdkToolsFor('linux'), ['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch']);
+test('toolset: Read, Grep, Glob, WebSearch, WebFetch everywhere; no shell, edit, write, agent, notebook or MCP tool', () => {
+  assert.deepEqual(sdkToolsFor('linux'), ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch']);
   assert.deepEqual(sdkToolsFor('darwin'), sdkToolsFor('linux'));
-  assert.deepEqual(sdkToolsFor('win32'), [...sdkToolsFor('linux'), 'PowerShell']);
+  assert.deepEqual(sdkToolsFor('win32'), sdkToolsFor('linux'), 'no PowerShell on Windows either');
+  for (const shell of ['Bash', 'PowerShell']) assert.ok(!sdkToolsFor('win32').includes(shell) && !sdkToolsFor('linux').includes(shell), shell);
   for (const t of sdkToolsFor('win32')) assert.ok(!SDK_DISALLOWED.includes(t), t);
   for (const t of ['Edit', 'Write', 'NotebookEdit', 'Agent', 'Task']) { assert.ok(!sdkToolsFor('win32').includes(t), t); assert.ok(SDK_DISALLOWED.includes(t), t); }
   assert.ok(!sdkToolsFor('win32').some((t) => t.startsWith('mcp__')));
@@ -146,24 +147,26 @@ test('toolset: Read, Grep, Glob, Bash, WebSearch, WebFetch everywhere, PowerShel
   assert.equal(SOFT_USD, 1);
   assert.equal(DEFAULT_HARD_USD, 2);
   assert.doesNotMatch(sdkSystem(30), /600000|timeout/i, 'no shell-timeout instruction: the tool defaults apply');
-  assert.match(sdkSystem(30), /AFFECTED by the diff/);
-  assert.match(sdkSystem(30), /Never run the full test suite or ci-local/);
-  assert.match(sdkSystem(30), /affected-test selector/);
-  for (const rule of SDK_POWERSHELL_DENY) assert.match(rule, /^PowerShell\(.+ \*\)$/);
+  assert.match(sdkSystem(30), /adversarial code reviewer, and a review is a READ of the code: assume the change is wrong and hunt for what the writer missed/);
+  assert.match(sdkSystem(30), /There is no shell: you do not build, run tests or CI, launch anything or rerun the writer's checks/);
+  assert.match(sdkSystem(30), /cannot scope a test command safely, so you run none and name the targeted tests you would have run/);
+  assert.match(sdkSystem(30), /callers and consumers \(grep, trace the call path\)/);
+  assert.match(sdkSystem(30), /report to the main agent that asked for the review of what it missed: defects, gaps against the acceptance criteria, callers and consumers left unhandled/);
+  for (const part of ['recorded decisions and standards with Glob and Read (ADR files such as docs/adr/, docs/decisions/ or ADR-*.md', 'the project CLAUDE.md is loaded', 'a deviation is a finding unless the change also updates or adds the ADR that justifies it; if the repo has no ADRs, say so']) assert.ok(sdkSystem(30).includes(part), part);
+  assert.doesNotMatch(sdkSystem(30), /AFFECTED by the diff|affected-test selector|Use the shell/);
 });
 
-test('runApiSdk on Windows: PowerShell is allowed, switched on in the child env, and has its own deny rules', async () => {
+test('runApiSdk on Windows: still no shell tool, and no PowerShell rules or env switch', async () => {
   const fx = makeFixture();
   try {
     const sdk = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 10, output_tokens: 10 }, { stop: 'end_turn' }), result()]);
     const r = await run(sdk, { platform: 'win32' });
     assert.equal(r.ok, true, r.reason);
     const o = sdk.calls[0].options;
-    assert.ok(o.tools.includes('PowerShell') && o.allowedTools.includes('PowerShell'));
-    assert.equal(o.env.CLAUDE_CODE_USE_POWERSHELL_TOOL, '1', 'else the scoped Bash deny rules turn the tool off');
-    for (const t of SDK_POWERSHELL_DENY) assert.ok(o.disallowedTools.includes(t), t);
+    assert.ok(!o.tools.includes('PowerShell') && !o.allowedTools.includes('PowerShell') && !o.tools.includes('Bash'));
+    assert.ok(!('CLAUDE_CODE_USE_POWERSHELL_TOOL' in o.env));
+    assert.ok(!o.disallowedTools.some((t) => t.startsWith('PowerShell')));
     for (const t of SDK_BASH_DENY) assert.ok(o.disallowedTools.includes(t), t);
-    assert.ok(!o.disallowedTools.includes('PowerShell'), 'the bare tool name is not denied');
   } finally { fx.cleanup(); }
 });
 
@@ -364,8 +367,9 @@ test('chooseRunner / briefAsksForCommands: an explicit choice wins; the default 
   assert.equal(briefAsksForCommands('the tests pass (api-* files)'), false);
   assert.equal(briefAsksForCommands('Please run the api tests with node --test'), true);
   assert.equal(briefAsksForCommands('execute the lint command'), true);
-  assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b', shell: true }), /Read, Grep, Glob, shell [(]Bash, and PowerShell on Windows[)], WebSearch and WebFetch tools can read it and run the affected tests/);
-  assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b' }), /you have no shell/);
+  assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b', shell: true }), /Your Read, Grep and Glob tools [(]and WebSearch and WebFetch[)] read it; you have no shell and run nothing, not even targeted tests/);
+  assert.doesNotMatch(buildPrompt({ brief: 'b', diffRef: 'a..b', shell: true }), /Bash|PowerShell|run the affected tests/);
+  assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b' }), /you have no shell and run nothing/);
 });
 
 function rig() {
@@ -406,8 +410,11 @@ test('api-review: --runner sdk runs the SDK engine, inlines the brief and the di
     assert.match(p, /^TYPE: code-review\nWRITER: sonnet\/high\nROLE: reviewer/);
     assert.match(p, /the lead brief, verbatim/);
     assert.match(p, /\+two/);
-    assert.match(p, /shell [(]Bash, and PowerShell on Windows[)].*run the affected tests/);
-    assert.match(p, /Run the tests affected by the diff, never the full suite or ci-local/);
+    assert.match(p, /you have no shell and run nothing, not even targeted tests/);
+    assert.match(p, /assume the change is wrong and hunt for what the writer missed/);
+    assert.match(p, /only when they run with no compile or build step/);
+    assert.match(p, /not even targeted tests \(name the ones you would have run\)/);
+    assert.doesNotMatch(p, /Run the tests affected by the diff/);
     assert.equal(sdk.calls[0].options.maxBudgetUsd, undefined);
     assert.equal('effort' in sdk.calls[0].options, false);
     const capped = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 1, output_tokens: 1 }), result()]);

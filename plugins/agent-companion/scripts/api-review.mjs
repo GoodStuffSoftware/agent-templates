@@ -79,7 +79,7 @@ export function fetchSystem(base, rules) {
 }
 
 // Two engines: 'fetch' (Messages API, read-only tools confined to the repository, cheapest) and 'sdk'
-// (the Agent SDK, with Bash, so the reviewer can run the tests). DEFAULT_RUNNER is what a review uses
+// (the Agent SDK: loads the project's rules and hooks; Read, Grep, Glob and web lookups, no shell: a review is a read). DEFAULT_RUNNER is what a review uses
 // when the api_review_runner option and --runner are unset; see the README for the measurement behind it.
 export const DEFAULT_RUNNER = 'sdk';
 const COMMANDS_RE = /\b(?:run|runs|running|execute|executing)\b[^.\n]{0,40}\b(?:tests?|test suite|suite|commands?|build|lint|linter|checks?)\b|\bnpm (?:run )?test\b|\bnode --test\b|\bpytest\b/i;
@@ -120,8 +120,8 @@ export function buildPrompt({ brief, diffRef, writer, stat = '', diff = '', note
     '',
     '---',
     shell
-      ? `Diff range under review: ${diffRef}. Your working directory is the repository at the head of that range. Your Read, Grep, Glob, shell (Bash, and PowerShell on Windows), WebSearch and WebFetch tools can read it and run the affected tests and the checks it needs; say which checks you ran and which you could not.`
-      : `Diff range under review: ${diffRef}. Your read_file, grep and glob tools see the repository at the head of that range; you have no shell, so you cannot run commands or tests: say which checks you could not run.`,
+      ? `Diff range under review: ${diffRef}. Your working directory is the repository at the head of that range. Your Read, Grep and Glob tools (and WebSearch and WebFetch) read it; you have no shell and run nothing, not even targeted tests (name the ones you would have run): a review is a read of the code.`
+      : `Diff range under review: ${diffRef}. Your read_file, grep and glob tools see the repository at the head of that range; you have no shell and run nothing, not even targeted tests (name the ones you would have run): a review is a read of the code.`,
     INSTRUCTION,
     'Add nothing that narrows the review.',
     '',

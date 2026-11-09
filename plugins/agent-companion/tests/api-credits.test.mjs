@@ -12,7 +12,7 @@ import {
   DEFAULT_SHARES, decide, record, recordFailure, recordFallback, reviewStats, summarizeReviews, reviewSummaryLine, status, summaryLine, cycleOf,
   keyConfigured, parseKeySource, parseShares,
 } from '../scripts/lib/api-credits.mjs';
-import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, softUsdFrom, reviewLimits, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
+import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, softUsdFrom, reviewLimits, reviewLimitsLine, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
 import { main as reviewMain, buildPrompt, readProjectRules, fetchSystem, RULES_CAP } from '../scripts/api-review.mjs';
 import { main as creditsMain } from '../scripts/api-credits.mjs';
@@ -165,6 +165,7 @@ test('CLI: decide prints the word then one reason line; with no key it is plan',
     assert.match(r.stdout, /recorded; review total \$1\.50/);
     const s = runScript('scripts/api-credits.mjs', ['status', '--now', '2026-11-16T00:00:00Z'], { env: { AC_API_KEY: 'x' } });
     assert.match(s.stdout, /review\s+spent \$1\.50/);
+    assert.match(s.stdout, /^review limits: soft limit \$1\.00 \(default, a note only\); hard stop \$2\.00 \(default; --max-usd sets it per review\)$/m, 'status shows the review limits and where they came from');
     assert.equal(runScript('scripts/api-credits.mjs', ['nope']).status, 2);
   } finally { fx.cleanup(); }
 });
@@ -531,9 +532,20 @@ test('buildPrompt: protocol header, verbatim brief, the instruction, the diff', 
   const p = buildPrompt({ brief: 'BRIEF TEXT\n\n', diffRef: 'a..b', writer: 'sonnet/high', stat: ' x | 1 +', diff: 'diff --git a/x b/x' });
   assert.match(p, /^TYPE: code-review\nWRITER: sonnet\/high\nROLE: reviewer\n\nBRIEF TEXT\n/);
   assert.ok(p.includes(REVIEW_INSTRUCTION), 'the runner prompt and the self-review clause share one instruction');
-  assert.match(REVIEW_INSTRUCTION, /Start with a verdict line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit, with file:line and a repro\.$/);
-  assert.match(REVIEW_INSTRUCTION, /Run the tests affected by the diff, never the full suite or ci-local/);
-  assert.match(REVIEW_INSTRUCTION, /affected-test selector if it has one .*otherwise mapped from the diff/);
+  assert.match(REVIEW_INSTRUCTION, /Start with a verdict line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit, with file:line and the reading that shows it/);
+  // Reviews are a READ of the code (operator rule 2026-11-08): read, grep, trace; never build, run tests, launch or rerun.
+  assert.match(REVIEW_INSTRUCTION, /^This review is a READ of the code, and it is adversarial: assume the change is wrong and hunt for what the writer missed\. Refute it by reading/);
+  assert.match(REVIEW_INSTRUCTION, /do not fix or edit anything/);
+  for (const part of ['ADR files (docs/adr/, docs/decisions/, ADR-*.md), the project CLAUDE.md and any conventions or contributing doc']) assert.ok(REVIEW_INSTRUCTION.includes(part), part);
+  assert.match(REVIEW_INSTRUCTION, /established patterns in neighbouring code \(naming, error handling, file layout, how similar features are done\)/);
+  assert.match(REVIEW_INSTRUCTION, /A deviation is a finding unless the change also updates or adds the ADR that justifies it; if the repo has no ADRs, say so and check against the patterns alone/);
+  assert.match(REVIEW_INSTRUCTION, /deviations from the repo's ADRs and patterns/);
+  assert.match(REVIEW_INSTRUCTION, /report to the main agent \(the lead or writer that asked for it\) of what it missed: defects, gaps against the acceptance criteria, callers and consumers left unhandled/);
+  assert.match(REVIEW_INSTRUCTION, /callers and consumers \(grep and trace the call path\)/);
+  assert.match(REVIEW_INSTRUCTION, /raw test and build output the writer put in the hand-off; say if that output is missing/);
+  assert.match(REVIEW_INSTRUCTION, /You may run only the tests that cover the changed code .*only when they run with no compile or build step\. Never build or compile, never run the full suite, ci-local or CI, never launch the app or game, never rerun the writer's whole check/);
+  assert.match(REVIEW_INSTRUCTION, /a review takes minutes/);
+  assert.doesNotMatch(REVIEW_INSTRUCTION, /Run the tests|affected-test selector|a repro|neutral/);
   assert.ok(p.includes('Diff range under review: a..b'));
   assert.ok(p.includes('diff --git a/x b/x'));
 });
@@ -575,8 +587,15 @@ test('the self-review clause runs the governor before spawning a reviewer, and k
   assert.ok(block.includes('no verdict line, no land'));
   assert.ok(block.includes('run_in_background') && block.includes('it logs itself at 8 minutes and goes on, and only a hung run is stopped'), 'a review can outlive a foreground Bash call (10 minutes), so it runs in the background');
   assert.ok(!block.includes('15 minutes') && !block.includes('stops itself after'), 'no wall-clock stop is promised');
-  assert.ok(block.includes(`this instruction: "${REVIEW_INSTRUCTION}"`), 'the reviewer brief carries the affected-tests-only instruction');
-  assert.ok(block.includes('can run the affected tests'));
+  assert.ok(block.includes(`this instruction: "${REVIEW_INSTRUCTION}"`), 'the reviewer brief carries the read-only instruction');
+  assert.ok(!block.includes('can run the affected tests'));
+  assert.ok(block.includes('the API reviewer only reads (read-only tools, no shell: it cannot run even the targeted tests'));
+  assert.ok(block.includes('0. Finish every task in your brief first, with no self-chosen sections or milestone stops'), 'no chunking: finish, then the complete tests once');
+  assert.ok(block.includes('run only the unit tests of the code you are changing; e2e tests you write or extend run only at the end. When all tasks are done, run the complete tests once'));
+  assert.ok(block.indexOf('0. Finish every task') < block.indexOf('1. List anything you built'));
+  assert.ok(block.includes('the raw output of your own test and build runs'), 'the writer still runs the checks and hands over the output');
+  assert.ok(block.includes('Throwaway test code (probes, timing harnesses, temporary diagnostics that never ship) has no review gate'));
+  assert.ok(block.includes('runs at most the tests that cover the changed code when they need no build: no builds, no full suite, no CI, no commits, no pushes'));
   assert.ok(!block.includes('Bash timeout of 600000 ms'));
   assert.ok(block.includes("brief TEXT goes into that file, never only a path to it"));
   assert.ok(block.includes('spawn exactly ONE reviewer, in the foreground'));
@@ -929,6 +948,14 @@ test('limits: soft note $1.00 and hard stop $2.00 by default; the options overri
   const opts = manifest.userConfig || manifest.options;
   assert.equal(opts.api_review_soft_usd.default, SOFT_USD);
   assert.equal(opts.api_review_hard_usd.default, DEFAULT_HARD_USD);
+});
+
+test('reviewLimitsLine: the active soft limit and hard stop, each with its source (option, default or off)', () => {
+  assert.equal(reviewLimitsLine({}), 'review limits: soft limit $1.00 (default, a note only); hard stop $2.00 (default; --max-usd sets it per review)');
+  assert.equal(reviewLimitsLine({ softRaw: '0.5', hardRaw: '3' }), 'review limits: soft limit $0.50 (option api_review_soft_usd, a note only); hard stop $3.00 (option api_review_hard_usd; --max-usd sets it per review)');
+  assert.match(reviewLimitsLine({ hardRaw: '0' }), /hard stop off \(option api_review_hard_usd = 0\)$/);
+  assert.match(reviewLimitsLine({ softRaw: '5', hardRaw: '2' }), /soft limit \$1\.00 \(option api_review_soft_usd, lowered to half the hard stop, a note only\)/, 'the clamp reviewLimits applies is the one shown');
+  assert.match(reviewLimitsLine({ softRaw: 'abc', hardRaw: 'x' }), /soft limit \$1\.00 \(default.*hard stop \$2\.00 \(default/, 'unusable option values fall back to the defaults, and say so');
 });
 
 test('limits: a soft note not below the hard stop is clamped to half of it, once, on stderr', async () => {
