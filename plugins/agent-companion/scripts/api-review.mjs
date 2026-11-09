@@ -82,13 +82,12 @@ export function fetchSystem(base, rules) {
 // (the Agent SDK: loads the project's rules and hooks; Read, Grep, Glob and web lookups, no shell: a review is a read). DEFAULT_RUNNER is what a review uses
 // when the api_review_runner option and --runner are unset; see the README for the measurement behind it.
 export const DEFAULT_RUNNER = 'sdk';
-const COMMANDS_RE = /\b(?:run|runs|running|execute|executing)\b[^.\n]{0,40}\b(?:tests?|test suite|suite|commands?|build|lint|linter|checks?)\b|\bnpm (?:run )?test\b|\bnode --test\b|\bpytest\b/i;
-export const briefAsksForCommands = (brief) => COMMANDS_RE.test(String(brief || ''));
-// An explicit choice (--runner, then the option) always wins; with none, the default engine, except
-// that a default of 'fetch' still goes to 'sdk' when the brief asks for commands to be run.
-export function chooseRunner({ flag = '', option = '', brief = '', fallback = DEFAULT_RUNNER } = {}) {
+// An explicit choice (--runner, then the option) always wins; with none, the default engine. The brief
+// plays no part: both engines are read-only, so a brief that mentions running tests (the protocol's own
+// review instruction does) is no reason to prefer one engine over the other.
+export function chooseRunner({ flag = '', option = '', fallback = DEFAULT_RUNNER } = {}) {
   for (const v of [flag, option]) { const t = String(v || '').trim().toLowerCase(); if (t === 'sdk' || t === 'fetch') return t; }
-  return fallback === 'sdk' || briefAsksForCommands(brief) ? 'sdk' : 'fetch';
+  return fallback === 'fetch' ? 'fetch' : 'sdk';
 }
 
 // The reviewer's tools cannot read outside the repository, so a brief file that only names a path
@@ -161,7 +160,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   if (briefIsOnlyAPath(brief)) { out('API review failed: the brief file holds a file path or no text, not the lead\'s brief itself (the reviewer cannot read outside the repository); put the brief text in the file'); return EXIT_FAILED; }
   let d;
   try { d = gitDiff(o.cwd, o['diff-ref']); } catch (e) { out(`API review failed: cannot read the diff ${o['diff-ref']} in ${o.cwd}`); return EXIT_FAILED; }
-  const runner = chooseRunner({ flag: o.runner, option: opt('api_review_runner', ''), brief });
+  const runner = chooseRunner({ flag: o.runner, option: opt('api_review_runner', '') });
   const meta = `review ${o['diff-ref']}`.slice(0, 120);
   // The soft note and the one hard spend backstop (0 = none); --max-usd takes precedence over the hard option for this review.
   // A soft note that is not below an active backstop is clamped, and said so once.

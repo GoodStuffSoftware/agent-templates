@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
 import {
   SCOPES, defaultRules, readRules, matchRules, renderRules, rulesPath, userOwnText, COPYABLE_PROMPT_WHEN,
-  outputCap, DEFAULT_OUTPUT_CAP, OUTPUT_CAP_CEILING,
+  outputCap, cutToCap, DEFAULT_OUTPUT_CAP, OUTPUT_CAP_CEILING,
 } from '../hooks/lib/rules.mjs';
 import { stateFile, writeJson } from '../hooks/lib/context.mjs';
 
@@ -722,4 +722,39 @@ test('outputCap: the hook cap is the standing_rules_max_chars option, 4000 when 
     assert.ok(OUTPUT_CAP_CEILING < 10000);
     for (const bad of ['0', '-5', 'abc']) { process.env[KEY] = bad; assert.equal(outputCap(), 4000, bad); }
   } finally { if (was === undefined) delete process.env[KEY]; else process.env[KEY] = was; }
+});
+
+test('cutToCap: the "(N more rules dropped)" note rides on top of the cap and is never the part that gets cut', () => {
+  const rules = [{ id: 'keep', then: 'k'.repeat(10) }];
+  for (let i = 1; i <= 8; i += 1) rules.push({ id: `big-${i}`, then: 'b'.repeat(50) });
+  const kept = renderRules(rules.slice(0, 1), { maxChars: 100000 });
+  const cap = kept.length + 10;
+  const out = renderRules(rules, { maxChars: cap });
+  assert.match(out, /8 more rules dropped/);
+  assert.ok(out.length > cap, 'the note is appended past the rules budget');
+  assert.equal(out.slice(0, cap).includes('more rules dropped'), false, 'a plain slice at the cap loses it');
+  assert.equal(cutToCap(out, cap), out, 'cutToCap keeps the whole block, note included');
+  assert.equal(cutToCap('x'.repeat(50), 20), 'x'.repeat(20), 'no note: a plain cut at the cap');
+  assert.equal(cutToCap('', 20), '');
+  // a block longer than the cap even before the note: the rules are cut, the note stays
+  const long = `${'y'.repeat(100)}\n- (3 more rules dropped: over the 40-char limit: a, b, c)`;
+  const cut = cutToCap(long, 40);
+  assert.ok(cut.startsWith('y'.repeat(40) + '\n- (3 more rules'), cut);
+  assert.ok(cut.endsWith('a, b, c)'));
+  assert.ok(cut.length < long.length);
+});
+
+test('hook --event session-start: with a small standing_rules_max_chars and several rules, the dropped-rules note survives the output cap', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const res = runHook('hooks/standing-rules.mjs',
+      { session_id: 'sess-cap-note', cwd: dir },
+      { args: ['--event', 'session-start'], env: { CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '400' } });
+    assert.equal(res.status, 0);
+    const text = res.json?.hookSpecificOutput?.additionalContext || '';
+    assert.match(text, /\(\d+ more rules? dropped: over the 400-char limit: [^)]+\)$/, text);
+    assert.ok(text.includes('outcome level'), 'the first rule still fits');
+  } finally {
+    cleanup();
+  }
 });

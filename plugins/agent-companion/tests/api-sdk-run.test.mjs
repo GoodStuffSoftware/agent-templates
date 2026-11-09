@@ -14,7 +14,8 @@ import {
   sdkToolsFor, sdkSystem, sdkOptions, initProof, initMismatch, pluginIdentity, isBuiltinPlugin, PLUGIN_ROOT,
 } from '../scripts/lib/api-sdk-run.mjs';
 import { SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
-import { main as reviewMain, DEFAULT_RUNNER, chooseRunner, briefAsksForCommands, buildPrompt } from '../scripts/api-review.mjs';
+import { main as reviewMain, DEFAULT_RUNNER, chooseRunner, buildPrompt } from '../scripts/api-review.mjs';
+import { REVIEW_INSTRUCTION } from '../hooks/lib/self-review.mjs';
 
 const CFG = { budget: 200, cycleDay: 1, shares: { ...DEFAULT_SHARES }, keySource: 'env:AC_API_KEY', reviewRatio: 0.5, itemEstimate: 2 };
 const KEY = 'sk-ant-api03-SENTINEL-sdk-do-not-leak-0123456789';
@@ -355,18 +356,18 @@ test('loadSdk: installs the pinned version once into the given dir, validates th
 
 // --- wiring in api-review.mjs -------------------------------------------------------------
 
-test('chooseRunner / briefAsksForCommands: an explicit choice wins; the default goes to sdk when the brief asks for commands', () => {
-  assert.equal(chooseRunner({ flag: 'sdk', option: 'fetch', brief: 'x' }), 'sdk');
-  assert.equal(chooseRunner({ option: 'sdk', brief: 'x' }), 'sdk');
-  assert.equal(chooseRunner({ option: 'fetch', brief: 'Run the tests and report' }), 'fetch');
-  assert.equal(chooseRunner({ brief: 'Run the tests and report', fallback: 'fetch' }), 'sdk');
-  assert.equal(chooseRunner({ brief: 'a plain review', fallback: 'fetch' }), 'fetch');
-  assert.equal(chooseRunner({ brief: 'a plain review', fallback: 'sdk' }), 'sdk');
+test('chooseRunner: an explicit choice wins, else the default engine; the brief text never decides (both engines are read-only)', () => {
+  assert.equal(chooseRunner({ flag: 'sdk', option: 'fetch' }), 'sdk');
+  assert.equal(chooseRunner({ option: 'sdk' }), 'sdk');
+  assert.equal(chooseRunner({ flag: 'fetch', option: 'sdk' }), 'fetch');
+  assert.equal(chooseRunner({ option: 'fetch' }), 'fetch');
+  assert.equal(chooseRunner({ fallback: 'fetch' }), 'fetch', 'a fetch default stays fetch');
+  assert.equal(chooseRunner({ fallback: 'sdk' }), 'sdk');
   assert.equal(DEFAULT_RUNNER, 'sdk', 'default chosen by measurement: the fixed overhead is under $0.02');
-  assert.equal(chooseRunner({ brief: 'a plain review' }), 'sdk');
-  assert.equal(briefAsksForCommands('the tests pass (api-* files)'), false);
-  assert.equal(briefAsksForCommands('Please run the api tests with node --test'), true);
-  assert.equal(briefAsksForCommands('execute the lint command'), true);
+  assert.equal(chooseRunner({}), 'sdk');
+  // a brief that mentions running tests (the protocol's own review instruction does) no longer switches the engine
+  assert.equal(chooseRunner({ fallback: 'fetch', brief: 'Run the tests and report; node --test tests/x.test.mjs' }), 'fetch');
+  assert.equal(chooseRunner({ fallback: 'fetch', brief: REVIEW_INSTRUCTION }), 'fetch');
   assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b', shell: true }), /Your Read, Grep and Glob tools [(]and WebSearch and WebFetch[)] read it; you have no shell and run nothing, not even targeted tests/);
   assert.doesNotMatch(buildPrompt({ brief: 'b', diffRef: 'a..b', shell: true }), /Bash|PowerShell|run the affected tests/);
   assert.match(buildPrompt({ brief: 'b', diffRef: 'a..b' }), /you have no shell and run nothing/);

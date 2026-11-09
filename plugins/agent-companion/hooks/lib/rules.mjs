@@ -789,3 +789,14 @@ export function renderRules(rules, { maxChars } = {}) {
   }
   return out;
 }
+
+// The hook's cut of a rendered block at outputCap(). renderRules keeps the rules within its own cap and then
+// appends the "(N more rules dropped ...)" note past it, so a plain slice at the same number would cut that note
+// off and the operator would lose rules without being told. The note gets its own room on top of the cap.
+const DROPPED_NOTE_RE = /\n- \(\d+ more rules? dropped: over the \d+-char limit: [^\n]*\)$/;
+export function cutToCap(text, cap = outputCap()) {
+  const s = String(text ?? '');
+  const note = DROPPED_NOTE_RE.exec(s);
+  if (!note) return s.slice(0, cap);
+  return s.slice(0, Math.min(note.index, cap)) + note[0];
+}

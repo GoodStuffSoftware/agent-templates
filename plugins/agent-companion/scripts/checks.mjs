@@ -22,7 +22,7 @@ import { execSyncHidden, execFileSyncHidden } from './lib/proc.mjs';
 
 import {
   classifyModel, classifyEffort, isModelAvailable, effortSupported, dataDir, opt, claudeDir,
-  referenceEffortSupported, retirement, modelTiers,
+  referenceEffortSupported, retirement, modelTiers, stateDir,
 } from '../hooks/lib/context.mjs';
 import {
   memoryRoot, discoverFiles, tokenize, search, loadOrBuildIndex,
@@ -1282,6 +1282,9 @@ const brevityCanary = {
       agent_type: 'general-purpose',
       agent_prompt: 'some prior brief text with no reporting contract in it at all',
     }, ['--event', 'start']);
+    // Its own once-per-agent marker is of no use to anyone after this run: remove it, so repeated audits leave
+    // no `canary-brevity-agent-b-*.seen` files behind in brevity-started/ (the hook prunes only after 24 h).
+    try { rmSync(join(stateDir(), 'brevity-started', `canary-brevity-agent-b-${runTag}.seen`), { force: true }); } catch { /* best effort */ }
     if (missingIt === undefined) {
       findings.push('subagent-brevity.mjs --event start (missing case): did not run at all');
     } else if (!String(missingIt?.hookSpecificOutput?.additionalContext || '').includes(CONTRACT_MARKER)) {

@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readdirSync, mkdirSync, utimesSync } from 'node:fs';
+import { writeFileSync, readdirSync, existsSync, mkdirSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 import {
@@ -577,6 +577,10 @@ test('audit brevity-canary: a second run in the same state dir still passes the 
     const inert = (r) => (r.findings || []).filter((f) => /self-heal path is inert/.test(f));
     assert.deepEqual(inert(first), [], `first run: ${first.findings}`);
     assert.deepEqual(inert(second), [], `second run: ${second.findings}`);
+    // ...and the probe cleans up its own once-per-agent marker
+    const dir = join(stateDir(), 'brevity-started');
+    const left = existsSync(dir) ? readdirSync(dir).filter((f) => f.startsWith('canary-brevity-agent-b-')) : [];
+    assert.deepEqual(left, [], 'the canary leaves no brevity-started marker behind');
   } finally {
     cleanup();
   }

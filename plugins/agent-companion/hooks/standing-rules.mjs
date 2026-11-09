@@ -25,14 +25,14 @@
 // (default 4000 when unset, never above 9500): the harness silently truncates
 // additionalContext above 10000 by writing it to a file and substituting a
 // preview (verified behaviour), and there is no reason for this feature — built
-// to SAVE tokens — to ever approach that. See outputCap() in lib/rules.mjs.
+// to SAVE tokens — to ever approach that. See outputCap() and cutToCap() in lib/rules.mjs: the "(N more rules dropped)" note rides on top of the cap, so the cut never takes it.
 
 import { readStdin, opt, passthrough, sessionIsSubagent } from './lib/context.mjs';
-import { matchRules, renderRules, readRules, outputCap } from './lib/rules.mjs';
+import { matchRules, renderRules, readRules, cutToCap } from './lib/rules.mjs';
 
 function emit(hookEventName, text) {
   process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { hookEventName, additionalContext: text.slice(0, outputCap()) },
+    hookSpecificOutput: { hookEventName, additionalContext: cutToCap(text) },
   }));
   process.exit(0);
 }
