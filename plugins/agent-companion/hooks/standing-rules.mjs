@@ -21,20 +21,18 @@
 // never jumps ahead of a 'user-prompt' rule that appears earlier in
 // standing-rules.json.
 //
-// The rendered block is hard-capped at 4000 chars regardless of
-// standing_rules_max_chars: the harness silently truncates additionalContext
-// above 10000 by writing it to a file and substituting a preview (verified
-// behaviour), and there is no reason for this feature — built to SAVE
-// tokens — to ever approach that.
+// The rendered block is hard-capped at the standing_rules_max_chars option
+// (default 4000 when unset, never above 9500): the harness silently truncates
+// additionalContext above 10000 by writing it to a file and substituting a
+// preview (verified behaviour), and there is no reason for this feature — built
+// to SAVE tokens — to ever approach that. See outputCap() in lib/rules.mjs.
 
 import { readStdin, opt, passthrough, sessionIsSubagent } from './lib/context.mjs';
-import { matchRules, renderRules, readRules } from './lib/rules.mjs';
-
-const HARD_CAP = 4000;
+import { matchRules, renderRules, readRules, outputCap } from './lib/rules.mjs';
 
 function emit(hookEventName, text) {
   process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { hookEventName, additionalContext: text.slice(0, HARD_CAP) },
+    hookSpecificOutput: { hookEventName, additionalContext: text.slice(0, outputCap()) },
   }));
   process.exit(0);
 }

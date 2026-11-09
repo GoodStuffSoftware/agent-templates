@@ -1,10 +1,10 @@
 // api-sdk-run.mjs — the second review engine: the Claude Agent SDK on the Console API key.
 // Same interface and guarantees as scripts/lib/api-run.mjs (the fetch engine), plus the one thing
-// the fetch engine cannot do: the reviewer has the plan reviewers' tools, including Bash (and PowerShell
-// on Windows), so it can run the tests. The toolset follows what the operator's reviewers used in 14 days
-// of transcripts (2026-10-18 to 2026-11-01): Bash 97%, Read 66%, Grep 26%, PowerShell 24%, WebFetch 4%,
-// Glob 3%, WebSearch 2%. Edit and Write (the runner writes the review file itself), Agent/Task,
-// notebooks and MCP stay off.
+// the fetch engine cannot do: the reviewer loads the project's rules (CLAUDE.md), the project's hooks and this plugin,
+// and has Read, Grep, Glob, WebSearch and WebFetch. A review is a READ of the code (operator rule 2026-11-08): there is
+// no Bash or PowerShell tool, so the reviewer cannot build, run tests or CI, or rerun the writer's checks (before
+// 0.31.49 it had both shells and ran the affected tests). Edit and Write (the runner writes the review file itself),
+// Agent/Task, notebooks and MCP stay off.
 //
 // Why this is allowed on the credits: the plan's API credits cover the Claude API, Managed Agents,
 // the Agent SDK and the Playground, and do NOT cover Claude Code
@@ -44,9 +44,9 @@
 //
 // The key reaches only the child's ANTHROPIC_API_KEY. CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 strips it
 // from the Bash tool's environment, and every string leaving this module is scrubbed of it anyway.
-// Unlike the fetch engine, this one is NOT confined to the repository: Bash can read and write
-// anywhere the operator's account can. The deny rules below block the obvious damage (writes through
-// the file tools, git push/commit/reset, rm), not a determined model; run it on trusted diffs.
+// Unlike the fetch engine, this one is NOT confined to the repository: Read, Grep and Glob can read
+// anywhere the operator's account can, and WebFetch reaches the network. The deny rules below block the obvious damage
+// (writes through the file tools, credential directories), not a determined model; run it on trusted diffs.
 
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -66,39 +66,29 @@ export const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
 export const DEFAULT_SDK_VERSION = '0.3.319';
 export const REQUIRED_KEY_SOURCE = 'ANTHROPIC_API_KEY';
 
-export const SDK_TOOLS = ['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch'];
-// PowerShell is a built-in tool of the SDK's binary (BUILTIN_TOOL_NAMES); it is added on Windows only,
-// where the operator's reviewers use it (24% of runs). Elsewhere it needs pwsh 7+.
-export const sdkToolsFor = (platform = process.platform) => (platform === 'win32' ? [...SDK_TOOLS, 'PowerShell'] : [...SDK_TOOLS]);
+export const SDK_TOOLS = ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch'];
+// Same on every platform: no Bash and no PowerShell (a review reads; it runs nothing). The platform argument is kept for the callers.
+export const sdkToolsFor = (_platform = process.platform) => [...SDK_TOOLS];
 // Removed from the model's context outright (bare names). Edit and Write are not in `tools` either;
 // the explicit list is belt and braces against a future default.
 export const SDK_DISALLOWED = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'Task', 'Agent', 'Skill', 'TodoWrite'];
-// Scoped denials: they hold in every permission mode. A guard rail, not a sandbox: Bash runs with the
-// operator's own file access (as a plan reviewer does), so the credential directories are denied to the
-// file tools by name and the claude binary is pointed at a private config dir (CLAUDE_CONFIG_DIR).
+// Scoped denials: they hold in every permission mode. A guard rail, not a sandbox: the file tools run with the
+// operator's own file access, so the credential directories are denied to them by name and the claude binary is
+// pointed at a private config dir (CLAUDE_CONFIG_DIR).
 export const SDK_READ_DENY = ['Read(~/.claude/**)', 'Read(~/.ssh/**)', 'Read(~/.aws/**)', 'Read(~/.config/**)', 'Read(~/.npmrc)'];
+// Belt and braces: Bash is not in `tools`, so these only matter if a future default adds it back.
 export const SDK_BASH_DENY = [
   'Bash(git push:*)', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(git checkout:*)', 'Bash(git clean:*)',
   'Bash(git merge:*)', 'Bash(git rebase:*)', 'Bash(rm:*)', 'Bash(del:*)', 'Bash(rmdir:*)', 'Bash(curl:*)', 'Bash(wget:*)',
 ];
-// The same guard rails for the PowerShell tool, which has its own permission rules (a Bash rule does not
-// restrict it). Note: with Git Bash installed, any scoped Bash deny rule turns the PowerShell tool off
-// unless CLAUDE_CODE_USE_POWERSHELL_TOOL=1 is in the environment (sdkEnv sets it) or a PowerShell rule exists.
-export const SDK_POWERSHELL_DENY = [
-  'PowerShell(git push *)', 'PowerShell(git commit *)', 'PowerShell(git reset *)', 'PowerShell(git checkout *)', 'PowerShell(git clean *)',
-  'PowerShell(git merge *)', 'PowerShell(git rebase *)', 'PowerShell(Remove-Item *)', 'PowerShell(rm *)', 'PowerShell(del *)', 'PowerShell(rmdir *)',
-  'PowerShell(Set-Content *)', 'PowerShell(Add-Content *)', 'PowerShell(Out-File *)', 'PowerShell(Invoke-WebRequest *)', 'PowerShell(Invoke-RestMethod *)',
-  'PowerShell(iwr *)', 'PowerShell(irm *)', 'PowerShell(curl *)', 'PowerShell(wget *)', 'PowerShell(Start-Process *)',
-];
-
 export const SDK_SYSTEM_PREFIX = [
-  'You are a code reviewer. The repository under review is your working directory, checked out at the head of the diff you are given.',
-  'Tools: Read, Grep, Glob, Bash (and PowerShell on Windows), WebSearch and WebFetch. Use the shell to run the tests AFFECTED by the diff and the other checks the change needs: the test files that cover the changed files, through an affected-test selector of the repository if it has one (look in its scripts, package.json or ci-local), otherwise mapped from the diff.',
-  'Never run the full test suite or ci-local: the writer and CI run those. Use WebSearch and WebFetch only to check a library, API or tool the change relies on, never to send out repository content.',
-  'Never modify the repository: no edits, no git commit, push, reset or checkout, no installs. Read the surrounding code, not only the diff, and try to refute the change.',
+  'You are an adversarial code reviewer, and a review is a READ of the code: assume the change is wrong and hunt for what the writer missed. The repository under review is your working directory, checked out at the head of the diff you are given.',
+  'Tools: Read, Grep, Glob, WebSearch and WebFetch. There is no shell: you do not build, run tests or CI, launch anything or rerun the writer\'s checks (the writer and CI run those). The instruction may allow targeted tests that need no build; this tool allowance cannot scope a test command safely, so you run none and name the targeted tests you would have run. Read the diff, the code it touches, and its callers and consumers (grep, trace the call path), and read the raw test and build output the writer put in the brief; say so if that output is missing.',
+  'Find the repository\'s recorded decisions and standards with Glob and Read (ADR files such as docs/adr/, docs/decisions/ or ADR-*.md, any conventions or contributing doc; the project CLAUDE.md is loaded) and check the change against them and against the patterns of neighbouring code (naming, error handling, file layout, how similar features are done): a deviation is a finding unless the change also updates or adds the ADR that justifies it; if the repo has no ADRs, say so and check against the patterns alone.',
+  'Use WebSearch and WebFetch only to check a library, API or tool the change relies on, never to send out repository content.',
+  'Never modify the repository and do not fix anything. Read the surrounding code, not only the diff, and try to refute the change by reading. Your reply is a report to the main agent that asked for the review of what it missed: defects, gaps against the acceptance criteria, callers and consumers left unhandled, deviations from the ADRs and patterns.',
   'The project rules (its CLAUDE.md) are loaded: follow its conventions and prohibitions. Rules that address a lead or a writer (delegate, spawn agents, load skills, run a knowledge check, ask the user) do not apply to you: you are the reviewer, you do no knowledge check, and your reply is the review.',
-  'Write the review as soon as you can support a verdict. Start it with one line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit with file:line and a repro,',
-  'and say which checks you ran and which you could not.',
+  'Write the review as soon as you can support a verdict. Start it with one line, `VERDICT: PASS` or `VERDICT: FIX`, then list each finding as blocker, should-fix or nit with file:line and the reading that shows it (the call path, or the line that contradicts the change).',
 ].join(' ');
 
 export function sdkSystem(maxTurns) {
@@ -127,12 +117,11 @@ const TRIM_ENV = {
   DISABLE_AUTOUPDATER: '1',
 };
 
-export function sdkEnv({ key, workspace = '', base = process.env, configDir = '', powershell = false }) {
+export function sdkEnv({ key, workspace = '', base = process.env, configDir = '' }) {
   const out = {};
   for (const k of Object.keys(base)) if (ENV_ALLOW.has(k.toLowerCase()) && typeof base[k] === 'string') out[k] = base[k];
   Object.assign(out, TRIM_ENV);
   out[REVIEWER_SESSION_ENV] = '1'; // the hooks' marker: lead-only hooks stay silent, safety guards run (hooks/lib/context.mjs)
-  if (powershell) out.CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'; // else the scoped Bash deny rules switch the tool off
   out.ANTHROPIC_API_KEY = key;
   if (configDir) out.CLAUDE_CONFIG_DIR = configDir;
   if (workspace) out.ANTHROPIC_CUSTOM_HEADERS = `anthropic-workspace-id: ${workspace}`;
@@ -157,15 +146,14 @@ export function sdkOptions({
   system, maxTurns = 30, maxUsd = 0, abortController, pluginRoot = PLUGIN_ROOT, hooks = null,
 }) {
   const tools = sdkToolsFor(platform);
-  const ps = tools.includes('PowerShell');
   const plugin = pluginIdentity(pluginRoot);
   return {
-    cwd, model: modelId, env: sdkEnv({ key, workspace, base, configDir, powershell: ps }),
+    cwd, model: modelId, env: sdkEnv({ key, workspace, base, configDir }),
     // Project rules and project hooks, plus ONLY this plugin; no user settings, no skills, no MCP servers (project .mcp.json included).
     settingSources: ['project'], plugins: plugin ? [{ type: 'local', path: plugin.root }] : [], skills: [], mcpServers: {}, strictMcpConfig: true,
     systemPrompt: system || sdkSystem(maxTurns),
     // allowedTools and disallowedTools are command-line rules: a project's permissions.allow cannot widen them (deny wins).
-    tools, allowedTools: [...tools], disallowedTools: [...SDK_DISALLOWED, ...SDK_READ_DENY, ...SDK_BASH_DENY, ...(ps ? SDK_POWERSHELL_DENY : [])],
+    tools, allowedTools: [...tools], disallowedTools: [...SDK_DISALLOWED, ...SDK_READ_DENY, ...SDK_BASH_DENY],
     permissionMode: 'dontAsk', maxTurns, persistSession: false,
     // The spend backstop (maxUsd) is the runner's own check between messages, which keeps a final reply that ends the turn. It is NOT passed as the SDK's
     // maxBudgetUsd: the SDK enforces that after the final reply too and then reports an error, discarding a review that was already paid for.

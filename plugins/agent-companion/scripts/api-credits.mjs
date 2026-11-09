@@ -3,7 +3,7 @@
 //
 //   node api-credits.mjs decide <category>              prints "api" or "plan", then one reason line
 //   node api-credits.mjs record <category> <usd> <meta> appends spend
-//   node api-credits.mjs status                         spend by category, the pace, what is left
+//   node api-credits.mjs status                         spend by category, the pace, what is left, the review limits in force
 //   node api-credits.mjs record-fallback <review id> [--reason <r>]  marks a review as redone on the plan (the id api-review.mjs printed)
 //   node api-credits.mjs reviews [--since <ISO date>] [--until <ISO date>]  real reviews only (no probe or measure rows): count, spend, median, stopped or fallen back
 //   node api-credits.mjs summary                        one line: "API credits: reviews $X of $100, cycle day N"
@@ -15,7 +15,8 @@
 
 import { isMain } from './lib/is-main.mjs';
 import { CATEGORIES, decide, record, recordFallback, reviewStats, reviewSummaryLine, status, summaryLine, loadConfig } from './lib/api-credits.mjs';
-import { runApi } from './lib/api-run.mjs';
+import { runApi, reviewLimitsLine } from './lib/api-run.mjs';
+import { opt } from '../hooks/lib/context.mjs';
 
 export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), env = process.env, fetchImpl, endpoint, sleep, cfg: cfgIn } = {}) {
   const args = [];
@@ -54,7 +55,12 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     if (Number.isNaN(since) || Number.isNaN(until)) { out('bad --since or --until (an ISO date)'); return 2; }
     try { out(reviewSummaryLine(reviewStats({ since, until }))); return 0; } catch (e) { out(`reviews failed: ${e.message}`); return 2; }
   }
-  if (cmd === 'status') { out(status({ now, cfg, env }).text); return 0; }
+  if (cmd === 'status') {
+    let limits = '';
+    try { limits = `\n${reviewLimitsLine({ softRaw: opt('api_review_soft_usd', ''), hardRaw: opt('api_review_hard_usd', '') })}`; } catch { /* a bad limits setting never hides the ledger */ }
+    out(status({ now, cfg, env }).text + limits);
+    return 0;
+  }
   if (cmd === 'summary') { out(summaryLine({ now, cfg })); return 0; }
   if (cmd === 'probe') {
     const r = await runApi({

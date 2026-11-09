@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
 import {
   SCOPES, defaultRules, readRules, matchRules, renderRules, rulesPath, userOwnText, COPYABLE_PROMPT_WHEN,
+  outputCap, DEFAULT_OUTPUT_CAP, OUTPUT_CAP_CEILING,
 } from '../hooks/lib/rules.mjs';
 import { stateFile, writeJson } from '../hooks/lib/context.mjs';
 
@@ -703,4 +704,22 @@ test('the built-in lead session-start rules, effort check on, stay lean enough t
   } finally {
     cleanup();
   }
+});
+
+test('outputCap: the hook cap is the standing_rules_max_chars option, 4000 when unset, never above the harness ceiling', () => {
+  const KEY = 'CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS';
+  const was = process.env[KEY];
+  try {
+    delete process.env[KEY];
+    assert.equal(DEFAULT_OUTPUT_CAP, 4000);
+    assert.equal(outputCap(), 4000, 'unset keeps the old 4000');
+    process.env[KEY] = '4200';
+    assert.equal(outputCap(), 4200, 'the option can raise the limit past 4000');
+    process.env[KEY] = '3000';
+    assert.equal(outputCap(), 3000, 'and lower it');
+    process.env[KEY] = '50000';
+    assert.equal(outputCap(), OUTPUT_CAP_CEILING, 'never past the point where the harness swaps the text for a preview');
+    assert.ok(OUTPUT_CAP_CEILING < 10000);
+    for (const bad of ['0', '-5', 'abc']) { process.env[KEY] = bad; assert.equal(outputCap(), 4000, bad); }
+  } finally { if (was === undefined) delete process.env[KEY]; else process.env[KEY] = was; }
 });
