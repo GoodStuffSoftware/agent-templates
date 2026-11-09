@@ -561,3 +561,37 @@ test('contract states the ~300 token cap and the no-interim-notice rule, within 
     cleanup();
   }
 });
+
+// --- 0.31.49: the audit's self-heal canary must not depend on earlier runs ----
+// The canary used fixed agent ids; subagent-brevity.mjs drops a repeat start for an
+// agent_id (brevity-started marker, 24h), so the second audit run inside a day
+// saw silence and reported "the self-heal path is inert" on a healthy hook.
+test('audit brevity-canary: a second run in the same state dir still passes the self-heal probe', async () => {
+  const { cleanup } = makeFixture();
+  try {
+    const { CHECKS } = await import('../scripts/checks.mjs');
+    const canary = CHECKS.find((c) => c.id === 'brevity-canary');
+    const ctx = { pluginRoot: join(import.meta.dirname, '..') };
+    const first = await canary.run(ctx);
+    const second = await canary.run(ctx);
+    const inert = (r) => (r.findings || []).filter((f) => /self-heal path is inert/.test(f));
+    assert.deepEqual(inert(first), [], `first run: ${first.findings}`);
+    assert.deepEqual(inert(second), [], `second run: ${second.findings}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('subagent-brevity start: a prompt that already carries the contract is left alone', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const res = runHook('hooks/subagent-brevity.mjs', {
+      session_id: 'sess-has-marker', agent_id: 'agent-has-marker', agent_type: 'general-purpose',
+      agent_prompt: `brief\n\n${CONTRACT_MARKER}\nalready here`,
+    }, { args: ['--event', 'start'] });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal((res.stdout || '').trim(), '');
+  } finally {
+    cleanup();
+  }
+});
