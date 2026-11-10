@@ -45,7 +45,9 @@
 // caller's regex source, applied to what follows the colon exactly as the
 // single-regex form did before.
 
-export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'WRITER', 'EFFORT', 'REVIEW', 'ROLE', 'REASON', 'BUDGET', 'PREMIUM'];
+// RISK: (0.31.50) is the change risk (low, mid or high) a self-reviewing writer puts on its reviewer's brief; measurement only
+// (spawns.jsonl declared_risk), it routes nothing.
+export const DIRECTIVE_LABELS = ['TYPE', 'WEIGHT', 'KIND', 'CONSEQUENCE', 'WARRANT', 'WRITER', 'EFFORT', 'REVIEW', 'ROLE', 'REASON', 'BUDGET', 'PREMIUM', 'RISK'];
 
 // ROLE: names what the spawn's main deliverable is, for usage measurement only
 // (0.31.3). It routes nothing and gates nothing; the spawn guard reads it to

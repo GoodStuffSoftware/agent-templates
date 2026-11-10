@@ -1,5 +1,5 @@
 // Advisory notes for a lead session: live sessions (F9), peer-message warning
-// (F10), overdue worker (F14), shared resources line (resource queue), keep-warm (lib/keep-warm.mjs). Logic in lib/advisory-b.mjs. Never blocks, adds
+// (F10), overdue worker (F14), shared resources line (resource queue), keep-warm (lib/keep-warm.mjs), long-run line (longRunNotices). Logic in lib/advisory-b.mjs. Never blocks, adds
 // no tokens unless a note fires, starts no child process, fails open.
 //   --event session-start   F9 (SessionStart)
 //   --event user-prompt     F9 when the set changed, F14 (UserPromptSubmit)
@@ -13,7 +13,7 @@ import { briefLedgerFields } from './lib/redo-alert.mjs';
 import { sharedResourcesNote, ensureLauncher } from './lib/resource-line.mjs';
 import { keepWarmToolNote, keepWarmPingNote, KEEP_WARM_MAX_DEFAULT_MIN } from './lib/keep-warm.mjs';
 import {
-  ledgerWrite, workerStatus, taskStopWrite, pruneState, overdueNotices, peerMessageNote, parseKnownPeers, liveSessionsNote, parseRelated, OVERDUE_DEFAULT_MINUTES,
+  ledgerWrite, workerStatus, taskStopWrite, pruneState, overdueNotices, longRunNotices, logLongRunSummary, peerMessageNote, parseKnownPeers, liveSessionsNote, parseRelated, OVERDUE_DEFAULT_MINUTES,
 } from './lib/advisory-b.mjs';
 
 const i = process.argv.indexOf('--event');
@@ -31,6 +31,7 @@ try {
   const wantF9 = opt('live_sessions', true);
 
   if (EVENT === 'worker-start' || EVENT === 'worker-stop') {
+    if (EVENT === 'worker-stop') await logLongRunSummary(p); // the "why" row of a worker that passed the long-run mark (lib/long-run.mjs)
     if (wantF14 || wantF10) {
       if (EVENT === 'worker-start') ledgerWrite(p.session_id, 'start', p);
       else ledgerWrite(p.session_id, 'stop', p, Date.now(), { status: workerStatus(p), ...briefLedgerFields(p) });
@@ -78,6 +79,10 @@ try {
         const n = await sharedResourcesNote(p, { mode: EVENT === 'session-start' ? 'start' : 'change' });
         if (n) parts.push(n);
       } catch { /* advisory */ }
+    }
+    // A worker past the long-run mark (150 steps, then every 100): the lead is told once per mark. Nothing here stops anything.
+    if (EVENT !== 'session-start' && !sessionIsSubagent(p)) {
+      try { parts.push(...longRunNotices(p)); } catch { /* advisory */ }
     }
     if (EVENT !== 'session-start' && wantF14) {
       try { parts.push(...overdueNotices(p, { minutes: opt('overdue_worker_minutes', OVERDUE_DEFAULT_MINUTES) })); } catch { /* advisory */ }

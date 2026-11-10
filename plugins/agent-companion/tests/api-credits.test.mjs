@@ -19,6 +19,7 @@ import { main as creditsMain } from '../scripts/api-credits.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
 import { spawnSyncHidden } from '../scripts/lib/proc.mjs';
 import { selfReviewBlock, REVIEW_INSTRUCTION } from '../hooks/lib/self-review.mjs';
+import { BATCH_RULE } from '../hooks/lib/tier-text.mjs';
 
 const NL = '\n';
 const T = (s) => Date.parse(s);
@@ -466,6 +467,26 @@ test('runner: a key echoed by the model is scrubbed from the output', async () =
   } finally { t.fx.cleanup(); }
 });
 
+test('runner: --risk reaches the prompt header, the no-shell sentence and the ledger meta with the project tier; a bad risk is a usage error', async () => {
+  const t = rig();
+  try {
+    const f = stubFetch([msg([text(`VERDICT: PASS${NL}no findings`)])]);
+    const r = await t.run(f, { extra: ['--risk', 'high'] });
+    assert.equal(r.code, 0, r.out);
+    const prompt = f.calls[0].body.messages[0].content[0].text;
+    assert.match(prompt, /^TYPE: code-review\nWRITER: sonnet\/high\nROLE: reviewer\nRISK: high\n/);
+    assert.match(prompt, /You have no shell, so you cannot start the app or any command, whatever the instruction above allows: if the change needs a check in the running app, list the checks you would have run\./);
+    assert.match(t.ledger().entries.at(-1).meta, /^review HEAD~1\.\.HEAD risk=high project_tier=(push|risk|gates)( ok)?$/);
+    const none = stubFetch([msg([text('VERDICT: PASS')])]);
+    const n = await t.run(none);
+    assert.doesNotMatch(none.calls[0].body.messages[0].content[0].text, /\nRISK: /, 'no --risk, no RISK header line');
+    assert.doesNotMatch(t.ledger().entries.at(-1).meta, /risk=/);
+    const bad = await t.run(stubFetch([msg([text('VERDICT: PASS')])]), { extra: ['--risk', 'extreme'] });
+    assert.equal(bad.code, 2);
+    assert.match(bad.out, /risk must be low, mid or high/);
+  } finally { t.fx.cleanup(); }
+});
+
 test('runner: no key means exit 4; a usage error means exit 2; nothing is called', async () => {
   const t = rig();
   try {
@@ -543,7 +564,15 @@ test('buildPrompt: protocol header, verbatim brief, the instruction, the diff', 
   assert.match(REVIEW_INSTRUCTION, /report to the main agent \(the lead or writer that asked for it\) of what it missed: defects, gaps against the acceptance criteria, callers and consumers left unhandled/);
   assert.match(REVIEW_INSTRUCTION, /callers and consumers \(grep and trace the call path\)/);
   assert.match(REVIEW_INSTRUCTION, /raw test and build output the writer put in the hand-off; say if that output is missing/);
-  assert.match(REVIEW_INSTRUCTION, /You may run only the tests that cover the changed code .*only when they run with no compile or build step\. Never build or compile, never run the full suite, ci-local or CI, never launch the app or game, never rerun the writer's whole check/);
+  assert.match(REVIEW_INSTRUCTION, /You may run only the tests that cover the changed code .*only when they run with no compile or build step\. Never run the full suite, ci-local, e2e or CI \(read the batch's result in the hand-off\), never rerun the writer's whole check/);
+  // Project tiers: a small change is read only; a high-risk or large one may start the project's own run command, never a separate build.
+  for (const frag of [
+    'a cell that says read only or by reading means you read and run nothing else, however large the change.',
+    'Where the cell asks you to check the changed behaviour in the running app, or the brief has no tier clause and its RISK is high or the change is large or risky, you may start the project\'s own run or dev command, including the compile that command does itself, only to check the touched behaviour for real; run no separate full build, packaging or install, and if the check needs one, write "not checked for real" and why.',
+    'With no tier clause, a small change is read only.',
+  ]) assert.ok(REVIEW_INSTRUCTION.includes(frag), frag);
+  assert.match(REVIEW_INSTRUCTION, /You may raise the writer's RISK, never lower it, and say so on the line after the verdict\./);
+  assert.doesNotMatch(REVIEW_INSTRUCTION, /launch the app/);
   assert.match(REVIEW_INSTRUCTION, /a review takes minutes/);
   assert.doesNotMatch(REVIEW_INSTRUCTION, /Run the tests|affected-test selector|a repro|neutral/);
   assert.ok(p.includes('Diff range under review: a..b'));
@@ -590,12 +619,17 @@ test('the self-review clause runs the governor before spawning a reviewer, and k
   assert.ok(block.includes(`this instruction: "${REVIEW_INSTRUCTION}"`), 'the reviewer brief carries the read-only instruction');
   assert.ok(!block.includes('can run the affected tests'));
   assert.ok(block.includes('the API reviewer only reads (read-only tools, no shell: it cannot run even the targeted tests'));
-  assert.ok(block.includes('0. Finish every task in your brief first, with no self-chosen sections or milestone stops'), 'no chunking: finish, then the complete tests once');
-  assert.ok(block.includes('run only the unit tests of the code you are changing; e2e tests you write or extend run only at the end. When all tasks are done, run the complete tests once'));
+  assert.ok(block.includes(`0. ${BATCH_RULE} Keep the raw output of your test runs for the reviewer.`), 'step 0 is the shared batch rule: no chunking, unit tests as you go, e2e once per batch and tree');
+  assert.ok(block.includes('0. Finish every task in your brief first, with no self-chosen sections or milestone stops'));
   assert.ok(block.indexOf('0. Finish every task') < block.indexOf('1. List anything you built'));
+  // Project tiers: the risk step sits between the commit and the reviewer steps, and the API route is skipped when the cell checks for real.
+  assert.ok(block.indexOf('1. List anything you built') < block.indexOf('2. State your risk') && block.indexOf('2. State your risk') < block.indexOf('3. Only when your cell names a reviewer'));
+  assert.ok(block.includes('the API reviewer has no shell, so skip the API route below'));
+  assert.ok(block.includes('--writer sonnet/high --risk <your risk> --review-file'), 'the API runner is told the risk');
+  assert.ok(block.includes('Its brief opens with these four lines, as plain text:') && block.includes('   ROLE: reviewer\n   RISK: <your risk>\n   ```'));
   assert.ok(block.includes('the raw output of your own test and build runs'), 'the writer still runs the checks and hands over the output');
   assert.ok(block.includes('Throwaway test code (probes, timing harnesses, temporary diagnostics that never ship) has no review gate'));
-  assert.ok(block.includes('runs at most the tests that cover the changed code when they need no build: no builds, no full suite, no CI, no commits, no pushes'));
+  assert.ok(block.includes('runs at most the tests that cover the changed code when they need no build (plus the project\'s own run command when your cell asks for a check in the running app, as the instruction says): no separate builds, no full suite, no e2e, no CI, no commits, no pushes'));
   assert.ok(!block.includes('Bash timeout of 600000 ms'));
   assert.ok(block.includes("brief TEXT goes into that file, never only a path to it"));
   assert.ok(block.includes('spawn exactly ONE reviewer, in the foreground'));

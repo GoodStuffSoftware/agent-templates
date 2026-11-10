@@ -7,6 +7,24 @@ import { createHash } from 'node:crypto';
 import {
   appendLog, claudeProjectDir, effortSupported, opt, pathKey, resolvedProjectRoot, runningCopyStamp,
 } from './context.mjs';
+import { briefDeclarations, declarationValue } from './brief-directives.mjs';
+import { tierFor } from './project-tier.mjs';
+
+// The RISK: line of a brief (low|mid|high), read like every other declaration (not inside a fence, quote or comment);
+// null when absent, not one of the three, or anything fails.
+function declaredRiskOf(prompt) {
+  try {
+    const m = declarationValue(briefDeclarations(String(prompt ?? '')), 'RISK', /(low|mid|high)\b/.source);
+    return m ? m[1].toLowerCase() : null;
+  } catch { return null; }
+}
+// The project's tier and where it came from (assigned | default | none), for the spawning session's folder; nulls on any failure.
+function projectTierOf(cwd) {
+  try {
+    const t = tierFor(cwd);
+    return { project_tier: t.tier || null, tier_source: t.source || null };
+  } catch { return { project_tier: null, tier_source: null }; }
+}
 
 export function writeSpawnRow({
   isCanary, input, model, def, callerEffort, sid, leadLive, p, loadedAtMs, ladderRewrite, declared, fromDef,
@@ -111,6 +129,8 @@ export function writeSpawnRow({
       declared_type: declaredTypeRaw,    // the brief's TYPE: value as written (null when none); an alias stays as written
       declared_type_resolved: declaredTypeRaw && declaredType !== declaredTypeRaw ? declaredType : null, // the canonical type an alias resolved to
       declared_role: declaredRole,       // the brief's ROLE: value (reviewer|fixer|lander|writer|docs|lookup|operate|other); null when absent or not one of those
+      declared_risk: declaredRiskOf(input?.prompt), // the brief's RISK: value (low|mid|high); null when absent, unusable or inside a fenced block
+      ...projectTierOf(p?.cwd),          // project_tier (push|risk|gates) and tier_source (assigned|default|none) of the spawning session's project; null when unresolvable
       fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid
       route_layer: route?.layer || null,  // profile | trial | grid: which resolveRoute() layer answered; null when no route
       route_profile_rev: route?.layer === 'profile' ? (route.profileRevision ?? null) : null, // routing-profile revision behind a profile answer; null for every other layer. The row's content is never logged.

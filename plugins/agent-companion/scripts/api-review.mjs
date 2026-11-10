@@ -4,7 +4,7 @@
 // by the credits, so this never runs `claude -p`; see scripts/lib/api-run.mjs.)
 //
 //   node api-review.mjs run --brief-file <f> --diff-ref <base>..<head> --model <alias>
-//                           [--effort <e>] --cwd <worktree> [--writer <model/effort>]
+//                           [--effort <e>] --cwd <worktree> [--writer <model/effort>] [--risk low|mid|high]
 //                           [--review-file <f>] [--max-usd N] [--max-turns N] [--max-tokens N]
 //
 // Prints the reviewer's output (its `VERDICT:` line first) on stdout, then one path-label
@@ -33,6 +33,7 @@ import { isMain } from './lib/is-main.mjs';
 import { execFileSyncHidden } from './lib/proc.mjs';
 import { opt } from '../hooks/lib/context.mjs';
 import { REVIEW_INSTRUCTION as INSTRUCTION } from '../hooks/lib/self-review.mjs';
+import { tierFor } from '../hooks/lib/project-tier.mjs';
 import { runApi, REVIEW_SYSTEM, reviewLimits, EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE, EXIT_FAILED } from './lib/api-run.mjs';
 import { runApiSdk, DEFAULT_SDK_VERSION } from './lib/api-sdk-run.mjs';
 
@@ -109,11 +110,17 @@ export function gitDiff(cwd, range) {
   return { stat, diff, note };
 }
 
-export function buildPrompt({ brief, diffRef, writer, stat = '', diff = '', note = '', shell = false }) {
+// The change risk the writer states (the table of project tiers): low, mid or high.
+export const RISKS = ['low', 'mid', 'high'];
+// Said once, after the instruction, which lets a reviewer start the project's own run command: this reviewer cannot.
+const NO_SHELL = 'You have no shell, so you cannot start the app or any command, whatever the instruction above allows: if the change needs a check in the running app, list the checks you would have run.';
+
+export function buildPrompt({ brief, diffRef, writer, risk = '', stat = '', diff = '', note = '', shell = false }) {
   return [
     'TYPE: code-review',
     `WRITER: ${writer || 'unknown'}`,
     'ROLE: reviewer',
+    ...(risk ? [`RISK: ${risk}`] : []),
     '',
     (brief.length > BRIEF_CAP ? `${brief.slice(0, BRIEF_CAP)}\n[brief cut at ${BRIEF_CAP} characters]` : brief).replace(/\s+$/, ''),
     '',
@@ -122,6 +129,7 @@ export function buildPrompt({ brief, diffRef, writer, stat = '', diff = '', note
       ? `Diff range under review: ${diffRef}. Your working directory is the repository at the head of that range. Your Read, Grep and Glob tools (and WebSearch and WebFetch) read it; you have no shell and run nothing, not even targeted tests (name the ones you would have run): a review is a read of the code.`
       : `Diff range under review: ${diffRef}. Your read_file, grep and glob tools see the repository at the head of that range; you have no shell and run nothing, not even targeted tests (name the ones you would have run): a review is a read of the code.`,
     INSTRUCTION,
+    NO_SHELL,
     'Add nothing that narrows the review.',
     '',
     'git diff --stat:',
@@ -145,8 +153,9 @@ function parse(argv) {
 
 export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`), env = process.env, fetchImpl, endpoint, sleep, now, cfg, clock, sdk, loadSdk } = {}) {
   const o = parse(argv);
-  const usage = 'usage: api-review.mjs run --brief-file <f> --diff-ref <base>..<head> --model <alias> [--effort <e>] --cwd <worktree> [--writer <model/effort>] [--review-file <f>] [--runner sdk|fetch] [--max-usd N] [--max-turns N] [--max-tokens N]';
+  const usage = 'usage: api-review.mjs run --brief-file <f> --diff-ref <base>..<head> --model <alias> [--effort <e>] --cwd <worktree> [--writer <model/effort>] [--risk low|mid|high] [--review-file <f>] [--runner sdk|fetch] [--max-usd N] [--max-turns N] [--max-tokens N]';
   if (o.error || o.cmd !== 'run' || !o['brief-file'] || !o['diff-ref'] || !o.model || !o.cwd) { out(o.error || usage); return EXIT_USAGE; }
+  if (o.risk !== undefined && !RISKS.includes(o.risk)) { out('risk must be low, mid or high'); return EXIT_USAGE; }
   // The numeric options are validated: a NaN would silently remove its own cap.
   if (o.runner !== undefined && !['sdk', 'fetch'].includes(o.runner)) { out('runner must be sdk or fetch'); return EXIT_USAGE; }
   for (const k of ['max-turns', 'max-tokens']) {
@@ -161,7 +170,11 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   let d;
   try { d = gitDiff(o.cwd, o['diff-ref']); } catch (e) { out(`API review failed: cannot read the diff ${o['diff-ref']} in ${o.cwd}`); return EXIT_FAILED; }
   const runner = chooseRunner({ flag: o.runner, option: opt('api_review_runner', '') });
-  const meta = `review ${o['diff-ref']}`.slice(0, 120);
+  // The ledger meta carries the stated risk and the project's tier, so the weekly report can split API reviews like the others (this path bypasses the spawn guard).
+  let projectTier = '';
+  try { projectTier = tierFor(o.cwd).tier || ''; } catch { projectTier = ''; }
+  const metaTail = `${o.risk ? ` risk=${o.risk}` : ''}${projectTier ? ` project_tier=${projectTier}` : ''}`;
+  const meta = `review ${String(o['diff-ref']).slice(0, Math.max(0, 120 - 7 - metaTail.length))}${metaTail}`;
   // The soft note and the one hard spend backstop (0 = none); --max-usd takes precedence over the hard option for this review.
   // A soft note that is not below an active backstop is clamped, and said so once.
   let limits;
@@ -172,7 +185,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   let r = null;
   if (runner === 'sdk') {
     r = await runApiSdk({
-      prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, shell: true, ...d }),
+      prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, risk: o.risk, shell: true, ...d }),
       model: o.model, effort: o.effort || null, cwd: o.cwd, category: 'review', meta,
       maxUsd, softUsd, reviewId,
       ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),
@@ -184,7 +197,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     if (r.sdkUnavailable) { err(`${r.reason}; using the fetch engine`); r = null; }
   }
   if (!r) r = await runApi({
-    prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, ...d }),
+    prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, risk: o.risk, ...d }),
     system: fetchSystem(REVIEW_SYSTEM, readProjectRules(o.cwd)),
     model: o.model, effort: o.effort || null, cwd: o.cwd, category: 'review', meta,
     maxUsd, softUsd, reviewId,

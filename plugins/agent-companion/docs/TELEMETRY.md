@@ -215,6 +215,9 @@ whose.
 | `declared_type` | string or null | the task type named on the brief's `TYPE:` line (a `config/model-tiers.json` `taskTypes` name, or an unknown name exactly as written, lower-cased; with several `TYPE:` lines, only the first counts, known or not); null when the brief names none or its first `TYPE:` value is not a name. Only the name is logged, never brief text. When set, `declared_weight`/`declared_kind`/`declared_consequence` are filled from that type's preset where the brief did not state them |
 | `declared_type_resolved` | string or null | the canonical task type the brief's `TYPE:` alias resolved to (for example `bugfix` -> `debug-root-cause`, see `taskTypeAliases` in `config/model-tiers.json`); null when the raw `declared_type` is already the canonical name or is unknown. `declared_type` itself carries the raw value as written |
 | `declared_role` | string or null | the role named on the brief's first `ROLE:` line: `reviewer`, `fixer`, `lander`, `writer`, `docs`, `lookup`, `operate` or `other` (lower-cased); null when the brief has none or its first `ROLE:` value is not one of those. Measurement only: nothing routes or gates on it. A null here is what `role_line_nudge` reacts to |
+| `declared_risk` | `low` \| `mid` \| `high` \| null | the change risk named on the brief's first `RISK:` line (0.31.50): the self-review protocol puts it on the reviewer's brief after `TYPE`, `WRITER` and `ROLE`. Read like the other brief lines (a `RISK:` inside a fenced block, quote or comment is ignored); null when the brief has none or its first `RISK:` value is not one of the three. Measurement only: nothing routes or gates on it |
+| `project_tier` | `push` \| `risk` \| `gates` \| null | the project tier of the spawning session's folder (0.31.50; `/ac tier`), the change-risk table that decides what each risk needs before it lands. Named `project_tier` because `tier` already means a model tier in this plugin. Null when it could not be resolved. No project name or path is stored |
+| `tier_source` | `assigned` \| `default` \| `none` \| null | where `project_tier` came from (0.31.50): `assigned` (the user gave this project a tier), `default` (no entry for it; the default tier applies) or `none` (the folder is not in a repo; the default tier applies); null when it could not be resolved |
 | `lead_effort_live` | string or null | the main session's live effort at this spawn (the hook payload's `effort.level`, lower-cased), recorded only while the `lead-effort-check` rule is enabled and `lead_effort_live_check` is not false; null for a subagent's spawns, canary probes and whenever the check is off. Same value as `caller_effort` where recorded; kept separate so the check can be read on its own. The row is written on every main-session spawn; the once-per-session note (live below target) is delivered with the first allowed one only (the above-target operator message was dropped in 0.31.36), and neither changes any allow, deny or rewrite |
 | `lead_effort_target` | `xhigh` \| `high` \| null | the lead-effort target the live value was compared with: `xhigh` before the rollout id named by the plugin option `lead_effort_rollout_id` is reached in the state root's `rollout.json` (or when the option is empty or the id is absent), `high` from it; null exactly when `lead_effort_live` is null because the check did not run |
 | `fit_trial` | boolean | true when the fit judgement used a shipped ROUTING TRIAL (`taskTypes.<type>.override`) rather than the plain grid; equivalent to `route_layer == "trial"` |
@@ -289,6 +292,7 @@ rows only).
 | `post_pass_defect` | null | always null on the row itself (unknown); rows are append-only and never rewritten. The signal lives in `review-outcomes.jsonl` (below) and is folded in at read time (0.31.17) |
 | `declared_type`, `declared_role` | string \| null | the brief's `TYPE:` and `ROLE:` |
 | `caller_effort`, `caller_is_subagent`, `caller_tool_use_id` | copied | from the reviewer's own spawns.jsonl row; null when that row was not found |
+| `declared_risk`, `project_tier`, `tier_source` | string \| null | copied from the reviewer's own spawns.jsonl row, for a foreground and a background reviewer alike (0.31.50): the change risk its brief stated, and the project's tier and where it came from; null when that row was not found |
 | `spawn_row_found` | boolean | whether that row was found |
 | `source` | `post-tool-use` \| `subagent-stop` | which path recorded it: foreground result or background SubagentStop (0.31.14; absent on rows written by 0.31.13, which are all `post-tool-use`) |
 | `agent_id` | string \| null | the background reviewer's agent id; null on the foreground path (0.31.14; absent on older rows) |
@@ -414,13 +418,15 @@ Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-abov
 | `rung_class` | string | `sonnet-high+` or `opus` |
 | `ceiling`, `repeat` | number | the two thresholds as set |
 
-### `long-runs.jsonl` (in `state/`, not `telemetry/`) — one record per long-run crossing
+### `long-runs.jsonl` (in `state/`, not `telemetry/`) — one record per long-run crossing, plus one summary per ended long run
 
-Written by `hooks/lib/long-run.mjs` when a subagent's tool-call count first reaches 150 and each further 100. Fields: `ts` (ISO), `sessionId`, `agentId`, `agentType` (string or null), `steps` (number), `startedAt` (ISO or null, the transcript's first timestamp), `durationMin` (number or null), `description` (first line of the brief, or null), `transcriptPath` (string or null).
+Written by `hooks/lib/long-run.mjs` when a subagent's tool-call count first reaches 150 and each further 100. It is a record, not a cap: nothing is stopped. Fields: `ts` (ISO), `sessionId`, `agentId`, `agentType` (string or null), `steps` (number), `startedAt` (ISO or null, the transcript's first timestamp), `durationMin` (number or null), `description` (first line of the brief, or null), `transcriptPath` (string or null). The lead session is told once per crossing from this log (the `Long run: ...` line, never shown to the worker).
+
+When a worker that passed the first mark ends, one more row is appended with `kind` `summary`: `ts`, `sessionId`, `agentId`, `agentType`, `name` (string or null), `type` (the brief's `TYPE:`, or null), `rung` (number or null), `steps` (number), `minutes` (number or null), `toolCounts` (object, tool name to calls), `failedCommands` (number, Bash results flagged as errors), `briefChars` (number). `scripts/long-runs.mjs` and the scout's informational `long_runs` signal (last 24 hours) read both kinds and show the summary beside the crossing.
 
 ### `step-budget.jsonl` — one record per step-budget warning or denied call
 
-Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a subagent is told it has used its warning share of steps (`kind` `warn`, once per worker), and at the stop value as a soft note (`kind` `soft-stop`, once per worker; the same crossing also writes a `state/long-runs.jsonl` row) and (only with `step_budget_deny`) each time a call is denied past the stop or once the helper has reached `step_budget_compaction_stop` compactions (default 3; `kind` `stop`). The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`, `step_budget_compaction_stop`.
+Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`). By default (`step_budget_deny` off) the only row is `kind` `checkpoint`: a brief that carried its own `BUDGET: <n>` line got its one progress-marker note at n steps (once per worker; a brief with no `BUDGET` line gets no row and no note, and a `BUDGET` of 150 is covered by the long-run line instead). With `step_budget_deny` on, the old cap is back and writes `warn` (the subagent was told it has used its warning share of steps, once per worker) and `stop` (each time a call is denied past the stop value, or once the helper has reached `step_budget_compaction_stop` compactions, default 3). Rows with `kind` `soft-stop` come from versions before 0.31.50. The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_deny`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`, `step_budget_compaction_stop`.
 
 | field | type | meaning |
 |---|---|---|
@@ -430,8 +436,8 @@ Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a sub
 | `tool` | string | the tool call that triggered the row |
 | `steps` | number | the subagent's tool calls so far, this one included |
 | `type` | string or null | the `TYPE:` line of the subagent's brief |
-| `caps` | object | `warn`, `stop` and `kind` (`writer`, `lookup` or `brief` when a `BUDGET:` line set the stop) |
-| `kind` | string | `warn`, `soft-stop` or `stop` |
+| `caps` | object | `warn`, `stop` and `kind` (`writer`, `lookup` or `brief` when a `BUDGET:` line set the stop); only enforced while `step_budget_deny` is on |
+| `kind` | string | `checkpoint` (default), or with `step_budget_deny` on `warn` or `stop`; `soft-stop` on rows from before 0.31.50 |
 | `why` | string; `stop` only | `steps` (the stop value was reached) or `compactions` (the `step_budget_compaction_stop`th compaction) |
 
 ### `bash-exit.jsonl` — Bash exit status

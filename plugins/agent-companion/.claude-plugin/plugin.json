@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.49",
+  "version": "0.31.50",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -878,7 +878,7 @@
     "step_budget": {
       "type": "boolean",
       "title": "Helper step budget",
-      "description": "On (default): the same PreToolUse hook that runs inside each subagent counts the subagent's own tool calls. At the warning line it is told ONCE how many of its steps are used and to finish, write its detail file and report what is left. At the stop line it is told ONCE, with the same short note as the 150-step long-run note (keep going and update your notes if progress, stop and report if stuck), and a row goes to state/long-runs.jsonl. By default nothing is ever denied: a long run that is working is not stopped. With step_budget_deny on, every call past the stop line is DENIED except writing a report or detail file (Write or Edit of a .md, .txt, .json or .csv file whose name says report, detail, handoff, review, summary, findings, analysis, verdict or notes), with the reason 'Step budget reached: write your report now and stop.', and a subagent whose context compacts step_budget_compaction_stop times (default 3) is stopped the same way. The lines come from the subagent's brief: TYPE lookup, research, survey, explore and verify use the lookup lines, every other or missing TYPE the writer lines, and a 'BUDGET: <n>' line in the brief (10 to 9999, optionally followed by calls, tool calls, steps or turns) sets the stop value with the warning at 80% of it. The lead's own session is never counted. Off = no counting, no warning, no note.",
+      "description": "On (default): the same PreToolUse hook that runs inside each subagent counts the subagent's own tool calls. Since 0.31.50 this is not a cap: a brief with no 'BUDGET: <n>' line gets no step note at all, and a brief with one (10 to 9999, optionally followed by calls, tool calls, steps or turns) gets ONE checkpoint note when it reaches n steps, worded as a progress marker (not a cap, nothing will interrupt the run). A worker hears about its length only from the long-run line at 150 steps, and the lead is told at each long-run mark (150, then every 100); nothing is ever denied. step_budget_deny is the only switch that brings the cap back: with it on, the warning and stop lines apply (80 and 120, or 40 and 60 for TYPE lookup, research, survey, explore and verify; a 'BUDGET: <n>' line replaces the stop with the warning at 80% of it), the subagent is told once at the warning line, every call past the stop line is DENIED except writing a report or detail file (Write or Edit of a .md, .txt, .json or .csv file whose name says report, detail, handoff, review, summary, findings, analysis, verdict or notes) with the reason 'Step budget reached: write your report now and stop.', and a subagent whose context compacts step_budget_compaction_stop times (default 3) is stopped the same way. The lead's own session is never counted. Off = no counting and no checkpoint note.",
       "default": true
     },
     "plan_allowance": {
@@ -896,31 +896,31 @@
     "step_budget_warn": {
       "type": "number",
       "title": "Helper step budget: warning at (writers and other types)",
-      "description": "Tool calls after which a subagent whose TYPE is not a lookup type (and has no BUDGET line) is told once to wrap up. 9 in 10 helpers finish under 80 calls. 0 = no warning.",
+      "description": "Only used while step_budget_deny is on. Tool calls after which a subagent whose TYPE is not a lookup type (and has no BUDGET line) is told once to wrap up. 9 in 10 helpers finish under 80 calls. 0 = no warning. With step_budget_deny off (default) nothing is sent at this line.",
       "default": 80
     },
     "step_budget_stop": {
       "type": "number",
       "title": "Helper step budget: stop at (writers and other types)",
-      "description": "Tool calls a subagent whose TYPE is not a lookup type (and has no BUDGET line) may make before it gets the one-time long-run note (denied past it only with step_budget_deny). 99 in 100 helpers finish under 120 calls. 0 = no stop line for this class.",
+      "description": "Only used while step_budget_deny is on. Tool calls a subagent whose TYPE is not a lookup type (and has no BUDGET line) may make before every further call is denied except writing a report or detail file. 99 in 100 helpers finish under 120 calls. 0 = no stop line for this class. With step_budget_deny off (default) the subagent is told nothing at this value.",
       "default": 120
     },
     "step_budget_lookup_warn": {
       "type": "number",
       "title": "Helper step budget: warning at (lookup types)",
-      "description": "Tool calls after which a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) is told once to wrap up. 0 = no warning.",
+      "description": "Only used while step_budget_deny is on. Tool calls after which a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) is told once to wrap up. 0 = no warning. With step_budget_deny off (default) nothing is sent at this line.",
       "default": 40
     },
     "step_budget_lookup_stop": {
       "type": "number",
       "title": "Helper step budget: stop at (lookup types)",
-      "description": "Tool calls a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) may make before it gets the one-time long-run note (denied past it only with step_budget_deny). 0 = no stop line for this class.",
+      "description": "Only used while step_budget_deny is on. Tool calls a subagent whose TYPE is lookup, research, survey, explore or verify (and has no BUDGET line) may make before every further call is denied except writing a report or detail file. 0 = no stop line for this class. With step_budget_deny off (default) the subagent is told nothing at this value.",
       "default": 60
     },
     "step_budget_deny": {
       "type": "boolean",
       "title": "Helper step budget: deny past the stop (opt-in)",
-      "description": "Off (default): the step stop lines only add a note and a state/long-runs.jsonl row, and nothing is ever denied. On: the old hard stop, every call past the stop line (and past step_budget_compaction_stop compactions) is denied except writing a report or detail file. Only used while step_budget is on.",
+      "description": "Off (default): step notes are not a cap. A brief with no BUDGET line gets no step note, a brief with one gets a single checkpoint note, the long-run line at 150 steps is a progress marker (the lead is told too), and nothing is ever denied. On: the only switch that brings the cap back. The warning at 80% of the stop applies, and every call past the stop line (and past step_budget_compaction_stop compactions) is denied except writing a report or detail file. The numeric step_budget_warn, _stop, _lookup_warn and _lookup_stop options are used only while this is on. Needs step_budget on.",
       "default": false
     },
     "step_budget_compaction_stop": {

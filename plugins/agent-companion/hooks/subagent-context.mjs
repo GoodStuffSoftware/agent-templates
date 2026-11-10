@@ -16,17 +16,16 @@
 // is set). Gated by the rollout schedule; reuses the
 // transcript reading below, so it adds no read. Advice only, never a deny.
 //
-// The STEP BUDGET rides on the same hook (lib/step-budget.mjs): it counts the helper's
-// tool calls, warns once at the warning line and notes once at the stop value (never a deny by default; with
-// step_budget_deny on it DENIES every call but a report or detail
-// write past the stop (40/60 for lookup-type helpers, 80/120 otherwise, a `BUDGET: <n>`
-// brief line replaces the stop). With step_budget_deny the Nth compaction (step_budget_compaction_stop, default 3, 0 = off) stops it the same way. This
-// is the one place the hook can deny, and only on that opt-in; options step_budget, step_budget_deny, step_budget_warn, step_budget_stop,
-// step_budget_lookup_warn, step_budget_lookup_stop.
+// The STEP BUDGET rides on the same hook (lib/step-budget.mjs). Since 0.31.50 it is not a cap by default: a brief with no `BUDGET: <n>` line
+// gets no step note; a brief with one gets a single checkpoint note at n (worded as a progress marker). Only with step_budget_deny on
+// (opt-in, default off) does the old cap return: the warning at 80% of the stop and a DENY of every call but a report or detail write past
+// it (40/60 for lookup-type helpers, 80/120 otherwise, a `BUDGET: <n>` brief line replaces the stop), and the Nth compaction
+// (step_budget_compaction_stop, default 3, 0 = off) stops it the same way. This is the one place the hook can deny, and only on that opt-in;
+// options step_budget, step_budget_deny, step_budget_warn, step_budget_stop, step_budget_lookup_warn, step_budget_lookup_stop.
 //
-// The soft LONG-RUN note (lib/long-run.mjs) replaces the old hard maxTurns: 150 on the agent definitions: at 150 tool calls
-// and every further 100 the helper is told once to keep going (updating its notes) or stop and report if stuck, and the
-// crossing is logged in state/long-runs.jsonl. It never denies.
+// The LONG-RUN marker (lib/long-run.mjs) replaces the old hard maxTurns: 150 on the agent definitions. At 150 tool calls and every further
+// 100 the crossing is logged in state/long-runs.jsonl and the lead session is told once (lib/advisory-b.mjs longRunNotices, from the lead-side
+// hook, never from here); the helper itself gets one neutral line at 150 that asks only that it keep its detail file current. It never denies.
 //
 // A brief line `BUDGET: N%` (percent of the weekly plan limit) makes the same hook add ONE allowance note at the helper's
 // first call (lib/plan-allowance.mjs; option plan_allowance) and ONE notice when the helper's own spend (its transcript and
@@ -46,7 +45,7 @@ import {
   CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
 } from './lib/context-ceiling.mjs';
 import { STEP_LOG, stepBudgetCheck } from './lib/step-budget.mjs';
-import { longRunCheck, logLongRun, longRunRow } from './lib/long-run.mjs';
+import { longRunCheck, logLongRun } from './lib/long-run.mjs';
 import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
 
 try {
@@ -87,7 +86,6 @@ try {
   if (stepsOn) {
     step = stepBudgetCheck(p, { transcript: path, sig });
     if (step) appendLog(STEP_LOG, step.row);
-    if (step && step.longRunSteps) logLongRun(longRunRow(p, step.longRunSteps, path));
   }
   if (step && step.deny) {
     recordDenial('step-budget', p, `${step.row.why} at ${step.row.steps} steps`);

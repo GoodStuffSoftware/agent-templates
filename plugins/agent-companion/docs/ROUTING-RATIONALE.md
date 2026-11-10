@@ -80,8 +80,10 @@ Parity says how big the reviewer is. Self-review says who spawns it. For every
 writer type listed in `selfReview` (bounded-feature, integration,
 debug-root-cause, large-refactor, novel-design, critical-change and
 long-autonomous-run since 2026-10-06, the lean worker shape; it was
-novel-design and critical-change only from 2026-10-02), the writer commits and
-spawns one foreground reviewer on its own rung, runs one fix round, lands its
+novel-design and critical-change only from 2026-10-02), the writer commits,
+states its change risk and, when the project's tier asks for a review of that
+risk (see "Review by risk" below), spawns one foreground reviewer on its own
+rung, runs one fix round, lands its
 own work (merge, plus the deploy check where the repo deploys on merge; the
 repo's release gates stay) and returns the reviewer's verdict line verbatim
 with the review path, the post-fix sha and any findings it disputes.
@@ -107,7 +109,7 @@ the lead can read:
 
 - The instructions are fixed and generated, not written by the writer: they
   tell it to give the reviewer the lead's brief verbatim, the diff range and
-  an adversarial read-only refute-this instruction (it reads the diff and its callers and consumers; at most the tests that cover the changed code, and only when they need no build), to add nothing that narrows the review, and to
+  an adversarial refute-this instruction (it reads the diff and its callers and consumers; at most the tests that cover the changed code, and only when they need no build; for a high-risk or large change it may also start the project's own run command to check the touched behaviour for real, never a separate build, the full suite, e2e or CI), to add nothing that narrows the review, and to
   return the verdict line verbatim.
 - The spawn guard checks what it can see at the reviewer's spawn: a
   `WRITER:` line below the writer's own pair gets a note, a critical-change
@@ -145,13 +147,38 @@ ladder rung gets the same generated text appended to its brief at spawn,
 sized to that rung. A built-in type pins no effort, so it gets a note
 instead, and a project agent keeps its own wording.
 
-**Medium-effort writers self-review too (2026-10-06).** The cost is a parity
-reviewer spawned on every such task, including ones the lead would have waved
-through; the operator accepted that price and rejected a risk gate ("a reviewer
-only for risky changes"). It is still measured (`self_review`,
-`self_review_expected` and `review_by_subagent` in `spawns.jsonl`), so the cost
-stays visible. The protocol lands the work only after the fix round, and stops
-before any merge while a blocker is disputed or left unfixed.
+**Medium-effort writers self-review too (2026-10-06).** Until 0.31.50 the cost
+was a parity reviewer spawned on every such task, including ones the lead would
+have waved through, and a risk gate ("a reviewer only for risky changes") was
+rejected. It is still measured (`self_review`, `self_review_expected` and
+`review_by_subagent` in `spawns.jsonl`), so the cost stays visible. The
+protocol lands the work only after the fix round, and stops before any merge
+while a blocker is disputed or left unfixed.
+
+**Review by risk (0.31.50).** This replaces "every change gets one reviewer"
+with review sized by risk. The writer states a change risk (low, mid or high,
+never below an objective floor: how many files and changed lines, and whether
+the change touches CI, build, deploy, hooks, data or schema, or sign-in and
+payments) and the project's tier says what that risk needs:
+
+| Tier | Low | Mid | High |
+|---|---|---|---|
+| `push` | unit tests, push | unit tests, push | one reviewer reads, then push |
+| `risk` (default) | unit tests, land | one reviewer reads | reviewer reads, then checks the changed behaviour in the running app |
+| `gates` | unit tests, lands with the next batch | one reviewer reads; e2e once for the batch | reviewer reads and checks for real; e2e once for the batch; the project's release gates |
+
+Why: a review of a low-risk change rarely finds a blocker and costs the same as
+any other review, so the review budget goes to the changes where a miss is
+expensive. E2E is the expensive run, so it runs once per batch and tree, never
+per change. What does not change: one review, one fix round, no second review,
+and the reviewer never runs e2e or the full suite (it reads the batch's result
+in the hand-off). The reviewer may raise the stated risk, never lower it. A
+reviewer reached through the API has no shell, so it lists the app checks it
+would have run, and a cell that checks for real always goes to the subagent
+reviewer. Reverse: `reviewEveryChange` in the project-tiers file turns every
+"no reviewer" cell back into one reviewer by reading. The risk each spawn and
+verdict carried is recorded (`declared_risk`, `project_tier`, `tier_source`),
+so the effect on blockers found and on cost can be measured.
 
 ## Consequence floors: six things that never depend on difficulty
 
