@@ -259,7 +259,7 @@ export const LONG_RUN_NOTICE_WINDOW_MS = 6 * 3600000;
 const LONG_RUN_TAIL_BYTES = 256 * 1024;
 
 export const leadLongRunText = (label, steps, minutes) =>
-  `Long run: ${label} is at ${steps} steps${Number.isFinite(minutes) ? `, ${Math.round(minutes)} min` : ''}. Nothing stops it.`;
+  `Long run: ${label} is at ${steps} steps${Number.isFinite(minutes) ? `, ${Math.max(0, Math.round(minutes))} min` : ''}. Nothing stops it.`;
 
 export function longRunNotices(p, { now = Date.now() } = {}) {
   const sid = p && p.session_id;

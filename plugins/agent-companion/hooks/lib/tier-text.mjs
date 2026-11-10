@@ -36,7 +36,7 @@ export const TIERS = {
     cells: {
       low: { writer: 'unit tests, then push, no reviewer', writerEvery: 'unit tests, one reviewer by reading, then push', line: 'unit tests, then push, no reviewer', lineEvery: 'one reviewer reads, then push', reviewer: 'read only' },
       mid: { writer: 'unit tests, then push, no reviewer', writerEvery: 'unit tests, one reviewer by reading, then push', line: 'unit tests, then push, no reviewer', lineEvery: 'one reviewer reads, then push', reviewer: 'read only' },
-      high: { writer: 'one reviewer by reading, then push', line: 'one reviewer reads, then push', reviewer: 'read only in this tier, even though the general instruction above allows a run' },
+      high: { writer: 'one reviewer by reading, then push', line: 'one reviewer reads, then push', reviewer: 'read only in this tier' },
     },
   },
   risk: {
@@ -78,14 +78,70 @@ export const FLOOR_RULES = {
   midSourceFiles: 2,
   midSourceLines: 40,
 };
-export const RISK_FLOORS = `floors: high = ${FLOOR_RULES.highFiles}+ files, ${FLOOR_RULES.highLines}+ changed lines, or a CI/build/deploy/hook, data/schema or sign-in/payments path; mid = ${FLOOR_RULES.midSourceFiles}+ source files, ${FLOOR_RULES.midSourceLines}+ changed source lines or a new source file; else low. State higher if the area has broken before, never lower`;
+export const RISK_FLOORS = `floors: high = ${FLOOR_RULES.highFiles}+ files, ${FLOOR_RULES.highLines}+ changed lines, or a CI/build/deploy/hooks, data/schema or sign-in/payments file or folder (matched by folder name or whole file-name word, never docs, tests, styles or UI source such as components/ and pages/); mid = ${FLOOR_RULES.midSourceFiles}+ source files, ${FLOOR_RULES.midSourceLines}+ changed source lines or a new source file; else low. State higher if the area has broken before, never lower`;
 
-// Path kinds that force high, tested on the lowercase path with forward slashes.
-export const HIGH_PATH_KINDS = [
-  { kind: 'CI/build/deploy/hook', re: /(^|\/)(\.github|\.githooks|\.gitlab-ci|\.circleci|hooks)(\/|\.|$)|(^|\/)(dockerfile|docker-compose|jenkinsfile|makefile)|(^|\/)scripts\/ci|(^|\/)(vite|webpack|rollup|esbuild|babel)[^/]*\.config\.|(^|\/)tsconfig[^/]*\.json$|\.gradle(\.kts)?$|(^|\/)gradle\.properties$|(^|[/._-])(deploy|release)/ },
-  { kind: 'data/schema', re: /(^|\/)migrations?\/|schema|\.sql$|\.rules$/ },
-  { kind: 'sign-in/payments', re: /(^|[/._-])(auth(?!or)|login|signin|oauth|session|token|payment|billing|stripe|checkout)/ },
-];
+// Path kinds that force high. A path matches by FOLDER NAME or by a WHOLE WORD of the file name (split on punctuation and
+// camelCase), never by a bare substring, and never inside a UI source tree (components/, pages/, views/, ui/ ...) unless the
+// path also has an api/ or server/ folder. A folder named hooks counts unless it sits under src/ or app/ (a React hooks folder),
+// except inside a plugin folder. Docs, tests and style files are exempt before this runs (riskFloor).
+export const HIGH_PATH_KIND_NAMES = ['CI/build/deploy/hook', 'data/schema', 'sign-in/payments'];
+const set = (...a) => new Set(a);
+const UI_DIRS = set('components', 'pages', 'views', 'ui', 'screens', 'containers', 'widgets', 'layouts', 'stories');
+const SERVER_DIRS = set('api', 'server', 'servers', 'backend');
+const SRC_ROOT_DIRS = set('src', 'app', 'apps', 'client', 'frontend', 'web');
+const PLUGIN_DIRS = set('plugins', 'plugin', '.claude', '.claude-plugin');
+const CI_DIRS = set('.github', '.githooks', '.husky', '.circleci', '.gitlab', '.buildkite', 'ci', '.ci', 'deploy', 'deployment', 'deployments', 'release', 'releases');
+const SCRIPT_DIRS = set('scripts', 'script', 'bin', 'tools', 'tooling', 'build', 'ops', 'devops', 'infra', 'infrastructure');
+const DATA_DIRS = set('migration', 'migrations', 'migrate', 'prisma', 'alembic', 'flyway', 'liquibase');
+const DATA_EXTS = set('sql', 'prisma', 'rules', 'ddl');
+const SCHEMA_EXTS = set('prisma', 'sql', 'graphql', 'gql', 'proto', 'rb', 'py', 'ts', 'js', 'mjs', 'cjs', 'json', 'xml', 'xsd');
+const SIGNIN_WORDS = set('auth', 'login', 'signin', 'oauth', 'payment', 'payments', 'billing', 'stripe', 'checkout');
+const SIGNIN_DIRS = set('auth', 'authentication', 'login', 'signin', 'oauth', 'payment', 'payments', 'billing', 'stripe', 'checkout');
+const UI_FILE_EXTS = set('tsx', 'jsx', 'vue', 'svelte', 'html');
+const BUILD_FILE = /^(dockerfile|docker-compose|jenkinsfile|makefile)([._-]|$)|\.dockerfile$|^compose\.ya?ml$|^\.gitlab-ci\b|^\.travis\.yml$|^azure-pipelines[^/]*\.ya?ml$|^bitbucket-pipelines\.ya?ml$|^(vite|webpack|rollup|esbuild|babel)[^/]*\.config\.|^tsconfig[^/]*\.json$|\.gradle(\.kts)?$|^gradle\.properties$/;
+
+// The whole words of a file name: split on punctuation and on camelCase, lowercased; plus the name with punctuation removed ("sign-in" -> "signin").
+function nameWords(file) {
+  const stem = file.replace(/\.[^./]+$/, '');
+  const words = stem.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w.toLowerCase());
+  const joined = stem.replace(/[^A-Za-z0-9]+/g, '').toLowerCase();
+  return { words, joined };
+}
+
+// The high path kind of a path ('CI/build/deploy/hook' | 'data/schema' | 'sign-in/payments') or null.
+export function highPathKind(path) {
+  const p = String(path ?? '').replace(/\\/g, '/').replace(/^\.?\/+/, '');
+  const parts = p.split('/').filter(Boolean);
+  if (!parts.length) return null;
+  const file = parts[parts.length - 1];
+  const lower = file.toLowerCase();
+  const dirs = parts.slice(0, -1).map((d) => d.toLowerCase());
+  const ext = lower.includes('.') ? lower.slice(lower.lastIndexOf('.') + 1) : '';
+  if (dirs.some((d) => UI_DIRS.has(d)) && !dirs.some((d) => SERVER_DIRS.has(d))) return null; // a UI source tree
+
+  // CI/build/deploy/hook
+  if (dirs.some((d) => CI_DIRS.has(d)) || BUILD_FILE.test(lower)) return HIGH_PATH_KIND_NAMES[0];
+  const hooksAt = dirs.indexOf('hooks');
+  if (hooksAt >= 0) {
+    const before = dirs.slice(0, hooksAt);
+    const reactHooks = before.some((d) => SRC_ROOT_DIRS.has(d)) && !before.some((d) => PLUGIN_DIRS.has(d));
+    if (!reactHooks) return HIGH_PATH_KIND_NAMES[0];
+  }
+  const lw = nameWords(file).words;
+  if (dirs[dirs.length - 1] === 'scripts' && /^ci([._-]|$)/.test(lower)) return HIGH_PATH_KIND_NAMES[0];
+  if (!UI_FILE_EXTS.has(ext) && (dirs.length === 0 || dirs.some((d) => SCRIPT_DIRS.has(d)))
+    && lw.some((w) => w === 'deploy' || w === 'deployment' || w === 'release')) return HIGH_PATH_KIND_NAMES[0];
+
+  // data/schema
+  if (dirs.some((d) => DATA_DIRS.has(d)) || DATA_EXTS.has(ext)) return HIGH_PATH_KIND_NAMES[1];
+  if (SCHEMA_EXTS.has(ext) && lw.includes('schema')) return HIGH_PATH_KIND_NAMES[1];
+
+  // sign-in/payments
+  if (dirs.some((d) => SIGNIN_DIRS.has(d))) return HIGH_PATH_KIND_NAMES[2];
+  const { words, joined } = nameWords(file);
+  if (words.some((w) => SIGNIN_WORDS.has(w)) || SIGNIN_WORDS.has(joined)) return HIGH_PATH_KIND_NAMES[2];
+  return null;
+}
 
 // Files that count for nothing: lockfiles and generated output.
 const EXCLUDED = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|npm-shrinkwrap\.json|cargo\.lock|go\.sum|poetry\.lock|gemfile\.lock|composer\.lock)$|\.lock$|\.min\.(js|css)$|\.map$|(^|\/)(dist|build|node_modules|coverage|__snapshots__)\/|\.generated\.|\.snap$/;
@@ -116,9 +172,8 @@ export function riskFloor(files) {
   const kinds = [];
   for (const f of live) {
     const cls = pathClass(f.path);
-    const p = String(f.path).replace(/\\/g, '/').toLowerCase();
     let kind = f.forceKind || null;
-    if (!kind && cls !== 'docs' && cls !== 'tests' && cls !== 'styles') kind = HIGH_PATH_KINDS.find((k) => k.re.test(p))?.kind || null;
+    if (!kind && cls !== 'docs' && cls !== 'tests' && cls !== 'styles') kind = highPathKind(f.path);
     if (kind) kinds.push(`${kind}: ${f.path}`);
   }
   const high = [];
@@ -140,13 +195,10 @@ export const BATCH_RULE = 'Finish every task in your brief first, with no self-c
 
 const RISK_REPORT = 'RISK: low|mid|high with the reason';
 
-// The one session line for the lead. `project` null means outside a repo.
+// The one session line for the lead, or '' outside a git repo (the hook then prints nothing: there is no project to name).
 export function tierLine(tier, project, opts = {}) {
+  if (!project) return '';
   const every = !!opts.reviewEveryChange;
-  if (!project) {
-    const t = TIERS[tier] || TIERS[DEFAULT_ID];
-    return `[agent-companion] No project (outside a repo): project_tier ${t.id} by default. Writers state RISK low|mid|high; low: ${lineCell(t, 'low', every)}; mid: ${lineCell(t, 'mid', every)}; high: ${lineCell(t, 'high', every)}. E2E once per batch and tree, never per change.`;
-  }
   const t = TIERS[tier] || TIERS[DEFAULT_ID];
   return `[agent-companion] Project ${project}, project_tier ${t.id} (${t.label}): low = ${lineCell(t, 'low', every)}; mid = ${lineCell(t, 'mid', every)}; high = ${lineCell(t, 'high', every)}. Writers state RISK low|mid|high when done. E2E once per batch and tree, never per change.`;
 }
@@ -163,19 +215,24 @@ export function writerClause(tier, project, opts = {}) {
   const every = !!opts.reviewEveryChange;
   const kind = opts.kind || 'protocol';
   const h = head(tier, project);
+  // The two short kinds land on the highest-volume spawns, so they carry no floors prose, no floor command and no tier label: the lead applies the floor.
+  const short = `Project ${project || '(none: outside a repo)'}, project_tier ${(TIERS[tier] || TIERS[DEFAULT_ID]).id}.`;
   if (kind === 'leg') {
-    return `${h} You are one leg of a larger job: the lead applies the change-risk table once to the whole diff, so you review nothing and spawn no reviewer. Finish every task in the brief, with no self-chosen sections or milestone stops. Unit tests are cheap: run them while you work. Run no end-to-end tests, CI or full build: the lead runs one pass after all legs. You may write or extend e2e tests. Commit, push, then report. State ${RISK_REPORT} in your report (${floorSentence}).`;
+    return `${short} You are one leg of a larger job: you spawn no reviewer; the lead applies the review table once to the whole change. Finish every task in the brief, no self-chosen sections. Run unit tests for what you touch, no full suite, e2e, CI or full build: the lead runs one pass after all legs. Commit, push, then report ${RISK_REPORT}.`;
   }
   if (kind === 'plain') {
-    return `${h} The lead applies the change-risk table to the whole diff; you spawn no reviewer. State ${RISK_REPORT} in your report (${floorSentence}). ${BATCH_RULE}`;
+    return `${short} You spawn no reviewer: the lead applies the review table once to the whole change. Report ${RISK_REPORT}. Run unit tests for what you touch, no full suite or e2e: the lead runs one pass for the batch.`;
   }
   const cell = (r) => cellText(tier, r, 'writer', every);
   return `${h} When done, state ${RISK_REPORT} and REVIEW: <the cell you applied> in your report. ${floorSentence}. Low: ${cell('low')}. Mid: ${cell('mid')}. High: ${cell('high')}. If your cell names a reviewer, spawn exactly one and mark its brief RISK: <your risk>; if it names none, skip the review step.`;
 }
 
+// The words every reviewer clause opens with after the project head; lib/tier-clause.mjs tells a reviewer clause from a writer clause by them.
+export const REVIEWER_TELL = 'Your checks depend on the RISK the writer states in your brief';
+
 // For a reviewer: the cell by the writer's RISK (the brief's RISK: line), which it may raise, never lower.
 export function reviewerClause(tier, project, opts = {}) {
   const h = head(tier, project);
   const cell = (r) => cellText(tier, r, 'reviewer');
-  return `${h} Your checks depend on the RISK the writer states in your brief; you may raise it, never lower it, and with no RISK line judge it from the diff with these floors and say which you used. ${floorSentence}. Low: ${cell('low')}. Mid: ${cell('mid')}. High: ${cell('high')}.`;
+  return `${h} ${REVIEWER_TELL}; you may raise it, never lower it, and with no RISK line judge it from the diff with these floors and say which you used. ${floorSentence}. Low: ${cell('low')}. Mid: ${cell('mid')}. High: ${cell('high')}.`;
 }

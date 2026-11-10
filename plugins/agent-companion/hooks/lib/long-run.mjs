@@ -123,7 +123,7 @@ export function longRunRow(p, n, transcript = null, now = new Date()) {
     agentType: p.agent_type ?? null,
     steps: n,
     startedAt,
-    durationMin: dur !== null && Number.isFinite(dur) ? Math.round(dur * 10) / 10 : null,
+    durationMin: dur !== null && Number.isFinite(dur) ? Math.max(0, Math.round(dur * 10) / 10) : null, // a clock skew never shows as negative minutes
     description: firstLine(readBrief(transcript)),
     transcriptPath: transcript || null,
   };
@@ -141,8 +141,10 @@ export function longRunCheck(p, { transcript = null, now = new Date() } = {}) {
     if (t === null || !claimOnce(`long-run-${p.agent_id}-${t}`)) return null;
     // A helper on a `BUDGET: N%` allowance alone gets its own 80% / 100% notices instead: the crossing is still logged, the note is not sent.
     const quiet = !!transcript && briefAllowanceOnly(readBrief(transcript));
-    // The worker hears it once, at the first mark (a marker per further 100 would be a drumbeat); the lead is told at every mark.
-    return { text: quiet || t !== LONG_RUN_FIRST ? '' : longRunText(n), row: longRunRow(p, n, transcript, now) };
+    // The worker hears it once per run, at the first mark (a marker per further 100 would be a drumbeat); the lead is told at every mark.
+    // The second claim keeps it to one line per run even when a call races past 150 before the exact number is seen.
+    const tell = !quiet && t === LONG_RUN_FIRST && claimOnce(`long-run-note-${p.agent_id}`);
+    return { text: tell ? longRunText(n) : '', row: longRunRow(p, n, transcript, now) };
   } catch {
     return null;
   }
@@ -200,7 +202,7 @@ export function longRunSummaryRow(p, { transcript = null, name = null, now = new
     return {
       kind: 'summary', ts: now.toISOString(), sessionId: p.session_id ?? null, agentId: p.agent_id, agentType: p.agent_type ?? null,
       name, type: briefStepInfo(brief).type, rung: rungOf(p.agent_type), steps,
-      minutes: dur !== null && Number.isFinite(dur) ? Math.round(dur * 10) / 10 : null,
+      minutes: dur !== null && Number.isFinite(dur) ? Math.max(0, Math.round(dur * 10) / 10) : null,
       toolCounts, failedCommands, briefChars: brief.length,
     };
   } catch {

@@ -10,7 +10,8 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync, readdirSy
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
 import { stateDir } from '../hooks/lib/context.mjs';
-import { thresholdFor, longRunText } from '../hooks/lib/long-run.mjs';
+import { thresholdFor, longRunText, longRunRow, longRunSummaryRow } from '../hooks/lib/long-run.mjs';
+import { leadLongRunText } from '../hooks/lib/advisory-b.mjs';
 
 const SID = 'sess-long';
 const AGENT = 'worker-long-test-1';
@@ -275,4 +276,32 @@ test('no agent definition carries maxTurns any more', () => {
     const fm = readFileSync(join(dir, f), 'utf8').replace(/\r\n/g, '\n').split('\n---\n')[0];
     assert.doesNotMatch(fm, /^maxTurns:/m, f);
   }
+});
+
+test('one run steps from 148 to 260: the worker hears exactly one line, at 150, and the lead log has a row at 150 and at 250', () => {
+  const fx = makeFixture();
+  try {
+    const { lead } = layout(fx);
+    seed(148); // the next call is the 148th
+    const lines = [];
+    for (let n = 148; n <= 260; n++) {
+      const text = ctx(run(lead));
+      if (text) lines.push([n, text]);
+    }
+    assert.deepEqual(lines, [[150, longRunText(150)]], 'one worker line per run, at 150');
+    assert.deepEqual(rows().map((r) => r.steps), [150, 250]);
+  } finally { fx.cleanup(); }
+});
+
+test('a clock behind the start of the run never shows negative minutes: the crossing row, the summary row and the lead line', () => {
+  const fx = makeFixture();
+  try {
+    const { agentFile } = layout(fx);
+    const before = new Date(Date.parse(STARTED) - 5 * 60000); // "now" five minutes before the transcript says the run began
+    assert.equal(longRunRow({ agent_id: AGENT }, 150, agentFile, before).durationMin, 0);
+    seed(151);
+    const sum = longRunSummaryRow({ agent_id: AGENT, session_id: SID }, { transcript: agentFile, now: before });
+    assert.equal(sum.minutes, 0);
+    assert.match(leadLongRunText('builder-one', 150, -5), /at 150 steps, 0 min\./);
+  } finally { fx.cleanup(); }
 });

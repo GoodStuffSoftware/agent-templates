@@ -2,7 +2,7 @@
 //
 // The tier is the user's: <configDir>/project-tiers.json, edited with `scripts/project-tiers.mjs`
 // (`/ac tier`). With no file the project is tier risk. Lead sessions only (a subagent that
-// compacted has no use for it), its own context line, not a standing rule: the rules block has
+// compacted has no use for it; a folder outside a git repo gets none), its own context line, not a standing rule: the rules block has
 // a character budget this line would eat into. `sessionLine: false` in the file turns it off.
 // Writers and reviewers get their clause from the spawn guard (lib/tier-clause.mjs), not from here.
 //
@@ -25,7 +25,10 @@ try {
   if (isCloudSession()) silent();
   const d = tierDetail(p?.cwd || process.cwd());
   if (d.config?.sessionLine === false) silent();
+  // Outside a git repo there is no project to name: no line (the spawn clauses still say the default tier).
+  if (!d.project) silent();
   const line = tierLine(d.tier, d.project, { reviewEveryChange: !!d.config?.reviewEveryChange });
+  if (!line) silent();
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: line },
   }));

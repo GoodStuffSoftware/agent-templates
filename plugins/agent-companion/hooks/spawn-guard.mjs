@@ -161,7 +161,7 @@ try {
     parityInheritedEffort, noEffortStatedNote, buildFloorNote, pinReplacedNote, projectRoutePlan, p,
     subagentCaller, pin, updatedInput, roleNudge, premiumDeclared, declaredKind, declaredConsequence,
     warrantDeclared, routingKnown, typeWeight, capCounts, parityRungName, rewriteState, rewriteModule,
-    RECOMMEND_CMD,
+    RECOMMEND_CMD, selfReviewExpected,
   });
 } catch {
   passthrough(); // never break a session

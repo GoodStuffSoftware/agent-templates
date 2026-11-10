@@ -8,13 +8,14 @@
 //   node project-tiers.mjs show [path]              the project, project_tier and source for a folder (default: here)
 //   node project-tiers.mjs set <name-or-path> <push|risk|gates>
 //   node project-tiers.mjs unset <name-or-path>
-//   node project-tiers.mjs floor <base>..<head>     the least risk a diff allows, and why
+//   node project-tiers.mjs floor <base>..<head>     the least risk a diff allows, and why. Two dots: a plain diff of the two refs;
+//                                                   three dots (<base>...<head>): the diff from their merge base, as a branch review reads it
 //
 // A project key is a repo folder name ("acme-app") or a full path. Given an existing path, `set` stores the
 // normalised path of that repo's MAIN checkout (so every worktree of it matches); given a bare name it stores the name.
 // A path key wins over a name key. Zero dependencies; hand-rolled argv like scripts/rules.mjs.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import { writeTextAtomic } from '../hooks/lib/context.mjs';
@@ -25,7 +26,7 @@ import { TIERS, riskFloor } from '../hooks/lib/tier-text.mjs';
 import { cleanGitEnv } from './lib/git-env.mjs';
 
 const [cmd, ...args] = process.argv.slice(2);
-const USAGE = 'Usage: project-tiers.mjs list | show [path] | set <name-or-path> <push|risk|gates> | unset <name-or-path> | floor <base>..<head>';
+const USAGE = 'Usage: project-tiers.mjs list | show [path] | set <name-or-path> <push|risk|gates> | unset <name-or-path> | floor <base>..<head> | floor <base>...<head>';
 
 function fail(msg, code = 1) {
   console.error(`project-tiers: ${msg}`);
@@ -93,6 +94,7 @@ const sameKey = (a, b) => (isPathKey(a) && isPathKey(b)
 function readRawForEdit() {
   const file = tiersPath();
   if (!existsSync(file)) return { default: DEFAULT_TIER, sessionLine: true, reviewEveryChange: false, projects: {} };
+  if (!statSync(file).isFile()) fail(`not changed: ${file} is not a file (a folder is there instead). It was left untouched; remove it, then retry.`);
   let raw;
   try { raw = JSON.parse(readFileSync(file, 'utf8').replace(/^﻿/, '')); } catch (e) {
     fail(`not changed: ${file} is not valid JSON (${String(e.message || e).slice(0, 80)}). It was left untouched; fix or remove it, then retry.`);
@@ -110,6 +112,7 @@ function writeRaw(raw) {
 }
 
 function setCmd() {
+  if (args.length < 2 || !String(args[0] ?? '').trim()) fail(`set needs a project and a tier. ${USAGE}`);
   const tier = String(args[1] ?? '').trim().toLowerCase();
   if (!TIER_IDS.includes(tier)) fail(`unknown tier "${args[1] ?? ''}": use ${TIER_IDS.join(', ')}. ${USAGE}`);
   const { key } = keyFor(args[0], { forSet: true });
@@ -149,9 +152,11 @@ function scriptsChanged(base, head, path) {
 function floorCmd() {
   const range = String(args[0] ?? '');
   try {
-    const m = /^([^.\s][^\s]*?)\.{2,3}([^\s]+)$/.exec(range);
-    if (!m || range.startsWith('-')) throw new Error('give a range as <base>..<head>');
-    const [, base, head] = m;
+    const m = /^([^.\s][^\s]*?)(\.{2,3})([^\s]+)$/.exec(range);
+    if (!m || range.startsWith('-')) throw new Error('give a range as <base>..<head> (or <base>...<head> for the diff from their merge base)');
+    const [, a, dots, head] = m;
+    // Three dots: the diff from the merge base of the two to the head, as `git diff a...b` reads it. Two dots: a plain diff of the two.
+    const base = dots === '...' ? git(['merge-base', a, head]).trim() : a;
     const numstat = git(['diff', '--numstat', '--no-renames', '-z', `${base}..${head}`, '--']).split('\0').filter(Boolean);
     const status = git(['diff', '--name-status', '--no-renames', '-z', `${base}..${head}`, '--']).split('\0').filter(Boolean);
     const isNew = new Set();

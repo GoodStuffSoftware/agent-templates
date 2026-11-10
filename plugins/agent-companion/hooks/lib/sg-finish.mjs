@@ -10,7 +10,7 @@ import {
 } from './context.mjs';
 import { matchRules, renderRules } from './rules.mjs';
 import { buildScopeClause } from './scope-rule.mjs';
-import { buildTierClause } from './tier-clause.mjs';
+import { applyTierClause } from './tier-clause.mjs';
 import { allowWith, combineNotes, commonTypeRoutes } from './sg-helpers.mjs';
 
 export async function finishSpawn({
@@ -23,10 +23,11 @@ export async function finishSpawn({
   parityInheritedEffort, noEffortStatedNote, buildFloorNote, pinReplacedNote, projectRoutePlan, p,
   subagentCaller, pin, updatedInput, roleNudge, premiumDeclared, declaredKind, declaredConsequence,
   warrantDeclared, routingKnown, typeWeight, capCounts, parityRungName, rewriteState, rewriteModule,
-  RECOMMEND_CMD,
+  RECOMMEND_CMD, selfReviewExpected,
 }) {
   function withAdditions(baseInput) {
     let suffix = '';
+    let sentBrief = input.prompt; // a reviewer brief loses an embedded writer tier clause (step 1c)
 
     // 0. The self-review protocol, for a self-reviewing TYPE on a ladder rung
     //    whose definition does not carry it (set below, see "Is this writer
@@ -60,7 +61,12 @@ export async function finishSpawn({
     try { suffix += buildScopeClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
 
     // 1c. The project tier clause: the project's tier and the change-risk table for a writer or reviewer (lib/tier-clause.mjs).
-    try { suffix += buildTierClause(declaredType, declaredRole, input.prompt, p.cwd); } catch { /* fail open */ }
+    //     The writer gets the protocol clause only when this spawn really carries the protocol (selfReviewExpected, decided above).
+    try {
+      const tier = applyTierClause(declaredType, declaredRole, input.prompt, p.cwd, { protocol: selfReviewExpected === true });
+      suffix += tier.clause;
+      if (tier.clause) sentBrief = tier.brief;
+    } catch { /* fail open */ }
 
     // 2. Operator-authored standing rules scoped to spawns, their conditions
     //    matched against this brief's own text. See lib/rules.mjs.
@@ -84,7 +90,7 @@ export async function finishSpawn({
     suffix += namegateSuffix || '';
 
     if (!suffix && !roleInserted) return baseInput;
-    return { ...(baseInput || input), prompt: `${roleInserted ? `ROLE: ${roleInserted}\n` : ''}${input.prompt || ''}${suffix}` };
+    return { ...(baseInput || input), prompt: `${roleInserted ? `ROLE: ${roleInserted}\n` : ''}${sentBrief || ''}${suffix}` };
   }
 
   let projectRouteNote = null; // warn mode only (project_route_guard), set below

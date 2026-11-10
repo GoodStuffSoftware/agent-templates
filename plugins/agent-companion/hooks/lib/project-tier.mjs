@@ -104,6 +104,10 @@ export function loadTiers() {
     out.path = tiersPath();
     if (!existsSync(out.path)) return out;
     out.exists = true;
+    if (!isFile(out.path)) {
+      out.problems.push('is not a file (a folder is there instead): using the defaults');
+      return out;
+    }
     let raw;
     try { raw = JSON.parse(readFileSync(out.path, 'utf8').replace(/^\uFEFF/, '')); } catch (e) {
       out.problems.push(`not valid JSON (${String(e.message || e).slice(0, 80)}): using the defaults`);

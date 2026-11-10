@@ -12,7 +12,7 @@ import {
   projectOf, repoOf, loadTiers, tierFor, tierDetail, tiersPath, normalisePath, isPathKey, TIER_IDS, DEFAULT_TIER,
 } from '../hooks/lib/project-tier.mjs';
 import {
-  TIERS, RISK_FLOORS, BATCH_RULE, tierLine, writerClause, reviewerClause, cellText, riskFloor, pathClass, FLOOR_COMMAND,
+  TIERS, RISK_FLOORS, BATCH_RULE, tierLine, writerClause, reviewerClause, cellText, riskFloor, pathClass, FLOOR_COMMAND, highPathKind,
 } from '../hooks/lib/tier-text.mjs';
 
 const IDENT = { GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
@@ -220,7 +220,7 @@ test('text: tiers, labels and lines; fields say project_tier', () => {
     assert.match(line, new RegExp(`^\\[agent-companion\\] Project acme-app, project_tier ${id} \\(${TIERS[id].label}\\)`));
     assert.match(line, /E2E once per batch and tree/);
   }
-  assert.match(tierLine('risk', null), /^\[agent-companion\] No project \(outside a repo\): project_tier risk by default/);
+  assert.equal(tierLine('risk', null), ''); // outside a repo there is no project to name: no line
   assert.ok(tierLine('gates', 'x').length < 420);
 });
 
@@ -238,17 +238,32 @@ test('text: reviewEveryChange turns every "no reviewer" cell into one reviewer b
 test('text: writer clause is short, names the floors line and the absolute floor command; the leg clause carries the leg rules', () => {
   const w = writerClause('risk', 'acme-app');
   assert.ok(w.includes(RISK_FLOORS));
+  assert.match(RISK_FLOORS, /by folder name or whole file-name word, never docs, tests, styles or UI source/);
   assert.ok(w.includes(FLOOR_COMMAND));
   assert.match(FLOOR_COMMAND, /^node "[^"]*\/scripts\/project-tiers\.mjs" floor <base>\.\.<head>$/);
   assert.match(w, /RISK: low\|mid\|high/);
   assert.match(w, /REVIEW: <the cell you applied>/);
   assert.ok(w.length < 1300, `writer clause is ${w.length} chars`);
+  // The two short kinds carry no floors prose and no floor command, and stay inside their size budget (a typical project name).
   const leg = writerClause('risk', 'acme-app', { kind: 'leg' });
-  for (const re of [/one leg of a larger job/, /no self-chosen sections or milestone stops/, /Unit tests are cheap/, /Run no end-to-end tests, CI or full build/, /lead runs one pass after all legs/, /write or extend e2e tests/, /Commit, push, then report/, /applies the change-risk table once to the whole diff/]) {
+  for (const re of [/one leg of a larger job/, /you spawn no reviewer; the lead applies the review table once to the whole change/, /no self-chosen sections/, /Run unit tests for what you touch, no full suite, e2e, CI or full build/, /lead runs one pass after all legs/, /Commit, push, then report RISK: low\|mid\|high with the reason/]) {
     assert.match(leg, re);
   }
   const plain = writerClause('risk', 'acme-app', { kind: 'plain' });
-  assert.ok(plain.includes(BATCH_RULE));
+  for (const re of [/^Project acme-app, project_tier risk\./, /You spawn no reviewer: the lead applies the review table once to the whole change/, /Report RISK: low\|mid\|high with the reason/, /Run unit tests for what you touch, no full suite or e2e: the lead runs one pass for the batch/]) {
+    assert.match(plain, re);
+  }
+  for (const id of TIER_IDS) {
+    const p = writerClause(id, 'acme-app', { kind: 'plain' });
+    const l = writerClause(id, 'acme-app', { kind: 'leg' });
+    assert.ok(p.length <= 300, `plain ${id} is ${p.length} chars`);
+    assert.ok(l.length <= 450, `leg ${id} is ${l.length} chars`);
+    for (const c of [p, l]) {
+      assert.ok(!c.includes('floors:') && !c.includes(FLOOR_COMMAND) && !c.includes('project-tiers.mjs'), 'no floors prose, no floor command');
+    }
+  }
+  // The protocol and reviewer kinds keep the floors and the floor command.
+  for (const c of [writerClause('risk', 'acme-app'), reviewerClause('risk', 'acme-app')]) assert.ok(c.includes(RISK_FLOORS) && c.includes(FLOOR_COMMAND));
 });
 
 test('text: no wording tells a worker to stop or wrap up by step count', () => {
@@ -265,8 +280,8 @@ test('text: the high-risk reviewer cell lets the reviewer run the project\'s own
     assert.match(hi, /no separate full build, packaging or install/);
     assert.match(hi, /not checked for real/);
   }
-  assert.equal(cellText('push', 'high', 'reviewer'), 'read only in this tier, even though the general instruction above allows a run');
-  assert.match(reviewerClause('push', 'acme-app'), /High: read only in this tier, even though the general instruction above allows a run\./);
+  assert.equal(cellText('push', 'high', 'reviewer'), 'read only in this tier');
+  assert.match(reviewerClause('push', 'acme-app'), /High: read only in this tier\./);
   assert.equal(cellText('risk', 'mid', 'reviewer'), 'read only');
   assert.ok(reviewerClause('risk', 'acme-app').includes('you may raise it, never lower it'));
 });
@@ -297,4 +312,48 @@ test('floors: classification and the three levels', () => {
   assert.equal(riskFloor([f('package.json', 1, { forceKind: 'CI/build/deploy/hook' })]).floor, 'high');
   const r = riskFloor([f('src/a.ts', 3), f('src/b.ts', 3)]);
   assert.match(r.reasons.join(' '), /2 source files/);
+});
+
+// Path kinds: folder names and whole file-name words, never a bare substring, never a UI source tree.
+const HIGH_PATHS = [
+  '.github/workflows/ci.yml', '.gitlab-ci.yml', 'Jenkinsfile', 'Dockerfile', 'docker-compose.yml', '.husky/pre-push',
+  '.githooks/pre-commit', 'hooks/hooks.json', 'plugins/sample/hooks/guard.mjs', 'scripts/deploy-prod.sh', 'deploy/site.conf',
+  'scripts/release.mjs', 'migrations/0042_add_col.sql', 'prisma/schema.prisma', 'db/schema.sql', 'firestore.rules',
+  'src/auth/login.ts', 'src/payments/checkout.ts', 'server/billing/stripe.ts',
+  // more: other spellings of the same kinds
+  'infra/Dockerfile.dev', 'ci/build.sh', 'scripts/ci-run.sh', 'vite.config.ts', 'tsconfig.build.json', 'android/app/build.gradle.kts',
+  'db/migrate/20240101_add_users.rb', 'src/lib/schema.ts', 'src/lib/AuthGuard.ts', 'src/sign-in.ts', 'src/oauth-callback.ts',
+  'lib/stripe.js', 'plugins/x/src/hooks/guard.mjs', 'scripts/hooks/pre-commit', 'src/pages/api/auth/login.ts', 'deploy.sh',
+  'ops/release-train.py', 'Makefile',
+];
+const SIZE_ONLY_PATHS = [
+  'src/hooks/useCart.ts', 'app/hooks/useTheme.tsx', 'src/styles/design-tokens.css', 'src/lib/tokenizer.ts', 'src/components/SessionList.tsx',
+  'src/components/SchemaForm.tsx', 'src/components/ReleaseBanner.tsx', 'src/pages/AuthorPage.tsx', 'docs/release-notes.md',
+  // more: look like a kind, are not one
+  'src/components/auth/LoginForm.tsx', 'src/components/checkout/CartRow.tsx', 'src/views/billing/InvoiceList.vue', 'src/lib/release-notes.ts',
+  'src/author-list.ts', 'src/sessions.ts', 'src/lib/tokens.ts', 'src/components/hooks/useAuth.ts', 'src/utils/preschema.ts', 'README.md',
+  'tests/auth/login.test.ts', 'docs/deploy-guide.md', 'src/auth/login.css', 'src/lib/checkouts-report.ts',
+];
+
+test('floors: path kinds floor high by folder name or whole file-name word', () => {
+  for (const p of HIGH_PATHS) {
+    assert.equal(riskFloor([{ path: p, added: 1, deleted: 0 }]).floor, 'high', p);
+  }
+  assert.equal(highPathKind('.github/workflows/ci.yml'), 'CI/build/deploy/hook');
+  assert.equal(highPathKind('prisma/schema.prisma'), 'data/schema');
+  assert.equal(highPathKind('src/payments/checkout.ts'), 'sign-in/payments');
+});
+
+test('floors: paths that only look like a kind floor by size, never high, and docs, tests and styles stay exempt', () => {
+  for (const p of SIZE_ONLY_PATHS) {
+    assert.notEqual(riskFloor([{ path: p, added: 1, deleted: 0 }]).floor, 'high', p);
+  }
+  // exempt classes are skipped even where the name matches a kind
+  for (const p of ['docs/release-notes.md', 'tests/auth/login.test.ts', 'src/auth/login.css']) assert.equal(riskFloor([{ path: p, added: 1, deleted: 0 }]).floor, 'low', p);
+  // size still applies to them
+  assert.equal(riskFloor([{ path: 'src/components/SessionList.tsx', added: 320, deleted: 0 }]).floor, 'high');
+  assert.equal(riskFloor([{ path: 'src/hooks/useCart.ts', added: 41, deleted: 0 }]).floor, 'mid');
+  // empty and odd input never throws
+  for (const p of ['', '/', null, undefined]) assert.equal(highPathKind(p), null);
+  assert.equal(highPathKind('a\\b\\auth\\login.ts'), 'sign-in/payments');
 });

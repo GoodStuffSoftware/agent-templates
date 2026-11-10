@@ -566,7 +566,11 @@ test('buildPrompt: protocol header, verbatim brief, the instruction, the diff', 
   assert.match(REVIEW_INSTRUCTION, /raw test and build output the writer put in the hand-off; say if that output is missing/);
   assert.match(REVIEW_INSTRUCTION, /You may run only the tests that cover the changed code .*only when they run with no compile or build step\. Never run the full suite, ci-local, e2e or CI \(read the batch's result in the hand-off\), never rerun the writer's whole check/);
   // Project tiers: a small change is read only; a high-risk or large one may start the project's own run command, never a separate build.
-  assert.match(REVIEW_INSTRUCTION, /A small change is read only\. When the brief's RISK is high, or the change is large or risky, you may start the project's own run or dev command, including the compile that command does itself, only to check the touched behaviour for real; run no separate full build, packaging or install, and if the check needs one, write "not checked for real" and why\./);
+  for (const frag of [
+    'a cell that says read only or by reading means you read and run nothing else, however large the change.',
+    'Where the cell asks you to check the changed behaviour in the running app, or the brief has no tier clause and its RISK is high or the change is large or risky, you may start the project\'s own run or dev command, including the compile that command does itself, only to check the touched behaviour for real; run no separate full build, packaging or install, and if the check needs one, write "not checked for real" and why.',
+    'With no tier clause, a small change is read only.',
+  ]) assert.ok(REVIEW_INSTRUCTION.includes(frag), frag);
   assert.match(REVIEW_INSTRUCTION, /You may raise the writer's RISK, never lower it, and say so on the line after the verdict\./);
   assert.doesNotMatch(REVIEW_INSTRUCTION, /launch the app/);
   assert.match(REVIEW_INSTRUCTION, /a review takes minutes/);
@@ -625,7 +629,7 @@ test('the self-review clause runs the governor before spawning a reviewer, and k
   assert.ok(block.includes('Its brief opens with these four lines, as plain text:') && block.includes('   ROLE: reviewer\n   RISK: <your risk>\n   ```'));
   assert.ok(block.includes('the raw output of your own test and build runs'), 'the writer still runs the checks and hands over the output');
   assert.ok(block.includes('Throwaway test code (probes, timing harnesses, temporary diagnostics that never ship) has no review gate'));
-  assert.ok(block.includes('runs at most the tests that cover the changed code when they need no build (plus the project\'s own run command when RISK is high, as the instruction says): no separate builds, no full suite, no e2e, no CI, no commits, no pushes'));
+  assert.ok(block.includes('runs at most the tests that cover the changed code when they need no build (plus the project\'s own run command when your cell asks for a check in the running app, as the instruction says): no separate builds, no full suite, no e2e, no CI, no commits, no pushes'));
   assert.ok(!block.includes('Bash timeout of 600000 ms'));
   assert.ok(block.includes("brief TEXT goes into that file, never only a path to it"));
   assert.ok(block.includes('spawn exactly ONE reviewer, in the foreground'));

@@ -114,8 +114,8 @@ export function longRuns({ since = '24h', now = Date.now(), file } = {}) {
   if (!runs.length) return { line: 'Long runs (24h): none', runs };
   const items = runs.map((r) => {
     const f = r.finalSteps != null ? ` (final ${r.finalSteps}${r.finished ? ', finished' : ', not finished'})` : '';
-    const mins = r.minutes != null ? `${Math.round(r.minutes)} min` : '? min';
-    const sm = r.summary ? `\n    why: ${r.summary.name || 'unnamed'}, TYPE ${r.summary.type || '?'}, rung ${r.summary.rung ?? '?'}, ${r.summary.steps} steps in ${r.summary.minutes != null ? Math.round(r.summary.minutes) : '?'} min; tools: ${toolsText(r.summary.toolCounts) || 'none'}; ${r.summary.failedCommands ?? '?'} failed commands; brief ${r.summary.briefChars ?? '?'} chars` : '';
+    const mins = r.minutes != null ? `${Math.max(0, Math.round(r.minutes))} min` : '? min';
+    const sm = r.summary ? `\n    why: ${r.summary.name || 'unnamed'}, TYPE ${r.summary.type || '?'}, rung ${r.summary.rung ?? '?'}, ${r.summary.steps} steps in ${r.summary.minutes != null ? Math.max(0, Math.round(r.summary.minutes)) : '?'} min; tools: ${toolsText(r.summary.toolCounts) || 'none'}; ${r.summary.failedCommands ?? '?'} failed commands; brief ${r.summary.briefChars ?? '?'} chars` : '';
     return `- ${r.type || 'agent'}, ${r.model || 'model ?'}, ${r.steps} steps${f}, ${mins}, ${r.compactions ?? '?'} compactions: ${short(r.description, 80) || '(no description)'}${sm}`;
   });
   return { line: `Long runs (24h): ${runs.length} past the long-run mark (150 steps, then every further 100; a marker, not a limit)\n${items.join('\n')}`, runs };

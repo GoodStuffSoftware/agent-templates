@@ -100,8 +100,12 @@ test('set refuses an unknown tier, a missing name, a non-repo path; unset refuse
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /unknown tier "strict"/);
     assert.ok(!existsSync(tiersPath()), 'nothing written');
-    assert.notEqual(cli(['set']).status, 0);
-    assert.notEqual(cli(['set', 'acme-app']).status, 0);
+    for (const bad of [['set'], ['set', 'acme-app'], ['set', '', 'push']]) {
+      r = cli(bad);
+      assert.notEqual(r.status, 0, bad.join(' '));
+      assert.match(r.stderr, /set needs a project and a tier\. Usage: project-tiers\.mjs list/, bad.join(' '));
+    }
+    assert.ok(!existsSync(tiersPath()), 'still nothing written');
     const plain = join(fx.dir, 'plain');
     mkdirSync(plain, { recursive: true });
     r = cli(['set', plain, 'push']);
@@ -206,3 +210,44 @@ test('floor: low, mid and high for real commit ranges; errors print "floor unkno
   r = cli(['floor', `${base}..${docs}`], { cwd: join(main, '..') }); // not a repo
   assert.match(r.stdout, /^floor unknown: /);
 }));
+
+test('floor: a...b diffs from the merge base, a..b stays a two-dot diff', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main }) => {
+  const commit = (rel, text, msg) => {
+    mkdirSync(join(main, rel, '..'), { recursive: true });
+    writeFileSync(join(main, rel), text);
+    git(main, 'add', '-A');
+    git(main, 'commit', '-q', '-m', msg);
+  };
+  git(main, 'checkout', '-q', '-b', 'topic');
+  commit('docs/notes.md', 'a\nb\n', 'docs on the topic branch');
+  git(main, 'checkout', '-q', 'main');
+  commit('.github/workflows/ci.yml', 'name: ci\n', 'ci lands on main after the branch point');
+  // topic changed only a doc since the branch point; main has moved on with a CI file
+  let r = cli(['floor', 'main...topic'], { cwd: main });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^floor: low$/m, r.stdout);
+  assert.doesNotMatch(r.stdout, /ci\.yml/);
+  // the two-dot diff of the two tips also sees main's CI file (as a deletion)
+  r = cli(['floor', 'main..topic'], { cwd: main });
+  assert.match(r.stdout, /^floor: high$/m, r.stdout);
+  assert.match(r.stdout, /ci\.yml/);
+  // an unknown ref on either side still prints "floor unknown"
+  assert.match(cli(['floor', 'main...nope'], { cwd: main }).stdout, /^floor unknown: /);
+}));
+
+test('a config path that is a folder is reported as not a file, by list and by set', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(tiersPath(), { recursive: true });
+    let r = cli(['list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /problem: is not a file/);
+    assert.doesNotMatch(r.stdout, /not valid JSON/);
+    r = cli(['set', 'acme-app', 'push']);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /is not a file/);
+    assert.doesNotMatch(r.stderr, /not valid JSON/);
+  } finally {
+    fx.cleanup();
+  }
+});

@@ -44,10 +44,18 @@ test('each tier has its own line, and no config file means tier risk', () => {
   });
 });
 
-test('outside a repo the line says so and uses the default tier', () => withRepo({ default: 'gates' }, ({ dir }) => {
+test('outside a git repo there is no session line: nothing, as valid JSON, on every SessionStart source', () => withRepo({ default: 'gates' }, ({ dir, repo }) => {
   const plain = join(dir, 'plain');
   mkdirSync(plain, { recursive: true });
-  assert.match(ctx(runHook('hooks/project-tier.mjs', start(plain))), /^\[agent-companion\] No project \(outside a repo\): project_tier gates by default/);
+  for (const source of ['startup', 'resume', 'clear', 'compact']) {
+    const res = runHook('hooks/project-tier.mjs', start(plain, { source }));
+    assert.equal(res.status, 0, res.stderr);
+    assert.deepEqual(res.json, {}, source);
+  }
+  // the same session inside the repo still gets its line again after a resume, clear or compaction (SessionStart fires on each)
+  for (const source of ['startup', 'resume', 'clear', 'compact']) {
+    assert.match(ctx(runHook('hooks/project-tier.mjs', start(repo, { source }))), /^\[agent-companion\] Project acme-app, project_tier gates/, source);
+  }
 }));
 
 test('a subagent session gets nothing, as valid JSON', () => withRepo(undefined, ({ repo }) => {
