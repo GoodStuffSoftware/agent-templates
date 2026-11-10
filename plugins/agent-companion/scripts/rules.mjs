@@ -12,6 +12,7 @@
 //   node rules.mjs show <id>
 //   node rules.mjs add --id <id> --scope <scope> --then <text> [--when <regex>] [--note <text>]
 //   node rules.mjs add --id <id> --scope <scope> --then-file <path> [--when <regex>]
+//   node rules.mjs add --id <id> --scope event-turn --then <text> --then-later <text>   # or --then-later-file <path>
 //   node rules.mjs enable <id>
 //   node rules.mjs disable <id>
 //   node rules.mjs remove <id>            # user rules only; a built-in is disabled, not removed
@@ -96,6 +97,8 @@ try {
       const note = val('--note');
       const thenFile = val('--then-file');
       let thenText = val('--then');
+      const thenLaterFile = val('--then-later-file');
+      let thenLaterText = val('--then-later');
 
       if (thenFile) {
         try {
@@ -105,11 +108,23 @@ try {
         }
       }
 
+      if (thenLaterFile) {
+        try {
+          thenLaterText = readFileSync(thenLaterFile, 'utf8');
+        } catch (e) {
+          usageError(`cannot read --then-later-file ${thenLaterFile}: ${e.message}`);
+        }
+      }
+
       if (!id) usageError('add requires --id');
       if (!KEBAB.test(id)) usageError(`--id "${id}" must be kebab-case (lowercase letters, digits, hyphens)`);
       if (!scope) usageError('add requires --scope');
       if (!SCOPES.includes(scope)) usageError(`--scope must be one of ${SCOPES.join(', ')}`);
       if (!thenText || !thenText.trim()) usageError('add requires --then <text> or --then-file <path> with non-empty content');
+
+      const laterGiven = thenLaterText !== undefined;
+      if (laterGiven && scope !== 'event-turn') usageError('--then-later / --then-later-file apply to scope "event-turn" only');
+      if (laterGiven && !thenLaterText.trim()) usageError('--then-later / --then-later-file needs non-empty text');
 
       const { rules } = readRules();
       if (findRule(rules, id)) usageError(`id "${id}" already exists — use enable/disable, or edit ${rulesPath()} directly to override a built-in`);
@@ -127,7 +142,7 @@ try {
       }
 
       persist(appendUserRule({
-        id, enabled: true, scope, when: when ?? null, then: thenText.trim(), gate: null, note: note ?? null, added: new Date().toISOString(),
+        id, enabled: true, scope, when: when ?? null, then: thenText.trim(), ...(laterGiven ? { thenLater: thenLaterText.trim() } : {}), gate: null, note: note ?? null, added: new Date().toISOString(),
       }), 'add');
       console.log(`rules add: added "${id}" (${scope}).`);
       break;

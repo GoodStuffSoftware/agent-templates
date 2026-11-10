@@ -42,7 +42,8 @@
 // contract just says "Node 20" — depending on the exact patch release would
 // make the gate silently inert on whichever build actually runs it.)
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configDir, opt, stateFile, readJson, rolloutActive, writeTextAtomic } from './context.mjs';
@@ -692,7 +693,16 @@ function oddQuotes(s, from, to) {
 // block where the text had none, and was silent; this code removes only the
 // <command-args> block, and the ask counts. Here a tag is only what the text
 // itself spells.
-export function userOwnText(text) {
+//
+// `strict` is for the event-turn decision, where wrongly dropping operator text
+// is the worse error (their question would go unanswered). There an unclosed
+// wrapper and a stray closing tag swallow nothing: only COMPLETE, properly
+// closed blocks are removed. Non-strict (user-prompt rules) keeps the
+// swallow-to-end on purpose, from 0.29.1: a truncated cross-session message
+// that says "prompt" must not fire copyable-prompt. That is safe because the
+// only effect of over-stripping there is a rule staying silent, never a claim
+// that the operator typed nothing.
+export function userOwnText(text, { strict = false } = {}) {
   const s = String(text ?? '');
   const stack = [];
   let out = '';
@@ -710,8 +720,10 @@ export function userOwnText(text) {
       if (s[SPACES_RE.lastIndex] === '>') {
         const end = SPACES_RE.lastIndex + 1;
         if (stack.length === 0) {
-          out += `${s.slice(copied, m.index)} `;
-          copied = end;
+          if (!strict) {
+            out += `${s.slice(copied, m.index)} `;
+            copied = end;
+          }
         } else if (stack[stack.length - 1] === name) {
           stack.pop();
           if (stack.length === 0) {
@@ -744,7 +756,7 @@ export function userOwnText(text) {
     stack.push(name);
     m = next;
   }
-  if (stack.length > 0) return `${out}${s.slice(copied, blockStart)} `;
+  if (stack.length > 0) return strict ? out + s.slice(copied) : `${out}${s.slice(copied, blockStart)} `;
   return out + s.slice(copied);
 }
 
@@ -753,28 +765,45 @@ export function userOwnText(text) {
 // wrapper blocks above are removed, and it is not empty and does carry one of the known event wrappers. A plain-text
 // timer prompt (the keep-warm ping) and any turn with operator text beside the wrapper are not event turns.
 const EVENT_KIND_RE = /<(?:task-notification|cross-session-message|side-sessions-event|ci-monitor-event)(?=[\s>])|\[SYSTEM NOTIFICATION - NOT USER INPUT\]/i;
+// A turn is an event turn only when, after removing complete, closed wrapper blocks (strict mode: an unclosed or
+// malformed tag removes nothing) and the automated banner line, only whitespace is left.
+const BANNER_LINE_RE = /^[ \t]*\[SYSTEM NOTIFICATION - NOT USER INPUT\][ \t]*$/gim;
 export function isEventTurn(text) {
   if (typeof text !== 'string' || !text.trim()) return false;
   if (!EVENT_KIND_RE.test(text)) return false;
-  return userOwnText(text).trim() === '';
+  return userOwnText(text, { strict: true }).replace(BANNER_LINE_RE, '').trim() === '';
 }
 
 // For rules of scope 'event-turn': the first firing of a rule in a session keeps its `then`; later firings in the
 // same session use its `thenLater` when it has one. "First" is a marker file per session and rule in the plugin's
-// state folder, created exclusively; a session id that is missing, or a marker that cannot be written, keeps `then`.
+// state folder; a session id that is missing, or a marker that cannot be read or written, keeps `then`. Picking
+// writes nothing: the marker is written by markEventTurnTold, only once the full text has actually gone out (the
+// character cap can drop it, and a dropped text must be offered again). File names are hashes of the ids, so two
+// ids that would sanitise to the same string cannot share a marker.
+const idHash = (x) => createHash('sha256').update(String(x)).digest('hex').slice(0, 32);
+const toldMarker = (sessionId, ruleId) => join(stateFile('event-turn-told'), `${idHash(sessionId)}-${idHash(ruleId)}.seen`);
 export function pickEventTurnText(rules, sessionId) {
   return rules.map((r) => {
     if (!r.thenLater || !sessionId) return r;
     try {
-      const dir = stateFile('event-turn-told');
-      mkdirSync(dir, { recursive: true });
-      const safe = (x) => String(x).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
-      writeFileSync(join(dir, `${safe(sessionId)}-${safe(r.id)}.seen`), '', { flag: 'wx' });
-      return r; // first firing this session
-    } catch (e) {
-      return e && e.code === 'EEXIST' ? { ...r, then: r.thenLater } : r;
-    }
+      if (existsSync(toldMarker(sessionId, r.id))) return { ...r, then: r.thenLater };
+    } catch { /* unreadable: treat as first */ }
+    return { ...r, firstEventText: true }; // the full text; marked told once it is delivered
   });
+}
+
+// After the hook has rendered and cut its output: record, for each rule that offered its full text, that the text
+// is really in what goes out. Fail open: a marker that cannot be written only means the full text is offered again.
+export function markEventTurnTold(rules, sessionId, delivered) {
+  if (!sessionId) return;
+  const out = String(delivered ?? '');
+  for (const r of rules) {
+    if (!r || !r.firstEventText || !out.includes(`\n- ${String(r.then || '').trim()}`)) continue;
+    try {
+      mkdirSync(stateFile('event-turn-told'), { recursive: true });
+      writeFileSync(toldMarker(sessionId, r.id), '', { flag: 'wx' });
+    } catch { /* EEXIST or unwritable: nothing to record */ }
+  }
 }
 
 export function matchRules({ scope, text, sessionId, subagent = false } = {}) {

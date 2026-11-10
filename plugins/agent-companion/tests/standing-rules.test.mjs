@@ -930,3 +930,118 @@ test('rules.mjs add --scope event-turn needs no --when and the rule shows in lis
     cleanup();
   }
 });
+
+// --- review round 0.31.51: an operator's own turn is never an event turn ------------------------------------------
+
+import { existsSync, readdirSync } from 'node:fs';
+import { markEventTurnTold } from '../hooks/lib/rules.mjs';
+
+const TN_BLOCK = '<task-notification>\n<summary>Worker "sample" completed</summary>\n</task-notification>';
+const markerCount = (stateDir) => {
+  const d = join(stateDir, 'state', 'event-turn-told');
+  return existsSync(d) ? readdirSync(d).length : 0;
+};
+
+test('isEventTurn: an unterminated or malformed wrapper tag swallows nothing; what follows it is operator text', () => {
+  const asked = '<task-notification>\nwhy did this show up in my chat?';
+  assert.equal(isEventTurn(asked), false, 'the reproduced input: an opening tag never closed, then a typed question');
+  assert.equal(isEventTurn('<task-notification>\nsome truncated log line'), false);
+  assert.equal(isEventTurn('please look at this <task-notification> thing, what is it?'), false, 'an unclosed tag in the middle of typed text');
+  assert.equal(isEventTurn(`${TN_BLOCK}\nwhat was that?`), false, 'a closed block followed by typed text');
+  assert.equal(isEventTurn(`what was that?\n${TN_BLOCK}`), false, 'typed text followed by a closed block');
+  assert.equal(isEventTurn(`${TN_BLOCK}\n<task-notification>\nand why?`), false, 'a closed block, then an unclosed tag with typed text');
+  assert.equal(isEventTurn('<task-notification>x</task-notification></task-notification> why?'), false, 'a stray closing tag does not hide text');
+});
+
+test('isEventTurn: complete blocks still count, with attributes, in a row and with surrounding whitespace', () => {
+  assert.equal(isEventTurn(`${TN_BLOCK}\n${TN_BLOCK}`), true, 'two closed blocks');
+  assert.equal(isEventTurn('<task-notification id="w1" kind="x">\ndone\n</task-notification>'), true, 'a block with attributes');
+  assert.equal(isEventTurn(`  \n\t${TN_BLOCK}  \n\n`), true, 'leading and trailing whitespace');
+  assert.equal(isEventTurn(`<cross-session-message from="peer-a">hi</cross-session-message>\n${TN_BLOCK}`), true, 'two different kinds');
+  assert.equal(isEventTurn('[SYSTEM NOTIFICATION - NOT USER INPUT]'), true, 'the automated banner line alone');
+  assert.equal(isEventTurn(`[SYSTEM NOTIFICATION - NOT USER INPUT]\n${TN_BLOCK}`), true, 'the banner line beside a complete block');
+  assert.equal(isEventTurn('[SYSTEM NOTIFICATION - NOT USER INPUT] and please fix the typo'), false, 'the banner text with typed words on its line');
+});
+
+test('user-prompt rules keep the swallow-to-end for an unclosed wrapper (a truncated message that says "prompt" stays silent)', () => {
+  assert.equal(userOwnText('<cross-session-message from="x">unterminated message that says prompt').trim(), '');
+  assert.match(userOwnText('<task-notification>\nwhy did this show up in my chat?', { strict: true }), /why did this show up/);
+});
+
+test('hook: the reproduced input is silent; a real event turn still gets the full text', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const typed = runHook('hooks/standing-rules.mjs',
+      { session_id: 'sess-et-typed', prompt: '<task-notification>\nwhy did this show up in my chat?', cwd: dir }, { args: ET_ARGS });
+    assert.equal(typed.status, 0);
+    assert.ok(!ctxOf(typed).includes('Event turn'), typed.stdout);
+    const real = runHook('hooks/standing-rules.mjs',
+      { session_id: 'sess-et-real', prompt: EVENT_PROMPTS['task notification'], cwd: dir }, { args: ET_ARGS });
+    assert.ok(ctxOf(real).includes(FULL_START), real.stdout);
+  } finally {
+    cleanup();
+  }
+});
+
+test('the told-marker is written only when the full text was injected (not when the character cap dropped it)', () => {
+  const { dir, stateDir, cleanup } = makeFixture();
+  try {
+    const run = (env) => runHook('hooks/standing-rules.mjs',
+      { session_id: 'sess-et-cap', prompt: EVENT_PROMPTS['task notification'], cwd: dir }, { args: ET_ARGS, env });
+    const capped = run({ CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '300' });
+    assert.equal(capped.status, 0);
+    assert.match(ctxOf(capped), /dropped: over the 300-char limit: event-turn-quiet/);
+    assert.ok(!ctxOf(capped).includes(FULL_START));
+    assert.equal(markerCount(stateDir), 0, 'a dropped text leaves no marker');
+    const again = run({});
+    assert.ok(ctxOf(again).includes(FULL_START), 'the full text is offered again once the cap allows it');
+    assert.equal(markerCount(stateDir), 1);
+    assert.ok(ctxOf(run({})).includes(SHORT_START), 'and the short text after that');
+  } finally {
+    cleanup();
+  }
+});
+
+test('marker names come from a hash of the ids: ids that sanitise to the same string keep separate markers', () => {
+  const { stateDir, cleanup } = makeFixture();
+  try {
+    const rules = [{ id: 'r', then: 'full text', thenLater: 'short text' }];
+    const deliver = (sid) => {
+      const picked = pickEventTurnText(rules, sid);
+      markEventTurnTold(picked, sid, '\n\n[agent-companion: standing rules]\n- full text');
+      return picked[0].then;
+    };
+    assert.equal(deliver('a/b'), 'full text');
+    assert.equal(deliver('a_b'), 'full text', 'a different id that sanitises to the same string is a new session');
+    assert.equal(deliver('a/b'), 'short text');
+    assert.equal(deliver('a_b'), 'short text');
+    assert.equal(markerCount(stateDir), 2);
+    for (const f of readdirSync(join(stateDir, 'state', 'event-turn-told'))) assert.match(f, /^[0-9a-f]{32}-[0-9a-f]{32}\.seen$/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('rules.mjs add --then-later (and --then-later-file) sets the later text of an event-turn rule, and show prints it', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const add = runScript('scripts/rules.mjs', ['add', '--id', 'sample-twice', '--scope', 'event-turn', '--then', 'First note.', '--then-later', 'Later note.']);
+    assert.equal(add.status, 0, add.stderr);
+    const show = runScript('scripts/rules.mjs', ['show', 'sample-twice']);
+    assert.equal(JSON.parse(show.stdout).thenLater, 'Later note.');
+    const file = join(dir, 'later.txt');
+    writeFileSync(file, 'Later note from a file.\n');
+    const add2 = runScript('scripts/rules.mjs', ['add', '--id', 'sample-file', '--scope', 'event-turn', '--then', 'First.', '--then-later-file', file]);
+    assert.equal(add2.status, 0, add2.stderr);
+    assert.equal(JSON.parse(runScript('scripts/rules.mjs', ['show', 'sample-file']).stdout).thenLater, 'Later note from a file.');
+    const bad = runScript('scripts/rules.mjs', ['add', '--id', 'sample-bad', '--scope', 'always', '--then', 'x', '--then-later', 'y']);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /event-turn/);
+    const run = (sid) => ctxOf(runHook('hooks/standing-rules.mjs',
+      { session_id: sid, prompt: EVENT_PROMPTS['cross-session message'], cwd: dir }, { args: ET_ARGS }));
+    assert.ok(run('sess-add-later').includes('First note.'));
+    assert.ok(run('sess-add-later').includes('Later note.'));
+  } finally {
+    cleanup();
+  }
+});

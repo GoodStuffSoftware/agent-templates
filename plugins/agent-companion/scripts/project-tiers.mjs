@@ -64,11 +64,15 @@ function showCmd() {
   if (d.ownRoot && d.mainRoot && d.ownRoot.toLowerCase() !== d.mainRoot.toLowerCase()) console.log(`worktree: ${d.ownRoot}`);
   console.log(`project_tier: ${tierName(d.tier)}`);
   const why = d.source === 'assigned' ? `assigned by ${d.by} "${d.key}"`
-    : d.source === 'default' ? `default (no entry for this project; default is ${d.config.default})`
+    : d.source === 'default' ? `default (no entry sets a tier for this project; default is ${d.config.default})`
       : 'none (not inside a repo; the default applies)';
   console.log(`source: ${why}`);
   console.log(`meaning: ${TIERS[d.tier].meaning}`);
   console.log(`landing: ${d.landing ? `${d.landing} (${d.landing === 'direct' ? 'no pull requests; commit and push to the branch the brief names' : 'through a pull request'})` : 'not set (the plugin says nothing about how work lands)'}`);
+  const landWhy = d.landingSource === 'assigned' ? `assigned by ${d.landingBy} "${d.landingKey}"`
+    : d.landingSource === 'default' ? 'the top-level default landing mode'
+      : 'none (no project entry or default sets one)';
+  console.log(`landing_source: ${landWhy}`);
   console.log(`file: ${tiersPath()}${d.config.exists ? '' : ' (absent)'}`);
   for (const p of d.config.problems) console.log(`problem: ${p}`);
 }
@@ -136,7 +140,8 @@ function setCmd() {
 
 // landing <name-or-path|--default> <pr|direct|clear>: set or clear the landing mode for one project or the top-level default.
 // A project entry that is a tier string becomes {tier, landing}; clearing turns it back into the string. An entry with a
-// landing but no tier (written by hand) follows the default tier. Entries that are not touched are not rewritten.
+// landing but no tier (as `landing` writes for a path whose repo is assigned by name) leaves the tier to the other entries
+// (name entry, then the default): tier and landing resolve on their own. Entries that are not touched are not rewritten.
 function landingCmd() {
   const mode = String(args[1] ?? '').trim().toLowerCase();
   if (args.length < 2 || !String(args[0] ?? '').trim()) fail(`landing needs a project (or --default) and a mode. ${USAGE}`);

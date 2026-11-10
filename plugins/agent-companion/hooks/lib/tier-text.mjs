@@ -227,7 +227,9 @@ export function writerClause(tier, project, opts = {}) {
   if (kind === 'leg') {
     return `${short} You are one leg of a larger job: you spawn no reviewer; the lead applies the review table once to the whole change. Finish every task in the brief, no self-chosen sections. Run unit tests for what you touch, no full suite, e2e, CI or full build: the lead runs one pass after all legs. Commit, push, then report ${RISK_REPORT}.`;
   }
-  const land = landingSentence(opts.landing) ? ` ${landingSentence(opts.landing)}` : '';
+  // No landing sentence outside a git repo (no project): the session line is silent there too.
+  const landSentence = project ? landingSentence(opts.landing) : '';
+  const land = landSentence ? ` ${landSentence}` : '';
   if (kind === 'plain') {
     return `${short} You spawn no reviewer: the lead applies the review table once to the whole change. Report ${RISK_REPORT}. Run unit tests for what you touch, no full suite or e2e: the lead runs one pass for the batch.${land}`;
   }

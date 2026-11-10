@@ -6,9 +6,9 @@ import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeFixture, runScript } from './helpers.mjs';
+import { makeFixture, runScript, runHook, readJsonl } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
-import { tiersPath } from '../hooks/lib/project-tier.mjs';
+import { tiersPath, tierDetail, tierFor } from '../hooks/lib/project-tier.mjs';
 
 const GIT_OK = spawnSync('git', ['--version'], { windowsHide: true }).status === 0;
 const IDENT = { GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
@@ -314,4 +314,82 @@ test('landing: a malformed file is refused by the landing command and left untou
   const r = cli(['landing', 'acme-app', 'direct']);
   assert.notEqual(r.status, 0);
   assert.equal(readFileSync(tiersPath(), 'utf8'), '{ nope');
+}));
+
+// ---- review round 0.31.51: tier and landing resolve on their own ----
+
+test('landing on a path never changes a tier assigned by name: show, resolver and the spawn row agree', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main, stateDir }) => {
+  const read = () => JSON.parse(readFileSync(tiersPath(), 'utf8'));
+  writeFileSync(tiersPath(), JSON.stringify({ default: 'risk', projects: { 'acme-app': 'gates' } }));
+  const r = cli(['landing', main, 'direct']);
+  assert.equal(r.status, 0, r.stderr);
+  const projects = read().projects;
+  assert.equal(projects['acme-app'], 'gates', 'the name entry is untouched');
+  assert.deepEqual(Object.values(projects).filter((v) => typeof v === 'object'), [{ landing: 'direct' }], 'the path entry holds only the landing mode');
+
+  const s = cli(['show', main]);
+  assert.match(s.stdout, /^project_tier: gates /m);
+  assert.match(s.stdout, /^source: assigned by name "acme-app"$/m);
+  assert.match(s.stdout, /^landing: direct /m);
+  assert.match(s.stdout, /^landing_source: assigned by path /m);
+
+  const d = tierDetail(main);
+  assert.deepEqual([d.tier, d.source, d.by, d.landing, d.landingSource, d.landingBy], ['gates', 'assigned', 'name', 'direct', 'assigned', 'path']);
+  assert.deepEqual(tierFor(main), { project: 'acme-app', tier: 'gates', source: 'assigned' });
+
+  const res = runHook('hooks/spawn-guard.mjs', {
+    session_id: 'sess-tier-landing', agent_type: 'main', cwd: main,
+    tool_input: { subagent_type: 'general-purpose', model: 'sonnet', prompt: 'TYPE: explore\nlook around', run_in_background: true, name: 'w' },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  const rows = readJsonl(join(stateDir, 'telemetry', 'spawns.jsonl'));
+  assert.equal(rows.at(-1).project_tier, 'gates');
+  assert.equal(rows.at(-1).tier_source, 'assigned');
+}));
+
+test('the reverse: a tier set by path never hides a landing mode set by name, and each field falls back on its own', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main }) => {
+  writeFileSync(tiersPath(), JSON.stringify({ default: 'risk', landing: 'pr', projects: { 'acme-app': { landing: 'direct' } } }));
+  let r = cli(['set', main, 'push']);
+  assert.equal(r.status, 0, r.stderr);
+  r = cli(['show', main]);
+  assert.match(r.stdout, /^project_tier: push /m);
+  assert.match(r.stdout, /^source: assigned by path /m);
+  assert.match(r.stdout, /^landing: direct /m);
+  assert.match(r.stdout, /^landing_source: assigned by name "acme-app"$/m);
+  // a project with no entry: the tier falls back to the default and the landing mode to the top-level one
+  const otherRepo = join(main, '..', 'other-app');
+  mkdirSync(join(otherRepo, '.git'), { recursive: true });
+  const other = tierDetail(otherRepo);
+  assert.deepEqual([other.tier, other.source, other.landing, other.landingSource], ['risk', 'default', 'pr', 'default']);
+}));
+
+test('set after landing keeps the landing mode; clearing landing from an entry that then holds nothing removes it', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main }) => {
+  const read = () => JSON.parse(readFileSync(tiersPath(), 'utf8'));
+  writeFileSync(tiersPath(), JSON.stringify({ default: 'risk', projects: { 'acme-app': 'gates' } }));
+  assert.equal(cli(['landing', main, 'direct']).status, 0);
+  assert.equal(cli(['set', main, 'push']).status, 0); // set on the path entry that has a landing mode keeps it
+  const key = Object.keys(read().projects).find((k) => k !== 'acme-app');
+  assert.deepEqual(read().projects[key], { tier: 'push', landing: 'direct' });
+  assert.equal(read().projects['acme-app'], 'gates');
+  assert.equal(cli(['landing', main, 'clear']).status, 0);
+  assert.equal(read().projects[key], 'push', 'a tier left: back to the plain string');
+  assert.equal(cli(['unset', main]).status, 0);
+  assert.equal(cli(['landing', 'acme-app', 'direct']).status, 0);
+  assert.deepEqual(read().projects['acme-app'], { tier: 'gates', landing: 'direct' });
+  assert.equal(cli(['landing', 'acme-app', 'clear']).status, 0);
+  assert.equal(read().projects['acme-app'], 'gates');
+  // an entry with only a landing mode: clearing it leaves nothing, so the entry goes
+  assert.equal(cli(['landing', main, 'pr']).status, 0);
+  assert.equal(cli(['landing', main, 'clear']).status, 0);
+  assert.deepEqual(Object.keys(read().projects), ['acme-app'], 'the emptied entry is removed');
+  assert.match(cli(['show', main]).stdout, /^landing_source: none /m);
+}));
+
+test('a 0.31.50 file (tier strings, {tier, landing} objects, tier-less landing objects) reads the same', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main }) => {
+  writeFileSync(tiersPath(), JSON.stringify({ default: 'push', projects: { 'acme-app': { tier: 'gates', landing: 'pr' } } }));
+  const d = tierDetail(main);
+  assert.deepEqual([d.tier, d.source, d.landing, d.landingSource], ['gates', 'assigned', 'pr', 'assigned']);
+  writeFileSync(tiersPath(), JSON.stringify({ default: 'push', projects: { 'acme-app': { landing: 'direct' } } }));
+  const e = tierDetail(main);
+  assert.deepEqual([e.tier, e.source, e.landing], ['push', 'default', 'direct']);
 }));

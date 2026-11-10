@@ -40,7 +40,7 @@ directive lands:
 
 An **event turn** is a turn nobody typed: a background worker's result, a message from another session, a side-session or CI event, or a timer's system notification started it. The hook recognises one when the prompt, with the harness's wrapper blocks removed, holds no operator text, and the raw prompt carries a known event wrapper (`task-notification`, `cross-session-message`, `side-sessions-event`, `ci-monitor-event`, or the automated `[SYSTEM NOTIFICATION - NOT USER INPUT]` reminder). A turn where you also typed something is not an event turn, and neither is a plain-text timer prompt. Subagents never get `event-turn` rules. Nothing else can reach these turns: a `user-prompt` rule sees only what you typed, so it reads an event turn as empty.
 
-A rule may carry an optional `thenLater`: its directive for every firing after the first in the same session (the first firing uses `then`). It is meant for `event-turn` rules, where a long first notice and a short reminder after it keep a long unattended job cheap. A rule without it repeats `then`.
+A rule may carry an optional `thenLater`: its directive for every firing after the first in the same session (the first firing uses `then`). It is meant for `event-turn` rules, where a long first notice and a short reminder after it keep a long unattended job cheap. A rule without it repeats `then`. Set it with `rules.mjs add --scope event-turn --then <text> --then-later <text>` (or `--then-later-file <path>`); `show <id>` prints it.
 
 ## Commands
 

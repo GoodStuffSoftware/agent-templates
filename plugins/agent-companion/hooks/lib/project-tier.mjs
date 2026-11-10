@@ -166,8 +166,12 @@ export function loadTiers() {
 }
 
 // The full answer for a folder:
-// { project, tier, landing, source: 'assigned'|'default'|'none', by: 'path'|'name'|null, key, mainRoot, ownRoot, config }
-// landing: the project's own mode, else the top-level one, else null.
+// { project, tier, landing, source: 'assigned'|'default'|'none', by: 'path'|'name'|null, key,
+//   landingSource: 'assigned'|'default'|'none', landingBy: 'path'|'name'|null, landingKey, mainRoot, ownRoot, config }
+// Tier and landing each resolve on their own: the most specific entry that SETS that field wins
+// (a path entry, then a name entry), then the top-level default. An entry that sets only a landing
+// mode never hides a tier set by another entry, and the reverse. source/by/key describe the tier;
+// landingSource/landingBy/landingKey the landing mode ('default' = the top-level mode, 'none' = no mode).
 // A path key matches the main repo's root or the worktree's own root (case-insensitive, slashes
 // normalised) and wins over a name key. Outside a repo: the default tier, source 'none'.
 export function tierDetail(cwd) {
@@ -175,21 +179,35 @@ export function tierDetail(cwd) {
   try { cfg = loadTiers(); } catch { cfg = { default: DEFAULT_TIER, landing: null, sessionLine: true, reviewEveryChange: false, entries: [], problems: [] }; }
   const repo = repoOf(cwd);
   const base = { project: repo?.name || null, mainRoot: repo?.mainRoot || null, ownRoot: repo?.ownRoot || null, config: cfg };
-  if (!repo) return { ...base, tier: cfg.default, landing: cfg.landing || null, source: 'none', by: null, key: null };
+  const topLanding = cfg.landing || null;
+  const fallback = { tier: cfg.default, landing: topLanding, source: 'default', by: null, key: null, landingSource: topLanding ? 'default' : 'none', landingBy: null, landingKey: null };
+  if (!repo) return { ...base, ...fallback, source: 'none', landingSource: topLanding ? 'default' : 'none' };
   try {
     const roots = new Set([repo.mainRoot.toLowerCase(), repo.ownRoot.toLowerCase()]);
-    let hit = null;
-    for (const e of cfg.entries) {
-      if (e.isPath && roots.has(pathKey(e.key))) hit = { ...e, by: 'path' }; // the last duplicate wins, like JSON
-    }
-    if (!hit) {
-      for (const e of cfg.entries) {
-        if (!e.isPath && e.key.toLowerCase() === repo.name.toLowerCase()) hit = { ...e, by: 'name' };
+    const pathHits = cfg.entries.filter((e) => e.isPath && roots.has(pathKey(e.key)));
+    const nameHits = cfg.entries.filter((e) => !e.isPath && e.key.toLowerCase() === repo.name.toLowerCase());
+    // First the path entries, then the name entries; within one kind the last duplicate that sets the field wins, like JSON.
+    const find = (field) => {
+      for (const [by, hits] of [['path', pathHits], ['name', nameHits]]) {
+        for (let i = hits.length - 1; i >= 0; i -= 1) if (hits[i][field]) return { value: hits[i][field], by, key: hits[i].key };
       }
-    }
-    if (hit) return { ...base, tier: hit.tier || cfg.default, landing: hit.landing || cfg.landing || null, source: hit.tier ? 'assigned' : 'default', by: hit.by, key: hit.key };
+      return null;
+    };
+    const t = find('tier');
+    const l = find('landing');
+    return {
+      ...base,
+      tier: t ? t.value : cfg.default,
+      source: t ? 'assigned' : 'default',
+      by: t ? t.by : null,
+      key: t ? t.key : null,
+      landing: l ? l.value : topLanding,
+      landingSource: l ? 'assigned' : (topLanding ? 'default' : 'none'),
+      landingBy: l ? l.by : null,
+      landingKey: l ? l.key : null,
+    };
   } catch { /* fall through to the default */ }
-  return { ...base, tier: cfg.default, landing: cfg.landing || null, source: 'default', by: null, key: null };
+  return { ...base, ...fallback };
 }
 
 // { project, tier, source } -- source 'assigned' (the user gave this project a tier), 'default'

@@ -425,6 +425,16 @@ test('landing text: the writer clause (protocol and plain) and the session line 
   assert.ok(writerClause('risk', 'acme-app', { kind: 'plain' }).length <= 300, 'plain clause without landing stays within 300');
 });
 
+test('landing text: no landing sentence outside a git repo (no project), as with the session line', () => {
+  for (const kind of ['protocol', 'plain']) {
+    const none = writerClause('risk', null, { kind });
+    assert.equal(writerClause('risk', null, { kind, landing: 'direct' }), none, `${kind} direct`);
+    assert.equal(writerClause('risk', null, { kind, landing: 'pr' }), none, `${kind} pr`);
+    assert.ok(!none.includes('pull request'));
+  }
+  assert.equal(tierLine('risk', null, { landing: 'direct' }), '');
+});
+
 test('batch rule: a gate or CI on the landing path that runs the suite is the pass; else whoever lands runs it once locally', () => {
   assert.match(BATCH_RULE, /where a push gate or CI on the landing path runs the full suite or e2e, that run is the pass/);
   assert.match(BATCH_RULE, /where neither does \(for example direct merges while CI runs only on pull requests\), whoever lands runs it once locally before landing/);
