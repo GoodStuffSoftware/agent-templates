@@ -186,8 +186,10 @@ test('tierFor: a path key wins over a name key; compared case-insensitively with
   assert.equal(tierFor(main).tier, 'gates');
   assert.equal(tierFor(wt).tier, 'gates'); // the worktree resolves to the main repo's path
   assert.equal(tierDetail(wt).by, 'path');
-  writeTiers({ projects: { 'acme-app': 'push', [`${norm(main).replace(/\//g, '\\')}\\`]: 'gates' } });
-  assert.equal(tierFor(main).tier, 'gates');
+  if (process.platform === 'win32') { // a backslash path key is a Windows form; elsewhere a backslash is part of a file name
+    writeTiers({ projects: { 'acme-app': 'push', [`${norm(main).replace(/\//g, '\\')}\\`]: 'gates' } });
+    assert.equal(tierFor(main).tier, 'gates');
+  }
   writeTiers({ projects: { 'acme-app': 'push', [join(dir, 'elsewhere')]: 'gates' } });
   assert.equal(tierFor(main).tier, 'push');
   assert.equal(tierDetail(main).by, 'name');
