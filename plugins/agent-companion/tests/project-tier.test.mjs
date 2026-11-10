@@ -357,3 +357,77 @@ test('floors: paths that only look like a kind floor by size, never high, and do
   for (const p of ['', '/', null, undefined]) assert.equal(highPathKind(p), null);
   assert.equal(highPathKind('a\\b\\auth\\login.ts'), 'sign-in/payments');
 });
+
+// ---- landing mode: pr | direct, per project or as a default ----
+
+test('landing: string entries, object entries and the top-level default; a project beats the default; absent is null', () => withFixture(({ dir }) => {
+  const work = join(dir, 'work');
+  mainRepo(work, 'plain-app'); mainRepo(work, 'obj-app'); mainRepo(work, 'tierless-app');
+  writeTiers({ default: 'risk', projects: { 'plain-app': 'push', 'obj-app': { tier: 'gates', landing: 'direct' } } });
+  const c = loadTiers();
+  assert.deepEqual(c.problems, []);
+  assert.equal(c.landing, null);
+  assert.deepEqual(c.entries.map((e) => [e.key, e.tier, e.landing]), [['plain-app', 'push', null], ['obj-app', 'gates', 'direct']]);
+  assert.equal(tierDetail(join(work, 'plain-app')).landing, null, 'a string entry says nothing about landing');
+  assert.equal(tierDetail(join(work, 'plain-app')).tier, 'push');
+  assert.deepEqual([tierDetail(join(work, 'obj-app')).tier, tierDetail(join(work, 'obj-app')).landing], ['gates', 'direct']);
+
+  writeTiers({ landing: 'pr', projects: { 'plain-app': 'push', 'obj-app': { tier: 'gates', landing: 'direct' }, 'tierless-app': { landing: 'direct' } } });
+  assert.equal(loadTiers().landing, 'pr');
+  assert.equal(tierDetail(join(work, 'plain-app')).landing, 'pr', 'the default applies to a project without its own');
+  assert.equal(tierDetail(join(work, 'obj-app')).landing, 'direct', 'a project entry wins over the default');
+  const t = tierDetail(join(work, 'tierless-app'));
+  assert.deepEqual([t.tier, t.landing, t.source], ['risk', 'direct', 'default'], 'a landing-only entry follows the default tier');
+  assert.equal(tierFor(join(work, 'obj-app')).landing, undefined, 'tierFor (telemetry) gains no field');
+}));
+
+test('landing: an unknown value is ignored, listed under problems, and never breaks the tier', () => withFixture(({ dir }) => {
+  const work = join(dir, 'work');
+  mainRepo(work, 'obj-app');
+  writeTiers({ landing: 'rebase', projects: { 'obj-app': { tier: 'gates', landing: 'ship-it' }, 'bad-app': { tier: 'gates', landing: 7 }, 'worse-app': { landing: 'x' } } });
+  const c = loadTiers();
+  assert.equal(c.landing, null);
+  assert.ok(c.problems.some((p) => p.includes('"landing"') && p.includes('"rebase"')), c.problems.join('\n'));
+  assert.ok(c.problems.some((p) => p.includes('obj-app') && p.includes('"ship-it"')), c.problems.join('\n'));
+  assert.ok(c.problems.some((p) => p.includes('bad-app')), c.problems.join('\n'));
+  assert.ok(c.problems.some((p) => p.includes('worse-app')), c.problems.join('\n'));
+  const d = tierDetail(join(work, 'obj-app'));
+  assert.deepEqual([d.tier, d.landing, d.source], ['gates', null, 'assigned']);
+}));
+
+test('landing: a malformed file gives no landing and no throw', () => withFixture(() => {
+  writeTiers('{ not json');
+  const c = loadTiers();
+  assert.equal(c.landing, null);
+  assert.ok(c.problems.length >= 1);
+  writeTiers({ landing: ['pr'], projects: { a: { tier: 'push', landing: { x: 1 } } } });
+  assert.equal(loadTiers().landing, null);
+  assert.ok(loadTiers().problems.length >= 2);
+}));
+
+test('landing text: the writer clause (protocol and plain) and the session line carry one sentence per mode; the leg and reviewer clauses never do', () => {
+  const D = 'No pull requests in this project: commit and push to the branch the brief names.';
+  const P = 'Land through a pull request.';
+  for (const kind of ['protocol', 'plain']) {
+    const unset = writerClause('risk', 'acme-app', { kind });
+    assert.ok(!unset.includes('pull request'), `${kind} unset`);
+    assert.equal(writerClause('risk', 'acme-app', { kind, landing: 'direct' }), `${unset} ${D}`);
+    assert.equal(writerClause('risk', 'acme-app', { kind, landing: 'pr' }), `${unset} ${P}`);
+    assert.equal(writerClause('risk', 'acme-app', { kind, landing: 'bogus' }), unset, 'an unknown mode adds nothing');
+  }
+  const leg = writerClause('risk', 'acme-app', { kind: 'leg' });
+  assert.equal(writerClause('risk', 'acme-app', { kind: 'leg', landing: 'direct' }), leg);
+  assert.equal(reviewerClause('risk', 'acme-app', { landing: 'direct' }), reviewerClause('risk', 'acme-app'));
+  const line = tierLine('risk', 'acme-app');
+  assert.ok(!line.includes('pull request'));
+  assert.equal(tierLine('risk', 'acme-app', { landing: 'direct' }), `${line} ${D}`);
+  assert.equal(tierLine('risk', 'acme-app', { landing: 'pr' }), `${line} ${P}`);
+  assert.ok(writerClause('risk', 'acme-app', { kind: 'plain' }).length <= 300, 'plain clause without landing stays within 300');
+});
+
+test('batch rule: a gate or CI on the landing path that runs the suite is the pass; else whoever lands runs it once locally', () => {
+  assert.match(BATCH_RULE, /where a push gate or CI on the landing path runs the full suite or e2e, that run is the pass/);
+  assert.match(BATCH_RULE, /where neither does \(for example direct merges while CI runs only on pull requests\), whoever lands runs it once locally before landing/);
+  assert.match(BATCH_RULE, /An unchanged tree is never rerun/);
+  assert.doesNotMatch(BATCH_RULE, /counts everywhere/);
+});

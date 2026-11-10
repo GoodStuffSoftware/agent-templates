@@ -88,7 +88,7 @@ export function applyTierClause(type, role, brief = '', cwd = process.cwd(), opt
       if (!plan) return none;
     }
     const d = tierDetail(cwd);
-    const o = { reviewEveryChange: !!d.config?.reviewEveryChange };
+    const o = { reviewEveryChange: !!d.config?.reviewEveryChange, landing: d.landing || null };
     const body = kind === 'reviewer'
       ? reviewerClause(d.tier, d.project, o)
       : writerClause(d.tier, d.project, { ...o, kind });

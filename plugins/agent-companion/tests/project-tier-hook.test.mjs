@@ -108,3 +108,19 @@ test('hooks.json registers it once, under SessionStart, with a timeout', () => {
   assert.equal(hits[0].event, 'SessionStart');
   assert.ok(hits[0].h.timeout > 0);
 });
+
+test('landing: the session line gains one sentence for direct and for pr, none when unset or unknown', () => {
+  const cases = [
+    [{ projects: { 'acme-app': { tier: 'risk', landing: 'direct' } } }, /never per change\. No pull requests in this project: commit and push to the branch the brief names\.$/],
+    [{ landing: 'pr', projects: { 'acme-app': 'risk' } }, /never per change\. Land through a pull request\.$/],
+    [{ projects: { 'acme-app': 'risk' } }, /never per change\.$/],
+    [{ landing: 'merge', projects: { 'acme-app': 'risk' } }, /never per change\.$/],
+  ];
+  for (const [config, re] of cases) {
+    withRepo(config, ({ repo }) => {
+      const line = ctx(runHook('hooks/project-tier.mjs', start(repo)));
+      assert.match(line, re);
+      assert.ok(!line.includes('\n'));
+    });
+  }
+});

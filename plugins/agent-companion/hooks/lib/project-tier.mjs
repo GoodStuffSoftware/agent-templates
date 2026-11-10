@@ -5,7 +5,12 @@
 //
 // The user's file is <configDir>/project-tiers.json:
 //   {"default":"risk","sessionLine":true,"reviewEveryChange":false,
-//    "projects":{"<repo folder name or full path>":"push|risk|gates"}}
+//    "landing":"pr|direct",
+//    "projects":{"<repo folder name or full path>":"push|risk|gates"
+//                or {"tier":"push|risk|gates","landing":"pr|direct"}}}
+// `landing` (optional, top level and per project) says how work lands: `pr` through a pull
+// request, `direct` by commit and push to the branch the brief names. Absent: the plugin says
+// nothing about landing. A project's own landing wins over the top-level one.
 // It is UNTRUSTED INPUT (hand-edited): a malformed file, an unknown value or a wrong
 // shape falls back to the defaults, is listed in `problems`, and never throws.
 //
@@ -21,6 +26,7 @@ import { configDir } from './context.mjs';
 
 export const TIER_IDS = ['push', 'risk', 'gates'];
 export const DEFAULT_TIER = 'risk';
+export const LANDING_MODES = ['pr', 'direct'];
 const MAX_WALK = 12;
 
 // A path with forward slashes, no trailing slash, resolved against cwd when relative.
@@ -96,10 +102,13 @@ export function tiersPath() {
 
 const tierId = (v) => (typeof v === 'string' && TIER_IDS.includes(v.trim().toLowerCase()) ? v.trim().toLowerCase() : null);
 
+const landingId = (v) => (typeof v === 'string' && LANDING_MODES.includes(v.trim().toLowerCase()) ? v.trim().toLowerCase() : null);
+
 // The parsed, validated config. Never throws.
-// { path, exists, default, sessionLine, reviewEveryChange, entries: [{key, tier, isPath}], problems: [string] }
+// { path, exists, default, landing, sessionLine, reviewEveryChange, entries: [{key, tier, landing, isPath}], problems: [string] }
+// entry.tier is null for an object entry that gives only a landing mode (the default tier applies).
 export function loadTiers() {
-  const out = { path: null, exists: false, default: DEFAULT_TIER, sessionLine: true, reviewEveryChange: false, entries: [], problems: [] };
+  const out = { path: null, exists: false, default: DEFAULT_TIER, landing: null, sessionLine: true, reviewEveryChange: false, entries: [], problems: [] };
   try {
     out.path = tiersPath();
     if (!existsSync(out.path)) return out;
@@ -121,6 +130,10 @@ export function loadTiers() {
       const d = tierId(raw.default);
       if (d) out.default = d; else out.problems.push(`"default" must be one of ${TIER_IDS.join(', ')} (got ${JSON.stringify(raw.default)}): using ${DEFAULT_TIER}`);
     }
+    if ('landing' in raw) {
+      const l = landingId(raw.landing);
+      if (l) out.landing = l; else out.problems.push(`"landing" must be one of ${LANDING_MODES.join(', ')} (got ${JSON.stringify(raw.landing)}): ignored (no landing mode)`);
+    }
     for (const f of ['sessionLine', 'reviewEveryChange']) {
       if (!(f in raw)) continue;
       if (typeof raw[f] === 'boolean') out[f] = raw[f];
@@ -128,14 +141,21 @@ export function loadTiers() {
     }
     if ('projects' in raw) {
       if (!raw.projects || typeof raw.projects !== 'object' || Array.isArray(raw.projects)) {
-        out.problems.push('"projects" must be an object of name or path to tier: ignored');
+        out.problems.push('"projects" must be an object of name or path to tier (or {tier, landing}): ignored');
       } else {
         for (const [k, v] of Object.entries(raw.projects)) {
           const key = k.trim();
-          const t = tierId(v);
-          if (!key) out.problems.push('a project with an empty name was ignored');
-          else if (!t) out.problems.push(`project "${key}": "${String(v).slice(0, 40)}" is not one of ${TIER_IDS.join(', ')}: ignored (the default applies)`);
-          else out.entries.push({ key, tier: t, isPath: isPathKey(key) });
+          if (!key) { out.problems.push('a project with an empty name was ignored'); continue; }
+          const isObj = !!v && typeof v === 'object' && !Array.isArray(v);
+          const t = tierId(isObj ? v.tier : v);
+          let landing = null;
+          if (isObj && 'landing' in v) {
+            landing = landingId(v.landing);
+            if (!landing) out.problems.push(`project "${key}": landing ${String(JSON.stringify(v.landing)).slice(0, 40)} is not one of ${LANDING_MODES.join(', ')}: ignored`);
+          }
+          if (isObj && !('tier' in v) && landing) out.entries.push({ key, tier: null, landing, isPath: isPathKey(key) });
+          else if (!t) out.problems.push(`project "${key}": ${String(JSON.stringify(isObj ? v.tier : v)).slice(0, 40)} is not one of ${TIER_IDS.join(', ')}: ignored (the default applies)`);
+          else out.entries.push({ key, tier: t, landing, isPath: isPathKey(key) });
         }
       }
     }
@@ -146,15 +166,16 @@ export function loadTiers() {
 }
 
 // The full answer for a folder:
-// { project, tier, source: 'assigned'|'default'|'none', by: 'path'|'name'|null, key, mainRoot, ownRoot, config }
+// { project, tier, landing, source: 'assigned'|'default'|'none', by: 'path'|'name'|null, key, mainRoot, ownRoot, config }
+// landing: the project's own mode, else the top-level one, else null.
 // A path key matches the main repo's root or the worktree's own root (case-insensitive, slashes
 // normalised) and wins over a name key. Outside a repo: the default tier, source 'none'.
 export function tierDetail(cwd) {
   let cfg;
-  try { cfg = loadTiers(); } catch { cfg = { default: DEFAULT_TIER, sessionLine: true, reviewEveryChange: false, entries: [], problems: [] }; }
+  try { cfg = loadTiers(); } catch { cfg = { default: DEFAULT_TIER, landing: null, sessionLine: true, reviewEveryChange: false, entries: [], problems: [] }; }
   const repo = repoOf(cwd);
   const base = { project: repo?.name || null, mainRoot: repo?.mainRoot || null, ownRoot: repo?.ownRoot || null, config: cfg };
-  if (!repo) return { ...base, tier: cfg.default, source: 'none', by: null, key: null };
+  if (!repo) return { ...base, tier: cfg.default, landing: cfg.landing || null, source: 'none', by: null, key: null };
   try {
     const roots = new Set([repo.mainRoot.toLowerCase(), repo.ownRoot.toLowerCase()]);
     let hit = null;
@@ -166,9 +187,9 @@ export function tierDetail(cwd) {
         if (!e.isPath && e.key.toLowerCase() === repo.name.toLowerCase()) hit = { ...e, by: 'name' };
       }
     }
-    if (hit) return { ...base, tier: hit.tier, source: 'assigned', by: hit.by, key: hit.key };
+    if (hit) return { ...base, tier: hit.tier || cfg.default, landing: hit.landing || cfg.landing || null, source: hit.tier ? 'assigned' : 'default', by: hit.by, key: hit.key };
   } catch { /* fall through to the default */ }
-  return { ...base, tier: cfg.default, source: 'default', by: null, key: null };
+  return { ...base, tier: cfg.default, landing: cfg.landing || null, source: 'default', by: null, key: null };
 }
 
 // { project, tier, source } -- source 'assigned' (the user gave this project a tier), 'default'

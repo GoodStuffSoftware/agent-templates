@@ -251,3 +251,67 @@ test('a config path that is a folder is reported as not a file, by list and by s
     fx.cleanup();
   }
 });
+
+test('landing: set and clear for a project and for the default; show and list print it; untouched entries are not rewritten', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main }) => {
+  const read = () => JSON.parse(readFileSync(tiersPath(), 'utf8'));
+  writeFileSync(tiersPath(), JSON.stringify({ default: 'risk', projects: { 'other-app': 'gates' } }));
+  let r = cli(['show', main]);
+  assert.match(r.stdout, /^landing: not set /m);
+  r = cli(['list']);
+  assert.match(r.stdout, /^ {2}landing: not set /m);
+
+  r = cli(['landing', 'acme-app', 'direct']); // a project with no entry: a tier-less object that follows the default tier
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(read().projects['acme-app'], { landing: 'direct' });
+  assert.equal(read().projects['other-app'], 'gates', 'an untouched entry stays a string');
+  r = cli(['show', main]);
+  assert.match(r.stdout, /^landing: direct /m);
+  assert.match(r.stdout, /^project_tier: risk /m);
+
+  r = cli(['set', 'acme-app', 'push']); // set keeps working and keeps the landing mode
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(read().projects['acme-app'], { tier: 'push', landing: 'direct' });
+  r = cli(['list']);
+  assert.match(r.stdout, /acme-app -> push \(Push on your word\), landing direct/);
+  r = cli(['landing', 'acme-app', 'pr']);
+  assert.deepEqual(read().projects['acme-app'], { tier: 'push', landing: 'pr' });
+  r = cli(['landing', 'acme-app', 'clear']); // back to the plain tier string
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(read().projects['acme-app'], 'push');
+  r = cli(['landing', 'acme-app', 'clear']);
+  assert.equal(r.status, 0, r.stderr); // clearing what is not there is a no-op on an existing entry
+  r = cli(['landing', 'no-such-app', 'clear']);
+  assert.notEqual(r.status, 0);
+
+  r = cli(['landing', '--default', 'direct']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(read().landing, 'direct');
+  r = cli(['show', main]);
+  assert.match(r.stdout, /^landing: direct /m); // acme-app has its own entry with no landing: the default applies
+  assert.match(cli(['list']).stdout, /^ {2}landing: direct$/m);
+  r = cli(['landing', '--default', 'clear']);
+  assert.ok(!('landing' in read()));
+
+  r = cli(['landing', 'acme-app', 'rebase']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /unknown landing mode/);
+  r = cli(['landing', 'acme-app']);
+  assert.notEqual(r.status, 0);
+  assert.equal(read().projects['acme-app'], 'push');
+}));
+
+test('landing: an unknown value in the file shows under problems in list and show', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main }) => {
+  writeFileSync(tiersPath(), JSON.stringify({ landing: 'squash', projects: { 'acme-app': { tier: 'gates', landing: 'later' } } }));
+  const l = cli(['list']);
+  assert.equal(l.status, 0, l.stderr);
+  assert.match(l.stdout, /problem: "landing" must be one of pr, direct/);
+  assert.match(l.stdout, /problem: project "acme-app": landing "later"/);
+  assert.match(cli(['show', main]).stdout, /^landing: not set /m);
+}));
+
+test('landing: a malformed file is refused by the landing command and left untouched', { skip: !GIT_OK }, () => withRepoAndWorktree(() => {
+  writeFileSync(tiersPath(), '{ nope');
+  const r = cli(['landing', 'acme-app', 'direct']);
+  assert.notEqual(r.status, 0);
+  assert.equal(readFileSync(tiersPath(), 'utf8'), '{ nope');
+}));

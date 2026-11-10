@@ -24,7 +24,7 @@ through unchanged.
 | `audit <args>` | `agent-companion:audit` | `node "$AC/scripts/audit.mjs" <args>` |
 | `brevity <args>` or `quiet <args>` | `agent-companion:brevity` | `node "$AC/scripts/brevity.mjs" <args>` |
 | `rules <args>` | `agent-companion:standing-rules` | `node "$AC/scripts/rules.mjs" <args>` |
-| `tier <args>` | — | `node "$AC/scripts/project-tiers.mjs" <list\|show\|set\|unset\|floor> <args>` |
+| `tier <args>` | — | `node "$AC/scripts/project-tiers.mjs" <list\|show\|set\|unset\|landing\|floor> <args>` |
 | `version` | `agent-companion:version` | `node "$AC/scripts/version.mjs" <args>` (reports the marketplace clone as THIS copy; use the skill to learn which copy THIS session runs) |
 | `setup` | `agent-companion:setup` | — |
 | `scout` | `agent-companion:calibration-scout` | — |
