@@ -144,7 +144,7 @@ const RISK_REPORT = 'RISK: low|mid|high with the reason';
 export function tierLine(tier, project, opts = {}) {
   const every = !!opts.reviewEveryChange;
   if (!project) {
-    const t = TIERS[DEFAULT_ID];
+    const t = TIERS[tier] || TIERS[DEFAULT_ID];
     return `[agent-companion] No project (outside a repo): project_tier ${t.id} by default. Writers state RISK low|mid|high; low: ${lineCell(t, 'low', every)}; mid: ${lineCell(t, 'mid', every)}; high: ${lineCell(t, 'high', every)}. E2E once per batch and tree, never per change.`;
   }
   const t = TIERS[tier] || TIERS[DEFAULT_ID];
@@ -170,7 +170,7 @@ export function writerClause(tier, project, opts = {}) {
     return `${h} The lead applies the change-risk table to the whole diff; you spawn no reviewer. State ${RISK_REPORT} in your report (${floorSentence}). ${BATCH_RULE}`;
   }
   const cell = (r) => cellText(tier, r, 'writer', every);
-  return `${h} When done, state ${RISK_REPORT} and REVIEW: <the cell you applied> in your report. ${floorSentence}. Low: ${cell('low')}. Mid: ${cell('mid')}. High: ${cell('high')}. A cell that names no reviewer means skip the review step; otherwise spawn exactly one reviewer and mark its brief RISK: <your risk>.`;
+  return `${h} When done, state ${RISK_REPORT} and REVIEW: <the cell you applied> in your report. ${floorSentence}. Low: ${cell('low')}. Mid: ${cell('mid')}. High: ${cell('high')}. If your cell names a reviewer, spawn exactly one and mark its brief RISK: <your risk>; if it names none, skip the review step.`;
 }
 
 // For a reviewer: the cell by the writer's RISK (the brief's RISK: line), which it may raise, never lower.

@@ -988,6 +988,19 @@ floors, trials vs. profiles, cost basis, and haiku-as-validator — see
 
 `TYPE:` accepts a few other spellings of a task type and routes them as that type, with the type's own route (an alias never creates a route). The eight defaults: `analysis` -> `explore`; `bugfix` -> `debug-root-cause`; `bounded-fix`, `bounded` -> `bounded-feature`; `mechanical`, `one-line`, `docs` -> `mechanical-edit`; `review` -> `code-review`. They live under `taskTypeAliases` in [`config/model-tiers.json`](config/model-tiers.json); a shipped or local type of the same name wins over an alias, an alias whose target is not a known type is ignored, and a user override file replaces the key whole (empty it to disable aliases). `recommend.mjs --type` and the spawn guard both resolve them; the telemetry keeps the raw spelling as `declared_type` and the resolved type as `declared_type_resolved`. An unknown `TYPE:` value is not routed; `type_line_nudge` says so. `lookup`, `survey` and `bounded-feature-small` are real types (haiku/medium, sonnet/medium, sonnet/medium), not aliases, and so is `research`; `explore` stays a real type until its 2026-10-19 trial review.
 
+## Project tiers
+
+A project tier says how much checking a change needs before it lands. There are three: `push` (**Push on your word**: unit tests, then push; only a high-risk change gets a reviewer), `risk` (**Risk-tiered**, the default: low lands after unit tests, mid gets one reviewer who reads, high also gets the changed behaviour checked in the running app) and `gates` (**Full gates**: as `risk`, plus one e2e pass per batch and the project's release gates). The change-risk table (low, mid, high) is the same for every tier; the tier picks the cell. A project that has no entry is tier `risk`.
+
+You give each project its tier in one file, `<state dir>/config/project-tiers.json` (it survives an uninstall):
+
+```json
+{"default": "risk", "sessionLine": true, "reviewEveryChange": false,
+ "projects": {"my-app": "gates", "C:/dev/scratch-repo": "push"}}
+```
+
+A project key is a repo folder name or a full path; a path wins over a name, and every worktree of a repo counts as that repo. `sessionLine: false` turns off the one-line session-start note; `reviewEveryChange: true` turns every "no reviewer" cell into "one reviewer by reading". A malformed file or an unknown value falls back to the defaults, and `show` lists what it ignored. Manage it with `/ac tier list`, `show [path]`, `set <name-or-path> <push|risk|gates>`, `unset <name-or-path>`; `floor <base>..<head>` prints the least risk a diff allows and why (8+ files, 300+ changed lines or a CI, build, hook, schema or sign-in/payments path is high). The lead gets the line at session start (`hooks/project-tier.mjs`); every writer and reviewer brief gets its clause from the spawn guard (`hooks/lib/tier-clause.mjs`), once.
+
 ## Self-review (every writer)
 
 Every writer gets its work reviewed by its own reviewer, spawned from inside
@@ -1538,6 +1551,7 @@ node "$AC/scripts/audit.mjs" --only guard-canary
 | `brevity` | `/ac brevity` | is the reporting contract on, for whom, and which layer is winning |
 | `standing-rules` | `/ac rules` | which "always do X if Y" rules exist, and whether one would fire on given text |
 | `version` | `/ac version` | which agent-companion is running, and whether every installed copy (CLI cache, desktop app copy, marketplace clone) is current |
+| (script, no skill) | `/ac tier` | which tier each project has (`push`, `risk`, `gates`), assigning one, and the risk floor of a diff: `/ac tier list`, `show`, `set`, `unset`, `floor <base>..<head>` |
 | `setup` | `/ac setup` | the setup steps on a new machine, both scouts included |
 | `calibration-scout` | `/ac scout` | the daily drift scout, run by hand; `/ac scout delta` shows what changed since the last run, what keeps repeating, and how to acknowledge it |
 | `model-benchmark` | `/ac benchmark` | re-running the model x effort benchmark: plan, budget, order, fairness, reporting |
