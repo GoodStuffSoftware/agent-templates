@@ -250,6 +250,50 @@ export function overdueNotices(p, { minutes = OVERDUE_DEFAULT_MINUTES, now = Dat
   return out;
 }
 
+// --- Long run (0.31.50) -------------------------------------------------------
+// A worker that passes the long-run mark (hooks/lib/long-run.mjs: 150 steps, then every 100) is logged to state/long-runs.jsonl by the hook
+// inside the worker. A subagent hook cannot add context to its parent, so the lead hears of it HERE, in the lead's own hook, which reads that
+// log: one line per worker per mark, never in the worker's context (callerIsSubagent is checked before this runs).
+export const LONG_RUN_LOG = 'long-runs.jsonl';
+export const LONG_RUN_NOTICE_WINDOW_MS = 6 * 3600000;
+const LONG_RUN_TAIL_BYTES = 256 * 1024;
+
+export const leadLongRunText = (label, steps, minutes) =>
+  `Long run: ${label} is at ${steps} steps${Number.isFinite(minutes) ? `, ${Math.round(minutes)} min` : ''}. Nothing stops it.`;
+
+export function longRunNotices(p, { now = Date.now() } = {}) {
+  const sid = p && p.session_id;
+  if (!sid) return [];
+  const rows = tailRecords(join(stateDir(), LONG_RUN_LOG), {
+    bytes: LONG_RUN_TAIL_BYTES, filter: (l) => l.includes(JSON.stringify(String(sid))),
+  });
+  const out = [];
+  let names = null;
+  for (const r of rows) {
+    if (!r || r.sessionId !== sid || !r.agentId || r.kind === 'summary' || !Number.isFinite(r.steps)) continue;
+    const t = Date.parse(r.ts);
+    if (!Number.isFinite(t) || now - t > LONG_RUN_NOTICE_WINDOW_MS) continue;
+    if (!claimOnce('long-run-told', sid, `${r.agentId}@${r.steps}`)) continue;
+    if (!names) names = agentNames(p.transcript_path, sid);
+    out.push(leadLongRunText(names.get(r.agentId) || r.agentType || r.agentId, r.steps, r.durationMin));
+  }
+  return out;
+}
+
+// SubagentStop: a worker that passed the first mark gets one summary row in the same log (the record of why it ran long, for the scout's
+// listing). Called from the worker-stop event; the heavy module is loaded only when the worker really was a long run.
+export async function logLongRunSummary(p) {
+  try {
+    if (!p || !p.agent_id) return null;
+    const lr = await import('./long-run.mjs');
+    if (lr.stepsSoFar(p.agent_id) < lr.LONG_RUN_FIRST) return null;
+    const name = agentNames(p.transcript_path, p.session_id).get(p.agent_id) || null;
+    const row = lr.longRunSummaryRow(p, { transcript: resolveAgentTranscript(p), name });
+    if (row) lr.logLongRun(row);
+    return row;
+  } catch { return null; }
+}
+
 // --- F10 ---------------------------------------------------------------------
 const stripRef = (to) => String(to || '').trim().replace(/\s*\[[^\]]*\]\s*$/, '');
 

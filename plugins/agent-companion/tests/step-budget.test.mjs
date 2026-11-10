@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 import { telemetryDir, stateDir } from '../hooks/lib/context.mjs';
 import { longRunText } from '../hooks/lib/long-run.mjs';
-import { briefStepInfo, capsFor, isReportWrite, STOP_REASON, warnText } from '../hooks/lib/step-budget.mjs';
+import { briefStepInfo, capsFor, isReportWrite, STOP_REASON, warnText, checkpointText } from '../hooks/lib/step-budget.mjs';
 
 const SID = 'sess-step';
 const AGENT = 'worker-step-test-1';
@@ -47,6 +47,12 @@ const counterFile = (agent = AGENT) => join(stateDir(), 'step-budget', `${agent}
 function seed(n, agent = AGENT) {
   mkdirSync(join(stateDir(), 'step-budget'), { recursive: true });
   writeFileSync(counterFile(agent), '.'.repeat(n - 1));
+}
+
+// The long-run marker keeps its own counter (state/long-runs/<agent>.cnt); seed it to the same value.
+function seedLong(n, agent = AGENT) {
+  mkdirSync(join(stateDir(), 'long-runs'), { recursive: true });
+  writeFileSync(join(stateDir(), 'long-runs', `${agent}.cnt`), '.'.repeat(n - 1));
 }
 
 const pre = (lead, extra = {}) => ({
@@ -299,62 +305,85 @@ test('fail open: no transcript, no brief, or a lead-only payload counts and caps
   } finally { fx.cleanup(); }
 });
 
-test('soft by default: past the stop value nothing is denied; the stop value gets the long-run note once and a long-runs.jsonl row', () => {
+test('no cap by default (2026-11-10): a brief with no BUDGET line gets no step note at 80, 120 or beyond, is never denied, and writes no step-budget row', () => {
   const fx = makeFixture();
   try {
-    const { lead } = layout(fx); // bounded-feature: 80 / 120
-    seed(119);
-    seed(119);
-    const before = runSoft(lead); // call 119, past the warning line (warns once at 80 only when crossed; seeded past it)
-    assert.equal(denied(before), false);
-    const at = runSoft(lead); // call 120
-    assert.equal(denied(at), false);
-    assert.ok(ctxText(at).includes(longRunText(120)), 'the note at the stop value');
+    const { lead } = layout(fx); // bounded-feature: the old 80 / 120
+    for (const n of [80, 81, 119, 120, 121, 149]) {
+      seed(n);
+      const r = runSoft(lead);
+      assert.equal(denied(r), false, String(n));
+      assert.equal(r.stdout.trim(), '', `call ${n}: silent`);
+    }
+    assert.equal(existsSync(join(telemetryDir(), 'step-budget.jsonl')), false);
+    // the only count-based line is the long-run marker at 150, and it is logged for the lead and the scout
+    seed(150);
+    seedLong(150);
+    assert.equal(ctxText(runSoft(lead)), longRunText(150));
     const rowsLR = readJsonl(join(stateDir(), 'long-runs.jsonl'));
     assert.equal(rowsLR.length, 1);
     assert.deepEqual(Object.keys(rowsLR[0]), ['ts', 'sessionId', 'agentId', 'agentType', 'steps', 'startedAt', 'durationMin', 'description', 'transcriptPath']);
-    assert.equal(rowsLR[0].steps, 120);
+    assert.equal(rowsLR[0].steps, 150);
     assert.equal(rowsLR[0].agentId, AGENT);
-    assert.equal(rows().at(-1).kind, 'soft-stop');
-    // once: later calls past it are silent and allowed, any tool, no report-write exception needed
-    for (const tool of ['Bash', 'Read', 'Agent']) {
-      const r = runSoft(lead, {}, { tool_name: tool, tool_input: { command: 'ls' } });
-      assert.equal(denied(r), false, tool);
-      assert.equal(r.stdout.trim(), '', tool);
-    }
-    assert.equal(readJsonl(join(stateDir(), 'long-runs.jsonl')).length, 1);
+    // the numeric options alone (no opt-in stop) set no cap either
+    seed(20);
+    assert.equal(runSoft(lead, { CLAUDE_PLUGIN_OPTION_STEP_BUDGET_WARN: '10', CLAUDE_PLUGIN_OPTION_STEP_BUDGET_STOP: '20' }).stdout.trim(), '');
+    // step_budget false still does not error, and still silences everything of the budget
+    seed(121);
+    const off = runSoft(lead, { CLAUDE_PLUGIN_OPTION_STEP_BUDGET: 'false' });
+    assert.equal(off.status, 0);
+    assert.equal(off.stdout.trim(), '');
   } finally { fx.cleanup(); }
 });
 
-test('soft by default: lookup (60) and BUDGET lines also only note; the compaction stop never denies', () => {
+test('no cap by default: lookup types are silent at 40 and 60; the compaction stop never denies', () => {
   const fx = makeFixture();
   try {
     const lk = layout(fx, 'TYPE: research\nfind it');
-    seed(60);
-    const r = runSoft(lk.lead);
-    assert.equal(denied(r), false);
-    assert.ok(ctxText(r).includes(longRunText(60)));
-    seed(200);
-    assert.equal(denied(runSoft(lk.lead)), false);
-    const b = layout(fx, 'TYPE: bounded-feature\nBUDGET: 30\nbuild');
-    rmSync(join(fx.stateDir, 'state', 'subagent-context-claims', `long-run-${AGENT}-60.seen`), { force: true });
-    seed(31);
-    assert.equal(denied(runSoft(b.lead)), false);
-    // three compactions, soft: no deny
-    appendFileSync(b.agentFile, boundary('b1') + turn('r2'));
-    appendFileSync(b.agentFile, boundary('b2') + turn('r3'));
-    appendFileSync(b.agentFile, boundary('b3') + turn('r4'));
-    assert.equal(denied(runSoft(b.lead, { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' })), false);
+    for (const n of [40, 60, 61, 149]) { seed(n); const r = runSoft(lk.lead); assert.equal(denied(r), false); assert.equal(r.stdout.trim(), '', String(n)); }
+    appendFileSync(lk.agentFile, boundary('b1') + turn('r2'));
+    appendFileSync(lk.agentFile, boundary('b2') + turn('r3'));
+    appendFileSync(lk.agentFile, boundary('b3') + turn('r4'));
+    assert.equal(denied(runSoft(lk.lead, { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' })), false);
   } finally { fx.cleanup(); }
 });
 
-test('soft stop value 150 gives one note with the long-run threshold, not two', () => {
+test('a brief that carries its own BUDGET: <n> keeps one checkpoint note at n, worded as a progress marker, and never denies', () => {
   const fx = makeFixture();
   try {
-    const { lead } = layout(fx, 'TYPE: bounded-feature\nBUDGET: 150\nbuild');
+    const b = layout(fx, 'TYPE: bounded-feature\nBUDGET: 30\nbuild');
+    seed(29);
+    assert.equal(runSoft(b.lead).stdout.trim(), '', 'no 80% warning without the opt-in stop');
+    seed(30);
+    const r = runSoft(b.lead);
+    assert.equal(denied(r), false);
+    assert.equal(ctxText(r), checkpointText(30));
+    assert.equal(ctxText(r), '[agent-companion] Step 30: the checkpoint your brief set. It is a progress marker, not a cap, and nothing will interrupt your run. Carry on as you were and keep your detail file current.');
+    assert.equal(rows().at(-1).kind, 'checkpoint');
+    seed(31);
+    assert.equal(runSoft(b.lead).stdout.trim(), '', 'once');
+    seed(400);
+    assert.equal(denied(runSoft(b.lead)), false);
+    // a checkpoint at the first long-run mark is not said twice: the worker already hears the neutral line
+    const c = layout(fx, 'TYPE: bounded-feature\nBUDGET: 150\nbuild');
     seed(150);
-    const r = runSoft(lead);
-    assert.equal(ctxText(r).split(longRunText(150)).length - 1, 1);
+    seedLong(150);
+    const at = runSoft(c.lead);
+    assert.equal(ctxText(at), longRunText(150));
     assert.equal(readJsonl(join(stateDir(), 'long-runs.jsonl')).length, 1);
+  } finally { fx.cleanup(); }
+});
+
+test('the opt-in stop still stops: step_budget_deny on, no BUDGET line, 80% warning, deny past 120, report writes pass', () => {
+  const fx = makeFixture();
+  try {
+    const { lead } = layout(fx);
+    seed(80);
+    assert.equal(ctxText(runSoft(lead, DENY_ON)), warnText(80, 120));
+    seed(121);
+    const r = runSoft(lead, DENY_ON);
+    assert.equal(denied(r), true);
+    assert.equal(r.json.hookSpecificOutput.permissionDecisionReason, STOP_REASON);
+    assert.equal(denied(runSoft(lead, DENY_ON, { tool_name: 'Write', tool_input: { file_path: 'x-detail.md', content: 'x' } })), false);
   } finally { fx.cleanup(); }
 });

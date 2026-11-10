@@ -1,12 +1,16 @@
-// Live step budget (token bleed guard, phase 2, part C): a counter of a helper's
-// own tool calls, a warning at a soft line, a one-time long-run note at the stop value and,
-// only with step_budget_deny on (default off, operator ruling 2026-11-01), a deny past it.
-// The text below describes the deny, which is now the opt-in.
+// Live step budget (token bleed guard, phase 2, part C). Since 0.31.50 it is OFF as a cap by default (operator ruling 2026-11-10: "step
+// budget is acting like a cap. We don't want cap. We just want to know when something is taking a long time"):
+//   - a brief with no `BUDGET: <n>` line gets NO step note at all (the 80 / 120 and 40 / 60 notes are gone; the long-run marker at 150
+//     steps, hooks/lib/long-run.mjs, is the only count-based line a worker hears, and the lead is told about it);
+//   - a brief that carries its own `BUDGET: <n>` line gets ONE checkpoint note at n steps, worded as a progress marker, never a cap;
+//   - with step_budget_deny on (opt-in, default off) the old cap is back: the warning at 80% of the stop, and a deny past it. The numeric
+//     options step_budget_warn / _stop / _lookup_warn / _lookup_stop set that cap and apply only while step_budget_deny is on.
+// The text below describes the deny, which is the opt-in.
 //
-// Why. 9 in 10 helpers finish in under 80 calls and 99 in 100 in under 120
+// Why the cap existed. 9 in 10 helpers finish in under 80 calls and 99 in 100 in under 120
 // (tasks/usage-why-2026-10-06/bleed-data-detail.md: median 37, p90 77, p99 115);
 // the rest are runaways. the hard maxTurns on the agent definitions (0.31.31) was
-// removed; the soft long-run note (long-run.mjs) now marks 150 steps and beyond. This guard tells the helper to wrap up
+// removed; the long-run marker (long-run.mjs) now marks 150 steps and beyond. With the deny on, this guard tells the helper to wrap up
 // and then refuses everything but writing its report.
 //
 // Where. hooks/subagent-context.mjs (PreToolUse, no matcher, subagent only)
@@ -46,7 +50,7 @@ import { opt, stateDir } from './context.mjs';
 import { claimOnce, BOUNDARY_FRESH_TURNS } from './subagent-context.mjs';
 import { briefDeclarations, declarationValue, splitBudget, briefAllowancePct, BUDGET_STEPS_SRC } from './brief-directives.mjs';
 import { safe } from './runaway.mjs';
-import { longRunText } from './long-run.mjs';
+import { LONG_RUN_FIRST } from './long-run.mjs';
 
 export const STEP_WARN_DEFAULT = 80;
 export const STEP_STOP_DEFAULT = 120;
@@ -194,6 +198,10 @@ export function pruneStepState(now = Date.now()) {
 
 export const warnText = (n, m) => `[agent-companion] ${n} of ${m} steps used: finish, write your detail file, report what is left.`;
 
+// The checkpoint a brief asked for with its own BUDGET line, when the opt-in stop is off: a progress marker, not a cap.
+export const checkpointText = (n) =>
+  `[agent-companion] Step ${n}: the checkpoint your brief set. It is a progress marker, not a cap, and nothing will interrupt your run. Carry on as you were and keep your detail file current.`;
+
 // The whole check for one helper tool call. `compactions` is how many compactions
 // subagent-context.mjs has recorded for this agent (including one found on this
 // very call). Returns null (nothing to do), { warn: text, row } or { deny: reason, row }.
@@ -201,9 +209,12 @@ export function stepBudgetCheck(p, { transcript, sig = null }) {
   if (!opt('step_budget', true) || !p.agent_id || !transcript) return null;
   const brief = readBrief(transcript);
   if (!brief) return null; // brief unreadable: not a helper this guard understands
-  const compactions = countCompaction(p.agent_id, sig);
+  const compactions = countCompaction(p.agent_id, sig); // always counted, so the opt-in compaction stop sees every compaction
   if (briefAllowanceOnly(brief)) return null; // `BUDGET: N%` alone: nothing counts, warns, stops or denies (hooks/lib/plan-allowance.mjs)
   const info = briefStepInfo(brief);
+  // No cap by default (operator ruling 2026-11-10). Without the opt-in stop, only a brief's own BUDGET line is counted, and only for its one checkpoint.
+  const denyOn = opt('step_budget_deny', false);
+  if (!denyOn && info.budget === null) return null;
   const caps = capsFor(info);
   const n = countCall(p.agent_id);
   if (n === null) return null;
@@ -213,20 +224,21 @@ export function stepBudgetCheck(p, { transcript, sig = null }) {
     tool: p.tool_name, steps: n, type: info.type, caps: { warn: caps.warn, stop: caps.stop, kind: caps.kind },
   });
 
-  // Soft by default (operator ruling 2026-11-01): the stop value is a line that gets a note and a long-runs.jsonl
-  // row, never a deny. step_budget_deny true restores the old deny past the stop and at the compaction stop.
-  const denyOn = opt('step_budget_deny', false);
+  if (!denyOn) {
+    // The checkpoint: once, at the brief's own step value. Skipped at the first long-run mark, where the worker already hears the neutral line.
+    if (n >= info.budget && info.budget !== LONG_RUN_FIRST && claimOnce(`step-checkpoint-${p.agent_id}`)) {
+      return { warn: checkpointText(n), row: { ...base(), kind: 'checkpoint' } };
+    }
+    return null;
+  }
+
+  // step_budget_deny on (opt-in): the old cap. A deny past the stop value and at the compaction stop; the warning at 80% of the stop.
   const compactionLimit = opt('step_budget_compaction_stop', COMPACTION_STOP_DEFAULT);
-  if (denyOn && compactionLimit > 0 && compactions >= compactionLimit) markCompactionStop(p.agent_id);
-  const compactionStop = denyOn && compactionLimit > 0 && existsSync(stopMarker(p.agent_id)); // 0 = off, also for a marker left earlier
-  const stepStop = denyOn && caps.stop > 0 && n > caps.stop;
+  if (compactionLimit > 0 && compactions >= compactionLimit) markCompactionStop(p.agent_id);
+  const compactionStop = compactionLimit > 0 && existsSync(stopMarker(p.agent_id)); // 0 = off, also for a marker left earlier
+  const stepStop = caps.stop > 0 && n > caps.stop;
   if ((stepStop || compactionStop) && !isReportWrite(p.tool_name, p.tool_input)) {
     return { deny: STOP_REASON, row: { ...base(), kind: 'stop', why: stepStop ? 'steps' : 'compactions' } };
-  }
-  // The soft stop: at the stop value, once, the same note as the 150-step one. The claim key is the long-run
-  // threshold key, so a stop value of 150 (or 250, ...) gives one note, not two.
-  if (!denyOn && caps.stop > 0 && n >= caps.stop && claimOnce(`long-run-${p.agent_id}-${caps.stop}`)) {
-    return { warn: longRunText(n), row: { ...base(), kind: 'soft-stop' }, longRunSteps: n };
   }
   if (caps.stop > 0 && caps.warn > 0 && caps.warn < caps.stop && n >= caps.warn && claimOnce(`step-warn-${p.agent_id}`)) {
     return { warn: warnText(n, caps.stop), row: { ...base(), kind: 'warn' } };
