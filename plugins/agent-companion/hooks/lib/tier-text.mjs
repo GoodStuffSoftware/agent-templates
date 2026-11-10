@@ -36,7 +36,7 @@ export const TIERS = {
     cells: {
       low: { writer: 'unit tests, then push, no reviewer', writerEvery: 'unit tests, one reviewer by reading, then push', line: 'unit tests, then push, no reviewer', lineEvery: 'one reviewer reads, then push', reviewer: 'read only' },
       mid: { writer: 'unit tests, then push, no reviewer', writerEvery: 'unit tests, one reviewer by reading, then push', line: 'unit tests, then push, no reviewer', lineEvery: 'one reviewer reads, then push', reviewer: 'read only' },
-      high: { writer: 'one reviewer by reading, then push', line: 'one reviewer reads, then push', reviewer: 'read only' },
+      high: { writer: 'one reviewer by reading, then push', line: 'one reviewer reads, then push', reviewer: 'read only in this tier, even though the general instruction above allows a run' },
     },
   },
   risk: {

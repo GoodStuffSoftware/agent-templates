@@ -263,7 +263,8 @@ test('text: the high-risk reviewer cell lets the reviewer run the project\'s own
     assert.match(hi, /no separate full build, packaging or install/);
     assert.match(hi, /not checked for real/);
   }
-  assert.equal(cellText('push', 'high', 'reviewer'), 'read only');
+  assert.equal(cellText('push', 'high', 'reviewer'), 'read only in this tier, even though the general instruction above allows a run');
+  assert.match(reviewerClause('push', 'acme-app'), /High: read only in this tier, even though the general instruction above allows a run\./);
   assert.equal(cellText('risk', 'mid', 'reviewer'), 'read only');
   assert.ok(reviewerClause('risk', 'acme-app').includes('you may raise it, never lower it'));
 });

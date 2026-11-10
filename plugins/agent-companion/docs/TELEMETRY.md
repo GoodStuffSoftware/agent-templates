@@ -418,13 +418,15 @@ Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-abov
 | `rung_class` | string | `sonnet-high+` or `opus` |
 | `ceiling`, `repeat` | number | the two thresholds as set |
 
-### `long-runs.jsonl` (in `state/`, not `telemetry/`) — one record per long-run crossing
+### `long-runs.jsonl` (in `state/`, not `telemetry/`) — one record per long-run crossing, plus one summary per ended long run
 
-Written by `hooks/lib/long-run.mjs` when a subagent's tool-call count first reaches 150 and each further 100. Fields: `ts` (ISO), `sessionId`, `agentId`, `agentType` (string or null), `steps` (number), `startedAt` (ISO or null, the transcript's first timestamp), `durationMin` (number or null), `description` (first line of the brief, or null), `transcriptPath` (string or null).
+Written by `hooks/lib/long-run.mjs` when a subagent's tool-call count first reaches 150 and each further 100. It is a record, not a cap: nothing is stopped. Fields: `ts` (ISO), `sessionId`, `agentId`, `agentType` (string or null), `steps` (number), `startedAt` (ISO or null, the transcript's first timestamp), `durationMin` (number or null), `description` (first line of the brief, or null), `transcriptPath` (string or null). The lead session is told once per crossing from this log (the `Long run: ...` line, never shown to the worker).
+
+When a worker that passed the first mark ends, one more row is appended with `kind` `summary`: `ts`, `sessionId`, `agentId`, `agentType`, `name` (string or null), `type` (the brief's `TYPE:`, or null), `rung` (number or null), `steps` (number), `minutes` (number or null), `toolCounts` (object, tool name to calls), `failedCommands` (number, Bash results flagged as errors), `briefChars` (number). `scripts/long-runs.mjs` and the scout's informational `long_runs` signal (last 24 hours) read both kinds and show the summary beside the crossing.
 
 ### `step-budget.jsonl` — one record per step-budget warning or denied call
 
-Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a subagent is told it has used its warning share of steps (`kind` `warn`, once per worker), and at the stop value as a soft note (`kind` `soft-stop`, once per worker; the same crossing also writes a `state/long-runs.jsonl` row) and (only with `step_budget_deny`) each time a call is denied past the stop or once the helper has reached `step_budget_compaction_stop` compactions (default 3; `kind` `stop`). The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`, `step_budget_compaction_stop`.
+Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`). By default (`step_budget_deny` off) the only row is `kind` `checkpoint`: a brief that carried its own `BUDGET: <n>` line got its one progress-marker note at n steps (once per worker; a brief with no `BUDGET` line gets no row and no note, and a `BUDGET` of 150 is covered by the long-run line instead). With `step_budget_deny` on, the old cap is back and writes `warn` (the subagent was told it has used its warning share of steps, once per worker) and `stop` (each time a call is denied past the stop value, or once the helper has reached `step_budget_compaction_stop` compactions, default 3). Rows with `kind` `soft-stop` come from versions before 0.31.50. The counter itself is `state/step-budget/<agent_id>.cnt` (one byte per call), not telemetry. Options `step_budget`, `step_budget_deny`, `step_budget_warn`, `step_budget_stop`, `step_budget_lookup_warn`, `step_budget_lookup_stop`, `step_budget_compaction_stop`.
 
 | field | type | meaning |
 |---|---|---|
@@ -434,8 +436,8 @@ Written by `hooks/subagent-context.mjs` (`hooks/lib/step-budget.mjs`) when a sub
 | `tool` | string | the tool call that triggered the row |
 | `steps` | number | the subagent's tool calls so far, this one included |
 | `type` | string or null | the `TYPE:` line of the subagent's brief |
-| `caps` | object | `warn`, `stop` and `kind` (`writer`, `lookup` or `brief` when a `BUDGET:` line set the stop) |
-| `kind` | string | `warn`, `soft-stop` or `stop` |
+| `caps` | object | `warn`, `stop` and `kind` (`writer`, `lookup` or `brief` when a `BUDGET:` line set the stop); only enforced while `step_budget_deny` is on |
+| `kind` | string | `checkpoint` (default), or with `step_budget_deny` on `warn` or `stop`; `soft-stop` on rows from before 0.31.50 |
 | `why` | string; `stop` only | `steps` (the stop value was reached) or `compactions` (the `step_budget_compaction_stop`th compaction) |
 
 ### `bash-exit.jsonl` — Bash exit status
