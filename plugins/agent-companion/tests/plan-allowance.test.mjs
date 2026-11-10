@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
 import { stateDir } from '../hooks/lib/context.mjs';
 import { briefAllowancePct, splitBudget } from '../hooks/lib/brief-directives.mjs';
-import { briefStepInfo, briefAllowanceOnly, capsFor } from '../hooks/lib/step-budget.mjs';
+import { briefStepInfo, briefAllowanceOnly, capsFor, checkpointText } from '../hooks/lib/step-budget.mjs';
 import {
   allowanceNoteText, allowanceNoticeText, allowanceWatch, perCallPct, perCallTokens, allowanceTokens, fmtTokens, requestUnits, rungOf,
   unitsPerPercent, planWeights, modelWeight, agentSpend, allowanceFile, NOTE_MAX_CHARS, _resetPlanWeightsForTests,
@@ -279,10 +279,10 @@ test('hook: no note without a percent line; the number form gets no note and kee
     assert.equal(run(lead, 'allow-num').stdout.trim(), '');
     // the record is written once either way (the brief is read once) and holds no allowance
     assert.equal(JSON.parse(readFileSync(join(stateDir(), 'allowance', 'allow-none.json'), 'utf8')).pct, null);
-    // the step budget of BUDGET: 60 still works: the warning at 80% of 60
+    // the step value of BUDGET: 60 still works: one checkpoint note at 60 (a progress marker, not a cap)
     mkdirSync(join(stateDir(), 'step-budget'), { recursive: true });
-    writeFileSync(join(stateDir(), 'step-budget', 'allow-num.cnt'), '.'.repeat(47));
-    assert.match(ctxText(run(lead, 'allow-num')), /48 of 60 steps used/);
+    writeFileSync(join(stateDir(), 'step-budget', 'allow-num.cnt'), '.'.repeat(59));
+    assert.equal(ctxText(run(lead, 'allow-num')), checkpointText(60));
   } finally { fx.cleanup(); }
 });
 
@@ -311,8 +311,8 @@ test('hook: BUDGET: 3%, 60 calls keeps its step budget (the number part is a bud
     const { lead } = layout(fx, [{ id: 'allow-both', text: user('TYPE: integration\nBUDGET: 3%, 60 calls\nbuild it') + turn('r1', 'claude-sonnet-5-5') }]);
     run(lead, 'allow-both');
     mkdirSync(join(stateDir(), 'step-budget'), { recursive: true });
-    writeFileSync(join(stateDir(), 'step-budget', 'allow-both.cnt'), '.'.repeat(47));
-    assert.match(ctxText(run(lead, 'allow-both')), /48 of 60 steps used/);
+    writeFileSync(join(stateDir(), 'step-budget', 'allow-both.cnt'), '.'.repeat(59));
+    assert.equal(ctxText(run(lead, 'allow-both')), checkpointText(60));
   } finally { fx.cleanup(); }
 });
 
@@ -644,16 +644,16 @@ test('notices: once the last notice has gone a call reads only the state file (n
 
 // --- the hook with a small step value beside a percent --------------------------------------------------------------
 
-test('hook: BUDGET: 3%, 5 calls keeps a 5-call step budget (warning at 4, soft stop at 5), and the allowance note too', () => {
+test('hook: BUDGET: 3%, 5 calls keeps a 5-call step value (one checkpoint note at 5, no cap), and the allowance note too', () => {
   const fx = makeFixture();
   try {
     const { lead } = layout(fx, [{ id: 'five', text: user('TYPE: integration\nBUDGET: 3%, 5 calls\nbuild it') + turn('r1', 'claude-sonnet-5-5') }]);
     assert.match(ctxText(run(lead, 'five')), /^Allowance: 3%/); // call 1: the allowance note
-    for (const n of [2, 3]) assert.equal(run(lead, 'five').stdout.trim(), '', `call ${n}`);
-    assert.match(ctxText(run(lead, 'five')), /4 of 5 steps used/);
+    for (const n of [2, 3, 4]) assert.equal(run(lead, 'five').stdout.trim(), '', `call ${n}`);
     const fifth = run(lead, 'five');
-    assert.match(ctxText(fifth), /./, 'call 5: the soft-stop note');
+    assert.equal(ctxText(fifth), checkpointText(5), 'call 5: the checkpoint note');
     assert.equal(denied(fifth), false, 'soft by default');
+    assert.equal(run(lead, 'five').stdout.trim(), '', 'once');
   } finally { fx.cleanup(); }
 });
 

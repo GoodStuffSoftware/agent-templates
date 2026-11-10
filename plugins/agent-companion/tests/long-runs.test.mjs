@@ -2,10 +2,11 @@
 import './isolate.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { longRuns, enrich, parseSince, main } from '../scripts/long-runs.mjs';
+import { makeFixture, runScript } from './helpers.mjs';
 
 const NOW = Date.parse('2026-11-01T12:00:00Z');
 const dir = mkdtempSync(join(tmpdir(), 'long-runs-'));
@@ -37,7 +38,7 @@ test('highest crossing per agent, last 24 h only, bad lines skipped', () => {
   const r = longRuns({ file, now: NOW });
   assert.equal(r.runs.length, 2);
   assert.equal(r.runs[0].steps, 250);
-  assert.match(r.line, /^Long runs \(24h\): 2 past a step threshold [(]150, the step-budget stop, every further 100[)]\n- ac-sonnet-high, model \?, 250 steps, 42 min, \? compactions: build x/);
+  assert.match(r.line, /^Long runs \(24h\): 2 past the long-run mark [(]150 steps, then every further 100; a marker, not a limit[)]\n- ac-sonnet-high, model \?, 250 steps, 42 min, \? compactions: build x/);
   assert.match(r.line, /\(no description\)/);
   assert.equal(longRuns({ file, now: NOW, since: '4d' }).runs[0].steps, 350);
 });
@@ -62,4 +63,37 @@ test('parseSince and the CLI', () => {
   assert.equal(main(['--since', 'junk'], { out: (s) => lines.push(s) }), 2);
   assert.equal(main(['--now', '2026-11-01T12:00:00Z'], { out: (s) => lines.push(s), file: join(dir, 'nope.jsonl') }), 0);
   assert.equal(JSON.parse(lines.at(-1)).line, 'Long runs (24h): none');
+});
+test('the summary row a finished long run left is shown under its listing line, and is not counted as a crossing', () => {
+  const sum = { kind: 'summary', ts: '2026-11-01T11:30:00Z', sessionId: 's', agentId: 'a1', agentType: 'ac-sonnet-high', name: 'builder-one', type: 'bounded-feature', rung: 4, steps: 230, minutes: 61.4, toolCounts: { Bash: 120, Read: 60, Edit: 40, Grep: 10 }, failedCommands: 17, briefChars: 5400 };
+  writeFileSync(file, jl([row({ steps: 150 }), row({ steps: 250, ts: '2026-11-01T11:00:00Z' }), sum]));
+  const r = longRuns({ file, now: NOW });
+  assert.equal(r.runs.length, 1, 'one run: the summary is not a second crossing');
+  assert.equal(r.runs[0].steps, 250);
+  assert.deepEqual(r.runs[0].summary, { name: 'builder-one', type: 'bounded-feature', rung: 4, steps: 230, minutes: 61.4, toolCounts: sum.toolCounts, failedCommands: 17, briefChars: 5400 });
+  assert.match(r.line, /\n    why: builder-one, TYPE bounded-feature, rung 4, 230 steps in 61 min; tools: Bash 120, Read 60, Edit 40, Grep 10; 17 failed commands; brief 5400 chars/);
+  // a run with no summary (still going, or never ended cleanly) has a null summary and no why line
+  writeFileSync(file, jl([row({ steps: 150 })]));
+  const r2 = longRuns({ file, now: NOW });
+  assert.equal(r2.runs[0].summary, null);
+  assert.doesNotMatch(r2.line, /why:/);
+});
+
+test('the scout (detect.mjs) lists long runs as an informational signal, and says nothing when there are none', () => {
+  const fx = makeFixture();
+  try {
+    const none = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, timeout: 60000 });
+    assert.equal(none.status, 0, none.stderr);
+    assert.equal(none.json.signals.some((x) => x.kind === 'long_runs'), false);
+    mkdirSync(join(fx.stateDir, 'state'), { recursive: true });
+    const ts = new Date(Date.now() - 600000).toISOString();
+    writeFileSync(join(fx.stateDir, 'state', 'long-runs.jsonl'), jl([row({ ts, steps: 250, description: 'build the widget' })]));
+    const d = runScript('scripts/detect.mjs', [], { cwd: fx.dir, env: { AGENT_COMPANION_CI_STATUS_NO_GH: '1' }, timeout: 60000 });
+    assert.equal(d.status, 0, d.stderr);
+    const sg = d.json.signals.find((x) => x.kind === 'long_runs');
+    assert.ok(sg, 'signal present');
+    assert.equal(sg.dispatch, 'none');
+    assert.match(sg.detail, /^Long runs \(24h\): 1 past the long-run mark/);
+    assert.match(sg.detail, /250 steps/);
+  } finally { fx.cleanup(); }
 });

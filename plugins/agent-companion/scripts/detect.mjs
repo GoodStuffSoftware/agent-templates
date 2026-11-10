@@ -36,6 +36,7 @@ import { projectAgentDrift, driftCounts } from './lib/agent-drift.mjs';
 import { churnVerdict, churnFreshness } from './lib/session-churn.mjs';
 import { runReleaseWatch } from './lib/release-watch.mjs';
 import { launchCheckup } from './lib/daily-checkup.mjs';
+import { longRuns } from './long-runs.mjs';
 import { usageSignals } from './lib/usage/signals.mjs';
 import { loadRegister, readState as readRegisterState, openFlags, scanChangelogToState, scanSignalsToState, scanDatesToState } from './lib/decision-register.mjs';
 import { scanPinnedModels, findingKey } from './lib/pinned-model.mjs';
@@ -290,6 +291,15 @@ if (opt('release_watch', true) && !suppressedKinds.has('cli_release_available'))
 // signal: the next main session start shows one line (hooks/scout-surface.mjs).
 // AGENT_COMPANION_DAILY_CHECKUP_NO_LAUNCH=1 forbids the launch (the suite sets it).
 try { launchCheckup({ nowT: nowDate().getTime() }); } catch { /* advisory: never block the scout */ }
+
+// --- 1f2. Long runs ----------------------------------------------------------
+// The operator's 2026-11-01 ruling is that a long run is looked at, not cut: the scout lists the workers that passed the long-run mark
+// (150 steps, then every 100) in the last 24 hours, with the summary row each left behind (tools, failed commands, brief length) so the
+// question "why did it take so long" has data. Informational only (dispatch none); silent when there are none.
+try {
+  const lr = longRuns({ since: '24h', now: nowDate().getTime() });
+  if (lr.runs.length) sig('long_runs', lr.line, 'none');
+} catch { /* the listing is advisory: never block the scout */ }
 
 // --- 1g. Decision register ------------------------------------------------
 // The operator's register of standing decisions (config/decision-register.json) is
