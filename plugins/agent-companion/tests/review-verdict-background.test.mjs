@@ -64,6 +64,22 @@ for (const [text, want] of [
   });
 }
 
+test('background reviewer: the verdict row copies declared_risk, project_tier and tier_source from the reviewer\'s spawn row (no launch-record change needed)', () => {
+  const fx = makeFixture();
+  try {
+    writeFileSync(join(telemetryDir(), 'spawns.jsonl'), JSON.stringify({
+      at: '2026-11-10T09:00:00Z', session_id: SID, tool_use_id: 'toolu_bgr', caller_is_subagent: true,
+      declared_type: 'code-review', declared_risk: 'mid', project_tier: 'push', tier_source: 'default',
+    }) + '\n');
+    post(launch('agentbgr', 'toolu_bgr'));
+    onStop(stop('agentbgr', 'VERDICT: PASS'));
+    const got = rows();
+    assert.equal(got.length, 1);
+    assert.equal(got[0].source, 'subagent-stop');
+    assert.deepEqual([got[0].declared_risk, got[0].project_tier, got[0].tier_source], ['mid', 'push', 'default']);
+  } finally { fx.cleanup(); }
+});
+
 test('background reviewer: a final message with no VERDICT line writes no row', () => {
   const fx = makeFixture();
   try {

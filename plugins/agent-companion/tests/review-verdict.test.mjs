@@ -97,6 +97,25 @@ test('copies the reviewer spawn row\'s effort and writer link when the row exist
   } finally { fx.cleanup(); }
 });
 
+test('copies declared_risk, project_tier and tier_source from the reviewer spawn row; null when no row', () => {
+  const fx = makeFixture();
+  try {
+    writeFileSync(join(telemetryDir(), 'spawns.jsonl'), JSON.stringify({
+      at: '2026-11-10T09:00:00Z', session_id: 'sess-rv', tool_use_id: 'toolu_rv1', caller_is_subagent: true,
+      declared_type: 'code-review', declared_risk: 'high', project_tier: 'gates', tier_source: 'assigned',
+    }) + '\n');
+    run(post(respond('VERDICT: PASS')));
+    const r = rows()[0];
+    assert.equal(r.declared_risk, 'high');
+    assert.equal(r.project_tier, 'gates');
+    assert.equal(r.tier_source, 'assigned');
+    run(post({ tool_use_id: 'toolu_rv2', ...respond('VERDICT: PASS') }));
+    const none = rows().find((x) => x.review_of_tool_use_id === 'toolu_rv2');
+    assert.equal(none.spawn_row_found, false);
+    assert.deepEqual([none.declared_risk, none.project_tier, none.tier_source], [null, null, null]);
+  } finally { fx.cleanup(); }
+});
+
 test('hooks.json registers the hook on PostToolUse ^Agent$ only', () => {
   const h = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
   const groups = (h.PostToolUse || []).filter((g) => g.hooks.some((x) => x.args.some((a) => a.endsWith('review-verdict.mjs'))));
