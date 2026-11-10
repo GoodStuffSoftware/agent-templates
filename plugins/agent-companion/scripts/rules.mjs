@@ -16,10 +16,11 @@
 //   node rules.mjs disable <id>
 //   node rules.mjs remove <id>            # user rules only; a built-in is disabled, not removed
 //   node rules.mjs test "<text>" [--scope user-prompt]
+//   node rules.mjs test "<raw prompt>" --scope event-turn   # simulate an event turn (see skills/standing-rules)
 
 import { readFileSync } from 'node:fs';
 import {
-  SCOPES, RULES_VERSION, rulesPath, readRules, appendUserRule, hasRawRuleEntry, setRuleEnabled, removeRuleEntry, matchRules, renderRules, effectiveRule,
+  SCOPES, RULES_VERSION, rulesPath, readRules, appendUserRule, hasRawRuleEntry, setRuleEnabled, removeRuleEntry, matchRules, renderRules, effectiveRule, isEventTurn,
 } from '../hooks/lib/rules.mjs';
 
 const argv = process.argv.slice(2);
@@ -66,7 +67,7 @@ try {
       }
       console.log(`Standing rules (${rulesPath()}):`);
       for (const r of rules) {
-        const cond = (r.scope === 'always' || r.scope === 'session-start') ? '(unconditional)' : (r.when || '(none)');
+        const cond = (r.scope === 'always' || r.scope === 'session-start') ? '(unconditional)' : r.scope === 'event-turn' ? '(every event turn)' : (r.when || '(none)');
         // The state it has RIGHT NOW: a rule scheduled for later shows off (or
         // its stored state, with an `after`) until its activeFrom is reached.
         console.log(
@@ -174,10 +175,13 @@ try {
       }
 
       console.log(`Testing against: ${JSON.stringify(text)}  (scope: ${scope})`);
+      const notEvent = scope === 'event-turn' && !isEventTurn(text);
+      if (notEvent) console.log('This text is NOT an event turn: it must be non-empty, carry a known event wrapper (task-notification, cross-session-message, side-sessions-event, ci-monitor-event, or an automated system-notification reminder) and hold no operator-typed text outside the wrappers.');
       console.log('(run with no --sessionId flag: a state gate like delegation-drift always reads as not-yet-drifted here — this is deliberate, see hooks/lib/rules.mjs)');
       for (const r of candidates) {
         let verdict;
-        if (!effectiveRule(r).enabled) verdict = 'disabled'; // as of now: a scheduled rule is judged by its activeFrom/after
+        if (!effectiveRule(r).enabled) verdict = 'disabled';
+        else if (notEvent) verdict = 'not an event turn'; // as of now: a scheduled rule is judged by its activeFrom/after
         else if (matchedIds.has(r.id)) verdict = 'MATCH';
         else if (r.scope === 'user-prompt' || r.scope === 'spawn') verdict = 'no text match (or gated off)';
         else verdict = 'gated off';
