@@ -10,6 +10,7 @@ import {
 } from './context.mjs';
 import { matchRules, renderRules } from './rules.mjs';
 import { buildScopeClause } from './scope-rule.mjs';
+import { buildTierClause } from './tier-clause.mjs';
 import { allowWith, combineNotes, commonTypeRoutes } from './sg-helpers.mjs';
 
 export async function finishSpawn({
@@ -57,6 +58,9 @@ export async function finishSpawn({
 
     // 1b. The scope rule: one short clause by task type or role (lib/scope-rule.mjs).
     try { suffix += buildScopeClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
+
+    // 1c. The project tier clause: the project's tier and the change-risk table for a writer or reviewer (lib/tier-clause.mjs).
+    try { suffix += buildTierClause(declaredType, declaredRole, input.prompt, p.cwd); } catch { /* fail open */ }
 
     // 2. Operator-authored standing rules scoped to spawns, their conditions
     //    matched against this brief's own text. See lib/rules.mjs.

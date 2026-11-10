@@ -276,6 +276,14 @@
             "type": "command",
             "command": "node",
             "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/project-tier.mjs"
+            ],
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/ladder-check.mjs"
             ],
             "timeout": 10

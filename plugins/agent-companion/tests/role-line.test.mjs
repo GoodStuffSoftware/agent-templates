@@ -38,6 +38,29 @@ test('unit: ROLE is read like the other brief lines (first wins, code and quotes
   for (const r of BRIEF_ROLES) assert.equal(roleOf(`ROLE: ${r}`), r);
 });
 
+test('unit: RISK is read like the other brief lines (fenced and quoted ones ignored; the first line decides)', () => {
+  const riskOf = (text) => declarationValue(briefDeclarations(text), 'RISK', /(low|mid|high)\b/.source)?.[1]?.toLowerCase() ?? null;
+  assert.equal(riskOf('TYPE: code-review\nWRITER: sonnet/high\nROLE: reviewer\nRISK: high\nbody'), 'high');
+  assert.equal(riskOf('- **RISK:** Mid'), 'mid');
+  assert.equal(riskOf('```\nRISK: high\n```\nno line'), null, 'inside a fenced block');
+  assert.equal(riskOf('> RISK: high\nRISK: low'), 'low', 'a quoted line is skipped');
+  assert.equal(riskOf('RISK: extreme\nRISK: high'), null, 'an invalid first value declares nothing');
+  assert.equal(riskOf('the RISK: high is mid-line'), null);
+});
+
+test('spawn row: a reviewer brief with RISK: high records declared_risk, project_tier and tier_source; a fenced RISK: records null', () => {
+  const a = spawn('TYPE: code-review\nWRITER: sonnet/high\nROLE: reviewer\nRISK: high\nreview it', 'sess-risk-1');
+  assert.equal(a.res.status, 0, a.res.stderr);
+  assert.equal(a.row.declared_risk, 'high');
+  assert.match(a.row.project_tier, /^(push|risk|gates)$/);
+  assert.match(a.row.tier_source, /^(assigned|default|none)$/);
+  const b = spawn('TYPE: code-review\nROLE: reviewer\n```\nRISK: high\n```\nreview it', 'sess-risk-2');
+  assert.equal(b.row.declared_risk, null, 'a RISK: inside a fenced block is ignored');
+  assert.match(b.row.project_tier, /^(push|risk|gates)$/, 'the project tier is recorded whatever the brief says');
+  const c = spawn('TYPE: explore\ndo it', 'sess-risk-3');
+  assert.equal(c.row.declared_risk, null);
+});
+
 test('a brief with ROLE: records declared_role and carries no nudge', () => {
   const { res, row, out } = spawn('ROLE: fixer\nTYPE: explore\nfix the thing', 'sess-role-1');
   assert.equal(res.status, 0, res.stderr);
