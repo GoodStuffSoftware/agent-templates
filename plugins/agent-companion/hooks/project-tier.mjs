@@ -27,7 +27,7 @@ try {
   if (d.config?.sessionLine === false) silent();
   // Outside a git repo there is no project to name: no line (the spawn clauses still say the default tier).
   if (!d.project) silent();
-  const line = tierLine(d.tier, d.project, { reviewEveryChange: !!d.config?.reviewEveryChange });
+  const line = tierLine(d.tier, d.project, { reviewEveryChange: !!d.config?.reviewEveryChange, landing: d.landing || null });
   if (!line) silent();
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: line },

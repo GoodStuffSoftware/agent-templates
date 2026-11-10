@@ -249,3 +249,19 @@ test('none: spawns that neither write code nor review it get no clause, through 
   // a writer still gets one
   assert.equal(count(sentPrompt(spawnGuard(repo, writerBrief())), TIER_MARKER), 1);
 }));
+
+test('landing: through the real hook the protocol and plain clauses carry the sentence; the leg clause does not', () => {
+  const D = 'No pull requests in this project: commit and push to the branch the brief names.';
+  const P = 'Land through a pull request.';
+  const cases = [[{ projects: { 'acme-app': { tier: 'risk', landing: 'direct' } } }, D], [{ landing: 'pr', projects: {} }, P], [{ projects: { 'acme-app': 'risk' } }, null]];
+  for (const [config, sentence] of cases) {
+    withRepo(({ repo }) => {
+      const plain = clauseOf(sentPrompt(spawnGuard(repo, writerBrief(), { subagent_type: 'general-purpose' })));
+      const proto = clauseOf(sentPrompt(spawnGuard(repo, writerBrief())));
+      const leg = clauseOf(sentPrompt(spawnGuard(repo, writerBrief('REVIEW: lead\n'))));
+      for (const c of [plain, proto]) assert.equal(c.trimEnd().endsWith(sentence || 'x-none'), !!sentence, c);
+      if (!sentence) { assert.ok(!plain.includes('pull request') && !proto.includes('pull request')); assert.ok(plain.length <= 300); }
+      assert.ok(!leg.includes('pull request'), 'the leg clause never changes');
+    }, config);
+  }
+});
