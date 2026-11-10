@@ -50,7 +50,8 @@ test('config: selfReview lists every stand-alone writer type (lean worker shape,
   }
   assert.equal(sr.fixRounds, 1);
   assert.equal(sr.optOut.line, 'REVIEW: lead');
-  assert.equal(sr.updated, '2026-10-27');
+  assert.equal(sr.updated, '2026-11-10');
+  assert.match(sr.rationale, /replaces "every change gets ONE separate reviewer" with a review sized by risk/);
   assert.ok(sr.rationale.length > 100);
   // It sits with the task types, so it moves with the table.
   const keys = Object.keys(SHIPPED);
@@ -66,7 +67,12 @@ test('committed rungs: ac-sonnet-high, ac-opus-medium, ac-opus-high and ac-opus-
       assert.match(block, /^ {3}TYPE: code-review$/m);
       assert.match(block, new RegExp(`^ {3}WRITER: ${rung.model}/${rung.effort}$`, 'm'));
       assert.match(block, /Land your own work/);
-      assert.match(block, /Every release gate stays/);
+      // Project tiers (0.31.50): the writer states a RISK, applies its tier clause's cell, and marks the reviewer's brief.
+      assert.match(block, /^2\. State your risk: `RISK: low\|mid\|high` with the reason, never below the floor/m);
+      assert.match(block, /A cell that names no reviewer skips steps 3-5: go to step 6\./);
+      assert.match(block, /With no tier clause in your brief, use project_tier risk: low = unit tests, land, no reviewer; mid = one reviewer by reading; high = one reviewer reads, then checks the changed behaviour in the running app\./);
+      assert.match(block, /^ {3}ROLE: reviewer\n {3}RISK: <your risk>$/m);
+      assert.match(block, /Return: your report with `RISK:` .* and `REVIEW:` \(the cell that applied\)/);      assert.match(block, /Every release gate stays/);
       assert.match(block, /`REVIEW: lead`/);
       assert.match(block, /Do one fix round/);
       assert.match(block, /Never re-review/);
