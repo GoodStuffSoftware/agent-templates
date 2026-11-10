@@ -42,13 +42,13 @@
 // contract just says "Node 20" — depending on the exact patch release would
 // make the gate silently inert on whichever build actually runs it.)
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configDir, opt, stateFile, readJson, rolloutActive, writeTextAtomic } from './context.mjs';
 
 export const RULES_VERSION = 1;
-export const SCOPES = ['user-prompt', 'always', 'session-start', 'spawn'];
+export const SCOPES = ['user-prompt', 'always', 'session-start', 'spawn', 'event-turn'];
 
 const WHEN_MAX_CHARS = 400;
 const DEFAULT_MAX_CHARS = 3000;
@@ -157,6 +157,9 @@ const LEAD_EFFORT_AFTER = Object.freeze({ then: LEAD_EFFORT_CHECK_TEXT_HIGH });
 const PLUGIN_ROOT = (process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('../..', import.meta.url))).replace(/\\/g, '/').replace(/\/+$/, '');
 export const PR_WAIT_HINT_WORDING = 'PR/CI wait: run_in_background (foreground dies at 2m), no gh/sleep loops: node "@/scripts/pr-wait.mjs" <pr|branch|sha>';
 export const PR_WAIT_HINT_TEXT = PR_WAIT_HINT_WORDING.replace('@', () => PLUGIN_ROOT); // a function, so a `$` in the path is literal, not a replace pattern
+
+export const EVENT_TURN_QUIET_FULL = 'Event turn: nothing here was typed by the operator (a worker result, a peer message, a CI event or a timer started it). Do not write a report. Update your task list to the current state: the list is the status. Write one line at most, only for something new the operator needs (a failure, a result that changes the plan, a decision that is theirs; a blocker in full, once). No recap, nothing already said, no pasted worker or peer output. Keep working; give one full report when the job is done or the operator next writes.';
+export const EVENT_TURN_QUIET_SHORT = 'Event turn: update the task list; one line at most and only if new. The full report waits for the end.';
 
 function builtinRules() {
   return [
@@ -326,6 +329,18 @@ function builtinRules() {
       gate: null,
       note: null,
     },
+    {
+      // The first event turn of a session gets `then`; later ones in the same session get `thenLater`.
+      id: 'event-turn-quiet',
+      enabled: true,
+      builtin: true,
+      scope: 'event-turn',
+      when: null,
+      then: EVENT_TURN_QUIET_FULL,
+      thenLater: EVENT_TURN_QUIET_SHORT,
+      gate: null,
+      note: null,
+    },
   ];
 }
 
@@ -361,6 +376,7 @@ function compileRule(rule) {
     scope: rule.scope,
     when,
     then: rule.then,
+    thenLater: typeof rule.thenLater === 'string' && rule.thenLater.trim() ? rule.thenLater : null,
     builtin: !!rule.builtin,
     gate: rule.gate || null,
     note: rule.note ?? null,
@@ -454,7 +470,7 @@ export function writeRules(cfg) {
   try {
     const rules = Array.isArray(cfg?.rules) ? cfg.rules : [];
     const builtinById = new Map(defaultRules().map((r) => [r.id, r]));
-    const DIFF_KEYS = ['enabled', 'scope', 'when', 'then', 'gate', 'note', 'activeFrom', 'after'];
+    const DIFF_KEYS = ['enabled', 'scope', 'when', 'then', 'gate', 'note', 'thenLater', 'activeFrom', 'after'];
     const out = [];
 
     for (const r0 of rules) {
@@ -478,6 +494,7 @@ export function writeRules(cfg) {
           scope: r.scope,
           when: r.when ?? null,
           then: r.then,
+          ...(r.thenLater ? { thenLater: r.thenLater } : {}),
           gate: r.gate ?? null,
           note: r.note ?? null,
           ...(r.audience === 'lead' ? { audience: 'lead' } : {}),
@@ -636,7 +653,7 @@ function gateSatisfied(gate, sessionId) {
 const WRAPPER_TAGS = [
   'cross-session-message', 'task-notification', 'agent-message', 'system-reminder',
   'teammate-message', 'command-message', 'command-name', 'command-args',
-  'local-command-stdout', 'local-command-caveat',
+  'local-command-stdout', 'local-command-caveat', 'side-sessions-event', 'ci-monitor-event',
 ].join('|');
 // A candidate tag: "<name" or "</name" followed by whitespace or ">". An
 // opening tag runs to the next ">", unless another candidate starts before
@@ -731,7 +748,37 @@ export function userOwnText(text) {
   return out + s.slice(copied);
 }
 
+// An event turn: the harness started the turn itself (a background worker's result, a peer session's message, a CI
+// event, a timer's system notification), so the operator typed nothing. The prompt holds no operator text once the
+// wrapper blocks above are removed, and it is not empty and does carry one of the known event wrappers. A plain-text
+// timer prompt (the keep-warm ping) and any turn with operator text beside the wrapper are not event turns.
+const EVENT_KIND_RE = /<(?:task-notification|cross-session-message|side-sessions-event|ci-monitor-event)(?=[\s>])|\[SYSTEM NOTIFICATION - NOT USER INPUT\]/i;
+export function isEventTurn(text) {
+  if (typeof text !== 'string' || !text.trim()) return false;
+  if (!EVENT_KIND_RE.test(text)) return false;
+  return userOwnText(text).trim() === '';
+}
+
+// For rules of scope 'event-turn': the first firing of a rule in a session keeps its `then`; later firings in the
+// same session use its `thenLater` when it has one. "First" is a marker file per session and rule in the plugin's
+// state folder, created exclusively; a session id that is missing, or a marker that cannot be written, keeps `then`.
+export function pickEventTurnText(rules, sessionId) {
+  return rules.map((r) => {
+    if (!r.thenLater || !sessionId) return r;
+    try {
+      const dir = stateFile('event-turn-told');
+      mkdirSync(dir, { recursive: true });
+      const safe = (x) => String(x).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
+      writeFileSync(join(dir, `${safe(sessionId)}-${safe(r.id)}.seen`), '', { flag: 'wx' });
+      return r; // first firing this session
+    } catch (e) {
+      return e && e.code === 'EEXIST' ? { ...r, then: r.thenLater } : r;
+    }
+  });
+}
+
 export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
+  if (scope === 'event-turn' && (subagent || !isEventTurn(text))) return [];
   const { rules } = readRules();
   const subject = scope === 'user-prompt' ? userOwnText(text) : String(text ?? '');
   return rules.map(effectiveRule).filter((r) => {
@@ -743,7 +790,7 @@ export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
     // reach everyone.
     if (subagent && r.audience === 'lead') return false;
     if (!gateSatisfied(r.gate, sessionId)) return false;
-    if (scope === 'always' || scope === 'session-start') return true;
+    if (scope === 'always' || scope === 'session-start' || scope === 'event-turn') return true;
     if (typeof r.when !== 'string' || !r.when) return false;
     let re;
     try { re = new RegExp(r.when, 'i'); } catch { return false; }

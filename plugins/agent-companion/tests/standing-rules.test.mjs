@@ -30,7 +30,7 @@ test('readRules() with no file returns the built-ins, agent-brevity disabled', (
     const { rules } = readRules();
     const ids = rules.map((r) => r.id).sort();
     assert.deepEqual(ids, [
-      'agent-brevity', 'copyable-prompt', 'delegate-first', 'delegate-reminder', 'lead-brevity', 'lead-effort-check', 'poll-guard-doctrine', 'pr-wait-hint', 'resume-doctrine', 'worker-one-wait', 'worker-one-wait-operate',
+      'agent-brevity', 'copyable-prompt', 'delegate-first', 'delegate-reminder', 'event-turn-quiet', 'lead-brevity', 'lead-effort-check', 'poll-guard-doctrine', 'pr-wait-hint', 'resume-doctrine', 'worker-one-wait', 'worker-one-wait-operate',
     ].sort());
     assert.equal(rules.find((r) => r.id === 'agent-brevity').enabled, false);
     for (const id of ['copyable-prompt', 'delegate-first', 'delegate-reminder', 'lead-brevity', 'poll-guard-doctrine', 'resume-doctrine', 'worker-one-wait', 'worker-one-wait-operate']) {
@@ -295,7 +295,7 @@ test('matchRules(user-prompt) ignores wrapper-only turns and still fires on the 
   }
 });
 
-test('hook --event user-prompt: a wrapper-only turn is silent; a real "write me a prompt" still fires', () => {
+test('hook --event user-prompt: a wrapper-only turn never fires copyable-prompt; a real "write me a prompt" still fires', () => {
   const { dir, cleanup } = makeFixture();
   try {
     for (const [i, prompt] of WRAPPED_ONLY.entries()) {
@@ -303,7 +303,7 @@ test('hook --event user-prompt: a wrapper-only turn is silent; a real "write me 
         { session_id: `sess-wrap-${i}`, prompt, cwd: dir },
         { args: ['--event', 'user-prompt'] });
       assert.equal(res.status, 0);
-      assert.equal(res.stdout.trim(), '', `wrapper-only turn must be silent: ${prompt}`);
+      assert.ok(!(res.json?.hookSpecificOutput?.additionalContext || '').includes('fenced code block'), `wrapper-only turn must not fire copyable-prompt: ${prompt}`);
     }
     const hit = runHook('hooks/standing-rules.mjs',
       { session_id: 'sess-wrap-real', prompt: 'write me a prompt for a reviewer', cwd: dir },
@@ -754,6 +754,178 @@ test('hook --event session-start: with a small standing_rules_max_chars and seve
     const text = res.json?.hookSpecificOutput?.additionalContext || '';
     assert.match(text, /\(\d+ more rules? dropped: over the 400-char limit: [^)]+\)$/, text);
     assert.ok(text.includes('outcome level'), 'the first rule still fits');
+  } finally {
+    cleanup();
+  }
+});
+
+// --- event turns ---------------------------------------------------------------------------------------------
+
+import { isEventTurn, pickEventTurnText } from '../hooks/lib/rules.mjs';
+import { runScript } from './helpers.mjs';
+
+const EVENT_PROMPTS = {
+  'task notification': '<task-notification>\n<task-id>w1</task-id>\n<summary>Worker "sample" completed</summary>\n</task-notification>',
+  'cross-session message': '<cross-session-message from="peer-a">status: the build is green</cross-session-message>',
+  'side-sessions event': '<side-sessions-event>\nside session "notes" finished\n</side-sessions-event>',
+  'CI monitor event': '<ci-monitor-event>\nrun 42 failed on the lint job\n</ci-monitor-event>',
+  'system notification reminder': '<system-reminder>\n[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event.\n</system-reminder>',
+};
+const ET_ARGS = ['--event', 'user-prompt'];
+const FULL_START = 'Event turn: nothing here was typed by the operator';
+const SHORT_START = 'Event turn: update the task list';
+const ctxOf = (res) => res.json?.hookSpecificOutput?.additionalContext || '';
+
+test('isEventTurn: each wrapper kind alone is an event turn', () => {
+  for (const [kind, prompt] of Object.entries(EVENT_PROMPTS)) assert.equal(isEventTurn(prompt), true, kind);
+});
+
+test('isEventTurn: operator text, keep-warm ping, plain text, empty and non-strings are not event turns', () => {
+  assert.equal(isEventTurn(`${EVENT_PROMPTS['system notification reminder']}\nplease also check the logs`), false, 'operator text beside a reminder');
+  assert.equal(isEventTurn(`${EVENT_PROMPTS['task notification']}\nfix the login bug`), false);
+  assert.equal(isEventTurn('[ac-keep-warm] ping'), false);
+  assert.equal(isEventTurn('fix the login bug'), false);
+  assert.equal(isEventTurn('<system-reminder>The user hasn\'t heard from you in a while.</system-reminder>'), false, 'a reminder that is not a system notification');
+  for (const bad of ['', '   ', null, undefined, 42, {}, []]) assert.equal(isEventTurn(bad), false);
+});
+
+test('hook: each event kind injects the full text on the first firing', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    let i = 0;
+    for (const [kind, prompt] of Object.entries(EVENT_PROMPTS)) {
+      const res = runHook('hooks/standing-rules.mjs', { session_id: `sess-ev-kind-${i++}`, prompt, cwd: dir }, { args: ET_ARGS });
+      assert.equal(res.status, 0, kind);
+      assert.ok(ctxOf(res).includes(FULL_START), `${kind}: ${res.stdout}`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('hook: full text first, short text after, in one session; a new session gets the full text again', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const run = (sid) => runHook('hooks/standing-rules.mjs', { session_id: sid, prompt: EVENT_PROMPTS['task notification'], cwd: dir }, { args: ET_ARGS });
+    const first = ctxOf(run('sess-ev-a'));
+    assert.ok(first.includes(FULL_START));
+    for (let n = 0; n < 2; n++) {
+      const later = ctxOf(run('sess-ev-a'));
+      assert.ok(later.includes(SHORT_START), later);
+      assert.ok(!later.includes(FULL_START));
+    }
+    assert.ok(ctxOf(run('sess-ev-b')).includes(FULL_START), 'another session starts again with the full text');
+  } finally {
+    cleanup();
+  }
+});
+
+test('hook: operator text beside a reminder, the keep-warm ping, plain text, empty and malformed input do not fire', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const silent = (payload, label) => {
+      const res = runHook('hooks/standing-rules.mjs', payload, { args: ET_ARGS });
+      assert.equal(res.status, 0, label);
+      assert.ok(!ctxOf(res).includes('Event turn'), label);
+    };
+    silent({ session_id: 's1', prompt: `${EVENT_PROMPTS['system notification reminder']}\nand fix the typo`, cwd: dir }, 'operator text + reminder');
+    silent({ session_id: 's2', prompt: '[ac-keep-warm] ping', cwd: dir }, 'keep-warm ping');
+    silent({ session_id: 's3', prompt: 'hello', cwd: dir }, 'plain text');
+    silent({ session_id: 's4', prompt: '', cwd: dir }, 'empty prompt');
+    silent({ session_id: 's5', cwd: dir }, 'no prompt');
+    silent({ session_id: 's6', prompt: 12345, cwd: dir }, 'non-string prompt');
+    const noSid = runHook('hooks/standing-rules.mjs', { prompt: EVENT_PROMPTS['task notification'], cwd: dir }, { args: ET_ARGS });
+    assert.equal(noSid.status, 0);
+    assert.ok(ctxOf(noSid).includes(FULL_START), 'no session id: fires, with the full text every time');
+    const garbage = runHook('hooks/standing-rules.mjs', undefined, { args: ET_ARGS });
+    assert.equal(garbage.status, 0);
+    assert.equal(garbage.stdout.trim(), '');
+  } finally {
+    cleanup();
+  }
+});
+
+test('hook: a subagent never gets the event-turn rule', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const res = runHook('hooks/standing-rules.mjs',
+      { session_id: 'sess-ev-sub', agent_id: 'agent-1', agent_type: 'worker', prompt: EVENT_PROMPTS['task notification'], cwd: dir },
+      { args: ET_ARGS });
+    assert.equal(res.status, 0);
+    assert.ok(!ctxOf(res).includes('Event turn'), res.stdout);
+    assert.deepEqual(matchRules({ scope: 'event-turn', text: EVENT_PROMPTS['task notification'], subagent: true }), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('hook: event-turn-quiet can be disabled by id', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    writeFileSync(rulesPath(), JSON.stringify([{ id: 'event-turn-quiet', enabled: false }]));
+    const res = runHook('hooks/standing-rules.mjs',
+      { session_id: 'sess-ev-off', prompt: EVENT_PROMPTS['task notification'], cwd: dir }, { args: ET_ARGS });
+    assert.equal(res.status, 0);
+    assert.equal(res.stdout.trim(), '');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a user-written event-turn rule fires on an event turn (no when needed), and not on a typed prompt', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    writeFileSync(rulesPath(), JSON.stringify([
+      { id: 'event-turn-quiet', enabled: false },
+      { id: 'my-event-note', scope: 'event-turn', then: 'Sample event note.' },
+      { id: 'my-event-twice', scope: 'event-turn', then: 'First note.', thenLater: 'Later note.' },
+    ]));
+    const run = (prompt) => ctxOf(runHook('hooks/standing-rules.mjs', { session_id: 'sess-ev-user', prompt, cwd: dir }, { args: ET_ARGS }));
+    const a = run(EVENT_PROMPTS['cross-session message']);
+    assert.ok(a.includes('Sample event note.') && a.includes('First note.') && !a.includes('Later note.'), a);
+    const b = run(EVENT_PROMPTS['cross-session message']);
+    assert.ok(b.includes('Sample event note.') && b.includes('Later note.') && !b.includes('First note.'), b);
+    assert.equal(run('fix the login bug'), '');
+  } finally {
+    cleanup();
+  }
+});
+
+test('pickEventTurnText: no session id keeps the full text', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const rules = [{ id: 'r', then: 'full', thenLater: 'short' }];
+    assert.equal(pickEventTurnText(rules, undefined)[0].then, 'full');
+    assert.equal(pickEventTurnText(rules, undefined)[0].then, 'full');
+  } finally {
+    cleanup();
+  }
+});
+
+test('rules.mjs test --scope event-turn simulates an event turn and says why a text is not one', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const hit = runScript('scripts/rules.mjs', ['test', EVENT_PROMPTS['CI monitor event'], '--scope', 'event-turn']);
+    assert.equal(hit.status, 0, hit.stderr);
+    assert.match(hit.stdout, /MATCH\s+event-turn-quiet/);
+    assert.ok(hit.stdout.includes(FULL_START));
+    const miss = runScript('scripts/rules.mjs', ['test', 'fix the login bug', '--scope', 'event-turn']);
+    assert.equal(miss.status, 0, miss.stderr);
+    assert.match(miss.stdout, /NOT an event turn/);
+    assert.match(miss.stdout, /not an event turn\s+event-turn-quiet/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('rules.mjs add --scope event-turn needs no --when and the rule shows in list', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const add = runScript('scripts/rules.mjs', ['add', '--id', 'sample-event-rule', '--scope', 'event-turn', '--then', 'Sample.']);
+    assert.equal(add.status, 0, add.stderr);
+    const list = runScript('scripts/rules.mjs', ['list']);
+    assert.match(list.stdout, /sample-event-rule\s+scope=event-turn/);
+    assert.match(list.stdout, /event-turn-quiet\s+scope=event-turn/);
   } finally {
     cleanup();
   }
