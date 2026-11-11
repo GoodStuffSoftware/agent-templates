@@ -479,13 +479,27 @@ test('brief: the first path named for a repo decides the folder (worktree or mai
   const wt = join(ws, 'worktrees', 'feat-1');
   fakeWorktree(main, wt);
   assert.equal(fromBrief(ws, `Work in ${norm(wt)} (base ${norm(main)}).`).ownRoot, normalisePath(wt));
-  assert.equal(fromBrief(ws, `Base ${norm(main)}, work in ${norm(wt)}.`).ownRoot, normalisePath(main));
+  assert.equal(fromBrief(ws, `Base ${norm(main)}, work in ${norm(wt)}.`).ownRoot, normalisePath(wt)); // a named linked worktree beats the main checkout
+  assert.equal(fromBrief(ws, `Only ${norm(main)} here.`).ownRoot, normalisePath(main));
   writeFileSync(join(main, 'a.mjs'), 'x\n');
   const file = `${norm(main)}/a.mjs`;
   for (const text of [`${file}:12.`, `${file}:12,`, `(${file}:12)`, `${file}:12:3;`, `${file}.`, `${file}:12:`, `"${file}:7",`]) {
     const d = fromBrief(ws, `See ${text}`);
     assert.deepEqual([d.project, d.projectSource], ['acme-app', 'brief'], text);
   }
+}));
+
+test('brief: main named first and a worktree second, the reverse order, and two worktrees (the first-named wins)', () => withWorkspace(({ ws }) => {
+  const main = mainRepo(join(ws, 'repos'), 'acme-app');
+  const wt = join(ws, 'worktrees', 'feat-1');
+  const wt2 = join(ws, 'worktrees', 'feat-2');
+  fakeWorktree(main, wt);
+  fakeWorktree(main, wt2);
+  const own = (text) => fromBrief(ws, text).ownRoot;
+  assert.equal(own(`Base ${norm(main)}, work in ${norm(wt)}.`), normalisePath(wt));
+  assert.equal(own(`Work in ${norm(wt)}, base ${norm(main)}.`), normalisePath(wt));
+  assert.equal(own(`${norm(main)} ${norm(wt2)} ${norm(wt)}`), normalisePath(wt2));
+  assert.equal(own(`${norm(wt)} ${norm(main)} ${norm(wt2)}`), normalisePath(wt));
 }));
 
 test('brief: a worktree path counts as its main repo', () => withWorkspace(({ dir, ws }) => {
@@ -587,6 +601,11 @@ test('brief: bounded work. 3 MB of path-like tokens, one 3 MB token, and more th
   const long = timed(`${f}\n/${'a'.repeat(3_000_000)}`);
   assert.equal(long.d.project, 'acme-app');
   assert.ok(long.ms < 3000, `one huge token took ${long.ms} ms`);
+  const run = ['.', ',', ';', ':', '!', '?', ')', ']', '}', '>', "'", '"', '`', '*'].join('');
+  const punct = timed(`${f}
+${run.repeat(Math.ceil(3_000_000 / run.length))}`);
+  assert.equal(punct.d.project, 'acme-app');
+  assert.ok(punct.ms < 500, `3 MB of punctuation took ${punct.ms} ms`);
   const prose = timed(`${f}\n${'plain words without any path in them. '.repeat(80_000)}`);
   assert.equal(prose.d.project, 'acme-app');
   assert.ok(prose.ms < 3000, `3 MB of prose took ${prose.ms} ms`);

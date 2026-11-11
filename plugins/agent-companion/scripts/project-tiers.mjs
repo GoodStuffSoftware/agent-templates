@@ -247,6 +247,10 @@ function floorCmd() {
       if (basename(path) === 'package.json' && !isNew.has(path) && scriptsChanged(base, head, path)) f.forceKind = 'CI/build/deploy/hook';
       return f;
     });
+    if (!files.length) {
+      console.log(`floor: unknown - no changed files in ${range} in ${repoDir || process.cwd()}; point --repo at the tree that holds the change or commit first, and do not take this as any risk level`);
+      return;
+    }
     const r = riskFloor(files);
     console.log(`floor: ${r.floor}`);
     console.log(`reason: ${r.reasons.join('; ')}`);

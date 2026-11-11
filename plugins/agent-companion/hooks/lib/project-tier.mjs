@@ -104,6 +104,7 @@ export function projectOf(cwd) {
 const MAX_BRIEF_CANDIDATES = 40;
 const MAX_BRIEF_MATCHES = 4000;
 const MAX_BRIEF_PATH = 1000;
+const MAX_BRIEF_CHARS = 200000; // only the first 200,000 characters of a brief are scanned for paths
 // A path starts at a drive letter (C:/ or C:\), "~/" or a POSIX "/", and not in the middle of a word, a URL
 // or a relative path (the character before it is none of the excluded ones). It ends at white space or a quote.
 const BRIEF_PATH_RE = /(?<![A-Za-z0-9_.~/\\:-])(?:[A-Za-z]:[\\/]|~[\\/]|\/(?![/\s]))[^\s"'`<>|*?[\]\u0000]*/g;
@@ -136,10 +137,11 @@ export function repoFromBrief(brief, sessionCwd) {
     let text = typeof brief === 'string' ? brief : '';
     if (!text) return null;
     if (text.includes(PLUGIN_LINE)) text = text.split('\n').filter((l) => !l.includes(PLUGIN_LINE)).join('\n');
+    if (text.length > MAX_BRIEF_CHARS) text = text.slice(0, MAX_BRIEF_CHARS);
     const excluded = [join(homeRoot(), '.claude'), process.env.CLAUDE_CONFIG_DIR].filter(Boolean).map(pathKey);
     const session = sessionCwd ? pathKey(sessionCwd) : null;
     const seen = new Set();
-    const repos = new Map(); // main root (lower case) -> { repo, under }
+    const repos = new Map(); // main root (lower case) -> { repo (first path named), wt (first linked worktree named), under }
     let matches = 0;
     for (const m of text.matchAll(BRIEF_PATH_RE)) {
       matches += 1;
@@ -155,12 +157,14 @@ export function repoFromBrief(brief, sessionCwd) {
       const mk = repo.mainRoot.toLowerCase();
       const under = !!session && (within(mk, session) || within(repo.ownRoot.toLowerCase(), session));
       const prev = repos.get(mk);
-      repos.set(mk, { repo: prev ? prev.repo : repo, under: under || !!prev?.under }); // keep the first path the brief named for a repo (its worktree, when it named one)
+      const linked = repo.ownRoot.toLowerCase() !== mk;
+      // keep the first path named for a repo, but a linked worktree named anywhere beats the main checkout: the main checkout alongside is the base, the worktree is where the work (and HEAD) is
+      repos.set(mk, { repo: prev ? prev.repo : repo, wt: prev?.wt || (linked ? repo : null), under: under || !!prev?.under });
     }
     const all = [...repos.values()];
     const here = all.filter((r) => r.under);
     const pool = here.length ? here : all;
-    return pool.length === 1 ? pool[0].repo : null;
+    return pool.length === 1 ? (pool[0].wt || pool[0].repo) : null;
   } catch { /* fail open: no project from the brief */ }
   return null;
 }

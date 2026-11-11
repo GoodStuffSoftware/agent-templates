@@ -211,6 +211,18 @@ test('floor: low, mid and high for real commit ranges; errors print "floor unkno
   assert.match(r.stdout, /^floor unknown: /);
 }));
 
+test('floor: a range with no changed files prints "floor: unknown" and no risk, with and without --repo', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main, dir }) => {
+  const head = git(main, 'rev-parse', 'HEAD');
+  for (const r of [cli(['floor', `${head}..${head}`], { cwd: main }), cli(['floor', `${head}..${head}`, '--repo', main], { cwd: join(main, '..') })]) {
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^floor: unknown - no changed files in /);
+    assert.ok(r.stdout.includes(`${head}..${head}`), r.stdout);
+    assert.ok(/--repo/.test(r.stdout), r.stdout);
+    assert.doesNotMatch(r.stdout, /(low|mid|high)/i);
+    assert.doesNotMatch(r.stdout, /^reason:/m);
+  }
+}));
+
 test('floor: a...b diffs from the merge base, a..b stays a two-dot diff', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main }) => {
   const commit = (rel, text, msg) => {
     mkdirSync(join(main, rel, '..'), { recursive: true });
