@@ -128,10 +128,10 @@ try {
       });
       if (d.action === 'deny') {
         gateRow(p, { event: 'denied', mode, classes: d.classes, command_chars: input.command.length });
-        process.stdout.write(JSON.stringify({
+        // The reason carries the wrapped command (tests/resource-gate.test.mjs), so it can be as large as the command.
+        writeAndExit(JSON.stringify({
           hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.text },
         }));
-        process.exit(0);
       }
       if (d.action === 'hint') {
         gateRow(p, { event: 'hinted', mode, classes: d.classes, command_chars: input.command.length });

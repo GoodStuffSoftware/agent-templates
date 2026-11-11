@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PLUGIN_ROOT, realTmpdir } from './helpers.mjs';
@@ -89,4 +89,15 @@ test('writeAndExit: an empty reply writes nothing and still exits 0', async () =
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.out.length, 0);
   assert.equal(r.afterRan, false);
+});
+
+// Windows pipes are synchronous, so the behaviour tests above cannot show a site that went back to
+// stdout.write() + process.exit() (only Linux CI can). This pins the routing: the sites whose reply can
+// carry the caller's prompt or command must send it through writeAndExit and keep no stdout.write of their own.
+test('the replies that can grow with caller input go through writeAndExit, not stdout.write + exit', () => {
+  for (const rel of ['hooks/lib/sg-helpers.mjs', 'hooks/bash-tail.mjs', 'hooks/poll-guard.mjs', 'hooks/lib/context.mjs']) {
+    const src = readFileSync(join(PLUGIN_ROOT, rel), 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n'); // code only, not comments
+    assert.ok(/writeAndExit\(/.test(src), `${rel} does not call writeAndExit`);
+    assert.ok(!/process\.stdout\.write\(/.test(src), `${rel} writes to process.stdout directly`);
+  }
 });

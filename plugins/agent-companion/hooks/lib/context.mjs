@@ -3066,17 +3066,19 @@ export function callerTranscriptPath(p) {
 //
 // Why: Node writes to a pipe asynchronously on Linux and macOS, and process.exit()
 // discards what has not gone out yet. Claude Code reads a hook's stdout through a pipe, so
-// a reply over the pipe buffer (64 KB on Linux) arrived cut off, as invalid JSON, and the
-// hook's additions were lost. (Node docs, "A note on process I/O": files synchronous on
+// a reply larger than the pipe buffer (64 KB on a plain Linux pipe; CI saw the cut at about 143 KB)
+// arrived cut off, as invalid JSON, and the hook's additions were lost. (Node docs, "A note on process I/O": files synchronous on
 // Windows and POSIX, TTYs asynchronous on Windows and synchronous on POSIX, pipes synchronous
 // on Windows and asynchronous on POSIX.)
 //
 // Here the bytes go out with fs.writeSync on fd 1 (blocking on a pipe; if the fd is
 // non-blocking, a full pipe throws EAGAIN and the loop waits and retries). A reader that
-// makes no progress for STDOUT_STALL_MS, a closed pipe or any other write error ends the
-// attempt: the hook then exits 0 with what it could send, which Claude Code treats as no
-// opinion. It never throws, so a hook's catch-all (passthrough) cannot run after it.
-const STDOUT_STALL_MS = 10_000;
+// makes no progress for STDOUT_STALL_MS (only reachable on a non-blocking fd; on a blocking
+// one the write simply waits for the reader, as it always did), a closed pipe or any other write
+// error ends the attempt: the hook then exits 0 with what it could send, which Claude Code
+// treats as no opinion. It never throws, so a hook's catch-all (passthrough) cannot run after it.
+// scripts/pr-wait.mjs uses the same writeSync(1) idea for its final line.
+const STDOUT_STALL_MS = 5000;
 export function writeAndExit(text) {
   try {
     const buf = Buffer.from(String(text ?? ''), 'utf8');
@@ -3105,14 +3107,15 @@ export function writeAndExit(text) {
 // tests/no-allow-decision.test.mjs holds every hook to it.
 
 export function deny(reason) {
-  process.stdout.write(JSON.stringify({
+  // Some reasons carry caller text (a worker-wait deny can name the Monitor description), and a cut-off deny would
+  // read as no decision, so it goes out whole like every reply that can grow.
+  writeAndExit(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
       permissionDecisionReason: reason,
     },
   }));
-  process.exit(0);
 }
 
 // Exit silently without a decision — the call proceeds normally.
