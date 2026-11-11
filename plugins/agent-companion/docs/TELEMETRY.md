@@ -22,6 +22,7 @@ ${AGENT_COMPANION_STATE_DIR}                      # override, mostly for tests
     spawns.jsonl                 # one record per subagent spawn (append-only)
     subagent-starts.jsonl        # one record per subagent actually starting
     denials.jsonl                 # one record per guard firing
+    question-dialog.jsonl         # one row per question dialog the plugin turned away (question_dialog)
     resource-gate.jsonl           # one row per resource-gate decision (denied, hinted, rewritten)
     unknown-agent-types.jsonl    # harness drift signal
     struggle.jsonl               # one row per scored operator prompt (scores only; struggle detector)
@@ -634,6 +635,20 @@ Two rows per run of `scripts/pr-wait.mjs`, both written by the script itself: a 
 | `error_class` | `permanent` \| `transient` \| absent | `end` only, on exit 3: `permanent` will not heal (no gh, not a repository, no such PR), `transient` is a retry budget used up |
 
 The effect for a review: each `end` row stands for `polls` gh calls that never reached the model, and one tool call in place of the repeated `gh` and sleep calls an agent would otherwise have made. Compare transcript counts of those calls with the hint on and off. A `passed` PR row always has `settle_waits` of at least 1 (the first green round only starts the clock); a high count means the check set kept changing, which is the late-registering check the settle rule exists for. `start` rows with no `end` count the runs the harness cut off.
+
+### `question-dialog.jsonl` — a question dialog turned away
+
+Written by `hooks/question-dialog.mjs` (0.31.51, option `question_dialog`) each time it refuses a main-session `AskUserQuestion` dialog, so the scout can count them later. One row per refusal; nothing for a dialog that was allowed. Its own stream, not `denials.jsonl`: a row there would count as a guard denial and hide a silent spawn guard from the zero-denials canary.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when the dialog was turned away |
+| `session_id` | string | the session |
+| `rule` | string | which rule fired, the first that held in this order: `helpers` (this session has helpers running), `live-sessions` (another session was active on this machine in the last two hours), `peer-message` (this session has received a message from another session), or `end-turn` (`question_dialog: end-turn`) |
+| `n` | number | what the rule counted: helpers running, other live sessions, distinct senders heard from; `0` for `end-turn` |
+| `mode` | string | the option's value when it fired (`auto` or `end-turn`; any other value reads as `auto`) |
+| `permission_mode` | string \| null | the payload's permission mode (`default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`; never `plan`, which is always allowed) |
 
 ### `worker-wait.jsonl` — the worker one-wait rule
 
