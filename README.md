@@ -1,5 +1,7 @@
 # agent-templates
 
+agent-templates is a set of open-source playbooks and guardrails for running teams of AI agents safely. It is designed to work with any AI agent platform, and Claude Code is the first one built out. Its guardrail plugin picks the right model for each job, keeps agents on track, sends riskier work to a reviewer and keeps spending in check.
+
 A **living library of agent-team templates** for AI coding tools. Instantiate a template into a project (down-flow / *hydration*), and contribute generic improvements back to the library (up-flow / *contribution*). The library is the source of truth; a project is an instantiation = **template + placeholder values**.
 
 This repo is vendor-agnostic and project-agnostic by construction. It contains no real project, person, path, or domain — only reusable templates and the process for using them. A [leak-check](scripts/leak-check.mjs) guard enforces that.
