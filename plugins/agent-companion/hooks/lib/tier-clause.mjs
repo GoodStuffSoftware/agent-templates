@@ -1,6 +1,7 @@
 // Project tiers: the clause appended to a writer's or reviewer's spawn brief, so the project's
 // tier and the change-risk table reach every worker without the lead repeating them. Pure apart
-// from the file reads in tierDetail(); spawn-guard (lib/sg-finish.mjs) merges the text into the
+// from the file reads in tierDetail() (and, for a session folder outside any repo, the brief's repo paths: lib/project-tier.mjs
+// repoFromBrief); spawn-guard (lib/sg-finish.mjs) merges the text into the
 // updatedInput it is already building, like lib/scope-rule.mjs, and fails open.
 //
 // Which clause (by the brief's TYPE first, then its ROLE, as the scope rule does):
@@ -87,8 +88,13 @@ export function applyTierClause(type, role, brief = '', cwd = process.cwd(), opt
       plan = reviewerPlan(text);
       if (!plan) return none;
     }
-    const d = tierDetail(cwd);
-    const o = { reviewEveryChange: !!d.config?.reviewEveryChange };
+    // A session folder outside any repo: the project may come from the repo path the brief names (lib/project-tier.mjs).
+    const d = tierDetail(cwd, { brief: text });
+    const o = {
+      reviewEveryChange: !!d.config?.reviewEveryChange,
+      landing: d.landing || null,
+      floorRepo: d.projectSource === 'brief' ? d.ownRoot : null, // the worker's shell starts in the session folder: the floor command names the folder the brief worked in (a worktree stays a worktree, so HEAD is its HEAD)
+    };
     const body = kind === 'reviewer'
       ? reviewerClause(d.tier, d.project, o)
       : writerClause(d.tier, d.project, { ...o, kind });

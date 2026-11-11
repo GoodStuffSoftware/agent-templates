@@ -5,11 +5,18 @@
 //
 // Usage:
 //   node project-tiers.mjs list
-//   node project-tiers.mjs show [path]              the project, project_tier and source for a folder (default: here)
+//   node project-tiers.mjs show [path] [--brief-file <file>]
+//                                                   the project, project_tier and source for a folder (default: here). A folder that is not in a repo
+//                                                   names a project only through --brief-file: the repo the brief text in <file> points at, as a spawn from that
+//                                                   folder would resolve it
 //   node project-tiers.mjs set <name-or-path> <push|risk|gates>
 //   node project-tiers.mjs unset <name-or-path>
+//   node project-tiers.mjs landing <name-or-path|--default> <pr|direct|clear>
+//                                                   how work lands (optional): pr = through a pull request, direct = commit and push to
+//                                                   the branch the brief names; clear removes it. --default sets the top-level mode
 //   node project-tiers.mjs floor <base>..<head>     the least risk a diff allows, and why. Two dots: a plain diff of the two refs;
-//                                                   three dots (<base>...<head>): the diff from their merge base, as a branch review reads it
+//                                                   three dots (<base>...<head>): the diff from their merge base, as a branch review reads it.
+//                                                   --repo <path> runs it in that repo (a path inside it is fine) instead of the current folder
 //
 // A project key is a repo folder name ("acme-app") or a full path. Given an existing path, `set` stores the
 // normalised path of that repo's MAIN checkout (so every worktree of it matches); given a bare name it stores the name.
@@ -20,13 +27,24 @@ import { spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import { writeTextAtomic } from '../hooks/lib/context.mjs';
 import {
-  TIER_IDS, DEFAULT_TIER, loadTiers, tiersPath, tierDetail, repoOf, normalisePath, isPathKey,
+  TIER_IDS, DEFAULT_TIER, LANDING_MODES, loadTiers, tiersPath, tierDetail, repoOf, normalisePath, isPathKey,
 } from '../hooks/lib/project-tier.mjs';
 import { TIERS, riskFloor } from '../hooks/lib/tier-text.mjs';
 import { cleanGitEnv } from './lib/git-env.mjs';
 
-const [cmd, ...args] = process.argv.slice(2);
-const USAGE = 'Usage: project-tiers.mjs list | show [path] | set <name-or-path> <push|risk|gates> | unset <name-or-path> | floor <base>..<head> | floor <base>...<head>';
+const [cmd, ...rawArgs] = process.argv.slice(2);
+// `--name <value>` options are taken out of the positional arguments.
+function takeOpt(name) {
+  const i = rawArgs.indexOf(name);
+  if (i < 0) return null;
+  const v = rawArgs[i + 1];
+  rawArgs.splice(i, v === undefined ? 1 : 2);
+  return v === undefined ? '' : v;
+}
+const repoOpt = takeOpt('--repo');
+const briefFileOpt = takeOpt('--brief-file');
+const args = rawArgs;
+const USAGE = 'Usage: project-tiers.mjs list | show [path] [--brief-file <file>] | set <name-or-path> <push|risk|gates> | unset <name-or-path> | landing <name-or-path|--default> <pr|direct|clear> | floor <base>..<head> [--repo <path>] | floor <base>...<head> [--repo <path>]';
 
 function fail(msg, code = 1) {
   console.error(`project-tiers: ${msg}`);
@@ -39,11 +57,12 @@ function listCmd() {
   const c = loadTiers();
   console.log(`Project tiers (${c.path})${c.exists ? '' : ' -- no file yet: every project is tier ' + DEFAULT_TIER}`);
   console.log(`  default: ${tierName(c.default)}`);
+  console.log(`  landing: ${c.landing || 'not set (the plugin says nothing about how work lands)'}`);
   console.log(`  sessionLine: ${c.sessionLine}`);
   console.log(`  reviewEveryChange: ${c.reviewEveryChange}`);
   if (c.entries.length) {
     console.log('  projects:');
-    for (const e of c.entries) console.log(`    ${e.key} -> ${tierName(e.tier)}${e.isPath ? '  (path)' : ''}`);
+    for (const e of c.entries) console.log(`    ${e.key} -> ${e.tier ? tierName(e.tier) : 'default tier'}${e.landing ? `, landing ${e.landing}` : ''}${e.isPath ? '  (path)' : ''}`);
   } else {
     console.log('  projects: none assigned');
   }
@@ -53,17 +72,29 @@ function listCmd() {
 
 function showCmd() {
   const target = args[0] || process.cwd();
-  const d = tierDetail(target);
+  let brief = '';
+  if (briefFileOpt !== null) {
+    if (!briefFileOpt || !existsSync(briefFileOpt) || !statSync(briefFileOpt).isFile()) fail(`--brief-file needs a readable file (got ${JSON.stringify(briefFileOpt)}).`);
+    brief = readFileSync(briefFileOpt, 'utf8');
+  }
+  const d = tierDetail(target, { brief });
   console.log(`path: ${normalisePath(target)}`);
   console.log(`project: ${d.project || '(none: not inside a repo)'}`);
+  const srcWhy = { cwd: 'cwd (the folder is inside the repo)', brief: 'brief (the folder is not in a repo; the brief names exactly one repo)' };
+  console.log(`project_source: ${srcWhy[d.projectSource] || 'none (not resolved from the folder or the brief; the default tier applies)'}`);
   if (d.mainRoot) console.log(`repo: ${d.mainRoot}`);
   if (d.ownRoot && d.mainRoot && d.ownRoot.toLowerCase() !== d.mainRoot.toLowerCase()) console.log(`worktree: ${d.ownRoot}`);
   console.log(`project_tier: ${tierName(d.tier)}`);
   const why = d.source === 'assigned' ? `assigned by ${d.by} "${d.key}"`
-    : d.source === 'default' ? `default (no entry for this project; default is ${d.config.default})`
-      : 'none (not inside a repo; the default applies)';
+    : d.source === 'default' ? `default (no entry sets a tier for this project; default is ${d.config.default})`
+      : 'none (no project resolved; the default applies)';
   console.log(`source: ${why}`);
   console.log(`meaning: ${TIERS[d.tier].meaning}`);
+  console.log(`landing: ${d.landing ? `${d.landing} (${d.landing === 'direct' ? 'no pull requests; commit and push to the branch the brief names' : 'through a pull request'})` : 'not set (the plugin says nothing about how work lands)'}`);
+  const landWhy = d.landingSource === 'assigned' ? `assigned by ${d.landingBy} "${d.landingKey}"`
+    : d.landingSource === 'default' ? 'the top-level default landing mode'
+      : 'none (no project entry or default sets one)';
+  console.log(`landing_source: ${landWhy}`);
   console.log(`file: ${tiersPath()}${d.config.exists ? '' : ' (absent)'}`);
   for (const p of d.config.problems) console.log(`problem: ${p}`);
 }
@@ -117,10 +148,50 @@ function setCmd() {
   if (!TIER_IDS.includes(tier)) fail(`unknown tier "${args[1] ?? ''}": use ${TIER_IDS.join(', ')}. ${USAGE}`);
   const { key } = keyFor(args[0], { forSet: true });
   const raw = readRawForEdit();
-  for (const k of Object.keys(raw.projects)) if (sameKey(k, key)) delete raw.projects[k];
-  raw.projects[key] = tier;
+  let landing = null;
+  for (const k of Object.keys(raw.projects)) {
+    if (!sameKey(k, key)) continue;
+    const old = raw.projects[k];
+    if (old && typeof old === 'object' && !Array.isArray(old) && old.landing !== undefined) landing = old.landing; // keep the landing mode as written
+    delete raw.projects[k];
+  }
+  raw.projects[key] = landing === null ? tier : { tier, landing };
   writeRaw(raw);
   console.log(`${key} -> ${tierName(tier)}`);
+}
+
+// landing <name-or-path|--default> <pr|direct|clear>: set or clear the landing mode for one project or the top-level default.
+// A project entry that is a tier string becomes {tier, landing}; clearing turns it back into the string. An entry with a
+// landing but no tier (as `landing` writes for a path whose repo is assigned by name) leaves the tier to the other entries
+// (name entry, then the default): tier and landing resolve on their own. Entries that are not touched are not rewritten.
+function landingCmd() {
+  const mode = String(args[1] ?? '').trim().toLowerCase();
+  if (args.length < 2 || !String(args[0] ?? '').trim()) fail(`landing needs a project (or --default) and a mode. ${USAGE}`);
+  const clear = ['clear', 'none', 'unset'].includes(mode);
+  if (!clear && !LANDING_MODES.includes(mode)) fail(`unknown landing mode "${args[1] ?? ''}": use ${LANDING_MODES.join(', ')} or clear. ${USAGE}`);
+  const raw = readRawForEdit();
+  if (args[0] === '--default') {
+    if (clear) delete raw.landing; else raw.landing = mode;
+    writeRaw(raw);
+    console.log(clear ? 'default landing cleared: the plugin says nothing about landing unless a project sets it.' : `default landing -> ${mode}`);
+    return;
+  }
+  const { key } = keyFor(args[0], { forSet: true });
+  const hits = Object.keys(raw.projects).filter((k) => sameKey(k, key));
+  const old = hits.length ? raw.projects[hits[hits.length - 1]] : undefined;
+  const isObj = !!old && typeof old === 'object' && !Array.isArray(old);
+  const tier = isObj ? old.tier : old; // a tier string, or undefined for no entry or a tier-less object
+  if (clear && !hits.length) fail(`no entry for ${key} in ${tiersPath()}; nothing to clear. Run \`list\` to see the keys.`);
+  for (const k of hits) delete raw.projects[k];
+  const entry = {};
+  if (tier !== undefined) entry.tier = tier;
+  if (!clear) entry.landing = mode;
+  if (isObj) for (const [f, v] of Object.entries(old)) if (f !== 'tier' && f !== 'landing') entry[f] = v;
+  const fields = Object.keys(entry);
+  if (fields.length === 1 && fields[0] === 'tier') raw.projects[key] = entry.tier;
+  else if (fields.length) raw.projects[key] = entry; // else nothing is left: the entry is gone
+  writeRaw(raw);
+  console.log(clear ? `${key}: landing cleared` : `${key}: landing -> ${mode}`);
 }
 
 function unsetCmd() {
@@ -133,8 +204,11 @@ function unsetCmd() {
   console.log(`removed ${hit.join(', ')}; that project now follows the default (${raw.default || DEFAULT_TIER}).`);
 }
 
+// --repo <path>: where git runs for `floor` (a worker's shell starts in the session folder, not in the repo the brief names).
+let repoDir = null;
+
 function git(argv) {
-  const r = spawnSync('git', argv, { encoding: 'utf8', windowsHide: true, env: cleanGitEnv(), maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync('git', argv, { cwd: repoDir || undefined, encoding: 'utf8', windowsHide: true, env: cleanGitEnv(), maxBuffer: 64 * 1024 * 1024 });
   if (r.error) throw new Error(r.error.code === 'ENOENT' ? 'git is not on PATH' : String(r.error.message));
   if (r.status !== 0) throw new Error(String(r.stderr || `git ${argv[0]} failed`).trim().split('\n')[0]);
   return r.stdout;
@@ -152,6 +226,11 @@ function scriptsChanged(base, head, path) {
 function floorCmd() {
   const range = String(args[0] ?? '');
   try {
+    if (repoOpt !== null) {
+      const abs = repoOpt ? normalisePath(repoOpt) : '';
+      if (!abs || !existsSync(abs) || !statSync(abs).isDirectory()) throw new Error(`--repo ${JSON.stringify(repoOpt)} is not a folder`);
+      repoDir = abs;
+    }
     const m = /^([^.\s][^\s]*?)(\.{2,3})([^\s]+)$/.exec(range);
     if (!m || range.startsWith('-')) throw new Error('give a range as <base>..<head> (or <base>...<head> for the diff from their merge base)');
     const [, a, dots, head] = m;
@@ -168,6 +247,10 @@ function floorCmd() {
       if (basename(path) === 'package.json' && !isNew.has(path) && scriptsChanged(base, head, path)) f.forceKind = 'CI/build/deploy/hook';
       return f;
     });
+    if (!files.length) {
+      console.log(`floor: unknown - no changed files in ${range} in ${repoDir || process.cwd()}; point --repo at the tree that holds the change or commit first, and do not take this as any risk level`);
+      return;
+    }
     const r = riskFloor(files);
     console.log(`floor: ${r.floor}`);
     console.log(`reason: ${r.reasons.join('; ')}`);
@@ -184,6 +267,7 @@ try {
     case 'show': showCmd(); break;
     case 'set': setCmd(); break;
     case 'unset': unsetCmd(); break;
+    case 'landing': landingCmd(); break;
     case 'floor': floorCmd(); break;
     default: fail(`unknown command "${cmd}". ${USAGE}`);
   }

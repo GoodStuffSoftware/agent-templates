@@ -14,13 +14,13 @@
 //
 // Windows the fit cannot explain are left out: a window whose meter went DOWN by more than 2 points (a reset the card does
 // not show, as in September 2026), and, after a first fit, a window whose residual is far above the others'.
-// --days <n> (default 60; 0 = all) skips transcripts not modified in n days. Default: print the fit. --apply writes <state root>/plan-weights.json (the per-user file read by
+// --days <n> (default 60; 0 = all) skips transcripts not modified in n days. Default: print the fit. --apply writes <state root>/config/plan-weights.json (or updates the old top-level <state root>/plan-weights.json when only that exists; the per-user file read by
 // hooks/lib/plan-allowance.mjs), only for figures whose interval is TIGHTER than the one now in force (shipped plus user file).
 
 import { readFileSync, writeFileSync, readdirSync, renameSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { claudeDir, stateRootPath, stateRoot, classifyModel } from '../hooks/lib/context.mjs';
+import { claudeDir, stateRootPath, stateRoot, configFilePath, classifyModel } from '../hooks/lib/context.mjs';
 import { planWeights } from '../hooks/lib/plan-allowance.mjs';
 import { parseUsage } from '../hooks/lib/plan-meter.mjs';
 
@@ -376,7 +376,7 @@ export function applyPlan(result, current = planWeights(), today = new Date().to
   return { patch, decisions };
 }
 
-export function writeUserFile(patch, file = join(stateRoot(), 'plan-weights.json')) {
+export function writeUserFile(patch, file = configFilePath('plan-weights.json', stateRoot())) { // where the file already is (config/ first, then the old top-level place); config/ when new
   let cur = {};
   try { cur = JSON.parse(readFileSync(file, 'utf8')); } catch { /* none yet */ }
   if (!cur || typeof cur !== 'object' || Array.isArray(cur)) cur = {};

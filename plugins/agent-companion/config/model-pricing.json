@@ -1,13 +1,21 @@
 {
   "version": 1,
-  "updated": "2026-10-12",
-  "provenance": "2026-10-12: sonnet-5-5 ($2 in / $10 out, cache read $0.10 = 0.05x) and haiku-5-5 ($0.10 in / $0.50 out, cache read $0.01 = 0.1x, prompts up to 100K tokens) were added from https://platform.claude.com/docs/en/models/haiku-5-5/overview and the Haiku 5.5 launch page; before that a Sonnet 5.5 id matched the sonnet-5 row and was priced at the Sonnet 5 read rate of $0.20. Prompts over 100K tokens price higher on Haiku 5.5 ($0.50 / $2.50 / read $0.05) and this table does not model that step. Every row checked against a live read of https://platform.claude.com/docs/en/about-claude/pricing (the page docs.claude.com/en/docs/about-claude/pricing redirects to) on 2026-09-25. opus-4-7 ($5 in / $25 out) and sonnet-4-6 ($3 / $15), both at the standard 0.1x cache read, were added that day: the only model ids in a local transcript corpus that had no price. The other rows were first verified live on 2026-09-23 and were unchanged.",
+  "environment": {
+    "kind": "public-fact",
+    "describes": "Public API list prices from the vendor pricing pages. Not a measurement of any environment.",
+    "measured": "Read from the public pricing page 2026-09-25; rows added 2026-10-12; fable-5-2 added 2026-11-11 (file updated 2026-11-11).",
+    "method": "Read by hand from the public pricing and model pages named in provenance.",
+    "remeasure": "Nothing to re-measure locally; check the public pricing page, or override config/model-pricing.json in your state folder. See docs/DEFAULTS-ENVIRONMENT.md."
+  },
+  "updated": "2026-11-11",
+  "provenance": "2026-11-11: fable-5-2 (model id claude-fable-5-2) was added at $8 in / $40 out, cache read $0.20 = 0.025x, from a live read of https://platform.claude.com/docs/en/about-claude/pricing (table row Claude Fable 5.2: 5m write $10, 1h write $16, hits and refreshes $0.20; footnote: 0.025x of base input) and https://platform.claude.com/docs/en/about-claude/models/overview (id claude-fable-5-2). 2026-10-12: sonnet-5-5 ($2 in / $10 out, cache read $0.10 = 0.05x) and haiku-5-5 ($0.10 in / $0.50 out, cache read $0.01 = 0.1x, prompts up to 100K tokens) were added from https://platform.claude.com/docs/en/models/haiku-5-5/overview and the Haiku 5.5 launch page; before that a Sonnet 5.5 id matched the sonnet-5 row and was priced at the Sonnet 5 read rate of $0.20. Prompts over 100K tokens price higher on Haiku 5.5 ($0.50 / $2.50 / read $0.05) and this table does not model that step. Every row checked against a live read of https://platform.claude.com/docs/en/about-claude/pricing (the page docs.claude.com/en/docs/about-claude/pricing redirects to) on 2026-09-25. opus-4-7 ($5 in / $25 out) and sonnet-4-6 ($3 / $15), both at the standard 0.1x cache read, were added that day: the only model ids in a local transcript corpus that had no price. The other rows were first verified live on 2026-09-23 and were unchanged.",
   "note": "Dollar pricing as DATA, not code — mirrors config/model-tiers.json's own rule (a table baked into code goes stale silently). This is a SEPARATE table from model-tiers.json on purpose: model-tiers.json classifies generic routing aliases (haiku/sonnet/opus/fable) for the spawn guards, which is a coarser grain than pricing needs (opus-5 and opus-5-5 route to the same tier but do not cost the same, and fable-5 vs fable-5-1 differ only in cache-read multiplier). Extend THIS file for a new model's price; extend model-tiers.json separately for its routing tier. $/MTok prices verified live from the Anthropic pricing page on 2026-09-23. Override without a release by writing a file of this shape to ~/.claude/agent-companion/state/model-pricing.json — merged by alias, same convention as model-tiers.json.",
   "models": {
     "opus-5-5": { "match": "opus-5-5", "in": 4, "out": 20, "readMultiplier": 0.05 },
     "opus-5": { "match": "opus-5(?!-5)", "in": 5, "out": 25, "readMultiplier": 0.1 },
     "opus-4-8": { "match": "opus-4-8", "in": 5, "out": 25, "readMultiplier": 0.1 },
     "opus-4-7": { "match": "opus-4-7", "in": 5, "out": 25, "readMultiplier": 0.1 },
+    "fable-5-2": { "match": "fable-5-2(?!\\d)", "in": 8, "out": 40, "readMultiplier": 0.025 },
     "fable-5-1": { "match": "fable-5-1", "in": 10, "out": 50, "readMultiplier": 0.025 },
     "fable-5": { "match": "fable-5(?!-1)", "in": 10, "out": 50, "readMultiplier": 0.1 },
     "sonnet-5-5": { "match": "sonnet-5-5", "in": 2, "out": 10, "readMultiplier": 0.05 },
@@ -16,7 +24,7 @@
     "haiku-5-5": { "match": "haiku-5-5", "in": 0.1, "out": 0.5, "readMultiplier": 0.1 },
     "haiku-4-5": { "match": "haiku-4-5", "in": 1, "out": 5, "readMultiplier": 0.1 }
   },
-  "matchOrderNote": "Entries are matched in the order written above, first match wins — put the more specific pattern (opus-5-5, fable-5-1) before the pattern it would otherwise also match (opus-5, fable-5). A negative lookahead on the generic entry keeps this from depending on iteration order alone.",
+  "matchOrderNote": "Entries are matched in the order written above, first match wins — put the more specific pattern (opus-5-5, fable-5-2, fable-5-1) before the pattern it would otherwise also match (opus-5, fable-5). A negative lookahead on the generic entry keeps this from depending on iteration order alone.",
   "defaultReadMultiplier": 0.1,
   "writeMultiplier5m": 1.25,
   "writeMultiplier1h": 2,

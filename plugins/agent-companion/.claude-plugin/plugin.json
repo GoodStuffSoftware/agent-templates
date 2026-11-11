@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.50",
+  "version": "0.31.51",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -730,6 +730,12 @@
       "title": "UI sign-off check",
       "description": "Before an Artifact call, or a question asking the operator to approve UI work, add one short note: capture a narrow-width screenshot, try each input once, attach a screenshot or dev URL to the sign-off. Advisory only; never blocks.",
       "default": true
+    },
+    "question_dialog": {
+      "type": "string",
+      "title": "Question dialog: end the turn instead",
+      "description": "What the plugin does when the main session opens a question dialog (the AskUserQuestion tool). A dialog holds the session's turn open until you answer, and messages from other agents and worker results wait behind it. \"auto\" (default): the dialog is turned away only when someone could be waiting (this session has helpers running, or it has received a message from another session, or other sessions were live on this machine in the last two hours); the agent is told to put the question, the options and a recommendation in the closing message of the turn and end the turn. \"end-turn\": always turn the dialog away. \"allow\" (or \"off\"): never interfere. A session in plan mode is always allowed. Any other value reads as auto. Each turned-away dialog is one row in telemetry/question-dialog.jsonl.",
+      "default": "auto"
     },
     "window_check": {
       "type": "boolean",

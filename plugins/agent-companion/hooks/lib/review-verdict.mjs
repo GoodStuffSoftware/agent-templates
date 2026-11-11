@@ -13,6 +13,7 @@
 //   caller_effort, caller_is_subagent, caller_tool_use_id   copied from the reviewer's own spawns.jsonl row (null when not found)
 //   reviewer_model, reviewer_effort   the reviewer's own model and effort, from its spawns.jsonl row (null when not found) (0.31.17)
 //   declared_risk, project_tier, tier_source   the change risk the brief stated (RISK: low|mid|high) and the project's tier and its source (assigned|default|none), copied from the reviewer's own spawns.jsonl row the same way for a foreground and a background reviewer (null when not found) (0.31.50)
+//   project_source           where the project came from, copied the same way: cwd (the session folder is in a repo), brief (it is not, and the brief names one repo) or none (0.31.51)
 //   reviewed_model, reviewed_effort   the writer under review, parsed from the brief's WRITER: line the way
 //                            spawn-guard parses it (null when absent or unusable; effort null for a no-effort model) (0.31.17)
 //                            Older rows carry none of these four; every reader treats a missing field as unknown.
@@ -251,6 +252,7 @@ function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId, writer, branc
     declared_risk: orig ? orig.declared_risk ?? null : null,
     project_tier: orig ? orig.project_tier ?? null : null,
     tier_source: orig ? orig.tier_source ?? null : null,
+    project_source: orig ? orig.project_source ?? null : null,
     reviewed_model: writer?.model ?? null,
     reviewed_effort: writer?.effort ?? null,
     reviewed_branch: typeof branch === 'string' && branch ? branch : null,

@@ -20,7 +20,7 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateRootPath, opt, classifyModel } from './context.mjs';
+import { stateRootPath, configFilePath, opt, classifyModel } from './context.mjs';
 import { briefAllowancePct } from './brief-directives.mjs';
 import { readBrief } from './step-budget.mjs';
 import { usageOf, safe } from './runaway.mjs';
@@ -43,7 +43,7 @@ export function planWeights() {
   let cfg = {};
   try { cfg = JSON.parse(readFileSync(shipped, 'utf8')); } catch { /* defaults below */ }
   let over = null;
-  try { over = JSON.parse(readFileSync(join(stateRootPath(), 'plan-weights.json'), 'utf8')); } catch { /* no user file: expected; a read never creates the state root (a dry run writes nothing) */ }
+  try { over = JSON.parse(readFileSync(configFilePath('plan-weights.json'), 'utf8')); } catch { /* no user file: expected; a read never creates the state root (a dry run writes nothing) */ }
   if (plain(over)) {
     const merged = { ...cfg };
     for (const [k, v] of Object.entries(over)) merged[k] = plain(v) && plain(cfg[k]) ? { ...cfg[k], ...v } : v;

@@ -69,14 +69,14 @@ test('background reviewer: the verdict row copies declared_risk, project_tier an
   try {
     writeFileSync(join(telemetryDir(), 'spawns.jsonl'), JSON.stringify({
       at: '2026-11-10T09:00:00Z', session_id: SID, tool_use_id: 'toolu_bgr', caller_is_subagent: true,
-      declared_type: 'code-review', declared_risk: 'mid', project_tier: 'push', tier_source: 'default',
+      declared_type: 'code-review', declared_risk: 'mid', project_tier: 'push', tier_source: 'default', project_source: 'brief',
     }) + '\n');
     post(launch('agentbgr', 'toolu_bgr'));
     onStop(stop('agentbgr', 'VERDICT: PASS'));
     const got = rows();
     assert.equal(got.length, 1);
     assert.equal(got[0].source, 'subagent-stop');
-    assert.deepEqual([got[0].declared_risk, got[0].project_tier, got[0].tier_source], ['mid', 'push', 'default']);
+    assert.deepEqual([got[0].declared_risk, got[0].project_tier, got[0].tier_source, got[0].project_source], ['mid', 'push', 'default', 'brief']);
   } finally { fx.cleanup(); }
 });
 

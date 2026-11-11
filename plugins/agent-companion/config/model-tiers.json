@@ -1,5 +1,12 @@
 {
   "version": 8,
+  "environment": {
+    "kind": "local-measurement",
+    "describes": "One developer's Windows 11 workstation with 64 GB of RAM; Claude Code desktop app and CLI on the highest individual subscription tier; several long-running lead sessions at once, each spawning helper agents, across a handful of app projects (web apps, an Android build with an emulator, Playwright end-to-end tests, Firebase tooling). The routing choices are that operator's decisions on that mix of work.",
+    "measured": "Operator-local live study 2026-09-27 (spawns of 2026-09-21 to 2026-09-27); operator decisions dated 2026-10-13 and 2026-10-17 (each entry carries its own date); file updated 2026-10-13.",
+    "method": "Per entry, in its reason and evidence fields: transcript reports and observed spawn verdicts. No single script produces the table.",
+    "remeasure": "By hand today: /ac routing set|unset|show|why|rollback writes config/routing-profile.json in your state folder; or override config/model-tiers.json there; scripts/transcript-report.mjs and the model-benchmark skill give you your own numbers. See docs/DEFAULTS-ENVIRONMENT.md."
+  },
   "updated": "2026-10-13",
   "note": "The routing table as DATA, not code. A table compiled into the guards goes stale the moment a lineup changes, and it goes stale silently — the guards keep running and simply stop classifying correctly. Override without waiting for a release by writing a file of this shape to ~/.claude/agent-companion/state/model-tiers.json (a legacy copy at $CLAUDE_PLUGIN_DATA/model-tiers.json is still honoured as a fallback); it merges by key, so you can change one model, one effort, or one weight row without restating the rest.",
   "aliasResolution": {

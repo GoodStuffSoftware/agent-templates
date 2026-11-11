@@ -7,7 +7,7 @@
 //
 // --- Plan units --------------------------------------------------------------
 // One source of truth: config/plan-weights.json (shipped, plus the per-user file
-// <state root>/plan-weights.json that scripts/calibrate-weights.mjs writes), read through
+// <state root>/config/plan-weights.json that scripts/calibrate-weights.mjs writes), read through
 // hooks/lib/plan-allowance.mjs. Every model's tokens are priced at the Sonnet 5 vector
 // times the model's weight, and 1% of the weekly limit is that file's unitsPerPercent
 // (so the week is 100 x that). Nothing here holds a number of its own. A turn on a

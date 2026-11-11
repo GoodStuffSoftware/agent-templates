@@ -344,6 +344,12 @@ test('pricing table: specific patterns win over their generic prefix (opus-5-5 v
   assert.equal(classifyPricing('claude-fable-5-20260101', cfg).alias, 'fable-5');
   assert.equal(classifyPricing('claude-fable-5-1-20260801', cfg).readMultiplier, 0.025);
   assert.equal(classifyPricing('claude-opus-5-5-20260912', cfg).readMultiplier, 0.05);
+  // Fable 5.2 (claude-fable-5-2): $8 in / $40 out, cache read 0.025x; it must not fall through to the fable-5 row.
+  const f52 = classifyPricing('claude-fable-5-2', cfg);
+  assert.equal(f52.alias, 'fable-5-2');
+  assert.equal(f52.readMultiplier, 0.025);
+  assert.equal(cfg.models['fable-5-2'].in, 8);
+  assert.equal(cfg.models['fable-5-2'].out, 40);
 });
 
 test('unknown model excluded from every total, and reported', async () => {

@@ -1,5 +1,12 @@
 {
   "version": 1,
+  "environment": {
+    "kind": "local-measurement",
+    "describes": "One developer's Windows 11 workstation with 64 GB of RAM; Claude Code desktop app and CLI on the highest individual subscription tier; several long-running lead sessions at once, each spawning helper agents, across a handful of app projects (web apps, an Android build with an emulator, Playwright end-to-end tests, Firebase tooling). Plan-usage figures were read on that subscription tier.",
+    "measured": "Weight fit of 2026-11-03 (official weekly readings 2026-10-02 to 2026-11-03); perCall medians from transcripts since 2026-10-02.",
+    "method": "scripts/calibrate-weights.mjs fits official weekly-percent readings (get_usage) against token sums of the local transcripts (OLS, 90% bootstrap intervals). How the perCall medians were produced: not recorded.",
+    "remeasure": "By hand today: node scripts/calibrate-weights.mjs --apply writes your fit to config/plan-weights.json in your state folder; or edit that file; or set the weekly_limit_units option (/ac settings). See docs/DEFAULTS-ENVIRONMENT.md."
+  },
   "updated": "2026-11-03",
   "note": "How many plan units one percent of the WEEKLY plan limit is, and how heavily each model's tokens count against it, as DATA (like model-tiers.json: a number baked into code goes stale silently). Read by hooks/lib/plan-allowance.mjs (the `BUDGET: N%` spawn note and its 80% / 100% notices), scripts/allowance.mjs (an agent's own spend) and scripts/lib/daily-checkup.mjs (the daily checkup and the usage analysis: its model weights). Override without a release by writing a file of this shape to <state root>/plan-weights.json (the same place as the model-tiers.json override; merged by key, one level deep, so a file naming only models.opus.weight keeps everything else). Every figure carries its date, source, interval and status: 'measured' (fitted from the operator's own official readings), 'assumed' (a stand-in, not fitted) or 'estimated' (derived from a neighbouring cell). Nothing here is a published limit.",
   "unit": {

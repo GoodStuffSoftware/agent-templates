@@ -42,13 +42,14 @@
 // contract just says "Node 20" — depending on the exact patch release would
 // make the gate silently inert on whichever build actually runs it.)
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configDir, opt, stateFile, readJson, rolloutActive, writeTextAtomic } from './context.mjs';
 
 export const RULES_VERSION = 1;
-export const SCOPES = ['user-prompt', 'always', 'session-start', 'spawn'];
+export const SCOPES = ['user-prompt', 'always', 'session-start', 'spawn', 'event-turn'];
 
 const WHEN_MAX_CHARS = 400;
 const DEFAULT_MAX_CHARS = 3000;
@@ -123,7 +124,7 @@ export const COPYABLE_PROMPT_WHEN = [
 //
 // The target depends on the rollout: LEAD_EFFORT_CHECK_TEXT (xhigh) is the
 // wording until the rollout id named by the option lead_effort_rollout_id is
-// reached in the state root's rollout.json (an empty option: always xhigh), LEAD_EFFORT_CHECK_TEXT_HIGH from then on (the built-in
+// reached in the state root's config/rollout.json (an empty option: always xhigh), LEAD_EFFORT_CHECK_TEXT_HIGH from then on (the built-in
 // rule below carries it as its `after` overlay). One template, so the two
 // cannot drift apart. At or above the target the lead says nothing; below it
 // it states the effort once and asks nothing; the text never raises to max and never suggests lowering.
@@ -158,6 +159,9 @@ const PLUGIN_ROOT = (process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('..
 export const PR_WAIT_HINT_WORDING = 'PR/CI wait: run_in_background (foreground dies at 2m), no gh/sleep loops: node "@/scripts/pr-wait.mjs" <pr|branch|sha>';
 export const PR_WAIT_HINT_TEXT = PR_WAIT_HINT_WORDING.replace('@', () => PLUGIN_ROOT); // a function, so a `$` in the path is literal, not a replace pattern
 
+export const EVENT_TURN_QUIET_FULL = 'Event turn: nothing here was typed by the operator (a worker result, a peer message, a CI event or a timer started it). Do not write a report. Update your task list to the current state: the list is the status. Write one line at most, only for something new the operator needs (a failure, a result that changes the plan, a decision that is theirs; a blocker in full, once). No recap, nothing already said, no pasted worker or peer output. Keep working; give one full report when the job is done or the operator next writes.';
+export const EVENT_TURN_QUIET_SHORT = 'Event turn: update the task list; one line at most and only if new. The full report waits for the end.';
+
 function builtinRules() {
   return [
     {
@@ -168,7 +172,7 @@ function builtinRules() {
       when: COPYABLE_PROMPT_WHEN,
       then: 'The user is asking for a prompt. Put the complete prompt in ONE fenced code block with nothing else inside the fence — no commentary, no ellipses, no placeholder text unless the user asked for placeholders. Anything you want to say about the prompt goes outside the fence.',
       gate: null,
-      note: null,
+      note: "Origin: one operator's preference for getting a requested prompt as one copyable block; date not recorded.",
     },
     {
       id: 'lead-brevity',
@@ -179,7 +183,7 @@ function builtinRules() {
       gate: 'brevity',
       when: null,
       then: 'Report at outcome level: what happened, what is next, what needs the user. Blockers in full; detail in a linked file, no narrative or recaps.',
-      note: null,
+      note: "Origin: one operator's preference for outcome-level reports (what happened, what is next, what needs the user); date not recorded.",
     },
     {
       // Disabled by default — this rule is documentation-by-example, not an
@@ -195,7 +199,7 @@ function builtinRules() {
       gate: 'brevity',
       when: '.',
       then: '(reserved — the reporting contract is injected by hooks/lib/brevity.mjs; this rule exists so an operator can see the spawn scope in `rules list` and add their own spawn-scoped rules alongside it)',
-      note: null,
+      note: "Origin: documentation by example for the spawn scope, not a directive; the real per-spawn contract is injected by hooks/lib/brevity.mjs.",
     },
     {
       id: 'delegate-first',
@@ -206,7 +210,7 @@ function builtinRules() {
       when: null,
       then: 'You are an orchestrator: reads, searches, shell, tests and self-contained edits go to subagents; you plan and decide. Max three execution calls in a row. Set each spawn\'s model.',
       gate: null,
-      note: null,
+      note: "Origin: one operator's experience that a lead doing its own reads and edits is the costly path; date not recorded.",
     },
     {
       // Guard (a)'s own doctrine (CACHE-ADVISOR-HANDOFF.md deliverable 6;
@@ -226,7 +230,7 @@ function builtinRules() {
       when: null,
       then: 'Continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff: continuing re-reads all context each call.',
       gate: null,
-      note: null,
+      note: "Origin: measured on one operator's workstation since 2026-09-01 (a continued worker cost 0.11-0.16 plan units per call against 0.06-0.07 for a fresh one), wording refined 2026-10-06.",
     },
     {
       // The only shipped 'always'-scope rule, deliberately: it is the reason
@@ -243,7 +247,7 @@ function builtinRules() {
       gate: 'delegation-drift',
       when: null,
       then: 'Delegation reminder: this session has already run execution work on the main thread. Route the next read, search, command, test run or edit to a subagent rather than doing it here.',
-      note: null,
+      note: "Origin: one operator's experience that delegation rules stop being followed late in a long session; it fires only after a delegation-guard firing; date not recorded.",
     },
     {
       // The discoverability line for scripts/pr-wait.mjs. Gated on the pr_wait
@@ -257,7 +261,7 @@ function builtinRules() {
       gate: 'pr_wait',
       when: null,
       then: PR_WAIT_HINT_TEXT,
-      note: null,
+      note: "Origin: one operator's experience of PR and CI waits being polled; it only points at scripts/pr-wait.mjs; date not recorded.",
     },
     {
       // Lead-effort check. DISABLED by default: it states a house policy
@@ -276,7 +280,7 @@ function builtinRules() {
       when: null,
       then: LEAD_EFFORT_CHECK_TEXT,
       gate: null,
-      note: null,
+      note: "Origin: one operator's house policy that an orchestrating lead runs at xhigh effort, so it ships off by default.",
       // xhigh wording until the rollout id is reached, the high wording from it
       // (effectiveRule lays `after` over the rule). An id absent from
       // rollout.json counts as not reached, so the xhigh wording stays.
@@ -298,7 +302,7 @@ function builtinRules() {
       gate: 'worker_wait',
       when: OPERATE_NOT_DECLARED_WHEN,
       then: 'One-wait rule: no sleep, poll or watch loops. One blocking call, or one run_in_background command that notifies on finish. PR/CI: pr-wait.mjs; main-branch run: gh run watch (both in background). No interim notice for a planned wait.',
-      note: null,
+      note: "Origin: one operator's experience of helper agents sleeping or polling for CI; enforced by hooks/poll-guard.mjs; date not recorded.",
     },
     {
       // The operate variant of worker-one-wait (0.31.17): same ban on sleep and poll
@@ -310,7 +314,7 @@ function builtinRules() {
       gate: 'worker_wait',
       when: OPERATE_DECLARED_WHEN,
       then: 'One-wait rule: no sleep, poll or watch loops. PR/CI wait: you wait, in one foreground pr-wait.mjs call. Other long waits: one blocking call or one background command (run_in_background). No interim notice for a planned wait.',
-      note: null,
+      note: "Origin: variant of worker-one-wait (0.31.17) for operate-type work, whose job is the long wait itself.",
     },
     {
       // Cache-advisor guard (b), deliverable 7. Doctrine-only text; the
@@ -324,7 +328,19 @@ function builtinRules() {
       when: null,
       then: 'One completion wait, never per-item wakes: background work notifies on finish; arm one long fallback.',
       gate: null,
-      note: null,
+      note: "Origin: cache-advisor guard (b), because every per-item wake-up re-reads the cached context; enforced by hooks/poll-guard.mjs; date not recorded.",
+    },
+    {
+      // The first event turn of a session gets `then`; later ones in the same session get `thenLater`.
+      id: 'event-turn-quiet',
+      enabled: true,
+      builtin: true,
+      scope: 'event-turn',
+      when: null,
+      then: EVENT_TURN_QUIET_FULL,
+      thenLater: EVENT_TURN_QUIET_SHORT,
+      gate: null,
+      note: "Origin: one operator's experience of long reports on turns nobody typed; added in 0.31.51.",
     },
   ];
 }
@@ -361,6 +377,7 @@ function compileRule(rule) {
     scope: rule.scope,
     when,
     then: rule.then,
+    thenLater: typeof rule.thenLater === 'string' && rule.thenLater.trim() ? rule.thenLater : null,
     builtin: !!rule.builtin,
     gate: rule.gate || null,
     note: rule.note ?? null,
@@ -376,7 +393,7 @@ function compileRule(rule) {
 }
 
 // A scheduled rule (`activeFrom`, optionally `after`): the timestamp, or the
-// change id looked up in the state root's rollout.json, when it takes effect
+// change id looked up in the state root's config/rollout.json, when it takes effect
 // (context.mjs "Rollout schedule"). Until then the rule is exactly as authored
 // when it has an `after` overlay (the overlay is laid over it from the moment
 // `activeFrom` is reached: `enabled`, `then`, `when`, `gate`), and OFF when it
@@ -454,7 +471,7 @@ export function writeRules(cfg) {
   try {
     const rules = Array.isArray(cfg?.rules) ? cfg.rules : [];
     const builtinById = new Map(defaultRules().map((r) => [r.id, r]));
-    const DIFF_KEYS = ['enabled', 'scope', 'when', 'then', 'gate', 'note', 'activeFrom', 'after'];
+    const DIFF_KEYS = ['enabled', 'scope', 'when', 'then', 'gate', 'note', 'thenLater', 'activeFrom', 'after'];
     const out = [];
 
     for (const r0 of rules) {
@@ -478,6 +495,7 @@ export function writeRules(cfg) {
           scope: r.scope,
           when: r.when ?? null,
           then: r.then,
+          ...(r.thenLater ? { thenLater: r.thenLater } : {}),
           gate: r.gate ?? null,
           note: r.note ?? null,
           ...(r.audience === 'lead' ? { audience: 'lead' } : {}),
@@ -636,7 +654,7 @@ function gateSatisfied(gate, sessionId) {
 const WRAPPER_TAGS = [
   'cross-session-message', 'task-notification', 'agent-message', 'system-reminder',
   'teammate-message', 'command-message', 'command-name', 'command-args',
-  'local-command-stdout', 'local-command-caveat',
+  'local-command-stdout', 'local-command-caveat', 'side-sessions-event', 'ci-monitor-event',
 ].join('|');
 // A candidate tag: "<name" or "</name" followed by whitespace or ">". An
 // opening tag runs to the next ">", unless another candidate starts before
@@ -675,7 +693,16 @@ function oddQuotes(s, from, to) {
 // block where the text had none, and was silent; this code removes only the
 // <command-args> block, and the ask counts. Here a tag is only what the text
 // itself spells.
-export function userOwnText(text) {
+//
+// `strict` is for the event-turn decision, where wrongly dropping operator text
+// is the worse error (their question would go unanswered). There an unclosed
+// wrapper and a stray closing tag swallow nothing: only COMPLETE, properly
+// closed blocks are removed. Non-strict (user-prompt rules) keeps the
+// swallow-to-end on purpose, from 0.29.1: a truncated cross-session message
+// that says "prompt" must not fire copyable-prompt. That is safe because the
+// only effect of over-stripping there is a rule staying silent, never a claim
+// that the operator typed nothing.
+export function userOwnText(text, { strict = false } = {}) {
   const s = String(text ?? '');
   const stack = [];
   let out = '';
@@ -693,8 +720,10 @@ export function userOwnText(text) {
       if (s[SPACES_RE.lastIndex] === '>') {
         const end = SPACES_RE.lastIndex + 1;
         if (stack.length === 0) {
-          out += `${s.slice(copied, m.index)} `;
-          copied = end;
+          if (!strict) {
+            out += `${s.slice(copied, m.index)} `;
+            copied = end;
+          }
         } else if (stack[stack.length - 1] === name) {
           stack.pop();
           if (stack.length === 0) {
@@ -727,11 +756,58 @@ export function userOwnText(text) {
     stack.push(name);
     m = next;
   }
-  if (stack.length > 0) return `${out}${s.slice(copied, blockStart)} `;
+  if (stack.length > 0) return strict ? out + s.slice(copied) : `${out}${s.slice(copied, blockStart)} `;
   return out + s.slice(copied);
 }
 
+// An event turn: the harness started the turn itself (a background worker's result, a peer session's message, a CI
+// event, a timer's system notification), so the operator typed nothing. The prompt holds no operator text once the
+// wrapper blocks above are removed, and it is not empty and does carry one of the known event wrappers. A plain-text
+// timer prompt (the keep-warm ping) and any turn with operator text beside the wrapper are not event turns.
+const EVENT_KIND_RE = /<(?:task-notification|cross-session-message|side-sessions-event|ci-monitor-event)(?=[\s>])|\[SYSTEM NOTIFICATION - NOT USER INPUT\]/i;
+// A turn is an event turn only when, after removing complete, closed wrapper blocks (strict mode: an unclosed or
+// malformed tag removes nothing) and the automated banner line, only whitespace is left.
+const BANNER_LINE_RE = /^[ \t]*\[SYSTEM NOTIFICATION - NOT USER INPUT\][ \t]*$/gim;
+export function isEventTurn(text) {
+  if (typeof text !== 'string' || !text.trim()) return false;
+  if (!EVENT_KIND_RE.test(text)) return false;
+  return userOwnText(text, { strict: true }).replace(BANNER_LINE_RE, '').trim() === '';
+}
+
+// For rules of scope 'event-turn': the first firing of a rule in a session keeps its `then`; later firings in the
+// same session use its `thenLater` when it has one. "First" is a marker file per session and rule in the plugin's
+// state folder; a session id that is missing, or a marker that cannot be read or written, keeps `then`. Picking
+// writes nothing: the marker is written by markEventTurnTold, only once the full text has actually gone out (the
+// character cap can drop it, and a dropped text must be offered again). File names are hashes of the ids, so two
+// ids that would sanitise to the same string cannot share a marker.
+const idHash = (x) => createHash('sha256').update(String(x)).digest('hex').slice(0, 32);
+const toldMarker = (sessionId, ruleId) => join(stateFile('event-turn-told'), `${idHash(sessionId)}-${idHash(ruleId)}.seen`);
+export function pickEventTurnText(rules, sessionId) {
+  return rules.map((r) => {
+    if (!r.thenLater || !sessionId) return r;
+    try {
+      if (existsSync(toldMarker(sessionId, r.id))) return { ...r, then: r.thenLater };
+    } catch { /* unreadable: treat as first */ }
+    return { ...r, firstEventText: true }; // the full text; marked told once it is delivered
+  });
+}
+
+// After the hook has rendered and cut its output: record, for each rule that offered its full text, that the text
+// is really in what goes out. Fail open: a marker that cannot be written only means the full text is offered again.
+export function markEventTurnTold(rules, sessionId, delivered) {
+  if (!sessionId) return;
+  const out = String(delivered ?? '');
+  for (const r of rules) {
+    if (!r || !r.firstEventText || !out.includes(`\n- ${String(r.then || '').trim()}`)) continue;
+    try {
+      mkdirSync(stateFile('event-turn-told'), { recursive: true });
+      writeFileSync(toldMarker(sessionId, r.id), '', { flag: 'wx' });
+    } catch { /* EEXIST or unwritable: nothing to record */ }
+  }
+}
+
 export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
+  if (scope === 'event-turn' && (subagent || !isEventTurn(text))) return [];
   const { rules } = readRules();
   const subject = scope === 'user-prompt' ? userOwnText(text) : String(text ?? '');
   return rules.map(effectiveRule).filter((r) => {
@@ -743,7 +819,7 @@ export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
     // reach everyone.
     if (subagent && r.audience === 'lead') return false;
     if (!gateSatisfied(r.gate, sessionId)) return false;
-    if (scope === 'always' || scope === 'session-start') return true;
+    if (scope === 'always' || scope === 'session-start' || scope === 'event-turn') return true;
     if (typeof r.when !== 'string' || !r.when) return false;
     let re;
     try { re = new RegExp(r.when, 'i'); } catch { return false; }

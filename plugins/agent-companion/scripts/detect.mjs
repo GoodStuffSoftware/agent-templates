@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { recordRun, ackCommandFor, DEFAULT_REPEAT_DAYS } from './lib/scout-handoff.mjs';
 import {
   modelTiers, tierEffortProblems, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
-  homeRoot, stateRoot, resolveRoute, isLadderAgentName, routingProfileState,
+  homeRoot, stateRoot, configFilePath, resolveRoute, isLadderAgentName, routingProfileState,
   readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
   LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES, scoutSuppressed, isStrayScopeEntry,
 } from '../hooks/lib/context.mjs';
@@ -65,14 +65,14 @@ const splitListLocal = (v) => (v ? String(v).split(/[,;]/).map((s) => s.trim()).
 
 // publication_leak_token_file: an operator-authored private-token file, fed
 // into EVERY sweep scan (universal — applies regardless of strict). Default
-// ~/.claude/agent-companion/leak-tokens.txt (the state root's config-shaped
+// ~/.claude/agent-companion/config/leak-tokens.txt (the old top-level place still works; the state root's config-shaped
 // location) IF it exists; the option overrides the path. Never required —
 // most operators have none, and a missing file is silently treated as "no
 // token file", not an error.
 function publicationTokenFile() {
   const configured = opt('publication_leak_token_file', '');
   if (configured) return configured;
-  const defaultPath = join(stateRoot(), 'leak-tokens.txt');
+  const defaultPath = configFilePath('leak-tokens.txt', stateRoot());
   return existsSync(defaultPath) ? defaultPath : null;
 }
 

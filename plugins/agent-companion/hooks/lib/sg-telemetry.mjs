@@ -8,7 +8,7 @@ import {
   appendLog, claudeProjectDir, effortSupported, opt, pathKey, resolvedProjectRoot, runningCopyStamp,
 } from './context.mjs';
 import { briefDeclarations, declarationValue } from './brief-directives.mjs';
-import { tierFor } from './project-tier.mjs';
+import { tierDetail } from './project-tier.mjs';
 
 // The RISK: line of a brief (low|mid|high), read like every other declaration (not inside a fence, quote or comment);
 // null when absent, not one of the three, or anything fails.
@@ -18,12 +18,14 @@ function declaredRiskOf(prompt) {
     return m ? m[1].toLowerCase() : null;
   } catch { return null; }
 }
-// The project's tier and where it came from (assigned | default | none), for the spawning session's folder; nulls on any failure.
-function projectTierOf(cwd) {
+// The project's tier, where it came from (assigned | default | none) and where the project came from (cwd: the session
+// folder is in a repo | brief: it is not, and the brief names one repo | none); nulls on any failure. The same
+// resolution as the tier clause (tierDetail with the brief), so the row says what the worker was told.
+function projectTierOf(cwd, prompt) {
   try {
-    const t = tierFor(cwd);
-    return { project_tier: t.tier || null, tier_source: t.source || null };
-  } catch { return { project_tier: null, tier_source: null }; }
+    const d = tierDetail(cwd, { brief: typeof prompt === 'string' ? prompt : '' });
+    return { project_tier: d.tier || null, tier_source: d.source || null, project_source: d.projectSource || null };
+  } catch { return { project_tier: null, tier_source: null, project_source: null }; }
 }
 
 export function writeSpawnRow({
@@ -130,7 +132,7 @@ export function writeSpawnRow({
       declared_type_resolved: declaredTypeRaw && declaredType !== declaredTypeRaw ? declaredType : null, // the canonical type an alias resolved to
       declared_role: declaredRole,       // the brief's ROLE: value (reviewer|fixer|lander|writer|docs|lookup|operate|other); null when absent or not one of those
       declared_risk: declaredRiskOf(input?.prompt), // the brief's RISK: value (low|mid|high); null when absent, unusable or inside a fenced block
-      ...projectTierOf(p?.cwd),          // project_tier (push|risk|gates) and tier_source (assigned|default|none) of the spawning session's project; null when unresolvable
+      ...projectTierOf(p?.cwd, input?.prompt), // project_tier (push|risk|gates), tier_source (assigned|default|none) and project_source (cwd|brief|none) of the spawn's project; null when unresolvable
       fit_trial: route?.trial ? true : false, // true when the fit judgement used a ROUTING TRIAL override, not the plain grid
       route_layer: route?.layer || null,  // profile | trial | grid: which resolveRoute() layer answered; null when no route
       route_profile_rev: route?.layer === 'profile' ? (route.profileRevision ?? null) : null, // routing-profile revision behind a profile answer; null for every other layer. The row's content is never logged.

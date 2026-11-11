@@ -22,6 +22,7 @@ ${AGENT_COMPANION_STATE_DIR}                      # override, mostly for tests
     spawns.jsonl                 # one record per subagent spawn (append-only)
     subagent-starts.jsonl        # one record per subagent actually starting
     denials.jsonl                 # one record per guard firing
+    question-dialog.jsonl         # one row per question dialog the plugin turned away (question_dialog)
     resource-gate.jsonl           # one row per resource-gate decision (denied, hinted, rewritten)
     unknown-agent-types.jsonl    # harness drift signal
     struggle.jsonl               # one row per scored operator prompt (scores only; struggle detector)
@@ -217,7 +218,8 @@ whose.
 | `declared_role` | string or null | the role named on the brief's first `ROLE:` line: `reviewer`, `fixer`, `lander`, `writer`, `docs`, `lookup`, `operate` or `other` (lower-cased); null when the brief has none or its first `ROLE:` value is not one of those. Measurement only: nothing routes or gates on it. A null here is what `role_line_nudge` reacts to |
 | `declared_risk` | `low` \| `mid` \| `high` \| null | the change risk named on the brief's first `RISK:` line (0.31.50): the self-review protocol puts it on the reviewer's brief after `TYPE`, `WRITER` and `ROLE`. Read like the other brief lines (a `RISK:` inside a fenced block, quote or comment is ignored); null when the brief has none or its first `RISK:` value is not one of the three. Measurement only: nothing routes or gates on it |
 | `project_tier` | `push` \| `risk` \| `gates` \| null | the project tier of the spawning session's folder (0.31.50; `/ac tier`), the change-risk table that decides what each risk needs before it lands. Named `project_tier` because `tier` already means a model tier in this plugin. Null when it could not be resolved. No project name or path is stored |
-| `tier_source` | `assigned` \| `default` \| `none` \| null | where `project_tier` came from (0.31.50): `assigned` (the user gave this project a tier), `default` (no entry for it; the default tier applies) or `none` (the folder is not in a repo; the default tier applies); null when it could not be resolved |
+| `tier_source` | `assigned` \| `default` \| `none` \| null | where `project_tier` came from (0.31.50): `assigned` (the user gave this project a tier), `default` (no entry for it; the default tier applies) or `none` (no project was resolved, see `project_source`; the default tier applies); null when it could not be resolved. The three values and their meaning do not change when the project comes from the brief: a project named by the brief gets `assigned` or `default` from the same lookup a session inside that repo gets |
+| `project_source` | `cwd` \| `brief` \| `none` \| null | where the project came from (0.31.51): `cwd` (the spawning session's folder is inside a repo), `brief` (it is not, and the absolute paths in the brief point at exactly one repo: paths that exist and are not under the Claude config folder, a worktree counting as its main repo, a repo under the session folder preferred over one elsewhere; the tier then comes from that repo's entry), or `none` (the folder is not in a repo and the brief names no repo, or several: the default tier applies). Null when it could not be resolved. A session inside a repo never reads the brief |
 | `lead_effort_live` | string or null | the main session's live effort at this spawn (the hook payload's `effort.level`, lower-cased), recorded only while the `lead-effort-check` rule is enabled and `lead_effort_live_check` is not false; null for a subagent's spawns, canary probes and whenever the check is off. Same value as `caller_effort` where recorded; kept separate so the check can be read on its own. The row is written on every main-session spawn; the once-per-session note (live below target) is delivered with the first allowed one only (the above-target operator message was dropped in 0.31.36), and neither changes any allow, deny or rewrite |
 | `lead_effort_target` | `xhigh` \| `high` \| null | the lead-effort target the live value was compared with: `xhigh` before the rollout id named by the plugin option `lead_effort_rollout_id` is reached in the state root's `rollout.json` (or when the option is empty or the id is absent), `high` from it; null exactly when `lead_effort_live` is null because the check did not run |
 | `fit_trial` | boolean | true when the fit judgement used a shipped ROUTING TRIAL (`taskTypes.<type>.override`) rather than the plain grid; equivalent to `route_layer == "trial"` |
@@ -292,7 +294,7 @@ rows only).
 | `post_pass_defect` | null | always null on the row itself (unknown); rows are append-only and never rewritten. The signal lives in `review-outcomes.jsonl` (below) and is folded in at read time (0.31.17) |
 | `declared_type`, `declared_role` | string \| null | the brief's `TYPE:` and `ROLE:` |
 | `caller_effort`, `caller_is_subagent`, `caller_tool_use_id` | copied | from the reviewer's own spawns.jsonl row; null when that row was not found |
-| `declared_risk`, `project_tier`, `tier_source` | string \| null | copied from the reviewer's own spawns.jsonl row, for a foreground and a background reviewer alike (0.31.50): the change risk its brief stated, and the project's tier and where it came from; null when that row was not found |
+| `declared_risk`, `project_tier`, `tier_source`, `project_source` | string \| null | copied from the reviewer's own spawns.jsonl row, for a foreground and a background reviewer alike (0.31.50; `project_source` 0.31.51): the change risk its brief stated, the project's tier and where it came from, and whether the project came from the session folder, the brief or neither; null when that row was not found |
 | `spawn_row_found` | boolean | whether that row was found |
 | `source` | `post-tool-use` \| `subagent-stop` | which path recorded it: foreground result or background SubagentStop (0.31.14; absent on rows written by 0.31.13, which are all `post-tool-use`) |
 | `agent_id` | string \| null | the background reviewer's agent id; null on the foreground path (0.31.14; absent on older rows) |
@@ -633,6 +635,20 @@ Two rows per run of `scripts/pr-wait.mjs`, both written by the script itself: a 
 | `error_class` | `permanent` \| `transient` \| absent | `end` only, on exit 3: `permanent` will not heal (no gh, not a repository, no such PR), `transient` is a retry budget used up |
 
 The effect for a review: each `end` row stands for `polls` gh calls that never reached the model, and one tool call in place of the repeated `gh` and sleep calls an agent would otherwise have made. Compare transcript counts of those calls with the hint on and off. A `passed` PR row always has `settle_waits` of at least 1 (the first green round only starts the clock); a high count means the check set kept changing, which is the late-registering check the settle rule exists for. `start` rows with no `end` count the runs the harness cut off.
+
+### `question-dialog.jsonl` — a question dialog turned away
+
+Written by `hooks/question-dialog.mjs` (0.31.51, option `question_dialog`) each time it refuses a main-session `AskUserQuestion` dialog, so the scout can count them later. One row per refusal; nothing for a dialog that was allowed. Its own stream, not `denials.jsonl`: a row there would count as a guard denial and hide a silent spawn guard from the zero-denials canary.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when the dialog was turned away |
+| `session_id` | string | the session |
+| `rule` | string | which rule fired, the first that held in this order: `helpers` (this session has helpers running), `live-sessions` (another session was active on this machine in the last two hours), `peer-message` (this session has received a message from another session), or `end-turn` (`question_dialog: end-turn`) |
+| `n` | number | what the rule counted: helpers running, other live sessions, distinct senders heard from; `0` for `end-turn` |
+| `mode` | string | the option's value when it fired (`auto` or `end-turn`; any other value reads as `auto`) |
+| `permission_mode` | string \| null | the payload's permission mode (`default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`; never `plan`, which is always allowed) |
 
 ### `worker-wait.jsonl` — the worker one-wait rule
 

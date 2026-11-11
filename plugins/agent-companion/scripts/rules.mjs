@@ -12,14 +12,16 @@
 //   node rules.mjs show <id>
 //   node rules.mjs add --id <id> --scope <scope> --then <text> [--when <regex>] [--note <text>]
 //   node rules.mjs add --id <id> --scope <scope> --then-file <path> [--when <regex>]
+//   node rules.mjs add --id <id> --scope event-turn --then <text> --then-later <text>   # or --then-later-file <path>
 //   node rules.mjs enable <id>
 //   node rules.mjs disable <id>
 //   node rules.mjs remove <id>            # user rules only; a built-in is disabled, not removed
 //   node rules.mjs test "<text>" [--scope user-prompt]
+//   node rules.mjs test "<raw prompt>" --scope event-turn   # simulate an event turn (see skills/standing-rules)
 
 import { readFileSync } from 'node:fs';
 import {
-  SCOPES, RULES_VERSION, rulesPath, readRules, appendUserRule, hasRawRuleEntry, setRuleEnabled, removeRuleEntry, matchRules, renderRules, effectiveRule,
+  SCOPES, RULES_VERSION, rulesPath, readRules, appendUserRule, hasRawRuleEntry, setRuleEnabled, removeRuleEntry, matchRules, renderRules, effectiveRule, isEventTurn,
 } from '../hooks/lib/rules.mjs';
 
 const argv = process.argv.slice(2);
@@ -66,7 +68,7 @@ try {
       }
       console.log(`Standing rules (${rulesPath()}):`);
       for (const r of rules) {
-        const cond = (r.scope === 'always' || r.scope === 'session-start') ? '(unconditional)' : (r.when || '(none)');
+        const cond = (r.scope === 'always' || r.scope === 'session-start') ? '(unconditional)' : r.scope === 'event-turn' ? '(every event turn)' : (r.when || '(none)');
         // The state it has RIGHT NOW: a rule scheduled for later shows off (or
         // its stored state, with an `after`) until its activeFrom is reached.
         console.log(
@@ -95,6 +97,8 @@ try {
       const note = val('--note');
       const thenFile = val('--then-file');
       let thenText = val('--then');
+      const thenLaterFile = val('--then-later-file');
+      let thenLaterText = val('--then-later');
 
       if (thenFile) {
         try {
@@ -104,11 +108,23 @@ try {
         }
       }
 
+      if (thenLaterFile) {
+        try {
+          thenLaterText = readFileSync(thenLaterFile, 'utf8');
+        } catch (e) {
+          usageError(`cannot read --then-later-file ${thenLaterFile}: ${e.message}`);
+        }
+      }
+
       if (!id) usageError('add requires --id');
       if (!KEBAB.test(id)) usageError(`--id "${id}" must be kebab-case (lowercase letters, digits, hyphens)`);
       if (!scope) usageError('add requires --scope');
       if (!SCOPES.includes(scope)) usageError(`--scope must be one of ${SCOPES.join(', ')}`);
       if (!thenText || !thenText.trim()) usageError('add requires --then <text> or --then-file <path> with non-empty content');
+
+      const laterGiven = thenLaterText !== undefined;
+      if (laterGiven && scope !== 'event-turn') usageError('--then-later / --then-later-file apply to scope "event-turn" only');
+      if (laterGiven && !thenLaterText.trim()) usageError('--then-later / --then-later-file needs non-empty text');
 
       const { rules } = readRules();
       if (findRule(rules, id)) usageError(`id "${id}" already exists — use enable/disable, or edit ${rulesPath()} directly to override a built-in`);
@@ -126,7 +142,7 @@ try {
       }
 
       persist(appendUserRule({
-        id, enabled: true, scope, when: when ?? null, then: thenText.trim(), gate: null, note: note ?? null, added: new Date().toISOString(),
+        id, enabled: true, scope, when: when ?? null, then: thenText.trim(), ...(laterGiven ? { thenLater: thenLaterText.trim() } : {}), gate: null, note: note ?? null, added: new Date().toISOString(),
       }), 'add');
       console.log(`rules add: added "${id}" (${scope}).`);
       break;
@@ -174,10 +190,13 @@ try {
       }
 
       console.log(`Testing against: ${JSON.stringify(text)}  (scope: ${scope})`);
+      const notEvent = scope === 'event-turn' && !isEventTurn(text);
+      if (notEvent) console.log('This text is NOT an event turn: it must be non-empty, carry a known event wrapper (task-notification, cross-session-message, side-sessions-event, ci-monitor-event, or an automated system-notification reminder) and hold no operator-typed text outside the wrappers.');
       console.log('(run with no --sessionId flag: a state gate like delegation-drift always reads as not-yet-drifted here — this is deliberate, see hooks/lib/rules.mjs)');
       for (const r of candidates) {
         let verdict;
-        if (!effectiveRule(r).enabled) verdict = 'disabled'; // as of now: a scheduled rule is judged by its activeFrom/after
+        if (!effectiveRule(r).enabled) verdict = 'disabled';
+        else if (notEvent) verdict = 'not an event turn'; // as of now: a scheduled rule is judged by its activeFrom/after
         else if (matchedIds.has(r.id)) verdict = 'MATCH';
         else if (r.scope === 'user-prompt' || r.scope === 'spawn') verdict = 'no text match (or gated off)';
         else verdict = 'gated off';

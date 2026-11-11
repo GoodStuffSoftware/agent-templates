@@ -42,10 +42,20 @@ install per machine: user scope only" under "Staying current".
 
 ## 1. Choose options
 
-Every feature is a toggle under `pluginConfigs.<qualified-plugin-id>.options`
-in `settings.json` — the `options` wrapper is required, omitting it fails
-silently, and `pluginConfigs` only takes effect in user or managed scope; the
-defaults are the recommended ones. Two are worth a conscious decision:
+Every feature is a toggle. The easiest place to set one is the settings home,
+one plain file the plugin reads before every other source:
+`/ac settings set <option> <value>` writes it (`/ac settings list` shows what
+differs from the default, `/ac settings get <option>` shows where a value comes
+from, `/ac settings where` prints the paths). It refuses an unknown name, a value
+of the wrong type and a `sensitive` option. The older place still works and is
+read after the settings home: a toggle under
+`pluginConfigs.<qualified-plugin-id>.options` in `settings.json` — the `options`
+wrapper is required, omitting it fails silently, and `pluginConfigs` only takes
+effect in user or managed scope. A user who already has options there can run
+`/ac settings migrate --dry-run`, then `/ac settings migrate`, to copy them into
+the settings home (it never edits `settings.json`; it lists the keys that can now
+be removed). The README's "Settings" section has the order the sources are read
+in. The defaults are the recommended ones. Two are worth a conscious decision:
 
 - `telemetry_endpoint` — empty means telemetry stays on this machine. Set it
   only if an Agent Audit ingest exists to receive it; the token goes in the
@@ -173,7 +183,7 @@ Plugin skills are namespaced by the plugin's name, so the full form is
 `/agent-companion:recommend`. A skill *inside* the plugin cannot escape that.
 The plugin therefore ships a user-level forwarder under `shims/ac/`; install it
 and `/ac recommend …`, `/ac evaluate …`, `/ac routing`, `/ac audit …`,
-`/ac tier …`, `/ac version`, `/ac setup`, `/ac scout` all work:
+`/ac tier …`, `/ac settings …`, `/ac version`, `/ac setup`, `/ac scout` all work:
 
 ```bash
 mkdir -p "$HOME/.claude/skills/ac" && cp "$AC/shims/ac/SKILL.md" "$HOME/.claude/skills/ac/SKILL.md"

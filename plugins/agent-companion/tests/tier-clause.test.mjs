@@ -5,7 +5,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook } from './helpers.mjs';
+import { spawnSync } from 'node:child_process';
+import { makeFixture, runHook, readJsonl, childEnv, PLUGIN_ROOT } from './helpers.mjs';
 import { buildTierClause, applyTierClause, tierKind, TIER_MARKER, REPLACES_SENTENCE } from '../hooks/lib/tier-clause.mjs';
 import { REVIEWER_TELL } from '../hooks/lib/tier-text.mjs';
 import { tiersPath } from '../hooks/lib/project-tier.mjs';
@@ -97,7 +98,8 @@ test('with no config file and outside any repo it is tier risk and does not erro
   const fx = makeFixture();
   try {
     const w = buildTierClause('bounded-feature', null, 'x', fx.dir, { protocol: true });
-    assert.match(w, /Project \(none: outside a repo\), project_tier risk \(Risk-tiered\)/);
+    assert.match(w, /Project not resolved from the session folder or the brief \(default tier applies\), project_tier risk \(Risk-tiered\)/);
+    assert.ok(!w.includes('outside a repo'), 'the clause no longer claims the worker is outside a repo');
     const w2 = buildTierClause('bounded-feature', null, 'x', undefined);
     assert.match(w2, /project_tier risk/);
   } finally {
@@ -248,4 +250,132 @@ test('none: spawns that neither write code nor review it get no clause, through 
   for (const b of briefs) assert.equal(count(sentPrompt(spawnGuard(repo, b)), TIER_MARKER), 0, b);
   // a writer still gets one
   assert.equal(count(sentPrompt(spawnGuard(repo, writerBrief())), TIER_MARKER), 1);
+}));
+
+test('landing: through the real hook the protocol and plain clauses carry the sentence; the leg clause does not', () => {
+  const D = 'No pull requests in this project: commit and push to the branch the brief names.';
+  const P = 'Land through a pull request.';
+  const cases = [[{ projects: { 'acme-app': { tier: 'risk', landing: 'direct' } } }, D], [{ landing: 'pr', projects: {} }, P], [{ projects: { 'acme-app': 'risk' } }, null]];
+  for (const [config, sentence] of cases) {
+    withRepo(({ repo }) => {
+      const plain = clauseOf(sentPrompt(spawnGuard(repo, writerBrief(), { subagent_type: 'general-purpose' })));
+      const proto = clauseOf(sentPrompt(spawnGuard(repo, writerBrief())));
+      const leg = clauseOf(sentPrompt(spawnGuard(repo, writerBrief('REVIEW: lead\n'))));
+      for (const c of [plain, proto]) assert.equal(c.trimEnd().endsWith(sentence || 'x-none'), !!sentence, c);
+      if (!sentence) { assert.ok(!plain.includes('pull request') && !proto.includes('pull request')); assert.ok(plain.length <= 300); }
+      assert.ok(!leg.includes('pull request'), 'the leg clause never changes');
+    }, config);
+  }
+});
+
+// ---- 0.31.51: the project from the brief, through the real hook ----
+
+const UNRESOLVED = /Project not resolved from (the session folder or the brief \(default tier applies\)|folder\/brief; default tier\.)/;
+const spawnRows = (fx) => readJsonl(join(fx.stateDir, 'telemetry', 'spawns.jsonl'));
+const slashes = (p) => p.replace(/\\/g, '/');
+
+// A session folder that is not a repo (`ws`), holding two child repos `acme-app` and `beta-app`.
+function withWorkspace(fn, config) {
+  const fx = makeFixture();
+  try {
+    const ws = join(fx.dir, 'ws');
+    const repo = join(ws, 'repos', 'acme-app');
+    const second = join(ws, 'repos', 'beta-app');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    mkdirSync(join(second, '.git'), { recursive: true });
+    if (config !== undefined) writeFileSync(tiersPath(), JSON.stringify(config));
+    return fn({ ...fx, ws, repo, second });
+  } finally {
+    fx.cleanup();
+  }
+}
+
+test('brief project, through the spawn guard: a writer brief naming a child repo gets that project and its tier, the floor command names the repo, and the row says brief', () => withWorkspace((fx) => {
+  const { ws, repo } = fx;
+  const proto = spawnGuard(ws, `${writerBrief()}\nWork in ${slashes(repo)}.`);
+  assert.equal(proto.status, 0, proto.stderr);
+  const pp = sentPrompt(proto);
+  assert.equal(count(pp, TIER_MARKER), 1, pp);
+  assert.match(pp, /Project acme-app, project_tier gates \(Full gates\)\./);
+  assert.ok(pp.includes(`project-tiers.mjs" floor <base>..<head> --repo "${slashes(repo)}"`), pp);
+  assert.ok(!pp.includes('outside a repo') && !UNRESOLVED.test(pp));
+  const plain = sentPrompt(spawnGuard(ws, `${writerBrief()}\nWork in ${slashes(repo)}.`, { subagent_type: 'general-purpose' }));
+  assert.match(clauseOf(plain), /^\[agent-companion: tier\] Project acme-app, project_tier gates\. You spawn no reviewer/);
+  const leg = sentPrompt(spawnGuard(ws, `${writerBrief('REVIEW: lead\n')}\nWork in ${slashes(repo)}.`));
+  assert.match(clauseOf(leg), /Project acme-app, project_tier gates\. You are one leg/);
+  const rows = spawnRows(fx);
+  assert.ok(rows.length >= 3);
+  for (const row of rows) assert.deepEqual([row.project_tier, row.tier_source, row.project_source], ['gates', 'assigned', 'brief']);
+}, { projects: { 'acme-app': 'gates', 'beta-app': 'push' } }));
+
+test('brief project, through the spawn guard: a reviewer brief naming a worktree of the child repo gets the reviewer clause for that project', () => withWorkspace((fx) => {
+  const { ws, repo } = fx;
+  const wt = join(ws, 'worktrees', 'feat-1');
+  const gitdir = join(repo, '.git', 'worktrees', 'n1');
+  mkdirSync(gitdir, { recursive: true });
+  writeFileSync(join(gitdir, 'commondir'), '../..\n');
+  mkdirSync(wt, { recursive: true });
+  writeFileSync(join(wt, '.git'), `gitdir: ${slashes(gitdir)}\n`);
+  const r = spawnGuard(ws, `TYPE: code-review\nWRITER: sonnet/high\nROLE: reviewer\nRISK: mid\nRead the diff in ${slashes(wt)}.`);
+  assert.equal(r.status, 0, r.stderr);
+  const rp = sentPrompt(r);
+  assert.equal(count(rp, TIER_MARKER), 1, rp);
+  assert.match(clauseOf(rp), /Project acme-app, project_tier push \(Push on your word\)\. Your checks depend on the RISK/);
+  assert.ok(clauseOf(rp).includes(`floor <base>..<head> --repo "${slashes(wt)}"`), "a worktree the brief names stays a worktree: HEAD in the range is its HEAD");
+  assert.ok(!clauseOf(rp).includes(`--repo "${slashes(repo)}"`));
+  const row = spawnRows(fx).at(-1);
+  assert.deepEqual([row.declared_risk, row.project_tier, row.tier_source, row.project_source], ['mid', 'push', 'assigned', 'brief']);
+  // the reviewer brief a writer builds from its own received brief (clause included) resolves the same way and ends with one clause
+  const writerSent = sentPrompt(spawnGuard(ws, `${writerBrief()}\nWork in ${slashes(repo)}.`));
+  const rev = sentPrompt(spawnGuard(ws, `TYPE: code-review\nROLE: reviewer\nThe brief, verbatim:\n${writerSent}\nRead the diff.`));
+  assert.equal(count(rev, TIER_MARKER), 1, rev);
+  assert.match(clauseOf(rev), /Project acme-app, project_tier push/);
+}, { projects: { 'acme-app': 'push' } }));
+
+test('brief project, through the spawn guard: nothing named, two repos named, or a session folder inside a repo', () => withWorkspace((fx) => {
+  const { ws, repo, second } = fx;
+  const lastRow = () => spawnRows(fx).at(-1);
+  // nothing named: the unresolved wording, no claim about being outside a repo, source none
+  const np = sentPrompt(spawnGuard(ws, writerBrief()));
+  assert.match(clauseOf(np), /^\[agent-companion: tier\] Project not resolved from the session folder or the brief \(default tier applies\), project_tier risk \(Risk-tiered\)\./);
+  assert.ok(!np.includes('outside a repo'));
+  assert.ok(!clauseOf(np).includes('--repo'));
+  assert.deepEqual([lastRow().project_tier, lastRow().tier_source, lastRow().project_source], ['risk', 'none', 'none']);
+  // the short kinds stay inside their limits with the new wording
+  const plain = clauseOf(sentPrompt(spawnGuard(ws, writerBrief(), { subagent_type: 'general-purpose' })));
+  const leg = clauseOf(sentPrompt(spawnGuard(ws, writerBrief('REVIEW: lead\n'))));
+  assert.ok(plain.length <= 300 && leg.length <= 450, `${plain.length} / ${leg.length}`);
+  assert.match(plain, UNRESOLVED);
+  assert.match(leg, UNRESOLVED);
+  // a reviewer with nothing named
+  const rev = sentPrompt(spawnGuard(ws, 'TYPE: code-review\nWRITER: sonnet/high\nROLE: reviewer\nRISK: low\nread it'));
+  assert.match(clauseOf(rev), /Project not resolved from the session folder or the brief \(default tier applies\), project_tier risk/);
+  assert.equal(lastRow().project_source, 'none');
+  // two repos named: unresolved
+  const two = sentPrompt(spawnGuard(ws, `${writerBrief()}\n${slashes(repo)} and ${slashes(second)}`));
+  assert.match(clauseOf(two), UNRESOLVED);
+  assert.equal(lastRow().project_source, 'none');
+  // a session folder inside a repo: the brief is not consulted, the row says cwd
+  const inside = sentPrompt(spawnGuard(second, `${writerBrief()}\nWork in ${slashes(repo)}.`));
+  assert.match(clauseOf(inside), /Project beta-app, project_tier push/);
+  assert.ok(!clauseOf(inside).includes('--repo'));
+  assert.deepEqual([lastRow().tier_source, lastRow().project_source], ['assigned', 'cwd']);
+}, { projects: { 'acme-app': 'gates', 'beta-app': 'push' } }));
+
+test('brief project, through the spawn guard: a 3 MB brief is handled promptly', () => withWorkspace((fx) => {
+  const { ws, repo } = fx;
+  // runHook caps the child's output at 1 MB (the hook echoes the whole brief back), so this one spawns the hook itself.
+  const prompt = `${writerBrief()}\n${slashes(repo)}\n${'/x/y/z and some words '.repeat(150_000)}`;
+  assert.ok(prompt.length > 3_000_000);
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, [join(PLUGIN_ROOT, 'hooks', 'spawn-guard.mjs')], {
+    input: JSON.stringify({ session_id: 'sess-tier-big', agent_type: 'main', cwd: ws, tool_input: { subagent_type: 'agent-companion:ac-sonnet-high', model: 'sonnet', description: 'x', prompt } }),
+    encoding: 'utf8', env: childEnv(), cwd: fx.dir, windowsHide: true, timeout: 30000, maxBuffer: 64 * 1024 * 1024,
+  });
+  const ms = Date.now() - t0;
+  assert.equal(r.status, 0, r.stderr);
+  const sent = String(JSON.parse(r.stdout).hookSpecificOutput?.updatedInput?.prompt || '');
+  assert.match(clauseOf(sent), /Project acme-app, project_tier risk/);
+  assert.equal(spawnRows(fx).at(-1).project_source, 'brief');
+  assert.ok(ms < 10000, `took ${ms} ms`);
 }));

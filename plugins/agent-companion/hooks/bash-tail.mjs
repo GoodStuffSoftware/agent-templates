@@ -38,7 +38,7 @@
 // The gate writes telemetry/resource-gate.jsonl (denied | hinted | rewritten |
 // fallback rows: class, mode, command length; never the command text).
 
-import { readStdin, opt, passthrough, noteAgentType, appendLog, telemetryDir, callerIsSubagent, isFixtureSession, claudeDir, homeRoot } from './lib/context.mjs';
+import { readStdin, opt, passthrough, noteAgentType, appendLog, telemetryDir, callerIsSubagent, isFixtureSession, claudeDir, homeRoot, writeAndExit } from './lib/context.mjs';
 import { homedir } from 'node:os';
 import { isServedCall } from './lib/delegation.mjs';
 import {
@@ -100,8 +100,8 @@ function finish(command, extra = {}) {
   if (gateText) out.additionalContext = gateText;
   if (!out.updatedInput && !out.additionalContext) passthrough();
   Object.assign(out, extra);
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: out }));
-  process.exit(0);
+  // updatedInput echoes the caller's whole command, so the reply can be large: send it whole (context.mjs).
+  writeAndExit(JSON.stringify({ hookSpecificOutput: out }));
 }
 
 try {
@@ -128,10 +128,10 @@ try {
       });
       if (d.action === 'deny') {
         gateRow(p, { event: 'denied', mode, classes: d.classes, command_chars: input.command.length });
-        process.stdout.write(JSON.stringify({
+        // The reason carries the wrapped command (tests/resource-gate.test.mjs), so it can be as large as the command.
+        writeAndExit(JSON.stringify({
           hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.text },
         }));
-        process.exit(0);
       }
       if (d.action === 'hint') {
         gateRow(p, { event: 'hinted', mode, classes: d.classes, command_chars: input.command.length });

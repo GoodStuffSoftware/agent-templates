@@ -28,7 +28,7 @@
 // to SAVE tokens — to ever approach that. See outputCap() and cutToCap() in lib/rules.mjs: the "(N more rules dropped)" note rides on top of the cap, so the cut never takes it.
 
 import { readStdin, opt, passthrough, sessionIsSubagent } from './lib/context.mjs';
-import { matchRules, renderRules, readRules, cutToCap } from './lib/rules.mjs';
+import { matchRules, renderRules, readRules, cutToCap, pickEventTurnText, markEventTurnTold } from './lib/rules.mjs';
 
 function emit(hookEventName, text) {
   process.stdout.write(JSON.stringify({
@@ -61,7 +61,11 @@ try {
 
     const { rules: all } = readRules();
     const order = new Map(all.map((r, i) => [r.id, i]));
-    const matched = [...always, ...prompted].sort(
+    // An event turn (nothing typed by the operator) also gets the 'event-turn' rules; a subagent never does.
+    const events = pickEventTurnText(
+      matchRules({ scope: 'event-turn', text: prompt, sessionId, subagent: sessionIsSubagent(p) }), sessionId,
+    );
+    const matched = [...always, ...prompted, ...events].sort(
       (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
     );
 
@@ -75,6 +79,8 @@ try {
         markReminded(sessionId);
       } catch { /* fail open: at worst the reminder repeats */ }
     }
+    const delivered = cutToCap(text);
+    markEventTurnTold(events, sessionId, delivered);
     emit('UserPromptSubmit', text);
   } else {
     passthrough(); // unknown/missing --event: never guess which payload shape this is

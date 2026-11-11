@@ -23,7 +23,7 @@
 // workerWaitDecision in lib/poll-guard.mjs); `hint` is the earlier hint-only behaviour.
 
 import {
-  readStdin, opt, passthrough, deny, callerTranscriptPath, tailRecords, callerIsSubagent, appendLog, recordDenial, isReviewerSession,
+  readStdin, opt, passthrough, deny, callerTranscriptPath, tailRecords, callerIsSubagent, appendLog, recordDenial, isReviewerSession, writeAndExit,
 } from './lib/context.mjs';
 import { pythonStdinGuard } from './lib/python-stdin.mjs';
 import { processGuard } from './lib/process-kill-guard.mjs';
@@ -47,11 +47,11 @@ function fakeNowMs() {
 // prompt for the ScheduleWakeup / Monitor call, which advice has no business
 // deciding. Without a decision the normal permission flow applies.
 function hint(systemMessage) {
-  process.stdout.write(JSON.stringify({
+  // The text can echo the Monitor call's description, so it goes out whole (writeAndExit, context.mjs).
+  writeAndExit(JSON.stringify({
     ...(systemMessage ? { systemMessage } : {}),
     hookSpecificOutput: { hookEventName: 'PreToolUse' },
   }));
-  process.exit(0);
 }
 
 try {
@@ -103,10 +103,9 @@ try {
     const finish = (advisory) => {
       const parts = [pyNote, advisory].filter(Boolean);
       if (!parts.length) passthrough();
-      process.stdout.write(JSON.stringify({
+      writeAndExit(JSON.stringify({
         hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: parts.join('\n\n') },
       }));
-      process.exit(0);
     };
     const mode = workerWaitMode(opt('worker_wait_guard', 'deny-repeat'));
     // A reviewer session (AC_REVIEWER_SESSION, hooks/lib/context.mjs) keeps the safety denials above and skips the worker one-wait advisory.

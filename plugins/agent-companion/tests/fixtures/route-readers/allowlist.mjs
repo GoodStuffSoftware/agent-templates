@@ -185,7 +185,7 @@ export const ALLOWED = {
   // lib/transcripts.mjs's report); the lines are unchanged.
   "scripts/lib/pricing.mjs": [
     "// override — one changed price does not require restating the table.",
-    "try { over = JSON.parse(readFileSync(join(stateRoot(), 'model-pricing.json'), 'utf8')); } catch { /* no override: expected */ }",
+    "try { over = JSON.parse(readFileSync(configFilePath('model-pricing.json', stateRoot()), 'utf8')); } catch { /* no override: expected */ }",
     "// at module scope and a test that writes an override needs the next call to",
   ],
   "scripts/lib/leak-scan-core.mjs": [

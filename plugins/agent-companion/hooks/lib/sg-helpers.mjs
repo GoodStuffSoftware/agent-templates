@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
   agentDefinition, classifyEffort, classifyModel, claudeDir, isLadderAgentName, ownAgentsDir,
-  projectAgentRoots, resolveRoute, routeLayerTag, rungFor, tailRecords, telemetryDir,
+  projectAgentRoots, resolveRoute, routeLayerTag, rungFor, tailRecords, telemetryDir, writeAndExit,
 } from './context.mjs';
 import { mergeLeadEffort } from './lead-effort-live.mjs';
 import { mergeRedoAlert } from './redo-alert.mjs';
@@ -59,7 +59,9 @@ export function allowWith(systemMessage, updatedInput, additionalContext) {
   const msg = typeof systemMessage === 'string' && systemMessage.trim() ? systemMessage : null;
   const ctx = typeof additionalContext === 'string' && additionalContext.trim() ? additionalContext : null;
   if (!msg && !updatedInput && !ctx) process.exit(0);
-  process.stdout.write(JSON.stringify({
+  // updatedInput echoes the caller's prompt, so the reply can be megabytes: writeAndExit
+  // (context.mjs) sends it whole before it exits.
+  writeAndExit(JSON.stringify({
     ...(msg ? { systemMessage: msg } : {}),
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
@@ -67,7 +69,6 @@ export function allowWith(systemMessage, updatedInput, additionalContext) {
       ...(ctx ? { additionalContext: ctx } : {}),
     },
   }));
-  process.exit(0);
 }
 
 // Several independent features each have their own opinion about the ONE

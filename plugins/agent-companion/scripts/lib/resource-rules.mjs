@@ -24,8 +24,11 @@ export function claudeHome(env = process.env) {
   return env.CLAUDE_CONFIG_DIR || join(env.AGENT_COMPANION_HOME_OVERRIDE || homedir(), '.claude');
 }
 
+// The same state root the rest of the plugin uses (context.mjs stateRootPath()): AGENT_COMPANION_STATE_DIR, else
+// <claude config dir>/agent-companion. AC_RESOURCE_RULES still names the file outright.
 export function userRulesPath(env = process.env) {
-  return env.AC_RESOURCE_RULES || join(claudeHome(env), 'agent-companion', 'config', 'resource-rules.json');
+  return env.AC_RESOURCE_RULES
+    || join(env.AGENT_COMPANION_STATE_DIR || join(claudeHome(env), 'agent-companion'), 'config', 'resource-rules.json');
 }
 
 function readJsonFile(file) {

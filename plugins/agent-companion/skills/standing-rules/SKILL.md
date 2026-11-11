@@ -36,6 +36,11 @@ directive lands:
 | `always` | *(ignored — fires every turn)* | the main session, every turn |
 | `session-start` | *(ignored — fires once)* | the main session, at start |
 | `spawn` | the brief of an agent being spawned | that subagent's prompt |
+| `event-turn` | *(ignored — fires on every event turn)* | the main session, that turn |
+
+An **event turn** is a turn nobody typed: a background worker's result, a message from another session, a side-session or CI event, or a timer's system notification started it. The hook recognises one when the prompt, with the harness's wrapper blocks removed, holds no operator text, and the raw prompt carries a known event wrapper (`task-notification`, `cross-session-message`, `side-sessions-event`, `ci-monitor-event`, or the automated `[SYSTEM NOTIFICATION - NOT USER INPUT]` reminder). A turn where you also typed something is not an event turn, and neither is a plain-text timer prompt. Subagents never get `event-turn` rules. Nothing else can reach these turns: a `user-prompt` rule sees only what you typed, so it reads an event turn as empty.
+
+A rule may carry an optional `thenLater`: its directive for every firing after the first in the same session (the first firing uses `then`). It is meant for `event-turn` rules, where a long first notice and a short reminder after it keep a long unattended job cheap. A rule without it repeats `then`. Set it with `rules.mjs add --scope event-turn --then <text> --then-later <text>` (or `--then-later-file <path>`); `show <id>` prints it.
 
 ## Commands
 
@@ -43,6 +48,7 @@ directive lands:
 node "$AC/scripts/rules.mjs" list                    # every rule, built-in and yours
 node "$AC/scripts/rules.mjs" show <id>
 node "$AC/scripts/rules.mjs" test "some text"        # which rules match it, and the exact injected block
+node "$AC/scripts/rules.mjs" test "<task-notification>done</task-notification>" --scope event-turn   # simulate an event turn
 node "$AC/scripts/rules.mjs" add --id <id> --scope <scope> --when '<regex>' --then '<directive>'
 node "$AC/scripts/rules.mjs" add --id <id> --scope <scope> --when '<regex>' --then-file <path>
 node "$AC/scripts/rules.mjs" disable <id>
@@ -79,6 +85,7 @@ documentation. `--when 'deploy|ship it|push to prod'` beats `--when
 | `delegate-reminder` | `always` | **only once this session has actually drifted** — see below |
 | `agent-brevity` | `spawn` | disabled; it exists so `list` shows you the spawn scope is available |
 | `poll-guard-doctrine` | `session-start` | every session — one completion wait, never per-item wakes (cache-advisor guard b, `hooks/poll-guard.mjs`) |
+| `event-turn-quiet` | `event-turn` | on every event turn, on by default: the agent updates its task list instead of writing a report, writes at most one line and only for something new, and keeps working. The first firing in a session injects the full text, later ones a short reminder (`thenLater`). Disable with `disable event-turn-quiet` |
 | `pr-wait-hint` | `session-start` | every session, while the `pr_wait` option is on — one line pointing at `scripts/pr-wait.mjs` (README "PR and CI wait"); `standing_rules: false` removes it too |
 | `lead-effort-check` | `session-start` | disabled by default (enable with `{"id":"lead-effort-check","enabled":true}`): an orchestrating session below xhigh states its effort once in its first report and that orchestration is tuned for xhigh, then continues; it never asks and never waits (the lead cannot self-set; the operator uses the app's effort control); silent at xhigh or above |
 
@@ -122,8 +129,9 @@ the hook that evaluates them has a five-second timeout.
 A rule in `standing-rules.json`, a row in the routing profile, or a
 `reviewerEffortCap` or `reviewerEffortFloor` entry in the per-user `model-tiers.json` may carry
 `activeFrom`: a zoned UTC timestamp (`"2026-10-12T08:00:00Z"`) or a change id
-looked up in `~/.claude/agent-companion/rollout.json`, one shared schedule of
-the form `{"<change-id>": "<ISO UTC timestamp>"}` (shared with the subagent
+looked up in `~/.claude/agent-companion/config/rollout.json` (a file at the old
+place, `~/.claude/agent-companion/rollout.json`, still works when there is no
+`config/` copy), one shared schedule of the form `{"<change-id>": "<ISO UTC timestamp>"}` (shared with the subagent
 context ceiling). A timestamp is UTC: `Z`, an offset, or no zone (read as UTC);
 an impossible date such as `2026-02-31` does not parse. Nothing needs to flip
 it: the check is made each time the config is read.

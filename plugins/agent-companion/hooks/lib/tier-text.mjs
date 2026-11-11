@@ -191,7 +191,14 @@ export function riskFloor(files) {
 }
 
 // The batch rule: how a writer treats the expensive e2e run. Self-review.mjs (leg B) imports it for step 0.
-export const BATCH_RULE = 'Finish every task in your brief first, with no self-chosen sections or milestone stops (chunking is the operator\'s call). Unit tests are cheap: run them while you work. E2E is the expensive run: hold it while other changes to the same repo are in flight and run it once for the whole batch, once per tree (note the tree id, git rev-parse HEAD^{tree}, with the result); a full e2e pass anywhere (local, push gate or CI) counts everywhere, and an unchanged tree is never rerun.';
+export const BATCH_RULE = 'Finish every task in your brief first, with no self-chosen sections or milestone stops (chunking is the operator\'s call). Unit tests are cheap: run them while you work. E2E is the expensive run: hold it while other changes to the same repo are in flight and run it once for the whole batch, once per tree (note the tree id, git rev-parse HEAD^{tree}, with the result); where a push gate or CI on the landing path runs the full suite or e2e, that run is the pass; where neither does (for example direct merges while CI runs only on pull requests), whoever lands runs it once locally before landing. An unchanged tree is never rerun.';
+
+// How work lands, from the user's `landing` setting (pr | direct). Unset or unknown: no sentence, the plugin says nothing.
+const LANDING_TEXT = {
+  direct: 'No pull requests in this project: commit and push to the branch the brief names.',
+  pr: 'Land through a pull request.',
+};
+export const landingSentence = (landing) => LANDING_TEXT[landing] || '';
 
 const RISK_REPORT = 'RISK: low|mid|high with the reason';
 
@@ -200,13 +207,17 @@ export function tierLine(tier, project, opts = {}) {
   if (!project) return '';
   const every = !!opts.reviewEveryChange;
   const t = TIERS[tier] || TIERS[DEFAULT_ID];
-  return `[agent-companion] Project ${project}, project_tier ${t.id} (${t.label}): low = ${lineCell(t, 'low', every)}; mid = ${lineCell(t, 'mid', every)}; high = ${lineCell(t, 'high', every)}. Writers state RISK low|mid|high when done. E2E once per batch and tree, never per change.`;
+  return `[agent-companion] Project ${project}, project_tier ${t.id} (${t.label}): low = ${lineCell(t, 'low', every)}; mid = ${lineCell(t, 'mid', every)}; high = ${lineCell(t, 'high', every)}. Writers state RISK low|mid|high when done. E2E once per batch and tree, never per change.${landingSentence(opts.landing) ? ` ${landingSentence(opts.landing)}` : ''}`;
 }
+// The project when neither the session folder nor the brief names a repo (the worker may still be in one the hook could not see).
+const NO_PROJECT = 'not resolved from the session folder or the brief (default tier applies)';
+const NO_PROJECT_SHORT = 'Project not resolved from folder/brief; default tier.';
 const head = (tier, project) => {
   const t = TIERS[tier] || TIERS[DEFAULT_ID];
-  return `Project ${project || '(none: outside a repo)'}, project_tier ${t.id} (${t.label}).`;
+  return `Project ${project || NO_PROJECT}, project_tier ${t.id} (${t.label}).`;
 };
-const floorSentence = `${RISK_FLOORS}. Floor for a range: ${FLOOR_COMMAND}`;
+// floorRepo: the repo folder when the project came from the brief (the worker's shell starts in the session folder, not in the repo).
+const floorSentence = (floorRepo) => `${RISK_FLOORS}. Floor for a range: ${FLOOR_COMMAND}${floorRepo ? ` --repo "${floorRepo}"` : ''}`;
 
 // kind: 'protocol' (a writer that runs the self-review protocol: picks its cell and spawns the reviewer),
 // 'leg' (REVIEW: lead: one leg of a larger job, the lead applies the table once to the whole diff),
@@ -216,15 +227,20 @@ export function writerClause(tier, project, opts = {}) {
   const kind = opts.kind || 'protocol';
   const h = head(tier, project);
   // The two short kinds land on the highest-volume spawns, so they carry no floors prose, no floor command and no tier label: the lead applies the floor.
-  const short = `Project ${project || '(none: outside a repo)'}, project_tier ${(TIERS[tier] || TIERS[DEFAULT_ID]).id}.`;
+  // The unresolved form is the same fact (the project was not found, the default tier applies; the lead applies the table, so
+  // these two kinds do not name the tier), worded to fit the 300 and 450 character limits of these two kinds.
+  const short = project ? `Project ${project}, project_tier ${(TIERS[tier] || TIERS[DEFAULT_ID]).id}.` : NO_PROJECT_SHORT;
   if (kind === 'leg') {
     return `${short} You are one leg of a larger job: you spawn no reviewer; the lead applies the review table once to the whole change. Finish every task in the brief, no self-chosen sections. Run unit tests for what you touch, no full suite, e2e, CI or full build: the lead runs one pass after all legs. Commit, push, then report ${RISK_REPORT}.`;
   }
+  // No landing sentence outside a git repo (no project): the session line is silent there too.
+  const landSentence = project ? landingSentence(opts.landing) : '';
+  const land = landSentence ? ` ${landSentence}` : '';
   if (kind === 'plain') {
-    return `${short} You spawn no reviewer: the lead applies the review table once to the whole change. Report ${RISK_REPORT}. Run unit tests for what you touch, no full suite or e2e: the lead runs one pass for the batch.`;
+    return `${short} You spawn no reviewer: the lead applies the review table once to the whole change. Report ${RISK_REPORT}. Run unit tests for what you touch, no full suite or e2e: the lead runs one pass for the batch.${land}`;
   }
   const cell = (r) => cellText(tier, r, 'writer', every);
-  return `${h} When done, state ${RISK_REPORT} and REVIEW: <the cell you applied> in your report. ${floorSentence}. Low: ${cell('low')}. Mid: ${cell('mid')}. High: ${cell('high')}. If your cell names a reviewer, spawn exactly one and mark its brief RISK: <your risk>; if it names none, skip the review step.`;
+  return `${h} When done, state ${RISK_REPORT} and REVIEW: <the cell you applied> in your report. ${floorSentence(opts.floorRepo)}. Low: ${cell('low')}. Mid: ${cell('mid')}. High: ${cell('high')}. If your cell names a reviewer, spawn exactly one and mark its brief RISK: <your risk>; if it names none, skip the review step.${land}`;
 }
 
 // The words every reviewer clause opens with after the project head; lib/tier-clause.mjs tells a reviewer clause from a writer clause by them.
@@ -234,5 +250,5 @@ export const REVIEWER_TELL = 'Your checks depend on the RISK the writer states i
 export function reviewerClause(tier, project, opts = {}) {
   const h = head(tier, project);
   const cell = (r) => cellText(tier, r, 'reviewer');
-  return `${h} ${REVIEWER_TELL}; you may raise it, never lower it, and with no RISK line judge it from the diff with these floors and say which you used. ${floorSentence}. Low: ${cell('low')}. Mid: ${cell('mid')}. High: ${cell('high')}.`;
+  return `${h} ${REVIEWER_TELL}; you may raise it, never lower it, and with no RISK line judge it from the diff with these floors and say which you used. ${floorSentence(opts.floorRepo)}. Low: ${cell('low')}. Mid: ${cell('mid')}. High: ${cell('high')}.`;
 }

@@ -25,6 +25,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { floorHour } from './days.mjs';
 import { settingInstant, readJournal, JOURNAL_FILE } from '../../../hooks/lib/settings-journal.mjs';
+import { configFilePath } from '../../../hooks/lib/context.mjs';
 import { gitClean } from '../git-env.mjs';
 
 export const CONFIG_JOURNAL_FILE = 'usage-config-digests.jsonl';
@@ -242,7 +243,7 @@ export function loadEventSources(root, { environment = {}, git } = {}) {
   const memo = {};
   const once = (k, fn) => () => (k in memo ? memo[k] : (memo[k] = fn()));
   const rolloutTable = once('rollout', () => {
-    const raw = readJsonFile(join(root, 'rollout.json'));
+    const raw = readJsonFile(configFilePath('rollout.json', root));
     const t = {};
     if (isObj(raw)) for (const [id, v] of Object.entries(raw)) { const ms = typeof v === 'string' ? parseIso(v.trim()) ?? Date.parse(v) : NaN; if (Number.isFinite(ms)) t[id] = ms; }
     return t;
