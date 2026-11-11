@@ -8,7 +8,7 @@
 
 import {
   readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync,
-  openSync, fstatSync, readSync, closeSync, unlinkSync, renameSync, appendFileSync,
+  openSync, fstatSync, readSync, closeSync, unlinkSync, renameSync, appendFileSync, writeSync,
 } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -3058,6 +3058,44 @@ export function callerTranscriptPath(p) {
     if (existsSync(candidate)) return candidate;
   }
   return (p && p.transcript_path) || null;
+}
+
+// Write a hook's reply to stdout in full, then exit 0 (never returns). Use this, not
+// process.stdout.write() followed by process.exit(), for any reply that can grow with the
+// caller's input (an updatedInput that echoes a prompt or a command).
+//
+// Why: Node writes to a pipe asynchronously on Linux and macOS, and process.exit()
+// discards what has not gone out yet. Claude Code reads a hook's stdout through a pipe, so
+// a reply over the pipe buffer (64 KB on Linux) arrived cut off, as invalid JSON, and the
+// hook's additions were lost. (Node docs, "A note on process I/O": files synchronous on
+// Windows and POSIX, TTYs asynchronous on Windows and synchronous on POSIX, pipes synchronous
+// on Windows and asynchronous on POSIX.)
+//
+// Here the bytes go out with fs.writeSync on fd 1 (blocking on a pipe; if the fd is
+// non-blocking, a full pipe throws EAGAIN and the loop waits and retries). A reader that
+// makes no progress for STDOUT_STALL_MS, a closed pipe or any other write error ends the
+// attempt: the hook then exits 0 with what it could send, which Claude Code treats as no
+// opinion. It never throws, so a hook's catch-all (passthrough) cannot run after it.
+const STDOUT_STALL_MS = 10_000;
+export function writeAndExit(text) {
+  try {
+    const buf = Buffer.from(String(text ?? ''), 'utf8');
+    let off = 0;
+    let lastProgress = Date.now();
+    let nap = null;
+    while (off < buf.length) {
+      try {
+        off += writeSync(1, buf, off, buf.length - off);
+        lastProgress = Date.now();
+      } catch (e) {
+        if (!e || (e.code !== 'EAGAIN' && e.code !== 'EWOULDBLOCK')) break;
+        if (Date.now() - lastProgress > STDOUT_STALL_MS) break;
+        if (!nap) nap = new Int32Array(new SharedArrayBuffer(4));
+        Atomics.wait(nap, 0, 0, 2); // 2 ms
+      }
+    }
+  } catch { /* fail open: exit 0 below */ }
+  process.exit(0);
 }
 
 // No allow() helper, on purpose: permissionDecision "allow" also skips the
