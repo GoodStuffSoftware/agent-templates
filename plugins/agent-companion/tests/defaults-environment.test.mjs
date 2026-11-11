@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import './isolate.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const shipped = (name) => JSON.parse(readFileSync(join(ROOT, 'config', name), 'utf8'));
