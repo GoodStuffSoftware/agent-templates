@@ -46,9 +46,10 @@ export function boundCwd(cwd) {
   return `${cwd.slice(0, CWD_MAX - 14)}~${createHash('sha1').update(cwd).digest('hex').slice(0, 12)}`;
 }
 
-function readJsonSafe(file) {
+function readJsonSafe(file, { stripBom = false } = {}) {
   try {
-    const o = JSON.parse(readFileSync(file, 'utf8'));
+    const text = readFileSync(file, 'utf8');
+    const o = JSON.parse(stripBom ? text.replace(/^﻿/, '') : text);
     return o && typeof o === 'object' && !Array.isArray(o) ? o : null;
   } catch { return null; }
 }
@@ -83,7 +84,7 @@ export function observeSettings(p, { env = process.env, dir = claudeDir() } = {}
   }
   // The settings home (<state root>/config/settings.json) is the first option source, so an edit there is a settings
   // change too. Parsed entries, not file bytes: a reformat is not a change. No file: no pairs, the digest as before.
-  const homeFile = readJsonSafe(settingsHomePath());
+  const homeFile = readJsonSafe(settingsHomePath(), { stripBom: true }); // the same BOM strip opt() applies to this file
   if (homeFile) for (const [k, v] of Object.entries(homeFile)) pairs.push(`home:${k}=${JSON.stringify(v)}`);
   pairs.sort();
   const options = pairs.length ? createHash('sha1').update(pairs.join('\n')).digest('hex').slice(0, 12) : 'none';

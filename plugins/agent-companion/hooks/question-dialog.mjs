@@ -4,7 +4,7 @@
 // refuses it with a reason that says what to do instead (QUESTION_DIALOG_DENY, the same text every time, no escalation).
 //
 // Option `question_dialog` (allow | end-turn | auto, default auto):
-//   allow     never interferes.
+//   allow     never interferes ("off" means the same).
 //   end-turn  always turns the dialog away.
 //   auto      turns it away only when someone could be waiting, checked cheapest first:
 //               helpers        this session has background helpers running (the worker ledger, hooks/lib/advisory-b.mjs)
@@ -59,7 +59,7 @@ function registryLiveCount(sessionId, now) {
 
 async function decide(p) {
   const mode = String(opt('question_dialog', 'auto')).trim().toLowerCase();
-  if (mode === 'allow') return null;
+  if (mode === 'allow' || mode === 'off') return null; // "off" is another word for allow
   if (mode === 'end-turn') return { rule: 'end-turn', n: 0 };
   // auto (and any value that is not one of the three)
   const adv = await import('./lib/advisory-b.mjs');

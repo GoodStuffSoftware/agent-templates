@@ -60,7 +60,7 @@ test('a fresh install: every subcommand works, exits 0 and creates nothing', () 
     }
     assert.ok(!existsSync(join(fx.stateDir, 'config')), 'no home folder was created');
     const list = cli(fx, ['list']);
-    assert.match(list.out, /none: every option is at its declared default/);
+    assert.match(list.out, /none: the home file sets nothing and every option is at its declared default/);
     assert.match(list.out, /settings\.json: .*\(not present\)/);
     const all = cli(fx, ['list', '--all']);
     assert.match(all.out, /main_compact_floor_tokens = 0/);
@@ -310,6 +310,90 @@ test('migrate never copies a sensitive option (fixture manifest) and reports a b
   } finally { fx.cleanup(); }
 });
 
+test('migrate: a config file that cannot be removed is left in place, with no second copy in config/', () => {
+  const fx = makeFixture();
+  try {
+    migrateFixture(fx);
+    // Simulates Windows: the old rollout.json is open elsewhere, so it can be neither renamed nor removed. The copy
+    // into config/ succeeds. fs methods are replaced before the CLI loads; syncBuiltinESMExports reaches its imports.
+    const pre = join(fx.dir, 'busy-preload.mjs');
+    writeFileSync(pre, [
+      "import fs from 'node:fs';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      "import { basename, dirname } from 'node:path';",
+      "const busy = (p) => basename(String(p)) === 'rollout.json' && basename(dirname(String(p))) !== 'config';",
+      "const boom = () => Object.assign(new Error('resource busy or locked'), { code: 'EBUSY' });",
+      'const rename = fs.renameSync; const unlink = fs.unlinkSync;',
+      'fs.renameSync = (a, b) => { if (busy(a)) throw boom(); return rename(a, b); };',
+      'fs.unlinkSync = (p) => { if (busy(p)) throw boom(); return unlink(p); };',
+      'syncBuiltinESMExports();',
+    ].join('\n'));
+    const r = cli(fx, ['migrate'], { node: ['--import', pathToFileURL(pre).href] });
+    assert.equal(r.status, 1, r.out + r.err);
+    assert.match(r.out, /rollout\.json left where it is: it is in use \(EBUSY\)/);
+    assert.ok(!/moved \(\d+\):[^\n]*rollout\.json/.test(r.out), 'rollout.json is not reported as moved');
+    assert.equal(readFileSync(join(fx.stateDir, 'rollout.json'), 'utf8'), '{"change-a":"2026-01-01T00:00:00Z"}', 'the old file is untouched');
+    assert.ok(!existsSync(join(fx.stateDir, 'config', 'rollout.json')), 'no second copy in config/');
+    assert.ok(existsSync(join(fx.stateDir, 'config', 'leak-tokens.txt')), 'the other files still move');
+    assert.ok(!existsSync(join(fx.stateDir, 'leak-tokens.txt')));
+    // Once nothing holds it, a second run moves it.
+    const again = cli(fx, ['migrate']);
+    assert.equal(again.status, 0, again.err);
+    assert.match(again.out, /moved \(1\): rollout\.json/);
+    assert.ok(!existsSync(join(fx.stateDir, 'rollout.json')));
+  } finally { fx.cleanup(); }
+});
+
+test('list shows a home key even at its default, and names the sources it overrides', () => {
+  const fx = makeFixture();
+  try {
+    let r = cli(fx, ['list']);
+    assert.match(r.out, /0 of \d+/, 'nothing set: nothing listed');
+    assert.equal(cli(fx, ['set', 'read_dedupe', 'true']).status, 0); // true is the declared default
+    writeClaudeSettings(fx, { pluginConfigs: { 'agent-companion@scratch-market': { options: { read_dedupe: false } } } });
+    r = cli(fx, ['list'], { env: { CLAUDE_PLUGIN_OPTION_READ_DEDUPE: '0' } });
+    assert.equal(r.status, 0, r.err);
+    const row = r.out.split('\n');
+    const i = row.findIndex((l) => l.startsWith('  read_dedupe = true'));
+    assert.ok(i >= 0, `read_dedupe row present: ${r.out}`);
+    assert.match(row[i + 1], /from the home file: .*; default true/);
+    assert.match(row[i + 2], /shadows: the environment \(CLAUDE_PLUGIN_OPTION_READ_DEDUPE\); Claude Code plugin options \(settings\.json\)/);
+    assert.ok(!/read_dedupe = false/.test(r.out));
+    // get agrees: same winner, same two overridden sources
+    const g = cli(fx, ['get', 'read_dedupe'], { env: { CLAUDE_PLUGIN_OPTION_READ_DEDUPE: '0' } });
+    assert.match(g.out, /from:\s+the home file/);
+    assert.match(g.out, /also set \(not used; the home file shadows them\)/);
+    assert.match(g.out, /the environment: CLAUDE_PLUGIN_OPTION_READ_DEDUPE = /);
+    // an option that differs from its default but is not in the home file is still listed, with nothing overridden
+    r = cli(fx, ['unset', 'read_dedupe']);
+    r = cli(fx, ['list']);
+    assert.match(r.out, /read_dedupe = false/);
+    assert.ok(!/shadows:/.test(r.out));
+  } finally { fx.cleanup(); }
+});
+
+test('get mentions a home file that cannot be used', () => {
+  const fx = makeFixture();
+  try {
+    writeHome(fx, '{ broken');
+    const r = cli(fx, ['get', 'read_dedupe']);
+    assert.equal(r.status, 0, r.err);
+    assert.match(r.out, /home file problem: .*not valid JSON/);
+  } finally { fx.cleanup(); }
+});
+
+test('set says so plainly when the settings folder cannot be created', () => {
+  const fx = makeFixture();
+  try {
+    mkdirSync(fx.stateDir, { recursive: true });
+    writeFileSync(join(fx.stateDir, 'config'), 'a file where the folder should be');
+    const r = cli(fx, ['set', 'read_dedupe', 'false']);
+    assert.equal(r.status, 1);
+    assert.match(r.err, /settings: could not create the folder .*config \(\w+\); nothing was written/);
+    assert.ok(!/at .*settings\.mjs:\d+/.test(r.err), 'no stack trace');
+  } finally { fx.cleanup(); }
+});
+
 test('a hook reads a value set with `set`', () => {
   const fx = makeFixture();
   try {
@@ -343,6 +427,11 @@ test('the journal option digest changes when the home file changes, and not for 
     assert.notEqual(digest(), a);
     writeHome(fx, '{ not json');
     assert.equal(digest(), 'none', 'a malformed home file adds nothing');
+    // A byte-order mark (PowerShell 5.1 and some editors write one) must not change the result: opt() reads it too.
+    writeHome(fx, '{"main_compact_floor_tokens": 400000}');
+    const plain = digest();
+    writeHome(fx, '﻿{"main_compact_floor_tokens": 400000}');
+    assert.equal(digest(), plain, 'same entries with a leading BOM: the same digest');
   } finally { fx.cleanup(); }
 });
 

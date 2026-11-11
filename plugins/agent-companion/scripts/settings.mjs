@@ -6,7 +6,7 @@
 // Claude Code's own settings files.
 //
 // Usage:
-//   node settings.mjs list [--all]    options that differ from their default (--all: every option), the config files, problems
+//   node settings.mjs list [--all]    options in the home file or differing from their default (--all: every option), the config files, problems
 //   node settings.mjs get <key>       effective value, where it comes from, the declared default, the other sources that set it
 //   node settings.mjs set <key> <value>   write the home file (refuses unknown keys, wrong types, sensitive options)
 //   node settings.mjs unset <key>     remove the entry from the home file
@@ -124,7 +124,10 @@ function readHomeForWrite() {
 }
 
 function writeHome(path, obj, style) {
-  mkdirSync(join(stateRootPath(), 'config'), { recursive: true });
+  const folder = join(stateRootPath(), 'config');
+  try { mkdirSync(folder, { recursive: true }); } catch (e) {
+    fail(`could not create the folder ${folder} (${e && e.code ? e.code : 'error'}); nothing was written`);
+  }
   let text = JSON.stringify(obj, null, style.indent);
   if (style.eol === '\r\n') text = text.replace(/\n/g, '\r\n');
   text = `${style.bom ? '﻿' : ''}${text}${style.eol}`;
@@ -138,15 +141,19 @@ function cmdList(args) {
   for (const a of args) { if (a === '--all') all = true; else usage(); }
   const specs = declaredOptions();
   const rows = specs.map((s) => explainOption(s.key));
-  const shown = all ? rows : rows.filter((e) => e.source !== 'default' && !same(e.value, e.default));
+  // A key present in the home file is always shown (even at the default: it pins the value against the other
+  // sources); so is every option whose effective value differs from the default.
+  const shown = all ? rows : rows.filter((e) => settingsHomeValue(e.key) !== undefined || (e.source !== 'default' && !same(e.value, e.default)));
   console.log(all
     ? `All ${rows.length} options:`
-    : `Options that differ from their default (${shown.length} of ${rows.length}; --all lists every option):`);
-  if (!shown.length) console.log('  none: every option is at its declared default');
+    : `Options in the home file or differing from their default (${shown.length} of ${rows.length}; --all lists every option):`);
+  if (!shown.length) console.log('  none: the home file sets nothing and every option is at its declared default');
   for (const e of shown) {
     const val = e.sensitive ? e.value : show(e.value);
     console.log(`  ${e.key} = ${val}`);
     console.log(`      from ${sourceText(e)}; default ${show(e.default)}${e.empty ? '; an empty value reads as unset' : ''}`);
+    const lower = overridden(e);
+    if (lower.length) console.log(`      shadows: ${lower.map((h) => `${SOURCE_LABEL[h.source] || h.source} (${h.detail})`).join('; ')}`);
   }
   const root = stateRootPath();
   console.log('');
@@ -169,7 +176,11 @@ function holders(key, sensitive) {
   const out = [];
   const home = settingsHomeValue(key);
   if (home !== undefined) out.push({ source: 'home', detail: settingsHomePath(), value: home });
+  const seen = new Set();
   for (const name of [`CLAUDE_PLUGIN_OPTION_${key.toUpperCase()}`, `CLAUDE_PLUGIN_OPTION_${key}`]) {
+    const id = process.platform === 'win32' ? name.toUpperCase() : name; // Windows names are case-insensitive: one variable, one row
+    if (seen.has(id)) continue;
+    seen.add(id);
     if (process.env[name] !== undefined) out.push({ source: 'env', detail: name, value: sensitive ? '(set, hidden)' : process.env[name] });
   }
   for (const e of pluginOptionEntries()) {
@@ -178,6 +189,11 @@ function holders(key, sensitive) {
     }
   }
   return out;
+}
+
+// The other sources that set this option while the one in `e` wins (shared by `list` and `get`).
+function overridden(e) {
+  return holders(e.key, e.sensitive).filter((h) => !(h.source === e.source && h.detail === e.detail));
 }
 
 function cmdGet(args) {
@@ -189,15 +205,17 @@ function cmdGet(args) {
   console.log(`  from:    ${sourceText(e)}${e.empty ? ' (empty, read as unset)' : ''}`);
   console.log(`  default: ${show(e.default)}`);
   console.log(`  type:    ${e.type}${e.sensitive ? ' (sensitive: never stored in the home file)' : ''}`);
-  const others = holders(key, e.sensitive).filter((h) => !(h.source === e.source && h.detail === e.detail));
+  const others = overridden(e);
   if (others.length) {
-    console.log('  also set (not used, a higher source wins):');
+    console.log(`  also set (not used; ${SOURCE_LABEL[e.source] || e.source} shadows them):`);
     for (const h of others) console.log(`    ${SOURCE_LABEL[h.source] || h.source}: ${h.detail} = ${typeof h.value === 'string' && h.value === '(set, hidden)' ? h.value : show(h.value)}`);
   } else {
     console.log('  no other source sets it');
   }
-  const prob = settingsHomeProblems().find((p) => p.key === key);
-  if (prob) console.log(`  home file entry ignored: ${prob.message}`);
+  for (const p of settingsHomeProblems()) {
+    if (p.key === key) console.log(`  home file entry ignored: ${p.message}`);
+    else if (p.key === null) console.log(`  home file problem: ${p.message}`);
+  }
 }
 
 function parseValue(spec, raw) {
@@ -298,6 +316,7 @@ function cmdMigrate(args) {
       newHome[key] = value;
       copied.push(key);
     }
+    if (copied.length && !dry) writeHome(h.path, newHome, h.style); // before the "copied" line: a failed write reports nothing as copied
     const line = (label, list) => { if (list.length) console.log(`  ${label} (${list.length}): ${list.join(', ')}`); };
     line(dry ? 'would copy' : 'copied', copied);
     line('already in the home file, kept as they are', kept);
@@ -305,7 +324,6 @@ function cmdMigrate(args) {
     line('skipped, not an option this plugin declares', undeclared);
     line('skipped, value does not match the declared type', badType);
     if (!winner.size) console.log('  no plugin options are set in Claude Code settings; nothing to copy');
-    if (copied.length && !dry) writeHome(h.path, newHome, h.style);
   }
 
   // 2. old top-level config files -> config/
@@ -320,8 +338,23 @@ function cmdMigrate(args) {
     if (!dry) {
       try {
         mkdirSync(confDir, { recursive: true });
-        try { renameSync(oldPath, newPath); } catch { copyFileSync(oldPath, newPath); unlinkSync(oldPath); }
+        try { renameSync(oldPath, newPath); } catch {
+          // No rename (another drive, or the file is open elsewhere): copy, then remove the old file. If the old file
+          // cannot be removed, undo the copy: there is never a second copy of a config file.
+          copyFileSync(oldPath, newPath);
+          try { unlinkSync(oldPath); } catch (ue) {
+            let undone = true;
+            try { unlinkSync(newPath); } catch { undone = false; }
+            const code = ue && ue.code ? ue.code : 'error';
+            console.log(undone
+              ? `  ${name} left where it is: it is in use (${code}), so it was not moved; close whatever has it open and run migrate again`
+              : `  ${name} could not be moved (${code}) and the copy made in config/ could not be undone: remove ${newPath} by hand`);
+            failed = true;
+            continue;
+          }
+        }
       } catch (e) {
+        try { if (existsSync(newPath) && existsSync(oldPath)) unlinkSync(newPath); } catch { /* best effort */ }
         console.log(`  could not move ${name} (${e && e.code ? e.code : 'error'}); left where it is`);
         failed = true;
         continue;

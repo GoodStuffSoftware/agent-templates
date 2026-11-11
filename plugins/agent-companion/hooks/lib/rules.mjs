@@ -124,7 +124,7 @@ export const COPYABLE_PROMPT_WHEN = [
 //
 // The target depends on the rollout: LEAD_EFFORT_CHECK_TEXT (xhigh) is the
 // wording until the rollout id named by the option lead_effort_rollout_id is
-// reached in the state root's rollout.json (an empty option: always xhigh), LEAD_EFFORT_CHECK_TEXT_HIGH from then on (the built-in
+// reached in the state root's config/rollout.json (an empty option: always xhigh), LEAD_EFFORT_CHECK_TEXT_HIGH from then on (the built-in
 // rule below carries it as its `after` overlay). One template, so the two
 // cannot drift apart. At or above the target the lead says nothing; below it
 // it states the effort once and asks nothing; the text never raises to max and never suggests lowering.
@@ -393,7 +393,7 @@ function compileRule(rule) {
 }
 
 // A scheduled rule (`activeFrom`, optionally `after`): the timestamp, or the
-// change id looked up in the state root's rollout.json, when it takes effect
+// change id looked up in the state root's config/rollout.json, when it takes effect
 // (context.mjs "Rollout schedule"). Until then the rule is exactly as authored
 // when it has an `after` overlay (the overlay is laid over it from the moment
 // `activeFrom` is reached: `enabled`, `then`, `when`, `gate`), and OFF when it

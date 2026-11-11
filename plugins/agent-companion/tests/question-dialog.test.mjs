@@ -95,6 +95,13 @@ test('allow: never interferes, with every trigger present', withFx((fx) => {
   assert.equal(denialRows(fx).length, 0);
 }));
 
+test('off is another word for allow (also in any letter case): never interferes, with every trigger present', withFx((fx) => {
+  helperRunning(fx); otherSession(fx);
+  silent(ask(fx, 'off', { transcript_path: transcriptWithPeer(fx) }));
+  silent(ask(fx, ' Off ', { transcript_path: transcriptWithPeer(fx) }));
+  assert.equal(denialRows(fx).length, 0);
+}));
+
 test('end-turn: always turns the dialog away, with no trigger present; one row names end-turn', withFx((fx) => {
   denied(ask(fx, 'end-turn'), 'end-turn', fx);
 }));
