@@ -38,8 +38,7 @@
 // agent type, agent_id, context tokens, tier), for the scout's daily count.
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { stateRootPath, modelTiers, ladderVariants } from './context.mjs';
+import { rolloutPath, modelTiers, ladderVariants } from './context.mjs';
 import { claimOnce, fmtTokens } from './subagent-context.mjs';
 
 export const CEILING_CHANGE_ID = 'context-ceiling';
@@ -72,7 +71,7 @@ export function ceilingRung(agentType, model) {
   return /opus/i.test(String(model || '')) ? 'opus' : null;
 }
 
-export function rolloutFile() { return join(stateRootPath(), 'rollout.json'); }
+export function rolloutFile() { return rolloutPath(); }
 
 export function nowMs() {
   const fake = process.env.AGENT_COMPANION_FAKE_NOW;

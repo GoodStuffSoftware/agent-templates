@@ -101,7 +101,7 @@ import { fileURLToPath } from 'node:url';
 import { scanCorpus, gapsOf, spawnBaselineOf, percentile } from './transcripts.mjs';
 import { pricingTable, classifyPricing, priceUsage, priceSpecFor, planPriceSpecFor } from './pricing.mjs';
 import {
-  stateRoot, stateDir, claudeDir, dataDir, writeJsonAtomic, modelTiers, classifyModel,
+  stateRoot, stateDir, claudeDir, dataDir, writeJsonAtomic, modelTiers, classifyModel, configFilePath,
 } from '../../hooks/lib/context.mjs';
 
 export const ADVISOR_SUMMARY_FILE = 'cache-advisor.json';
@@ -119,7 +119,7 @@ export function compactionConfig() {
   };
   try { cfg = { ...cfg, ...JSON.parse(readFileSync(shipped, 'utf8')) }; } catch { /* use defaults */ }
   let local = null;
-  try { local = JSON.parse(readFileSync(join(stateRoot(), 'compaction.json'), 'utf8')); } catch { /* none: expected */ }
+  try { local = JSON.parse(readFileSync(configFilePath('compaction.json', stateRoot()), 'utf8')); } catch { /* none: expected */ }
   if (local) cfg = { ...cfg, ...local, models: { ...(cfg.models || {}), ...(local.models || {}) } };
   _cfg = cfg;
   return _cfg;

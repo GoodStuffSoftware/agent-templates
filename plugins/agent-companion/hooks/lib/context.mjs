@@ -357,7 +357,7 @@ export function modelTiers() {
   // location under dataDir() is still honoured as a fallback so an override
   // written before this version keeps working until it is migrated.
   let over = null;
-  try { over = JSON.parse(readFileSync(join(stateRoot(), 'model-tiers.json'), 'utf8')); } catch { /* try legacy */ }
+  try { over = JSON.parse(readFileSync(configFilePath('model-tiers.json', stateRoot()), 'utf8')); } catch { /* try legacy */ }
   if (!over) {
     try { over = JSON.parse(readFileSync(join(dataDir(), 'model-tiers.json'), 'utf8')); } catch { /* no override: expected */ }
   }
@@ -779,7 +779,10 @@ export function effortFor(weight, kind = 'bounded', consequence = 'routine', { n
 // active, so existing config is unchanged. AGENT_COMPANION_FAKE_NOW moves the
 // clock when no `now` is passed (tests and sandbox before/after runs).
 export function rolloutPath() {
-  return join(stateRootPath(), 'rollout.json');
+  // config/ when it holds the file, else the old top-level place (also when neither exists: a reader finds nothing
+  // either way, and the path stays what it always was).
+  const inConfig = configFilePath('rollout.json');
+  return existsSync(inConfig) ? inConfig : join(stateRootPath(), 'rollout.json');
 }
 const ISO_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i;
 // ms since epoch for a rollout timestamp, or null when it is not one.
@@ -2240,6 +2243,69 @@ export function configDir() {
   return d;
 }
 
+// ONE folder for the user's own config files: <state root>/config/. Six files used to sit at the state-root top
+// level instead; they keep working from there when there is no config/ copy.
+export const LEGACY_TOPLEVEL_CONFIG_FILES = Object.freeze([
+  'model-tiers.json', 'plan-weights.json', 'compaction.json', 'model-pricing.json', 'rollout.json', 'leak-tokens.txt',
+]);
+
+// The path of one user config file, for a reader AND for a writer (the rule is the same): <root>/config/<name> when
+// that exists; else, for one of the six legacy names, the old top-level file when THAT exists; else <root>/config/<name>
+// (where a new file is created). So config/ wins when both exist, a writer updates the copy that is already there and
+// never makes a second one. Pure: it creates nothing. `root` defaults to the state-root path without creating it; a
+// caller that always created the state root before reading passes stateRoot() to keep that.
+export function configFilePath(name, root = stateRootPath()) {
+  const inConfig = join(root, 'config', name);
+  try {
+    if (existsSync(inConfig)) return inConfig;
+    if (LEGACY_TOPLEVEL_CONFIG_FILES.includes(name)) {
+      const old = join(root, name);
+      if (existsSync(old)) return old;
+    }
+  } catch { /* fail open: the caller's own read or write fails open too */ }
+  return inConfig;
+}
+
+// Every user-authored config file the plugin reads, for the reporting helper below (name, what reads it). Files that
+// are not read from config/<name> under the state root (the engine's shipped counterparts, the repo-local usage
+// layer, the token file an option points at) are not listed.
+export const KNOWN_CONFIG_FILES = Object.freeze([
+  { name: 'settings.json', note: 'plugin options (the settings home)' },
+  { name: 'model-tiers.json', note: 'user routing table, merged by alias' },
+  { name: 'plan-weights.json', note: 'user plan weights; written by scripts/calibrate-weights.mjs --apply' },
+  { name: 'compaction.json', note: 'user compaction figures' },
+  { name: 'model-pricing.json', note: 'user price table' },
+  { name: 'rollout.json', note: '{change-id: activeFrom UTC} schedule' },
+  { name: 'leak-tokens.txt', note: 'private tokens fed into every publication sweep' },
+  { name: 'routing-profile.json', note: 'routing profile rows' },
+  { name: 'standing-rules.json', note: 'standing rules, merged by id' },
+  { name: 'brevity.json', note: 'brevity toggles' },
+  { name: 'decision-register.json', note: 'decision register' },
+  { name: 'routine-pins.json', note: 'routine placement pins' },
+  { name: 'usage-analysis.json', note: 'usage-analysis user layer' },
+  { name: 'struggle-patterns.json', note: 'struggle detector patterns' },
+  { name: 'project-tiers.json', note: 'per-project tier pins' },
+  { name: 'resource-rules.json', note: 'resource queue rules (the AC_RESOURCE_RULES variable names another path)' },
+  { name: 'evidence-families.json', note: 'benchmark evidence families (bench only)' },
+]);
+
+// For each known config file: the path in effect, whether it exists, whether that path is the OLD top-level location,
+// and (old === true or false) whether a second copy sits at the old place that config/ shadows. Pure: creates nothing.
+export function configFileStatus(root = stateRootPath()) {
+  return KNOWN_CONFIG_FILES.map(({ name, note }) => {
+    const path = name === 'resource-rules.json' && process.env.AC_RESOURCE_RULES
+      ? process.env.AC_RESOURCE_RULES : configFilePath(name, root);
+    let exists = false;
+    try { exists = existsSync(path); } catch { exists = false; }
+    const legacy = LEGACY_TOPLEVEL_CONFIG_FILES.includes(name);
+    const oldPath = join(root, name);
+    const oldLocation = legacy && path === oldPath;
+    let shadowedOld = false;
+    if (legacy && !oldLocation) { try { shadowedOld = existsSync(oldPath); } catch { shadowedOld = false; } }
+    return { name, path, exists, oldLocation, shadowedOld, note };
+  });
+}
+
 // Inside a hook the harness sets CLAUDE_PLUGIN_DATA and this is exact. The
 // fallback matters for READERS — the audit, the doctor, the scout — which run
 // outside a hook. It previously guessed `data/agent-companion`, but the real
@@ -2319,6 +2385,7 @@ export function dataDirs() {
 // one, and the operator's settings.json is the fallback behind it.
 //
 // Resolution order, highest first:
+//   0. the settings home, <state root>/config/settings.json (see "The settings home" below)
 //   1. CLAUDE_PLUGIN_OPTION_<KEY> (uppercased), then ..._<key> (verbatim)
 //   2. pluginConfigs["<plugin>@<marketplace>"].options[<key>] in
 //      settings.local.json, then settings.json, under claudeDir()
@@ -2412,6 +2479,11 @@ function readSettings(file) {
 // actually DEFINES the key counts, so a second, emptier config for the same
 // plugin can never shadow the one the operator filled in.
 function optionFromSettings(key) {
+  return optionFromSettingsSource(key)?.value;
+}
+
+// Same lookup, also saying which settings file and pluginConfigs key supplied the value.
+function optionFromSettingsSource(key) {
   const name = pluginName();
   const preferred = `${name}@${currentMarketplace()}`;
   for (const file of SETTINGS_FILES) {
@@ -2428,7 +2500,7 @@ function optionFromSettings(key) {
     for (const k of matches) {
       const options = configs[k]?.options;
       if (options && typeof options === 'object'
-        && Object.prototype.hasOwnProperty.call(options, key)) return options[key];
+        && Object.prototype.hasOwnProperty.call(options, key)) return { value: options[key], file: join(claudeDir(), file), configKey: k };
     }
   }
   return undefined;
@@ -2454,13 +2526,156 @@ export function isCloudSession(env = process.env) {
   return env?.CLAUDE_CODE_REMOTE === 'true';
 }
 
-export function opt(key, fallback) {
-  let raw;
+// ---- The settings home ------------------------------------------------------------------------------------------
+// <state root>/config/settings.json: a flat JSON object keyed by the option names plugin.json `userConfig` declares.
+// It is the FIRST source in opt(); a key it does not hold resolves through the old chain unchanged. Claude Code's
+// docs (plugins-reference, "User configuration", read 2026-11-11): non-sensitive values live under pluginConfigs in
+// the user's settings.json, sensitive ones in the platform credential store, and every option is exported to hook
+// processes as CLAUDE_PLUGIN_OPTION_<KEY>. So a `sensitive` option never comes from this plain-text file.
+//
+// Nothing here may throw into a hook. A malformed file, a non-object, an unknown key, a sensitive key and a value
+// of the wrong type are each ignored (that entry falls through to the old chain) and recorded in a problems list
+// that settingsHomeProblems() returns. A problem never carries the value.
+const SETTINGS_HOME_FILE = 'settings.json';
+
+export function settingsHomePath(root = stateRootPath()) {
+  return join(root, 'config', SETTINGS_HOME_FILE);
+}
+
+let _manifestPathForTests = null; // a fixture plugin.json (to test `sensitive`), never set in production
+function manifestFile() {
+  return _manifestPathForTests || join(pluginRootDir(), '.claude-plugin', 'plugin.json');
+}
+
+// plugin.json userConfig -> Map(key -> { key, type, default, sensitive, title }), read once per manifest path.
+const _declaredCache = new Map();
+function declaredMap() {
+  const file = manifestFile();
+  if (_declaredCache.has(file)) return _declaredCache.get(file);
+  const map = new Map();
   try {
-    raw = process.env[`CLAUDE_PLUGIN_OPTION_${key.toUpperCase()}`]
-      ?? process.env[`CLAUDE_PLUGIN_OPTION_${key}`];
-    if (raw === undefined) raw = scalarOrUndefined(optionFromSettings(key));
-  } catch { raw = undefined; } // fail toward the default, never into the hook
+    const uc = JSON.parse(readFileSync(file, 'utf8'))?.userConfig;
+    if (uc && typeof uc === 'object' && !Array.isArray(uc)) {
+      for (const [k, v] of Object.entries(uc)) {
+        if (!v || typeof v !== 'object') continue;
+        map.set(k, {
+          key: k,
+          type: typeof v.type === 'string' ? v.type : 'string',
+          default: Object.prototype.hasOwnProperty.call(v, 'default') ? v.default : undefined,
+          sensitive: v.sensitive === true,
+          title: typeof v.title === 'string' ? v.title : '',
+        });
+      }
+    }
+  } catch { /* an unreadable manifest declares nothing, so the home file is ignored: the safe direction */ }
+  _declaredCache.set(file, map);
+  return map;
+}
+
+// Every declared option: { key, type, default, sensitive, title }, in manifest order.
+export function declaredOptions() {
+  return [...declaredMap().values()].map((s) => ({ ...s }));
+}
+
+function homeValueFits(type, v) {
+  if (type === 'boolean') return typeof v === 'boolean';
+  if (type === 'number') return typeof v === 'number' && Number.isFinite(v);
+  if (type === 'string' || type === 'directory' || type === 'file') return typeof v === 'string';
+  return false;
+}
+
+// path + manifest -> { path, exists, values: Map, problems: [] }. Parsed at most once per process and key; a missing
+// file is ONE failed read, remembered. resetSettingsHomeCache() forgets it (a writer that just changed the file).
+const _homeCache = new Map();
+function loadSettingsHome(path = settingsHomePath()) {
+  const ck = `${path}\u0000${manifestFile()}`;
+  const hit = _homeCache.get(ck);
+  if (hit) return hit;
+  const out = { path, exists: false, values: new Map(), problems: [] };
+  _homeCache.set(ck, out);
+  let text = null;
+  try {
+    text = readFileSync(path, 'utf8');
+    out.exists = true;
+  } catch (e) {
+    if (e && e.code !== 'ENOENT' && e.code !== 'ENOTDIR') {
+      out.problems.push({ key: null, kind: 'unreadable', message: `cannot read ${path} (${e.code || 'error'})` });
+    }
+    return out;
+  }
+  let obj;
+  try {
+    obj = JSON.parse(text.replace(/^﻿/, ''));
+  } catch {
+    out.problems.push({ key: null, kind: 'malformed', message: `${path} is not valid JSON; the whole file is ignored` });
+    return out;
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    out.problems.push({ key: null, kind: 'not-object', message: `${path} must hold one JSON object of option names and values; the whole file is ignored` });
+    return out;
+  }
+  const declared = declaredMap();
+  for (const key of Object.keys(obj)) {
+    const spec = declared.get(key);
+    if (!spec) { out.problems.push({ key, kind: 'unknown-key', message: `"${key}" is not an option this plugin declares; ignored` }); continue; }
+    if (spec.sensitive) { out.problems.push({ key, kind: 'sensitive-key', message: `"${key}" is a sensitive option and is never read from this file; ignored` }); continue; }
+    if (!homeValueFits(spec.type, obj[key])) {
+      out.problems.push({ key, kind: 'wrong-type', message: `"${key}" must be a ${spec.type}; ignored` });
+      continue;
+    }
+    out.values.set(key, obj[key]);
+  }
+  return out;
+}
+
+// The home value for an option, or undefined when the file or the key is absent or the entry was ignored.
+export function settingsHomeValue(key) {
+  try {
+    const v = loadSettingsHome().values;
+    return v.has(key) ? v.get(key) : undefined;
+  } catch { return undefined; }
+}
+
+// What was wrong with the home file, as [{ key, kind, message }] ([] when it is absent or clean).
+export function settingsHomeProblems() {
+  try { return loadSettingsHome().problems.map((p) => ({ ...p })); } catch { return []; }
+}
+
+// { path, exists, keys } for the file in effect; `keys` are the entries that were accepted.
+export function settingsHomeStatus() {
+  const h = loadSettingsHome();
+  return { path: h.path, exists: h.exists, keys: [...h.values.keys()] };
+}
+
+// Forget what was read (tests; a writer that changed the file and keeps running).
+export function resetSettingsHomeCache() {
+  _homeCache.clear();
+  _declaredCache.clear();
+}
+
+// Test seam: read userConfig from this manifest instead of the plugin's own. Pass null to undo.
+export function setManifestPathForTests(p) {
+  _manifestPathForTests = p || null;
+  resetSettingsHomeCache();
+}
+
+// The old chain plus the home, one path for opt() and for explainOption(), so they cannot disagree.
+// { raw: string|undefined, source: 'home'|'env'|'settings.local.json'|'settings.json'|'default', detail }.
+function resolveOptionRaw(key) {
+  const home = scalarOrUndefined(settingsHomeValue(key));
+  if (home !== undefined) return { raw: home, source: 'home', detail: settingsHomePath() };
+  for (const name of [`CLAUDE_PLUGIN_OPTION_${key.toUpperCase()}`, `CLAUDE_PLUGIN_OPTION_${key}`]) {
+    if (process.env[name] !== undefined) return { raw: process.env[name], source: 'env', detail: name };
+  }
+  const s = optionFromSettingsSource(key);
+  if (s) {
+    const raw = scalarOrUndefined(s.value);
+    if (raw !== undefined) return { raw, source: basename(s.file) === 'settings.local.json' ? 'settings.local.json' : 'settings.json', detail: s.file };
+  }
+  return { raw: undefined, source: 'default', detail: null };
+}
+
+function coerceOption(raw, fallback) {
   if (raw === undefined || raw === '') return fallback;
   if (typeof fallback === 'boolean') return !/^(false|0|no|off)$/i.test(raw);
   if (typeof fallback === 'number') {
@@ -2468,6 +2683,33 @@ export function opt(key, fallback) {
     return Number.isFinite(n) ? n : fallback;
   }
   return raw;
+}
+
+export function opt(key, fallback) {
+  let raw;
+  try {
+    raw = resolveOptionRaw(key).raw;
+  } catch { raw = undefined; } // fail toward the default, never into the hook
+  return coerceOption(raw, fallback);
+}
+
+// For one option key: its effective value and where that came from, plus the declared default. `value` is
+// computed against the DECLARED default (a call site may pass another fallback; that is not reported here).
+// source: 'home' | 'env' | 'settings.local.json' | 'settings.json' | 'default'; `detail` names the file or variable;
+// `empty` is true when the source holds an empty string (read as unset, so value is the default). A sensitive
+// option's value is never returned.
+export function explainOption(key) {
+  const spec = declaredMap().get(key) || null;
+  let r;
+  try { r = resolveOptionRaw(key); } catch { r = { raw: undefined, source: 'default', detail: null }; }
+  const base = { key, declared: !!spec, type: spec ? spec.type : null, default: spec ? spec.default : undefined, sensitive: !!spec?.sensitive };
+  if (spec?.sensitive) return { ...base, value: r.raw === undefined || r.raw === '' ? spec.default : '(set, hidden)', source: r.source, detail: r.detail, empty: r.raw === '' };
+  const typed = spec && spec.default !== undefined ? spec.default
+    : spec?.type === 'boolean' ? false : spec?.type === 'number' ? 0 : '';
+  const value = !spec ? r.raw
+    : r.raw === undefined || r.raw === '' ? spec.default
+      : coerceOption(r.raw, typed);
+  return { ...base, value, source: r.source, detail: r.detail, empty: r.raw === '' };
 }
 
 // Scout signal kinds the operator chose not to hear about (option

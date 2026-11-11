@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { recordRun, ackCommandFor, DEFAULT_REPEAT_DAYS } from './lib/scout-handoff.mjs';
 import {
   modelTiers, tierEffortProblems, telemetryDir as resolveTelemetryDir, stateFile, claudeDir, opt, parseSemver, semverBelow,
-  homeRoot, stateRoot, resolveRoute, isLadderAgentName, routingProfileState,
+  homeRoot, stateRoot, configFilePath, resolveRoute, isLadderAgentName, routingProfileState,
   readInstalledPlugins, pluginEntries, scopeKey, versionBelow, compareVersions,
   LOAD_SETTLE_MS, TRUSTED_LOAD_SOURCES, scoutSuppressed, isStrayScopeEntry,
 } from '../hooks/lib/context.mjs';
@@ -72,7 +72,7 @@ const splitListLocal = (v) => (v ? String(v).split(/[,;]/).map((s) => s.trim()).
 function publicationTokenFile() {
   const configured = opt('publication_leak_token_file', '');
   if (configured) return configured;
-  const defaultPath = join(stateRoot(), 'leak-tokens.txt');
+  const defaultPath = configFilePath('leak-tokens.txt', stateRoot());
   return existsSync(defaultPath) ? defaultPath : null;
 }
 

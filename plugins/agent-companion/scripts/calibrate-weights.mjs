@@ -20,7 +20,7 @@
 import { readFileSync, writeFileSync, readdirSync, renameSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { claudeDir, stateRootPath, stateRoot, classifyModel } from '../hooks/lib/context.mjs';
+import { claudeDir, stateRootPath, stateRoot, configFilePath, classifyModel } from '../hooks/lib/context.mjs';
 import { planWeights } from '../hooks/lib/plan-allowance.mjs';
 import { parseUsage } from '../hooks/lib/plan-meter.mjs';
 
@@ -376,7 +376,7 @@ export function applyPlan(result, current = planWeights(), today = new Date().to
   return { patch, decisions };
 }
 
-export function writeUserFile(patch, file = join(stateRoot(), 'plan-weights.json')) {
+export function writeUserFile(patch, file = configFilePath('plan-weights.json', stateRoot())) { // where the file already is (config/ first, then the old top-level place); config/ when new
   let cur = {};
   try { cur = JSON.parse(readFileSync(file, 'utf8')); } catch { /* none yet */ }
   if (!cur || typeof cur !== 'object' || Array.isArray(cur)) cur = {};

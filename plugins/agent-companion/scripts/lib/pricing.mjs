@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateRoot, modelTiers, classifyModel } from '../../hooks/lib/context.mjs';
+import { stateRoot, configFilePath, modelTiers, classifyModel } from '../../hooks/lib/context.mjs';
 
 export const PRICE_BASIS = 'price-derived';
 
@@ -24,7 +24,7 @@ export function pricingTable() {
   // Same by-alias merge convention as hooks/lib/context.mjs's modelTiers()
   // override — one changed price does not require restating the table.
   let over = null;
-  try { over = JSON.parse(readFileSync(join(stateRoot(), 'model-pricing.json'), 'utf8')); } catch { /* no override: expected */ }
+  try { over = JSON.parse(readFileSync(configFilePath('model-pricing.json', stateRoot()), 'utf8')); } catch { /* no override: expected */ }
   if (over) cfg = { ...cfg, ...over, models: { ...(cfg.models || {}), ...(over.models || {}) } };
   _pricing = cfg;
   return _pricing;
