@@ -129,7 +129,7 @@ Until this fix the guard required `agent_type === "main"`, which no real main-th
 
 ## Question dialog
 
-A question dialog (Claude Code's `AskUserQuestion` tool) holds the session's turn open until you answer, and everything sent to that session waits behind it: messages from other agents and worker results. Measured on one machine over 78 dialogs (2026-11-01 to 11-11): queued messages waited a median of 72 minutes (p90 over 7 hours), 31 dialogs had worker results or messages from other agents stuck behind them, and the worst held 17 items for 473 minutes. A question asked in the closing message of a turn blocks nothing: 20 of 20 sampled messages to such sessions were handled normally.
+A question dialog (Claude Code's `AskUserQuestion` tool) holds the session's turn open until you answer, and everything sent to that session waits behind it: messages from other agents and worker results. Measured on one machine over 78 dialogs (2026-11-01 to 11-11): queued messages waited a median of 72 minutes (p90 over 7 hours), 31 dialogs had worker results or messages from other agents stuck behind them, the worst held 17 items for 473 minutes, and a question asked in the closing message of a turn blocked nothing (20 of 20 sampled messages to such sessions were handled normally).
 
 So `hooks/question-dialog.mjs` turns the dialog away in the **main session** and tells the agent what to do instead: carry on with everything that does not depend on the answer, then put the question, the options and a recommendation in the closing message of the turn (or the app's end-of-turn question tool, if there is one) and end the turn. The text is the same every time; a second attempt gets no extra warning. A subagent's own call is never touched, and the hook never blocks any other tool.
 
@@ -139,7 +139,7 @@ Option `question_dialog`:
 - `end-turn`: always turned away.
 - `allow`: the plugin never interferes.
 
-A session in plan mode always gets its dialog (you are at the keyboard, planning). Any problem reading state, or an input the hook cannot read, lets the dialog through. Each time the hook turns a dialog away it writes one row to `denials.jsonl` (guard `question-dialog`; the `detail` names the rule that fired: `helpers`, `live-sessions`, `peer-message` or `end-turn`; see `docs/TELEMETRY.md`). Set it with `/ac settings set question_dialog allow` (or `end-turn`, `auto`).
+A session in plan mode always gets its dialog (you are at the keyboard, planning). Any problem reading state, or an input the hook cannot read, lets the dialog through. Each time the hook turns a dialog away it writes one row to `telemetry/question-dialog.jsonl` (the rule that fired: `helpers`, `live-sessions`, `peer-message` or `end-turn`; see `docs/TELEMETRY.md`). A busy session counts as live while its process is alive, because Claude Code stamps its record on a status change only. Set it with `/ac settings set question_dialog allow` (or `end-turn`, `auto`).
 
 ## Bash output tail
 

@@ -27,10 +27,12 @@ const ask = (fx, mode, extra = {}, env = {}) => runHook('hooks/question-dialog.m
 const withFx = (fn) => () => { const fx = makeFixture(); try { fn(fx); } finally { fx.cleanup(); } };
 
 function denialRows(fx) {
-  const f = join(fx.stateDir, 'telemetry', 'denials.jsonl');
+  const f = join(fx.stateDir, 'telemetry', 'question-dialog.jsonl');
   if (!existsSync(f)) return [];
-  return readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.guard === 'question-dialog');
+  return readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
+// The refusal is not a guard denial: denials.jsonl stays empty, or the scout's zero-denials canary would be blind.
+const noGuardDenials = (fx) => assert.equal(existsSync(join(fx.stateDir, 'telemetry', 'denials.jsonl')), false);
 const silent = (r) => { assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout.trim(), '', 'no output: the dialog goes through'); };
 const denied = (r, rule, fx) => {
   assert.equal(r.status, 0, r.stderr);
@@ -39,10 +41,14 @@ const denied = (r, rule, fx) => {
   assert.equal(r.json.hookSpecificOutput.permissionDecisionReason, DENY_TEXT);
   const rows = denialRows(fx);
   assert.equal(rows.length, 1, 'one telemetry row per refusal');
-  assert.equal(rows[0].outcome, 'deny');
-  assert.equal(rows[0].tool_name, 'AskUserQuestion');
+  assert.equal(rows[0].v, 2);
+  assert.equal(rows[0].rule, rule);
   assert.equal(rows[0].session_id, SID);
-  assert.match(rows[0].detail, new RegExp(`^rule=${rule}\\b`));
+  assert.ok(Number.isFinite(Date.parse(rows[0].at)));
+  assert.equal(rows[0].n, rule === 'end-turn' ? 0 : 1);
+  assert.equal(rows[0].mode, rule === 'end-turn' ? 'end-turn' : 'auto');
+  assert.equal(rows[0].permission_mode, 'default');
+  noGuardDenials(fx);
 };
 
 // Triggers -------------------------------------------------------------------------------------------------------
@@ -148,7 +154,8 @@ test('the order is cheapest first: helpers, then live sessions, then a peer mess
   helperRunning(fx); otherSession(fx);
   const r = ask(fx, 'auto', { transcript_path: transcriptWithPeer(fx) });
   assert.equal(decisionOf(r.json), 'deny');
-  assert.match(denialRows(fx)[0].detail, /^rule=helpers n=1$/);
+  assert.equal(denialRows(fx)[0].rule, 'helpers');
+  assert.equal(denialRows(fx)[0].n, 1);
 }));
 
 test('plan mode is always allowed, even with end-turn and every trigger', withFx((fx) => {
@@ -230,6 +237,43 @@ test('an unreadable state folder does not stop a refusal that needs no state (en
   assert.equal(decisionOf(r.json), 'deny');
   assert.equal(r.json.hookSpecificOutput.permissionDecisionReason, DENY_TEXT);
 }));
+
+test('the order continues: live sessions beat a peer message', withFx((fx) => {
+  otherSession(fx);
+  const r = ask(fx, 'auto', { transcript_path: transcriptWithPeer(fx) });
+  assert.equal(decisionOf(r.json), 'deny');
+  assert.equal(denialRows(fx)[0].rule, 'live-sessions');
+}));
+
+test('auto: a session that has been busy for hours counts while its process is alive; a dead process or an idle old record does not', withFx((fx) => {
+  const d = join(fx.dir, '.claude', 'sessions');
+  mkdirSync(d, { recursive: true });
+  const old = Date.now() - 5 * HOUR;
+  const rec = (pid, status) => writeFileSync(join(d, `${pid}.json`), JSON.stringify({ pid, sessionId: `sess-qd-busy-${pid}`, startedAt: old, updatedAt: old, statusUpdatedAt: old, status }));
+  // a process that has exited: its pid is not alive now
+  const gone = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8', windowsHide: true });
+  rec(Number(gone.stdout), 'busy');
+  rec(process.pid, 'idle'); // idle and old: not live, even though the process exists
+  silent(ask(fx, 'auto'));
+  rec(process.pid, 'busy'); // busy for 5 hours and the process exists: live
+  denied(ask(fx, 'auto'), 'live-sessions', fx);
+}));
+
+test('the option can come from the settings home', withFx((fx) => {
+  mkdirSync(join(fx.stateDir, 'config'), { recursive: true });
+  writeFileSync(join(fx.stateDir, 'config', 'settings.json'), JSON.stringify({ question_dialog: 'end-turn' }));
+  denied(ask(fx, null), 'end-turn', fx);
+  writeFileSync(join(fx.stateDir, 'config', 'settings.json'), JSON.stringify({ question_dialog: 'allow' }));
+  silent(ask(fx, null));
+  // the settings home is read before the environment
+  helperRunning(fx);
+  silent(ask(fx, 'end-turn'));
+}));
+
+test('plugin.json: the option text names the stream the rows go to', () => {
+  const manifest = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
+  assert.match((manifest.userConfig || manifest.options).question_dialog.description, /question-dialog\.jsonl/);
+});
 
 test('registered in hooks.json on exactly ^AskUserQuestion$ (the publish check keeps its own entry); question_dialog is declared with default auto', () => {
   const hooks = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks.PreToolUse;

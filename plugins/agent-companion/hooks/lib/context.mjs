@@ -3459,7 +3459,7 @@ export const REVIEWER_OFF_HOOKS = Object.freeze([
   'self-update', 'scout-surface', 'capacity-probe', 'ladder-check', 'git-brief', 'telemetry-send',
   // spawn, worker and routine hooks (their tools are not in a reviewer's toolset)
   'spawn-guard', 'spawn-log', 'resume-guard', 'subagent-brevity', 'review-verdict', 'runaway-check', 'runaway-notice',
-  'chip-check', 'publish-check', 'cloud-routine-pin', 'routine-placement', 'routine-pin-check',
+  'chip-check', 'publish-check', 'question-dialog', 'cloud-routine-pin', 'routine-placement', 'routine-pin-check',
 ]);
 if (isHookProcess() && isReviewerSession() && REVIEWER_OFF_HOOKS.includes(basename(process.argv[1]).replace(/.mjs$/i, ''))) process.exit(0);
 
