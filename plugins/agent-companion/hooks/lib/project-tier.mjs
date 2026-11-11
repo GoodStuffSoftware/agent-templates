@@ -22,7 +22,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { configDir } from './context.mjs';
+import { configDir, homeRoot } from './context.mjs';
 
 export const TIER_IDS = ['push', 'risk', 'gates'];
 export const DEFAULT_TIER = 'risk';
@@ -96,6 +96,72 @@ export function projectOf(cwd) {
   return repoOf(cwd)?.name || null;
 }
 
+// --- The project from the brief (a spawn whose session folder is not inside a repo) ---
+// A lead often starts a session in a folder that HOLDS several repos and hand-made worktrees; the workers then
+// work in those. The session folder alone says "no project", so the repo is read from the absolute paths the
+// brief names. Bounded: at most MAX_BRIEF_MATCHES path-shaped tokens are looked at, at most MAX_BRIEF_CANDIDATES
+// distinct ones are checked on disk, and a token longer than MAX_BRIEF_PATH is skipped unread.
+const MAX_BRIEF_CANDIDATES = 40;
+const MAX_BRIEF_MATCHES = 4000;
+const MAX_BRIEF_PATH = 1000;
+// A path starts at a drive letter (C:/ or C:\), "~/" or a POSIX "/", and not in the middle of a word, a URL
+// or a relative path (the character before it is none of the excluded ones). It ends at white space or a quote.
+const BRIEF_PATH_RE = /(?<![A-Za-z0-9_.~/\\:-])(?:[A-Za-z]:[\\/]|~[\\/]|\/(?![/\s]))[^\s"'`<>|*?[\]\u0000]*/g;
+const PLUGIN_LINE = '[agent-companion:'; // lines the plugin itself added to a brief (a tier clause names plugin paths)
+
+const within = (path, root) => path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`);
+
+// A brief token -> an absolute, normalised path, or null (not usable). Never touches the disk.
+function briefCandidate(raw) {
+  if (raw.length > MAX_BRIEF_PATH) return null;
+  let s = raw.replace(/:\d+(?::\d+)?$/, '').replace(/[\s.,;:!?)\]}>'"`*]+$/, '');
+  if (s.length < 3) return null;
+  if (/^[a-zA-Z]:/.test(s)) {
+    if (process.platform !== 'win32') return null; // a drive-letter path means nothing here
+    return normalisePath(s);
+  }
+  if (s.startsWith('~')) s = join(homeRoot(), s.slice(2));
+  return normalisePath(s);
+}
+
+// The one repo the brief points at, or null. `sessionCwd` is the (non-repo) folder the session works in.
+// Candidates: absolute paths in the brief that exist and are not under the Claude config folder; each resolves to its
+// repo with repoOf (a worktree is its main repo). A repo located under the session folder (its main checkout or the
+// worktree the brief names is under it) beats a repo elsewhere: exactly one distinct repo there is the answer; with
+// none there, exactly one distinct repo among all candidates is. Zero or several: null. Never throws.
+export function repoFromBrief(brief, sessionCwd) {
+  try {
+    let text = typeof brief === 'string' ? brief : '';
+    if (!text) return null;
+    if (text.includes(PLUGIN_LINE)) text = text.split('\n').filter((l) => !l.includes(PLUGIN_LINE)).join('\n');
+    const excluded = [join(homeRoot(), '.claude'), process.env.CLAUDE_CONFIG_DIR].filter(Boolean).map(pathKey);
+    const session = sessionCwd ? pathKey(sessionCwd) : null;
+    const seen = new Set();
+    const repos = new Map(); // main root (lower case) -> { repo, under }
+    let matches = 0;
+    for (const m of text.matchAll(BRIEF_PATH_RE)) {
+      matches += 1;
+      if (matches > MAX_BRIEF_MATCHES || seen.size >= MAX_BRIEF_CANDIDATES) break;
+      const abs = briefCandidate(m[0]);
+      if (!abs) continue;
+      const key = abs.toLowerCase();
+      if (seen.has(key) || excluded.some((e) => within(key, e))) continue;
+      seen.add(key);
+      if (!existsSync(abs)) continue;
+      const repo = repoOf(abs);
+      if (!repo) continue;
+      const mk = repo.mainRoot.toLowerCase();
+      const under = !!session && (within(mk, session) || within(repo.ownRoot.toLowerCase(), session));
+      repos.set(mk, { repo, under: under || !!repos.get(mk)?.under });
+    }
+    const all = [...repos.values()];
+    const here = all.filter((r) => r.under);
+    const pool = here.length ? here : all;
+    return pool.length === 1 ? pool[0].repo : null;
+  } catch { /* fail open: no project from the brief */ }
+  return null;
+}
+
 export function tiersPath() {
   return join(configDir(), 'project-tiers.json');
 }
@@ -166,7 +232,7 @@ export function loadTiers() {
 }
 
 // The full answer for a folder:
-// { project, tier, landing, source: 'assigned'|'default'|'none', by: 'path'|'name'|null, key,
+// { project, tier, landing, source: 'assigned'|'default'|'none', by: 'path'|'name'|null, key, projectSource: 'cwd'|'brief'|'none',
 //   landingSource: 'assigned'|'default'|'none', landingBy: 'path'|'name'|null, landingKey, mainRoot, ownRoot, config }
 // Tier and landing each resolve on their own: the most specific entry that SETS that field wins
 // (a path entry, then a name entry), then the top-level default. An entry that sets only a landing
@@ -174,11 +240,19 @@ export function loadTiers() {
 // landingSource/landingBy/landingKey the landing mode ('default' = the top-level mode, 'none' = no mode).
 // A path key matches the main repo's root or the worktree's own root (case-insensitive, slashes
 // normalised) and wins over a name key. Outside a repo: the default tier, source 'none'.
-export function tierDetail(cwd) {
+// projectSource says where the project came from: 'cwd' (the folder is inside a repo), 'brief' (the folder is not, and
+// opts.brief names exactly one repo: see repoFromBrief; tier and landing then come from the same lookup a session inside
+// that repo gets, and source/by/key keep their meaning) or 'none'. A folder inside a repo never consults the brief.
+export function tierDetail(cwd, opts = {}) {
   let cfg;
   try { cfg = loadTiers(); } catch { cfg = { default: DEFAULT_TIER, landing: null, sessionLine: true, reviewEveryChange: false, entries: [], problems: [] }; }
-  const repo = repoOf(cwd);
-  const base = { project: repo?.name || null, mainRoot: repo?.mainRoot || null, ownRoot: repo?.ownRoot || null, config: cfg };
+  let repo = repoOf(cwd);
+  let projectSource = repo ? 'cwd' : 'none';
+  if (!repo && opts && opts.brief) {
+    repo = repoFromBrief(opts.brief, cwd);
+    if (repo) projectSource = 'brief';
+  }
+  const base = { project: repo?.name || null, mainRoot: repo?.mainRoot || null, ownRoot: repo?.ownRoot || null, projectSource, config: cfg };
   const topLanding = cfg.landing || null;
   const fallback = { tier: cfg.default, landing: topLanding, source: 'default', by: null, key: null, landingSource: topLanding ? 'default' : 'none', landingBy: null, landingKey: null };
   if (!repo) return { ...base, ...fallback, source: 'none', landingSource: topLanding ? 'default' : 'none' };

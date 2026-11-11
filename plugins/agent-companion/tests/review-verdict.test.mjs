@@ -102,17 +102,18 @@ test('copies declared_risk, project_tier and tier_source from the reviewer spawn
   try {
     writeFileSync(join(telemetryDir(), 'spawns.jsonl'), JSON.stringify({
       at: '2026-11-10T09:00:00Z', session_id: 'sess-rv', tool_use_id: 'toolu_rv1', caller_is_subagent: true,
-      declared_type: 'code-review', declared_risk: 'high', project_tier: 'gates', tier_source: 'assigned',
+      declared_type: 'code-review', declared_risk: 'high', project_tier: 'gates', tier_source: 'assigned', project_source: 'brief',
     }) + '\n');
     run(post(respond('VERDICT: PASS')));
     const r = rows()[0];
     assert.equal(r.declared_risk, 'high');
     assert.equal(r.project_tier, 'gates');
     assert.equal(r.tier_source, 'assigned');
+    assert.equal(r.project_source, 'brief');
     run(post({ tool_use_id: 'toolu_rv2', ...respond('VERDICT: PASS') }));
     const none = rows().find((x) => x.review_of_tool_use_id === 'toolu_rv2');
     assert.equal(none.spawn_row_found, false);
-    assert.deepEqual([none.declared_risk, none.project_tier, none.tier_source], [null, null, null]);
+    assert.deepEqual([none.declared_risk, none.project_tier, none.tier_source, none.project_source], [null, null, null, null]);
   } finally { fx.cleanup(); }
 });
 

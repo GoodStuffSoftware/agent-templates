@@ -393,3 +393,55 @@ test('a 0.31.50 file (tier strings, {tier, landing} objects, tier-less landing o
   const e = tierDetail(main);
   assert.deepEqual([e.tier, e.source, e.landing], ['push', 'default', 'direct']);
 }));
+
+// ---- 0.31.51: the project from the brief ----
+
+test('floor --repo: runs in the named repo (or a worktree of it) from a folder that is not a repo; a bad path prints "floor unknown"', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main, wt, dir }) => {
+  const base = git(main, 'rev-parse', 'HEAD');
+  mkdirSync(join(main, '.github', 'workflows'), { recursive: true });
+  writeFileSync(join(main, '.github', 'workflows', 'ci.yml'), 'name: ci\n');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-q', '-m', 'ci');
+  const ci = git(main, 'rev-parse', 'HEAD');
+  const elsewhere = join(dir, 'ws'); // the session folder: not a repo
+  mkdirSync(elsewhere, { recursive: true });
+  assert.match(cli(['floor', `${base}..${ci}`], { cwd: elsewhere }).stdout, /^floor unknown: /, 'without --repo the current folder decides');
+  for (const repo of [main, wt, join(main, '.github')]) {
+    const r = cli(['floor', `${base}..${ci}`, '--repo', repo], { cwd: elsewhere });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^floor: high$/m, repo);
+  }
+  const first = cli(['floor', '--repo', main, `${base}..${ci}`], { cwd: elsewhere });
+  assert.match(first.stdout, /^floor: high$/m, 'the option may come before the range');
+  for (const bad of [join(dir, 'nope'), '', join(main, 'README.md')]) {
+    const r = cli(['floor', `${base}..${ci}`, '--repo', bad], { cwd: elsewhere });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^floor unknown: /, JSON.stringify(bad));
+  }
+}));
+
+test('show --brief-file: a folder that is not in a repo reports the project the brief names, with project_source', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main, wt, dir }) => {
+  const ws = join(dir, 'ws');
+  mkdirSync(ws, { recursive: true });
+  const brief = join(dir, 'brief.txt');
+  writeFileSync(brief, `Do the work in ${norm(wt)} please.\n`);
+  assert.equal(cli(['set', 'acme-app', 'gates']).status, 0);
+  let r = cli(['show', ws, '--brief-file', brief]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^project: acme-app$/m);
+  assert.match(r.stdout, /^project_source: brief /m);
+  assert.match(r.stdout, /^project_tier: gates \(Full gates\)$/m);
+  assert.match(r.stdout, /^source: assigned by name "acme-app"$/m);
+  assert.ok(r.stdout.includes(`repo: ${norm(main)}`), r.stdout);
+  // without the brief the same folder is unresolved; a folder inside the repo says cwd
+  r = cli(['show', ws]);
+  assert.match(r.stdout, /^project: \(none: not inside a repo\)$/m);
+  assert.match(r.stdout, /^project_source: none /m);
+  assert.match(cli(['show', main]).stdout, /^project_source: cwd /m);
+  // a brief that names nothing, or two repos, stays unresolved; a missing file is an error
+  writeFileSync(brief, 'no paths here');
+  assert.match(cli(['show', ws, '--brief-file', brief]).stdout, /^project_source: none /m);
+  r = cli(['show', ws, '--brief-file', join(dir, 'missing.txt')]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--brief-file needs a readable file/);
+}));

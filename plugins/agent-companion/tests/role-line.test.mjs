@@ -54,6 +54,7 @@ test('spawn row: a reviewer brief with RISK: high records declared_risk, project
   assert.equal(a.row.declared_risk, 'high');
   assert.match(a.row.project_tier, /^(push|risk|gates)$/);
   assert.match(a.row.tier_source, /^(assigned|default|none)$/);
+  assert.match(a.row.project_source, /^(cwd|brief|none)$/);
   const b = spawn('TYPE: code-review\nROLE: reviewer\n```\nRISK: high\n```\nreview it', 'sess-risk-2');
   assert.equal(b.row.declared_risk, null, 'a RISK: inside a fenced block is ignored');
   assert.match(b.row.project_tier, /^(push|risk|gates)$/, 'the project tier is recorded whatever the brief says');

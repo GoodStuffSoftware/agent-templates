@@ -5,14 +5,18 @@
 //
 // Usage:
 //   node project-tiers.mjs list
-//   node project-tiers.mjs show [path]              the project, project_tier and source for a folder (default: here)
+//   node project-tiers.mjs show [path] [--brief-file <file>]
+//                                                   the project, project_tier and source for a folder (default: here). A folder that is not in a repo
+//                                                   names a project only through --brief-file: the repo the brief text in <file> points at, as a spawn from that
+//                                                   folder would resolve it
 //   node project-tiers.mjs set <name-or-path> <push|risk|gates>
 //   node project-tiers.mjs unset <name-or-path>
 //   node project-tiers.mjs landing <name-or-path|--default> <pr|direct|clear>
 //                                                   how work lands (optional): pr = through a pull request, direct = commit and push to
 //                                                   the branch the brief names; clear removes it. --default sets the top-level mode
 //   node project-tiers.mjs floor <base>..<head>     the least risk a diff allows, and why. Two dots: a plain diff of the two refs;
-//                                                   three dots (<base>...<head>): the diff from their merge base, as a branch review reads it
+//                                                   three dots (<base>...<head>): the diff from their merge base, as a branch review reads it.
+//                                                   --repo <path> runs it in that repo (a path inside it is fine) instead of the current folder
 //
 // A project key is a repo folder name ("acme-app") or a full path. Given an existing path, `set` stores the
 // normalised path of that repo's MAIN checkout (so every worktree of it matches); given a bare name it stores the name.
@@ -28,8 +32,19 @@ import {
 import { TIERS, riskFloor } from '../hooks/lib/tier-text.mjs';
 import { cleanGitEnv } from './lib/git-env.mjs';
 
-const [cmd, ...args] = process.argv.slice(2);
-const USAGE = 'Usage: project-tiers.mjs list | show [path] | set <name-or-path> <push|risk|gates> | unset <name-or-path> | landing <name-or-path|--default> <pr|direct|clear> | floor <base>..<head> | floor <base>...<head>';
+const [cmd, ...rawArgs] = process.argv.slice(2);
+// `--name <value>` options are taken out of the positional arguments.
+function takeOpt(name) {
+  const i = rawArgs.indexOf(name);
+  if (i < 0) return null;
+  const v = rawArgs[i + 1];
+  rawArgs.splice(i, v === undefined ? 1 : 2);
+  return v === undefined ? '' : v;
+}
+const repoOpt = takeOpt('--repo');
+const briefFileOpt = takeOpt('--brief-file');
+const args = rawArgs;
+const USAGE = 'Usage: project-tiers.mjs list | show [path] [--brief-file <file>] | set <name-or-path> <push|risk|gates> | unset <name-or-path> | landing <name-or-path|--default> <pr|direct|clear> | floor <base>..<head> [--repo <path>] | floor <base>...<head> [--repo <path>]';
 
 function fail(msg, code = 1) {
   console.error(`project-tiers: ${msg}`);
@@ -57,15 +72,22 @@ function listCmd() {
 
 function showCmd() {
   const target = args[0] || process.cwd();
-  const d = tierDetail(target);
+  let brief = '';
+  if (briefFileOpt !== null) {
+    if (!briefFileOpt || !existsSync(briefFileOpt) || !statSync(briefFileOpt).isFile()) fail(`--brief-file needs a readable file (got ${JSON.stringify(briefFileOpt)}).`);
+    brief = readFileSync(briefFileOpt, 'utf8');
+  }
+  const d = tierDetail(target, { brief });
   console.log(`path: ${normalisePath(target)}`);
   console.log(`project: ${d.project || '(none: not inside a repo)'}`);
+  const srcWhy = { cwd: 'cwd (the folder is inside the repo)', brief: 'brief (the folder is not in a repo; the brief names exactly one repo)' };
+  console.log(`project_source: ${srcWhy[d.projectSource] || 'none (not resolved from the folder or the brief; the default tier applies)'}`);
   if (d.mainRoot) console.log(`repo: ${d.mainRoot}`);
   if (d.ownRoot && d.mainRoot && d.ownRoot.toLowerCase() !== d.mainRoot.toLowerCase()) console.log(`worktree: ${d.ownRoot}`);
   console.log(`project_tier: ${tierName(d.tier)}`);
   const why = d.source === 'assigned' ? `assigned by ${d.by} "${d.key}"`
     : d.source === 'default' ? `default (no entry sets a tier for this project; default is ${d.config.default})`
-      : 'none (not inside a repo; the default applies)';
+      : 'none (no project resolved; the default applies)';
   console.log(`source: ${why}`);
   console.log(`meaning: ${TIERS[d.tier].meaning}`);
   console.log(`landing: ${d.landing ? `${d.landing} (${d.landing === 'direct' ? 'no pull requests; commit and push to the branch the brief names' : 'through a pull request'})` : 'not set (the plugin says nothing about how work lands)'}`);
@@ -182,8 +204,11 @@ function unsetCmd() {
   console.log(`removed ${hit.join(', ')}; that project now follows the default (${raw.default || DEFAULT_TIER}).`);
 }
 
+// --repo <path>: where git runs for `floor` (a worker's shell starts in the session folder, not in the repo the brief names).
+let repoDir = null;
+
 function git(argv) {
-  const r = spawnSync('git', argv, { encoding: 'utf8', windowsHide: true, env: cleanGitEnv(), maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync('git', argv, { cwd: repoDir || undefined, encoding: 'utf8', windowsHide: true, env: cleanGitEnv(), maxBuffer: 64 * 1024 * 1024 });
   if (r.error) throw new Error(r.error.code === 'ENOENT' ? 'git is not on PATH' : String(r.error.message));
   if (r.status !== 0) throw new Error(String(r.stderr || `git ${argv[0]} failed`).trim().split('\n')[0]);
   return r.stdout;
@@ -201,6 +226,11 @@ function scriptsChanged(base, head, path) {
 function floorCmd() {
   const range = String(args[0] ?? '');
   try {
+    if (repoOpt !== null) {
+      const abs = repoOpt ? normalisePath(repoOpt) : '';
+      if (!abs || !existsSync(abs) || !statSync(abs).isDirectory()) throw new Error(`--repo ${JSON.stringify(repoOpt)} is not a folder`);
+      repoDir = abs;
+    }
     const m = /^([^.\s][^\s]*?)(\.{2,3})([^\s]+)$/.exec(range);
     if (!m || range.startsWith('-')) throw new Error('give a range as <base>..<head> (or <base>...<head> for the diff from their merge base)');
     const [, a, dots, head] = m;

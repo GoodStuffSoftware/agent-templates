@@ -441,3 +441,165 @@ test('batch rule: a gate or CI on the landing path that runs the suite is the pa
   assert.match(BATCH_RULE, /An unchanged tree is never rerun/);
   assert.doesNotMatch(BATCH_RULE, /counts everywhere/);
 });
+
+// ---- 0.31.51: the project from the brief (a session folder that is not inside a repo) ----
+
+// A non-repo session folder `ws` that holds repos under `ws/repos` and worktrees under `ws/worktrees`.
+function withWorkspace(fn) {
+  return withFixture((fx) => {
+    const ws = join(fx.dir, 'ws');
+    mkdirSync(join(ws, 'repos'), { recursive: true });
+    mkdirSync(join(ws, 'worktrees'), { recursive: true });
+    return fn({ ...fx, ws });
+  });
+}
+const fromBrief = (ws, brief) => tierDetail(ws, { brief });
+
+test('brief: one repo path names the project; tier and landing come from the lookup a session inside that repo gets', () => withWorkspace(({ ws }) => {
+  const repo = mainRepo(join(ws, 'repos'), 'acme-app');
+  writeTiers({ default: 'risk', landing: 'pr', projects: { 'acme-app': { tier: 'gates', landing: 'direct' } } });
+  const d = fromBrief(ws, `Work in ${norm(repo)} and report.`);
+  assert.deepEqual([d.project, d.projectSource, d.tier, d.source, d.by, d.landing], ['acme-app', 'brief', 'gates', 'assigned', 'name', 'direct']);
+  assert.equal(d.mainRoot, normalisePath(repo));
+  // the same answer as a session inside the repo, except where the project came from
+  const inside = tierDetail(repo);
+  assert.deepEqual([inside.project, inside.tier, inside.source, inside.landing, inside.projectSource], ['acme-app', 'gates', 'assigned', 'direct', 'cwd']);
+  // a path entry works too
+  writeTiers({ projects: { [norm(repo)]: 'push' } });
+  const p = fromBrief(ws, `see ${norm(repo)}`);
+  assert.deepEqual([p.tier, p.source, p.by, p.projectSource], ['push', 'assigned', 'path', 'brief']);
+  // no entry: the default, still a project
+  writeTiers({ default: 'gates' });
+  const q = fromBrief(ws, `see ${norm(repo)}`);
+  assert.deepEqual([q.project, q.tier, q.source, q.projectSource], ['acme-app', 'gates', 'default', 'brief']);
+}));
+
+test('brief: a worktree path counts as its main repo', () => withWorkspace(({ dir, ws }) => {
+  const main = mainRepo(join(ws, 'repos'), 'acme-app');
+  const wt = join(ws, 'worktrees', 'feat-1');
+  fakeWorktree(main, wt);
+  const d = fromBrief(ws, `Your worktree is ${norm(wt)}.`);
+  assert.deepEqual([d.project, d.projectSource, d.mainRoot, d.ownRoot], ['acme-app', 'brief', normalisePath(main), normalisePath(wt)]);
+  // a worktree under the session folder whose main repo is elsewhere still counts as "under" it
+  const far = mainRepo(join(dir, 'elsewhere'), 'far-app');
+  const wt2 = join(ws, 'worktrees', 'far-1');
+  fakeWorktree(far, wt2);
+  const other = mainRepo(join(dir, 'elsewhere'), 'other-app');
+  assert.equal(fromBrief(ws, `${norm(wt2)} and ${norm(other)}`).project, 'far-app');
+}));
+
+test('brief: two distinct repos is unresolved; a worktree and its main repo are one repo', () => withWorkspace(({ ws }) => {
+  const a = mainRepo(join(ws, 'repos'), 'acme-app');
+  const b = mainRepo(join(ws, 'repos'), 'beta-app');
+  const d = fromBrief(ws, `compare ${norm(a)} with ${norm(b)}`);
+  assert.deepEqual([d.project, d.projectSource, d.source, d.tier], [null, 'none', 'none', 'risk']);
+  const wt = join(ws, 'worktrees', 'a-1');
+  fakeWorktree(a, wt);
+  assert.equal(fromBrief(ws, `${norm(a)} ${norm(wt)}`).project, 'acme-app');
+}));
+
+test('brief: a repo under the session folder beats one elsewhere; several under it is unresolved even with one elsewhere', () => withWorkspace(({ dir, ws }) => {
+  const inWs = mainRepo(join(ws, 'repos'), 'acme-app');
+  const outside = mainRepo(join(dir, 'elsewhere'), 'other-app');
+  assert.equal(fromBrief(ws, `${norm(outside)} first, then ${norm(inWs)}`).project, 'acme-app');
+  assert.equal(fromBrief(ws, `only ${norm(outside)}`).project, 'other-app', 'with none under the session folder, the one repo wins');
+  const second = mainRepo(join(ws, 'repos'), 'beta-app');
+  const d = fromBrief(ws, `${norm(inWs)} ${norm(second)} ${norm(outside)}`);
+  assert.deepEqual([d.project, d.projectSource], [null, 'none']);
+}));
+
+test('brief: a path under the Claude config folder, or one that does not exist, is ignored', () => withWorkspace(({ dir, ws }) => {
+  const real = mainRepo(join(ws, 'repos'), 'acme-app');
+  const inClaude = mainRepo(join(dir, '.claude', 'plugins', 'cache'), 'plug-repo'); // <home>/.claude is the config folder in the fixture
+  assert.equal(fromBrief(ws, `${norm(inClaude)}`).project, null, 'only a config-folder path: unresolved');
+  assert.equal(fromBrief(ws, `${norm(inClaude)} and ${norm(real)}`).project, 'acme-app');
+  assert.equal(fromBrief(ws, `${norm(join(ws, 'repos', 'gone-app'))} and ${norm(real)}`).project, 'acme-app', 'a missing path does not make it ambiguous');
+  assert.equal(fromBrief(ws, `${norm(join(ws, 'repos', 'gone-app'))}`).project, null);
+  // CLAUDE_CONFIG_DIR names another config folder: also excluded
+  const custom = join(dir, 'custom-claude');
+  const inCustom = mainRepo(join(custom, 'x'), 'cfg-repo');
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = custom;
+  try { assert.equal(fromBrief(ws, `${norm(inCustom)} ${norm(real)}`).project, 'acme-app'); } finally {
+    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
+  }
+  assert.equal(fromBrief(ws, `${norm(inCustom)}`).project, 'cfg-repo', 'without the override that folder is an ordinary one');
+}));
+
+test('brief: forward and back slashes, ~/, quotes, backticks, trailing punctuation and :line suffixes', () => withWorkspace(({ dir, ws }) => {
+  const repo = mainRepo(join(ws, 'repos'), 'acme-app');
+  const f = norm(repo);
+  mkdirSync(join(repo, 'hooks'), { recursive: true });
+  writeFileSync(join(repo, 'hooks', 'a.mjs'), '');
+  const forms = [f, `\`${f}\``, `"${f}"`, `'${f}'`, `(${f})`, `see ${f}.`, `${f},`, `${f}:`, `**${f}**`, `[${f}](x)`, `${f}/`, `${f}/hooks/a.mjs:12:3`, `path=${f};`, `- ${f}\n`];
+  for (const form of forms) assert.equal(fromBrief(ws, `x ${form} y`).project, 'acme-app', form);
+  if (process.platform === 'win32') {
+    assert.equal(fromBrief(ws, f.replace(/\//g, '\\')).project, 'acme-app', 'backslashes');
+    assert.equal(fromBrief(ws, `\`${f.replace(/\//g, '\\')}\`.`).project, 'acme-app', 'backslashes in backticks, then a full stop');
+  }
+  // ~/ is the home folder (the fixture's home here)
+  assert.equal(fromBrief(ws, 'in ~/ws/repos/acme-app now').project, 'acme-app');
+  assert.equal(norm(dir) + '/ws/repos/acme-app', f);
+  // not paths: a URL, a relative path, a word that merely ends in a path
+  assert.equal(fromBrief(ws, 'https://example.invalid/ws/repos/acme-app and ./ws/repos/acme-app and a/b/acme-app').project, null);
+}));
+
+test('brief: a session folder inside a repo never consults the brief', () => withWorkspace(({ ws, dir }) => {
+  const mine = mainRepo(join(dir, 'work'), 'mine-app');
+  const named = mainRepo(join(ws, 'repos'), 'acme-app');
+  mkdirSync(join(mine, 'src'), { recursive: true });
+  const d = tierDetail(join(mine, 'src'), { brief: `only ${norm(named)}` });
+  assert.deepEqual([d.project, d.projectSource], ['mine-app', 'cwd']);
+  assert.equal(tierDetail(ws).projectSource, 'none');
+  assert.equal(tierDetail(ws, { brief: '' }).projectSource, 'none');
+  assert.equal(tierDetail(ws, { brief: undefined }).projectSource, 'none');
+  assert.equal(tierDetail(ws, { brief: { not: 'a string' } }).projectSource, 'none');
+}));
+
+test('brief: plugin-added lines (a tier clause naming plugin paths) are not read; no session folder still resolves', () => withWorkspace(({ ws }) => {
+  const repo = mainRepo(join(ws, 'repos'), 'acme-app');
+  const other = mainRepo(join(ws, 'repos'), 'beta-app');
+  assert.equal(fromBrief(ws, `${norm(repo)}\n[agent-companion: tier] Floor: node "${norm(other)}/scripts/project-tiers.mjs" floor <base>..<head>`).project, 'acme-app');
+  assert.equal(tierDetail(undefined, { brief: `${norm(repo)}` }).project, 'acme-app');
+}));
+
+test('brief: bounded work. 3 MB of path-like tokens, one 3 MB token, and more than 40 distinct candidates all return promptly', () => withWorkspace(({ ws }) => {
+  const repo = mainRepo(join(ws, 'repos'), 'acme-app');
+  const f = norm(repo);
+  const timed = (brief) => { const t0 = Date.now(); const d = fromBrief(ws, brief); return { d, ms: Date.now() - t0 }; };
+  const tokens = timed(`${f}\n${'/x/y/z '.repeat(Math.ceil(3_000_000 / 7))}`);
+  assert.equal(tokens.d.project, 'acme-app');
+  assert.ok(tokens.ms < 3000, `token flood took ${tokens.ms} ms`);
+  const long = timed(`${f}\n/${'a'.repeat(3_000_000)}`);
+  assert.equal(long.d.project, 'acme-app');
+  assert.ok(long.ms < 3000, `one huge token took ${long.ms} ms`);
+  const prose = timed(`${f}\n${'plain words without any path in them. '.repeat(80_000)}`);
+  assert.equal(prose.d.project, 'acme-app');
+  assert.ok(prose.ms < 3000, `3 MB of prose took ${prose.ms} ms`);
+  // only the first 40 distinct candidates are looked at: a repo named after 40 other paths is not found
+  const many = Array.from({ length: 40 }, (_, i) => norm(join(ws, 'repos', `gone-${i}`))).join(' ');
+  assert.equal(fromBrief(ws, `${many} ${f}`).project, null);
+  assert.equal(fromBrief(ws, `${f} ${many}`).project, 'acme-app');
+}));
+
+test('text: the floor command names the repo when the project came from the brief; the unresolved wording fits the size limits', () => {
+  const w = writerClause('risk', 'acme-app', { floorRepo: 'C:/dev/ws/repos/acme-app' });
+  assert.ok(w.includes(`${FLOOR_COMMAND} --repo "C:/dev/ws/repos/acme-app"`));
+  const r = reviewerClause('gates', 'acme-app', { floorRepo: 'C:/dev/ws/repos/acme-app' });
+  assert.ok(r.includes(`${FLOOR_COMMAND} --repo "C:/dev/ws/repos/acme-app"`));
+  assert.ok(!writerClause('risk', 'acme-app').includes('--repo'), 'a project from the session folder keeps the plain command');
+  for (const id of TIER_IDS) {
+    const p = writerClause(id, null, { kind: 'plain' });
+    const l = writerClause(id, null, { kind: 'leg' });
+    assert.ok(p.length <= 300, `unresolved plain ${id} is ${p.length} chars`);
+    assert.ok(l.length <= 450, `unresolved leg ${id} is ${l.length} chars`);
+    for (const c of [p, l, writerClause(id, null), reviewerClause(id, null)]) {
+      assert.ok(!c.includes('outside a repo'), c.slice(0, 80));
+      assert.match(c, /^Project not resolved from (folder\/brief; default tier\.|the session folder or the brief \(default tier applies\))/);
+    }
+    assert.match(p, /^Project not resolved from folder\/brief; default tier\. You spawn no reviewer/);
+    assert.match(writerClause(id, null), new RegExp(`^Project not resolved from the session folder or the brief \\(default tier applies\\), project_tier ${id} `));
+    assert.match(reviewerClause(id, null), new RegExp(`project_tier ${id} \\(${TIERS[id].label}\\)\\. Your checks depend`));
+  }
+  assert.match(writerClause('risk', null), /^Project not resolved from the session folder or the brief \(default tier applies\), project_tier risk \(Risk-tiered\)\./);
+});
