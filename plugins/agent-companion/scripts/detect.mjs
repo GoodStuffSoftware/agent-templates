@@ -65,7 +65,7 @@ const splitListLocal = (v) => (v ? String(v).split(/[,;]/).map((s) => s.trim()).
 
 // publication_leak_token_file: an operator-authored private-token file, fed
 // into EVERY sweep scan (universal — applies regardless of strict). Default
-// ~/.claude/agent-companion/leak-tokens.txt (the state root's config-shaped
+// ~/.claude/agent-companion/config/leak-tokens.txt (the old top-level place still works; the state root's config-shaped
 // location) IF it exists; the option overrides the path. Never required —
 // most operators have none, and a missing file is silently treated as "no
 // token file", not an error.

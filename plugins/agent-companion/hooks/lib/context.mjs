@@ -2482,8 +2482,11 @@ function optionFromSettings(key) {
   return optionFromSettingsSource(key)?.value;
 }
 
-// Same lookup, also saying which settings file and pluginConfigs key supplied the value.
-function optionFromSettingsSource(key) {
+// Every plugin-options object Claude Code holds for this plugin, in the order opt() reads them: settings.local.json
+// before settings.json, and within a file the marketplace this copy came from first. Lazy, so opt() stops reading
+// at the first hit. Yields { file, configKey, options }. The settings CLI (scripts/settings.mjs) lists and migrates
+// from the same walk, so what it reports is what opt() reads.
+export function* pluginOptionEntries() {
   const name = pluginName();
   const preferred = `${name}@${currentMarketplace()}`;
   for (const file of SETTINGS_FILES) {
@@ -2499,9 +2502,15 @@ function optionFromSettingsSource(key) {
       });
     for (const k of matches) {
       const options = configs[k]?.options;
-      if (options && typeof options === 'object'
-        && Object.prototype.hasOwnProperty.call(options, key)) return { value: options[key], file: join(claudeDir(), file), configKey: k };
+      if (options && typeof options === 'object' && !Array.isArray(options)) yield { file: join(claudeDir(), file), configKey: k, options };
     }
+  }
+}
+
+// Same lookup, also saying which settings file and pluginConfigs key supplied the value.
+function optionFromSettingsSource(key) {
+  for (const e of pluginOptionEntries()) {
+    if (Object.prototype.hasOwnProperty.call(e.options, key)) return { value: e.options[key], file: e.file, configKey: e.configKey };
   }
   return undefined;
 }
@@ -2576,6 +2585,9 @@ function declaredMap() {
 export function declaredOptions() {
   return [...declaredMap().values()].map((s) => ({ ...s }));
 }
+
+// Does a JSON value have the type an option declares? (the rule for the home file; the settings CLI uses it too)
+export function optionValueFits(type, v) { return homeValueFits(type, v); }
 
 function homeValueFits(type, v) {
   if (type === 'boolean') return typeof v === 'boolean';

@@ -299,3 +299,54 @@ test('plugin.json option: number, default 0 (off)', () => {
   assert.equal(o.type, 'number');
   assert.equal(o.default, 0);
 });
+
+// ---- the settings home (<state root>/config/settings.json) ------------------
+
+const HOME_FILE = '/state/config/settings.json';
+const homeEngine = (home, over = {}) => {
+  const t = fakeEngine({ options: {}, tokens: 120000, env: { AGENT_COMPANION_STATE_DIR: '/state' }, ...over });
+  if (home !== undefined) t.files.set(HOME_FILE, home);
+  return t;
+};
+
+test('register: a floor set in the home file vetoes below it', async () => {
+  const t = homeEngine(JSON.stringify({ main_compact_floor_tokens: 367000 }));
+  const veto = await t.fire({ trigger: 'auto', messages: [] });
+  assert.equal(veto.skip, SKIP_REASON);
+  assert.equal(t.nexted.length, 0);
+});
+
+test('register: the home file wins over the plugin option, and 0 there turns the floor off', async () => {
+  const a = homeEngine(JSON.stringify({ main_compact_floor_tokens: 367000 }), { options: { main_compact_floor_tokens: 0 } });
+  assert.equal((await a.fire({ trigger: 'auto', messages: [] })).skip, SKIP_REASON);
+  const b = homeEngine(JSON.stringify({ main_compact_floor_tokens: 0 }), { options: { main_compact_floor_tokens: 367000 } });
+  assert.deepEqual(await b.fire({ trigger: 'auto', messages: [] }), { messages: ['compacted'] });
+  assert.equal(b.usageCalls(), 0);
+});
+
+test('register: no home file, no key, a wrong type, bad JSON or a non-object all fall back to the plugin option', async () => {
+  for (const home of [undefined, '{}', '{"main_compact_floor_tokens":"367000"}', '{"main_compact_floor_tokens":null}', '{ nope', '[1]', '']) {
+    const t = homeEngine(home, { options: { main_compact_floor_tokens: 367000 } });
+    const r = await t.fire({ trigger: 'auto', messages: [] });
+    assert.equal(r.skip, SKIP_REASON, `option used for home=${JSON.stringify(home)}`);
+  }
+  const off = homeEngine('{ nope', { options: {} });
+  assert.deepEqual(await off.fire({ trigger: 'auto', messages: [] }), { messages: ['compacted'] });
+});
+
+test('register: a home file read that throws fails open to the plugin option', async () => {
+  const t = homeEngine('x', { options: { main_compact_floor_tokens: 367000 } });
+  const origGet = t.files.get.bind(t.files);
+  t.files.get = (p) => { if (p === HOME_FILE) throw new Error('denied'); return origGet(p); };
+  const r = await t.fire({ trigger: 'auto', messages: [] });
+  assert.equal(r.skip, SKIP_REASON);
+});
+
+test('register: the home file is found under the Claude config dir or the user home when the state dir variable is unset', async () => {
+  const t = fakeEngine({ options: {}, tokens: 120000, env: { CLAUDE_CONFIG_DIR: '/cfg/' } });
+  t.files.set('/cfg/agent-companion/config/settings.json', JSON.stringify({ main_compact_floor_tokens: 367000 }));
+  assert.equal((await t.fire({ trigger: 'auto', messages: [] })).skip, SKIP_REASON);
+  const u = fakeEngine({ options: {}, tokens: 120000, env: { USERPROFILE: 'D:\\fixture-home\\' } });
+  u.files.set('D:\\fixture-home/.claude/agent-companion/config/settings.json', JSON.stringify({ main_compact_floor_tokens: 367000 }));
+  assert.equal((await u.fire({ trigger: 'auto', messages: [] })).skip, SKIP_REASON);
+});

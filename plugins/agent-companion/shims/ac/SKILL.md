@@ -1,6 +1,6 @@
 ---
 name: ac
-description: Short entry point for the agent-companion plugin — "/ac recommend …", "/ac evaluate …", "/ac routing", "/ac audit …", "/ac brevity …", "/ac rules …", "/ac version", "/ac setup", "/ac scout", "/ac usage …". Forwards to the matching agent-companion skill and passes the arguments through. Installed at user level (~/.claude/skills/ac) by the plugin's setup skill, because a skill inside a plugin is always namespaced by the plugin's name.
+description: Short entry point for the agent-companion plugin — "/ac recommend …", "/ac evaluate …", "/ac routing", "/ac audit …", "/ac brevity …", "/ac rules …", "/ac settings …", "/ac version", "/ac setup", "/ac scout", "/ac usage …". Forwards to the matching agent-companion skill and passes the arguments through. Installed at user level (~/.claude/skills/ac) by the plugin's setup skill, because a skill inside a plugin is always namespaced by the plugin's name.
 ---
 
 # ac — agent-companion, short form
@@ -25,6 +25,7 @@ through unchanged.
 | `brevity <args>` or `quiet <args>` | `agent-companion:brevity` | `node "$AC/scripts/brevity.mjs" <args>` |
 | `rules <args>` | `agent-companion:standing-rules` | `node "$AC/scripts/rules.mjs" <args>` |
 | `tier <args>` | — | `node "$AC/scripts/project-tiers.mjs" <list\|show\|set\|unset\|landing\|floor> <args>` |
+| `settings <args>` | — | `node "$AC/scripts/settings.mjs" <list\|get\|set\|unset\|where\|migrate> <args>` |
 | `version` | `agent-companion:version` | `node "$AC/scripts/version.mjs" <args>` (reports the marketplace clone as THIS copy; use the skill to learn which copy THIS session runs) |
 | `setup` | `agent-companion:setup` | — |
 | `scout` | `agent-companion:calibration-scout` | — |

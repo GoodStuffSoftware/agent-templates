@@ -30,7 +30,7 @@
 //
 // Rollout gate. The operator rolls changes out one per day. The nudge does
 // nothing until `activeFrom` for change id "context-ceiling" in the shared
-// schedule <state root>/rollout.json ({ "<change-id>": "<UTC timestamp>" })
+// schedule <state root>/config/rollout.json (the old <state root>/rollout.json still works) ({ "<change-id>": "<UTC timestamp>" })
 // has passed. A missing or unreadable file, a missing id or a bad timestamp
 // all mean OFF. AGENT_COMPANION_FAKE_NOW moves the clock for tests.
 //

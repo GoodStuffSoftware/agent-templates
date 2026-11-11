@@ -129,8 +129,9 @@ the hook that evaluates them has a five-second timeout.
 A rule in `standing-rules.json`, a row in the routing profile, or a
 `reviewerEffortCap` or `reviewerEffortFloor` entry in the per-user `model-tiers.json` may carry
 `activeFrom`: a zoned UTC timestamp (`"2026-10-12T08:00:00Z"`) or a change id
-looked up in `~/.claude/agent-companion/rollout.json`, one shared schedule of
-the form `{"<change-id>": "<ISO UTC timestamp>"}` (shared with the subagent
+looked up in `~/.claude/agent-companion/config/rollout.json` (a file at the old
+place, `~/.claude/agent-companion/rollout.json`, still works when there is no
+`config/` copy), one shared schedule of the form `{"<change-id>": "<ISO UTC timestamp>"}` (shared with the subagent
 context ceiling). A timestamp is UTC: `Z`, an offset, or no zone (read as UTC);
 an impossible date such as `2026-02-31` does not parse. Nothing needs to flip
 it: the check is made each time the config is read.

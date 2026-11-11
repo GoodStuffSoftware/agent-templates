@@ -68,7 +68,7 @@ It was built after two observed failures:
 | `type_line_nudge` | A brief's `TYPE:` value should be a task type or one of its aliases (see [Task type aliases](#task-type-aliases)). When it is neither, the spawn guard adds one short line of context naming the valid types, because an unknown TYPE routes and measures nothing (default `true`). It never denies or blocks a spawn. The raw value is still recorded as `declared_type`, and the canonical type an alias resolved to as `declared_type_resolved`. | no |
 | `project_pins` | Respect project-pinned agents (default `true`). A project agent (`<project>/.claude/agents`) or user agent (`~/.claude/agents`) whose definition sets its own model and/or effort is your own tier choice: the spawn guard does not deny, nag or rewrite such a spawn over task weight (no best-fit deny, no over/under/parity notes, no `WARRANT:` requirement, no model autofill or rung swap). Role rules still apply (reporting contract, first action, review framing, `ROLE:` nudge); a pinned writer whose file carries no self-review protocol gets it appended; a `model` parameter that replaces the pinned model gets one non-blocking note. The premium cap is unchanged. The spawn audit counts pinned rows apart. Off judges pinned agents by weight like any other spawn. A project's `.claude/agents` folder is repository content, so whoever can change the repo can change the pins the guard respects. | no |
 | `lead_effort_live_check` | Live lead-effort check (default `true`). While the `lead-effort-check` standing rule is enabled, the first Agent spawn of a main session compares the live effort in the hook payload (get_session shows the effort the session was created at, not the live one) with the lead target: below it, one non-blocking note to the lead; above it or equal, nothing (the above-target message was dropped in 0.31.36). Once per session, never a deny or a rewrite. Recorded as `lead_effort_live` and `lead_effort_target` in the spawn telemetry. | no |
-| `lead_effort_rollout_id` | String, default empty. Empty means no switch: the built-in lead-effort target stays `xhigh`. A value names the `rollout.json` id (state root) whose switch-on moves the target to `high`, in both the `lead-effort-check` wording and the live check; it never lowers. Nothing about your own rollout belongs in the repository, so set it in your own settings. | no |
+| `lead_effort_rollout_id` | String, default empty. Empty means no switch: the built-in lead-effort target stays `xhigh`. A value names the `rollout.json` id (`config/rollout.json` under the state root) whose switch-on moves the target to `high`, in both the `lead-effort-check` wording and the live check; it never lowers. Nothing about your own rollout belongs in the repository, so set it in your own settings. | no |
 | `routine_placement_note` | Routine placement note (default `true`). A PreToolUse hook (`hooks/routine-placement.mjs`) on the desktop scheduled-task create tool, and on the update tool when it sets a `prompt`, adds one advisory note: the effort pin of the working folder (with the model the pin is keyed to, for example `low, for claude-opus-5-5`; the pin does nothing on another model, and a task whose `SKILL.md` has no `model:` line starts on the composer's last-selected model, which the note says), the effort a new task starts at, the `/ac recommend` placement rule (recommend for parent and worker, create from the folder pinned to the parent's level) and, when `config/routine-pins.json` exists, the folder map. It also states the pin rule (see [Routines](#routines)) and whether the working folder's pin applies. It never blocks and writes no telemetry. False turns the note off. | no |
 | `routine_pin_rule` | Routine pin rule (default `true`): the enforcement of the rule in [Routines](#routines). Two hooks: `hooks/cloud-routine-pin.mjs` (PreToolUse on `RemoteTrigger` create/update) and `hooks/routine-pin-check.mjs` (PostToolUse on the scheduled-task create tool). False turns both off. | no |
 | `publish_check` | UI sign-off check (default `true`). A PreToolUse hook (`hooks/publish-check.mjs`) on `Artifact` (main thread) and on `AskUserQuestion` when the question asks for approval or sign-off and names UI work adds one advisory note: capture a narrow-width (about 360 px) screenshot, try each input and button once, attach the screenshot or dev URL to a sign-off. Once per artifact id per 30 minutes; once per session for the question. Never blocks; no telemetry. | no |
@@ -227,7 +227,7 @@ A rule is two independent conditions plus a directive:
 
 The split exists because some rules need to fire on content regardless of history (`copyable-prompt`), and at least one needs to fire on history regardless of content (`delegate-reminder`, below) — a single condition type cannot express both.
 
-A rule (and a routing-profile row, and a `reviewerEffortCap` or `reviewerEffortFloor` entry) may also carry `activeFrom`, a zoned UTC timestamp or a change id in `~/.claude/agent-companion/rollout.json` (`{"<change-id>": "<ISO UTC>"}`), with an optional `after` overlay: it switches on by the clock with nobody flipping it, and an unresolvable value counts as not yet reached. Write a scheduled change as the current behaviour plus `after` (a new rule: `"enabled": false` with `"after": {"enabled": true}`) so a copy of the plugin that ignores the keys never starts early. See `skills/standing-rules/SKILL.md`.
+A rule (and a routing-profile row, and a `reviewerEffortCap` or `reviewerEffortFloor` entry) may also carry `activeFrom`, a zoned UTC timestamp or a change id in `~/.claude/agent-companion/config/rollout.json` (`{"<change-id>": "<ISO UTC>"}`; a file at the old place, `~/.claude/agent-companion/rollout.json`, still works when there is no `config/` copy), with an optional `after` overlay: it switches on by the clock with nobody flipping it, and an unresolvable value counts as not yet reached. Write a scheduled change as the current behaviour plus `after` (a new rule: `"enabled": false` with `"after": {"enabled": true}`) so a copy of the plugin that ignores the keys never starts early. See `skills/standing-rules/SKILL.md`.
 
 Five scopes, each deciding what `when` is tested against and where the directive lands:
 
@@ -725,8 +725,10 @@ pricing needs (opus-5 and opus-5-5 route to the same guard tier but do not
 cost the same; fable-5 and fable-5-1 share a sticker price but differ in
 cache-read multiplier). Extend `config/model-pricing.json` for a new model's
 price; override without a release by writing the same shape to
-`~/.claude/agent-companion/state/model-pricing.json` (merged by alias, like
-every other override in this plugin).
+`~/.claude/agent-companion/config/model-pricing.json` (merged by alias, like
+every other override in this plugin; a copy at the old top-level place,
+`~/.claude/agent-companion/model-pricing.json`, still works when there is no
+`config/` copy).
 
 ## Transcript report
 
@@ -923,8 +925,10 @@ correctly. This plugin exists partly because a routing table sat wrong for a
 whole model generation without anyone noticing.
 
 Override without waiting for a release by writing a file of the same shape to
-`~/.claude/agent-companion/state/model-tiers.json` (a legacy copy at
-`$CLAUDE_PLUGIN_DATA/model-tiers.json` is still honoured as a fallback, so an
+`~/.claude/agent-companion/config/model-tiers.json` (a copy at the old
+top-level place, `~/.claude/agent-companion/model-tiers.json`, still works when
+there is no `config/` copy, and a legacy copy at
+`$CLAUDE_PLUGIN_DATA/model-tiers.json` is still honoured as a last fallback, so an
 override written before 0.17.0 keeps working). It merges **by alias, then per key within a tier** (one level deep), so
 adding one model needs one entry, and changing one field of a tier needs only
 `{"tiers":{"sonnet":{"match":"sonnet|newsonnet"}}}` — not a restatement of the table — a table
@@ -1288,10 +1292,95 @@ surfaces in the next calibration run instead of silently changing behaviour.
 identical to a guard that was never tripped, so the calibration routine treats a
 denial count of **zero** as a signal to run the canary — not as good news.
 
+## Settings
+
+Everything you choose can live in one place: a plain JSON file, the **settings
+home**, at `~/.claude/agent-companion/config/settings.json` (the folder is the
+plugin's state root; `AGENT_COMPANION_STATE_DIR` moves it). It holds option
+values by name, with real JSON types, and nothing else:
+
+```json
+{
+  "main_compact_floor_tokens": 367000,
+  "scout_suppress": "model_benchmark_suggested",
+  "bash_exit_telemetry": false
+}
+```
+
+**Nothing changes until the file exists.** With no file, every option behaves as
+before. The file is optional, the options below still work, and you can use both.
+
+**Order the sources are read in** (first one that sets the option wins):
+
+1. the settings home, `config/settings.json`
+2. the environment variable `CLAUDE_PLUGIN_OPTION_<KEY>` (Claude Code sets this for
+   every hook from your plugin options, so a plugin option set the old way arrives here)
+3. `pluginConfigs` in `~/.claude/settings.local.json`
+4. `pluginConfigs` in `~/.claude/settings.json` (the block shown under [Configuration](#configuration))
+5. the default declared in the plugin
+
+The file is read first on purpose: Claude Code exports every option to hooks, and a
+value exported from a default would otherwise hide the one you wrote here.
+
+**What the file may hold.** Only options the plugin declares, with the declared
+type (boolean, number or string). Anything else is ignored and reported, never
+fatal: a key the plugin does not know, a value of the wrong type (`"true"` for a
+boolean), an option marked `sensitive` (secrets never go in a plain file; Claude
+Code keeps those in the system credential store), and a file that is not valid JSON
+(then the whole file is ignored). An empty string reads as unset, like an empty
+plugin option. The file is read once per process.
+
+**One exception to know about.** `main_compact_floor_tokens` is used by a hooks
+module that runs in Claude Code's sandbox and has no environment or plugin code. It
+reads the settings home itself, with the sandbox's own file access, on each
+compaction decision, and falls back to the plugin option when the file is missing, is
+not valid JSON, or holds no number for that key. The state folder it looks in is
+`AGENT_COMPANION_STATE_DIR`, else `CLAUDE_CONFIG_DIR/agent-companion`, else
+`~/.claude/agent-companion` (the user home Claude Code reports).
+
+**Config files in one folder.** The files you author (`standing-rules.json`,
+`brevity.json`, `routing-profile.json`, `project-tiers.json`, `rollout.json`,
+`model-tiers.json`, `model-pricing.json`, `plan-weights.json`, `compaction.json`,
+`leak-tokens.txt`, and the others listed under [State](#state)) belong in
+`~/.claude/agent-companion/config/`, next to `settings.json`. Six of them used to
+sit one level up, directly in `~/.claude/agent-companion/`: `model-tiers.json`,
+`plan-weights.json`, `compaction.json`, `model-pricing.json`, `rollout.json` and
+`leak-tokens.txt`. Those old places **still work**: the plugin reads `config/<name>`
+first and the old file only when there is no `config/` copy (the `config/` copy wins
+when both exist; the two are never merged).
+
+**The command.** `/ac settings` (or `node scripts/settings.mjs`):
+
+| Command | Does |
+|---|---|
+| `list [--all]` | options whose value differs from the default (all of them with `--all`), each with its value, where it comes from and its default; then every config file (path in effect, present or not, a flag when it is still at the old place or an old copy is hidden by a `config/` one); then any problems in the settings home |
+| `get <key>` | the effective value, where it comes from, the default, and every other source that also sets it |
+| `set <key> <value>` | writes the settings home. Refuses an unknown name (and suggests the nearest), a value of the wrong type and a `sensitive` option; keeps every other entry and the file's layout; refuses to write over a file that is not valid JSON |
+| `unset <key>` | removes the entry and says what the value falls back to |
+| `where` | the settings folder, the settings file, and the files where Claude Code keeps plugin options (paths only) |
+| `migrate [--dry-run]` | copies your plugin options into the settings home and moves old top-level config files into `config/` (below) |
+
+`/ac settings` reads the environment of the shell it runs in; Claude Code exports the plugin
+options only to hook processes, so an environment source shows up there only when it is also set
+in your shell.
+
+**`migrate`.** It copies the agent-companion option values that are set as Claude Code plugin
+options (`pluginConfigs`) into the settings home. Only this plugin's keys, never a
+`sensitive` one, and never over a key the settings home already has. It moves the six old
+top-level config files into `config/`, never over a file already there. It **never edits
+Claude Code's own settings**: it ends by listing the option keys you can now remove there,
+and prints key names only, never values. `--dry-run` prints the same report and changes nothing.
+After migrating, keeping the old plugin options is harmless (the settings home wins); removing
+them is up to you.
+
+A change to the settings home is recorded like any other settings change in
+`telemetry/settings-changes.jsonl`.
+
 ## Configuration
 
-Toggles are declared as `userConfig` and set per-user without editing plugin
-files:
+Toggles are declared as `userConfig` and can be set per-user without editing plugin
+files, in your Claude Code `settings.json` (the [Settings](#settings) home above is
+the other place, and is read first):
 
 ```json
 {
@@ -1380,7 +1469,8 @@ the legacy-data import, and the schema.
 | `state/upload-state.json` | state root | opt-in telemetry-upload cursor |
 | `state/import-cursors.json` | state root | legacy-import cursors, keyed by source file path |
 | `state/migrated.json` | state root | written once, after the first legacy-data import |
-| `state/model-tiers.json` | state root | operator override of `config/model-tiers.json` (optional); a legacy copy under the plugin data dir is still honoured as a fallback |
+| `config/settings.json` | state root | the settings home: plugin option values you chose, read before every other source (see [Settings](#settings)) |
+| `config/model-tiers.json` | state root | operator override of the shipped `config/model-tiers.json` in the plugin (optional); a copy at the old top-level place, then one under the plugin data dir, are still honoured as fallbacks |
 | `state/agent-types/*.seen` | state root | one marker file per seen unknown agent type (race-free dedup) |
 | `memory-vault/` | state root, or `AGENT_COMPANION_VAULT_DIR` when set | the vault repo itself — a separate git repository, see [Memory vault](#memory-vault) |
 | `state/memory-vault-sync.lock` | state root | held for the duration of one `memory-vault.mjs sync`; stale after 120s and taken over |
@@ -1564,6 +1654,7 @@ node "$AC/scripts/audit.mjs" --only guard-canary
 | `brevity` | `/ac brevity` | is the reporting contract on, for whom, and which layer is winning |
 | `standing-rules` | `/ac rules` | which "always do X if Y" rules exist, and whether one would fire on given text |
 | `version` | `/ac version` | which agent-companion is running, and whether every installed copy (CLI cache, desktop app copy, marketplace clone) is current |
+| (script, no skill) | `/ac settings` | the settings home: `/ac settings list [--all]`, `get <key>`, `set <key> <value>`, `unset <key>`, `where`, `migrate [--dry-run]`; see [Settings](#settings) |
 | (script, no skill) | `/ac tier` | which tier each project has (`push`, `risk`, `gates`), assigning one, and the risk floor of a diff: `/ac tier list`, `show`, `set`, `unset`, `floor <base>..<head>` (or `<base>...<head>` from the merge base) |
 | `setup` | `/ac setup` | the setup steps on a new machine, both scouts included |
 | `calibration-scout` | `/ac scout` | the daily drift scout, run by hand; `/ac scout delta` shows what changed since the last run, what keeps repeating, and how to acknowledge it |

@@ -28,7 +28,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, openSync, readSync, closeSync, fstatSync, statSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { stateRootPath, claudeDir, pluginName, pluginVersion, TELEMETRY_SCHEMA, isFixtureSession } from './context.mjs';
+import { stateRootPath, settingsHomePath, claudeDir, pluginName, pluginVersion, TELEMETRY_SCHEMA, isFixtureSession } from './context.mjs';
 
 export const JOURNAL_FILE = 'settings-changes.jsonl';
 export const SETTING_KEYS = ['model', 'effort', 'plugin_version', 'options'];
@@ -81,6 +81,10 @@ export function observeSettings(p, { env = process.env, dir = claudeDir() } = {}
       if (o && typeof o === 'object') for (const [k, v] of Object.entries(o)) pairs.push(`${tag}:${k}=${JSON.stringify(v)}`);
     }
   }
+  // The settings home (<state root>/config/settings.json) is the first option source, so an edit there is a settings
+  // change too. Parsed entries, not file bytes: a reformat is not a change. No file: no pairs, the digest as before.
+  const homeFile = readJsonSafe(settingsHomePath());
+  if (homeFile) for (const [k, v] of Object.entries(homeFile)) pairs.push(`home:${k}=${JSON.stringify(v)}`);
   pairs.sort();
   const options = pairs.length ? createHash('sha1').update(pairs.join('\n')).digest('hex').slice(0, 12) : 'none';
   return { model: clip(model), effort: clip(effort), plugin_version: clip(pluginVersion()), options, fallback };

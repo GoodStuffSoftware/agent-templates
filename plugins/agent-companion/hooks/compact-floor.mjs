@@ -119,13 +119,47 @@ function logLine($, state, text) {
   return state.writing;
 }
 
+// The settings home (<state root>/config/settings.json, the first source for every plugin option: see the plugin
+// README, "Settings"). A module has no process.env and cannot call opt(), so the one option it honours is read here
+// through the engine's own file access. The state root is resolved the way hooks/lib/context.mjs stateRootPath()
+// does: AGENT_COMPANION_STATE_DIR, else CLAUDE_CONFIG_DIR/agent-companion, else <home>/.claude/agent-companion (not
+// the plugin data directory the log may use). Returns { found: true, value } only for a finite number in the file.
+// A missing file, a file that is not a JSON object, an absent key, a value of another type and any exception all
+// return { found: false }, so the plugin option (options.main_compact_floor_tokens) is used: fail open.
+// Env names must be string literals ($.env.get is statically scanned).
+async function homeFloor($) {
+  try {
+    let root = await $.env.get('AGENT_COMPANION_STATE_DIR');
+    if (!root) {
+      let base = (await $.env.get('CLAUDE_CONFIG_DIR')) || '';
+      if (!base) {
+        const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'));
+        base = home ? `${home.replace(/[\\/]+$/, '')}/.claude` : '';
+      }
+      root = base ? `${base.replace(/[\\/]+$/, '')}/agent-companion` : '';
+    }
+    if (!root) return { found: false };
+    const path = `${root.replace(/[\\/]+$/, '')}/config/settings.json`;
+    if (!(await $.fs.exists(path))) return { found: false };
+    const obj = JSON.parse(String(await $.fs.read(path)).replace(/^﻿/, ''));
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { found: false };
+    if (!Object.prototype.hasOwnProperty.call(obj, 'main_compact_floor_tokens')) return { found: false };
+    const v = obj.main_compact_floor_tokens;
+    return typeof v === 'number' && Number.isFinite(v) ? { found: true, value: v } : { found: false };
+  } catch {
+    return { found: false };
+  }
+}
+
 // true = veto this compaction. Decided inside try/catch; the caller invokes
 // next() outside it, so a throw from core's own compaction cannot make this
 // hook run next() a second time. Logging stays bounded: ONE line at the first
 // veto of the session, ONE per main-session pass, ONE per fail-open kind.
 async function verdict($, e, state, options) {
   try {
-    const parsed = parseFloor(options?.main_compact_floor_tokens);
+    // The settings home wins over the plugin option, as it does for opt(); no home entry means the plugin option.
+    const home = await homeFloor($);
+    const parsed = parseFloor(home.found ? home.value : options?.main_compact_floor_tokens);
     // Cheap exits first: the option off, a subagent or a non-auto trigger
     // never reads usage and never touches the log.
     if (parsed.off) return false;
