@@ -1,5 +1,12 @@
 {
   "version": 1,
+  "environment": {
+    "kind": "local-measurement",
+    "describes": "One developer's Windows 11 workstation with 64 GB of RAM; Claude Code desktop app and CLI on the highest individual subscription tier; several long-running lead sessions at once, each spawning helper agents, across a handful of app projects (web apps, an Android build with an emulator, Playwright end-to-end tests, Firebase tooling). Memory figures were taken on that machine; the reserve and the box budget size themselves from the machine you run on.",
+    "measured": "Not recorded (the notes tag values M = measured or E = estimate; none carries a date).",
+    "method": "M values: measured by hand on that workstation, procedure not recorded. E values: conservative estimates, not measured.",
+    "remeasure": "By hand today: watch the peak memory and run time of your own runs, then override config/resource-rules.json in your state folder (or point AC_RESOURCE_RULES at a file). The settings home does not cover this file. See docs/DEFAULTS-ENVIRONMENT.md."
+  },
   "notes": "Defaults for the machine-wide resource queue (scripts/resource-queue.mjs; spec: docs/resource-queue.md). Override per user in <claude dir>/agent-companion/config/resource-rules.json (objects merge key by key, 'rules' merges by id, 'classes' merges by id, other arrays replace) or point AC_RESOURCE_RULES at a file. M = measured, E = estimate; E values are conservative placeholders. A value of null or 0 turns a limit off.",
   "reservationIdleLapseMinutes": 20,
   "ram": {

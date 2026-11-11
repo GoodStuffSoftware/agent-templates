@@ -1376,6 +1376,10 @@ them is up to you.
 A change to the settings home is recorded like any other settings change in
 `telemetry/settings-changes.jsonl`.
 
+**Where the shipped defaults come from.** Many defaults were measured in one environment (one
+developer's workstation and subscription). [docs/DEFAULTS-ENVIRONMENT.md](docs/DEFAULTS-ENVIRONMENT.md)
+says what that environment was and, per item, how to change the value and how to measure your own.
+
 ## Configuration
 
 Toggles are declared as `userConfig` and can be set per-user without editing plugin

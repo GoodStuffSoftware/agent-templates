@@ -1,5 +1,12 @@
 {
   "version": 1,
+  "environment": {
+    "kind": "public-fact",
+    "describes": "Public API list prices from the vendor pricing pages. Not a measurement of any environment.",
+    "measured": "Read from the public pricing page 2026-09-25; rows added 2026-10-12 (file updated 2026-10-12).",
+    "method": "Read by hand from the public pricing and model pages named in provenance.",
+    "remeasure": "Nothing to re-measure locally; check the public pricing page, or override config/model-pricing.json in your state folder. See docs/DEFAULTS-ENVIRONMENT.md."
+  },
   "updated": "2026-10-12",
   "provenance": "2026-10-12: sonnet-5-5 ($2 in / $10 out, cache read $0.10 = 0.05x) and haiku-5-5 ($0.10 in / $0.50 out, cache read $0.01 = 0.1x, prompts up to 100K tokens) were added from https://platform.claude.com/docs/en/models/haiku-5-5/overview and the Haiku 5.5 launch page; before that a Sonnet 5.5 id matched the sonnet-5 row and was priced at the Sonnet 5 read rate of $0.20. Prompts over 100K tokens price higher on Haiku 5.5 ($0.50 / $2.50 / read $0.05) and this table does not model that step. Every row checked against a live read of https://platform.claude.com/docs/en/about-claude/pricing (the page docs.claude.com/en/docs/about-claude/pricing redirects to) on 2026-09-25. opus-4-7 ($5 in / $25 out) and sonnet-4-6 ($3 / $15), both at the standard 0.1x cache read, were added that day: the only model ids in a local transcript corpus that had no price. The other rows were first verified live on 2026-09-23 and were unchanged.",
   "note": "Dollar pricing as DATA, not code — mirrors config/model-tiers.json's own rule (a table baked into code goes stale silently). This is a SEPARATE table from model-tiers.json on purpose: model-tiers.json classifies generic routing aliases (haiku/sonnet/opus/fable) for the spawn guards, which is a coarser grain than pricing needs (opus-5 and opus-5-5 route to the same tier but do not cost the same, and fable-5 vs fable-5-1 differ only in cache-read multiplier). Extend THIS file for a new model's price; extend model-tiers.json separately for its routing tier. $/MTok prices verified live from the Anthropic pricing page on 2026-09-23. Override without a release by writing a file of this shape to ~/.claude/agent-companion/state/model-pricing.json — merged by alias, same convention as model-tiers.json.",

@@ -172,7 +172,7 @@ function builtinRules() {
       when: COPYABLE_PROMPT_WHEN,
       then: 'The user is asking for a prompt. Put the complete prompt in ONE fenced code block with nothing else inside the fence — no commentary, no ellipses, no placeholder text unless the user asked for placeholders. Anything you want to say about the prompt goes outside the fence.',
       gate: null,
-      note: null,
+      note: "Origin: one operator's preference for getting a requested prompt as one copyable block; date not recorded.",
     },
     {
       id: 'lead-brevity',
@@ -183,7 +183,7 @@ function builtinRules() {
       gate: 'brevity',
       when: null,
       then: 'Report at outcome level: what happened, what is next, what needs the user. Blockers in full; detail in a linked file, no narrative or recaps.',
-      note: null,
+      note: "Origin: one operator's preference for outcome-level reports (what happened, what is next, what needs the user); date not recorded.",
     },
     {
       // Disabled by default — this rule is documentation-by-example, not an
@@ -199,7 +199,7 @@ function builtinRules() {
       gate: 'brevity',
       when: '.',
       then: '(reserved — the reporting contract is injected by hooks/lib/brevity.mjs; this rule exists so an operator can see the spawn scope in `rules list` and add their own spawn-scoped rules alongside it)',
-      note: null,
+      note: "Origin: documentation by example for the spawn scope, not a directive; the real per-spawn contract is injected by hooks/lib/brevity.mjs.",
     },
     {
       id: 'delegate-first',
@@ -210,7 +210,7 @@ function builtinRules() {
       when: null,
       then: 'You are an orchestrator: reads, searches, shell, tests and self-contained edits go to subagents; you plan and decide. Max three execution calls in a row. Set each spawn\'s model.',
       gate: null,
-      note: null,
+      note: "Origin: one operator's experience that a lead doing its own reads and edits is the costly path; date not recorded.",
     },
     {
       // Guard (a)'s own doctrine (CACHE-ADVISOR-HANDOFF.md deliverable 6;
@@ -230,7 +230,7 @@ function builtinRules() {
       when: null,
       then: 'Continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff: continuing re-reads all context each call.',
       gate: null,
-      note: null,
+      note: "Origin: measured on one operator's workstation since 2026-09-01 (a continued worker cost 0.11-0.16 plan units per call against 0.06-0.07 for a fresh one), wording refined 2026-10-06.",
     },
     {
       // The only shipped 'always'-scope rule, deliberately: it is the reason
@@ -247,7 +247,7 @@ function builtinRules() {
       gate: 'delegation-drift',
       when: null,
       then: 'Delegation reminder: this session has already run execution work on the main thread. Route the next read, search, command, test run or edit to a subagent rather than doing it here.',
-      note: null,
+      note: "Origin: one operator's experience that delegation rules stop being followed late in a long session; it fires only after a delegation-guard firing; date not recorded.",
     },
     {
       // The discoverability line for scripts/pr-wait.mjs. Gated on the pr_wait
@@ -261,7 +261,7 @@ function builtinRules() {
       gate: 'pr_wait',
       when: null,
       then: PR_WAIT_HINT_TEXT,
-      note: null,
+      note: "Origin: one operator's experience of PR and CI waits being polled; it only points at scripts/pr-wait.mjs; date not recorded.",
     },
     {
       // Lead-effort check. DISABLED by default: it states a house policy
@@ -280,7 +280,7 @@ function builtinRules() {
       when: null,
       then: LEAD_EFFORT_CHECK_TEXT,
       gate: null,
-      note: null,
+      note: "Origin: one operator's house policy that an orchestrating lead runs at xhigh effort, so it ships off by default.",
       // xhigh wording until the rollout id is reached, the high wording from it
       // (effectiveRule lays `after` over the rule). An id absent from
       // rollout.json counts as not reached, so the xhigh wording stays.
@@ -302,7 +302,7 @@ function builtinRules() {
       gate: 'worker_wait',
       when: OPERATE_NOT_DECLARED_WHEN,
       then: 'One-wait rule: no sleep, poll or watch loops. One blocking call, or one run_in_background command that notifies on finish. PR/CI: pr-wait.mjs; main-branch run: gh run watch (both in background). No interim notice for a planned wait.',
-      note: null,
+      note: "Origin: one operator's experience of helper agents sleeping or polling for CI; enforced by hooks/poll-guard.mjs; date not recorded.",
     },
     {
       // The operate variant of worker-one-wait (0.31.17): same ban on sleep and poll
@@ -314,7 +314,7 @@ function builtinRules() {
       gate: 'worker_wait',
       when: OPERATE_DECLARED_WHEN,
       then: 'One-wait rule: no sleep, poll or watch loops. PR/CI wait: you wait, in one foreground pr-wait.mjs call. Other long waits: one blocking call or one background command (run_in_background). No interim notice for a planned wait.',
-      note: null,
+      note: "Origin: variant of worker-one-wait (0.31.17) for operate-type work, whose job is the long wait itself.",
     },
     {
       // Cache-advisor guard (b), deliverable 7. Doctrine-only text; the
@@ -328,7 +328,7 @@ function builtinRules() {
       when: null,
       then: 'One completion wait, never per-item wakes: background work notifies on finish; arm one long fallback.',
       gate: null,
-      note: null,
+      note: "Origin: cache-advisor guard (b), because every per-item wake-up re-reads the cached context; enforced by hooks/poll-guard.mjs; date not recorded.",
     },
     {
       // The first event turn of a session gets `then`; later ones in the same session get `thenLater`.
@@ -340,7 +340,7 @@ function builtinRules() {
       then: EVENT_TURN_QUIET_FULL,
       thenLater: EVENT_TURN_QUIET_SHORT,
       gate: null,
-      note: null,
+      note: "Origin: one operator's experience of long reports on turns nobody typed; added in 0.31.51.",
     },
   ];
 }
