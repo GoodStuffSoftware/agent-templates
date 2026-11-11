@@ -321,7 +321,8 @@ test('brief project, through the spawn guard: a reviewer brief naming a worktree
   const rp = sentPrompt(r);
   assert.equal(count(rp, TIER_MARKER), 1, rp);
   assert.match(clauseOf(rp), /Project acme-app, project_tier push \(Push on your word\)\. Your checks depend on the RISK/);
-  assert.ok(clauseOf(rp).includes(`floor <base>..<head> --repo "${slashes(repo)}"`));
+  assert.ok(clauseOf(rp).includes(`floor <base>..<head> --repo "${slashes(wt)}"`), "a worktree the brief names stays a worktree: HEAD in the range is its HEAD");
+  assert.ok(!clauseOf(rp).includes(`--repo "${slashes(repo)}"`));
   const row = spawnRows(fx).at(-1);
   assert.deepEqual([row.declared_risk, row.project_tier, row.tier_source, row.project_source], ['mid', 'push', 'assigned', 'brief']);
   // the reviewer brief a writer builds from its own received brief (clause included) resolves the same way and ends with one clause

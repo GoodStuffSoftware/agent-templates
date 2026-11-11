@@ -420,6 +420,20 @@ test('floor --repo: runs in the named repo (or a worktree of it) from a folder t
   }
 }));
 
+test('floor --repo <worktree>: HEAD in the range is the worktree HEAD, not the main checkout HEAD', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main, wt, dir }) => {
+  const base = git(main, 'rev-parse', 'HEAD');
+  mkdirSync(join(wt, '.github', 'workflows'), { recursive: true });
+  writeFileSync(join(wt, '.github', 'workflows', 'ci.yml'), 'name: ci\n');
+  git(wt, 'add', '-A');
+  git(wt, 'commit', '-q', '-m', 'ci');
+  const elsewhere = join(dir, 'ws');
+  mkdirSync(elsewhere, { recursive: true });
+  const inWt = cli(['floor', `${base}..HEAD`, '--repo', wt], { cwd: elsewhere });
+  assert.match(inWt.stdout, /^floor: high$/m, inWt.stdout);
+  const inMain = cli(['floor', `${base}..HEAD`, '--repo', main], { cwd: elsewhere });
+  assert.doesNotMatch(inMain.stdout, /^floor: high$/m, 'the main checkout HEAD has no change: this is why the clause names the worktree');
+}));
+
 test('show --brief-file: a folder that is not in a repo reports the project the brief names, with project_source', { skip: !GIT_OK }, () => withRepoAndWorktree(({ main, wt, dir }) => {
   const ws = join(dir, 'ws');
   mkdirSync(ws, { recursive: true });

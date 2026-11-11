@@ -114,7 +114,9 @@ const within = (path, root) => path === root || path.startsWith(root.endsWith('/
 // A brief token -> an absolute, normalised path, or null (not usable). Never touches the disk.
 function briefCandidate(raw) {
   if (raw.length > MAX_BRIEF_PATH) return null;
-  let s = raw.replace(/:\d+(?::\d+)?$/, '').replace(/[\s.,;:!?)\]}>'"`*]+$/, '');
+  const tail = /[\s.,;:!?)\]}>'"`*]+$/;
+  // trailing punctuation, then a :line[:col], then punctuation again ("a.mjs:12." and "(a.mjs:12)" both work)
+  let s = raw.replace(tail, '').replace(/:\d+(?::\d+)?$/, '').replace(tail, '');
   if (s.length < 3) return null;
   if (/^[a-zA-Z]:/.test(s)) {
     if (process.platform !== 'win32') return null; // a drive-letter path means nothing here
@@ -152,7 +154,8 @@ export function repoFromBrief(brief, sessionCwd) {
       if (!repo) continue;
       const mk = repo.mainRoot.toLowerCase();
       const under = !!session && (within(mk, session) || within(repo.ownRoot.toLowerCase(), session));
-      repos.set(mk, { repo, under: under || !!repos.get(mk)?.under });
+      const prev = repos.get(mk);
+      repos.set(mk, { repo: prev ? prev.repo : repo, under: under || !!prev?.under }); // keep the first path the brief named for a repo (its worktree, when it named one)
     }
     const all = [...repos.values()];
     const here = all.filter((r) => r.under);

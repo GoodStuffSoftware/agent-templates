@@ -93,7 +93,7 @@ export function applyTierClause(type, role, brief = '', cwd = process.cwd(), opt
     const o = {
       reviewEveryChange: !!d.config?.reviewEveryChange,
       landing: d.landing || null,
-      floorRepo: d.projectSource === 'brief' ? d.mainRoot : null, // the worker's shell starts in the session folder: the floor command names the repo
+      floorRepo: d.projectSource === 'brief' ? d.ownRoot : null, // the worker's shell starts in the session folder: the floor command names the folder the brief worked in (a worktree stays a worktree, so HEAD is its HEAD)
     };
     const body = kind === 'reviewer'
       ? reviewerClause(d.tier, d.project, o)

@@ -474,6 +474,20 @@ test('brief: one repo path names the project; tier and landing come from the loo
   assert.deepEqual([q.project, q.tier, q.source, q.projectSource], ['acme-app', 'gates', 'default', 'brief']);
 }));
 
+test('brief: the first path named for a repo decides the folder (worktree or main), and :line / punctuation compose', () => withWorkspace(({ ws }) => {
+  const main = mainRepo(join(ws, 'repos'), 'acme-app');
+  const wt = join(ws, 'worktrees', 'feat-1');
+  fakeWorktree(main, wt);
+  assert.equal(fromBrief(ws, `Work in ${norm(wt)} (base ${norm(main)}).`).ownRoot, normalisePath(wt));
+  assert.equal(fromBrief(ws, `Base ${norm(main)}, work in ${norm(wt)}.`).ownRoot, normalisePath(main));
+  writeFileSync(join(main, 'a.mjs'), 'x\n');
+  const file = `${norm(main)}/a.mjs`;
+  for (const text of [`${file}:12.`, `${file}:12,`, `(${file}:12)`, `${file}:12:3;`, `${file}.`, `${file}:12:`, `"${file}:7",`]) {
+    const d = fromBrief(ws, `See ${text}`);
+    assert.deepEqual([d.project, d.projectSource], ['acme-app', 'brief'], text);
+  }
+}));
+
 test('brief: a worktree path counts as its main repo', () => withWorkspace(({ dir, ws }) => {
   const main = mainRepo(join(ws, 'repos'), 'acme-app');
   const wt = join(ws, 'worktrees', 'feat-1');
