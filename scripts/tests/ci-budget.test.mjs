@@ -49,6 +49,10 @@ function world(dir, over = {}) {
     // host, 5 busy cores read as "loaded" on a 4-core CI runner and grants shrink
     // to one worker. 64 is above every busy reading these tests feed.
     sampler: () => w.busy, reserve: 0, loadPct: Infinity, cores: 64,
+    // A live pid with a stale heartbeat is verified against the process table (ctx.procStart). Left to the
+    // host, a real process that happens to hold pid 601 on the CI runner keeps the "hung" lease alive and
+    // the grants in the reclaim test shrink (the 0.31.51 leak-check flake). Pinned: nothing is verifiable.
+    procStart: () => null,
     log: (l) => w.lines.push(l),
     ...over,
   };
@@ -184,7 +188,8 @@ test('share of free: grant = min(desired, free) with a floor of 1; no free unit 
 test('external load: busy cores that our held units do not explain count against the budget', () => {
   const t = tmp();
   try {
-    const w = world(t.dir);
+    // cores = budget: no unbudgeted headroom, so every outside core is charged (headroom is tested in ci-budget-headroom.test.mjs)
+    const w = world(t.dir, { cores: 8 });
     w.busy = 5; // nothing of ours is held, so all 5 are outside load
     const a = w.acquire({ desired: 8, pid: 101 });
     assert.equal(a.units, 3, 'budget 8 minus 5 outside');
@@ -417,7 +422,8 @@ test('express: a targeted run is admitted at once, with no ticket, up to budget 
 test('resize: a shrink applies at once, a grow is limited to what is free, never below one worker', () => {
   const t = tmp();
   try {
-    const w = world(t.dir);
+    // 12 cores, budget 8: 4 cores of headroom, so 8 outside cores charge 4 (busy 12 is not over the 12-core guard threshold)
+    const w = world(t.dir, { cores: 12 });
     const a = w.acquire({ desired: 6, pid: 1101 });
     const b = w.acquire({ desired: 2, pid: 1102 });
     assert.equal(a.resize(2).units, 2);
@@ -427,7 +433,7 @@ test('resize: a shrink applies at once, a grow is limited to what is free, never
     assert.equal(a.resize(0).units, 1, 'floor of one');
     assert.equal(a.workers, 1);
     assert.equal(b.resize(3).units, 3);
-    w.busy = 12; // outside load makes a grow shrink the grant too: free = 8 - 4 - (12 - 4)
+    w.busy = 12; // outside load makes a grow shrink the grant too: free = 8 - 1 - 4 (counted) - 3 (kept)
     assert.equal(b.resize(7).units, 3, 'no free units, so the grow is refused');
     a.release();
     assert.throws(() => a.resize(2), /released/);
@@ -449,7 +455,7 @@ test('resize can carry a label that status shows', () => {
 test('status: budget, held, free, outside load, every lease (any repo) and the queue', () => {
   const t = tmp();
   try {
-    const w = world(t.dir, { budget: 16 });
+    const w = world(t.dir, { budget: 16, cores: 16 }); // cores = budget: free = budget - held - external
     const a = w.acquire({ desired: 4, pid: 1301, worktree: 'wt-run', repo: 'agent-templates' });
     a.resize({ units: 2, heavy: 1 });
     writeLease(t.dir, { pid: 1302, units: 1, kind: 'targeted', worktree: 'wt-elsewhere', repo: 'sibling-repo', startedAt: T0 - 65_000, heartbeatAt: T0 - 15_000 });

@@ -154,7 +154,7 @@ test('a capacity-1 resource is never held twice, a capacity-2 resource twice but
 });
 
 test('box units are exclusive up to the budget; alone on the box a request always progresses', async () => {
-  const w = makeWorld({ budget: 4 });
+  const w = makeWorld({ budget: 4, cores: 4 }); // cores = budget: no headroom, so the outside load is charged and only the lone-run floor admits 'alone'
   try {
     w.busy = 4; // outside load fills the machine, but nothing of ours is held
     const alone = await w.acq({ box: 4, label: 'alone' });
@@ -556,7 +556,7 @@ test('release by hand: by id or unique prefix, logged as a clear by "manual", th
 // ---------------------------------------------------------------- cleared but alive
 
 test('a cleared lease whose process is alive is never signalled or killed, and its CPU still counts as outside load', async () => {
-  const w = makeWorld({ budget: 8, isAlive: isPidAlive, staleMs: 60_000 });
+  const w = makeWorld({ budget: 8, cores: 8, isAlive: isPidAlive, staleMs: 60_000 }); // cores = budget: no headroom, all outside load counts
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
   const realKill = process.kill;
   const signals = [];
@@ -595,7 +595,7 @@ test('a cleared lease whose process is alive is never signalled or killed, and i
         w.busy = 1; // the runaway finally stops
       },
     });
-    assert.match(line, /box:4 needed, 3 free of 8 \(1 held, outside load ~4\)/, 'D waited on the cleared process load');
+    assert.match(line, /box:4 wanted, 3 available of 8 \(1 held, outside load ~4 cores; 4 count against the budget after 0 cores of headroom\)/, 'D waited on the cleared process load');
     assert.ok(d.units === 4);
     d.release();
     other.release();
@@ -604,6 +604,77 @@ test('a cleared lease whose process is alive is never signalled or killed, and i
     process.kill = realKill;
     child.kill();
     w.done();
+  }
+});
+
+// ---------------------------------------------------------------- outside load past the budget's headroom
+
+// The box budget is already a share of the cores (the rest is headroom for outside work), so only outside
+// load beyond that headroom is charged against it. 0.31.51 charged all of it: on a 32-core desktop with 9-17
+// busy outside cores, a 12-slot head job never fitted behind a 1-slot holder and the whole queue waited out
+// the 30-minute bound.
+
+async function admitWithOutside(w, outside, box, held = 1) {
+  const other = await w.acq({ box: held, label: 'holder' });
+  w.busy = held + outside; // our held units plus the outside load
+  let polled = 0;
+  const lease = await w.acq({
+    box, label: 'head',
+    delay: async (ms) => { polled += 1; w.t += ms; w.busy = 0; other.release(); }, // the wait ends: the holder and the load go
+  });
+  const result = { immediately: polled === 0 && !lease.off, polled, lines: w.lines.slice() };
+  lease.release(); other.release();
+  return result;
+}
+
+test('box admission: the stall case (32 cores, budget 16, 1 held, outside load 9-17) admits the 12-slot head job at once', async () => {
+  for (const outside of [9, 12, 16, 17]) {
+    const w = makeWorld({ budget: 16, cores: 32 });
+    try {
+      const r = await admitWithOutside(w, outside, 12);
+      assert.equal(r.immediately, true, `outside load ${outside}: admitted without waiting`);
+    } finally { w.done(); }
+  }
+});
+
+test('box admission: outside load beyond the headroom still holds a job back, with the reason in the wait line', async () => {
+  const w = makeWorld({ budget: 16, cores: 32 });
+  try {
+    // 20 outside cores: 4 past the 16 of headroom, so 16 - 1 - 4 = 11 available < 12 wanted
+    const r = await admitWithOutside(w, 20, 12);
+    assert.equal(r.immediately, false);
+    assert.ok(r.polled >= 1);
+    assert.match(r.lines.join('\n'), /box:12 wanted, 11 available of 16 \(1 held, outside load ~20 cores; 4 count against the budget after 16 cores of headroom\)/);
+  } finally { w.done(); }
+  const w2 = makeWorld({ budget: 16, cores: 32 });
+  try {
+    assert.equal((await admitWithOutside(w2, 19, 11)).immediately, true, 'exactly at the limit: 16 - 1 - 3 = 12 >= 11');
+  } finally { w2.done(); }
+});
+
+test('box admission: the budget is never exceeded, whatever the headroom', async () => {
+  const w = makeWorld({ budget: 16, cores: 32 });
+  try {
+    // no outside load at all, but 5 held + 12 wanted > 16: held back
+    const r = await admitWithOutside(w, 0, 12, 5);
+    assert.equal(r.immediately, false);
+  } finally { w.done(); }
+});
+
+test('box admission, small host: 4 cores with budget 2 has 2 cores of headroom; budget >= cores has none', async () => {
+  const small = makeWorld({ budget: 2, cores: 4 });
+  try {
+    assert.equal((await admitWithOutside(small, 2, 1)).immediately, true, 'outside 2 is within the 2 cores of headroom');
+  } finally { small.done(); }
+  const small2 = makeWorld({ budget: 2, cores: 4 });
+  try {
+    assert.equal((await admitWithOutside(small2, 3, 1)).immediately, false, 'outside 3: 1 counts, 2 - 1 - 1 = 0 available');
+  } finally { small2.done(); }
+  for (const cores of [2, 1]) { // budget at or above the cores: no headroom, never a negative one
+    const w = makeWorld({ budget: 2, cores });
+    try {
+      assert.equal((await admitWithOutside(w, 1, 1)).immediately, false, `${cores} cores: every outside core counts`);
+    } finally { w.done(); }
   }
 });
 

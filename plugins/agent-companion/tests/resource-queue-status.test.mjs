@@ -21,7 +21,7 @@ const HOLDER = [
   'releaseCommand', 'repo', 'session', 'stale', 'startedAt', 'units', 'worktree',
 ];
 const QUEUE = [
-  'alive', 'blockedBy', 'createdAt', 'group', 'heartbeatAt', 'id', 'kind', 'label', 'passedOver', 'paused', 'pausedBy', 'pausedUntil', 'pid', 'position', 'project', 'ramMb', 'repo', 'session',
+  'alive', 'blockedBy', 'blockedReason', 'createdAt', 'group', 'heartbeatAt', 'id', 'kind', 'label', 'passedOver', 'paused', 'pausedBy', 'pausedUntil', 'pid', 'position', 'project', 'ramMb', 'repo', 'session',
   'waitedMs', 'wants', 'worktree',
 ];
 const CLEAR = ['at', 'evidence', 'id', 'label', 'pid', 'project', 'repo', 'resources', 'rule', 'session', 'type', 'worktree'];
@@ -197,5 +197,35 @@ test('status shows an old-lock holder in the box as legacy and keeps the queue p
     assert.deepEqual(q.map((x) => [x.position, x.label]), [[1, 'q1'], [2, 'q2'], [3, 'q3']]);
     a.release();
     for (const p of waiters) (await p).release();
+  } finally { w.done(); }
+});
+
+test('status says why the head job is blocked: slots wanted vs available, and the sampled outside load', async () => {
+  // The 2026-11-13 stall: a 32-core desktop (budget 16) with one holder and 30 busy cores of outside load.
+  const w = makeWorld({ budget: 16, cores: 32 });
+  try {
+    const other = await w.acq({ box: 1, label: 'other' });
+    w.busy = 31; // 1 ours + 30 outside: 30 - 16 headroom = 14 counted, so 16 - 1 - 14 = 1 available
+    let snap = null; let unsampled = null; let text = '';
+    const head = await w.acq({
+      box: 12, label: 'head',
+      delay: async (ms) => {
+        w.t += ms;
+        if (!snap) {
+          snap = resourceStatus({ ...w.opts, sample: true });
+          unsampled = resourceStatus({ ...w.opts });
+          text = formatResourceStatus(snap);
+        }
+        w.busy = 1; // the outside load drops: the head is admitted on the next poll
+      },
+    });
+    const q = snap.queue[0];
+    assert.deepEqual(q.blockedBy, ['box']);
+    assert.match(q.blockedReason, /box:12 wanted, 1 available of 16 \(1 held, outside load ~30 cores; 14 count against the budget after 16 cores of headroom\)/);
+    assert.match(text, /#1 .*blocked on box/);
+    assert.match(text, /why: box:12 wanted, 1 available of 16 \(1 held, outside load ~30 cores/);
+    assert.deepEqual(unsampled.queue[0].blockedBy, [], 'without a sample the box check is skipped, as before');
+    assert.equal(unsampled.queue[0].blockedReason, '');
+    head.release(); other.release();
   } finally { w.done(); }
 });
