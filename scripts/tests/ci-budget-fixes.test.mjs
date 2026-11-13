@@ -102,7 +102,7 @@ test('F1: a non-waiting heavy request keeps the one-worker floor; only a waiter 
 test('F2: a lone run in the heavy pass gets a heavy worker even when outside load fills the machine', () => {
   const t = tmp();
   try {
-    const w = world(t);
+    const w = world(t, { cores: 16 }); // cores = budget: no headroom, so the outside load is charged and the lone-run floors are what grant the worker
     w.busy = 32;
     const lease = w.acquire({ desired: 8, timeoutMs: 60_000 });
     assert.ok(lease.units >= 1);

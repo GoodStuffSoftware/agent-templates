@@ -10,8 +10,8 @@
 //
 // Replaces the one-run mutex (scripts/ci-lock.mjs, removed). Several ci-local and
 // pre-push runs may go at once; the TOTAL number of test workers across all of
-// them, plus load from outside our runs, stays under one budget that scales
-// with the machine. A run that finds the box busy starts with fewer workers or
+// them, plus the load from outside our runs that goes beyond the machine's
+// headroom, stays under one budget that scales with the machine. A run that finds the box busy starts with fewer workers or
 // waits in a fair queue. It never fails.
 //
 // The lease format and protocol (file names, fields, atomic rules, stale rules,

@@ -524,10 +524,12 @@ export async function cli(argv, io = {}) {
         else if (rest[i] === '--resource') { only = flagValue(rest, i, '--resource'); i += 1; }
         else throw new Error(`unknown option "${rest[i]}"`);
       }
-      let st = resourceStatus({ env, sample, strays, ...(io.ledger ?? {}) });
+      let st = resourceStatus({ env, sample, strays: false, ...(io.ledger ?? {}) });
       // The text form takes one CPU sample when something is queued, so it can say why the head is blocked
-      // (slots wanted vs available, outside load). `--json` stays unsampled unless asked, as before.
-      if (!sample && !json && st.ok && st.queue.length > 0) st = resourceStatus({ env, sample: true, strays, ...(io.ledger ?? {}) });
+      // (slots wanted vs available, outside load). `--json` stays unsampled unless asked, as before. The
+      // stray scan (a process-table read) runs once, in the last call only.
+      const wantSample = sample || (!json && st.ok && st.queue.length > 0);
+      if (strays || wantSample !== sample) st = resourceStatus({ env, sample: wantSample, strays, ...(io.ledger ?? {}) });
       if (only) {
         st.resources = st.resources.filter((r) => r.name === only);
         st.queue = st.queue.filter((q) => only in q.wants);

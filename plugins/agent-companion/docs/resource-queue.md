@@ -16,7 +16,7 @@ Contents: Part 1 is the lease protocol the pre-push gate (`scripts/ci-local.mjs`
 
 ## Part 1: the shared CI budget (lease protocol)
 
-`plugins/agent-companion/scripts/ci-budget.mjs` replaces the one-run mutex with a shared worker budget: several runs may go at once, and the total of test workers across every run on the machine, plus load from outside our runs, stays under one budget. A new run starts with fewer workers when the box is busy, or waits in a fair queue; it never fails. `scripts/ci-local.mjs` takes its leases from it (see "Full suites go through the shared budget" in CONTRIBUTING.md). This file is the one spec of the format. The code links here, and another repo can take leases from the same budget by following it.
+`plugins/agent-companion/scripts/ci-budget.mjs` replaces the one-run mutex with a shared worker budget: several runs may go at once, and the total of test workers across every run on the machine, plus the load from outside our runs that goes beyond the cores the budget leaves free, stays under one budget. A new run starts with fewer workers when the box is busy, or waits in a fair queue; it never fails. `scripts/ci-local.mjs` takes its leases from it (see "Full suites go through the shared budget" in CONTRIBUTING.md). This file is the one spec of the format. The code links here, and another repo can take leases from the same budget by following it.
 
 **Knobs.**
 

@@ -78,7 +78,7 @@
 //
 // Shared CI budget (plugins/agent-companion/scripts/ci-budget.mjs; protocol in
 // plugins/agent-companion/docs/resource-queue.md): the TOTAL number of test workers across every ci-local run on the
-// machine, plus load from outside our runs, stays under one budget (default half
+// machine, plus the load from outside our runs beyond the cores the budget leaves free, stays under one budget (default half
 // the logical cores). A run takes a 'full' lease just before its first suite (the
 // pre-push scan runs without one): it asks for the concurrency above, gets what
 // is free (at least 1), and passes the grant to node as --test-concurrency. A

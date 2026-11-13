@@ -154,7 +154,7 @@ test('a capacity-1 resource is never held twice, a capacity-2 resource twice but
 });
 
 test('box units are exclusive up to the budget; alone on the box a request always progresses', async () => {
-  const w = makeWorld({ budget: 4 });
+  const w = makeWorld({ budget: 4, cores: 4 }); // cores = budget: no headroom, so the outside load is charged and only the lone-run floor admits 'alone'
   try {
     w.busy = 4; // outside load fills the machine, but nothing of ours is held
     const alone = await w.acq({ box: 4, label: 'alone' });
