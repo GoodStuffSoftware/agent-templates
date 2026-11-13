@@ -115,7 +115,7 @@ test('F2: a lone run in the heavy pass gets a heavy worker even when outside loa
 test('F2: the floor is for a run alone on the box; with another holder the outside load still counts', () => {
   const t = tmp();
   try {
-    const w = world(t);
+    const w = world(t, { cores: 16 }); // cores = budget: no headroom, so all outside load is charged
     w.busy = 32;
     const a = w.acquire({ desired: 1 });
     const b = w.acquire({ desired: 1, kind: 'targeted' });

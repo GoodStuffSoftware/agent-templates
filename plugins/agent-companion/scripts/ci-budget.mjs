@@ -34,7 +34,11 @@
 // against the budget, and `heavy` counts toward the machine-wide heavy cap.
 //
 // Admission, full run (kind 'full'; takes a ticket and queues):
-//   free  = budget - held - external          (held = sum of live charges)
+//   free  = budget - held - counted           (held = sum of live charges)
+//   counted = max(0, external - (cores - budget)): the budget already leaves
+//   `cores - budget` cores to outside work, so only outside load beyond that
+//   headroom is charged again (counting all of it twice stalled a 12-slot job
+//   behind a busy desktop for the full queue wait).
 //   admit only when this run's ticket is the head of the queue (ordered by
 //   (createdAt, pid)), fewer than maxFull full leases are live, and free >= 1;
 //   grant = min(desired, free) plain units.
@@ -45,7 +49,8 @@
 //   (still with no ticket, so it never queues behind full suites).
 // External load: busy = sum over cores of (1 - idleDelta/totalDelta) between
 //   two os.cpus() samples; external = max(0, round(busy - held)), i.e. the
-//   busy cores that our held units do not explain. The sampler is injectable.
+//   busy cores that our held units do not explain; admission charges only
+//   `counted` of it (see above). The sampler is injectable.
 // Load guard (reserve and re-sample). busy = the sampled busy cores, ours
 //   included. The machine is "loaded" when busy > min(cores - reserve, cores *
 //   loadPct / 100): fewer than `reserve` cores idle (interactive work and hooks
@@ -319,19 +324,30 @@ export function sampleBusyCores({ ms = DEFAULT_SAMPLE_MS, sleep = sleepMs, read 
   return busy;
 }
 
+/**
+ * The part of the outside load that admission charges against the budget: only
+ * what exceeds the cores the budget leaves to outside work (cores - budget).
+ * Never negative; a budget at or above the core count (a small host, or a
+ * setting) has no headroom, so all of the outside load counts there.
+ */
+export function countedExternal(ctx, external) {
+  const cores = Number(ctx.cores);
+  const headroom = Number.isFinite(cores) ? Math.max(0, cores - ctx.budget) : 0;
+  const ext = Number(external);
+  return Number.isFinite(ext) ? Math.max(0, ext - headroom) : 0;
+}
+
 // One fresh sample of the machine: `busy` cores (ours included), `external` (the
-// busy cores our held units do not explain) and `over` (busy is above the load
+// busy cores our held units do not explain), `counted` (the part of `external`
+// that admission charges, see countedExternal) and `over` (busy is above the load
 // threshold: fewer than `reserve` cores idle, or more than `loadPct` percent busy).
 function measureLoad(ctx) {
   const busy = Number(ctx.sampler());
   const held = totals(ctx, readState(ctx, { reclaim: false })).held;
-  if (!Number.isFinite(busy)) return { busy: NaN, external: 0, over: false };
+  if (!Number.isFinite(busy)) return { busy: NaN, external: 0, counted: 0, over: false };
   const at = overloadThreshold(ctx);
-  return { busy, external: Math.max(0, Math.round(busy - held)), over: busy > at };
-}
-
-function measureExternal(ctx) {
-  return measureLoad(ctx).external;
+  const external = Math.max(0, Math.round(busy - held));
+  return { busy, external, counted: countedExternal(ctx, external), over: busy > at };
 }
 
 // ---------------------------------------------------------------- files
@@ -1055,8 +1071,8 @@ function createLease(ctx, {
       const grows = want.units > rec.units || want.heavy > rec.heavy;
       // Re-sample the machine on every grow, and on request (resample: a lease that
       // is already full size asks again between slices of a long pass).
-      const load = grows || resample ? measureLoad(ctx) : { external: 0, over: false, busy: NaN };
-      const { external } = load;
+      const load = grows || resample ? measureLoad(ctx) : { external: 0, counted: 0, over: false, busy: NaN };
+      const external = load.counted;
       if (grows || resample) noteLoad(load);
       // Loaded machine: admit new workers slowly. The lease keeps (or is cut to)
       // one worker per lane; a later request admits more once the load is down.
@@ -1136,7 +1152,8 @@ function timeoutError() {
 
 function describe(ctx, st, external) {
   const t = totals(ctx, st);
-  return `budget ${ctx.budget}, held ${t.held}, outside load ~${external}, free ${Math.max(0, ctx.budget - t.held - external)}`;
+  const counted = countedExternal(ctx, external);
+  return `budget ${ctx.budget}, held ${t.held}, outside load ~${external}${counted === external ? '' : ` (${counted} counted past the budget's headroom)`}, free ${Math.max(0, ctx.budget - t.held - counted)}`;
 }
 
 function acquireFull(ctx, opts) {
@@ -1178,13 +1195,14 @@ function acquireFull(ctx, opts) {
         } else {
           const load = measureLoad(ctx);
           external = load.external;
+          const counted = load.counted;
           const got = withAdmit(ctx, () => {
             const s = readState(ctx, { reclaim: true });
             const sq = s.tickets.filter(usesBox);
             if (!sq.length || sq[0].id !== id) return null;
             const tt = totals(ctx, s);
             if (tt.fullCount >= ctx.maxFull) return null;
-            let free = ctx.budget - tt.held - external;
+            let free = ctx.budget - tt.held - counted;
             if (tt.held === 0) free = Math.max(free, 1); // alone on the box: always progress
             if (free < 1) return null;
             // A loaded machine (reserve not idle, or over the load threshold) gets one worker.
@@ -1324,7 +1342,7 @@ export function status(opts = {}) {
     dir: ctx.dir, cores: ctx.cores, budget: ctx.budget, heavyCost: ctx.heavyCost, heavyMax: ctx.heavyMax,
     express: ctx.express, reserve: ctx.reserve, loadPct: ctx.loadPct, loadThreshold: Math.round(overloadThreshold(ctx) * 10) / 10,
     loaded, maxFull: Number.isFinite(ctx.maxFull) ? ctx.maxFull : null,
-    held: t.held, heavyHeld: t.heavyHeld, free: Math.max(0, ctx.budget - t.held - external),
+    held: t.held, heavyHeld: t.heavyHeld, free: Math.max(0, ctx.budget - t.held - countedExternal(ctx, external)),
     busyCores: busyCores === null ? null : Math.round(busyCores * 10) / 10, external,
     leases: state.leases.map((l) => ({
       id: l.id, kind: l.kind, pid: l.pid, repo: l.repo || '', worktree: l.worktree, units: l.units, heavy: l.heavy,
@@ -1425,7 +1443,8 @@ const who = (l, now) => `pid ${l.pid}${l.label ? ` "${l.label}"` : ''} for ${Mat
 /**
  * Does request `req` fit right now, behind the tickets ahead of `id`? Pure on
  * (ctx, state). `external` is the sampled outside load (null: not sampled, the
- * box check is skipped and `needsSample` says so). Returns {ok, reasons[{resource, text}], needsSample}.
+ * box check is skipped and `needsSample` says so); only the part past the budget's
+ * headroom is charged (countedExternal). Returns {ok, reasons[{resource, text}], needsSample}.
  */
 function evaluateFit(ctx, state, req, id, external) {
   const reasons = [];
@@ -1471,8 +1490,16 @@ function evaluateFit(ctx, state, req, id, external) {
   let needsSample = false;
   if (req.box > 0 && t.held > 0) { // alone on the box: always progress
     if (external === null) needsSample = true;
-    else if (req.box > ctx.budget - t.held - external) {
-      reasons.push({ resource: BOX, text: `box:${req.box} needed, ${Math.max(0, ctx.budget - t.held - external)} free of ${ctx.budget} (${t.held} held, outside load ~${external})` });
+    else {
+      const counted = countedExternal(ctx, external);
+      if (req.box > ctx.budget - t.held - counted) {
+        const avail = Math.max(0, ctx.budget - t.held - counted);
+        reasons.push({
+          resource: BOX,
+          text: `box:${req.box} wanted, ${avail} available of ${ctx.budget} (${t.held} held, outside load ~${external} cores; `
+            + `${counted} count against the budget after ${Math.max(0, ctx.cores - ctx.budget)} cores of headroom)`,
+        });
+      }
     }
   }
   if (req.ramMb > 0 && (state.leases.length > 0 || state.legacy.length > 0)) {
@@ -1664,9 +1691,11 @@ export function resourceStatus(opts = {}) {
     if (opts.sample === true) {
       try {
         busyCores = Number(ctx.sampler());
-        external = Math.max(0, Math.round(busyCores - t.held));
-        loaded = busyCores > overloadThreshold(ctx);
-      } catch { /* best effort */ }
+        if (Number.isFinite(busyCores)) {
+          external = Math.max(0, Math.round(busyCores - t.held));
+          loaded = busyCores > overloadThreshold(ctx);
+        } else busyCores = null;
+      } catch { busyCores = null; external = null; /* best effort */ }
     }
     const staleLeases = state.stale.filter((s) => s.type === 'lease');
     const names = new Set([...Object.keys(ctx.rules?.resources ?? {}).filter((n) => n !== BOX && ctx.rules.resources[n]?.capacity), ...Object.keys(held)]);
@@ -1696,7 +1725,7 @@ export function resourceStatus(opts = {}) {
     }
     const queue = state.tickets.map((q, i) => {
       const req = { box: q.kind === 'run' ? q.boxUnits : 1, named: q.resources ?? {}, ramMb: q.ramMb || 0, group: q.group || '' };
-      const fit = evaluateFit(ctx, state, req, q.id, null);
+      const fit = evaluateFit(ctx, state, req, q.id, external);
       const hb = Math.max(num(q.heartbeatAt), num(q.createdAt));
       return {
         position: i + 1, id: q.id, kind: q.kind, pid: q.pid, alive: ctx.isAlive(q.pid), label: q.label || '',
@@ -1704,6 +1733,7 @@ export function resourceStatus(opts = {}) {
         wants: { ...(req.box ? { [BOX]: q.kind === 'run' ? q.boxUnits : q.desired } : {}), ...req.named },
         ramMb: req.ramMb, createdAt: num(q.createdAt) || null, heartbeatAt: hb || null,
         waitedMs: Math.max(0, now - num(q.createdAt)), blockedBy: [...new Set(fit.reasons.map((r) => r.resource))],
+        blockedReason: fit.reasons.map((r) => r.text).join('; '),
         group: q.group || '', paused: Boolean(q.paused), pausedBy: q.pausedBy || '', pausedUntil: q.pausedUntil ?? null,
         passedOver: fit.policy,
       };
@@ -1777,6 +1807,7 @@ export function formatResourceStatus(st) {
     lines.push(`  #${q.position} pid ${String(q.pid).padEnd(7)} wants ${Object.entries(q.wants).map(([n, u]) => `${n}:${u}`).join(' ')}  waiting ${dur(q.waitedMs)}`
       + `  ${q.project || ''} ${q.worktree}${q.label ? `  [${q.label}]` : ''}${q.group ? `  group ${q.group}` : ''}${q.paused ? '  PAUSED' : ''}`
       + `${q.blockedBy.length ? `  blocked on ${q.blockedBy.join(', ')}` : ''}${q.alive ? '' : '  PID DEAD'}`);
+    if (q.blockedReason && q.position === 1) lines.push(`       why: ${q.blockedReason}`);
   }
   if (st.recentClears.length) {
     lines.push('');

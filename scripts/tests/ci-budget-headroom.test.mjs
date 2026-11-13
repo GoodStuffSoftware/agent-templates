@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir, constants as osConstants } from 'node:os';
 import { join } from 'node:path';
 import {
-  acquire, status, formatStatus, resolveBudgetConfig, defaultReserve, overloadThreshold, lowerOwnPriority,
+  acquire, status, formatStatus, resolveBudgetConfig, defaultReserve, overloadThreshold, lowerOwnPriority, countedExternal,
 } from '../../plugins/agent-companion/scripts/ci-budget.mjs';
 
 const NO_LEGACY = mkdtempSync(join(tmpdir(), 'ci-budget-headroom-legacy-'));
@@ -240,5 +240,53 @@ test('status names the load guard and whether the machine is loaded now', () => 
     assert.equal(st.loaded, false);
     assert.match(formatStatus(st), /\(not loaded now\)/);
     assert.equal(w.status({ sample: false }).loaded, null);
+  } finally { cleanup(); }
+});
+
+// ---------------------------------------------------------------- outside load past the budget's headroom
+
+test('countedExternal: only the outside load past the cores the budget leaves free is charged, never negative', () => {
+  assert.equal(countedExternal({ cores: 32, budget: 16 }, 0), 0);
+  assert.equal(countedExternal({ cores: 32, budget: 16 }, 16), 0, 'exactly the headroom: nothing charged');
+  assert.equal(countedExternal({ cores: 32, budget: 16 }, 17), 1);
+  assert.equal(countedExternal({ cores: 32, budget: 16 }, 30), 14);
+  assert.equal(countedExternal({ cores: 4, budget: 2 }, 2), 0, 'small host: 2 cores of headroom');
+  assert.equal(countedExternal({ cores: 4, budget: 2 }, 3), 1);
+  assert.equal(countedExternal({ cores: 2, budget: 2 }, 3), 3, 'budget = cores: no headroom, all of it counts');
+  assert.equal(countedExternal({ cores: 4, budget: 8 }, 3), 3, 'a budget set above the cores has no headroom, and never a negative one');
+  assert.equal(countedExternal({ cores: 32, budget: 16 }, NaN), 0, 'an unreadable sample charges nothing');
+  assert.equal(countedExternal({ cores: NaN, budget: 16 }, 5), 5, 'unknown cores: no headroom assumed');
+  assert.equal(countedExternal({ cores: 32, budget: 16 }, -4), 0);
+});
+
+test('a full run behind a small holder is admitted on a busy desktop: 32 cores, budget 16, outside load 17', () => {
+  const { dir, cleanup } = tmp();
+  try {
+    const w = world(dir, { budget: 16 });
+    const held = w.acquire({ desired: 1 });
+    w.busy = 1 + 17; // one held unit and 17 busy outside cores: 1 past the 16 cores of headroom
+    const l = w.acquire({ desired: 8 });
+    assert.equal(l.units, 8, 'free = 16 - 1 - 1');
+    assert.equal(l.waitedMs, 0);
+    l.release();
+    w.busy = 1 + 27; // 11 past the headroom, and 28 busy is not yet "loaded": free = 16 - 1 - 11 = 4
+    const m = w.acquire({ desired: 8 });
+    assert.equal(m.units, 4, 'outside load above the headroom still shrinks the grant');
+    assert.match(w.lines.join(String.fromCharCode(10)), /starting with 4 of 8 workers .*outside load ~27 \(11 counted past the budget's headroom\), free 0/); // described after the grant (held 5)
+    m.release(); held.release();
+  } finally { cleanup(); }
+});
+
+test('status free counts only the outside load past the headroom', () => {
+  const { dir, cleanup } = tmp();
+  try {
+    const w = world(dir, { budget: 16 });
+    const a = w.acquire({ desired: 2 });
+    w.busy = 2 + 12; // 12 outside cores: inside the 16 of headroom
+    assert.equal(w.status().free, 14);
+    assert.equal(w.status().external, 12, 'the estimate itself is still the raw outside load');
+    w.busy = 2 + 20;
+    assert.equal(w.status().free, 10, '16 - 2 - (20 - 16)');
+    a.release();
   } finally { cleanup(); }
 });
