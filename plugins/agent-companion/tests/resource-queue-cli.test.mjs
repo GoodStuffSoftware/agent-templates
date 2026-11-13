@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './isolate.mjs';
-import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -253,6 +253,20 @@ test('status --json prints the schema-v1 object of the ledger; --resource filter
     assert.match(text.stdout, /\[cli-holder\]/);
     assert.equal(b.run(['status', '--nonsense']).status, 2);
   } finally { holder.release(); b.done(); }
+});
+
+test('status text samples the cpu when something is queued, so it can say why; --json does not', () => {
+  const b = box();
+  try {
+    mkdirSync(b.ledger, { recursive: true });
+    const id = Math.random().toString(16).slice(2, 14).padEnd(12, '0');
+    const now = Date.now();
+    writeFileSync(join(b.ledger, `ticket-${id}.json`), JSON.stringify({
+      id, pid: process.pid, createdAt: now, heartbeatAt: now, repo: 'demo-repo', worktree: 'wt-demo', kind: 'run', boxUnits: 2, label: 'queued-demo',
+    }));
+    assert.match(b.run(['status']).stdout, /cpu busy [\d.]+ cores, outside load ~\d+/, 'the text form sampled');
+    assert.equal(JSON.parse(b.run(['status', '--json']).stdout).machine.busyCores, null, 'json stays unsampled');
+  } finally { b.done(); }
 });
 
 test('status on an empty or missing ledger is ok and has the same shape; sweep says there is nothing to clear', () => {
