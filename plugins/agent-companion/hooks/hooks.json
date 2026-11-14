@@ -72,6 +72,19 @@
         ]
       },
       {
+        "matcher": "^(SendMessage|mcp__ccd_session_mgmt__send_message)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/coordinator-gate.mjs"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "^mcp__scheduled-tasks__(create|update)_scheduled_task$",
         "hooks": [
           {
