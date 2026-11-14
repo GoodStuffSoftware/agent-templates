@@ -32,7 +32,7 @@ function world(extraEnv = {}) {
   const record = (local, cli, spawnedFrom, more = {}) => writeFileSync(join(sessions, `${local}.json`), JSON.stringify({
     sessionId: local, cliSessionId: cli, title: 'invented', ...(spawnedFrom ? { spawnedFrom: { sessionId: spawnedFrom, taskId: 'task_1' } } : {}), ...more,
   }));
-  record(COORD, COORD_CLI, null);
+  record(COORD, COORD_CLI, null, { title: 'Orchard planner' });
   record(CHILD, CHILD_CLI, COORD);
   record(PEER, 'cli-peer-0001', COORD);
   // The child's transcript: the coordinator's message carries the reply address and its session id.
@@ -82,7 +82,8 @@ test('modeFrom: block, warn and off; anything else is the shipped default', () =
   assert.equal(modeFrom('block'), 'block');
   assert.equal(modeFrom(' WARN '), 'warn');
   assert.equal(modeFrom('off'), 'off');
-  for (const v of ['', 'maybe', undefined, null, 1]) assert.equal(modeFrom(v), 'block');
+  for (const v of ['false', '0', 'No', false, 0]) assert.equal(modeFrom(v), 'off');
+  for (const v of ['', 'maybe', undefined, null, 1, true]) assert.equal(modeFrom(v), 'block');
 });
 
 // ---- the hook: the gate ---------------------------------------------------------------------------------
@@ -161,6 +162,32 @@ test('addresses: a local_ id and a uds: reply address both resolve to the coordi
     assert.equal(tagged.stdout.trim(), '');
     assert.deepEqual(w.rows().map((x) => [x.target, x.decision]), [['address', 'deny'], ['address', 'allow']]);
   } finally { w.fx.cleanup(); }
+});
+
+test('addresses: the coordinator named by its title is gated; any other name passes', () => {
+  const w = world();
+  try {
+    const status = 'still working on the atlas packer';
+    for (const to of ['Orchard planner', '  orchard PLANNER  ', 'Orchard planner [3fa9c1]']) {
+      assert.equal(decisionOf(w.send({ tool_input: { to, message: status } }).json), 'deny', to);
+    }
+    assert.equal(w.send({ tool_input: { to: 'Orchard planner', message: 'FINDING: the atlas is 2x too large' } }).stdout.trim(), '');
+    for (const to of ['Orchard planner two', 'tile-worker', 'invented']) {
+      assert.equal(w.send({ tool_input: { to, message: status } }).stdout.trim(), '', to);
+    }
+    assert.deepEqual(w.rows().map((x) => [x.target, x.decision]), [['name', 'deny'], ['name', 'deny'], ['name', 'deny'], ['name', 'allow']]);
+    // a coordinator renamed in the app is followed: the title is read each time
+    w.record(COORD, COORD_CLI, null, { title: 'Orchard release lead' });
+    assert.equal(decisionOf(w.send({ tool_input: { to: 'Orchard release lead', message: status } }).json), 'deny');
+    assert.equal(w.send({ tool_input: { to: 'Orchard planner', message: status } }).stdout.trim(), '');
+  } finally { w.fx.cleanup(); }
+});
+
+test('tagOf: a very long run of leading spaces is read in linear time', () => {
+  const t0 = Date.now();
+  assert.equal(tagOf(`${' '.repeat(200000)}x`), null);
+  assert.equal(tagOf(`${' '.repeat(200000)}DONE: ok`), 'DONE');
+  assert.ok(Date.now() - t0 < 500, `${Date.now() - t0} ms`);
 });
 
 test('addresses: names, unknown pipes and other address forms do not resolve', () => {
@@ -312,6 +339,11 @@ test('lookup: a found parent is cached; "no parent" is cached only briefly', () 
       w.record(COORD, COORD_CLI, PEER); // now it has a parent
       assert.equal(parentOf(COORD_CLI, { now: 1000 + 60_000 }), null, 'negative answer still cached');
       assert.equal(parentOf(COORD_CLI, { now: 1000 + 11 * 60_000 }), PEER, 'negative answer expired');
+      // a session with no record at all: remembered for two minutes, then looked up again
+      assert.equal(parentOf('cli-late', { now: 5000 }), null);
+      w.record('local_orchard-late-0005', 'cli-late', COORD);
+      assert.equal(parentOf('cli-late', { now: 5000 + 60_000 }), null, 'still remembered as unknown');
+      assert.equal(parentOf('cli-late', { now: 5000 + 3 * 60_000 }), COORD, 'found once the record exists');
     } finally {
       if (prev === undefined) delete process.env.AGENT_COMPANION_CODE_SESSIONS_DIR; else process.env.AGENT_COMPANION_CODE_SESSIONS_DIR = prev;
     }

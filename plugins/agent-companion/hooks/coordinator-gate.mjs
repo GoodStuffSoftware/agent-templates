@@ -6,12 +6,12 @@
 // belongs on the card or task list: a status message wakes the coordinator for an expensive turn.
 //
 // Passes untouched, and never gated on a guess: a send from a coordinator or a top-level session, between
-// children, to a subagent by name, from a subagent, a message that is not plain text, or to a target that
+// children, to a name that is not the coordinator's title (a subagent or teammate), from a subagent, a message that is not plain text, or to a target that
 // cannot be resolved to the parent. Any error passes (fail open). One telemetry row per gated decision
 // (telemetry/coordinator-messages.jsonl): the decision and the tag, never the message text.
 
 import { readStdin, opt, passthrough, deny, appendLog, callerIsSubagent } from './lib/context.mjs';
-import { modeFrom, tagOf, parentOf, resolveTargetSession, DENY_REASON, WARN_NOTE } from './lib/coordinator-gate.mjs';
+import { modeFrom, tagOf, parentOf, resolveTargetSession, namesSession, DENY_REASON, WARN_NOTE } from './lib/coordinator-gate.mjs';
 
 function row(p, mode, decision, tag, via) {
   appendLog('coordinator-messages.jsonl', {
@@ -38,15 +38,15 @@ try {
   const to = mcp ? input.session_id : (input.to || input.recipient);
   const message = input.message;
   if (typeof to !== 'string' || typeof message !== 'string') passthrough();
-  // Only a session id or a reply address can name the coordinator; a name is a subagent or teammate.
-  if (!/^(local_|uds:)/i.test(to.trim())) passthrough();
-
   const parent = parentOf(p.session_id);
   if (!parent) passthrough();
+  // The coordinator is named by its session id, by a reply address of its messages, or by its title. Any
+  // other name is a subagent or teammate of this session (or unknown) and passes.
   const target = resolveTargetSession(to, p.transcript_path);
-  if (!target || target !== parent) passthrough();
+  const named = !target && namesSession(to, parent);
+  if (!named && target !== parent) passthrough();
 
-  const via = /^uds:/i.test(to.trim()) ? 'address' : 'session-id';
+  const via = named ? 'name' : /^uds:/i.test(to.trim()) ? 'address' : 'session-id';
   const tag = tagOf(message);
   if (tag) {
     row(p, mode, 'allow', tag, via);

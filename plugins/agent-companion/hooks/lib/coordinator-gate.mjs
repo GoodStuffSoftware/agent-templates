@@ -25,18 +25,21 @@ export const DENY_REASON = 'Messages to your coordinator start with QUESTION:, B
 export const WARN_NOTE = 'agent-companion (coordinator message gate, warn): this message to your coordinator has no tag. Start it with QUESTION:, BLOCKED:, DONE:, CHANGE:, FINDING: or ANSWER:, and put status on your card or task list.';
 export const STANDING_RULE_TEXT = 'Messages to your coordinator start with QUESTION: (need a decision), BLOCKED: (stuck), DONE: (hand-back), CHANGE: (plan changed), FINDING: (new risk or fact it must act on) or ANSWER: (reply to its request).\nStatus goes on your task card if you use one, otherwise your task list; never message the coordinator just to report progress or acknowledge.';
 
+// block, warn or off; the plain off spellings (false, 0, no) read as off like the other guards' options;
+// anything else is the shipped default.
 export function modeFrom(value) {
   const v = String(value ?? '').trim().toLowerCase();
+  if (/^(false|0|no|none|disabled)$/.test(v)) return 'off';
   return MODES.includes(v) ? v : DEFAULT_MODE;
 }
 
-const TAG_RE = new RegExp(`^\\s*(?:\\*\\*|__)?\\s*(${TAGS.join('|')})\\s*(?:\\*\\*|__)?\\s*:`, 'i');
+const TAG_RE = new RegExp(`^(?:\\*\\*|__)?\\s{0,3}(${TAGS.join('|')})\\s{0,3}(?:\\*\\*|__)?\\s{0,3}:`, 'i');
 
 // The tag a message opens with (upper case), or null. Case, leading whitespace and markdown bold around the
 // tag do not matter: "  **question:** ...", "**Done**: ...".
 export function tagOf(message) {
   if (typeof message !== 'string') return null;
-  const m = TAG_RE.exec(message);
+  const m = TAG_RE.exec(message.trimStart().slice(0, 80));
   return m ? m[1].toUpperCase() : null;
 }
 
@@ -90,6 +93,7 @@ export function sessionRecord(cliId, root = codeSessionsDir()) {
 
 const CACHE_FILE = 'coordinator-parent.json';
 const NEGATIVE_TTL_MS = 10 * 60 * 1000;
+const NO_RECORD_TTL_MS = 2 * 60 * 1000;
 const CACHE_MAX = 400;
 
 // The coordinator's local_ id for a child session, or null (a top-level session, or no record found).
@@ -104,14 +108,15 @@ export function parentOf(cliId, { now = Date.now(), root } = {}) {
     if (now - (hit.at || 0) < NEGATIVE_TTL_MS) return null;
   }
   const rec = sessionRecord(cliId, root);
-  if (!rec) return null; // not cached: the record may not be written yet
-  cache[cliId] = { parent: rec.parent, at: now };
+  // No record yet (a session the app has not written down): remembered for two minutes only, so a sender
+  // with no record does not rescan the folder on every send, and a record written a moment later is found.
+  cache[cliId] = rec ? { parent: rec.parent, at: now } : { parent: null, at: now - NEGATIVE_TTL_MS + NO_RECORD_TTL_MS };
   const keys = Object.keys(cache);
   if (keys.length > CACHE_MAX) {
     for (const k of keys.sort((a, b) => (cache[a].at || 0) - (cache[b].at || 0)).slice(0, keys.length - CACHE_MAX)) delete cache[k];
   }
   writeJsonAtomic(stateFile(CACHE_FILE), cache);
-  return rec.parent;
+  return rec ? rec.parent : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,4 +172,29 @@ export function resolveTargetSession(to, transcriptPath) {
   if (/^local_[\w-]+$/.test(t)) return t;
   if (/^uds:/i.test(t)) return sessionForAddress(t, transcriptPath);
   return null;
+}
+
+// A send addressed by NAME: the desktop app lets a session reach another by its title, and a child often
+// writes its coordinator's title. `to` names the coordinator when it equals that session's title (a trailing
+// " [ref]" disambiguator and case ignored). The title is read from the coordinator's own record each time
+// (it can be renamed); null when it cannot be read.
+export function titleOfSession(local, root = codeSessionsDir()) {
+  if (!/^local_[\w-]+$/.test(String(local || ''))) return null;
+  for (const p of recordFiles(root)) {
+    if (!p.endsWith(`${local}.json`)) continue;
+    try {
+      const t = JSON.parse(readFileSync(p, 'utf8')).title;
+      return typeof t === 'string' && t.trim() ? t : null;
+    } catch { return null; }
+  }
+  return null;
+}
+
+const normName = (s) => String(s ?? '').trim().replace(/\s*\[[^\]]*\]\s*$/, '').trim().toLowerCase();
+
+export function namesSession(to, local, root) {
+  const want = normName(to);
+  if (!want) return false;
+  const title = titleOfSession(local, root);
+  return !!title && normName(title) === want;
 }

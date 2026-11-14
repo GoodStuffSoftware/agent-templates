@@ -350,7 +350,7 @@ Written by `hooks/coordinator-gate.mjs` (option `coordinator_message_gate`, 0.31
 | `mode` | string | `block` or `warn` (`off` writes nothing) |
 | `decision` | string | `allow` (tagged), `deny` (untagged, `block`) or `warn` (untagged, sent anyway) |
 | `tag` | string or null | the tag the message opened with, upper case; null when untagged |
-| `target` | string | how the coordinator was addressed: `session-id` or `address` |
+| `target` | string | how the coordinator was addressed: `session-id`, `address` or `name` |
 
 ### `denials.jsonl` — one record per guard firing
 
