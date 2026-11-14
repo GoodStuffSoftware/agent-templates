@@ -12,10 +12,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
 import { telemetryDir } from '../hooks/lib/context.mjs';
-import { readContextSignal, subagentNoticeText, BOUNDARY_FRESH_TURNS } from '../hooks/lib/subagent-context.mjs';
+import { readContextSignal, subagentNoticeText, noticeVariant, BOUNDARY_FRESH_TURNS } from '../hooks/lib/subagent-context.mjs';
 
 const SID = 'sess-ctx';
 const AGENT = 'worker-ctx-test-1';
@@ -341,4 +341,50 @@ test('detect.mjs: no rows, no signal', () => {
     assert.equal(d.status, 0, d.stderr);
     assert.equal(d.json.signals.some((x) => x.kind === 'budget_notices'), false);
   } finally { fx.cleanup(); }
+});
+
+// --- Review round (0.31.54 fix): the size notice is role-aware ----------------------------------------------------------
+
+test('unit: noticeVariant reads read-only from a reviewer, lookup, plan leg or built-in read-only agent, and writer otherwise', () => {
+  const ro = [
+    'ROLE: reviewer\nTYPE: code-review\nreview it', 'TYPE: code-review\nreview it', 'ROLE: lookup\nfind it', 'TYPE: research\nfind it',
+    'TYPE: survey\nx', 'TYPE: explore\nx', 'TYPE: verify\nx', 'ROLE: other\nTYPE: large-refactor\nplan it', 'ROLE: plan\nTYPE: novel-design\nx',
+    'TYPE: debug-root-cause\nRead-only: write x-plan.md', 'ROLE: operate\ndeploy',
+  ];
+  for (const b of ro) assert.equal(noticeVariant(b, 'agent-companion:ac-sonnet-high'), 'readonly', b);
+  for (const t of ['Explore', 'Plan', 'claude-code-guide']) assert.equal(noticeVariant('TYPE: integration\nROLE: writer', t), 'readonly', t);
+  const wr = ['ROLE: writer\nTYPE: integration\nbuild', 'ROLE: fixer\nfix', 'ROLE: lander\nland', 'ROLE: docs\nwrite docs', 'TYPE: bounded-feature\nbuild', 'TYPE: large-refactor\nROLE: writer\nbuild', 'go', ''];
+  for (const b of wr) assert.equal(noticeVariant(b, 'general-purpose'), 'writer', JSON.stringify(b));
+  assert.equal(noticeVariant('ROLE: fixer\nTYPE: lookup\nfix', 'general-purpose'), 'writer', 'the ROLE wins over the TYPE');
+});
+
+test('past 110k: a reviewer, a lookup and a plan leg are told to write their findings and return, never to commit or push; a writer is told to commit and hand off', () => {
+  const notice = (brief, id) => {
+    const fx = makeFixture();
+    try {
+      const { lead, agentFile } = layout(fx);
+      writeFileSync(join(dirname(agentFile), `agent-${id}.jsonl`), user(brief) + turn('r1', 120000));
+      return ctxText(runHook('hooks/subagent-context.mjs', pre(lead, { agent_id: id })));
+    } finally { fx.cleanup(); }
+  };
+  for (const [name, brief] of [
+    ['reviewer', 'TYPE: code-review\nROLE: reviewer\nWRITER: sonnet/high\nNo commits, no pushes. Review the diff.'],
+    ['lookup', 'TYPE: lookup\nROLE: lookup\nfind the caller'],
+    ['plan leg', 'TYPE: large-refactor\nROLE: other\nplan it, write task-plan.md'],
+  ]) {
+    const t = notice(brief, `ro-${name.replace(' ', '')}`);
+    assert.match(t, /^\[agent-companion\] Your context is past 110,000 tokens\./, name);
+    assert.match(t, /write your findings so far to your detail file/, name);
+    assert.doesNotMatch(t, /commit|push|handoff\.md|DONE: partial/, `${name}: never told to commit, push or hand off`);
+  }
+  for (const [name, brief] of [['writer', 'TYPE: integration\nROLE: writer\nbuild it'], ['fixer', 'ROLE: fixer\nfix it'], ['lander', 'ROLE: lander\nland it']]) {
+    assert.equal(notice(brief, `wr-${name}`), `[agent-companion] Your context is past 110,000 tokens. ${HAND}`, name);
+  }
+});
+
+test('subagentNoticeText: the read-only variant is the size notice only; a compaction alone is unchanged', () => {
+  assert.equal(subagentNoticeText(['compaction'], 110000, 'readonly'), '[agent-companion] You compacted; re-read only what the next step needs and continue.');
+  const t = subagentNoticeText(['compaction', 'size'], 110000, 'readonly');
+  assert.match(t, /^\[agent-companion\] You just compacted\. Finish the current step, write your findings so far/);
+  assert.doesNotMatch(t, /commit|push/);
 });

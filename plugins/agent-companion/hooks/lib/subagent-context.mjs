@@ -47,7 +47,8 @@ import {
   readdirSync, statSync, rmSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { stateDir } from './context.mjs';
+import { canonicalTaskType, stateDir } from './context.mjs';
+import { BRIEF_ROLES, briefDeclarations, briefMarksPlanLeg, declarationValue } from './brief-directives.mjs';
 import { safe } from './runaway.mjs';
 
 export const CONTEXT_DEFAULT_TOKENS = 110000;
@@ -212,15 +213,43 @@ export const fmtTokens = (n) => Number(n).toLocaleString('en-US');
 // The line a worker returns when it hands off at the size notice; the lead's resume rule reads it (hooks/lib/rules.mjs).
 export const HANDOFF_RETURN = 'DONE: partial, handoff at <path>';
 
+// Which handoff text a worker gets: 'writer' (commit, push, handoff file) or 'readonly' (write what you have to the detail or plan
+// file and return; never commit or push). Read-only: a reviewer, lookup, operate or other ROLE; a brief that marks itself the plan
+// leg; with no ROLE, a TYPE that is code-review, a lookup type or operate; the built-in Explore, Plan and claude-code-guide agents.
+// A writer, fixer, lander or docs ROLE, a writing TYPE, and a brief that declares neither (or cannot be read) get the writer text.
+const READONLY_ROLES = ['reviewer', 'lookup', 'operate', 'other'];
+const READONLY_TYPES = ['code-review', 'lookup', 'research', 'survey', 'explore', 'verify', 'operate'];
+const READONLY_BUILTIN = ['explore', 'plan', 'claude-code-guide'];
+export function noticeVariant(brief, agentType = '') {
+  try {
+    const at = String(agentType || '').toLowerCase();
+    if (READONLY_BUILTIN.includes(at.slice(at.indexOf(':') + 1))) return 'readonly';
+    const text = String(brief || '');
+    if (!text.trim()) return 'writer';
+    if (briefMarksPlanLeg(text)) return 'readonly';
+    const decls = briefDeclarations(text);
+    const rm = declarationValue(decls, 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`);
+    if (rm) return READONLY_ROLES.includes(rm[1].toLowerCase()) ? 'readonly' : 'writer';
+    const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
+    if (!tm) return 'writer';
+    const raw = tm[1].toLowerCase();
+    const type = canonicalTaskType(raw)?.name || raw;
+    return READONLY_TYPES.includes(type) ? 'readonly' : 'writer';
+  } catch { return 'writer'; }
+}
+
 // The text the subagent sees. A compaction alone is informative only: workers compact and keep
 // going (operator decision 2026-10-27), so no wrap-up and no return is asked. The size notice is the
 // handoff request, and so is a size-plus-compaction message.
-export function subagentNoticeText(kinds, threshold) {
+export function subagentNoticeText(kinds, threshold, variant = 'writer') {
   if (!kinds.includes('size')) {
     return '[agent-companion] You compacted; re-read only what the next step needs and continue.';
   }
   const what = kinds.includes('compaction')
     ? 'You just compacted'
     : `Your context is past ${fmtTokens(threshold)} tokens`;
+  if (variant === 'readonly') {
+    return `[agent-companion] ${what}. Finish the current step, write your findings so far to your detail file (or the plan file your brief names), and return them with what is left. You edit nothing in the repo, so there is nothing to hand off but the findings.`;
+  }
   return `[agent-companion] ${what}. Finish the current step, commit and push your WIP, write <task>-handoff.md (done / left / first next action), and return "${HANDOFF_RETURN}".`;
 }

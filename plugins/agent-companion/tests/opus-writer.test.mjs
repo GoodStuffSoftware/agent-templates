@@ -10,6 +10,9 @@ import {
   OPUS_WRITING_TYPES, OPUS_NON_WRITING_TYPES, OPUS_WRITER_LOG, writerBasis, planLegSpawn,
 } from '../hooks/lib/opus-writer.mjs';
 import { legsOf, writeLegPair } from '../hooks/lib/legs.mjs';
+import { SCOPE_MARKER } from '../hooks/lib/scope-rule.mjs';
+import { TIER_MARKER } from '../hooks/lib/tier-clause.mjs';
+import { briefMarksPlanLeg } from '../hooks/lib/brief-directives.mjs';
 import { modelTiers, resolveRoute, rungFor } from '../hooks/lib/context.mjs';
 import {
   WRITER_MARKER, HANDOFF_SENTENCE, TEST_SENTENCE, STAGING_SENTENCE, countDeliverables, buildWriterClause, isWriterSpawn,
@@ -59,8 +62,11 @@ test('unit: writerBasis reads ROLE first, then TYPE only when there is no usable
   assert.equal(writerBasis('docs', null), null);
   assert.equal(writerBasis('lookup', 'integration'), null);
   assert.equal(writerBasis(null, 'integration'), 'type');
-  assert.equal(writerBasis(null, 'novel-design'), null);
-  assert.equal(writerBasis(null, 'debug-root-cause'), null);
+  assert.equal(writerBasis(null, 'novel-design'), 'type', 'a two-leg type with no ROLE is the write leg');
+  assert.equal(writerBasis(null, 'debug-root-cause'), 'type');
+  assert.equal(writerBasis(null, 'novel-design', true), null, 'unless the brief marks itself the plan leg');
+  assert.equal(writerBasis(null, 'integration', true), null);
+  assert.equal(writerBasis('other', 'novel-design'), null);
   assert.equal(writerBasis(null, 'code-review'), null);
   assert.equal(writerBasis(null, null), null);
 });
@@ -90,7 +96,7 @@ test('ROLE: fixer and ROLE: lander count as writers; model opus on a general-pur
     assert.ok(rewritten(r), `${role}: ${JSON.stringify(r.upd)}`);
     assert.equal(r.rows.length, 1);
     assert.equal(r.rows[0].declared_role, role);
-    assert.equal(r.out?.systemMessage, undefined);
+    assert.doesNotMatch(r.out?.systemMessage || '', /routing table|opus/i, 'no fit note');
   }
   const full = spawn({ subagent_type: 'general-purpose', model: 'claude-opus-5-5', prompt: 'ROLE: writer\nbuild it' }, { sid: 'sess-ow-full' });
   assert.ok(rewritten(full), 'a full claude-opus-* id counts as Opus');
@@ -104,10 +110,18 @@ test('no ROLE: the TYPE decides: writing types are rewritten, design and root-ca
     assert.equal(r.rows[0].basis, 'type');
   }
   for (const type of ['novel-design', 'debug-root-cause']) {
+    // Two-leg types with no ROLE line are the WRITE leg (Opus must not end up writing without self-review): rewritten.
     const r = spawn({ subagent_type: OPUS_RUNG, prompt: `TYPE: ${type}\nfigure it out` }, { sid: `sess-ow-n-${type}` });
-    assert.notEqual(r.upd?.subagent_type, RUNG, type);
-    assert.notEqual(r.upd?.model, 'sonnet', type);
-    assert.equal(r.rows.length, 0, type);
+    assert.equal(r.upd?.subagent_type, RUNG, type);
+    assert.equal(r.rows.length, 1, type);
+    assert.equal(r.rows[0].basis, 'type');
+    // ... unless the brief says it is the plan leg.
+    for (const [k, brief] of [['role-plan', `TYPE: ${type}\nROLE: plan\nfigure it out`], ['plan-md', `TYPE: ${type}\nRead-only: write findings to task-plan.md.`]]) {
+      const q = spawn({ subagent_type: OPUS_RUNG, prompt: brief }, { sid: `sess-ow-n-${type}-${k}` });
+      assert.notEqual(q.upd?.subagent_type, RUNG, `${type} ${k}`);
+      assert.notEqual(q.upd?.model, 'sonnet', `${type} ${k}`);
+      assert.equal(q.rows.length, 0, `${type} ${k}`);
+    }
   }
 });
 
@@ -157,7 +171,7 @@ test('an inherited Opus model: rewritten when the caller ran on Opus, not when i
   const brief = 'ROLE: writer\nTYPE: bounded-feature\nbuild it';
   const opus = spawn({ subagent_type: 'general-purpose', prompt: brief }, { sid: 'sess-ow-i1', model: 'claude-opus-5-5' });
   assert.ok(rewritten(opus), JSON.stringify(opus.upd));
-  assert.equal(opus.out?.systemMessage, undefined, 'silent');
+  assert.doesNotMatch(opus.out?.systemMessage || '', /routing table|opus/i, 'no fit note');
   assert.equal(opus.rows.length, 1);
   assert.match(opus.rows[0].from, /inherited/);
   const sonnet = spawn({ subagent_type: 'general-purpose', prompt: brief }, { sid: 'sess-ow-i2', model: 'claude-sonnet-5-5' });
@@ -263,8 +277,11 @@ test('unit: every Opus-resolving writer row carries legs: an Opus plan route and
 test('unit: planLegSpawn is a type with legs whose brief does not say it writes', () => {
   assert.equal(planLegSpawn('large-refactor', 'other'), true);
   assert.equal(planLegSpawn('critical-change', 'other'), true);
-  assert.equal(planLegSpawn('novel-design', null), true, 'design is non-writing with no ROLE');
-  assert.equal(planLegSpawn('debug-root-cause', null), true);
+  assert.equal(planLegSpawn('novel-design', null), false, 'design with no ROLE and no plan marker is the write leg');
+  assert.equal(planLegSpawn('debug-root-cause', null), false);
+  assert.equal(planLegSpawn('novel-design', null, 'ROLE: plan\ndesign it'), true, 'ROLE: plan marks the plan leg');
+  assert.equal(planLegSpawn('debug-root-cause', null, 'Read-only. Write the root cause to x-plan.md'), true);
+  assert.equal(planLegSpawn('large-refactor', null, 'ROLE: plan'), true);
   assert.equal(planLegSpawn('large-refactor', null), false, 'a writing type with no ROLE is a writer');
   assert.equal(planLegSpawn('large-refactor', 'writer'), false);
   assert.equal(planLegSpawn('debug-root-cause', 'fixer'), false);
@@ -286,5 +303,76 @@ test('the plan leg stays on its Opus rung: ROLE: other is not rewritten and carr
     assert.equal(write.rows.length, 0, `${type}: already on the Sonnet writer rung`);
     assert.equal(write.row.self_review_expected, true, `${type}: the write leg carries the protocol in its body`);
     assert.equal(write.row.self_review_injected, false, type);
+  }
+});
+
+test('unit: briefMarksPlanLeg is ROLE: plan, or a <task>-plan.md output with read-only', () => {
+  assert.equal(briefMarksPlanLeg('TYPE: novel-design\nROLE: plan\nx'), true);
+  assert.equal(briefMarksPlanLeg('**ROLE:** Plan'), true);
+  assert.equal(briefMarksPlanLeg('Write x-plan.md. This is read-only.'), true);
+  assert.equal(briefMarksPlanLeg('Write x-plan.md.'), false, 'a plan file alone does not say read-only');
+  assert.equal(briefMarksPlanLeg('read-only lookup'), false);
+  assert.equal(briefMarksPlanLeg('ROLE: planner-ish writer'), false, 'plan must be the whole word');
+  assert.equal(briefMarksPlanLeg(''), false);
+});
+
+// --- Review round (0.31.54 fix): what the spawn is actually SENT ---------------------------------------------------------
+
+test('novel-design and debug-root-cause with no ROLE on an Opus rung: sent as the Sonnet WRITE leg with self-review, not an Opus writer without it', () => {
+  for (const [type, rung] of [['novel-design', 'agent-companion:ac-opus-xhigh'], ['debug-root-cause', 'agent-companion:ac-opus-medium']]) {
+    const r = spawn({ subagent_type: rung, prompt: `TYPE: ${type}\nWARRANT: weight 5 - design\nfigure it out and implement it` }, { sid: `sess-fix-${type}` });
+    assert.equal(r.upd.subagent_type, RUNG, type);
+    assert.equal(r.upd.model, 'sonnet', type);
+    assert.match(r.upd.prompt, /^ROLE: writer\n/, `${type}: the inserted ROLE is writer`);
+    assert.ok(r.upd.prompt.includes(WRITER_MARKER), type);
+    assert.equal(r.row.self_review_expected, true, `${type}: the Sonnet rung carries the protocol`);
+    assert.equal(r.rows.length, 1, type);
+  }
+});
+
+test('opus_writer_policy: allow, novel-design with no ROLE on an Opus rung: not a plan leg, so the protocol is appended', () => {
+  const r = spawn({ subagent_type: 'agent-companion:ac-opus-xhigh', prompt: 'TYPE: novel-design\nWARRANT: weight 5 - design\ndesign it' },
+    { sid: 'sess-fix-allow', env: { CLAUDE_PLUGIN_OPTION_OPUS_WRITER_POLICY: 'allow' } });
+  assert.equal(r.rows.length, 0);
+  assert.equal(r.row.self_review_injected, true, 'an Opus writer never runs without self-review');
+});
+
+test('the plan leg is sent no writer clause: no scope, writer or tier clause, and no ROLE: writer inserted', () => {
+  const cases = [
+    ['ROLE: other', 'TYPE: large-refactor\nROLE: other\nWARRANT: weight 5 - plan leg\nplan it, write task-plan.md'],
+    ['ROLE: plan', 'TYPE: critical-change\nROLE: plan\nWARRANT: weight 5 - plan leg\nplan it'],
+    ['read-only plan.md', 'TYPE: novel-design\nWARRANT: weight 5 - plan leg\nRead-only. Write task-plan.md.'],
+  ];
+  for (const [name, prompt] of cases) {
+    const r = spawn({ subagent_type: OPUS_RUNG, prompt }, { sid: `sess-fix-plan-${name.replace(/\W/g, '')}` });
+    const sent = r.upd?.prompt || '';
+    assert.notEqual(r.upd?.model, 'sonnet', name);
+    assert.equal(r.rows.length, 0, name);
+    assert.ok(!sent.includes(WRITER_MARKER), `${name}: no writer clause`);
+    assert.ok(!sent.includes(SCOPE_MARKER), `${name}: no scope clause`);
+    assert.ok(!sent.includes(TIER_MARKER), `${name}: no tier clause`);
+    assert.doesNotMatch(sent, /^ROLE: writer/m, name);
+    assert.equal(r.row.self_review_expected, false, name);
+  }
+  // The inserted ROLE for a plan-marked brief with no ROLE line is other.
+  const marked = spawn({ subagent_type: OPUS_RUNG, prompt: 'TYPE: novel-design\nWARRANT: weight 5 - plan leg\nRead-only. Write task-plan.md.' }, { sid: 'sess-fix-plan-role' });
+  assert.match(marked.upd.prompt, /^ROLE: other\n/);
+  // The write leg still gets all three.
+  const write = spawn({ subagent_type: RUNG, prompt: 'TYPE: large-refactor\nROLE: writer\nbuild it' }, { sid: 'sess-fix-plan-write' });
+  for (const m of [WRITER_MARKER, SCOPE_MARKER, TIER_MARKER]) assert.ok(write.upd.prompt.includes(m), m);
+});
+
+test('a model-only rewrite (general-purpose, no rung swap) still tells the lead the writer has no self-review protocol', () => {
+  const r = spawn({ subagent_type: 'general-purpose', model: 'opus', prompt: 'ROLE: writer\nTYPE: integration\nbuild it' }, { sid: 'sess-fix-note' });
+  assert.ok(rewritten(r), JSON.stringify(r.upd));
+  assert.equal(r.upd.subagent_type, 'general-purpose', 'only the model changed, the type was not swapped');
+  assert.match(r.out?.systemMessage || '', /self-review/, 'the lead is told it must review this writer');
+});
+
+test('a built-in read-only agent (Plan, Explore) with a writing TYPE and no ROLE is never moved off its model', () => {
+  for (const sub of ['Plan', 'Explore', 'claude-code-guide']) {
+    const r = spawn({ subagent_type: sub, prompt: 'TYPE: large-refactor\nplan the refactor' }, { sid: `sess-fix-${sub}`, model: 'claude-opus-5-5' });
+    assert.equal(r.rows.length, 0, sub);
+    assert.notEqual(r.upd?.model, 'sonnet', sub);
   }
 });

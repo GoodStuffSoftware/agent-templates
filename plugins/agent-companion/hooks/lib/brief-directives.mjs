@@ -194,6 +194,17 @@ export function briefDeclarations(text) {
   return found;
 }
 
+// Does the brief mark itself as the read-only PLAN leg of a two-leg task (config legs, hooks/lib/legs.mjs)? Either `ROLE: plan`
+// (not a recognised ROLE value, so BRIEF_ROLES never matches it), or it names a `<task>-plan.md` output and says read-only.
+export function briefMarksPlanLeg(text) {
+  try {
+    const src = String(text ?? '');
+    const d = briefDeclarations(src).ROLE;
+    if (d && /^[ \t]*(?:\*\*|__)?[ \t]*plan\b/i.test(d.rest)) return true;
+    return /-plan\.md\b/i.test(src) && /\bread[- ]only\b/i.test(src);
+  } catch { return false; }
+}
+
 // The first declaration of `label` checked against `valueSrc` (a regex
 // source whose first group is the value): the match, or null when the label
 // was not declared or its first declaration's value is not valid.

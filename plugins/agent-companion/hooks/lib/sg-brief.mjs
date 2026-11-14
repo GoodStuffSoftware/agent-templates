@@ -3,7 +3,7 @@
 // parameters are the guard's own locals this phase reads, the return value
 // the locals it declares or reassigns that later phases read.
 
-import { BRIEF_ROLES, briefDeclarations, declarationValue, inferRole } from './brief-directives.mjs';
+import { BRIEF_ROLES, briefDeclarations, briefMarksPlanLeg, declarationValue, inferRole } from './brief-directives.mjs';
 import {
   agentDefinition, canonicalTaskType, classifyModel, isLadderAgentName, ladderVariants, noteAgentType, opt,
   pluginName, readStdin, taskTypeDef, unknownTypeHint, writerFromDeclaration,
@@ -134,7 +134,7 @@ export function readSpawnBrief() {
   // 0.31.36: no message. A brief with no usable ROLE: line gets one inserted through updatedInput
   // (first line of the brief), inferred from its TYPE (inferRole). Measurement only: it routes nothing.
   const roleInserted = !declaredRole && opt('role_line_nudge', true) && brief.trim()
-    ? inferRole(declaredType)
+    ? (briefMarksPlanLeg(brief) ? 'other' : inferRole(declaredType)) // a brief that marks itself the read-only plan leg reads as ROLE: other
     : null;
   const silentFixes = []; // what this guard fixed without a message, for the spawn row (silent_fixes)
   if (opusRw) silentFixes.push(`opus_writer_rewrite:${opusRw.record.from}->${opusRw.record.to}`);

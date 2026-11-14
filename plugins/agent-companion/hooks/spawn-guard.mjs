@@ -158,9 +158,11 @@ try {
     declaredType, leadLabel, recursionDeny, callerDeclaredType, RECOMMEND_CMD,
   });
   if (opusRw) writeOpusWriterRow(opusRw.record);
-  // The Opus-writer rewrite is silent: the fit and self-review notes judge the spawn against the table's row for its TYPE (an
-  // opus row), which the rewrite just left on purpose, so neither is said. Both stay in the spawn row (fit, silent_fixes).
-  if (opusRw) { fit = null; selfReviewNote = null; }
+  // The Opus-writer rewrite is silent: the fit note judges the spawn against the table's row for its TYPE (an opus row), which the
+  // rewrite just left on purpose, so it is not said (it stays in the spawn row, fit). The self-review note is NOT dropped: it is about
+  // the agent type that will run (a model-only rewrite of general-purpose or a project agent still has no protocol), so the lead still
+  // hears that it must review that writer.
+  if (opusRw) fit = null;
   await finishSpawn({
     selfReviewSuffix, input, isCanary, sid, ladderRewrite, declaredType, declaredRole, declaredTypeRaw, decls,
     brief, memoryAddition, namegateSuffix, roleInserted, parityRoute, writer, writerInferred, declaredWeight,

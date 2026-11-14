@@ -39,12 +39,12 @@
 import { readStdin, opt, passthrough, deny, recordDenial, callerIsSubagent, appendLog } from './lib/context.mjs';
 import { resolveAgentTranscript } from './lib/runaway.mjs';
 import {
-  CONTEXT_DEFAULT_TOKENS, readContextSignal, claimSignals, recordEvent, subagentNoticeText, pruneContextState,
+  CONTEXT_DEFAULT_TOKENS, readContextSignal, claimSignals, recordEvent, subagentNoticeText, noticeVariant, pruneContextState,
 } from './lib/subagent-context.mjs';
 import {
   CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
 } from './lib/context-ceiling.mjs';
-import { STEP_LOG, stepBudgetCheck } from './lib/step-budget.mjs';
+import { STEP_LOG, stepBudgetCheck, readBrief } from './lib/step-budget.mjs';
 import { longRunCheck, logLongRun } from './lib/long-run.mjs';
 import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
 
@@ -99,7 +99,7 @@ try {
   const allowance = planOn ? allowanceNote(p, { transcript: path, sig, noticePct }) : null;
   const nearLimit = planOn && noticePct > 0 ? allowanceWatch(p, { noticePct }) : null;
 
-  const text = [kinds.length ? subagentNoticeText(kinds, threshold) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
+  const text = [kinds.length ? subagentNoticeText(kinds, threshold, kinds.includes('size') ? noticeVariant(readBrief(path), p.agent_type) : 'writer') : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
     .filter(Boolean).join('\n');
   if (!text) passthrough();
   process.stdout.write(JSON.stringify({

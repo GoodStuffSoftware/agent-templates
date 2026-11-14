@@ -12,6 +12,7 @@ import { matchRules, renderRules } from './rules.mjs';
 import { buildScopeClause } from './scope-rule.mjs';
 import { buildWriterClause } from './writer-brief.mjs';
 import { applyTierClause } from './tier-clause.mjs';
+import { planLegSpawn } from './opus-writer.mjs';
 import { allowWith, combineNotes, commonTypeRoutes } from './sg-helpers.mjs';
 
 export async function finishSpawn({
@@ -58,16 +59,21 @@ export async function finishSpawn({
       }
     } catch { /* fail open: no contract, spawn proceeds untouched */ }
 
+    // The read-only PLAN leg of a two-leg type (ROLE: other / plan, lib/legs.mjs) edits nothing: it gets none of the writer clauses
+    // below (scope, writer, tier), which tell a writer to build, commit, push and run the suite.
+    let planLeg = false;
+    try { planLeg = planLegSpawn(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
+
     // 1b. The scope rule: one short clause by task type or role (lib/scope-rule.mjs).
-    try { suffix += buildScopeClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
+    try { if (!planLeg) suffix += buildScopeClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
 
     // 1b2. The writer clause (lib/writer-brief.mjs): handoff, test running, and staging for a brief with more than 4 deliverables.
-    try { suffix += buildWriterClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
+    try { if (!planLeg) suffix += buildWriterClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
 
     // 1c. The project tier clause: the project's tier and the change-risk table for a writer or reviewer (lib/tier-clause.mjs).
     //     The writer gets the protocol clause only when this spawn really carries the protocol (selfReviewExpected, decided above).
     try {
-      const tier = applyTierClause(declaredType, declaredRole, input.prompt, p.cwd, { protocol: selfReviewExpected === true });
+      const tier = applyTierClause(declaredType, declaredRole, input.prompt, p.cwd, { protocol: selfReviewExpected === true, planLeg });
       suffix += tier.clause;
       if (tier.clause) sentBrief = tier.brief;
     } catch { /* fail open */ }

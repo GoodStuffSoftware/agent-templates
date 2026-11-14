@@ -129,7 +129,7 @@ export function projectRouteAndSelfReview({
     if (declaredType && sr.types.includes(declaredType)) {
       if (optedOut(brief, sr)) {
         selfReviewExpected = false;
-      } else if (planLegSpawn(declaredType, declaredRole)) {
+      } else if (planLegSpawn(declaredType, declaredRole, brief)) {
         // The read-only plan leg of a two-leg type (legs, 0.31.54): it writes <task>-plan.md and edits nothing, so no
         // self-review protocol is expected or appended; the write leg carries it.
         selfReviewExpected = false;
