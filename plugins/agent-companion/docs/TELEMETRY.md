@@ -714,6 +714,23 @@ than one row for it. A new entry means the harness introduced something the
 guards do not yet classify — enforcement may be quietly narrower than
 intended.
 
+### `opus-writer-rewrites.jsonl` — the no-Opus-writers rewrite
+
+Written by `hooks/spawn-guard.mjs` (`hooks/lib/opus-writer.mjs`) once per spawn it rewrote from Opus to the Sonnet writer rung, as the spawn is allowed (a spawn the guard then denies writes nothing). Nothing for a spawn it left alone (a reviewer, lookup, docs, operate, design or root-cause-only spawn, a writer already off Opus, or `opus_writer_policy: "allow"`). The spawn's own row in `spawns.jsonl` also carries `silent_fixes: ["opus_writer_rewrite:<from>-><to>"]`.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when it was written |
+| `session_id` | string | the lead's session |
+| `agent` | string \| null | the spawn's `name` (else its `description`) |
+| `from` | string | `<subagent_type or (none)>/<model>` before the rewrite; the model is the call's `model`, else the definition's, else `inherited` |
+| `to` | string | `<subagent_type>/sonnet` after it (the type is unchanged when only the `model` parameter could be changed) |
+| `declared_type` | string \| null | the brief's `TYPE:` (canonical name) |
+| `declared_role` | string \| null | the brief's `ROLE:` |
+| `basis` | `role` \| `type` | why the brief counted as a writer's: a writer `ROLE:` line, or no usable `ROLE:` and a writing `TYPE:` |
+| `via` | `opus_model` \| `opus_agent` \| `inherited` | why the spawn would have run on Opus |
+
 ### `fixtures.jsonl` — every row from a fixture/verification session
 
 Same record shape as whichever stream it would have gone to, plus a `stream`
