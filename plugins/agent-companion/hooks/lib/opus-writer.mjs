@@ -56,7 +56,7 @@ const READONLY_BUILTIN = new Set(['explore', 'plan', 'claude-code-guide']);
 // must not end up writing, so an unmarked spawn is rewritten to Sonnet, where the self-review protocol lives.
 export function writerBasis(role, type, planMarked = false) {
   if (role) return OPUS_WRITER_ROLES.includes(role) ? 'role' : null;
-  if (!type || planMarked) return null;
+  if (!type || (planMarked && legsOf(type))) return null; // the plan-leg exemption is only for a type that has a plan leg
   if (OPUS_WRITING_TYPES.includes(type)) return 'type';
   return OPUS_NON_WRITING_TYPES.includes(type) && legsOf(type) ? 'type' : null;
 }

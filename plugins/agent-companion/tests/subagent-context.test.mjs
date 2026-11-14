@@ -388,3 +388,9 @@ test('subagentNoticeText: the read-only variant is the size notice only; a compa
   assert.match(t, /^\[agent-companion\] You just compacted\. Finish the current step, write your findings so far/);
   assert.doesNotMatch(t, /commit|push/);
 });
+
+test('noticeVariant: a ROLE: writer brief that names a plan file and says read-only still gets the writer notice', () => {
+  assert.equal(noticeVariant('ROLE: writer\nTYPE: novel-design\nwork from x-plan.md; fixtures are read-only', 'general-purpose'), 'writer');
+  assert.equal(noticeVariant('ROLE: fixer\nfix per x-plan.md\n[agent-companion] read only', 'general-purpose'), 'writer');
+  assert.equal(noticeVariant('Write x-plan.md. This is read-only.', 'general-purpose'), 'readonly', 'no ROLE: the text clause applies');
+});

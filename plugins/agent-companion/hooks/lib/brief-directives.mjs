@@ -201,8 +201,19 @@ export function briefMarksPlanLeg(text) {
     const src = String(text ?? '');
     const d = briefDeclarations(src).ROLE;
     if (d && /^[ \t]*(?:\*\*|__)?[ \t]*plan\b/i.test(d.rest)) return true;
-    return /-plan\.md\b/i.test(src) && /\bread[- ]only\b/i.test(src);
+    // A declared ROLE (writer, fixer, lander, docs, ...) always wins: the text clause applies only with no usable ROLE line.
+    if (declarationValue(briefDeclarations(src), 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`)) return false;
+    const own = ownBriefText(src);
+    return /-plan\.md\b/i.test(own) && /\bread[- ]only\b/i.test(own);
   } catch { return false; }
+}
+
+// The brief as the lead wrote it: the text before anything the spawn guard appended (the self-review protocol block, a
+// `[agent-companion]` tier clause).
+export function ownBriefText(src) {
+  const s = String(src ?? '');
+  const cuts = [s.indexOf('<!-- self-review protocol BEGIN'), s.search(/^[ \t]*\[agent-companion\]/m)].filter((i) => i >= 0);
+  return cuts.length ? s.slice(0, Math.min(...cuts)) : s;
 }
 
 // The first declaration of `label` checked against `valueSrc` (a regex

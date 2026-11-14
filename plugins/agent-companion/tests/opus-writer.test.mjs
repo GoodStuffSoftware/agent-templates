@@ -65,7 +65,7 @@ test('unit: writerBasis reads ROLE first, then TYPE only when there is no usable
   assert.equal(writerBasis(null, 'novel-design'), 'type', 'a two-leg type with no ROLE is the write leg');
   assert.equal(writerBasis(null, 'debug-root-cause'), 'type');
   assert.equal(writerBasis(null, 'novel-design', true), null, 'unless the brief marks itself the plan leg');
-  assert.equal(writerBasis(null, 'integration', true), null);
+  assert.equal(writerBasis(null, 'integration', true), 'type', 'a type with no plan leg has no plan-leg exemption');
   assert.equal(writerBasis('other', 'novel-design'), null);
   assert.equal(writerBasis(null, 'code-review'), null);
   assert.equal(writerBasis(null, null), null);
@@ -375,4 +375,25 @@ test('a built-in read-only agent (Plan, Explore) with a writing TYPE and no ROLE
     assert.equal(r.rows.length, 0, sub);
     assert.notEqual(r.upd?.model, 'sonnet', sub);
   }
+});
+
+// --- Recheck fixes (0.31.54): a declared ROLE wins over the plan-leg text clause; the plan-leg exemption needs a type with legs ---
+
+test('unit: a declared writer, fixer, lander or docs ROLE wins over the -plan.md + read-only text clause, and spawn-guard appendices are ignored', () => {
+  for (const role of ['writer', 'fixer', 'lander', 'docs']) {
+    assert.equal(briefMarksPlanLeg(`ROLE: ${role}\nTYPE: novel-design\nwork from x-plan.md; fixtures are read-only`), false, role);
+  }
+  assert.equal(briefMarksPlanLeg('ROLE: plan\nTYPE: novel-design\nx'), true, 'ROLE: plan still marks the plan leg');
+  assert.equal(briefMarksPlanLeg('Implement per x-plan.md.\n[agent-companion] Writers state RISK. read only in this tier'), false, 'tier clause text ignored');
+  assert.equal(briefMarksPlanLeg('Implement per x-plan.md.\n<!-- self-review protocol BEGIN: x -->\nread-only work\n<!-- self-review protocol END -->'), false, 'protocol text ignored');
+  assert.equal(briefMarksPlanLeg('Write x-plan.md. Read-only.\n[agent-companion] tier'), true, 'the lead\'s own text still counts');
+});
+
+test('a plan-marked Opus brief whose TYPE has no plan leg is still rewritten to Sonnet and not relabelled ROLE: other', () => {
+  const r = spawn({ subagent_type: OPUS_RUNG, prompt: 'TYPE: bounded-feature\nWARRANT: weight 5 - feature\nimplement per docs/foo-plan.md; keep fixtures read-only' }, { sid: 'sess-nolegs-plan' });
+  assert.equal(r.upd?.model, 'sonnet');
+  assert.equal(r.rows.length, 1);
+  assert.doesNotMatch(r.upd?.prompt || '', /^ROLE: other\n/);
+  assert.equal(writerBasis(null, 'bounded-feature', true), 'type');
+  assert.equal(writerBasis(null, 'novel-design', true), null, 'a type with legs keeps the plan-leg exemption');
 });

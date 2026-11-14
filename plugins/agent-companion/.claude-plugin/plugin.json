@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.53",
+  "version": "0.31.54",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -878,7 +878,7 @@
     "subagent_context_notice_tokens": {
       "type": "number",
       "title": "Subagent context notice: tokens",
-      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens the subagent is told once to finish the current step, commit and push its WIP, write <task>-handoff.md (done / left / first next action) and return \"DONE: partial, handoff at <path>\" (the lead then starts a fresh worker on the same rung from that file); when it has just compacted it is told only to re-read what the next step needs and continue (no wrap-up: workers compact and keep going). The lead is told when it stops. Nothing is ever blocked. Shipped default 110000: measured on one operator's Opus workers (2026-11-13), long workers averaged 133k context per call and execution calls were 37% of Opus worker cost; raise it for a machine where workers run cheaper or shorter. 0 turns it off, the compaction note included.",
+      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens the subagent is told once to finish the current step, commit and push its WIP, write <task>-handoff.md (done / left / first next action) and return \"DONE: partial, handoff at <path>\" (the lead then starts a fresh worker on the same rung from that file); when it has just compacted it is told only to re-read what the next step needs and continue (no wrap-up: workers compact and keep going). A reviewer, lookup, operate or plan-leg worker (a read-only role) gets a read-only variant instead: write what you have to your detail or plan file and return, never commit or push. The lead is told when it stops. Nothing is ever blocked. Shipped default 110000: measured on one operator's Opus workers (2026-11-13), long workers averaged 133k context per call and execution calls were 37% of Opus worker cost; raise it for a machine where workers run cheaper or shorter. 0 turns it off, the compaction note included.",
       "default": 110000
     },
     "subagent_ceiling_tokens": {

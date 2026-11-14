@@ -9,6 +9,7 @@ import {
   pluginName, readStdin, taskTypeDef, unknownTypeHint, writerFromDeclaration,
 } from './context.mjs';
 import { pinInfo } from './sg-helpers.mjs';
+import { legsOf } from './legs.mjs';
 import { opusWriterRewrite } from './opus-writer.mjs';
 
 export function readSpawnBrief() {
@@ -134,7 +135,7 @@ export function readSpawnBrief() {
   // 0.31.36: no message. A brief with no usable ROLE: line gets one inserted through updatedInput
   // (first line of the brief), inferred from its TYPE (inferRole). Measurement only: it routes nothing.
   const roleInserted = !declaredRole && opt('role_line_nudge', true) && brief.trim()
-    ? (briefMarksPlanLeg(brief) ? 'other' : inferRole(declaredType)) // a brief that marks itself the read-only plan leg reads as ROLE: other
+    ? (declaredType && legsOf(declaredType) && briefMarksPlanLeg(brief) ? 'other' : inferRole(declaredType)) // a brief that marks itself the read-only plan leg reads as ROLE: other
     : null;
   const silentFixes = []; // what this guard fixed without a message, for the spawn row (silent_fixes)
   if (opusRw) silentFixes.push(`opus_writer_rewrite:${opusRw.record.from}->${opusRw.record.to}`);

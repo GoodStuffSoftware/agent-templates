@@ -1,6 +1,6 @@
 # ADR 0006: no Opus writers; Opus plans, root-causes and reviews, Sonnet writes
 
-**Status:** Accepted (2026-11-13), shipped in agent-companion 0.31.54.
+**Status:** Accepted (2026-11-14), shipped in agent-companion 0.31.54.
 **Date:** 2026-11-14
 **Owner:** agent-companion plugin (`plugins/agent-companion/`)
 
