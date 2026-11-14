@@ -54,6 +54,7 @@ import { projectRouteAndSelfReview } from './lib/sg-review-plan.mjs';
 import { writeSpawnRow } from './lib/sg-telemetry.mjs';
 import { hardDenials } from './lib/sg-deny.mjs';
 import { finishSpawn } from './lib/sg-finish.mjs';
+import { writeOpusWriterRow } from './lib/opus-writer.mjs';
 
 // The recommender and the setup SKILL.md as paths a worker can use from any directory: the guard's
 // messages reach subagents (a worker spawning its reviewer), whose cwd is the
@@ -68,7 +69,7 @@ const RECOMMEND_CMD = (() => {
 try {
   const readSpawnBriefOut = readSpawnBrief();
   const {
-    p, input, sid, declared, isLadderSpawn, fromDef, trulyInherited, pin, pinned, pinModelOverridden,
+    p, input, sid, opusRw, declared, isLadderSpawn, fromDef, trulyInherited, pin, pinned, pinModelOverridden,
     pinReplacedNote, isCanary, brief, decls, warrantDeclared, weightLineExplicit, weightWasDeclared,
     kindWasDeclared, consequenceWasDeclared, declaredTypeRaw, declaredType, declaredRole, roleInserted,
     silentFixes, typeRequiredMode, typeReqIsRung, typeRequiredMissing, roleNudge, typeIsParity, writerRaw,
@@ -103,6 +104,11 @@ try {
     autofilled, updatedInput, ladderRewrite, autofillAdvisory, rewriteState, buildFloorNote,
   } = autofillAndModelNotesOut;
   ({ model, def } = autofillAndModelNotesOut);
+  // No Opus writers (lib/opus-writer.mjs, applied in readSpawnBrief): carry the silent rewrite into the one updatedInput this hook emits.
+  if (opusRw) {
+    if (!updatedInput) updatedInput = { ...input };
+    if (opusRw.ladderRewrite && !ladderRewrite) ladderRewrite = opusRw.ladderRewrite;
+  }
   const memoryAndShapeGatesOut = memoryAndShapeGates({
     brief, p, input, subagentCaller, model, silentFixes, updatedInput, declaredType, sid,
   });
@@ -132,7 +138,7 @@ try {
   const projectRouteAndSelfReviewOut = projectRouteAndSelfReview({
     pin, fromDef, spawnAlias, route, parityYardstick, declaredType, decls, model, updatedInput, input,
     typeIsParity, srCfg, brief, ladderRewrite, def, pinned, consequenceWasDeclared, declaredConsequence,
-    callerEffort, selfReviewSuffix, p, silentFixes,
+    callerEffort, selfReviewSuffix, p, silentFixes, declaredRole,
   });
   let {
     projectRoutePlan, selfReviewExpected, selfReviewNote, selfReviewInjected,
@@ -151,6 +157,12 @@ try {
     gate1Action, p, input, typeRequiredMissing, typeRequiredMode, subagentCaller, inheritBlock, callerAlias,
     declaredType, leadLabel, recursionDeny, callerDeclaredType, RECOMMEND_CMD,
   });
+  if (opusRw) writeOpusWriterRow(opusRw.record);
+  // The Opus-writer rewrite is silent: the fit note judges the spawn against the table's row for its TYPE (an opus row), which the
+  // rewrite just left on purpose, so it is not said (it stays in the spawn row, fit). The self-review note is NOT dropped: it is about
+  // the agent type that will run (a model-only rewrite of general-purpose or a project agent still has no protocol), so the lead still
+  // hears that it must review that writer.
+  if (opusRw) fit = null;
   await finishSpawn({
     selfReviewSuffix, input, isCanary, sid, ladderRewrite, declaredType, declaredRole, declaredTypeRaw, decls,
     brief, memoryAddition, namegateSuffix, roleInserted, parityRoute, writer, writerInferred, declaredWeight,

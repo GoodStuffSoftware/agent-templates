@@ -240,7 +240,7 @@ function builtinRules() {
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'Continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff: continuing re-reads all context each call.',
+      then: 'Continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff: continuing re-reads all context each call. A worker that returns "DONE: partial, handoff at <path>" gets a fresh same-rung continuation from that file, not a resume.',
       gate: null,
       note: "Origin: measured on one operator's workstation since 2026-09-01 (a continued worker cost 0.11-0.16 plan units per call against 0.06-0.07 for a fresh one), wording refined 2026-10-06.",
     },

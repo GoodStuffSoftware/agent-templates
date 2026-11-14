@@ -194,6 +194,28 @@ export function briefDeclarations(text) {
   return found;
 }
 
+// Does the brief mark itself as the read-only PLAN leg of a two-leg task (config legs, hooks/lib/legs.mjs)? Either `ROLE: plan`
+// (not a recognised ROLE value, so BRIEF_ROLES never matches it), or it names a `<task>-plan.md` output and says read-only.
+export function briefMarksPlanLeg(text) {
+  try {
+    const src = String(text ?? '');
+    const d = briefDeclarations(src).ROLE;
+    if (d && /^[ \t]*(?:\*\*|__)?[ \t]*plan\b/i.test(d.rest)) return true;
+    // A declared ROLE (writer, fixer, lander, docs, ...) always wins: the text clause applies only with no usable ROLE line.
+    if (declarationValue(briefDeclarations(src), 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`)) return false;
+    const own = ownBriefText(src);
+    return /-plan\.md\b/i.test(own) && /\bread[- ]only\b/i.test(own);
+  } catch { return false; }
+}
+
+// The brief as the lead wrote it: the text before anything the spawn guard appended (the self-review protocol block, a
+// `[agent-companion]` tier clause).
+export function ownBriefText(src) {
+  const s = String(src ?? '');
+  const cuts = [s.indexOf('<!-- self-review protocol BEGIN'), s.indexOf('\n---\n(agent-companion:'), s.search(/^[ \t]*\[agent-companion(?::[^\]\n]*)?\]/m)].filter((i) => i >= 0);
+  return cuts.length ? s.slice(0, Math.min(...cuts)) : s;
+}
+
 // The first declaration of `label` checked against `valueSrc` (a regex
 // source whose first group is the value): the match, or null when the label
 // was not declared or its first declaration's value is not valid.

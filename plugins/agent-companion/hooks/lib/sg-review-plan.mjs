@@ -7,6 +7,8 @@ import {
   agentDefinition, canonicalTaskType, classifyModel, effortSupported, modelTiers, opt, referenceEffortSupported,
   resolveRoute, rungFor, taskTypeDef,
 } from './context.mjs';
+import { planLegSpawn } from './opus-writer.mjs';
+import { writeLegPair } from './legs.mjs';
 import {
   definitionCarriesProtocol, injectionRung, optedOut, pinnedInjectionRung, reviewerRungFor,
   selfReviewBriefText, selfReviewConfig,
@@ -17,7 +19,7 @@ const BUILTIN_AGENT_TYPES = new Set(['', 'general-purpose', 'explore', 'plan', '
 export function projectRouteAndSelfReview({
   pin, fromDef, spawnAlias, route, parityYardstick, declaredType, decls, model, updatedInput, input,
   typeIsParity, srCfg, brief, ladderRewrite, def, pinned, consequenceWasDeclared, declaredConsequence,
-  callerEffort, selfReviewSuffix, p, silentFixes,
+  callerEffort, selfReviewSuffix, p, silentFixes, declaredRole,
 }) {
 
   // --- Project-agent routing, first half (project_route_guard: autofix | warn | off) ---
@@ -127,6 +129,10 @@ export function projectRouteAndSelfReview({
     if (declaredType && sr.types.includes(declaredType)) {
       if (optedOut(brief, sr)) {
         selfReviewExpected = false;
+      } else if (planLegSpawn(declaredType, declaredRole, brief)) {
+        // The read-only plan leg of a two-leg type (legs, 0.31.54): it writes <task>-plan.md and edits nothing, so no
+        // self-review protocol is expected or appended; the write leg carries it.
+        selfReviewExpected = false;
       } else {
         const runningType = ladderRewrite ? ladderRewrite.to : input.subagent_type;
         selfReviewExpected = definitionCarriesProtocol(runningType, def);
@@ -178,7 +184,7 @@ export function projectRouteAndSelfReview({
             // A pinned agent is never pointed at another rung: its pin is the choice.
             if (pinnedNoBlock) selfReviewExpected = false;
             else try {
-              const r = resolveRoute({ type: declaredType });
+              const r = writeLegPair(declaredType) || resolveRoute({ type: declaredType });
               const hr = r.model && r.effort ? rungFor(r.model, r.effort) : null;
               const hdef = hr ? agentDefinition(`agent-companion:${hr.agent}`, p.cwd) : null;
               home = hr && definitionCarriesProtocol(hr.agent, hdef) === true ? `agent-companion:${hr.agent}` : null;

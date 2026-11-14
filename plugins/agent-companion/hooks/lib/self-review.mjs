@@ -45,6 +45,7 @@ import {
 } from './context.mjs';
 import { declarationLines } from './brief-directives.mjs';
 import { BATCH_RULE, cellText } from './tier-text.mjs';
+import { writeLegPair } from './legs.mjs';
 
 export const SELF_REVIEW_BEGIN = '<!-- self-review protocol BEGIN: generated from config/model-tiers.json `selfReview` by scripts/routing-table.mjs --sync-agent-descriptions; do not edit by hand -->';
 export const SELF_REVIEW_END = '<!-- self-review protocol END -->';
@@ -115,8 +116,9 @@ export function selfReviewTypesForRung(rung, sr = selfReviewConfig()) {
   for (const type of sr.types) {
     const t = (cfg.taskTypes || {})[type];
     if (!t || typeof t.weight !== 'number') continue;
-    let r;
-    try { r = resolveRoute({ type, profile: false }); } catch { continue; }
+    // A type with legs is WRITTEN by its write leg (hooks/lib/legs.mjs): that rung carries the protocol, not the Opus plan leg.
+    let r = writeLegPair(type, cfg);
+    if (!r) { try { r = resolveRoute({ type, profile: false }); } catch { continue; } }
     if (r.model === rung.model && (r.effort || null) === (rung.effort || null)) out.push(type);
   }
   return out;
@@ -151,8 +153,8 @@ export function selfReviewConfigProblems(sr = selfReviewConfig()) {
     if (!t) { out.push(`selfReview.types names "${type}", which is not a task type`); continue; }
     if (t.weight === 'parity') { out.push(`selfReview.types names "${type}", a parity-sized review type: reviewers never spawn reviewers`); continue; }
     if (typeof t.weight !== 'number') continue;
-    let r = null;
-    try { r = resolveRoute({ type, profile: false }); } catch { r = null; }
+    let r = writeLegPair(type, cfg);
+    if (!r) { try { r = resolveRoute({ type, profile: false }); } catch { r = null; } }
     const rung = r && r.model ? ladder.find((x) => x && x.model === r.model && (x.effort || null) === (r.effort || null)) : null;
     if (!rung) out.push(`selfReview type "${type}" routes to ${r && r.model ? `${r.model}${r.effort ? '/' + r.effort : ''}` : 'nothing'}, which is no ladder rung, so no rung carries its protocol`);
   }

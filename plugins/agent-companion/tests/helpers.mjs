@@ -145,7 +145,8 @@ export function childEnv(env = {}) {
   // The shared-resources session line reads the machine-wide ledger: a suite run
   // under ci-local (which holds a lease there) would see it in every hook that adds
   // context. Children get an empty ledger of their own unless a test passes CI_BUDGET_DIR.
-  return { CLAUDE_PLUGIN_OPTION_TYPE_LINE_REQUIRED: 'off', CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'off', ...base, CI_BUDGET_DIR: emptyLedger(), ...env };
+  // opus_writer_policy defaults to sonnet (it silently rewrites an Opus writer); the older spawn-guard tests spawn opus rungs on purpose, so children run with it allowed unless a test sets it (tests/opus-writer.test.mjs).
+  return { CLAUDE_PLUGIN_OPTION_TYPE_LINE_REQUIRED: 'off', CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'off', CLAUDE_PLUGIN_OPTION_OPUS_WRITER_POLICY: 'allow', ...base, CI_BUDGET_DIR: emptyLedger(), ...env };
 }
 
 let emptyLedgerDir = null;

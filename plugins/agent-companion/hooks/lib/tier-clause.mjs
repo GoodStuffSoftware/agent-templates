@@ -33,11 +33,12 @@ const NO_CLAUSE_TYPES = new Set(['research', 'survey', 'explore', 'lookup', 'ver
 const NO_CLAUSE_ROLES = new Set(['docs', 'lookup', 'operate', 'other']);
 
 // 'protocol' | 'leg' | 'plain' | 'reviewer' | null. `protocolCarried`: the spawn guard's selfReviewExpected === true.
-export function tierKind(type, role, brief = '', protocolCarried = false) {
+export function tierKind(type, role, brief = '', protocolCarried = false, planLeg = false) {
   const t = typeof type === 'string' ? type.toLowerCase() : '';
   const r = typeof role === 'string' ? role.toLowerCase() : '';
   if (t === 'code-review' || (!t && r === 'reviewer')) return 'reviewer';
   if (t ? NO_CLAUSE_TYPES.has(t) : NO_CLAUSE_ROLES.has(r)) return null;
+  if (planLeg) return null; // the read-only plan leg of a two-leg type edits nothing: no writer clause
   if (scopeKind(t, r) !== 'writer') return null;
   const sr = selfReviewConfig();
   if (optedOut(brief, sr)) return 'leg';
@@ -80,7 +81,7 @@ export function applyTierClause(type, role, brief = '', cwd = process.cwd(), opt
   const text = typeof brief === 'string' ? brief : String(brief ?? '');
   const none = { brief: typeof brief === 'string' ? brief : text, clause: '' };
   try {
-    const kind = tierKind(type, role, text, !!opts.protocol);
+    const kind = tierKind(type, role, text, !!opts.protocol, !!opts.planLeg);
     if (!kind) return none;
     let plan = null;
     if (text.includes(TIER_MARKER)) {

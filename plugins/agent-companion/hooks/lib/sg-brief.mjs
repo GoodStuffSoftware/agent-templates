@@ -3,19 +3,25 @@
 // parameters are the guard's own locals this phase reads, the return value
 // the locals it declares or reassigns that later phases read.
 
-import { BRIEF_ROLES, briefDeclarations, declarationValue, inferRole } from './brief-directives.mjs';
+import { BRIEF_ROLES, briefDeclarations, briefMarksPlanLeg, declarationValue, inferRole } from './brief-directives.mjs';
 import {
   agentDefinition, canonicalTaskType, classifyModel, isLadderAgentName, ladderVariants, noteAgentType, opt,
   pluginName, readStdin, taskTypeDef, unknownTypeHint, writerFromDeclaration,
 } from './context.mjs';
 import { pinInfo } from './sg-helpers.mjs';
+import { legsOf } from './legs.mjs';
+import { opusWriterRewrite } from './opus-writer.mjs';
 
 export function readSpawnBrief() {
   const p = readStdin();
   noteAgentType(p);
 
-  const input = p.tool_input || {};
   const sid = p.session_id || 'unknown';
+  // No Opus writers (0.31.54, lib/opus-writer.mjs): an Opus spawn whose brief says it writes is rewritten here, first, so every later
+  // phase judges the Sonnet writer rung it will really run as. Silent: the guard seeds updatedInput from this input.
+  const opusRw = opusWriterRewrite(p, p.tool_input || {}, sid);
+  const input = opusRw ? opusRw.input : (p.tool_input || {});
+  if (opusRw) p.tool_input = input;
 
   // Model resolution order is: env override -> spawn parameter -> the agent's
   // own frontmatter -> the lead's model. Reading only the spawn parameter
@@ -129,9 +135,10 @@ export function readSpawnBrief() {
   // 0.31.36: no message. A brief with no usable ROLE: line gets one inserted through updatedInput
   // (first line of the brief), inferred from its TYPE (inferRole). Measurement only: it routes nothing.
   const roleInserted = !declaredRole && opt('role_line_nudge', true) && brief.trim()
-    ? inferRole(declaredType)
+    ? (declaredType && legsOf(declaredType) && briefMarksPlanLeg(brief) ? 'other' : inferRole(declaredType)) // a brief that marks itself the read-only plan leg reads as ROLE: other
     : null;
   const silentFixes = []; // what this guard fixed without a message, for the spawn row (silent_fixes)
+  if (opusRw) silentFixes.push(`opus_writer_rewrite:${opusRw.record.from}->${opusRw.record.to}`);
   if (roleInserted) silentFixes.push(`role_inserted:${roleInserted}`);
   // A TYPE: line that is no type (and no alias) routes and measures nothing:
   // say so once, naming the valid ones (type_line_nudge). Never a deny.
@@ -205,7 +212,7 @@ export function readSpawnBrief() {
     else writerProblem = parsed.reason;
   }
   return {
-    p, input, sid, declared, isLadderSpawn, def, fromDef, model, trulyInherited, pin, pinned,
+    p, input, sid, opusRw, declared, isLadderSpawn, def, fromDef, model, trulyInherited, pin, pinned,
     pinModelOverridden, pinReplacedNote, isCanary, brief, decls, warrantDeclared, weightLineExplicit,
     declaredWeight, weightWasDeclared, declaredKind, kindWasDeclared, declaredConsequence,
     consequenceWasDeclared, declaredTypeRaw, declaredType, declaredRole, roleInserted, silentFixes,

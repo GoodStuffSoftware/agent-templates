@@ -83,6 +83,6 @@ test('the text built-in rules inject is byte-identical to 0.31.51 before the not
   const mask = (x) => (typeof x === 'string' ? x.split(root).join('<root>') : x);
   const rows = defaultRules().filter((r) => r.id !== 'child-coordinator-messages').map((r) => [r.id, r.then, r.thenLater ?? null, r.after ?? null].map(mask));
   const sha = createHash('sha256').update(JSON.stringify(rows)).digest('hex').slice(0, 12);
-  // Baseline taken from the settings-home branch before the notes were added. A deliberate wording change updates this hash.
-  assert.equal(sha, ['69d1a7', '54f5a7'].join(''));
+  // Baseline taken from the settings-home branch before the notes were added. A deliberate wording change updates this hash (0.31.54: the resume-doctrine handoff clause).
+  assert.equal(sha, ['d188e0', 'cc3a41'].join(''));
 });

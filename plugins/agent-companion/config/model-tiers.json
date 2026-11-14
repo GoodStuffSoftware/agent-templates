@@ -475,7 +475,7 @@
       "weight": 2,
       "kind": "mechanical",
       "consequence": "routine",
-      "summary": "rename, config edit, reformat, apply a known migration recipe; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself",
+      "summary": "rename, config edit, reformat, apply a known migration recipe (lean worker shape: a Sonnet writer makes edits itself)",
       "provenance": "COMMUNITY (Wavect): avoid Fable for tiny fixes, CRUD, renaming, formatting, boilerplate.",
       "override": {
         "model": "sonnet",
@@ -523,6 +523,10 @@
       "kind": "diagnostic",
       "consequence": "routine",
       "summary": "a specific failure, unexplained regression, flaky test - the answer exists and must be found",
+      "legs": {
+        "plan": { "label": "root-cause", "artifact": "<task>-plan.md", "what": "finds and proves the cause (evidence, the failing path), then names the fix; edits nothing" },
+        "write": { "model": "sonnet", "effort": "high" }
+      },
       "provenance": "COMMUNITY: Sonnet 5 praised first-hand for tracing brownfield failures to root causes rather than patching symptoms. Escalate to Opus when evidence conflicts or constraints are hidden.",
       "override": {
         "model": "opus",
@@ -540,6 +544,10 @@
       "consequence": "elevated",
       "architectureClass": true,
       "summary": "large-scale refactor across a module or subsystem; the target shape is known, the surface is wide",
+      "legs": {
+        "plan": { "label": "plan", "artifact": "<task>-plan.md", "what": "reads the surface and writes the target shape, the file order and the risks; edits nothing" },
+        "write": { "model": "sonnet", "effort": "high" }
+      },
       "provenance": "OFFICIAL choosing-a-model: Opus for large-scale refactoring and complex systems engineering. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself; measured since by the 2026-09-27 architecture-task benchmark and live study -- see operatorNote and the ROUTING TRIAL v3 override below.",
       "operatorNote": "Architecture and deep technical work stay on Opus; Sonnet gets confused on some of the operator's technical/architecture work (operator-observed 2026-09-23). Do not route architecture off Opus on benchmark evidence alone.",
       "override": {
@@ -557,6 +565,10 @@
       "consequence": "elevated",
       "architectureClass": true,
       "summary": "a protocol, concurrency or sync/merge logic, a message bus, a new abstraction with no known-good shape",
+      "legs": {
+        "plan": { "label": "design", "artifact": "<task>-plan.md", "what": "works the design through and writes it as a plan the writer can follow; edits nothing" },
+        "write": { "model": "sonnet", "effort": "high" }
+      },
       "provenance": "Our kind axis. OFFICIAL: Opus for complex systems engineering. Fable only with a warrant - and per the procedural-discipline finding, first try a brief that carries the verification checklist on Opus. UNBENCHMARKED by the 2026-09-23 effort-grid trial itself; measured since by the 2026-09-27 architecture-task benchmark and live study -- see operatorNote and the ROUTING TRIAL v3 override below.",
       "operatorNote": "Architecture and deep technical work stay on Opus; Sonnet gets confused on some of the operator's technical/architecture work (operator-observed 2026-09-23). Do not route architecture off Opus on benchmark evidence alone.",
       "override": {
@@ -575,6 +587,10 @@
       "consequence": "critical",
       "architectureClass": true,
       "summary": "production data, migrations, destructive ops, auth, billing, secrets - regardless of size",
+      "legs": {
+        "plan": { "label": "plan", "artifact": "<task>-plan.md", "what": "writes the change, its checks and its rollback as a plan; edits nothing" },
+        "write": { "model": "sonnet", "effort": "high" }
+      },
       "provenance": "Consequence axis (arXiv 2606.04402: consequence is orthogonal to difficulty). The floor raises even a one-line change to opus/xhigh. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; the critical floor (opus/xhigh) stays regardless."
     },
     "code-review": {
@@ -589,6 +605,10 @@
       "kind": "bounded",
       "consequence": "elevated",
       "summary": "an agent session expected to run for hours with minimal supervision",
+      "legs": {
+        "plan": { "label": "plan", "artifact": "<task>-plan.md", "what": "breaks the run into steps with a done-test each; edits nothing" },
+        "write": { "model": "sonnet", "effort": "high" }
+      },
       "provenance": "OFFICIAL choosing-a-model: Fable for agent sessions that run for hours. COMMUNITY, first-hand (TheNeuronDaily): management overhead from unrequested inferences grows with autonomy. Warrant required for Fable; Opus/xhigh is the default. UNBENCHMARKED — not covered by the 2026-09-23 effort-grid trial; routing unchanged.",
       "override": {
         "model": "opus",
@@ -603,7 +623,7 @@
       "weight": 2,
       "kind": "mechanical",
       "consequence": "routine",
-      "summary": "a delegated worker doing a bounded, well-specified piece of a larger task; spawn it only for a mechanical job of about 15+ calls or parallel work (lean worker shape), else the writer edits itself",
+      "summary": "a delegated worker doing a bounded, well-specified piece of a larger task (lean worker shape: a Sonnet writer makes edits itself)",
       "provenance": "OFFICIAL choosing-a-model: Haiku for subagent tasks. Raise the weight if the piece is not actually bounded.",
       "override": {
         "model": "sonnet",
@@ -650,8 +670,9 @@
     "fixRounds": 1,
     "optOut": "REVIEW: lead",
     "updated": "2026-11-10",
-    "rationale": "Review by risk (0.31.50): this replaces \"every change gets ONE separate reviewer\" with a review sized by risk. A writer states its change risk (low, mid or high; objective floors by files, changed lines and path kinds, never below the floor) and the project's tier (push, risk or gates; default risk; set per project with `/ac tier`) says what that risk needs: low = unit tests, no reviewer; mid = one reviewer by reading; high = the reviewer reads and then checks the changed behaviour in the running app (push: only a high-risk change gets a reviewer; gates: also one e2e pass per batch and the project's release gates). Why: a review of a low-risk change rarely finds a blocker and costs the same as any other review, so the review budget goes to the changes where a miss is expensive, and e2e runs once per batch and tree instead of once per change. What stays: one review, one fix round, no second review, the reviewer never runs e2e or the full suite. Reverse: set `reviewEveryChange` in the project-tiers file (every \"no reviewer\" cell becomes one reviewer by reading). Protocol history follows. Operator decision 2026-10-06 (the lean worker shape, so the main session stays unblocked): a change gets ONE separate reviewer at the writer's tier, spawned by the writer (until 0.31.50 every change did, and review only for risky changes was rejected; the risk table above replaces that). A writer of any listed type (the stand-alone writer types; mechanical-edit and subagent-worker are the edit workers a writer spawns for a 15+ call job and are covered by that writer's own review, so listing them would give a change two reviews; read-only types and parity types stay out), whose brief has no `REVIEW: lead` line, commits, spawns ONE parity reviewer in the foreground on its own rung (TYPE: code-review, WRITER: its own model/effort, the lead's brief verbatim, the diff range, the review file path), runs `fixRounds` (one) fix round on blocker and should-fix findings, never re-reviews, LANDS its own work (merge, plus verify the deploy where the repo deploys on merge, and every release gate the repo's CLAUDE.md requires stays), and returns the reviewer's verdict line verbatim, the review path, the post-fix sha and any disputed findings. The lead settles disputed findings and spot-checks the review file. Why: every lead-routed review costs two lead round-trips (spawn reviewer, then resume or re-spawn the writer), each stalling on the lead being free, and the fix round often starts on a cold cache; done by the writer, the fix round runs on its warm cache. Risk: the writer frames its own review; mitigated by the fixed brief the protocol dictates (the lead's brief verbatim, no scoping of the reviewer), the verbatim verdict line, and the lead spot-checking the review file. Cost history: a reviewer costs about 9.85 plan units per spawn on xhigh against 3.78 on opus/medium (2026-10-02 usage review: 172 units in the week when only xhigh writers carried it); 2026-10-02 had narrowed the list to novel-design and critical-change, and 2026-10-06 reverses that narrowing. The protocol text is GENERATED into the body of every agents/ac-*.md rung that is currently the default route for one of these types (scripts/routing-table.mjs --sync-agent-descriptions; --check-agent-descriptions fails on drift), so a routing-table move carries it along; a listed type spawned on any other ladder rung (a routing profile or local override can put it there) gets the same text, sized to that rung, appended to its brief at spawn. hooks/spawn-guard.mjs denies a code-review spawned by an agent that was itself spawned as a code-review (reviewers never spawn reviewers; positive match only). A review that returns no verdict line (the reviewer ran out of context or was cut off) counts as no review (operator, 2026-10-27, after a writer landed a refactor on such a review): the writer does not land or merge, reports \"review incomplete\" and the lead reviews instead. Reverse: empty `types`, or put `REVIEW: lead` in briefs."
+    "rationale": "Review by risk (0.31.50): this replaces \"every change gets ONE separate reviewer\" with a review sized by risk. A writer states its change risk (low, mid or high; objective floors by files, changed lines and path kinds, never below the floor) and the project's tier (push, risk or gates; default risk; set per project with `/ac tier`) says what that risk needs: low = unit tests, no reviewer; mid = one reviewer by reading; high = the reviewer reads and then checks the changed behaviour in the running app (push: only a high-risk change gets a reviewer; gates: also one e2e pass per batch and the project's release gates). Why: a review of a low-risk change rarely finds a blocker and costs the same as any other review, so the review budget goes to the changes where a miss is expensive, and e2e runs once per batch and tree instead of once per change. What stays: one review, one fix round, no second review, the reviewer never runs e2e or the full suite. Reverse: set `reviewEveryChange` in the project-tiers file (every \"no reviewer\" cell becomes one reviewer by reading). Protocol history follows. Operator decision 2026-10-06 (the lean worker shape, so the main session stays unblocked): a change gets ONE separate reviewer at the writer's tier, spawned by the writer (until 0.31.50 every change did, and review only for risky changes was rejected; the risk table above replaces that). A writer of any listed type (the stand-alone writer types; mechanical-edit and subagent-worker are lean workers covered by their lead's review, so listing them would give a change two reviews; read-only types and parity types stay out), whose brief has no `REVIEW: lead` line, commits, spawns ONE parity reviewer in the foreground on its own rung (TYPE: code-review, WRITER: its own model/effort, the lead's brief verbatim, the diff range, the review file path), runs `fixRounds` (one) fix round on blocker and should-fix findings, never re-reviews, LANDS its own work (merge, plus verify the deploy where the repo deploys on merge, and every release gate the repo's CLAUDE.md requires stays), and returns the reviewer's verdict line verbatim, the review path, the post-fix sha and any disputed findings. The lead settles disputed findings and spot-checks the review file. Why: every lead-routed review costs two lead round-trips (spawn reviewer, then resume or re-spawn the writer), each stalling on the lead being free, and the fix round often starts on a cold cache; done by the writer, the fix round runs on its warm cache. Risk: the writer frames its own review; mitigated by the fixed brief the protocol dictates (the lead's brief verbatim, no scoping of the reviewer), the verbatim verdict line, and the lead spot-checking the review file. Cost history: a reviewer costs about 9.85 plan units per spawn on xhigh against 3.78 on opus/medium (2026-10-02 usage review: 172 units in the week when only xhigh writers carried it); 2026-10-02 had narrowed the list to novel-design and critical-change, and 2026-10-06 reverses that narrowing. The protocol text is GENERATED into the body of every agents/ac-*.md rung that is currently the default route for one of these types (scripts/routing-table.mjs --sync-agent-descriptions; --check-agent-descriptions fails on drift), so a routing-table move carries it along; a listed type spawned on any other ladder rung (a routing profile or local override can put it there) gets the same text, sized to that rung, appended to its brief at spawn. hooks/spawn-guard.mjs denies a code-review spawned by an agent that was itself spawned as a code-review (reviewers never spawn reviewers; positive match only). A review that returns no verdict line (the reviewer ran out of context or was cut off) counts as no review (operator, 2026-10-27, after a writer landed a refactor on such a review): the writer does not land or merge, reports \"review incomplete\" and the lead reviews instead. Reverse: empty `types`, or put `REVIEW: lead` in briefs."
   },
+  "legsNote": "Two-leg routes (0.31.54): a task type with `legs` is split into a read-only PLAN leg and a WRITE leg. The type's own route (override, trial or grid, floors included) is the plan leg: it stays on Opus and writes <task>-plan.md (the root cause, the design or the plan) and edits nothing, runs no tests, builds or git. `legs.write` is the writer: the work is done by that model and effort (sonnet/high, `ac-sonnet-high`) from the plan file. The self-review protocol therefore lives in the write leg's rung body, not in the Opus rungs. Shipped default, with its environment: operator data of 2026-11-13, where 37% of Opus worker cost was execution calls (edits, tests, builds, git) and long workers averaged 133k tokens of context per call. The plan leg's brief says `ROLE: other` so the spawn guard's Opus-writer rewrite (opus_writer_policy) leaves it on Opus; the write leg says `ROLE: writer` (or fixer). Reverse: remove `legs` from a type, or set opus_writer_policy to allow.",
   "taskTypesNote": "A task type is a named preset over (weight, kind, consequence). Resolve it through the same grid as everything else; do not special-case it. \"parity\" as a weight means: sized to the writer being reviewed (at least its model and effort, then the floors; see reviewerParity). \"inherit\" as a consequence means: take the consequence of the change under review. Provenance is recorded per entry because these WILL go stale - the scout re-checks the lineup, and a routing review should re-read the sources, not the table. `--type` is now the PREFERRED input over `--weight`/`--kind` alone, because a named type is the only place the measured evidence (`override`, below) attaches — resolving by raw weight/kind bypasses it and falls back to the grid. An entry may carry an `override` block ({model, effort, reason, evidence, trialSince, reviewBy}, plus `overridesKindDelta: true` where it deliberately bypasses the kind's effort delta) recording a ROUTING TRIAL: a benchmark-backed (model, effort) pair that supersedes this entry's own weight/kind/consequence grid resolution for the stated trial window. It applies only when the type is resolved as-is (no explicit --weight/--kind/--consequence that departs from the preset); passing an explicit weight/kind/consequence that DEPARTS from the preset answers a different question and falls back to the plain grid, while one EQUAL to the preset restates the type and keeps the override. The weight/kind/consequence fields on an overridden entry are kept unchanged for provenance and for `--list`/weight-only callers — only the resolved (model, effort) changes. A type with no `override` is UNBENCHMARKED by this trial and keeps its grid-resolved routing unchanged; say so explicitly rather than leaving it ambiguous.",
   "cacheTtl": {
     "default": "5m",

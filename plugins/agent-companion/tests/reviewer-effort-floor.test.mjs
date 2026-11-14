@@ -253,13 +253,14 @@ test('spawn guard: a rung that carries the block is told the reviewer rung in a 
     for (const [agent, b] of [['ac-sonnet-high', brief], ['ac-opus-medium', opusBrief], ['ac-opus-xhigh', crit]]) {
       assert.doesNotMatch(spawn(agent, b), NOTE, `${agent} unfloored`);
     }
-    // A critical consequence on an opus rung that is not the critical reviewer's rung: told the critical reviewer (predates 0.31.28).
-    for (const agent of ['ac-opus-medium', 'ac-opus-high']) {
-      const c = spawn(agent, crit);
-      assert.match(c, NOTE, agent);
-      assert.match(c, /subagent_type "agent-companion:ac-opus-xhigh"/, agent);
+    // 0.31.54: the Opus rungs are read-only plan legs and carry no block, so a writing brief sent to one is rewritten to ac-sonnet-high (opus_writer_policy); the block, and this note, live on ac-sonnet-high.
+    // A critical consequence on ac-sonnet-high: told the critical reviewer (predates 0.31.28).
+    {
+      const c = spawn('ac-sonnet-high', crit);
+      assert.match(c, NOTE);
+      assert.match(c, /subagent_type "agent-companion:ac-opus-xhigh"/);
       assert.match(c, /replaces the rung/);
-      assert.doesNotMatch(c, /does not carry the self-review protocol/, `${agent}: no second copy of the protocol`);
+      assert.doesNotMatch(c, /does not carry the self-review protocol/, 'no second copy of the protocol');
     }
     // The sonnet floor reaches ac-sonnet-high.
     mkdirSync(f.stateDir, { recursive: true });

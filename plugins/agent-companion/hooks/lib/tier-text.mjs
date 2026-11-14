@@ -191,7 +191,7 @@ export function riskFloor(files) {
 }
 
 // The batch rule: how a writer treats the expensive e2e run. Self-review.mjs (leg B) imports it for step 0.
-export const BATCH_RULE = 'Finish every task in your brief first, with no self-chosen sections or milestone stops (chunking is the operator\'s call). Unit tests are cheap: run them while you work. E2E is the expensive run: hold it while other changes to the same repo are in flight and run it once for the whole batch, once per tree (note the tree id, git rev-parse HEAD^{tree}, with the result); where a push gate or CI on the landing path runs the full suite or e2e, that run is the pass; where neither does (for example direct merges while CI runs only on pull requests), whoever lands runs it once locally before landing. An unchanged tree is never rerun.';
+export const BATCH_RULE = 'Finish the task in your brief; at the context handoff notice, hand off as the writer clause on your brief says. Unit tests are cheap: run them while you work. E2E is the expensive run: hold it while other changes to the same repo are in flight and run it once for the whole batch, once per tree (note the tree id, git rev-parse HEAD^{tree}, with the result); where a push gate or CI on the landing path runs the full suite or e2e, that run is the pass; where neither does (for example direct merges while CI runs only on pull requests), whoever lands runs it once locally before landing. An unchanged tree is never rerun.';
 
 // How work lands, from the user's `landing` setting (pr | direct). Unset or unknown: no sentence, the plugin says nothing.
 const LANDING_TEXT = {
@@ -231,7 +231,7 @@ export function writerClause(tier, project, opts = {}) {
   // these two kinds do not name the tier), worded to fit the 300 and 450 character limits of these two kinds.
   const short = project ? `Project ${project}, project_tier ${(TIERS[tier] || TIERS[DEFAULT_ID]).id}.` : NO_PROJECT_SHORT;
   if (kind === 'leg') {
-    return `${short} You are one leg of a larger job: you spawn no reviewer; the lead applies the review table once to the whole change. Finish every task in the brief, no self-chosen sections. Run unit tests for what you touch, no full suite, e2e, CI or full build: the lead runs one pass after all legs. Commit, push, then report ${RISK_REPORT}.`;
+    return `${short} You are one leg of a larger job: you spawn no reviewer; the lead applies the review table once to the whole change. Finish the task; at the handoff notice, hand off per the writer clause. Run unit tests for what you touch, no full suite, e2e, CI or full build: the lead runs one pass after all legs. Commit, push, then report ${RISK_REPORT}.`;
   }
   // No landing sentence outside a git repo (no project): the session line is silent there too.
   const landSentence = project ? landingSentence(opts.landing) : '';

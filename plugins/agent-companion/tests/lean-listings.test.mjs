@@ -79,7 +79,7 @@ test('a brief that asks a worker to load a skill is recognised, so the guard doe
 });
 
 test('the self-review block tells a worker with no Skill tool that the text is the whole spawn recipe', () => {
-  for (const agent of ['ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh']) {
+  for (const agent of ['ac-sonnet-high']) { // the Opus rungs are read-only plan legs since 0.31.54 and carry no block
     const body = readFileSync(join(PLUGIN_ROOT, 'agents', `${agent}.md`), 'utf8');
     assert.match(body, /you have no Skill tool/, agent);
     assert.match(body, /do not look for the team-orchestration skill/, agent);

@@ -39,7 +39,7 @@ const sync = (agentsDir) => runScript('scripts/routing-table.mjs', ['--sync-agen
 const blockOf = (file) => readSelfReviewBlock(readFileSync(file, 'utf8')).block;
 
 const WRITER_TYPES = ['bounded-feature', 'integration', 'debug-root-cause', 'large-refactor', 'novel-design', 'critical-change', 'long-autonomous-run'];
-const SELF_REVIEW_RUNGS = ['ac-sonnet-high', 'ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh'];
+const SELF_REVIEW_RUNGS = ['ac-sonnet-high']; // the write leg of every selfReview type (0.31.54: the Opus rungs are plan legs and carry no protocol)
 
 test('config: selfReview lists every stand-alone writer type (lean worker shape, 2026-10-06), one fix round, and the REVIEW: lead opt-out', () => {
   const sr = selfReviewConfig(SHIPPED);
@@ -58,7 +58,7 @@ test('config: selfReview lists every stand-alone writer type (lean worker shape,
   assert.equal(keys.indexOf('selfReview'), keys.indexOf('taskTypes') + 1);
 });
 
-test('committed rungs: ac-sonnet-high, ac-opus-medium, ac-opus-high and ac-opus-xhigh (the defaults for the selfReview types today) carry the block, and no other rung does', () => {
+test('committed rungs: only ac-sonnet-high (the write leg of the selfReview types today) carries the block; the Opus rungs and every other rung do not', () => {
   for (const rung of SHIPPED.ladder) {
     const block = blockOf(join(PLUGIN_ROOT, 'agents', `${rung.agent}.md`));
     if (SELF_REVIEW_RUNGS.includes(rung.agent)) {
@@ -111,12 +111,12 @@ test('drift: a hand-edited block fails the check as self-review-drift, and --syn
   const { dir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    const file = join(agentsDir, 'ac-opus-xhigh.md');
+    const file = join(agentsDir, 'ac-sonnet-high.md');
     const original = readFileSync(file, 'utf8');
     writeFileSync(file, original.replace('Do one fix round', 'Do two fix rounds, then re-review'));
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
-    assert.match(res.stderr, /ac-opus-xhigh \[self-review-drift\]/);
+    assert.match(res.stderr, /ac-sonnet-high \[self-review-drift\]/);
     assert.match(res.stderr, /differs from the generated one/);
     assert.equal(sync(agentsDir).status, 0);
     assert.equal(readFileSync(file, 'utf8'), original);
@@ -128,8 +128,8 @@ test('drift: a block deleted from its rung, or pasted onto another rung, fails t
   const { dir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    const xhigh = join(agentsDir, 'ac-opus-xhigh.md');
-    const high = join(agentsDir, 'ac-sonnet-medium.md');
+    const xhigh = join(agentsDir, 'ac-sonnet-high.md');
+    const high = join(agentsDir, 'ac-opus-high.md');
     const xOrig = readFileSync(xhigh, 'utf8');
     const hOrig = readFileSync(high, 'utf8');
     const block = readSelfReviewBlock(xOrig).block;
@@ -137,8 +137,8 @@ test('drift: a block deleted from its rung, or pasted onto another rung, fails t
     writeFileSync(high, setSelfReviewBlock(hOrig, block));
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
-    assert.match(res.stderr, /ac-opus-xhigh \[self-review-drift\][\s\S]*actual:\s+\(absent\)/);
-    assert.match(res.stderr, /ac-sonnet-medium \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
+    assert.match(res.stderr, /ac-sonnet-high \[self-review-drift\][\s\S]*actual:\s+\(absent\)/);
+    assert.match(res.stderr, /ac-opus-high \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
     assert.equal(sync(agentsDir).status, 0);
     assert.equal(readFileSync(xhigh, 'utf8'), xOrig);
     assert.equal(readFileSync(high, 'utf8'), hOrig, 'removing the block restores the rung byte for byte');
@@ -146,28 +146,23 @@ test('drift: a block deleted from its rung, or pasted onto another rung, fails t
   } finally { cleanup(); }
 });
 
-test('table move: when the selfReview types route to another rung, --check fails on the rung that lost them AND the one that gained them; --sync moves the block', () => {
+test('table move: when the selfReview types are written on another rung (legs.write), --check fails on the rung that lost them AND the one that gained them; --sync moves the block', () => {
   const { dir, stateDir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    // Route every selfReview type's writer to opus/high: shift each trial
-    // override (and add one where the type has none) to high. critical-change
-    // is grid-floored to opus/xhigh (F1), so it leaves the list for this move.
+    // Put the write leg of three selfReview types on opus/high (a deliberate operator change that re-puts a writer on Opus).
     const taskTypes = JSON.parse(JSON.stringify(SHIPPED.taskTypes));
-    for (const t of ['novel-design', 'large-refactor', 'long-autonomous-run']) {
-      taskTypes[t].override = { ...(taskTypes[t].override || {}), model: 'opus', effort: 'high', trialVersion: 9, overridesKindDelta: true, reason: 'test move', trialSince: '2026-09-28', reviewBy: '2026-12-31' };
-    }
-    writeOverride(stateDir, { taskTypes, selfReview: { ...SHIPPED.selfReview, types: ['novel-design', 'large-refactor', 'long-autonomous-run'] } });
+    const moved3 = ['novel-design', 'large-refactor', 'long-autonomous-run'];
+    for (const t of moved3) taskTypes[t].legs.write = { model: 'opus', effort: 'high' };
+    writeOverride(stateDir, { taskTypes, selfReview: { ...SHIPPED.selfReview, types: moved3 } });
     const res = check(agentsDir);
     assert.equal(res.status, 1, res.stdout + res.stderr);
-    assert.match(res.stderr, /ac-opus-xhigh \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
-    assert.match(res.stderr, /ac-opus-medium \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
+    assert.match(res.stderr, /ac-sonnet-high \[self-review-drift\][\s\S]*expected: no self-review protocol block/);
     assert.match(res.stderr, /ac-opus-high \[self-review-drift\][\s\S]*novel-design, large-refactor, long-autonomous-run/);
 
     const syncRes = sync(agentsDir);
     assert.equal(syncRes.status, 0, syncRes.stderr);
-    assert.equal(blockOf(join(agentsDir, 'ac-opus-xhigh.md')), null, 'the old rung lost the block');
-    assert.equal(blockOf(join(agentsDir, 'ac-opus-medium.md')), null, 'a rung whose types are no longer listed lost it too');
+    assert.equal(blockOf(join(agentsDir, 'ac-sonnet-high.md')), null, 'the old rung lost the block');
     const moved = blockOf(join(agentsDir, 'ac-opus-high.md'));
     assert.ok(moved, 'the new rung gained it');
     assert.match(moved, /subagent_type: "agent-companion:ac-opus-high"/);
@@ -186,7 +181,7 @@ test('config edits flow into the text: fixRounds and the opt-out line are genera
     writeOverride(stateDir, { selfReview: { ...SHIPPED.selfReview, fixRounds: 2, optOut: 'SELF-REVIEW: off' } });
     assert.equal(check(agentsDir).status, 1);
     assert.equal(sync(agentsDir).status, 0);
-    const block = blockOf(join(agentsDir, 'ac-opus-xhigh.md'));
+    const block = blockOf(join(agentsDir, 'ac-sonnet-high.md'));
     assert.match(block, /Do at most 2 fix rounds/);
     assert.match(block, /`SELF-REVIEW: off`/);
     assert.doesNotMatch(block, /REVIEW: lead/);
@@ -222,12 +217,12 @@ test('malformed markers are reported and never rewritten by --sync', () => {
   const { dir, cleanup } = makeFixture();
   try {
     const agentsDir = fixtureAgentsDir(dir);
-    const file = join(agentsDir, 'ac-opus-xhigh.md');
+    const file = join(agentsDir, 'ac-sonnet-high.md');
     const broken = readFileSync(file, 'utf8').replace(SELF_REVIEW_END, '');
     writeFileSync(file, broken);
     const res = check(agentsDir);
     assert.equal(res.status, 1);
-    assert.match(res.stderr, /ac-opus-xhigh \[self-review-malformed\]/);
+    assert.match(res.stderr, /ac-sonnet-high \[self-review-malformed\]/);
     assert.equal(sync(agentsDir).status, 0);
     assert.equal(readFileSync(file, 'utf8'), broken, 'sync never guesses where a block ends');
   } finally { cleanup(); }
@@ -320,6 +315,7 @@ function harness(extraEnv = {}) {
 }
 
 const XHIGH = 'agent-companion:ac-opus-xhigh';
+const SONHIGH = 'agent-companion:ac-sonnet-high';
 const REVIEW = (writer) => `TYPE: code-review\n${writer ? `WRITER: ${writer}\n` : ''}review the diff on wip/x`;
 const bg = (o) => ({ run_in_background: false, ...o });
 
@@ -418,15 +414,15 @@ test('recursion guard: a code-review spawned by an agent whose own spawn row is 
 test('recursion guard: a writer reviewing its own work is allowed and recorded as self_review', () => {
   const h = harness();
   try {
-    const spawnW = h.lead(bg({ subagent_type: XHIGH, prompt: 'TYPE: novel-design\nbuild the bus' }), { tool_use_id: 'toolu_W' });
+    const spawnW = h.lead(bg({ subagent_type: SONHIGH, prompt: 'TYPE: bounded-feature\nbuild the bus' }), { tool_use_id: 'toolu_W' });
     assert.equal(spawnW.row.self_review_expected, true);
-    h.sidecar('www1', { agentType: XHIGH, toolUseId: 'toolu_W', spawnDepth: 1 });
-    const r = h.sub('www1', XHIGH, bg({ subagent_type: XHIGH, prompt: REVIEW(null) }), { tool_use_id: 'toolu_WR' });
+    h.sidecar('www1', { agentType: SONHIGH, toolUseId: 'toolu_W', spawnDepth: 1 });
+    const r = h.sub('www1', SONHIGH, bg({ subagent_type: XHIGH, prompt: REVIEW(null) }), { tool_use_id: 'toolu_WR' });
     assert.equal(r.decision, 'proceed', r.reason);
     assert.equal(r.row.caller_row_found, true);
-    assert.equal(r.row.caller_declared_type, 'novel-design');
+    assert.equal(r.row.caller_declared_type, 'bounded-feature');
     assert.equal(r.row.self_review, true);
-    assert.equal(r.row.inferred_writer, 'opus/xhigh');
+    assert.equal(r.row.inferred_writer, 'sonnet/high');
     assert.deepEqual(h.denials(), []);
   } finally { h.cleanup(); }
 });
@@ -526,22 +522,41 @@ test('telemetry: every row carries tool_use_id, parent_agent_id, inferred_writer
 test('self_review_expected: true on the rung carrying the protocol (nothing appended); false with REVIEW: lead (no note); null for another agent file', () => {
   const h = harness();
   try {
-    const on = h.lead(bg({ subagent_type: XHIGH, prompt: 'TYPE: critical-change\nsplit the module' }));
+    const on = h.lead(bg({ subagent_type: SONHIGH, prompt: 'TYPE: critical-change\nsplit the module' }));
     assert.equal(on.row.self_review_expected, true);
     assert.equal(on.row.self_review_injected, false, 'the rung carries it already');
     assert.doesNotMatch(on.prompt || '', /Self-review before you return/);
     assert.doesNotMatch(on.msg, /self-review\)/);
 
-    const optOut = h.lead(bg({ subagent_type: XHIGH, prompt: 'TYPE: critical-change\nREVIEW: lead\nsplit the module' }));
+    const optOut = h.lead(bg({ subagent_type: SONHIGH, prompt: 'TYPE: critical-change\nREVIEW: lead\nsplit the module' }));
     assert.equal(optOut.row.self_review_expected, false);
     assert.doesNotMatch(optOut.msg, /self-review/i, 'an opt-out is deliberate: no note');
+
+    // The read-only PLAN leg of a two-leg type (0.31.54, config `legs`): an Opus rung with ROLE: other, ROLE: plan, or a brief that
+    // names a <task>-plan.md output and says read-only is not a writer: no protocol expected, none appended, no note.
+    for (const prompt of ['TYPE: critical-change\nROLE: other\nplan the split', 'TYPE: novel-design\nROLE: plan\nplan the bus', 'TYPE: debug-root-cause\nRead-only: write the cause to x-plan.md']) {
+      const plan = h.lead(bg({ subagent_type: XHIGH, prompt: `${prompt}\nWARRANT: weight 5 - test` }));
+      assert.equal(plan.row.self_review_expected, false, prompt);
+      assert.equal(plan.row.self_review_injected, false, prompt);
+      assert.doesNotMatch(plan.prompt || '', /Self-review before you return/, prompt);
+      assert.doesNotMatch(plan.msg || '', /self-review/i, prompt);
+    }
+
+    // A two-leg TYPE with no ROLE line and no plan marker is the WRITE leg (review fix): an Opus rung there (policy allow, so no rewrite)
+    // is not a plan leg, so it gets the protocol appended: Opus never writes without self-review.
+    for (const prompt of ['TYPE: novel-design\nplan the bus', 'TYPE: debug-root-cause\nfind the cause']) {
+      const w = h.lead(bg({ subagent_type: XHIGH, prompt: `${prompt}\nWARRANT: weight 5 - test` }));
+      assert.equal(w.row.self_review_expected, true, prompt);
+      assert.equal(w.row.self_review_injected, true, prompt);
+      assert.match(w.prompt || '', /Self-review before you return/, prompt);
+    }
 
     // project_pins off (0.31.12 behaviour): a project agent may carry its own wording.
     // With pins on (default) a pinned writer without the markers gets the protocol: see spawn-guard-project-pins.test.mjs.
     const off = harness({ CLAUDE_PLUGIN_OPTION_PROJECT_PINS: 'false' });
     try {
       off.agent('proj-architect', 'model: opus\neffort: xhigh');
-      const proj = off.lead(bg({ subagent_type: 'proj-architect', prompt: 'TYPE: novel-design\ndesign it' }));
+      const proj = off.lead(bg({ subagent_type: 'proj-architect', prompt: 'TYPE: large-refactor\nROLE: writer\ndesign it' }));
       assert.equal(proj.row.self_review_expected, null, 'a project agent may carry its own wording');
       assert.equal(proj.row.self_review_injected, false);
       assert.doesNotMatch(proj.msg, /self-review\)/);
@@ -552,11 +567,11 @@ test('self_review_expected: true on the rung carrying the protocol (nothing appe
 test('a self-reviewing TYPE on a ladder rung WITHOUT the block gets the generated protocol appended to its brief, sized to that rung', () => {
   const h = harness();
   try {
-    const r = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nWARRANT: weight 5 - test\ndesign it' }));
+    const r = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nROLE: writer\nWARRANT: weight 5 - test\ndesign it' }));
     assert.equal(r.decision, 'proceed', r.reason);
     assert.equal(r.row.self_review_expected, true);
     assert.equal(r.row.self_review_injected, true);
-    assert.match(r.prompt, /^ROLE: writer\nTYPE: novel-design\nWARRANT: weight 5 - test\ndesign it\n\n---\n\(agent-companion: your definition does not carry the self-review protocol/);
+    assert.match(r.prompt, /^TYPE: novel-design\nROLE: writer\nWARRANT: weight 5 - test\ndesign it\n\n---\n\(agent-companion: your definition does not carry the self-review protocol/);
     assert.match(r.prompt, /## Self-review before you return/);
     assert.match(r.prompt, /subagent_type: "agent-companion:ac-opus-max"/);
     assert.match(r.prompt, /^ {3}WRITER: opus\/max$/m);
@@ -569,13 +584,13 @@ test('a self-reviewing TYPE on a ladder rung WITHOUT the block gets the generate
     assert.doesNotMatch(r.msg || '', /self-review\)/);
 
     // The rung that matches what will RUN: a model named on the spawn wins.
-    const s = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-low', model: 'sonnet', prompt: 'TYPE: novel-design\nrefactor it' }));
+    const s = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-low', model: 'sonnet', prompt: 'TYPE: bounded-feature\nrefactor it' }));
     assert.equal(s.row.self_review_injected, true);
     assert.match(s.prompt, /subagent_type: "agent-companion:ac-sonnet-low"/);
     assert.match(s.prompt, /^ {3}WRITER: sonnet\/low$/m);
 
     // REVIEW: lead: nothing appended.
-    const o = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nREVIEW: lead\nWARRANT: weight 5 - test\ndesign it' }));
+    const o = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nROLE: writer\nREVIEW: lead\nWARRANT: weight 5 - test\ndesign it' }));
     assert.equal(o.row.self_review_injected, false);
     assert.doesNotMatch(o.prompt || '', /Self-review before you return/);
 
@@ -589,25 +604,26 @@ test('a self-reviewing TYPE on a ladder rung WITHOUT the block gets the generate
 test('a built-in writer (effort not pinned) gets no protocol, and a note that names a rung only when its installed file carries the block', () => {
   const h = harness();
   try {
-    const g = h.lead(bg({ subagent_type: 'general-purpose', model: 'opus', prompt: 'TYPE: novel-design\ndesign it' }));
+    const g = h.lead(bg({ subagent_type: 'general-purpose', model: 'opus', prompt: 'TYPE: large-refactor\nROLE: writer\nWARRANT: weight 5 - test\nrefactor it' }));
     assert.equal(g.row.self_review_expected, false);
     assert.equal(g.row.self_review_injected, false);
     assert.doesNotMatch(g.prompt || '', /Self-review before you return/);
     assert.match(g.msg, /"general-purpose" carries no self-review protocol and is no ladder rung it can be added to/);
-    assert.match(g.msg, /Spawn agent-companion:ac-opus-xhigh \(its routed rung\) for a self-reviewed result/);
+    assert.match(g.msg, /Spawn agent-companion:ac-sonnet-high \(its routed rung\) for a self-reviewed result/);
   } finally { h.cleanup(); }
-  // A state override moves novel-design to opus/max; the installed ac-opus-max
+  // A state override moves large-refactor's write leg to opus/max; the installed ac-opus-max
   // has no block, so the note must not send the lead there "for the protocol".
   const h2 = harness();
   try {
     const taskTypes = JSON.parse(JSON.stringify(SHIPPED.taskTypes));
-    taskTypes['novel-design'].override = { ...(taskTypes['novel-design'].override || {}), model: 'opus', effort: 'max', trialVersion: 9, overridesKindDelta: true, reason: 'test move', trialSince: '2026-09-28', reviewBy: '2026-12-31' };
+    taskTypes['large-refactor'].override = { ...(taskTypes['large-refactor'].override || {}), model: 'opus', effort: 'max', trialVersion: 9, reason: 'test move', trialSince: '2026-09-28', reviewBy: '2026-12-31' };
+    taskTypes['large-refactor'].legs.write = { model: 'opus', effort: 'max' };
     writeOverride(h2.stateDir, { taskTypes });
-    const g = h2.lead(bg({ subagent_type: 'general-purpose', model: 'opus', prompt: 'TYPE: novel-design\nWARRANT: weight 5 - test\ndesign it' }));
+    const g = h2.lead(bg({ subagent_type: 'general-purpose', model: 'opus', prompt: 'TYPE: large-refactor\nROLE: writer\nWARRANT: weight 5 - test\nrefactor it' }));
     assert.match(g.msg, /carries no self-review protocol/);
     assert.doesNotMatch(g.msg, /Spawn agent-companion:/, 'no rung whose installed file carries it');
     // ...and ac-opus-max itself, spawned under that override, gets the text appended.
-    const m = h2.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nWARRANT: weight 5 - frontier\ndesign it' }));
+    const m = h2.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: large-refactor\nROLE: writer\nWARRANT: weight 5 - frontier\nrefactor it' }));
     assert.equal(m.row.self_review_injected, true, m.reason);
     assert.match(m.prompt, /^ {3}WRITER: opus\/max$/m);
   } finally { h2.cleanup(); }
@@ -701,10 +717,10 @@ test('the recursion deny tells a re-tasked agent to return to the lead', () => {
 test('recommend.mjs says when the writer reviews itself, so the lead does not review twice', () => {
   const nd = runScript('scripts/recommend.mjs', ['--type', 'novel-design']);
   assert.equal(nd.status, 0, nd.stderr);
-  assert.match(nd.stdout, /self-review: +the writer spawns that reviewer itself \(protocol in agent-companion:ac-opus-xhigh's body\), runs one fix round/);
+  assert.match(nd.stdout, /self-review: +the writer spawns that reviewer itself \(protocol in agent-companion:ac-sonnet-high's body\), runs one fix round/);
   assert.match(nd.stdout, /unless the brief carries `REVIEW: lead`/);
   const js = JSON.parse(runScript('scripts/recommend.mjs', ['--type', 'novel-design', '--json']).stdout);
-  assert.deepEqual(js.selfReview, { protocol: 'rung', fixRounds: 1, optOut: 'REVIEW: lead' });
+  assert.deepEqual(js.selfReview, { protocol: 'rung', writerAgent: 'agent-companion:ac-sonnet-high', fixRounds: 1, optOut: 'REVIEW: lead' });
   assert.match(nd.stdout, /lands its own work/);
   const me = runScript('scripts/recommend.mjs', ['--type', 'mechanical-edit']);
   assert.doesNotMatch(me.stdout, /self-review:/);
@@ -814,4 +830,32 @@ test('a bounded-feature or integration writer on ac-sonnet-high (the shipped def
     const med = h.lead(bg({ subagent_type: 'agent-companion:ac-sonnet-medium', prompt: 'TYPE: bounded-feature\nadd the flag' }));
     assert.equal(med.row.self_review_injected, true, 'a rung without the block gets the text appended');
   } finally { h.cleanup(); }
+});
+
+test('recommend.mjs shows both legs for an Opus-resolving writer type, one short line each (0.31.54)', () => {
+  for (const type of ['debug-root-cause', 'large-refactor', 'novel-design', 'critical-change', 'long-autonomous-run']) {
+    const r = runScript('scripts/recommend.mjs', ['--type', type]);
+    assert.equal(r.status, 0, r.stderr);
+    const plan = r.stdout.split('\n').filter((l) => /^plan leg:/.test(l));
+    const write = r.stdout.split('\n').filter((l) => /^write leg:/.test(l));
+    assert.equal(plan.length, 1, type);
+    assert.equal(write.length, 1, type);
+    assert.match(plan[0], /agent-companion:ac-opus-(medium|high|xhigh) \(opus\/\w+\), read-only, writes <task>-plan\.md; brief TYPE: .* \+ ROLE: other$/, type);
+    assert.match(write[0], /agent-companion:ac-sonnet-high \(sonnet\/high\), works from that plan; brief TYPE: .* \+ ROLE: writer \(fixer for a fix\)$/, type);
+    assert.doesNotMatch(r.stdout, /^spawn as:/m, `${type}: the two legs replace the single spawn line`);
+    assert.match(r.stdout, /protocol in agent-companion:ac-sonnet-high's body/, `${type}: the write leg carries the protocol`);
+    const js = JSON.parse(runScript('scripts/recommend.mjs', ['--type', type, '--json']).stdout);
+    assert.equal(js.legs.plan.model, 'opus');
+    assert.equal(js.legs.plan.role, 'other');
+    assert.equal(js.legs.plan.artifact, '<task>-plan.md');
+    assert.equal(js.legs.write.agent, 'ac-sonnet-high');
+    assert.equal(js.legs.write.role, 'writer');
+    assert.equal(js.reviewer.model === 'sonnet' || js.reviewer.model === 'opus', true, 'the review is sized to the write leg (or floored for a critical change)');
+  }
+  // Types that never resolved to Opus keep the single spawn line; an explicit deviation skips the legs.
+  const bf = runScript('scripts/recommend.mjs', ['--type', 'bounded-feature']);
+  assert.match(bf.stdout, /^spawn as:/m);
+  assert.doesNotMatch(bf.stdout, /^(plan|write) leg:/m);
+  const dev = runScript('scripts/recommend.mjs', ['--type', 'large-refactor', '--weight', '5']);
+  assert.doesNotMatch(dev.stdout, /^(plan|write) leg:/m, 'an explicit --weight is a deliberate deviation from the preset');
 });

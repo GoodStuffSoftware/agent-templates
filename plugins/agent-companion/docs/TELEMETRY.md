@@ -401,6 +401,8 @@ total that skips several multiples at once still writes one.
 ### `subagent-context.jsonl` — one record per subagent context notice
 
 Written when a subagent's own context passes `subagent_context_notice_tokens`
+(default 110000 since 0.31.54: the worker is told to commit and push its WIP,
+write `<task>-handoff.md` and return `DONE: partial, handoff at <path>`)
 or the subagent has just compacted. Each kind fires once per subagent (a
 compaction once per compaction).
 
@@ -713,6 +715,23 @@ hook processes racing on the same brand-new type can no longer produce more
 than one row for it. A new entry means the harness introduced something the
 guards do not yet classify — enforcement may be quietly narrower than
 intended.
+
+### `opus-writer-rewrites.jsonl` — the no-Opus-writers rewrite
+
+Written by `hooks/spawn-guard.mjs` (`hooks/lib/opus-writer.mjs`) once per spawn it rewrote from Opus to the Sonnet writer rung, as the spawn is allowed (a spawn the guard then denies writes nothing). Nothing for a spawn it left alone (a reviewer, lookup, docs, operate, design or root-cause-only spawn, a writer already off Opus, or `opus_writer_policy: "allow"`). The spawn's own row in `spawns.jsonl` also carries `silent_fixes: ["opus_writer_rewrite:<from>-><to>"]`.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when it was written |
+| `session_id` | string | the lead's session |
+| `agent` | string \| null | the spawn's `name` (else its `description`) |
+| `from` | string | `<subagent_type or (none)>/<model>` before the rewrite; the model is the call's `model`, else the definition's, else `inherited` |
+| `to` | string | `<subagent_type>/sonnet` after it (the type is unchanged when only the `model` parameter could be changed) |
+| `declared_type` | string \| null | the brief's `TYPE:` (canonical name) |
+| `declared_role` | string \| null | the brief's `ROLE:` |
+| `basis` | `role` \| `type` | why the brief counted as a writer's: a writer `ROLE:` line, or no usable `ROLE:` and a writing `TYPE:` |
+| `via` | `opus_model` \| `opus_agent` \| `inherited` | why the spawn would have run on Opus |
 
 ### `fixtures.jsonl` — every row from a fixture/verification session
 

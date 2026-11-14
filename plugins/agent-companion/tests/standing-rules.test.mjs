@@ -43,6 +43,28 @@ test('readRules() with no file returns the built-ins, agent-brevity disabled', (
   }
 });
 
+test('0.31.54: the resume-doctrine rule carries the handoff clause in the same rule (no new rule), and the session-start text stays under the cap', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const { rules } = readRules();
+    const rd = rules.find((r) => r.id === 'resume-doctrine');
+    assert.match(rd.then, /A worker that returns "DONE: partial, handoff at <path>" gets a fresh same-rung continuation from that file, not a resume./);
+    assert.equal(rules.filter((r) => /DONE: partial, handoff at/.test(r.then || '')).length, 1, 'one rule, not a new one');
+    // The cap test must be able to fail: render at the shipped default cap (3000) AND at 4200, and require that the
+    // handoff clause survived (a rule dropped for length is replaced by a "(N more rules dropped" line, never silently).
+    const hits = matchRules({ scope: 'session-start', text: '', sessionId: 's' });
+    for (const maxChars of [3000, 4200]) {
+      const text = renderRules(hits, { maxChars });
+      assert.ok(text.includes('DONE: partial, handoff at'), `the handoff clause is in the session-start text at ${maxChars} chars`);
+      assert.doesNotMatch(text, /more rules? dropped/, `no rule dropped for length at ${maxChars} chars (text is ${text.length})`);
+    }
+    // And the check itself bites: a cap too small for the whole set drops rules and says so.
+    assert.match(renderRules(hits, { maxChars: 500 }), /more rules? dropped/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('a minimal user override disables a built-in without dropping it', () => {
   const { cleanup } = makeFixture();
   try {
