@@ -138,7 +138,7 @@ try {
   const projectRouteAndSelfReviewOut = projectRouteAndSelfReview({
     pin, fromDef, spawnAlias, route, parityYardstick, declaredType, decls, model, updatedInput, input,
     typeIsParity, srCfg, brief, ladderRewrite, def, pinned, consequenceWasDeclared, declaredConsequence,
-    callerEffort, selfReviewSuffix, p, silentFixes,
+    callerEffort, selfReviewSuffix, p, silentFixes, declaredRole,
   });
   let {
     projectRoutePlan, selfReviewExpected, selfReviewNote, selfReviewInjected,

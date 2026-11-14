@@ -7,8 +7,10 @@ import { join } from 'node:path';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 import {
-  OPUS_WRITING_TYPES, OPUS_NON_WRITING_TYPES, OPUS_WRITER_LOG, writerBasis,
+  OPUS_WRITING_TYPES, OPUS_NON_WRITING_TYPES, OPUS_WRITER_LOG, writerBasis, planLegSpawn,
 } from '../hooks/lib/opus-writer.mjs';
+import { legsOf, writeLegPair } from '../hooks/lib/legs.mjs';
+import { modelTiers, resolveRoute, rungFor } from '../hooks/lib/context.mjs';
 import {
   WRITER_MARKER, HANDOFF_SENTENCE, TEST_SENTENCE, STAGING_SENTENCE, countDeliverables, buildWriterClause, isWriterSpawn,
 } from '../hooks/lib/writer-brief.mjs';
@@ -238,4 +240,51 @@ test('a rewritten Opus writer also gets the writer clause (it runs as the Sonnet
   const r = spawn({ subagent_type: OPUS_RUNG, prompt: 'TYPE: integration\nROLE: writer\n1. a\n2. b\n3. c\n4. d\n5. e\n' }, { sid: 'sess-ow-both' });
   assert.equal(r.upd.subagent_type, RUNG);
   assert.ok(r.upd.prompt.includes(STAGING_SENTENCE));
+});
+// --- Two legs (0.31.54): the Opus rung is a read-only plan leg, the write leg is ac-sonnet-high -----------------------------
+
+const LEG_TYPES = ['debug-root-cause', 'large-refactor', 'novel-design', 'critical-change', 'long-autonomous-run'];
+
+test('unit: every Opus-resolving writer row carries legs: an Opus plan route and a Sonnet write rung that exists', () => {
+  const cfg = modelTiers();
+  for (const type of LEG_TYPES) {
+    const l = legsOf(type, cfg);
+    assert.ok(l, `${type} has legs`);
+    assert.equal(l.plan.artifact, '<task>-plan.md', type);
+    assert.deepEqual(l.write, { model: 'sonnet', effort: 'high' }, type);
+    assert.equal(rungFor(l.write.model, l.write.effort)?.agent, 'ac-sonnet-high', type);
+    assert.equal(resolveRoute({ type, profile: false }).model, 'opus', `${type}: the row's own route is the Opus plan leg`);
+    assert.deepEqual(writeLegPair(type, cfg), { model: 'sonnet', effort: 'high' }, type);
+  }
+  // Rows that never resolved to Opus have no legs.
+  for (const type of ['bounded-feature', 'integration', 'mechanical-edit', 'code-review', 'explore']) assert.equal(legsOf(type, cfg), null, type);
+});
+
+test('unit: planLegSpawn is a type with legs whose brief does not say it writes', () => {
+  assert.equal(planLegSpawn('large-refactor', 'other'), true);
+  assert.equal(planLegSpawn('critical-change', 'other'), true);
+  assert.equal(planLegSpawn('novel-design', null), true, 'design is non-writing with no ROLE');
+  assert.equal(planLegSpawn('debug-root-cause', null), true);
+  assert.equal(planLegSpawn('large-refactor', null), false, 'a writing type with no ROLE is a writer');
+  assert.equal(planLegSpawn('large-refactor', 'writer'), false);
+  assert.equal(planLegSpawn('debug-root-cause', 'fixer'), false);
+  assert.equal(planLegSpawn('bounded-feature', 'other'), false, 'a type with no legs has no plan leg');
+  assert.equal(planLegSpawn(null, 'other'), false);
+});
+
+test('the plan leg stays on its Opus rung: ROLE: other is not rewritten and carries no self-review protocol; the write leg on ac-sonnet-high does', () => {
+  for (const type of LEG_TYPES) {
+    const plan = spawn({ subagent_type: OPUS_RUNG, prompt: `TYPE: ${type}\nROLE: other\nWARRANT: weight 5 - plan leg\nplan it, write plan.md` }, { sid: `sess-leg-p-${type}` });
+    assert.notEqual(plan.upd?.model, 'sonnet', type);
+    assert.notEqual(plan.upd?.subagent_type, RUNG, type);
+    assert.equal(plan.rows.length, 0, type);
+    assert.equal(plan.row.self_review_expected, false, `${type}: no protocol for the read-only leg`);
+    assert.equal(plan.row.self_review_injected, false, type);
+    assert.doesNotMatch(plan.upd?.prompt || '', /Self-review before you return/, type);
+
+    const write = spawn({ subagent_type: RUNG, prompt: `TYPE: ${type}\nROLE: writer\nbuild it from plan.md` }, { sid: `sess-leg-w-${type}` });
+    assert.equal(write.rows.length, 0, `${type}: already on the Sonnet writer rung`);
+    assert.equal(write.row.self_review_expected, true, `${type}: the write leg carries the protocol in its body`);
+    assert.equal(write.row.self_review_injected, false, type);
+  }
 });

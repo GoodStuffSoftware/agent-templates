@@ -88,7 +88,7 @@ own work (merge, plus the deploy check where the repo deploys on merge; the
 repo's release gates stay) and returns the reviewer's verdict line verbatim
 with the review path, the post-fix sha and any findings it disputes.
 `mechanical-edit` and `subagent-worker` are not listed: they are the edit
-workers a writer spawns for a 15+ call job, and the parent writer's one review
+workers a writer may spawn, and the parent writer's one review
 covers them. The lead is out of the first review pass and the landing, not out
 of the decision.
 
