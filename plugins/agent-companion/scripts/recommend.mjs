@@ -29,6 +29,7 @@ import {
 import { loadAdvisorSummary, windowHintFor } from './lib/cache-advisor.mjs';
 import { selfReviewConfig, readSelfReviewBlock } from '../hooks/lib/self-review.mjs';
 import { BRIEF_ROLES } from '../hooks/lib/brief-directives.mjs';
+import { legsOf } from '../hooks/lib/legs.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -137,6 +138,26 @@ if (rung) {
   out.spawnAgentNamespaced = `agent-companion:${rung.agent}`;
 }
 
+// Two legs (0.31.54, no Opus writers; config `legs`, hooks/lib/legs.mjs): a type whose route lands on Opus is split into a
+// read-only PLAN leg on that route (writes <task>-plan.md, ROLE: other) and a WRITE leg on the config's write rung (the
+// writer: ROLE: writer or fixer). Only for the preset as shipped: an explicit --weight/--kind/--consequence is a deliberate
+// deviation, and a route that is not on Opus (a routing profile moved it) has no Opus writer to split.
+const legsDef = out.taskType && weight !== 'parity' && !weightExplicit && !kindExplicit && !consequenceExplicit ? legsOf(canon.name) : null;
+if (legsDef && out.model === 'opus') {
+  const wr = rungFor(legsDef.write.model, legsDef.write.effort);
+  if (wr) {
+    out.legs = {
+      plan: {
+        model: out.model, effort: out.effort || null, agent: rung ? rung.agent : null,
+        spawnAgentNamespaced: rung ? `agent-companion:${rung.agent}` : null, role: 'other', artifact: legsDef.plan.artifact, label: legsDef.plan.label,
+      },
+      write: {
+        model: wr.model, effort: wr.effort || null, agent: wr.agent, spawnAgentNamespaced: `agent-companion:${wr.agent}`, role: 'writer',
+      },
+    };
+  }
+}
+
 // UI and browser work: the numbered rungs drop the browser servers (config
 // ladderTools), so --browser points at the browser variant instead
 // (config ladderVariants). Routing is unchanged: the route is still the
@@ -162,27 +183,30 @@ if (has('--browser') && out.model !== 'fable') {
 const cls = classifyModel(out.model);
 out.premium = cls.premium;
 out.warrantRequired = cls.premium;
+// The writer's pair: the write leg when the type has legs, else the route. The review is sized to the writer.
+const wModel = out.legs ? out.legs.write.model : out.model;
+const wEffort = out.legs ? out.legs.write.effort : out.effort;
 out.reviewer = {
-  model: out.model,
-  effort: out.effort ? `>= ${out.effort}` : '(none)',
+  model: wModel,
+  effort: wEffort ? `>= ${wEffort}` : '(none)',
   note: 'reviewer parity: at least the writer\'s model and effort (effort may exceed, must not drop), raised to F1 on a critical change and capped by F2 (never fable)',
 };
 // The operator's reviewerEffortCap / reviewerEffortFloor (config; exceptions to
 // effort parity) can size a review of this route below or above the writer's
 // effort: say so.
-if (weight !== 'parity' && out.model && out.effort && out.model !== 'fable') {
+if (weight !== 'parity' && wModel && wEffort && wModel !== 'fable') {
   try {
     const pr = resolveRoute({
       type: 'code-review', consequence: out.consequence, consequenceExplicit: true,
-      writer: { model: out.model, effort: out.effort }, writerType: typeName || null,
+      writer: { model: wModel, effort: wEffort }, writerType: typeName || null,
     });
-    if (pr.model === out.model && pr.effort && pr.effort !== out.effort) {
+    if (pr.model === wModel && pr.effort && pr.effort !== wEffort) {
       const fa = (pr.floorsApplied || []).map((f) => f.raised || f.capped || '').join(' ');
       const which = /reviewerEffortFloor/.test(fa) ? 'reviewerEffortFloor' : /reviewerEffortCap/.test(fa) ? 'reviewerEffortCap' : 'reviewer floors';
       out.reviewer = {
         model: pr.model,
         effort: pr.effort,
-        note: `${which}${which === 'reviewer floors' ? '' : ' (an exception to effort parity)'}: this ${out.consequence} change's review runs at ${pr.model}/${pr.effort}, ${classifyEffort(pr.effort).rank < classifyEffort(out.effort).rank ? 'below' : 'above'} the writer's ${out.effort}`,
+        note: `${which}${which === 'reviewer floors' ? '' : ' (an exception to effort parity)'}: this ${out.consequence} change's review runs at ${pr.model}/${pr.effort}, ${classifyEffort(pr.effort).rank < classifyEffort(wEffort).rank ? 'below' : 'above'} the writer's ${wEffort}`,
       };
     }
   } catch { /* table unreadable: keep the parity note */ }
@@ -213,15 +237,18 @@ if (out.taskType) out.role = BRIEF_ROLES.includes(TYPE_ROLE[out.taskType]) ? TYP
 try {
   const sr = selfReviewConfig();
   if (out.taskType && sr.types.includes(out.taskType)) {
+    // The writer's rung: the write leg when the type has legs (the plan leg is read-only and carries no protocol).
+    const writerAgent = out.legs ? out.legs.write.agent : out.spawnAgent;
     let inBody = false;
-    if (out.spawnAgent) {
+    if (writerAgent) {
       try {
-        const f = fileURLToPath(new URL(`../agents/${out.spawnAgent}.md`, import.meta.url));
+        const f = fileURLToPath(new URL(`../agents/${writerAgent}.md`, import.meta.url));
         inBody = !!readSelfReviewBlock(readFileSync(f, 'utf8')).block;
       } catch { inBody = false; }
     }
     out.selfReview = {
-      protocol: out.spawnAgent ? (inBody ? 'rung' : 'appended') : 'none',
+      protocol: writerAgent ? (inBody ? 'rung' : 'appended') : 'none',
+      ...(out.legs ? { writerAgent: `agent-companion:${writerAgent}` } : {}),
       fixRounds: sr.fixRounds,
       optOut: sr.optOut.line,
     };
@@ -247,10 +274,12 @@ if (has('--json')) {
 }
 
 const eff = out.effort ? `/${out.effort}` : ' (no effort — this model takes none)';
-console.log(`recommendation: ${out.model}${eff}`);
+console.log(out.legs
+  ? `recommendation: ${out.model}${eff} plan leg, then ${out.legs.write.model}/${out.legs.write.effort} write leg`
+  : `recommendation: ${out.model}${eff}`);
 if (out.taskType) console.log(`task type:      ${out.taskType}`);
 if (out.aliasOf) console.log(`type ${out.aliasOf} is an alias of ${out.taskType}`);
-if (out.role) console.log(`brief lines:    TYPE: ${out.taskType} + ROLE: ${out.role} (one of ${BRIEF_ROLES.join('/')}: what the main deliverable is; fixer, lander, docs when it is that. Tags the spawn for usage measurement only)`);
+if (out.role && !out.legs) console.log(`brief lines:    TYPE: ${out.taskType} + ROLE: ${out.role} (one of ${BRIEF_ROLES.join('/')}: what the main deliverable is; fixer, lander, docs when it is that. Tags the spawn for usage measurement only)`);
 console.log(`inputs:         weight=${out.weight} kind=${out.kind} consequence=${out.consequence}`);
 console.log(`why:            ${out.rationale}`);
 console.log('budget:         a brief may carry BUDGET: N% (an allowance of N% of the weekly plan limit that the agent plans against; it gets a notice at 80% and 100% and is never stopped. BUDGET: <n> stays the separate step budget)');
@@ -262,6 +291,11 @@ if (out.browser) {
   } else {
     console.log(`spawn as:       no browser variant for this route (${b.reason}) - drive the browser from the lead, or split the work and give the browser check to a variant`);
   }
+} else if (out.legs) {
+  const L = out.legs;
+  console.log(`plan leg:       ${L.plan.spawnAgentNamespaced} (${L.plan.model}/${L.plan.effort}), read-only, writes ${L.plan.artifact}; brief TYPE: ${out.taskType} + ROLE: ${L.plan.role}`);
+  console.log(`write leg:      ${L.write.spawnAgentNamespaced} (${L.write.model}/${L.write.effort}), works from that plan; brief TYPE: ${out.taskType} + ROLE: ${L.write.role} (fixer for a fix)`);
+  console.log('                UI or browser work: add --browser (the numbered rungs have no browser tools)');
 } else if (out.spawnAgentNamespaced) {
   console.log(`spawn as:       subagent_type: "${out.spawnAgentNamespaced}"  (ladder rung ${out.rung}/10)`);
   console.log('                UI or browser work: add --browser (the numbered rungs have no browser tools)');
@@ -273,7 +307,7 @@ if (out.selfReview) {
   const s = out.selfReview;
   console.log(s.protocol === 'none'
     ? `self-review:    none — no ladder rung for this route carries or can take the protocol; the lead spawns the reviewer above`
-    : `self-review:    the writer spawns that reviewer itself (protocol ${s.protocol === 'rung' ? `in ${out.spawnAgentNamespaced}'s body` : 'appended to its brief by the spawn guard'}), ` +
+    : `self-review:    the writer spawns that reviewer itself (protocol ${s.protocol === 'rung' ? `in ${s.writerAgent || out.spawnAgentNamespaced}'s body` : 'appended to its brief by the spawn guard'}), ` +
       `runs ${s.fixRounds === 1 ? 'one fix round' : `${s.fixRounds} fix round(s)`}, returns the verdict and lands its own work; the lead does not spawn a reviewer unless the brief carries \`${s.optOut}\``);
 }
 if (route?.layer === 'profile') console.log(`route layer:    your routing profile (rev ${route.profileRevision}) — /ac routing why ${out.taskType} explains it`);
@@ -300,7 +334,7 @@ if (out.trial) {
   if (out.trial.evidence?.source) console.log(`  evidence:      ${out.trial.evidence.source} (${out.trial.evidence.date || 'undated'})`);
 }
 if (out.warrantRequired) {
-  console.log(`\nPREMIUM TIER — a warrant is required on the spawn brief:`);
+  console.log(`\nPREMIUM TIER — a warrant is required on the spawn brief${out.legs ? ' of the plan leg' : ''}:`);
   console.log(`  ${out.warrantTemplate}`);
 }
 if (out.tryFirst) console.log(`\ntry first:      ${out.tryFirst}`);

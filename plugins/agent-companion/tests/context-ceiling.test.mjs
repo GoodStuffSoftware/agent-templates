@@ -17,8 +17,10 @@ import { rolloutActive, ceilingNoticeText, ceilingRung, CEILING_DEFAULT_TOKENS, 
 
 const SID = 'sess-ceil';
 const AGENT = 'worker-ceil-test-1';
-const ON = { AGENT_COMPANION_FAKE_NOW: '2026-10-15T00:00:00Z', CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_TOKENS: '175000' };
-const DEFAULTS = { AGENT_COMPANION_FAKE_NOW: '2026-10-15T00:00:00Z' }; // the option unset: the shipped default
+// The size notice is pinned to its pre-0.31.54 value (300000) here: these tests are about the ceiling nudge, and the 110000 default would add its own notice at the sizes they use.
+const NOTICE_300K = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' };
+const ON = { ...NOTICE_300K, AGENT_COMPANION_FAKE_NOW: '2026-10-15T00:00:00Z', CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_TOKENS: '175000' };
+const DEFAULTS = { ...NOTICE_300K, AGENT_COMPANION_FAKE_NOW: '2026-10-15T00:00:00Z' }; // the ceiling option unset: the shipped default
 
 const turn = (id, ctx, model = 'claude-sonnet-5-5') => `${JSON.stringify({
   type: 'assistant', requestId: id,
@@ -285,7 +287,7 @@ test('the existing compaction/size notice is unchanged and combines with the cei
       const l2 = layout(fx2);
       writeFileSync(l2.agentFile, user('go') + turn('r1', 320000));
       const only = ctxText(run(l2.lead, { ...ON, AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00Z', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }));
-      assert.equal(only, '[agent-companion] Your context is past 300,000 tokens. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.');
+      assert.equal(only, '[agent-companion] Your context is past 300,000 tokens. Finish the current step, commit and push your WIP, write <task>-handoff.md (done / left / first next action), and return "DONE: partial, handoff at <path>".');
     } finally { fx2.cleanup(); }
   } finally { fx.cleanup(); }
 });
@@ -360,7 +362,7 @@ test('the 300K size notice still fires for a low rung, unchanged', () => {
     const { lead, agentFile } = layout(fx);
     writeFileSync(agentFile, user('go') + turn('r1', 320000));
     const out = ctxText(run(lead, { ...ON, CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }, { agent_type: 'ac-haiku' }));
-    assert.equal(out, '[agent-companion] Your context is past 300,000 tokens. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.');
+    assert.equal(out, '[agent-companion] Your context is past 300,000 tokens. Finish the current step, commit and push your WIP, write <task>-handoff.md (done / left / first next action), and return "DONE: partial, handoff at <path>".');
     assert.equal(existsSync(join(telemetryDir(), 'context-ceiling.jsonl')), false);
   } finally { fx.cleanup(); }
 });

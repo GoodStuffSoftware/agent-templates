@@ -37,6 +37,7 @@ import {
 import { BRIEF_ROLES, briefDeclarations, declarationValue } from './brief-directives.mjs';
 import { SCOPE_WRITER_TYPES } from './scope-rule.mjs';
 import { ladderRewriteTarget, pinInfo } from './sg-helpers.mjs';
+import { legsOf } from './legs.mjs';
 
 export const OPUS_WRITER_ROLES = ['writer', 'fixer', 'lander'];
 export const OPUS_NON_WRITING_TYPES = ['novel-design', 'debug-root-cause'];
@@ -47,6 +48,13 @@ export const OPUS_WRITER_LOG = 'opus-writer-rewrites.jsonl';
 export function writerBasis(role, type) {
   if (role) return OPUS_WRITER_ROLES.includes(role) ? 'role' : null;
   return type && OPUS_WRITING_TYPES.includes(type) ? 'type' : null;
+}
+
+// A spawn of a type that has legs (hooks/lib/legs.mjs) whose brief does NOT say it writes is the type's read-only PLAN leg:
+// ROLE: other (or any usable non-writer role), or, with no ROLE line, one of the non-writing types above. It writes
+// <task>-plan.md and carries no self-review protocol (the write leg does).
+export function planLegSpawn(type, role) {
+  return !!type && !!legsOf(type) && !writerBasis(role, type);
 }
 
 // The caller's own last turn ran on Opus. A subagent whose own transcript cannot be found falls back to the

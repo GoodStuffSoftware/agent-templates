@@ -25,6 +25,7 @@ import {
   selfReviewConfig, selfReviewTypesForRung, selfReviewConfigProblems, selfReviewBlock,
   readSelfReviewBlock, setSelfReviewBlock,
 } from '../hooks/lib/self-review.mjs';
+import { legsOf } from '../hooks/lib/legs.mjs';
 
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
@@ -76,6 +77,11 @@ function typeRoute(name) {
     grid,
   };
 }
+// Two-leg routes (0.31.54, config `legs`): a type whose route lands on Opus is a read-only plan leg there, written on its write rung.
+const legMark = (name, tr) => {
+  const l = legsOf(name);
+  return l && tr.model === 'opus' ? ` plan leg, then \`${l.write.model}${l.write.effort ? '/' + l.write.effort : ''}\` write leg` : '';
+};
 const profileMark = (tr) => (tr.layer === 'profile' ? ` _(your routing profile, rev ${tr.profileRevision})_` : '');
 
 const cell = (w, k) => {
@@ -108,8 +114,8 @@ function taskTypeBlock() {
     if (typeof t.weight === 'number') {
       const tr = typeRoute(name);
       route = tr.won
-        ? `\`${tr.label}\` (routing trial${tr.trial.reviewBy ? ', review by ' + tr.trial.reviewBy : ''})`
-        : `\`${tr.label}\`${profileMark(tr)}`;
+        ? `\`${tr.label}\`${legMark(name, tr)} (routing trial${tr.trial.reviewBy ? ', review by ' + tr.trial.reviewBy : ''})`
+        : `\`${tr.label}\`${legMark(name, tr)}${profileMark(tr)}`;
       premium = premiumOf(tr.model) ? 'yes' : 'no';
     } else if (t.weight === 'parity') {
       route = "writer's model, floored to opus/xhigh if critical and never fable; effort ≥ writer's";
@@ -765,12 +771,30 @@ if (cfg.taskTypes) {
       } else {
         resolved = `\`${tr.label}\`${profileMark(tr)}`;
       }
+      const leg = legMark(name, tr);
+      if (leg) resolved = resolved.replace(/^(`[^`]*`)/, (m) => `${m}${leg}`);
     } else if (t.weight === 'parity') {
       resolved = '_writer\'s model, floored to opus/xhigh if critical and never fable; effort ≥ writer_';
     }
     L.push(`| \`${name}\` | ${t.weight} | \`${t.kind}\` | \`${t.consequence}\` | ${resolved} | ${t.summary || ''} |`);
   }
   L.push(``);
+  const legTypes = Object.keys(cfg.taskTypes).filter((n) => legsOf(n));
+  if (legTypes.length) {
+    L.push(`### Two legs: Opus plans, Sonnet writes (0.31.54)`);
+    L.push(``);
+    L.push(cfg.legsNote);
+    L.push(``);
+    L.push(`| Task type | Plan leg (read-only, Opus) | Brief | Write leg | Brief |`);
+    L.push(`|---|---|---|---|---|`);
+    for (const name of legTypes) {
+      const l = legsOf(name);
+      const tr = typeRoute(name);
+      const wr = rungFor(l.write.model, l.write.effort);
+      L.push(`| \`${name}\` | \`${tr.label}\`: ${l.plan.label}, writes \`${l.plan.artifact}\`; ${l.plan.what} | \`TYPE: ${name}\` + \`ROLE: other\` | \`${l.write.model}/${l.write.effort}\`${wr ? ` (\`agent-companion:${wr.agent}\`)` : ''}, works from the plan | \`TYPE: ${name}\` + \`ROLE: writer\` (\`fixer\` for a fix) |`);
+    }
+    L.push(``);
+  }
   L.push(`<details><summary>Provenance per task type</summary>`);
   L.push(``);
   for (const [name, t] of Object.entries(cfg.taskTypes)) L.push(`- **\`${name}\`** — ${t.provenance || 'none recorded'}`);

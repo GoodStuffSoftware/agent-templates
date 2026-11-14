@@ -1,5 +1,5 @@
 // Subagent context notice: tell a subagent, WHILE IT RUNS, that its own context
-// has grown past `subagent_context_notice_tokens` (default 300000; 0 is off) or
+// has grown past `subagent_context_notice_tokens` (default 110000; 0 is off) or
 // that it has just compacted, and tell the lead about it when the subagent
 // stops.
 //
@@ -23,6 +23,12 @@
 // compacted"). With autoCompactWindow at 200000 a worker compacts long before
 // 300000, so the compaction signal is the one that usually fires.
 //
+// The size notice is the HANDOFF notice (0.31.54): finish the step, commit and push WIP, write
+// <task>-handoff.md (done / left / first next action) and return "DONE: partial, handoff at <path>", so the lead
+// continues from the file with a fresh worker on the same rung. Default 110000, from operator data of 2026-11-13: long
+// workers averaged 133k tokens of context per call, and every call re-reads it; at the old 300000 default the size
+// notice almost never fired, because a worker compacts first.
+//
 // Reads are BOUNDED: the last CTX_TAIL_BYTES of the file, widened once to
 // CTX_TAIL_WIDE_BYTES when the narrow tail holds no assistant record (a huge
 // tool result sits last). Fails open everywhere.
@@ -44,7 +50,7 @@ import { join } from 'node:path';
 import { stateDir } from './context.mjs';
 import { safe } from './runaway.mjs';
 
-export const CONTEXT_DEFAULT_TOKENS = 300000;
+export const CONTEXT_DEFAULT_TOKENS = 110000;
 export const CTX_TAIL_BYTES = 1024 * 1024;
 export const CTX_TAIL_WIDE_BYTES = 8 * 1024 * 1024;
 export const BOUNDARY_FRESH_TURNS = 3;
@@ -203,9 +209,12 @@ export function claimSignals(agentId, sig, threshold, { fresh }) {
 
 export const fmtTokens = (n) => Number(n).toLocaleString('en-US');
 
+// The line a worker returns when it hands off at the size notice; the lead's resume rule reads it (hooks/lib/rules.mjs).
+export const HANDOFF_RETURN = 'DONE: partial, handoff at <path>';
+
 // The text the subagent sees. A compaction alone is informative only: workers compact and keep
-// going (operator decision 2026-10-27), so no wrap-up and no return is asked. The size notice
-// keeps its wrap-up wording, and so does a size-plus-compaction message.
+// going (operator decision 2026-10-27), so no wrap-up and no return is asked. The size notice is the
+// handoff request, and so is a size-plus-compaction message.
 export function subagentNoticeText(kinds, threshold) {
   if (!kinds.includes('size')) {
     return '[agent-companion] You compacted; re-read only what the next step needs and continue.';
@@ -213,5 +222,5 @@ export function subagentNoticeText(kinds, threshold) {
   const what = kinds.includes('compaction')
     ? 'You just compacted'
     : `Your context is past ${fmtTokens(threshold)} tokens`;
-  return `[agent-companion] ${what}. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.`;
+  return `[agent-companion] ${what}. Finish the current step, commit and push your WIP, write <task>-handoff.md (done / left / first next action), and return "${HANDOFF_RETURN}".`;
 }
