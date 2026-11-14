@@ -1,5 +1,5 @@
 // PreToolUse (no matcher), inside a SUBAGENT only — tell it, mid-run, that its
-// own context is past `subagent_context_notice_tokens` (default 300000; 0 turns
+// own context is past `subagent_context_notice_tokens` (default 110000; 0 turns
 // the notice off) or that it just compacted. See lib/subagent-context.mjs for
 // what is measured, why PreToolUse can reach a subagent, and the once-only
 // claims.

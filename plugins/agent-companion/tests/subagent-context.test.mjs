@@ -19,7 +19,8 @@ import { readContextSignal, subagentNoticeText, BOUNDARY_FRESH_TURNS } from '../
 
 const SID = 'sess-ctx';
 const AGENT = 'worker-ctx-test-1';
-const TH = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' };
+const TH = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }; // an operator who raised the option back to the pre-0.31.54 value
+const HAND = 'Finish the current step, commit and push your WIP, write <task>-handoff.md (done / left / first next action), and return "DONE: partial, handoff at <path>".';
 
 // An assistant request whose context (input + cache_read + cache_write) is `ctx`.
 const turn = (id, ctx) => `${JSON.stringify({
@@ -62,7 +63,7 @@ test('mid-run: past the threshold, the subagent is told once, with the agent-sid
     const r = runHook('hooks/subagent-context.mjs', pre(lead));
     assert.equal(r.status, 0);
     assert.equal(r.json.hookSpecificOutput.hookEventName, 'PreToolUse');
-    assert.equal(ctxText(r), '[agent-companion] Your context is past 300,000 tokens. Finish the current step, return your results, and if more work remains, say what is left so the lead can split it.');
+    assert.equal(ctxText(r), `[agent-companion] Your context is past 110,000 tokens. ${HAND}`);
     assert.deepEqual(Object.keys(r.json), ['hookSpecificOutput'], 'advice only: no decision of any kind');
     // Once: later tool calls of the same agent, however large the context.
     appendFileSync(agentFile, turn('r3', 380000));
@@ -76,11 +77,43 @@ test('mid-run: past the threshold, the subagent is told once, with the agent-sid
   } finally { fx.cleanup(); }
 });
 
+test('0.31.54: with no option set the default 110,000 fires the hand-off notice once, one telemetry row per worker', () => {
+  const fx = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fx);
+    writeFileSync(agentFile, user('go') + turn('r1', 90000) + turn('r2', 118000));
+    const r = runHook('hooks/subagent-context.mjs', pre(lead));
+    assert.equal(ctxText(r), `[agent-companion] Your context is past 110,000 tokens. ${HAND}`);
+    assert.match(ctxText(r), /commit and push your WIP/);
+    assert.match(ctxText(r), /<task>-handoff\.md \(done \/ left \/ first next action\)/);
+    appendFileSync(agentFile, turn('r3', 160000));
+    assert.equal(runHook('hooks/subagent-context.mjs', pre(lead)).stdout.trim(), '', 'once per worker');
+    assert.equal(rows().length, 1, 'exactly one telemetry line');
+    assert.equal(rows()[0].kind, 'size');
+    assert.equal(rows()[0].threshold, 110000);
+    // A second worker gets its own notice and its own row.
+    const other = join(agentFile, '..', 'agent-worker-ctx-test-2.jsonl');
+    writeFileSync(other, user('go') + turn('q1', 125000));
+    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead, { agent_id: 'worker-ctx-test-2' }))), /past 110,000 tokens/);
+    assert.equal(rows().length, 2);
+  } finally { fx.cleanup(); }
+});
+
+test('0.31.54: the option still moves the threshold (a bigger number fires later)', () => {
+  const fx = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fx);
+    writeFileSync(agentFile, user('go') + turn('r1', 200000));
+    assert.equal(runHook('hooks/subagent-context.mjs', pre(lead), { env: TH }).stdout.trim(), '', 'raised to 300,000: 200,000 is under it');
+    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /past 110,000 tokens/);
+  } finally { fx.cleanup(); }
+});
+
 test('under the threshold: silent, nothing logged', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
-    writeFileSync(agentFile, user('go') + turn('r1', 299000));
+    writeFileSync(agentFile, user('go') + turn('r1', 109000));
     assert.equal(runHook('hooks/subagent-context.mjs', pre(lead)).stdout.trim(), '');
     assert.equal(existsSync(join(telemetryDir(), 'subagent-context.jsonl')), false);
   } finally { fx.cleanup(); }
@@ -94,7 +127,7 @@ test('compaction trigger: a compact_boundary just behind the agent says "you jus
     writeFileSync(agentFile, user('go') + turn('r1', 195000) + boundary('b-1') + user('summary') + turn('r2', 30000));
     const r = runHook('hooks/subagent-context.mjs', pre(lead));
     assert.equal(ctxText(r), '[agent-companion] You compacted; re-read only what the next step needs and continue.');
-    assert.doesNotMatch(ctxText(r), /split|return your results|Finish/, 'a compaction alone asks for no wrap-up');
+    assert.doesNotMatch(ctxText(r), /split|handoff|Finish/, 'a compaction alone asks for no wrap-up');
     assert.equal(runHook('hooks/subagent-context.mjs', pre(lead)).stdout.trim(), '', 'same boundary: once');
 
     // A second compaction is a second event; the stop (opt-in) is the third (step budget, hooks/lib/step-budget.mjs).
@@ -187,7 +220,7 @@ test('a huge tool result after the last request does not hide it: the tail widen
     const { lead, agentFile } = layout(fx);
     const big = `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'x'.repeat(1500000) } })}\n`;
     writeFileSync(agentFile, user('go') + turn('r1', 330000) + big);
-    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /past 300,000 tokens/);
+    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /past 110,000 tokens/);
   } finally { fx.cleanup(); }
 });
 
@@ -204,23 +237,23 @@ test('SubagentStop: a mid-run event reaches the lead next to the runaway flag, o
     const text = ctxText(leadDrain(lead));
     assert.match(text, /runaway spawn: general-purpose/);
     assert.match(text, /subagent context: general-purpose \(worker-ctx-t\) compacted; row in subagent-context\.jsonl\./);
-    assert.doesNotMatch(text, /split the remainder|told mid-run/, 'a compaction alone: no advice to the lead');
+    assert.doesNotMatch(text, /split what it left|told mid-run/, 'a compaction alone: no advice to the lead');
     assert.equal((text.match(/subagent context:/g) || []).length, 1, 'reported once');
     assert.equal(leadDrain(lead).stdout.trim(), '');
     assert.equal(rows().length, 1, 'the stop did not log a second row for the same compaction');
   } finally { fx.cleanup(); }
 });
 
-test('SubagentStop: a size event seen mid-run keeps the "told mid-run to wrap up" line and the split advice', () => {
+test('SubagentStop: a size event seen mid-run says "told mid-run to hand off" and points the lead at a fresh same-rung worker', () => {
   const fx = makeFixture();
   try {
     const { lead, agentFile } = layout(fx);
     writeFileSync(agentFile, user('go') + turn('r1', 80000) + turn('r2', 340000));
-    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /Your context is past 300,000 tokens/);
+    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /Your context is past 110,000 tokens/);
     runHook('hooks/runaway-check.mjs', stopPayload(lead));
     const text = ctxText(leadDrain(lead));
-    assert.match(text, /passed 300,000 tokens of context \(340,000 at its last call\); it was told mid-run to wrap up\./);
-    assert.match(text, /split the remainder into smaller briefs/);
+    assert.match(text, /passed 110,000 tokens of context \(340,000 at its last call\); it was told mid-run to hand off\./);
+    assert.match(text, /returned "DONE: partial, handoff at <path>", start a fresh worker on the same rung from that file \(not a resume\)/);
   } finally { fx.cleanup(); }
 });
 
@@ -237,8 +270,8 @@ test('SubagentStop fallback: a worker the mid-run hook never reached is recorded
     assert.equal(logged[0].phase, 'stop');
     assert.equal(logged[0].kind, 'size');
     const text = ctxText(leadDrain(lead));
-    assert.match(text, /subagent context: general-purpose \(worker-ctx-t\) passed 300,000 tokens of context \(340,000 at its last call\); it was not reached mid-run\./);
-    assert.match(text, /split the remainder into smaller briefs/);
+    assert.match(text, /subagent context: general-purpose \(worker-ctx-t\) passed 110,000 tokens of context \(340,000 at its last call\); it was not reached mid-run\./);
+    assert.match(text, /otherwise split what it left into smaller briefs/);
   } finally { fx.cleanup(); }
 });
 
@@ -249,7 +282,7 @@ test('a workflow agent (subagents/workflows/<id>/agent-<id>.jsonl) is found and 
     const wf = join(agentFile, '..', 'workflows', 'wf_1');
     mkdirSync(wf, { recursive: true });
     writeFileSync(join(wf, `agent-${AGENT}.jsonl`), user('go') + turn('r1', 350000));
-    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /past 300,000 tokens/);
+    assert.match(ctxText(runHook('hooks/subagent-context.mjs', pre(lead))), /past 110,000 tokens/);
   } finally { fx.cleanup(); }
 });
 
@@ -271,10 +304,10 @@ test('hooks.json: a PreToolUse entry with NO matcher runs the hook, the plugin d
   assert.equal(g.matcher, undefined, 'every tool, so a subagent is checked on each call');
   assert.ok(existsSync(join(PLUGIN_ROOT, 'hooks', 'subagent-context.mjs')));
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
-  assert.equal(cfg.userConfig.subagent_context_notice_tokens.default, 300000);
-  assert.equal(subagentNoticeText(['size'], 300000).startsWith('[agent-companion] Your context is past 300,000 tokens.'), true);
-  assert.match(subagentNoticeText(['compaction', 'size'], 300000), /^\[agent-companion\] You just compacted\. Finish the current step.*can split it\.$/);
-  assert.equal(subagentNoticeText(['compaction'], 300000), '[agent-companion] You compacted; re-read only what the next step needs and continue.');
+  assert.equal(cfg.userConfig.subagent_context_notice_tokens.default, 110000);
+  assert.equal(subagentNoticeText(['size'], 110000).startsWith('[agent-companion] Your context is past 110,000 tokens.'), true);
+  assert.equal(subagentNoticeText(['compaction', 'size'], 110000), `[agent-companion] You just compacted. ${HAND}`);
+  assert.equal(subagentNoticeText(['compaction'], 110000), '[agent-companion] You compacted; re-read only what the next step needs and continue.');
   assert.equal(cfg.userConfig.step_budget_compaction_stop.default, 3);
 });
 

@@ -103,9 +103,9 @@ function contextCheck(p, path) {
     queueNotice(p.session_id, `[agent-companion] subagent context: ${who} ${parts.join(' and ')}; row in subagent-context.jsonl.`);
     return;
   }
-  const told = fresh.every((e) => e.phase === 'mid-run') ? 'it was told mid-run to wrap up' : 'it was not reached mid-run';
+  const told = fresh.every((e) => e.phase === 'mid-run') ? 'it was told mid-run to hand off' : 'it was not reached mid-run';
   queueNotice(p.session_id, `[agent-companion] subagent context: ${who} ${parts.join(' and ')}; ${told}. `
-    + 'If it left work undone, split the remainder into smaller briefs rather than resuming it with everything; row in subagent-context.jsonl.');
+    + 'If it returned "DONE: partial, handoff at <path>", start a fresh worker on the same rung from that file (not a resume); otherwise split what it left into smaller briefs. Row in subagent-context.jsonl.');
 }
 
 try {
