@@ -46,6 +46,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { modeFrom, parentOf, DEFAULT_MODE, STANDING_RULE_TEXT } from './coordinator-gate.mjs';
 import { configDir, opt, stateFile, readJson, rolloutActive, writeTextAtomic } from './context.mjs';
 
 export const RULES_VERSION = 1;
@@ -200,6 +201,17 @@ function builtinRules() {
       when: '.',
       then: '(reserved — the reporting contract is injected by hooks/lib/brevity.mjs; this rule exists so an operator can see the spawn scope in `rules list` and add their own spawn-scoped rules alongside it)',
       note: "Origin: documentation by example for the spawn scope, not a directive; the real per-spawn contract is injected by hooks/lib/brevity.mjs.",
+    },
+    {
+      id: 'child-coordinator-messages',
+      audience: 'lead',
+      enabled: true,
+      builtin: true,
+      scope: 'session-start',
+      gate: 'child_session',
+      when: null,
+      then: STANDING_RULE_TEXT,
+      note: "Origin: a replay of three days of one operator's session messages (2026-11-11 to 11-14): status-only messages from child sessions woke the coordinator, and a tag rule lost almost nothing that mattered. Added in 0.31.53; coordinator_message_gate: off removes it.",
     },
     {
       id: 'delegate-first',
@@ -611,6 +623,17 @@ function gateSatisfied(gate, sessionId) {
 
   // gate:'pr_wait' is the pr_wait option (default on; CLAUDE_PLUGIN_OPTION_PR_WAIT=0 turns it off).
   if (gate === 'pr_wait') return opt('pr_wait', true);
+
+  // gate:'child_session' holds while coordinator_message_gate is not off and the app's own record says another
+  // session started this one. Any lookup error reads as "not a child".
+  if (gate === 'child_session') {
+    try {
+      if (modeFrom(opt('coordinator_message_gate', DEFAULT_MODE)) === 'off' || !sessionId) return false;
+      return !!parentOf(sessionId);
+    } catch {
+      return false;
+    }
+  }
 
   // gate:'worker_wait' is the worker_wait_advisory option (default on): the same switch as the Bash hook.
   if (gate === 'worker_wait') return opt('worker_wait_advisory', true);

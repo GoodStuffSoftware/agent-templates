@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.52",
+  "version": "0.31.53",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -551,6 +551,12 @@
       "title": "Standing rules budget (characters)",
       "description": "Ceiling on the rendered rule block per injection. Rules past the ceiling are dropped and the count is stated, so a budget overrun is visible rather than silent.",
       "default": 3000
+    },
+    "coordinator_message_gate": {
+      "type": "string",
+      "title": "Coordinator message gate",
+      "description": "In a CHILD session (one another session started), a message to its coordinator (the session that started it) must open with QUESTION:, BLOCKED:, DONE:, CHANGE:, FINDING: or ANSWER:, because a status-only message wakes the coordinator for an expensive turn. \"block\" (default): an untagged message is denied with a one-line reason; \"warn\": it is sent and the model is told to tag; \"off\": no gate, no session-start rule. Applies to SendMessage and mcp__ccd_session_mgmt__send_message when the target is the coordinator, given as its session id (local_...) or as the reply address of a message it sent (uds:...). Messages between children, from a coordinator, to a subagent, and to a target that cannot be resolved pass. One telemetry row per gated decision (telemetry/coordinator-messages.jsonl). The default is our environment's default: a replay of three days of one operator's real session messages (2026-11-11 to 11-14) found the tag check (with FINDING as a sixth tag) would have stopped 79 of 452 messages and one that mattered, while stricter rules (no follow-ups, quiet after DONE) stopped dozens that did; see docs/DEFAULTS-ENVIRONMENT.md.",
+      "default": "block"
     },
     "resume_guard": {
       "type": "boolean",
