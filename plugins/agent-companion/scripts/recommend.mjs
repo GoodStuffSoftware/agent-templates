@@ -295,6 +295,7 @@ if (out.browser) {
   const L = out.legs;
   console.log(`plan leg:       ${L.plan.spawnAgentNamespaced} (${L.plan.model}/${L.plan.effort}), read-only, writes ${L.plan.artifact}; brief TYPE: ${out.taskType} + ROLE: ${L.plan.role}`);
   console.log(`write leg:      ${L.write.spawnAgentNamespaced} (${L.write.model}/${L.write.effort}), works from that plan; brief TYPE: ${out.taskType} + ROLE: ${L.write.role} (fixer for a fix)`);
+  console.log('                UI or browser work: add --browser (the numbered rungs have no browser tools)');
 } else if (out.spawnAgentNamespaced) {
   console.log(`spawn as:       subagent_type: "${out.spawnAgentNamespaced}"  (ladder rung ${out.rung}/10)`);
   console.log('                UI or browser work: add --browser (the numbered rungs have no browser tools)');

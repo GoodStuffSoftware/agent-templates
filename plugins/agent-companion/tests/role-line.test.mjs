@@ -125,9 +125,9 @@ test('a denied spawn is still denied for its own reason, with or without a ROLE 
 test('the self-review protocol makes the writer\'s reviewer carry ROLE: reviewer', () => {
   const block = selfReviewBlock({ model: 'sonnet', effort: 'high', agent: 'ac-sonnet-high' });
   assert.match(block, /TYPE: code-review\n\s+WRITER: sonnet\/high\n\s+ROLE: reviewer\n/);
-  for (const f of ['ac-opus-medium', 'ac-opus-high', 'ac-opus-xhigh']) {
+  for (const f of ['ac-sonnet-high']) { // the Opus rungs carry no block since 0.31.54 (plan legs)
     const body = readFileSync(join(PLUGIN_ROOT, 'agents', `${f}.md`), 'utf8');
-    assert.match(body, /TYPE: code-review\r?\n\s+WRITER: opus\/[a-z]+\r?\n\s+ROLE: reviewer\r?\n/, f);
+    assert.match(body, /TYPE: code-review\r?\n\s+WRITER: sonnet\/[a-z]+\r?\n\s+ROLE: reviewer\r?\n/, f);
   }
 });
 
