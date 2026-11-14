@@ -532,14 +532,23 @@ test('self_review_expected: true on the rung carrying the protocol (nothing appe
     assert.equal(optOut.row.self_review_expected, false);
     assert.doesNotMatch(optOut.msg, /self-review/i, 'an opt-out is deliberate: no note');
 
-    // The read-only PLAN leg of a two-leg type (0.31.54, config `legs`): an Opus rung with ROLE: other (or a non-writing type
-    // and no ROLE line) is not a writer: no protocol expected, none appended, no note.
-    for (const prompt of ['TYPE: critical-change\nROLE: other\nplan the split', 'TYPE: novel-design\nplan the bus', 'TYPE: debug-root-cause\nfind the cause']) {
+    // The read-only PLAN leg of a two-leg type (0.31.54, config `legs`): an Opus rung with ROLE: other, ROLE: plan, or a brief that
+    // names a <task>-plan.md output and says read-only is not a writer: no protocol expected, none appended, no note.
+    for (const prompt of ['TYPE: critical-change\nROLE: other\nplan the split', 'TYPE: novel-design\nROLE: plan\nplan the bus', 'TYPE: debug-root-cause\nRead-only: write the cause to x-plan.md']) {
       const plan = h.lead(bg({ subagent_type: XHIGH, prompt: `${prompt}\nWARRANT: weight 5 - test` }));
       assert.equal(plan.row.self_review_expected, false, prompt);
       assert.equal(plan.row.self_review_injected, false, prompt);
       assert.doesNotMatch(plan.prompt || '', /Self-review before you return/, prompt);
       assert.doesNotMatch(plan.msg || '', /self-review/i, prompt);
+    }
+
+    // A two-leg TYPE with no ROLE line and no plan marker is the WRITE leg (review fix): an Opus rung there (policy allow, so no rewrite)
+    // is not a plan leg, so it gets the protocol appended: Opus never writes without self-review.
+    for (const prompt of ['TYPE: novel-design\nplan the bus', 'TYPE: debug-root-cause\nfind the cause']) {
+      const w = h.lead(bg({ subagent_type: XHIGH, prompt: `${prompt}\nWARRANT: weight 5 - test` }));
+      assert.equal(w.row.self_review_expected, true, prompt);
+      assert.equal(w.row.self_review_injected, true, prompt);
+      assert.match(w.prompt || '', /Self-review before you return/, prompt);
     }
 
     // project_pins off (0.31.12 behaviour): a project agent may carry its own wording.
