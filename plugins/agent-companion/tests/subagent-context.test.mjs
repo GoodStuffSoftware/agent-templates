@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, appendFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
+import { selfReviewBriefText } from '../hooks/lib/self-review.mjs';
 import { telemetryDir } from '../hooks/lib/context.mjs';
 import { readContextSignal, subagentNoticeText, noticeVariant, BOUNDARY_FRESH_TURNS } from '../hooks/lib/subagent-context.mjs';
 
@@ -393,4 +394,10 @@ test('noticeVariant: a ROLE: writer brief that names a plan file and says read-o
   assert.equal(noticeVariant('ROLE: writer\nTYPE: novel-design\nwork from x-plan.md; fixtures are read-only', 'general-purpose'), 'writer');
   assert.equal(noticeVariant('ROLE: fixer\nfix per x-plan.md\n[agent-companion] read only', 'general-purpose'), 'writer');
   assert.equal(noticeVariant('Write x-plan.md. This is read-only.', 'general-purpose'), 'readonly', 'no ROLE: the text clause applies');
+});
+
+test('noticeVariant: a plan marker on a type with no plan leg does not make a writer read-only; the real appended protocol text is ignored', () => {
+  assert.equal(noticeVariant('TYPE: bounded-feature\nimplement per docs/foo-plan.md; keep fixtures read-only', 'general-purpose'), 'writer');
+  assert.equal(noticeVariant('TYPE: novel-design\nwrite x-plan.md. Read-only.', 'general-purpose'), 'readonly');
+  assert.equal(noticeVariant(`TYPE: novel-design\nbuild from x-plan.md${selfReviewBriefText('ac-sonnet-high')}`, 'general-purpose'), 'writer');
 });

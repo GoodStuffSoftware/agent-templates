@@ -13,7 +13,7 @@
 //      line of another value (reviewer, docs, lookup, operate, other) the spawn is never touched. With
 //      NO usable ROLE: line, the TYPE: decides: a type of OPUS_WRITING_TYPES, or one of the two-leg types in
 //      OPUS_NON_WRITING_TYPES (novel-design, debug-root-cause), is the WRITE leg and is rewritten, UNLESS the
-//      brief marks itself the read-only plan leg (`ROLE: plan`, or it names a <task>-plan.md output and says
+//      brief marks itself the read-only plan leg AND the TYPE has a plan leg (`ROLE: plan`, or, with no usable ROLE, it names a <task>-plan.md output and says
 //      read-only: briefMarksPlanLeg). Opus must not end up writing without the self-review protocol, which
 //      lives on the Sonnet rung. Built-in read-only agents (Explore, Plan, claude-code-guide) are never touched.
 //

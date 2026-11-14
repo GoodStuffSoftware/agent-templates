@@ -212,7 +212,7 @@ export function briefMarksPlanLeg(text) {
 // `[agent-companion]` tier clause).
 export function ownBriefText(src) {
   const s = String(src ?? '');
-  const cuts = [s.indexOf('<!-- self-review protocol BEGIN'), s.search(/^[ \t]*\[agent-companion\]/m)].filter((i) => i >= 0);
+  const cuts = [s.indexOf('<!-- self-review protocol BEGIN'), s.indexOf('\n---\n(agent-companion:'), s.search(/^[ \t]*\[agent-companion(?::[^\]\n]*)?\]/m)].filter((i) => i >= 0);
   return cuts.length ? s.slice(0, Math.min(...cuts)) : s;
 }
 

@@ -13,6 +13,7 @@ import { legsOf, writeLegPair } from '../hooks/lib/legs.mjs';
 import { SCOPE_MARKER } from '../hooks/lib/scope-rule.mjs';
 import { TIER_MARKER } from '../hooks/lib/tier-clause.mjs';
 import { briefMarksPlanLeg } from '../hooks/lib/brief-directives.mjs';
+import { selfReviewBriefText } from '../hooks/lib/self-review.mjs';
 import { modelTiers, resolveRoute, rungFor } from '../hooks/lib/context.mjs';
 import {
   WRITER_MARKER, HANDOFF_SENTENCE, TEST_SENTENCE, STAGING_SENTENCE, countDeliverables, buildWriterClause, isWriterSpawn,
@@ -384,7 +385,8 @@ test('unit: a declared writer, fixer, lander or docs ROLE wins over the -plan.md
     assert.equal(briefMarksPlanLeg(`ROLE: ${role}\nTYPE: novel-design\nwork from x-plan.md; fixtures are read-only`), false, role);
   }
   assert.equal(briefMarksPlanLeg('ROLE: plan\nTYPE: novel-design\nx'), true, 'ROLE: plan still marks the plan leg');
-  assert.equal(briefMarksPlanLeg('Implement per x-plan.md.\n[agent-companion] Writers state RISK. read only in this tier'), false, 'tier clause text ignored');
+  assert.equal(briefMarksPlanLeg('Implement per x-plan.md.\n[agent-companion: tier] Writers state RISK. read only in this tier'), false, 'tier clause text ignored');
+  assert.equal(briefMarksPlanLeg(`Implement per x-plan.md.${selfReviewBriefText('ac-sonnet-high')}`), false, 'the real appended protocol text is ignored');
   assert.equal(briefMarksPlanLeg('Implement per x-plan.md.\n<!-- self-review protocol BEGIN: x -->\nread-only work\n<!-- self-review protocol END -->'), false, 'protocol text ignored');
   assert.equal(briefMarksPlanLeg('Write x-plan.md. Read-only.\n[agent-companion] tier'), true, 'the lead\'s own text still counts');
 });
@@ -393,7 +395,7 @@ test('a plan-marked Opus brief whose TYPE has no plan leg is still rewritten to 
   const r = spawn({ subagent_type: OPUS_RUNG, prompt: 'TYPE: bounded-feature\nWARRANT: weight 5 - feature\nimplement per docs/foo-plan.md; keep fixtures read-only' }, { sid: 'sess-nolegs-plan' });
   assert.equal(r.upd?.model, 'sonnet');
   assert.equal(r.rows.length, 1);
-  assert.doesNotMatch(r.upd?.prompt || '', /^ROLE: other\n/);
+  assert.match(r.upd?.prompt || '', /^ROLE: writer\n/);
   assert.equal(writerBasis(null, 'bounded-feature', true), 'type');
   assert.equal(writerBasis(null, 'novel-design', true), null, 'a type with legs keeps the plan-leg exemption');
 });

@@ -50,6 +50,7 @@ import { join } from 'node:path';
 import { canonicalTaskType, stateDir } from './context.mjs';
 import { BRIEF_ROLES, briefDeclarations, briefMarksPlanLeg, declarationValue } from './brief-directives.mjs';
 import { safe } from './runaway.mjs';
+import { legsOf } from './legs.mjs';
 
 export const CONTEXT_DEFAULT_TOKENS = 110000;
 export const CTX_TAIL_BYTES = 1024 * 1024;
@@ -226,8 +227,11 @@ export function noticeVariant(brief, agentType = '') {
     if (READONLY_BUILTIN.includes(at.slice(at.indexOf(':') + 1))) return 'readonly';
     const text = String(brief || '');
     if (!text.trim()) return 'writer';
-    if (briefMarksPlanLeg(text)) return 'readonly';
     const decls = briefDeclarations(text);
+    const pt = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
+    const ptype = pt ? (canonicalTaskType(pt[1].toLowerCase())?.name || pt[1].toLowerCase()) : null;
+    // A plan marker counts for a type that has a plan leg, or for a brief that declares no type.
+    if (briefMarksPlanLeg(text) && (!ptype || legsOf(ptype))) return 'readonly';
     const rm = declarationValue(decls, 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`);
     if (rm) return READONLY_ROLES.includes(rm[1].toLowerCase()) ? 'readonly' : 'writer';
     const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);

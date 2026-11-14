@@ -20,6 +20,8 @@ the thinking: designing, root-causing, planning, reviewing. The typing does not.
    Opus route; `ROLE: other` or `ROLE: plan`, or a brief that names a `<task>-plan.md` output and says
    read-only) and a WRITE leg (Sonnet, the rung that carries the self-review protocol). The plan leg gets
    no writer clauses (scope, writer, tier) and no self-review protocol; Opus never writes without self-review.
+   A declared writer, fixer, lander or docs ROLE always beats the text marker, the marker ignores text the spawn
+   guard appended, and the exemption applies only to a type that has a plan leg.
 3. **The policy outranks a routing profile.** ADR 0003 makes a per-user profile the user's recorded choice
    of route. This ADR carves one exception out of it: a profile (or `--weight` / `--kind`) that puts a
    writer type on Opus still routes the PLAN leg there, but the WRITE leg is Sonnet. The recommender prints
