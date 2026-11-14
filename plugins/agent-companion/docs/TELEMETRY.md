@@ -337,6 +337,21 @@ the branch, and it misses briefs that name no branch.
 Pairing this against `spawns.jsonl` shows requested-versus-started. A spawn
 with no corresponding start was denied or failed.
 
+### `coordinator-messages.jsonl` — one record per gated coordinator message
+
+Written by `hooks/coordinator-gate.mjs` (option `coordinator_message_gate`, 0.31.53) when a child session sends to its coordinator. Never the message text.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | ISO 8601 string | when the decision was made |
+| `session_id` | string | the sending (child) session |
+| `tool_name` | string | `SendMessage` or `mcp__ccd_session_mgmt__send_message` |
+| `mode` | string | `block` or `warn` (`off` writes nothing) |
+| `decision` | string | `allow` (tagged), `deny` (untagged, `block`) or `warn` (untagged, sent anyway) |
+| `tag` | string or null | the tag the message opened with, upper case; null when untagged |
+| `target` | string | how the coordinator was addressed: `session-id` or `address` |
+
 ### `denials.jsonl` — one record per guard firing
 
 | field | type | meaning |
