@@ -401,6 +401,8 @@ total that skips several multiples at once still writes one.
 ### `subagent-context.jsonl` — one record per subagent context notice
 
 Written when a subagent's own context passes `subagent_context_notice_tokens`
+(default 110000 since 0.31.54: the worker is told to commit and push its WIP,
+write `<task>-handoff.md` and return `DONE: partial, handoff at <path>`)
 or the subagent has just compacted. Each kind fires once per subagent (a
 compaction once per compaction).
 
