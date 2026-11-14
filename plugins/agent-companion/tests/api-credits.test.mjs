@@ -620,8 +620,8 @@ test('the self-review clause runs the governor before spawning a reviewer, and k
   assert.ok(!block.includes('can run the affected tests'));
   assert.ok(block.includes('the API reviewer only reads (read-only tools, no shell: it cannot run even the targeted tests'));
   assert.ok(block.includes(`0. ${BATCH_RULE} Keep the raw output of your test runs for the reviewer.`), 'step 0 is the shared batch rule: no chunking, unit tests as you go, e2e once per batch and tree');
-  assert.ok(block.includes('0. Finish every task in your brief first, with no self-chosen sections or milestone stops'));
-  assert.ok(block.indexOf('0. Finish every task') < block.indexOf('1. List anything you built'));
+  assert.ok(block.includes('0. Finish the task in your brief; at the context handoff notice, hand off as the writer clause on your brief says.'));
+  assert.ok(block.indexOf('0. Finish the task') < block.indexOf('1. List anything you built'));
   // Project tiers: the risk step sits between the commit and the reviewer steps, and the API route is skipped when the cell checks for real.
   assert.ok(block.indexOf('1. List anything you built') < block.indexOf('2. State your risk') && block.indexOf('2. State your risk') < block.indexOf('3. Only when your cell names a reviewer'));
   assert.ok(block.includes('the API reviewer has no shell, so skip the API route below'));

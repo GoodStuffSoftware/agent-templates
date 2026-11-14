@@ -9,13 +9,18 @@ import {
   pluginName, readStdin, taskTypeDef, unknownTypeHint, writerFromDeclaration,
 } from './context.mjs';
 import { pinInfo } from './sg-helpers.mjs';
+import { opusWriterRewrite } from './opus-writer.mjs';
 
 export function readSpawnBrief() {
   const p = readStdin();
   noteAgentType(p);
 
-  const input = p.tool_input || {};
   const sid = p.session_id || 'unknown';
+  // No Opus writers (0.31.54, lib/opus-writer.mjs): an Opus spawn whose brief says it writes is rewritten here, first, so every later
+  // phase judges the Sonnet writer rung it will really run as. Silent: the guard seeds updatedInput from this input.
+  const opusRw = opusWriterRewrite(p, p.tool_input || {}, sid);
+  const input = opusRw ? opusRw.input : (p.tool_input || {});
+  if (opusRw) p.tool_input = input;
 
   // Model resolution order is: env override -> spawn parameter -> the agent's
   // own frontmatter -> the lead's model. Reading only the spawn parameter
@@ -132,6 +137,7 @@ export function readSpawnBrief() {
     ? inferRole(declaredType)
     : null;
   const silentFixes = []; // what this guard fixed without a message, for the spawn row (silent_fixes)
+  if (opusRw) silentFixes.push(`opus_writer_rewrite:${opusRw.record.from}->${opusRw.record.to}`);
   if (roleInserted) silentFixes.push(`role_inserted:${roleInserted}`);
   // A TYPE: line that is no type (and no alias) routes and measures nothing:
   // say so once, naming the valid ones (type_line_nudge). Never a deny.
@@ -205,7 +211,7 @@ export function readSpawnBrief() {
     else writerProblem = parsed.reason;
   }
   return {
-    p, input, sid, declared, isLadderSpawn, def, fromDef, model, trulyInherited, pin, pinned,
+    p, input, sid, opusRw, declared, isLadderSpawn, def, fromDef, model, trulyInherited, pin, pinned,
     pinModelOverridden, pinReplacedNote, isCanary, brief, decls, warrantDeclared, weightLineExplicit,
     declaredWeight, weightWasDeclared, declaredKind, kindWasDeclared, declaredConsequence,
     consequenceWasDeclared, declaredTypeRaw, declaredType, declaredRole, roleInserted, silentFixes,

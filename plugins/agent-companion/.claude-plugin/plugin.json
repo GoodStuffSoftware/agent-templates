@@ -78,6 +78,12 @@
       "description": "How to treat a spawn that names no model and whose definition states neither model nor effort, so it runs on the lead's own model AND effort. \"warn\" (default): one note naming the lead's pair and the line to add. \"block\": deny it when the lead is on a premium tier (opus, fable, mythos) and the brief has no WEIGHT line and no TYPE the table knows (an unknown TYPE routes nothing); the deny says to add `TYPE: <task type>` or spawn a ladder rung (agent-companion:ac-<model>-<effort>). Block also stops un-TYPEd Explore, Plan and claude-code-guide spawns from such a lead, which name no model of their own. A lead whose model cannot be read or classified is never blocked.",
       "default": "warn"
     },
+    "opus_writer_policy": {
+      "type": "string",
+      "title": "Opus writers",
+      "description": "What the spawn guard does with a spawn that would run on Opus (an ac-opus-* rung, a model of opus or claude-opus-*, or an Opus model inherited from the caller) AND whose brief says it writes (ROLE: writer, fixer or lander; with no ROLE: line, a TYPE: that builds or changes something: bounded-feature, bounded-feature-small, integration, large-refactor, critical-change, long-autonomous-run, mechanical-edit, subagent-worker). \"sonnet\" (shipped default): rewrite it silently to the Sonnet writer rung (agent-companion:ac-sonnet-high, model sonnet), with no note in the transcript and one line in telemetry/opus-writer-rewrites.jsonl. Reviewer, lookup, docs, operate, design (novel-design) and root-cause-only (debug-root-cause) spawns are never touched, nor is a project agent whose own file pins Opus. \"allow\": the old behaviour, nothing rewritten. Shipped default and why (operator data, 2026-11-13): execution calls (edits, tests, builds, git) were 37% of Opus worker cost, at Opus prices and with large contexts, so Opus designs, root-causes and reviews and Sonnet writes. Set \"allow\" if your own data says otherwise.",
+      "default": "sonnet"
+    },
     "warrant_required": {
       "type": "boolean",
       "title": "Premium warrant",
