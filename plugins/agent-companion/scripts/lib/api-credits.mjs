@@ -81,7 +81,7 @@ export function parseWorkspaceLimits(raw) {
   return out;
 }
 
-// "category=workspace, ..." -> overrides of DEFAULT_CATEGORY_WORKSPACES (category names are lower-cased).
+// "category=workspace, ..." -> replacements for DEFAULT_CATEGORY_WORKSPACES (category names are lower-cased).
 export function parseCategoryWorkspaces(raw) {
   const out = {};
   for (const part of String(raw ?? '').split(/[,;\s]+/).filter(Boolean)) {
