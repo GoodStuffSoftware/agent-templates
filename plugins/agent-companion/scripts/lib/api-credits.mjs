@@ -31,8 +31,8 @@ import { opt, stateFile } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { spawnSyncHidden } from './proc.mjs';
 
-export const CATEGORIES = ['review', 'overflow', 'rater'];
-export const DEFAULT_SHARES = { review: 0.5, overflow: 0.3, rater: 0.1, reserve: 0.1 };
+export const CATEGORIES = ['review', 'overflow', 'rater', 'workers'];
+export const DEFAULT_SHARES = { review: 0.5, overflow: 0.3, rater: 0.1, workers: 0.4, reserve: 0.1 };
 export const RESERVE_DAYS = 3;
 export const DEFAULT_KEY_SOURCE = 'env:AC_API_KEY';
 export const TRIP_AFTER = 2; // billing/auth failures in a row

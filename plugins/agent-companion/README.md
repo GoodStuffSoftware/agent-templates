@@ -1182,6 +1182,22 @@ Options: `api_review_soft_usd` (1.00), `api_review_hard_usd` (2.00), `api_credit
 
 **The ledger.** The Admin API is unavailable for individual accounts, so no usage or cost report exists for these credits and `state/api-credits.json` is the only machine record of API spend. Every run is one entry: timestamp, category, project (the repository folder name), model, input, output and cache tokens, turns, and the dollar cost at list price. The governor itself reads nothing from `/v1/organizations/*`; the optional spend watch below checks the ledger against the Admin API cost report when an organization key exists. API-key runs write no Claude Code transcripts, so they never count as plan units in the usage analysis.
 
+## API workers (writers on the plan's API credits)
+
+A lead can run a writer brief on the plan's Claude Platform API credits instead of the subscription: `scripts/api-worker.mjs` runs it on the Agent SDK with the Console API key. The credits cover the Claude API and the Agent SDK but **not** Claude Code, so a hand-rolled `claude -p` worker is billed to the subscription whatever key is in its environment; this runner never calls `claude -p`.
+
+**Run one.** Write the brief to a file (the whole brief text, with the acceptance criteria and the handoff-file path), create the worktree, then start the runner with Bash `run_in_background` and wait for its notification (a foreground call is cut at 10 minutes):
+
+```
+node "<plugin>/scripts/api-worker.mjs" run --brief-file <brief.md> --cwd <worktree> [--model sonnet] [--max-usd 3] [--max-turns 60] [--result-file <out.json>] [--meta <label>]
+```
+
+**Read the result.** stdout is the worker's final report, then one line `API-WORKER {...}` with `status`, `cost_usd`, `turns`, `apiKeySource` and `booked`; `--result-file` holds the same as JSON. Exit 0 = done, 3 = refused before any work (nothing spent), 4 = stopped or failed (spend cap, turn cap, error; the worktree may hold partial work, so read the text and `git log`). The worker commits in the worktree and does not push: the lead reviews, pushes and merges. For a multi-stage job, have each worker write a handoff file (done / left / first next action) and give the next stage's brief the path of that file.
+
+**Guards.** The model defaults to Sonnet; Opus is refused while `opus_writer_policy` is `sonnet`. A run stops at `--max-usd` (option `api_workers_max_usd`, default $3) or `--max-turns`. The key goes into `ANTHROPIC_API_KEY` of the child only; `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_AUTH_TOKEN` are removed, the Claude config dir is a private empty one, and the run is aborted before any tool runs unless the init message reports `apiKeySource` `ANTHROPIC_API_KEY` (a run on anything else would bill the subscription). Shell commands that would print the environment or a secret (`env`, `printenv`, a bare `set`, `Get-ChildItem env:`, echo of a `*KEY*`/`*TOKEN*` variable, `process.env` dumps) are denied by a PreToolUse hook. The key is never printed, logged or written.
+
+**Where the cost shows up.** The run sends `anthropic-workspace-id` (environment variable `AC_API_WORKERS_WORKSPACE_ID`, or the option `api_workers_workspace_id`, or `--workspace-id`), so the Console bills it to that workspace; with no id the runner refuses, because a personal key is not tied to a workspace. Before each run it asks `api-credits.mjs decide workers` and stops if the answer is `plan`; after the run it books `total_cost_usd` under `workers` (`api-credits.mjs record workers`), so `api-credits.mjs status` and `api-spend.mjs` list it. The category's share of the budget is `workers=0.4` in `api_credits_shares`.
+
 ## API spend watch (what the credits actually billed)
 
 The governor's ledger is the plugin's own record of API-credit spend. The spend watch checks it against the organization's cost report, so a runaway or an unrelated user of the same key does not go unnoticed. It needs an organization (the Admin API is unavailable for individual accounts) and an Admin API key (`sk-ant-admin...`); without one it reports `unavailable` and nothing else changes.

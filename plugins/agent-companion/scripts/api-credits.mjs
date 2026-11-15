@@ -9,7 +9,7 @@
 //   node api-credits.mjs summary                        one line: "API credits: reviews $X of $100, cycle day N"
 //   node api-credits.mjs probe                         one tiny haiku Messages call on the key; reports tokens and dollar cost, books it
 //
-// Categories: review, overflow, rater. Any error, a missing key or an unreadable ledger
+// Categories: review, overflow, rater, workers (API worker runs, scripts/api-worker.mjs). Any error, a missing key or an unreadable ledger
 // answers "plan". `--now <ISO time>` is a test seam. Settings: api_credits_* plugin
 // options (see README "API credits"). Exit codes: 0 ok, 2 bad usage, 1 probe failed.
 
@@ -35,7 +35,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   }
   if (!cfg) { out('unreadable configuration'); return 2; }
   if (cmd === 'record') {
-    if (!CATEGORIES.includes(rest[0]) || rest[1] === undefined) { out('usage: api-credits.mjs record <review|overflow|rater> <usd> <meta>'); return 2; }
+    if (!CATEGORIES.includes(rest[0]) || rest[1] === undefined) { out('usage: api-credits.mjs record <review|overflow|rater|workers> <usd> <meta>'); return 2; }
     try { const r = record(rest[0], rest[1], rest.slice(2).join(' '), { now, cfg }); out(`recorded; ${rest[0]} total $${r.spent.toFixed(2)} in ${r.n} item(s)`); return 0; } catch (e) { out(`record failed: ${e.message}`); return 2; }
   }
   if (cmd === 'record-fallback') {

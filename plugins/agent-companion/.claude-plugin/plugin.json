@@ -243,8 +243,8 @@
     "api_credits_shares": {
       "type": "string",
       "title": "API credits: category shares",
-      "description": "Share of the budget per category as name=fraction pairs. Default review=0.5,overflow=0.3,rater=0.1,reserve=0.1. A category may have spent at most share x budget x elapsed fraction of the cycle plus one average item. The reserve is held back until the last 3 days of the cycle. Only review is used today; overflow and rater are reserved for later.",
-      "default": "review=0.5,overflow=0.3,rater=0.1,reserve=0.1"
+      "description": "Share of the budget per category as name=fraction pairs. Default review=0.5,overflow=0.3,rater=0.1,workers=0.4,reserve=0.1. A category may have spent at most share x budget x elapsed fraction of the cycle plus one average item. The reserve is held back until the last 3 days of the cycle. Only review is used today; overflow and rater are reserved for later.",
+      "default": "review=0.5,overflow=0.3,rater=0.1,workers=0.4,reserve=0.1"
     },
     "api_credits_review_ratio": {
       "type": "number",
@@ -257,6 +257,18 @@
       "title": "API credits: estimated cost of one review (USD)",
       "description": "Used as the pace slack and balance check until the cycle has a recorded review. An agentic review costs about $1-3.",
       "default": 2
+    },
+    "api_workers_workspace_id": {
+      "type": "string",
+      "title": "API workers: workspace id",
+      "description": "The Console workspace id that API worker runs (scripts/api-worker.mjs) are billed to, sent as the anthropic-workspace-id header. The AC_API_WORKERS_WORKSPACE_ID environment variable wins over this option. With neither, a worker run is refused.",
+      "default": ""
+    },
+    "api_workers_max_usd": {
+      "type": "number",
+      "title": "API workers: spend cap per run (USD)",
+      "description": "The Agent SDK stops an API worker run when its cost estimate reaches this value (default 3). The --max-usd flag of api-worker.mjs overrides it for one run.",
+      "default": 3
     },
     "api_review_runner": {
       "type": "string",

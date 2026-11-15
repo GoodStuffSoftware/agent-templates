@@ -53,7 +53,7 @@ test('config helpers: key source forms, shares', () => {
   assert.equal(keyConfigured('env:AC_API_KEY', KEYENV), true);
   assert.equal(keyConfigured('bws:x', {}), false);
   assert.equal(keyConfigured('bws:x', { BWS_ACCESS_TOKEN: 't' }), true);
-  assert.deepEqual(parseShares('review=0.6, reserve=0'), { review: 0.6, overflow: 0.3, rater: 0.1, reserve: 0 });
+  assert.deepEqual(parseShares('review=0.6, reserve=0'), { review: 0.6, overflow: 0.3, rater: 0.1, workers: 0.4, reserve: 0 });
 });
 
 test('fails closed to plan: no key, unreadable ledger, unknown category', () => {
