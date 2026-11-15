@@ -243,8 +243,8 @@
     "api_credits_shares": {
       "type": "string",
       "title": "API credits: category shares",
-      "description": "Share of the budget per category as name=fraction pairs. Default review=0.5,overflow=0.3,rater=0.1,workers=0.4,reserve=0.1. A category may have spent at most share x budget x elapsed fraction of the cycle plus one average item. The reserve is held back until the last 3 days of the cycle. Only review is used today; overflow and rater are reserved for later.",
-      "default": "review=0.5,overflow=0.3,rater=0.1,workers=0.4,reserve=0.1"
+      "description": "Share of the budget per category as name=fraction pairs. Default review=0.4,overflow=0.1,rater=0.1,workers=0.3,reserve=0.1 (sums to 1.0: review keeps the largest share, workers is a real spender, overflow and rater are reserved and barely used; `api-credits.mjs status` warns when the sum is not 1.0). A category may have spent at most share x budget x elapsed fraction of the cycle plus one average item. The reserve is held back until the last 3 days of the cycle.",
+      "default": "review=0.4,overflow=0.1,rater=0.1,workers=0.3,reserve=0.1"
     },
     "api_credits_review_ratio": {
       "type": "number",

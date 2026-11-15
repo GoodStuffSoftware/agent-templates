@@ -41,7 +41,8 @@ import { spawnSyncHidden } from './proc.mjs';
 import { priceUsage } from './pricing.mjs';
 
 export const CATEGORIES = ['review', 'overflow', 'rater', 'workers'];
-export const DEFAULT_SHARES = { review: 0.5, overflow: 0.3, rater: 0.1, workers: 0.4, reserve: 0.1 };
+// Sum 1.0. review keeps the largest share; workers is a real spender now; overflow and rater are reserved and barely used.
+export const DEFAULT_SHARES = { review: 0.4, overflow: 0.1, rater: 0.1, workers: 0.3, reserve: 0.1 };
 export const RESERVE_DAYS = 3;
 export const DEFAULT_KEY_SOURCE = 'env:AC_API_KEY';
 export const TRIP_AFTER = 2; // billing/auth failures in a row
@@ -67,6 +68,12 @@ export function parseShares(raw) {
     if (k in DEFAULT_SHARES && Number.isFinite(n) && n >= 0) out[k] = n;
   }
   return out;
+}
+
+// A warning line when the shares do not sum to 1.0 (+-0.001), else ''.
+export function sharesWarning(shares) {
+  const t = Object.values(shares || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+  return Math.abs(t - 1) > 0.001 ? `WARNING: api_credits_shares sum to ${t.toFixed(3)}, not 1.0; the pace caps and the reserve assume 1.0` : '';
 }
 
 // "name=usd, name=usd" -> { name: usd } (a workspace name or wrkspc_ id; amounts above 0 only).
@@ -272,6 +279,7 @@ export function spendView(billing, category, { cfg, cy, entries, now }) {
   const name = wsId === null ? (wsRef || null) : workspaceName(snap, wsId);
   return {
     verified: true,
+    wsMapped: wsId !== null,
     total: billedSince(snap, cy.start) + bookedBetween(entries, winFrom),
     spent: (wsId === null ? 0 : billedSince(snap, cy.start, wsId)) + bookedBetween(entries, winFrom, Infinity, [category]),
     wsName: name,
@@ -303,7 +311,7 @@ export function decide(category, { now = Date.now(), cfg = loadConfig(), path = 
       const spent = view.verified ? view.spent : (c.spent[category] || 0);
       const cnt = c.n[category] || 0;
       const avg = cnt > 0 ? (c.spent[category] || 0) / cnt : cfg.itemEstimate;
-      const basis = view.verified ? 'billed' : 'booked';
+      const basis = view.verified ? (view.wsMapped ? 'billed' : 'booked only, no workspace mapped') : 'booked';
       if (pool - total < avg) return plan(`balance: $${(cfg.budget - total).toFixed(2)} left of $${cfg.budget} (${basis})${cy.reserveReleased ? '' : ', the rest is the held reserve'}${tag}`);
       const share = cy.reserveReleased ? (sh[category] || 0) + (sh.reserve || 0) * ((sh[category] || 0) / nonReserve) : (sh[category] || 0);
       const cap = share * cfg.budget * cy.frac + avg;
@@ -337,7 +345,7 @@ export function record(category, usd, meta = '', { now = Date.now(), cfg = loadC
       ...(detail ? { project: String(detail.project || '').slice(0, 80), model: String(detail.model || '').slice(0, 80), tokens: detail.tokens || null, turns: detail.turns ?? null, ...(detail.path ? { path: String(detail.path).slice(0, 20) } : {}), ...(detail.error ? { error: String(detail.error).slice(0, 200) } : {}), ...(Array.isArray(detail.notes) && detail.notes.length ? { notes: detail.notes.slice(0, 5).map((x) => String(x).slice(0, 120)) } : {}) } : {}),
     });
     if (c.entries.length > MAX_ENTRIES) c.entries.splice(0, c.entries.length - MAX_ENTRIES);
-    if (success) { c.fails = 0; c.tripped = null; }
+    if (success && category !== 'workers') { c.fails = 0; c.tripped = null; }
     return { spent: c.spent[category], n: c.n[category] };
   });
 }
@@ -428,6 +436,7 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
   }
   if (!unreadable) lines.push(`real reviews this cycle: ${reviewSummaryLine(summarizeReviews(c.entries))}`);
   lines.push(`total spent $${total.toFixed(2)} of $${cfg.budget}; left $${(cfg.budget - total).toFixed(2)} (reserve $${((sh.reserve || 0) * cfg.budget).toFixed(2)})`);
+  { const w = sharesWarning(sh); if (w) lines.push(w); }
   if (c.tripped) lines.push(`BREAKER TRIPPED ${c.tripped.at}: ${c.tripped.reason}; decide answers plan until the cycle ends or a probe succeeds`);
   else if (c.fails) lines.push(`${c.fails} billing/auth failure(s) in a row (trips at ${TRIP_AFTER})`);
   return { text: lines.join('\n'), total, cycle: cy, ledger: c };
@@ -527,6 +536,7 @@ export function billingStatusLines(snap, { cfg, entries, now, reason = '', cache
   const billedCycle = billedSince(snap, cy.start);
   const win = bookedBetween(entries, Math.max(snap.through, cy.start));
   lines.push(`credits left (estimate) = monthly plan credit $${cfg.budget} - billed this cycle ${usd2(billedCycle)} = ${usd2(cfg.budget - billedCycle)}; minus ${usd2(win)} booked since the last complete day = ${usd2(cfg.budget - billedCycle - win)} (cost is before credits; the Console Billing page shows the real balance)`);
+  for (const [cat, w] of Object.entries(cfg.categoryWorkspaces || {})) if (resolveWorkspace(snap, w) === null) lines.push(`category ${cat}: workspace ${w} not found, booked spend only`);
   const wsMonth = [];
   for (const [name, lim] of Object.entries(cfg.workspaceLimits || {})) {
     const id = /^wrkspc_/.test(name) ? name : resolveWorkspace(snap, name);

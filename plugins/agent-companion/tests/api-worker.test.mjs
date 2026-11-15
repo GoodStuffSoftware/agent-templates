@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { makeFixture } from './helpers.mjs';
 import { DEFAULT_SHARES, CATEGORIES } from '../scripts/lib/api-credits.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
-import { runWorker, envDumpReason, makeGuardHooks, workerOptions, workerEnv, cliCredits, main, WORKER_TOOLS, DEFAULT_MAX_USD } from '../scripts/api-worker.mjs';
+import { runWorker, envDumpReason, gitDenyReason, makeGuardHooks, workerOptions, workerEnv, cliCredits, main, WORKER_TOOLS, DEFAULT_MAX_USD } from '../scripts/api-worker.mjs';
 
 const CFG = { budget: 200, cycleDay: 1, shares: { ...DEFAULT_SHARES }, keySource: 'env:AC_API_KEY', reviewRatio: 0.5, itemEstimate: 2 };
 const KEY = 'sk-ant-api03-SENTINEL-worker-do-not-leak-0123456789';
@@ -236,4 +236,57 @@ test('the key never appears in the result text, reason or CLI output', async () 
     assert.match(lines[lines.length - 1], /^API-WORKER \{.*"status":"done".*"apiKeySource":"ANTHROPIC_API_KEY"/);
     assert.equal(await main(['run'], { write: () => {} }), 2);
   } finally { dir.cleanup(); }
+});
+
+test('auth: no init message at all fails closed as refused_auth, nothing booked', async () => {
+  const credits = fakeCredits();
+  const r = await run(fakeSdk([assistant('m1', 'did work', { input_tokens: 100, output_tokens: 20 }), result({ total_cost_usd: 0.5 })]), { credits });
+  assert.equal(r.status, 'refused_auth');
+  assert.equal(r.exit, 3);
+  assert.equal(r.apiKeySource, null);
+  assert.equal(r.booked, false);
+  assert.equal(credits.log.record.length, 0);
+  assert.match(r.reason, /no init message/);
+  const empty = await run(fakeSdk([]), { credits: fakeCredits() });
+  assert.equal(empty.status, 'refused_auth');
+});
+
+test('model: allow-list, a fable id (or any non sonnet/haiku id) is refused unless opus_writer_policy is allow; haiku is allowed', async () => {
+  const sdk = fakeSdk([init(), result()]);
+  for (const m of ['claude-fable-5-1', 'fable']) {
+    const r = await run(sdk, { model: m });
+    assert.equal(r.status, 'refused_model', m);
+    assert.equal(r.exit, 3);
+  }
+  assert.equal(sdk.calls.length, 0);
+  const hk = await run(fakeSdk([init(), assistant('m1', 'ok', { input_tokens: 1, output_tokens: 1 }), result()]), { model: 'claude-haiku-5-5' });
+  assert.equal(hk.status, 'done');
+});
+
+test('env-dump guard: new credential files, /proc reads and git pushes are denied; env: words and grep patterns are not', async () => {
+  const denied = [
+    'cat .npmrc', 'cat ~/.netrc', 'cat ~/.git-credentials', 'cat ~/.config/gh/hosts.yml', 'cat .claude/.credentials', 'ls .claude/.cred-store',
+    'Get-ChildItem env:', 'ls env:', 'gci env:', 'Get-Item env:PATH', 'Write-Output $env:AC_API_KEY',
+  ];
+  for (const c of denied) assert.ok(envDumpReason(c), `should deny: ${c}`);
+  const allowed = ['git commit -m "fix env: handling"', 'grep "env:" README.md', 'grep -rn env: src', 'echo "the env: block"', 'ls environments'];
+  for (const c of allowed) assert.equal(envDumpReason(c), null, `should allow: ${c}`);
+  const cb = makeGuardHooks({ authOk: true, denied: [] }).PreToolUse[0].hooks[0];
+  for (const p of ['/proc/self/environ', '/proc/1/status', 'C:\\proc\\x']) {
+    const o = await cb({ tool_name: 'Read', tool_input: { file_path: p } });
+    assert.equal(o.hookSpecificOutput.permissionDecision, 'deny', p);
+  }
+  assert.deepEqual(await cb({ tool_name: 'Read', tool_input: { file_path: 'src/process/a.mjs' } }), {});
+  const o = workerOptions({ cwd: '.', modelId: 'm', key: KEY, workspace: WS, maxUsd: 1, maxTurns: 5 });
+  assert.ok(o.disallowedTools.includes('Read(/proc/**)'));
+});
+
+test('git: push in any form, git -C reset --hard and git -C push are denied by rule and by hook; commit and status pass', async () => {
+  const o = workerOptions({ cwd: '.', modelId: 'm', key: KEY, workspace: WS, maxUsd: 1, maxTurns: 5 });
+  for (const r of ['Bash(git push:*)', 'Bash(git -C * push:*)', 'Bash(git -C * reset --hard:*)', 'Bash(git push --force:*)', 'Bash(git reset --hard:*)']) assert.ok(o.disallowedTools.includes(r), r);
+  const denied = ['git push', 'git push origin main', 'git push --force', 'git -C /tmp/x push', 'git -C x push origin HEAD', 'git -c a=b push', 'cd x && git push', 'git -C ../y reset --hard', 'git reset --hard HEAD~1', 'git -C y reset --hard origin/main'];
+  for (const c of denied) assert.ok(gitDenyReason(c), `should deny: ${c}`);
+  for (const c of ['git status', 'git commit -m "no push here"', 'git add -A && git commit -m x', 'git -C x status', 'git reset --soft HEAD~1', 'echo pushing']) assert.equal(gitDenyReason(c), null, `should allow: ${c}`);
+  const cb = makeGuardHooks({ authOk: true, denied: [] }).PreToolUse[0].hooks[0];
+  assert.equal((await cb({ tool_name: 'Bash', tool_input: { command: 'git -C x push' } })).hookSpecificOutput.permissionDecision, 'deny');
 });

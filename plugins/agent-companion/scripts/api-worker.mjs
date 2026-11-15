@@ -41,9 +41,23 @@ export const HUNG_MS = 15 * 60 * 1000;
 export const EXIT = { done: 0, usage: 2, refused: 3, failed: 4 };
 // Edit and Write are what a writer needs on top of the reviewer's reads; the shell is Bash (Git Bash on Windows; the SDK's PowerShell tool is off by default).
 export const WORKER_TOOLS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
-const WORKER_DISALLOWED = ['Task', 'Agent', 'Skill', 'TodoWrite', 'NotebookEdit'];
+const WORKER_DISALLOWED = ['Task', 'Agent', 'Skill', 'TodoWrite', 'NotebookEdit', 'Read(/proc/**)'];
 // Destructive git stays with the lead: scoped denials hold in every permission mode.
-const WORKER_BASH_DENY = ['push --force', 'push -f', 'reset --hard', 'clean'].map((s) => `Bash(git ${s}:*)`);
+// Any `git push` (the lead pushes) and `git -C <dir> push|reset --hard` (the -C form dodges a plain prefix rule; gitDenyReason in the hook covers every option order).
+export const WORKER_BASH_DENY = [
+  ...['push', 'push --force', 'push -f', 'reset --hard', 'clean'].map((s) => `Bash(git ${s}:*)`),
+  'Bash(git -C * push:*)', 'Bash(git -C * reset --hard:*)',
+];
+const GIT_OPTS = String.raw`(?:(?:-C|-c|--git-dir|--work-tree|--namespace)(?:\s+|=)\S+\s+|--?[\w-]+\s+)*`;
+const GIT_PUSH = new RegExp(String.raw`(?:^|[;&|(\n\x60]|&&)\s*(?:(?:sudo|command|exec|time)\s+)*git\s+${GIT_OPTS}push\b`, 'i');
+const GIT_RESET_HARD = new RegExp(String.raw`(?:^|[;&|(\n\x60])\s*(?:(?:sudo|command|exec|time)\s+)*git\s+${GIT_OPTS}reset\b[^;&|\n]*--hard\b`, 'i');
+// null when the command is fine; else the reason. Backs the PreToolUse hook (permission rules alone miss option-order variants).
+export function gitDenyReason(command) {
+  const c = String(command ?? '');
+  if (GIT_PUSH.test(c)) return 'git push stays with the lead';
+  if (GIT_RESET_HARD.test(c)) return 'git reset --hard stays with the lead';
+  return null;
+}
 const STRIP_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', REVIEWER_SESSION_ENV];
 
 // --- the env-dump guard ----------------------------------------------------------------------
@@ -55,13 +69,14 @@ const PLAIN_VAR = new RegExp(`(?:\\$\\{?|%)[A-Z0-9_]*${SECRET}[A-Z0-9_]*`);
 const ENV_VAR = new RegExp(`(?:\\$\\{?env:|(?<![\\w$])env:[\\\\/]?|process\\.env\\.|process\\.env\\[\\s*['"]|os\\.environ(?:\\.get\\()?[\\[(]\\s*['"]|ENV\\[\\s*['"]|getenv\\(\\s*['"]|GetEnvironmentVariable\\(\\s*['"])[A-Za-z0-9_]*(?:${SECRET}|ANTHROPIC|OAUTH)`, 'i');
 const ANTHROPIC_VAR = /(?:\$\{?|%)(?:ANTHROPIC|CLAUDE_CODE_OAUTH|AC_API)[A-Z0-9_]*/;
 const DUMP_PATTERNS = [
-  [/(?<![\w$])env:/i, 'Get-ChildItem env: and similar read the whole environment'],
+  // PowerShell env-drive forms only (a cmdlet or alias, then env:), not words like "fix env: handling" or grep "env:".
+  [/(?:^|[;&|(\n\x60]|-Command\s+['"])\s*(?:Get-ChildItem|Get-Item|Get-Content|gci|ls|dir|gi|gc|cat|type|Set-Location|cd)\s+(?:-\w+\s+)*['"]?env:/i, 'Get-ChildItem env: and similar read the whole environment'],
   [/\bGetEnvironmentVariables\b/i, 'GetEnvironmentVariables dumps the environment'],
   [/process\.env(?![.\[\w])/, 'process.env dumps the environment'],
   [/os\.environ(?!\.get\b|\s*\[)/, 'os.environ dumps the environment'],
   [/\/proc\/[^\s'"]*\/environ/, '/proc/.../environ is the environment'],
   [/\breg(?:\.exe)?\s+query\s+\S*\\Environment/i, 'the registry Environment key holds user variables'],
-  [/\.credentials\.json|[\\/]\.ssh[\\/]|[\\/]\.aws[\\/]/, 'credential files are off limits'],
+  [/\.credentials\.json|[\\/]\.ssh[\\/]|[\\/]\.aws[\\/]|\.npmrc\b|\.netrc\b|\.git-credentials\b|config[\\/]gh[\\/]hosts\.yml|\.claude[\\/]\.cred/i, 'credential files are off limits'],
 ];
 const HEAD = String.raw`(?:^|[;&|(\n\x60]|-c\s+['"]|-Command\s+['"]|/c\s+['"]?)\s*(?:(?:sudo|command|builtin|exec|call|time|nohup)\s+|&\s*)*['"]?`;
 const BARE_ENV = new RegExp(`${HEAD}(?:env|printenv)(?=['"]?\\s*(?:$|[;&|)\\x60\\n]|>|-\\w))`, 'i');
@@ -96,7 +111,14 @@ export function makeGuardHooks(state) {
   const cb = async (input) => {
     if (!state.authOk) return deny('the run has not been verified to use the API key; no tool may run');
     const name = String((input && input.tool_name) || '');
+    if (name === 'Read' || name === 'Grep' || name === 'Glob') {
+      const ti = input.tool_input || {};
+      const target = String(ti.file_path || ti.path || '').replace(/\\/g, '/');
+      if (/(?:^|\/)proc\//.test(target)) { state.denied.push('/proc is off limits'); return deny('blocked: /proc is off limits (it holds the process environment)'); }
+    }
     if (SHELL_TOOLS.has(name)) {
+      const git = gitDenyReason(input.tool_input && input.tool_input.command);
+      if (git) { state.denied.push(git); return deny(`blocked: ${git}. Commit only; the lead pushes.`); }
       const why = envDumpReason(input.tool_input && input.tool_input.command, name === 'PowerShell' ? 'powershell' : 'bash');
       if (why) { state.denied.push(why); return deny(`blocked: ${why}. Do not print the environment or any secret.`); }
     }
@@ -179,7 +201,8 @@ export async function runWorker({
     // 1. Model: Opus does not write (opus_writer_policy).
     const policy = String(opusPolicy ?? opt('opus_writer_policy', 'sonnet')).toLowerCase();
     const m = resolveModel(model);
-    if (/opus/i.test(`${model} ${m.id}`) && policy !== 'allow') return out('refused_model', { reason: 'Opus plans, Sonnet writes (opus_writer_policy): an API worker does not run on Opus; use sonnet' });
+    // Allow-list: only sonnet and haiku write; Opus and anything else (a new family included) need opus_writer_policy allow.
+    if (!/sonnet|haiku/i.test(m.id) && policy !== 'allow') return out('refused_model', { reason: `Opus plans, Sonnet writes (opus_writer_policy): an API worker runs on sonnet or haiku only, not ${m.id}; use sonnet` });
     if (!priceUsage({ input: 1 }, m.id)) return out('refused_model', { reason: `no price for model ${m.id} in config/model-pricing.json, so its cost cannot be metered` });
     // 2. Key.
     cfg = cfg || loadConfig();
@@ -254,7 +277,8 @@ export async function runWorker({
     if (sdkUsd > usd) usd = sdkUsd;
     if (result && Number.isFinite(Number(result.num_turns))) turns = Number(result.num_turns);
 
-    if (authFailed) return out('refused_auth', { apiKeySource, denied: state.denied, reason: `the SDK run authenticates with "${apiKeySource}", not ${REQUIRED_KEY_SOURCE}: it would not be billed to the API credits; aborted before any tool ran` });
+    // Fail closed: no init message (apiKeySource still null) is as bad as a wrong source; nothing is booked.
+    if (authFailed || apiKeySource !== REQUIRED_KEY_SOURCE) return out('refused_auth', { apiKeySource, denied: state.denied, reason: apiKeySource === null ? `no init message arrived, so the auth source (${REQUIRED_KEY_SOURCE}) was never verified: refused, nothing booked` : `the SDK run authenticates with "${apiKeySource}", not ${REQUIRED_KEY_SOURCE}: it would not be billed to the API credits; aborted before any tool ran` });
 
     // Book what was spent, whatever the outcome.
     let booked = false;

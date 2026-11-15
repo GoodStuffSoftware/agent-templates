@@ -60,7 +60,7 @@ test('line: reviewers and total spend this cycle, cents to dollars, default work
   record('review', 12.34, 't', { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const r = await run(s, p);
   assert.equal(r.ok, true);
-  assert.equal(r.line, 'API credits: reviewers $12.34 of $100 · total $17.34 of $200 · cycle day 10');
+  assert.equal(r.line, 'API credits: reviewers $12.34 of $80 · total $17.34 of $200 · cycle day 10');
   assert.deepEqual(r.notify, []);
   const c = s.calls.find((x) => x.url.includes('cost_report'));
   assert.match(c.url, /starting_at=2026-11-01T00%3A00%3A00.000Z/);
@@ -91,7 +91,7 @@ test('first day of the cycle: no completed day yet, no cost call, zero spend', a
   const p = tmp();
   const s = stub();
   const r = await run(s, { ...p, o: { now: T('2026-11-01T09:00:00Z') } });
-  assert.equal(r.line, 'API credits: reviewers $0 of $100 · total $0 of $200 · cycle day 1');
+  assert.equal(r.line, 'API credits: reviewers $0 of $80 · total $0 of $200 · cycle day 1');
   assert.equal(s.calls.some((x) => x.url.includes('cost_report')), false);
 });
 
@@ -113,7 +113,7 @@ test('threshold crossing notifies until acknowledged, then not again this cycle'
   assert.deepEqual(ackedIds('2026-11-01', p.alerts), ['reviewers-50']);
   const c = await run(s, p);
   assert.deepEqual(c.notify, []);
-  assert.match(c.line, /^API credits: reviewers \$52 of \$100/);
+  assert.match(c.line, /^API credits: reviewers \$52 of \$80/);
 });
 
 test('below the threshold nothing is notified; several thresholds notify one id each', async () => {
@@ -146,7 +146,7 @@ test('unexplained spend: reviewers beyond the ledger by more than max($1, 10%)',
   const p = tmp();
   record('review', 20, 't', { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const r = await run(stub({ cents: { [REV]: 5200 } }), p);
-  assert.equal(r.line, 'API credits: reviewers $52 of $100 · total $52 of $200 · cycle day 10 · unexplained $32');
+  assert.equal(r.line, 'API credits: reviewers $52 of $80 · total $52 of $200 · cycle day 10 · unexplained $32');
   assert.deepEqual(r.notify.map((n) => n.id).sort(), ['reviewers-50', 'unexplained']);
   const u = r.notify.find((n) => n.id === 'unexplained');
   assert.match(u.message, /\$32\.00/);
@@ -256,7 +256,7 @@ test('config: alerts list, defaults, governor values reused', () => {
   assert.deepEqual(c.alerts, [50]);
   assert.equal(c.budget, 200);
   assert.equal(c.cycleDay, 1);
-  assert.equal(c.shares.review * c.budget, 100);
+  assert.equal(c.shares.review * c.budget, 80);
   assert.match(c.adminKeySource, /^dpapi:.*anthropic-admin-key\.dpapi$/);
   const o = loadSpendConfig((k, d) => ({ api_admin_key_source: 'env:X', api_spend_alerts: '30,60' })[k] ?? d);
   assert.equal(o.adminKeySource, 'env:X');
@@ -538,3 +538,50 @@ function readLedgerEntries(dir) {
   const led = JSON.parse(readFileSync(join(dir, 'led.json'), 'utf8'));
   return Object.values(led.cycles).flatMap((c) => c.entries);
 }
+
+test('billing: a failed fetch is not retried for 5 minutes (negative cache); a later call and force retry', async () => {
+  const cachePath = join(tmp().dir, 'c.json');
+  let reads = 0;
+  const readKey = () => { reads++; throw new Error('no admin key source configured'); };
+  const get = (now, extra = {}) => getBilling({ now, cfg: BCFG, fetchImpl: mkBilling().fetchImpl, readKey, cachePath, ...extra });
+  assert.equal((await get(NOW)).ok, false);
+  assert.equal(reads, 1);
+  const again = await get(NOW + 60000);
+  assert.equal(again.ok, false);
+  assert.match(again.reason, /no admin key/);
+  assert.equal(reads, 1, 'no second attempt inside 5 minutes');
+  await get(NOW + 6 * 60000);
+  assert.equal(reads, 2);
+  await get(NOW + 6 * 60000 + 1000, { force: true });
+  assert.equal(reads, 3);
+});
+
+test('decide CLI: a billing fetch that never answers falls back to booked only after the deadline', async () => {
+  const lines = [];
+  const never = () => new Promise(() => {});
+  const env = { AC_API_KEY: 'sk-ant-api03-x' };
+  const code = await creditsMain(['decide', 'review'], { out: (s) => lines.push(s), cfg: { ...CFG }, env, readKey: never, billingDeadlineMs: 50, billingCachePath: join(tmp().dir, 'c.json') });
+  assert.equal(code, 0);
+  assert.ok(['api', 'plan'].includes(lines[0]));
+  if (lines[0] === 'api') assert.match(lines[1], /booked only/);
+});
+
+test('config: workers maps to the workspace id from the runner variable or option unless set explicitly', () => {
+  const none = loadSpendConfig((k, d) => d, {});
+  assert.equal(none.categoryWorkspaces.workers, 'workers');
+  const viaVar = loadSpendConfig((k, d) => d, { AC_API_WORKERS_WORKSPACE_ID: 'wrkspc_W1' });
+  assert.equal(viaVar.categoryWorkspaces.workers, 'wrkspc_W1');
+  const viaOpt = loadSpendConfig((k, d) => ({ api_workers_workspace_id: 'wrkspc_W2' })[k] ?? d, {});
+  assert.equal(viaOpt.categoryWorkspaces.workers, 'wrkspc_W2');
+  const notId = loadSpendConfig((k, d) => d, { AC_API_WORKERS_WORKSPACE_ID: 'some-name' });
+  assert.equal(notId.categoryWorkspaces.workers, 'workers');
+  const explicit = loadSpendConfig((k, d) => ({ api_credits_category_workspaces: 'workers=mine' })[k] ?? d, { AC_API_WORKERS_WORKSPACE_ID: 'wrkspc_W1' });
+  assert.equal(explicit.categoryWorkspaces.workers, 'mine');
+});
+
+test('status: a category whose workspace does not resolve is named', () => {
+  const snapshot = { through: T('2026-11-10T00:00:00Z'), from: T('2026-11-01T00:00:00Z'), cost: [], workspaces: { [REV]: 'reviewers' } };
+  const lines = billingStatusLines(snapshot, { cfg: { ...CFG, categoryWorkspaces: { review: 'reviewers', workers: 'workers' } }, entries: [], now: NOW });
+  assert.ok(lines.includes('category workers: workspace workers not found, booked spend only'));
+  assert.ok(!lines.some((l) => l.startsWith('category review:')));
+});

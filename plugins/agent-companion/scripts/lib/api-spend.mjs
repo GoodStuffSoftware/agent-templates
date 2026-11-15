@@ -17,7 +17,7 @@
 // Cost report notes: completed UTC days only (spend lags up to a day); amounts are decimal strings in cents; cost is before credits; the default
 // workspace has workspace_id null.
 
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { opt, stateFile, stateRootPath } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
@@ -32,6 +32,7 @@ const DAY_MS = 86400000;
 const MAX_PAGES = 6;
 const HOUR_MS = 3600000;
 export const BILLING_TTL_MS = 15 * 60000;
+export const BILLING_FAIL_TTL_MS = 5 * 60000; // after a failed fetch, do not retry for this long
 
 export const alertStatePath = () => stateFile('api-spend-alerts.json');
 export const billingCachePath = () => stateFile('api-billing-cache.json');
@@ -48,15 +49,19 @@ export function parseAlerts(raw) {
   return out.sort((a, b) => a - b);
 }
 
-export function loadSpendConfig(o = opt) {
+export function loadSpendConfig(o = opt, env = process.env) {
   const gov = loadConfig(o);
+  const explicit = parseCategoryWorkspaces(o('api_credits_category_workspaces', ''));
+  // The workers runner sends a workspace id (AC_API_WORKERS_WORKSPACE_ID or the api_workers_workspace_id option); map the category to it.
+  const idOf = (v) => { const x = String(v || '').trim(); return /^wrkspc_/.test(x) ? x : ''; };
+  const workersWs = idOf(env && env.AC_API_WORKERS_WORKSPACE_ID) || idOf(o('api_workers_workspace_id', ''));
   const raw = o('api_spend_alerts', '');
   const alerts = String(raw).trim() === '' ? [...DEFAULT_ALERTS] : parseAlerts(raw);
   const reviewersWorkspace = String(o('api_spend_reviewers_workspace', DEFAULT_REVIEWERS_WORKSPACE) || '').trim() || DEFAULT_REVIEWERS_WORKSPACE;
   return {
     ...gov,
     // The reviewers workspace is the review category's workspace unless api_credits_category_workspaces names one.
-    categoryWorkspaces: { ...gov.categoryWorkspaces, ...(parseCategoryWorkspaces(o('api_credits_category_workspaces', '')).review ? {} : { review: reviewersWorkspace }) },
+    categoryWorkspaces: { ...gov.categoryWorkspaces, ...(explicit.review ? {} : { review: reviewersWorkspace }), ...(explicit.workers || !workersWs ? {} : { workers: workersWs }) },
     adminKeySource: String(o('api_admin_key_source', '') || '').trim() || defaultAdminKeySource(),
     alerts,
     reviewersWorkspace,
@@ -383,6 +388,13 @@ export async function getBilling({
   const from = windowFrom(now, cfg.cycleDay);
   const hit = force ? null : readBillingCache(cachePath);
   if (hit && hit.snapshot.from === from && now - hit.fetchedAt >= 0 && now - hit.fetchedAt < BILLING_TTL_MS) return { ok: true, snapshot: hit.snapshot, cached: true, ageMs: now - hit.fetchedAt };
+  const failPath = `${cachePath}.fail`;
+  if (!force) {
+    try {
+      const f = JSON.parse(readFileSync(failPath, 'utf8'));
+      if (f && Number.isFinite(f.at) && now - f.at >= 0 && now - f.at < BILLING_FAIL_TTL_MS) return { ok: false, reason: `${String(f.reason || 'fetch failed').slice(0, 100)} (retry in ${Math.ceil((BILLING_FAIL_TTL_MS - (now - f.at)) / 60000)} min)`, negativeCached: true };
+    } catch { /* no failure on record */ }
+  }
   let key = '';
   try {
     key = await readKey(cfg.adminKeySource);
@@ -393,8 +405,11 @@ export async function getBilling({
       writeFileSync(tmp, `${JSON.stringify({ v: 1, fetchedAt: now, snapshot })}\n`);
       renameSync(tmp, cachePath);
     } catch { /* an unwritable cache only costs a refetch */ }
+    try { unlinkSync(failPath); } catch { /* none */ }
     return { ok: true, snapshot, cached: false, ageMs: 0 };
   } catch (e) {
-    return { ok: false, reason: scrub((e && e.message) || e, key).slice(0, 120) };
+    const reason = scrub((e && e.message) || e, key).slice(0, 120);
+    try { mkdirSync(dirname(cachePath), { recursive: true }); writeFileSync(failPath, `${JSON.stringify({ at: now, reason })}\n`); } catch { /* only costs a retry */ }
+    return { ok: false, reason };
   }
 }

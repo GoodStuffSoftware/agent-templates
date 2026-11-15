@@ -19,7 +19,10 @@ import { runApi, reviewLimitsLine } from './lib/api-run.mjs';
 import { getBilling, loadSpendConfig } from './lib/api-spend.mjs';
 import { opt } from '../hooks/lib/context.mjs';
 
-export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), env = process.env, fetchImpl, endpoint, sleep, cfg: cfgIn, billingFetch, readKey, billingCachePath } = {}) {
+// Overall wait for the billing snapshot; past it decide and status fall back to booked spend only.
+export const BILLING_DEADLINE_MS = 10000;
+
+export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), env = process.env, fetchImpl, endpoint, sleep, cfg: cfgIn, billingFetch, readKey, billingCachePath, billingDeadlineMs = BILLING_DEADLINE_MS } = {}) {
   const args = [];
   let now = Date.now();
   for (let i = 0; i < argv.length; i++) {
@@ -29,7 +32,12 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   let cfg;
   try { cfg = cfgIn || loadSpendConfig(); } catch { cfg = null; }
   // The billed-spend snapshot (Admin API, cached about 15 minutes). Never throws; { ok: false, reason } means booked only.
-  const billing = () => getBilling({ now, cfg, env, ...(billingFetch ? { fetchImpl: billingFetch } : {}), ...(readKey ? { readKey } : {}), ...(billingCachePath ? { cachePath: billingCachePath } : {}) });
+  const billingRaw = () => getBilling({ now, cfg, env, ...(billingFetch ? { fetchImpl: billingFetch } : {}), ...(readKey ? { readKey } : {}), ...(billingCachePath ? { cachePath: billingCachePath } : {}) });
+  const billing = async () => {
+    let t;
+    const late = new Promise((r) => { t = setTimeout(() => r({ ok: false, reason: `billing fetch passed the ${Math.round(billingDeadlineMs / 1000)} s deadline` }), billingDeadlineMs); if (t.unref) t.unref(); });
+    try { return await Promise.race([billingRaw(), late]); } finally { clearTimeout(t); }
+  };
   if (cmd === 'decide') {
     if (!cfg) { out('plan'); out('failed closed: unreadable configuration'); return 0; }
     // Nothing is fetched for a category that fails closed anyway, and a failed or absent billing source never blocks the decision.
