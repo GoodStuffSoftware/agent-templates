@@ -3,7 +3,7 @@
 // inside it for reading (Read, Grep, Glob, read-only Bash) or for writing (Write, Edit, any Bash). Credential-like files stay
 // denied even inside an allowed directory (denyNameReason). A guard rail, not a sandbox.
 
-import { resolve } from 'node:path';
+import { resolve, win32 } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { parseCommands, baseName } from '../../hooks/lib/process-kill-guard.mjs';
@@ -21,7 +21,9 @@ export function expandHome(value, home = homedir()) {
 }
 export function normPath(value, cwd, home = homedir()) {
   const v = expandHome(value, home);
-  let n = resolve(cwd || process.cwd(), v).replace(/\\/g, '/');
+  // A drive-letter path (C:/x, C:) is absolute on every platform; posix resolve would treat it as relative to cwd.
+  const drive = !win() && /^[A-Za-z]:/.test(v);
+  let n = (drive ? win32.resolve(/^[A-Za-z]:$/.test(v) ? `${v}/` : v) : resolve(cwd || process.cwd(), v)).replace(/\\/g, '/');
   n = n.replace(/^([A-Za-z]):/, (_, d) => `${d.toLowerCase()}:`);
   if (n.length > 1 && !ROOT_RE.test(n)) n = n.replace(/\/+$/, '');
   return n;
