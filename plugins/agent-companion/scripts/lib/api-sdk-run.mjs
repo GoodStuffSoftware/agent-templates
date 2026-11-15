@@ -75,7 +75,7 @@ export const SDK_DISALLOWED = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'Ta
 // Scoped denials: they hold in every permission mode. A guard rail, not a sandbox: the file tools run with the
 // operator's own file access, so the credential directories are denied to them by name and the claude binary is
 // pointed at a private config dir (CLAUDE_CONFIG_DIR).
-export const SDK_READ_DENY = ['Read(~/.claude/**)', 'Read(~/.ssh/**)', 'Read(~/.aws/**)', 'Read(~/.config/**)', 'Read(~/.npmrc)'];
+export const SDK_READ_DENY = ['Read(~/.claude/**)', 'Read(~/.ssh/**)', 'Read(~/.aws/**)', 'Read(~/.config/**)', 'Read(~/.npmrc)', 'Read(~/.netrc)', 'Read(~/.git-credentials)', 'Read(~/.pypirc)', 'Read(~/.claude.json)'];
 // Belt and braces: Bash is not in `tools`, so these only matter if a future default adds it back.
 export const SDK_BASH_DENY = [
   'Bash(git push:*)', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(git checkout:*)', 'Bash(git clean:*)',

@@ -4,7 +4,7 @@
 //   node api-spend.mjs check          prints one JSON object: { ok, line, notify: [{id, message}], ... }
 //   node api-spend.mjs ack <alert-id> marks an alert done for this billing cycle
 //
-// `line` is "API credits: reviewers $X of $100 · total $Y of $200 · cycle day N" (plus
+// `line` is "API credits: reviewers $X of the review share · total $Y of $200 · cycle day N" (plus
 // "· unexplained $Z"), or "API credits: unavailable (<reason>)" on any key or API failure.
 // `notify` holds the alerts not yet acknowledged this cycle. `--now <ISO time>` is a test seam.
 // Settings: api_admin_key_source, api_spend_alerts, api_spend_reviewers_workspace (README

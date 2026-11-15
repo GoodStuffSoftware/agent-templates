@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
   DEFAULT_SHARES, decide, record, recordFailure, recordFallback, reviewStats, summarizeReviews, reviewSummaryLine, status, summaryLine, cycleOf,
-  keyConfigured, parseKeySource, parseShares,
+  keyConfigured, parseKeySource, parseShares, sharesWarning,
 } from '../scripts/lib/api-credits.mjs';
 import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, softUsdFrom, reviewLimits, reviewLimitsLine, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
@@ -53,7 +53,7 @@ test('config helpers: key source forms, shares', () => {
   assert.equal(keyConfigured('env:AC_API_KEY', KEYENV), true);
   assert.equal(keyConfigured('bws:x', {}), false);
   assert.equal(keyConfigured('bws:x', { BWS_ACCESS_TOKEN: 't' }), true);
-  assert.deepEqual(parseShares('review=0.6, reserve=0'), { review: 0.6, overflow: 0.3, rater: 0.1, reserve: 0 });
+  assert.deepEqual(parseShares('review=0.6, reserve=0'), { review: 0.6, overflow: 0.1, rater: 0.05, workers: 0.3, reserve: 0 });
 });
 
 test('fails closed to plan: no key, unreadable ledger, unknown category', () => {
@@ -105,7 +105,7 @@ test('early in the cycle spend is throttled to the pace plus one average item; a
 test('the reserve is held until the last 3 days of the cycle', () => {
   const fx = makeFixture();
   try {
-    rec(fx, 'rater', 180, '2026-11-20T00:00:00Z'); // 90% of the budget gone: only the reserve is left
+    rec(fx, 'rater', 190, '2026-11-20T00:00:00Z'); // 95% of the budget gone: only the reserve is left
     const held = dec(fx, 'review', '2026-11-20T00:00:00Z');
     assert.equal(held.decision, 'plan');
     assert.match(held.reason, /^balance:/);
@@ -1113,4 +1113,52 @@ test('CLI: api-credits reviews counts real reviews only', async () => {
     assert.match(lines[0], /^1 real review \(\$0\.70\), median \$0\.70; 0 stopped or fell back/);
     assert.equal(await creditsMain(['reviews', '--since', 'nonsense'], { out: () => {}, cfg: CFG }), 2);
   } finally { t.fx.cleanup(); }
+});
+
+test('shares: the defaults sum to 1.0; a sum off 1.0 is warned about in status', () => {
+  const env = KEYENV;
+  const sum = Object.values(DEFAULT_SHARES).reduce((a, v) => a + v, 0);
+  assert.ok(Math.abs(sum - 1) < 1e-9);
+  assert.equal(sharesWarning(DEFAULT_SHARES), '');
+  assert.match(sharesWarning(parseShares('review=0.9')), /sum to 1\.\d+, not 1\.0/);
+  const fx = makeFixture();
+  try {
+    const now = T('2026-11-16T00:00:00Z');
+    const st = status({ now, cfg: { ...CFG, shares: parseShares('review=0.9') }, path: ledgerIn(fx), env });
+    assert.match(st.text, /WARNING: api_credits_shares sum to/);
+    const ok = status({ now, cfg: CFG, path: ledgerIn(fx), env });
+    assert.doesNotMatch(ok.text, /WARNING/);
+  } finally { fx.cleanup(); }
+});
+
+test('decide: a category with no resolvable workspace says booked only, not billed', () => {
+  const env = KEYENV;
+  const fx = makeFixture();
+  try {
+    const now = T('2026-11-16T00:00:00Z');
+    const billing = { through: T('2026-11-15T00:00:00Z'), from: T('2026-11-01T00:00:00Z'), cost: [], workspaces: { wrkspc_a: 'reviewers' } };
+    const cfg = { ...CFG, categoryWorkspaces: { review: 'reviewers', workers: 'nowhere' } };
+    const w = decide('workers', { now, cfg, env, path: ledgerIn(fx), billing });
+    assert.match(w.reason, /booked only, no workspace mapped/);
+    assert.doesNotMatch(w.reason, /\(billed\)/);
+    const r = decide('review', { now, cfg, env, path: ledgerIn(fx), billing });
+    assert.match(r.reason, /\(billed\)/);
+  } finally { fx.cleanup(); }
+});
+
+test('record: a workers booking never clears or trips the review breaker', () => {
+  const fx = makeFixture();
+  try {
+    const now = T('2026-11-16T00:00:00Z');
+    recordFailure('boom', { now, cfg: CFG, path: ledgerIn(fx), hard: true });
+    record('workers', 1, 'w', { now, cfg: CFG, path: ledgerIn(fx) });
+    assert.match(dec(fx, 'review', '2026-11-16T00:00:00Z').reason, /failed 1 time in a row/);
+    record('review', 1, 'r', { now, cfg: CFG, path: ledgerIn(fx) });
+    assert.doesNotMatch(dec(fx, 'review', '2026-11-16T00:00:00Z').reason, /^API runs fa/);
+  } finally { fx.cleanup(); }
+});
+
+test('default shares: review 0.5, workers 0.3, overflow 0.1, rater 0.05, reserve 0.05, sum 1.0', () => {
+  assert.deepEqual(DEFAULT_SHARES, { review: 0.5, overflow: 0.1, rater: 0.05, workers: 0.3, reserve: 0.05 });
+  assert.ok(Math.abs(Object.values(DEFAULT_SHARES).reduce((a, v) => a + v, 0) - 1) < 1e-9);
 });
