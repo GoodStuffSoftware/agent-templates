@@ -8,9 +8,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_SHARES, record, recordSpend } from '../scripts/lib/api-credits.mjs';
+import { DEFAULT_SHARES, record, recordSpend, decide, billedSince, billingStatusLines, parseWorkspaceLimits, parseCategoryWorkspaces } from '../scripts/lib/api-credits.mjs';
+import { makeFixture } from './helpers.mjs';
+import { main as creditsMain } from '../scripts/api-credits.mjs';
 import {
-  check, ack, ackedIds, readAdminKey, parseAdminKeySource, parseAlerts, loadSpendConfig, scrub, unexplained,
+  check, ack, ackedIds, readAdminKey, parseAdminKeySource, parseAlerts, loadSpendConfig, scrub, unexplained, getBilling, BILLING_TTL_MS,
 } from '../scripts/lib/api-spend.mjs';
 import { main } from '../scripts/api-spend.mjs';
 
@@ -269,3 +271,270 @@ test('alert state is a file next to the governor state files and survives a bad 
   assert.ok(existsSync(p.alerts));
   assert.deepEqual(ackedIds('2026-11-01', p.alerts), ['reviewers-50']);
 });
+
+
+// --- billed spend (0.31.55): the Admin API snapshot, decide and status on billed figures ---------------------------------
+//
+// Invented names and ids throughout. The shapes follow the live responses of 2026-11-15: cost_report amounts are decimal
+// strings in cents, usage_report rows carry token counts per api_key_id, workspace_id and model.
+
+const WS_A = 'wrkspc_AAAA';
+const WS_B = 'wrkspc_BBBB';
+const KEY_A = 'apikey_AAAA';
+const BCFG = {
+  ...CFG, workspaceLimits: {}, categoryWorkspaces: { review: 'reviewers', workers: 'workers' },
+};
+const HOUR = 3600000;
+
+// cost: [day, workspace id|null, cents, description, model]; usage: [day, key, ws, model, in, out, cacheRead, cacheWrite]; hourly: [ISO hour, ws]
+function billingStub({ cost = [], usage = [], hourly = [], failPath = null } = {}) {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init });
+    const u = new URL(url);
+    const ok = (body) => ({ ok: true, status: 200, json: async () => body });
+    if (failPath && u.pathname.includes(failPath)) return { ok: false, status: 500, json: async () => ({ error: { type: 'api_error' } }) };
+    const day = (d) => ({ starting_at: `${d}T00:00:00Z`, ending_at: new Date(Date.parse(`${d}T00:00:00Z`) + 86400000).toISOString() });
+    if (u.pathname === '/v1/organizations/workspaces') return ok({ data: [{ id: WS_A, name: 'reviewers' }, { id: WS_B, name: 'workers' }], has_more: false, last_id: null });
+    if (u.pathname === '/v1/organizations/api_keys') return ok({ data: [{ id: KEY_A, name: 'review-key' }], has_more: false, last_id: null });
+    if (u.pathname === '/v1/organizations/cost_report') {
+      const days = [...new Set(cost.map((c) => c[0]))].sort();
+      return ok({ data: days.map((d) => ({ ...day(d), results: cost.filter((c) => c[0] === d).map(([, ws, cents, description, model]) => ({ currency: 'USD', amount: String(cents), workspace_id: ws, description, model })) })), has_more: false, next_page: null });
+    }
+    if (u.pathname === '/v1/organizations/usage_report/messages') {
+      if (u.searchParams.get('bucket_width') === '1h') {
+        const hours = [...new Set(hourly.map((h) => h[0]))].sort();
+        return ok({ data: hours.map((h) => ({ starting_at: h, ending_at: new Date(Date.parse(h) + HOUR).toISOString(), results: hourly.filter((x) => x[0] === h).map(([, ws]) => ({ uncached_input_tokens: 10, cache_read_input_tokens: 0, output_tokens: 5, workspace_id: ws })) })), has_more: false, next_page: null });
+      }
+      const days = [...new Set(usage.map((x) => x[0]))].sort();
+      return ok({ data: days.map((d) => ({ ...day(d), results: usage.filter((x) => x[0] === d).map(([, k, ws, model, i, o, cr, cw]) => ({ api_key_id: k, workspace_id: ws, model, uncached_input_tokens: i, output_tokens: o, cache_read_input_tokens: cr, cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: cw } })) })), has_more: false, next_page: null });
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  return { fetchImpl, calls };
+}
+
+// Billed through 11-10T00:00Z: reviewers $5.00 + $20.00, workers $3.00, the default workspace $1.00.
+const COST = [
+  ['2026-11-02', WS_A, 2000, 'Claude Sonnet 5.5 - Output Tokens', 'claude-sonnet-5-5'],
+  ['2026-11-03', WS_A, 500, 'Claude Haiku 5.5 - Output Tokens', 'claude-haiku-5-5'],
+  ['2026-11-04', WS_B, 300, 'Claude Sonnet 5.5 - Input Tokens', 'claude-sonnet-5-5'],
+  ['2026-11-04', null, 100, 'Claude Haiku 5.5 - Input Tokens', 'claude-haiku-5-5'],
+];
+const USAGE = [['2026-11-02', KEY_A, WS_A, 'claude-sonnet-5-5', 1000, 2000, 5000, 3000]];
+const HOURLY = [['2026-11-05T10:00:00Z', WS_A], ['2026-11-09T20:00:00Z', WS_B]];
+const mkBilling = (o = {}) => billingStub({ cost: COST, usage: USAGE, hourly: HOURLY, ...o });
+const snap = async (o) => (await getBilling({ now: NOW, cfg: BCFG, fetchImpl: mkBilling(o).fetchImpl, readKey: () => KEY, cachePath: join(tmp().dir, 'cache.json') })).snapshot;
+
+test('billing snapshot: cents to dollars by day, workspace and model; names; usage by key; hourly; cut-off at the last complete day', async () => {
+  const s = mkBilling();
+  const r = await getBilling({ now: NOW, cfg: BCFG, fetchImpl: s.fetchImpl, readKey: () => KEY, cachePath: join(tmp().dir, 'cache.json') });
+  assert.equal(r.ok, true);
+  const sn = r.snapshot;
+  assert.equal(sn.through, T('2026-11-10T00:00:00Z'));
+  assert.equal(billedSince(sn, T('2026-11-01T00:00:00Z')), 29);
+  assert.equal(billedSince(sn, T('2026-11-01T00:00:00Z'), WS_A), 25);
+  assert.equal(billedSince(sn, T('2026-11-03T00:00:00Z'), WS_A), 5);
+  assert.equal(billedSince(sn, T('2026-11-01T00:00:00Z'), ''), 1);
+  assert.deepEqual(sn.workspaces, { [WS_A]: 'reviewers', [WS_B]: 'workers' });
+  assert.deepEqual(sn.keys, { [KEY_A]: 'review-key' });
+  assert.deepEqual(sn.usage[0], { day: '2026-11-02', ws: WS_A, key: KEY_A, model: 'claude-sonnet-5-5', input: 1000, output: 2000, cacheRead: 5000, cacheWrite: 3000 });
+  assert.equal(sn.hourly.length, 2);
+  assert.equal(sn.hourlyFrom, T('2026-11-03T13:00:00Z'));
+  // GET only, the key only in the x-api-key header, never in a URL
+  for (const c of s.calls) { assert.equal(c.init.method, 'GET'); assert.equal(c.init.headers['x-api-key'], KEY); assert.ok(!c.url.includes('sk-ant')); }
+  assert.ok(s.calls.some((c) => c.url.includes('/usage_report/messages') && c.url.includes('bucket_width=1h')));
+});
+
+test('billing cache: a second call within 15 minutes makes no request; after the TTL or in a new window it refetches', async () => {
+  const p = tmp();
+  const cachePath = join(p.dir, 'cache.json');
+  const s = mkBilling();
+  const get = (now) => getBilling({ now, cfg: BCFG, fetchImpl: s.fetchImpl, readKey: () => KEY, cachePath });
+  const a = await get(NOW);
+  const n = s.calls.length;
+  assert.ok(n > 0 && !a.cached);
+  const b = await get(NOW + 14 * 60000);
+  assert.equal(b.cached, true);
+  assert.equal(s.calls.length, n);
+  assert.ok(!readFileSync(cachePath, 'utf8').includes(KEY), 'the cache never holds the key');
+  const c = await get(NOW + 16 * 60000);
+  assert.equal(c.cached, false);
+  assert.ok(s.calls.length > n);
+  const m = s.calls.length;
+  await get(T('2026-12-02T12:00:00Z')); // the window moved (new month): the old cache is not used
+  assert.ok(s.calls.length > m);
+  assert.equal(BILLING_TTL_MS, 15 * 60000);
+});
+
+test('billing unavailable: no key, HTTP failure or a key that is not an admin key leave ok false with a reason that never holds the key', async () => {
+  const noKey = await getBilling({ now: NOW, cfg: BCFG, fetchImpl: mkBilling().fetchImpl, readKey: () => { throw new Error('no admin key source configured (api_admin_key_source)'); }, cachePath: join(tmp().dir, 'c.json') });
+  assert.equal(noKey.ok, false);
+  assert.match(noKey.reason, /no admin key/);
+  const http = await getBilling({ now: NOW, cfg: BCFG, fetchImpl: mkBilling({ failPath: 'cost_report' }).fetchImpl, readKey: () => KEY, cachePath: join(tmp().dir, 'c.json') });
+  assert.equal(http.ok, false);
+  assert.match(http.reason, /HTTP 500/);
+  const net = await getBilling({ now: NOW, cfg: BCFG, fetchImpl: async () => { throw Object.assign(new Error(`boom ${KEY}`), { cause: { code: 'ENOTFOUND' } }); }, readKey: () => KEY, cachePath: join(tmp().dir, 'c.json') });
+  assert.equal(net.ok, false);
+  assert.ok(!JSON.stringify(net).includes(KEY));
+});
+
+test('billing snapshot: usage, hourly and key-name failures are optional and listed as missing', async () => {
+  const sn = await snap({ failPath: 'usage_report' });
+  assert.equal(sn.usage, null);
+  assert.equal(sn.hourly, null);
+  assert.deepEqual(sn.missing, ['usage by key and model', 'hourly usage']);
+  const lines = billingStatusLines(sn, { cfg: BCFG, entries: [], now: NOW }).join('\n');
+  assert.match(lines, /by key: not available/);
+  assert.match(lines, /hourly check: not available/);
+  assert.match(lines, /billed \$29\.00/);
+});
+
+const bk = (fx, cat, usd, at) => record(cat, usd, 't', { now: T(at), cfg: BCFG, path: join(fx.dir, 'led.json') });
+const dB = (fx, cat, billing, cfg = BCFG, now = NOW) => decide(cat, { now, cfg, env: { AC_API_KEY: 'present' }, path: join(fx.dir, 'led.json'), billing });
+
+test('decide rests on billed spend: booked spend that never reached the API does not throttle it', async () => {
+  const p = tmp(); const fx = { dir: p.dir };
+  const sn = await snap();
+  bk(fx, 'review', 75, '2026-11-05T00:00:00Z'); bk(fx, 'review', 75, '2026-11-06T00:00:00Z'); // booked $150 of reviews, billed $25
+  const booked = dB(fx, 'review', null);
+  assert.equal(booked.decision, 'plan');
+  assert.match(booked.reason, /booked only, not verified against billing/);
+  const billed = dB(fx, 'review', sn);
+  assert.equal(billed.decision, 'api', billed.reason);
+  assert.match(billed.reason, /\(billed\)/);
+  assert.ok(!/booked only/.test(billed.reason));
+});
+
+test('decide lag window: booked spend counts only after the last complete billed day', async () => {
+  const sn = await snap(); // billed reviewers $25 through 11-10T00:00Z; the review pace cap at day 10 is about $34
+  const before = tmp(); bk({ dir: before.dir }, 'review', 40, '2026-11-09T05:00:00Z'); bk({ dir: before.dir }, 'review', 40, '2026-11-09T06:00:00Z'); // inside the billed days: billed already says it all
+  assert.equal(dB({ dir: before.dir }, 'review', sn).decision, 'api');
+  const after = tmp(); bk({ dir: after.dir }, 'review', 40, '2026-11-10T05:00:00Z'); bk({ dir: after.dir }, 'review', 40, '2026-11-10T06:00:00Z'); // not reported yet: added on top of billed
+  const d = dB({ dir: after.dir }, 'review', sn);
+  assert.equal(d.decision, 'plan');
+  assert.match(d.reason, /pace: review spent \$105.00 \(billed\)/);
+});
+
+test('decide balance: the total is billed across all workspaces plus the unreported window', async () => {
+  const s = tmp();
+  const big = await snap({ cost: [['2026-11-03', WS_B, 15500, 'Claude Sonnet 5.5 - Output Tokens', 'claude-sonnet-5-5']] }); // workers billed $155
+  const d = dB({ dir: s.dir }, 'review', big, { ...BCFG, itemEstimate: 30 });
+  assert.equal(d.decision, 'plan');
+  assert.match(d.reason, /^balance: \$45\.00 left of \$200 \(billed\)/);
+});
+
+test('workspace limits: a category whose workspace is at or over its monthly limit is refused; below it is allowed', async () => {
+  const sn = await snap(); // reviewers billed $25 this month
+  const cfg = (lim) => ({ ...BCFG, workspaceLimits: { reviewers: lim } });
+  const p = tmp();
+  const over = dB({ dir: p.dir }, 'review', sn, cfg(20));
+  assert.equal(over.decision, 'plan');
+  assert.match(over.reason, /workspace limit: reviewers at \$25\.00 of its \$20\.00 monthly limit/);
+  assert.equal(dB({ dir: p.dir }, 'review', sn, cfg(25)).decision, 'plan', 'at the limit is refused');
+  assert.equal(dB({ dir: tmp().dir }, 'review', sn, cfg(26)).decision, 'api');
+  // booked spend after the last complete day counts toward the limit
+  const q = tmp(); bk({ dir: q.dir }, 'review', 2, '2026-11-10T08:00:00Z');
+  assert.equal(dB({ dir: q.dir }, 'review', sn, cfg(26)).decision, 'plan');
+  // a limit on another workspace does not touch this category; a limit given by wrkspc_ id works
+  assert.equal(dB({ dir: tmp().dir }, 'review', sn, { ...BCFG, workspaceLimits: { workers: 1 } }).decision, 'api');
+  assert.equal(dB({ dir: tmp().dir }, 'review', sn, { ...BCFG, workspaceLimits: { [WS_A]: 10 } }).decision, 'plan');
+});
+
+test('workspace limits without billing data: checked against the booked spend of the workspace this month', async () => {
+  const p = tmp(); const fx = { dir: p.dir };
+  bk(fx, 'review', 12, '2026-11-04T00:00:00Z');
+  const d = dB(fx, 'review', null, { ...BCFG, workspaceLimits: { reviewers: 10 } });
+  assert.equal(d.decision, 'plan');
+  assert.match(d.reason, /workspace limit: reviewers at \$12\.00 of its \$10\.00 monthly limit \(booked only, not verified against billing\)/);
+});
+
+test('config: workspace limits default to none, the review workspace follows api_spend_reviewers_workspace, limits and the map parse', () => {
+  assert.deepEqual(parseWorkspaceLimits('reviewers=100, workers=$60;bad=0 junk=x'), { reviewers: 100, workers: 60 });
+  assert.deepEqual(parseCategoryWorkspaces('Workers=agents, review=wrkspc_X'), { workers: 'agents', review: 'wrkspc_X' });
+  const none = loadSpendConfig(() => '');
+  assert.deepEqual(none.workspaceLimits, {});
+  assert.deepEqual(none.categoryWorkspaces, { review: 'reviewers', workers: 'workers' });
+  const set = loadSpendConfig((k, f) => ({ api_spend_reviewers_workspace: 'rev2', api_credits_workspace_limits: 'rev2=50' })[k] ?? f);
+  assert.equal(set.categoryWorkspaces.review, 'rev2');
+  assert.deepEqual(set.workspaceLimits, { rev2: 50 });
+  const own = loadSpendConfig((k, f) => ({ api_spend_reviewers_workspace: 'rev2', api_credits_category_workspaces: 'review=rev3' })[k] ?? f);
+  assert.equal(own.categoryWorkspaces.review, 'rev3');
+});
+
+test('status lines: billed month and cycle by workspace, key and model, booked beside it, credits left, limits, no gaps', async () => {
+  const sn = await snap();
+  const p = tmp();
+  bk({ dir: p.dir }, 'review', 24, '2026-11-05T10:30:00Z'); // matches usage on reviewers at 10:00Z; billed $25
+  const entries = readLedgerEntries(p.dir);
+  const text = billingStatusLines(sn, { cfg: { ...BCFG, workspaceLimits: { reviewers: 50 } }, entries, now: NOW, cacheAgeMs: 0 }).join('\n');
+  assert.match(text, /calendar month 2026-11: billed \$29\.00 through 2026-11-09 \(complete UTC days\) \| booked \$24\.00/);
+  assert.match(text, /by workspace: reviewers \$25\.00 of \$50\.00 limit \(50%\), workers \$3\.00, default \$1\.00/);
+  assert.match(text, /by model: sonnet-5-5 \$23\.00, haiku-5-5 \$6\.00/);
+  assert.match(text, /by key \(tokens; est = list price\): review-key 0\.01M tokens, est \$/);
+  assert.match(text, /credits left \(estimate\) = monthly plan credit \$200 - billed this cycle \$29\.00 = \$171\.00/);
+  assert.match(text, /workspace limits \(calendar month, billed\): reviewers \$25\.00 of \$50\.00 \(50%\)/);
+  assert.match(text, /gaps: none/);
+  assert.ok(!/GAP/.test(text));
+});
+
+test('status gaps: booked over billed beyond the tolerance, and booked entries with no usage on their workspace in that hour', async () => {
+  const sn = await snap();
+  const p = tmp(); const fx = { dir: p.dir };
+  bk(fx, 'review', 24, '2026-11-05T10:30:00Z'); // matched hour
+  bk(fx, 'review', 30, '2026-11-06T03:10:00Z'); // no usage on reviewers that hour
+  bk(fx, 'review', 1, '2026-11-05T11:05:00Z'); // the hour before (10:00) has usage: matched
+  bk(fx, 'overflow', 50, '2026-11-07T00:00:00Z'); // no workspace mapped: cannot be checked per hour, counted in the total
+  const text = billingStatusLines(sn, { cfg: BCFG, entries: readLedgerEntries(p.dir), now: NOW }).join('\n');
+  assert.match(text, /GAP: all categories: booked \$105\.00 but billed \$29\.00/);
+  assert.match(text, /GAP: workspace reviewers: booked \$55\.00 but billed \$25\.00/);
+  assert.match(text, /GAP: 1 booked entry \(\$30\.00\) with no usage on their workspace in that hour: 2026-11-06T03:10Z review \$30\.00/);
+  assert.ok(!/gaps: none/.test(text));
+  // within the tolerance (max $1 or 10% of billed) there is no flag
+  const q = tmp(); bk({ dir: q.dir }, 'review', 26.5, '2026-11-05T10:30:00Z');
+  const ok = billingStatusLines(sn, { cfg: BCFG, entries: readLedgerEntries(q.dir), now: NOW }).join('\n');
+  assert.ok(!/GAP: workspace reviewers/.test(ok));
+  // a hole in the hourly report is a gap only inside the fetched window
+  const old = tmp(); bk({ dir: old.dir }, 'review', 3, '2026-11-01T03:00:00Z');
+  assert.ok(!/GAP: \d+ booked/.test(billingStatusLines(sn, { cfg: BCFG, entries: readLedgerEntries(old.dir), now: NOW }).join('\n')));
+});
+
+test('status without billing data: the figures are labelled booked only, not verified against billing', () => {
+  const t = billingStatusLines(null, { cfg: BCFG, entries: [], now: NOW, reason: 'no admin key source configured' }).join('\n');
+  assert.match(t, /billing: booked only, not verified against billing \(no admin key source configured\)/);
+});
+
+test('CLI: decide and status use the Admin API; without a key they fall back and say so', async () => {
+  const fx = makeFixture();
+  try {
+    record('review', 75, 'big', { now: T('2026-11-05T00:00:00Z'), cfg: BCFG }); record('review', 75, 'big', { now: T('2026-11-06T00:00:00Z'), cfg: BCFG });
+    const s = mkBilling();
+    const inj = { cfg: BCFG, env: { AC_API_KEY: 'present' }, billingFetch: s.fetchImpl, readKey: () => KEY, billingCachePath: join(fx.dir, 'bc.json') };
+    const out = [];
+    assert.equal(await creditsMain(['decide', 'review', '--now', '2026-11-10T12:00:00Z'], { out: (x) => out.push(x), ...inj }), 0);
+    assert.equal(out[0], 'api', out.join('\n'));
+    assert.match(out[1], /\(billed\)/);
+    const calls = s.calls.length;
+    const st = [];
+    assert.equal(await creditsMain(['status', '--now', '2026-11-10T12:00:00Z'], { out: (x) => st.push(x), ...inj }), 0);
+    assert.equal(s.calls.length, calls, 'status reuses the cache of decide');
+    const text = st.join('\n');
+    assert.match(text, /billing \(Admin API, cached \d+ min ago\)|billing \(Admin API, fetched now\)/);
+    assert.match(text, /credits left \(estimate\)/);
+    assert.match(text, /GAP: all categories: booked \$150\.00 but billed \$29\.00/);
+    assert.ok(!text.includes(KEY));
+    // no admin key: booked only
+    const out2 = []; const st2 = [];
+    const noKey = { cfg: BCFG, env: { AC_API_KEY: 'present' }, readKey: () => { throw new Error('no admin key source configured (api_admin_key_source)'); }, billingCachePath: join(fx.dir, 'bc2.json') };
+    await creditsMain(['decide', 'review', '--now', '2026-11-10T12:00:00Z'], { out: (x) => out2.push(x), ...noKey });
+    assert.equal(out2[0], 'plan');
+    assert.match(out2[1], /booked only, not verified against billing/);
+    await creditsMain(['status', '--now', '2026-11-10T12:00:00Z'], { out: (x) => st2.push(x), ...noKey });
+    assert.match(st2.join('\n'), /billing: booked only, not verified against billing \(no admin key source configured/);
+  } finally { fx.cleanup(); }
+});
+
+function readLedgerEntries(dir) {
+  const led = JSON.parse(readFileSync(join(dir, 'led.json'), 'utf8'));
+  return Object.values(led.cycles).flatMap((c) => c.entries);
+}
