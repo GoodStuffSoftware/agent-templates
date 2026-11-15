@@ -252,7 +252,7 @@ test('key sources: env, dpapi on a non-Windows host, dpapi through a hidden powe
 
 test('config: alerts list, defaults, governor values reused', () => {
   assert.deepEqual(parseAlerts('50, 80;$20 x -3'), [20, 50, 80]);
-  const c = loadSpendConfig((k, d) => d);
+  const c = loadSpendConfig((k, d) => d, {});
   assert.deepEqual(c.alerts, [50]);
   assert.equal(c.budget, 200);
   assert.equal(c.cycleDay, 1);
@@ -452,13 +452,13 @@ test('workspace limits without billing data: checked against the booked spend of
 test('config: workspace limits default to none, the review workspace follows api_spend_reviewers_workspace, limits and the map parse', () => {
   assert.deepEqual(parseWorkspaceLimits('reviewers=100, workers=$60;bad=0 junk=x'), { reviewers: 100, workers: 60 });
   assert.deepEqual(parseCategoryWorkspaces('Workers=agents, review=wrkspc_X'), { workers: 'agents', review: 'wrkspc_X' });
-  const none = loadSpendConfig(() => '');
+  const none = loadSpendConfig(() => '', {});
   assert.deepEqual(none.workspaceLimits, {});
   assert.deepEqual(none.categoryWorkspaces, { review: 'reviewers', workers: 'workers' });
-  const set = loadSpendConfig((k, f) => ({ api_spend_reviewers_workspace: 'rev2', api_credits_workspace_limits: 'rev2=50' })[k] ?? f);
+  const set = loadSpendConfig((k, f) => ({ api_spend_reviewers_workspace: 'rev2', api_credits_workspace_limits: 'rev2=50' })[k] ?? f, {});
   assert.equal(set.categoryWorkspaces.review, 'rev2');
   assert.deepEqual(set.workspaceLimits, { rev2: 50 });
-  const own = loadSpendConfig((k, f) => ({ api_spend_reviewers_workspace: 'rev2', api_credits_category_workspaces: 'review=rev3' })[k] ?? f);
+  const own = loadSpendConfig((k, f) => ({ api_spend_reviewers_workspace: 'rev2', api_credits_category_workspaces: 'review=rev3' })[k] ?? f, {});
   assert.equal(own.categoryWorkspaces.review, 'rev3');
 });
 

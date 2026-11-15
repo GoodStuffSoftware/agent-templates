@@ -281,7 +281,7 @@ export function spendView(billing, category, { cfg, cy, entries, now }) {
     verified: true,
     wsMapped: wsId !== null,
     total: billedSince(snap, cy.start) + bookedBetween(entries, winFrom),
-    spent: (wsId === null ? 0 : billedSince(snap, cy.start, wsId)) + bookedBetween(entries, winFrom, Infinity, [category]),
+    spent: wsId === null ? bookedBetween(entries, cy.start, Infinity, [category]) : billedSince(snap, cy.start, wsId) + bookedBetween(entries, winFrom, Infinity, [category]),
     wsName: name,
     limit: wsRef ? limitFor(cfg, name, wsId) : null,
     wsMonth: (wsId === null ? 0 : billedSince(snap, monthStart, wsId)) + bookedBetween(entries, Math.max(snap.through, monthStart), Infinity, cats),

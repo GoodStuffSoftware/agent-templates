@@ -41,7 +41,7 @@ export const HUNG_MS = 15 * 60 * 1000;
 export const EXIT = { done: 0, usage: 2, refused: 3, failed: 4 };
 // Edit and Write are what a writer needs on top of the reviewer's reads; the shell is Bash (Git Bash on Windows; the SDK's PowerShell tool is off by default).
 export const WORKER_TOOLS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
-const WORKER_DISALLOWED = ['Task', 'Agent', 'Skill', 'TodoWrite', 'NotebookEdit', 'Read(/proc/**)'];
+const WORKER_DISALLOWED = ['Task', 'Agent', 'Skill', 'TodoWrite', 'NotebookEdit', 'Read(//proc/**)'];
 // Destructive git stays with the lead: scoped denials hold in every permission mode.
 // Any `git push` (the lead pushes) and `git -C <dir> push|reset --hard` (the -C form dodges a plain prefix rule; gitDenyReason in the hook covers every option order).
 export const WORKER_BASH_DENY = [

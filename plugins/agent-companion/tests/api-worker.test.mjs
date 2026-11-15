@@ -278,7 +278,7 @@ test('env-dump guard: new credential files, /proc reads and git pushes are denie
   }
   assert.deepEqual(await cb({ tool_name: 'Read', tool_input: { file_path: 'src/process/a.mjs' } }), {});
   const o = workerOptions({ cwd: '.', modelId: 'm', key: KEY, workspace: WS, maxUsd: 1, maxTurns: 5 });
-  assert.ok(o.disallowedTools.includes('Read(/proc/**)'));
+  assert.ok(o.disallowedTools.includes('Read(//proc/**)'));
 });
 
 test('git: push in any form, git -C reset --hard and git -C push are denied by rule and by hook; commit and status pass', async () => {

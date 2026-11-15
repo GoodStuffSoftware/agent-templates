@@ -94,4 +94,8 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   return 2;
 }
 
-if (isMain(import.meta.url)) process.exitCode = await main(process.argv.slice(2));
+if (isMain(import.meta.url)) {
+  process.exitCode = await main(process.argv.slice(2));
+  // A billing fetch that lost the deadline race must not keep the process (and the caller) waiting on its sockets.
+  setTimeout(() => process.exit(), 100);
+}
