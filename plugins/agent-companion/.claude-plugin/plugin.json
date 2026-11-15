@@ -231,13 +231,13 @@
     "api_credits_budget_usd": {
       "type": "number",
       "title": "API credits: monthly budget (USD)",
-      "description": "The plan's monthly Claude Platform API credits, in USD. Spend is paced linearly across the billing cycle, so the credits last the month.",
+      "description": "The plan's monthly Claude Platform API credit, in USD: the figure `api-credits.mjs status` subtracts billed spend from (\"credits left (estimate)\") and the budget `decide` paces. Default 200 = the Ultra plan's monthly credit per Anthropic's API-credits-for-subscribers page (read 2026-11-15; Max is $100, Team $20 or $100 per seat, pooled to at most $500): set your own plan's amount. Spend is paced linearly across the billing cycle, so the credits last the month.",
       "default": 200
     },
     "api_credits_cycle_day": {
       "type": "number",
       "title": "API credits: billing cycle start day",
-      "description": "Day of the month (1-28, UTC) the credit cycle starts. The ledger rolls over then.",
+      "description": "Day of the month (1-28, UTC) the credit cycle starts: the ledger rolls over then, and the cycle figures of `api-credits.mjs status` and `decide` count billed spend from it. Default 1 is an assumption (the credit cycle is your plan's billing cycle, which Anthropic's page does not state; the Console Billing page shows when the credits expire): set it to your renewal day.",
       "default": 1
     },
     "api_credits_shares": {
@@ -269,6 +269,18 @@
       "title": "API workers: spend cap per run (USD)",
       "description": "The Agent SDK stops an API worker run when its cost estimate reaches this value (default 3). The --max-usd flag of api-worker.mjs overrides it for one run.",
       "default": 3
+    },
+    "api_credits_workspace_limits": {
+      "type": "string",
+      "title": "API credits: monthly spend limit per workspace (USD)",
+      "description": "name=usd pairs (a workspace name or wrkspc_ id), e.g. \"reviewers=100,workers=60\". The Console's workspace spend limits cannot be read back through the API, so keep this map in step with them by hand. api-credits.mjs status shows each workspace's billed spend this calendar month against its limit, and decide answers plan for a category whose workspace is at or over its limit (billed plus booked-but-unreported spend). Default empty: no limit is enforced.",
+      "default": ""
+    },
+    "api_credits_category_workspaces": {
+      "type": "string",
+      "title": "API credits: which workspace each category bills",
+      "description": "category=workspace pairs (a workspace name or wrkspc_ id): which workspace's billed spend is attributed to a category and which limit applies to it. Default empty = the built-in review=<api_spend_reviewers_workspace> (reviewers) and workers=workers. A category with no workspace is not limited and its pace counts only its own booked spend after the last complete billed day.",
+      "default": ""
     },
     "api_review_runner": {
       "type": "string",
@@ -303,7 +315,7 @@
     "api_admin_key_source": {
       "type": "string",
       "title": "API spend watch: where the Admin API key comes from",
-      "description": "Where scripts/api-spend.mjs finds the organization's Admin API key (sk-ant-admin...), which reads the cost report: \"dpapi:<path>\" (a file written by PowerShell ConvertFrom-SecureString for the current Windows user; default <state root>/secrets/anthropic-admin-key.dpapi), \"env:<NAME>\" or \"bws:<secret-name>\". The key goes only into the x-api-key header of a GET request; it is never printed, logged, written or put on a command line. Only an organization has an Admin API; with no key the watch reports 'unavailable' and nothing else changes.",
+      "description": "Where scripts/api-spend.mjs and scripts/api-credits.mjs (status, decide: billed spend) find the organization's Admin API key (sk-ant-admin...), which reads the cost and usage reports: \"dpapi:<path>\" (a file written by PowerShell ConvertFrom-SecureString for the current Windows user; default <state root>/secrets/anthropic-admin-key.dpapi), \"env:<NAME>\" or \"bws:<secret-name>\". The key goes only into the x-api-key header of a GET request; it is never printed, logged, written or put on a command line. Only an organization has an Admin API; with no key the watch reports 'unavailable' and nothing else changes.",
       "default": ""
     },
     "api_spend_alerts": {
