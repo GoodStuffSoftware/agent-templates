@@ -53,7 +53,7 @@ test('config helpers: key source forms, shares', () => {
   assert.equal(keyConfigured('env:AC_API_KEY', KEYENV), true);
   assert.equal(keyConfigured('bws:x', {}), false);
   assert.equal(keyConfigured('bws:x', { BWS_ACCESS_TOKEN: 't' }), true);
-  assert.deepEqual(parseShares('review=0.6, reserve=0'), { review: 0.6, overflow: 0.1, rater: 0.1, workers: 0.3, reserve: 0 });
+  assert.deepEqual(parseShares('review=0.6, reserve=0'), { review: 0.6, overflow: 0.1, rater: 0.05, workers: 0.3, reserve: 0 });
 });
 
 test('fails closed to plan: no key, unreadable ledger, unknown category', () => {
@@ -105,7 +105,7 @@ test('early in the cycle spend is throttled to the pace plus one average item; a
 test('the reserve is held until the last 3 days of the cycle', () => {
   const fx = makeFixture();
   try {
-    rec(fx, 'rater', 180, '2026-11-20T00:00:00Z'); // 90% of the budget gone: only the reserve is left
+    rec(fx, 'rater', 190, '2026-11-20T00:00:00Z'); // 95% of the budget gone: only the reserve is left
     const held = dec(fx, 'review', '2026-11-20T00:00:00Z');
     assert.equal(held.decision, 'plan');
     assert.match(held.reason, /^balance:/);
@@ -586,11 +586,11 @@ test('summary line: reviews spent of the review share, cycle day; the CLI prints
   try {
     rec(fx, 'review', 12.5, '2026-11-16T00:00:00Z');
     rec(fx, 'rater', 3, '2026-11-16T00:00:00Z');
-    assert.equal(summaryLine({ now: T('2026-11-16T10:00:00Z'), cfg: CFG, path: ledgerIn(fx) }), 'API credits: reviews $12.50 of $80, cycle day 16');
-    assert.equal(summaryLine({ now: T('2026-12-02T10:00:00Z'), cfg: CFG, path: ledgerIn(fx) }), 'API credits: reviews $0.00 of $80, cycle day 2');
+    assert.equal(summaryLine({ now: T('2026-11-16T10:00:00Z'), cfg: CFG, path: ledgerIn(fx) }), 'API credits: reviews $12.50 of $100, cycle day 16');
+    assert.equal(summaryLine({ now: T('2026-12-02T10:00:00Z'), cfg: CFG, path: ledgerIn(fx) }), 'API credits: reviews $0.00 of $100, cycle day 2');
     const lines = [];
     await creditsMain(['summary', '--now', '2026-11-16T10:00:00Z'], { out: (s) => lines.push(s), cfg: CFG });
-    assert.match(lines[0], /^API credits: reviews \$\d+\.\d\d of \$80, cycle day 16$/);
+    assert.match(lines[0], /^API credits: reviews \$\d+\.\d\d of \$100, cycle day 16$/);
   } finally { fx.cleanup(); }
 });
 
@@ -1156,4 +1156,9 @@ test('record: a workers booking never clears or trips the review breaker', () =>
     record('review', 1, 'r', { now, cfg: CFG, path: ledgerIn(fx) });
     assert.doesNotMatch(dec(fx, 'review', '2026-11-16T00:00:00Z').reason, /^API runs fa/);
   } finally { fx.cleanup(); }
+});
+
+test('default shares: review 0.5, workers 0.3, overflow 0.1, rater 0.05, reserve 0.05, sum 1.0', () => {
+  assert.deepEqual(DEFAULT_SHARES, { review: 0.5, overflow: 0.1, rater: 0.05, workers: 0.3, reserve: 0.05 });
+  assert.ok(Math.abs(Object.values(DEFAULT_SHARES).reduce((a, v) => a + v, 0) - 1) < 1e-9);
 });

@@ -6,7 +6,7 @@
 //   node api-credits.mjs status                         spend by category, the pace, what is left, the review limits in force, then billed spend (month and cycle, by workspace, key and model), the booked figure beside it, gaps, credits left (estimate), workspace limits
 //   node api-credits.mjs record-fallback <review id> [--reason <r>]  marks a review as redone on the plan (the id api-review.mjs printed)
 //   node api-credits.mjs reviews [--since <ISO date>] [--until <ISO date>]  real reviews only (no probe or measure rows): count, spend, median, stopped or fallen back
-//   node api-credits.mjs summary                        one line: "API credits: reviews $X of $100, cycle day N"
+//   node api-credits.mjs summary                        one line: "API credits: reviews $X of the review share of the budget, cycle day N"
 //   node api-credits.mjs probe                         one tiny haiku Messages call on the key; reports tokens and dollar cost, books it
 //
 // Categories: review, overflow, rater, workers (API worker runs, scripts/api-worker.mjs). Any error, a missing key or an unreadable ledger

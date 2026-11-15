@@ -272,7 +272,7 @@ test('env-dump guard: new credential files, /proc reads and git pushes are denie
   const allowed = ['git commit -m "fix env: handling"', 'grep "env:" README.md', 'grep -rn env: src', 'echo "the env: block"', 'ls environments'];
   for (const c of allowed) assert.equal(envDumpReason(c), null, `should allow: ${c}`);
   const cb = makeGuardHooks({ authOk: true, denied: [] }).PreToolUse[0].hooks[0];
-  for (const p of ['/proc/self/environ', '/proc/1/status', 'C:\\proc\\x']) {
+  for (const p of ['/proc/self/environ', '/proc/1/status', '/proc']) {
     const o = await cb({ tool_name: 'Read', tool_input: { file_path: p } });
     assert.equal(o.hookSpecificOutput.permissionDecision, 'deny', p);
   }
@@ -289,4 +289,40 @@ test('git: push in any form, git -C reset --hard and git -C push are denied by r
   for (const c of ['git status', 'git commit -m "no push here"', 'git add -A && git commit -m x', 'git -C x status', 'git reset --soft HEAD~1', 'echo pushing']) assert.equal(gitDenyReason(c), null, `should allow: ${c}`);
   const cb = makeGuardHooks({ authOk: true, denied: [] }).PreToolUse[0].hooks[0];
   assert.equal((await cb({ tool_name: 'Bash', tool_input: { command: 'git -C x push' } })).hookSpecificOutput.permissionDecision, 'deny');
+});
+
+test('hook: /proc is denied for Read, Grep and Glob (absolute, with and without a trailing path); a repo proc/ directory is allowed', async () => {
+  const state = { authOk: true, denied: [], cwd: '/work/repo' };
+  const cb = makeGuardHooks(state).PreToolUse[0].hooks[0];
+  const denied = async (tool_name, tool_input) => (await cb({ tool_name, tool_input })).hookSpecificOutput?.permissionDecision === 'deny';
+  assert.ok(await denied('Read', { file_path: '/proc/self/environ' }));
+  assert.ok(await denied('Grep', { pattern: 'x', path: '/proc' }));
+  assert.ok(await denied('Grep', { pattern: 'x', path: '/proc/' }));
+  assert.ok(await denied('Glob', { pattern: '*', path: '/proc/1' }));
+  for (const [t, i] of [['Read', { file_path: 'src/proc/a.mjs' }], ['Read', { file_path: '/work/repo/src/proc/a.mjs' }], ['Grep', { pattern: 'x', path: 'proc' }], ['Glob', { pattern: 'proc/**' }], ['Read', { file_path: '/work/procfile' }]]) {
+    assert.equal(await denied(t, i), false, JSON.stringify(i));
+  }
+});
+
+test('hook: credential files are denied for Read, Grep and Glob', async () => {
+  const cb = makeGuardHooks({ authOk: true, denied: [], cwd: '/work/repo' }).PreToolUse[0].hooks[0];
+  for (const p of ['/srv/w/.netrc', '~/.git-credentials', '/srv/w/.npmrc', 'D:\w\\.pypirc', '/srv/w/.aws/credentials', '/srv/w/.ssh/id_ed25519', '/srv/w/.config/gh/hosts.yml']) {
+    for (const tool_name of ['Read', 'Grep', 'Glob']) {
+      const o = await cb({ tool_name, tool_input: tool_name === 'Read' ? { file_path: p } : { pattern: 'x', path: p } });
+      assert.equal(o.hookSpecificOutput?.permissionDecision, 'deny', `${tool_name} ${p}`);
+    }
+  }
+  assert.deepEqual(await cb({ tool_name: 'Read', tool_input: { file_path: 'src/netrc-parser.mjs' } }), {});
+});
+
+test('git guard: push, reset --hard and clean are denied through env prefixes, nested shells, wrappers and -C', () => {
+  const denied = [
+    'GIT_TERMINAL_PROMPT=0 git push', 'GIT_SSH_COMMAND="x y" git push origin main', 'bash -c "git push"', "sh -c 'git push origin HEAD'",
+    'if true; then git push; fi', 'for i in 1; do git push; done', 'echo origin | xargs git push', 'nohup git push &', 'env FOO=1 git push', 'env git push',
+    'git -C "dir with space" push', 'git -C /tmp/x push --force', 'git -C ../other clean -fd', 'git clean -fdx', 'git -C d reset --hard HEAD~1', 'git reset --hard',
+    'cd x && GIT_TERMINAL_PROMPT=0 bash -c "git -C y push"',
+  ];
+  for (const c of denied) assert.ok(gitDenyReason(c), `should deny: ${c}`);
+  const allowed = ['git status', 'git commit -m "docs: explain git push for the lead"', "git commit -m 'never run git push here'", 'echo "git push" > notes.txt', 'git -C "dir with space" status', 'git reset --soft HEAD~1', 'git add -A && git commit -m x'];
+  for (const c of allowed) assert.equal(gitDenyReason(c), null, `should allow: ${c}`);
 });

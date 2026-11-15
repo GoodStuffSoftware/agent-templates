@@ -42,7 +42,7 @@ import { priceUsage } from './pricing.mjs';
 
 export const CATEGORIES = ['review', 'overflow', 'rater', 'workers'];
 // Sum 1.0. review keeps the largest share; workers is a real spender now; overflow and rater are reserved and barely used.
-export const DEFAULT_SHARES = { review: 0.4, overflow: 0.1, rater: 0.1, workers: 0.3, reserve: 0.1 };
+export const DEFAULT_SHARES = { review: 0.5, overflow: 0.1, rater: 0.05, workers: 0.3, reserve: 0.05 };
 export const RESERVE_DAYS = 3;
 export const DEFAULT_KEY_SOURCE = 'env:AC_API_KEY';
 export const TRIP_AFTER = 2; // billing/auth failures in a row
@@ -251,9 +251,12 @@ export function bookedBetween(entries, fromMs, toMs = Infinity, cats = null) {
   return t;
 }
 
-const limitFor = (cfg, name, id) => {
+// `names`: the workspace name and, when the category is mapped by id with no billing to resolve it, the category's default name
+// (a limit set as workers=50 must still hold when AC_API_WORKERS_WORKSPACE_ID maps workers to an id).
+const limitFor = (cfg, name, id, extraNames = []) => {
+  const names = [name, ...extraNames].filter((n) => n !== null && n !== undefined).map((n) => String(n).toLowerCase());
   for (const [k, v] of Object.entries(cfg.workspaceLimits || {})) {
-    if (k === id || k.toLowerCase() === String(name).toLowerCase()) return v;
+    if (k === id || names.includes(k.toLowerCase())) return v;
   }
   return null;
 };
@@ -271,7 +274,7 @@ export function spendView(billing, category, { cfg, cy, entries, now }) {
   };
   if (!snap) {
     const cats = wsRef ? sameWsCats((w) => String(w).toLowerCase()) : [category];
-    return { verified: false, wsName: wsRef || null, limit: wsRef ? limitFor(cfg, wsRef, wsRef) : null, wsMonth: bookedBetween(entries, monthStart, Infinity, cats) };
+    return { verified: false, wsName: wsRef || null, limit: wsRef ? limitFor(cfg, wsRef, wsRef, [category]) : null, wsMonth: bookedBetween(entries, monthStart, Infinity, cats) };
   }
   const winFrom = Math.max(snap.through, cy.start);
   const wsId = resolveWorkspace(snap, wsRef);
@@ -283,7 +286,7 @@ export function spendView(billing, category, { cfg, cy, entries, now }) {
     total: billedSince(snap, cy.start) + bookedBetween(entries, winFrom),
     spent: wsId === null ? bookedBetween(entries, cy.start, Infinity, [category]) : billedSince(snap, cy.start, wsId) + bookedBetween(entries, winFrom, Infinity, [category]),
     wsName: name,
-    limit: wsRef ? limitFor(cfg, name, wsId) : null,
+    limit: wsRef ? limitFor(cfg, name, wsId, [category]) : null,
     wsMonth: (wsId === null ? 0 : billedSince(snap, monthStart, wsId)) + bookedBetween(entries, Math.max(snap.through, monthStart), Infinity, cats),
     through: snap.through,
   };

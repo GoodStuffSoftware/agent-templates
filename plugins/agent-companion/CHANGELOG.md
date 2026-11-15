@@ -2,6 +2,15 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.55 — 2026-11-15
+
+- **New: status and decide use the money the Admin API says was billed.** `api-credits.mjs status` and `decide` now read the real billed spend from the Anthropic Admin API (cost report, with a 10-second deadline and a 5-minute pause after a failure) and add what was booked since the last billed day. If billing cannot be read, they fall back to the booked ledger and say so. Why: the booked figure alone drifted from the invoice.
+- **New: workspace limits.** `api_credits_workspace_limits` (for example `workers=50`) caps a workspace's spend, by name or by `wrkspc_` id. A limit set by name still holds when the workspace is mapped by id and billing is unavailable.
+- **New: the API worker runner, `scripts/api-worker.mjs`.** It runs a writer brief on the Agent SDK with the Console API key, so the work is paid from API credits and not from the subscription, in a separate workers workspace. Safeguards: the SDK's init message must report `apiKeySource` `ANTHROPIC_API_KEY` or the run is aborted before any tool runs (no init message also aborts); the child environment is rebuilt from a short allow-list; a hook denies shell commands that would print the environment or a secret, and Read, Grep and Glob of `/proc` and of credential files (`.ssh`, `.aws`, `.npmrc`, `.netrc`, `.git-credentials` and similar); pushing, hard resets and cleaning in git are denied in common forms (env prefixes, `bash -c`, `-C`); only Sonnet and Haiku are allowed; a spend cap (`--max-usd`) applies; the cost is booked automatically under `workers`. `--workspace-id` reaches the credits check too.
+- **Changed: default shares of the API credits** are review 0.5, workers 0.3, overflow 0.1, rater 0.05, reserve 0.05 (they sum to 1.0; status warns if they do not). Why: credits expire monthly and do not roll over, and the old review share (0.4) made the pace gate block API reviews mid-cycle. Reverse with `api_credits_shares`.
+- **Fix: the README's `--max-usd` description** for the API review and worker commands now matches the behaviour.
+- Tests: `tests/api-worker.test.mjs`, `tests/api-credits.test.mjs`, `tests/api-spend.test.mjs`, `tests/api-sdk-run.test.mjs` (guards, git forms, limits by name, pace for unmapped categories, defaults).
+
 ## 0.31.54 — 2026-11-14
 
 - **New: Opus no longer writes (option `opus_writer_policy`, default `sonnet`).** A spawn that would run on Opus and whose brief says it writes (ROLE writer, fixer or lander, or no ROLE and a writing task type) is rewritten to Sonnet high, on the matching ladder rung where that loses no tool. Opus keeps the thinking: planning, design, root-cause work and review. Set `allow` to keep the old behavior. Every rewrite is logged in `telemetry/opus-writer-rewrites.jsonl`. The reasoning is in `docs/adr/0006-no-opus-writers.md`.

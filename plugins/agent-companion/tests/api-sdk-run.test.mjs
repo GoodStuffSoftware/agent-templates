@@ -566,3 +566,7 @@ test('api-review: the sdk engine takes the soft note from api_review_soft_usd, a
     t.fx.cleanup();
   }
 });
+
+test('SDK_READ_DENY covers the credential files the Bash patterns cover', () => {
+  for (const t of ['Read(~/.netrc)', 'Read(~/.git-credentials)', 'Read(~/.npmrc)', 'Read(~/.pypirc)', 'Read(~/.aws/**)', 'Read(~/.ssh/**)']) assert.ok(SDK_READ_DENY.includes(t), t);
+});

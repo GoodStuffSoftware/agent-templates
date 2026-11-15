@@ -30,7 +30,8 @@ import { priceUsage } from './lib/pricing.mjs';
 import { opt, stateFile, REVIEWER_SESSION_ENV } from '../hooks/lib/context.mjs';
 import { loadConfig, resolveKey } from './lib/api-credits.mjs';
 import { validKeyShape, scrub, resolveModel } from './lib/api-run.mjs';
-import { envDumpHits } from '../hooks/lib/env-dump-guard.mjs';
+import { parseCommands, baseName } from '../hooks/lib/process-kill-guard.mjs';
+import { envDumpHits, rawProg } from '../hooks/lib/env-dump-guard.mjs';
 import { loadSdk, sdkEnv, initProof, DEFAULT_SDK_VERSION, REQUIRED_KEY_SOURCE, SDK_READ_DENY } from './lib/api-sdk-run.mjs';
 
 export const WORKSPACE_ENV = 'AC_API_WORKERS_WORKSPACE_ID';
@@ -46,17 +47,64 @@ const WORKER_DISALLOWED = ['Task', 'Agent', 'Skill', 'TodoWrite', 'NotebookEdit'
 // Any `git push` (the lead pushes) and `git -C <dir> push|reset --hard` (the -C form dodges a plain prefix rule; gitDenyReason in the hook covers every option order).
 export const WORKER_BASH_DENY = [
   ...['push', 'push --force', 'push -f', 'reset --hard', 'clean'].map((s) => `Bash(git ${s}:*)`),
-  'Bash(git -C * push:*)', 'Bash(git -C * reset --hard:*)',
+  'Bash(git -C * push:*)', 'Bash(git -C * reset --hard:*)', 'Bash(git -C * clean:*)',
 ];
-const GIT_OPTS = String.raw`(?:(?:-C|-c|--git-dir|--work-tree|--namespace)(?:\s+|=)\S+\s+|--?[\w-]+\s+)*`;
-const GIT_PUSH = new RegExp(String.raw`(?:^|[;&|(\n\x60]|&&)\s*(?:(?:sudo|command|exec|time)\s+)*git\s+${GIT_OPTS}push\b`, 'i');
-const GIT_RESET_HARD = new RegExp(String.raw`(?:^|[;&|(\n\x60])\s*(?:(?:sudo|command|exec|time)\s+)*git\s+${GIT_OPTS}reset\b[^;&|\n]*--hard\b`, 'i');
+// Walk each parsed simple command: env assignments, then/do/nohup/sudo prefixes (rawProg), env/xargs/timeout wrappers and `sh -c '...'` bodies are looked through.
+const WRAPPERS = new Set(['env', 'xargs', 'nohup', 'timeout', 'nice', 'stdbuf', 'ionice', 'setsid', 'sudo', 'doas']);
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash']);
+const GIT_ARG_OPTS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix']);
+// Index of the program word; quoted assignments (GIT_SSH_COMMAND="x y") are skipped too.
+function progOf(words) {
+  let i = 0;
+  for (;;) {
+    const k = rawProg(words.slice(i));
+    if (k < 0) return -1;
+    i += k;
+    if (/^[A-Za-z_]\w*=/.test(words[i].t)) { i++; continue; }
+    return i;
+  }
+}
+function gitReasonOf(words, depth) {
+  let k = progOf(words);
+  while (k >= 0 && k < words.length) {
+    const b = baseName(words[k].t).replace(/\.exe$/i, '').toLowerCase();
+    if (WRAPPERS.has(b)) {
+      k++;
+      while (k < words.length && (/^-/.test(words[k].t) || (!words[k].q && /^[A-Za-z_]\w*=/.test(words[k].t)) || (b === 'timeout' && /^\d/.test(words[k].t)))) k++;
+      const r = progOf(words.slice(k));
+      if (r < 0) return null;
+      k += r;
+      continue;
+    }
+    if (SHELLS.has(b)) {
+      if (depth > 4) return null;
+      for (let j = k + 1; j < words.length; j++) {
+        if (/^-[a-z]*c[a-z]*$/i.test(words[j].t) && words[j + 1]) return gitReasonIn(words[j + 1].t, depth + 1);
+      }
+      return null;
+    }
+    if (b !== 'git') return null;
+    const rest = words.slice(k + 1).map((w) => w.t);
+    let i = 0;
+    while (i < rest.length && rest[i].startsWith('-')) i += GIT_ARG_OPTS.has(rest[i]) ? 2 : 1;
+    const sub = (rest[i] || '').toLowerCase();
+    if (sub === 'push') return 'git push stays with the lead';
+    if (sub === 'reset' && rest.slice(i + 1).some((a) => a === '--hard')) return 'git reset --hard stays with the lead';
+    if (sub === 'clean') return 'git clean stays with the lead';
+    return null;
+  }
+  return null;
+}
+function gitReasonIn(text, depth = 0) {
+  for (const c of parseCommands(String(text), 'bash', depth, { nextChain: 0, steps: 0 })) {
+    const r = gitReasonOf(c.words, depth);
+    if (r) return r;
+  }
+  return null;
+}
 // null when the command is fine; else the reason. Backs the PreToolUse hook (permission rules alone miss option-order variants).
 export function gitDenyReason(command) {
-  const c = String(command ?? '');
-  if (GIT_PUSH.test(c)) return 'git push stays with the lead';
-  if (GIT_RESET_HARD.test(c)) return 'git reset --hard stays with the lead';
-  return null;
+  try { return gitReasonIn(command); } catch { return 'the git command could not be checked'; }
 }
 const STRIP_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', REVIEWER_SESSION_ENV];
 
@@ -104,7 +152,9 @@ export function envDumpReason(command, shell = 'bash') {
   return null;
 }
 
-const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
+// The credential files the Bash patterns (DUMP_PATTERNS) cover, for the Read/Grep/Glob path inputs.
+const CRED_PATH = /(?:^|\/)(?:\.ssh|\.aws)(?:\/|$)|(?:^|\/)(?:\.npmrc|\.netrc|\.pypirc|\.git-credentials|\.credentials\.json)$|\/\.claude\/\.cred|\/gh\/hosts\.yml$/i;
+const SHELL_TOOLS =new Set(['Bash', 'PowerShell']);
 // PreToolUse hook callback: no tool runs before the init message proved the auth source; shells are checked for env dumps.
 export function makeGuardHooks(state) {
   const deny = (reason) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
@@ -113,8 +163,10 @@ export function makeGuardHooks(state) {
     const name = String((input && input.tool_name) || '');
     if (name === 'Read' || name === 'Grep' || name === 'Glob') {
       const ti = input.tool_input || {};
-      const target = String(ti.file_path || ti.path || '').replace(/\\/g, '/');
-      if (/(?:^|\/)proc\//.test(target)) { state.denied.push('/proc is off limits'); return deny('blocked: /proc is off limits (it holds the process environment)'); }
+      const raw = String(ti.file_path || ti.path || '').replace(/\\/g, '/');
+      const target = raw ? resolve(state.cwd || process.cwd(), raw).replace(/\\/g, '/') : '';
+      if (CRED_PATH.test(target) || CRED_PATH.test(raw)) { state.denied.push('credential files are off limits'); return deny('blocked: credential files are off limits'); }
+      if (/^\/proc(?:\/|$)/.test(target) || /^\/proc(?:\/|$)/.test(raw)) { state.denied.push('/proc is off limits'); return deny('blocked: /proc is off limits (it holds the process environment)'); }
     }
     if (SHELL_TOOLS.has(name)) {
       const git = gitDenyReason(input.tool_input && input.tool_input.command);
@@ -130,7 +182,10 @@ export function makeGuardHooks(state) {
 // --- the budget, through the api-credits CLI only ------------------------------------------------
 
 const CREDITS_CLI = join(dirname(fileURLToPath(import.meta.url)), 'api-credits.mjs');
-export function cliCredits(env = process.env) {
+// The decide/record child reads the workspace from AC_API_WORKERS_WORKSPACE_ID (loadSpendConfig): a --workspace-id flag reaches it as that variable.
+export const creditsEnv = (env, workspaceId = '') => (String(workspaceId || '').trim() ? { ...env, [WORKSPACE_ENV]: String(workspaceId).trim() } : env);
+export function cliCredits(baseEnv = process.env, workspaceId = '') {
+  const env = creditsEnv(baseEnv, workspaceId);
   const call = (args) => {
     const r = spawnSyncHidden(process.execPath, [CREDITS_CLI, ...args], { env, encoding: 'utf8', timeout: 60000 });
     if (r.error) throw new Error(`api-credits failed: ${r.error.code || r.error.message}`);
@@ -213,14 +268,14 @@ export async function runWorker({
     if (!ws) return out('refused_workspace', { reason: `no workers workspace id: set ${WORKSPACE_ENV} (or the api_workers_workspace_id option, or --workspace-id). A personal key is not tied to a workspace, so the run would not be billed to the workers workspace` });
     if (!/^[A-Za-z0-9_.-]+$/.test(ws)) return out('refused_workspace', { reason: 'the workspace id is malformed (letters, digits, _ . - only)' });
     // 4. Budget, through the api-credits CLI.
-    credits = credits || cliCredits(env);
+    credits = credits || cliCredits(env, ws);
     let d;
     try { d = credits.decide(CATEGORY); } catch (e) { d = { decision: 'plan', reason: `budget check failed: ${String((e && e.message) || e)}` }; }
     if (d.decision !== 'api') return out('refused_budget', { reason: `api-credits decide ${CATEGORY}: ${d.decision} (${d.reason})` });
     // 5. The SDK.
     try { sdk = sdk || await load({ version: sdkVersion }); } catch (e) { return out('refused_auth', { reason: `the Agent SDK is not available: ${String((e && e.message) || e)}`.slice(0, 200) }); }
 
-    const state = { authOk: false, denied: [] };
+    const state = { authOk: false, denied: [], cwd };
     const ac = new AbortController();
     let abortReason = null;
     let wake = () => {};

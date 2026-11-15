@@ -51,7 +51,7 @@ const PREFIX = new Set(['exec', 'command', 'builtin', 'nohup', 'time', 'setsid',
 const PRINTERS = new Set(['echo', 'printf', 'print', 'write-host', 'write-output', 'write-information', 'out-host']);
 
 // the program word of a simple command WITHOUT looking through `env` (bare `env` is the dump)
-function rawProg(words) {
+export function rawProg(words) {
   let k = 0;
   while (k < words.length) {
     const a = words[k].t;
