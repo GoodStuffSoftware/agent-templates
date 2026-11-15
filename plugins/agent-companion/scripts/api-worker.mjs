@@ -3,8 +3,9 @@
 // API credits (workers workspace) and not to the subscription. The plan's API credits cover the Claude API and the
 // Agent SDK, NOT Claude Code, so this never runs `claude -p` (platform.claude.com api-credits-for-subscribers).
 //
-//   node api-worker.mjs run --brief-file <f> --cwd <worktree> [--model sonnet] [--max-usd 3] [--max-turns 60]
+//   node api-worker.mjs run [--mode write | --mode plan --plan-file <f>] --brief-file <f> --cwd <worktree> [--model sonnet] [--max-usd 3] [--max-turns 60]
 //                           [--workspace-id <id>] [--result-file <f>] [--meta <label>]
+//                           [--allow-read <dir>]... [--allow-write <dir>]...   (opt-in dirs inside ~/.claude; see README)
 //
 // stdout: the worker's final text, then one line `API-WORKER {json}` (status, cost_usd, turns, model, apiKeySource, reason).
 // Exit: 0 done; 2 bad usage; 3 refused before any work (no key, no workspace id, Opus, budget, wrong auth source: nothing was
@@ -31,7 +32,8 @@ import { opt, stateFile, REVIEWER_SESSION_ENV } from '../hooks/lib/context.mjs';
 import { loadConfig, resolveKey } from './lib/api-credits.mjs';
 import { validKeyShape, scrub, resolveModel } from './lib/api-run.mjs';
 import { parseCommands, baseName } from '../hooks/lib/process-kill-guard.mjs';
-import { envDumpHits, rawProg } from '../hooks/lib/env-dump-guard.mjs';
+import { envDumpHits } from '../hooks/lib/env-dump-guard.mjs';
+import { accessReason, bashPathReason, normDirs, validateAllowDir, normPath, expandHome, staticDir, claudeDir, isUnder, denyNameReason, WRITE_BLOCKED } from './lib/api-worker-paths.mjs';
 import { loadSdk, sdkEnv, initProof, DEFAULT_SDK_VERSION, REQUIRED_KEY_SOURCE, SDK_READ_DENY } from './lib/api-sdk-run.mjs';
 
 export const WORKSPACE_ENV = 'AC_API_WORKERS_WORKSPACE_ID';
@@ -42,6 +44,12 @@ export const HUNG_MS = 15 * 60 * 1000;
 export const EXIT = { done: 0, usage: 2, refused: 3, failed: 4 };
 // Edit and Write are what a writer needs on top of the reviewer's reads; the shell is Bash (Git Bash on Windows; the SDK's PowerShell tool is off by default).
 export const WORKER_TOOLS = ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
+// Plan mode: read-only research plus Write, which the hook narrows to the one plan file. No shell, no Edit.
+export const PLAN_TOOLS = ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Write'];
+export const PLAN_DISALLOWED = ['Bash', 'PowerShell', 'Edit', 'MultiEdit'];
+export const MODES = ['write', 'plan'];
+// With an allowance the broad Read(~/.claude/**) rule is replaced by these file rules; the PreToolUse hook then confines ~/.claude to the allowed dirs.
+const ALLOW_READ_DENY = [...SDK_READ_DENY.filter((r) => r !== 'Read(~/.claude/**)'), ...['.credentials.json', 'settings.json', 'settings.local.json'].flatMap((n) => [`Read(~/.claude/${n})`, `Read(~/.claude/**/${n})`]), 'Read(~/.claude/**/secrets/**)'];
 const WORKER_DISALLOWED = ['Task', 'Agent', 'Skill', 'TodoWrite', 'NotebookEdit', 'Read(//proc/**)'];
 // Destructive git stays with the lead: scoped denials hold in every permission mode.
 // Any `git push` (the lead pushes) and `git -C <dir> push|reset --hard` (the -C form dodges a plain prefix rule; gitDenyReason in the hook covers every option order).
@@ -49,61 +57,142 @@ export const WORKER_BASH_DENY = [
   ...['push', 'push --force', 'push -f', 'reset --hard', 'clean'].map((s) => `Bash(git ${s}:*)`),
   'Bash(git -C * push:*)', 'Bash(git -C * reset --hard:*)', 'Bash(git -C * clean:*)',
 ];
-// Walk each parsed simple command: env assignments, then/do/nohup/sudo prefixes (rawProg), env/xargs/timeout wrappers and `sh -c '...'` bodies are looked through.
-const WRAPPERS = new Set(['env', 'xargs', 'nohup', 'timeout', 'nice', 'stdbuf', 'ionice', 'setsid', 'sudo', 'doas']);
+// Walk each parsed simple command: env assignments, control keywords and sudo are skipped; wrapper commands are unwrapped with their
+// option arguments (WRAP_ARGS); the string payload of eval, sh -c and find -exec is scanned again. Unsure = deny: after any wrapper, a
+// git word anywhere later is judged too.
+const WRAP_ARGS = {
+  nice: ['-n', '--adjustment'], time: ['-f', '--format', '-o', '--output'], timeout: ['-s', '--signal', '-k', '--kill-after'],
+  env: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'], xargs: ['-n', '-I', '-L', '-P', '-s', '-d', '-E', '-a', '-l', '-i', '--max-args', '--replace', '--max-procs', '--delimiter', '--arg-file'],
+  stdbuf: ['-i', '-o', '-e'], ionice: ['-c', '-n', '-p', '-t', '-P', '-u'], doas: ['-u', '-C'], command: [], builtin: [], exec: ['-a'], nohup: [], setsid: [], sudo: ['-u', '-g', '-h', '-p', '-C', '-D', '-R', '-T', '-U'],
+};
+const WRAPPERS = new Set(Object.keys(WRAP_ARGS));
+const KEYWORDS = new Set(['then', 'do', 'else', 'elif', 'if', 'while', 'until', '!', 'call', '{', '(']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash']);
+const OPAQUE = new Set(['watch', 'flock', 'su', 'runuser', 'busybox', 'script', 'parallel', 'unbuffer', 'chronic', 'sg', 'setpriv', 'chroot', 'strace', 'ltrace', 'taskset', 'numactl', 'xvfb-run']);
 const GIT_ARG_OPTS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix']);
-// Index of the program word; quoted assignments (GIT_SSH_COMMAND="x y") are skipped too.
-function progOf(words) {
+const FIND_EXEC = new Set(['-exec', '-execdir', '-ok', '-okdir']);
+const bname = (t) => baseName(t).replace(/\.exe$/i, '').toLowerCase();
+// Skip env assignments (quoted ones too) and control keywords.
+function skipLead(words, i) {
+  while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i].t) || (!words[i].q && KEYWORDS.has(words[i].t)))) i++;
+  return i;
+}
+// Config keys that can hide or re-route a push (aliases, URL rewrites, push URLs, hooks, ssh/credential commands, includes).
+const RISKY_KEY = /^(?:alias\.|url\.|remote\.[^.]+\.(?:push)?url|core\.(?:sshcommand|hookspath|fsmonitor|gitproxy)|credential|include|protocol|pushinsteadof)/i;
+function gitSub(rest) {
   let i = 0;
-  for (;;) {
-    const k = rawProg(words.slice(i));
-    if (k < 0) return -1;
-    i += k;
-    if (/^[A-Za-z_]\w*=/.test(words[i].t)) { i++; continue; }
-    return i;
+  while (i < rest.length && rest[i].startsWith('-')) {
+    if (rest[i] === '-c' && RISKY_KEY.test(rest[i + 1] || '')) return 'git -c alias.*, url.*, push-URL and hook settings can hide a git push';
+    if (/^-c(?:alias|url|core\.(?:sshcommand|hookspath)|credential|include|remote)/i.test(rest[i])) return 'git -c alias.*, url.*, push-URL and hook settings can hide a git push';
+    if (/^--config-env=(?:alias|url|core\.(?:sshcommand|hookspath)|credential|include|remote)/i.test(rest[i])) return 'git config aliases and URL rewrites can hide a git push';
+    i += GIT_ARG_OPTS.has(rest[i]) ? 2 : 1;
   }
+  const sub = (rest[i] || '').toLowerCase();
+  if (sub === 'config' && rest.slice(i + 1).some((a) => RISKY_KEY.test(a))) return 'git config of aliases, URL rewrites, push URLs or hooks can hide a git push';
+  if (sub === 'push' || sub === 'send-pack' || sub === 'http-push') return 'git push stays with the lead';
+  if (sub === 'reset' && rest.slice(i + 1).some((a) => a === '--hard')) return 'git reset --hard stays with the lead';
+  if (sub === 'clean') return 'git clean stays with the lead';
+  return null;
 }
 function gitReasonOf(words, depth) {
-  let k = progOf(words);
-  while (k >= 0 && k < words.length) {
-    const b = baseName(words[k].t).replace(/\.exe$/i, '').toLowerCase();
+  if (depth > 6) return 'the git command could not be checked (nested too deep)';
+  let ws = words;
+  let wrapped = false;
+  for (let guard = 0; guard < 40; guard++) {
+    const k = skipLead(ws, 0);
+    if (k >= ws.length) break;
+    ws = ws.slice(k);
+    const b = bname(ws[0].t);
     if (WRAPPERS.has(b)) {
-      k++;
-      while (k < words.length && (/^-/.test(words[k].t) || (!words[k].q && /^[A-Za-z_]\w*=/.test(words[k].t)) || (b === 'timeout' && /^\d/.test(words[k].t)))) k++;
-      const r = progOf(words.slice(k));
-      if (r < 0) return null;
-      k += r;
+      wrapped = true;
+      const takes = WRAP_ARGS[b];
+      let i = 1;
+      while (i < ws.length) {
+        const t = ws[i].t;
+        if (t === '--') { i++; break; }
+        if (/^[A-Za-z_]\w*=/.test(t) && !ws[i].q) { i++; continue; }
+        if (!t.startsWith('-') || t === '-') {
+          if (b === 'timeout' && /^\d/.test(t)) { i++; continue; }
+          break;
+        }
+        if (b === 'env') {
+          // -S / --split-string carries a whole command line: judge it as one.
+          const payload = (t === '-S' || t === '--split-string') ? (ws[i + 1] ? ws[i + 1].t : '') : /^-S./.test(t) ? t.slice(2) : /^--split-string=/.test(t) ? t.slice(15) : null;
+          if (payload !== null) { const r = gitReasonIn(payload, depth + 1); if (r) return r; }
+        }
+        i += takes.includes(t) ? 2 : 1;
+      }
+      ws = ws.slice(i);
       continue;
     }
+    if (OPAQUE.has(b)) {
+      // The command line is an argument of a program we cannot unwrap (watch, flock, su -c, busybox, script, parallel ...): judge each word as a command line, and the words as a command.
+      const rest = ws.slice(1);
+      for (const w of rest) { const r = gitReasonIn(w.t, depth + 1); if (r) return r; }
+      const r2 = gitReasonOf(rest, depth + 1);
+      if (r2) return r2;
+      wrapped = true;
+      break;
+    }
+    if (b === 'eval') {
+      const r = gitReasonIn(ws.slice(1).map((w) => w.t).join(' '), depth + 1);
+      if (r) return r;
+      wrapped = true;
+      break;
+    }
     if (SHELLS.has(b)) {
-      if (depth > 4) return null;
-      for (let j = k + 1; j < words.length; j++) {
-        if (/^-[a-z]*c[a-z]*$/i.test(words[j].t) && words[j + 1]) return gitReasonIn(words[j + 1].t, depth + 1);
+      for (let j = 1; j < ws.length; j++) {
+        if (/^-[a-z]*c[a-z]*$/i.test(ws[j].t) && ws[j + 1]) return gitReasonIn(ws[j + 1].t, depth + 1);
       }
       return null;
     }
-    if (b !== 'git') return null;
-    const rest = words.slice(k + 1).map((w) => w.t);
-    let i = 0;
-    while (i < rest.length && rest[i].startsWith('-')) i += GIT_ARG_OPTS.has(rest[i]) ? 2 : 1;
-    const sub = (rest[i] || '').toLowerCase();
-    if (sub === 'push') return 'git push stays with the lead';
-    if (sub === 'reset' && rest.slice(i + 1).some((a) => a === '--hard')) return 'git reset --hard stays with the lead';
-    if (sub === 'clean') return 'git clean stays with the lead';
-    return null;
+    if (b === 'find') {
+      for (let j = 1; j < ws.length; j++) {
+        if (!FIND_EXEC.has(ws[j].t)) continue;
+        let e = j + 1;
+        while (e < ws.length && ws[e].t !== ';' && ws[e].t !== '\;' && ws[e].t !== '+') e++;
+        const r = gitReasonOf(ws.slice(j + 1, e), depth + 1);
+        if (r) return r;
+      }
+      return null;
+    }
+    if (b === 'git') return gitSub(ws.slice(1).map((w) => w.t));
+    break;
+  }
+  if (wrapped) {
+    for (let j = 0; j < ws.length; j++) {
+      if (bname(ws[j].t) === 'git') { const r = gitSub(ws.slice(j + 1).map((w) => w.t)); if (r) return r; }
+    }
   }
   return null;
 }
+const PUSH_TEXT = /\bgit\b[^\n]*\bpush\b/i;
 function gitReasonIn(text, depth = 0) {
-  for (const c of parseCommands(String(text), 'bash', depth, { nextChain: 0, steps: 0 })) {
+  const cmds = parseCommands(String(text), 'bash', depth, { nextChain: 0, steps: 0 });
+  for (const c of cmds) {
     const r = gitReasonOf(c.words, depth);
     if (r) return r;
   }
+  // `echo git push | sh`: a shell that reads its command from stdin or a script file has no text to unwrap; a push named anywhere beside it is refused.
+  const bareShell = cmds.some((c) => { const k = skipLead(c.words, 0); const w = c.words.slice(k); return w.length && SHELLS.has(bname(w[0].t)) && !w.slice(1).some((x) => /^-[a-z]*c[a-z]*$/i.test(x.t)); });
+  if (bareShell && PUSH_TEXT.test(String(text))) return 'git push stays with the lead (a shell fed a push on stdin)';
   return null;
+}
+// Backstop that does not read the command text: every git the worker runs gets url.<x>.pushInsteadOf entries (git's own env config,
+// GIT_CONFIG_COUNT/KEY_n/VALUE_n) that rewrite the push URL of every remote form we can name to an unknown scheme, so `git push` fails in git
+// itself ("'remote-pushblocked' is not a git command"), through any wrapper, script, alias or shell. Fetch and clone are untouched.
+// Not covered: a push to a bare relative directory name or a scp-like host:path (the text guard above is the first line there).
+export function gitPushBlockEnv() {
+  const prefixes = ['https://', 'http://', 'ssh://', 'git://', 'file://', 'ftp://', 'ftps://', 'HTTPS://', 'HTTP://', 'SSH://', 'GIT://', 'FILE://', 'git+ssh://', 'ssh+git://', 'Https://', 'Http://', 'Ssh://', 'git@', '/', '.', '\\', '~'];
+  for (const l of 'abcdefghijklmnopqrstuvwxyz') prefixes.push(`${l}:`, `${l.toUpperCase()}:`);
+  const e = { GIT_CONFIG_COUNT: String(prefixes.length) };
+  prefixes.forEach((p, n) => { e[`GIT_CONFIG_KEY_${n}`] = 'url.pushblocked://api-worker-no-push/.pushInsteadOf'; e[`GIT_CONFIG_VALUE_${n}`] = p; });
+  return e;
 }
 // null when the command is fine; else the reason. Backs the PreToolUse hook (permission rules alone miss option-order variants).
 export function gitDenyReason(command) {
+  // The backstop lives in GIT_CONFIG_*; a command that names it (to unset or change it) is refused.
+  if (/GIT_CONFIG/i.test(String(command ?? ''))) return 'GIT_CONFIG_* is part of the push block and may not be touched';
   try { return gitReasonIn(command); } catch { return 'the git command could not be checked'; }
 }
 const STRIP_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', REVIEWER_SESSION_ENV];
@@ -154,6 +243,22 @@ export function envDumpReason(command, shell = 'bash') {
 
 // The credential files the Bash patterns (DUMP_PATTERNS) cover, for the Read/Grep/Glob path inputs.
 const CRED_PATH = /(?:^|\/)(?:\.ssh|\.aws)(?:\/|$)|(?:^|\/)(?:\.npmrc|\.netrc|\.pypirc|\.git-credentials|\.credentials\.json)$|\/\.claude\/\.cred|\/gh\/hosts\.yml$/i;
+const ROOT_DIR = /^(?:\/|~\/?|[A-Za-z]:\/?)$/;
+const samePathKey = (p) => { const n = String(p).replace(/\\/g, '/').replace(/\/+$/, ''); return process.platform === 'win32' ? n.toLowerCase() : n; };
+// null when a Read/Grep/Glob path or glob is fine; else the reason. A search root of /, ~, the home dir or a drive root would recurse into /proc
+// and credentials. ~, $HOME, ${HOME} and %USERPROFILE% are expanded first and .. is resolved, so ~/../.. is judged as the root it is.
+export function pathReason(value, cwd, allow = {}) {
+  const base = cwd || process.cwd();
+  const raw = expandHome(value);
+  const target = raw ? normPath(raw, base) : '';
+  const dir = raw ? normPath(staticDir(raw) || '.', base) : '';
+  const home = normPath('~', '/');
+  const probes = [raw, target, dir];
+  if (probes.some((p) => CRED_PATH.test(p))) return 'credential files are off limits';
+  if (probes.some((p) => /^\/proc(?:\/|$)/.test(p))) return '/proc is off limits (it holds the process environment)';
+  if (raw && (ROOT_DIR.test(raw.trim()) || ROOT_DIR.test(target) || ROOT_DIR.test(dir) || isUnder(home, target) || isUnder(home, dir))) return 'a search root of /, ~ (the home dir or a parent of it) or a drive root is off limits (it would reach /proc and credentials)';
+  return raw ? accessReason(value, base, 'read', allow) : null;
+}
 const SHELL_TOOLS =new Set(['Bash', 'PowerShell']);
 // PreToolUse hook callback: no tool runs before the init message proved the auth source; shells are checked for env dumps.
 export function makeGuardHooks(state) {
@@ -161,14 +266,34 @@ export function makeGuardHooks(state) {
   const cb = async (input) => {
     if (!state.authOk) return deny('the run has not been verified to use the API key; no tool may run');
     const name = String((input && input.tool_name) || '');
+    if (state.mode === 'plan') {
+      if (name === 'Bash' || name === 'PowerShell' || name === 'Edit' || name === 'MultiEdit' || name === 'NotebookEdit') { state.denied.push(`plan mode: ${name} is off`); return deny(`blocked: ${name} is not available in plan mode (read, search and write the plan file only)`); }
+      if (name === 'Write') {
+        const ti = (input && input.tool_input) || {};
+        const t = ti.file_path ? samePathKey(resolve(state.cwd || process.cwd(), String(ti.file_path))) : '';
+        if (!state.planFile || t !== samePathKey(state.planFile)) { state.denied.push('plan mode: Write outside the plan file'); return deny('blocked: in plan mode Write is allowed only to the plan file'); }
+      }
+    }
+    const allow = { allowRead: state.allowRead || [], allowWrite: state.allowWrite || [] };
+    if (state.mode !== 'plan' && (name === 'Write' || name === 'Edit' || name === 'MultiEdit')) {
+      const ti = (input && input.tool_input) || {};
+      const p = ti.file_path || ti.path;
+      const why = p ? accessReason(p, state.cwd || process.cwd(), 'write', allow) : null;
+      if (why) { state.denied.push(why); return deny(`blocked: ${why}`); }
+    }
     if (name === 'Read' || name === 'Grep' || name === 'Glob') {
       const ti = input.tool_input || {};
-      const raw = String(ti.file_path || ti.path || '').replace(/\\/g, '/');
-      const target = raw ? resolve(state.cwd || process.cwd(), raw).replace(/\\/g, '/') : '';
-      if (CRED_PATH.test(target) || CRED_PATH.test(raw)) { state.denied.push('credential files are off limits'); return deny('blocked: credential files are off limits'); }
-      if (/^\/proc(?:\/|$)/.test(target) || /^\/proc(?:\/|$)/.test(raw)) { state.denied.push('/proc is off limits'); return deny('blocked: /proc is off limits (it holds the process environment)'); }
+      const fields = name === 'Read' ? [ti.file_path, ti.path] : name === 'Grep' ? [ti.path, ti.glob] : [ti.path, ti.pattern];
+      for (const f of fields) {
+        let why = f ? pathReason(f, state.cwd, allow) : null;
+        // Plan mode can fetch from the web: credential-like names (.env*, *.pem, *.key, *token*) are off limits everywhere, not only in allowed dirs.
+        if (!why && f && state.mode === 'plan') why = denyNameReason(normPath(f, state.cwd || process.cwd())) || denyNameReason(normPath(staticDir(expandHome(f)) || '.', state.cwd || process.cwd()));
+        if (why) { state.denied.push(why); return deny(`blocked: ${why}`); }
+      }
     }
     if (SHELL_TOOLS.has(name)) {
+      const pr = bashPathReason(input.tool_input && input.tool_input.command, state.cwd, allow);
+      if (pr) { state.denied.push(pr); return deny(`blocked: ${pr}`); }
       const git = gitDenyReason(input.tool_input && input.tool_input.command);
       if (git) { state.denied.push(git); return deny(`blocked: ${git}. Commit only; the lead pushes.`); }
       const why = envDumpReason(input.tool_input && input.tool_input.command, name === 'PowerShell' ? 'powershell' : 'bash');
@@ -204,9 +329,16 @@ export function cliCredits(baseEnv = process.env, workspaceId = '') {
 
 export function workerEnv({ key, workspace, base = process.env, configDir = '' }) {
   const e = sdkEnv({ key, workspace, base, configDir });
-  for (const k of Object.keys(e)) if (STRIP_ENV.includes(k.toUpperCase())) delete e[k];
-  return e;
+  for (const k of Object.keys(e)) if (STRIP_ENV.includes(k.toUpperCase()) || /^GIT_CONFIG_/i.test(k)) delete e[k];
+  return { ...e, ...gitPushBlockEnv() };
 }
+
+export const planSystem = (maxTurns) => [
+  'You are a planner running on an API worker. The brief is your task: research the repository and the web, then write the plan to the plan file named in the brief or the command, and nothing else.',
+  `You have about ${Math.max(1, maxTurns - 3)} tool turns. You can read, search and fetch; Write works for the plan file only; there is no shell and no Edit.`,
+  'Never print or look for secrets or credential files.',
+  'Your final message is the report the lead reads: say what the plan covers, the plan file path, and anything you could not finish.',
+].join(' ');
 
 export const workerSystem = (maxTurns) => [
   'You are a writer running on an API worker. The brief is your task: do it exactly, in your working directory (a git worktree), and nothing else.',
@@ -215,13 +347,14 @@ export const workerSystem = (maxTurns) => [
   'Your final message is the report the lead reads: say what you did, the files changed, the commands you ran and their results, and anything you could not finish.',
 ].join(' ');
 
-export function workerOptions({ cwd, modelId, key, workspace, base = process.env, configDir = '', maxUsd, maxTurns, abortController, hooks }) {
-  const tools = [...WORKER_TOOLS];
+export function workerOptions({ cwd, modelId, key, workspace, base = process.env, configDir = '', maxUsd, maxTurns, abortController, hooks, mode = 'write', allowRead = [], allowWrite = [] }) {
+  const plan = mode === 'plan';
+  const tools = [...(plan ? PLAN_TOOLS : WORKER_TOOLS)];
   return {
     cwd, model: modelId, env: workerEnv({ key, workspace, base, configDir }),
     settingSources: ['project'], plugins: [], skills: [], mcpServers: {}, strictMcpConfig: true,
-    systemPrompt: { type: 'preset', preset: 'claude_code', append: workerSystem(maxTurns) },
-    tools, allowedTools: [...tools], disallowedTools: [...WORKER_DISALLOWED, ...SDK_READ_DENY, ...WORKER_BASH_DENY],
+    systemPrompt: { type: 'preset', preset: 'claude_code', append: (plan ? planSystem : workerSystem)(maxTurns) },
+    tools, allowedTools: [...tools, ...(plan ? [] : allowWrite.flatMap((d) => { const r = String(d).replace(/^([a-z]):/i, (m, l) => `//${l.toLowerCase()}`).replace(/^\/(?!\/)/, '//'); return ['Write', 'Edit'].map((t) => `${t}(${r}/**)`); }))], disallowedTools: [...(plan ? PLAN_DISALLOWED : []), ...WORKER_DISALLOWED, ...(allowRead.length || allowWrite.length ? ALLOW_READ_DENY : SDK_READ_DENY), ...WORKER_BASH_DENY],
     permissionMode: 'dontAsk', maxTurns, maxBudgetUsd: maxUsd, persistSession: false,
     settings: { env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } }, // a project settings `env` block must not redirect the key
     ...(abortController ? { abortController } : {}), ...(hooks ? { hooks } : {}),
@@ -239,25 +372,32 @@ const textOf = (m) => (m && Array.isArray(m.content) ? m.content.filter((b) => b
 // Never throws. Returns { status, ok, exit, text, usd, turns, model, apiKeySource, reason, booked, denied }.
 // status: done | stopped_budget | stopped_turns | failed | refused_key | refused_workspace | refused_model | refused_budget | refused_auth
 export async function runWorker({
-  prompt, cwd = process.cwd(), model = 'sonnet', maxUsd = DEFAULT_MAX_USD, maxTurns = DEFAULT_MAX_TURNS, workspaceId = '', meta = 'worker',
+  prompt, cwd = process.cwd(), model = null, mode = 'write', planFile = '', maxUsd = DEFAULT_MAX_USD, maxTurns = DEFAULT_MAX_TURNS, workspaceId = '', meta = 'worker',
   env = process.env, cfg = null, credits = null, sdk = null, load = loadSdk, sdkVersion = DEFAULT_SDK_VERSION,
-  opusPolicy = null, hungMs = HUNG_MS, configDir = null,
+  opusPolicy = null, hungMs = HUNG_MS, configDir = null, allowRead = [], allowWrite = [],
 }) {
+  const allowR = normDirs(allowRead, cwd);
+  const allowW = normDirs(allowWrite, cwd);
   let key = '';
+  const plan = mode === 'plan';
+  model = model || (plan ? 'opus' : 'sonnet');
+  const planAbs = plan && planFile ? resolve(cwd, String(planFile)) : '';
   const out = (status, extra = {}) => {
     const refused = status.startsWith('refused_');
     return {
       status, ok: status === 'done', exit: status === 'done' ? EXIT.done : refused ? EXIT.refused : EXIT.failed, usd: 0, turns: 0, model: String(model),
-      apiKeySource: null, booked: false, denied: [], ...extra,
+      apiKeySource: null, booked: false, denied: [], mode: plan ? 'plan' : 'write', ...(plan ? { planFile: planAbs } : {}), allow_read: allowR, allow_write: allowW, ...extra,
       reason: scrub(extra.reason || '', key).replace(/\s+/g, ' ').slice(0, 300), text: scrub(extra.text || '', key),
     };
   };
   try {
-    // 1. Model: Opus does not write (opus_writer_policy).
+    if (!MODES.includes(mode)) return out('refused_model', { reason: `unknown mode ${mode} (write or plan)` });
+    if (plan && !planAbs) return out('refused_model', { reason: 'plan mode needs a plan file' });
+    // 1. Model: Opus does not write (opus_writer_policy); plan mode may use it.
     const policy = String(opusPolicy ?? opt('opus_writer_policy', 'sonnet')).toLowerCase();
     const m = resolveModel(model);
     // Allow-list: only sonnet and haiku write; Opus and anything else (a new family included) need opus_writer_policy allow.
-    if (!/sonnet|haiku/i.test(m.id) && policy !== 'allow') return out('refused_model', { reason: `Opus plans, Sonnet writes (opus_writer_policy): an API worker runs on sonnet or haiku only, not ${m.id}; use sonnet` });
+    if (!plan && !/sonnet|haiku/i.test(m.id) && policy !== 'allow') return out('refused_model', { reason: `Opus plans, Sonnet writes (opus_writer_policy): an API worker runs on sonnet or haiku only, not ${m.id}; use sonnet` });
     if (!priceUsage({ input: 1 }, m.id)) return out('refused_model', { reason: `no price for model ${m.id} in config/model-pricing.json, so its cost cannot be metered` });
     // 2. Key.
     cfg = cfg || loadConfig();
@@ -275,7 +415,7 @@ export async function runWorker({
     // 5. The SDK.
     try { sdk = sdk || await load({ version: sdkVersion }); } catch (e) { return out('refused_auth', { reason: `the Agent SDK is not available: ${String((e && e.message) || e)}`.slice(0, 200) }); }
 
-    const state = { authOk: false, denied: [], cwd };
+    const state = { authOk: false, denied: [], cwd, mode: plan ? 'plan' : 'write', planFile: planAbs, allowRead: allowR, allowWrite: allowW };
     const ac = new AbortController();
     let abortReason = null;
     let wake = () => {};
@@ -285,12 +425,14 @@ export async function runWorker({
     const armHung = () => { clearTimeout(hungTimer); hungTimer = setTimeout(() => abort('hung'), Math.max(1, hungMs)); if (hungTimer.unref) hungTimer.unref(); };
     let cd = configDir;
     if (cd === null) { try { cd = stateFile(join('sdk', 'config-worker')); mkdirSync(cd, { recursive: true }); } catch { cd = ''; } }
-    const options = workerOptions({ cwd, modelId: m.id, key, workspace: ws, base: env, configDir: cd, maxUsd, maxTurns, abortController: ac, hooks: makeGuardHooks(state) });
+    const options = workerOptions({ cwd, modelId: m.id, key, workspace: ws, base: env, configDir: cd, maxUsd, maxTurns, abortController: ac, hooks: makeGuardHooks(state), mode: plan ? 'plan' : 'write', allowRead: allowR, allowWrite: allowW });
 
     const seen = new Map();
     let usd = 0; let turns = 0; let lastText = ''; let result = null; let apiKeySource = null; let authFailed = false;
     armHung();
-    const q = sdk.query({ prompt, options });
+    const q = sdk.query({ prompt: plan ? `Plan file (write the plan here, the only file you may Write): ${planAbs}
+
+${prompt}` : prompt, options });
     const it = q[Symbol.asyncIterator]();
     try {
       for (;;) {
@@ -361,20 +503,36 @@ export async function main(argv, { write = (s) => process.stdout.write(`${s}\n`)
   const a = {};
   for (let i = 0; i < rest.length; i++) {
     if (!rest[i].startsWith('--')) { write(`unexpected argument ${rest[i]}`); return EXIT.usage; }
-    a[rest[i].slice(2)] = rest[++i];
+    const k = rest[i].slice(2);
+    if (k === 'allow-read' || k === 'allow-write') {
+      const v = rest[++i];
+      if (v === undefined || v.startsWith('--')) { write(`--${k} needs a directory`); return EXIT.usage; }
+      (a[k] = a[k] || []).push(v);
+    } else a[k] = rest[++i];
+  }
+  const allowCwd = a.cwd ? resolve(a.cwd) : process.cwd();
+  for (const k of ['allow-read', 'allow-write']) {
+    for (const d of a[k] || []) {
+      const bad = validateAllowDir(d, allowCwd);
+      if (bad) { write(`--${k}: ${bad}`); return EXIT.usage; }
+      if (k === 'allow-write' && isUnder(normPath(d, allowCwd), claudeDir())) { write(`--allow-write ${d}: ${WRITE_BLOCKED}`); return EXIT.usage; }
+    }
   }
   const num = (v, d) => (v === undefined ? d : Number(v));
   const maxUsd = num(a['max-usd'], Number(opt('api_workers_max_usd', DEFAULT_MAX_USD)) || DEFAULT_MAX_USD);
   const maxTurns = num(a['max-turns'], DEFAULT_MAX_TURNS);
-  if (cmd !== 'run' || !a['brief-file'] || !a.cwd || !(maxUsd > 0) || !(maxTurns > 0)) {
-    write('usage: api-worker.mjs run --brief-file <f> --cwd <worktree> [--model sonnet] [--max-usd 3] [--max-turns 60] [--workspace-id <id>] [--result-file <f>] [--meta <label>]');
+  const mode = a.mode === undefined ? 'write' : a.mode;
+  const modeBad = !MODES.includes(mode) || (mode === 'plan' && !a['plan-file']) || (mode === 'write' && a['plan-file'] !== undefined);
+  if (cmd !== 'run' || !a['brief-file'] || !a.cwd || !(maxUsd > 0) || !(maxTurns > 0) || modeBad) {
+    if (modeBad && cmd === 'run') write(mode === 'plan' ? '--mode plan needs --plan-file <path>' : mode === 'write' ? '--plan-file is only valid with --mode plan' : `--mode must be write or plan, not ${mode}`);
+    write('usage: api-worker.mjs run --brief-file <f> --cwd <worktree> [--mode write|plan --plan-file <f> (plan only)] [--model sonnet (opus in plan mode)] [--max-usd 3] [--max-turns 60] [--workspace-id <id>] [--result-file <f>] [--meta <label>] [--allow-read <dir>]... [--allow-write <dir>]...');
     return EXIT.usage;
   }
   let prompt;
   try { prompt = readFileSync(a['brief-file'], 'utf8'); } catch { write(`cannot read the brief file ${a['brief-file']}`); return EXIT.usage; }
   if (!prompt.trim()) { write('the brief file is empty'); return EXIT.usage; }
-  const r = await runWorker({ prompt, cwd: resolve(a.cwd), model: a.model || 'sonnet', maxUsd, maxTurns, workspaceId: a['workspace-id'] || '', meta: a.meta || 'worker', env, ...inject });
-  const summary = { status: r.status, cost_usd: Number(r.usd.toFixed(4)), turns: r.turns, model: r.model, apiKeySource: r.apiKeySource, booked: r.booked, denied_commands: r.denied.length, reason: r.reason || undefined };
+  const r = await runWorker({ prompt, cwd: resolve(a.cwd), model: a.model || (mode === 'plan' ? 'opus' : 'sonnet'), mode, planFile: mode === 'plan' ? resolve(resolve(a.cwd), a['plan-file']) : '', maxUsd, maxTurns, workspaceId: a['workspace-id'] || '', allowRead: a['allow-read'] || [], allowWrite: a['allow-write'] || [], meta: a.meta || 'worker', env, ...inject });
+  const summary = { status: r.status, cost_usd: Number(r.usd.toFixed(4)), turns: r.turns, model: r.model, mode: r.mode, ...(r.mode === 'plan' ? { planFile: r.planFile } : {}), apiKeySource: r.apiKeySource, booked: r.booked, allow_read: r.allow_read, allow_write: r.allow_write, denied_commands: r.denied.length, reason: r.reason || undefined };
   if (a['result-file']) { try { writeFileSync(a['result-file'], `${JSON.stringify({ ...summary, text: r.text }, null, 2)}\n`); } catch { /* the stdout copy stands */ } }
   if (r.text) write(r.text);
   write(`API-WORKER ${JSON.stringify(summary)}`);

@@ -840,8 +840,8 @@ test('recommend.mjs shows both legs for an Opus-resolving writer type, one short
     const write = r.stdout.split('\n').filter((l) => /^write leg:/.test(l));
     assert.equal(plan.length, 1, type);
     assert.equal(write.length, 1, type);
-    assert.match(plan[0], /agent-companion:ac-opus-(medium|high|xhigh) \(opus\/\w+\), read-only, writes <task>-plan\.md; brief TYPE: .* \+ ROLE: other$/, type);
-    assert.match(write[0], /agent-companion:ac-sonnet-high \(sonnet\/high\), works from that plan; brief TYPE: .* \+ ROLE: writer \(fixer for a fix\)$/, type);
+    assert.match(plan[0], /agent-companion:ac-opus-(medium|high|xhigh) \(opus\/\w+\), read-only, writes <task>-plan\.md; brief TYPE: .* \+ ROLE: other(?:; API form: .*)?$/, type);
+    assert.match(write[0], /agent-companion:ac-sonnet-high \(sonnet\/high\), works from that plan; brief TYPE: .* \+ ROLE: writer \(fixer for a fix\)(?:; API form: .*)?$/, type);
     assert.doesNotMatch(r.stdout, /^spawn as:/m, `${type}: the two legs replace the single spawn line`);
     assert.match(r.stdout, /protocol in agent-companion:ac-sonnet-high's body/, `${type}: the write leg carries the protocol`);
     const js = JSON.parse(runScript('scripts/recommend.mjs', ['--type', type, '--json']).stdout);

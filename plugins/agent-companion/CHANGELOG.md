@@ -2,6 +2,17 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.56 — 2026-11-15
+
+- **New: Opus plan mode for the API runner.** `api-worker.mjs --mode plan --plan-file <path>` runs a planning brief with read-only tools and allows Opus (Opus still does not write).
+- **New: `--allow-read` / `--allow-write`** let a worker read or write named directories outside the worktree. Both are read-only under `~/.claude`: `--allow-write` there exits 2.
+- **Fix: search roots.** `~`, `$HOME` and `%USERPROFILE%` are expanded, `..` is resolved, `/` and drive roots are handled, and an absolute Glob pattern is checked.
+- **Fix: the git-push text guard covers more wrapper forms**, including `git send-pack` and `git http-push`.
+- **New: an env backstop makes pushes fail at the transport level.** The worker env carries git config that rewrites push URLs to an unknown scheme, so a push fails inside git even when a wrapper gets past the text guard.
+- **Changed: the recommend leg lines show the API forms** of the commands.
+- **Known limits:** see the README (a mixed-case URL scheme such as `hTtPs://` is not rewritten by the env backstop; a hyphenated `git-send-pack` on PATH is not seen by the text guard; the env block needs git 2.31 or later).
+- Tests: `tests/api-worker.test.mjs`.
+
 ## 0.31.55 — 2026-11-15
 
 - **New: status and decide use the money the Admin API says was billed.** `api-credits.mjs status` and `decide` now read the real billed spend from the Anthropic Admin API (cost report, with a 10-second deadline and a 5-minute pause after a failure) and add what was booked since the last billed day. If billing cannot be read, they fall back to the booked ledger and say so. Why: the booked figure alone drifted from the invoice.

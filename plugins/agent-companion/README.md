@@ -1219,6 +1219,46 @@ node "<plugin>/scripts/api-worker.mjs" run --brief-file <brief.md> --cwd <worktr
 
 **Where the cost shows up.** The run sends `anthropic-workspace-id` (environment variable `AC_API_WORKERS_WORKSPACE_ID`, or the option `api_workers_workspace_id`, or `--workspace-id`), so the Console bills it to that workspace; with no id the runner refuses, because a personal key is not tied to a workspace. Before each run it asks `api-credits.mjs decide workers` and stops if the answer is `plan`; after the run it books `total_cost_usd` under `workers` (`api-credits.mjs record workers`), so `api-credits.mjs status` lists it as booked spend under `workers`. The category's share of the budget is `workers=0.3` in `api_credits_shares`. For the billed-spend attribution the workers category maps to the workspace id the runner sends (`AC_API_WORKERS_WORKSPACE_ID`, `api_workers_workspace_id` or the `--workspace-id` flag, which the runner hands to the `decide` and `record` child as `AC_API_WORKERS_WORKSPACE_ID`; it must be a `wrkspc_` id) unless `api_credits_category_workspaces` sets it; `status` names any category whose workspace does not resolve (its spend is then booked only).
 
+### Plan mode
+
+The plan leg of a two-leg route can run on the API credits too:
+
+```
+node "<plugin>/scripts/api-worker.mjs" run --mode plan --plan-file <plan.md> --brief-file <brief.md> --cwd <worktree> [--model opus] [--max-usd 3] [--max-turns 60] [--result-file <out.json>]
+```
+
+- **Tools:** Read, Grep, Glob, WebFetch, WebSearch and Write. No Bash and no Edit (disallowed, and denied again in the PreToolUse hook).
+- **Write goes to the plan file only.** The hook resolves the path (relative and `..` forms too) and compares it with the normalised absolute `--plan-file`; any other path is denied. `--plan-file` is required in plan mode (exit 2 without it) and invalid in write mode (`--mode write` is the default).
+- **Opus is allowed** in plan mode whatever `opus_writer_policy` says, and is the default model there (`--model opus`). Write mode keeps Sonnet as its default and its Opus refusal.
+- **Same gates as write mode:** the `ANTHROPIC_API_KEY` init check (tools denied until verified), the workspace header, `api-credits.mjs decide workers` before the run and the booking under `workers` after it, also for stopped or failed runs. The credential-path and `/proc` checks on Read, Grep and Glob apply too.
+- **Result:** the `API-WORKER` line and the `--result-file` JSON carry `mode` and `planFile` (the absolute plan file path).
+
+### Opt-in path allowances (`--allow-read`, `--allow-write`)
+
+A worker may not touch `~/.claude` (settings, credentials, state), which also blocks `ls`, Glob and Read in a worktree that lives there. Two repeatable flags open one directory each; both are **off by default**, and without them nothing changes.
+
+```
+node "<plugin>/scripts/api-worker.mjs" run ... --cwd <worktree> --allow-read <dir> [--allow-read <dir2>] --allow-write <worktree>
+```
+
+- `--allow-read <dir>`: Read, Grep, Glob and read-only Bash (`ls`, `cat`, `head`, `git log` and similar; no redirects, no `$(...)`) may touch paths under `<dir>`, even inside `~/.claude`. A cwd under `~/.claude` is fine for a read-only run with this flag.
+- `--allow-write <dir>`: opens a directory **outside** `~/.claude` for Write and Edit (an ordinary `Write(//<dir>/**)` permission rule; no bypass). With a dir under `~/.claude` the runner exits 2 before any API call: "Claude Code blocks writes under ~/.claude; write output to a folder outside it."
+- **Allowances under `~/.claude` are read-only.** Claude Code itself treats paths under `~/.claude` as sensitive and refuses Write, Edit and Bash redirects there (measured 0.31.56, in every permission mode), and this plugin does not route around that: the guard denies any write under `~/.claude` with the same message, the runner stays on the SDK `dontAsk` mode with the PreToolUse guard, and nothing ships a permission bypass. Keep the output folder outside `~/.claude`, or have the worker return the text in its final message.
+- **Always denied, even inside an allowed dir:** `.credentials.json`; `settings.json` and `settings.local.json` anywhere under `~/.claude`; any `secrets` directory; `.env*`, `*.pem`, `*.key`; file names containing `token` or `credential` (any case); the admin-key store (`api_admin_key_source`, default `<state root>/secrets/anthropic-admin-key.dpapi`). `--allow-read ~/.claude` therefore still denies all of these. The env-dump and `git push` guards are unchanged.
+- **Matching:** paths are normalised first (`~`, `..`, mixed slashes, drive-letter case) and compared on a path boundary (`/a/b` does not cover `/a/bc`). `/`, `~`, the home dir and a drive root are refused with exit 2.
+- **Record:** the `API-WORKER` line and `--result-file` carry `allow_read` and `allow_write` (normalised arrays, empty by default).
+- Limit: a Grep or Glob over a whole allowed directory cannot be filtered per file by the hook; the SDK deny rules for `settings.json`, `.credentials.json` and `secrets/` under `~/.claude` back it up. This is a guard rail, not a sandbox.
+
+Path guard (both modes): a Read, Grep or Glob search root is expanded first (`~`, `$HOME`, `${HOME}`, `%USERPROFILE%`) and `..` is resolved; `/`, a drive root, the home dir or any parent of it (`~/..`, `~/../..`), and an absolute Glob pattern that reaches one of them (or whose literal prefix names credentials or `/proc`) are denied.
+
+`git push` guard, two layers. (1) The text guard sees through wrappers with options (`nice -n`, `time -p`, `timeout -s`, `env -u`, `env -S "<command>"`, `xargs -n`, `command -p`, `stdbuf -oL`), `eval`, `sh -c`/`bash -c`, `find -exec`, `watch`, `flock`, `su -c`, `busybox`, `script`, `parallel`, a shell fed a push on stdin (`echo git push | sh`) and `git -c alias.*`. (2) A backstop that does not read the command: the worker's env carries git config (`GIT_CONFIG_COUNT`, `url.<x>.pushInsteadOf`) that rewrites the push URL of every remote form (`https://`, `ssh://`, `file://`, `git@`, `/`, `.`, drive letters) to an unknown scheme, so `git push` fails inside git from any wrapper, script file or alias; fetch and clone are untouched. Known limits: the backstop does not cover a push to a bare relative directory name or a scp-like `host:path`; the text guard refuses any command that names `GIT_CONFIG_*`, `git config`/`git -c` of aliases, `url.*`, push URLs, hooks or credential settings, but a worker that writes a script or runs `node -e`/`python -c` can still reach `git` without the text guard seeing the push, and git picks the longest `pushInsteadOf` prefix across config scopes, so a repo-local longer rule would win over the env block. The env block needs git 2.31 or later (older git ignores it silently). The worker env is an allow-list (no `SSH_AUTH_SOCK`, `GIT_ASKPASS`), but a credential helper in the user's global git config still applies. Treat both layers as best-effort guard rails, not a sandbox: the lead pushes, and the worker's credentials are the real limit.
+
+**Known limits (0.31.56).** The git text guard also refuses `git send-pack` and `git http-push` (plumbing pushes the env block does not rewrite); a worker that Writes a longer `pushInsteadOf` into a git config file can undo the env block (best-effort, as above); in plan mode the hook leaves a plan file under `~/.claude` to Claude Code's own refusal. A Grep or Glob over a whole allowed directory returns files whose names the hook never sees (`.env*`, `*.pem`, `*.key`, `*token*`). "Read-only" Bash under `--allow-read` is a name allow-list (`node`, `sort -o`, `git --output`, `rg --pre` can still write or run code), and `~`, `$HOME`, variables and globs are not expanded in Bash paths. In plan mode WebFetch and WebSearch are on and Read is not confined to non-secret names outside an allowed dir, so a prompt-injected page could steer a read of a worktree secret. The plan file path is not checked against credential names. `~/.Claude` case variants are not folded on macOS. A prompt-text match: a later bare `git` word after any wrapper is judged too (`timeout 60 npm test -- git push` is refused).
+
+- Known limit (0.31.56): the env backstop rewrites URL schemes case-sensitively, so a mixed form such as `hTtPs://` or `sSh://` is not rewritten; only the text guard catches it.
+- Known limit (0.31.56): the text guard matches the `git` binary name only, so a hyphenated `git-send-pack`, `git-http-push` or `git-push` on PATH is not seen by it (normally they live in git-core, off PATH).
+- Known limit (0.31.56): tests cover `git send-pack` and `-C x http-push` as denied cases, but not `git+ssh://` or `ssh+git://` in the env backstop.
+
 ## API spend watch (what the credits actually billed)
 
 The governor's ledger is the plugin's own record of API-credit spend. The spend watch checks it against the organization's cost report, so a runaway or an unrelated user of the same key does not go unnoticed. It needs an organization (only an organization has an Admin API) and an Admin API key (`sk-ant-admin...`); without one it reports `unavailable` and nothing else changes.
