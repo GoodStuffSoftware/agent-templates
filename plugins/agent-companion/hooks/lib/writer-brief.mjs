@@ -60,8 +60,7 @@ export function isWriterSpawn(type, role) {
 export function buildWriterClause(type, role, brief = '') {
   if (!isWriterSpawn(type, role)) return '';
   const text = String(brief ?? '');
-  // The block itself (the marker at a line start); a brief that only quotes the marker still gets the clause (0.31.58).
-  if (text.split(/\r\n|\n|\r/).some((l) => l.startsWith(WRITER_MARKER))) return '';
+  if (text.includes(WRITER_MARKER)) return '';
   const staged = countDeliverables(text) > STAGING_THRESHOLD;
   return `\n\n${WRITER_MARKER} ${HANDOFF_SENTENCE} ${TEST_SENTENCE}${staged ? ` ${STAGING_SENTENCE}` : ''}`;
 }

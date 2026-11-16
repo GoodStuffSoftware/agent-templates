@@ -34,7 +34,6 @@ export function scopeKind(type, role) {
 export function buildScopeClause(type, role, brief = '') {
   const kind = scopeKind(type, role);
   if (!kind) return '';
-  // The block itself (the marker at a line start); a brief that only quotes the marker still gets the clause (0.31.58).
-  if (String(brief).split(/\r\n|\n|\r/).some((l) => l.startsWith(SCOPE_MARKER))) return '';
+  if (String(brief).includes(SCOPE_MARKER)) return '';
   return `\n\n${SCOPE_MARKER} ${kind === 'writer' ? SCOPE_WRITER_CLAUSE : SCOPE_LOOKUP_CLAUSE}`;
 }

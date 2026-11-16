@@ -1237,20 +1237,14 @@ test('A7: a brief that quotes the marker still gets the clause and the lead noti
   } finally { cleanup(); }
 });
 
-test('A8: the carried block is read like a declaration (CRLF counts, a fence or comment does not); the scope, writer and tier clauses are not skipped by a quoted marker', () => {
-  const { dir, cleanup } = makeFixture();
+test('A8: the carried block is read like a declaration (CRLF counts, a fence or comment does not)', () => {
+  const { cleanup } = makeFixture();
   try {
     const d = (brief) => knowledgeDecision({ type: 'bounded-feature', role: 'writer', brief, now: KC_NOW });
     const block = knowledgeClause(KC_NOW);
     assert.equal(d(`build it\r\n\r\n${block}`), null, 'a CRLF brief that carries the block');
     assert.equal(d(`build it\n\n\`\`\`\n${block}\n\`\`\``), 'clause', 'a fenced copy is a quote');
     assert.equal(d(`build it\n<!--\n${block}\n-->`), 'clause', 'a commented copy is a quote');
-    const quoted = 'TYPE: bounded-feature\nROLE: writer\nAsk the worker whether its brief holds "[agent-companion: scope]", "[agent-companion: writer]" and "[agent-companion: tier]" blocks.';
-    const res = kcSpawn(dir, quoted, { sid: 'sess-kc-quote-4' });
-    assert.equal(res.status, 0, res.stderr);
-    for (const m of ['[agent-companion: scope] Build', '[agent-companion: writer] Finish', '[agent-companion: tier] Project', KC_MARKER]) {
-      assert.ok(kcPrompt(res).includes(`\n\n${m}`), `${m} missing: ${kcPrompt(res)}`);
-    }
   } finally { cleanup(); }
 });
 

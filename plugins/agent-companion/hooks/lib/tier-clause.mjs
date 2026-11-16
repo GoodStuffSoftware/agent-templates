@@ -84,8 +84,7 @@ export function applyTierClause(type, role, brief = '', cwd = process.cwd(), opt
     const kind = tierKind(type, role, text, !!opts.protocol, !!opts.planLeg);
     if (!kind) return none;
     let plan = null;
-    // The block itself (the marker at a line start); a brief that only quotes the marker still gets the clause (0.31.58).
-    if (text.split(/\r\n|\n|\r/).some((l) => l.startsWith(TIER_MARKER))) {
+    if (text.includes(TIER_MARKER)) {
       if (kind !== 'reviewer') return none;
       plan = reviewerPlan(text);
       if (!plan) return none;
