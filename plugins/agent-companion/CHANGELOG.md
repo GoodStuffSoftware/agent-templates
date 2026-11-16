@@ -2,6 +2,11 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.58 — 2026-11-16
+
+- **Fix: the knowledge check clause was skipped for any brief that mentioned its marker.** The "already appended" test looked for the bare text `[agent-companion: knowledge check]` anywhere in the brief, so a brief that only quoted it (for example a verification brief asking the worker whether it contains such a block) got no clause and no lead notice. The test now looks for the appended block itself (the marker followed by the clause's first words, at the start of a line). A re-spawned brief that already carries the block still gets no second one.
+- Tests: `tests/standing-rules.test.mjs` A7 (quoted marker gets the clause and the once-per-session notice, a carried block is not doubled, dated line and research type, through the spawn-guard entry point with a stdin payload and no option env).
+
 ## 0.31.57 — 2026-11-16
 
 - **New: the knowledge check, by task type (options `knowledge_check`, default on, and `knowledge_check_types`).** A brief whose `TYPE:` is `bounded-feature`, `bounded-feature-small`, `integration`, `debug-root-cause`, `critical-change`, `novel-design`, `large-refactor` or `long-autonomous-run` gets one clause (at most 350 characters): `[agent-companion: knowledge check] Before your first edit, run ONE WebSearch (or WebFetch of the official docs or changelog) on the main library or tool you use. Open your report "Knowledge check <YYYY-MM-DD>: confirmed" or "changed: <what>"; if it contradicts the brief, stop and report. No outside dependency: "Knowledge check: none needed (<why>)".` A brief that already has a line `Knowledge check YYYY-MM-DD:` dated today or yesterday (local date) gets nothing. Research, lookup, explore, survey, operate, mechanical-edit, verify, docs, code-review, reviewers and briefs with no `TYPE:` get nothing. Why by type: see `docs/adr/0007-knowledge-check-by-type.md` (builder types searched early in 0-4% of cases; no worker reported the check changing or contradicting its brief).

@@ -1212,6 +1212,31 @@ test('A6: knowledge_check off at the spawn guard: no clause, no notice', () => {
   } finally { cleanup(); }
 });
 
+// 0.31.58: the live miss. A brief that only MENTIONS the marker (a verification brief that asks the worker to look for the
+// block) was read as "already appended" and got no clause. Payload shape and entry point as hooks.json runs them: stdin
+// JSON, no CLAUDE_PLUGIN_OPTION_* env, a lead (no agent_id).
+test('A7: a brief that quotes the marker still gets the clause and the lead notice; a brief that carries the block does not get a second one', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const verify = `TYPE: bounded-feature-small\nROLE: other\n\nRead your brief and reply CLAUSE: yes|no (yes if it contains a block starting "${KC_MARKER}").`;
+    const a = kcSpawn(dir, verify, { sid: 'sess-kc-quote' });
+    assert.equal(a.status, 0, a.stderr);
+    assert.ok(kcPrompt(a).includes(`\n\n${knowledgeClause()}`), `clause missing: ${kcPrompt(a)}`);
+    assert.ok(kcCtx(a).includes(KC_LEAD_NOTICE), `notice missing: ${a.stdout}`);
+    const b = kcSpawn(dir, verify, { sid: 'sess-kc-quote' });
+    assert.ok(kcPrompt(b).includes(`\n\n${knowledgeClause()}`), 'the second spawn still gets the clause');
+    assert.ok(!kcCtx(b).includes(KC_LEAD_NOTICE), 'the notice goes once per session');
+    // a re-spawned brief that already ends in the appended block
+    const again = kcSpawn(dir, `TYPE: bounded-feature-small\nROLE: other\nbuild it\n\n${knowledgeClause()}`, { sid: 'sess-kc-quote-2' });
+    assert.equal(kcPrompt(again).split(KC_MARKER).length - 1, 1, 'one block, not two');
+    // the dated line and a research type, same entry point
+    const dated = kcSpawn(dir, `TYPE: bounded-feature-small\nROLE: other\nKnowledge check ${localDate()}: confirmed.\nbuild it`, { sid: 'sess-kc-quote-3' });
+    assert.ok(!kcPrompt(dated).includes(KC_MARKER) && !kcCtx(dated).includes(KC_LEAD_NOTICE));
+    const research = kcSpawn(dir, 'TYPE: research\nROLE: lookup\nfind it', { sid: 'sess-kc-quote-3' });
+    assert.ok(!kcPrompt(research).includes(KC_MARKER) && !kcCtx(research).includes(KC_LEAD_NOTICE));
+  } finally { cleanup(); }
+});
+
 const HOWTO_HITS = [
   'how do I set up the Gmail connector', 'How to configure the proxy for npm', 'give me the steps to install node',
   'walk me through enabling 2FA', 'what are the instructions for setting up SSO', 'how can we deploy this to Firebase',

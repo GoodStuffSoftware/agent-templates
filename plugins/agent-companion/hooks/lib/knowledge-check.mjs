@@ -19,6 +19,10 @@ import { opt, stateDir } from './context.mjs';
 import { declarationLines } from './brief-directives.mjs';
 
 export const KC_MARKER = '[agent-companion: knowledge check]';
+// The appended block, as it starts a line: the marker, then the clause's own first words. A brief that only MENTIONS the
+// marker (a verification brief that asks the worker to look for it, a quoted rule) is not "already appended": matching the
+// bare marker anywhere in the text suppressed the clause for exactly those briefs (0.31.57, fixed 0.31.58).
+const KC_APPENDED = /^[ \t]*\[agent-companion: knowledge check\] Before your first edit, run ONE WebSearch/m;
 // The shipped default: the builder types, where a stale idea of an API or a tool costs a rebuild.
 export const KC_DEFAULT_TYPES = [
   'bounded-feature', 'bounded-feature-small', 'integration', 'debug-root-cause',
@@ -78,7 +82,7 @@ export function knowledgeDecision({ type, role, brief, now } = {}) {
   if (!t || !knowledgeCheckTypes().includes(t)) return null;
   if (typeof role === 'string' && role.toLowerCase() === 'reviewer') return null;
   const text = String(brief ?? '');
-  if (text.includes(KC_MARKER)) return null; // already appended (a re-spawned brief)
+  if (KC_APPENDED.test(text)) return null; // the block itself is already there (a re-spawned brief)
   return hasFreshKnowledgeLine(text, now) ? 'reused' : 'clause';
 }
 
