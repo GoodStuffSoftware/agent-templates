@@ -22,7 +22,11 @@ export const KC_MARKER = '[agent-companion: knowledge check]';
 // The appended block, as it starts a line: the marker, then the clause's own first words. A brief that only MENTIONS the
 // marker (a verification brief that asks the worker to look for it, a quoted rule) is not "already appended": matching the
 // bare marker anywhere in the text suppressed the clause for exactly those briefs (0.31.57, fixed 0.31.58).
-const KC_APPENDED = /^[ \t]*\[agent-companion: knowledge check\] Before your first edit, run ONE WebSearch/m;
+const KC_APPENDED_HEAD = /^[ \t]*\[agent-companion: knowledge check\] Before your first edit, run ONE WebSearch/;
+// Read through declarationLines, so a block inside a code fence, a blockquote or an HTML comment (a quoted earlier brief) is not "already there".
+function carriesBlock(text) {
+  try { return declarationLines(text).some((l) => KC_APPENDED_HEAD.test(l)); } catch { return false; }
+}
 // The shipped default: the builder types, where a stale idea of an API or a tool costs a rebuild.
 export const KC_DEFAULT_TYPES = [
   'bounded-feature', 'bounded-feature-small', 'integration', 'debug-root-cause',
@@ -82,7 +86,7 @@ export function knowledgeDecision({ type, role, brief, now } = {}) {
   if (!t || !knowledgeCheckTypes().includes(t)) return null;
   if (typeof role === 'string' && role.toLowerCase() === 'reviewer') return null;
   const text = String(brief ?? '');
-  if (KC_APPENDED.test(text)) return null; // the block itself is already there (a re-spawned brief)
+  if (carriesBlock(text)) return null; // the block itself is already there (a re-spawned brief)
   return hasFreshKnowledgeLine(text, now) ? 'reused' : 'clause';
 }
 
