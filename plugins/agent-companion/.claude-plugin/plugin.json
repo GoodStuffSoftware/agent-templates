@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.56",
+  "version": "0.31.57",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -581,6 +581,18 @@
       "title": "Standing rules budget (characters)",
       "description": "Ceiling on the rendered rule block per injection. Rules past the ceiling are dropped and the count is stated, so a budget overrun is visible rather than silent.",
       "default": 3000
+    },
+    "knowledge_check": {
+      "type": "boolean",
+      "title": "Knowledge check",
+      "description": "Shipped default: on. Before a builder starts, one look at the current docs of what it will use. (1) A spawn brief whose TYPE is in knowledge_check_types gets one short clause: before the first edit, run ONE WebSearch (or WebFetch of the official docs or changelog) on the main library or tool it uses, open the report with \"Knowledge check <date>: confirmed\" or \"changed: <what>\", stop and report if it contradicts the brief. A brief that already carries a \"Knowledge check YYYY-MM-DD:\" line dated today or yesterday (local date) gets nothing: the worker uses that check. Other types, reviewers and a brief with no TYPE get nothing. (2) The first spawn of a session that gets the clause tells the lead, once, to run one check for the whole body of work and pass it down as a dated line. (3) The built-in standing rule knowledge-check-howto tells the lead to read the current official docs before giving setup steps. Off removes all three. Where the default comes from: 3,760 worker briefs on one developer's workstation (Windows 11, Claude Code on the highest individual plan, 2026-11-01 to 11-16): builder types searched early in 0-4% of cases, no check changed or contradicted a brief; see docs/adr/0007-knowledge-check-by-type.md and docs/DEFAULTS-ENVIRONMENT.md. Re-measure with the report line the clause asks for. Env override: CLAUDE_PLUGIN_OPTION_KNOWLEDGE_CHECK=0.",
+      "default": true
+    },
+    "knowledge_check_types": {
+      "type": "string",
+      "title": "Knowledge check: task types",
+      "description": "Shipped default: bounded-feature,bounded-feature-small,integration,debug-root-cause,critical-change,novel-design,large-refactor,long-autonomous-run (the builder types; where this list comes from: see knowledge_check and docs/DEFAULTS-ENVIRONMENT.md). Comma-separated TYPE values whose spawn briefs get the knowledge check clause. Research and lookup types search anyway; add a type here to include it, remove one to drop it. Ignored while knowledge_check is off. An empty value reads as the default list.",
+      "default": "bounded-feature,bounded-feature-small,integration,debug-root-cause,critical-change,novel-design,large-refactor,long-autonomous-run"
     },
     "coordinator_message_gate": {
       "type": "string",

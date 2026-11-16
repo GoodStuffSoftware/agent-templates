@@ -30,7 +30,7 @@ test('readRules() with no file returns the built-ins, agent-brevity disabled', (
     const { rules } = readRules();
     const ids = rules.map((r) => r.id).sort();
     assert.deepEqual(ids, [
-      'agent-brevity', 'child-coordinator-messages', 'copyable-prompt', 'delegate-first', 'delegate-reminder', 'event-turn-quiet', 'lead-brevity', 'lead-effort-check', 'poll-guard-doctrine', 'pr-wait-hint', 'resume-doctrine', 'worker-one-wait', 'worker-one-wait-operate',
+      'agent-brevity', 'child-coordinator-messages', 'copyable-prompt', 'delegate-first', 'delegate-reminder', 'event-turn-quiet', 'knowledge-check-howto', 'lead-brevity', 'lead-effort-check', 'poll-guard-doctrine', 'pr-wait-hint', 'resume-doctrine', 'worker-one-wait', 'worker-one-wait-operate',
     ].sort());
     assert.equal(rules.find((r) => r.id === 'agent-brevity').enabled, false);
     for (const id of ['copyable-prompt', 'delegate-first', 'delegate-reminder', 'lead-brevity', 'poll-guard-doctrine', 'resume-doctrine', 'worker-one-wait', 'worker-one-wait-operate']) {
@@ -1066,4 +1066,354 @@ test('rules.mjs add --then-later (and --then-later-file) sets the later text of 
   } finally {
     cleanup();
   }
+});
+
+// ---- 0.31.57: the shipped knowledge check (by task type), the session-start budget and its overflow warning ------------
+import {
+  KC_MARKER, KC_DEFAULT_TYPES, KC_LEAD_NOTICE, knowledgeDecision, buildKnowledgeClause, knowledgeClause, hasFreshKnowledgeLine, localDate,
+} from '../hooks/lib/knowledge-check.mjs';
+import {
+  KNOWLEDGE_HOWTO_WHEN, SUPERSEDED_USER_RULE_IDS, sessionStartBudget, sessionStartOverflow, BUDGET_AUDIENCES,
+} from '../hooks/lib/rules.mjs';
+
+import { readFileSync as kcReadFile } from 'node:fs';
+import { fileURLToPath as kcFileURL } from 'node:url';
+const KC_PLUGIN_ROOT = kcFileURL(new URL('..', import.meta.url));
+const KC_NOW = new Date(2026, 10, 16, 12, 0, 0); // local noon, 2026-11-16
+const KC_TYPES_OFF = ['research', 'lookup', 'explore', 'survey', 'operate', 'mechanical-edit', 'verify', 'docs', 'code-review'];
+
+test('A1: every default builder type gets the clause; no other type, no reviewer and no TYPE does', () => {
+  const { cleanup } = makeFixture();
+  try {
+    assert.equal(KC_DEFAULT_TYPES.length, 8);
+    for (const t of KC_DEFAULT_TYPES) assert.equal(knowledgeDecision({ type: t, role: 'writer', brief: 'b', now: KC_NOW }), 'clause', t);
+    for (const t of KC_TYPES_OFF) assert.equal(knowledgeDecision({ type: t, role: 'writer', brief: 'b', now: KC_NOW }), null, t);
+    assert.equal(knowledgeDecision({ type: null, role: 'writer', brief: 'b', now: KC_NOW }), null, 'no TYPE');
+    assert.equal(knowledgeDecision({ type: 'critical-change', role: 'reviewer', brief: 'b', now: KC_NOW }), null, 'a reviewer');
+    assert.equal(knowledgeDecision({ type: 'Bounded-Feature', role: null, brief: 'b', now: KC_NOW }), 'clause', 'case is ignored');
+  } finally { cleanup(); }
+});
+
+test('A1: the clause is short, dated, and carries each instruction', () => {
+  const c = knowledgeClause(KC_NOW);
+  assert.ok(c.length <= 350, `clause is ${c.length} chars`);
+  assert.ok(c.startsWith(KC_MARKER));
+  assert.match(c, /Before your first edit/);
+  assert.match(c, /ONE WebSearch \(or WebFetch of the official docs or changelog\)/);
+  assert.match(c, /"Knowledge check 2026-11-16: confirmed" or "changed: <what>"/);
+  assert.match(c, /contradicts the brief, stop and report\./);
+  assert.match(c, /"Knowledge check: none needed \(<why>\)"/);
+  assert.equal(buildKnowledgeClause({ type: 'integration', brief: 'b', now: KC_NOW }), `\n\n${c}`);
+});
+
+test('A2: a "Knowledge check YYYY-MM-DD:" line dated today or yesterday is reused; older, future-less, quoted or fenced ones are not', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const d = (brief) => knowledgeDecision({ type: 'bounded-feature', role: 'writer', brief, now: KC_NOW });
+    assert.equal(d('TYPE: bounded-feature\nKnowledge check 2026-11-16: confirmed (docs say X).\nBuild it.'), 'reused', 'today');
+    assert.equal(d('TYPE: bounded-feature\nKnowledge check 2026-11-15: changed: the flag moved.\nBuild it.'), 'reused', 'yesterday');
+    assert.equal(d('- **Knowledge check 2026-11-16:** confirmed\nBuild it.'), 'reused', 'bullet and bold');
+    assert.equal(d('knowledge check 2026-11-16: confirmed'), 'reused', 'case');
+    assert.equal(d('Knowledge check 2026-11-14: confirmed'), 'clause', 'two days old');
+    assert.equal(d('Knowledge check 2026-11-17: confirmed'), 'clause', 'tomorrow is not today or yesterday');
+    assert.equal(d('Knowledge check: confirmed'), 'clause', 'no date');
+    assert.equal(d('> Knowledge check 2026-11-16: confirmed'), 'clause', 'a quoted line');
+    assert.equal(d('```\nKnowledge check 2026-11-16: confirmed\n```'), 'clause', 'a fenced line');
+    assert.equal(d('Note: Knowledge check 2026-11-16: confirmed'), 'clause', 'not at the start of a line');
+    assert.equal(hasFreshKnowledgeLine('Knowledge check 2026-11-16: x', KC_NOW), true);
+    // month and year edges of "yesterday"
+    assert.equal(hasFreshKnowledgeLine('Knowledge check 2026-02-28: x', new Date(2026, 2, 1, 9)), true);
+    assert.equal(hasFreshKnowledgeLine('Knowledge check 2025-12-31: x', new Date(2026, 0, 1, 9)), true);
+  } finally { cleanup(); }
+});
+
+test('A6: knowledge_check off removes the clause; knowledge_check_types narrows or widens the list', () => {
+  const { cleanup } = makeFixture();
+  try {
+    withEnv({ CLAUDE_PLUGIN_OPTION_KNOWLEDGE_CHECK: '0' }, () => {
+      assert.equal(knowledgeDecision({ type: 'bounded-feature', role: 'writer', brief: 'b', now: KC_NOW }), null);
+    });
+    withEnv({ CLAUDE_PLUGIN_OPTION_KNOWLEDGE_CHECK_TYPES: 'research, integration' }, () => {
+      assert.equal(knowledgeDecision({ type: 'research', role: 'other', brief: 'b', now: KC_NOW }), 'clause');
+      assert.equal(knowledgeDecision({ type: 'integration', role: 'writer', brief: 'b', now: KC_NOW }), 'clause');
+      assert.equal(knowledgeDecision({ type: 'bounded-feature', role: 'writer', brief: 'b', now: KC_NOW }), null);
+    });
+    withEnv({ CLAUDE_PLUGIN_OPTION_KNOWLEDGE_CHECK_TYPES: '' }, () => {
+      assert.equal(knowledgeDecision({ type: 'bounded-feature', role: 'writer', brief: 'b', now: KC_NOW }), 'clause', 'empty reads as the default list');
+    });
+  } finally { cleanup(); }
+});
+
+const kcSpawn = (dir, prompt, { sid = 'sess-kc-1', env = {}, extra = {} } = {}) => runHook('hooks/spawn-guard.mjs', {
+  session_id: sid, agent_type: 'main', cwd: dir, ...extra,
+  tool_input: { subagent_type: 'agent-companion:ac-sonnet-low', model: 'sonnet', description: 'x', prompt },
+}, { env });
+const kcPrompt = (res) => String(res.json?.hookSpecificOutput?.updatedInput?.prompt || '');
+const kcCtx = (res) => String(res.json?.hookSpecificOutput?.additionalContext || '');
+
+test('A1+A4: a bounded-feature spawn gets the clause and the lead notice, the notice once per session', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const a = kcSpawn(dir, 'TYPE: bounded-feature\nROLE: writer\nadd the flag');
+    assert.equal(a.status, 0, a.stderr);
+    assert.ok(kcPrompt(a).includes(KC_MARKER), kcPrompt(a));
+    assert.ok(kcPrompt(a).includes(`Knowledge check ${localDate()}: confirmed`));
+    assert.ok(kcCtx(a).includes(KC_LEAD_NOTICE), `notice missing: ${a.stdout}`);
+    const b = kcSpawn(dir, 'TYPE: bounded-feature\nROLE: writer\nadd another flag');
+    assert.ok(kcPrompt(b).includes(KC_MARKER), 'the second spawn still gets the clause');
+    assert.ok(!kcCtx(b).includes(KC_LEAD_NOTICE), 'the notice goes once per session');
+    const c = kcSpawn(dir, 'TYPE: bounded-feature\nROLE: writer\nthird', { sid: 'sess-kc-2' });
+    assert.ok(kcCtx(c).includes(KC_LEAD_NOTICE), 'a new session is told again');
+  } finally { cleanup(); }
+});
+
+test('A2: a brief with "Knowledge check <today>:" gets neither the clause nor the notice', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const res = kcSpawn(dir, `TYPE: bounded-feature\nROLE: writer\nKnowledge check ${localDate()}: confirmed, the docs agree.\nadd the flag`);
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(!kcPrompt(res).includes(KC_MARKER));
+    assert.ok(!kcCtx(res).includes(KC_LEAD_NOTICE));
+    // and it did not use up the session's notice: the next spawn without the line still gets it
+    const next = kcSpawn(dir, 'TYPE: bounded-feature\nROLE: writer\nadd the other flag');
+    assert.ok(kcCtx(next).includes(KC_LEAD_NOTICE));
+  } finally { cleanup(); }
+});
+
+test('A3: TYPE research, operate, code-review and a brief with no TYPE get nothing', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    for (const prompt of ['TYPE: research\nROLE: lookup\nfind the flag', 'TYPE: operate\nROLE: operate\nrun it', 'TYPE: code-review\nROLE: reviewer\nreview it', 'just fix it']) {
+      const res = kcSpawn(dir, prompt);
+      assert.equal(res.status, 0, `${prompt}: ${res.stderr}`);
+      assert.ok(!kcPrompt(res).includes(KC_MARKER), prompt);
+      assert.ok(!kcCtx(res).includes(KC_LEAD_NOTICE), prompt);
+    }
+  } finally { cleanup(); }
+});
+
+test('A4: a worker that spawns a builder gets the clause for it but the lead notice is not sent to a worker', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const res = kcSpawn(dir, 'TYPE: bounded-feature\nROLE: writer\nadd the flag', { sid: 'sess-kc-3', extra: { agent_id: 'worker-1', agent_type: 'agent-companion:ac-sonnet-high' } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(kcPrompt(res).includes(KC_MARKER));
+    assert.ok(!kcCtx(res).includes(KC_LEAD_NOTICE));
+  } finally { cleanup(); }
+});
+
+test('A6: knowledge_check off at the spawn guard: no clause, no notice', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const res = kcSpawn(dir, 'TYPE: bounded-feature\nROLE: writer\nadd the flag', { env: { CLAUDE_PLUGIN_OPTION_KNOWLEDGE_CHECK: '0' } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(!kcPrompt(res).includes(KC_MARKER));
+    assert.ok(!kcCtx(res).includes(KC_LEAD_NOTICE));
+  } finally { cleanup(); }
+});
+
+const HOWTO_HITS = [
+  'how do I set up the Gmail connector', 'How to configure the proxy for npm', 'give me the steps to install node',
+  'walk me through enabling 2FA', 'what are the instructions for setting up SSO', 'how can we deploy this to Firebase',
+  'how should I connect the desktop app to the bus', 'step by step to upgrade the plugin',
+];
+const HOWTO_MISSES = [
+  'how does the hook work', 'how long did the install take', 'install the plugin and run the tests', 'set up a worktree and fix the bug',
+  'how do I know the installer worked', 'the steps below failed', 'how did you configure it', 'how do I read the log',
+  'a guide to the codebase', 'how to read this config file', 'walk me through the diff', 'explain it step by step', 'why did the deploy fail',
+];
+
+test('A5: knowledge-check-howto fires on a request for setup steps and not on near-misses', () => {
+  const { cleanup } = makeFixture();
+  try {
+    assert.ok(KNOWLEDGE_HOWTO_WHEN.length <= 400, `when is ${KNOWLEDGE_HOWTO_WHEN.length} chars; the cap is 400`);
+    const rule = readRules().rules.find((r) => r.id === 'knowledge-check-howto');
+    assert.ok(rule && rule.builtin && rule.audience === 'lead' && rule.scope === 'user-prompt' && rule.enabled, 'built-in, lead, user-prompt, on');
+    const fires = (t) => matchRules({ scope: 'user-prompt', text: t, sessionId: 's' }).some((r) => r.id === 'knowledge-check-howto');
+    for (const t of HOWTO_HITS) assert.ok(fires(t), `should fire: ${t}`);
+    for (const t of HOWTO_MISSES) assert.ok(!fires(t), `should not fire: ${t}`);
+    // the injected text asks for the docs and the date
+    const text = renderRules(matchRules({ scope: 'user-prompt', text: HOWTO_HITS[0], sessionId: 's' }));
+    assert.match(text, /current official docs/);
+    assert.match(text, /say the date you checked/);
+  } finally { cleanup(); }
+});
+
+test('A5: the how-to rule is gated by knowledge_check and works through the prompt hook', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const on = runHook('hooks/standing-rules.mjs', { session_id: 'sess-howto', prompt: 'how do I set up the proxy', cwd: dir }, { args: ['--event', 'user-prompt'] });
+    assert.match(on.json?.hookSpecificOutput?.additionalContext || '', /current official docs/);
+    const quiet = runHook('hooks/standing-rules.mjs', { session_id: 'sess-howto', prompt: 'how does the proxy work', cwd: dir }, { args: ['--event', 'user-prompt'] });
+    assert.equal((quiet.stdout || '').trim(), '', 'a near-miss is silent');
+    const off = runHook('hooks/standing-rules.mjs', { session_id: 'sess-howto', prompt: 'how do I set up the proxy', cwd: dir },
+      { args: ['--event', 'user-prompt'], env: { CLAUDE_PLUGIN_OPTION_KNOWLEDGE_CHECK: '0' } });
+    assert.equal((off.stdout || '').trim(), '', 'knowledge_check off: no how-to rule');
+  } finally { cleanup(); }
+});
+
+test('A7: no knowledge check rule is a session-start rule (it was the overflow victim)', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const startRules = defaultRules().filter((r) => r.scope === 'session-start');
+    assert.ok(startRules.length > 0);
+    for (const r of startRules) {
+      assert.doesNotMatch(r.id, /knowledge/);
+      assert.doesNotMatch(r.then, /knowledge check/i);
+    }
+    assert.equal(defaultRules().some((r) => r.id === 'knowledge-check-spawn' || r.id === 'knowledge-check-session'), false);
+  } finally { cleanup(); }
+});
+
+const KC_OLD_RULES = [
+  { id: 'knowledge-check-spawn', enabled: true, scope: 'spawn', when: '.', then: 'KNOWLEDGE CHECK (old spawn rule): run ONE quick WebSearch.' },
+  { id: 'knowledge-check-session', enabled: true, scope: 'session-start', then: 'KNOWLEDGE CHECK (old session rule): look it up.' },
+];
+
+test('A8: the two hand-written rule ids are ignored while the shipped check is on, so nothing is doubled', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    assert.deepEqual(SUPERSEDED_USER_RULE_IDS, ['knowledge-check-spawn', 'knowledge-check-session']);
+    writeFileSync(rulesPath(), JSON.stringify({ version: 1, rules: [...KC_OLD_RULES, { id: 'my-own-spawn-rule', scope: 'spawn', when: '.', then: 'OWN SPAWN RULE.' }] }));
+    const spawnIds = matchRules({ scope: 'spawn', text: 'TYPE: bounded-feature', sessionId: 's' }).map((r) => r.id);
+    assert.ok(!spawnIds.includes('knowledge-check-spawn'));
+    assert.ok(spawnIds.includes('my-own-spawn-rule'), 'another user rule is untouched');
+    assert.ok(!matchRules({ scope: 'session-start', sessionId: 's' }).some((r) => r.id === 'knowledge-check-session'));
+    // the spawn brief carries one clause and not the old text
+    const res = kcSpawn(dir, 'TYPE: bounded-feature\nROLE: writer\nadd the flag');
+    assert.ok(kcPrompt(res).includes(KC_MARKER));
+    assert.ok(!kcPrompt(res).includes('old spawn rule'));
+    assert.ok(kcPrompt(res).includes('OWN SPAWN RULE.'));
+    // the session-start block does not carry the old text either
+    const start = runHook('hooks/standing-rules.mjs', { session_id: 'sess-kc-start', cwd: dir }, { args: ['--event', 'session-start'] });
+    assert.ok(!(start.json?.hookSpecificOutput?.additionalContext || '').includes('old session rule'));
+    // `rules list` shows them as superseded
+    const list = runScript('scripts/rules.mjs', ['list']);
+    assert.match(list.stdout, /off\s+knowledge-check-spawn[^\n]*superseded by the built-in knowledge check/);
+    assert.match(list.stdout, /off\s+knowledge-check-session[^\n]*superseded/);
+    assert.doesNotMatch(list.stdout, /my-own-spawn-rule[^\n]*superseded/);
+    // knowledge_check off: they work as written again
+    withEnv({ CLAUDE_PLUGIN_OPTION_KNOWLEDGE_CHECK: '0' }, () => {
+      assert.ok(matchRules({ scope: 'spawn', text: 'x', sessionId: 's' }).some((r) => r.id === 'knowledge-check-spawn'));
+      assert.ok(matchRules({ scope: 'session-start', sessionId: 's' }).some((r) => r.id === 'knowledge-check-session'));
+    });
+    // and a built-in id still merges as before (lead-effort-check is the pattern this follows)
+    writeFileSync(rulesPath(), JSON.stringify([{ id: 'lead-effort-check', enabled: true }]));
+    assert.ok(matchRules({ scope: 'session-start', sessionId: 's' }).some((r) => r.id === 'lead-effort-check'));
+  } finally { cleanup(); }
+});
+
+test('C: with every default built-in on (effort check too), the worst-case lead block leaves headroom under 4000', () => {
+  const { cleanup } = makeFixture();
+  try {
+    writeFileSync(rulesPath(), JSON.stringify([{ id: 'lead-effort-check', enabled: true }]));
+    withEnv({ CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '4000' }, () => {
+      assert.deepEqual(BUDGET_AUDIENCES, ['lead', 'lead-child', 'subagent']);
+      for (const a of BUDGET_AUDIENCES) {
+        const b = sessionStartBudget(a);
+        assert.equal(b.dropped.length, 0, `${a} drops ${b.dropped}`);
+        assert.ok(b.cap === 4000);
+        assert.ok(b.headroom >= 1500, `${a}: ${b.wanted} of 4000 chars leaves ${b.headroom} for the operator's own rules`);
+      }
+      assert.ok(sessionStartBudget('lead-child').wanted > sessionStartBudget('lead').wanted, 'the child-session rule only counts for a child');
+      assert.ok(sessionStartBudget('subagent').wanted < sessionStartBudget('lead').wanted, 'lead-only rules stay out of a worker');
+      assert.deepEqual(sessionStartOverflow(), []);
+    });
+  } finally { cleanup(); }
+});
+
+const BIG_RULE = { id: 'big-user-rule', enabled: true, scope: 'session-start', then: `B${'x'.repeat(2399)}` };
+
+test('B1: sessionStartBudget names the dropped rule for a lead and not for a worker that has room', () => {
+  const { cleanup } = makeFixture();
+  try {
+    writeFileSync(rulesPath(), JSON.stringify([BIG_RULE]));
+    withEnv({ CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '4200' }, () => {
+      const lead = sessionStartBudget('lead');
+      assert.deepEqual(lead.dropped, [], 'the lead block still fits at 4200 here');
+      writeFileSync(rulesPath(), JSON.stringify([BIG_RULE, { id: 'big-two', scope: 'session-start', then: `C${'y'.repeat(900)}` }]));
+      const over = sessionStartBudget('lead');
+      assert.deepEqual(over.dropped, ['big-two']);
+      assert.ok(over.wanted > over.cap);
+      assert.ok(over.rules.find((r) => r.id === 'big-user-rule').chars > 2400);
+      assert.deepEqual(sessionStartBudget('subagent').dropped, [], 'a worker has fewer rules, so it fits');
+      assert.deepEqual(sessionStartOverflow().map((b) => b.audience), ['lead', 'lead-child']);
+    });
+  } finally { cleanup(); }
+});
+
+test('B1: rules.mjs add, enable and disable warn about a dropped rule after the edit and never refuse it', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const env = { CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '4200' };
+    const fill = runScript('scripts/rules.mjs', ['add', '--id', 'fill-one', '--scope', 'session-start', '--then', `F${'x'.repeat(2399)}`], { env });
+    assert.equal(fill.status, 0, fill.stderr);
+    assert.doesNotMatch(fill.stderr, /WARNING/, 'still fits: no warning');
+    const add = runScript('scripts/rules.mjs', ['add', '--id', 'fill-two', '--scope', 'session-start', '--then', `G${'y'.repeat(800)}`], { env });
+    assert.equal(add.status, 0, 'the edit is not refused');
+    assert.match(add.stdout, /added "fill-two"/);
+    assert.match(add.stderr, /WARNING: the session-start block is over its budget/);
+    assert.match(add.stderr, /lead: 1 rule would drop \(fill-two\); the block needs \d+ chars, the cap is 4200/);
+    assert.match(add.stderr, /lead-child: /);
+    assert.doesNotMatch(add.stderr, /subagent: /, 'the worker block still fits');
+    assert.match(add.stderr, /shorten a rule and keep its long form in a spec or doc file[^\n]*raise the standing_rules_max_chars option/);
+    assert.ok(readRules().rules.some((r) => r.id === 'fill-two'), 'the rule was written');
+    const off = runScript('scripts/rules.mjs', ['disable', 'fill-two'], { env });
+    assert.equal(off.status, 0, off.stderr);
+    assert.doesNotMatch(off.stderr, /WARNING/, 'disabling the rule clears the overflow');
+    const on = runScript('scripts/rules.mjs', ['enable', 'fill-two'], { env });
+    assert.equal(on.status, 0, on.stderr);
+    assert.match(on.stderr, /WARNING[\s\S]*fill-two/);
+    const raised = runScript('scripts/rules.mjs', ['enable', 'fill-two'], { env: { ...env, CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '6000' } });
+    assert.doesNotMatch(raised.stderr, /WARNING/, 'a raised cap fits it');
+  } finally { cleanup(); }
+});
+
+test('B1: rules.mjs budget prints both audiences with each rule\'s length, and a dropped rule; --json parses', () => {
+  const { cleanup } = makeFixture();
+  try {
+    const env = { CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '4200' };
+    let r = runScript('scripts/rules.mjs', ['budget'], { env });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^lead: used \d+ \/ cap 4200, headroom \d+$/m);
+    assert.match(r.stdout, /^subagent \(a worker that compacts\): used \d+ \/ cap 4200, headroom \d+$/m);
+    assert.match(r.stdout, /^\s+\d+\s+delegate-first$/m);
+    const before = readRules().rules.length;
+    writeFileSync(rulesPath(), JSON.stringify([BIG_RULE, { id: 'big-two', scope: 'session-start', then: `C${'y'.repeat(900)}` }]));
+    r = runScript('scripts/rules.mjs', ['budget'], { env });
+    assert.match(r.stdout, /big-two\s+\(DROPPED\)/);
+    assert.match(r.stdout, /OVER by \d+/);
+    const j = runScript('scripts/rules.mjs', ['budget', '--json'], { env });
+    const parsed = JSON.parse(j.stdout);
+    assert.deepEqual(parsed.audiences.map((a) => a.audience), ['lead', 'lead-child', 'subagent']);
+    assert.deepEqual(parsed.audiences[0].dropped, ['big-two']);
+    assert.equal(readRules().rules.length, before + 2, 'budget wrote nothing');
+  } finally { cleanup(); }
+});
+
+test('B2: the scout raises standing_rules_overflow when the config drops a rule, and only then', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const run = (env) => {
+      const res = runScript('scripts/detect.mjs', [], { cwd: dir, env, timeout: 90000 });
+      assert.equal(res.status, 0, res.stderr);
+      assert.ok(res.json, 'detect prints JSON');
+      return (res.json.signals || []).filter((s) => s.kind === 'standing_rules_overflow');
+    };
+    const env = { CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '4200' };
+    assert.equal(run(env).length, 0, 'the shipped rules fit');
+    writeFileSync(rulesPath(), JSON.stringify([BIG_RULE, { id: 'big-two', scope: 'session-start', then: `C${'y'.repeat(900)}` }]));
+    const hit = run(env);
+    assert.equal(hit.length, 1);
+    assert.equal(hit[0].dispatch, 'manual-check');
+    assert.match(hit[0].detail, /lead: 1 rule would drop \(big-two\)/);
+    assert.match(hit[0].detail, /the cap is 4200/);
+    assert.match(hit[0].detail, /rules\.mjs budget/);
+    assert.equal(run({ CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '6000' }).length, 0, 'a raised cap clears it');
+    // the kind is documented in the routine and the skill, and has a stale-signal guide
+
+    for (const f of [['routines', 'calibration-scout-daily.md'], ['skills', 'calibration-scout', 'SKILL.md']]) {
+      assert.match(kcReadFile(join(KC_PLUGIN_ROOT, ...f), 'utf8'), /standing_rules_overflow/);
+    }
+  } finally { cleanup(); }
 });

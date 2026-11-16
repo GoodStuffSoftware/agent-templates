@@ -9,6 +9,7 @@ import {
 } from './context.mjs';
 import { mergeLeadEffort } from './lead-effort-live.mjs';
 import { mergeRedoAlert } from './redo-alert.mjs';
+import { mergeKnowledgeNotice } from './knowledge-check.mjs';
 
 // The Agent tool's input fields. Claude Code 2.1.300 and later validates a hook's
 // updatedInput like its own tool input: keys outside the schema are dropped and
@@ -53,6 +54,7 @@ export function allowWith(systemMessage, updatedInput, additionalContext) {
   if (updatedInput) updatedInput = sanitizeAgentInput(updatedInput);
   ({ systemMessage, additionalContext } = mergeLeadEffort(systemMessage, additionalContext)); // lead-effort live check (text only)
   additionalContext = mergeRedoAlert(additionalContext); // redo alert (text only; lib/redo-alert.mjs)
+  additionalContext = mergeKnowledgeNotice(additionalContext); // knowledge check notice, once per session (text only; lib/knowledge-check.mjs)
   // Text that is empty or only whitespace is no text. When there is nothing at
   // all to say or change, emit nothing: a bare {hookSpecificOutput:
   // {hookEventName}} object shows the lead an empty "PreToolUse:Agent says:".

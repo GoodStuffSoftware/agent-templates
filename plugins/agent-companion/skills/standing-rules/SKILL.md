@@ -54,7 +54,11 @@ node "$AC/scripts/rules.mjs" add --id <id> --scope <scope> --when '<regex>' --th
 node "$AC/scripts/rules.mjs" disable <id>
 node "$AC/scripts/rules.mjs" enable <id>
 node "$AC/scripts/rules.mjs" remove <id>             # your rules only; a built-in is disabled, not removed
+node "$AC/scripts/rules.mjs" budget                  # read-only: session-start block per audience, used / cap, each rule's length
 ```
+
+`add`, `enable` and `disable` warn (stderr) when the session-start block would drop a rule for length,
+naming the rules, the block length and the cap `standing_rules_max_chars`. The edit still goes through.
 
 `test` is the one to reach for first. A regex that does not fire is the common
 failure, and `test` makes it visible without restarting a session.
@@ -80,6 +84,7 @@ documentation. `--when 'deploy|ship it|push to prod'` beats `--when
 | id | scope | fires when |
 |---|---|---|
 | `copyable-prompt` | `user-prompt` | you ask for a prompt — requires the answer to contain the whole prompt in one fenced block, with commentary kept outside the fence |
+| `knowledge-check-howto` | `user-prompt` | you ask how to set something up or for steps (narrow pattern), while `knowledge_check` is on — the lead reads the current official docs first and says the date it checked |
 | `lead-brevity` | `session-start` | every session, while brevity is globally on — report at outcome level, blockers in full, detail to files |
 | `delegate-first` | `session-start` | every session — the orchestrator rules, restated where they are read |
 | `delegate-reminder` | `always` | **only once this session has actually drifted** — see below |

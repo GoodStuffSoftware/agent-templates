@@ -45,6 +45,7 @@ import { deriveTokens } from './lib/leak-scan-core.mjs';
 import { makeScrubber } from './lib/scrub.mjs';
 import { checkWindowDrift, settingForms } from './lib/cache-advisor.mjs';
 import { stateDir as advisorStateDir } from '../hooks/lib/context.mjs';
+import { sessionStartOverflow, overflowLine } from '../hooks/lib/rules.mjs';
 import { checkRepoCiStatus, githubOwnerRepoFromUrl, repoCacheKey } from './lib/ci-status.mjs';
 import { STREAK_FILE, attendedCoverage } from '../hooks/lib/delegation.mjs';
 import { collect as collectCopies, staleBeyondGrace, STALE_GRACE_MS, strayCopies, STRAY_RULE } from './version.mjs';
@@ -624,6 +625,22 @@ try {
     sig('haiku_fit_leak',
       `${leak.count} spawn(s) in 7 days routed to haiku ran on another model; top agent types: ${leak.top.join('; ')}. Plan units per spawn are not in spawns.jsonl; fix pinned agents (add effort: medium, drop the sonnet pin) or the lead model choice`,
       'routing-review');
+  }
+} catch { /* fail open */ }
+
+// --- 3b3. Standing rules overflow ------------------------------------------------
+// The session-start standing-rules block is cut at standing_rules_max_chars in file order; a rule that does not
+// fit is dropped with only a note inside the block, which sessions ignored for a week (0.31.57). Renders the
+// current config's block for a lead, a lead started by another session and a worker (hooks/lib/rules.mjs
+// sessionStartBudget, the same layout the hook uses) and raises one signal naming the rules that would drop.
+// A fresh install with no rules file, and the cloud (no local config), render the shipped rules, which fit.
+try {
+  const over = sessionStartOverflow();
+  if (over.length) {
+    sig('standing_rules_overflow',
+      `the session-start standing-rules block drops rules before they reach the model: ${over.map(overflowLine).join('; ')}. ` +
+      'Run `rules.mjs budget` (plugin scripts folder), then shorten a rule (keep its long form in a spec or doc file) or raise standing_rules_max_chars',
+      'manual-check');
   }
 } catch { /* fail open */ }
 

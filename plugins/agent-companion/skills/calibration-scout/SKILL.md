@@ -61,6 +61,7 @@ Only for signals that fired:
 | `pinned_model_id` | report each place that pins a full model id and the alias (`sonnet`, `opus`, `haiku`) to use; a pin never follows the next release. Suggest the change, never edit another project's files. For claude.ai cloud routines, which no script can list, list them with RemoteTrigger when the session has it and report any pinned `model`; otherwise say the check was skipped |
 | `routine_model_drift` | a scheduled run's model or effort differs from its task's `model:` line or folder pin, or a task has no `model:` line (the app then uses the composer's last-selected model). Report task and values; suggest adding a `model:` alias line to the task's SKILL.md frontmatter; never edit scheduled tasks |
 | `model_tier_data_changed` | informational: the model an alias resolves to moved in `config/model-tiers.json`. Report alias, old id, new id. It also feeds the decision register's `signal` triggers |
+| `standing_rules_overflow` | report the audience, the dropped rule ids, the block length and the cap; the operator runs `node scripts/rules.mjs budget`, then shortens a rule or raises `standing_rules_max_chars`. Never edit their rules file |
 | `session_churn` | routing review (from `session-churn.jsonl`; refresh with `transcript-harvest.mjs --churn`). With dispatch `manual-check`: the file is missing or older than 2 days, so the refresh step is not running; report it |
 | `spawn_activity` with `spend-deep-dive` | spend attribution |
 | `harness_version_unreadable` | report to the operator; do not guess |

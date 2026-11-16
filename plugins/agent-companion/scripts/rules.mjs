@@ -16,12 +16,14 @@
 //   node rules.mjs enable <id>
 //   node rules.mjs disable <id>
 //   node rules.mjs remove <id>            # user rules only; a built-in is disabled, not removed
+//   node rules.mjs budget [--json]        # read-only: the session-start block per audience, used / cap, length of each rule
 //   node rules.mjs test "<text>" [--scope user-prompt]
 //   node rules.mjs test "<raw prompt>" --scope event-turn   # simulate an event turn (see skills/standing-rules)
 
 import { readFileSync } from 'node:fs';
 import {
   SCOPES, RULES_VERSION, rulesPath, readRules, appendUserRule, hasRawRuleEntry, setRuleEnabled, removeRuleEntry, matchRules, renderRules, effectiveRule, isEventTurn,
+  BUDGET_AUDIENCES, sessionStartBudget, sessionStartOverflow, overflowLine,
 } from '../hooks/lib/rules.mjs';
 
 const argv = process.argv.slice(2);
@@ -31,7 +33,7 @@ const has = (n) => rest.includes(n);
 const val = (n) => { const i = rest.indexOf(n); return i >= 0 ? rest[i + 1] : undefined; };
 
 const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-const USAGE = 'Usage: rules.mjs list|show|add|enable|disable|remove|test ...';
+const USAGE = 'Usage: rules.mjs list|show|add|enable|disable|remove|budget|test ...';
 
 function usageError(msg) {
   console.error(`rules: ${msg}`);
@@ -57,6 +59,17 @@ function persist(ok, label) {
   }
 }
 
+// After an edit that can add to the session-start block (add, enable, disable): render the block as the hook would for each
+// audience and warn when a rule would drop. The edit is never refused; the warning goes to stderr.
+function warnOverflow() {
+  let over = [];
+  try { over = sessionStartOverflow(); } catch { return; }
+  if (!over.length) return;
+  console.error('rules: WARNING: the session-start block is over its budget, so a rule will not reach the model:');
+  for (const b of over) console.error(`  ${overflowLine(b)}`);
+  console.error('  Fix: shorten a rule and keep its long form in a spec or doc file the rule points to, or raise the standing_rules_max_chars option (at most 9500). `rules.mjs budget` shows the length of every rule.');
+}
+
 try {
   switch (cmd) {
     case undefined:
@@ -74,7 +87,8 @@ try {
         console.log(
           `  ${effectiveRule(r).enabled ? 'on ' : 'off'}  ${r.id.padEnd(24)} scope=${r.scope.padEnd(13)} `
           + `builtin=${r.builtin ? 'yes' : 'no '} ${r.gate ? `gate=${r.gate} ` : ''}${r.scheduleInvalid ? 'activeFrom=(unusable value: rule held off) ' : ''}${r.activeFrom ? `activeFrom=${r.activeFrom}${r.after ? '(+after)' : ''} ` : ''}`
-          + `when=${truncate(cond, 40)}  then="${truncate(r.then, 60)}"`,
+          + `when=${truncate(cond, 40)}  then="${truncate(r.then, 60)}"`
+          + (r.superseded && !effectiveRule(r).enabled ? '  [superseded by the built-in knowledge check: ignored; remove it]' : ''),
         );
       }
       break;
@@ -145,6 +159,7 @@ try {
         id, enabled: true, scope, when: when ?? null, then: thenText.trim(), ...(laterGiven ? { thenLater: thenLaterText.trim() } : {}), gate: null, note: note ?? null, added: new Date().toISOString(),
       }), 'add');
       console.log(`rules add: added "${id}" (${scope}).`);
+      warnOverflow();
       break;
     }
 
@@ -157,6 +172,8 @@ try {
       if (!r) { console.error(`rules ${cmd}: no rule "${id}"`); process.exit(1); }
       persist(setRuleEnabled(id, cmd === 'enable'), cmd);
       console.log(`rules ${cmd}: "${id}" is now ${cmd === 'enable' ? 'enabled' : 'disabled'}.`);
+      if (r.superseded) console.log(`rules ${cmd}: "${id}" is superseded by the built-in knowledge check (option knowledge_check): it stays off while that is on. Remove it with "remove ${id}".`);
+      warnOverflow();
       break;
     }
 
@@ -172,6 +189,23 @@ try {
       }
       persist(removeRuleEntry(id), 'remove');
       console.log(`rules remove: removed "${id}".`);
+      break;
+    }
+
+    case 'budget': {
+      // Read-only: the session-start block as the hook renders it, per audience, with each rule's length.
+      const budgets = BUDGET_AUDIENCES.map((a) => sessionStartBudget(a));
+      if (has('--json')) {
+        console.log(JSON.stringify({ audiences: budgets }, null, 2));
+        break;
+      }
+      console.log('Session-start block budget (characters; the option is standing_rules_max_chars):');
+      for (const b of budgets) {
+        const note = b.audience === 'lead-child' ? ' (a lead started by another session: the worst case)' : b.audience === 'subagent' ? ' (a worker that compacts)' : '';
+        console.log(`\n${b.audience}${note}: used ${b.used} / cap ${b.cap}, ${b.headroom >= 0 ? `headroom ${b.headroom}` : `OVER by ${-b.headroom}`}`);
+        for (const r of b.rules) console.log(`  ${String(r.chars).padStart(5)}  ${r.id}${r.dropped ? '  (DROPPED)' : ''}`);
+        if (b.dropped.length) console.log(`  ${overflowLine(b)}`);
+      }
       break;
     }
 

@@ -52,6 +52,11 @@ import { configDir, opt, stateFile, readJson, rolloutActive, writeTextAtomic } f
 export const RULES_VERSION = 1;
 export const SCOPES = ['user-prompt', 'always', 'session-start', 'spawn', 'event-turn'];
 
+// User rules (an operator's own standing-rules.json entries, not built-ins) with these ids are the hand-written form of
+// the knowledge check that 0.31.57 ships in the plugin. They are not merged over a built-in (there is none with these ids:
+// the spawn half is a clause, the session half was dropped); effectiveRule() keeps them off while knowledge_check is on.
+export const SUPERSEDED_USER_RULE_IDS = ['knowledge-check-spawn', 'knowledge-check-session'];
+
 const WHEN_MAX_CHARS = 400;
 const DEFAULT_MAX_CHARS = 3000;
 // The most the standing-rules hook emits in one injection. The harness writes additionalContext above 10000 characters
@@ -119,6 +124,14 @@ export const COPYABLE_PROMPT_WHEN = [
   'prompt.{0,60}write it\\b',
 ].join('|');
 
+// knowledge-check-howto: the operator asks for steps to set something up, so the lead reads the current official docs
+// before answering from memory. Narrow on purpose: a question form (how do I / how to / how can we ...) with a setup
+// verb close behind it, or an explicit request for steps, instructions or a walkthrough. "How does X work", "how long
+// did the install take" and an instruction to DO the setup ("install the plugin") do not match. A test pins the length.
+const HOWTO_VERB = '(?:set(?:ting)?[ -]?up|configur(?:e|ing)|install(?:ing)?|enabl(?:e|ing)|connect(?:ing)?|deploy(?:ing)?|upgrad(?:e|ing))\\b';
+export const KNOWLEDGE_HOWTO_WHEN = `\\b(?:how\\s+(?:(?:do|can|should|would|could)\\s+(?:i|we)|to)|(?:steps|instructions|guide)\\s+(?:to|for)|walk\\s+me\\s+through|step[- ]by[- ]step)\\s+(?:\\S+\\s+){0,4}?${HOWTO_VERB}`;
+export const KNOWLEDGE_HOWTO_TEXT = 'The user asked how to do or set something up. Before giving steps, read the current official docs (one WebFetch, or a haiku worker) and say the date you checked; do not answer from memory. Trust the user\'s screen over older steps.';
+
 // The lead-effort-check directive. Plain and short on purpose: it is read at
 // session start and has to survive a long session. Exported so the tests pin
 // the exact injected wording.
@@ -174,6 +187,19 @@ function builtinRules() {
       then: 'The user is asking for a prompt. Put the complete prompt in ONE fenced code block with nothing else inside the fence — no commentary, no ellipses, no placeholder text unless the user asked for placeholders. Anything you want to say about the prompt goes outside the fence.',
       gate: null,
       note: "Origin: one operator's preference for getting a requested prompt as one copyable block; date not recorded.",
+    },
+    {
+      // 0.31.57: the lead half of the shipped knowledge check (lib/knowledge-check.mjs). The spawn half is a clause added by the
+      // spawn guard, not a rule. Gated on the knowledge_check option, which removes both.
+      id: 'knowledge-check-howto',
+      audience: 'lead',
+      enabled: true,
+      builtin: true,
+      scope: 'user-prompt',
+      gate: 'knowledge_check',
+      when: KNOWLEDGE_HOWTO_WHEN,
+      then: KNOWLEDGE_HOWTO_TEXT,
+      note: "Origin: one operator's experience of steps given from memory that the vendor had since changed; added in 0.31.57 (docs/adr/0007-knowledge-check-by-type.md). knowledge_check: false removes it.",
     },
     {
       id: 'lead-brevity',
@@ -391,6 +417,8 @@ function compileRule(rule) {
     then: rule.then,
     thenLater: typeof rule.thenLater === 'string' && rule.thenLater.trim() ? rule.thenLater : null,
     builtin: !!rule.builtin,
+    // A user rule with the id of one the shipped knowledge check replaced (see SUPERSEDED_USER_RULE_IDS).
+    superseded: !rule.builtin && SUPERSEDED_USER_RULE_IDS.includes(rule.id),
     gate: rule.gate || null,
     note: rule.note ?? null,
     audience: rule.audience === 'lead' ? 'lead' : 'all',
@@ -416,6 +444,9 @@ function compileRule(rule) {
 // on; the input is never mutated.
 export function effectiveRule(r) {
   if (r && r.scheduleInvalid) return { ...r, enabled: false };
+  // The shipped knowledge check replaces these two hand-written rules: while it is on they stay in the file and in
+  // `rules list` (marked superseded) but never fire, so the check is not doubled. With knowledge_check off they work as written.
+  if (r && r.superseded && opt('knowledge_check', true) !== false) return { ...r, enabled: false };
   if (!r || !r.activeFrom) return r;
   const reached = rolloutActive(r.activeFrom);
   if (!r.after) return reached ? r : { ...r, enabled: false };
@@ -609,7 +640,7 @@ export function removeRuleEntry(id) {
 // (old file, a session that never fired) reads as 0. No sessionId at all
 // (CLI usage with no live session) resolves to NOT satisfied — a drift rule
 // must never claim to be active when there is no session to have drifted.
-function gateSatisfied(gate, sessionId) {
+function gateSatisfied(gate, sessionId, assumeChild = false) {
   if (!gate) return true;
 
   if (gate === 'brevity') {
@@ -628,12 +659,17 @@ function gateSatisfied(gate, sessionId) {
   // session started this one. Any lookup error reads as "not a child".
   if (gate === 'child_session') {
     try {
-      if (modeFrom(opt('coordinator_message_gate', DEFAULT_MODE)) === 'off' || !sessionId) return false;
+      if (modeFrom(opt('coordinator_message_gate', DEFAULT_MODE)) === 'off') return false;
+      if (assumeChild) return true; // the budget check asks for the worst case: a lead that is a child session
+      if (!sessionId) return false;
       return !!parentOf(sessionId);
     } catch {
       return false;
     }
   }
+
+  // gate:'knowledge_check' is the knowledge_check option (default on), the switch for the whole shipped knowledge check.
+  if (gate === 'knowledge_check') return opt('knowledge_check', true) !== false;
 
   // gate:'worker_wait' is the worker_wait_advisory option (default on): the same switch as the Bash hook.
   if (gate === 'worker_wait') return opt('worker_wait_advisory', true);
@@ -829,7 +865,7 @@ export function markEventTurnTold(rules, sessionId, delivered) {
   }
 }
 
-export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
+export function matchRules({ scope, text, sessionId, subagent = false, assumeChild = false } = {}) {
   if (scope === 'event-turn' && (subagent || !isEventTurn(text))) return [];
   const { rules } = readRules();
   const subject = scope === 'user-prompt' ? userOwnText(text) : String(text ?? '');
@@ -841,7 +877,7 @@ export function matchRules({ scope, text, sessionId, subagent = false } = {}) {
     // subagent's session start. Unmarked rules, the operator's own included,
     // reach everyone.
     if (subagent && r.audience === 'lead') return false;
-    if (!gateSatisfied(r.gate, sessionId)) return false;
+    if (!gateSatisfied(r.gate, sessionId, assumeChild)) return false;
     if (scope === 'always' || scope === 'session-start' || scope === 'event-turn') return true;
     if (typeof r.when !== 'string' || !r.when) return false;
     let re;
@@ -863,22 +899,34 @@ export function outputCap() {
 // skipping any rule that would push past maxChars, then one closing line that
 // counts the rules left out and names them (first six ids), so an operator
 // whose rules outgrew the cap sees which ones instead of quietly losing them.
+const BLOCK_HEADER = '\n\n[agent-companion: standing rules]';
+
+// The one layout both renderRules and the budget report use, so they cannot disagree about what drops: each rule is a
+// "\n- <then>" line, kept while the running length stays within `cap`, else dropped (and later, shorter rules may still fit).
+function layoutRules(list, cap) {
+  let used = BLOCK_HEADER.length;
+  let wanted = BLOCK_HEADER.length;
+  const lines = [];
+  for (const r of list) {
+    const line = `\n- ${String((r && r.then) || '').trim()}`;
+    const id = r && typeof r.id === 'string' && r.id ? r.id : '(no id)';
+    wanted += line.length;
+    if (used + line.length > cap) { lines.push({ id, chars: line.length, line, dropped: true }); continue; }
+    used += line.length;
+    lines.push({ id, chars: line.length, line, dropped: false });
+  }
+  return { lines, used, wanted, cap };
+}
+
 export function renderRules(rules, { maxChars } = {}) {
   const list = Array.isArray(rules) ? rules : [];
   if (list.length === 0) return '';
 
   const cap = typeof maxChars === 'number' ? maxChars : opt('standing_rules_max_chars', DEFAULT_MAX_CHARS);
-  const header = '\n\n[agent-companion: standing rules]';
-  let body = '';
-  let used = header.length;
-  const dropped = [];
-
-  for (const r of list) {
-    const line = `\n- ${String((r && r.then) || '').trim()}`;
-    if (used + line.length > cap) { dropped.push(r && typeof r.id === 'string' && r.id ? r.id : '(no id)'); continue; }
-    body += line;
-    used += line.length;
-  }
+  const header = BLOCK_HEADER;
+  const laid = layoutRules(list, cap);
+  const body = laid.lines.filter((l) => !l.dropped).map((l) => l.line).join('');
+  const dropped = laid.lines.filter((l) => l.dropped).map((l) => l.id);
 
   let out = header + body;
   if (dropped.length > 0) {
@@ -898,4 +946,42 @@ export function cutToCap(text, cap = outputCap()) {
   const note = DROPPED_NOTE_RE.exec(s);
   if (!note) return s.slice(0, cap);
   return s.slice(0, Math.min(note.index, cap)) + note[0];
+}
+
+// ---- the session-start budget (0.31.57) -----------------------------------------------------------------------------
+// The session-start block is cut at the standing_rules_max_chars budget in rule order (built-ins, then the operator's
+// rules), and a rule that does not fit is dropped with only a note inside the block itself. This renders the block the
+// way hooks/standing-rules.mjs does, for the audiences it serves, and reports what would drop: `rules.mjs` warns after
+// an edit, `rules.mjs budget` prints it, and the daily scout raises standing_rules_overflow from it.
+//   lead        a lead session
+//   lead-child  a lead that another session started (the worst case: it also gets child-coordinator-messages)
+//   subagent    a worker whose SessionStart fires (it compacts): the rules with no `audience: lead`
+export const BUDGET_AUDIENCES = ['lead', 'lead-child', 'subagent'];
+
+export function sessionStartBudget(audience = 'lead') {
+  const subagent = audience === 'subagent';
+  const matched = matchRules({ scope: 'session-start', subagent, assumeChild: audience === 'lead-child' });
+  const rawCap = opt('standing_rules_max_chars', DEFAULT_MAX_CHARS);
+  const cap = Math.min(Number.isFinite(rawCap) && rawCap > 0 ? Math.floor(rawCap) : DEFAULT_MAX_CHARS, outputCap());
+  const laid = layoutRules(matched, cap);
+  return {
+    audience,
+    cap,
+    used: laid.used,
+    wanted: laid.wanted,
+    headroom: cap - laid.wanted,
+    rules: laid.lines.map((l) => ({ id: l.id, chars: l.chars, dropped: l.dropped })),
+    dropped: laid.lines.filter((l) => l.dropped).map((l) => l.id),
+  };
+}
+
+// The audiences whose session-start block would drop a rule right now: [] when none does.
+export function sessionStartOverflow() {
+  return BUDGET_AUDIENCES.map((a) => sessionStartBudget(a)).filter((b) => b.dropped.length > 0);
+}
+
+// One line per overflowing audience, for the CLI warning and the scout signal.
+export function overflowLine(b) {
+  const n = b.dropped.length;
+  return `${b.audience}: ${n} rule${n === 1 ? '' : 's'} would drop (${b.dropped.join(', ')}); the block needs ${b.wanted} chars, the cap is ${b.cap}`;
 }

@@ -214,6 +214,7 @@ export const STALE_GUIDE = {
   inherited_model_spawns: { means: 'Spawns named no model and inherited the lead tier.', action: 'fix' },
   session_churn: { means: 'Sessions crossed the churn thresholds (effort switches, tool errors, corrections, review rounds).', action: 'fix' },
   haiku_fit_leak: { means: 'Spawns the table routes to haiku ran on another model.', action: 'fix' },
+  standing_rules_overflow: { means: 'The session-start standing-rules block drops a rule for length, so it never reaches the model.', action: 'fix' },
 };
 
 const ACTION_TEXT = {

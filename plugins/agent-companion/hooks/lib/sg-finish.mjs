@@ -11,6 +11,7 @@ import {
 import { matchRules, renderRules } from './rules.mjs';
 import { buildScopeClause } from './scope-rule.mjs';
 import { buildWriterClause } from './writer-brief.mjs';
+import { knowledgeDecision, knowledgeClause, holdKnowledgeNotice } from './knowledge-check.mjs';
 import { applyTierClause } from './tier-clause.mjs';
 import { planLegSpawn } from './opus-writer.mjs';
 import { allowWith, combineNotes, commonTypeRoutes } from './sg-helpers.mjs';
@@ -69,6 +70,16 @@ export async function finishSpawn({
 
     // 1b2. The writer clause (lib/writer-brief.mjs): handoff, test running, and staging for a brief with more than 4 deliverables.
     try { if (!planLeg) suffix += buildWriterClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
+
+    // 1b3. The knowledge check clause (lib/knowledge-check.mjs): a builder TYPE gets one look at the current docs before it builds,
+    //      unless the brief already carries the lead's own dated line. The first such spawn of a session also holds a one-line
+    //      notice for the lead (merged into the allow by allowWith, once per session).
+    try {
+      if (knowledgeDecision({ type: declaredType, role: declaredRole, brief: input.prompt }) === 'clause') {
+        suffix += `\n\n${knowledgeClause()}`;
+        holdKnowledgeNotice({ sid, subagentCaller, isCanary });
+      }
+    } catch { /* fail open */ }
 
     // 1c. The project tier clause: the project's tier and the change-risk table for a writer or reviewer (lib/tier-clause.mjs).
     //     The writer gets the protocol clause only when this spawn really carries the protocol (selfReviewExpected, decided above).
