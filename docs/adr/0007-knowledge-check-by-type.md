@@ -25,7 +25,8 @@ search" clause on every brief it matched, and a session-start rule. Aggregate nu
    (default: bounded-feature, bounded-feature-small, integration, debug-root-cause, critical-change,
    novel-design, large-refactor, long-autonomous-run) gets one clause of at most 350 characters
    (`hooks/lib/knowledge-check.mjs`, appended by the spawn guard). Every other type, every reviewer and every
-   brief with no TYPE gets nothing: the clause costs characters on every brief and the data shows it buys
+   brief with no TYPE gets nothing, and so does the read-only plan leg of a two-leg type (it edits nothing; the
+   write leg gets the clause): the clause costs characters on every brief and the data shows it buys
    nothing there.
 2. **Reuse.** A brief with a line `Knowledge check YYYY-MM-DD:` dated today or yesterday (local date) gets no
    clause; the worker uses the lead's check. Lines in code fences, blockquotes and HTML comments do not count.
@@ -45,7 +46,7 @@ search" clause on every brief it matched, and a session-start rule. Aggregate nu
 
 ## Consequences
 
-- A builder brief is 349 characters longer unless the lead passed a dated line down. Briefs for other types are
+- A builder brief is about 350 characters longer unless the lead passed a dated line down. Briefs for other types are
   unchanged, which is most of the 1.48M characters of the old clause.
 - The worker's report line (`Knowledge check <date>: confirmed|changed|none needed`) makes the effect measurable
   from transcripts without new telemetry.

@@ -129,7 +129,7 @@ export const COPYABLE_PROMPT_WHEN = [
 // verb close behind it, or an explicit request for steps, instructions or a walkthrough. "How does X work", "how long
 // did the install take" and an instruction to DO the setup ("install the plugin") do not match. A test pins the length.
 const HOWTO_VERB = '(?:set(?:ting)?[ -]?up|configur(?:e|ing)|install(?:ing)?|enabl(?:e|ing)|connect(?:ing)?|deploy(?:ing)?|upgrad(?:e|ing))\\b';
-export const KNOWLEDGE_HOWTO_WHEN = `\\b(?:how\\s+(?:(?:do|can|should|would|could)\\s+(?:i|we)|to)|(?:steps|instructions|guide)\\s+(?:to|for)|walk\\s+me\\s+through|step[- ]by[- ]step)\\s+(?:\\S+\\s+){0,4}?${HOWTO_VERB}`;
+export const KNOWLEDGE_HOWTO_WHEN = `\\b(?:how\\s+(?:(?:do|can|should|would|could)\\s+(?:i|we|you)|to)|(?:steps|instructions|guide)\\s+(?:to|for)|walk\\s+me\\s+through|step[- ]by[- ]step)\\s+(?:(?!(?:know|tell|see|check|verify|handle|debug)\\b)\\S+\\s+){0,2}?${HOWTO_VERB}`;
 export const KNOWLEDGE_HOWTO_TEXT = 'The user asked how to do or set something up. Before giving steps, read the current official docs (one WebFetch, or a haiku worker) and say the date you checked; do not answer from memory. Trust the user\'s screen over older steps.';
 
 // The lead-effort-check directive. Plain and short on purpose: it is read at

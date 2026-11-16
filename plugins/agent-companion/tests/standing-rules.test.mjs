@@ -1070,7 +1070,7 @@ test('rules.mjs add --then-later (and --then-later-file) sets the later text of 
 
 // ---- 0.31.57: the shipped knowledge check (by task type), the session-start budget and its overflow warning ------------
 import {
-  KC_MARKER, KC_DEFAULT_TYPES, KC_LEAD_NOTICE, knowledgeDecision, buildKnowledgeClause, knowledgeClause, hasFreshKnowledgeLine, localDate,
+  KC_MARKER, KC_DEFAULT_TYPES, KC_LEAD_NOTICE, holdKnowledgeNotice, mergeKnowledgeNotice, knowledgeDecision, buildKnowledgeClause, knowledgeClause, hasFreshKnowledgeLine, localDate,
 } from '../hooks/lib/knowledge-check.mjs';
 import {
   KNOWLEDGE_HOWTO_WHEN, SUPERSEDED_USER_RULE_IDS, sessionStartBudget, sessionStartOverflow, BUDGET_AUDIENCES,
@@ -1215,12 +1215,12 @@ test('A6: knowledge_check off at the spawn guard: no clause, no notice', () => {
 const HOWTO_HITS = [
   'how do I set up the Gmail connector', 'How to configure the proxy for npm', 'give me the steps to install node',
   'walk me through enabling 2FA', 'what are the instructions for setting up SSO', 'how can we deploy this to Firebase',
-  'how should I connect the desktop app to the bus', 'step by step to upgrade the plugin',
+  'how should I connect the desktop app to the bus', 'step by step to upgrade the plugin', 'how do you set up the proxy',
 ];
 const HOWTO_MISSES = [
   'how does the hook work', 'how long did the install take', 'install the plugin and run the tests', 'set up a worktree and fix the bug',
   'how do I know the installer worked', 'the steps below failed', 'how did you configure it', 'how do I read the log',
-  'a guide to the codebase', 'how to read this config file', 'walk me through the diff', 'explain it step by step', 'why did the deploy fail',
+  'a guide to the codebase', 'how to read this config file', 'walk me through the diff', 'explain it step by step', 'why did the deploy fail', 'how do I know the install worked', 'how should we handle the deploy failing', 'how do I tell if the upgrade worked',
 ];
 
 test('A5: knowledge-check-howto fires on a request for setup steps and not on near-misses', () => {
@@ -1307,14 +1307,19 @@ test('C: with every default built-in on (effort check too), the worst-case lead 
   const { cleanup } = makeFixture();
   try {
     writeFileSync(rulesPath(), JSON.stringify([{ id: 'lead-effort-check', enabled: true }]));
+    // 3000 is the shipped plugin.json default, 4000 the output cap the brief names.
+    for (const cap of ['3000', '4000']) {
+      withEnv({ CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: cap }, () => {
+        for (const a of BUDGET_AUDIENCES) {
+          const b = sessionStartBudget(a);
+          assert.equal(b.dropped.length, 0, `${a} drops ${b.dropped} at ${cap}`);
+          assert.equal(b.cap, Number(cap));
+          assert.ok(b.headroom >= Number(cap) - 2400, `${a}: ${b.wanted} of ${cap} chars leaves ${b.headroom} for the operator's own rules`);
+        }
+      });
+    }
     withEnv({ CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '4000' }, () => {
       assert.deepEqual(BUDGET_AUDIENCES, ['lead', 'lead-child', 'subagent']);
-      for (const a of BUDGET_AUDIENCES) {
-        const b = sessionStartBudget(a);
-        assert.equal(b.dropped.length, 0, `${a} drops ${b.dropped}`);
-        assert.ok(b.cap === 4000);
-        assert.ok(b.headroom >= 1500, `${a}: ${b.wanted} of 4000 chars leaves ${b.headroom} for the operator's own rules`);
-      }
       assert.ok(sessionStartBudget('lead-child').wanted > sessionStartBudget('lead').wanted, 'the child-session rule only counts for a child');
       assert.ok(sessionStartBudget('subagent').wanted < sessionStartBudget('lead').wanted, 'lead-only rules stay out of a worker');
       assert.deepEqual(sessionStartOverflow(), []);
@@ -1416,4 +1421,43 @@ test('B2: the scout raises standing_rules_overflow when the config drops a rule,
       assert.match(kcReadFile(join(KC_PLUGIN_ROOT, ...f), 'utf8'), /standing_rules_overflow/);
     }
   } finally { cleanup(); }
+});
+
+test('A4: a denied or held spawn does not use up the lead notice; a worker caller and a canary never get it', () => {
+  const { stateDir, cleanup } = makeFixture();
+  try {
+    // held, then the spawn is denied: a denied spawn never reaches allowWith, so no merge runs and no marker is written
+    holdKnowledgeNotice({ sid: 'sess-denied', subagentCaller: false, isCanary: false });
+    assert.equal(existsSync(join(stateDir, 'knowledge-check-notice')), false, 'a hold alone claims nothing');
+    holdKnowledgeNotice({ sid: 'sess-denied', subagentCaller: false, isCanary: false });
+    assert.ok(mergeKnowledgeNotice('ctx').includes(KC_LEAD_NOTICE), 'the next allowed spawn still gets it');
+    holdKnowledgeNotice({ sid: 'sess-denied', subagentCaller: false, isCanary: false });
+    assert.equal(mergeKnowledgeNotice('ctx'), 'ctx', 'and only once');
+    assert.equal(mergeKnowledgeNotice('ctx'), 'ctx', 'a merge with nothing held is a no-op');
+    holdKnowledgeNotice({ sid: 'sess-worker', subagentCaller: true, isCanary: false });
+    assert.equal(mergeKnowledgeNotice('ctx'), 'ctx');
+    holdKnowledgeNotice({ sid: 'sess-canary', subagentCaller: false, isCanary: true });
+    assert.equal(mergeKnowledgeNotice('ctx'), 'ctx');
+  } finally { cleanup(); }
+});
+
+test('A1: the read-only plan leg of a two-leg type gets no clause and does not use up the notice', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const plan = kcSpawn(dir, 'TYPE: novel-design\nROLE: plan\nplan the design, read-only');
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.ok(!kcPrompt(plan).includes(KC_MARKER), 'plan leg: no clause');
+    assert.ok(!kcCtx(plan).includes(KC_LEAD_NOTICE), 'plan leg: no notice');
+    const write = kcSpawn(dir, 'TYPE: novel-design\nROLE: writer\nbuild the design');
+    assert.ok(kcPrompt(write).includes(KC_MARKER), 'write leg: clause');
+    assert.ok(kcCtx(write).includes(KC_LEAD_NOTICE), 'write leg: notice');
+  } finally { cleanup(); }
+});
+
+test('A6: the plugin.json defaults for knowledge_check and knowledge_check_types match the code', () => {
+  const manifest = JSON.parse(kcReadFile(join(KC_PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
+  const cfg = manifest.userConfig;
+  assert.equal(cfg.knowledge_check.type, 'boolean');
+  assert.equal(cfg.knowledge_check.default, true);
+  assert.equal(cfg.knowledge_check_types.default, KC_DEFAULT_TYPES.join(','));
 });

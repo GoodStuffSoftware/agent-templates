@@ -61,7 +61,7 @@ export function hasFreshKnowledgeLine(brief, now) {
   return false;
 }
 
-// The clause (about 340 characters), dated with the local date so the worker's report line is exact.
+// The clause (about 350 characters, pinned by a test), dated with the local date so the worker's report line is exact.
 export function knowledgeClause(now) {
   const d = localDate(0, now);
   return `${KC_MARKER} Before your first edit, run ONE WebSearch (or WebFetch of the official docs or changelog) on the main library or tool you use. ` +

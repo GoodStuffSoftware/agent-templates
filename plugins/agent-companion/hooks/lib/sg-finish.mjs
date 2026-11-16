@@ -72,10 +72,10 @@ export async function finishSpawn({
     try { if (!planLeg) suffix += buildWriterClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
 
     // 1b3. The knowledge check clause (lib/knowledge-check.mjs): a builder TYPE gets one look at the current docs before it builds,
-    //      unless the brief already carries the lead's own dated line. The first such spawn of a session also holds a one-line
+    //      (not the read-only plan leg, which edits nothing) unless the brief already carries the lead's own dated line. The first such spawn of a session also holds a one-line
     //      notice for the lead (merged into the allow by allowWith, once per session).
     try {
-      if (knowledgeDecision({ type: declaredType, role: declaredRole, brief: input.prompt }) === 'clause') {
+      if (!planLeg && knowledgeDecision({ type: declaredType, role: declaredRole, brief: input.prompt }) === 'clause') {
         suffix += `\n\n${knowledgeClause()}`;
         holdKnowledgeNotice({ sid, subagentCaller, isCanary });
       }
