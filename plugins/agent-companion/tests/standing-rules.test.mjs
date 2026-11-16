@@ -1396,7 +1396,9 @@ test('B1: rules.mjs add, enable and disable warn about a dropped rule after the 
     const fill = runScript('scripts/rules.mjs', ['add', '--id', 'fill-one', '--scope', 'session-start', '--then', `F${'x'.repeat(2399)}`], { env });
     assert.equal(fill.status, 0, fill.stderr);
     assert.doesNotMatch(fill.stderr, /WARNING/, 'still fits: no warning');
-    const add = runScript('scripts/rules.mjs', ['add', '--id', 'fill-two', '--scope', 'session-start', '--then', `G${'y'.repeat(800)}`], { env });
+    // Well over the line, not just past it: the pr-wait-hint rule embeds the plugin's own path, so the lead block is a few
+    // dozen characters shorter on CI (a short checkout path) than in a long local one, and 800 fit there.
+    const add = runScript('scripts/rules.mjs', ['add', '--id', 'fill-two', '--scope', 'session-start', '--then', `G${'y'.repeat(1100)}`], { env });
     assert.equal(add.status, 0, 'the edit is not refused');
     assert.match(add.stdout, /added "fill-two"/);
     assert.match(add.stderr, /WARNING: the session-start block is over its budget/);

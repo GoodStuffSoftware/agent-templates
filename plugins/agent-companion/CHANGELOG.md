@@ -5,6 +5,7 @@ All notable changes to the `agent-companion` plugin. Dates are UTC.
 ## 0.31.58 — 2026-11-16
 
 - **Fix: the knowledge check clause was skipped for any brief that mentioned its marker.** The "already appended" test looked for the bare text `[agent-companion: knowledge check]` anywhere in the brief, so a brief that only quoted it (for example a verification brief asking the worker whether it contains such a block) got no clause and no lead notice. The test now looks for the appended block itself (the marker followed by the clause's first words, at the start of a line). A re-spawned brief that already carries the block still gets no second one (a block inside a code fence, blockquote or HTML comment is a quote and does not count). The scope, writer and tier clauses had the same bare-marker test and now use the same line-start rule.
+- **Fix: CI red on 0.31.57.** The test `B1: rules.mjs add, enable and disable warn about a dropped rule` filled the lead block to within a few dozen characters of the cap, but the `pr-wait-hint` rule embeds the plugin's own path, so on a short CI checkout path the lead block fit and only the lead-child block overflowed. The test now overflows the block by a wide margin. No code change.
 - Tests: `tests/standing-rules.test.mjs` A7 (quoted marker gets the clause and the once-per-session notice, a carried block is not doubled, dated line and research type, through the spawn-guard entry point with a stdin payload and no option env); A8 (CRLF, fenced and commented blocks, quoted scope/writer/tier markers).
 
 ## 0.31.57 — 2026-11-16
