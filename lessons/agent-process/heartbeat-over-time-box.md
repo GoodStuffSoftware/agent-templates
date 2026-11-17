@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-06-12
 provenance: [contrib-2]
-corroborated: 3
+corroborated: 4
 ---
 Teammate briefs should ask for progress reports at natural phase transitions and before blocking calls — not at wall-clock intervals ("if stuck for 5 minutes, abort"). Wall-clock abort triggers fire on slow-but-progressing work (long builds, large uploads, test suites) and cause false aborts.
 
@@ -21,3 +21,5 @@ Teammate briefs should ask for progress reports at natural phase transitions and
 **Third case — never time-box a PROVISIONING step below its real cost.** A two-minute tool timeout on a workspace-creation command killed its post-checkout hook mid-run, leaving one in-tree dependency built to an empty output directory. The damage surfaced much later and somewhere else: five test failures that a writer reasonably diagnosed as "unrelated pre-existing." Building the missing package turned the suite green.
 
 The shape to recognize: **a partially provisioned environment does not announce itself.** It reports as unrelated failures in whatever runs next, and the agent that hits them has no reason to suspect the setup. Size a provisioning timeout against the real cost of the dependency install and build, or do not bound it at all — and when a fresh workspace produces strange failures, verify provisioning completed before investigating the diff.
+
+**Fourth case: a worker's message is not free to the lead.** A progress heartbeat from a worker wakes an idle lead, and that wake has a price. Measured on one fleet, a worker's message woke an idle lead 68 percent of the time at about 0.09 plan units per wake; hooking an automatic "message the lead first" step into every spawn would have cost several times the budget set for it. So report at natural phase transitions only where a human-visible decision hangs on it, and brief the worker: "Message the lead only when you are blocked or need a decision; your final message is the report. Every message wakes the lead." Replace a periodic heartbeat with a cheap passive signal (a log line or a progress file the lead can read when it chooses) and keep the never-park rule: a blocked worker says so once, then stops.
