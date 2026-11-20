@@ -1,4 +1,0 @@
-CHANGELOG-ready note:
-- **The API ledger refuses unproven records.** `api-credits.mjs record` (all four categories: review, overflow, rater, workers; every one is API-billed) now requires `--api-key-source ANTHROPIC_API_KEY` (library: `apiKeySource`). Without it: exit 2, one line, nothing booked, and the attempt goes to `api-credits-rejects.jsonl` beside the ledger; the plugin's own runners pass the proof. Old ledgers load unchanged.
-- **`status` is stricter.** It flags a category with booked spend this cycle and no billed cost on its workspace (`gaps: none` used to hide it: categories with no mapped workspace, overflow and rater by default, were never checked; they are now held to the default workspace), and shows `REJECTED records this cycle: N` when non-zero.
-Not changed: recordSpend() (internal per-turn booking, library only, not reachable from the CLI).
