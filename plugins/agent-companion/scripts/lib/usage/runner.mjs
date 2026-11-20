@@ -45,12 +45,17 @@ import { readTelemetry, telemetryRecords, versionFirstSeen } from './telemetry.m
 import { makeRoutineSource } from './routines.mjs';
 import { sessionRecordRoot } from '../routine-model-drift.mjs';
 import { homeRoot, claudeDir } from '../../../hooks/lib/context.mjs';
-import { weeklyLimitUnits } from '../../../hooks/lib/plan-allowance.mjs';
+import { weeklyLimitUnits, unitsPerPercentFor } from '../../../hooks/lib/plan-allowance.mjs';
+import { accountHistory } from '../../../hooks/lib/account.mjs';
+import { opt, pluginVersion } from '../../../hooks/lib/context.mjs';
+import { configuredWindow } from '../cache-advisor.mjs';
+import { transcriptsRoot as defaultTranscriptsRoot } from '../transcripts.mjs';
+import { computeEfficiency } from './efficiency.mjs';
 import {
   renderReport, summaryLines, regressionsOf, regressionIdsOf, infoRegressionsOf, r4,
 } from './report.mjs';
 
-export const RUNNER_VERSION = 3; // 3: worker/routine metrics (batch 6b): richer spawn records, slash rung labels, telemetry and routine records; 2: day records, byModel, spawn start and re-spawn keys
+export const RUNNER_VERSION = 4; // 4: efficiency sections (landings, lead compactions, Opus share, accounts, setting markers); 3: worker/routine metrics (batch 6b): richer spawn records, slash rung labels, telemetry and routine records; 2: day records, byModel, spawn start and re-spawn keys
 export const RESULT_SCHEMA = 'agent-companion/usage-analysis-result';
 export const LATEST_SCHEMA = 'agent-companion/usage-analysis-latest';
 export const STATUS_SCHEMA = 'agent-companion/usage-analysis-status';
@@ -361,7 +366,7 @@ export function makeHooks({
     }
     return routineSource.records(day, boundary, environment);
   };
-  return { sessionAttrs, spawnRecords, dayRecords, telemetryRecords: telemetryHook, routineRecords: routineHook };
+  return { sessionAttrs, spawnRecords, dayRecords, telemetryRecords: telemetryHook, routineRecords: routineHook, telemetry: telemetryOf };
 }
 
 // ---------------------------------------------------------------- metrics --
@@ -658,9 +663,50 @@ function computeDay(ctx, day, parts, prior, force) {
     gaps,
     regressions,
   };
+  res.efficiency = computeEfficiency({
+    f, fromMs: dayStartMs(day, boundary), toMs: dayEndMs(day, boundary), seams: ctx.effSeams(day, prior),
+  });
   const lines = summaryLines(res);
   res.summary = { lines, regressionIds: regressionIdsOf(regressions), infoRegressionIds: regressionIdsOf(infoRegressionsOf(scenarios)) };
   return res;
+}
+
+// ------------------------------------------------------------- efficiency --
+
+/**
+ * The readers the efficiency sections use, with the test seams in opts.efficiency (git, transcriptsRoot, accountHistory, rateFor,
+ * spawnRows, settings, pluginVersion). Everything is read lazily and once per run. Of the settings only two values are read:
+ * autoCompactWindow (through configuredWindow) and main_compact_floor_tokens (through opt); nothing else of them.
+ */
+function makeEfficiencySeams({ root, hooks, nowT, opts }) {
+  const e = opts.efficiency || {};
+  const lazy = (fn) => { let v; let done = false; return () => { if (!done) { try { v = fn(); } catch { v = null; } done = true; } return v; }; };
+  const rows = lazy(() => {
+    const m = new Map();
+    const tel = hooks.telemetry();
+    for (const r of (tel && tel.spawns) || []) if (typeof r.tool_use_id === 'string') m.set(r.tool_use_id, r);
+    return m;
+  });
+  const history = lazy(() => accountHistory());
+  const repoCache = new Map();
+  return (day, prior) => {
+    const prevDay = addDays(day, -1);
+    const pv = readResult(root, prevDay);
+    const markersOf = (res) => (res && res.efficiency && res.efficiency.markers && res.efficiency.markers.values ? res.efficiency.markers : null);
+    return {
+      git: e.git, repoCache,
+      transcriptsRoot: e.transcriptsRoot || opts.transcriptsRoot || defaultTranscriptsRoot(),
+      accountHistory: e.accountHistory !== undefined ? e.accountHistory : history(),
+      rateFor: e.rateFor || ((acct) => unitsPerPercentFor({ account: acct })),
+      spawnRows: e.spawnRows || rows() || new Map(),
+      settings: e.settings || (() => ({ window: configuredWindow().tokens, floor: opt('main_compact_floor_tokens', 0) })),
+      pluginVersion: e.pluginVersion !== undefined ? e.pluginVersion : pluginVersion(),
+      prev: markersOf(pv) ? markersOf(pv).values : null,
+      prevDay,
+      prior: markersOf(prior),
+      nowT,
+    };
+  };
 }
 
 // ----------------------------------------------------------------- latest --
@@ -778,6 +824,7 @@ function runAnalysisUnsafe(opts, t0, clock) {
   const ctx = {
     root, cfg, store, loadDay, sources, boundary, limit, wstates, metrics: opts.metrics || defaultMetrics,
     only: restricted ? new Set(opts.scenarios) : null,
+    effSeams: makeEfficiencySeams({ root, hooks, nowT, opts }),
   };
 
   // order: days with no result yet (oldest first), then recent days that may need a revision (oldest first)

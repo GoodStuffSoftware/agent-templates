@@ -184,6 +184,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`) }
         force: !!f.force,
         dryRun: !!f['dry-run'],
         reportDir,
+        transcriptsRoot: f.transcripts || undefined,
       });
       if (analysis.error) errors.push(`analysis: ${analysis.error}`);
       Object.assign(result, analysis, { skipped_days: (analysis.skipped || []).length });

@@ -25,6 +25,8 @@ import { briefAllowancePct } from './brief-directives.mjs';
 import { readBrief } from './step-budget.mjs';
 import { usageOf, safe } from './runaway.mjs';
 import { claimOnce } from './subagent-context.mjs';
+import { currentAccount } from './account.mjs';
+import { latestSample } from './plan-meter.mjs';
 
 const STATE_TTL_MS = 7 * 86400000;
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -61,11 +63,59 @@ export function planWeights() {
 const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d);
 export function unitsPerPercent() { return num(planWeights().unitsPerPercent?.value, 28.6); }
 
+// Units per 1% for one account (0.31.59). Each claude.ai account has its own weekly limit, so on a smaller plan the same tokens are
+// a larger percent. plan-weights.json (shipped, plus the user file, merged one level deep) may hold
+//   unitsPerPercentByAccount: { "<account id>": { value, interval?, status?, date?, source? } | <number> }   (calibrate-weights.mjs writes these)
+//   unitsPerPercentByPlan:    { "<plan name, e.g. Max>": same shapes }                                         (by hand)
+// Order: the account's entry, else the plan's entry, else `unitsPerPercent` (the shipped default, with its own date and source).
+// Returns { value, basis: 'account' | 'plan' | 'default', key, status, date, interval, source }.
+export function unitsPerPercentFor({ account = null, plan = null } = {}) {
+  const w = planWeights();
+  const entry = (map, key) => {
+    if (!key || !plain(map)) return null;
+    const k = Object.keys(map).find((x) => x === key || x.toLowerCase() === String(key).toLowerCase());
+    const e = k === undefined ? null : map[k];
+    const value = typeof e === 'number' ? e : plain(e) ? e.value : undefined;
+    if (!(num(value, 0) > 0)) return null;
+    return { value, key: k, status: plain(e) && e.status ? e.status : 'configured', date: plain(e) ? e.date : undefined, interval: plain(e) ? e.interval : undefined, source: plain(e) ? e.source : undefined };
+  };
+  const a = entry(w.unitsPerPercentByAccount, account);
+  if (a) return { basis: 'account', ...a };
+  const p = entry(w.unitsPerPercentByPlan, plan);
+  if (p) return { basis: 'plan', ...p };
+  const d = w.unitsPerPercent;
+  return { value: unitsPerPercent(), basis: 'default', key: null, status: d?.status, date: d?.date, interval: d?.interval, source: d?.source };
+}
+
+// The rate for the account in use now: its entry, else the entry of its plan (the plan named by its newest meter sample), else the default.
+// With no per-account or per-plan entry configured this does no I/O and is exactly unitsPerPercent(): a single-account user is unchanged.
+// A current account the plugin cannot tell uses the default, never another account's figure.
+export function currentRate() {
+  try {
+    const w = planWeights();
+    const any = (m) => plain(m) && Object.keys(m).length > 0;
+    if (!any(w.unitsPerPercentByAccount) && !any(w.unitsPerPercentByPlan)) return unitsPerPercentFor();
+    const account = currentAccount();
+    return unitsPerPercentFor({ account, plan: any(w.unitsPerPercentByPlan) ? latestSample(account)?.plan ?? null : null });
+  } catch {
+    return unitsPerPercentFor();
+  }
+}
+
+// One line saying which rate was used and where it came from: "28.6 units = 1% (shipped default, measured 2026-11-03)",
+// "14.3 units = 1% (account <first 8 characters of its id>, measured 2026-11-20)", "14.3 units = 1% (plan Max, configured)".
+export function rateLabel(r = currentRate()) {
+  const what = r.basis === 'account' ? `account ${String(r.key).slice(0, 8)}` : r.basis === 'plan' ? `plan ${r.key}` : 'shipped default';
+  const how = [r.status, r.date].filter(Boolean).join(' ');
+  return `${r.value} units = 1% (${what}${how ? `, ${how}` : ''})`;
+}
+
 // What 100% of the weekly plan limit is, in plan units: 100 x units per 1% (2860 shipped). The ONE place the weekly limit comes from:
 // the session budget notice, the daily checkup and the usage analysis all call this; the option `weekly_limit_units` replaces it when set above 0.
-export function weeklyLimitUnits() {
+// `rate` (units per 1%) defaults to the shipped figure; the session budget passes the current account's (currentRate().value).
+export function weeklyLimitUnits(rate = unitsPerPercent()) {
   const o = opt('weekly_limit_units', 0);
-  return o > 0 ? o : Math.round(100 * unitsPerPercent() * 1e6) / 1e6;
+  return o > 0 ? o : Math.round(100 * rate * 1e6) / 1e6;
 }
 
 // The model's weight vs Sonnet, and whether it is a measured figure. alias '' (an unrecognised model) counts as Sonnet.
@@ -169,7 +219,8 @@ export function rungOf(agentType, { model = '', effort = '' } = {}) {
 
 // noticePct: the first notice line (option allowance_notice_pct); 0 = no notices, and the note says nothing will warn it.
 export function allowanceNoteText({ pct, alias, effort, assumed = false, root, agentId, noticePct = 80 }) {
-  const units = pct * unitsPerPercent();
+  const rate = currentRate();
+  const units = pct * rate.value;
   const per = perCallPct(alias, effort);
   const toks = allowanceTokens(pct, alias, effort);
   const est = assumed || (per && per.estimated) ? ' (est.)' : '';
@@ -179,7 +230,7 @@ export function allowanceNoteText({ pct, alias, effort, assumed = false, root, a
   const notices = noticePct > 0
     ? `You get a notice at ${noticePct >= 100 ? '' : `${trimNum(noticePct)}% and `}100%; nothing stops you.`
     : 'Nothing will warn or stop you.';
-  return `Allowance: ${trimNum(pct)}% of the weekly limit (${trimNum(units)} units)${size ? `, ${size}` : ''}. Plan your work to fit. ${notices} `
+  return `Allowance: ${trimNum(pct)}% of the weekly limit (${trimNum(units)} units${rate.basis === 'default' ? '' : ` at ${rate.value} per 1%, ${rate.basis} rate`})${size ? `, ${size}` : ''}. Plan your work to fit. ${notices} `
     + `Spend: node "${root}/scripts/allowance.mjs" ${agentId}`;
 }
 
@@ -356,7 +407,7 @@ export function allowanceWatch(p, { noticePct = 80 } = {}) {
     for (const [kid, m] of Object.entries(st.kids)) dirty = meterAdvance(m, join(dir, `agent-${kid}.jsonl`), deadline) || dirty;
     const meters = [st.own, ...Object.values(st.kids)];
     const units = meters.reduce((a, m) => a + m.units + (m.open ? requestUnits(m.open.usage, m.open.model) : 0), 0);
-    const used = (units / unitsPerPercent() / rec.pct) * 100; // percent of the allowance
+    const used = (units / currentRate().value / rec.pct) * 100; // percent of the allowance
     const crossed = marks.filter((m) => used >= m && !st.fired.includes(m));
     const sent = crossed.filter((m) => claimOnce(`allowance-notice-${id}-${m}`));
     for (const m of crossed) st.fired.push(m); // a mark another call of this agent claimed first is done too
@@ -503,7 +554,8 @@ export function agentSpend(agentId, claudeDirPath) {
   const sub = kids.reduce((a, k) => ({ units: a.units + k.units, tokens: a.tokens + k.tokens, calls: a.calls + k.calls }), { units: 0, tokens: 0, calls: 0 });
   const models = {};
   for (const s of [own, ...kids]) for (const [a, v] of Object.entries(s.byModel)) models[a] = (models[a] || 0) + v.calls;
-  const per = unitsPerPercent();
+  const rate = currentRate();
+  const per = rate.value;
   const totalUnits = own.units + sub.units;
   const totalTokens = own.tokens + sub.tokens;
   // Tokens: the allowance at the model's usual mix (the rung from the state record, else the model with most calls, at high) and
@@ -514,6 +566,7 @@ export function agentSpend(agentId, claudeDirPath) {
   const allowTok = pct ? allowanceTokens(pct, alias, effort) : null;
   return {
     ok: true,
+    rate,
     allowancePct: pct,
     totalTokens, allowanceTokens: allowTok, tokensLeft: allowTok ? allowTok * Math.max(0, 1 - totalUnits / (pct * per)) : null,
     allowanceModel: `${alias}/${effort}`,

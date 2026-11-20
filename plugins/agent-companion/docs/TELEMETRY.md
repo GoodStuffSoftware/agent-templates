@@ -392,7 +392,9 @@ total that skips several multiples at once still writes one.
 | `units` | number | the session's plan units at that moment (tokens at Sonnet 5 rates times the model's weight in `config/plan-weights.json`) |
 | `level` | number | the multiple of the threshold just passed, in units |
 | `threshold` | number | `session_budget_units` as set |
-| `week_pct` | number | `units` as a percentage of the week, 100 x `unitsPerPercent` in `config/plan-weights.json` (plus the per-user override) |
+| `week_pct` | number | `units` as a percentage of the week, 100 x the units per 1% of the account in use (below; by default `unitsPerPercent` in `config/plan-weights.json`, plus the per-user override) |
+| `units_per_pct` | number | the units per 1% that `week_pct` used |
+| `rate_basis` | string | where that rate came from: `account` (an entry in `unitsPerPercentByAccount`), `plan` (`unitsPerPercentByPlan`) or `default` |
 | `transcripts` | number | transcripts read: the lead's plus its subagents' |
 | `scan_complete` | boolean | false when the scan stopped at its deadline and `units` is a lower bound |
 | `estimated_turns` | number | requests counted at their own API list price because their weight in `config/plan-weights.json` is not measured (status `assumed` or `estimated`: haiku, fable) |
