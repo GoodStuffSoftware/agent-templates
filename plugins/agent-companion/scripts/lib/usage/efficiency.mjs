@@ -21,7 +21,7 @@ import { join, basename, dirname } from 'node:path';
 import { unitsFromTokens } from './facts.mjs';
 import { r4 } from './report.mjs';
 import { inferRole } from '../../../hooks/lib/brief-directives.mjs';
-import { accountAt } from '../../../hooks/lib/account.mjs';
+import { accountAt, uncertainSpans } from '../../../hooks/lib/account.mjs';
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const nonEmpty = (x) => (typeof x === 'string' && x.trim() !== '' ? x.trim() : null);
@@ -292,28 +292,35 @@ export function opusSharesOf({ rows, spawns, used, spawnRows = new Map() }) {
 
 // ----------------------------------------------------------------- accounts --
 
+const UNATTRIBUTED = Symbol('unattributed');
+
 /**
  * Units per account. Each facts row (one session in one UTC hour) goes to the account active at the START of its hour (accountAt):
  * the hour is the finest the facts keep. `history` is accountHistory()'s result; `rateFor(acct)` the account's units per 1% of its
- * week ({ value, ...}). One distinct account (or none known): { single: true } and nothing else.
+ * week ({ value, ...}). One distinct account (or none known): { single: true } and nothing else. An hour that starts inside a span
+ * whose switch time is unknown (the account was seen as A, then as B, nothing dated in between) is not given to either: it is
+ * 'unattributed'. An hour before the first known account is 'unknown'.
  */
 export function accountsOf({ rows, used, history, rateFor }) {
   const distinct = new Set((Array.isArray(history) ? history : []).map((h) => h.acct));
   if (distinct.size < 2) return { single: true };
+  const spans = uncertainSpans(history);
   const by = new Map();
   for (const r of rows || []) {
     const t = Date.parse(r.hour);
-    const acct = (Number.isFinite(t) ? accountAt(history, t) : null) || null;
+    let acct = (Number.isFinite(t) ? accountAt(history, t) : null) || null;
+    if (!acct && Number.isFinite(t) && spans.some((x) => t > x.from && t < x.to)) acct = UNATTRIBUTED;
     by.set(acct, (by.get(acct) || 0) + rowUnits(r, used));
   }
-  const list = [...by.entries()].sort((a, b) => (a[0] === null ? 1 : b[0] === null ? -1 : b[1] - a[1]));
+  const noAcct = (k) => k === null || k === UNATTRIBUTED;
+  const list = [...by.entries()].sort((a, b) => (noAcct(a[0]) !== noAcct(b[0]) ? (noAcct(a[0]) ? 1 : -1) : b[1] - a[1]));
   return {
     single: false,
     rows: list.map(([acct, units]) => {
-      const rate = acct ? rateFor(acct) : null;
+      const rate = acct && acct !== UNATTRIBUTED ? rateFor(acct) : null;
       const per = rate && rate.value > 0 ? rate.value : null;
       return {
-        account: acct ? String(acct).slice(0, 8) : 'unknown', units: r4(units),
+        account: acct === UNATTRIBUTED ? 'unattributed' : acct ? String(acct).slice(0, 8) : 'unknown', units: r4(units),
         unitsPerPercent: per, rateBasis: rate ? rate.basis : null, pctOfWeek: per ? r4(units / per) : null,
       };
     }),

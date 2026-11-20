@@ -3,7 +3,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, runScript } from './helpers.mjs';
 import { stateDir } from '../hooks/lib/context.mjs';
@@ -159,7 +159,7 @@ function writeTranscript(dir, h) {
 
 // Readings: every other one through the samples file (the sampler's lines), the rest as get_usage results in the transcript;
 // one reading appears in both places seconds apart (must count once).
-function setup(fx, { extraWindow = false } = {}) {
+function setup(fx, { extraWindow = false, acct = null } = {}) {
   const h = history();
   const tr = writeTranscript(fx.dir, h);
   const samples = [];
@@ -184,6 +184,7 @@ function setup(fx, { extraWindow = false } = {}) {
     for (const [dt, y] of [[1, 40], [2, 80], [3, 3], [4, 20]]) samples.push({ ts: new Date(st + dt * DAY).toISOString(), source: 'get_usage', weekly_pct: y, weekly_resets_at: reset });
   }
   tr.flush();
+  if (acct) for (const x of samples) x.acct = acct; // the sampler's account tag (0.31.59)
   const sf = join(fx.dir, 'samples.jsonl');
   writeFileSync(sf, `${samples.map((s) => JSON.stringify(s)).join('\n')}\n`);
   return { h, projects: join(fx.dir, 'projects'), samples: sf };
@@ -232,6 +233,27 @@ test('calibrator: a window whose meter went down is left out and named; the prin
     assert.match(text.stdout, /^opus +1\.\d\d +\[/m);
     assert.match(text.stdout, /Units per 1% of the weekly limit \(Sonnet-priced\): \d\d\.\d \[/);
     assert.equal(existsSync(join(fx.stateDir, 'plan-weights.json')), false, 'no --apply: nothing written');
+  } finally { fx.cleanup(); }
+});
+
+test('calibrator with ONE tagged account: output and written values are those of an untagged history (0.31.58), no account lines', () => {
+  const fx = makeFixture();
+  try {
+    const file = join(fx.stateDir, 'config', 'plan-weights.json');
+    const plain = setup(fx);
+    const a = runCal(fx, plain, ['--apply']);
+    const wroteA = readFileSync(file, 'utf8');
+    const textA = runScript('scripts/calibrate-weights.mjs', ['--projects', plain.projects, '--samples', plain.samples, '--boot', '200', '--apply'], { timeout: 60000 }).stdout;
+    rmSync(file);
+    const tagged = setup(fx, { acct: 'acct-north-one' });
+    const b = runCal(fx, tagged, ['--apply']);
+    const textB = runScript('scripts/calibrate-weights.mjs', ['--projects', tagged.projects, '--samples', tagged.samples, '--boot', '200', '--apply'], { timeout: 60000 }).stdout;
+    assert.deepEqual(b, a, 'the same JSON: no accounts, no accountApply');
+    assert.equal('accounts' in b, false);
+    assert.equal(readFileSync(file, 'utf8'), wroteA, 'the same written values');
+    assert.equal(JSON.parse(wroteA).unitsPerPercentByAccount, undefined, 'no per-account entry for a single account');
+    assert.equal(textB, textA, 'the same printed lines');
+    assert.doesNotMatch(textB, /Account /);
   } finally { fx.cleanup(); }
 });
 

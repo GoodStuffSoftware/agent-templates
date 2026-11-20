@@ -184,7 +184,7 @@ export function efficiencyLines(eff) {
   else {
     L.push('| account | units | % of its week | rate (units = 1%) |');
     L.push('|---|---|---|---|');
-    for (const r of ac.rows) L.push(`| ${cell(r.account)} | ${fmt(r.units, 1)} | ${pctText(r.pctOfWeek, 2)} | ${num(r.unitsPerPercent) ? `${fmt(r.unitsPerPercent, 1)} (${cell(r.rateBasis || 'unknown')})` : 'n/a (account not known)'} |`);
+    for (const r of ac.rows) L.push(`| ${cell(r.account)} | ${fmt(r.units, 1)} | ${pctText(r.pctOfWeek, 2)} | ${num(r.unitsPerPercent) ? `${fmt(r.unitsPerPercent, 1)} (${cell(r.rateBasis || 'unknown')})` : r.account === 'unattributed' ? 'n/a (switch time unknown)' : 'n/a (account not known)'} |`);
   }
   L.push('');
 
@@ -206,7 +206,7 @@ export function efficiencyLines(eff) {
   L.push('- Landing: a commit on the repository\'s default branch (or its merge target, git config guard.mergeTarget; origin\'s copy when there is one), counted along the first parent, committed during the day. A merged branch or a squash is one landing; the commits inside a merged branch are not. Repositories: those a session of the day worked in (the session\'s working directory, a linked worktree resolving to its main repository). Units per landing: the units of those sessions in that repository / its landings.');
   L.push('- Lead compaction: a compact_boundary record in a main-thread transcript; the tokens are its preTokens (context just before compacting). Lead sessions: those with main-thread requests that day.');
   L.push('- Opus writer: a spawn on an Opus model whose declared ROLE (spawn guard, spawns.jsonl declared_role) is writer, fixer or lander, or which has no ROLE and a writing task type. Reviewers, plan legs and lookup, operate or docs roles that wrote notes, plans or scratch files are not writers. Shares are of the day\'s subagent units.');
-  L.push('- Accounts: each session-hour is attributed to the account active at the start of that hour; % of its week uses that account\'s units per 1%.');
+  L.push('- Accounts: each session-hour is attributed to the account active at the start of that hour; % of its week uses that account\'s units per 1%. An hour inside a stretch whose switch time is unknown (one account was last seen, another first seen, nothing dated in between) is shown as unattributed, never guessed.');
   L.push('- Setting markers: Claude Code build (from the lead transcripts), agent-companion version (the spawn guard\'s version on the day\'s spawns), autoCompactWindow and main_compact_floor_tokens (read when the day was computed). A value that differs from the previous day\'s report is marked CHANGED.');
   L.push('');
   return L;

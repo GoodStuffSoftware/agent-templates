@@ -15,11 +15,15 @@
 // Windows the fit cannot explain are left out: a window whose meter went DOWN by more than 2 points (a reset the card does
 // not show, as in September 2026), and, after a first fit, a window whose residual is far above the others'.
 // Accounts (0.31.59): a sample tagged with its account (`acct`, hooks/lib/account.mjs) belongs to that account's weekly meter, and each
-// account has its own plan, so once tagged samples exist the units per 1% is fitted PER ACCOUNT (one parameter, the model weights in
-// force held fixed) over that account's readings and the requests made while it was signed in (the account history), and --apply writes
-// it to unitsPerPercentByAccount. Only windows that opened after the history begins are used (earlier requests cannot be attributed).
-// With two or more tagged accounts the all-readings fit is narrowed to the current account and unitsPerPercent (the default) is not
-// overwritten. No tagged sample (no account source): nothing here changes.
+// account has its own plan. Only when TWO OR MORE accounts have tagged samples is the units per 1% fitted PER ACCOUNT (one parameter,
+// the model weights in force held fixed) over that account's readings and the requests made while it was signed in (the account
+// history); --apply writes it to unitsPerPercentByAccount only with 3+ windows behind it and an interval whose relative width is no
+// wider than the figure in force (the default, for an account with no entry yet). The all-readings fit is then narrowed to the
+// current account and unitsPerPercent (the default) is not overwritten. With one account, or none, nothing here changes from 0.31.58:
+// no account line, no account output, no account entry.
+// Only windows that opened after the history begins are used (earlier requests cannot be attributed). A window that holds a span whose
+// switch time is unknown (the account was seen as A, then as B, with nothing dated in between: hooks/lib/account.mjs) is left out of
+// the per-account fits and counted as unattributed, never guessed.
 // --days <n> (default 60; 0 = all) skips transcripts not modified in n days. Default: print the fit. --apply writes <state root>/config/plan-weights.json (or updates the old top-level <state root>/plan-weights.json when only that exists; the per-user file read by
 // hooks/lib/plan-allowance.mjs), only for figures whose interval is TIGHTER than the one now in force (shipped plus user file).
 
@@ -29,7 +33,7 @@ import { pathToFileURL } from 'node:url';
 import { claudeDir, stateRootPath, stateRoot, configFilePath, classifyModel } from '../hooks/lib/context.mjs';
 import { planWeights, unitsPerPercentFor } from '../hooks/lib/plan-allowance.mjs';
 import { parseUsage, readSampleLines } from '../hooks/lib/plan-meter.mjs';
-import { currentAccount, accountHistory, accountAt } from '../hooks/lib/account.mjs';
+import { currentAccount, accountHistory, accountAt, uncertainSpans } from '../hooks/lib/account.mjs';
 
 const H = 3600e3;
 const WEEK = 7 * 86_400_000;
@@ -381,18 +385,23 @@ export function scopeToAccount(acct, readings, reqs, history) {
   };
 }
 
-// One fit per account that has tagged readings: { [acct]: { enough, n, windows, upp: { value, interval } } }. Only windows that opened at
-// or after the first history entry count (a request before it has no known account, so the window's units would be understated).
+// One fit per account that has tagged readings: { [acct]: { enough, n, windows, unattributedWindows, upp: { value, interval } } }. Only
+// windows that opened at or after the first history entry count (a request before it has no known account, so the window's units would
+// be understated), and a row whose stretch of the window (opening to the reading) holds a span of unknown switch time is left out
+// (`unattributedWindows` counts the windows that lost a row that way).
 export function fitAccounts(readings, reqs, history, { boot = 400, since = NaN } = {}) {
   const out = {};
   const start = history.length ? Date.parse(history[0].at) : Infinity;
+  const spans = uncertainSpans(history);
   for (const acct of [...new Set(readings.filter((r) => r.acct).map((r) => r.acct))]) {
     const sc = scopeToAccount(acct, readings, reqs, history);
     const { rows } = buildRows(sc.readings, sc.reqs, { since });
-    const covered = rows.filter((r) => r.win - WEEK >= start);
+    const known = rows.filter((r) => r.win - WEEK >= start);
+    const covered = known.filter((r) => !spans.some((s) => s.from < r.t && s.to > r.win - WEEK));
     const windows = new Set(covered.map((r) => r.win)).size;
+    const unattributedWindows = new Set(known.filter((r) => !covered.includes(r)).map((r) => r.win)).size;
     const f = fitRate(covered, { boot });
-    out[acct] = f ? { enough: true, n: f.n, windows, upp: { value: f.value, interval: f.interval } } : { enough: false, n: covered.length, windows };
+    out[acct] = f ? { enough: true, n: f.n, windows, unattributedWindows, upp: { value: f.value, interval: f.interval } } : { enough: false, n: covered.length, windows, unattributedWindows };
   }
   return out;
 }
@@ -438,9 +447,11 @@ export function applyPlan(result, current = planWeights(), today = new Date().to
   return { patch, decisions };
 }
 
-// The per-account figures --apply would write: an account with no entry yet gets its fit (a different plan is EXPECTED to land far from
-// the default, so there is no overlap test); an account that has an entry only when the new interval is tighter. At least
-// MIN_APPLY_WINDOWS windows behind the fit either way.
+// The per-account figures --apply would write, held to the same bar as the global figure: at least MIN_APPLY_WINDOWS windows behind the
+// fit and an interval TIGHTER than the one in force. In force is the account's own entry, else the default (another plan is EXPECTED to
+// land far from the default, so there is no overlap test, and the widths are compared relative to their value: a figure of 14 and one
+// of 28 are compared by how sure they are, not by their size). A thin fit (few windows, no or a wide interval) is shown, not written.
+const relWidth = (iv, value) => (value > 0 ? width(iv) / value : Infinity);
 export function applyAccountPlan(accounts, current = planWeights(), today = new Date().toISOString().slice(0, 10)) {
   const decisions = [];
   const patch = {};
@@ -450,8 +461,11 @@ export function applyAccountPlan(accounts, current = planWeights(), today = new 
     if (!a.enough) { decisions.push({ what, apply: false, reason: `only ${a.n} usable readings (need ${MIN_ROWS})` }); continue; }
     if (a.windows < MIN_APPLY_WINDOWS) { decisions.push({ what, apply: false, reason: `only ${a.windows} window(s) behind the fit (need ${MIN_APPLY_WINDOWS})` }); continue; }
     const cur = unitsPerPercentFor({ account: acct });
-    if (cur.basis === 'account' && !(width(a.upp.interval) < width(cur.interval))) { decisions.push({ what, apply: false, reason: 'interval not tighter than the one in force' }); continue; }
-    decisions.push({ what, apply: true, reason: cur.basis === 'account' ? 'interval tighter' : 'no figure for this account yet' });
+    if (!(relWidth(a.upp.interval, a.upp.value) < relWidth(cur.interval, cur.value))) {
+      decisions.push({ what, apply: false, reason: `interval not tighter than the ${cur.basis === 'account' ? 'one in force' : 'default'}` });
+      continue;
+    }
+    decisions.push({ what, apply: true, reason: cur.basis === 'account' ? 'interval tighter' : 'no figure for this account yet, interval tighter than the default' });
     (patch.unitsPerPercentByAccount ||= {})[acct] = {
       value: r1(a.upp.value), ...(a.upp.interval ? { interval: a.upp.interval.map(r1) } : {}), status: 'measured', date: today, n: a.n,
       source: `calibrate-weights.mjs ${today}: ${a.n} official weekly readings in ${a.windows} windows of this account against the requests made while it was signed in, model weights as in force, cache reads at ${rho} x API price; 90% bootstrap interval.`,
@@ -494,7 +508,7 @@ function printAccounts(accounts, accPlan, applying) {
     const d = accPlan.decisions.find((x) => x.what === `unitsPerPercentByAccount.${acct}`);
     const cur = unitsPerPercentFor({ account: acct });
     const fit1 = a.enough ? `${a.upp.value.toFixed(1)} ${a.upp.interval ? `[${a.upp.interval[0].toFixed(1)}, ${a.upp.interval[1].toFixed(1)}]` : '-'} from ${a.n} readings in ${a.windows} windows` : `no fit (${a.n} usable readings in ${a.windows} windows)`;
-    console.log(`Account ${acct.slice(0, 8)}: units per 1% ${fit1}; in force ${cur.value} (${cur.basis}); ${d && d.apply ? (applying ? 'written' : 'would be written') : `not written: ${d ? d.reason : 'no fit'}`}.`);
+    console.log(`Account ${acct.slice(0, 8)}: units per 1% ${fit1}; in force ${cur.value} (${cur.basis}); ${d && d.apply ? (applying ? 'written' : 'would be written') : `not written: ${d ? d.reason : 'no fit'}`}${a.unattributedWindows ? `; ${a.unattributedWindows} window(s) left out as unattributed (the switch time inside them is unknown)` : ''}.`);
   }
 }
 
@@ -508,14 +522,16 @@ export function main(argv = process.argv.slice(2)) {
   const fromSamples = readSamples(samplesFile);
   const readings = dedupeReadings([...fromSamples, ...scan.readings]);
   const current = planWeights();
-  // Accounts: tagged samples make the history (with session-sync's, when installed) and the per-account fits.
+  // Accounts: only with two or more tagged accounts (one account, or none: exactly what 0.31.58 did) do the tagged samples make the history
+  // (with session-sync's and the plugin's own record) and the per-account fits.
   const tagged = [...new Set(readings.filter((r) => r.acct).map((r) => r.acct))];
-  const history = tagged.length ? accountHistory({ samples: readSampleLines(samplesFile) }) : [];
-  const accounts = tagged.length ? fitAccounts(readings, scan.reqs, history, { boot, since }) : {};
+  const perAccount = tagged.length >= 2;
+  const history = perAccount ? accountHistory({ samples: readSampleLines(samplesFile) }) : [];
+  const accounts = perAccount ? fitAccounts(readings, scan.reqs, history, { boot, since }) : {};
   let fitReadings = readings;
   let fitReqs = scan.reqs;
   let scopeNote = '';
-  if (tagged.length >= 2) { // two meters in one regression would mean nothing: fit the model weights on the account in use
+  if (perAccount) { // two meters in one regression would mean nothing: fit the model weights on the account in use
     const mine = currentAccount() || [...readings].reverse().find((r) => r.acct)?.acct;
     const sc = scopeToAccount(mine, readings, scan.reqs, history);
     fitReadings = sc.readings; fitReqs = sc.reqs;
@@ -526,10 +542,10 @@ export function main(argv = process.argv.slice(2)) {
     sources: { transcripts: scan.files, requests: scan.reqs.length, samples: fromSamples.length, transcriptReadings: scan.readings.length, readings: readings.length },
     cacheReadFactor: current.cacheReadFactor?.value ?? 1,
     result,
-    ...(tagged.length ? { accounts, accountApply: null } : {}),
+    ...(perAccount ? { accounts, accountApply: null } : {}),
   };
-  const accPlan = tagged.length ? applyAccountPlan(accounts, current) : { patch: {}, decisions: [] };
-  if (tagged.length) out.accountApply = accPlan;
+  const accPlan = perAccount ? applyAccountPlan(accounts, current) : { patch: {}, decisions: [] };
+  if (perAccount) out.accountApply = accPlan;
   if (!result.enough) {
     const wrote = argv.includes('--apply') && accPlan.patch.unitsPerPercentByAccount ? writeUserFile(accPlan.patch) : null;
     if (wrote) out.written = wrote;
@@ -541,7 +557,7 @@ export function main(argv = process.argv.slice(2)) {
     return wrote ? 0 : 1;
   }
   const plan = applyPlan(result, current);
-  if (tagged.length >= 2) { delete plan.patch.unitsPerPercent; plan.decisions = plan.decisions.filter((d) => d.what !== 'unitsPerPercent'); }
+  if (perAccount) { delete plan.patch.unitsPerPercent; plan.decisions = plan.decisions.filter((d) => d.what !== 'unitsPerPercent'); }
   out.apply = plan;
   const patchAll = { ...plan.patch, ...accPlan.patch };
   if (argv.includes('--apply') && (patchAll.models || patchAll.unitsPerPercent || patchAll.unitsPerPercentByAccount)) out.written = writeUserFile(patchAll);
@@ -565,7 +581,7 @@ export function main(argv = process.argv.slice(2)) {
   const du = plan.decisions.find((x) => x.what === 'unitsPerPercent');
   console.log('');
   if (scopeNote) console.log(scopeNote);
-  console.log(`Units per 1% of the weekly limit (Sonnet-priced): ${f(result.upp.value, 1)} ${ivs(result.upp.interval, 1)}; in force ${cu ? `${cu.value} ${ivs(cu.interval, 1)}` : '-'}; ${tagged.length >= 2 ? 'default left alone' : du && du.apply ? 'tighter' : 'not tighter'}.`);
+  console.log(`Units per 1% of the weekly limit (Sonnet-priced): ${f(result.upp.value, 1)} ${ivs(result.upp.interval, 1)}; in force ${cu ? `${cu.value} ${ivs(cu.interval, 1)}` : '-'}; ${perAccount ? 'default left alone' : du && du.apply ? 'tighter' : 'not tighter'}.`);
   printAccounts(accounts, accPlan, argv.includes('--apply'));
   if (argv.includes('--apply')) console.log(out.written ? `Wrote the tighter figures to ${out.written}.` : 'Nothing is tighter than what is in force: no file written.');
   else if (patchAll.models || patchAll.unitsPerPercent || patchAll.unitsPerPercentByAccount) console.log('Run again with --apply to write the tighter figures to the per-user file.');

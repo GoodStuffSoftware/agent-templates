@@ -6,15 +6,17 @@ import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, stateDir, passthrough } from './lib/context.mjs';
 import { parseUsage, sampleLine } from './lib/plan-meter.mjs';
-import { currentAccount } from './lib/account.mjs';
+import { currentAccount, noteAccount } from './lib/account.mjs';
 
 try {
   const p = readStdin();
   if (!/get_usage$/.test(String(p.tool_name || ''))) passthrough();
   const reading = parseUsage(p.tool_response);
   if (!reading) passthrough();
-  const line = sampleLine(reading, { ts: new Date().toISOString(), sessionId: typeof p.session_id === 'string' ? p.session_id : null, account: currentAccount() });
+  const account = currentAccount();
+  const line = sampleLine(reading, { ts: new Date().toISOString(), sessionId: typeof p.session_id === 'string' ? p.session_id : null, account });
   appendFileSync(join(stateDir(), 'plan-meter-samples.jsonl'), `${JSON.stringify(line)}\n`);
+  noteAccount({ account }); // dates a switch to the first sight of the new account (state/account-history.jsonl); fail-soft
 } catch {
   // fail open
 }

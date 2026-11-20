@@ -5,11 +5,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook } from './helpers.mjs';
 import { stateDir } from '../hooks/lib/context.mjs';
-import { currentAccount, accountHistory, accountAt } from '../hooks/lib/account.mjs';
+import { currentAccount, accountHistory, accountAt, noteAccount, uncertainSpans } from '../hooks/lib/account.mjs';
 import { sampleLine, readSampleLines, samplesOf, latestSample } from '../hooks/lib/plan-meter.mjs';
 import {
   _resetPlanWeightsForTests, unitsPerPercent, unitsPerPercentFor, currentRate, rateLabel, weeklyLimitUnits, allowanceNoteText,
@@ -98,6 +98,111 @@ test('accountHistory from tagged samples alone (no session-sync), read from the 
     ].join('\n') + '\n');
     assert.deepEqual(accountHistory().map((e) => e.acct), [A, B, A]);
   } finally { fx.cleanup(); }
+});
+
+test('accountHistory: a switch seen only by samples or the plugin record is an UNCERTAIN interval, never a guessed time; session-sync dates are exact', () => {
+  const fx = makeFixture();
+  try {
+    // no session-sync: A seen on Nov 1 and Nov 2, B first seen on Nov 5. The switch is somewhere in (Nov 2 12:00, Nov 5).
+    const samples = [
+      { ts: '2026-11-01T00:00:00.000Z', acct: A }, { ts: '2026-11-02T12:00:00.000Z', acct: A }, { ts: '2026-11-05T00:00:00.000Z', acct: B },
+    ];
+    const h = accountHistory({ samples });
+    assert.deepEqual(h, [
+      { at: '2026-11-01T00:00:00.000Z', acct: A },
+      { at: '2026-11-05T00:00:00.000Z', acct: B, after: '2026-11-02T12:00:00.000Z' },
+    ]);
+    assert.equal(accountAt(h, '2026-11-02T12:00:00.000Z'), A, 'A was seen then');
+    assert.equal(accountAt(h, '2026-11-03T00:00:00.000Z'), null, 'inside the uncertain interval: not A, not B');
+    assert.equal(accountAt(h, '2026-11-04T23:59:00.000Z'), null);
+    assert.equal(accountAt(h, '2026-11-05T00:00:00.000Z'), B);
+    assert.deepEqual(uncertainSpans(h), [{ from: Date.parse('2026-11-02T12:00:00.000Z'), to: Date.parse('2026-11-05T00:00:00.000Z'), acct: A }]);
+
+    // the same samples with session-sync's DATED switch to B on Nov 3: exact, nothing uncertain
+    write(join(syncDir(fx), 'switch-history.json'), [{ at: '2026-11-03T08:00:00.000Z', acct: B }]);
+    const exact = accountHistory({ samples });
+    assert.deepEqual(exact, [{ at: '2026-11-01T00:00:00.000Z', acct: A }, { at: '2026-11-03T08:00:00.000Z', acct: B }]);
+    assert.equal(accountAt(exact, '2026-11-04T00:00:00.000Z'), B);
+    assert.deepEqual(uncertainSpans(exact), []);
+    assert.deepEqual(uncertainSpans(null), []);
+  } finally { fx.cleanup(); }
+});
+
+test('noteAccount: appends { at, acct } only when the account differs from the last entry; nothing when unchanged; fail-soft', () => {
+  const fx = makeFixture();
+  try {
+    const file = join(fx.stateDir, 'state', 'account-history.jsonl');
+    const rows = () => (existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
+    assert.equal(noteAccount({ now: new Date('2026-11-01T00:00:00Z') }), false, 'no account source: nothing written');
+    assert.equal(existsSync(file), false);
+    write(appConfig(fx), JSON.stringify({ lastKnownAccountUuid: A }));
+    assert.equal(noteAccount({ now: new Date('2026-11-01T00:00:00Z') }), true);
+    assert.equal(noteAccount({ now: new Date('2026-11-02T00:00:00Z') }), false, 'unchanged: no write');
+    assert.deepEqual(rows(), [{ at: '2026-11-01T00:00:00.000Z', acct: A }]);
+    write(appConfig(fx), JSON.stringify({ lastKnownAccountUuid: B }));
+    assert.equal(noteAccount({ now: new Date('2026-11-04T00:00:00Z') }), true);
+    assert.equal(noteAccount({ account: B, now: new Date('2026-11-05T00:00:00Z') }), false);
+    assert.deepEqual(rows().map((r) => r.acct), [A, B]);
+    // merged into the history: the switch is somewhere between the last sign of A and the first sign of B
+    const h = accountHistory({ samples: [{ ts: '2026-11-02T06:00:00.000Z', acct: A }] });
+    assert.deepEqual(h, [{ at: '2026-11-01T00:00:00.000Z', acct: A }, { at: '2026-11-04T00:00:00.000Z', acct: B, after: '2026-11-02T06:00:00.000Z' }]);
+    // a torn line and a bad record are skipped; an unwritable file is fail-soft
+    writeFileSync(file, `${readFileSync(file, 'utf8')}{torn\n{"at":"x","acct":"y z"}\n`);
+    assert.equal(accountHistory({ samples: [] }).length, 2);
+    rmSync(file);
+    mkdirSync(file); // a directory where the file should be: the append throws
+    write(appConfig(fx), JSON.stringify({ lastKnownAccountUuid: C }));
+    assert.equal(noteAccount(), false);
+  } finally { fx.cleanup(); }
+});
+
+test('the SessionStart hook records the account once, and not again while it is unchanged', () => {
+  const fx = makeFixture();
+  try {
+    const file = join(fx.stateDir, 'state', 'account-history.jsonl');
+    write(appConfig(fx), JSON.stringify({ lastKnownAccountUuid: A }));
+    const payload = { session_id: 's1', hook_event_name: 'SessionStart', source: 'startup', cwd: fx.dir };
+    assert.equal(runHook('hooks/settings-journal.mjs', payload).status, 0);
+    assert.equal(runHook('hooks/settings-journal.mjs', { ...payload, session_id: 's2' }).status, 0);
+    assert.equal(readFileSync(file, 'utf8').trim().split('\n').length, 1, 'one entry for two sessions');
+    write(appConfig(fx), JSON.stringify({ lastKnownAccountUuid: B }));
+    assert.equal(runHook('hooks/settings-journal.mjs', { ...payload, session_id: 's3' }).status, 0);
+    assert.deepEqual(readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l).acct), [A, B]);
+    // no account source: the hook writes nothing and exits 0
+    rmSync(file); rmSync(appConfig(fx));
+    assert.equal(runHook('hooks/settings-journal.mjs', payload).status, 0);
+    assert.equal(existsSync(file), false);
+  } finally { fx.cleanup(); }
+});
+
+test('the app record is looked for in the per-platform folder (win32, darwin, linux) when no seam is set', () => {
+  const fx = makeFixture();
+  const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const seam = process.env.AGENT_COMPANION_DESKTOP_DIR;
+  try {
+    delete process.env.AGENT_COMPANION_DESKTOP_DIR;
+    const places = {
+      win32: ['AppData', 'Roaming', 'Claude'],
+      darwin: ['Library', 'Application Support', 'Claude'],
+      linux: ['.config', 'Claude'],
+    };
+    for (const [platform, parts] of Object.entries(places)) {
+      Object.defineProperty(process, 'platform', { value: platform });
+      assert.equal(currentAccount(), null, `${platform}: no record yet`);
+      write(join(fx.dir, ...parts, 'config.json'), JSON.stringify({ lastKnownAccountUuid: A }));
+      assert.equal(currentAccount(), A, `${platform}: ${parts.join('/')}`);
+      for (const other of Object.keys(places)) {
+        if (other === platform) continue;
+        Object.defineProperty(process, 'platform', { value: other });
+        assert.equal(currentAccount(), null, `${other} does not look in the ${platform} folder`);
+      }
+      rmSync(join(fx.dir, ...parts, 'config.json'));
+    }
+  } finally {
+    Object.defineProperty(process, 'platform', realPlatform);
+    if (seam === undefined) delete process.env.AGENT_COMPANION_DESKTOP_DIR; else process.env.AGENT_COMPANION_DESKTOP_DIR = seam;
+    fx.cleanup();
+  }
 });
 
 // --- 2. Samples are tagged; readers use the current account's -----------------------------------------------------------------------
@@ -295,6 +400,20 @@ test('calibration: a rate per account from tagged readings and the requests made
   assert.deepEqual(Object.keys(fitAccounts(onlyA, reqs, history, { boot: 50 })), [A]);
 });
 
+test('calibration: a window holding a span of unknown switch time is left out and counted as unattributed, never guessed', () => {
+  const { reqs, readings, history } = twoAccounts();
+  const exact = fitAccounts(readings, reqs, history, { boot: 100 });
+  // the same switches, but each only SEEN half a day after the previous account's last sign: the interval between is unknown
+  const guessed = history.map((e, i) => (i === 0 ? e : { ...e, after: new Date(Date.parse(e.at) - 12 * 3600e3).toISOString() }));
+  const r = fitAccounts(readings, reqs, guessed, { boot: 100 });
+  for (const a of [A, B]) {
+    assert.ok(exact[a].windows >= 3 && exact[a].unattributedWindows === 0, `${a} exact ${JSON.stringify(exact[a])}`);
+    assert.ok(r[a].unattributedWindows > 0, `${a} ${JSON.stringify(r[a])}`);
+    assert.ok(r[a].windows < exact[a].windows, `${a}: ${r[a].windows} windows against ${exact[a].windows}`);
+  }
+  assert.ok(applyAccountPlan(r).patch.unitsPerPercentByAccount === undefined, 'nothing written from windows that are all unattributed');
+});
+
 test('calibration: a window that opened before the history began is not used; too few rows is no fit', () => {
   const { reqs, readings, history } = twoAccounts();
   const late = history.slice(10); // history known only from day 10: no window of either account opened after it with >= 3 windows
@@ -319,6 +438,14 @@ test('calibration --apply: writes each account\'s rate (with provenance) to the 
     assert.equal(thin.patch.unitsPerPercentByAccount, undefined);
     const none = applyAccountPlan({ [A]: { enough: false, n: 3, windows: 1 } });
     assert.equal(none.decisions[0].apply, false);
+    // the same bar as the global fit: 3+ windows is not enough when the interval is wide or missing (a thin fit is shown, not written)
+    const wideNew = applyAccountPlan({ [A]: { enough: true, n: 40, windows: 5, upp: { value: 10, interval: [4, 30] } } });
+    assert.equal(wideNew.patch.unitsPerPercentByAccount, undefined);
+    assert.match(wideNew.decisions[0].reason, /not tighter than the default/);
+    const noInterval = applyAccountPlan({ [A]: { enough: true, n: 40, windows: 5, upp: { value: 10, interval: null } } });
+    assert.equal(noInterval.patch.unitsPerPercentByAccount, undefined);
+    const sharp = applyAccountPlan({ [A]: { enough: true, n: 40, windows: 5, upp: { value: 10, interval: [9.95, 10.05] } } });
+    assert.ok(sharp.patch.unitsPerPercentByAccount[A], 'relative width 1% against the default 1.4%: tighter, written');
 
     const file = join(fx.stateDir, 'config', 'plan-weights.json');
     writeUserFile(plan.patch, file);
