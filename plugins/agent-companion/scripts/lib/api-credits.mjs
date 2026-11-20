@@ -33,8 +33,8 @@
 // fall back to booked figures and say so (BOOKED_ONLY). Per-workspace monthly limits are a
 // config map because the API cannot read them back.
 
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { opt, stateFile } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { spawnSyncHidden } from './proc.mjs';
@@ -336,8 +336,42 @@ export function decide(category, { now = Date.now(), cfg = loadConfig(), path = 
 
 // --- record ----------------------------------------------------------------------------
 
-export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null, alreadyBooked = 0, count = true, id = null } = {}) {
+// Every category books money that the Console bills to an API key (review and workers run on the key; overflow and rater are
+// categories of the same budget), so every category needs proof that the run billed the API: apiKeySource === 'ANTHROPIC_API_KEY'
+// (what the SDK init message reports for a run on the key; a subscription run reports another source). A record without it is
+// refused, nothing is written to the ledger, and the attempt goes to the rejects log beside the ledger.
+export const REQUIRED_API_KEY_SOURCE = 'ANTHROPIC_API_KEY';
+export const rejectsPath = (path = ledgerPath()) => join(dirname(path), 'api-credits-rejects.jsonl');
+export class RecordRefused extends Error {}
+
+function logReject(path, now, category, usd, meta, reason) {
+  try {
+    const rp = rejectsPath(path);
+    mkdirSync(dirname(rp), { recursive: true });
+    appendFileSync(rp, `${JSON.stringify({ t: new Date(now).toISOString(), cat: String(category), usd: Number.isFinite(Number(usd)) ? Number(usd) : String(usd), meta: String(meta).slice(0, 200), reason })}\n`);
+  } catch { /* the refusal still stands when the log cannot be written */ }
+}
+
+// The rejects of the cycle that holds `now`: the lines of the rejects log with a time inside it.
+export function rejectsInCycle({ now = Date.now(), cfg = loadConfig(), path = ledgerPath() } = {}) {
+  const cy = cycleOf(now, cfg.cycleDay);
+  let n = 0;
+  try {
+    for (const line of readFileSync(rejectsPath(path), 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try { const t = Date.parse(JSON.parse(line).t); if (t >= cy.start && t < cy.end) n++; } catch { /* a damaged line is not counted */ }
+    }
+  } catch { /* no log: none */ }
+  return n;
+}
+
+export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null, alreadyBooked = 0, count = true, id = null, apiKeySource = null } = {}) {
   if (!CATEGORIES.includes(category)) throw new Error(`unknown category "${category}"`);
+  if (apiKeySource !== REQUIRED_API_KEY_SOURCE) {
+    const reason = apiKeySource ? `api key source "${String(apiKeySource).slice(0, 40)}" is not ${REQUIRED_API_KEY_SOURCE}` : 'no api key source: the record carries no proof that the run billed the API key';
+    logReject(path, now, category, usd, meta, reason);
+    throw new RecordRefused(`refused, nothing booked: ${reason}; pass --api-key-source ${REQUIRED_API_KEY_SOURCE} (CLI) or apiKeySource: '${REQUIRED_API_KEY_SOURCE}' (library) only for a run billed to the API key`);
+  }
   const n = Number(usd);
   if (!Number.isFinite(n) || n < 0) throw new Error('usd must be a non-negative number');
   return mutate(now, cfg, path, (c) => {
@@ -437,6 +471,7 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
     const pace = (sh[k] || 0) * cfg.budget * cy.frac;
     lines.push(`${k.padEnd(9)} spent $${(c.spent[k] || 0).toFixed(2)} in ${c.n[k] || 0} item(s); share ${(sh[k] * 100).toFixed(0)}% = $${(sh[k] * cfg.budget).toFixed(2)}; paced allowance now $${pace.toFixed(2)}`);
   }
+  { const rj = rejectsInCycle({ now, cfg, path }); if (rj > 0) lines.push(`REJECTED records this cycle: ${rj} (see ${rejectsPath(path)}): callers tried to book spend without proof of an API-billed run`); }
   if (!unreadable) lines.push(`real reviews this cycle: ${reviewSummaryLine(summarizeReviews(c.entries))}`);
   lines.push(`total spent $${total.toFixed(2)} of $${cfg.budget}; left $${(cfg.budget - total).toFixed(2)} (reserve $${((sh.reserve || 0) * cfg.budget).toFixed(2)})`);
   { const w = sharesWarning(sh); if (w) lines.push(w); }
@@ -465,7 +500,7 @@ const model5 = (m) => String(m || 'unknown').replace(/^claude-/, '');
 
 // Gaps between what the ledger booked and what Anthropic billed. Tolerance: the larger of $1 and 10% of billed.
 export function billingGaps(snap, { cfg, cy, entries, now }) {
-  const out = { over: [], unmatched: { n: 0, usd: 0, examples: [] }, checked: false };
+  const out = { over: [], unbilled: [], unmatched: { n: 0, usd: 0, examples: [] }, checked: false };
   const tol = (billed) => Math.max(1, 0.1 * billed);
   const booked = (cats) => bookedBetween(entries, cy.start, snap.through, cats);
   const total = { scope: 'all categories', booked: booked(null), billed: billedSince(snap, cy.start) };
@@ -478,6 +513,17 @@ export function billingGaps(snap, { cfg, cy, entries, now }) {
     const cats = Object.entries(cfg.categoryWorkspaces).filter(([, w]) => resolveWorkspace(snap, w) === id).map(([c]) => c);
     const row = { scope: `workspace ${workspaceName(snap, id)}`, booked: booked(cats), billed: billedSince(snap, cy.start, id) };
     if (row.booked - row.billed > tol(row.billed)) out.over.push({ ...row, over: row.booked - row.billed });
+  }
+  // A category that booked spend this cycle (through the cut-off) while its workspace has no billed cost at all. A category with
+  // no mapped workspace (overflow and rater by default) was skipped by the loop above, which is why "gaps: none" hid a category
+  // booked on a workspace with no billing; it is held to the default workspace. One mapped to a name the snapshot does not
+  // know is skipped (status says so elsewhere).
+  for (const cat of CATEGORIES) {
+    const ref = (cfg.categoryWorkspaces || {})[cat];
+    const ws = ref ? resolveWorkspace(snap, ref) : '';
+    if (ws === null) continue;
+    const bk = booked([cat]);
+    if (bk > 0 && billedSince(snap, cy.start, ws) <= 0) out.unbilled.push({ cat, booked: bk, ws: workspaceName(snap, ws), mapped: !!ref });
   }
   if (Array.isArray(snap.hourly) && Number.isFinite(snap.hourlyFrom)) {
     out.checked = true;
@@ -550,10 +596,11 @@ export function billingStatusLines(snap, { cfg, entries, now, reason = '', cache
   lines.push(wsMonth.length ? `workspace limits (calendar month, billed): ${wsMonth.join('; ')}` : 'workspace limits: none configured (api_credits_workspace_limits; the API cannot read the Console limits)');
   const g = billingGaps(snap, { cfg, cy, entries, now });
   for (const o of g.over) lines.push(`GAP: ${o.scope}: booked ${usd2(o.booked)} but billed ${usd2(o.billed)} (booked over billed by ${usd2(o.over)}; booked spend that never reached the API?)`);
+  for (const u of g.unbilled) lines.push(`GAP: category ${u.cat}: booked ${usd2(u.booked)} this cycle but the Console shows no billed cost on its workspace ${u.ws}${u.mapped ? '' : ' (no workspace mapped, so the default one)'}; booked spend that never reached the API?`);
   if (g.unmatched.n) lines.push(`GAP: ${g.unmatched.n} booked entr${g.unmatched.n === 1 ? 'y' : 'ies'} (${usd2(g.unmatched.usd)}) with no usage on their workspace in that hour: ${g.unmatched.examples.join(', ')}${g.unmatched.n > g.unmatched.examples.length ? ', ...' : ''}`);
   else if (g.checked) lines.push('hourly check: every booked entry in the last days has usage on its workspace in its hour');
   else lines.push('hourly check: not available (hourly usage could not be read)');
-  if (!g.over.length && !g.unmatched.n) lines.push('gaps: none');
+  if (!g.over.length && !g.unbilled.length && !g.unmatched.n) lines.push('gaps: none');
   if (Array.isArray(snap.missing) && snap.missing.length) lines.push(`not fetched: ${snap.missing.join(', ')}`);
   return lines;
 }

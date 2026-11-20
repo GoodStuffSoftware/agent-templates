@@ -270,7 +270,7 @@ export async function runApiSdk({
   const bookCost = (ok, error = null) => {
     try {
       record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
-        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok, id: reviewId,
+        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok, id: reviewId, apiKeySource: REQUIRED_KEY_SOURCE,
         detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'sdk', error: ok ? null : error, notes },
       });
     } catch (e) { ledgerFailed(`$${(usd - booked).toFixed(4)} not recorded`, e); }
