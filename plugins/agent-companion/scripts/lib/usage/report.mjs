@@ -139,7 +139,7 @@ export function efficiencyLines(eff) {
   L.push('### Landings', '');
   const ld = eff.landings;
   if (!ld || ld.gap) L.push(gapLine(ld || { gap: 'not computed' }));
-  else if (!ld.repos.length) L.push(`No session of the day worked in a git repository (${fmt(ld.unattributedUnits, 1)} units not attributed to a repository).`);
+  else if (!ld.repos.length) L.push(`No session of the day worked in a git repository (${fmt(ld.unattributedUnits, 1)} units not attributed to a repository).${ld.gitNote ? ` ${cell(ld.gitNote)}` : ''}`);
   else {
     L.push('| repository | branch | sessions | units | landings | units per landing |');
     L.push('|---|---|---|---|---|---|');

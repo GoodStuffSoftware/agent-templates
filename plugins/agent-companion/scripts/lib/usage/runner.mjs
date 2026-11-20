@@ -17,12 +17,16 @@
 // (which input changed). Nothing time-dependent is written into a results file or a report; clocks and
 // costs live in the status file.
 //
-// BUDGET. `maxSeconds` is checked after each day (the first day always runs, so a run always makes
-// progress). Days not reached are deferred ("time-budget") and the next run resumes with them.
+// BUDGET. `maxSeconds` is checked before each day (the first day always runs, so a run always makes
+// progress). Days not reached are deferred ("time-budget") and the next run resumes with them. The slow
+// efficiency parts (lead compactions, landings) also check it between transcripts and repositories, FIRST DAY
+// INCLUDED: a part that is not reached says so (`deferred`), the day's result is kept with it, and the next run
+// recomputes just that part (a measured part of the day is reused) before anything else.
 //
 // NO LOCK HERE. The caller (scripts/usage-analysis.mjs, or the checkup CLI) holds the shared checkup
-// lock around the scan and this stage. Nothing in this file spawns a process or calls a model; every
-// write goes below `root` (the report directory defaults to <root>/reports/usage).
+// lock around the scan and this stage. Nothing here calls a model, and every write goes below `root` (the
+// report directory defaults to <root>/reports/usage). The one child process is `git` (read only, hidden
+// window, 5 s per call) that the efficiency landings run (lib/usage/efficiency.mjs).
 
 import { createHash } from 'node:crypto';
 import {
@@ -664,7 +668,7 @@ function computeDay(ctx, day, parts, prior, force) {
     regressions,
   };
   res.efficiency = computeEfficiency({
-    f, fromMs: dayStartMs(day, boundary), toMs: dayEndMs(day, boundary), seams: ctx.effSeams(day, prior),
+    f, fromMs: dayStartMs(day, boundary), toMs: dayEndMs(day, boundary), seams: ctx.effSeams(day, prior, same ? prior.efficiency : null),
   });
   const lines = summaryLines(res);
   res.summary = { lines, regressionIds: regressionIdsOf(regressions), infoRegressionIds: regressionIdsOf(infoRegressionsOf(scenarios)) };
@@ -673,12 +677,18 @@ function computeDay(ctx, day, parts, prior, force) {
 
 // ------------------------------------------------------------- efficiency --
 
+/** Does the day's stored result hold an efficiency part the run's time budget did not reach (to be completed by a later run)? */
+export function efficiencyPending(res) {
+  const e = res && res.efficiency;
+  return !!e && ['landings', 'compactions'].some((k) => e[k] && e[k].deferred === true);
+}
+
 /**
  * The readers the efficiency sections use, with the test seams in opts.efficiency (git, transcriptsRoot, accountHistory, rateFor,
  * spawnRows, settings, pluginVersion). Everything is read lazily and once per run. Of the settings only two values are read:
  * autoCompactWindow (through configuredWindow) and main_compact_floor_tokens (through opt); nothing else of them.
  */
-function makeEfficiencySeams({ root, hooks, nowT, opts }) {
+function makeEfficiencySeams({ root, hooks, nowT, opts, stop = null }) {
   const e = opts.efficiency || {};
   const lazy = (fn) => { let v; let done = false; return () => { if (!done) { try { v = fn(); } catch { v = null; } done = true; } return v; }; };
   const rows = lazy(() => {
@@ -689,12 +699,12 @@ function makeEfficiencySeams({ root, hooks, nowT, opts }) {
   });
   const history = lazy(() => accountHistory());
   const repoCache = new Map();
-  return (day, prior) => {
+  return (day, prior, reuse = null) => {
     const prevDay = addDays(day, -1);
     const pv = readResult(root, prevDay);
     const markersOf = (res) => (res && res.efficiency && res.efficiency.markers && res.efficiency.markers.values ? res.efficiency.markers : null);
     return {
-      git: e.git, repoCache,
+      git: e.git, repoCache, stop, reuse,
       transcriptsRoot: e.transcriptsRoot || opts.transcriptsRoot || defaultTranscriptsRoot(),
       accountHistory: e.accountHistory !== undefined ? e.accountHistory : history(),
       rateFor: e.rateFor || ((acct) => unitsPerPercentFor({ account: acct })),
@@ -763,6 +773,7 @@ function runAnalysisUnsafe(opts, t0, clock) {
   const paths = usagePaths(root, opts.reportDir || null);
   const store = makeFactsStore(root);
   const maxMs = Number.isFinite(opts.maxSeconds) ? opts.maxSeconds * 1000 : Infinity;
+  const clockStop = () => clock() - t0 >= maxMs;
 
   // explicit selection
   let explicit = null;
@@ -824,15 +835,19 @@ function runAnalysisUnsafe(opts, t0, clock) {
   const ctx = {
     root, cfg, store, loadDay, sources, boundary, limit, wstates, metrics: opts.metrics || defaultMetrics,
     only: restricted ? new Set(opts.scenarios) : null,
-    effSeams: makeEfficiencySeams({ root, hooks, nowT, opts }),
+    effSeams: makeEfficiencySeams({ root, hooks, nowT, opts, stop: () => clock() - t0 >= maxMs }),
   };
 
   // order: days with no result yet (oldest first), then recent days that may need a revision (oldest first)
   const lastClosed = plan.lastClosed;
   const reviseFrom = addDays(lastClosed, -(REVISE_WINDOW_DAYS - 1));
-  const fresh = []; const stale = [];
-  for (const d of plan.have) (readResult(root, d) ? stale : fresh).push(d);
-  const order = explicit ? [...fresh, ...stale] : [...fresh, ...stale.filter((d) => d >= reviseFrom)];
+  const fresh = []; const stale = []; const pending = [];
+  for (const d of plan.have) {
+    const r = readResult(root, d);
+    if (!r) fresh.push(d); else if (efficiencyPending(r)) pending.push(d); else stale.push(d);
+  }
+  // a day whose efficiency parts were not reached comes FIRST (it has the whole fresh budget), whatever its age
+  const order = explicit ? [...pending, ...fresh, ...stale] : [...pending, ...fresh, ...stale.filter((d) => d >= reviseFrom)];
   const limitDays = Number.isInteger(opts.maxDays) && opts.maxDays > 0 ? opts.maxDays : Infinity;
 
   const meterSamplesOf = (day) => {
@@ -869,7 +884,9 @@ function runAnalysisUnsafe(opts, t0, clock) {
   for (const day of order) {
     const prior = readResult(root, day);
     const { parts, digest } = inputsFor(day);
-    if (prior && prior.inputsDigest === digest && prior.runnerVersion === RUNNER_VERSION && !opts.force) {
+    // a day with an unfinished efficiency part is recomputed only while there is budget left (with none, it stays as it is: no endless loop)
+    const unfinished = !!prior && efficiencyPending(prior) && !clockStop();
+    if (prior && prior.inputsDigest === digest && prior.runnerVersion === RUNNER_VERSION && !opts.force && !unfinished) {
       skipped.push(day);
       if (restricted || opts.dryRun) results[day] = prior;
       if (persist) writeIfChanged(reportPathFor(root, day, opts.reportDir || null), renderReport(prior)); // restores a deleted report

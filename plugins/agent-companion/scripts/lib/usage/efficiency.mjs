@@ -16,7 +16,7 @@
 // `preTokens` is the context size just before the compaction. `version` is the Claude Code build on every record.
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, statSync, openSync, readSync, closeSync, existsSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
 import { unitsFromTokens } from './facts.mjs';
 import { r4 } from './report.mjs';
@@ -55,10 +55,18 @@ export function rowUnits(row, used, kind = null) {
 
 // ---------------------------------------------------------------- landings --
 
+// A part the run's time budget did not reach (or reached only in part): it says so, the day's result is kept with it, and the next run
+// recomputes just this part (runner.mjs reads `deferred`). Never a guess and never zero.
+export const DEFERRED_GAP = 'the run time budget was used up; the next run completes this part';
+const deferredPart = () => ({ gap: DEFERRED_GAP, deferred: true });
+
+// git older than this has no `rev-parse --path-format=absolute`, so no repository can be resolved (every cwd would be "not attributed").
+const gitTooOldNote = (v) => `git ${v} is older than 2.31, which the landings need (rev-parse --path-format=absolute): no repository could be told apart, so every session below is not attributed.`;
+
 function defaultGit(dir, args) {
   try {
     return execFileSync('git', ['-C', dir, ...args], {
-      encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 32 * 1024 * 1024,
+      encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 32 * 1024 * 1024,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
     });
   } catch { return null; }
@@ -111,16 +119,21 @@ export function countLandings(root, ref, fromMs, toMs, git = defaultGit) {
  * The day's landings for the repos its sessions worked in. `rows` are the facts rows; a row counts for the repo that owns its cwd.
  * Units per landing = the units of the sessions that worked in that repo / its landings (n/a with no landing, never zero).
  */
-export function landingsOf({ rows, used, fromMs, toMs, git = defaultGit, repoCache = new Map() }) {
+export function landingsOf({ rows, used, fromMs, toMs, git = defaultGit, repoCache = new Map(), stop = null }) {
   const byRepo = new Map();
   let unattributed = 0;
+  let firstFailedCwd = null;
   for (const r of rows || []) {
     const u = rowUnits(r, used);
     let repo = null;
     if (nonEmpty(r.cwd)) {
       const ck = String(r.cwd);
-      if (!repoCache.has(ck)) repoCache.set(ck, repoOf(r.cwd, git));
+      if (!repoCache.has(ck)) {
+        if (stop && stop()) return deferredPart();
+        repoCache.set(ck, repoOf(r.cwd, git));
+      }
       repo = repoCache.get(ck);
+      if (!repo && !firstFailedCwd) firstFailedCwd = ck;
     }
     if (!repo) { unattributed += u; continue; }
     const e = byRepo.get(repo.key) || { root: repo.root, label: basename(repo.root), sids: new Set(), units: 0 };
@@ -132,7 +145,10 @@ export function landingsOf({ rows, used, fromMs, toMs, git = defaultGit, repoCac
   let skipped = 0;
   for (const e of all) {
     if (out.length >= MAX_REPOS) { skipped += 1; continue; }
-    const ref = landingRef(e.root, git);
+    if (stop && stop()) return deferredPart();
+    const rk = `ref:${e.root}`; // the ref does not change within a run: once per repository, not once per day
+    if (!repoCache.has(rk)) repoCache.set(rk, landingRef(e.root, git));
+    const ref = repoCache.get(rk);
     const landings = ref ? countLandings(e.root, ref.ref, fromMs, toMs, git) : null;
     out.push({
       label: e.label, branch: ref ? ref.name : null, sessions: e.sids.size, units: r4(e.units), landings,
@@ -142,7 +158,16 @@ export function landingsOf({ rows, used, fromMs, toMs, git = defaultGit, repoCac
   const counted = out.filter((x) => Number.isFinite(x.landings));
   const totalLandings = counted.reduce((a, x) => a + x.landings, 0);
   const countedUnits = counted.reduce((a, x) => a + x.units, 0);
+  // a folder that exists but no repository could be made of it: say when git is too old to tell (a note, never silently unattributed)
+  let gitNote = null;
+  if (firstFailedCwd && !byRepo.size) {
+    try {
+      const m = /git version (\d+)\.(\d+)/.exec(existsSync(firstFailedCwd) ? git(firstFailedCwd, ['--version']) || '' : '');
+      if (m && (Number(m[1]) < 2 || (Number(m[1]) === 2 && Number(m[2]) < 31))) gitNote = gitTooOldNote(`${m[1]}.${m[2]}`);
+    } catch { /* no note */ }
+  }
   return {
+    ...(gitNote ? { gitNote } : {}),
     repos: out, skippedRepos: skipped, unattributedUnits: r4(unattributed), totalLandings,
     countedUnits: r4(countedUnits), unitsPerLanding: totalLandings > 0 ? r4(countedUnits / totalLandings) : null,
   };
@@ -188,7 +213,7 @@ export function buildVersionOfTail(path) {
  * median context tokens just before compacting (compactMetadata.preTokens). Also the Claude Code builds the sessions ran on.
  * `transcriptsRoot/<proj>/<sid>.jsonl` is read; a missing file is counted as unreadable, never as zero compactions.
  */
-export function leadCompactionsOf({ rows, fromMs, toMs, transcriptsRoot }) {
+export function leadCompactionsOf({ rows, fromMs, toMs, transcriptsRoot, stop = null }) {
   const sess = new Map();
   for (const r of rows || []) {
     const mainReq = Object.values(r.tok || {}).reduce((a, mt) => a + ((mt && mt.m && mt.m[5]) || 0), 0);
@@ -209,6 +234,7 @@ export function leadCompactionsOf({ rows, fromMs, toMs, transcriptsRoot }) {
     const v = buildVersionOfTail(path);
     if (v) versions[v] = (versions[v] || 0) + 1;
     if (st.mtimeMs < fromMs) continue; // nothing was written to it on or after the day's start
+    if (stop && stop()) return deferredPart();
     let recs = [];
     try { recs = compactionRecords(readFileSync(path)); } catch { unreadable += 1; continue; }
     const mine = [];
@@ -370,16 +396,20 @@ const safe = (fn) => { try { return fn(); } catch (e) { return { gap: `could not
 /**
  * The efficiency block of one day's result. `f` is the day's facts, `seams` the injectable readers:
  *   git, transcriptsRoot, accountHistory (array), rateFor(acct), spawnRows (Map), settings() -> { window, floor }, pluginVersion,
- *   prev (the previous day's stored markers or null), prior (this day's earlier stored markers or null), nowT, lateAfterMs.
+ *   prev (the previous day's stored markers or null), prior (this day's earlier stored markers or null), nowT, lateAfterMs,
+ *   stop() (true once the run's time budget is used up: the slow parts, lead compactions and landings, then say so and are completed by
+ *   the next run), reuse (this day's earlier efficiency block when its inputs are unchanged: a part of it that was measured is kept).
  * `markers` already stored for the day are kept (a recompute must not stamp today's settings on an old day).
  */
 export function computeEfficiency({ f, fromMs, toMs, seams = {} }) {
   const used = f.weightsUsed || {};
   const rows = f.rows || [];
   const spawns = f.spawns || [];
-  const comp = safe(() => (seams.transcriptsRoot ? leadCompactionsOf({ rows, fromMs, toMs, transcriptsRoot: seams.transcriptsRoot })
+  const kept = (name) => (isObj(seams.reuse) && isObj(seams.reuse[name]) && !seams.reuse[name].gap ? seams.reuse[name] : null);
+  const stop = typeof seams.stop === 'function' ? seams.stop : null;
+  const comp = kept('compactions') || safe(() => (seams.transcriptsRoot ? leadCompactionsOf({ rows, fromMs, toMs, transcriptsRoot: seams.transcriptsRoot, stop })
     : { gap: 'no transcripts folder' }));
-  const landings = safe(() => landingsOf({ rows, used, fromMs, toMs, git: seams.git || defaultGit, repoCache: seams.repoCache || new Map() }));
+  const landings = kept('landings') || safe(() => landingsOf({ rows, used, fromMs, toMs, git: seams.git || defaultGit, repoCache: seams.repoCache || new Map(), stop }));
   const opus = safe(() => opusSharesOf({ rows, spawns, used, spawnRows: seams.spawnRows || new Map() }));
   const accounts = safe(() => (Array.isArray(seams.accountHistory)
     ? accountsOf({ rows, used, history: seams.accountHistory, rateFor: seams.rateFor || (() => null) }) : { single: true }));

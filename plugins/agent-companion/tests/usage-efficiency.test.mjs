@@ -3,14 +3,14 @@
 import { makeFixture } from './helpers.mjs'; // sandboxes state paths first (see isolate.mjs)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   rowUnits, median, repoOf, landingRef, countLandings, landingsOf, compactionRecords, leadCompactionsOf, isWriterSpawn, opusSharesOf,
   accountsOf, markerValues, changedMarkers, computeEfficiency,
 } from '../scripts/lib/usage/efficiency.mjs';
-import { runAnalysis, readResult } from '../scripts/lib/usage/runner.mjs';
+import { runAnalysis, readResult, efficiencyPending } from '../scripts/lib/usage/runner.mjs';
 import { efficiencyLines, renderReport } from '../scripts/lib/usage/report.mjs';
 
 const SPEC = { inUsd: 1, outRatio: 5, r: 0.1, w5: 1.25, w1: 2, mult: 1 };
@@ -339,6 +339,90 @@ test('the runner writes the sections into the report; the second day marks the s
     const r3 = run(Date.parse('2026-11-18T12:00:00Z'), { days: ['2026-11-17'], force: true });
     assert.deepEqual(r3.computed, ['2026-11-17']);
     assert.equal(renderReport(readResult(root, '2026-11-17')), text);
+  } finally { fx.cleanup(); }
+});
+
+test('the time budget: the efficiency parts stop at it (first day included), the day is kept, the next run completes only what was not reached', () => {
+  const fx = makeFixture();
+  try {
+    const root = join(fx.dir, 'root');
+    const factsDir = join(root, 'state', 'usage-facts');
+    mkdirSync(factsDir, { recursive: true });
+    const day = '2026-11-16';
+    writeFileSync(join(factsDir, `${day}.json`), JSON.stringify({
+      schema: 'agent-companion/usage-facts', factsVersion: 1, extractorVersion: 2, day, from: `${day}T08:00:00.000Z`, to: '2026-11-17T08:00:00.000Z',
+      dataThrough: '2026-11-17T07:59:00.000Z', scanFrom: `${day}T08:00:00.000Z`, computedAt: '2026-11-17T09:00:00.000Z', weightsUsed: USED,
+      rows: ['a', 'b', 'c'].map((x, i) => row(`${day}T1${i}:00:00.000Z`, `sess-${i + 1}`, { main: { [SONNET]: 20 }, cwd: `/fixture/repo-${x}` })),
+      spawns: [],
+    }));
+    const tdir = join(fx.dir, 'transcripts');
+    mkdirSync(join(tdir, 'proj-a'), { recursive: true });
+    writeFileSync(join(tdir, 'proj-a', 'sess-1.jsonl'), `${boundary('sess-1', `${day}T12:00:00Z`, { pre: 150000 })}\n`);
+
+    // a fake clock the git seam advances: 10 s per git call; a repository costs 4 calls (resolve, merge target, branch check, log)
+    const clk = { t: 1000, cost: 10000, calls: 0 };
+    const git = (dir, args) => {
+      clk.t += clk.cost; clk.calls += 1;
+      if (args.includes('--git-common-dir')) return `${dir}/.git\n`;
+      if (args[0] === 'config') return 'main\n';
+      if (args[0] === 'rev-parse') return 'abc123\n';
+      if (args[0] === 'log') return '';
+      return null;
+    };
+    const run = (extra = {}) => runAnalysis({
+      root, nowT: Date.parse('2026-11-17T12:00:00Z'), metrics: () => null, cwds: [], days: [day], clock: () => clk.t,
+      efficiency: { git, transcriptsRoot: tdir, accountHistory: [], pluginVersion: '0.31.58', spawnRows: new Map(), settings: () => ({ window: 250000, floor: 0 }) }, ...extra,
+    });
+
+    // run 1: a 60 s budget. The three repositories are resolved (30 s) and one is counted (30 s more); the next is not started.
+    const start = clk.t;
+    const r1 = run({ maxSeconds: 60 });
+    assert.deepEqual(r1.computed, [day], 'the first day runs');
+    assert.ok(clk.t - start <= 60000, `no overrun: ${clk.t - start} ms of a 60000 ms budget`);
+    const a = readResult(root, day);
+    assert.equal(a.efficiency.landings.deferred, true);
+    assert.match(a.efficiency.landings.gap, /time budget/);
+    assert.equal(a.efficiency.compactions.total, 1, 'the part that was reached is measured');
+    assert.ok(a.totals.units > 0, 'the day itself is kept');
+    assert.match(renderReport(a), /Not measured: the run time budget was used up; the next run completes this part\./);
+    assert.equal(efficiencyPending(a), true);
+
+    // a run with no budget left does not redo it (and so cannot loop); the day stays as it is
+    const calls = clk.calls;
+    const r0 = run({ maxSeconds: 0 });
+    assert.deepEqual(r0.computed, []);
+    assert.equal(clk.calls, calls, 'no git call without budget');
+
+    // run 2: a fresh budget, cheap git. Only the landings are computed; the compactions are kept (their transcript is gone: a recompute would lose them).
+    clk.cost = 1;
+    rmSync(join(tdir, 'proj-a', 'sess-1.jsonl'));
+    const r2 = run({ maxSeconds: 60 });
+    assert.deepEqual(r2.computed, [day]);
+    const b = readResult(root, day);
+    assert.equal(b.efficiency.landings.gap, undefined);
+    assert.equal(b.efficiency.landings.repos.length, 3);
+    assert.equal(b.efficiency.compactions.total, 1, 'kept from run 1');
+    assert.equal(b.revision, a.revision, 'same inputs: same revision');
+    assert.equal(efficiencyPending(b), false);
+    // run 3: nothing is pending any more
+    assert.deepEqual(run({ maxSeconds: 60 }).computed, []);
+  } finally { fx.cleanup(); }
+});
+
+test('git older than 2.31 is named once in the landings instead of leaving every session silently unattributed', () => {
+  const fx = makeFixture();
+  try {
+    const dir = join(fx.dir, 'work');
+    mkdirSync(dir, { recursive: true });
+    const old = (d, args) => (args[0] === '--version' ? 'git version 2.30.2\n' : null); // rev-parse --path-format=absolute is refused
+    const rows = [row('2026-11-18T12:00:00.000Z', 's', { main: { [SONNET]: 3 }, cwd: dir })];
+    const l = landingsOf({ rows, used: USED, fromMs: FROM, toMs: TO, git: old });
+    assert.deepEqual(l.repos, []);
+    assert.match(l.gitNote, /git 2\.30 is older than 2\.31/);
+    assert.match(efficiencyLines({ landings: l }).join('\n'), /git 2\.30 is older than 2\.31/);
+    const fresh = landingsOf({ rows, used: USED, fromMs: FROM, toMs: TO, git: (d, args) => (args[0] === '--version' ? 'git version 2.43.0\n' : null) });
+    assert.equal(fresh.gitNote, undefined, 'a current git that merely found no repository says nothing about its version');
+    assert.equal(landingsOf({ rows, used: USED, fromMs: FROM, toMs: TO, git: () => null }).gitNote, undefined);
   } finally { fx.cleanup(); }
 });
 
